@@ -48,17 +48,17 @@ env:
 
 | Workflow | Inputs | Secrets |
 |----------|--------|---------|
-| **ci-reusable** | `runs_on`, `node_version=24`, `concurrency_group` | none |
-| **secret-scan-reusable** | `runs_on`, `node_version=22`, `python_version=3.12`, `require_gitleaks_license=false`, `concurrency_group` | `GITLEAKS_LICENSE` (optional) |
-| **static-review-reusable** | `runs_on`, `node_version=24`, `python_version=3.14`, `paths_ignore`, `concurrency_group` | none |
-| **mutation-testing-diff-reusable** | `runs_on`, `node_version=24`, `paths_ignore`, `concurrency_group` | none |
+| **ci-reusable** | `runs_on`, `node_version=24` | none |
+| **secret-scan-reusable** | `runs_on`, `node_version=22`, `python_version=3.12`, `require_gitleaks_license=false` | `GITLEAKS_LICENSE` (optional) |
+| **static-review-reusable** | `runs_on`, `node_version=24`, `python_version=3.14`, `paths_ignore` | none |
+| **mutation-testing-diff-reusable** | `runs_on`, `node_version=24`, `paths_ignore` | none |
 
 **Notes:**
 - `GITHUB_TOKEN` auto-injected by workflow_call (never declare).
 - All declared secrets have `required: false` (caller gates with conditionals).
 - `node_version` / `python_version` parameterized; defaults are CI best-practice.
 - `paths_ignore` input gates internal changed-files detection; caller still owns top-level `on.paths-ignore`.
-- `concurrency_group` allows custom slot identity (e.g., per-deployment stage); empty string uses default.
+- Concurrency is the **caller's** responsibility — reusables declare none (a reusable-level concurrency block resolves the caller's github.workflow and self-cancels the caller run).
 
 ## Caller Examples
 
