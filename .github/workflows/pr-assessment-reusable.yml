@@ -16,7 +16,6 @@ on:
       litellm_proxy_url: { type: string, default: '', description: 'Proxy base URL for proxy mode; pass vars.LITELLM_PROXY_URL.' }
       model: { type: string, default: '', description: 'Optional model id override; empty = script/action default.' }
       runs_on: { type: string, default: ubuntu-latest }
-      paths_ignore: { type: string, default: '', description: 'Newline-separated globs excluded from the internal changed-files gate.' }
     secrets:
       ANTHROPIC_API_KEY: { required: false, description: 'Required when provider_mode=anthropic.' }
       LITELLM_MASTER_KEY: { required: false, description: 'Required when provider_mode=proxy.' }
@@ -59,14 +58,17 @@ jobs:
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
+          persist-credentials: false
           fetch-depth: 0
 
       - name: Get PR diff
         id: diff
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          git diff origin/${{ github.base_ref }}...HEAD > /tmp/pr.diff
+          git diff "origin/${BASE_REF}...HEAD" > /tmp/pr.diff
           echo "lines=$(wc -l < /tmp/pr.diff)" >> $GITHUB_OUTPUT
-          echo "files=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | wc -l)" >> $GITHUB_OUTPUT
+          echo "files=$(git diff --name-only "origin/${BASE_REF}...HEAD" | wc -l)" >> $GITHUB_OUTPUT
 
       - name: Run pr-classifier
         id: classify
@@ -181,9 +183,10 @@ jobs:
       - name: Run specialist skills
         env:
           SKILLS: ${{ needs.classify.outputs.invoke_skills }}
+          BASE_REF: ${{ github.base_ref }}
         run: |
           mkdir -p .ai/candidates
-          git diff origin/${{ github.base_ref }}...HEAD > /tmp/pr.diff
+          git diff "origin/${BASE_REF}...HEAD" > /tmp/pr.diff
           python3 scripts/run-specialists.py \
             --skills "$SKILLS" \
             --diff /tmp/pr.diff \
@@ -221,6 +224,7 @@ jobs:
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
+          persist-credentials: false
           fetch-depth: 0
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -231,9 +235,10 @@ jobs:
       - name: Run broad agents
         env:
           AGENTS: ${{ needs.classify.outputs.invoke_agents }}
+          BASE_REF: ${{ github.base_ref }}
         run: |
           mkdir -p .ai/candidates
-          git diff origin/${{ github.base_ref }}...HEAD > /tmp/pr.diff
+          git diff "origin/${BASE_REF}...HEAD" > /tmp/pr.diff
           python3 scripts/run-broad-agents.py \
             --agents "$AGENTS" \
             --diff /tmp/pr.diff \
@@ -270,6 +275,8 @@ jobs:
           fi
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
 
       - name: Download all candidates
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4

@@ -28,6 +28,8 @@ jobs:
       has_pkg: ${{ steps.detect.outputs.has_pkg }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
       - id: detect
         # Lockfiles count too: a PR that deletes package.json but leaves a
         # lockfile still runs CI (and fails loudly at install) instead of
@@ -41,6 +43,8 @@ jobs:
     needs: [detect]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: ${{ inputs.node_version }}
@@ -51,7 +55,7 @@ jobs:
         id: cache-node-modules
         with:
           path: node_modules
-          key: nm-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
+          key: nm-${{ runner.os }}-node-${{ inputs.node_version }}-${{ hashFiles('package-lock.json') }}
       - if: steps.cache-node-modules.outputs.cache-hit != 'true'
         run: npm ci        # Replace with: pnpm install --frozen-lockfile
 
@@ -62,13 +66,15 @@ jobs:
     runs-on: ${{ inputs.runs_on }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: ${{ inputs.node_version }}
       - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: node_modules
-          key: nm-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
+          key: nm-${{ runner.os }}-node-${{ inputs.node_version }}-${{ hashFiles('package-lock.json') }}
       - name: Fallback install if cache miss
         run: test -d node_modules || npm ci
       - name: Check for known vulnerabilities
@@ -80,13 +86,15 @@ jobs:
     runs-on: ${{ inputs.runs_on }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: ${{ inputs.node_version }}
       - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: node_modules
-          key: nm-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
+          key: nm-${{ runner.os }}-node-${{ inputs.node_version }}-${{ hashFiles('package-lock.json') }}
       - name: Fallback install if cache miss
         run: test -d node_modules || npm ci
       - run: npx eslint .
@@ -97,13 +105,15 @@ jobs:
     runs-on: ${{ inputs.runs_on }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: ${{ inputs.node_version }}
       - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: node_modules
-          key: nm-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
+          key: nm-${{ runner.os }}-node-${{ inputs.node_version }}-${{ hashFiles('package-lock.json') }}
       - name: Fallback install if cache miss
         run: test -d node_modules || npm ci
       - run: npx tsc --noEmit
@@ -114,13 +124,15 @@ jobs:
     runs-on: ${{ inputs.runs_on }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: ${{ inputs.node_version }}
       - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: node_modules
-          key: nm-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
+          key: nm-${{ runner.os }}-node-${{ inputs.node_version }}-${{ hashFiles('package-lock.json') }}
       - name: Fallback install if cache miss
         run: test -d node_modules || npm ci
       - run: npm test -- --coverage
@@ -136,13 +148,15 @@ jobs:
     runs-on: ${{ inputs.runs_on }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: ${{ inputs.node_version }}
       - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: node_modules
-          key: nm-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
+          key: nm-${{ runner.os }}-node-${{ inputs.node_version }}-${{ hashFiles('package-lock.json') }}
       - name: Fallback install if cache miss
         run: test -d node_modules || npm ci
       - run: npm run build

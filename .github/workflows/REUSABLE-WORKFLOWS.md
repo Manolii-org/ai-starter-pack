@@ -29,10 +29,10 @@ Guard-then-wire: Always validate secrets exist before wiring. Use this guard ste
     PURL: ${{ inputs.litellm_proxy_url }}
   run: |
     if [[ "$PM" == "proxy" ]]; then
-      [[ -z "$LK" ]] && { echo "::error::proxy requires LITELLM_MASTER_KEY"; exit 1; }
-      [[ -z "$PURL" ]] && { echo "::error::proxy requires litellm_proxy_url"; exit 1; }
+      if [[ -z "$LK" ]]; then echo "::error::proxy requires LITELLM_MASTER_KEY"; exit 1; fi
+      if [[ -z "$PURL" ]]; then echo "::error::proxy requires litellm_proxy_url"; exit 1; fi
     else
-      [[ -z "$AK" ]] && { echo "::error::anthropic requires ANTHROPIC_API_KEY"; exit 1; }
+      if [[ -z "$AK" ]]; then echo "::error::anthropic requires ANTHROPIC_API_KEY"; exit 1; fi
     fi
 ```
 
@@ -87,25 +87,24 @@ jobs:
 ### Proxy Mode
 
 ```yaml
-name: Secret Scan
+name: PR Assessment
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
 
 permissions:
   contents: read
-  security-events: write
+  pull-requests: write
 
 jobs:
-  secret-scan:
-    uses: manolii-org/ai-starter-pack/.github/workflows/secret-scan-reusable.yml@v1
+  assessment:
+    uses: manolii-org/ai-starter-pack/.github/workflows/pr-assessment-reusable.yml@v1
     with:
-      require_gitleaks_license: true
+      provider_mode: proxy
+      litellm_proxy_url: ${{ vars.LITELLM_PROXY_URL }}
     secrets:
-      GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+      LITELLM_MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY }}
 ```
 
 ## Renovate Config

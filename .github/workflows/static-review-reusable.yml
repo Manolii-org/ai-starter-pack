@@ -20,15 +20,9 @@ on:
         type: string
         default: '3.14'
         description: Python version.
-      paths_ignore:
-        type: string
-        default: ''
-        description: Newline-separated globs excluded from the internal changed-files gate.
 
 permissions:
   contents: read
-  pull-requests: write
-  security-events: write
 
 
 jobs:
@@ -43,11 +37,13 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
+          persist-credentials: false
           fetch-depth: 0
       - id: detect
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
-          # TODO(paths_ignore): wire into EXCLUDE patterns
+          CHANGED=$(git diff --name-only "origin/${BASE_REF}...HEAD")
           echo "has_py=$(echo "$CHANGED" | grep -q '\.py$' && echo true || echo false)" >> $GITHUB_OUTPUT
           echo "has_sh=$(echo "$CHANGED" | grep -q '\.sh$' && echo true || echo false)" >> $GITHUB_OUTPUT
           echo "has_ts=$(echo "$CHANGED" | grep -qE '\.(ts|tsx|js|jsx)$' && echo true || echo false)" >> $GITHUB_OUTPUT
@@ -60,6 +56,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
+          persist-credentials: false
           fetch-depth: 0
       - name: Run Semgrep on changed files
         uses: returntocorp/semgrep-action@713efdd345f3035192eaa63f56867b88e63e4e5d # v1
@@ -78,6 +75,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
+          persist-credentials: false
           fetch-depth: 0
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
         with:
@@ -85,8 +83,10 @@ jobs:
       - name: Install bandit
         run: pip install bandit[toml] -q
       - name: Run Bandit on changed Python files
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          CHANGED_PY=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep '\.py$' | head -50)
+          CHANGED_PY=$(git diff --name-only "origin/${BASE_REF}...HEAD" | grep '\.py$' | head -50)
           if [ -n "$CHANGED_PY" ]; then
             bandit $CHANGED_PY -ll -ii || echo "::warning::Bandit found issues — review above"
           fi
@@ -99,10 +99,13 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
+          persist-credentials: false
           fetch-depth: 0
       - name: Run Shellcheck on changed shell files
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          CHANGED_SH=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep '\.sh$')
+          CHANGED_SH=$(git diff --name-only "origin/${BASE_REF}...HEAD" | grep '\.sh$')
           if [ -n "$CHANGED_SH" ]; then
             shellcheck --severity=warning $CHANGED_SH
           fi
@@ -115,6 +118,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
+          persist-credentials: false
           fetch-depth: 0
       - name: Detect package.json
         id: detect
@@ -129,8 +133,10 @@ jobs:
         run: npm ci
       - name: Run ESLint on changed files
         if: steps.detect.outputs.found == 'true'
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          CHANGED_TS=$(git diff --name-only origin/${{ github.base_ref }}...HEAD \
+          CHANGED_TS=$(git diff --name-only "origin/${BASE_REF}...HEAD" \
             | grep -E '\.(ts|tsx|js|jsx)$' | head -50)
           if [ -n "$CHANGED_TS" ]; then
             npx eslint $CHANGED_TS --max-warnings 0 || echo "::warning::ESLint found issues"
@@ -141,6 +147,8 @@ jobs:
     runs-on: ${{ inputs.runs_on }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
       - name: Detect agent/skill docs
         id: detect
         run: |
