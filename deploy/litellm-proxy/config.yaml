@@ -1,0 +1,244 @@
+# LiteLLM Proxy Configuration — AI Starter Pack template (v2)
+#
+# Maps stable tier names (tier-1-fast, tier-2-agentic, etc.) to OSS providers.
+# To swap a backend: change the litellm_params.model value for that alias and redeploy.
+# Full tier guide: .claude/model-routing.md
+#
+# Required secrets (set via Fly: flyctl secrets set KEY=VALUE --app {YOUR_APP_NAME}):
+#   LITELLM_MASTER_KEY   generate with: openssl rand -hex 24
+#   ANTHROPIC_API_KEY    for tier-0-opus/sonnet passthrough
+#   FIREWORKS_API_KEY    for tier-1-fast, tier-0-oss-heavy (tier-3-tool fallback)
+#   TOGETHER_API_KEY     for tier-2-agentic (Kimi K2.6), sonnet alias
+#   GROQ_API_KEY         for tier-4-extract, tier-5-latency
+#   OPENROUTER_API_KEY   for tier-3-tool (Gemma 4 31B)
+#
+# Note: scripts/setup-litellm.sh handles all of this interactively.
+#
+# Note on Together model IDs: Always live-probe before relying on a model.
+# Together's /v1/models catalog lists dedicated-only endpoints alongside serverless —
+# model_not_available at call time is the only reliable signal.
+#
+# === Env var naming note ===
+# LiteLLM's docs use `TOGETHERAI_API_KEY` as the auto-load convention. Because we
+# use explicit `api_key: os.environ/NAME` interpolation, the name is literal. We use
+# `TOGETHER_API_KEY` (plain, no AI suffix) for clarity. If you omit the api_key: lines,
+# add a TOGETHERAI_API_KEY alias in your secrets store.
+#
+# === Fallback design ===
+# Fallback targets use distinct model_name entries so LiteLLM does not load-balance
+# them as peers; they are referenced only via litellm_settings.fallbacks.
+
+model_list:
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # TIER 0: Claude — anthropic_only data, nuanced writing, orchestration
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  - model_name: claude-opus-4-6
+    litellm_params:
+      model: anthropic/claude-opus-4-6
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: claude-sonnet-4-6
+    litellm_params:
+      model: anthropic/claude-sonnet-4-6
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  # OSS heavy tier — SWE-Bench Pro 58.4 > Opus 4.6 at 57.3.
+  # RESTRICTED: code-patch, agentic-loop, math-reasoning, bulk-extract ONLY.
+  # EXCLUDED from: prose, code-review, ADRs, orchestration, client-facing, vision.
+  # data_clearance: internal + public (NOT anthropic_only).
+  - model_name: tier-0-oss-heavy
+    litellm_params:
+      model: fireworks_ai/accounts/fireworks/models/kimi-k2p6
+      api_key: os.environ/FIREWORKS_API_KEY
+  - model_name: tier-0-oss-heavy-fallback-together
+    litellm_params:
+      model: together_ai/moonshotai/Kimi-K2.6
+      api_key: os.environ/TOGETHER_API_KEY
+  - model_name: tier-0-oss-heavy-fallback-glm
+    litellm_params:
+      # GLM-5.1 as cross-family tertiary fallback. Artificial Analysis Intelligence Index 51.
+      model: fireworks_ai/accounts/fireworks/models/glm-5p1
+      api_key: os.environ/FIREWORKS_API_KEY
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # TIER 1 FAST — single-step generation, rename, format, boilerplate
+  # OpenAI GPT-OSS 120B (Fireworks) — 117B MoE / 5.1B active, 131K context.
+  # AA Intelligence 33. US-origin OpenAI OSS weights. Text-only.
+  # data_clearance: internal + public.
+  # ═══════════════════════════════════════════════════════════════════════════
+  - model_name: tier-1-fast
+    litellm_params:
+      model: fireworks_ai/accounts/fireworks/models/gpt-oss-120b
+      api_key: os.environ/FIREWORKS_API_KEY
+  - model_name: tier-1-fast-fallback-together
+    litellm_params:
+      # Kimi K2.6 on Together — cross-provider resilience (PRC-origin, internal-clearance only).
+      model: together_ai/moonshotai/Kimi-K2.6
+      api_key: os.environ/TOGETHER_API_KEY
+  - model_name: tier-1-fast-fallback-groq
+    litellm_params:
+      # Llama 3.3 70B on Groq LPU — different provider and different model family.
+      model: groq/llama-3.3-70b-versatile
+      api_key: os.environ/GROQ_API_KEY
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # TIER 2 AGENTIC — long tool chains, 262K context, multi-step subagents
+  # Kimi K2.6: SWE-bench flagship (successor to K2.5), 200+ sequential tool calls, ~417 tok/s.
+  # data_clearance: internal + public.
+  # ═══════════════════════════════════════════════════════════════════════════
+  - model_name: tier-2-agentic
+    litellm_params:
+      model: together_ai/moonshotai/Kimi-K2.6
+      api_key: os.environ/TOGETHER_API_KEY
+  - model_name: tier-2-agentic-fallback-fireworks
+    litellm_params:
+      model: fireworks_ai/accounts/fireworks/models/kimi-k2p6
+      api_key: os.environ/FIREWORKS_API_KEY
+  - model_name: tier-2-agentic-fallback-qwen
+    litellm_params:
+      # Note: no "-Instruct" suffix on Together for this model.
+      model: together_ai/Qwen/Qwen3.5-397B-A17B
+      api_key: os.environ/TOGETHER_API_KEY
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # TIER 3 TOOL — high tool-call density (Gemma 4 31B: strong function-calling)
+  # Gemma 4 31B on OpenRouter — Google US-origin weights, dense 32B model.
+  # data_clearance: internal + public.
+  # Note: GLM-4.7 (Fireworks serverless) retired 2026-05. OpenRouter is now primary.
+  # ═══════════════════════════════════════════════════════════════════════════
+  - model_name: tier-3-tool
+    litellm_params:
+      model: openrouter/google/gemma-4-31b-it
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: tier-3-tool-fallback-kimi-together
+    litellm_params:
+      # Different provider + different model family for resilience.
+      model: together_ai/moonshotai/Kimi-K2.6
+      api_key: os.environ/TOGETHER_API_KEY
+  - model_name: tier-3-tool-fallback-kimi-fireworks
+    litellm_params:
+      model: fireworks_ai/accounts/fireworks/models/kimi-k2p6
+      api_key: os.environ/FIREWORKS_API_KEY
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # TIER 4 EXTRACT — grep, count, format, lint, bulk classification
+  # Groq LPU: ~$0.05/$0.08, ~800 tok/s. Rate limit: ~1000 rpm Developer tier.
+  # data_clearance: internal + public.
+  # ═══════════════════════════════════════════════════════════════════════════
+  - model_name: tier-4-extract
+    litellm_params:
+      model: groq/llama-3.1-8b-instant
+      api_key: os.environ/GROQ_API_KEY
+  - model_name: tier-4-extract-fallback-fireworks
+    litellm_params:
+      # Different provider (Fireworks) + different model (Qwen) for rate-limit resilience.
+      model: fireworks_ai/accounts/fireworks/models/qwen3-8b
+      api_key: os.environ/FIREWORKS_API_KEY
+  - model_name: tier-4-extract-fallback-gptoss
+    litellm_params:
+      # Same provider as secondary but different model family (GPT-OSS). Last-resort
+      # if Qwen3-8B has quality regression or is unavailable.
+      model: fireworks_ai/accounts/fireworks/models/gpt-oss-20b
+      api_key: os.environ/FIREWORKS_API_KEY
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # TIER 5 LATENCY — real-time classification, DOM selection, latency-critical
+  # Same model as tier-4-extract but distinct tier: latency is the constraint.
+  # ~800 tok/s on Groq LPU — 5-10x faster than GPU providers.
+  # data_clearance: internal + public.
+  # ═══════════════════════════════════════════════════════════════════════════
+  - model_name: tier-5-latency
+    litellm_params:
+      model: groq/llama-3.1-8b-instant
+      api_key: os.environ/GROQ_API_KEY
+  - model_name: tier-5-latency-fallback-gptoss
+    litellm_params:
+      # Higher-quality Groq fallback — Llama 3.3 70B on LPU. Still Groq, does NOT protect against Groq outage.
+      model: groq/llama-3.3-70b-versatile
+      api_key: os.environ/GROQ_API_KEY
+  - model_name: tier-5-latency-fallback-fireworks
+    litellm_params:
+      # Different provider — survives Groq outage (loses LPU speed, ~200 tok/s on GPU).
+      # deepseek-v3p2 retired from Fireworks serverless 2026-05-14; replaced with gpt-oss-20b.
+      model: fireworks_ai/accounts/fireworks/models/gpt-oss-20b
+      api_key: os.environ/FIREWORKS_API_KEY
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Sonnet alias — transparent substitution + fail-closed advisor guardrail
+  # Routes Agent(model="sonnet") → Gemma 4 31B (Together, US-origin weights).
+  # Advisor guardrail (sonnet_advisor_guardrail.py) reviews each response via
+  # Llama 3.3 70B on Groq; fails closed to Anthropic Sonnet on empty advisor output.
+  # data_clearance: restricted_us_oss_ok (US-origin, guardrail-protected).
+  # ═══════════════════════════════════════════════════════════════════════════
+  - model_name: sonnet
+    litellm_params:
+      model: together_ai/google/gemma-4-31b-it
+      api_key: os.environ/TOGETHER_API_KEY
+  - model_name: sonnet-us-fallback-gptoss120b
+    litellm_params:
+      # Cross-provider fallback — GPT-OSS 120B on Fireworks (US-origin OpenAI OSS weights).
+      model: fireworks_ai/accounts/fireworks/models/gpt-oss-120b
+      api_key: os.environ/FIREWORKS_API_KEY
+  - model_name: sonnet-us-fallback-llama8b
+    litellm_params:
+      # Lightweight fallback — Llama 3.1 8B on Groq (fast, US-origin Meta weights).
+      model: groq/llama-3.1-8b-instant
+      api_key: os.environ/GROQ_API_KEY
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Haiku alias — transparent substitution to GPT-OSS 120B (Fireworks)
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Claude Code sends haiku, proxy routes to GPT-OSS 120B (matches tier-1-fast).
+  # Cost: GPT-OSS 120B $0.80/$3.20 vs Anthropic Haiku $0.30/$1.20.
+  # Note: starter-pack uses GPT-OSS 120B for both tier-1-fast and haiku for
+  # consistency; master uses DeepSeek V4 Flash for haiku (cheaper) per its
+  # own config.yaml. Override here if cost-sensitive.
+  # data_clearance: internal-only (NOT for client code or restricted data).
+  - model_name: claude-haiku-4-5-20251001
+    litellm_params:
+      model: fireworks_ai/accounts/fireworks/models/gpt-oss-120b
+      api_key: os.environ/FIREWORKS_API_KEY
+  # Haiku fallback — real Anthropic Haiku (distinct model_name to avoid load-balancing)
+  - model_name: claude-haiku-4-5-20251001-anthropic
+    litellm_params:
+      model: anthropic/claude-haiku-4-5-20251001
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+litellm_settings:
+  # Guardrail callbacks — SonnetAdvisorGuardrail reviews sonnet alias responses.
+  # Imported from PYTHONPATH=/tmp (set in fly.toml [env]; file injected via [[files]]); fail-closed to Anthropic Sonnet.
+  callbacks: ["sonnet_advisor_guardrail.SonnetAdvisorGuardrail"]
+  # Drop Anthropic-specific params that open-source models don't support
+  drop_params: true
+  # Request timeout — Fireworks/Together P99 ~15s; 60s gives plenty of headroom
+  request_timeout: 60
+  # Retry on transient provider errors before invoking the fallback chain
+  num_retries: 2
+
+  # Fallback chains: primary fails → secondary → tertiary.
+  # Claude tiers do NOT automatically fall back to OSS — explicitly route if needed.
+  fallbacks:
+    - claude-haiku-4-5-20251001: [claude-haiku-4-5-20251001-anthropic]
+    - sonnet: [sonnet-us-fallback-gptoss120b, sonnet-us-fallback-llama8b]
+    - tier-0-oss-heavy: [tier-0-oss-heavy-fallback-together, tier-0-oss-heavy-fallback-glm]
+    - tier-1-fast: [tier-1-fast-fallback-together, tier-1-fast-fallback-groq]
+    - tier-2-agentic: [tier-2-agentic-fallback-fireworks, tier-2-agentic-fallback-qwen]
+    - tier-3-tool: [tier-3-tool-fallback-kimi-together, tier-3-tool-fallback-kimi-fireworks]
+    - tier-4-extract: [tier-4-extract-fallback-fireworks, tier-4-extract-fallback-gptoss]
+    - tier-5-latency: [tier-5-latency-fallback-gptoss, tier-5-latency-fallback-fireworks]
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  # PRIVACY: Disable storing request/response content in LiteLLM DB.
+  # Prompt content must NOT be persisted on Fly.io infrastructure.
+  disable_spend_logs: true
+  store_model_in_db: false
+  health_check_interval: 60
+
+# ─── Customisation guide ──────────────────────────────────────────────────────
+# Swap a backend model: change the model: value for that tier alias, redeploy.
+# Add a tier: add model_list entry + fallbacks entry; agent frontmatter unchanged.
+# Remove a provider: delete its entries; LiteLLM routes to fallback automatically.
+# For the full tier guide: .claude/model-routing.md

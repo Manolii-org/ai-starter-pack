@@ -1,0 +1,54 @@
+---
+name: graphify
+version: 1.0.0
+description: Query codebase intelligence graphs. Routes to the correct graphify MCP server based on the codebase scope.
+type: command
+requires_mcp:
+  - graphify
+required_entities: []
+safety_tier: green
+tags:
+  - codebase
+  - navigation
+  - architecture
+  - debugging
+  - tools
+  - mcp
+eval_cases: null
+supersedes: []
+deprecation: null
+---
+
+# /graphify
+
+{{ATTRIBUTION_LINE}}
+
+Query codebase intelligence graphs for code navigation and architecture analysis.
+
+## Scope
+
+You may have one or more graphify MCP servers depending on your project structure. Common setups:
+
+- **Single codebase:** One graphify server pointing to the main repo
+- **Monorepo:** One graphify server covering the entire workspace
+- **Multi-repo:** Multiple graphify servers — one per repo (coordinate with project maintainers)
+
+Contact your project lead or check `.mcp.json` to see which graphify servers are available and what they cover.
+
+## Usage patterns
+
+**Find entry points / core abstractions:**
+→ Call `god_nodes` — returns highest-degree nodes (the architectural hubs)
+
+**Understand a feature area:**
+→ Call `query_graph` with a descriptive keyword
+→ Follow with `get_neighbors` on the most relevant node
+
+**Impact analysis before a change:**
+→ Call `shortest_path` between the function you're changing and the feature it affects
+→ Review all intermediate nodes — these are potential blast-radius targets
+
+**Look up a specific symbol:**
+→ Call `get_node` with the function/class name
+
+ARGUMENTS: $ARGUMENTS

@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Pre-push hook: block direct push to main/master, run typecheck + lint + tests
+set -euo pipefail
+
+# --- Block direct push to protected branches ---
+CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+if [[ "$CURRENT_BRANCH" == "main" || "$CURRENT_BRANCH" == "master" ]]; then
+  echo "[pre-push] ERROR: Direct push to $CURRENT_BRANCH is blocked."
+  echo "  Create a feature branch and open a PR instead."
+  exit 1
+fi
+
+# --- Phase 1: Parallel typecheck + lint ---
+echo "[pre-push] Phase 1: typecheck + lint (parallel)"
+
+TYPECHECK_PID=""
+LINT_PID=""
+TYPECHECK_EXIT=0
+LINT_EXIT=0
+
+if command -v npx &>/dev/null; then
+  # Typecheck in background
+  if npx --no-install tsc --version &>/dev/null; then
+    npx tsc --noEmit &
+    TYPECHECK_PID=$!
+  fi
+
+  # Lint in background
+  if npx --no-install eslint --version &>/dev/null; then
+    npx eslint . &
+    LINT_PID=$!
+  fi
+else
+  echo "[pre-push] npx not found — cannot run typecheck/lint"
+  exit 1
+fi
+
+# Wait for parallel jobs
+if [[ -n "$TYPECHECK_PID" ]]; then
+  wait "$TYPECHECK_PID" || TYPECHECK_EXIT=$?
+fi
+if [[ -n "$LINT_PID" ]]; then
+  wait "$LINT_PID" || LINT_EXIT=$?
+fi
+
+if [[ $TYPECHECK_EXIT -ne 0 ]]; then
+  echo "[pre-push] Typecheck failed"
+  exit 1
+fi
+if [[ $LINT_EXIT -ne 0 ]]; then
+  echo "[pre-push] Lint failed"
+  exit 1
+fi
+
+# --- Phase 2: Tests ---
+echo "[pre-push] Phase 2: tests"
+
+if command -v npx &>/dev/null; then
+  if npx --no-install vitest --version &>/dev/null 2>&1; then
+    npx vitest --run || {
+      echo "[pre-push] Tests failed"
+      exit 1
+    }
+  elif npx --no-install jest --version &>/dev/null 2>&1; then
+    npx jest --bail || {
+      echo "[pre-push] Tests failed"
+      exit 1
+    }
+  elif [[ -f "package.json" ]] && grep -q '"test"' package.json 2>/dev/null; then
+    npm test || {
+      echo "[pre-push] Tests failed"
+      exit 1
+    }
+  fi
+else
+  echo "[pre-push] npx not found — cannot run tests"
+  exit 1
+fi
+
+echo "[pre-push] All required checks passed"

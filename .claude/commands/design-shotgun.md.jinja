@@ -1,0 +1,49 @@
+---
+name: design-shotgun
+version: 1.0.0
+description: Generate 4 distinct HTML mockup variants for a UI scene; uses per-product design tokens
+type: command
+requires_mcp: []
+required_entities: []
+safety_tier: green
+tags: ['design', 'ui', 'mockups']
+blast_radius: low
+---
+
+# /design-shotgun — mockup variants
+
+{{ATTRIBUTION_LINE}}
+
+Generates N self-contained HTML mockup variants for a UI scene. Default N=4. Each variant inherits from the project's design tokens (`.ai/design-systems/<product>.json`) if available.
+
+## Usage
+
+```
+/design-shotgun "<scene>" --product=<slug> [--n=4] [--vectors="<v1,v2,...>"]
+```
+
+- `--product`: your app's slug (e.g. `my-app`). Used to load design tokens if present.
+- `--n`: variant count (default 4, max 8)
+- `--vectors`: comma-separated design vectors to seed each variant. Default: "minimalist,bold-colorful,data-dense,emotional-warm"
+
+## Steps
+
+1. Load `.ai/design-systems/<product>.json` if it exists. If missing, proceed with defaults.
+2. Load taste signals from `.ai/memory/facts.jsonl` filtered by `tags: [design-taste, <product>]`. If a remote memory MCP is configured, search it too.
+3. Mint a variant set id: `shotgun-<utc-yyyymmdd-hhmm>-<8hex>`.
+4. Dispatch Agent(generate, model=haiku) with N parallel sub-prompts, each seeded with: tokens + taste signals + scene description + the specific design vector for this variant.
+5. Each prompt instructs: "Output a complete self-contained HTML file. Use ONLY inline styles + provided tokens. NO external resources, NO CDN links. WCAG AA contrast. Mobile-first 320px."
+6. Write each variant to `.ai/design-variants/<shotgun-id>/v1.html`...`vN.html`.
+7. Print a one-line summary + `file://` paths.
+
+## Token efficiency
+
+- N parallel haiku sub-prompts via the generate agent (single dispatch, fan-out internal)
+- Default N=4 — good variety at reasonable cost
+- Self-contained HTML eliminates a compile step until winner is picked
+- Sonnet only on `/design-html` winner conversion
+
+## See also
+
+- `/design-html` — convert chosen variant to product components
+- `.ai/design-systems/<product>.json` — token files

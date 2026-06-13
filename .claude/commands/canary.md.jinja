@@ -1,0 +1,127 @@
+# /canary — Post-Deploy Monitoring
+
+Monitor a deployment for errors after shipping. Continuously checks HTTP health, response times, error pages, and performance regressions.
+
+{{ATTRIBUTION_LINE}}
+
+## Prerequisites
+
+- A deployed URL to monitor (Vercel preview, staging, or production)
+- `curl` available in the environment
+- For Vercel deployments: Vercel MCP server configured (optional, for deployment status)
+
+## Process
+
+### 1. Determine Target URL
+
+Check for the deployment URL in this priority order:
+1. User-provided URL argument (e.g. `/canary https://preview-xxx.vercel.app`)
+2. Latest Vercel preview deployment for current branch (via Vercel MCP `list_deployments` if available)
+3. Production URL from `VERCEL_PROJECT_URL`, `NEXT_PUBLIC_URL`, or `BASE_URL` environment variable
+4. If none found, ask the user for the URL
+
+### 2. Health Check Loop
+
+Run these checks on the target URL. Repeat every 60 seconds for 5 rounds (configurable):
+
+#### a. HTTP Health
+
+```bash
+curl -sSL --connect-timeout 5 --max-time 10 -o /dev/null -w "%{http_code} %{time_total}s" "{URL}"
+```
+
+- Status must resolve to a final 200 (after following redirects via `-L`)
+- If a 301/302 occurs, verify the `Location` is expected (e.g. HTTP→HTTPS or known auth redirect); fail on redirect loops or unexpected destinations
+- Response time under 3 seconds (warn if 1-3s, fail if >3s)
+
+#### b. Key Route Verification
+
+Test critical routes (adapt per project):
+
+| Route Pattern | Expected | Check |
+|---|---|---|
+| `/` | 200 | Home page loads |
+| `/api/health` | 200 + JSON | Health endpoint responds |
+| `/login` | 200 | Auth flow accessible |
+| `/dashboard` | 200 or 302→login | Requires auth redirect |
+
+#### c. Error Detection
+
+Use `curl` to fetch page content and scan for:
+- Server error pages (500, 502, 503, 504)
+- "Internal Server Error" or "Application Error" text
+- Next.js error overlay markers
+- Empty response bodies (0-byte responses)
+
+#### d. Response Time Baseline
+
+Track response times across rounds. Flag if:
+- Any route >3x slower than round 1 (regression)
+- Any route consistently >1s (potential issue)
+- Response times trending upward across rounds
+
+### 3. Vercel-Specific Checks (if Vercel MCP available)
+
+- Check deployment status via `list_deployments`
+- Verify no build errors via `get_deployment_build_logs`
+- Check runtime logs for errors via `get_runtime_logs`
+
+### 4. Cron/Background Job Health
+
+If the project has cron routes or background jobs (check `vercel.json`, `crons` in config, or `/api/cron/` routes):
+- **Do NOT invoke mutating cron execution endpoints** (e.g. `/api/cron/sync-*`) — these trigger real jobs and risk duplicate processing
+- Prefer dedicated non-mutating health endpoints (e.g. `/api/health`, `/api/cron/status`) or check Vercel runtime logs for recent job outcomes
+- If no health endpoint exists, try a `HEAD` request first (lightweight); fall back to a safe `GET` with tight timeouts if `HEAD` returns 405
+- Verify cron jobs are scheduled and recently succeeded, without triggering new runs
+
+### 5. Alert on Failure
+
+If any check fails:
+1. Report the specific failure with details
+2. Suggest rollback if P0 (data loss, crash, auth broken)
+3. Suggest investigation if P1 (degraded performance, partial failure)
+4. Note for monitoring if P2 (minor, intermittent)
+
+## Output Format
+
+```text
+Canary Report — {DATE}
+URL: {deployment_url}
+Duration: {N} rounds × 60s = {total}s
+================================
+
+Round 1 (00:00):
+  / .................. 200 (0.45s) ✓
+  /api/health ........ 200 (0.12s) ✓
+  /dashboard ......... 302 (0.08s) ✓
+
+Round 2 (01:00):
+  / .................. 200 (0.43s) ✓
+  /api/health ........ 200 (0.11s) ✓
+  /dashboard ......... 302 (0.09s) ✓
+
+Performance Trend:
+  / .................. stable (0.45s → 0.43s)
+  /api/health ........ stable (0.12s → 0.11s)
+
+Errors Detected: 0
+Regressions: none
+================================
+Verdict: HEALTHY | DEGRADED | FAILING
+```
+
+## Usage
+
+```text
+/canary                          # Monitor latest deployment
+/canary https://preview-xxx.vercel.app  # Monitor specific URL
+/canary --rounds 10              # Extended monitoring (10 rounds)
+```
+
+## When to Use
+
+- After merging a PR to main (post-deploy verification)
+- After promoting to production
+- After infrastructure changes (env var updates, secret rotation)
+- After database migrations
+- When investigating reported downtime

@@ -1,0 +1,367 @@
+# AI Starter Pack
+
+Production-grade AI-assisted development from day one. {{ATTRIBUTION_LINE}}
+
+## What's Included
+
+| Component | Files | Purpose |
+|-----------|-------|---------|
+| **Hooks** | `.claude/hooks/` (7 files) | Full session lifecycle: credential loading, prompt tracking, edit monitoring, compaction, stop, response-hygiene + injection scanning |
+| **Commands** | `.claude/commands/` (47 files) | Slash commands: `/wrap-up`, `/tdd`, `/doctor`, `/watch-pr`, `/sprint-fan-out`, `/investigate`, `/retro`, `/freeze`, `/guard`, `/design-shotgun`, etc. |
+| **Skills** | `.claude/skills/` (23 dirs) | Persistent context: conventions, security, database, TDD, OSS compat, analytics, curator, governance (assess-model, completeness-check, phase-gate) + 7 PR assessment specialists |
+| **Agents** | `.claude/agents/` (28 files) | Parallel workers: PR assessment pipeline, security review, CI fixer, architecture impact, main-thread-executor, prompt-hardener, test-hardener, critics, `secrets-handler` (credential router), `memory-keeper`, and more |
+| **PR Assessment** | `.github/workflows/pr-assessment.yml` | AI-driven 5-stage review pipeline: pr-classifier → SAST → specialists → broad agents → judge |
+| **Memory** | `.ai/memory/` + `.ai/decisions/` | Persistent JSONL memory (facts, patterns, sessions) + Architecture Decision Records (template + practice guide) |
+| **Security** | `.ai/security/token-shapes.json`, `scripts/injection_scan.py`, `canary_tokens.py`, `safe_env.sh` | Provider token-shape patterns, prompt-injection scanner, canary tokens, sanctioned env helpers — wired into the pre/post-tool hooks |
+| **Multi-model routing** | `.claude/model-routing.json`, `.claude/model-routing.md`, `deploy/litellm-proxy/` | 9-tier framework: Anthropic Claude + Fireworks/Together/Groq/OpenRouter OSS models |
+| **Scripts** | `scripts/` (25 files) | Utilities: knowledge index, skill graph, system self-check, model routing, pre-tool enforcement (scope-budget / broad-dispatch / token-leak guards), injection scan, canary tokens, safe-env helpers, pack drift check, session-stop checklist, OTEL/Langfuse headers |
+| **Husky** | `.husky/` (3 files) | Git hooks: pre-commit, commit-msg, pre-push |
+| **CI** | `.github/workflows/` (5 files) | CI, PR assessment, static review, secret scanning, mutation testing |
+| **Docs** | `docs/` (8 files) | Quality gate, output-token discipline, OSS delegation; security (MCP response hygiene, token-leak hygiene); governance (model-change protocol, model-config schema, US-OSS eligibility) |
+| **Config** | `.claude/settings.json`, `.mcp.json` | Hook wiring, MCP server setup (Context7 + GitHub included), permissions |
+| **Templates** | `CLAUDE.md`, `AGENTS.md` | Fill-in project documentation |
+
+## Scope & What's Not Included
+
+This pack is an **unbranded, vendor-neutral harness**. It deliberately ships **no
+organisation-specific infrastructure**: no hardcoded credentials (all secrets come from
+your environment or secrets manager), no proprietary backend, and no coupling to any
+specific company's tooling. Optional integrations are **off by default** and gated by
+flags in `pack.manifest.yml`:
+
+- **OSS model routing** (`oss_routing`) — Claude works out of the box; OSS tiers and the
+  US-OSS eligibility matrix activate only when you enable this and run `setup-litellm.sh`.
+- **Remote memory backend** (`kl_integration`) — memory is local git-tracked JSONL by
+  default; a remote MCP memory backend is opt-in.
+- **Browser automation** (`browserbase`), **telemetry** (`langfuse_telemetry`), and
+  **cross-provider adversarial review** (`codex_adversarial`, needs `OPENAI_API_KEY`) — opt-in.
+
+Run `python3 scripts/pack-drift-check.py` after customising to verify the pack stays
+self-consistent (README counts, feature-exclude paths, sub-agent models) and free of
+organisation-specific identifiers.
+
+## Quick Start
+
+### 1. Copy the template
+
+```bash
+cp -r /path/to/master/templates/ai-starter-pack/ ./
+```
+
+### 2. Install dev dependencies
+
+```bash
+npm install -D husky @commitlint/cli @commitlint/config-conventional lint-staged
+# or: pnpm add -D husky @commitlint/cli @commitlint/config-conventional lint-staged
+```
+
+### 3. Initialize Husky
+
+```bash
+npx husky init
+# The .husky/ hooks are already in place — just wire up git:
+git config core.hooksPath .husky
+```
+
+### 4. Customize CLAUDE.md
+
+Open `CLAUDE.md` and fill in all `{PLACEHOLDER}` sections:
+- Project name and stack
+- Build/test/lint commands
+- Architecture and patterns
+- Framework-specific rules
+- Known gotchas
+
+### 5. Customize conventions skill
+
+Edit `.claude/skills/conventions/CLAUDE.md` with your project's:
+- Naming conventions
+- File structure
+- Import ordering
+- Error handling patterns
+
+### 6. Add MCP servers
+
+Edit `.mcp.json` to add project-specific MCP servers (Neon, Stripe, Sentry, etc.). Context7 and GitHub are pre-configured. See `.mcp.example.json` for more options.
+
+### 7. Configure lint-staged
+
+Add to `package.json`:
+
+```json
+{
+  "lint-staged": {
+    "*.{ts,tsx}": ["eslint --fix", "prettier --write"],
+    "*.{json,md,yml}": ["prettier --write"]
+  }
+}
+```
+
+### 8. Configure commitlint
+
+Create `commitlint.config.js`:
+
+```js
+module.exports = { extends: ['@commitlint/config-conventional'] };
+```
+
+### 9. (Optional) Activate OSS model routing
+
+The 9-tier multi-model framework ships pre-configured. For Claude Code sessions it works immediately (Claude Max models). To also enable cheaper OSS tiers (Fireworks, Together, Groq, OpenRouter) for application code:
+
+```bash
+# Prerequisites: flyctl installed and authenticated; Fireworks/Together/Groq/OpenRouter API keys ready
+bash scripts/setup-litellm.sh
+```
+
+The script deploys a LiteLLM proxy to Fly.io, pushes your API keys, smoke-tests all tiers, and sets `litellm_proxy.enabled=true` in `.claude/model-routing.json`. Then set `USE_LITELLM_PROXY=true` in your app environment. See `.claude/model-routing.md` for details.
+
+## Customization Points
+
+| What | Where | When |
+|------|-------|------|
+| Project stack/rules | `CLAUDE.md` | Before first session |
+| Coding conventions | `.claude/skills/conventions/CLAUDE.md` | Before first session |
+| MCP servers | `.mcp.json` | Add project-specific tools |
+| CI workflow | `.github/workflows/ci.yml` | Adjust build commands, add E2E |
+| Hook behavior | `.claude/settings.json` | Adjust timeouts, matchers |
+| New skills | `.claude/skills/{name}/CLAUDE.md` | Add as needed |
+| New agents | `.claude/agents/{name}.md` | Add as needed |
+| New commands | `.claude/commands/{name}.md` | Add as needed |
+
+## How It Works
+
+### Hook Lifecycle
+
+1. **SessionStart** (`session-start.sh`): Loads credentials from Doppler (1hr cache), exports `GH_TOKEN`, injects last compact summary into context
+2. **UserPromptSubmit** (`user-prompt.py` + `classify-message.py`): 
+   - `user-prompt.py`: First prompt — sets up Husky, checks for active plans. Every prompt — checks for unresolved PR comments
+   - `classify-message.py`: Classifies prompts for model tier routing (heavy/standard/light by keyword heuristics); emits `<model-routing>` block with tier suggestion and agent dispatch rules; tracks session spend; emits stream-checkpoint warnings
+3. **PreToolUse** (`pre-tool.py`): 
+   - Enforces explicit `model=` parameter on Agent() calls to prevent OSS tier bypass
+   - PR repository targeting guard — blocks cross-repo PR misfires
+4. **PostToolUse** (`post-tool.py` + `advisor-metrics-hook.py`):
+   - `post-tool.py`: Unified hook — tracks edit count and modified files, reminds about lint/typecheck every 15 edits, API route security reminders, tool-call counter with `/smart-compact` recommendations
+   - `advisor-metrics-hook.py`: Logs advisor() invocations to `.ai/metrics/advisor-usage.jsonl`; fires circuit breaker if invocation rate exceeds threshold
+5. **PreCompact** (`pre-compact.sh`): Generates structured session state summary before compaction so critical context survives
+6. **PostCompact** (`post-compact.sh`): Saves compaction summary keyed by branch; resets call counter; logs to `.ai/compact-metrics.jsonl`
+7. **Stop** (`session-stop-checklist.sh` + `stop.sh`): 
+   - `session-stop-checklist.sh`: Outputs session-end checklist; branch fingerprint vs main; doctor signal summary; optional intent-drift check
+   - `stop.sh`: Writes stop sentinel and session-end record; rebuilds skill graph; runs system self-check
+
+### Memory System
+
+The memory commands provide persistent memory across sessions:
+
+| Command | Purpose | Storage |
+|---------|---------|---------|
+| `/remember` | Quick-save a fact or decision (confidence 0.8, reviewed) | `.ai/memory/facts.jsonl` |
+| `/learn` | Extract a reusable pattern from current work | `.ai/memory/patterns.jsonl` |
+| `/recall` | Search memory by keyword or tag | reads all `.ai/memory/*.jsonl` |
+| `/extract-insights` | Auto-batch extract decisions/gotchas (confidence 0.5, unreviewed) | `.ai/memory/facts.jsonl` |
+| `/session-summary` | Log session metadata (branch, files, decisions, issues) | `.ai/memory/sessions.jsonl` |
+| `/wrap-up` | End-of-session orchestrator: extract-insights + session-summary + knowledge index + self-check | all memory files |
+| `/prune` | Decay stale entries, archive dead patterns, consolidate duplicates | all memory files |
+| `/diagnose` | Search memory for similar past issues | read-only |
+
+### Multi-Model Tier Framework
+
+The starter pack ships with a production-ready 8-tier LLM routing framework that balances cost, quality, and data classification requirements:
+
+| Tier | Provider | Model | Cost | Best for |
+|------|----------|-------|------|---------|
+| `tier-0-opus` | Anthropic | claude-opus-4-6 | ~$15/$75/M | Architect, security, ADRs |
+| `tier-0-sonnet` | Anthropic | claude-sonnet-4-6 | ~$3/$15/M | Implement, debug, review |
+| `tier-0-oss-heavy` | Fireworks/Kimi K2.6 | 58.6% SWE-bench | $0.50/$2.80/M | SWE-patch, bulk-extract — **restricted use** |
+| `tier-1-fast` | Fireworks/GPT-OSS 120B | US-origin OpenAI OSS | $0.80/$3.20/M | Boilerplate, single-step, format |
+| `tier-2-agentic` | Together/Kimi K2.6 | 76.8%+ SWE-bench | $0.50/$2.80/M | Long tool chains, 262K context |
+| `tier-3-tool` | OpenRouter/Gemma 4 31B | strong function-calling | ~$0.10/$0.30/M | Tool-heavy agents |
+| `sonnet` (alias) | Together/Gemma 4 31B | US-origin, advisor-guarded | ~$0.10/$0.30/M | `Agent(model="sonnet")` — restricted_us_oss_ok |
+| `tier-4-extract` | Groq/Llama 3.1 8B | LPU ~800 tok/s | $0.05/$0.08/M | Grep, count, extract, lint |
+| `tier-5-latency` | Groq LPU | ~800 tok/s | $0.05/$0.08/M | Real-time classification |
+
+**Data classification** — every agent declares `data_sensitivity`:
+- `anthropic_only` — client code, PII, emails → Claude tiers only
+- `internal` — own codebase, scripts → all tiers allowed
+- `public` — open-source, boilerplate → all tiers allowed
+
+**Claude Code routing** (no proxy needed): Claude Max subscription models (`haiku`/`sonnet`/`opus`) via the Agent tool. Tier suggestions are emitted on every prompt by the `UserPromptSubmit` hook via `classify-message.py`.
+
+**OSS routing** (optional, ~5–30× cheaper for non-sensitive tasks): Deploy a LiteLLM proxy that translates stable tier names into provider API calls. Run `scripts/setup-litellm.sh` to deploy interactively.
+
+**Quality-gate dispatch**: `.claude/settings.json` configures `model: "claude-sonnet-4-6"` (executor). Quality-gate review is delegated to the `quick-critic` (haiku → proxy → OSS) and `work-critic` (sonnet via proxy) sub-agents — see `.claude/agents/{quick,work}-critic.md`. The legacy native `advisor()` tool is disabled (`ADVISOR_BETA_ENABLED=false`); it consumed tokens on every session and forwarded the full conversation transcript.
+
+See `.claude/model-routing.md` for the full setup guide.
+
+### Scripts
+
+| Script | Purpose | When to run |
+|--------|---------|-------------|
+| `scripts/generate-knowledge-index.sh` | Rebuild `.ai/knowledge-index.md` from memory JSONL files | Automatically via `/wrap-up`; manually anytime |
+| `scripts/build-skill-graph.py` | Scan `.claude/skills/` and map tool/script/skill dependencies → `.ai/skill-graph.md` | Automatically at session Stop |
+| `scripts/system-self-check.py` | Validate settings.json, .mcp.json, hooks, CLAUDE.md, memory dirs | Automatically at session Stop; manually for diagnostics |
+| `scripts/setup-litellm.sh` | Interactive: deploy LiteLLM proxy to Fly.io, push API keys, smoke-test all tiers, update model-routing.json | Once per project to activate OSS routing |
+| `scripts/classify-message.py` | **UserPromptSubmit hook** — Classifies prompts by keyword heuristics into tier buckets (heavy/standard/light); emits `<model-routing>` block with tier suggestion and agent dispatch rules; tracks cumulative session spend; emits stream-checkpoint warnings on high token usage | Runs automatically on every prompt |
+| `scripts/advisor-metrics-hook.py` | _Legacy._ Logged `advisor()` tool invocations to `.ai/metrics/advisor-usage.jsonl`. No longer wired in (advisor disabled); retained for historical telemetry analysis only | Not invoked |
+| `scripts/pre-tool-use.py` | **PreToolUse hook** — Enforces explicit `model=` parameter on Agent() instantiation (prevents OSS tier bypass); validates PR repo targeting (blocks cross-repo misfires); warns on unsafe git operations | Runs before tools execute |
+| `scripts/session-stop-checklist.sh` | **Stop hook** — Outputs session-end checklist including branch fingerprint vs main, doctor signal summary, optional intent-drift check; prepares final context summary for Stop | Runs at session end |
+| `scripts/model-routing-suggester.py` | Tier suggester — maps incoming prompts to light-main/medium-main/heavy-main tier recommendations; logs tier suggestions to `.ai/metrics/tier-suggestion.jsonl` for telemetry; used by `/plan-review` and `/investigate-fix` workflows | Called by classifier hooks; runs manually via `/recall tier-metrics` |
+| `scripts/otel-langfuse-headers.sh` | Generates OTEL/OTLP auth headers from `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` environment variables; outputs header dict for `otelHeadersHelper` in settings.json; enables Langfuse telemetry | Automatically called by `otelHeadersHelper` in settings.json; disable by unsetting env vars |
+
+### Configuration: Telemetry & Model Pairing
+
+**Telemetry (optional)**: Set `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` in your environment to enable OTEL tracing to Langfuse. The `otelHeadersHelper` in settings.json calls `scripts/otel-langfuse-headers.sh` automatically to generate auth headers from these env vars. Leave unset to disable telemetry. Telemetry captures:
+- Session start/stop events
+- Prompt and model routing decisions
+- Tool invocation latency
+- Critic dispatch rate and cost
+
+Telemetry data is used for:
+- Cost tracking (cumulative spend warnings via `classify-message.py`)
+- Performance analysis (critic dispatch latency, tier routing efficacy)
+- Tier routing optimisation
+
+### Sub-Agents vs Skills
+
+- **Skills** = passive context (what the agent knows). Loaded into context, always available.
+- **Agents** = active parallel workers (what the agent delegates). Spawned on demand, return results.
+
+## File Tree
+
+```
+.mcp.json                    # MCP server definitions (Context7 + GitHub pre-configured)
+.mcp.example.json            # Documented catalogue of optional MCP servers
+.claude/
+  settings.json              # Hook config, permissions, env
+  persistent-instructions.md # Compression-safe constraints
+  hooks/
+    session-start.sh         # Credential loading, compact summary injection
+    user-prompt.py           # PR comments, plan check, Husky init
+    pre-tool.py              # Commit gate (session report reminder)
+    post-tool.py             # Edit tracking, lint reminders, tool-call counter (unified)
+    pre-compact.sh           # Pre-compaction session state summary
+    post-compact.sh          # Save compact summary, reset counter, log metrics
+    stop.sh                  # Stop sentinel, session-end log, skill graph, self-check
+  commands/
+    wrap-up.md               # End-of-session orchestrator
+    smart-compact.md         # Intelligent context compaction
+    compact-review.md        # Compaction system health report
+    extract-insights.md      # Auto-batch extract decisions/gotchas
+    session-summary.md       # Log session metadata to memory
+    pr-resolve.md            # Fix PR issues (conflicts, CI, reviews)
+    pr-watch.md              # Continuous PR monitoring
+    investigate-fix.md       # Investigate, diagnose & fix workflow
+    session-report.md        # Session retrospective
+    checkpoint.md            # Save work state
+    plan.md                  # Implementation planning
+    plan-review.md           # Architecture & scope review
+    health-check.md          # Service connectivity test
+    verify.md                # Full validation suite
+    learn.md                 # Extract pattern from session
+    recall.md                # Search memory
+    remember.md              # Quick-save fact
+    diagnose.md              # Search memory for past issues
+    prune.md                 # Decay stale memory entries
+    evolve.md                # Promote patterns to skill candidates
+    canary.md                # Post-deploy monitoring
+    gen-tests.md             # Generate test suite
+    qa.md                    # Browser QA testing
+    self-code-review.md      # Pre-commit review
+  skills/
+    self-code-review/        # Pre-commit review checklist
+    conventions/             # Project coding standards (template)
+    defense-in-depth/        # Security patterns
+    database-optimization/   # Query performance
+    test-driven-development/ # TDD workflow
+    verification-before-completion/ # Task completion gates
+    browser-qa/              # Browser-based QA testing
+    test-adequacy/           # PR: flags changed functions with no test update
+    docs-fact-check/         # PR: verifies doc claims against code
+    migration-safety/        # PR: SQL migration safety checks
+    security-boundary-test/  # PR: adversarial test requirements
+    shell-security/          # PR: curl timeouts, errexit, secret-passing
+    scope-adherence/         # PR: flags off-scope files and single-call abstractions
+    config-completeness/     # PR: sibling parameter consistency
+  agents/
+    # Development
+    memory-protocol.md       # JSONL memory read/write (haiku)
+    insight-miner.md         # Surface patterns and promotion candidates (sonnet)
+    deep-analyse.md          # Architecture analysis (haiku)
+    generate.md              # Code generation from spec (haiku)
+    qa.md                    # Browser QA testing (haiku)
+    review.md                # Code review for client/restricted code (claude-sonnet-4-6)
+    default.md               # General-purpose research and lookup (haiku)
+    # PR Assessment Pipeline
+    pr-classifier.md         # Triage PR diff → routing manifest (haiku)
+    diff-reflex.md           # Lightning pre-commit CRITICAL-only check (sonnet)
+    review-internal.md       # Code review for own-repo PRs (haiku)
+    review-triage.md         # Cheap first-pass filter for one relayed PR comment (haiku)
+    architecture-impact.md   # Downstream caller count + breaking change risk (sonnet)
+    ci-fixer.md              # CI failure diagnosis, propose-only (sonnet)
+    security-deep-dive.md    # SAST triage with true-positive scoring (claude-sonnet-4-6)
+    systems-consistency.md   # Cross-file deployment invariant checks (sonnet)
+    judge.md                 # Final 3-gate filter, only posts to GitHub (sonnet)
+    orchestrator.md          # Multi-step DAG coordinator (sonnet)
+    # Quality Critics
+    quick-critic.md          # Fast 4-dimension accountability critic (haiku)
+    work-critic.md           # Deep adversarial critic for plans and architecture (sonnet)
+    # File Exploration
+    explore-summarised.md    # Selective summarisation for large files (haiku)
+scripts/
+  generate-knowledge-index.sh # Rebuild .ai/knowledge-index.md from memory files
+  build-skill-graph.py        # Map skill → tool/script dependencies → .ai/skill-graph.md
+  system-self-check.py        # Validate harness files at session stop
+  setup-litellm.sh            # Interactive: deploy LiteLLM proxy, push secrets, smoke test
+  check-oss-routing.py        # Verify LiteLLM proxy routing for all tier aliases
+  pack-agent-context.sh       # Cross-repo sub-agent context packing utility
+deploy/
+  litellm-proxy/
+    README.md                 # Deploy pattern + instance migration notes (no custom image)
+    fly.toml                  # Fly.io config — pinned public image + [[files]] injection (replace {YOUR_APP_NAME})
+    config.yaml               # All tier aliases + sonnet alias + 3-provider fallback chains
+    sonnet_advisor_guardrail.py # Fail-closed post-call advisor for sonnet alias (Llama 3.3 70B)
+.ai/
+  knowledge-index.md          # Auto-generated knowledge index (run /wrap-up to refresh)
+  skill-graph.md              # Auto-generated skill dependency map (rebuilt at Stop)
+  memory/
+    facts.jsonl              # Facts, decisions, preferences, gotchas
+    patterns.jsonl           # Reusable patterns from /learn
+    sessions.jsonl           # Session metadata from /session-summary
+    retry/                   # Pending write-through retry envelopes
+    archive/                 # Archived low-confidence entries
+  decisions/                 # ADR files (Architecture Decision Records)
+  evals/                     # Eval results and benchmark outputs
+  reflections/               # Reflection entries from /reflect
+  navigation/
+    scripts/                 # Saved browser navigation scripts (from /nav-record)
+  compact-metrics.jsonl      # Compaction health metrics for /compact-review
+  session-logs/              # Per-day session event logs
+.husky/
+  pre-commit               # lint-staged → typecheck → test
+  commit-msg               # commitlint
+  pre-push                 # Block main push → typecheck + lint → test
+.github/
+  workflows/
+    ci.yml                 # Lint, typecheck, test, build
+CLAUDE.md                  # Project documentation (template)
+AGENTS.md                  # Multi-agent routing
+README-STARTER-PACK.md     # This file
+```
+
+## Copier updates for zip-based installs
+
+The prebuilt release zip intentionally ships **without** `.copier-answers.yml`
+(Copier's update provenance records the build host's template path, which is
+meaningless on your machine). To adopt the `copier update` flow later, reseed
+provenance once the template has a public home:
+
+```bash
+# one-time adoption: re-render over your project from the template source.
+# --skip '*' leaves every existing file untouched and only adds what is
+# missing (notably .copier-answers.yml provenance).
+copier copy --skip '*' <template-source> .
+```
+
+After that, `.copier-answers.yml` exists locally and `copier update` works
+normally. Until the template is published to its own repository, rendering
+from a local clone is the supported source.

@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# pre-commit hook — agent routing data-classification safety check
+#
+# Runs scripts/lint-agent-routing.py when agent files or model-routing.json
+# are staged for commit. Fails the commit if any agent declares an OSS-routed
+# or proxy-intercepted model while also requiring Anthropic-only data routing.
+#
+# INSTALL (one-time per clone):
+#   git config core.hooksPath .githooks
+#
+# Or use the convenience script:
+#   bash scripts/install-hooks.sh
+
+set -euo pipefail
+
+STAGED=$(git diff --cached --name-only 2>/dev/null || true)
+
+if echo "$STAGED" | grep -qE '(\.claude/agents/.*\.md|\.claude/model-routing\.json)'; then
+    echo "[pre-commit] Linting agent routing safety rules..."
+    python3 "$(git rev-parse --show-toplevel)/scripts/lint-agent-routing.py"
+fi

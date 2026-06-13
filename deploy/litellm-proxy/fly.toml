@@ -1,0 +1,78 @@
+# fly.toml — LiteLLM proxy for multi-model tier routing
+# Replace {YOUR_APP_NAME} with your actual Fly.io app name (e.g. myapp-litellm).
+# Run scripts/setup-litellm.sh for automated interactive setup.
+#
+# No custom image: the pinned public upstream image is used as-is; config.yaml
+# and the guardrail are injected at deploy time via [[files]] (ADR-0023 D3).
+# config.yaml is instance POLICY (not just secrets) — never bake it into a
+# shared image; each instance ships its own copy.
+app = "{YOUR_APP_NAME}"
+primary_region = "lax"
+
+[build]
+  image = "ghcr.io/berriai/litellm-non_root:v1.82.3-stable.patch.4"
+
+# Both files are injected from this directory at deploy time (validated on a
+# live Fly app 2026-06-12: /health/liveliness 200 + SonnetAdvisorGuardrail
+# present in runtime callbacks). Relative local_path values resolve against
+# the directory containing fly.toml (Fly docs); running `flyctl deploy` from
+# this directory (as scripts/setup-litellm.sh does) also lets flyctl
+# auto-discover fly.toml. Written to /tmp (writable by UID
+# 65532) rather than /app (read-only in the base image).
+#
+# NOTE: local_path content is embedded in the machine config and visible via
+# `fly machine status`/the Machines API to anyone with app access. That is
+# acceptable here: config.yaml and the guardrail are policy files, not secrets
+# (API keys stay in Fly secrets, referenced via os.environ/). If your
+# compliance posture forbids that visibility, use the equivalent
+# `secret_name = "LITELLM_CONFIG"` / `secret_name = "SONNET_ADVISOR_GUARDRAIL"`
+# form (base64-encode each file into a Fly secret first; keep total file
+# secrets under Fly's 64 KiB ceiling).
+[[files]]
+  guest_path = "/tmp/config.yaml"
+  local_path = "config.yaml"
+
+[[files]]
+  guest_path = "/tmp/sonnet_advisor_guardrail.py"
+  local_path = "sonnet_advisor_guardrail.py"
+
+# PYTHONPATH lets LiteLLM import sonnet_advisor_guardrail from the injected
+# dir at startup (litellm_settings.callbacks in config.yaml references it).
+# If this env var is lost (e.g. a deploy with --env overrides or a trimmed
+# fly.toml), the callback import fails and the proxy will not start — that is
+# fail-closed by design, not a soft degradation.
+[env]
+  PYTHONPATH = "/tmp"
+
+# Override CMD to read the injected config from /tmp rather than the default
+# /app path. Keep --num_workers 1: with custom Python callbacks that import
+# litellm at module level, multi-worker spawn mode can deadlock at startup.
+[processes]
+  app = "--config /tmp/config.yaml --port 4000 --num_workers 1"
+
+[http_service]
+  internal_port = 4000
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ["app"]
+
+  # /health/liveliness is unauthenticated process-alive; /health requires the
+  # master key. Use scripts/setup-litellm.sh's smoke test for a real model call.
+  [[http_service.checks]]
+    grace_period = "30s"
+    interval = "30s"
+    method = "GET"
+    path = "/health/liveliness"
+    timeout = "5s"
+
+  [http_service.concurrency]
+    type = "requests"
+    hard_limit = 50
+    soft_limit = 25
+
+[[vm]]
+  memory = "1024mb"
+  cpu_kind = "shared"
+  cpus = 1

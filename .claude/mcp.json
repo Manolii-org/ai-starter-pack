@@ -1,0 +1,46 @@
+{
+  "mcpServers": {
+    "_example-github": {
+      "_comment": "Uncomment for PR/issue management via GitHub MCP",
+      "_disabled": true,
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_TOKEN": "${GITHUB_TOKEN}"
+      }
+    },
+    "_example-vercel": {
+      "_comment": "Uncomment for Vercel deployment status and preview links",
+      "_disabled": true,
+      "command": "npx",
+      "args": ["-y", "vercel-mcp-server"],
+      "env": {
+        "VERCEL_TOKEN": "${VERCEL_TOKEN}"
+      }
+    },
+    "_example-database": {
+      "_comment": "Uncomment and configure for your database provider (Neon, Supabase, PlanetScale, etc.)",
+      "_disabled": true,
+      "command": "npx",
+      "args": ["-y", "@neondatabase/mcp-server-neon"],
+      "env": {
+        "NEON_API_KEY": "${NEON_API_KEY}"
+      }
+    },
+    "_example-sentry": {
+      "_comment": "Uncomment for error tracking integration",
+      "_disabled": true,
+      "command": "npx",
+      "args": ["-y", "@sentry/mcp-server"],
+      "env": {
+        "SENTRY_AUTH_TOKEN": "${SENTRY_AUTH_TOKEN}"
+      }
+    },
+    "_example-playwright": {
+      "_comment": "Uncomment for browser automation / QA testing",
+      "_disabled": true,
+      "command": "npx",
+      "args": ["-y", "@anthropic/mcp-playwright"]
+    }
+  }
+}

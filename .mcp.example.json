@@ -1,0 +1,80 @@
+{
+  "_comment": "Copy relevant entries into .mcp.json. Secrets come from environment variables — load via Doppler, .env, or your CI secret manager.",
+  "mcpServers": {
+    "github": {
+      "_comment": "GitHub — PR management, issue tracking, cross-repo file access. INCLUDED in default .mcp.json.",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github@0.7.1"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GH_TOKEN}"
+      }
+    },
+    "context7": {
+      "_comment": "Context7 — library documentation lookups. INCLUDED in default .mcp.json.",
+      "type": "http",
+      "url": "https://mcp.context7.com/mcp"
+    },
+    "vercel": {
+      "_comment": "Vercel — deployment management, preview URLs, build logs.",
+      "type": "http",
+      "url": "https://mcp.vercel.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${VERCEL_TOKEN}"
+      }
+    },
+    "neon": {
+      "_comment": "Neon — serverless PostgreSQL. Add NEON_API_KEY to your secrets.",
+      "command": "npx",
+      "args": ["-y", "@neondatabase/mcp-server-neon"],
+      "env": {
+        "NEON_API_KEY": "${NEON_API_KEY}"
+      }
+    },
+    "supabase": {
+      "_comment": "Supabase — PostgreSQL + auth + storage. Add SUPABASE_ACCESS_TOKEN to your secrets.",
+      "command": "npx",
+      "args": ["-y", "@supabase/mcp-server-supabase@latest"],
+      "env": {
+        "SUPABASE_ACCESS_TOKEN": "${SUPABASE_ACCESS_TOKEN}"
+      }
+    },
+    "doppler": {
+      "_comment": "Doppler — secrets management. Add DOPPLER_TOKEN to your secrets.",
+      "command": "npx",
+      "args": ["-y", "@dopplerhq/mcp-server@1.0.4"],
+      "env": {
+        "DOPPLER_TOKEN": "${DOPPLER_TOKEN}"
+      }
+    },
+    "sentry": {
+      "_comment": "Sentry — error tracking and performance monitoring.",
+      "command": "npx",
+      "args": ["-y", "@sentry/mcp-server@latest"],
+      "env": {
+        "SENTRY_AUTH_TOKEN": "${SENTRY_AUTH_TOKEN}"
+      }
+    },
+    "stripe": {
+      "_comment": "Stripe — payment and subscription management.",
+      "command": "npx",
+      "args": ["-y", "@stripe/agent-toolkit@latest"],
+      "env": {
+        "STRIPE_SECRET_KEY": "${STRIPE_SECRET_KEY}"
+      }
+    },
+    "browserbase": {
+      "_comment": "Browserbase — cloud browser automation for external sites. Stealth mode included.",
+      "command": "npx",
+      "args": ["-y", "@browserbasehq/mcp@3.0.0", "--keepAlive"],
+      "env": {
+        "BROWSERBASE_API_KEY": "${BROWSERBASE_API_KEY}",
+        "BROWSERBASE_PROJECT_ID": "${BROWSERBASE_PROJECT_ID}"
+      }
+    },
+    "playwright": {
+      "_comment": "Playwright — local browser automation. Works for localhost only (no external sites in sandbox).",
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@0.0.70", "--browser", "chromium"]
+    }
+  }
+}

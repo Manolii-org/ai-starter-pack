@@ -1,0 +1,129 @@
+name: Static Review
+
+# SAST on changed files only — Semgrep (all languages), Bandit (Python),
+# Shellcheck (shell scripts), ESLint (JS/TS).
+# Faster than full-repo scan; covers the blast radius of each PR.
+
+on:
+  pull_request:
+    branches: [main, master, develop]
+
+concurrency:
+  group: static-review-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  security-events: write
+
+jobs:
+  changed-files:
+    name: Detect Changed Files
+    runs-on: ubuntu-latest
+    outputs:
+      has_py: ${{ steps.detect.outputs.has_py }}
+      has_sh: ${{ steps.detect.outputs.has_sh }}
+      has_ts: ${{ steps.detect.outputs.has_ts }}
+      has_sql: ${{ steps.detect.outputs.has_sql }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+      - id: detect
+        run: |
+          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+          echo "has_py=$(echo "$CHANGED" | grep -q '\.py$' && echo true || echo false)" >> $GITHUB_OUTPUT
+          echo "has_sh=$(echo "$CHANGED" | grep -q '\.sh$' && echo true || echo false)" >> $GITHUB_OUTPUT
+          echo "has_ts=$(echo "$CHANGED" | grep -qE '\.(ts|tsx|js|jsx)$' && echo true || echo false)" >> $GITHUB_OUTPUT
+          echo "has_sql=$(echo "$CHANGED" | grep -q '\.sql$' && echo true || echo false)" >> $GITHUB_OUTPUT
+
+  semgrep:
+    name: Semgrep
+    runs-on: ubuntu-latest
+    needs: changed-files
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+      - name: Run Semgrep on changed files
+        uses: returntocorp/semgrep-action@713efdd345f3035192eaa63f56867b88e63e4e5d # v1
+        with:
+          config: >-
+            p/default
+            p/secrets
+            p/owasp-top-ten
+          # To add custom rules: create .semgrep/ directory with *.yaml rule files
+
+  bandit:
+    name: Bandit (Python)
+    runs-on: ubuntu-latest
+    needs: changed-files
+    if: needs.changed-files.outputs.has_py == 'true'
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: '3.14'
+      - name: Install bandit
+        run: pip install bandit[toml] -q
+      - name: Run Bandit on changed Python files
+        run: |
+          CHANGED_PY=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep '\.py$' | head -50)
+          if [ -n "$CHANGED_PY" ]; then
+            bandit $CHANGED_PY -ll -ii || echo "::warning::Bandit found issues — review above"
+          fi
+
+  shellcheck:
+    name: Shellcheck
+    runs-on: ubuntu-latest
+    needs: changed-files
+    if: needs.changed-files.outputs.has_sh == 'true'
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+      - name: Run Shellcheck on changed shell files
+        run: |
+          CHANGED_SH=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep '\.sh$')
+          if [ -n "$CHANGED_SH" ]; then
+            shellcheck --severity=warning $CHANGED_SH
+          fi
+
+  eslint:
+    name: ESLint (JS/TS)
+    runs-on: ubuntu-latest
+    needs: changed-files
+    if: needs.changed-files.outputs.has_ts == 'true' && hashFiles('package.json') != ''
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: '24'
+      - name: Install dependencies
+        run: npm ci
+      - name: Run ESLint on changed files
+        run: |
+          CHANGED_TS=$(git diff --name-only origin/${{ github.base_ref }}...HEAD \
+            | grep -E '\.(ts|tsx|js|jsx)$' | head -50)
+          if [ -n "$CHANGED_TS" ]; then
+            npx eslint $CHANGED_TS --max-warnings 0 || echo "::warning::ESLint found issues"
+          fi
+
+  agent-routing-lint:
+    name: Agent Routing Lint
+    runs-on: ubuntu-latest
+    if: hashFiles('.claude/agents/*.md', '.claude/skills/**/*.md') != ''
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: '3.14'
+      - name: Lint agent routing config
+        run: python3 scripts/lint-agent-routing.py
+        # Validates: data_sensitivity, model assignments, frontmatter completeness
+        # Fails if any restricted agent routes through OSS providers

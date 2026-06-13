@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Commit message hook: run commitlint
+set -euo pipefail
+
+# Skip gracefully if node_modules missing
+if ! command -v npx &>/dev/null; then
+  echo "[commit-msg] npx not found — skipping commitlint"
+  exit 0
+fi
+
+if ! npx --no-install commitlint --version &>/dev/null; then
+  echo "[commit-msg] commitlint not installed — skipping"
+  exit 0
+fi
+
+npx --no-install commitlint --edit "$1" || {
+  echo ""
+  echo "[commit-msg] Commit message does not follow conventional commits format."
+  echo "  Expected: type(scope): description"
+  echo "  Examples: feat(auth): add OAuth login"
+  echo "            fix(api): handle null response from provider"
+  echo "            chore(deps): update typescript to 5.4"
+  exit 1
+}

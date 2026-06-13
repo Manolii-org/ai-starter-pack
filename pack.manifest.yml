@@ -1,0 +1,44 @@
+# AI Starter Pack — Manifest
+#
+# Controls brand injection and feature flags for rendered output.
+# Edit .brand/branded.yml or .brand/unbranded.yml, not this file directly.
+# Run: python3 scripts/render-pack.py --mode branded|unbranded [flags] --output <dir>
+
+version: "1.2.2"   # see CHANGELOG.md
+
+brand:
+  ecosystem_name: "{{ECOSYSTEM_NAME}}"
+  attribution_line: "{{ATTRIBUTION_LINE}}"
+  org_name: "{{ORG_NAME}}"
+
+# Feature flags — set at first-session by Claude Code guided setup,
+# or pass as flags to render-pack.py for pre-rendered artifacts.
+features:
+  oss_routing: false        # Claude + OSS proxy (Fireworks/Together/Groq). Requires setup-litellm.sh.
+  kl_integration: false     # Remote knowledge layer memory backend (kl_* MCP tools).
+  browserbase: false        # Browserbase browser automation. Requires BROWSERBASE_API_KEY.
+  langfuse_telemetry: false # OTEL tracing to Langfuse. Requires LANGFUSE_PUBLIC_KEY + SECRET.
+  codex_adversarial: false  # Cross-provider adversarial PR review. Requires OPENAI_API_KEY.
+
+install_mode: unbranded     # branded | unbranded
+
+# Files excluded from output based on feature flags.
+# Keys map to feature flag names; values are glob patterns relative to pack root.
+feature_excludes:
+  # Files excluded when the named feature flag is disabled (false).
+  # oss_routing excludes the OSS-tier eligibility matrix (only relevant when OSS
+  # routing is enabled). kl_integration has no file exclusions yet — its flag is
+  # reserved for when remote-memory MCP config files are added.
+  # langfuse_telemetry has no exclusions: scripts/otel-langfuse-headers.sh always
+  # ships (dormant without LANGFUSE_* keys) because settings.json references it
+  # via otelHeadersHelper regardless of the flag (render-consistency fix, 1.1.5).
+  oss_routing:
+    - docs/us-oss-eligibility-matrix.md
+  kl_integration: []
+  browserbase:
+    - .claude/commands/browse.md
+    - .claude/commands/nav-record.md
+    - .claude/commands/nav-replay.md
+  langfuse_telemetry: []
+  codex_adversarial:
+    - .claude/agents/codex-adversarial.md

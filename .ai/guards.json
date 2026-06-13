@@ -1,0 +1,23 @@
+{
+  "guards": [
+    {
+      "id": "settings-permissions-block",
+      "description": "Prevent modification of Claude Code permissions configuration",
+      "paths": [".claude/settings.json"],
+      "regions": ["permissions"],
+      "frozen": true,
+      "frozen_at": "2026-01-01T00:00:00Z",
+      "frozen_reason": "Permissions block is intentional — do not weaken"
+    },
+    {
+      "id": "example-guard",
+      "description": "Example: protect a critical config file",
+      "paths": ["config/critical.json"],
+      "frozen": false,
+      "frozen_at": null,
+      "frozen_reason": null
+    }
+  ],
+  "session_unfreezes": [],
+  "bypass_log": ".ai/bypass-log.jsonl"
+}

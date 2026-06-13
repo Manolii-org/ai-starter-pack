@@ -1,0 +1,133 @@
+# /qa — Browser QA Testing
+
+Test the application in a real browser. Find bugs, fix them, and generate regression tests.
+
+{{ATTRIBUTION_LINE}}
+
+## Prerequisites
+
+- Application must be running locally (e.g. `npm run dev`, `pnpm dev`, or equivalent)
+- Playwright must be available (install via your package manager: `npm i -D playwright @playwright/test` or `pnpm add -D playwright @playwright/test`)
+- If Playwright MCP server is configured, prefer using it for browser commands
+
+## Process
+
+### 1. Identify What to Test
+
+Check what changed on the current branch:
+
+```bash
+git diff --name-only main...HEAD
+```
+
+If working on a single commit, use `HEAD~1` instead. For PR scope, always use `main...HEAD`.
+
+Map changed files to user-facing flows:
+- **API routes** → test the endpoint + any UI that calls it
+- **Components** → test the page/flow containing the component
+- **Server actions** → test the form/interaction that triggers the action
+- **Database schema** → test CRUD operations on affected tables
+- **Styles/layout** → visual verification of affected pages
+
+### 2. Launch Browser & Test
+
+Use Playwright to test each identified flow:
+
+```typescript
+// Example test structure
+import { test, expect } from '@playwright/test';
+
+test('flow description', async ({ page }) => {
+  await page.goto('http://localhost:3000/path');
+  // Verify page loads
+  await expect(page).toHaveTitle(/expected/);
+  // Interact
+  await page.click('button:has-text("Submit")');
+  // Verify result
+  await expect(page.locator('.success')).toBeVisible();
+});
+```
+
+**For each flow, check:**
+- Page loads without console errors
+- Key elements render correctly
+- User interactions work (clicks, form submissions, navigation)
+- Data displays correctly (not empty, not stale, correct format)
+- Error states show appropriate messages
+- Loading states appear and resolve
+- Capture Playwright screenshots for key UI states (baseline, post-action, error)
+
+### 3. Document Bugs Found
+
+For each bug:
+
+```text
+BUG: {short description}
+  Page: {URL path}
+  Steps: {1. Go to... 2. Click... 3. Observe...}
+  Expected: {what should happen}
+  Actual: {what actually happens}
+  Console: {any errors in browser console}
+  Severity: P0 (crash/data loss) | P1 (broken flow) | P2 (visual/minor) | P3 (cosmetic)
+```
+
+### 4. Write Failing Regression Test (Red)
+
+For each bug found:
+1. Write a regression test that reproduces the bug
+2. Confirm it **fails** (red) — this proves the test catches the issue
+3. The test must live in the appropriate test directory (`__tests__/`, `tests/`, or `*.test.ts`)
+4. Use descriptive names: `test('should not crash when X is empty', ...)`
+
+### 5. Fix Bug and Verify (Green)
+
+For each failing regression test:
+1. Fix the root cause (not just the symptom)
+2. Confirm the test now **passes** (green)
+3. Run self-code-review on the fix (invoke the `self-code-review` skill or check staged diff for P0/P1 issues)
+4. Add a `Root cause:` line in the commit message
+5. Commit the fix separately: `git commit -m "fix: {description}" -m "Root cause: {explanation}"`
+6. One bug = one commit (atomic fixes for easy revert)
+
+### 6. Final Verification
+
+After all fixes, run the project's full validation pipeline:
+1. Re-run the full test flow to confirm fixes work
+2. Run lint, typecheck, and tests (e.g. `npm run lint && npm run typecheck && npm test`)
+3. Run build to catch compilation errors (e.g. `npm run build`)
+4. Check that no new console errors appeared in the browser
+
+## Output Format
+
+```text
+QA Report — {DATE}
+================================
+Flows Tested: {N}
+Bugs Found: {N} (P0: {n}, P1: {n}, P2: {n}, P3: {n})
+Bugs Fixed: {N}
+Regression Tests Added: {N}
+
+Flow: {name}
+  Status: PASS | FAIL
+  Bugs: {list or "none"}
+
+Commits:
+  {hash} fix: {description}
+  {hash} test: regression test for {bug}
+================================
+```
+
+## When to Use
+
+- After implementing a feature (before PR)
+- After fixing a bug (verify the fix + check for side effects)
+- Before shipping to production (full QA pass)
+- When investigating a reported issue (reproduce → fix → test)
+
+## Tips
+
+- Test on the critical path first (login → main feature → output)
+- Check mobile viewport if the app is responsive (`page.setViewportSize({ width: 375, height: 812 })`)
+- Test with empty data states (new user, no records)
+- Test with large data sets if pagination is involved
+- If authentication is required, use cookies from a logged-in session or test credentials

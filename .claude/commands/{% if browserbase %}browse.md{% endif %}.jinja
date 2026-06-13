@@ -1,0 +1,100 @@
+---
+name: browse
+version: 1.0.0
+description: "Navigate external websites via the best available browser automation path"
+type: command
+requires_mcp:
+  - browserbase
+  - playwright
+required_entities: []
+safety_tier: green
+tags:
+  - browser
+  - automation
+  - browserbase
+  - playwright
+eval_cases: null  # TODO: add eval cases
+---
+
+# /browse — External Website Navigation
+
+{{ATTRIBUTION_LINE}}
+
+Navigate external websites using the best available browser automation path.
+
+## Quick Decision (DO THIS FIRST)
+
+Before writing any code, determine the path:
+
+```
+1. Is target localhost/internal?     → Use Playwright MCP directly (Tier 3)
+2. Is Browserbase MCP connected?     → Use browserbase tools: start, navigate, act, observe, extract (Tier 2a)
+3. Is Fly.io relay available?        → Use browser-worker API (Tier 2b)
+4. None of the above?               → Tell user to use Claude in Chrome from Desktop/CLI
+```
+
+**How to check:**
+- Tier 2a: Try `mcp__browserbase__start` — if it connects, use it. **⚠️ Claude Code Web sessions: Browserbase MCP CANNOT connect (WebSocket blocked by sandbox). Skip to Tier 2b.**
+- Tier 2b: Check `FLY_API_TOKEN` env var is set, then use `api.machines.dev`. **Alternative (CLI sessions only):** `node` + `playwright-core` are available locally — use direct Node.js CDP (faster, no relay needed).
+- Tier 3: Try `mcp__playwright__browser_navigate` to localhost
+
+## Tier 2a: Browserbase MCP (Preferred for external sites)
+
+When the Browserbase MCP tools are available (`start`, `navigate`, `act`, `observe`, `extract`):
+
+```
+1. start           → Creates cloud browser session
+2. navigate <url>  → Goes to the URL
+3. observe         → Describes what's on the page (AI-powered)
+4. act "click the login button"  → Natural language interaction
+5. extract "get the page title and main content"  → Structured data extraction
+6. end             → Closes session
+```
+
+**All interactions are natural language** — no CSS selectors needed. Stagehand AI handles element identification.
+
+### Proxy for bot-protected sites
+
+Sites that block datacenter IPs (telcos, banks, government portals):
+- The Browserbase MCP should be configured with `--proxies` flag in `.mcp.json`
+- If not, and you hit bot detection, tell the user to add `"--proxies"` to the args
+
+## Tier 2b: Fly.io Browser Relay (Claude Code Web fallback)
+
+When Browserbase MCP can't connect (WebSocket blocked in Claude Code Web sandbox):
+
+### Option A: Pre-deployed browser-worker
+
+Check project documentation for whether a pre-deployed browser-worker service is available.
+
+### Option B: Ad-hoc relay machine (fallback)
+
+Create an ephemeral machine for the task:
+
+```bash
+# 1. Create machine with node:22-slim, sleep 3600
+# Note: Use double-quotes to allow ${VAR} expansion
+curl -s -X POST "https://api.machines.dev/v1/apps/{YOUR_APP_NAME}/machines" \
+  -H "Authorization: Bearer ${FLY_API_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d "{\"config\": {\"image\": \"node:22-slim\", \"env\": {\"BROWSERBASE_API_KEY\": \"${BROWSERBASE_API_KEY}\", \"BROWSERBASE_PROJECT_ID\": \"${BROWSERBASE_PROJECT_ID}\"}, \"guest\": {\"cpu_kind\": \"shared\", \"cpus\": 2, \"memory_mb\": 2048}, \"auto_destroy\": false, \"restart\": {\"policy\": \"no\"}, \"processes\": [{\"cmd\": [\"bash\", \"-c\", \"cd /tmp && npm init -y >/dev/null 2>&1 && npm install playwright >/dev/null 2>&1 && echo READY && sleep 3600\"]}]}, \"region\": \"{YOUR_REGION}\"}"
+
+# 2. Wait 15s for npm install, then exec scripts
+# 3. Use the step-by-step pattern: write script → exec → read result → decide next step
+# 4. IMPORTANT: Create Browserbase sessions with residential proxies for bot-protected sites
+# 5. IMPORTANT: Use `keepAlive: true` for multi-step flows (OTP, pagination)
+# 6. Clean up: DELETE machine when done
+```
+
+## Tier 3: Local Playwright (localhost only)
+
+Use the Playwright MCP tools directly for localhost URLs:
+```
+mcp__playwright__browser_navigate → http://localhost:3000/...
+mcp__playwright__browser_snapshot → Read page state
+mcp__playwright__browser_click   → Interact
+```
+
+**NEVER use for external URLs** — the sandbox blocks all outbound browser traffic.
+
+ARGUMENTS: $ARGUMENTS

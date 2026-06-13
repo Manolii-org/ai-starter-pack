@@ -1,0 +1,167 @@
+# AI Starter Pack — Copier template configuration
+#
+# Replaces the one-shot scripts/render-pack.py renderer (ADR-0023 Decision 1).
+# Render:  copier copy <this-dir> <output-dir> --defaults [--data flag=true ...]
+# Update:  copier update  (requires the template to live in its own git repo —
+#          planned relocation to manolii-org/ai-starter-pack, ADR-0023 Decision 2;
+#          until then `copier copy` from this subdirectory works in
+#          dirty-template mode and `copier update` is unavailable)
+#
+# Brand defaults below MUST stay in sync with .brand/branded.yml and
+# .brand/unbranded.yml (enforced by tests/test_copier_render.py).
+
+# ── Brand questions ──────────────────────────────────────────────────────────
+install_mode:
+  type: str
+  help: Brand mode for the rendered pack
+  choices:
+    - branded
+    - unbranded
+  default: unbranded
+
+ecosystem_name:
+  type: str
+  help: Ecosystem name used in attribution surfaces (empty for white-label)
+  default: "{% if install_mode == 'branded' %}Manolii{% endif %}"
+
+attribution_line:
+  type: str
+  help: Attribution line appended to command docs (empty for white-label)
+  default: "{% if install_mode == 'branded' %}Based on proven patterns from the Manolii ecosystem.{% endif %}"
+
+org_name:
+  type: str
+  help: GitHub org the rendered instance belongs to
+  default: "{% if install_mode == 'branded' %}manolii-org{% else %}your-org{% endif %}"
+
+# ── Feature flags (all default off — ADR-0023 Decision 5 tenet 3) ───────────
+oss_routing:
+  type: bool
+  help: Claude + OSS proxy routing (Fireworks/Together/Groq). Requires setup-litellm.sh.
+  default: false
+
+kl_integration:
+  type: bool
+  help: Remote knowledge layer memory backend (kl_* MCP tools).
+  default: false
+
+browserbase:
+  type: bool
+  help: Browserbase browser automation commands. Requires BROWSERBASE_API_KEY.
+  default: false
+
+langfuse_telemetry:
+  type: bool
+  help: OTEL tracing to Langfuse. Requires LANGFUSE_PUBLIC_KEY + SECRET. (No file exclusions — scripts/otel-langfuse-headers.sh always ships, dormant without keys.)
+  default: false
+
+codex_adversarial:
+  type: bool
+  help: Cross-provider adversarial PR review agent. Requires OPENAI_API_KEY.
+  default: false
+
+mesh_telemetry:
+  type: bool
+  help: Agent-mesh cost/outcome telemetry contract (ships mesh-contract.yaml.template; instance gains MESH_INVOCATION_URL repo var + bearer secret).
+  default: false
+
+# ── Instance identity (provenance — pack-components.yml, ADR-0023 Decision 4) ─
+instance_name:
+  type: str
+  help: Short instance slug (e.g. acme) recorded in pack-components.yml
+  default: "{% if install_mode == 'branded' %}manolii{% else %}your-instance{% endif %}"
+
+doppler_project:
+  type: str
+  help: Doppler project holding this instance's runtime secrets
+  default: your-doppler-project
+
+doppler_config:
+  type: str
+  help: Doppler config within the project
+  default: prd
+
+fly_app:
+  type: str
+  help: Fly.io app name for the LiteLLM proxy (only used when oss_routing is enabled)
+  default: your-litellm-app
+
+# ── Telemetry (§3-O5 — multi-instance-safe OTEL endpoint) ───────────────────
+otel_endpoint:
+  type: str
+  help: OTLP endpoint for Claude Code telemetry (settings.json OTEL_EXPORTER_OTLP_ENDPOINT)
+  default: "https://us.cloud.langfuse.com/api/public/otel"
+
+# ── Computed render-context aliases (not asked, not recorded) ────────────────
+# Shipped files carry {{ATTRIBUTION_LINE}} placeholders (render-pack.py legacy
+# convention, already valid Jinja). This alias bridges the lowercase answer to
+# the uppercase in-file marker.
+ATTRIBUTION_LINE:
+  type: str
+  default: "{{ attribution_line }}"
+  when: false
+
+# ── Copier settings ──────────────────────────────────────────────────────────
+# trim/lstrip keep block-tag templates (pack-components.yml.jinja) clean.
+# keep_trailing_newline is Copier's default but pinned here because _envops
+# entries override per-key — losing it would strip the final newline from every
+# rendered .jinja file and break byte-parity.
+_envops:
+  trim_blocks: true
+  lstrip_blocks: true
+  keep_trailing_newline: true
+
+# Only files genuinely containing placeholders carry the .jinja suffix; all
+# other files (including .github/workflows/*.yml with `${{ }}` expressions)
+# are copied verbatim and never pass through Jinja.
+_templates_suffix: .jinja
+
+# NOTE: _exclude REPLACES Copier's built-in default list (verified on Copier
+# 9.15.2), so the defaults we still need are re-declared here alongside the
+# pack-internal scaffolding that must never ship (mirrors render-pack.py
+# ALWAYS_EXCLUDE + its releases/dist/artifact skip rules).
+_exclude:
+  # Copier defaults we re-declare
+  - copier.yml
+  - copier.yaml
+  - "~*"
+  - "*.py[co]"
+  - __pycache__
+  - __pycache__/**
+  - .git
+  - .git/**
+  - .DS_Store
+  - .svn
+  - .svn/**
+  # Pack-internal scaffolding (never ships)
+  - pack.manifest.yml
+  - .brand
+  - .brand/**
+  - scripts/render-pack.py
+  # Template-repo-only test (needs copier.yml + .brand; also carries brand
+  # literals in assertions that would trip the unbranded brand-leak scan)
+  - tests/test_copier_render.py
+  # Build artifacts / caches
+  - .ruff_cache
+  - .ruff_cache/**
+  - .pytest_cache
+  - .pytest_cache/**
+  - node_modules
+  - node_modules/**
+  - .venv
+  - .venv/**
+  - venv
+  - venv/**
+  - releases
+  - releases/**
+  - dist
+  - dist/**
+  - "*.zip"
+
+# Instance-owned files: written on first copy, never overwritten by
+# `copier update` (report §4 Lever A / ADR-0023 Decision 1).
+_skip_if_exists:
+  - CLAUDE.md
+  - .claude/model-routing.json
+  - .claude/mcp.json
+  - .claude/hooks/session-start.sh

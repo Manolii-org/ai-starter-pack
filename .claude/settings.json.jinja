@@ -1,0 +1,138 @@
+{
+  "skipDangerousModePermissionPrompt": true,
+  "model": "claude-sonnet-4-6",
+  "env": {
+    "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "haiku",
+    "MAIN_THREAD_EXECUTOR_MODEL": "claude-sonnet-4-6",
+    "ADVISOR_BETA_ENABLED": "false",
+    "ENABLE_TOOL_SEARCH": "auto:5",
+    "OTEL_METRICS_EXPORTER": "otlp",
+    "OTEL_TRACES_EXPORTER": "otlp",
+    "OTEL_LOGS_EXPORTER": "otlp",
+    "OTEL_EXPORTER_OTLP_ENDPOINT": "{{ otel_endpoint }}",
+    "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf"
+  },
+  "otelHeadersHelper": "scripts/otel-langfuse-headers.sh",
+  "permissions": {
+    "defaultMode": "bypassPermissions",
+    "allow": [
+      "Bash(*)",
+      "Edit(*)",
+      "Write(*)",
+      "Read(*)",
+      "Glob(*)",
+      "Grep(*)",
+      "WebFetch(*)",
+      "WebSearch(*)",
+      "NotebookEdit(*)",
+      "TodoWrite(*)",
+      "Agent(*)",
+      "Skill(*)",
+      "AskUserQuestion(*)",
+      "ToolSearch(*)",
+      "ExitPlanMode(*)",
+      "Monitor(*)",
+      "mcp__github__*",
+      "mcp__playwright__*",
+      "mcp__supabase__*",
+      "mcp__doppler__*",
+      "mcp__browserbase__*",
+      "mcp__neon__*",
+      "mcp__*"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "_R=$(git rev-parse --show-toplevel 2>/dev/null || echo \"$PWD\"); cd \"$_R\" && python3 scripts/pre-tool-use.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "_R=$(git rev-parse --show-toplevel 2>/dev/null || echo \"$PWD\"); cd \"$_R\" && bash .claude/hooks/session-start.sh",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "_R=$(git rev-parse --show-toplevel 2>/dev/null || echo \"$PWD\"); cd \"$_R\" && python3 scripts/classify-message.py",
+            "timeout": 15
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "_R=$(git rev-parse --show-toplevel 2>/dev/null || echo \"$PWD\"); cd \"$_R\" && python3 .claude/hooks/user-prompt.py",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "_R=$(git rev-parse --show-toplevel 2>/dev/null || echo \"$PWD\"); cd \"$_R\" && python3 .claude/hooks/post-tool.py",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "_R=$(git rev-parse --show-toplevel 2>/dev/null || echo \"$PWD\"); cd \"$_R\" && bash .claude/hooks/pre-compact.sh",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "_R=$(git rev-parse --show-toplevel 2>/dev/null || echo \"$PWD\"); cd \"$_R\" && bash .claude/hooks/post-compact.sh",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "_R=$(git rev-parse --show-toplevel 2>/dev/null || echo \"$PWD\"); cd \"$_R\" && scripts/session-stop-checklist.sh",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "_R=$(git rev-parse --show-toplevel 2>/dev/null || echo \"$PWD\"); cd \"$_R\" && python3 scripts/system-self-check.py > /dev/null 2>&1 && python3 scripts/build-skill-graph.py > /dev/null 2>&1; echo \"{\\\"timestamp\\\":\\\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\\\",\\\"exit_code\\\":$?,\\\"event\\\":\\\"stop-hook-self-check\\\"}\" >> .ai/memory/eval-failures.jsonl",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

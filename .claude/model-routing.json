@@ -1,0 +1,2461 @@
+{
+  "version": "5.9.0",
+  "last_synced": "2026-04-28T00:00:00Z",
+  "instance_config": {
+    "name": "your-org",
+    "doppler_project": "master",
+    "doppler_config": "prd",
+    "fly_app_prefix": "your-org"
+  },
+  "provider_registry": {
+    "anthropic": {
+      "label": "Anthropic (native)",
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "api_base": null,
+      "data_region": "US",
+      "soc2": true,
+      "trains_on_api_data": false
+    },
+    "fireworks": {
+      "label": "Fireworks AI (US-hosted open models)",
+      "api_key_env": "FIREWORKS_API_KEY",
+      "api_base": "https://api.fireworks.ai/inference/v1",
+      "data_region": "US",
+      "soc2": true,
+      "trains_on_api_data": false,
+      "notes": "Open-source model weights hosted on Fireworks US infrastructure. Chinese model vendors do not receive query data."
+    },
+    "together": {
+      "label": "Together AI (US-hosted open models)",
+      "api_key_env": "TOGETHER_API_KEY",
+      "api_key_env_aliases": [
+        "TOGETHERAI_API_KEY"
+      ],
+      "api_base": "https://api.together.xyz/v1",
+      "litellm_prefix": "together_ai/",
+      "data_region": "US",
+      "soc2": true,
+      "soc2_type": "Type II",
+      "soc2_date": "2025-07",
+      "hipaa": true,
+      "trains_on_api_data": false,
+      "vpc_available": true,
+      "notes": "Broader catalog than Fireworks (~200 open-source models). 2026-04-11 v5.3.2 (post-live-probe): Together is PRIMARY only for tier-2-agentic Kimi K2.5 (-17% input, -7% output, ~2x faster at 417 tok/s vs Fireworks ~150 tok/s) and serves as a cross-provider secondary for tier-1-fast (DeepSeek V3.1) and tier-3-tool (Kimi K2.5). Round-2 attempts to make Together primary for tier-3-tool GLM-4.7 and tier-4-extract Llama 3.1 8B were rolled back after live probing \u2014 both were dedicated-endpoint-only on Together's serverless plan, so tier-3-tool stayed on Fireworks GLM-4.7 and tier-4-extract switched to Groq Llama 3.1 8B Instant. Also hosts GLM-5.1 (zai-org/GLM-5.1, $1.40/$4.40, 202K context \u2014 used as the tier-0-oss-heavy cross-provider fallback) and GLM-5 FP4 at $1.00/$3.20 (28% cheaper than BF16 GLM-5 \u2014 validate quality before adopting). Zero-retention requires enterprise VPC tier \u2014 not available on serverless by default."
+    },
+    "groq": {
+      "label": "Groq (LPU inference \u2014 US-hosted)",
+      "api_key_env": "GROQ_API_KEY",
+      "api_base": "https://api.groq.com/openai/v1",
+      "data_region": "US",
+      "soc2": true,
+      "trains_on_api_data": false,
+      "notes": "LPU hardware delivers ~600 tok/s vs ~80 tok/s on GPU providers. Limited model catalog (Llama 3.x, Qwen 3 32B, DeepSeek R1 distills \u2014 no Kimi K2.5 or GLM-4.7). Best suited for tier-4-extract and Stagehand DOM selection where latency matters more than model capability. Cannot replace full Fireworks tier stack."
+    },
+    "_deferred_zai": {
+      "label": "Z.ai (GLM Coding Plan)",
+      "api_key_env": "ZAI_API_KEY",
+      "api_base": "https://api.z.ai/api/anthropic",
+      "data_region": "CN",
+      "soc2": false,
+      "status": "deferred",
+      "deferred_reason": "Data sovereignty risk for consulting client code. Subscription economics (~$30/mo) do not justify risk at current usage scale. Revisit if isolated non-client workloads warrant it."
+    },
+    "_deferred_minimax": {
+      "label": "MiniMax (direct API)",
+      "api_key_env": "MINIMAX_API_KEY",
+      "api_base": "https://api.minimax.io/v1",
+      "data_region": "CN",
+      "soc2": false,
+      "status": "deferred",
+      "deferred_reason": "Direct API sends data to China (data_region: CN). NOT needed \u2014 MiniMax M2.7 is available on Fireworks and Together US infrastructure at the same $0.30/$1.20 pricing. Direct API only warranted if Fireworks/Together drop the model or if MiniMax-exclusive features (e.g. M2.7-highspeed variant) are needed."
+    }
+  },
+  "tier_definitions": {
+    "tier-0-opus": {
+      "provider": "anthropic",
+      "model": "claude-opus-4-6",
+      "litellm_alias": "claude-opus-4-6",
+      "swebench": 0.808,
+      "baseline_swebench": 0.808,
+      "intelligence_score": null,
+      "gdpval_aa_elo": 1620,
+      "use_cases": [
+        "architect",
+        "security",
+        "cross-repo",
+        "plan-mode"
+      ],
+      "data_clearance": [
+        "anthropic_only",
+        "internal",
+        "public"
+      ],
+      "cost_per_m_input": 5.0,
+      "cost_per_m_output": 25.0,
+      "vision": {
+        "supported": true,
+        "modalities": [
+          "text",
+          "image"
+        ],
+        "mmmu_pro": 0.78,
+        "max_images_per_request": 100,
+        "pricing": {
+          "per_1k_images_1mp_usd": 8.0,
+          "native_unit": "input_token_equivalent",
+          "native_rate_usd": 5.0
+        }
+      }
+    },
+    "tier-0-sonnet": {
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-6",
+      "litellm_alias": "claude-sonnet-4-6",
+      "swebench": 0.796,
+      "baseline_swebench": 0.796,
+      "intelligence_score": 44,
+      "gdpval_aa_elo": 1655,
+      "use_cases": [
+        "implement",
+        "debug",
+        "code-review",
+        "deep-analysis"
+      ],
+      "data_clearance": [
+        "anthropic_only",
+        "internal",
+        "public"
+      ],
+      "cost_per_m_input": 3.0,
+      "cost_per_m_output": 15.0,
+      "fallback_chain": {},
+      "vision": {
+        "supported": true,
+        "modalities": [
+          "text",
+          "image"
+        ],
+        "mmmu_pro": 0.74,
+        "max_images_per_request": 100,
+        "pricing": {
+          "per_1k_images_1mp_usd": 4.8,
+          "native_unit": "input_token_equivalent",
+          "native_rate_usd": 3.0
+        }
+      }
+    },
+    "tier-0-oss-heavy": {
+      "provider": "fireworks",
+      "model": "accounts/fireworks/models/kimi-k2p6",
+      "litellm_alias": "tier-0-oss-heavy",
+      "label": "Kimi K2.6 (OSS heavy tier) \u2014 RESTRICTED USE",
+      "swebench_pro": 0.586,
+      "swebench_verified": 0.802,
+      "baseline_swebench_pro": 0.586,
+      "intelligence_score": 54,
+      "context_window": 262144,
+      "context_cap_runtime": 64000,
+      "use_cases": {
+        "allowed": [
+          "code-patch",
+          "swe-patch",
+          "agentic-loop",
+          "long-horizon-agent",
+          "bulk-extract",
+          "math-reasoning",
+          "structured-extraction",
+          "classification",
+          "scientific-reasoning"
+        ],
+        "excluded": [
+          "prose",
+          "creative-writing",
+          "tone-sensitive",
+          "client-facing",
+          "code-review",
+          "architecture",
+          "adr",
+          "trade-off-analysis",
+          "orchestration",
+          "dialog",
+          "planning",
+          "vision",
+          "multimodal",
+          "factual-qa",
+          "narrative-docs",
+          "long-context-over-64k"
+        ]
+      },
+      "data_clearance": [
+        "internal",
+        "public"
+      ],
+      "cost_per_m_input": 0.5,
+      "cost_per_m_output": 2.8,
+      "weaknesses": [
+        "Smoke test null as of 2026-05-10 \u2014 run against Fireworks serverless before relying on primary",
+        "8-case fitness eval not yet run \u2014 GLM-5.1 baseline comparison pending",
+        "PRC censorship on politically sensitive topics (Moonshot AI CN weights)",
+        "~100% tool call rate inherited from K2.5 base \u2014 no published BFCL score specific to K2.6",
+        "Chinese character / non-English leakage risk not confirmed absent (verify in fitness eval)"
+      ],
+      "eval_status": "promoted-pending-smoke-test. Smoke test + 8-case fitness eval required before production reliance. See reports/tier-0-oss-heavy-evaluation-2026-05-10.md for rationale. GLM-5.1 retained as tertiary fallback.",
+      "fallback_chain": {
+        "primary": {
+          "provider": "fireworks",
+          "litellm_alias": "tier-0-oss-heavy",
+          "model_id_hint": "accounts/fireworks/models/kimi-k2p6",
+          "smoke_tested": null,
+          "vision": {
+            "supported": true,
+            "modalities": [
+              "text",
+              "image"
+            ]
+          }
+        },
+        "secondary": {
+          "provider": "together",
+          "litellm_alias": "tier-0-oss-heavy-fallback-together",
+          "model_id_hint": "moonshotai/Kimi-K2.6",
+          "cost_per_m_input": 0.5,
+          "cost_per_m_output": 2.8,
+          "smoke_tested": "2026-04-27",
+          "vision": {
+            "supported": true,
+            "modalities": [
+              "text",
+              "image"
+            ]
+          }
+        },
+        "tertiary": {
+          "provider": "fireworks",
+          "litellm_alias": "tier-0-oss-heavy-fallback-glm",
+          "model_id_hint": "accounts/fireworks/models/glm-5p1",
+          "cost_per_m_input": 1.4,
+          "cost_per_m_output": 4.4,
+          "notes": "GLM-5.1 retained as cross-family fallback after K2.6 primary + Together K2.6 secondary. Different model family ensures tertiary survives a Kimi-family outage.",
+          "vision": {
+            "supported": false,
+            "modalities": [
+              "text"
+            ]
+          }
+        }
+      },
+      "vision": {
+        "supported": true,
+        "modalities": [
+          "text",
+          "image"
+        ]
+      }
+    },
+    "tier-1-fast": {
+      "provider": "fireworks",
+      "model": "accounts/fireworks/models/gpt-oss-120b",
+      "litellm_alias": "tier-1-fast",
+      "swebench": null,
+      "baseline_swebench": null,
+      "intelligence_score": 33,
+      "gdpval_aa_elo": 948,
+      "context_window": 131072,
+      "throughput_tok_per_sec": null,
+      "use_cases": [
+        "single-step",
+        "boilerplate",
+        "rename",
+        "format",
+        "list"
+      ],
+      "data_clearance": [
+        "internal",
+        "public"
+      ],
+      "cost_per_m_input": 0.8,
+      "cost_per_m_output": 3.2,
+      "fallback_chain": {
+        "primary": {
+          "provider": "fireworks",
+          "litellm_alias": "tier-1-fast",
+          "model_id_hint": "accounts/fireworks/models/gpt-oss-120b",
+          "smoke_tested": "2026-04-13",
+          "vision": {
+            "supported": false,
+            "modalities": [
+              "text"
+            ]
+          }
+        },
+        "secondary": {
+          "provider": "together",
+          "litellm_alias": "tier-1-fast-fallback-together",
+          "model_id_hint": "moonshotai/Kimi-K2.6",
+          "smoke_tested": "2026-04-28",
+          "cost_per_m_input": 0.5,
+          "cost_per_m_output": 2.8,
+          "notes": "Kimi K2.6 on Together \u2014 cross-provider resilience. Different model from primary (PRC-origin, internal-clearance only).",
+          "vision": {
+            "supported": false,
+            "modalities": [
+              "text"
+            ]
+          }
+        },
+        "tertiary": {
+          "provider": "groq",
+          "litellm_alias": "tier-1-fast-fallback-groq",
+          "model_id_hint": "llama-3.3-70b-versatile",
+          "notes": "Different provider and different model family for maximum outage resilience.",
+          "vision": {
+            "supported": false,
+            "modalities": [
+              "text"
+            ]
+          }
+        }
+      },
+      "vision": {
+        "supported": false,
+        "modalities": [
+          "text"
+        ]
+      }
+    },
+    "tier-2-agentic": {
+      "provider": "fireworks",
+      "model": "accounts/fireworks/models/kimi-k2p6",
+      "litellm_alias": "tier-2-agentic",
+      "swebench": 0.768,
+      "baseline_swebench": 0.768,
+      "intelligence_score": 54,
+      "gdpval_aa_elo": 1531,
+      "context_window": 262144,
+      "use_cases": [
+        "long-tool-chains",
+        "multi-step-subagents",
+        "large-context"
+      ],
+      "data_clearance": [
+        "internal",
+        "public"
+      ],
+      "cost_per_m_input": 0.5,
+      "cost_per_m_output": 2.8,
+      "throughput_tok_per_sec": 140,
+      "fallback_chain": {
+        "primary": {
+          "provider": "fireworks",
+          "litellm_alias": "tier-2-agentic",
+          "model_id_hint": "accounts/fireworks/models/kimi-k2p6",
+          "context_window": 262144,
+          "vision": {
+            "supported": false,
+            "modalities": [
+              "text"
+            ]
+          },
+          "smoke_tested": "2026-04-28"
+        },
+        "secondary": {
+          "provider": "together",
+          "litellm_alias": "tier-2-agentic-fallback-kimi",
+          "model_id_hint": "moonshotai/Kimi-K2.6",
+          "cost_per_m_input": 0.5,
+          "cost_per_m_output": 2.8,
+          "context_window": 262144,
+          "smoke_tested": "2026-04-27",
+          "notes": "K2.5 \u2192 K2.6 upgrade 2026-04-26: intelligence 47 \u2192 54 (+7pp), same 262K context. Cross-provider + cross-model family overflow path. Needs smoke test before production reliance.",
+          "vision": {
+            "supported": true,
+            "modalities": [
+              "text",
+              "image"
+            ],
+            "mmmu_pro": 0.62,
+            "pricing": {
+              "per_1k_images_1mp_usd": 1.425,
+              "native_unit": "input_token_equivalent",
+              "native_rate_usd": 0.95
+            }
+          }
+        },
+        "tertiary": {
+          "provider": "fireworks",
+          "litellm_alias": "tier-2-agentic-fallback-fireworks",
+          "model_id_hint": "accounts/fireworks/models/kimi-k2p6",
+          "cost_per_m_input": 0.5,
+          "cost_per_m_output": 2.8,
+          "context_window": 262144,
+          "smoke_tested": "2026-04-27",
+          "notes": "K2.5 \u2192 K2.6 upgrade 2026-04-26: intelligence 47 \u2192 54. Day-0 serverless on Fireworks (fireworks.ai/models/fireworks/kimi-k2p6). Smoke tested 2026-04-27: 3/3 PASS via live proxy.",
+          "vision": {
+            "supported": true,
+            "modalities": [
+              "text",
+              "image"
+            ],
+            "mmmu_pro": 0.62,
+            "pricing": {
+              "per_1k_images_1mp_usd": 1.425,
+              "native_unit": "input_token_equivalent",
+              "native_rate_usd": 0.95
+            }
+          }
+        }
+      },
+      "vision": {
+        "supported": true,
+        "modalities": [
+          "text",
+          "image"
+        ],
+        "mmmu_pro": 0.62
+      }
+    },
+    "tier-3-tool": {
+      "provider": "openrouter",
+      "model": "google/gemma-4-31b-it",
+      "litellm_alias": "openrouter/google/gemma-4-31b-it",
+      "swebench": null,
+      "baseline_swebench": null,
+      "intelligence_score": 39,
+      "gdpval_aa_elo": 1124,
+      "tool_calling_success_rate": 0.864,
+      "use_cases": [
+        "tool-heavy-subagents",
+        "structured-output"
+      ],
+      "data_clearance": [
+        "internal",
+        "public"
+      ],
+      "cost_per_m_input": 0.13,
+      "cost_per_m_output": 0.38,
+      "fallback_chain": {
+        "primary": {
+          "provider": "openrouter",
+          "litellm_alias": "tier-3-tool",
+          "model_id_hint": "google/gemma-4-31b-it",
+          "smoke_tested": null,
+          "vision": {
+            "supported": true,
+            "modalities": [
+              "text",
+              "image",
+              "video"
+            ],
+            "mmmu_pro": 0.58,
+            "max_images_per_request": null,
+            "pricing": {
+              "per_1k_images_1mp_usd": 0.3,
+              "native_unit": "input_token_equivalent",
+              "native_rate_usd": 0.2
+            }
+          }
+        },
+        "secondary": {
+          "provider": "fireworks",
+          "litellm_alias": "tier-3-tool-fallback-kimi-fireworks",
+          "model_id_hint": "accounts/fireworks/models/kimi-k2p6",
+          "smoke_tested": "2026-04-27",
+          "cost_per_m_input": 0.95,
+          "cost_per_m_output": 4.0,
+          "notes": "K2.5 \u2192 K2.6 upgrade 2026-04-26: intelligence 47 \u2192 54. Cross-provider first hop from OpenRouter primary. Smoke tested 2026-04-27: 3/3 PASS via live proxy.",
+          "vision": {
+            "supported": true,
+            "modalities": [
+              "text",
+              "image"
+            ],
+            "mmmu_pro": 0.62,
+            "pricing": {
+              "per_1k_images_1mp_usd": 1.425,
+              "native_unit": "input_token_equivalent",
+              "native_rate_usd": 0.95
+            }
+          }
+        },
+        "tertiary": {
+          "provider": "together",
+          "litellm_alias": "tier-3-tool-fallback-kimi-together",
+          "model_id_hint": "moonshotai/Kimi-K2.6",
+          "smoke_tested": "2026-04-27",
+          "cost_per_m_input": 0.95,
+          "cost_per_m_output": 4.0,
+          "notes": "K2.5 \u2192 K2.6 upgrade 2026-04-26: intelligence 47 \u2192 54. Last resort: same provider as primary (Together) but different model family. Native agentic + tool calling. Smoke tested 2026-04-27: 3/3 PASS via live proxy.",
+          "vision": {
+            "supported": true,
+            "modalities": [
+              "text",
+              "image"
+            ],
+            "mmmu_pro": 0.62,
+            "pricing": {
+              "per_1k_images_1mp_usd": 1.425,
+              "native_unit": "input_token_equivalent",
+              "native_rate_usd": 0.95
+            }
+          }
+        }
+      },
+      "vision": {
+        "supported": true,
+        "modalities": [
+          "text",
+          "image",
+          "video"
+        ],
+        "mmmu_pro": 0.58,
+        "max_images_per_request": null,
+        "pricing": {
+          "per_1k_images_1mp_usd": 0.3,
+          "native_unit": "input_token_equivalent",
+          "native_rate_usd": 0.2
+        }
+      }
+    },
+    "tier-3-tool-us": {
+      "provider": "together",
+      "model": "google/gemma-4-31b-it",
+      "litellm_alias": "tier-3-tool-us",
+      "swebench": null,
+      "intelligence_score": 39,
+      "gdpval_aa_elo": 1124,
+      "tool_calling_success_rate": 0.864,
+      "use_cases": [
+        "tool-heavy-subagents",
+        "structured-output"
+      ],
+      "data_clearance": [
+        "restricted_us_oss_ok",
+        "internal",
+        "public"
+      ],
+      "data_sensitivity_max": "restricted_us_oss_ok",
+      "cost_per_m_input": 0.2,
+      "cost_per_m_output": 0.5,
+      "fallback_chain": {
+        "primary": {
+          "provider": "together",
+          "litellm_alias": "tier-3-tool-us",
+          "model_id_hint": "google/gemma-4-31b-it",
+          "smoke_tested": "2026-04-19",
+          "vision": {
+            "supported": true,
+            "modalities": [
+              "text",
+              "image",
+              "video"
+            ],
+            "mmmu_pro": 0.58,
+            "max_images_per_request": null,
+            "pricing": {
+              "per_1k_images_1mp_usd": 0.3,
+              "native_unit": "input_token_equivalent",
+              "native_rate_usd": 0.2
+            }
+          }
+        },
+        "secondary": {
+          "provider": "fireworks",
+          "litellm_alias": "tier-3-tool-us-fallback-gptoss20b",
+          "model_id_hint": "accounts/fireworks/models/gpt-oss-20b",
+          "cost_per_m_input": 0.075,
+          "cost_per_m_output": 0.3,
+          "notes": "GPT-OSS-120B (OpenAI US-origin). Cross-provider from Together primary.",
+          "vision": {
+            "supported": false,
+            "modalities": [
+              "text"
+            ]
+          }
+        },
+        "tertiary": {
+          "provider": "groq",
+          "litellm_alias": "tier-3-tool-us-fallback-llama8b",
+          "model_id_hint": "llama-3.1-8b-instant",
+          "cost_per_m_input": 0.05,
+          "cost_per_m_output": 0.08,
+          "notes": "Llama 3.1 8B (Meta US-origin) on Groq. Third-provider last resort.",
+          "vision": {
+            "supported": false,
+            "modalities": [
+              "text"
+            ]
+          }
+        }
+      },
+      "vision": {
+        "supported": true,
+        "modalities": [
+          "text",
+          "image",
+          "video"
+        ],
+        "mmmu_pro": 0.58,
+        "max_images_per_request": null,
+        "pricing": {
+          "per_1k_images_1mp_usd": 0.3,
+          "native_unit": "input_token_equivalent",
+          "native_rate_usd": 0.2
+        }
+      }
+    },
+    "tier-4-extract": {
+      "provider": "groq",
+      "model": "meta-llama/llama-3.1-8b-instant",
+      "litellm_alias": "tier-4-extract",
+      "swebench": 0.6,
+      "baseline_swebench": 0.6,
+      "use_cases": [
+        "grep",
+        "count",
+        "format",
+        "lint",
+        "extract",
+        "bulk-classification"
+      ],
+      "data_clearance": [
+        "restricted_us_oss_ok",
+        "internal",
+        "public"
+      ],
+      "data_sensitivity_max": "internal",
+      "cost_per_m_input": 0.05,
+      "cost_per_m_output": 0.08,
+      "fallback_chain": {
+        "primary": {
+          "provider": "groq",
+          "litellm_alias": "tier-4-extract",
+          "model_id_hint": "llama-3.1-8b-instant",
+          "smoke_tested": "2026-04-11",
+          "cost_per_m_input": 0.05,
+          "cost_per_m_output": 0.08,
+          "vision": {
+            "supported": false,
+            "modalities": [
+              "text"
+            ]
+          }
+        },
+        "secondary": {
+          "provider": "fireworks",
+          "litellm_alias": "tier-4-extract-fallback-v4flash",
+          "model_id_hint": "deepseek-ai/deepseek-v4-flash",
+          "smoke_tested": null,
+          "cost_per_m_input": 0.14,
+          "cost_per_m_output": 0.28,
+          "notes": "Added 2026-05-10: DeepSeek V4 Flash on Fireworks. int=47 vs Llama primary's ~18 \u2014 dramatically higher quality for extract/classify tasks at comparable cost. IV=70 (highest in dataset). Breaks the prior Together-concentration SPOF at secondary+tertiary. Text-only (no vision adapter) \u2014 appropriate since this tier is already text-only. Fireworks confirmed live as of May 2026 (was flagged pending 2026-04-27). Smoke test required.",
+          "vision": {
+            "supported": false,
+            "modalities": [
+              "text"
+            ]
+          }
+        },
+        "tertiary": {
+          "provider": "together",
+          "litellm_alias": "tier-4-extract-fallback-gemma",
+          "model_id_hint": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+          "smoke_tested": "2026-04-25",
+          "cost_per_m_input": 0.18,
+          "cost_per_m_output": 0.18,
+          "notes": "Together Llama 3.3 70B Instruct Turbo (Meta US-origin). Replaced google/gemma-4-31b-it 2026-04-25 \u2014 Together removed Gemma 4 31B serverless access (HTTP 400). Alias name kept for config.yaml compatibility. Demoted from secondary to tertiary 2026-05-10 (V4 Flash inserted at secondary). $0.18/$0.18 on Together serverless.",
+          "vision": {
+            "supported": false,
+            "modalities": [
+              "text"
+            ]
+          }
+        },
+        "quaternary": {
+          "provider": "together",
+          "litellm_alias": "tier-4-extract-fallback-together",
+          "model_id_hint": "deepseek-ai/DeepSeek-V3.2-Exp",
+          "cost_per_m_input": 0.0,
+          "cost_per_m_output": 0.0,
+          "notes": "v2.5: Cross-provider escape from Fireworks double-fallback SPOF. Together DeepSeek V3.2 Exp at $0/$0 (experimental tier). Demoted from tertiary to quaternary 2026-05-10 (V4 Flash inserted at secondary, Llama 3.3 70B at tertiary). Re-verify price at together.xyz/models if deploying for high-volume.",
+          "vision": {
+            "supported": false,
+            "modalities": [
+              "text"
+            ]
+          }
+        },
+        "quinary": {
+          "provider": "fireworks",
+          "litellm_alias": "tier-4-extract-fallback-llama",
+          "model_id_hint": "accounts/fireworks/models/llama-v3p3-70b-instruct",
+          "smoke_tested": null,
+          "cost_per_m_input": 0.9,
+          "cost_per_m_output": 0.9,
+          "notes": "Added 2026-05-10: Fireworks Llama 3.3 70B Instruct. Provides Fireworks-provider resilience after Together-hosted fallbacks (tertiary + quaternary) are exhausted. Distinct from tier-4-extract-fallback-gemma (Together Llama 3.3 70B \u2014 different provider, same model family). config.yaml L574 chain: v4flash -> gemma -> together -> llama -> gptoss.",
+          "vision": {
+            "supported": false,
+            "modalities": [
+              "text"
+            ]
+          }
+        },
+        "senary": {
+          "provider": "fireworks",
+          "litellm_alias": "tier-4-extract-fallback-gptoss",
+          "model_id_hint": "accounts/fireworks/models/gpt-oss-20b",
+          "cost_per_m_input": 0.075,
+          "cost_per_m_output": 0.3,
+          "notes": "Last resort: Fireworks GPT-OSS-20B. Demoted from quaternary to quinary 2026-05-10. Only reached when Groq, V4 Flash, AND Together are all unavailable. Demoted from quinary to senary 2026-05-10 (Fireworks Llama 3.3 70B inserted at quinary).",
+          "vision": {
+            "supported": false,
+            "modalities": [
+              "text"
+            ]
+          }
+        }
+      },
+      "vision": {
+        "supported": false,
+        "modalities": [
+          "text"
+        ]
+      }
+    },
+    "tier-vision": {
+      "provider": "openrouter",
+      "model": "google/gemma-4-31b-it",
+      "litellm_alias": "tier-vision",
+      "swebench": null,
+      "baseline_swebench": null,
+      "use_cases": [
+        "vision-ocr",
+        "screenshot-extraction",
+        "image-data-extraction"
+      ],
+      "data_clearance": [
+        "restricted_us_oss_ok",
+        "internal",
+        "public"
+      ],
+      "data_sensitivity_max": "restricted_us_oss_ok",
+      "cost_per_m_input": 0.13,
+      "cost_per_m_output": 0.38,
+      "fallback_chain": {
+        "primary": {
+          "provider": "openrouter",
+          "litellm_alias": "tier-vision",
+          "model_id_hint": "google/gemma-4-31b-it",
+          "smoke_tested": null,
+          "cost_per_m_input": 0.13,
+          "cost_per_m_output": 0.38,
+          "notes": "OpenRouter Gemma 4 31B IT \u2014 8-provider mesh provides stable access independent of Together/Fireworks per-model serverless restrictions. US-origin (Google DeepMind). $0.13/$0.38/M confirmed via OpenRouter API 2026-05-03. Vision: text+image+video modality confirmed.",
+          "vision": {
+            "supported": true,
+            "modalities": [
+              "text",
+              "image",
+              "video"
+            ],
+            "mmmu_pro": 0.58,
+            "max_images_per_request": null,
+            "pricing": {
+              "per_1k_images_1mp_usd": 0.195,
+              "native_unit": "input_token_equivalent",
+              "native_rate_usd": 0.13
+            }
+          }
+        },
+        "secondary": {
+          "provider": "fireworks",
+          "litellm_alias": "tier-vision-fallback-gptoss20b",
+          "model_id_hint": "accounts/fireworks/models/gpt-oss-20b",
+          "smoke_tested": null,
+          "cost_per_m_input": 0.03,
+          "cost_per_m_output": 0.14,
+          "notes": "GPT-OSS-20B (OpenAI US-origin) on Fireworks \u2014 confirmed serverless. Text-only fallback for when OpenRouter Gemma 4 is degraded. Cross-provider from OpenRouter primary. US-origin (OpenAI) \u2014 Rule 3 compliant for restricted_us_oss_ok. $0.03/$0.14/M confirmed via OpenRouter API 2026-05-03.",
+          "vision": {
+            "supported": false,
+            "modalities": [
+              "text"
+            ]
+          }
+        },
+        "tertiary": {
+          "provider": "anthropic",
+          "litellm_alias": "tier-vision-fallback-sonnet",
+          "model_id_hint": "claude-sonnet-4-6",
+          "smoke_tested": null,
+          "cost_per_m_input": 3.0,
+          "cost_per_m_output": 15.0,
+          "notes": "Anthropic Claude Sonnet direct \u2014 native vision, data_clearance: all. Last resort when both OpenRouter Gemma and Fireworks GPT-OSS-20B are unavailable.",
+          "vision": {
+            "supported": true,
+            "modalities": [
+              "text",
+              "image"
+            ],
+            "mmmu_pro": 0.74,
+            "max_images_per_request": 100,
+            "pricing": {
+              "per_1k_images_1mp_usd": 4.8,
+              "native_unit": "input_token_equivalent",
+              "native_rate_usd": 3.0
+            }
+          }
+        }
+      },
+      "vision": {
+        "supported": true,
+        "modalities": [
+          "text",
+          "image",
+          "video"
+        ],
+        "mmmu_pro": 0.58,
+        "max_images_per_request": null,
+        "pricing": {
+          "per_1k_images_1mp_usd": 0.195,
+          "native_unit": "input_token_equivalent",
+          "native_rate_usd": 0.13
+        }
+      }
+    },
+    "tier-5-latency": {
+      "provider": "groq",
+      "model": "meta-llama/llama-3.1-8b-instant",
+      "litellm_alias": "tier-5-latency",
+      "swebench": null,
+      "baseline_swebench": null,
+      "context_window": 131072,
+      "throughput_tok_per_sec": 800,
+      "use_cases": [
+        "dom-selection",
+        "structured-extraction",
+        "real-time-classification",
+        "latency-critical-paths"
+      ],
+      "data_clearance": [
+        "restricted_us_oss_ok",
+        "internal",
+        "public"
+      ],
+      "data_sensitivity_max": "internal",
+      "cost_per_m_input": 0.05,
+      "cost_per_m_output": 0.08,
+      "alternative_models": {
+        "higher_quality": "openai/gpt-oss-20b ($0.075/$0.30 at ~1000 tok/s, 131K context)",
+        "mid_quality": "meta-llama/llama-4-scout-17b-16e-instruct ($0.11/$0.34 at ~600 tok/s, 128K context)"
+      },
+      "notes": "Dedicated latency tier on Groq LPU hardware. ~10x faster than GPU providers. NOT a replacement for tier-2-agentic/tier-3-tool (Groq does not serve Kimi K2.5, GLM-4.7, or full DeepSeek V3.2). Best used for: (1) Stagehand DOM selection, (2) browser-automation multi-action flows where latency dominates, (3) real-time classification over webhook payloads. Cannot be used for anthropic_only data.",
+      "fallback_chain": {
+        "primary": {
+          "provider": "groq",
+          "litellm_alias": "tier-5-latency",
+          "model_id_hint": "llama-3.1-8b-instant",
+          "vision": {
+            "supported": false,
+            "modalities": [
+              "text"
+            ]
+          }
+        },
+        "secondary": {
+          "provider": "groq",
+          "litellm_alias": "tier-5-latency-fallback-gptoss",
+          "model_id_hint": "openai/gpt-oss-20b",
+          "notes": "Higher quality, still ~1000 tok/s. Same Groq provider \u2014 does NOT protect against Groq-level outage; for that, use tertiary.",
+          "vision": {
+            "supported": false,
+            "modalities": [
+              "text"
+            ]
+          }
+        },
+        "tertiary": {
+          "provider": "together",
+          "litellm_alias": "tier-5-latency-fallback-together",
+          "model_id_hint": "openai/gpt-oss-20b",
+          "notes": "2026-05-01: DeepSeek V3.2 retired from Fireworks serverless 2026-05-14. Pivoted to Together gpt-oss-20b \u2014 preserves cross-provider resilience (Groq \u2192 Fireworks \u2192 Together), keeps the small/fast model profile required for tier-5-latency. Fireworks's recommended replacements (Kimi K2.6 / GLM-5.1) are 754B/1T reasoning models and unsuitable for the latency tier. For latency-critical paths that cannot degrade, callers should fail-fast instead of invoking tertiary.",
+          "vision": {
+            "supported": false,
+            "modalities": [
+              "text"
+            ]
+          }
+        }
+      },
+      "vision": {
+        "supported": false,
+        "modalities": [
+          "text"
+        ]
+      }
+    }
+  },
+  "data_classification": {
+    "anthropic_only": {
+      "description": "Client code, PII, email content, KL contacts/deals \u2014 Anthropic-hosted models only",
+      "examples": [
+        "client repo files",
+        "inbox-briefing output",
+        "KL contact records"
+      ],
+      "allowed_tiers": [
+        "tier-0-opus",
+        "tier-0-sonnet"
+      ],
+      "allowed_providers": [
+        "anthropic"
+      ]
+    },
+    "restricted_us_oss_ok": {
+      "description": "Non-client, non-PII data where engagement contract permits US-origin OSS inference. PRC-origin weights excluded regardless of hosting provider.",
+      "examples": [
+        "document extraction for engagement with us_weights_ok policy",
+        "structured data transform on internal schema",
+        "single-shot generation tasks with no client PII",
+        "classification and summarisation on internal docs"
+      ],
+      "allowed_tiers": [
+        "tier-0-opus",
+        "tier-0-sonnet",
+        "tier-3-tool-us"
+      ],
+      "allowed_providers": [
+        "anthropic",
+        "fireworks",
+        "together",
+        "groq"
+      ],
+      "excluded_weight_origins": [
+        "Zhipu AI (China)",
+        "Moonshot AI (China)",
+        "MiniMax AI (China)",
+        "DeepSeek AI (China)",
+        "Alibaba/Qwen (China)"
+      ]
+    },
+    "internal": {
+      "description": "Own business logic, architecture, non-client code, generic patterns",
+      "examples": [
+        "your codebase",
+        "deploy scripts",
+        "migration files",
+        "agent prompts"
+      ],
+      "allowed_tiers": [
+        "tier-0-opus",
+        "tier-0-sonnet",
+        "tier-0-oss-heavy",
+        "tier-1-fast",
+        "tier-2-agentic",
+        "tier-3-tool",
+        "tier-4-extract",
+        "tier-5-latency"
+      ],
+      "allowed_providers": [
+        "anthropic",
+        "fireworks",
+        "together",
+        "groq"
+      ]
+    },
+    "public": {
+      "description": "Publicly available code, boilerplate, generic patterns, linting",
+      "examples": [
+        "open-source snippets",
+        "TypeScript interfaces from public specs",
+        "format/lint tasks"
+      ],
+      "allowed_tiers": [
+        "*"
+      ],
+      "allowed_providers": [
+        "anthropic",
+        "fireworks",
+        "together",
+        "groq"
+      ]
+    }
+  },
+  "platforms": {
+    "claude_code": {
+      "subscription": "Claude Max",
+      "docs_url": "https://docs.anthropic.com/en/docs/claude-code/overview",
+      "available_models": [
+        "opus",
+        "sonnet",
+        "haiku"
+      ],
+      "tier_map": {
+        "light": "haiku",
+        "standard": "sonnet",
+        "heavy": "sonnet"
+      },
+      "pricing": {
+        "haiku": 2.4e-06,
+        "sonnet": 9e-06,
+        "opus": 1.5e-05
+      },
+      "notes": "Agent tool model param accepts: 'haiku', 'sonnet', 'opus'. All included in subscription.",
+      "env_vars": {
+        "CLAUDE_CODE_SUBAGENT_MODEL": {
+          "value": "haiku",
+          "set_in": ".claude/settings.json env block",
+          "effect": "Defaults all built-in sub-agents (Explore, general-purpose) to haiku. Custom agents with explicit model: frontmatter are unaffected. Without this, built-in sub-agents inherit the parent session model (Opus).",
+          "added": "2026-04-16"
+        },
+        "ANTHROPIC_BASE_URL": {
+          "value": "https://your-litellm-proxy.fly.dev",
+          "status": "ACTIVE \u2014 set by SessionStart hook (scripts/claude-session-start.sh line 342) when proxy health check passes",
+          "effect": "All Claude Code API traffic routes through the LiteLLM proxy. The proxy passes claude-sonnet-4-6 and claude-opus-4-6 through to Anthropic directly. Intercepts: claude-haiku-4-5-20251001 \u2192 Fireworks M2.7 ($0.30/$1.20); sonnet alias \u2192 Together Gemma 4 31B (US-origin, advisor-guardrailed, restricted_us_oss_ok max). Use claude-sonnet-4-6 (full ID) for Anthropic-direct Sonnet. Auth: ANTHROPIC_API_KEY is set to Bearer ${LITELLM_MASTER_KEY} by the SessionStart hook.",
+          "verified": "2026-04-16: confirmed ANTHROPIC_BASE_URL=https://your-litellm-proxy.fly.dev in runtime env. Proxy alive. Test sub-agent with model=haiku dispatched successfully.",
+          "fallback": "If proxy health check fails, SessionStart sets LITELLM_FALLBACK_MODE=1 and routes natively to Anthropic."
+        }
+      },
+      "main_thread_flip": {
+        "status": "permanent",
+        "enabled_since": "2026-04-18",
+        "promoted_to_permanent": "2026-05-03",
+        "promotion_rationale": "LLM policy migration 2026-05-03: shadow-period telemetry stable; Sonnet+Opus advisor pair is the standing default. Estimated ~$1,500-3,000/mo saving over pure Opus main-thread.",
+        "executor": "claude-sonnet-4-6",
+        "advisor": "claude-opus-4-7",
+        "advisor_beta": "anthropic-beta: advisor-tool-2026-03-01"
+      }
+    },
+    "cursor": {
+      "pricing": "pay-per-use",
+      "docs_url": "https://docs.cursor.com/settings/models",
+      "orchestrator": "user-selected (via Cursor model picker)",
+      "sub_agent_delegation": "fireworks (via OpenAI-compatible endpoint \u2014 see fallback.tier_map)",
+      "notes": "Cursor supports custom OpenAI-compatible endpoints in Settings \u2192 Models. Add Fireworks as a provider so sub-agent work uses our open-source tier map instead of burning Cursor credits."
+    },
+    "codex_web": {
+      "status": "excluded",
+      "reason": "Codex web is a sealed system \u2014 model selection is automatic, no user controls for cloud tasks. Models dynamically adjust reasoning effort per task complexity. Including it in routing would be pointless since there are no levers to pull.",
+      "docs_url": "https://openai.com/index/introducing-codex/",
+      "notes": "Re-evaluate if Codex web exposes model selection controls, or if there are reports of poor token efficiency / model allocation."
+    }
+  },
+  "fallback": {
+    "enabled": false,
+    "provider": "fireworks",
+    "api_base": "https://api.fireworks.ai/inference/v1",
+    "api_key_env": "FIREWORKS_API_KEY",
+    "api_key_source": "Doppler master/prd",
+    "tier_map": {
+      "light": {
+        "model_id": "accounts/fireworks/models/llama4-scout-instruct-basic",
+        "label": "Llama 4 Scout",
+        "params": "109B MoE (17B active)",
+        "weight_origin": "Meta (US)",
+        "cost_per_m_input": 0.2,
+        "cost_per_m_output": 0.6,
+        "context_window": 1048576,
+        "serverless": true,
+        "data_clearance": [
+          "restricted_us_oss_ok",
+          "internal",
+          "public"
+        ],
+        "data_sensitivity_max": "restricted_us_oss_ok",
+        "notes": "Massive 1M context window, cheapest option for search/lookup tasks. US-origin weights (Meta).",
+        "vision": {
+          "supported": true,
+          "modalities": [
+            "text",
+            "image"
+          ],
+          "mmmu_pro": 0.4,
+          "pricing": {
+            "per_1k_images_1mp_usd": 0.3,
+            "native_unit": "input_token_equivalent",
+            "native_rate_usd": 0.2
+          }
+        }
+      },
+      "standard": {
+        "model_id": "accounts/fireworks/models/kimi-k2p6",
+        "label": "Kimi K2.6",
+        "params": "1T MoE (32B active)",
+        "cost_per_m_input": 0.5,
+        "cost_per_m_output": 2.8,
+        "context_window": 262144,
+        "serverless": true,
+        "function_calling": true,
+        "thinking": false,
+        "notes": "Non-thinking mode. Repointed 2026-05-01 from DeepSeek V3.2 (Fireworks serverless retirement 2026-05-14). Frontier open-source for everyday tasks, agent work, function calling.",
+        "vision": {
+          "supported": false,
+          "modalities": [
+            "text"
+          ]
+        }
+      },
+      "heavy": {
+        "model_id": "accounts/fireworks/models/kimi-k2p6",
+        "label": "Kimi K2.6 (Reasoning)",
+        "params": "1T MoE (32B active)",
+        "cost_per_m_input": 0.5,
+        "cost_per_m_output": 2.8,
+        "context_window": 262144,
+        "serverless": true,
+        "function_calling": true,
+        "thinking": true,
+        "notes": "Promoted 2026-05-10: GLM-5.1 \u2192 Kimi K2.6. int=54, SWE-Pro 58.6%, IV=28. PRC-origin weights (Moonshot AI). GLM-5.1 retained as tertiary fallback in tier-0-oss-heavy fallback chain.",
+        "vision": {
+          "supported": true,
+          "modalities": [
+            "text",
+            "image"
+          ]
+        }
+      }
+    },
+    "alternatives": {
+      "deepseek-v3p2": {
+        "model_id": "accounts/fireworks/models/deepseek-v3p2",
+        "label": "DeepSeek V3.2",
+        "params": "675B MoE (37B active)",
+        "swebench": 0.731,
+        "intelligence_score": 42,
+        "gdpval_aa_elo": 1203,
+        "cost_per_m_input": 0.56,
+        "cost_per_m_output": 1.68,
+        "context_window": 163840,
+        "serverless": false,
+        "deprecated": true,
+        "decommission_date": "2026-05-14",
+        "function_calling": true,
+        "notes": "Primary haiku replacement via tier-1-fast. Best value-for-quality on Fireworks serverless for single-step tasks.",
+        "vision": {
+          "supported": false,
+          "modalities": [
+            "text"
+          ]
+        }
+      },
+      "glm-5": {
+        "model_id": "accounts/fireworks/models/glm-5",
+        "label": "GLM-5 (Reasoning)",
+        "params": "~MoE (40B active)",
+        "cost_per_m_input": 1.0,
+        "cost_per_m_output": 3.2,
+        "context_window": 200000,
+        "serverless": false,
+        "deprecated": true,
+        "decommission_date": "2026-05-14",
+        "intelligence_score": 50,
+        "gdpval_aa_elo": null,
+        "superseded_by": "glm-5.1",
+        "notes": "Highest open-source intelligence score (50) \u2014 now superseded by GLM-5.1 (released 2026-04-07). Leave in place until GLM-5.1 passes internal eval.",
+        "vision": {
+          "supported": false,
+          "modalities": [
+            "text"
+          ]
+        }
+      },
+      "glm-5.1": {
+        "model_id": "accounts/fireworks/models/glm-5p1",
+        "label": "GLM-5.1 (Reasoning, frontier)",
+        "release_date": "2026-04-07",
+        "params": "754B MoE (40B active)",
+        "swebench_pro": 0.584,
+        "cybergym": 0.687,
+        "cost_per_m_input": 1.4,
+        "cost_per_m_output": 4.4,
+        "context_window": 202000,
+        "serverless": true,
+        "intelligence_score": 51,
+        "gdpval_aa_elo": 1535,
+        "status": "watchlist-heavy-candidate",
+        "data_sovereignty_note": "Zhipu AI (Chinese origin weights) hosted on Fireworks US infrastructure \u2014 data stays US, but client-code policy may still require Anthropic-only. Not promoted until data-classification review completed.",
+        "notes": "FIRST open-source model to beat Claude Opus 4.6 on SWE-Bench Pro (58.4 vs 57.3). Strong candidate for tier-0-oss-heavy alias for internal-classed workloads. Requires eval harness run before promotion (see reports/model-routing-effectiveness-2026-04-11.md Step 6).",
+        "vision": {
+          "supported": false,
+          "modalities": [
+            "text"
+          ]
+        }
+      },
+      "glm-4.7": {
+        "model_id": "accounts/fireworks/models/glm-4p7",
+        "label": "GLM-4.7 (Reasoning)",
+        "params": "357B MoE (32B active)",
+        "swebench": 0.75,
+        "tool_calling_success_rate": 0.906,
+        "cost_per_m_input": 0.6,
+        "cost_per_m_output": 2.2,
+        "context_window": 200000,
+        "serverless": false,
+        "deprecated": true,
+        "decommission_date": "2026-05-14",
+        "intelligence_score": 42,
+        "gdpval_aa_elo": 1193,
+        "notes": "90.6% tool calling success rate. Promoted to tier-3-tool for tool-heavy subagents and structured output tasks.",
+        "vision": {
+          "supported": true,
+          "modalities": [
+            "text",
+            "image"
+          ],
+          "mmmu_pro": 0.55,
+          "pricing": {
+            "per_1k_images_1mp_usd": 0.9,
+            "native_unit": "input_token_equivalent",
+            "native_rate_usd": 0.6
+          }
+        }
+      },
+      "kimi-k2.5": {
+        "model_id": "accounts/fireworks/models/kimi-k2p5",
+        "label": "Kimi K2.5 (Reasoning)",
+        "params": "1T MoE (32B active)",
+        "swebench": 0.768,
+        "cost_per_m_input": 0.6,
+        "cost_per_m_output": 3.0,
+        "context_window": 262144,
+        "serverless": true,
+        "intelligence_score": 47,
+        "gdpval_aa_elo": 1282,
+        "notes": "76.8% SWE-bench, 262K context, 200+ sequential tool calls. Promoted to tier-2-agentic for long-tool-chain and large-context tasks.",
+        "vision": {
+          "supported": true,
+          "modalities": [
+            "text",
+            "image"
+          ],
+          "mmmu_pro": 0.59,
+          "pricing": {
+            "per_1k_images_1mp_usd": 0.75,
+            "native_unit": "input_token_equivalent",
+            "native_rate_usd": 0.5
+          }
+        }
+      },
+      "kimi-k2-thinking": {
+        "model_id": "accounts/fireworks/models/kimi-k2-thinking",
+        "label": "Kimi K2 Thinking",
+        "cost_per_m_input": 0.6,
+        "cost_per_m_output": 2.5,
+        "context_window": 262144,
+        "serverless": true,
+        "notes": "Cheaper than K2.5 but lower rated. Standard tier candidate if V3.2 is unavailable.",
+        "vision": {
+          "supported": true,
+          "modalities": [
+            "text",
+            "image"
+          ],
+          "mmmu_pro": 0.59,
+          "pricing": {
+            "per_1k_images_1mp_usd": 0.75,
+            "native_unit": "input_token_equivalent",
+            "native_rate_usd": 0.5
+          }
+        }
+      },
+      "minimax-m2.5": {
+        "model_id": "accounts/fireworks/models/minimax-m2.5",
+        "label": "MiniMax M2.5",
+        "params": "~MoE (10B active)",
+        "cost_per_m_input": 0.3,
+        "cost_per_m_output": 1.2,
+        "context_window": 205000,
+        "serverless": true,
+        "intelligence_score": 42,
+        "deprecated": true,
+        "superseded_by": "minimax-m2.7",
+        "notes": "Superseded by MiniMax M2.7. Kept for reference.",
+        "vision": {
+          "supported": false,
+          "modalities": [
+            "text"
+          ]
+        }
+      },
+      "minimax-m2.7": {
+        "model_id": "accounts/fireworks/models/minimax-m2p7",
+        "label": "MiniMax M2.7 (Reasoning, self-evolving)",
+        "params": "230B MoE (10B active, 256 experts, 8 active/token)",
+        "swebench": 0.78,
+        "swebench_pro": 0.5622,
+        "intelligence_score": 50,
+        "gdpval_aa_elo": 1508,
+        "cost_per_m_input": 0.3,
+        "cost_per_m_output": 1.2,
+        "context_window": 204800,
+        "serverless": true,
+        "also_on_together": true,
+        "together_model_id": "MiniMaxAI/MiniMax-M2.7",
+        "status": "promoted",
+        "live_probe_2026_04_13": {
+          "fireworks_avg_tok_per_sec": 149.3,
+          "fireworks_verbosity_vs_dsv3": 0.53,
+          "per_task_cost_vs_deepseek_v3p2": 0.39,
+          "per_task_cost_vs_kimi_k2p5": 0.19,
+          "tasks_tested": [
+            "agentic_code_gen",
+            "simple_function",
+            "json_extraction"
+          ]
+        },
+        "notes": "78% SWE-bench, 56.22% SWE-Pro (near Opus 57.3%), Intelligence Index 50. Reasoning model with native interleaved thinking between tool calls. Apache 2.0 open weights on HuggingFace (but commercial use requires MiniMax written authorization \u2014 check license if self-hosting). Tool-calling accuracy 75.8% (vs GLM-4.7 90.6% \u2014 not suitable for tier-3-tool). Highspeed variant available on MiniMax direct API.",
+        "vision": {
+          "supported": false,
+          "modalities": [
+            "text"
+          ]
+        }
+      },
+      "deepseek-r1": {
+        "model_id": "accounts/fireworks/models/deepseek-r1",
+        "label": "DeepSeek R1 (Fast)",
+        "params": "671B MoE (37B active)",
+        "cost_per_m_input": 0.55,
+        "cost_per_m_output": 2.19,
+        "context_window": 163840,
+        "serverless": true,
+        "notes": "Superseded by V3.2 Thinking on most benchmarks. Fallback if V3.2 thinking mode is unavailable on Fireworks.",
+        "vision": {
+          "supported": false,
+          "modalities": [
+            "text"
+          ]
+        }
+      },
+      "qwen3p5-397b": {
+        "model_id": "accounts/fireworks/models/qwen3p5-397b-a17b",
+        "label": "Qwen 3.5 397B (Reasoning)",
+        "params": "397B MoE (17B active)",
+        "context_window": 262144,
+        "serverless": true,
+        "cost_per_m_input": 0.6,
+        "cost_per_m_output": 3.6,
+        "status": "tier-2-agentic-alternative",
+        "intelligence_score": 45,
+        "notes": "Now serverless on Fireworks. Intelligence score 45 beats tier-2-agentic Kimi K2.5 (scored 47 but K2.5 price just rose to $0.60/$3.00 \u2014 making Qwen 3.5 397B roughly equal cost). Evaluate as alternative to Kimi K2.5 in tier-2-agentic position. 262K context parity.",
+        "vision": {
+          "supported": false,
+          "modalities": [
+            "text"
+          ]
+        }
+      },
+      "qwen3p6-plus": {
+        "model_id": "accounts/fireworks/models/qwen3p6-plus",
+        "label": "Qwen3.6 Plus",
+        "swebench": 0.788,
+        "cost_per_m_input": 0.5,
+        "cost_per_m_output": 3.0,
+        "serverless": true,
+        "notes": "78.8% SWE-bench. Competitive on quality but output cost ($3.00/M) is higher than tier-2-agentic (Kimi K2.5 at $2.19/M). Watch for price drops.",
+        "vision": {
+          "supported": false,
+          "modalities": [
+            "text"
+          ]
+        }
+      },
+      "qwen3-coder-480b": {
+        "model_id": "accounts/fireworks/models/qwen3-coder-480b-a35b-instruct",
+        "label": "Qwen3 Coder 480B",
+        "params": "480B MoE (35B active)",
+        "context_window": 262144,
+        "serverless": false,
+        "deprecated": true,
+        "notes": "67% SWE-bench \u2014 not competitive vs tier_definitions entries. On-demand only. Removed from active consideration.",
+        "vision": {
+          "supported": false,
+          "modalities": [
+            "text"
+          ]
+        }
+      },
+      "gpt-oss-120b": {
+        "model_id": "accounts/fireworks/models/gpt-oss-120b",
+        "label": "OpenAI GPT-OSS 120B",
+        "params": "117B MoE (5.1B active)",
+        "weight_origin": "OpenAI (US)",
+        "cost_per_m_input": 0.15,
+        "cost_per_m_output": 0.6,
+        "context_window": 131072,
+        "serverless": true,
+        "also_on_groq": true,
+        "groq_throughput_tok_per_sec": 500,
+        "intelligence_score": 33,
+        "gdpval_aa_elo": 948,
+        "tier_fit": "light-to-standard. NOT suitable for restricted/anthropic_only tasks. US-origin weights permit restricted_us_oss_ok use.",
+        "data_clearance": [
+          "restricted_us_oss_ok",
+          "internal",
+          "public"
+        ],
+        "data_sensitivity_max": "restricted_us_oss_ok",
+        "notes": "OpenAI open-source model on US infrastructure. Also on Groq at ~500 tok/s. Non-PRC weights but 5.1B active params limits intelligence. Serverless confirmed on Fireworks and Groq.",
+        "vision": {
+          "supported": false,
+          "modalities": [
+            "text"
+          ]
+        }
+      },
+      "gemma-4-31b": {
+        "model_id": "accounts/fireworks/models/gemma-4-31b-it",
+        "label": "Gemma 4 31B IT (Reasoning)",
+        "params": "30.7B dense",
+        "weight_origin": "Google DeepMind (US)",
+        "license": "Apache 2.0",
+        "release_date": "2026-04-02",
+        "cost_per_m_input": 0.13,
+        "cost_per_m_output": 0.38,
+        "context_window": 262144,
+        "serverless": true,
+        "also_on_together": true,
+        "together_model_id": "google/gemma-4-31b-it",
+        "intelligence_score": 39,
+        "gdpval_aa_elo": 1124,
+        "arena_elo": 1452,
+        "tool_calling_success_rate": 0.864,
+        "function_calling": true,
+        "multimodal": true,
+        "tier_fit": "HIGH PRIORITY tier-3-tool candidate. \u03c42-bench 86.4% clears the 85% tool_calling threshold. $0.13/$0.38 vs GLM-4.7's $0.60/$2.20 = 78% cheaper input, 83% cheaper output. Intelligence 39 vs GLM-4.7 42 is a minor gap acceptable for structured tool workflows. Requires live probe to confirm serverless throughput and validate tool-calling in our actual workloads (\u03c42-bench vs BFCL are different evals). Could also serve as tier-1-fast cross-provider fallback on Fireworks (replacing DeepSeek V3.1 which drifted to Together-only).",
+        "data_clearance": [
+          "restricted_us_oss_ok",
+          "internal",
+          "public"
+        ],
+        "data_sensitivity_max": "restricted_us_oss_ok",
+        "status": "PROBE PASSED (2026-04-18) \u2014 ready for tier-3-tool promotion. Together AI path available immediately; Fireworks path blocked on account model access. Proxy config change + redeploy required to activate.",
+        "notes": "Google DeepMind. Multimodal (text + image), 256K context, Apache 2.0. Released 2026-04-02. Confirmed live on Fireworks and Together AI as of 2026-04-15. KEY FINDING 2026-04-15: \u03c42-bench 86.4% agentic tool use clears tier-3-tool 85% threshold \u2014 \u03c42-bench is a component of AA Intelligence Index v4.0 (includes tool-use measurement). Promotion case: 78%/83% cost savings vs GLM-4.7 with comparable tool capability. LIVE PROBE 2026-04-18: PASSED via Together AI \u2014 3/3 correct tool_calls, ~1.3s avg latency. Fireworks account does not have this model in allowlist; request access at fireworks.ai/account/models. To activate: update deploy/litellm-proxy/config.yaml tier-3-tool model_name + api_key to Together (TOGETHER_API_KEY) and redeploy via deploy.sh.",
+        "vision": {
+          "supported": true,
+          "modalities": [
+            "text",
+            "image",
+            "video"
+          ],
+          "mmmu_pro": 0.58,
+          "max_images_per_request": null,
+          "pricing": {
+            "per_1k_images_1mp_usd": 0.3,
+            "native_unit": "input_token_equivalent",
+            "native_rate_usd": 0.2
+          }
+        }
+      },
+      "gemma-4-26b-a4b": {
+        "model_id": "accounts/fireworks/models/gemma-4-26b-a4b-it",
+        "label": "Gemma 4 26B A4B IT (MoE, Fast)",
+        "params": "25.2B total (3.8B active \u2014 MoE)",
+        "weight_origin": "Google DeepMind (US)",
+        "license": "Apache 2.0",
+        "release_date": "2026-04-02",
+        "cost_per_m_input": 0.08,
+        "cost_per_m_output": 0.35,
+        "context_window": 262144,
+        "serverless": true,
+        "also_on_together": null,
+        "intelligence_score": 31,
+        "gdpval_aa_elo": null,
+        "arena_elo": 1441,
+        "function_calling": true,
+        "multimodal": true,
+        "throughput_advantage": "3.8B active params on GPU inference = high token throughput despite 26B total param count. Local benchmarks show 52 tok/s with NVFP4 quantization on DGX Spark \u2014 Fireworks hosted throughput likely higher on A100/H100 clusters. Expected to rival or beat Fireworks Qwen3-8B throughput.",
+        "tier_fit": "tier-4-extract secondary upgrade candidate. Intelligence 31 is below tier-3-tool standard (intelligence <32 range \u2014 too far below GLM-4.7's 42 to be a tool tier candidate). Best fit: replace Fireworks Qwen3-8B ($0.20/$0.20) as tier-4-extract fallback secondary \u2014 cheaper on input ($0.08 vs $0.20) and significantly smarter (31 vs Qwen3-8B's much lower intelligence). For bulk extraction where input tokens dominate, this is a clear cost win. NOT suitable for tier-5-latency unless Fireworks throughput confirms sub-100ms TTFT.",
+        "data_clearance": [
+          "restricted_us_oss_ok",
+          "internal",
+          "public"
+        ],
+        "data_sensitivity_max": "restricted_us_oss_ok",
+        "status": "NOT AVAILABLE on Fireworks serverless API as of 2026-04-25. tier-4-extract secondary uses Together Gemma 4 31B instead (smoke-tested 2026-04-25).",
+        "notes": "Google DeepMind MoE model. 3.8B active params = fast inference despite 26B total. 256K context, Apache 2.0, multimodal (text + image), native function calling. Cheaper than 31B dense and faster due to sparse activation. Intelligence 31 rules out tier-3-tool. FIREWORKS STATUS: page lists model but API returns HTTP 403 \u2014 not deployed on serverless tier. Available on Cloudflare Workers AI if edge-inference is ever needed. Re-evaluate Fireworks availability before any future use.",
+        "vision": {
+          "supported": true,
+          "modalities": [
+            "text",
+            "image"
+          ],
+          "mmmu_pro": 0.5,
+          "pricing": {
+            "per_1k_images_1mp_usd": 0.12,
+            "native_unit": "input_token_equivalent",
+            "native_rate_usd": 0.08
+          }
+        }
+      },
+      "gemma-4-edge": {
+        "label": "Gemma 4 E2B / E4B (Edge models)",
+        "params": "E2B: 5.1B total (2.3B active MoE) | E4B: ~8B effective",
+        "weight_origin": "Google DeepMind (US)",
+        "license": "Apache 2.0",
+        "intelligence_score_e2b": 15,
+        "intelligence_score_e4b": 19,
+        "serverless": false,
+        "status": "NOT applicable \u2014 edge/on-device only",
+        "notes": "E2B and E4B are designed for on-device deployment (Android AI Edge, iOS, browser WASM) with native audio input for speech recognition. NOT available on Fireworks or Together AI serverless APIs. Available only via Ollama local inference, Hugging Face inference endpoints, or Google AI Edge SDK. No case for our OSS routing framework \u2014 intelligence scores (15/19) are far below any API tier threshold. Document and discard.",
+        "vision": {
+          "supported": true,
+          "modalities": [
+            "text",
+            "image",
+            "audio"
+          ]
+        }
+      },
+      "nvidia-nemotron-3-super-120b": {
+        "model_id": null,
+        "label": "NVIDIA Nemotron 3 Super 120B A12B (Reasoning)",
+        "params": "120.6B MoE (12.7B active)",
+        "weight_origin": "NVIDIA (US) \u2014 Llama 3.1 405B distillation, NVIDIA fine-tune",
+        "cost_per_m_input": 0.3,
+        "cost_per_m_output": 0.75,
+        "context_window": 1048576,
+        "serverless": null,
+        "intelligence_score": 36,
+        "gdpval_aa_elo": 1007,
+        "tier_fit": "light-to-standard for internal reasoning tasks needing long context. 1M context = potential tier-2-agentic overflow fallback beyond Kimi K2.5 262K if quality and serverless validate.",
+        "data_clearance": [
+          "restricted_us_oss_ok",
+          "internal",
+          "public"
+        ],
+        "data_sensitivity_max": "restricted_us_oss_ok",
+        "status": "candidate \u2014 model ID and serverless availability must be verified before use",
+        "notes": "NVIDIA Llama 3.1 405B distillation, 12.7B active (MoE), reasoning-focused. 1M context is the standout feature. Non-PRC weights. Needs: (1) Fireworks/Together serverless probe, (2) correct model_id slug, (3) quality eval on long-context reasoning tasks.",
+        "vision": {
+          "supported": false,
+          "modalities": [
+            "text"
+          ]
+        }
+      },
+      "gpt-oss-20b": {
+        "model_id": "accounts/fireworks/models/gpt-oss-20b",
+        "label": "OpenAI GPT-OSS 20B",
+        "params": "20B dense",
+        "weight_origin": "OpenAI (US)",
+        "cost_per_m_input": 0.075,
+        "cost_per_m_output": 0.3,
+        "context_window": 131072,
+        "serverless": true,
+        "also_on_groq": true,
+        "data_clearance": [
+          "restricted_us_oss_ok",
+          "internal",
+          "public"
+        ],
+        "data_sensitivity_max": "restricted_us_oss_ok",
+        "status": "tier-4-extract-candidate",
+        "notes": "Strong replacement candidate for tier-4-extract now that Qwen3-8B has risen to ~$0.20 flat. Also on Groq at ~1000 tok/s at matching pricing, making it a tier-5-latency higher-quality alternative. US-origin weights (OpenAI).",
+        "vision": {
+          "supported": false,
+          "modalities": [
+            "text"
+          ]
+        }
+      },
+      "kimi-k2-legacy": {
+        "model_id": "accounts/fireworks/models/kimi-k2",
+        "label": "Kimi K2 (original)",
+        "deprecated": true,
+        "deprecated_date": "2026-04-10",
+        "notes": "Removed from Groq Oct 2025 (replaced by gpt-oss-120b). Kimi K2.5 is the active successor. Entry kept for historical reference.",
+        "vision": {
+          "supported": false,
+          "modalities": [
+            "text"
+          ]
+        }
+      }
+    },
+    "activation_conditions": [
+      "Primary subscription model returns error/timeout after 2 retries",
+      "Cursor sub-agent delegation (always \u2014 Cursor orchestrator is user-selected, sub-tasks go through Fireworks)",
+      "Platform is down or degraded",
+      "User explicitly requests open-source model"
+    ],
+    "safety_rules": [
+      "Never send credentials, API keys, or PII to Fireworks \u2014 strip from prompts",
+      "Never use fallback for Red-tier safety actions (email sending, contact merging)",
+      "Log every fallback activation to .ai/memory/facts.jsonl with tag 'model-fallback'",
+      "Alert user when fallback activates \u2014 never silently switch"
+    ]
+  },
+  "browser_automation": {
+    "stagehand_llm": {
+      "primary": {
+        "model_id": "openai/gpt-oss-120b",
+        "label": "GPT-OSS 120B (via Groq LPU)",
+        "rollout_state": "active",
+        "cost_per_action": 0.0003,
+        "monthly_estimate_20_tasks_day": 1.0,
+        "env_var": "GROQ_API_KEY",
+        "base_url": "https://api.groq.com/openai/v1",
+        "throughput_tok_per_sec": 500,
+        "notes": "Groq LPU hardware delivers ~500 tok/s (117B MoE, 5.1B active). Significantly more capable than gpt-oss-20b: AA Intelligence Index 33 vs lower 20B score. Same JSON-mode support; no vision needed \u2014 Stagehand uses DOM tree. Non-PRC weights; US-origin (OpenAI). ELO 948 is sufficient for browser DOM selection tasks.",
+        "vision": {
+          "supported": false,
+          "modalities": [
+            "text"
+          ]
+        }
+      },
+      "secondary": {
+        "model_id": "openai/accounts/fireworks/models/kimi-k2p6",
+        "label": "Kimi K2.6 (via Fireworks)",
+        "cost_per_action": 0.0005,
+        "monthly_estimate_20_tasks_day": 1.5,
+        "env_var": "FIREWORKS_API_KEY",
+        "base_url": "https://api.fireworks.ai/inference/v1",
+        "notes": "Repointed 2026-05-01 from DeepSeek V3.2 (Fireworks serverless retirement 2026-05-14). Kimi K2.6 is the Fireworks-recommended replacement; ~100-200 tok/s but 262K context. Automatic fallback on Groq rate-limit or 5xx.",
+        "vision": {
+          "supported": false,
+          "modalities": [
+            "text"
+          ]
+        }
+      },
+      "tertiary": {
+        "model_id": "google/gemini-2.5-flash",
+        "label": "Gemini 2.5 Flash",
+        "cost_per_action": 0.001,
+        "monthly_estimate_20_tasks_day": 3.0,
+        "env_var": "STAGEHAND_MODEL_API_KEY",
+        "notes": "Stagehand's default model. 3x the per-action cost of the OSS options but proven stable and a completely different provider family (Google) \u2014 worth keeping as last-resort fallback in case BOTH Groq and Fireworks have simultaneous outages.",
+        "vision": {
+          "supported": true,
+          "modalities": [
+            "text",
+            "image",
+            "video"
+          ],
+          "mmmu_pro": 0.65,
+          "max_images_per_request": 16,
+          "pricing": {
+            "per_1k_images_1mp_usd": 0.39,
+            "native_unit": "per_image",
+            "native_rate_usd": 0.3
+          }
+        }
+      },
+      "promotion_criteria": "Replace primary when a model is: (1) serverless with competitive pricing, (2) demonstrably faster than the incumbent, (3) capable of structured output (JSON mode). Vision is NOT required \u2014 Stagehand uses DOM tree extraction, not screenshots."
+    }
+  },
+  "sync_sources": {
+    "intelligence_ratings": {
+      "url": "https://artificialanalysis.ai/models/open-source",
+      "leaderboard_url": "https://artificialanalysis.ai/leaderboards/models",
+      "gdpval_leaderboard_url": "https://artificialanalysis.ai/evaluations/gdpval-aa",
+      "methodology": "Artificial Analysis Intelligence Index v4.0 \u2014 composite of 10 evaluations: GDPval-AA (agentic professional tasks, 44 occupations, shell + web access), \u03c4\u00b2-Bench Telecom (tool use), Terminal-Bench Hard (terminal coding), SciCode (scientific reasoning), AA-LCR (long-context reasoning), AA-Omniscience (accuracy + non-hallucination), IFBench (instruction following), HLE (Humanity's Last Exam \u2014 hard knowledge), GPQA Diamond (graduate-level QA), CritPt (critical point analysis)",
+      "check_frequency": "weekly",
+      "score_fields": {
+        "intelligence_score": "Composite AA Intelligence Index (0\u201367 scale observed; higher = better). Source field on all model entries.",
+        "gdpval_aa_elo": "GDPval-AA ELO \u2014 most relevant metric for restricted-tier eligibility (agentic professional tasks with tool access). Sonnet 4.6 baseline = 1655."
+      },
+      "tier_thresholds": {
+        "restricted_tier_eligibility": "gdpval_aa_elo >= 1550 required for code-review / security / architecture tasks. Currently only Anthropic models qualify. No non-PRC US-origin model meets this threshold (best: Gemma 4 31B at 1124).",
+        "heavy_tier_oss": "intelligence_score >= 42 for tier-0-oss-heavy (current: Kimi K2.6 at 54, MiniMax M2.7 at 50). Drift alert if current model drops >5pp below baseline.",
+        "standard_tier_oss": "intelligence_score >= 40 for tier-1-fast / tier-2-agentic.",
+        "tool_tier_oss": "tool_calling_success_rate >= 85% for tier-3-tool.",
+        "extract_tier_oss": "Speed (tok/s) is the primary signal for tier-4-extract and tier-5-latency; intelligence_score secondary."
+      },
+      "notes": "GDPval-AA ELO is now the primary promotion gate for any model targeting restricted-tier work. intelligence_score gates OSS tier promotions. Both fields are stored on every model entry. Last bulk update: 2026-04-14 from artificialanalysis.ai."
+    },
+    "fireworks_models": {
+      "url": "https://fireworks.ai/models",
+      "pricing_url": "https://fireworks.ai/pricing",
+      "check_frequency": "weekly",
+      "notes": "Primary source for serverless availability and pricing. Pricing checked manually via dashboard \u2014 HTML scraping is fragile. Only serverless models qualify for tier defaults."
+    }
+  },
+  "tier_aliases": {
+    "tier-0-oss-heavy": {
+      "resolves_to": "fireworks:accounts/fireworks/models/kimi-k2p6",
+      "model_id": "accounts/fireworks/models/kimi-k2p6",
+      "litellm_alias": "tier-0-oss-heavy",
+      "label": "Kimi K2.6 (Fireworks) \u2014 OSS heavy tier, RESTRICTED USE",
+      "data_sensitivity_max": "internal",
+      "requires_proxy": true,
+      "context_window": 262144,
+      "notes": "Promoted 2026-05-10: GLM-5.1 \u2192 Kimi K2.6. ONLY route here when task tag is in tier-0-oss-heavy.use_cases.allowed AND USE_OSS_FALLBACK is set. NOT a default; explicit opt-in only. Do not use for anthropic_only or restricted data.",
+      "vision": {
+        "supported": true,
+        "modalities": [
+          "text",
+          "image"
+        ]
+      }
+    },
+    "tier-1-fast": {
+      "resolves_to": "fireworks:accounts/fireworks/models/gpt-oss-120b",
+      "model_id": "accounts/fireworks/models/gpt-oss-120b",
+      "litellm_alias": "tier-1-fast",
+      "label": "OpenAI GPT-OSS 120B (Fireworks) \u2014 fast single-step",
+      "data_sensitivity_max": "internal",
+      "requires_proxy": true,
+      "context_window": 131072,
+      "throughput_tok_per_sec": null,
+      "notes": "Fast text-only single-step generation via Fireworks GPT-OSS 120B (US-origin OpenAI OSS weights). Aligned with tier_definitions.tier-1-fast and deploy/litellm-proxy/config.yaml. Do not use for restricted data \u2014 chain ceiling internal because Kimi K2.6 (Together) is the secondary fallback.",
+      "vision": {
+        "supported": false,
+        "modalities": [
+          "text"
+        ]
+      }
+    },
+    "tier-2-agentic": {
+      "resolves_to": "fireworks:accounts/fireworks/models/kimi-k2p6",
+      "model_id": "accounts/fireworks/models/kimi-k2p6",
+      "litellm_alias": "tier-2-agentic",
+      "label": "Kimi K2.6 (Fireworks) \u2014 agentic multi-step",
+      "data_sensitivity_max": "internal",
+      "requires_proxy": true,
+      "context_window": 262144,
+      "throughput_tok_per_sec": 140,
+      "notes": "Agentic tier for multi-step subagents, session transcript mining, and long tool chains. 262K context. PRC-origin (Moonshot AI) \u2014 capped at internal. Do not use for restricted data.",
+      "vision": {
+        "supported": false,
+        "modalities": [
+          "text"
+        ]
+      }
+    },
+    "tier-3-tool": {
+      "resolves_to": "together:google/gemma-4-31b-it",
+      "model_id": "google/gemma-4-31b-it",
+      "litellm_alias": "tier-3-tool",
+      "label": "Gemma 4 31B (Together AI) \u2014 tool-calling optimised",
+      "data_sensitivity_max": "internal",
+      "requires_proxy": true,
+      "tool_calling_success_rate": 0.864,
+      "notes": "86.4% tool calling (\u03c42-bench). Used by ecosystem-auditor, infra, and qa agents for tool-heavy workflows (git/fly/doppler/github MCPs, Playwright). Primary model (Gemma 4 31B) is US-origin but fallback chain uses Kimi K2.6 (PRC-origin) \u2014 tier alias capped at internal. Direct routing to google/gemma-4-31b-it bypassing this alias is restricted_us_oss_ok eligible. Probe PASSED 2026-04-18 (~1.3s avg, 3/3 correct). Do not use for restricted or anthropic_only data.",
+      "vision": {
+        "supported": true,
+        "modalities": [
+          "text",
+          "image",
+          "video"
+        ],
+        "mmmu_pro": 0.58,
+        "max_images_per_request": null,
+        "pricing": {
+          "per_1k_images_1mp_usd": 0.3,
+          "native_unit": "input_token_equivalent",
+          "native_rate_usd": 0.2
+        }
+      }
+    },
+    "tier-3-tool-us": {
+      "resolves_to": "together:google/gemma-4-31b-it",
+      "model_id": "google/gemma-4-31b-it",
+      "litellm_alias": "tier-3-tool-us",
+      "label": "Tool-heavy (US-origin only, restricted_us_oss_ok)",
+      "data_sensitivity_max": "restricted_us_oss_ok",
+      "requires_proxy": true,
+      "tool_calling_success_rate": 0.864,
+      "notes": "All-US-origin chain: Gemma 4 31B (Together) \u2192 GPT-OSS-20B (Fireworks) \u2192 Llama 3.1 8B (Groq). Safe for client_ai_policy: us_weights_ok. Added 2026-04-19.",
+      "vision": {
+        "supported": true,
+        "modalities": [
+          "text",
+          "image",
+          "video"
+        ],
+        "mmmu_pro": 0.58,
+        "max_images_per_request": null,
+        "pricing": {
+          "per_1k_images_1mp_usd": 0.3,
+          "native_unit": "input_token_equivalent",
+          "native_rate_usd": 0.2
+        }
+      }
+    },
+    "tier-4-extract": {
+      "resolves_to": "groq:llama-3.1-8b-instant",
+      "model_id": "llama-3.1-8b-instant",
+      "litellm_alias": "tier-4-extract",
+      "label": "Llama 3.1 8B Instant (Groq LPU) \u2014 bulk extraction",
+      "data_sensitivity_max": "internal",
+      "requires_proxy": true,
+      "notes": "Cheapest extraction tier ($0.05/$0.08). QUALITY BOUNDARY: only route here for binary/multi-class classification, format/lint, grep/count, and DOM element selection \u2014 tasks with well-defined correct answers. Do NOT route email enrichment, standing-order evaluation, summarization, or any multi-step reasoning here; those require tier-2-agentic (Kimi K2.6) minimum. Background pipeline: email classification \u2192 tier-4-extract (correct); email enrichment/recommendation \u2192 tier-2-agentic (correct). Groq Developer rate limit ~1000 rpm; LiteLLM fallback chain routes overflow to Together Llama 3.3 70B Instruct Turbo, then Together DeepSeek V3.2 Exp. Do not use for restricted data.",
+      "vision": {
+        "supported": false,
+        "modalities": [
+          "text"
+        ]
+      }
+    },
+    "tier-5-latency": {
+      "resolves_to": "groq:llama-3.1-8b-instant",
+      "model_id": "llama-3.1-8b-instant",
+      "litellm_alias": "tier-5-latency",
+      "label": "Llama 3.1 8B Instant (Groq LPU) \u2014 latency critical",
+      "data_sensitivity_max": "internal",
+      "requires_proxy": true,
+      "throughput_tok_per_sec": 800,
+      "context_window": 131072,
+      "notes": "Dedicated latency tier on Groq LPU hardware. ~10x faster than GPU providers. Best for Stagehand DOM selection, browser-automation multi-action flows, real-time webhook classification. Cannot be used for anthropic_only or restricted data.",
+      "vision": {
+        "supported": false,
+        "modalities": [
+          "text"
+        ]
+      }
+    },
+    "tier-vision": {
+      "resolves_to": "openrouter:google/gemma-4-31b-it",
+      "model_id": "google/gemma-4-31b-it",
+      "litellm_alias": "tier-vision",
+      "label": "Gemma 4 31B IT (Together AI) \u2014 vision OCR / screenshot extraction",
+      "data_sensitivity_max": "restricted_us_oss_ok",
+      "requires_proxy": true,
+      "notes": "Vision tier for practitioner screenshot extraction (astroengine). Primary: OpenRouter Gemma 4 31B IT (Google DeepMind US-origin, 8-provider mesh, $0.13/$0.38/M). Alias promoted to restricted_us_oss_ok 2026-05-03 after replacing PRC-origin Qwen 3.5 397B fallback with GPT-OSS-20B (OpenAI US-origin). All-US-origin chain: OpenRouter Gemma 4 \u2192 Fireworks GPT-OSS-20B \u2192 claude-sonnet-4-6.",
+      "vision": {
+        "supported": true,
+        "modalities": [
+          "text",
+          "image",
+          "video"
+        ],
+        "mmmu_pro": 0.58,
+        "max_images_per_request": null,
+        "pricing": {
+          "per_1k_images_1mp_usd": 0.195,
+          "native_unit": "input_token_equivalent",
+          "native_rate_usd": 0.13
+        }
+      }
+    },
+    "light-main": {
+      "resolves_to": "anthropic:claude-haiku-4-5-20251001",
+      "model": "haiku",
+      "advisor": null,
+      "label": "Main-thread light tier \u2014 Haiku solo",
+      "data_sensitivity_max": "internal",
+      "prompt_chars_range": "0-500",
+      "tool_calls_expected": "0",
+      "vision": {
+        "supported": true,
+        "modalities": [
+          "text",
+          "image"
+        ],
+        "mmmu_pro": 0.45,
+        "max_images_per_request": 100,
+        "pricing": {
+          "per_1k_images_1mp_usd": 1.28,
+          "native_unit": "input_token_equivalent",
+          "native_rate_usd": 0.8
+        }
+      }
+    },
+    "medium-main": {
+      "resolves_to": "anthropic:claude-sonnet-4-6",
+      "model": "sonnet",
+      "advisor": null,
+      "label": "Main-thread medium tier \u2014 Sonnet solo",
+      "data_sensitivity_max": "anthropic_only",
+      "prompt_chars_range": "500-2000",
+      "tool_calls_expected": "1-3",
+      "vision": {
+        "supported": true,
+        "modalities": [
+          "text",
+          "image"
+        ],
+        "mmmu_pro": 0.74,
+        "max_images_per_request": 100,
+        "pricing": {
+          "per_1k_images_1mp_usd": 4.8,
+          "native_unit": "input_token_equivalent",
+          "native_rate_usd": 3.0
+        }
+      }
+    },
+    "heavy-main": {
+      "resolves_to": "anthropic:claude-sonnet-4-6",
+      "model": "sonnet",
+      "advisor": "claude-opus-4-7",
+      "advisor_version": "beta:advisor-tool-2026-03-01",
+      "label": "Main-thread heavy tier \u2014 Sonnet executor + Opus advisor",
+      "data_sensitivity_max": "anthropic_only",
+      "prompt_chars_range": "2000+",
+      "vision": {
+        "supported": true,
+        "modalities": [
+          "text",
+          "image"
+        ],
+        "mmmu_pro": 0.74,
+        "max_images_per_request": 100,
+        "pricing": {
+          "per_1k_images_1mp_usd": 4.8,
+          "native_unit": "input_token_equivalent",
+          "native_rate_usd": 3.0
+        }
+      }
+    },
+    "fast-escape": {
+      "resolves_to": "anthropic:claude-opus-4-7",
+      "model": "opus",
+      "advisor": null,
+      "label": "Main-thread fast-escape \u2014 raw Opus (user-invoked only)",
+      "data_sensitivity_max": "anthropic_only",
+      "vision": {
+        "supported": true,
+        "modalities": [
+          "text",
+          "image"
+        ],
+        "mmmu_pro": 0.78,
+        "max_images_per_request": 100,
+        "pricing": {
+          "per_1k_images_1mp_usd": 8.0,
+          "native_unit": "input_token_equivalent",
+          "native_rate_usd": 5.0
+        }
+      }
+    }
+  },
+  "proxy_fallback_aliases": {
+    "tier-1-fast": "claude-haiku-4-5-20251001",
+    "tier-2-agentic": "claude-sonnet-4-6",
+    "tier-3-tool": "claude-sonnet-4-6",
+    "tier-4-extract": "claude-haiku-4-5-20251001",
+    "tier-5-latency": "claude-haiku-4-5-20251001",
+    "tier-0-oss-heavy": "claude-sonnet-4-6",
+    "tier-3-tool-us": "claude-sonnet-4-6",
+    "tier-vision": "claude-sonnet-4-6"
+  },
+  "proxy_intercepted_models": {
+    "claude-haiku-4-5-20251001": {
+      "label": "Claude Haiku 4.5 (proxy-intercepted)",
+      "remapped_to_tier": "tier-1-fast",
+      "resolves_to": "fireworks:accounts/fireworks/models/gpt-oss-120b",
+      "data_sensitivity_max": "internal",
+      "proxy_live_since": "2026-04-10",
+      "warning": "This Anthropic model ID is intercepted by the LiteLLM proxy and routed to Fireworks GPT-OSS 120B (OpenAI OSS, US-origin). Any call reaching the proxy with this model name will NOT use Anthropic infrastructure. Do not assign to agents with data_sensitivity: restricted or anthropic_only.",
+      "fallback_chain": {
+        "primary": {
+          "provider": "fireworks",
+          "litellm_alias": "claude-haiku-4-5-20251001",
+          "model_id_hint": "accounts/fireworks/models/gpt-oss-120b",
+          "vision": {
+            "supported": false,
+            "modalities": [
+              "text"
+            ]
+          }
+        },
+        "secondary": {
+          "provider": "together",
+          "litellm_alias": "claude-haiku-4-5-20251001-together-fallback",
+          "model_id_hint": "moonshotai/Kimi-K2.6",
+          "notes": "Kimi K2.6 on Together \u2014 cross-provider escape from Fireworks primary. 262K context, 0.71s TTFT.",
+          "vision": {
+            "supported": false,
+            "modalities": [
+              "text"
+            ]
+          }
+        },
+        "tertiary": {
+          "provider": "groq",
+          "litellm_alias": "claude-haiku-4-5-20251001-groq-fallback",
+          "model_id_hint": "llama-3.3-70b-versatile",
+          "notes": "Third-provider last resort. Llama 3.3 70B on Groq LPU \u2014 different provider and different model family.",
+          "vision": {
+            "supported": false,
+            "modalities": [
+              "text"
+            ]
+          }
+        }
+      },
+      "vision": {
+        "supported": false,
+        "modalities": [
+          "text"
+        ]
+      }
+    },
+    "haiku": {
+      "label": "haiku (Claude Code short alias \u2014 proxy risk)",
+      "remapped_to_tier": "tier-1-fast",
+      "resolves_to": "fireworks:accounts/fireworks/models/gpt-oss-120b",
+      "data_sensitivity_max": "internal",
+      "warning": "Short alias for claude-haiku-4-5-20251001. ANTHROPIC_BASE_URL is set to the proxy by SessionStart \u2014 haiku sub-agent calls route through the proxy to Fireworks GPT-OSS 120B. Text-only OSS weights. Treat as OSS-routed when assigning to agents.",
+      "vision": {
+        "supported": false,
+        "modalities": [
+          "text"
+        ]
+      }
+    },
+    "sonnet": {
+      "label": "sonnet (Claude Code short alias \u2014 proxy-intercepted, US-origin OSS)",
+      "remapped_to_tier": "tier-3-tool-us",
+      "resolves_to": "together:google/gemma-4-31b-it",
+      "data_sensitivity_max": "restricted_us_oss_ok",
+      "proxy_live_since": "2026-04-20",
+      "warning": "Short alias for claude-sonnet-4-6. When proxy intercept activates: sonnet sub-agent calls route to Gemma 4 31B (Together, US-origin). Advisor guardrail is MANDATORY and FAIL-CLOSED. Use for restricted_us_oss_ok work only; do NOT assign to restricted or anthropic_only agents \u2014 use claude-sonnet-4-6 for those.",
+      "advisor_guardrail": {
+        "mode": "post_call",
+        "fail_closed": true,
+        "reviewer_model": "groq/llama-3.3-70b-versatile",
+        "callback_class": "sonnet_advisor_guardrail.SonnetAdvisorGuardrail",
+        "deploy_note": "Custom Python callback deployed to the LiteLLM proxy container. See deploy/litellm-proxy/sonnet_advisor_guardrail.py. Reviewer switched to Groq Llama 3.3 70B (Meta US-origin) 2026-05-15 — eliminates provider-concentration risk from the Together-primary sonnet path."
+      },
+      "fallback_chain": {
+        "primary": {
+          "provider": "together",
+          "litellm_alias": "sonnet",
+          "model_id_hint": "google/gemma-4-31b-it",
+          "vision": {
+            "supported": true,
+            "modalities": [
+              "text",
+              "image",
+              "video"
+            ],
+            "mmmu_pro": 0.58,
+            "max_images_per_request": null,
+            "pricing": {
+              "per_1k_images_1mp_usd": 0.3,
+              "native_unit": "input_token_equivalent",
+              "native_rate_usd": 0.2
+            }
+          }
+        },
+        "secondary": {
+          "provider": "fireworks",
+          "litellm_alias": "sonnet-us-fallback-gptoss120b",
+          "model_id_hint": "accounts/fireworks/models/gpt-oss-120b",
+          "vision": {
+            "supported": false,
+            "modalities": [
+              "text"
+            ]
+          }
+        },
+        "tertiary": {
+          "provider": "groq",
+          "litellm_alias": "sonnet-us-fallback-llama8b",
+          "model_id_hint": "llama-3.1-8b-instant",
+          "vision": {
+            "supported": false,
+            "modalities": [
+              "text"
+            ]
+          }
+        }
+      },
+      "vision": {
+        "supported": true,
+        "modalities": [
+          "text",
+          "image"
+        ],
+        "mmmu_pro": 0.58,
+        "pricing": {
+          "per_1k_images_1mp_usd": 0.3,
+          "native_unit": "input_token_equivalent",
+          "native_rate_usd": 0.2
+        }
+      }
+    },
+    "sonnet-internal": {
+      "label": "sonnet-internal (internal-only, Kimi K2.6 Fireworks dual-key)",
+      "resolves_to": "fireworks:kimi-k2p6 (dual-key load balanced)",
+      "data_sensitivity_max": "internal",
+      "proxy_live_since": "2026-04-20",
+      "warning": "PRC-origin (Moonshot AI / Kimi). ONLY for data_sensitivity: internal agents. Do NOT assign to restricted_us_oss_ok, restricted, or anthropic_only agents.",
+      "fallback_chain": {
+        "primary": {
+          "provider": "fireworks",
+          "litellm_alias": "sonnet-internal",
+          "model_id_hint": "kimi-k2p6 (dual-key)",
+          "vision": {
+            "supported": false,
+            "modalities": [
+              "text"
+            ]
+          }
+        },
+        "secondary": {
+          "provider": "together",
+          "litellm_alias": "sonnet-internal-fallback-together",
+          "model_id_hint": "moonshotai/Kimi-K2.6",
+          "vision": {
+            "supported": false,
+            "modalities": [
+              "text"
+            ]
+          }
+        },
+        "tertiary": {
+          "provider": "groq",
+          "litellm_alias": "sonnet-internal-fallback-groq",
+          "model_id_hint": "llama-3.1-8b-instant",
+          "vision": {
+            "supported": false,
+            "modalities": [
+              "text"
+            ]
+          }
+        }
+      },
+      "vision": {
+        "supported": false,
+        "modalities": [
+          "text"
+        ]
+      }
+    }
+  },
+  "tiers": {
+    "light": {
+      "description": "Simple, mechanical tasks with low reasoning requirements",
+      "examples": [
+        "File search / grep / glob lookups",
+        "Simple text replacements or renames",
+        "Reading and summarizing a single file",
+        "Generating boilerplate from a clear template",
+        "Formatting / linting fixes",
+        "Git status checks and simple commits",
+        "Listing or counting items",
+        "Translating between obvious equivalent formats (JSON \u2194 YAML)"
+      ],
+      "signals": [
+        "Task can be described in one sentence",
+        "No ambiguity in requirements",
+        "No cross-file reasoning needed",
+        "Output format is well-defined",
+        "No architectural decisions involved"
+      ],
+      "prompt_guidance": {
+        "rules": [
+          "Always include a word/line limit: 'Keep response under N words' or 'Report in under 120 words'",
+          "Specify output format explicitly: 'Return as a markdown table' or 'List one file per line'",
+          "Use 'do NOT use the Agent tool' to prevent recursive sub-agent spawning",
+          "Prefer structured output (tables, lists) over prose \u2014 reduces verbosity by ~40%"
+        ]
+      }
+    },
+    "standard": {
+      "description": "Moderate complexity \u2014 requires context awareness and some reasoning",
+      "examples": [
+        "Implementing a well-scoped feature in 1-3 files",
+        "Writing or updating tests for existing code",
+        "Bug investigation with clear reproduction steps",
+        "Code review of a single PR",
+        "Refactoring within a single module",
+        "Writing documentation from existing code",
+        "API integration with clear docs available",
+        "Database query writing and optimization"
+      ],
+      "signals": [
+        "Requires reading and understanding multiple files",
+        "Needs to maintain consistency across changes",
+        "Some design choices but within established patterns",
+        "May need to handle edge cases",
+        "Output quality matters but format is clear"
+      ],
+      "prompt_guidance": {
+        "rules": [
+          "Provide file paths and line numbers when possible \u2014 reduces exploration overhead",
+          "Scope the task clearly: 'Modify only X and Y files' prevents over-exploration",
+          "Include acceptance criteria so the agent knows when to stop"
+        ]
+      }
+    },
+    "heavy": {
+      "description": "Complex reasoning, architecture, multi-step orchestration",
+      "examples": [
+        "Multi-repo coordination and planning",
+        "Architecture design and ADR creation",
+        "Complex debugging across system boundaries",
+        "Security audit and threat modelling",
+        "Migration planning with rollback strategies",
+        "Orchestrating multiple sub-agents",
+        "Ambiguous requirements needing clarification strategy",
+        "Performance optimization requiring profiling analysis",
+        "Cross-entity knowledge synthesis (context-loader)"
+      ],
+      "signals": [
+        "Requires reasoning about trade-offs",
+        "Multiple valid approaches exist",
+        "Cross-system or cross-repo impact",
+        "Needs to anticipate failure modes",
+        "Involves human-facing communication (PR descriptions, reports)",
+        "Orchestration of other agents or pipelines"
+      ],
+      "prompt_guidance": {
+        "rules": [
+          "Reserve for genuinely ambiguous or cross-system tasks \u2014 don't escalate by default",
+          "When spawning heavy alongside light/standard, the heavy task dominates wall-clock time",
+          "Consider decomposing: can the heavy task be split into a standard analysis + light execution?"
+        ]
+      }
+    }
+  },
+  "dispatch_restricted_agents": [
+    "review",
+    "security-deep-dive"
+  ],
+  "agent_routing": {
+    "default": "tier-1-fast",
+    "generate": "tier-1-fast",
+    "insight-miner": "tier-2-agentic",
+    "context-loader": "tier-2-agentic",
+    "infra": "haiku",
+    "ecosystem-auditor": "tier-3-tool",
+    "qa": "tier-3-tool",
+    "review": "claude-sonnet-4-6",
+    "review-internal": "tier-1-fast",
+    "deep-analyse": "tier-1-fast",
+    "orchestrator": "sonnet",
+    "ci-fixer": "sonnet",
+    "architecture-impact": "sonnet",
+    "systems-consistency": "sonnet",
+    "security-deep-dive": "claude-sonnet-4-6",
+    "secrets-handler": "sonnet",
+    "judge": "sonnet",
+    "pr-classifier": "haiku",
+    "diff-reflex": "sonnet",
+    "test-hardener": "tier-0-oss-heavy",
+    "quick-critic": "haiku",
+    "work-critic": "sonnet",
+    "explore-summarised": "haiku",
+    "review-triage": "haiku"
+  },
+  "skill_routing": {
+    "light": [
+      "remember",
+      "recall",
+      "learn",
+      "diagnose",
+      "prune",
+      "litigation-hold",
+      "engagement-purge",
+      "engagement-export",
+      "session-summary",
+      "compact-review",
+      "canary",
+      "nav-replay",
+      "loop",
+      "keybindings-help",
+      "update-config"
+    ],
+    "standard": [
+      "extract-insights",
+      "smart-compact",
+      "wrap-up",
+      "inbox-briefing",
+      "qa",
+      "reflect",
+      "evolve",
+      "investigate-fix",
+      "simplify",
+      "nav-record",
+      "browse",
+      "graphify",
+      "session-start-hook",
+      "claude-api"
+    ],
+    "heavy": [
+      "plan-review"
+    ]
+  },
+  "overrides": {
+    "escalate_to_heavy": [
+      "architect",
+      "design",
+      "plan",
+      "migration",
+      "security",
+      "audit",
+      "cross-repo",
+      "orchestrate",
+      "ambiguous",
+      "trade-off"
+    ],
+    "escalate_to_standard": [
+      "implement",
+      "refactor",
+      "test",
+      "review",
+      "debug",
+      "integrate",
+      "summarize",
+      "analyze",
+      "document",
+      "docs",
+      "optimize"
+    ],
+    "deescalate_to_light": [
+      "list",
+      "count",
+      "find",
+      "search",
+      "rename",
+      "format",
+      "lint",
+      "grep",
+      "glob",
+      "status",
+      "boilerplate"
+    ]
+  },
+  "dispatch_strategy": {
+    "parallel_dispatch": {
+      "rule": "Always launch independent sub-agents in parallel. Heavy tasks dominate wall-clock time (30s vs 5s for light), so running light/standard tasks alongside heavy costs zero additional time.",
+      "example": "When a user request needs a file search (light), code analysis (standard), and architecture proposal (heavy) \u2014 launch all three simultaneously. Total time = heavy task time only."
+    },
+    "decomposition": {
+      "rule": "Before assigning heavy tier, check if the task can be split into: (1) a standard-tier analysis/research step, then (2) a light-tier execution step. This avoids burning Opus tokens on mechanical follow-through.",
+      "example": "Instead of one heavy agent for 'refactor and update all imports', use standard to plan the refactor, then light to execute the renames."
+    },
+    "token_efficiency": {
+      "haiku_mitigation": "Always include explicit output constraints (word limits, structured format) in light-tier prompts. This reduces Haiku token usage by ~40%.",
+      "sonnet_note": "Sonnet produces comparable token counts to Opus with equivalent quality on scoped tasks. No special handling needed."
+    }
+  },
+  "policies": {
+    "advisor_policy": {
+      "deterministic_triggers": {
+        "file_patterns": [
+          "**/*.sql",
+          "**/auth/**",
+          "**/crypto/**",
+          "**/payment/**",
+          "**/stripe/**",
+          "schema.sql",
+          "drizzle.config.*",
+          "config.yaml",
+          "model-routing.json",
+          "fly.toml",
+          "openapi.yaml",
+          "trpc.*.ts"
+        ],
+        "operations": [
+          "data_sensitivity_restricted_boundary",
+          "merge_contacts",
+          "bulk_delete",
+          "send_email"
+        ],
+        "thresholds": {
+          "files_count": 10,
+          "lines_changed": 300
+        }
+      },
+      "in_prompt_taxonomy": ".claude/agents/_templates/executor-system-prompt.md",
+      "uncertainty_threshold": 6,
+      "auto_injection": {
+        "migration": [
+          "phase_1_pre_draft",
+          "phase_2_post_draft"
+        ],
+        "auth": [
+          "phase_1_pre_draft"
+        ],
+        "security": [
+          "phase_1_pre_draft",
+          "phase_2_post_draft"
+        ],
+        "red_mutation": [
+          "phase_0_task_intake"
+        ]
+      },
+      "shadow_sample_rate": 0.05,
+      "soft_use_guidance": {
+        "tier-0-oss-heavy": {
+          "soft_budget_per_session_tokens": 500,
+          "description": "guidance only"
+        },
+        "tier-1-fast": {
+          "soft_budget_per_session_tokens": 1000,
+          "description": "guidance only"
+        },
+        "tier-3-tool": {
+          "soft_budget_per_session_tokens": 2000,
+          "description": "guidance only"
+        }
+      },
+      "anomaly_threshold": 3,
+      "circuit_breaker": 50,
+      "light_main_sampling": {
+        "status": "planned",
+        "deploy_after": "2026-05-02",
+        "enabled": false,
+        "sample_rate": 0.05,
+        "reviewer_model": "claude-sonnet-4-6",
+        "mode": "async",
+        "fail_behaviour": "graceful_degradation",
+        "token_budget_input": 800,
+        "token_budget_output": 300,
+        "log_destination": ".ai/metrics/advisor-usage.jsonl",
+        "tier_tag": "light-main",
+        "implementation_notes": "Trigger from Stop hook (scripts/session-stop-checklist.sh or new stop hook). Hook reads last-turn model tier from transcript; if haiku and random() < 0.05, fire async claude-sonnet-4-6 call with compressed last-turn context. Result logged with shadow_review_verdict field. advisor-health-check.py updated to report light-main miss rate separately.",
+        "quality_signal": "should_have_escalated rate in advisor-health-weekly.md. Alert threshold: light-main miss rate > 2x sonnet-tier miss rate sustained over 4 weeks.",
+        "cost_estimate_weekly": "$0.024 at 200 haiku calls/week x 5% x 800 tokens x $3/M"
+      }
+    }
+  },
+  "advisor_pairing": {
+    "executor_model": "claude-sonnet-4-6",
+    "advisor_model": "claude-opus-4-7",
+    "advisor_beta_header": "anthropic-beta: advisor-tool-2026-03-01",
+    "advisor_config": {
+      "thinking_type": "disabled",
+      "budget_tokens": 3000
+    },
+    "shadow_period": {
+      "active": false,
+      "start_date": "2026-04-18",
+      "end_date": "2026-05-02",
+      "promoted_to_permanent": "2026-05-03",
+      "ab_split_ratio": 0.5
+    },
+    "rollback_thresholds": {
+      "quality_delta_max_pp": 1.0,
+      "cost_increase_max_pct": 5.0,
+      "advisor_invocation_rate_min": 0.05,
+      "advisor_invocation_rate_max": 0.4
+    },
+    "fallback": {
+      "if_advisor_unavailable": "executor_continues_solo",
+      "user_escape_hatch": "/fast or /heavy commands route to fast-escape tier (raw Opus, no advisor)"
+    },
+    "scope": "claude_code_only",
+    "context_compression": {
+      "path_a_briefing": {
+        "status": "live",
+        "deploy_date": "2026-04-21",
+        "mechanism": "Structured [ADVISOR BRIEFING] block written by executor before every advisor() call. Acts as attentional anchor \u2014 Opus reads it first and focuses selectively on the rest of session context.",
+        "token_reduction": "0% input tokens (Opus still ingests full context); ~15% reduction in Opus scan latency via attentional focus",
+        "spec_location": ".claude/agents/_templates/executor-system-prompt.md \u00a7 Pre-advisor briefing"
+      },
+      "path_b_custom_invocation": {
+        "status": "planned",
+        "deploy_after": "2026-05-15",
+        "blocker": "Requires new MCP tool \u2014 advisor-tool-2026-03-01 beta cannot be intercepted or replaced at hook level. Custom tool must: (1) accept compressed context payload, (2) make direct Opus API call, (3) return advisory response. Implementation: new MCP tool in your-platform or dedicated stdio MCP server.",
+        "activation_gate": "Session context >10K tokens only \u2014 below this threshold Path B overhead (compression pass ~200ms, ~500 tokens) exceeds savings",
+        "activation_env_var": "ADVISOR_CONTEXT_COMPRESSION=1 in Doppler master/prd",
+        "compression_pipeline": [
+          "1. Extract intent from first user turn (1-2 sentences)",
+          "2. Summarise tool call log: tool name + outcome only, discard verbose output",
+          "3. Inject last 3 decisions from advisor-usage.jsonl",
+          "4. Include executor confidence rating and specific question",
+          "5. Total target: 4000-6000 tokens vs 80-150K raw"
+        ],
+        "validation_required": "Corpus test: 20 real sessions, raw vs compressed Opus verdicts, >=95% agreement + zero deterministic trigger misses before production rollout",
+        "token_reduction_estimate": "55-70% of Opus input tokens on qualifying sessions",
+        "cost_saving_estimate": "$18/week at 20 advisor calls/week avg 100K token sessions"
+      }
+    }
+  }
+}

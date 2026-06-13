@@ -1,0 +1,8 @@
+# Unbranded / white-label overlay
+# Used when running: render-pack.py --mode unbranded
+# Output contains zero Manolii/Adrian/gstack identifiers.
+brand:
+  ecosystem_name: ""
+  attribution_line: ""
+  org_name: "your-org"
+install_mode: unbranded

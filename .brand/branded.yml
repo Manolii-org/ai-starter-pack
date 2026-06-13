@@ -1,0 +1,7 @@
+# Manolii-branded overlay
+# Used when running: render-pack.py --mode branded
+brand:
+  ecosystem_name: "Manolii"
+  attribution_line: "Based on proven patterns from the Manolii ecosystem."
+  org_name: "manolii-org"
+install_mode: branded
