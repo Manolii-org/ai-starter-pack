@@ -17,14 +17,10 @@ on:
       model: { type: string, default: '', description: 'Optional model id override; empty = script/action default.' }
       runs_on: { type: string, default: ubuntu-latest }
       paths_ignore: { type: string, default: '', description: 'Newline-separated globs excluded from the internal changed-files gate.' }
-      concurrency_group: { type: string, default: '' }
     secrets:
       ANTHROPIC_API_KEY: { required: false, description: 'Required when provider_mode=anthropic.' }
       LITELLM_MASTER_KEY: { required: false, description: 'Required when provider_mode=proxy.' }
 
-concurrency:
-  group: ${{ inputs.concurrency_group != '' && inputs.concurrency_group || format('{0}-{1}', github.workflow, github.ref) }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read

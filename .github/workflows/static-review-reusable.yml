@@ -24,19 +24,12 @@ on:
         type: string
         default: ''
         description: Newline-separated globs excluded from the internal changed-files gate.
-      concurrency_group:
-        type: string
-        default: ''
-        description: Concurrency group key.
 
 permissions:
   contents: read
   pull-requests: write
   security-events: write
 
-concurrency:
-  group: ${{ inputs.concurrency_group != '' && inputs.concurrency_group || format('{0}-{1}', github.workflow, github.ref) }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   changed-files:

@@ -13,17 +13,10 @@ on:
         type: string
         default: '24'
         description: Node.js version.
-      concurrency_group:
-        type: string
-        default: ''
-        description: Concurrency group key.
 
 permissions:
   contents: read
 
-concurrency:
-  group: ${{ inputs.concurrency_group != '' && inputs.concurrency_group || format('{0}-{1}', github.workflow, github.ref) }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # hashFiles() is only valid in step-level contexts, so job gating on
