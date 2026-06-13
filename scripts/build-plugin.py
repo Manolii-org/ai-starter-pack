@@ -107,6 +107,7 @@ def assemble_plugin(rendered: Path, out: Path) -> dict:
             "planning, and model-routing governance."
         ),
         "version": read_pack_version(),
+        "author": {"name": "Manolii", "url": "https://github.com/manolii-org"},
     }
     (out / ".claude-plugin").mkdir()
     (out / ".claude-plugin" / "plugin.json").write_text(
