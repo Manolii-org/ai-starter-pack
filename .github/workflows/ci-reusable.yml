@@ -1,0 +1,155 @@
+name: CI (Reusable)
+# Reusable workflow_call form. Caller owns on: + paths-ignore via top-level.
+# Cite: .github/REUSABLE-WORKFLOWS.md
+
+on:
+  workflow_call:
+    inputs:
+      runs_on:
+        type: string
+        default: ubuntu-latest
+        description: Runner label for all jobs.
+      node_version:
+        type: string
+        default: '24'
+        description: Node.js version.
+      concurrency_group:
+        type: string
+        default: ''
+        description: Concurrency group key.
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ inputs.concurrency_group != '' && inputs.concurrency_group || format('{0}-{1}', github.workflow, github.ref) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # hashFiles() is only valid in step-level contexts, so job gating on
+  # package.json presence goes through this job's output instead.
+  detect:
+    name: Detect Project
+    runs-on: ${{ inputs.runs_on }}
+    outputs:
+      has_pkg: ${{ steps.detect.outputs.has_pkg }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - id: detect
+        # Lockfiles count too: a PR that deletes package.json but leaves a
+        # lockfile still runs CI (and fails loudly at install) instead of
+        # silently skipping the whole pipeline.
+        run: echo "has_pkg=$({ [ -f package.json ] || [ -f package-lock.json ] || [ -f pnpm-lock.yaml ] || [ -f yarn.lock ] || [ -f bun.lockb ] || [ -f bun.lock ]; } && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+  install:
+    name: Install Dependencies
+    if: needs.detect.outputs.has_pkg == 'true'
+    runs-on: ${{ inputs.runs_on }}
+    needs: [detect]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: ${{ inputs.node_version }}
+          # Uncomment the appropriate cache line for your package manager:
+          # cache: 'npm'
+          # cache: 'pnpm'
+      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        id: cache-node-modules
+        with:
+          path: node_modules
+          key: nm-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
+      - if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        run: npm ci        # Replace with: pnpm install --frozen-lockfile
+
+  # Downstream jobs skip automatically when install is skipped (via needs).
+  security-audit:
+    name: Security Audit
+    needs: [install]
+    runs-on: ${{ inputs.runs_on }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: ${{ inputs.node_version }}
+      - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: node_modules
+          key: nm-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
+      - name: Fallback install if cache miss
+        run: test -d node_modules || npm ci
+      - name: Check for known vulnerabilities
+        run: npm audit --audit-level=high
+
+  lint:
+    name: Lint
+    needs: [install]
+    runs-on: ${{ inputs.runs_on }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: ${{ inputs.node_version }}
+      - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: node_modules
+          key: nm-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
+      - name: Fallback install if cache miss
+        run: test -d node_modules || npm ci
+      - run: npx eslint .
+
+  typecheck:
+    name: Type Check
+    needs: [install]
+    runs-on: ${{ inputs.runs_on }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: ${{ inputs.node_version }}
+      - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: node_modules
+          key: nm-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
+      - name: Fallback install if cache miss
+        run: test -d node_modules || npm ci
+      - run: npx tsc --noEmit
+
+  test:
+    name: Test
+    needs: [install]
+    runs-on: ${{ inputs.runs_on }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: ${{ inputs.node_version }}
+      - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: node_modules
+          key: nm-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
+      - name: Fallback install if cache miss
+        run: test -d node_modules || npm ci
+      - run: npm test -- --coverage
+      # Uncomment to upload coverage to a service (Codecov, Coveralls, etc.):
+      # - uses: codecov/codecov-action@v4
+      #   with:
+      #     token: ${{ secrets.CODECOV_TOKEN }}
+      #     fail_ci_if_error: false
+
+  build:
+    name: Build
+    needs: [security-audit, lint, typecheck, test]
+    runs-on: ${{ inputs.runs_on }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: ${{ inputs.node_version }}
+      - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: node_modules
+          key: nm-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
+      - name: Fallback install if cache miss
+        run: test -d node_modules || npm ci
+      - run: npm run build

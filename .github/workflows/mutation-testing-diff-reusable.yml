@@ -1,0 +1,121 @@
+name: Mutation Testing (Diff) (Reusable)
+# Reusable workflow_call form. Caller owns on: + paths-ignore via top-level.
+# Cite: .github/REUSABLE-WORKFLOWS.md
+#
+# Runs mutation testing only on lines changed in a PR.
+# Requires: project must have a test runner configured (Vitest, Jest, or pytest).
+
+on:
+  workflow_call:
+    inputs:
+      runs_on:
+        type: string
+        default: ubuntu-latest
+        description: Runner label for all jobs.
+      node_version:
+        type: string
+        default: '24'
+        description: Node.js version.
+      paths_ignore:
+        type: string
+        default: ''
+        description: Newline-separated globs excluded from the internal changed-files gate.
+      concurrency_group:
+        type: string
+        default: ''
+        description: Concurrency group key.
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: ${{ inputs.concurrency_group != '' && inputs.concurrency_group || format('{0}-{1}', github.workflow, github.ref) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  mutation-diff:
+    name: Mutation Testing on Diff
+    runs-on: ${{ inputs.runs_on }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: ${{ inputs.node_version }}
+          # cache: 'pnpm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Get changed source files
+        id: changed
+        run: |
+          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD \
+            | grep -E '\.(ts|tsx|js|jsx|py)$' \
+            | grep -v '__tests__\|\.test\.\|\.spec\.\|test_' \
+            | head -20)
+          echo "files<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGED" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "count=$(echo "$CHANGED" | grep -c . || echo 0)" >> $GITHUB_OUTPUT
+
+      - name: Skip if no source files changed
+        if: steps.changed.outputs.count == '0'
+        run: echo "No source files changed — skipping mutation testing" && exit 0
+
+      # --- TypeScript/JavaScript (Stryker) ---
+      # Uncomment if using JS/TS:
+      #
+      # - name: Run Stryker on changed files
+      #   if: steps.changed.outputs.count != '0'
+      #   run: |
+      #     FILES="${{ steps.changed.outputs.files }}"
+      #     npx stryker run \
+      #       --mutate "$FILES" \
+      #       --reporters json,clear-text \
+      #       --jsonReporter.fileName /tmp/stryker-report.json \
+      #       --coverageAnalysis off
+      #
+      # - name: Check mutation score
+      #   run: |
+      #     SCORE=$(python3 -c "
+      #     import json
+      #     r = json.load(open('/tmp/stryker-report.json'))
+      #     killed = r.get('mutants', {}).get('killed', 0)
+      #     total = sum(r.get('mutants', {v: 0 for v in ['killed','survived','timeout','noCoverage']}).values())
+      #     score = (killed / total * 100) if total > 0 else 100
+      #     print(f'{score:.1f}')
+      #     ")
+      #     echo "Mutation score: $SCORE%"
+      #     # Fail if score drops below 60%
+      #     python3 -c "import sys; sys.exit(0 if float('$SCORE') >= 60 else 1)" || \
+      #       echo "::warning::Mutation score $SCORE% is below 60% threshold"
+
+      # --- Python (mutmut) ---
+      # Uncomment if using Python:
+      #
+      # - name: Install mutmut
+      #   run: pip install mutmut
+      #
+      # - name: Run mutmut on changed files
+      #   if: steps.changed.outputs.count != '0'
+      #   run: |
+      #     FILES="${{ steps.changed.outputs.files }}"
+      #     for f in $FILES; do
+      #       mutmut run --paths-to-mutate "$f" --runner "python3 -m pytest --tb=no -q" || true
+      #     done
+      #     mutmut results
+
+      - name: Placeholder — configure mutation tool
+        if: steps.changed.outputs.count != '0'
+        run: |
+          echo "Changed source files:"
+          echo "${{ steps.changed.outputs.files }}"
+          echo ""
+          echo "Configure mutation testing above:"
+          echo "  JS/TS: uncomment the Stryker section"
+          echo "  Python: uncomment the mutmut section"
+          echo "  Other: add your mutation tool invocation"

@@ -1,0 +1,295 @@
+name: PR Assessment (Reusable)
+# Reusable workflow_call form of pr-assessment.yml.
+# Caller owns the `on:` triggers; this file only defines the jobs.
+# Dual provider_mode: anthropic (direct ANTHROPIC_API_KEY) | proxy (LiteLLM via ANTHROPIC_BASE_URL + LITELLM_MASTER_KEY).
+# See REUSABLE-WORKFLOWS.md for caller examples and secret passing conventions.
+# config-completeness-ignore: uses
+# config-completeness-ignore: with
+# config-completeness-ignore: id
+# config-completeness-ignore: name
+# config-completeness-ignore: run
+
+on:
+  workflow_call:
+    inputs:
+      provider_mode: { type: string, default: anthropic, description: 'anthropic (direct ANTHROPIC_API_KEY) | proxy (LiteLLM via ANTHROPIC_BASE_URL + LITELLM_MASTER_KEY).' }
+      litellm_proxy_url: { type: string, default: '', description: 'Proxy base URL for proxy mode; pass vars.LITELLM_PROXY_URL.' }
+      model: { type: string, default: '', description: 'Optional model id override; empty = script/action default.' }
+      runs_on: { type: string, default: ubuntu-latest }
+      paths_ignore: { type: string, default: '', description: 'Newline-separated globs excluded from the internal changed-files gate.' }
+      concurrency_group: { type: string, default: '' }
+    secrets:
+      ANTHROPIC_API_KEY: { required: false, description: 'Required when provider_mode=anthropic.' }
+      LITELLM_MASTER_KEY: { required: false, description: 'Required when provider_mode=proxy.' }
+
+concurrency:
+  group: ${{ inputs.concurrency_group != '' && inputs.concurrency_group || format('{0}-{1}', github.workflow, github.ref) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  classify:
+    name: Classify PR
+    runs-on: ${{ inputs.runs_on }}
+    if: |
+      !contains(github.event.pull_request.labels.*.name, 'skip-ai-review') &&
+      !startsWith(github.event.pull_request.title, 'chore(sync):')
+    outputs:
+      invoke_skills: ${{ steps.classify.outputs.invoke_skills }}
+      invoke_agents: ${{ steps.classify.outputs.invoke_agents }}
+      depth: ${{ steps.classify.outputs.depth }}
+    # Provider env — all steps inherit; empty ANTHROPIC_BASE_URL is a no-op for anthropic mode.
+    env:
+      ANTHROPIC_API_KEY: ${{ inputs.provider_mode == 'proxy' && secrets.LITELLM_MASTER_KEY || secrets.ANTHROPIC_API_KEY }}
+      ANTHROPIC_BASE_URL: ${{ inputs.provider_mode == 'proxy' && inputs.litellm_proxy_url || '' }}
+      ANTHROPIC_MODEL: ${{ inputs.model }}
+    steps:
+      - name: Validate provider secrets
+        env:
+          PM: ${{ inputs.provider_mode }}
+          AK: ${{ secrets.ANTHROPIC_API_KEY }}
+          LK: ${{ secrets.LITELLM_MASTER_KEY }}
+          PURL: ${{ inputs.litellm_proxy_url }}
+        run: |
+          if [[ "$PM" == "proxy" ]]; then
+            [[ -z "$LK" ]] && { echo "::error::provider_mode=proxy requires LITELLM_MASTER_KEY"; exit 1; }
+            [[ -z "$PURL" ]] && { echo "::error::provider_mode=proxy requires litellm_proxy_url"; exit 1; }
+          else
+            [[ -z "$AK" ]] && { echo "::error::provider_mode=anthropic requires ANTHROPIC_API_KEY"; exit 1; }
+          fi
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+
+      - name: Get PR diff
+        id: diff
+        run: |
+          git diff origin/${{ github.base_ref }}...HEAD > /tmp/pr.diff
+          echo "lines=$(wc -l < /tmp/pr.diff)" >> $GITHUB_OUTPUT
+          echo "files=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | wc -l)" >> $GITHUB_OUTPUT
+
+      - name: Run pr-classifier
+        id: classify
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          mkdir -p .ai/candidates
+          # Run pr-classifier agent via Claude API
+          python3 scripts/run-pr-classifier.py \
+            --diff /tmp/pr.diff \
+            --title "$PR_TITLE" \
+            --body "$PR_BODY" \
+            --output /tmp/classifier-output.json
+
+          # Parse output for downstream jobs
+          SKILLS=$(python3 -c "import json; d=json.load(open('/tmp/classifier-output.json')); print(','.join(d.get('invoke_skills',[])))")
+          AGENTS=$(python3 -c "import json; d=json.load(open('/tmp/classifier-output.json')); print(','.join(d.get('invoke_agents',[])))")
+          DEPTH=$(python3 -c "import json; d=json.load(open('/tmp/classifier-output.json')); print(d.get('depth','none'))")
+
+          echo "invoke_skills=$SKILLS" >> $GITHUB_OUTPUT
+          echo "invoke_agents=$AGENTS" >> $GITHUB_OUTPUT
+          echo "depth=$DEPTH" >> $GITHUB_OUTPUT
+          echo "Classification: depth=$DEPTH skills=$SKILLS agents=$AGENTS"
+
+  sast:
+    name: SAST (Semgrep + Bandit)
+    runs-on: ${{ inputs.runs_on }}
+    needs: [classify]
+    if: needs.classify.outputs.depth != 'none'
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+
+      - name: Run Semgrep
+        uses: returntocorp/semgrep-action@713efdd345f3035192eaa63f56867b88e63e4e5d # v1
+        continue-on-error: true
+        with:
+          config: auto
+          output: /tmp/semgrep-results.json
+          json: true
+
+      - name: Run Bandit (Python)
+        if: hashFiles('**/*.py') != ''
+        run: |
+          pip install bandit -q
+          bandit -r . -f json -o /tmp/bandit-results.json --exclude ./.venv,./node_modules || true
+
+      - name: Merge SAST findings
+        run: |
+          mkdir -p .ai
+          python3 -c "
+          import json, os
+          findings = []
+          for path in ['/tmp/semgrep-results.json', '/tmp/bandit-results.json']:
+              if os.path.exists(path):
+                  try:
+                      data = json.load(open(path))
+                      # Normalise to common schema
+                      if 'results' in data and data['results'] and 'check_id' in data['results'][0]:  # semgrep
+                          for r in data['results']:
+                              findings.append({'finding_id': f'semgrep-{r[\"check_id\"]}-{r[\"path\"]}', 'rule': r['check_id'], 'file': r['path'], 'line': r['start']['line'], 'message': r['extra']['message'], 'severity': r['extra']['severity'].upper()})
+                      elif 'results' in data:  # bandit
+                          for r in data.get('results', []):
+                              findings.append({'finding_id': f'bandit-{r[\"test_id\"]}-{r[\"filename\"]}', 'rule': r['test_id'], 'file': r['filename'], 'line': r['line_number'], 'message': r['issue_text'], 'severity': r['issue_severity'].upper()})
+                  except Exception as e:
+                      print(f'Warning: could not parse {path}: {e}')
+          json.dump(findings, open('.ai/sast-findings.json', 'w'), indent=2)
+          print(f'Merged {len(findings)} SAST findings')
+          "
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sast-findings
+          path: .ai/sast-findings.json
+
+  specialists:
+    name: Specialist Skills
+    runs-on: ${{ inputs.runs_on }}
+    needs: [classify, sast]
+    if: needs.classify.outputs.invoke_skills != ''
+    # Provider env — all steps inherit; empty ANTHROPIC_BASE_URL is a no-op for anthropic mode.
+    env:
+      ANTHROPIC_API_KEY: ${{ inputs.provider_mode == 'proxy' && secrets.LITELLM_MASTER_KEY || secrets.ANTHROPIC_API_KEY }}
+      ANTHROPIC_BASE_URL: ${{ inputs.provider_mode == 'proxy' && inputs.litellm_proxy_url || '' }}
+      ANTHROPIC_MODEL: ${{ inputs.model }}
+    steps:
+      - name: Validate provider secrets
+        env:
+          PM: ${{ inputs.provider_mode }}
+          AK: ${{ secrets.ANTHROPIC_API_KEY }}
+          LK: ${{ secrets.LITELLM_MASTER_KEY }}
+          PURL: ${{ inputs.litellm_proxy_url }}
+        run: |
+          if [[ "$PM" == "proxy" ]]; then
+            [[ -z "$LK" ]] && { echo "::error::provider_mode=proxy requires LITELLM_MASTER_KEY"; exit 1; }
+            [[ -z "$PURL" ]] && { echo "::error::provider_mode=proxy requires litellm_proxy_url"; exit 1; }
+          else
+            [[ -z "$AK" ]] && { echo "::error::provider_mode=anthropic requires ANTHROPIC_API_KEY"; exit 1; }
+          fi
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: sast-findings
+          path: .ai/
+
+      - name: Run specialist skills
+        env:
+          SKILLS: ${{ needs.classify.outputs.invoke_skills }}
+        run: |
+          mkdir -p .ai/candidates
+          git diff origin/${{ github.base_ref }}...HEAD > /tmp/pr.diff
+          python3 scripts/run-specialists.py \
+            --skills "$SKILLS" \
+            --diff /tmp/pr.diff \
+            --candidates-dir .ai/candidates/
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: specialist-candidates
+          path: .ai/candidates/
+
+  broad-agents:
+    name: Broad Agents
+    runs-on: ${{ inputs.runs_on }}
+    needs: [classify, sast]
+    if: needs.classify.outputs.depth == 'broad'
+    # Provider env — all steps inherit; empty ANTHROPIC_BASE_URL is a no-op for anthropic mode.
+    env:
+      ANTHROPIC_API_KEY: ${{ inputs.provider_mode == 'proxy' && secrets.LITELLM_MASTER_KEY || secrets.ANTHROPIC_API_KEY }}
+      ANTHROPIC_BASE_URL: ${{ inputs.provider_mode == 'proxy' && inputs.litellm_proxy_url || '' }}
+      ANTHROPIC_MODEL: ${{ inputs.model }}
+    steps:
+      - name: Validate provider secrets
+        env:
+          PM: ${{ inputs.provider_mode }}
+          AK: ${{ secrets.ANTHROPIC_API_KEY }}
+          LK: ${{ secrets.LITELLM_MASTER_KEY }}
+          PURL: ${{ inputs.litellm_proxy_url }}
+        run: |
+          if [[ "$PM" == "proxy" ]]; then
+            [[ -z "$LK" ]] && { echo "::error::provider_mode=proxy requires LITELLM_MASTER_KEY"; exit 1; }
+            [[ -z "$PURL" ]] && { echo "::error::provider_mode=proxy requires litellm_proxy_url"; exit 1; }
+          else
+            [[ -z "$AK" ]] && { echo "::error::provider_mode=anthropic requires ANTHROPIC_API_KEY"; exit 1; }
+          fi
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: sast-findings
+          path: .ai/
+
+      - name: Run broad agents
+        env:
+          AGENTS: ${{ needs.classify.outputs.invoke_agents }}
+        run: |
+          mkdir -p .ai/candidates
+          git diff origin/${{ github.base_ref }}...HEAD > /tmp/pr.diff
+          python3 scripts/run-broad-agents.py \
+            --agents "$AGENTS" \
+            --diff /tmp/pr.diff \
+            --candidates-dir .ai/candidates/
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: broad-candidates
+          path: .ai/candidates/
+
+  judge:
+    name: Judge
+    runs-on: ${{ inputs.runs_on }}
+    needs: [classify, specialists, broad-agents]
+    if: always() && needs.classify.result == 'success' && needs.classify.outputs.depth != 'none'
+    # Provider env — all steps inherit; empty ANTHROPIC_BASE_URL is a no-op for anthropic mode.
+    env:
+      ANTHROPIC_API_KEY: ${{ inputs.provider_mode == 'proxy' && secrets.LITELLM_MASTER_KEY || secrets.ANTHROPIC_API_KEY }}
+      ANTHROPIC_BASE_URL: ${{ inputs.provider_mode == 'proxy' && inputs.litellm_proxy_url || '' }}
+      ANTHROPIC_MODEL: ${{ inputs.model }}
+    steps:
+      - name: Validate provider secrets
+        env:
+          PM: ${{ inputs.provider_mode }}
+          AK: ${{ secrets.ANTHROPIC_API_KEY }}
+          LK: ${{ secrets.LITELLM_MASTER_KEY }}
+          PURL: ${{ inputs.litellm_proxy_url }}
+        run: |
+          if [[ "$PM" == "proxy" ]]; then
+            [[ -z "$LK" ]] && { echo "::error::provider_mode=proxy requires LITELLM_MASTER_KEY"; exit 1; }
+            [[ -z "$PURL" ]] && { echo "::error::provider_mode=proxy requires litellm_proxy_url"; exit 1; }
+          else
+            [[ -z "$AK" ]] && { echo "::error::provider_mode=anthropic requires ANTHROPIC_API_KEY"; exit 1; }
+          fi
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Download all candidates
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: '*-candidates'
+          path: .ai/candidates/
+          merge-multiple: true
+
+      - name: Run judge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          mkdir -p .ai/judge-log
+          python3 scripts/run-judge.py \
+            --candidates-dir .ai/candidates/ \
+            --pr-number "$PR_NUMBER" \
+            --repo "$REPO"
