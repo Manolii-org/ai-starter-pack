@@ -214,8 +214,17 @@ except Exception:
 # (PostToolUse cannot block a tool that already ran). See
 # docs/mcp-response-hygiene.md and docs/token-leak-hygiene.md.
 
-SHAPES_FILE = REPO_ROOT / ".ai" / "security" / "token-shapes.json"
 _plug = os.environ.get("CLAUDE_PLUGIN_ROOT")
+# consumer override (.ai/security/) -> bundled plugin default (data/) ->
+# in-tree fallback. Without the plugin tier, pure-plugin installs find no
+# token-shapes file and secret-redaction silently fails open.
+_shapes_candidates = []
+if _proj:
+    _shapes_candidates.append(Path(_proj) / ".ai" / "security" / "token-shapes.json")
+if _plug:
+    _shapes_candidates.append(Path(_plug) / "data" / "token-shapes.json")
+_shapes_candidates.append(Path(__file__).parent.parent.parent / ".ai" / "security" / "token-shapes.json")
+SHAPES_FILE = next((c for c in _shapes_candidates if c.exists()), _shapes_candidates[-1])
 SCRIPTS_DIR = (Path(_plug) / "scripts") if _plug else (Path(__file__).parent.parent.parent / "scripts")
 _EXTERNAL_CONTENT_TOOLS = {"WebFetch", "WebSearch"}
 _MAX_SCAN_CHARS = 200_000

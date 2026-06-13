@@ -203,7 +203,17 @@ SENSITIVITY_ORDER = {
 def _load_routing_config() -> dict | None:
     try:
         _proj = os.environ.get("CLAUDE_PROJECT_DIR")
-        config_path = Path(_proj) / ".claude" / "model-routing.json" if _proj else Path(__file__).parent.parent / ".claude" / "model-routing.json"
+        _plug = os.environ.get("CLAUDE_PLUGIN_ROOT")
+        # consumer override (.claude/) wins, then the bundled plugin default
+        # (data/ at the plugin root), then the in-tree fallback. Without the
+        # plugin tier, pure-plugin installs find no config and routing fails open.
+        _candidates = []
+        if _proj:
+            _candidates.append(Path(_proj) / ".claude" / "model-routing.json")
+        if _plug:
+            _candidates.append(Path(_plug) / "data" / "model-routing.json")
+        _candidates.append(Path(__file__).parent.parent / ".claude" / "model-routing.json")
+        config_path = next((c for c in _candidates if c.exists()), _candidates[-1])
         with open(config_path) as f:
             return json.load(f)
     except Exception:

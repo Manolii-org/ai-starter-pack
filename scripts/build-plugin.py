@@ -188,8 +188,37 @@ def assemble_hooks_and_scripts(rendered: Path, out: Path) -> dict:
     return counts
 
 
+def assemble_data(rendered: Path, out: Path) -> dict:
+    """Bundle framework data (routing policy + secret-shape patterns) so a pure
+    plugin install (no Copier render in the consumer) still has routing
+    governance and secret redaction. Hooks resolve the consumer override first,
+    then these bundled defaults (data/), then the in-tree fallback."""
+    src_root = Path(__file__).resolve().parent.parent
+    data = out / "data"
+    data.mkdir(parents=True, exist_ok=True)
+    spec = {
+        "model-routing.json": [rendered / ".claude" / "model-routing.json",
+                               src_root / ".claude" / "model-routing.json"],
+        "token-shapes.json": [rendered / ".ai" / "security" / "token-shapes.json",
+                              src_root / ".ai" / "security" / "token-shapes.json"],
+    }
+    bundled = 0
+    for name, cands in spec.items():
+        srcf = next((c for c in cands if c.is_file()), None)
+        if srcf is None:
+            sys.stderr.write(f"FAIL: framework data source missing: {name}\n")
+            sys.exit(1)
+        shutil.copy2(srcf, data / name)
+        bundled += 1
+    return {"data": bundled}
+
+
 def verify(out: Path, counts: dict, rendered: Path) -> None:
     """Fail loudly if any Jinja survived, or required manifest is missing."""
+    for _d in ("model-routing.json", "token-shapes.json"):
+        if not (out / "data" / _d).is_file():
+            sys.stderr.write(f"FAIL: framework data not bundled: data/{_d}\n")
+            sys.exit(1)
     leaks = [
         str(p.relative_to(out))
         for p in out.rglob("*")
@@ -339,6 +368,7 @@ def main() -> None:
     try:
         counts = assemble_plugin(rendered, out)
         counts.update(assemble_hooks_and_scripts(rendered, out))
+        counts.update(assemble_data(rendered, out))
         verify(out, counts, rendered)
     finally:
         if not args.keep_rendered:

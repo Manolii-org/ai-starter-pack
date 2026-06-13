@@ -77,10 +77,18 @@ def _load_routing_config():
 
     try:
         _proj = os.environ.get("CLAUDE_PROJECT_DIR")
-        config_path = os.path.join(
-            _proj if _proj else os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        _plug = os.environ.get("CLAUDE_PLUGIN_ROOT")
+        # consumer override -> bundled plugin default (data/) -> in-tree fallback.
+        _candidates = []
+        if _proj:
+            _candidates.append(os.path.join(_proj, ".claude", "model-routing.json"))
+        if _plug:
+            _candidates.append(os.path.join(_plug, "data", "model-routing.json"))
+        _candidates.append(os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             ".claude", "model-routing.json"
-        )
+        ))
+        config_path = next((c for c in _candidates if os.path.exists(c)), _candidates[-1])
         with open(config_path) as f:
             cfg = json.load(f)
 

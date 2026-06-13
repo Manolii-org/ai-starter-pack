@@ -54,7 +54,15 @@ def _load_routing_keywords():
     """Load keyword lists from .claude/model-routing.json. Falls back to defaults."""
     try:
         _proj = os.environ.get("CLAUDE_PROJECT_DIR")
-        config_path = Path(_proj) / ".claude" / "model-routing.json" if _proj else Path(__file__).parent.parent / "model-routing.json"
+        _plug = os.environ.get("CLAUDE_PLUGIN_ROOT")
+        # consumer override -> bundled plugin default (data/) -> in-tree fallback.
+        _candidates = []
+        if _proj:
+            _candidates.append(Path(_proj) / ".claude" / "model-routing.json")
+        if _plug:
+            _candidates.append(Path(_plug) / "data" / "model-routing.json")
+        _candidates.append(Path(__file__).parent.parent / "model-routing.json")
+        config_path = next((c for c in _candidates if c.exists()), _candidates[-1])
         with open(config_path) as f:
             cfg = json.load(f)
         overrides = cfg.get("overrides", {})
