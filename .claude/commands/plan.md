@@ -1,3 +1,7 @@
+---
+description: "Create or update an implementation plan for the current task"
+---
+
 # Plan — Implementation Planning
 
 Create or update an implementation plan for the current task.

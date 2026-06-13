@@ -1,3 +1,7 @@
+---
+description: "A structured workflow for investigating bugs, diagnosing root causes, implementing fixes, and closing the PR loop"
+---
+
 # /investigate-fix — Investigate, Diagnose & Fix
 
 A structured workflow for investigating bugs, diagnosing root causes, implementing fixes, and closing the PR loop.

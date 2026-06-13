@@ -1,3 +1,7 @@
+---
+description: "Save a fact, decision, or preference to memory"
+---
+
 # Remember — Quick Save Fact
 
 Save a fact, decision, or preference to memory.

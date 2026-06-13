@@ -1,3 +1,7 @@
+---
+description: "Expire stale low-confidence patterns that were only seen once and never re-confirmed"
+---
+
 # /prune
 
 Expire stale low-confidence patterns that were only seen once and never re-confirmed.

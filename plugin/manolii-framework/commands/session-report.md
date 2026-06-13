@@ -1,3 +1,7 @@
+---
+description: "Generate a session retrospective and save it"
+---
+
 # Session Report — Retrospective
 
 Generate a session retrospective and save it.

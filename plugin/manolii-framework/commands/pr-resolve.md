@@ -1,3 +1,7 @@
+---
+description: "Find the PR for the current branch and resolve all issues in priority order"
+---
+
 # PR Resolve — One-Shot Fix Loop
 
 Find the PR for the current branch and resolve all issues in priority order.

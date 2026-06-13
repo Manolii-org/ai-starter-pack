@@ -1,3 +1,7 @@
+---
+description: "Capture a reusable pattern from the current session's work"
+---
+
 # Learn — Extract Pattern from Session
 
 Capture a reusable pattern from the current session's work.

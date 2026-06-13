@@ -1,3 +1,7 @@
+---
+description: "Search execution traces and memory for similar past issues"
+---
+
 # /diagnose
 
 Search execution traces and memory for similar past issues.

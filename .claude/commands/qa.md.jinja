@@ -1,3 +1,7 @@
+---
+description: "Test the application in a real browser"
+---
+
 # /qa — Browser QA Testing
 
 Test the application in a real browser. Find bugs, fix them, and generate regression tests.

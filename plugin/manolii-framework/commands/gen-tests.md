@@ -1,3 +1,7 @@
+---
+description: "Generate unit and integration tests for recently changed or specified files"
+---
+
 # /gen-tests — Generate Tests for Changed Code
 
 Generate unit and integration tests for recently changed or specified files.

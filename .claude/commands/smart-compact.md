@@ -1,3 +1,7 @@
+---
+description: "Prepare a structured session summary, then compact context to preserve quality while reducing token usage"
+---
+
 # /smart-compact — Intelligent Context Compaction
 
 Prepare a structured session summary, then compact context to preserve quality while reducing token usage. Run this at task boundaries, after a git push/PR, or when the compact-trigger hook recommends it.

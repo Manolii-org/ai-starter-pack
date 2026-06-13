@@ -1,3 +1,7 @@
+---
+description: "Chains all session-end cleanup commands in sequence"
+---
+
 # /wrap-up — End-of-Session Orchestrator
 
 Chains all session-end cleanup commands in sequence. Run this instead of remembering to invoke each command separately.

@@ -1,3 +1,7 @@
+---
+description: "Test all configured services and report pass/fail"
+---
+
 # Health Check — Service Connectivity
 
 Test all configured services and report pass/fail.

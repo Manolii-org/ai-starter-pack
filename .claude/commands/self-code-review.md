@@ -1,3 +1,7 @@
+---
+description: "Review staged changes (or recent edits if nothing staged) before committing"
+---
+
 # Self-Code Review
 
 Review staged changes (or recent edits if nothing staged) before committing.

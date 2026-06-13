@@ -1,3 +1,7 @@
+---
+description: "Monitor a deployment for errors after shipping"
+---
+
 # /canary — Post-Deploy Monitoring
 
 Monitor a deployment for errors after shipping. Continuously checks HTTP health, response times, error pages, and performance regressions.

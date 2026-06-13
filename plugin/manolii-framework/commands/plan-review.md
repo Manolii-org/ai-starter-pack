@@ -1,3 +1,7 @@
+---
+description: "Rigorous pre-implementation review combining CEO-level scope challenge with engineering architecture lock-in"
+---
+
 # /plan-review — Architecture & Scope Review
 
 Rigorous pre-implementation review combining CEO-level scope challenge with engineering architecture lock-in.

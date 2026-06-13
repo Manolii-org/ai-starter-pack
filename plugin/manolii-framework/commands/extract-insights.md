@@ -1,3 +1,7 @@
+---
+description: "Automatically extract decisions, preferences, gotchas, and facts from the current conversation and save them to memory"
+---
+
 # /extract-insights
 
 Automatically extract decisions, preferences, gotchas, and facts from the current conversation and save them to memory.

@@ -1,3 +1,7 @@
+---
+description: "Run the complete validation pipeline and report results"
+---
+
 # Verify — Full Validation Suite
 
 Run the complete validation pipeline and report results.

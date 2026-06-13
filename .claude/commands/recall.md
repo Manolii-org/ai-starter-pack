@@ -1,3 +1,7 @@
+---
+description: "Search .ai/memory/ for patterns, facts, and decisions matching a query"
+---
+
 # Recall — Search Memory
 
 Search `.ai/memory/` for patterns, facts, and decisions matching a query.

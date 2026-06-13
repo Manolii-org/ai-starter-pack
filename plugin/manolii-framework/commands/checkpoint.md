@@ -1,3 +1,7 @@
+---
+description: "Capture current work state for session resumption"
+---
+
 # Checkpoint — Save Work State
 
 Capture current work state for session resumption.

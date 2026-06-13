@@ -1,3 +1,7 @@
+---
+description: "Read .ai/compact-metrics.jsonl and generate a health report on how the smart compaction system is performing"
+---
+
 # /compact-review — Compaction System Health Report
 
 Read `.ai/compact-metrics.jsonl` and generate a health report on how the smart compaction system is performing. Run this periodically (weekly, or when token usage feels high) to detect drift and tune thresholds.

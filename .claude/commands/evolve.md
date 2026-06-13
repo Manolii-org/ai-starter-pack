@@ -1,3 +1,7 @@
+---
+description: "Review accumulated patterns and promote high-confidence ones to skill candidates"
+---
+
 # /evolve
 
 Review accumulated patterns and promote high-confidence ones to skill candidates.
