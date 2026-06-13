@@ -51,10 +51,10 @@ jobs:
           PURL: ${{ inputs.litellm_proxy_url }}
         run: |
           if [[ "$PM" == "proxy" ]]; then
-            [[ -z "$LK" ]] && { echo "::error::provider_mode=proxy requires LITELLM_MASTER_KEY"; exit 1; }
-            [[ -z "$PURL" ]] && { echo "::error::provider_mode=proxy requires litellm_proxy_url"; exit 1; }
+            if [[ -z "$LK" ]]; then echo "::error::provider_mode=proxy requires LITELLM_MASTER_KEY"; exit 1; fi
+            if [[ -z "$PURL" ]]; then echo "::error::provider_mode=proxy requires litellm_proxy_url"; exit 1; fi
           else
-            [[ -z "$AK" ]] && { echo "::error::provider_mode=anthropic requires ANTHROPIC_API_KEY"; exit 1; }
+            if [[ -z "$AK" ]]; then echo "::error::provider_mode=anthropic requires ANTHROPIC_API_KEY"; exit 1; fi
           fi
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -163,10 +163,10 @@ jobs:
           PURL: ${{ inputs.litellm_proxy_url }}
         run: |
           if [[ "$PM" == "proxy" ]]; then
-            [[ -z "$LK" ]] && { echo "::error::provider_mode=proxy requires LITELLM_MASTER_KEY"; exit 1; }
-            [[ -z "$PURL" ]] && { echo "::error::provider_mode=proxy requires litellm_proxy_url"; exit 1; }
+            if [[ -z "$LK" ]]; then echo "::error::provider_mode=proxy requires LITELLM_MASTER_KEY"; exit 1; fi
+            if [[ -z "$PURL" ]]; then echo "::error::provider_mode=proxy requires litellm_proxy_url"; exit 1; fi
           else
-            [[ -z "$AK" ]] && { echo "::error::provider_mode=anthropic requires ANTHROPIC_API_KEY"; exit 1; }
+            if [[ -z "$AK" ]]; then echo "::error::provider_mode=anthropic requires ANTHROPIC_API_KEY"; exit 1; fi
           fi
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -213,10 +213,10 @@ jobs:
           PURL: ${{ inputs.litellm_proxy_url }}
         run: |
           if [[ "$PM" == "proxy" ]]; then
-            [[ -z "$LK" ]] && { echo "::error::provider_mode=proxy requires LITELLM_MASTER_KEY"; exit 1; }
-            [[ -z "$PURL" ]] && { echo "::error::provider_mode=proxy requires litellm_proxy_url"; exit 1; }
+            if [[ -z "$LK" ]]; then echo "::error::provider_mode=proxy requires LITELLM_MASTER_KEY"; exit 1; fi
+            if [[ -z "$PURL" ]]; then echo "::error::provider_mode=proxy requires litellm_proxy_url"; exit 1; fi
           else
-            [[ -z "$AK" ]] && { echo "::error::provider_mode=anthropic requires ANTHROPIC_API_KEY"; exit 1; }
+            if [[ -z "$AK" ]]; then echo "::error::provider_mode=anthropic requires ANTHROPIC_API_KEY"; exit 1; fi
           fi
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -263,10 +263,10 @@ jobs:
           PURL: ${{ inputs.litellm_proxy_url }}
         run: |
           if [[ "$PM" == "proxy" ]]; then
-            [[ -z "$LK" ]] && { echo "::error::provider_mode=proxy requires LITELLM_MASTER_KEY"; exit 1; }
-            [[ -z "$PURL" ]] && { echo "::error::provider_mode=proxy requires litellm_proxy_url"; exit 1; }
+            if [[ -z "$LK" ]]; then echo "::error::provider_mode=proxy requires LITELLM_MASTER_KEY"; exit 1; fi
+            if [[ -z "$PURL" ]]; then echo "::error::provider_mode=proxy requires litellm_proxy_url"; exit 1; fi
           else
-            [[ -z "$AK" ]] && { echo "::error::provider_mode=anthropic requires ANTHROPIC_API_KEY"; exit 1; }
+            if [[ -z "$AK" ]]; then echo "::error::provider_mode=anthropic requires ANTHROPIC_API_KEY"; exit 1; fi
           fi
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6

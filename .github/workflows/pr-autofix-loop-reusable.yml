@@ -53,10 +53,10 @@ jobs:
           PURL: ${{ inputs.litellm_proxy_url }}
         run: |
           if [[ "$PM" == "proxy" ]]; then
-            [[ -z "$LK" ]] && { echo "::error::provider_mode=proxy requires LITELLM_MASTER_KEY"; exit 1; }
-            [[ -z "$PURL" ]] && { echo "::error::provider_mode=proxy requires litellm_proxy_url"; exit 1; }
+            if [[ -z "$LK" ]]; then echo "::error::provider_mode=proxy requires LITELLM_MASTER_KEY"; exit 1; fi
+            if [[ -z "$PURL" ]]; then echo "::error::provider_mode=proxy requires litellm_proxy_url"; exit 1; fi
           else
-            [[ -z "$AK" ]] && { echo "::error::provider_mode=anthropic requires ANTHROPIC_API_KEY"; exit 1; }
+            if [[ -z "$AK" ]]; then echo "::error::provider_mode=anthropic requires ANTHROPIC_API_KEY"; exit 1; fi
           fi
 
       - name: Resolve PR head ref
