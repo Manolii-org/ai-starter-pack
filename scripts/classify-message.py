@@ -76,8 +76,9 @@ def _load_routing_config():
     _PROXY_INTERCEPT_RATES_DEFAULT = {}
 
     try:
+        _proj = os.environ.get("CLAUDE_PROJECT_DIR")
         config_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            _proj if _proj else os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             ".claude", "model-routing.json"
         )
         with open(config_path) as f:
@@ -224,7 +225,8 @@ _HARD_LIMIT_USD = 35.0   # force → haiku/OSS + strong warning
 _DEFAULT_PRICING: dict[str, float] = {"in": 3.00, "out": 15.00}
 
 
-_SPEND_CACHE_DIR = Path(__file__).parent.parent / ".ai" / "spend-cache"
+_proj_scd = os.environ.get("CLAUDE_PROJECT_DIR")
+_SPEND_CACHE_DIR = Path(_proj_scd) / ".ai" / "spend-cache" if _proj_scd else Path(__file__).parent.parent / ".ai" / "spend-cache"
 
 
 def _compute_session_spend(transcript_path: str | None) -> float:
@@ -603,7 +605,8 @@ def classify_tier(prompt_text: str) -> dict:
 
 # --- Pre-flight context injection helpers ---
 # Repo root — same derivation used above for config_path.
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_proj_rr = os.environ.get("CLAUDE_PROJECT_DIR")
+_REPO_ROOT = _proj_rr if _proj_rr else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Match script paths including kebab-case names like "scripts/post-tool-use.py"
 _PY_SCRIPT_RE = re.compile(r'\bscripts/([a-z0-9_/-]+)\.py\b', re.I)

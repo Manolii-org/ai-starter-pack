@@ -27,7 +27,7 @@ load_from_cache() {
 
 fetch_from_doppler() {
   # Prefer the ecosystem loader if available (e.g., in master repo)
-  local ecosystem_loader="scripts/load-ecosystem.sh"
+  local ecosystem_loader="${CLAUDE_PLUGIN_ROOT:-.}/scripts/load-ecosystem.sh"
   if [[ -f "$ecosystem_loader" ]]; then
     log "Using ecosystem loader: $ecosystem_loader"
     # shellcheck source=/dev/null

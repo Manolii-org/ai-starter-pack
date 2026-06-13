@@ -13,6 +13,7 @@ Block output:
   {"decision": "block", "reason": "..."} → Claude Code aborts the tool call and shows reason
 """
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -201,7 +202,8 @@ SENSITIVITY_ORDER = {
 
 def _load_routing_config() -> dict | None:
     try:
-        config_path = Path(__file__).parent.parent / ".claude" / "model-routing.json"
+        _proj = os.environ.get("CLAUDE_PROJECT_DIR")
+        config_path = Path(_proj) / ".claude" / "model-routing.json" if _proj else Path(__file__).parent.parent / ".claude" / "model-routing.json"
         with open(config_path) as f:
             return json.load(f)
     except Exception:
@@ -216,7 +218,20 @@ def _load_agent_sensitivity(agent_name: str) -> str:
     if not agent_name:
         return "internal"
     try:
-        agent_path = Path(__file__).parent.parent / ".claude" / "agents" / f"{agent_name}.md"
+        # Resolve the agent definition across layouts: consumer-local override
+        # (.claude/agents/) wins, then the bundled plugin copy (agents/ at the
+        # plugin root — no .claude/ prefix), then the in-tree fallback. Without
+        # this, plugin installs silently return the "internal" default and the
+        # OSS data-sensitivity guard is bypassed for restricted agents.
+        _plug = os.environ.get("CLAUDE_PLUGIN_ROOT")
+        _proj = os.environ.get("CLAUDE_PROJECT_DIR")
+        _candidates = []
+        if _proj:
+            _candidates.append(Path(_proj) / ".claude" / "agents" / f"{agent_name}.md")
+        if _plug:
+            _candidates.append(Path(_plug) / "agents" / f"{agent_name}.md")
+        _candidates.append(Path(__file__).parent.parent / ".claude" / "agents" / f"{agent_name}.md")
+        agent_path = next((c for c in _candidates if c.exists()), _candidates[-1])
         text = agent_path.read_text()
     except Exception:
         return "internal"

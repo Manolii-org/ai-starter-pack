@@ -53,7 +53,8 @@ def save_state(state):
 def _load_routing_keywords():
     """Load keyword lists from .claude/model-routing.json. Falls back to defaults."""
     try:
-        config_path = Path(__file__).parent.parent / "model-routing.json"
+        _proj = os.environ.get("CLAUDE_PROJECT_DIR")
+        config_path = Path(_proj) / ".claude" / "model-routing.json" if _proj else Path(__file__).parent.parent / "model-routing.json"
         with open(config_path) as f:
             cfg = json.load(f)
         overrides = cfg.get("overrides", {})

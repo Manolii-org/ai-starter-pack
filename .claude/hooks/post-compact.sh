@@ -10,7 +10,7 @@ set -o pipefail
 trap 'exit 0' ERR
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+REPO_ROOT="${CLAUDE_PROJECT_DIR:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 METRICS_FILE="$REPO_ROOT/.ai/compact-metrics.jsonl"
 STATE_FILE="$REPO_ROOT/.ai/compact-state.json"
 

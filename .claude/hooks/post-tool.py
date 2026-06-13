@@ -47,7 +47,8 @@ def _flush_output() -> None:
 
 # ── SECTION 1: Compact trigger (ALL tools) ───────────────────────────────────
 
-REPO_ROOT  = Path(__file__).parent.parent.parent
+_proj = os.environ.get("CLAUDE_PROJECT_DIR")
+REPO_ROOT  = Path(_proj) if _proj else Path(__file__).parent.parent.parent
 STATE_FILE = REPO_ROOT / ".ai" / "compact-state.json"
 METRICS_FILE = REPO_ROOT / ".ai" / "compact-metrics.jsonl"
 
@@ -214,7 +215,8 @@ except Exception:
 # docs/mcp-response-hygiene.md and docs/token-leak-hygiene.md.
 
 SHAPES_FILE = REPO_ROOT / ".ai" / "security" / "token-shapes.json"
-SCRIPTS_DIR = REPO_ROOT / "scripts"
+_plug = os.environ.get("CLAUDE_PLUGIN_ROOT")
+SCRIPTS_DIR = (Path(_plug) / "scripts") if _plug else (Path(__file__).parent.parent.parent / "scripts")
 _EXTERNAL_CONTENT_TOOLS = {"WebFetch", "WebSearch"}
 _MAX_SCAN_CHARS = 200_000
 

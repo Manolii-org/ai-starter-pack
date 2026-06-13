@@ -11,7 +11,7 @@ trap 'exit 0' ERR
 
 # .claude/hooks/ is 2 levels below repo root
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+REPO_ROOT="${CLAUDE_PROJECT_DIR:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 LOGS_DIR="$REPO_ROOT/.ai/session-logs"
 
 INPUT=$(cat)
