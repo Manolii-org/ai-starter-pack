@@ -24,7 +24,7 @@ Post-hoc analysis of Claude Code session transcripts. Detects behavioural anti-p
 ### 1. Run the detector
 
 ```bash
-python3 scripts/doctor-analyse.py
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/doctor-analyse.py"
 ```
 
 Flags:

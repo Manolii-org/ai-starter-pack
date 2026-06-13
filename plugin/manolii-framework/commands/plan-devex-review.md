@@ -56,7 +56,7 @@ The script never blocks — it surfaces consideration items.
 
 1. Determine plan location (read file if path provided; search `.ai/sprints/` if sprint ID)
 2. Parse plan frontmatter + body for references to skills, commands, agents, hooks, MCP servers
-3. Run `python3 scripts/devex_check.py <plan-file>` and capture table output
+3. Run `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/devex_check.py" <plan-file>` and capture table output
 4. Print table to terminal
 5. If sprint context, write findings to `.ai/sprints/<sprint-id>/plan-devex-review.md`
 

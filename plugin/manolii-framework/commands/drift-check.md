@@ -33,20 +33,20 @@ Detects silent configuration drift before it compounds across sessions.
 
 Or run directly:
 ```bash
-python3 scripts/lint-agent-routing.py
-python3 scripts/system-self-check.py
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lint-agent-routing.py"
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/system-self-check.py"
 ```
 
 ## Protocol
 
 1. Run the agent routing linter:
 ```bash
-python3 scripts/lint-agent-routing.py
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lint-agent-routing.py"
 ```
 
 2. Run the system self-check:
 ```bash
-python3 scripts/system-self-check.py
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/system-self-check.py"
 ```
 
 3. Check for stale checkpoints:

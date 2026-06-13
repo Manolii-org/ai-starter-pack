@@ -12,11 +12,14 @@ Checks:
   - CLAUDE.md               — present (not just placeholder)
 """
 import json
+import os
 import shlex
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).parent.parent
+# As a plugin Stop hook (run after `cd $CLAUDE_PROJECT_DIR`), validate the consumer
+# project, not the plugin install dir.
+REPO_ROOT = Path(os.environ.get("CLAUDE_PROJECT_DIR") or Path(__file__).parent.parent)
 SETTINGS  = REPO_ROOT / ".claude" / "settings.json"
 MCP_FILE  = REPO_ROOT / ".mcp.json"
 

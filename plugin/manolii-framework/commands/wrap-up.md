@@ -24,7 +24,7 @@ Quick health check on the memory system:
 ### Step 4: Regenerate knowledge index (if not already done)
 If Step 2 (`/session-summary`) completed and you saw the "Session logged" confirmation, the index was already regenerated. Otherwise, run:
 ```bash
-bash scripts/generate-knowledge-index.sh
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/generate-knowledge-index.sh"
 ```
 
 ### Step 5: Flag items for next session

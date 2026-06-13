@@ -18,7 +18,9 @@ from pathlib import Path
 
 # Paths can be overridden via env vars for portability across repos/templates
 _default_root = Path(__file__).resolve().parent.parent
-REPO_ROOT   = Path(os.environ.get("AI_REPO_ROOT",   str(_default_root)))
+# As a plugin Stop hook (run after `cd $CLAUDE_PROJECT_DIR`), graph the consumer
+# project; AI_REPO_ROOT still wins for explicit overrides.
+REPO_ROOT   = Path(os.environ.get("AI_REPO_ROOT") or os.environ.get("CLAUDE_PROJECT_DIR") or str(_default_root))
 SKILLS_DIR  = Path(os.environ.get("AI_SKILLS_DIR",  str(REPO_ROOT / ".claude" / "skills")))
 OUTPUT_FILE = Path(os.environ.get("AI_SKILL_GRAPH", str(REPO_ROOT / ".ai" / "skill-graph.md")))
 

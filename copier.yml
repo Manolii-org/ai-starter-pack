@@ -161,6 +161,11 @@ _exclude:
   # consumed via the marketplace, never rendered into instances.
   - plugin
   - plugin/**
+  # Plugin marketplace metadata + the plugin-only eval gate must not render into
+  # instances (marketplace.json points at ./plugin; the gate needs build-plugin.py).
+  - .claude-plugin
+  - .claude-plugin/**
+  - .github/workflows/plugin-eval-gate.yml
   - "*.zip"
 
 # Instance-owned files: written on first copy, never overwritten by

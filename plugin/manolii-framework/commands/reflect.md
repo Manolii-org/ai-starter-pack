@@ -17,7 +17,7 @@ Works in Claude Code, Cursor, Codex, or any agent with file I/O.
 ## Step 1: Gather failure context
 
 ```bash
-python3 scripts/reflect-on-failures.py
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/reflect-on-failures.py"
 ```
 
 The script writes one compact JSON file per failing skill to `.ai/reflections/.staged/`.

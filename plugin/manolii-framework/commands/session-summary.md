@@ -35,7 +35,7 @@ Capture a summary of the current session for persistent memory. Run `/extract-in
 
 5. **Regenerate knowledge index** — update the human-browsable index with this session's data:
    ```bash
-   bash scripts/generate-knowledge-index.sh
+   bash "${CLAUDE_PLUGIN_ROOT}/scripts/generate-knowledge-index.sh"
    ```
 
 ## Auto-trigger guidance

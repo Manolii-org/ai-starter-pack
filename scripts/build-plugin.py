@@ -95,7 +95,24 @@ def assemble_plugin(rendered: Path, out: Path) -> dict:
             continue
         shutil.copytree(s, out / comp)
         if comp == "skills":
-            counts[comp] = sum(1 for p in (out / comp).iterdir() if p.is_dir())
+            # Plugin skill discovery requires skills/<name>/SKILL.md; some canonical
+            # skill dirs ship CLAUDE.md — promote those so the skill loads on install.
+            for d in (out / comp).iterdir():
+                if d.is_dir() and not (d / "SKILL.md").exists() and (d / "CLAUDE.md").exists():
+                    shutil.move(str(d / "CLAUDE.md"), str(d / "SKILL.md"))
+            counts[comp] = sum(1 for p in (out / comp).iterdir()
+                               if p.is_dir() and (p / "SKILL.md").exists())
+        elif comp == "commands":
+            # Plugin commands run from the consumer cwd; rewrite bundled-script
+            # invocations to the plugin root so /commands work in a pure plugin
+            # install. Source keeps bare scripts/ for in-tree template use.
+            for md in (out / comp).rglob("*.md"):
+                t = md.read_text(encoding="utf-8")
+                nt = re.sub(r'\b(python3|bash) (scripts/[^\s`"]+)',
+                            r'\1 "${CLAUDE_PLUGIN_ROOT}/\2"', t)
+                if nt != t:
+                    md.write_text(nt, encoding="utf-8")
+            counts[comp] = sum(1 for p in (out / comp).rglob("*.md"))
         else:
             counts[comp] = sum(1 for p in (out / comp).rglob("*.md"))
 

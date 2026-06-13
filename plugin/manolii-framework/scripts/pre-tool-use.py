@@ -227,6 +227,8 @@ def _normalise_sensitivity(value: str) -> str:
 def _load_agent_sensitivity(agent_name: str) -> str:
     if not agent_name:
         return "internal"
+    # Plugin agents arrive namespaced as "<plugin>:<agent>"; agent files are not.
+    agent_name = agent_name.split(":")[-1]
     try:
         # Resolve the agent definition across layouts: consumer-local override
         # (.claude/agents/) wins, then the bundled plugin copy (agents/ at the
@@ -278,8 +280,10 @@ routing_config = _load_routing_config()
 routing_config_loaded = routing_config is not None
 routing_config = routing_config or {}
 agent_routing = routing_config.get("agent_routing", {})
-recommended = agent_routing.get(subagent_type, agent_routing.get("default", "tier-1-fast"))
-agent_sensitivity = _load_agent_sensitivity(subagent_type)
+# Plugin agents are namespaced "<plugin>:<agent>"; routing + sensitivity keys are bare.
+_agent_key = subagent_type.split(":")[-1] if subagent_type else subagent_type
+recommended = agent_routing.get(_agent_key, agent_routing.get("default", "tier-1-fast"))
+agent_sensitivity = _load_agent_sensitivity(_agent_key)
 agent_sensitivity_rank = SENSITIVITY_ORDER.get(agent_sensitivity, SENSITIVITY_ORDER["internal"])
 model_omitted = model is None or model == "" or model == "default"
 
