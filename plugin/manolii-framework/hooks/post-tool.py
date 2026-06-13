@@ -224,8 +224,14 @@ if _proj:
 if _plug:
     _shapes_candidates.append(Path(_plug) / "data" / "token-shapes.json")
 _shapes_candidates.append(Path(__file__).parent.parent.parent / ".ai" / "security" / "token-shapes.json")
+# plugin-layout fallback if CLAUDE_PLUGIN_ROOT is unset (data/ beside hooks/)
+_shapes_candidates.append(Path(__file__).parent.parent / "data" / "token-shapes.json")
 SHAPES_FILE = next((c for c in _shapes_candidates if c.exists()), _shapes_candidates[-1])
-SCRIPTS_DIR = (Path(_plug) / "scripts") if _plug else (Path(__file__).parent.parent.parent / "scripts")
+if _plug:
+    SCRIPTS_DIR = Path(_plug) / "scripts"
+else:
+    _intree_scripts = Path(__file__).parent.parent.parent / "scripts"
+    SCRIPTS_DIR = _intree_scripts if _intree_scripts.exists() else (Path(__file__).parent.parent / "scripts")
 _EXTERNAL_CONTENT_TOOLS = {"WebFetch", "WebSearch"}
 _MAX_SCAN_CHARS = 200_000
 

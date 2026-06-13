@@ -6,8 +6,8 @@ Called by pr-assessment.yml (classify job). Reads diff from /tmp/pr.diff,
 invokes the pr-classifier agent, writes manifest to .ai/candidates/manifest.json.
 
 Exit codes:
-  0 = success (manifest written, even if partial fallback)
-  1 = fatal error (API key missing, agent file missing)
+  0 = success, or graceful skip (manifest written: empty diff or no API key)
+  1 = fatal error (agent file missing)
 """
 import argparse
 import json
@@ -121,17 +121,27 @@ def main() -> None:
         print(f"[classifier] Agent not found: {CLASSIFIER_AGENT}", file=sys.stderr)
         sys.exit(1)
 
+    diff_file = pathlib.Path(args.diff)
+    diff = diff_file.read_text(encoding="utf-8", errors="replace") if diff_file.exists() else ""
+    print(f"[classifier] diff lines={diff.count(chr(10))}")
+
+    out = pathlib.Path(args.output)
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    # Empty diff (metadata-only change / empty commit): nothing to classify —
+    # emit the fallback manifest and skip the API call rather than waste tokens.
+    if not diff.strip():
+        print("[classifier] empty diff — fallback manifest, skipping API call")
+        out.write_text(json.dumps(_FALLBACK_MANIFEST, indent=2) + "\n", encoding="utf-8")
+        return
+
+    # No API key (fork PR, or a consumer who hasn't configured the secret):
+    # skip gracefully with the fallback manifest instead of failing CI.
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        print("[classifier] ANTHROPIC_API_KEY not set", file=sys.stderr)
-        sys.exit(1)
-
-    diff_file = pathlib.Path(args.diff)
-    if diff_file.exists():
-        diff = diff_file.read_text(encoding="utf-8", errors="replace")
-    else:
-        diff = ""
-    print(f"[classifier] diff lines={diff.count(chr(10))}")
+        print("[classifier] ANTHROPIC_API_KEY not set — fallback manifest, skipping classification", file=sys.stderr)
+        out.write_text(json.dumps(_FALLBACK_MANIFEST, indent=2) + "\n", encoding="utf-8")
+        return
 
     try:
         frontmatter, system_prompt = _load_agent(CLASSIFIER_AGENT)

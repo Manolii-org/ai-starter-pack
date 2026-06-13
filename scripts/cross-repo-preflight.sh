@@ -34,6 +34,10 @@ fi
 # --- Write ~/.netrc ---
 STATUS="BLOCKED"
 if [[ -n "$GH_TOKEN_VALUE" ]]; then
+  if [[ -f ~/.netrc ]]; then
+    cp -p ~/.netrc "$HOME/.netrc.preflight-bak" 2>/dev/null || true
+    log "backed up existing netrc to \$HOME/.netrc.preflight-bak"
+  fi
   (umask 077 && cat > ~/.netrc <<EOF
 machine github.com
   login x-access-token
@@ -43,7 +47,7 @@ machine api.github.com
   password ${GH_TOKEN_VALUE}
 EOF
 )
-  log "~/.netrc written with GitHub token"
+  log "netrc written with GitHub token (\$HOME/.netrc)"
   STATUS="READY"
 else
   log "WARNING: Could not obtain GH_TOKEN — cross-repo git operations will fail"

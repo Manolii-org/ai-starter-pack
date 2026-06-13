@@ -26,7 +26,7 @@ OUTPUT_FILE = Path(os.environ.get("AI_SKILL_GRAPH", str(REPO_ROOT / ".ai" / "ski
 RE_MCP_TOOL    = re.compile(r'\b(mcp__[\w]+__[\w]+)\b')
 RE_NATIVE_TOOL = re.compile(r'\b(Bash|Edit|Write|Read|Glob|Grep|Agent|WebFetch|WebSearch|TodoWrite|ToolSearch)\b')
 RE_SCRIPT      = re.compile(r'scripts/[\w\-\.]+\.(?:py|sh)')  # non-capturing group → returns full path
-RE_SKILL_REF   = re.compile(r'/([a-z][a-z0-9\-]+)')  # /skill-name style references
+RE_SKILL_REF   = re.compile(r'(?<![\w:/])/([a-z][a-z0-9\-]+)')  # /skill-name refs (skip URL/path segments)
 
 
 def parse_skill(path: Path) -> dict:

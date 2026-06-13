@@ -41,7 +41,16 @@ jobs:
           # cache: 'pnpm'
 
       - name: Install dependencies
-        run: npm ci   # Replace with: pnpm install --frozen-lockfile
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          elif [ -f pnpm-lock.yaml ]; then
+            corepack enable && pnpm install --frozen-lockfile
+          elif [ -f yarn.lock ]; then
+            corepack enable && yarn install --frozen-lockfile
+          else
+            echo "No JS lockfile found — skipping dependency install (configure your mutation tool)."
+          fi
 
       - name: Get changed source files
         id: changed

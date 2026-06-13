@@ -1,0 +1,19 @@
+# Semgrep ignore patterns — AI Starter Pack
+#
+# plugin/ is a GENERATED build artifact: scripts/build-plugin.py assembles it
+# verbatim from source (.claude/ + scripts/ + data files) and the
+# plugin-eval-gate workflow verifies it byte-for-byte against a fresh build.
+# SAST runs on the source surface; scanning the generated duplicate only yields
+# redundant findings (e.g. dynamic-urllib-use on hardcoded-endpoint API calls
+# that already carry `# nosec B310` in source).
+plugin/
+
+# Standard dependency / build / vendor paths
+node_modules/
+vendor/
+dist/
+build/
+.venv/
+venv/
+__pycache__/
+*.min.js

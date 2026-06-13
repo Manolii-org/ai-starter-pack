@@ -45,7 +45,7 @@ BROAD_AGENTS = [
     "security-deep-dive",
 ]
 
-MAX_DIFF_CHARS = 8000
+MAX_DIFF_CHARS = int(os.environ.get("MAX_DIFF_CHARS", "65000"))
 TIMEOUT_SECS = 120
 
 

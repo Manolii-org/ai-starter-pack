@@ -62,6 +62,8 @@ def _load_routing_keywords():
         if _plug:
             _candidates.append(Path(_plug) / "data" / "model-routing.json")
         _candidates.append(Path(__file__).parent.parent / "model-routing.json")
+        # plugin-layout fallback if CLAUDE_PLUGIN_ROOT is unset (data/ beside hooks/)
+        _candidates.append(Path(__file__).parent.parent / "data" / "model-routing.json")
         config_path = next((c for c in _candidates if c.exists()), _candidates[-1])
         with open(config_path) as f:
             cfg = json.load(f)

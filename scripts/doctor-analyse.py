@@ -53,6 +53,22 @@ def _jaccard(a: str, b: str) -> float:
     return len(wa & wb) / len(wa | wb)
 
 
+def _content_text(content) -> str:
+    """Normalize a transcript message 'content' to plain text.
+
+    Claude Code stores content as either a string or a list of content blocks
+    (e.g. [{"type": "text", "text": "..."}]); extract text from both forms.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(
+            b.get("text", "") for b in content
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
+    return ""
+
+
 def _analyse(events: list[dict]) -> list[dict]:
     signals: list[dict] = []
 
@@ -90,7 +106,12 @@ def _analyse(events: list[dict]) -> list[dict]:
         })
 
     # --- C/D/E: User message analysis ---
-    user_messages = [ev.get("content", "") for ev in events if ev.get("role") == "user" and isinstance(ev.get("content"), str)]
+    user_messages = [
+        _content_text(ev.get("content"))
+        for ev in events
+        if ev.get("role") == "user"
+    ]
+    user_messages = [m for m in user_messages if m]
 
     correction_keywords = re.compile(
         r"\b(no[,.]?|wrong|incorrect|that'?s not|don'?t|stop|wait|actually|re-?do|undo|revert|you missed|not what)\b",
