@@ -1,0 +1,87 @@
+---
+name: nav-replay
+version: 1.0.0
+description: Execute a saved navigation script with automatic self-healing on failure
+type: command
+requires_mcp: [browserbase, playwright]
+required_entities: ["*"]
+safety_tier: green
+tags: [workflow, browser, automation]
+eval_cases: null
+supersedes: []
+deprecation: null
+---
+
+# /nav-replay — Replay a Recorded Navigation Script
+
+Based on proven patterns from the Manolii ecosystem.
+
+Execute a saved navigation script, routing to the correct execution tier and invoking self-healing on failure.
+
+## Usage
+
+```
+/nav-replay <name>          — Execute a script by name
+/nav-replay list            — List all available scripts
+```
+
+## Process
+
+### Step 1 — Load Script
+
+Read `.ai/navigation/scripts/<name>.json`.
+
+### Step 2 — Guard Checks (fail fast)
+
+**Sanitization:** Script must have `_sanitized: true`. Abort otherwise.
+
+**Approval:** Script must have `status: "approved"`. Abort if `proposed` or `deprecated`.
+
+**Environment:** `desktop-only` scripts cannot run in Claude Code Web. Abort on mismatch.
+
+**Dependencies:** Build the full dependency graph. Detect cycles. Topologically sort. Execute each dependency first.
+
+**Variables:** Scan for `${ENV:VAR_NAME}` patterns. Verify all env vars are set. Abort if any missing.
+
+### Step 3 — Route to Execution Tier
+
+- `mode: "deterministic"` → Playwright MCP with cached selectors
+- `mode: "smart"` → Stagehand v3 via Browserbase/relay
+- `mode: "vision"` → Stagehand v3 with vision enabled
+
+### Step 4 — Execute Steps
+
+For each step, log progress and execute via selected tier.
+
+**Token budget:** Abort if cumulative tokens exceed `maxTokenBudget`.
+
+### Step 5 — Healer (on step failure)
+
+If a step fails:
+1. Increment retry counter
+2. Invoke Healer: analyze page, re-execute with new element identification
+3. Update `_selector` cache if successful
+4. Continue or abort based on retry limit
+
+### Step 6 — Report
+
+```
+Navigation Complete: <name>
+─────────────────────────────────
+Status:     SUCCESS | PARTIAL | FAILED
+Steps:      8/8 completed
+Tokens:     12,450 / 30,000 budget
+Duration:   ~45s
+```
+
+## Failure Modes
+
+| Failure | Message |
+|---------|---------|
+| Not sanitized | Script has not been sanitized. Re-record. |
+| Not approved | Script is proposed. Run /nav-record to approve. |
+| Wrong env | Script requires desktop. Run from Desktop/CLI. |
+| Missing var | Missing env var: VAR_NAME — set and retry. |
+| Circular dep | Circular dependency detected: <chain> |
+
+ARGUMENTS: $ARGUMENTS
