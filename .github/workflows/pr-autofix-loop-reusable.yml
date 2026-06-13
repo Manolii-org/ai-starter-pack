@@ -67,10 +67,11 @@ jobs:
         id: ref
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
           set -euo pipefail
           PR_NUM="${{ github.event.pull_request.number || github.event.issue.number }}"
-          HEAD_REF="${{ github.event.pull_request.head.ref || '' }}"
+          HEAD_REF="${PR_HEAD_REF:-}"
           if [[ -z "$HEAD_REF" ]] && [[ -n "$PR_NUM" ]]; then
             HEAD_REF=$(gh pr view "$PR_NUM" --json headRefName --jq '.headRefName' 2>/dev/null || echo '')
           fi

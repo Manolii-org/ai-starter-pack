@@ -118,17 +118,24 @@ jobs:
     name: ESLint (JS/TS)
     runs-on: ${{ inputs.runs_on }}
     needs: changed-files
-    if: needs.changed-files.outputs.has_ts == 'true' && hashFiles('package.json') != ''
+    if: needs.changed-files.outputs.has_ts == 'true'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
+      - name: Detect package.json
+        id: detect
+        run: |
+          if [ -f package.json ]; then echo "found=true" >> "$GITHUB_OUTPUT"; else echo "found=false" >> "$GITHUB_OUTPUT"; fi
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        if: steps.detect.outputs.found == 'true'
         with:
           node-version: ${{ inputs.node_version }}
       - name: Install dependencies
+        if: steps.detect.outputs.found == 'true'
         run: npm ci
       - name: Run ESLint on changed files
+        if: steps.detect.outputs.found == 'true'
         run: |
           CHANGED_TS=$(git diff --name-only origin/${{ github.base_ref }}...HEAD \
             | grep -E '\.(ts|tsx|js|jsx)$' | head -50)
@@ -139,11 +146,21 @@ jobs:
   agent-routing-lint:
     name: Agent Routing Lint
     runs-on: ${{ inputs.runs_on }}
-    if: hashFiles('.claude/agents/*.md', '.claude/skills/**/*.md') != ''
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Detect agent/skill docs
+        id: detect
+        run: |
+          if find .claude/agents -maxdepth 1 -name '*.md' 2>/dev/null | grep -q . \
+             || find .claude/skills -name '*.md' 2>/dev/null | grep -q .; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        if: steps.detect.outputs.found == 'true'
         with:
           python-version: ${{ inputs.python_version }}
       - name: Lint agent routing config
+        if: steps.detect.outputs.found == 'true'
         run: python3 scripts/lint-agent-routing.py
