@@ -1,0 +1,95 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"${CLAUDE_PROJECT_DIR}\" && python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/pre-tool-use.py\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"${CLAUDE_PROJECT_DIR}\" && bash \"${CLAUDE_PLUGIN_ROOT}/hooks/session-start.sh\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"${CLAUDE_PROJECT_DIR}\" && python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/classify-message.py\"",
+            "timeout": 15
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"${CLAUDE_PROJECT_DIR}\" && python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/user-prompt.py\"",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"${CLAUDE_PROJECT_DIR}\" && python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/post-tool.py\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"${CLAUDE_PROJECT_DIR}\" && bash \"${CLAUDE_PLUGIN_ROOT}/hooks/pre-compact.sh\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"${CLAUDE_PROJECT_DIR}\" && bash \"${CLAUDE_PLUGIN_ROOT}/hooks/post-compact.sh\"",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"${CLAUDE_PROJECT_DIR}\" && bash \"${CLAUDE_PLUGIN_ROOT}/scripts/session-stop-checklist.sh\"",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "cd \"${CLAUDE_PROJECT_DIR}\" && python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/system-self-check.py\" > /dev/null 2>&1 && python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/build-skill-graph.py\" > /dev/null 2>&1; _rc=$?; mkdir -p .ai/memory; echo \"{\\\"timestamp\\\":\\\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\\\",\\\"exit_code\\\":$_rc,\\\"event\\\":\\\"stop-hook-self-check\\\"}\" >> .ai/memory/eval-failures.jsonl",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
