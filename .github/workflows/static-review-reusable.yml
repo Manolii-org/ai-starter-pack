@@ -1,26 +1,34 @@
-name: Static Review
-
+name: Static Review (Reusable)
+# Reusable workflow_call form. Caller owns on: + paths-ignore via top-level.
+# Cite: .github/REUSABLE-WORKFLOWS.md
+#
 # SAST on changed files only — Semgrep (all languages), Bandit (Python),
 # Shellcheck (shell scripts), ESLint (JS/TS).
-# Faster than full-repo scan; covers the blast radius of each PR.
 
 on:
-  pull_request:
-    branches: [main, master, develop]
-
-concurrency:
-  group: static-review-${{ github.ref }}
-  cancel-in-progress: true
+  workflow_call:
+    inputs:
+      runs_on:
+        type: string
+        default: ubuntu-latest
+        description: Runner label for all jobs.
+      node_version:
+        type: string
+        default: '24'
+        description: Node.js version.
+      python_version:
+        type: string
+        default: '3.14'
+        description: Python version.
 
 permissions:
   contents: read
-  pull-requests: write
-  security-events: write
+
 
 jobs:
   changed-files:
     name: Detect Changed Files
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs_on }}
     outputs:
       has_py: ${{ steps.detect.outputs.has_py }}
       has_sh: ${{ steps.detect.outputs.has_sh }}
@@ -29,10 +37,13 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
+          persist-credentials: false
           fetch-depth: 0
       - id: detect
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+          CHANGED=$(git diff --name-only "origin/${BASE_REF}...HEAD")
           echo "has_py=$(echo "$CHANGED" | grep -q '\.py$' && echo true || echo false)" >> $GITHUB_OUTPUT
           echo "has_sh=$(echo "$CHANGED" | grep -q '\.sh$' && echo true || echo false)" >> $GITHUB_OUTPUT
           echo "has_ts=$(echo "$CHANGED" | grep -qE '\.(ts|tsx|js|jsx)$' && echo true || echo false)" >> $GITHUB_OUTPUT
@@ -40,11 +51,12 @@ jobs:
 
   semgrep:
     name: Semgrep
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs_on }}
     needs: changed-files
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
+          persist-credentials: false
           fetch-depth: 0
       - name: Run Semgrep on changed files
         uses: returntocorp/semgrep-action@713efdd345f3035192eaa63f56867b88e63e4e5d # v1
@@ -57,49 +69,56 @@ jobs:
 
   bandit:
     name: Bandit (Python)
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs_on }}
     needs: changed-files
     if: needs.changed-files.outputs.has_py == 'true'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
+          persist-credentials: false
           fetch-depth: 0
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
         with:
-          python-version: '3.14'
+          python-version: ${{ inputs.python_version }}
       - name: Install bandit
         run: pip install bandit[toml] -q
       - name: Run Bandit on changed Python files
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          CHANGED_PY=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep '\.py$' | head -50)
+          CHANGED_PY=$(git diff --name-only "origin/${BASE_REF}...HEAD" | grep '\.py$' | head -50)
           if [ -n "$CHANGED_PY" ]; then
             bandit $CHANGED_PY -ll -ii || echo "::warning::Bandit found issues — review above"
           fi
 
   shellcheck:
     name: Shellcheck
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs_on }}
     needs: changed-files
     if: needs.changed-files.outputs.has_sh == 'true'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
+          persist-credentials: false
           fetch-depth: 0
       - name: Run Shellcheck on changed shell files
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          CHANGED_SH=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep '\.sh$')
+          CHANGED_SH=$(git diff --name-only "origin/${BASE_REF}...HEAD" | grep '\.sh$')
           if [ -n "$CHANGED_SH" ]; then
             shellcheck --severity=warning $CHANGED_SH
           fi
 
   eslint:
     name: ESLint (JS/TS)
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs_on }}
     needs: changed-files
     if: needs.changed-files.outputs.has_ts == 'true'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
+          persist-credentials: false
           fetch-depth: 0
       - name: Detect package.json
         id: detect
@@ -108,14 +127,16 @@ jobs:
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         if: steps.detect.outputs.found == 'true'
         with:
-          node-version: '24'
+          node-version: ${{ inputs.node_version }}
       - name: Install dependencies
         if: steps.detect.outputs.found == 'true'
         run: npm ci
       - name: Run ESLint on changed files
         if: steps.detect.outputs.found == 'true'
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          CHANGED_TS=$(git diff --name-only origin/${{ github.base_ref }}...HEAD \
+          CHANGED_TS=$(git diff --name-only "origin/${BASE_REF}...HEAD" \
             | grep -E '\.(ts|tsx|js|jsx)$' | head -50)
           if [ -n "$CHANGED_TS" ]; then
             npx eslint $CHANGED_TS --max-warnings 0 || echo "::warning::ESLint found issues"
@@ -123,9 +144,11 @@ jobs:
 
   agent-routing-lint:
     name: Agent Routing Lint
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs_on }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
       - name: Detect agent/skill docs
         id: detect
         run: |
@@ -138,9 +161,7 @@ jobs:
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
         if: steps.detect.outputs.found == 'true'
         with:
-          python-version: '3.14'
+          python-version: ${{ inputs.python_version }}
       - name: Lint agent routing config
         if: steps.detect.outputs.found == 'true'
         run: python3 scripts/lint-agent-routing.py
-        # Validates: data_sensitivity, model assignments, frontmatter completeness
-        # Fails if any restricted agent routes through OSS providers
