@@ -1,0 +1,15 @@
+{
+  "name": "manolii",
+  "description": "The Manolii AI framework for Claude Code — specialist sub-agents, slash-commands, skills, and lifecycle hooks for engineering workflows (PR review, persistent memory, planning, model-routing governance).",
+  "owner": {
+    "name": "Manolii",
+    "url": "https://github.com/manolii-org"
+  },
+  "plugins": [
+    {
+      "name": "manolii-framework",
+      "source": "./plugin/manolii-framework",
+      "description": "Manolii AI framework for Claude Code — specialist sub-agents, slash-commands, skills, and lifecycle hooks for PR review, persistent memory, planning, and model-routing governance."
+    }
+  ]
+}

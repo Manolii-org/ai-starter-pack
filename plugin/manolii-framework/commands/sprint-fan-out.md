@@ -1,0 +1,105 @@
+---
+name: sprint-fan-out
+version: 1.0.0
+description: Decompose a goal into a DAG of parallel tasks; dispatch worktree-isolated orchestrator sub-agents
+type: command
+requires_mcp: []
+required_entities: []
+safety_tier: amber
+tags: ['orchestration', 'parallel', 'worktree']
+blast_radius: high
+---
+
+# /sprint-fan-out — parallel sprint orchestration
+
+Based on proven patterns from the Manolii ecosystem.
+
+Decomposes a goal into a DAG of tasks, validates dependencies, and dispatches worktree-isolated orchestrator sub-agents. Hard cap of 6 concurrent tasks. Per-task checkpoints. DAG-aware queuing.
+
+## Usage
+
+```
+/sprint-fan-out "<goal>"                 # auto-decompose via haiku
+/sprint-fan-out --manifest <path>        # use a pre-written manifest
+/sprint-fan-out --kill <sprint-id>       # cancel an active sprint
+/sprint-fan-out --status [<sprint-id>]   # show status
+/sprint-fan-out --resume <sprint-id>     # resume a halted sprint
+```
+
+## Steps (auto-decompose mode)
+
+1. Mint a sprint id: `sprint-<utc-yyyymmdd-hhmm>-<8hex>`.
+2. Dispatch generate(haiku) (~3k tokens) to decompose the goal into 3–6 tasks. Each task declares: `id, description, repo, depends_on[], tier_hint (impl|review|search), agent (orchestrator|judge|generate)`.
+3. Validate the DAG (topological sort). Reject cycles with a clear message.
+4. Write `.ai/sprint-state/<sprint-id>/manifest.json`.
+5. Allocate per-task branches: `sprint/<sprint-id>/<task-id>` from current HEAD.
+6. Map tier_hint to model: `impl → haiku`, `review → sonnet`, `search → haiku`. For each independent task, dispatch via `Agent(subagent_type=<task.agent>, isolation="worktree", run_in_background=true, model=<mapped_model>)`.
+7. As tasks complete, `scripts/sprint_status.py` regenerates `status.md`.
+8. Operator polls `cat .ai/sprint-state/<sprint-id>/status.md` for live status.
+
+## Hard caps
+
+- **Concurrent tasks: 6** — beyond this, review queue saturates and merge conflicts cascade
+- **Concurrent sprints: 2**
+- **No supervisor agent** — status is a file; operator reads when wanted
+
+## Manifest schema
+
+```json
+{
+  "version": 1,
+  "sprint_id": "sprint-...",
+  "goal": "...",
+  "started_at": "<utc-iso>",
+  "on_failure": "halt | continue_independent | continue_all",
+  "tasks": [
+    {
+      "id": "task-1",
+      "description": "...",
+      "repo": "your-org/your-repo",
+      "depends_on": [],
+      "tier_hint": "impl",
+      "agent": "orchestrator",
+      "branch": "sprint/<sprint-id>/task-1",
+      "status": "pending"
+    }
+  ]
+}
+```
+
+## State directory
+
+```
+.ai/sprint-state/<sprint-id>/
+├── manifest.json
+├── tasks/<task-id>.json
+├── status.md                # regenerated on every task state change
+├── events.jsonl             # append-only timeline (consumed by /retro)
+└── worktrees/               # task worktrees (gitignored)
+```
+
+## Multi-repo
+
+Tasks declare `repo: <slug>`. The fan-out clones on demand into `.ai/sprint-state/<sprint-id>/repos/<slug>/`.
+
+## Cancellation
+
+`/sprint-fan-out --kill <sprint-id>` writes `cancelled: true` to manifest. Sub-agents check this flag on each step and exit gracefully.
+
+## On-failure policies
+
+- **halt:** stop dispatching new tasks; wait for in-flight to complete
+- **continue_independent (default):** failed task's dependents blocked; other independents continue
+- **continue_all:** dispatch dependents anyway with failure context (explicit operator choice)
+
+## Token efficiency
+
+- Decomposition is one haiku call (~3k tokens)
+- Status rollup is deterministic Python (no LLM)
+- Per-task worktrees bound each sub-agent's context
+
+## See also
+
+- `/retro` — consumes events.jsonl at sprint end
+- `/investigate` — read-only fan-out (safest)
+- `scripts/sprint_status.py` — status rollup logic

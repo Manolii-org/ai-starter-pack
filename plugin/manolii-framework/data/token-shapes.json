@@ -1,0 +1,350 @@
+{
+  "version": "1.0",
+  "updated": "2026-05-24",
+  "comment": "Canonical token-shape regex set. Provider API-key patterns are universal and client-deployable; internal/organization-specific entries have been removed.",
+  "patterns": [
+    {
+      "name": "github_classic",
+      "regex": "ghp_[A-Za-z0-9]{36,251}",
+      "class": "GITHUB_PAT_CLASSIC",
+      "min_length": 40,
+      "notes": "GitHub classic PAT."
+    },
+    {
+      "name": "github_finegrained",
+      "regex": "github_pat_[A-Za-z0-9_]{82,}",
+      "class": "GITHUB_PAT_FINEGRAINED",
+      "min_length": 93,
+      "notes": "GitHub fine-grained PAT."
+    },
+    {
+      "name": "github_server",
+      "regex": "ghs_[A-Za-z0-9]{36,251}",
+      "class": "GITHUB_SERVER_TOKEN",
+      "min_length": 40,
+      "notes": "GitHub App server token."
+    },
+    {
+      "name": "github_oauth",
+      "regex": "gho_[A-Za-z0-9]{36,251}",
+      "class": "GITHUB_OAUTH_TOKEN",
+      "min_length": 40,
+      "notes": "GitHub OAuth user token."
+    },
+    {
+      "name": "github_refresh",
+      "regex": "ghr_[A-Za-z0-9]{36,251}",
+      "class": "GITHUB_REFRESH_TOKEN",
+      "min_length": 40,
+      "notes": "GitHub App refresh token."
+    },
+    {
+      "name": "anthropic",
+      "regex": "sk-ant-(?:api|admin)\\d{2}-[A-Za-z0-9_-]{80,}",
+      "class": "ANTHROPIC_API_KEY",
+      "min_length": 95,
+      "notes": "Anthropic API key (sk-ant-api03-... or sk-ant-admin01-...)."
+    },
+    {
+      "name": "openai_proj",
+      "regex": "sk-proj-[A-Za-z0-9_-]{40,}",
+      "class": "OPENAI_API_KEY",
+      "min_length": 48,
+      "notes": "OpenAI project-scoped key."
+    },
+    {
+      "name": "openai_legacy",
+      "regex": "sk-[A-Za-z0-9]{48,}",
+      "class": "OPENAI_API_KEY",
+      "min_length": 51,
+      "notes": "OpenAI legacy key sk-<48+ alphanumeric>. Does NOT match sk-ant-* (has hyphen)."
+    },
+    {
+      "name": "openrouter",
+      "regex": "sk-or-(?:v1-)?[A-Za-z0-9]{40,}",
+      "class": "OPENROUTER_API_KEY",
+      "min_length": 46,
+      "notes": "OpenRouter API key."
+    },
+    {
+      "name": "openai_admin",
+      "regex": "sk-admin-[A-Za-z0-9_-]{40,}",
+      "class": "OPENAI_ADMIN_KEY",
+      "min_length": 49,
+      "notes": "OpenAI admin/org key."
+    },
+    {
+      "name": "fly_v1",
+      "regex": "FlyV1\\s+[A-Za-z0-9_=-]{40,}",
+      "class": "FLY_API_TOKEN",
+      "min_length": 46,
+      "notes": "Fly.io v1 macaroon — note literal 'FlyV1 ' prefix WITH space."
+    },
+    {
+      "name": "fly_fm2",
+      "regex": "fm2_[A-Za-z0-9_=-]{40,}",
+      "class": "FLY_API_TOKEN",
+      "min_length": 44,
+      "notes": "Fly.io fm2_ prefix."
+    },
+    {
+      "name": "groq",
+      "regex": "gsk_[A-Za-z0-9]{40,}",
+      "class": "GROQ_API_KEY",
+      "min_length": 44,
+      "notes": "Groq API key."
+    },
+    {
+      "name": "fireworks",
+      "regex": "fw_[A-Za-z0-9]{20,}",
+      "class": "FIREWORKS_API_KEY",
+      "min_length": 23,
+      "notes": "Fireworks AI key."
+    },
+    {
+      "name": "cerebras",
+      "regex": "csk-[A-Za-z0-9]{40,}",
+      "class": "CEREBRAS_API_KEY",
+      "min_length": 44,
+      "notes": "Cerebras Cloud key."
+    },
+    {
+      "name": "perplexity",
+      "regex": "pplx-[A-Za-z0-9]{40,}",
+      "class": "PERPLEXITY_API_KEY",
+      "min_length": 45,
+      "notes": "Perplexity API key."
+    },
+    {
+      "name": "together",
+      "regex": "tgp_v1_[A-Za-z0-9_-]{30,}",
+      "class": "TOGETHER_API_KEY",
+      "min_length": 37,
+      "notes": "Together AI key."
+    },
+    {
+      "name": "neon",
+      "regex": "napi_[A-Za-z0-9]{40,}",
+      "class": "NEON_API_KEY",
+      "min_length": 45,
+      "notes": "Neon API key."
+    },
+    {
+      "name": "supabase_pat",
+      "regex": "sbp_[A-Za-z0-9]{40,}",
+      "class": "SUPABASE_ACCESS_TOKEN",
+      "min_length": 44,
+      "notes": "Supabase personal access token."
+    },
+    {
+      "name": "jwt_token",
+      "regex": "eyJ[A-Za-z0-9_-]{20,}\\.eyJ[A-Za-z0-9_-]{40,}\\.[A-Za-z0-9_=/+-]{20,}",
+      "class": "JWT_TOKEN",
+      "min_length": 100,
+      "notes": "JWT shape (header.payload.signature) — matches service-role keys, OAuth ID tokens."
+    },
+    {
+      "name": "vercel",
+      "regex": "vcl_[A-Za-z0-9]{24,}",
+      "class": "VERCEL_TOKEN",
+      "min_length": 28,
+      "notes": "Vercel token vcl_ prefix."
+    },
+    {
+      "name": "stripe_secret",
+      "regex": "sk_(?:live|test)_[A-Za-z0-9]{24,}",
+      "class": "STRIPE_SECRET_KEY",
+      "min_length": 32,
+      "notes": "Stripe secret key."
+    },
+    {
+      "name": "stripe_restricted",
+      "regex": "rk_(?:live|test)_[A-Za-z0-9]{24,}",
+      "class": "STRIPE_RESTRICTED_KEY",
+      "min_length": 32,
+      "notes": "Stripe restricted key."
+    },
+    {
+      "name": "slack_bot",
+      "regex": "xoxb-[0-9]+-[0-9]+-[A-Za-z0-9]+",
+      "class": "SLACK_BOT_TOKEN",
+      "min_length": 24,
+      "notes": "Slack bot OAuth token."
+    },
+    {
+      "name": "slack_user",
+      "regex": "xoxp-[0-9]+-[0-9]+-[0-9]+-[A-Za-z0-9]+",
+      "class": "SLACK_USER_TOKEN",
+      "min_length": 24,
+      "notes": "Slack user OAuth token."
+    },
+    {
+      "name": "slack_webhook",
+      "regex": "https://hooks\\.slack\\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]{20,}",
+      "class": "SLACK_WEBHOOK_URL",
+      "min_length": 60,
+      "notes": "Slack incoming webhook URL."
+    },
+    {
+      "name": "sentry_user",
+      "regex": "sntryu_[A-Za-z0-9]{20,}",
+      "class": "SENTRY_USER_TOKEN",
+      "min_length": 27,
+      "notes": "Sentry user token."
+    },
+    {
+      "name": "sentry_secret",
+      "regex": "sntrys_[A-Za-z0-9_=]{40,}",
+      "class": "SENTRY_INTERNAL_TOKEN",
+      "min_length": 47,
+      "notes": "Sentry internal-integration secret."
+    },
+    {
+      "name": "langfuse_public",
+      "regex": "pk-lf-[A-Za-z0-9-]{20,}",
+      "class": "LANGFUSE_PUBLIC_KEY",
+      "min_length": 26,
+      "notes": "Langfuse publishable key."
+    },
+    {
+      "name": "langfuse_secret",
+      "regex": "sk-lf-[A-Za-z0-9-]{20,}",
+      "class": "LANGFUSE_SECRET_KEY",
+      "min_length": 26,
+      "notes": "Langfuse secret key."
+    },
+    {
+      "name": "aws_access",
+      "regex": "AKIA[A-Z0-9]{16}",
+      "class": "AWS_ACCESS_KEY_ID",
+      "min_length": 20,
+      "notes": "AWS access key ID."
+    },
+    {
+      "name": "aws_temporary",
+      "regex": "ASIA[A-Z0-9]{16}",
+      "class": "AWS_TEMPORARY_KEY_ID",
+      "min_length": 20,
+      "notes": "AWS STS temporary key."
+    },
+    {
+      "name": "google_api",
+      "regex": "AIza[A-Za-z0-9_-]{35}",
+      "class": "GOOGLE_API_KEY",
+      "min_length": 39,
+      "notes": "Google API key AIza prefix."
+    },
+    {
+      "name": "netrc_machine_entry",
+      "regex": "machine\\s+[a-zA-Z0-9._-]{4,}\\s+(?:login\\s+\\S+\\s+)?(?:account\\s+\\S+\\s+)?password\\s+\\S{8,}",
+      "class": "NETRC_CREDENTIAL_ENTRY",
+      "min_length": 35,
+      "notes": "Netrc machine/password line — indicates a direct ~/.netrc read leaked to stdout."
+    },
+    {
+      "name": "azure_managed_identity_secret",
+      "regex": "(?:client_secret|azure_secret|managed_identity)[=:\\s]+[A-Za-z0-9~._-]{34,40}",
+      "class": "AZURE_MANAGED_IDENTITY_SECRET",
+      "min_length": 48,
+      "notes": "Azure/managed-identity style secret assignment; includes context key in match."
+    },
+    {
+      "name": "private_key_pkcs8",
+      "regex": "-----BEGIN PRIVATE KEY-----[\\s\\S]*?-----END PRIVATE KEY-----",
+      "class": "PRIVATE_KEY_PKCS8",
+      "min_length": 200,
+      "notes": "PKCS#8 private key block; multiline non-greedy match across newlines."
+    },
+    {
+      "name": "private_key_typed",
+      "regex": "-----BEGIN (?:(?:RSA |EC |OPENSSH |PGP )PRIVATE KEY|PGP PRIVATE KEY BLOCK)-----[\\s\\S]*?-----END (?:(?:RSA |EC |OPENSSH |PGP )PRIVATE KEY|PGP PRIVATE KEY BLOCK)-----",
+      "class": "PRIVATE_KEY_BLOCK",
+      "min_length": 200,
+      "notes": "Typed private key block formats (RSA/EC/OPENSSH/PGP) including OpenPGP ASCII armor."
+    },
+    {
+      "name": "private_key_putty_ppk",
+      "regex": "---- BEGIN SSH2 ENCRYPTED PRIVATE KEY ----[\\s\\S]*?---- END SSH2 ENCRYPTED PRIVATE KEY ----",
+      "class": "PRIVATE_KEY_PPK",
+      "min_length": 200,
+      "notes": "PuTTY/SSH2 encrypted private-key block."
+    },
+    {
+      "name": "discord_bot_legacy",
+      "regex": "[MN][A-Za-z\\d_-]{23}\\.[\\w-]{6}\\.[\\w-]{27}",
+      "class": "DISCORD_BOT_TOKEN",
+      "min_length": 59,
+      "notes": "Discord legacy bot token format."
+    },
+    {
+      "name": "discord_bot_new",
+      "regex": "MTk[0-9A-Za-z]{67,}",
+      "class": "DISCORD_BOT_TOKEN_NEW",
+      "min_length": 70,
+      "notes": "Discord newer long base64-like token format starting with MTk."
+    },
+    {
+      "name": "huggingface_write",
+      "regex": "hf_[A-Za-z0-9]{36,}",
+      "class": "HUGGINGFACE_WRITE_TOKEN",
+      "min_length": 39,
+      "notes": "HuggingFace write-scoped user token."
+    },
+    {
+      "name": "huggingface_public",
+      "regex": "hf_[A-Za-z0-9]{20,35}",
+      "class": "HUGGINGFACE_PUBLIC_KEY",
+      "min_length": 23,
+      "notes": "HuggingFace shorter/read-only style token. Ordered after write token to avoid misclassification."
+    },
+    {
+      "name": "cloudflare_api_token",
+      "regex": "cf_[A-Za-z0-9_-]{30,}",
+      "class": "CLOUDFLARE_API_TOKEN",
+      "min_length": 33,
+      "notes": "Cloudflare API token with cf_ prefix."
+    },
+    {
+      "name": "twilio_account_sid",
+      "regex": "AC[a-f0-9]{32}",
+      "class": "TWILIO_ACCOUNT_SID",
+      "min_length": 34,
+      "notes": "Twilio Account SID."
+    },
+    {
+      "name": "twilio_auth_token",
+      "regex": "twilio_(?:token|auth)[=:\\s]+[a-f0-9]{32}",
+      "class": "TWILIO_AUTH_TOKEN",
+      "min_length": 44,
+      "notes": "Twilio auth token in assignment-style contexts."
+    },
+    {
+      "name": "npm_token",
+      "regex": "npm_[A-Za-z0-9]{36}",
+      "class": "NPM_TOKEN",
+      "min_length": 40,
+      "notes": "npm access token."
+    },
+    {
+      "name": "digitalocean_pat",
+      "regex": "dop_v1_[a-f0-9]{64}",
+      "class": "DIGITALOCEAN_PAT",
+      "min_length": 71,
+      "notes": "DigitalOcean personal access token v1."
+    },
+    {
+      "name": "pinecone_api_key",
+      "regex": "pcsk_[A-Za-z0-9]{10,}",
+      "class": "PINECONE_API_KEY",
+      "min_length": 15,
+      "notes": "Pinecone API key prefix pcsk_."
+    }
+  ],
+  "fingerprint_algorithm": "sha256_truncated_8",
+  "redaction_format": "[REDACTED:{class}:len={length}:fp={fingerprint}]",
+  "false_positive_allowlist": [
+    "^[a-f0-9]{40}$",
+    "^[a-f0-9]{64}$",
+    "^https?://(?!hooks\\.slack\\.com)"
+  ]
+}

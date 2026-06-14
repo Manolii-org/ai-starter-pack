@@ -1,0 +1,15 @@
+# Gitleaks config for the AI Starter Pack.
+# Extends the default ruleset and allowlists known false positives:
+#   - token-shapes.json: a catalogue of secret-DETECTION regex patterns
+#     (matched by the private-key rule) — these are patterns, not real secrets.
+#   - tests/test_safe_env.py: intentional fake secrets that exercise the
+#     redaction/safe-env helpers.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Detection-pattern catalogue + intentional test fixtures (not real secrets)"
+paths = [
+  '''token-shapes\.json''',
+  '''tests/test_safe_env\.py''',
+]

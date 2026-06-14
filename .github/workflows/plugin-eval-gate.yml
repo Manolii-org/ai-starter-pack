@@ -1,0 +1,58 @@
+name: Plugin Eval Gate
+
+# Gates the generated Claude Code plugin: it must build from the canonical
+# .claude/ source, pass structural verification, prove every hook FIRES, and the
+# committed plugin/ artifact must match a fresh build (no stale checked-in copy).
+# Pure Python + copier — no external CLI or secrets required.
+
+on:
+  push:
+    branches: [main, "claude/**"]
+    paths:
+      - ".claude/**"
+      - "scripts/**"
+      - "plugin/**"
+      - "copier.yml"
+      - "pack.manifest.yml"
+      - ".claude-plugin/**"
+      - ".github/workflows/plugin-eval-gate.yml"
+  pull_request:
+    paths:
+      - ".claude/**"
+      - "scripts/**"
+      - "plugin/**"
+      - "copier.yml"
+      - "pack.manifest.yml"
+      - ".claude-plugin/**"
+
+jobs:
+  eval-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build deps
+        run: pip install --quiet copier jinja2
+
+      - name: Build plugin — verify() + hook-firing smoke test
+        # build-plugin.py exits non-zero on: surviving Jinja, missing plugin.json,
+        # a hooks.json command referencing a missing bundled file, hook-event drift
+        # vs settings.json, an unbundled import-time dep, or any hook that fails to
+        # fire / writes into the (read-only) plugin tree.
+        run: python3 scripts/build-plugin.py --out /tmp/plugin-fresh
+
+      - name: Drift check — committed artifact matches a fresh build
+        run: |
+          if diff -r -x '__pycache__' -x '*.pyc' plugin/manolii-framework /tmp/plugin-fresh; then
+            echo "OK: committed plugin/ matches a fresh build"
+          else
+            echo "FAIL: committed plugin/ is stale — run 'python3 scripts/build-plugin.py' and commit the result"
+            exit 1
+          fi
+
+      - name: Routing lint
+        run: python3 scripts/lint-agent-routing.py

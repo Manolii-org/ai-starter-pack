@@ -1,3 +1,7 @@
+---
+description: "Capture a summary of the current session for persistent memory"
+---
+
 # /session-summary
 
 Capture a summary of the current session for persistent memory. Run `/extract-insights` first (to capture implicit knowledge), then run this command to finalise the session record.
