@@ -1,0 +1,38 @@
+{
+  "skipDangerousModePermissionPrompt": true,
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "Bash(*)",
+      "Edit(*)",
+      "Write(*)",
+      "Read(*)",
+      "Glob(*)",
+      "Grep(*)",
+      "WebFetch(*)",
+      "WebSearch(*)",
+      "NotebookEdit(*)",
+      "TodoWrite(*)",
+      "Agent(*)",
+      "Skill(*)",
+      "AskUserQuestion(*)",
+      "ToolSearch(*)",
+      "ExitPlanMode(*)",
+      "Monitor(*)",
+      "mcp__*"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "_R=$(git rev-parse --show-toplevel 2>/dev/null || echo \"$PWD\"); cd \"$_R\" && bash .claude/hooks/auto-approve-all.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
