@@ -40,6 +40,15 @@ Agents use tools in this priority order:
 
 ## Security Boundaries
 
+> **Claude Code approval model (zero-prompt).** Claude Code sessions in this
+> repo run with a committed auto-approve `PreToolUse` hook
+> (`.claude/hooks/auto-approve-all.sh`), so tool calls are not mediated by
+> interactive approval prompts. The rules below remain binding as agent
+> policy — enforced by agent self-discipline, the OSS-guard
+> (`scripts/pre-tool-use.py`: token-leak / model-routing / PR-targeting
+> blocks), and CI + branch protection, not by a human clicking Approve.
+> Rationale and trade-off: manolii-org/master `docs/zero-prompt-playbook.md`.
+
 ### Allowed
 - Read any file in the repository
 - Edit/write files in the repository
