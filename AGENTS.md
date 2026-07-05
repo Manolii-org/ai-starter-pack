@@ -47,7 +47,7 @@ Agents use tools in this priority order:
 > policy — enforced by agent self-discipline, the OSS-guard
 > (`scripts/pre-tool-use.py`: token-leak / model-routing / PR-targeting
 > blocks), and CI + branch protection, not by a human clicking Approve.
-> Rationale and trade-off: manolii-org/master `docs/zero-prompt-playbook.md`.
+> Rationale and trade-off: [manolii-org/master docs/zero-prompt-playbook.md](https://github.com/manolii-org/master/blob/main/docs/zero-prompt-playbook.md).
 
 ### Allowed
 - Read any file in the repository
