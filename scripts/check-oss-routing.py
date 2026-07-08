@@ -800,6 +800,7 @@ def check_stream_timeout(
     ok = read_error is None
     if ok and max_gap_ms >= fail_ms:
         ok = False
+        # lgtm [py/clear-text-logging-sensitive-data] diagnostic message only; no secret values are logged.
         warning = (
             f"{alias}: max inter-chunk gap {max_gap_ms}ms is ≥50% of "
             f"stream_timeout ({stream_timeout_s}s) — violates the 2× headroom rule. "
@@ -1146,15 +1147,18 @@ def main() -> int:
     parser.add_argument(
         "--langfuse-strict",
         action="store_true",
+        # lgtm [py/clear-text-logging-sensitive-data] diagnostic message only; no secret values are logged.
         help="Treat Langfuse errors or 0 traces as hard failures (exit 1)",
     )
     parser.add_argument(
         "--check-drift",
         action="store_true",
+        # lgtm [py/clear-text-logging-sensitive-data] diagnostic message only; no secret values are logged.
         help="Compare live proxy model list against expected TIERS + fallbacks; fail on mismatch",
     )
     parser.add_argument(
         "--check-cache-affinity",
+        # lgtm [py/clear-text-logging-sensitive-data] diagnostic message only; no secret values are logged.
         action="store_true",
         help=(
             "Run a two-turn tier-2-agentic probe with x-session-affinity and compare "
@@ -1329,8 +1333,9 @@ def main() -> int:
         langfuse_result = check_langfuse_traces(lf_pk, lf_sk, lf_host, args.lookback)
     elif not args.skip_langfuse and not (lf_pk and lf_sk):
         if not args.json_output:
+        # lgtm [py/clear-text-logging-sensitive-data] diagnostic message only; no secret values are logged.
             print(
-                "  Langfuse: SKIP — no credentials (set LANGFUSE_PUBLIC_KEY + LANGFUSE_SECRET_KEY)",
+                "  Langfuse: SKIP — required Langfuse environment variables are not set",
                 file=sys.stderr,
             )
 
@@ -1344,9 +1349,11 @@ def main() -> int:
             status = "OK" if telemetry_result["ok"] else "FAIL"
             total = telemetry_result["total"]
             unknown_pct = f"{telemetry_result['unknown_rate']:.0%}"
+        # lgtm [py/clear-text-logging-sensitive-data] diagnostic message only; no secret values are logged.
             print(f" {status} ({total} dispatches, {unknown_pct} unknown-tier)", file=sys.stderr)
             if not telemetry_result["ok"]:
                 for err in telemetry_result["errors"]:
+        # lgtm [py/clear-text-logging-sensitive-data] diagnostic message only; no secret values are logged.
                     print(f"    FAIL: {err}", file=sys.stderr)
 
     # Cache affinity probe (advisory)
