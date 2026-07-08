@@ -115,7 +115,7 @@ def scan_org_leak(pack_root: Path) -> list[CheckResult]:
     for path in pack_root.rglob('*'):
         if not should_scan_file(path, pack_root):
             continue
-        rel = str(path.relative_to(pack_root))
+        rel = path.relative_to(pack_root).as_posix()
         if rel in DETECTOR_FILES:
             continue
         try:
@@ -153,7 +153,7 @@ def scan_provider_names(pack_root: Path) -> list[CheckResult]:
     for path in pack_root.rglob('*'):
         if not should_scan_file(path, pack_root):
             continue
-        rel = str(path.relative_to(pack_root))
+        rel = path.relative_to(pack_root).as_posix()
         if rel in DETECTOR_FILES or exclude_path in rel:
             continue  # Skip detector files and expected provider references
         try:

@@ -131,7 +131,7 @@ ok "Secrets pushed"
 
 # Deploy
 log "Deploying proxy image (this may take ~2 minutes)..."
-( cd "$PROXY_DIR" && set -o pipefail && flyctl deploy --app "$APP_NAME" --remote-only 2>&1 | tail -5 )
+( cd "$PROXY_DIR" && set -o pipefail && timeout 300 flyctl deploy --app "$APP_NAME" --remote-only 2>&1 | tail -5 )
 ok "Deployed"
 
 # ── 5. Health check ───────────────────────────────────────────────────────────
@@ -141,7 +141,7 @@ echo "Verifying deployment..."
 PROXY_URL="https://$APP_NAME.fly.dev"
 sleep 3
 
-if curl -sf "$PROXY_URL/health/liveliness" &>/dev/null; then
+if curl --max-time 30 --connect-timeout 10 -sf "$PROXY_URL/health/liveliness" &>/dev/null; then
   ok "Health check passed: $PROXY_URL"
 else
   log "Health check pending — proxy may still be starting. Try manually:"
@@ -160,7 +160,7 @@ _smoke_test() {
   # keeping the smoke cheap. Success also requires non-empty message content.
   local max_tokens="${2:-128}"
   local result
-  result=$(curl -sf -X POST "$PROXY_URL/v1/chat/completions" \
+  result=$(curl --max-time 30 --connect-timeout 10 -sf -X POST "$PROXY_URL/v1/chat/completions" \
     -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
     -H "Content-Type: application/json" \
     -d "{\"model\":\"$tier\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":$max_tokens}" \

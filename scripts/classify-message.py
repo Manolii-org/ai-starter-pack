@@ -39,8 +39,15 @@ CONTENT_PATTERNS = {
 # --- Build the DISPATCH RULE string from routing config ---
 def _build_dispatch_rule(cfg):
     """Construct the DISPATCH RULE from routing config, splitting OSS-routed agents into dispatch buckets."""
+    tier_aliases = cfg.get("tier_aliases") or {}
+    non_proxy_tiers = {"light-main", "medium-main", "heavy-main", "fast-escape"}
+    proxy_backed_tiers = {
+        k for k, v in tier_aliases.items()
+        if not k.startswith("$") and k not in non_proxy_tiers
+        and (not isinstance(v, dict) or v.get("requires_proxy") is not False)
+    }
     oss_tiers = (
-        {k for k in (cfg.get("tier_aliases") or {}).keys() if not k.startswith("$")}
+        proxy_backed_tiers
         | {k for k in (cfg.get("proxy_intercepted_models") or {}).keys() if not k.startswith("$")}
     )
     _SONNET_PROXY = frozenset({"sonnet"})

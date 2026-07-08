@@ -2041,7 +2041,7 @@
     },
     "sonnet": {
       "label": "sonnet (Claude Code short alias \u2014 proxy-intercepted, PRC-origin OSS, guardrail-protected)",
-      "remapped_to_tier": "tier-3-tool-us",
+      "remapped_to_tier": "sonnet-guardrailed-prc",
       "resolves_to": "fireworks:accounts/fireworks/models/deepseek-v4-pro",
       "data_sensitivity_max": "restricted_us_oss_ok",
       "proxy_live_since": "2026-04-20",
