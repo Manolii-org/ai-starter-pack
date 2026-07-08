@@ -13,7 +13,6 @@ Block output:
   {"decision": "block", "reason": "..."} → Claude Code aborts the tool call and shows reason
 """
 import json
-import os
 import re
 import sys
 from pathlib import Path
@@ -179,6 +178,11 @@ OSS_TIER_ALIASES = {
     "tier-3-tool-us",
     "tier-4-extract",
     "tier-5-latency",
+    # Reasoning review tier (DeepSeek V4 Flash). Dispatched under its own alias rather
+    # than the haiku bucket — haiku proxy-remaps to GPT-OSS-120B (non-reasoning), which
+    # would discard the reasoning budget. classify-message.py emits model="tier-review"
+    # for agents routed here; the proxy (config.yaml model_name: tier-review) routes it.
+    "tier-review",
 }
 ANTHROPIC_MODELS = {
     "sonnet",
@@ -202,18 +206,7 @@ SENSITIVITY_ORDER = {
 
 def _load_routing_config() -> dict | None:
     try:
-        _proj = os.environ.get("CLAUDE_PROJECT_DIR")
-        _plug = os.environ.get("CLAUDE_PLUGIN_ROOT")
-        # consumer override (.claude/) wins, then the bundled plugin default
-        # (data/ at the plugin root), then the in-tree fallback. Without the
-        # plugin tier, pure-plugin installs find no config and routing fails open.
-        _candidates = []
-        if _proj:
-            _candidates.append(Path(_proj) / ".claude" / "model-routing.json")
-        if _plug:
-            _candidates.append(Path(_plug) / "data" / "model-routing.json")
-        _candidates.append(Path(__file__).parent.parent / ".claude" / "model-routing.json")
-        config_path = next((c for c in _candidates if c.exists()), _candidates[-1])
+        config_path = Path(__file__).parent.parent / ".claude" / "model-routing.json"
         with open(config_path) as f:
             return json.load(f)
     except Exception:
@@ -227,23 +220,8 @@ def _normalise_sensitivity(value: str) -> str:
 def _load_agent_sensitivity(agent_name: str) -> str:
     if not agent_name:
         return "internal"
-    # Plugin agents arrive namespaced as "<plugin>:<agent>"; agent files are not.
-    agent_name = agent_name.split(":")[-1]
     try:
-        # Resolve the agent definition across layouts: consumer-local override
-        # (.claude/agents/) wins, then the bundled plugin copy (agents/ at the
-        # plugin root — no .claude/ prefix), then the in-tree fallback. Without
-        # this, plugin installs silently return the "internal" default and the
-        # OSS data-sensitivity guard is bypassed for restricted agents.
-        _plug = os.environ.get("CLAUDE_PLUGIN_ROOT")
-        _proj = os.environ.get("CLAUDE_PROJECT_DIR")
-        _candidates = []
-        if _proj:
-            _candidates.append(Path(_proj) / ".claude" / "agents" / f"{agent_name}.md")
-        if _plug:
-            _candidates.append(Path(_plug) / "agents" / f"{agent_name}.md")
-        _candidates.append(Path(__file__).parent.parent / ".claude" / "agents" / f"{agent_name}.md")
-        agent_path = next((c for c in _candidates if c.exists()), _candidates[-1])
+        agent_path = Path(__file__).parent.parent / ".claude" / "agents" / f"{agent_name}.md"
         text = agent_path.read_text()
     except Exception:
         return "internal"
@@ -280,10 +258,8 @@ routing_config = _load_routing_config()
 routing_config_loaded = routing_config is not None
 routing_config = routing_config or {}
 agent_routing = routing_config.get("agent_routing", {})
-# Plugin agents are namespaced "<plugin>:<agent>"; routing + sensitivity keys are bare.
-_agent_key = subagent_type.split(":")[-1] if subagent_type else subagent_type
-recommended = agent_routing.get(_agent_key, agent_routing.get("default", "tier-1-fast"))
-agent_sensitivity = _load_agent_sensitivity(_agent_key)
+recommended = agent_routing.get(subagent_type, agent_routing.get("default", "tier-1-fast"))
+agent_sensitivity = _load_agent_sensitivity(subagent_type)
 agent_sensitivity_rank = SENSITIVITY_ORDER.get(agent_sensitivity, SENSITIVITY_ORDER["internal"])
 model_omitted = model is None or model == "" or model == "default"
 
@@ -371,7 +347,16 @@ OSS_DISPATCH_NOTE = (
 if model_omitted:
     # Claude Code's Agent tool accepts short aliases; LiteLLM-internal tier names
     # need a Claude Code alias that the proxy intercepts.
-    cc_model = "haiku" if recommended in OSS_TIER_ALIASES else recommended
+    # tier-review is dispatched under its own alias (the proxy routes it to the
+    # reasoning model); folding it into the haiku remap would drop the reasoning tier
+    # this is meant to preserve. Other OSS tiers map to the haiku alias the proxy
+    # intercepts.
+    if recommended == "tier-review":
+        cc_model = "tier-review"
+    elif recommended in OSS_TIER_ALIASES:
+        cc_model = "haiku"
+    else:
+        cc_model = recommended
     proxy_note = (
         f"(Proxy routes haiku → {recommended} tier internally.) "
         if cc_model == "haiku" else ""

@@ -35,6 +35,78 @@ CONTENT_PATTERNS = {
     ),
 }
 
+# --- Build the DISPATCH RULE string from routing config ---
+def _build_dispatch_rule(cfg):
+    """Construct the DISPATCH RULE from agent_routing + tier_aliases +
+    proxy_intercepted_models, splitting OSS-routed agents into dispatch buckets.
+
+    Pure function of ``cfg`` (a parsed model-routing.json dict) so the bucketing
+    logic can be unit-tested without the real config file.
+    """
+    # tier_aliases keys are the OSS-tier short names (tier-1-fast, tier-0-oss-heavy, etc.).
+    # `... or {}` guards against keys present but explicitly null in model-routing.json.
+    oss_tiers = (
+        {k for k in (cfg.get("tier_aliases") or {}).keys() if not k.startswith("$")}
+        | {k for k in (cfg.get("proxy_intercepted_models") or {}).keys() if not k.startswith("$")}
+    )
+    # Split OSS tiers into quality buckets for the dispatch rule.
+    # "sonnet" proxy alias → Gemma 4 31B (Together AI), fallback GPT-OSS-120B.
+    _SONNET_PROXY = frozenset({"sonnet"})
+    # Reasoning-tier aliases must be dispatched under their OWN alias, never folded into
+    # the haiku bucket: they carry a large max_tokens / reasoning budget (see
+    # scripts/check-oss-routing.py TIER_MAX_TOKENS) that the haiku remap would discard,
+    # truncating chain-of-thought mid-answer. They must still stay registered in
+    # tier_aliases so lint-agent-routing.py does not flag agents routed to them as
+    # unregistered — hence this carve-out rather than dropping them from tier_aliases.
+    _REASONING_OSS = frozenset({"tier-review"})
+    # Everything else (tier-1-fast, tier-2-agentic, tier-3-tool, tier-0-oss-heavy,
+    # haiku, sonnet-internal, claude-haiku-*) → M2.7 quality → suggest model="haiku".
+    # sonnet-internal resolves to M2.7 (Fireworks), same as haiku — NOT Gemma 4 31B.
+    _HAIKU_OSS = oss_tiers - _SONNET_PROXY - _REASONING_OSS
+
+    agent_routing = {k: v for k, v in (cfg.get("agent_routing") or {}).items()
+                     if not k.startswith("$")}
+    # Derive Anthropic-locked agents dynamically: any agent whose routing model is not
+    # in oss_tiers (no proxy intercept, no tier alias) must be Anthropic-hosted.
+    # Dynamic derivation stays consistent as new agents are added to agent_routing.
+    anthropic_locked = {k for k, v in agent_routing.items() if v not in oss_tiers}
+    # Built-in Claude Code agent types that always belong in the haiku dispatch group.
+    builtin_haiku = ["Explore"]
+    # Exclude builtin_haiku names so an agent literally named "Explore" is not listed twice.
+    haiku_named = sorted(k for k, v in agent_routing.items()
+                         if v in _HAIKU_OSS and k not in anthropic_locked
+                         and k not in builtin_haiku)
+    haiku_all = builtin_haiku + haiku_named
+    sonnet_named = sorted(
+        k for k, v in agent_routing.items()
+        if v in _SONNET_PROXY and k not in anthropic_locked
+    )
+    reasoning_named = sorted(
+        k for k, v in agent_routing.items()
+        if v in _REASONING_OSS and k not in anthropic_locked
+    )
+    restricted_listed = sorted(anthropic_locked)
+    # Terse format: preserves all agent names and tier assignments but strips prose.
+    # Full prose was ~280 tokens × every turn = 28K+ tokens/100-call session of overhead.
+    # Terse format: ~140 tokens. Same routing signal, 50% fewer tokens.
+    # The reasoning clause is emitted ONLY when an agent is actually routed to a
+    # reasoning alias, so instances that don't use one pay zero extra dispatch tokens.
+    reasoning_clause = (
+        f"tier-review=reasoning/editorial ({', '.join(reasoning_named)}). "
+        if reasoning_named else ""
+    )
+    return (
+        "DISPATCH RULE: The tier above is for the MAIN THREAD ONLY. "
+        f"For Agent tool calls: haiku=search/grep/format/file-read AND "
+        f"({', '.join(haiku_all)}). "
+        f"sonnet=({', '.join(sonnet_named)}). "
+        f"{reasoning_clause}"
+        f"claude-sonnet-4-6=restricted/client ({', '.join(restricted_listed)}). "
+        "opus=MAIN THREAD ONLY — NEVER pass model=\"opus\" to any named sub-agent. "
+        "Passing opus to a named sub-agent overrides its configured tier and wastes 5-16x cost."
+    )
+
+
 # --- Load all config from model-routing.json in a single read ---
 def _load_routing_config():
     """Read model-routing.json once; return (heavy_kw, standard_kw, light_kw, tier_model_map,
@@ -76,19 +148,10 @@ def _load_routing_config():
     _PROXY_INTERCEPT_RATES_DEFAULT = {}
 
     try:
-        _proj = os.environ.get("CLAUDE_PROJECT_DIR")
-        _plug = os.environ.get("CLAUDE_PLUGIN_ROOT")
-        # consumer override -> bundled plugin default (data/) -> in-tree fallback.
-        _candidates = []
-        if _proj:
-            _candidates.append(os.path.join(_proj, ".claude", "model-routing.json"))
-        if _plug:
-            _candidates.append(os.path.join(_plug, "data", "model-routing.json"))
-        _candidates.append(os.path.join(
+        config_path = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             ".claude", "model-routing.json"
-        ))
-        config_path = next((c for c in _candidates if os.path.exists(c)), _candidates[-1])
+        )
         with open(config_path) as f:
             cfg = json.load(f)
 
@@ -106,47 +169,7 @@ def _load_routing_config():
                 skill_map[skill_name] = tier
 
         # Build DISPATCH RULE from agent_routing + tier_aliases + proxy_intercepted_models.
-        # tier_aliases keys are the OSS-tier short names (tier-1-fast, tier-0-oss-heavy, etc.).
-        oss_tiers = (
-            {k for k in cfg.get("tier_aliases", {}).keys() if not k.startswith("$")}
-            | {k for k in cfg.get("proxy_intercepted_models", {}).keys() if not k.startswith("$")}
-        )
-        # Split OSS tiers into quality buckets for the dispatch rule.
-        # "sonnet" proxy alias → Gemma 4 31B (Together AI), fallback GPT-OSS-120B.
-        # Everything else (tier-1-fast, tier-2-agentic, tier-3-tool, tier-0-oss-heavy,
-        # haiku, sonnet-internal, claude-haiku-*) → M2.7 quality → suggest model="haiku".
-        # sonnet-internal resolves to M2.7 (Fireworks), same as haiku — NOT Gemma 4 31B.
-        _SONNET_PROXY = frozenset({"sonnet"})
-        _HAIKU_OSS = oss_tiers - _SONNET_PROXY
-
-        agent_routing = {k: v for k, v in cfg.get("agent_routing", {}).items()
-                         if not k.startswith("$")}
-        # Derive Anthropic-locked agents dynamically: any agent whose routing model is not
-        # in oss_tiers (no proxy intercept, no tier alias) must be Anthropic-hosted.
-        # Dynamic derivation stays consistent as new agents are added to agent_routing.
-        anthropic_locked = {k for k, v in agent_routing.items() if v not in oss_tiers}
-        # Built-in Claude Code agent types that always belong in the haiku dispatch group.
-        builtin_haiku = ["Explore"]
-        haiku_named = sorted(k for k, v in agent_routing.items()
-                             if v in _HAIKU_OSS and k not in anthropic_locked)
-        haiku_all = builtin_haiku + haiku_named
-        sonnet_named = sorted(
-            k for k, v in agent_routing.items()
-            if v in _SONNET_PROXY and k not in anthropic_locked
-        )
-        restricted_listed = sorted(anthropic_locked)
-        # Terse format: preserves all agent names and tier assignments but strips prose.
-        # Full prose was ~280 tokens × every turn = 28K+ tokens/100-call session of overhead.
-        # Terse format: ~140 tokens. Same routing signal, 50% fewer tokens.
-        dispatch_rule = (
-            "DISPATCH RULE: The tier above is for the MAIN THREAD ONLY. "
-            f"For Agent tool calls: haiku=search/grep/format/file-read AND "
-            f"({', '.join(haiku_all)}). "
-            f"sonnet=({', '.join(sonnet_named)}). "
-            f"claude-sonnet-4-6=restricted/client ({', '.join(restricted_listed)}). "
-            "opus=MAIN THREAD ONLY — NEVER pass model=\"opus\" to any named sub-agent. "
-            "Passing opus to a named sub-agent overrides its configured tier and wastes 5-16x cost."
-        )
+        dispatch_rule = _build_dispatch_rule(cfg)
 
         # --- Build pricing from tier_definitions ---
         # Start with Anthropic defaults, then add/override from tier_definitions
@@ -181,6 +204,14 @@ def _load_routing_config():
         # For each proxy-intercepted model, resolve its backend tier and copy rates
         for model_id, model_cfg in proxy_models.items():
             if isinstance(model_cfg, dict) and not model_id.startswith("$"):
+                # Explicit per-alias pricing wins — needed when the alias resolves
+                # to a model that has no tier_definitions entry (an alias re-route
+                # otherwise silently falls back to default rates).
+                in_rate = model_cfg.get("cost_per_m_input")
+                out_rate = model_cfg.get("cost_per_m_output")
+                if in_rate is not None and out_rate is not None:
+                    proxy_intercept_rates[model_id] = {"in": float(in_rate), "out": float(out_rate)}
+                    continue
                 resolves_to = model_cfg.get("resolves_to", "")
                 # Match by finding which tier model path appears as a substring of resolves_to.
                 # resolves_to format: "provider:model_path [optional annotations]"
@@ -233,8 +264,7 @@ _HARD_LIMIT_USD = 35.0   # force → haiku/OSS + strong warning
 _DEFAULT_PRICING: dict[str, float] = {"in": 3.00, "out": 15.00}
 
 
-_proj_scd = os.environ.get("CLAUDE_PROJECT_DIR")
-_SPEND_CACHE_DIR = Path(_proj_scd) / ".ai" / "spend-cache" if _proj_scd else Path(__file__).parent.parent / ".ai" / "spend-cache"
+_SPEND_CACHE_DIR = Path(__file__).parent.parent / ".ai" / "spend-cache"
 
 
 def _compute_session_spend(transcript_path: str | None) -> float:
@@ -613,8 +643,7 @@ def classify_tier(prompt_text: str) -> dict:
 
 # --- Pre-flight context injection helpers ---
 # Repo root — same derivation used above for config_path.
-_proj_rr = os.environ.get("CLAUDE_PROJECT_DIR")
-_REPO_ROOT = _proj_rr if _proj_rr else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Match script paths including kebab-case names like "scripts/post-tool-use.py"
 _PY_SCRIPT_RE = re.compile(r'\bscripts/([a-z0-9_/-]+)\.py\b', re.I)

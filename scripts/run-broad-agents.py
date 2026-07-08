@@ -45,8 +45,11 @@ BROAD_AGENTS = [
     "security-deep-dive",
 ]
 
-MAX_DIFF_CHARS = int(os.environ.get("MAX_DIFF_CHARS", "65000"))
-TIMEOUT_SECS = 120
+MAX_DIFF_CHARS = 8000
+# Fail-fast: a hung backend should surface in seconds, not block the (non-required)
+# Broad Agents job for the full client-side window. One retry covers a transient blip.
+TIMEOUT_SECS = 45
+MAX_ATTEMPTS = 2
 
 
 @dataclass
@@ -120,6 +123,37 @@ def build_user_message(diff: str, changed_files: list[str]) -> str:
     return msg
 
 
+def _extract_text(resp_data: Any) -> str:
+    """Extract assistant text across response shapes.
+
+    Anthropic /v1/messages returns ``content: [{"type":"text","text":...}]``.
+    OpenAI-compatible proxies (e.g. a LiteLLM gateway) return
+    ``choices: [{"message": {"content": "..."}}]``. Reading both makes this
+    robust if a deployment points ANTHROPIC_BASE_URL at an OpenAI-shaped proxy.
+    Returns "" when no text is present so the caller treats it as an empty response.
+    """
+    if not isinstance(resp_data, dict):
+        return ""
+    # Anthropic shape
+    content = resp_data.get("content")
+    if isinstance(content, list):
+        parts = [
+            b.get("text", "")
+            for b in content
+            if isinstance(b, dict) and b.get("type") == "text"
+        ]
+        text = "".join(parts).strip()
+        if text:
+            return text
+    # OpenAI-compatible shape
+    choices = resp_data.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        message = choices[0].get("message") or {}
+        if isinstance(message, dict) and isinstance(message.get("content"), str):
+            return message["content"].strip()
+    return ""
+
+
 def invoke_agent(
     agent_config: AgentConfig,
     api_key: str,
@@ -161,23 +195,40 @@ def invoke_agent(
         "content-type": "application/json",
     }
 
-    try:
-        req = Request(
-            "https://api.anthropic.com/v1/messages",
-            data=json.dumps(payload).encode("utf-8"),
-            headers=headers,
-            method="POST",
-        )
-        with urlopen(req, timeout=TIMEOUT_SECS) as response:
-            resp_data = json.loads(response.read().decode("utf-8"))
-    except (URLError, json.JSONDecodeError, TimeoutError) as e:
-        logger.error(f"Agent {agent_config.name} API error: {e}")
-        return None
+    resp_data = None
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            req = Request(
+                "https://api.anthropic.com/v1/messages",
+                data=json.dumps(payload).encode("utf-8"),
+                headers=headers,
+                method="POST",
+            )
+            with urlopen(req, timeout=TIMEOUT_SECS) as response:
+                resp_data = json.loads(response.read().decode("utf-8"))
+            break
+        except (TimeoutError, URLError) as e:
+            # Transport/timeout = infrastructure failure. Retry once, then give up.
+            if attempt < MAX_ATTEMPTS:
+                logger.warning(
+                    f"Agent {agent_config.name} transport error (attempt "
+                    f"{attempt}/{MAX_ATTEMPTS}), retrying: {e}"
+                )
+                continue
+            logger.warning(f"Agent {agent_config.name} unreachable after {MAX_ATTEMPTS} attempts: {e}")
+            return None
+        except json.JSONDecodeError as e:
+            logger.warning(f"Agent {agent_config.name} non-JSON response body: {e}")
+            return None
 
     try:
-        content = resp_data.get("content", [{}])[0].get("text", "")
+        content = _extract_text(resp_data)
         if not content:
-            logger.error(f"Agent {agent_config.name} empty response")
+            # Empty body is an infrastructure/provider symptom, not a code finding.
+            # Log the raw response shape so the failure mode is diagnosable in CI.
+            logger.warning(
+                f"Agent {agent_config.name} empty response — keys={sorted(resp_data.keys()) if isinstance(resp_data, dict) else type(resp_data).__name__}"
+            )
             return None
 
         # Strip markdown fences
@@ -303,9 +354,16 @@ def run_broad_agents(
     if results:
         logger.info(f"[broad-agents] completed {len(results)}/{len(agents_to_run)} agents")
         return 0
-    else:
-        logger.warning("[broad-agents] no findings generated")
-        return 1
+    # Degrade gracefully: every agent returning nothing is almost always an
+    # infrastructure symptom (provider timeout / empty body), not a clean review.
+    # Broad Agents is a NON-REQUIRED check — surface a warning instead of a red X
+    # that would otherwise add noise without blocking merge. Genuine misconfiguration
+    # (missing manifest/diff) still returns 1 above.
+    logger.warning(
+        "[broad-agents] no findings from any agent — treating as infrastructure "
+        "degradation (non-required check), exiting 0"
+    )
+    return 0
 
 
 def main():

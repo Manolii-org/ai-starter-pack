@@ -7,9 +7,9 @@
 # Required secrets (set via Fly: flyctl secrets set KEY=VALUE --app {YOUR_APP_NAME}):
 #   LITELLM_MASTER_KEY   generate with: openssl rand -hex 24
 #   ANTHROPIC_API_KEY    for tier-0-opus/sonnet passthrough
-#   FIREWORKS_API_KEY    for tier-1-fast, tier-0-oss-heavy (tier-3-tool fallback)
-#   TOGETHER_API_KEY     for tier-2-agentic (Kimi K2.6), sonnet alias
-#   GROQ_API_KEY         for tier-4-extract, tier-5-latency
+#   FIREWORKS_API_KEY    for tier-1-fast, tier-0-oss-heavy (tier-3-tool fallback), sonnet alias, tier-review, claude-haiku-4-5-20251001
+#   TOGETHER_API_KEY     for tier-2-agentic (Kimi K2.6)
+#   GROQ_API_KEY         for tier-4-extract, tier-5-latency, sonnet advisor (fail-closed: every sonnet response is reviewed by the Groq advisor — absent key fails the request)
 #   OPENROUTER_API_KEY   for tier-3-tool (Gemma 4 31B)
 #
 # Note: scripts/setup-litellm.sh handles all of this interactively.
@@ -167,15 +167,18 @@ model_list:
 
   # ═══════════════════════════════════════════════════════════════════════════
   # Sonnet alias — transparent substitution + fail-closed advisor guardrail
-  # Routes Agent(model="sonnet") → Gemma 4 31B (Together, US-origin weights).
+  # Routes Agent(model="sonnet") → DeepSeek V4 Pro (Fireworks).
+  # Repointed 2026-06-17 off together_ai/google/gemma-4-31b-it: Together revoked
+  # Gemma 4 31B serverless access (HTTP 400, ~2026-04-25), leaving the primary dead.
   # Advisor guardrail (sonnet_advisor_guardrail.py) reviews each response via
   # Llama 3.3 70B on Groq; fails closed to Anthropic Sonnet on empty advisor output.
-  # data_clearance: restricted_us_oss_ok (US-origin, guardrail-protected).
+  # data_clearance: restricted_us_oss_ok (PRC-origin weights on US infra, guardrail-protected —
+  #   eligible at this tier ONLY because of the mandatory fail-closed advisor; cf. model-routing Rule 3).
   # ═══════════════════════════════════════════════════════════════════════════
   - model_name: sonnet
     litellm_params:
-      model: together_ai/google/gemma-4-31b-it
-      api_key: os.environ/TOGETHER_API_KEY
+      model: fireworks_ai/accounts/fireworks/models/deepseek-v4-pro
+      api_key: os.environ/FIREWORKS_API_KEY
   - model_name: sonnet-us-fallback-gptoss120b
     litellm_params:
       # Cross-provider fallback — GPT-OSS 120B on Fireworks (US-origin OpenAI OSS weights).
@@ -205,6 +208,25 @@ model_list:
     litellm_params:
       model: anthropic/claude-haiku-4-5-20251001
       api_key: os.environ/ANTHROPIC_API_KEY
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # tier-review — reasoning-model review tier (DeepSeek V4 Flash on Fireworks)
+  # For editorial / structured-output review tasks (document or code review that
+  # benefits from explicit reasoning). DeepSeek V4 Flash is a *reasoning* model:
+  # it emits chain-of-thought BEFORE its (often JSON) answer, so callers MUST
+  # budget output generously — set max_tokens >= ~1500 (a strict-JSON review
+  # caller should use >= 2000 and parse defensively), or the response truncates
+  # before content is emitted and choices[0].message.content comes back empty.
+  # Single-model alias by design — NO fallback: the use case depends on this
+  # specific reasoning model's output shape, and a non-reasoning fallback would
+  # change output semantics. Callers handle errors defensively.
+  # data_clearance: internal + public (NOT client/restricted data — PRC-origin
+  # weights on US infra, eligible at internal under the relaxed-origin OSS policy).
+  # ═══════════════════════════════════════════════════════════════════════════
+  - model_name: tier-review
+    litellm_params:
+      model: fireworks_ai/accounts/fireworks/models/deepseek-v4-flash
+      api_key: os.environ/FIREWORKS_API_KEY
 
 litellm_settings:
   # Guardrail callbacks — SonnetAdvisorGuardrail reviews sonnet alias responses.

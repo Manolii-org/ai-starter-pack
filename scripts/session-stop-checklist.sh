@@ -148,7 +148,13 @@ try:
         timeout=15.0,
         messages=[{"role": "user", "content": _prompt_text}]
     )
-    _result = json.loads(r.content[0].text)
+    # Reasoning models (e.g. DeepSeek via a LiteLLM proxy alias) prepend a
+    # `thinking` block — select text blocks, not content[0].
+    _text = "".join(
+        getattr(_b, "text", "") for _b in r.content
+        if getattr(_b, "type", "text") == "text"
+    )
+    _result = json.loads(_text)
     if _result.get("classification") in ("significant-drift", "scope-creep"):
         os.makedirs(".ai/drift-alerts", exist_ok=True)
         _fname = f".ai/drift-alerts/{datetime.now(timezone.utc):%Y%m%d-%H%M%S}.json"

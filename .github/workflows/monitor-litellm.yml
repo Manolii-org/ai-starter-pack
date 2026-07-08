@@ -1,0 +1,201 @@
+name: Monitor LiteLLM Proxy
+
+# Combined liveness + correctness canary for the instance's LiteLLM proxy.
+#
+# Adapted from manolii master's two-layer design (monitor-litellm-health.yml +
+# monitor-litellm-proxy.yml) for GitHub-hosted runners: one workflow, every
+# 3 hours (~10 runner-minutes/day), probing both layers:
+#   Layer 1 — /health/liveliness (process alive, no auth).
+#   Layer 2 — POST /v1/messages with model=sonnet, exercising the full
+#     advisor-guardrail path. Catches the "process alive but every model call
+#     returns fail-closed 503s" failure mode (manolii 2026-05-13→15; buro
+#     2026-06→07 Together Gemma degradation) that a liveness probe cannot see.
+#
+# Two SEPARATE incident labels on purpose (lesson from manolii 2026-05-15):
+# a liveness recovery must never close a correctness incident.
+#   litellm-liveness-down    — owned by the Layer 1 probe
+#   litellm-correctness-down — owned by the Layer 2 probe
+#
+# Config (no code edits needed per instance):
+#   vars.LITELLM_PROXY_URL      — proxy base URL. Workflow no-ops when unset.
+#   secrets.LITELLM_MASTER_KEY  — auth for the Layer 2 probe (skipped without;
+#                                 a skip neither opens nor closes incidents).
+#
+# If this repo gains self-hosted runners, tighten cadence and set
+# vars.CI_RUNNER_OVERRIDE (JSON array) to move off GitHub-hosted minutes.
+
+on:
+  schedule:
+    - cron: '13 */3 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: monitor-litellm
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  probe:
+    name: Probe liveness + sonnet path
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_OVERRIDE || '["ubuntu-latest"]') }}
+    timeout-minutes: 6
+
+    steps:
+      - name: Layer 1 - /health/liveliness
+        id: health
+        env:
+          PROXY_URL: ${{ vars.LITELLM_PROXY_URL }}
+        run: |
+          set +e
+          if [ -z "$PROXY_URL" ]; then
+            echo "HEALTH_OK=skipped" >> "$GITHUB_ENV"
+            echo "SONNET_OK=skipped" >> "$GITHUB_ENV"
+            echo "monitor: SKIPPED (vars.LITELLM_PROXY_URL not set)"
+            exit 0
+          fi
+          BASE="${PROXY_URL%/}"
+          echo "PROXY_BASE=$BASE" >> "$GITHUB_ENV"
+          # Two attempts, 45s apart: absorbs transient blips and brief
+          # single-machine restart windows without flapping the incident issue.
+          for ATTEMPT in 1 2; do
+            RAW=$(curl --connect-timeout 5 --max-time 15 -sS \
+              -w '\n__HTTP_CODE__:%{http_code}' \
+              "$BASE/health/liveliness" 2>&1)
+            RC=$?
+            HTTP_CODE=$(printf '%s' "$RAW" | grep -oE '__HTTP_CODE__:[0-9]+' | tail -n1 | cut -d: -f2)
+            BODY=$(printf '%s' "$RAW" | sed 's/__HTTP_CODE__:[0-9]*$//')
+            SNIPPET=$(printf '%s' "$BODY" | tr '\r\n\t' '   ' | head -c 200)
+            if [ "$RC" -eq 0 ] && [[ "$HTTP_CODE" =~ ^2[0-9][0-9]$ ]] && echo "$BODY" | grep -q "alive"; then
+              echo "HEALTH_OK=true" >> "$GITHUB_ENV"
+              echo "health: OK (http=$HTTP_CODE, attempt=$ATTEMPT)"
+              break
+            fi
+            if [ "$ATTEMPT" -eq 1 ]; then
+              echo "health: attempt 1 failed (rc=$RC http=$HTTP_CODE) — retrying in 45s"
+              sleep 45
+            else
+              echo "HEALTH_OK=false" >> "$GITHUB_ENV"
+              echo "HEALTH_DETAIL=curl_rc=$RC http=$HTTP_CODE body=$SNIPPET (after 2 attempts 45s apart)" >> "$GITHUB_ENV"
+              echo "health: FAIL (rc=$RC http=$HTTP_CODE)"
+            fi
+          done
+
+      - name: Layer 2 - sonnet advisor path
+        if: env.HEALTH_OK != 'skipped'
+        continue-on-error: true
+        env:
+          LITELLM_MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY }}
+        run: |
+          set +e
+          if [ -z "$LITELLM_MASTER_KEY" ]; then
+            echo "SONNET_OK=skipped" >> "$GITHUB_ENV"
+            echo "sonnet: SKIPPED (no LITELLM_MASTER_KEY secret)"
+            exit 0
+          fi
+          # Two attempts: the advisor path (OSS reviewer post-call) can blip
+          # transiently; a sustained defect fails both. max-time 90s/attempt
+          # covers Fly cold-start + reasoning-model latency + advisor review.
+          # Success requires HTTP 2xx AND at least one text block with
+          # non-whitespace text — an empty or thinking-only content array means
+          # reasoning-token truncation upstream, the exact degradation this
+          # canary exists to catch (a type-only grep passed empty text blocks).
+          SONNET_OK=false
+          for attempt in 1 2; do
+            RAW=$(curl --connect-timeout 5 --max-time 90 -sS -X POST \
+              -w '\n__HTTP_CODE__:%{http_code}' \
+              -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
+              -H "anthropic-version: 2023-06-01" \
+              -H "Content-Type: application/json" \
+              -d '{"model":"sonnet","max_tokens":128,"messages":[{"role":"user","content":"reply OK"}]}' \
+              "$PROXY_BASE/v1/messages" 2>&1)
+            RC=$?
+            HTTP_CODE=$(printf '%s' "$RAW" | grep -oE '__HTTP_CODE__:[0-9]+' | tail -n1 | cut -d: -f2)
+            BODY=$(printf '%s' "$RAW" | sed 's/__HTTP_CODE__:[0-9]*$//')
+            SNIPPET=$(printf '%s' "$BODY" | tr '\r\n\t' '   ' | head -c 200)
+            TEXT_OK=$(printf '%s' "$BODY" | python3 -c 'import json,sys; d=json.load(sys.stdin); d=d if isinstance(d,dict) else {}; t="".join(b.get("text") or "" for b in (d.get("content") or []) if isinstance(b,dict) and b.get("type")=="text"); print("yes" if t.strip() else "no")' 2>/dev/null)
+            if [ "$RC" -eq 0 ] && [[ "$HTTP_CODE" =~ ^2[0-9][0-9]$ ]] && [ "$TEXT_OK" = "yes" ]; then
+              SONNET_OK=true
+              echo "sonnet: OK (http=$HTTP_CODE, attempt=$attempt)"
+              break
+            fi
+            echo "sonnet: attempt $attempt FAIL (rc=$RC http=$HTTP_CODE)"
+            [ "$attempt" -lt 2 ] && sleep 15
+          done
+          if [ "$SONNET_OK" = "true" ]; then
+            echo "SONNET_OK=true" >> "$GITHUB_ENV"
+          else
+            echo "SONNET_OK=false" >> "$GITHUB_ENV"
+            echo "SONNET_DETAIL=curl_rc=$RC http=$HTTP_CODE body=$SNIPPET (2 attempts)" >> "$GITHUB_ENV"
+            echo "sonnet: FAIL after 2 attempts (rc=$RC http=$HTTP_CODE)"
+          fi
+
+      - name: Manage liveness incident
+        if: env.HEALTH_OK == 'true' || env.HEALTH_OK == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEALTH_OK: ${{ env.HEALTH_OK }}
+          HEALTH_DETAIL: ${{ env.HEALTH_DETAIL }}
+          PROXY_BASE: ${{ env.PROXY_BASE }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -e
+          LABEL=litellm-liveness-down
+          OPEN=$(gh issue list -R "$REPO" --label "$LABEL" --state open --json number --jq '.[0].number // empty')
+          NOW=$(date -u +%FT%TZ)
+          if [ "$HEALTH_OK" = "false" ]; then
+            gh label create "$LABEL" --color B60205 \
+              --description "Auto-managed: LiteLLM proxy /health/liveliness probe failure (Layer 1)" \
+              -R "$REPO" 2>/dev/null || true
+            COMMENT_BODY=$(printf 'Health probe failure at %s\n\n- /health/liveliness: FAIL\n- Run: %s\n- detail: %s\n' \
+              "$NOW" "$RUN_URL" "${HEALTH_DETAIL:-(none)}")
+            if [ -n "$OPEN" ]; then
+              gh issue comment "$OPEN" -R "$REPO" --body "$COMMENT_BODY"
+            else
+              ISSUE_BODY=$(printf '%s\n\n## Triage\n1. `flyctl machines list` for the proxy app\n2. `flyctl logs --no-tail` for the proxy app\n3. Redeploy: dispatch the deploy-litellm workflow\n\nThis issue is auto-managed and will close on recovery.\n' "$COMMENT_BODY")
+              gh issue create -R "$REPO" \
+                --title "LiteLLM proxy unhealthy (liveness) - $PROXY_BASE" \
+                --label "$LABEL" --body "$ISSUE_BODY"
+            fi
+          elif [ -n "$OPEN" ]; then
+            gh issue comment "$OPEN" -R "$REPO" --body "Recovered at $NOW - /health/liveliness passing. Run: $RUN_URL"
+            gh issue close "$OPEN" -R "$REPO" --comment "Monitor detected recovery."
+          fi
+
+      - name: Manage correctness incident
+        # Opens on a genuine FAIL; closes ONLY on a genuine sonnet success —
+        # a 'skipped' run (missing key) must neither open nor close incidents.
+        if: env.SONNET_OK == 'true' || env.SONNET_OK == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONNET_OK: ${{ env.SONNET_OK }}
+          SONNET_DETAIL: ${{ env.SONNET_DETAIL }}
+          PROXY_BASE: ${{ env.PROXY_BASE }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -e
+          LABEL=litellm-correctness-down
+          OPEN=$(gh issue list -R "$REPO" --label "$LABEL" --state open --json number --jq '.[0].number // empty')
+          NOW=$(date -u +%FT%TZ)
+          if [ "$SONNET_OK" = "false" ]; then
+            gh label create "$LABEL" --color B60205 \
+              --description "Auto-managed: LiteLLM sonnet advisor-path correctness failure (Layer 2)" \
+              -R "$REPO" 2>/dev/null || true
+            COMMENT_BODY=$(printf 'Monitor failure at %s\n\n- sonnet advisor path: FAIL\n- Run: %s\n- detail: %s\n' \
+              "$NOW" "$RUN_URL" "${SONNET_DETAIL:-(none)}")
+            if [ -n "$OPEN" ]; then
+              gh issue comment "$OPEN" -R "$REPO" --body "$COMMENT_BODY"
+            else
+              ISSUE_BODY=$(printf '%s\n\n## Triage\n1. Probe providers directly (keys in the litellm Doppler project) to isolate proxy vs provider\n2. `flyctl logs --no-tail` for the proxy app (guardrail logs advisor failures)\n3. Redeploy: dispatch the deploy-litellm workflow\n\nThis issue is auto-managed and will close on recovery.\n' "$COMMENT_BODY")
+              gh issue create -R "$REPO" \
+                --title "LiteLLM proxy unhealthy (correctness) - $PROXY_BASE" \
+                --label "$LABEL" --body "$ISSUE_BODY"
+            fi
+          elif [ -n "$OPEN" ]; then
+            gh issue comment "$OPEN" -R "$REPO" --body "Recovered at $NOW - sonnet advisor path passing. Run: $RUN_URL"
+            gh issue close "$OPEN" -R "$REPO" --comment "Monitor detected recovery."
+          fi
