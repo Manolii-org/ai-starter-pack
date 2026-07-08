@@ -46,7 +46,7 @@ BROAD_AGENTS = [
     "security-deep-dive",
 ]
 
-MAX_DIFF_CHARS = 8000
+MAX_DIFF_CHARS = int(os.environ.get("BROAD_AGENTS_MAX_DIFF_CHARS", "40000"))
 TIMEOUT_SECS = 120
 
 
@@ -130,8 +130,14 @@ def invoke_agent(
     # Use proxy alias from frontmatter directly (haiku / sonnet map to OSS models).
     model = MODEL_ALIASES.get(agent_config.model, agent_config.model)
 
-    # Route through LiteLLM proxy when ANTHROPIC_BASE_URL is set (required by CLAUDE.md).
-    base_url = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
+    # Restricted/anthropic_only broad agents must stay on direct Anthropic even
+    # when the workflow sets ANTHROPIC_BASE_URL to the LiteLLM proxy for OSS agents.
+    if agent_config.data_sensitivity == "restricted" or agent_config.tier == "anthropic_only":
+        base_url = "https://api.anthropic.com"
+        if model in {"haiku", "sonnet"}:
+            model = "claude-sonnet-4-6"
+    else:
+        base_url = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
     api_url = f"{base_url}/v1/messages"
 
     payload = {

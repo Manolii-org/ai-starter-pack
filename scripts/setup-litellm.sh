@@ -87,13 +87,14 @@ _prompt_key() {
   ask "$label (press Enter to skip):" "$var_name"
 }
 
+_prompt_key ANTHROPIC_KEY   "ANTHROPIC_API_KEY  (Claude passthrough + fallback routes)"        ANTHROPIC_API_KEY
 _prompt_key FIREWORKS_KEY   "FIREWORKS_API_KEY  (tier-1-fast, tier-0-oss-heavy)"               FIREWORKS_API_KEY
 _prompt_key TOGETHER_KEY    "TOGETHER_API_KEY   (tier-2-agentic — Kimi K2.6, sonnet alias)"    TOGETHER_API_KEY
 _prompt_key GROQ_KEY        "GROQ_API_KEY       (tier-4-extract, tier-5-latency)"              GROQ_API_KEY
 _prompt_key OPENROUTER_KEY  "OPENROUTER_API_KEY (tier-3-tool — Gemma 4 31B)"                   OPENROUTER_API_KEY
 
-if [ -z "$FIREWORKS_KEY" ] && [ -z "$TOGETHER_KEY" ] && [ -z "$GROQ_KEY" ] && [ -z "$OPENROUTER_KEY" ]; then
-  fail "At least one OSS provider key is required (Fireworks, Together, Groq, or OpenRouter)."
+if [ -z "$ANTHROPIC_KEY" ] && [ -z "$FIREWORKS_KEY" ] && [ -z "$TOGETHER_KEY" ] && [ -z "$GROQ_KEY" ] && [ -z "$OPENROUTER_KEY" ]; then
+  fail "At least one provider key is required (Anthropic, Fireworks, Together, Groq, or OpenRouter)."
 fi
 
 # ── 4. Deploy to Fly.io ───────────────────────────────────────────────────────
@@ -118,6 +119,7 @@ ok "Generated LITELLM_MASTER_KEY"
 # Push secrets (only non-empty keys)
 log "Pushing secrets to Fly..."
 SECRETS_ARGS=("LITELLM_MASTER_KEY=$LITELLM_MASTER_KEY")
+[ -n "$ANTHROPIC_KEY"   ] && SECRETS_ARGS+=("ANTHROPIC_API_KEY=$ANTHROPIC_KEY")
 [ -n "$FIREWORKS_KEY"   ] && SECRETS_ARGS+=("FIREWORKS_API_KEY=$FIREWORKS_KEY")
 [ -n "$TOGETHER_KEY"    ] && SECRETS_ARGS+=("TOGETHER_API_KEY=$TOGETHER_KEY")
 [ -n "$GROQ_KEY"        ] && SECRETS_ARGS+=("GROQ_API_KEY=$GROQ_KEY")
