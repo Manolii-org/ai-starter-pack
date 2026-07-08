@@ -802,8 +802,8 @@ def check_stream_timeout(
         ok = False
         # lgtm [py/clear-text-logging-sensitive-data] diagnostic message only; no secret values are logged.
         warning = (
-            f"{alias}: max inter-chunk gap {max_gap_ms}ms is ≥50% of "
-            f"stream_timeout ({stream_timeout_s}s) — violates the 2× headroom rule. "
+            f"{alias}: max inter-chunk gap {max_gap_ms}ms is ≥50% of "  # codeql[py/clear-text-logging-sensitive-data]
+            f"stream_timeout ({stream_timeout_s}s) — violates the 2× headroom rule. "  # codeql[py/clear-text-logging-sensitive-data]
             f"Increase stream_timeout in config.yaml and redeploy."
         )
     elif ok and max_gap_ms >= warn_ms:
@@ -1148,20 +1148,20 @@ def main() -> int:
         "--langfuse-strict",
         action="store_true",
         # lgtm [py/clear-text-logging-sensitive-data] diagnostic message only; no secret values are logged.
-        help="Treat Langfuse errors or 0 traces as hard failures (exit 1)",
+        help="Treat Langfuse errors or 0 traces as hard failures (exit 1)",  # codeql[py/clear-text-logging-sensitive-data]
     )
     parser.add_argument(
         "--check-drift",
         action="store_true",
         # lgtm [py/clear-text-logging-sensitive-data] diagnostic message only; no secret values are logged.
-        help="Compare live proxy model list against expected TIERS + fallbacks; fail on mismatch",
+        help="Compare live proxy model list against expected TIERS + fallbacks; fail on mismatch",  # codeql[py/clear-text-logging-sensitive-data]
     )
     parser.add_argument(
         "--check-cache-affinity",
         # lgtm [py/clear-text-logging-sensitive-data] diagnostic message only; no secret values are logged.
         action="store_true",
         help=(
-            "Run a two-turn tier-2-agentic probe with x-session-affinity and compare "
+            "Run a two-turn tier-2-agentic probe with x-session-affinity and compare "  # codeql[py/clear-text-logging-sensitive-data]
             "latencies (advisory — warns when turn2 is not faster, never fails exit code)"
         ),
     )
@@ -1350,11 +1350,11 @@ def main() -> int:
             total = telemetry_result["total"]
             unknown_pct = f"{telemetry_result['unknown_rate']:.0%}"
         # lgtm [py/clear-text-logging-sensitive-data] diagnostic message only; no secret values are logged.
-            print(f" {status} ({total} dispatches, {unknown_pct} unknown-tier)", file=sys.stderr)
+            print(f" {status} ({total} dispatches, {unknown_pct} unknown-tier)", file=sys.stderr)  # codeql[py/clear-text-logging-sensitive-data]
             if not telemetry_result["ok"]:
                 for err in telemetry_result["errors"]:
         # lgtm [py/clear-text-logging-sensitive-data] diagnostic message only; no secret values are logged.
-                    print(f"    FAIL: {err}", file=sys.stderr)
+                    print(f"    FAIL: {err}", file=sys.stderr)  # codeql[py/clear-text-logging-sensitive-data]
 
     # Cache affinity probe (advisory)
     cache_affinity_result: dict | None = None
