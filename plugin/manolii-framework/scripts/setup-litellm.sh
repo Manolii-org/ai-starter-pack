@@ -133,15 +133,8 @@ ok "Secrets pushed"
 # (resolved against the fly.toml directory). Deploying from the proxy dir lets
 # flyctl auto-discover fly.toml.
 log "Deploying proxy (public image + injected config; this may take ~2 minutes)..."
-_deploy_log="$(mktemp)"
-if ( cd "$PROXY_DIR" && flyctl deploy --app "$APP_NAME" ) >"$_deploy_log" 2>&1; then
-  tail -5 "$_deploy_log"
-  rm -f "$_deploy_log"
-else
-  cat "$_deploy_log"
-  rm -f "$_deploy_log"
-  fail "Deploy failed — full output above (or run 'flyctl deploy' from $PROXY_DIR)."
-fi
+( cd "$PROXY_DIR" && flyctl deploy --app "$APP_NAME" 2>&1 | tail -5 ) \
+  || fail "Deploy failed — run 'flyctl deploy' from $PROXY_DIR to see full output."
 ok "Deployed"
 
 # ── 5. Health check ───────────────────────────────────────────────────────────
