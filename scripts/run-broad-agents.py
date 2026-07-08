@@ -33,10 +33,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Use proxy model aliases directly; do not remap to full Claude model IDs.
+# The LiteLLM proxy maps these aliases to OSS models (see deploy/litellm-proxy/README.md).
 MODEL_ALIASES = {
-    "haiku": "claude-haiku-4-5-20251001",
-    "sonnet": "claude-sonnet-4-6",
-    "claude-sonnet-4-6": "claude-sonnet-4-6",
+    "haiku": "haiku",
+    "sonnet": "sonnet",
 }
 
 BROAD_AGENTS = [
@@ -46,10 +47,7 @@ BROAD_AGENTS = [
 ]
 
 MAX_DIFF_CHARS = 8000
-# Fail-fast: a hung backend should surface in seconds, not block the (non-required)
-# Broad Agents job for the full client-side window. One retry covers a transient blip.
-TIMEOUT_SECS = 45
-MAX_ATTEMPTS = 2
+TIMEOUT_SECS = 120
 
 
 @dataclass
@@ -123,57 +121,27 @@ def build_user_message(diff: str, changed_files: list[str]) -> str:
     return msg
 
 
-def _extract_text(resp_data: Any) -> str:
-    """Extract assistant text across response shapes.
-
-    Anthropic /v1/messages returns ``content: [{"type":"text","text":...}]``.
-    OpenAI-compatible proxies (e.g. a LiteLLM gateway) return
-    ``choices: [{"message": {"content": "..."}}]``. Reading both makes this
-    robust if a deployment points ANTHROPIC_BASE_URL at an OpenAI-shaped proxy.
-    Returns "" when no text is present so the caller treats it as an empty response.
-    """
-    if not isinstance(resp_data, dict):
-        return ""
-    # Anthropic shape
-    content = resp_data.get("content")
-    if isinstance(content, list):
-        parts = [
-            b.get("text", "")
-            for b in content
-            if isinstance(b, dict) and b.get("type") == "text"
-        ]
-        text = "".join(parts).strip()
-        if text:
-            return text
-    # OpenAI-compatible shape
-    choices = resp_data.get("choices")
-    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
-        message = choices[0].get("message") or {}
-        if isinstance(message, dict) and isinstance(message.get("content"), str):
-            return message["content"].strip()
-    return ""
-
-
 def invoke_agent(
     agent_config: AgentConfig,
     api_key: str,
     user_message: str,
 ) -> Optional[dict[str, Any]]:
-    """Invoke agent via Anthropic API, return parsed findings."""
+    """Invoke agent via the configured model API, return parsed findings."""
+    # Use proxy alias from frontmatter directly (haiku / sonnet map to OSS models).
     model = MODEL_ALIASES.get(agent_config.model, agent_config.model)
 
-    # For restricted agents, ensure Anthropic direct (never proxy)
-    if agent_config.data_sensitivity == "restricted":
-        if model not in ["claude-sonnet-4-6", "claude-opus-4-1"]:
-            logger.warning(
-                f"Agent {agent_config.name} has restricted sensitivity but model={model} "
-                f"may route via proxy; forcing claude-sonnet-4-6"
-            )
-            model = "claude-sonnet-4-6"
+    # Route through LiteLLM proxy when ANTHROPIC_BASE_URL is set (required by CLAUDE.md).
+    base_url = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
+    api_url = f"{base_url}/v1/messages"
 
     payload = {
         "model": model,
-        "max_tokens": 4096,
+        # 2400 tokens ≈ 9.6K chars keeps the visible text inside the advisor
+        # guardrail's 10K-char review window (longer responses fail closed with
+        # 503). Reasoning tokens (thinking blocks) share this budget but are
+        # excluded from the reviewed text, so real findings output sits well
+        # under the window.
+        "max_tokens": 2400,
         "system": [
             {
                 "type": "text",
@@ -195,47 +163,45 @@ def invoke_agent(
         "content-type": "application/json",
     }
 
-    resp_data = None
-    for attempt in range(1, MAX_ATTEMPTS + 1):
-        try:
-            req = Request(
-                "https://api.anthropic.com/v1/messages",
-                data=json.dumps(payload).encode("utf-8"),
-                headers=headers,
-                method="POST",
-            )
-            with urlopen(req, timeout=TIMEOUT_SECS) as response:
-                resp_data = json.loads(response.read().decode("utf-8"))
-            break
-        except (TimeoutError, URLError) as e:
-            # Transport/timeout = infrastructure failure. Retry once, then give up.
-            if attempt < MAX_ATTEMPTS:
-                logger.warning(
-                    f"Agent {agent_config.name} transport error (attempt "
-                    f"{attempt}/{MAX_ATTEMPTS}), retrying: {e}"
-                )
-                continue
-            logger.warning(f"Agent {agent_config.name} unreachable after {MAX_ATTEMPTS} attempts: {e}")
-            return None
-        except json.JSONDecodeError as e:
-            logger.warning(f"Agent {agent_config.name} non-JSON response body: {e}")
-            return None
+    try:
+        req = Request(
+            api_url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        with urlopen(req, timeout=TIMEOUT_SECS) as response:
+            resp_data = json.loads(response.read().decode("utf-8"))
+    except (URLError, json.JSONDecodeError, TimeoutError) as e:
+        logger.error(f"Agent {agent_config.name} API error: {e}")
+        return None
 
     try:
-        content = _extract_text(resp_data)
+        # Reasoning models (DeepSeek V4 via the proxy) prepend a `thinking`
+        # block to the content array — select text blocks, not content[0].
+        blocks = resp_data.get("content") or []
+        content = "".join(
+            b.get("text", "") for b in blocks
+            if isinstance(b, dict) and b.get("type", "text") == "text"
+        )
         if not content:
-            # Empty body is an infrastructure/provider symptom, not a code finding.
-            # Log the raw response shape so the failure mode is diagnosable in CI.
-            logger.warning(
-                f"Agent {agent_config.name} empty response — keys={sorted(resp_data.keys()) if isinstance(resp_data, dict) else type(resp_data).__name__}"
-            )
+            logger.error(f"Agent {agent_config.name} empty response")
             return None
 
         # Strip markdown fences
-        content = re.sub(r"^```json\n?", "", content)
+        content = content.strip()
+        content = re.sub(r"^```(?:json)?\n?", "", content)
         content = re.sub(r"\n?```$", "", content)
 
-        parsed = json.loads(content)
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
+            # OSS models sometimes wrap the JSON in prose — extract the first
+            # top-level array or object instead of failing the agent outright.
+            m = re.search(r"\[[\s\S]*\]|\{[\s\S]*\}", content)
+            if not m:
+                raise
+            parsed = json.loads(m.group(0))
 
         # Normalise to {source, findings:[...]} contract expected by run-judge.py
         if isinstance(parsed, list):
@@ -354,16 +320,9 @@ def run_broad_agents(
     if results:
         logger.info(f"[broad-agents] completed {len(results)}/{len(agents_to_run)} agents")
         return 0
-    # Degrade gracefully: every agent returning nothing is almost always an
-    # infrastructure symptom (provider timeout / empty body), not a clean review.
-    # Broad Agents is a NON-REQUIRED check — surface a warning instead of a red X
-    # that would otherwise add noise without blocking merge. Genuine misconfiguration
-    # (missing manifest/diff) still returns 1 above.
-    logger.warning(
-        "[broad-agents] no findings from any agent — treating as infrastructure "
-        "degradation (non-required check), exiting 0"
-    )
-    return 0
+    else:
+        logger.warning("[broad-agents] no findings generated")
+        return 1
 
 
 def main():

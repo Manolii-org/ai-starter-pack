@@ -87,7 +87,6 @@ _prompt_key() {
   ask "$label (press Enter to skip):" "$var_name"
 }
 
-_prompt_key ANTHROPIC_KEY   "ANTHROPIC_API_KEY  (required for tier-0-opus/sonnet passthrough)" ANTHROPIC_API_KEY
 _prompt_key FIREWORKS_KEY   "FIREWORKS_API_KEY  (tier-1-fast, tier-0-oss-heavy)"               FIREWORKS_API_KEY
 _prompt_key TOGETHER_KEY    "TOGETHER_API_KEY   (tier-2-agentic — Kimi K2.6, sonnet alias)"    TOGETHER_API_KEY
 _prompt_key GROQ_KEY        "GROQ_API_KEY       (tier-4-extract, tier-5-latency)"              GROQ_API_KEY
@@ -111,14 +110,14 @@ else
   ok "Fly app '$APP_NAME' already exists"
 fi
 
-# Generate LITELLM_MASTER_KEY
+# Generate LITELLM_MASTER_KEY (local run). For CI/shared use, store this in
+# Doppler litellm/prd so clients send the same key.
 LITELLM_MASTER_KEY="$(openssl rand -hex 24)"
 ok "Generated LITELLM_MASTER_KEY"
 
 # Push secrets (only non-empty keys)
 log "Pushing secrets to Fly..."
 SECRETS_ARGS=("LITELLM_MASTER_KEY=$LITELLM_MASTER_KEY")
-[ -n "$ANTHROPIC_KEY"   ] && SECRETS_ARGS+=("ANTHROPIC_API_KEY=$ANTHROPIC_KEY")
 [ -n "$FIREWORKS_KEY"   ] && SECRETS_ARGS+=("FIREWORKS_API_KEY=$FIREWORKS_KEY")
 [ -n "$TOGETHER_KEY"    ] && SECRETS_ARGS+=("TOGETHER_API_KEY=$TOGETHER_KEY")
 [ -n "$GROQ_KEY"        ] && SECRETS_ARGS+=("GROQ_API_KEY=$GROQ_KEY")
@@ -128,13 +127,9 @@ SECRETS_ARGS=("LITELLM_MASTER_KEY=$LITELLM_MASTER_KEY")
 printf '%s\n' "${SECRETS_ARGS[@]}" | flyctl secrets import --app "$APP_NAME"
 ok "Secrets pushed"
 
-# Deploy — no custom image: the pinned public image in fly.toml [build] is used
-# as-is; config.yaml and the guardrail are injected via [[files]] local_path
-# (resolved against the fly.toml directory). Deploying from the proxy dir lets
-# flyctl auto-discover fly.toml.
-log "Deploying proxy (public image + injected config; this may take ~2 minutes)..."
-( cd "$PROXY_DIR" && flyctl deploy --app "$APP_NAME" 2>&1 | tail -5 ) \
-  || fail "Deploy failed — run 'flyctl deploy' from $PROXY_DIR to see full output."
+# Deploy
+log "Deploying proxy image (this may take ~2 minutes)..."
+( cd "$PROXY_DIR" && flyctl deploy --app "$APP_NAME" --remote-only ) 2>&1 | tail -5
 ok "Deployed"
 
 # ── 5. Health check ───────────────────────────────────────────────────────────
@@ -157,12 +152,21 @@ echo "Smoke testing active tiers..."
 
 _smoke_test() {
   local tier="$1"
+  # Reasoning models (DeepSeek V4 on sonnet/haiku) spend thinking tokens from
+  # the max_tokens budget before emitting text — 5 tokens produces an empty
+  # completion and a false FAIL. 128 covers thinking + a short reply while
+  # keeping the smoke cheap. Success also requires non-empty message content.
+  local max_tokens="${2:-128}"
   local result
   result=$(curl -sf -X POST "$PROXY_URL/v1/chat/completions" \
     -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
     -H "Content-Type: application/json" \
-    -d "{\"model\":\"$tier\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":5}" \
-    2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print('OK' if d.get('choices') else 'FAIL')" 2>/dev/null || echo "UNREACHABLE")
+    -d "{\"model\":\"$tier\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":$max_tokens}" \
+    2>/dev/null | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+c = (d.get('choices') or [{}])[0].get('message', {}).get('content') or ''
+print('OK' if c.strip() else 'FAIL')" 2>/dev/null || echo "UNREACHABLE")
   if [ "$result" = "OK" ]; then
     ok "$tier"
   else
@@ -175,7 +179,10 @@ _smoke_test() {
 [ -n "$OPENROUTER_KEY" ] && _smoke_test "tier-3-tool"
 [ -n "$GROQ_KEY"       ] && _smoke_test "tier-4-extract"
 [ -n "$GROQ_KEY"       ] && _smoke_test "tier-5-latency"
-[ -n "$TOGETHER_KEY"   ] && _smoke_test "sonnet"
+# sonnet is Fireworks-primary (DeepSeek V4 Pro) with a mandatory Groq advisor;
+# Together is only an optional fallback hop — gate on the keys the path needs.
+[ -n "$FIREWORKS_KEY" ] && [ -n "$GROQ_KEY" ] && _smoke_test "sonnet"
+[ -n "$FIREWORKS_KEY" ] && _smoke_test "haiku"
 
 # ── 7. Update model-routing.json ─────────────────────────────────────────────
 echo ""
