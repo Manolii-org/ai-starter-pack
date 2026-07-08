@@ -89,7 +89,7 @@
       "data_sensitivity_max": "internal",
       "cost_per_m_input": 0.14,
       "cost_per_m_output": 0.28,
-      "notes": "Reasoning model: emits chain-of-thought before its (often JSON) answer, so callers MUST set max_tokens >= ~1500 (strict-JSON callers >= 2000, parsed defensively) or output truncates before content and choices[0].message.content is empty. Single-model alias, NO fallback by design — the use case depends on this model's output shape and a non-reasoning fallback would change semantics; callers handle errors defensively. PRC-origin weights on US infra, eligible at the internal ceiling under the relaxed-origin OSS policy. Verify the Fireworks serverless id with a smoke test before relying.",
+      "notes": "Reasoning model: emits chain-of-thought before its (often JSON) answer, so callers MUST set max_tokens >= ~1500 (strict-JSON callers >= 2000, parsed defensively) or output truncates before content and choices[0].message.content is empty. Single-model alias, NO fallback by design \u2014 the use case depends on this model's output shape and a non-reasoning fallback would change semantics; callers handle errors defensively. PRC-origin weights on US infra, eligible at the internal ceiling under the relaxed-origin OSS policy. Verify the Fireworks serverless id with a smoke test before relying.",
       "fallback_chain": {},
       "vision": {
         "supported": false,
@@ -569,7 +569,7 @@
           "litellm_alias": "tier-3-tool-us",
           "model_id_hint": "google/gemma-4-31b-it",
           "smoke_tested": null,
-          "notes": "Repointed 2026-06-19 from Together (revoked Gemma 4 31B serverless, HTTP 400 ~2026-04-25) to OpenRouter, which serves Gemma 4 31B IT live across its provider mesh — same Google DeepMind US-origin weights, preserving the vision capability (mmmu_pro 0.58). Mirrors tier-vision's 2026-05-03 OpenRouter repoint. smoke_tested stays null pending the 3-day restricted_us_oss_ok shadow (see .ai/assessments/tier-3-tool-us-gemma-openrouter-2026-06-19.md).",
+          "notes": "Repointed 2026-06-19 from Together (revoked Gemma 4 31B serverless, HTTP 400 ~2026-04-25) to OpenRouter, which serves Gemma 4 31B IT live across its provider mesh \u2014 same Google DeepMind US-origin weights, preserving the vision capability (mmmu_pro 0.58). Mirrors tier-vision's 2026-05-03 OpenRouter repoint. smoke_tested stays null pending the 3-day restricted_us_oss_ok shadow (see .ai/assessments/tier-3-tool-us-gemma-openrouter-2026-06-19.md).",
           "vision": {
             "supported": true,
             "modalities": [
@@ -592,7 +592,7 @@
           "model_id_hint": "accounts/fireworks/models/gpt-oss-20b",
           "cost_per_m_input": 0.075,
           "cost_per_m_output": 0.3,
-          "notes": "GPT-OSS-120B (OpenAI US-origin). Cross-provider from Together primary.",
+          "notes": "GPT-OSS-20B (OpenAI US-origin). Cross-provider from the OpenRouter primary.",
           "vision": {
             "supported": false,
             "modalities": [
@@ -1862,10 +1862,10 @@
       "resolves_to": "fireworks:accounts/fireworks/models/deepseek-v4-flash",
       "model_id": "accounts/fireworks/models/deepseek-v4-flash",
       "litellm_alias": "tier-review",
-      "label": "Reasoning review (DeepSeek V4 Flash, Fireworks) — editorial / structured-output / code-review",
+      "label": "Reasoning review (DeepSeek V4 Flash, Fireworks) \u2014 editorial / structured-output / code-review",
       "data_sensitivity_max": "internal",
       "requires_proxy": true,
-      "notes": "Reasoning-model review tier for editorial / structured-output / code-review tasks. Emits chain-of-thought before the answer — smoke tests must budget max_tokens >= ~1500 (see scripts/check-oss-routing.py TIER_MAX_TOKENS). Added 2026-06-18.",
+      "notes": "Reasoning-model review tier for editorial / structured-output / code-review tasks. Emits chain-of-thought before the answer \u2014 smoke tests must budget max_tokens >= ~1500 (see scripts/check-oss-routing.py TIER_MAX_TOKENS). Added 2026-06-18.",
       "vision": {
         "supported": false,
         "modalities": [
@@ -2051,7 +2051,7 @@
         "fail_closed": true,
         "reviewer_model": "groq/llama-3.3-70b-versatile",
         "callback_class": "sonnet_advisor_guardrail.SonnetAdvisorGuardrail",
-        "deploy_note": "Custom Python callback deployed to the LiteLLM proxy container. See deploy/litellm-proxy/sonnet_advisor_guardrail.py. Reviewer switched to Groq Llama 3.3 70B (Meta US-origin) 2026-05-15 — eliminates provider-concentration risk from the Together-primary sonnet path."
+        "deploy_note": "Custom Python callback deployed to the LiteLLM proxy container. See deploy/litellm-proxy/sonnet_advisor_guardrail.py. Reviewer switched to Groq Llama 3.3 70B (Meta US-origin) 2026-05-15 \u2014 eliminates provider-concentration risk from the Together-primary sonnet path."
       },
       "fallback_chain": {
         "primary": {
@@ -2096,7 +2096,9 @@
         "modalities": [
           "text"
         ]
-      }
+      },
+      "cost_per_m_input": 1.74,
+      "cost_per_m_output": 3.48
     },
     "sonnet-internal": {
       "label": "sonnet-internal (internal-only, Kimi K2.6 Fireworks dual-key)",

@@ -61,7 +61,7 @@ def should_scan_file(path: Path, pack_root: Path) -> bool:
         return False
     if any(part in SKIP_DIRS for part in rel_parts):
         return False
-    return path.suffix.lower() in {'.md', '.py', '.sh', '.json', '.yml', '.yaml'}
+    return path.is_file() and path.suffix.lower() in {'.md', '.py', '.sh', '.json', '.yml', '.yaml'}
 
 
 # Leak detectors legitimately contain the marker list they search for — scanning
@@ -185,7 +185,7 @@ def check_readme_counts(pack_root: Path) -> list[CheckResult]:
     if not readme_path.exists():
         return [CheckResult('WARN', 'README-COUNTS', 'README-STARTER-PACK.md not found')]
 
-    with open(readme_path, 'r') as f:
+    with open(readme_path, 'r', encoding='utf-8', errors='ignore') as f:
         content = f.read()
 
     # Look for "(N files)" near "Agents"
@@ -351,8 +351,12 @@ def check_agent_models(pack_root: Path) -> list[CheckResult]:
             ))
             continue
 
+        if not isinstance(frontmatter, dict):
+            results.append(CheckResult('WARN', 'AGENT-MODEL', f'{agent_file.name} — YAML frontmatter is not a mapping'))
+            continue
+
         # Check for opus
-        model = frontmatter.get('model', '')
+        model = str(frontmatter.get('model') or '')
         if 'opus' in model.lower():
             results.append(CheckResult(
                 status='FAIL',

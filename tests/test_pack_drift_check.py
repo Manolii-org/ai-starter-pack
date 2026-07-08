@@ -163,6 +163,7 @@ class TestPackDriftScanOrgLeak(unittest.TestCase):
             self.assertEqual(len(fail_results), 0)
 
 
+@unittest.skipIf(pack_drift_check.yaml is None, "PyYAML unavailable")
 class TestFeatureExcludesCopier(unittest.TestCase):
     """Test check_feature_excludes() with Copier conditionals."""
 
@@ -278,6 +279,32 @@ class TestPackDriftIntegration(unittest.TestCase):
             results = pack_drift_check.scan_org_leak(pack_root)
             fail_results = [r for r in results if r.status == "FAIL"]
             self.assertGreater(len(fail_results), 0)
+
+
+    def test_agent_model_handles_empty_and_null_frontmatter(self):
+        """AGENT-MODEL should warn, not crash, on malformed frontmatter shapes."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pack_root = Path(tmpdir)
+            agents = pack_root / ".claude" / "agents"
+            agents.mkdir(parents=True)
+            (agents / "empty.md").write_text("---\n\n---\n# Empty\n", encoding="utf-8")
+            (agents / "null-model.md").write_text("---\nmodel:\n---\n# Null model\n", encoding="utf-8")
+
+            results = pack_drift_check.check_agent_models(pack_root)
+            self.assertTrue(any(r.status == "WARN" and "frontmatter" in r.detail for r in results))
+            self.assertFalse(any(r.status == "FAIL" for r in results))
+
+    def test_readme_counts_reports_mismatch(self):
+        """README-COUNTS should compare README count to agent files."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pack_root = Path(tmpdir)
+            agents = pack_root / ".claude" / "agents"
+            agents.mkdir(parents=True)
+            (pack_root / "README-STARTER-PACK.md").write_text("**Agents** (2 files)\n", encoding="utf-8")
+            (agents / "one.md").write_text("---\nmodel: haiku\n---\n# One\n", encoding="utf-8")
+
+            results = pack_drift_check.check_readme_counts(pack_root)
+            self.assertTrue(any(r.status == "WARN" for r in results))
 
 
 if __name__ == "__main__":

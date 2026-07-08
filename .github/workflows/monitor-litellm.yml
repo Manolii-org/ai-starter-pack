@@ -84,7 +84,7 @@ jobs:
           done
 
       - name: Layer 2 - sonnet advisor path
-        if: env.HEALTH_OK != 'skipped'
+        if: env.HEALTH_OK == 'true'
         continue-on-error: true
         env:
           LITELLM_MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY }}

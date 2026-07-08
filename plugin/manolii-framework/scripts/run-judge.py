@@ -595,11 +595,17 @@ def main() -> int:
         default=os.environ.get("GITHUB_REPOSITORY", ""),
         help="GitHub repo in owner/name format (defaults to GITHUB_REPOSITORY env)",
     )
+    parser.add_argument(
+        "--sha",
+        default=os.environ.get("GITHUB_SHA", ""),
+        help="Head SHA for duplicate-review detection (defaults to GITHUB_SHA env; required)",
+    )
 
     args = parser.parse_args()
 
-    # SHA comes from the environment — it's set by GitHub Actions as GITHUB_SHA
-    sha = os.environ.get("GITHUB_SHA", "")
+    sha = args.sha.strip()
+    if not sha:
+        parser.error("--sha or GITHUB_SHA is required for duplicate-review detection")
 
     # --repo overrides GITHUB_REPOSITORY env so the workflow can pass it explicitly
     if args.repo:

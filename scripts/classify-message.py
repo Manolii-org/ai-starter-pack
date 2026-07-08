@@ -106,11 +106,20 @@ def _load_routing_config():
     _PROXY_INTERCEPT_RATES_DEFAULT = {}
 
     try:
-        config_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            ".claude", "model-routing.json"
-        )
-        with open(config_path) as f:
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        candidates = []
+        plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT")
+        project_root = os.environ.get("CLAUDE_PROJECT_DIR")
+        if project_root:
+            candidates.append(os.path.join(project_root, ".claude", "model-routing.json"))
+        if plugin_root:
+            candidates.append(os.path.join(plugin_root, "data", "model-routing.json"))
+        candidates.extend([
+            os.path.join(root, ".claude", "model-routing.json"),
+            os.path.join(root, "data", "model-routing.json"),
+        ])
+        config_path = next((c for c in candidates if os.path.exists(c)), candidates[-1])
+        with open(config_path, encoding="utf-8") as f:
             cfg = json.load(f)
 
         overrides = cfg.get("overrides", {})

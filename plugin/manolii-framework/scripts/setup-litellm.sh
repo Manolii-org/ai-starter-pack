@@ -129,7 +129,7 @@ ok "Secrets pushed"
 
 # Deploy
 log "Deploying proxy image (this may take ~2 minutes)..."
-( cd "$PROXY_DIR" && flyctl deploy --app "$APP_NAME" --remote-only ) 2>&1 | tail -5
+( cd "$PROXY_DIR" && set -o pipefail && flyctl deploy --app "$APP_NAME" --remote-only 2>&1 | tail -5 )
 ok "Deployed"
 
 # ── 5. Health check ───────────────────────────────────────────────────────────
