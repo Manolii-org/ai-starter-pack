@@ -35,7 +35,6 @@ import base64
 import json
 import math
 import os
-import re
 import sys
 import time
 import urllib.error
@@ -63,7 +62,15 @@ def _urlopen(
         )
     return urllib.request.urlopen(req, timeout=timeout)  # nosec B310
 
-# ── Tier definitions (must match .claude/model-routing.json tier_definitions) ─
+# ── Expected-live tier aliases ───────────────────────────────────────────────
+# Deliberately a HARDCODED, curated subset of the tiers actually deployed in
+# deploy/litellm-proxy/config.yaml — intentionally NOT derived from
+# .claude/model-routing.json tier_definitions. tier_definitions also holds
+# registry-only / not-yet-deployed entries (e.g. tier-vision, tier-3-tool-us);
+# deriving this list from it would make check_model_drift() report those as
+# MISSING on a correctly-deployed proxy. Keep in sync with config.yaml's
+# model_list when a tier is genuinely added to / removed from the deployment.
+# (Fallback aliases ARE supplemented dynamically — see load_fallback_aliases.)
 TIERS: list[str] = [
     "claude-haiku-4-5-20251001",  # intercept → DeepSeek V4 Flash on OpenRouter (tier-1-fast)
     "tier-0-oss-heavy",            # Kimi K2.6 on Fireworks
@@ -182,11 +189,8 @@ _HARDCODED_FALLBACKS: list[str] = [
     # tier-3-tool-us fallbacks (v5.5.6 — all-US-origin chain; corrected gptoss20b→gptoss120b)
     "tier-3-tool-us-fallback-gptoss120b",
     "tier-3-tool-us-fallback-llama8b",
-    # sonnet fallback chain (2026-07-07: DeepSeek V4 Pro migration — Together same-model
-    # first hop, then the US-origin hops. Replaced sonnet-fallback-kimi-together.)
-    "sonnet-fallback-deepseek-together",
-    "sonnet-us-fallback-gptoss120b",
-    "sonnet-us-fallback-llama8b",
+    # sonnet fallback chain (v2.11: was sonnet-fallback-openrouter-gemma4; renamed 2026-05-17 to Kimi K2.6)
+    "sonnet-fallback-kimi-together",
     # tier-4-extract-fallback-gemma: alias retained; now routes Llama 3.3 70B
     # on Together (OpenRouter dropped Gemma 4 31B serverless 2026-04-25)
     "tier-4-extract-fallback-gemma",
@@ -224,44 +228,18 @@ def load_fallback_aliases() -> list[str]:
 
     try:
         config = json.loads(config_path.read_text())
-        # Walk fallback chains in BOTH tier_definitions and
-        # proxy_intercepted_models — the sonnet/haiku alias chains live in the
-        # latter, and reading only tiers let their fallback hops go unprobed
-        # (Codex review on the DeepSeek V4 migration, 2026-07-07).
-        for section in ("tier_definitions", "proxy_intercepted_models"):
-            for _name, entry_def in config.get(section, {}).items():
-                if _name.startswith("$") or not isinstance(entry_def, dict):
-                    continue
-                chain = entry_def.get("fallback_chain", {})
-                # Read all named hop positions — quaternary added for tier-4-extract
-                # which gained a Together cross-provider entry in v2.5. `primary`
-                # is deliberately excluded: it is the tier/alias itself, probed
-                # by the main tier smoke, not a fallback-only deployment.
-                for position in ("secondary", "tertiary", "quaternary"):
-                    hop = chain.get(position, {})
-                    alias = hop.get("litellm_alias", "") if isinstance(hop, dict) else ""
-                    if alias and alias not in aliases:
-                        aliases.append(alias)
-
-        # Filter to aliases the proxy actually serves: model-routing.json chains
-        # can reference hops this instance's deploy config never defined (e.g.
-        # sonnet-internal-* inherited from the canonical pack), and the drift
-        # check treats every returned alias as expected-live. Skip the filter
-        # when the deploy config is unreadable — better to over-probe than to
-        # silently probe nothing.
-        deploy_config = root / "deploy" / "litellm-proxy" / "config.yaml"
-        if deploy_config.exists():
-            served = set(
-                re.findall(r"^\s*-\s*model_name:\s*(\S+)", deploy_config.read_text(), re.M)
-            )
-            if served:
-                dropped = [a for a in aliases if a not in served]
-                if dropped:
-                    print(
-                        f"  NOTE: skipping fallback aliases not in deploy config: {', '.join(dropped)}",
-                        file=sys.stderr,
-                    )
-                aliases = [a for a in aliases if a in served]
+        tier_defs = config.get("tier_definitions", {})
+        for _tier_name, tier_def in tier_defs.items():
+            if _tier_name.startswith("$") or not isinstance(tier_def, dict):
+                continue
+            chain = tier_def.get("fallback_chain", {})
+            # Read all named hop positions — quaternary added for tier-4-extract
+            # which gained a Together cross-provider entry in v2.5.
+            for position in ("secondary", "tertiary", "quaternary"):
+                entry = chain.get(position, {})
+                alias = entry.get("litellm_alias", "")
+                if alias and alias not in aliases:
+                    aliases.append(alias)
 
         return list(dict.fromkeys(aliases))  # deduplicate, preserve order
     except Exception as exc:
@@ -346,17 +324,11 @@ def _latency_threshold(alias: str) -> dict[str, int]:
 def _fetch_from_doppler(
     token: str, keys: list[str], project: str = "master", config: str = "prd"
 ) -> dict[str, str]:
-    """Read secrets from Doppler using a project service token or workspace token.
-
-    Service tokens (dp.st.*) are pre-scoped to one project/config; Doppler
-    rejects requests that name a project explicitly ("This token does not have
-    access to requested project ..."), so the params must be omitted for them.
-    """
+    """Read secrets from Doppler using a project service token or workspace token."""
     key_csv = ",".join(keys)
-    scope = "" if token.startswith("dp.st.") else f"&project={project}&config={config}"
     url = (
         f"https://api.doppler.com/v3/configs/config/secrets/download"
-        f"?format=json{scope}&keys={key_csv}"
+        f"?format=json&project={project}&config={config}&keys={key_csv}"
     )
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
     try:
@@ -405,35 +377,11 @@ def resolve_credentials(
         # Step 1: Fetch proxy creds + workspace token from primary Doppler project.
         proxy_keys: list[str] = ["DOPPLER_TOKEN", "DOPPLER_PERSONAL"]
         if needs_proxy:
-            proxy_keys += [
-                "LITELLM_PROXY_URL",
-                "LITELLM_MASTER_KEY",
-                "DOPPLER_SERVICE_TOKEN_LITELLM",
-            ]
+            proxy_keys += ["LITELLM_PROXY_URL", "LITELLM_MASTER_KEY"]
         master_secrets = _fetch_from_doppler(doppler_token, proxy_keys)
         proxy_url = proxy_url or master_secrets.get("LITELLM_PROXY_URL", "")
         api_key = api_key or master_secrets.get("LITELLM_MASTER_KEY", "")
         ws_token = master_secrets.get("DOPPLER_TOKEN") or master_secrets.get("DOPPLER_PERSONAL", "")
-
-        # Step 1b: Proxy creds live in litellm/prd, not master/prd (CLAUDE.md
-        # Secrets Architecture). If step 1 didn't find them, hop via the
-        # litellm service token held in master/prd.
-        if needs_proxy and (not proxy_url or not api_key):
-            svc_token = master_secrets.get("DOPPLER_SERVICE_TOKEN_LITELLM", "")
-            if svc_token:
-                try:
-                    litellm_secrets = _fetch_from_doppler(
-                        svc_token,
-                        ["LITELLM_PROXY_URL", "LITELLM_MASTER_KEY"],
-                        project="litellm",
-                    )
-                    proxy_url = proxy_url or litellm_secrets.get("LITELLM_PROXY_URL", "")
-                    api_key = api_key or litellm_secrets.get("LITELLM_MASTER_KEY", "")
-                except Exception as exc:
-                    print(
-                        f"  WARN: Failed to fetch proxy creds from litellm/prd: {exc}",
-                        file=sys.stderr,
-                    )
 
         # Step 2: Optionally fetch Langfuse from a configured Doppler project.
         langfuse_doppler_project = os.environ.get("LANGFUSE_DOPPLER_PROJECT", "")
@@ -559,6 +507,13 @@ def check_health(proxy_url: str) -> dict[str, Any]:
 
 
 def check_tier(proxy_url: str, api_key: str, alias: str) -> dict[str, Any]:
+    """Smoke-test one tier alias via a minimal chat completion.
+
+    Applies per-tier overrides so reasoning tiers (e.g. tier-review) get enough
+    output budget (TIER_MAX_TOKENS) and a socket timeout above the proxy's own
+    request_timeout (TIER_REQUEST_TIMEOUT), instead of false-failing on
+    truncation or a healthy-but-slow response.
+    """
     return _chat_messages(
         proxy_url,
         api_key,
@@ -576,6 +531,7 @@ def _chat_messages(
     prompt: str,
     *,
     max_tokens: int = MAX_TOKENS,
+    timeout: int = REQUEST_TIMEOUT,
     extra_headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     payload = json.dumps({
@@ -599,7 +555,7 @@ def _chat_messages(
     )
     t0 = time.monotonic()
     try:
-        resp = _urlopen(req, timeout=REQUEST_TIMEOUT)
+        resp = _urlopen(req, timeout=timeout)
         resp_data = resp.read()
         elapsed_ms = int((time.monotonic() - t0) * 1000)
         body = json.loads(resp_data)
@@ -800,10 +756,9 @@ def check_stream_timeout(
     ok = read_error is None
     if ok and max_gap_ms >= fail_ms:
         ok = False
-        # lgtm [py/clear-text-logging-sensitive-data] diagnostic message only; no secret values are logged.
         warning = (
-            f"{alias}: max inter-chunk gap {max_gap_ms}ms is ≥50% of "  # codeql[py/clear-text-logging-sensitive-data]
-            f"stream_timeout ({stream_timeout_s}s) — violates the 2× headroom rule. "  # codeql[py/clear-text-logging-sensitive-data]
+            f"{alias}: max inter-chunk gap {max_gap_ms}ms is ≥50% of "
+            f"stream_timeout ({stream_timeout_s}s) — violates the 2× headroom rule. "
             f"Increase stream_timeout in config.yaml and redeploy."
         )
     elif ok and max_gap_ms >= warn_ms:
@@ -1147,21 +1102,18 @@ def main() -> int:
     parser.add_argument(
         "--langfuse-strict",
         action="store_true",
-        # lgtm [py/clear-text-logging-sensitive-data] diagnostic message only; no secret values are logged.
-        help="Treat Langfuse errors or 0 traces as hard failures (exit 1)",  # codeql[py/clear-text-logging-sensitive-data]
+        help="Treat Langfuse errors or 0 traces as hard failures (exit 1)",
     )
     parser.add_argument(
         "--check-drift",
         action="store_true",
-        # lgtm [py/clear-text-logging-sensitive-data] diagnostic message only; no secret values are logged.
-        help="Compare live proxy model list against expected TIERS + fallbacks; fail on mismatch",  # codeql[py/clear-text-logging-sensitive-data]
+        help="Compare live proxy model list against expected TIERS + fallbacks; fail on mismatch",
     )
     parser.add_argument(
         "--check-cache-affinity",
-        # lgtm [py/clear-text-logging-sensitive-data] diagnostic message only; no secret values are logged.
         action="store_true",
         help=(
-            "Run a two-turn tier-2-agentic probe with x-session-affinity and compare "  # codeql[py/clear-text-logging-sensitive-data]
+            "Run a two-turn tier-2-agentic probe with x-session-affinity and compare "
             "latencies (advisory — warns when turn2 is not faster, never fails exit code)"
         ),
     )
@@ -1333,9 +1285,8 @@ def main() -> int:
         langfuse_result = check_langfuse_traces(lf_pk, lf_sk, lf_host, args.lookback)
     elif not args.skip_langfuse and not (lf_pk and lf_sk):
         if not args.json_output:
-        # lgtm [py/clear-text-logging-sensitive-data] diagnostic message only; no secret values are logged.
             print(
-                "  Langfuse: SKIP — required Langfuse environment variables are not set",
+                "  Langfuse: SKIP — no credentials (set LANGFUSE_PUBLIC_KEY + LANGFUSE_SECRET_KEY)",
                 file=sys.stderr,
             )
 
@@ -1349,12 +1300,10 @@ def main() -> int:
             status = "OK" if telemetry_result["ok"] else "FAIL"
             total = telemetry_result["total"]
             unknown_pct = f"{telemetry_result['unknown_rate']:.0%}"
-        # lgtm [py/clear-text-logging-sensitive-data] diagnostic message only; no secret values are logged.
-            print(f" {status} ({total} dispatches, {unknown_pct} unknown-tier)", file=sys.stderr)  # codeql[py/clear-text-logging-sensitive-data]
+            print(f" {status} ({total} dispatches, {unknown_pct} unknown-tier)", file=sys.stderr)
             if not telemetry_result["ok"]:
                 for err in telemetry_result["errors"]:
-        # lgtm [py/clear-text-logging-sensitive-data] diagnostic message only; no secret values are logged.
-                    print(f"    FAIL: {err}", file=sys.stderr)  # codeql[py/clear-text-logging-sensitive-data]
+                    print(f"    FAIL: {err}", file=sys.stderr)
 
     # Cache affinity probe (advisory)
     cache_affinity_result: dict | None = None
