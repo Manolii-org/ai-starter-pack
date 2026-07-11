@@ -3,6 +3,7 @@ name: test-adequacy
 version: 2.0.0
 description: "Flags functions in src/ or scripts/ that were changed, have observable side effects, and have no corresponding test file updated in the same PR."
 type: skill
+disable-model-invocation: true  # slash/CI-invoked checklist — removed from model-facing catalogue to cut per-session tokens (2026-07-06); delete this line to restore auto-invocation
 model: haiku
 advisor_model: claude-sonnet-4-6
 data_sensitivity: internal

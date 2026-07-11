@@ -3,6 +3,7 @@ name: scope-adherence
 version: 1.0.0
 description: "Checks if a PR diff stays within the stated scope. Flags files modified that appear unrelated to the PR title/description, and new abstractions with only one call site."
 type: skill
+disable-model-invocation: true  # slash/CI-invoked checklist — removed from model-facing catalogue to cut per-session tokens (2026-07-06); delete this line to restore auto-invocation
 model: haiku
 data_sensitivity: internal
 safety_tier: green

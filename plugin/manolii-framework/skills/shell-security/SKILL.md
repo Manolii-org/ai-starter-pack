@@ -3,6 +3,7 @@ name: shell-security
 version: 2.0.0
 description: "Checks shell script diffs for missing timeouts, secret-passing anti-patterns, missing errexit guards, and soft-fail dependency checks."
 type: skill
+disable-model-invocation: true  # slash/CI-invoked checklist — removed from model-facing catalogue to cut per-session tokens (2026-07-06); delete this line to restore auto-invocation
 model: haiku
 advisor_model: claude-sonnet-4-6
 data_sensitivity: internal
