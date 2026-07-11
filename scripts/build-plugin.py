@@ -257,9 +257,11 @@ def read_om_plugin_version() -> str:
     manifest = REPO / "plugin" / OM_PLUGIN_NAME / ".claude-plugin" / "plugin.json"
     if manifest.is_file():
         try:
-            v = json.loads(manifest.read_text()).get("version")
-            if v:
-                return v
+            data = json.loads(manifest.read_text())
+            if isinstance(data, dict):
+                v = data.get("version")
+                if v:
+                    return v
         except (json.JSONDecodeError, OSError):
             pass
     return "0.1.0"
@@ -307,6 +309,18 @@ def assemble_om_plugin(rendered: Path, out: Path) -> dict:
     if readme_src.is_file():
         shutil.copy2(readme_src, out / "README.md")
 
+    # Optional vendored contracts mirror — see plugin-sources/manolii-om/README.md.
+    # Currently unpopulated; when a future build ships offline schemas, drop them
+    # under plugin-sources/manolii-om/contracts-mirror/ with a SOURCE.md pinning
+    # the manolii-knowledge-layer commit. verify_om_plugin enforces the SOURCE.md
+    # invariant on the resulting bundle.
+    mirror_src = OM_SOURCE_DIR / "contracts-mirror"
+    if mirror_src.is_dir():
+        shutil.copytree(mirror_src, out / "contracts-mirror")
+        counts["contracts_mirror"] = sum(
+            1 for p in (out / "contracts-mirror").rglob("*") if p.is_file()
+        )
+
     manifest = {
         "name": OM_PLUGIN_NAME,
         "description": (
@@ -332,6 +346,9 @@ def verify_om_plugin(out: Path, counts: dict) -> None:
         sys.stderr.write("FAIL: manolii-om missing .claude-plugin/plugin.json\n")
         sys.exit(1)
     manifest = json.loads(manifest_path.read_text())
+    if not isinstance(manifest, dict):
+        sys.stderr.write("FAIL: manolii-om plugin.json is not a JSON object\n")
+        sys.exit(1)
     for key in ("name", "description", "version"):
         if not manifest.get(key):
             sys.stderr.write(f"FAIL: manolii-om plugin.json missing '{key}'\n")
