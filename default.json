@@ -1,6 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "description": "Renovate preset for repositories rendered from Manolii AI Starter Pack.",
+  "description": "Shareable Renovate preset for Manolii ecosystem consumers — extend with 'github>Manolii-org/ai-starter-pack'. Digest/pin rotations automerge on green CI (they carry no semver surface); every semver update stays a manually-reviewed PR. A consumer's own packageRules override these on conflict.",
   "extends": ["config:recommended"],
   "customManagers": [
     {
@@ -13,11 +13,22 @@
       "versioningTemplate": "semver"
     }
   ],
+  "timezone": "Europe/London",
+  "schedule": ["before 9am on monday"],
+  "labels": ["dependencies"],
+  "prConcurrentLimit": 10,
   "packageRules": [
     {
-      "matchPackageNames": ["Manolii-org/ai-starter-pack"],
-      "labels": ["starter-pack", "dependencies"],
-      "commitMessageTopic": "AI Starter Pack"
+      "description": "Automerge pure pin/digest rotations (action digests, docker digests, pin-dependencies) once required checks pass — no semver surface, reviewable content is nil. Everything semver-versioned still requires human review.",
+      "matchUpdateTypes": ["pin", "digest", "pinDigest"],
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": false
+    },
+    {
+      "description": "Never automerge anything with a version component.",
+      "matchUpdateTypes": ["major", "minor", "patch"],
+      "automerge": false
     }
   ]
 }
