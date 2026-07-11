@@ -19,7 +19,7 @@
   "prConcurrentLimit": 10,
   "packageRules": [
     {
-      "description": "Automerge pure pin/digest rotations (action digests, docker digests, pin-dependencies) once required checks pass — no semver surface, reviewable content is nil. Everything semver-versioned still requires human review.",
+      "description": "Automerge pure pin/digest rotations (action digests, docker digests, pin-dependencies) — no semver surface, reviewable content is nil. platformAutomerge stays OFF: in a consumer repo with no required status checks GitHub's native queue would merge before CI runs, whereas Renovate-managed automerge waits for branch tests to pass and (ignoreTests=false default) refuses to automerge when a repo has no tests at all. Everything semver-versioned still requires human review.",
       "matchUpdateTypes": ["pin", "digest", "pinDigest"],
       "automerge": true,
       "automergeType": "pr",
