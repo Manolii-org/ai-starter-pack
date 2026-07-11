@@ -3,6 +3,7 @@ name: migration-safety
 version: 2.0.0
 description: "Checks SQL migration diffs for NOT NULL without DEFAULT, missing IF EXISTS guards, irreversible DDL without down-migration, and missing transaction wrappers."
 type: skill
+disable-model-invocation: true  # slash/CI-invoked checklist — removed from model-facing catalogue to cut per-session tokens (2026-07-06); delete this line to restore auto-invocation
 model: haiku
 advisor_model: claude-sonnet-4-6
 data_sensitivity: internal
