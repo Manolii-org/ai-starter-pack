@@ -12,6 +12,7 @@ on:
       - ".claude/**"
       - "scripts/**"
       - "plugin/**"
+      - "plugin-sources/**"
       - "copier.yml"
       - "pack.manifest.yml"
       - ".claude-plugin/**"
@@ -21,6 +22,7 @@ on:
       - ".claude/**"
       - "scripts/**"
       - "plugin/**"
+      - "plugin-sources/**"
       - "copier.yml"
       - "pack.manifest.yml"
       - ".claude-plugin/**"
@@ -38,19 +40,31 @@ jobs:
       - name: Install build deps
         run: pip install --quiet copier jinja2
 
-      - name: Build plugin — verify() + hook-firing smoke test
+      - name: Build manolii-framework — verify() + hook-firing smoke test
         # build-plugin.py exits non-zero on: surviving Jinja, missing plugin.json,
         # a hooks.json command referencing a missing bundled file, hook-event drift
         # vs settings.json, an unbundled import-time dep, or any hook that fails to
         # fire / writes into the (read-only) plugin tree.
-        run: python3 scripts/build-plugin.py --out /tmp/plugin-fresh
+        run: python3 scripts/build-plugin.py --plugin manolii-framework --out /tmp/plugin-framework-fresh
 
-      - name: Drift check — committed artifact matches a fresh build
+      - name: Drift check — manolii-framework
         run: |
-          if diff -r -x '__pycache__' -x '*.pyc' plugin/manolii-framework /tmp/plugin-fresh; then
-            echo "OK: committed plugin/ matches a fresh build"
+          if diff -r -x '__pycache__' -x '*.pyc' plugin/manolii-framework /tmp/plugin-framework-fresh; then
+            echo "OK: committed plugin/manolii-framework matches a fresh build"
           else
-            echo "FAIL: committed plugin/ is stale — run 'python3 scripts/build-plugin.py' and commit the result"
+            echo "FAIL: committed plugin/manolii-framework is stale — run 'python3 scripts/build-plugin.py --plugin manolii-framework' and commit the result"
+            exit 1
+          fi
+
+      - name: Build manolii-om — verify()
+        run: python3 scripts/build-plugin.py --plugin manolii-om --out /tmp/plugin-om-fresh
+
+      - name: Drift check — manolii-om
+        run: |
+          if diff -r -x '__pycache__' -x '*.pyc' plugin/manolii-om /tmp/plugin-om-fresh; then
+            echo "OK: committed plugin/manolii-om matches a fresh build"
+          else
+            echo "FAIL: committed plugin/manolii-om is stale — run 'python3 scripts/build-plugin.py --plugin manolii-om' and commit the result"
             exit 1
           fi
 

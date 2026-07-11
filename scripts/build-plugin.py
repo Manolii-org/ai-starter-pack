@@ -36,6 +36,14 @@ REPO = Path(__file__).resolve().parent.parent
 PLUGIN_NAME = "manolii-framework"  # kebab-case (plugin name constraint)
 PLUGIN_COMPONENTS = ("agents", "commands", "skills")
 
+# manolii-om plugin — separate marketplace entry that ships OM skills, the eval
+# pack, and a reference to the KL contract validators. Sourced from
+# .claude/skills/om-*/SKILL.md (rendered with kl_integration=true) plus
+# plugin-sources/manolii-om/ (evals + plugin README, excluded from copier).
+OM_PLUGIN_NAME = "manolii-om"
+OM_SKILLS = ("om-fact-capture", "om-readiness", "om-staff-answer", "om-handover")
+OM_SOURCE_DIR = REPO / "plugin-sources" / OM_PLUGIN_NAME
+
 # Render with every feature flag ON so the plugin ships the COMPLETE framework
 # (28 agents / 47 commands / 23 skills). Whether a given agent/command actually
 # functions in a consumer repo depends on that instance's MCP/secrets at runtime;
@@ -82,7 +90,11 @@ def render_template(install_mode: str) -> Path:
 
 
 def assemble_plugin(rendered: Path, out: Path) -> dict:
-    """Assemble agents/commands/skills at the plugin root + write plugin.json."""
+    """Assemble agents/commands/skills at the plugin root + write plugin.json.
+
+    OM_SKILLS are ship-via-manolii-om-only: they exist in the rendered
+    .claude/skills (kl_integration=true) but must not be duplicated into the
+    framework plugin's skills/ directory."""
     if out.exists():
         shutil.rmtree(out)
     out.mkdir(parents=True)
@@ -95,6 +107,12 @@ def assemble_plugin(rendered: Path, out: Path) -> dict:
             continue
         shutil.copytree(s, out / comp)
         if comp == "skills":
+            # Drop OM skills — they ship via the manolii-om plugin (dual-run
+            # retirement policy §6 / plan B5).
+            for om in OM_SKILLS:
+                d = out / comp / om
+                if d.is_dir():
+                    shutil.rmtree(d)
             # Plugin skill discovery requires skills/<name>/SKILL.md; some canonical
             # skill dirs ship CLAUDE.md — promote those so the skill loads on install.
             for d in (out / comp).iterdir():
@@ -229,6 +247,118 @@ def assemble_data(rendered: Path, out: Path) -> dict:
         shutil.copy2(srcf, data / name)
         bundled += 1
     return {"data": bundled}
+
+
+def read_om_plugin_version() -> str:
+    """Read the manolii-om plugin's own version from the committed plugin.json
+    if present, else default to 0.1.0. The om plugin bumps independently of
+    pack.manifest.yml (it releases on its own cadence via v1.x pack tags but
+    tracks its skill/eval-pack sha)."""
+    manifest = REPO / "plugin" / OM_PLUGIN_NAME / ".claude-plugin" / "plugin.json"
+    if manifest.is_file():
+        try:
+            v = json.loads(manifest.read_text()).get("version")
+            if v:
+                return v
+        except (json.JSONDecodeError, OSError):
+            pass
+    return "0.1.0"
+
+
+def assemble_om_plugin(rendered: Path, out: Path) -> dict:
+    """Assemble the manolii-om plugin.
+
+    Layout:
+      out/.claude-plugin/plugin.json
+      out/README.md                — copied verbatim from plugin-sources
+      out/skills/om-*/SKILL.md     — 4 OM skills sourced from the render
+      out/evals/operational-memory/ — sourced from plugin-sources
+    """
+    if out.exists():
+        shutil.rmtree(out)
+    out.mkdir(parents=True)
+
+    counts: dict[str, int] = {}
+    skills_out = out / "skills"
+    skills_out.mkdir()
+    for name in OM_SKILLS:
+        src = rendered / ".claude" / "skills" / name / "SKILL.md"
+        if not src.is_file():
+            sys.stderr.write(
+                f"FAIL: OM skill source missing in render: .claude/skills/{name}/SKILL.md — "
+                "did copier render with kl_integration=true?\n")
+            sys.exit(1)
+        (skills_out / name).mkdir()
+        shutil.copy2(src, skills_out / name / "SKILL.md")
+    counts["skills"] = len(OM_SKILLS)
+
+    if not OM_SOURCE_DIR.is_dir():
+        sys.stderr.write(f"FAIL: OM plugin source dir missing: {OM_SOURCE_DIR}\n")
+        sys.exit(1)
+
+    evals_src = OM_SOURCE_DIR / "evals" / "operational-memory"
+    if not evals_src.is_dir():
+        sys.stderr.write(f"FAIL: OM eval pack missing: {evals_src}\n")
+        sys.exit(1)
+    shutil.copytree(evals_src, out / "evals" / "operational-memory")
+    counts["evals"] = sum(1 for _ in (out / "evals").rglob("*.json"))
+
+    readme_src = OM_SOURCE_DIR / "README.md"
+    if readme_src.is_file():
+        shutil.copy2(readme_src, out / "README.md")
+
+    manifest = {
+        "name": OM_PLUGIN_NAME,
+        "description": (
+            "Operational Memory skills for Claude Code — propose-only fact "
+            "capture, read-only readiness / staff-answer, and client "
+            "handover. Requires a Knowledge Layer MCP backend (contract "
+            "schemas live in manolii-knowledge-layer/contracts/operational-memory/)."
+        ),
+        "version": read_om_plugin_version(),
+        "author": {"name": "Manolii", "url": "https://github.com/manolii-org"},
+    }
+    (out / ".claude-plugin").mkdir()
+    (out / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps(manifest, indent=2) + "\n"
+    )
+    return counts
+
+
+def verify_om_plugin(out: Path, counts: dict) -> None:
+    """Structural checks on the manolii-om plugin artifact."""
+    manifest_path = out / ".claude-plugin" / "plugin.json"
+    if not manifest_path.is_file():
+        sys.stderr.write("FAIL: manolii-om missing .claude-plugin/plugin.json\n")
+        sys.exit(1)
+    manifest = json.loads(manifest_path.read_text())
+    for key in ("name", "description", "version"):
+        if not manifest.get(key):
+            sys.stderr.write(f"FAIL: manolii-om plugin.json missing '{key}'\n")
+            sys.exit(1)
+    for name in OM_SKILLS:
+        if not (out / "skills" / name / "SKILL.md").is_file():
+            sys.stderr.write(f"FAIL: manolii-om missing skill: {name}\n")
+            sys.exit(1)
+    if not (out / "evals" / "operational-memory").is_dir():
+        sys.stderr.write("FAIL: manolii-om missing eval pack\n")
+        sys.exit(1)
+    # OM plugin must NOT vendor forked schemas at the top level. contracts-mirror
+    # is optional; when present it must carry a SOURCE.md pin.
+    mirror = out / "contracts-mirror"
+    if mirror.is_dir() and not (mirror / "SOURCE.md").is_file():
+        sys.stderr.write(
+            "FAIL: manolii-om contracts-mirror present without SOURCE.md — "
+            "vendored schemas must record a pinned source commit\n")
+        sys.exit(1)
+    leaks = [str(p.relative_to(out)) for p in out.rglob("*")
+             if "{%" in p.name or "{{" in p.name or p.name.endswith(".jinja")]
+    if leaks:
+        sys.stderr.write("FAIL: unresolved Jinja artifacts in manolii-om:\n  "
+                         + "\n  ".join(leaks) + "\n")
+        sys.exit(1)
+    print(f"OK  plugin '{manifest['name']}' v{manifest['version']} assembled at {out}")
+    print(f"    components: {json.dumps(counts)}")
 
 
 def verify(out: Path, counts: dict, rendered: Path) -> None:
@@ -368,34 +498,53 @@ def smoke_test_hooks(out: Path) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--install-mode", default="branded", choices=["branded", "unbranded"])
-    ap.add_argument("--out", default=str(REPO / "plugin" / PLUGIN_NAME))
+    ap.add_argument("--out",
+                    help="Output dir. Defaults to plugin/<plugin-name>. "
+                         "Only used when --plugin selects a single plugin.")
+    ap.add_argument("--plugin", default="all",
+                    choices=["all", PLUGIN_NAME, OM_PLUGIN_NAME],
+                    help="Which plugin to build (default: all).")
     ap.add_argument("--keep-rendered", action="store_true",
                     help="keep the temp copier render dir (debug)")
     ap.add_argument("--no-smoke", action="store_true",
-                    help="skip the hook-firing smoke test")
+                    help="skip the hook-firing smoke test (manolii-framework only)")
     ap.add_argument("--smoke-only", action="store_true",
                     help="run the smoke test against the existing --out plugin (no render)")
     args = ap.parse_args()
 
     if args.smoke_only:
-        smoke_test_hooks(Path(args.out))
+        smoke_test_hooks(Path(args.out or (REPO / "plugin" / PLUGIN_NAME)))
         return
 
+    if args.out and args.plugin == "all":
+        sys.stderr.write("FAIL: --out requires --plugin <name> (cannot redirect two builds)\n")
+        sys.exit(2)
+
+    build_framework = args.plugin in ("all", PLUGIN_NAME)
+    build_om = args.plugin in ("all", OM_PLUGIN_NAME)
+
     rendered = render_template(args.install_mode)
-    out = Path(args.out)
     try:
-        counts = assemble_plugin(rendered, out)
-        counts.update(assemble_hooks_and_scripts(rendered, out))
-        counts.update(assemble_data(rendered, out))
-        verify(out, counts, rendered)
+        if build_framework:
+            out = Path(args.out) if (args.out and args.plugin == PLUGIN_NAME) \
+                else REPO / "plugin" / PLUGIN_NAME
+            counts = assemble_plugin(rendered, out)
+            counts.update(assemble_hooks_and_scripts(rendered, out))
+            counts.update(assemble_data(rendered, out))
+            verify(out, counts, rendered)
+            if not args.no_smoke:
+                smoke_test_hooks(out)
+
+        if build_om:
+            om_out = Path(args.out) if (args.out and args.plugin == OM_PLUGIN_NAME) \
+                else REPO / "plugin" / OM_PLUGIN_NAME
+            om_counts = assemble_om_plugin(rendered, om_out)
+            verify_om_plugin(om_out, om_counts)
     finally:
         if not args.keep_rendered:
             shutil.rmtree(rendered, ignore_errors=True)
         else:
             print(f"    (kept render dir: {rendered})")
-
-    if not args.no_smoke:
-        smoke_test_hooks(out)
 
 
 if __name__ == "__main__":

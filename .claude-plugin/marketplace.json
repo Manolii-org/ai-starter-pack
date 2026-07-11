@@ -10,6 +10,11 @@
       "name": "manolii-framework",
       "source": "./plugin/manolii-framework",
       "description": "Manolii AI framework for Claude Code — specialist sub-agents, slash-commands, skills, and lifecycle hooks for PR review, persistent memory, planning, and model-routing governance."
+    },
+    {
+      "name": "manolii-om",
+      "source": "./plugin/manolii-om",
+      "description": "Operational Memory skills for Claude Code — propose-only fact capture, read-only readiness / staff-answer, and client handover. Requires a Knowledge Layer MCP backend (contract schemas live in manolii-knowledge-layer/contracts/operational-memory/)."
     }
   ]
 }

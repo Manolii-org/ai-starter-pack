@@ -5,6 +5,50 @@ All notable changes to the AI Starter Pack are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] — 2026-07-11
+
+### Added
+
+- **`manolii-om` marketplace plugin** — second entry in `.claude-plugin/marketplace.json`,
+  built by `scripts/build-plugin.py --plugin manolii-om` from
+  `plugin-sources/manolii-om/` (eval pack + README) plus the copier-rendered
+  Operational Memory skills. Ships four propose-only / read-only OM skills
+  (`om-fact-capture`, `om-readiness`, `om-staff-answer`, `om-handover`), the
+  14-case OM eval pack, and a README pinning the contract-schema source of
+  truth (`manolii-knowledge-layer/contracts/operational-memory/`) — schemas
+  are referenced, not forked. Starts at v0.1.0; bumps independently of pack
+  version via `plugin/manolii-om/.claude-plugin/plugin.json`.
+- **`kl_integration` copier payload** — rendered instances with
+  `kl_integration=true` now include `.claude/skills/om-{fact-capture,readiness,staff-answer,handover}/SKILL.md`
+  and a `docs/knowledge-layer-access.md` stub. `pack.manifest.yml`
+  `feature_excludes.kl_integration` lists the files removed when the flag is
+  off; `pack-components.yml.jinja` already required `MCP_API_KEY` in the
+  instance Doppler config under this flag (unchanged). The OM eval pack and
+  contract validators do NOT render into consumer instances — install the
+  `manolii-om` plugin from the marketplace to get them.
+
+### Changed
+
+- **`scripts/build-plugin.py`** generalised to build multiple plugins
+  (`--plugin manolii-framework|manolii-om|all`, default `all`). The
+  `manolii-framework` skills bundle now explicitly drops the OM skills so
+  they ship only via `manolii-om` (dual-run retirement policy §6 / HIHA
+  execution plan B5). Framework plugin bytes are unchanged aside from the
+  removed OM skill directories that were never intended to appear there.
+- **`.github/workflows/plugin-eval-gate.yml`** builds and drift-checks both
+  plugins on every `plugin/**`, `plugin-sources/**`, `.claude/**`, or
+  `.claude-plugin/**` change.
+- **`copier.yml`** `_exclude` now covers `plugin-sources/**` so plugin build
+  inputs never render into consumer instances.
+
+### Notes
+
+- A `v1.3.0` release tag should follow merge so downstream consumers can pin
+  the standalone pack (Renovate `github>Manolii-org/ai-starter-pack` picks up
+  both plugins via the marketplace manifest).
+- OM skills are deliberately excluded from `shared-ai-skills` sync scope —
+  they ship via this plugin only.
+
 ## [1.2.2] — 2026-06-12
 
 ### Fixed
