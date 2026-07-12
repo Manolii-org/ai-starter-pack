@@ -65,7 +65,7 @@ on:
           npm  -> `npm audit --audit-level=high`
           pnpm -> `pnpm audit --audit-level=high`
           yarn -> `yarn audit --level high` (Yarn Classic v1)
-          bun  -> emits a notice and passes (bun has no first-party audit).
+          bun  -> `bun audit --audit-level=high`
           Yarn Berry (v2+) callers should override with
           `yarn npm audit --severity=high`.
       skip_lint:
@@ -211,7 +211,7 @@ jobs:
               npm)  npm audit --audit-level=high ;;
               pnpm) pnpm audit --audit-level=high ;;
               yarn) yarn audit --level high ;;
-              bun)  echo "::notice::bun has no first-party audit; skipping" ;;
+              bun)  bun audit --audit-level=high ;;
               *)    echo "::error::Unknown package_manager: $PACKAGE_MANAGER (expected npm | pnpm | yarn | bun)"; exit 1 ;;
             esac
           fi
