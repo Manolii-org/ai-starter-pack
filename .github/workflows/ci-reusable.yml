@@ -37,8 +37,10 @@ on:
           Install command. Empty (default) derives per package_manager:
           npm  -> `npm ci`
           pnpm -> `pnpm install --frozen-lockfile`
-          yarn -> `yarn install --frozen-lockfile`
+          yarn -> `yarn install --frozen-lockfile` (Yarn Classic v1)
           bun  -> `bun install --frozen-lockfile`
+          Yarn Berry (v2+) callers should override with
+          `yarn install --immutable`.
       lint_command:
         type: string
         default: 'npx eslint .'
@@ -62,8 +64,10 @@ on:
           Security-audit command. Empty (default) derives per package_manager:
           npm  -> `npm audit --audit-level=high`
           pnpm -> `pnpm audit --audit-level=high`
-          yarn -> `yarn npm audit --severity=high`
+          yarn -> `yarn audit --level high` (Yarn Classic v1)
           bun  -> emits a notice and passes (bun has no first-party audit).
+          Yarn Berry (v2+) callers should override with
+          `yarn npm audit --severity=high`.
       skip_lint:
         type: boolean
         default: false
@@ -205,7 +209,7 @@ jobs:
             case "$PACKAGE_MANAGER" in
               npm)  npm audit --audit-level=high ;;
               pnpm) pnpm audit --audit-level=high ;;
-              yarn) yarn npm audit --severity=high ;;
+              yarn) yarn audit --level high ;;
               bun)  echo "::notice::bun has no first-party audit; skipping" ;;
             esac
           fi
