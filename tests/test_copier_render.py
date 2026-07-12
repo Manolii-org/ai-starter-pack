@@ -26,7 +26,13 @@ GATED = {
         ".claude/commands/nav-replay.md",
     },
     "codex_adversarial": {".claude/agents/codex-adversarial.md"},
-    "kl_integration": set(),
+    "kl_integration": {
+        ".claude/skills/om-fact-capture/SKILL.md",
+        ".claude/skills/om-readiness/SKILL.md",
+        ".claude/skills/om-staff-answer/SKILL.md",
+        ".claude/skills/om-handover/SKILL.md",
+        "docs/knowledge-layer-access.md",
+    },
     "langfuse_telemetry": set(),
     "mesh_telemetry": {"mesh-contract.yaml.template"},
 }

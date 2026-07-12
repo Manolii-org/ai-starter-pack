@@ -1,0 +1,26 @@
+{
+  "skill": "om-staff-answer",
+  "id": "unknown-is-an-answer",
+  "description": "No reviewed knowledge covers the question: explicit 'not known', no guessing, offers a review item",
+  "input": "/om-staff-answer manolii-knowledge-layer/contracts/operational-memory/examples/hiha-holiday-rentals.module.json \"Which units allow charcoal barbecues on balconies?\"",
+  "env": {
+    "active_entity": "manolii"
+  },
+  "assertions": [
+    {
+      "type": "output_matches_regex",
+      "pattern": "(?i)(not known|don't know|no reviewed)"
+    },
+    {
+      "type": "output_matches_regex",
+      "pattern": "(?i)review item"
+    }
+  ],
+  "severity": "hard",
+  "tags": [
+    "operational-memory",
+    "synthetic",
+    "unknown"
+  ],
+  "requires_mcp": true
+}

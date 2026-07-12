@@ -1,0 +1,22 @@
+{
+  "skill": "om-staff-answer",
+  "id": "stale-source-qualified",
+  "description": "Answer from an item past or near stale_after carries an explicit staleness qualifier",
+  "input": "/om-staff-answer manolii-knowledge-layer/contracts/operational-memory/examples/hiha-holiday-rentals.module.json \"What is the wifi setup procedure for EX-01?\"",
+  "env": {
+    "active_entity": "manolii"
+  },
+  "assertions": [
+    {
+      "type": "output_matches_regex",
+      "pattern": "(?i)(stale|out of date|last reviewed|verify before)"
+    }
+  ],
+  "severity": "soft",
+  "tags": [
+    "operational-memory",
+    "synthetic",
+    "freshness"
+  ],
+  "requires_mcp": true
+}
