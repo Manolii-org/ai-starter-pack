@@ -44,19 +44,19 @@ on:
       lint_command:
         type: string
         default: 'npx eslint .'
-        description: Lint command.
+        description: Lint command. Must be non-empty; empty fails the job.
       typecheck_command:
         type: string
         default: 'npx tsc --noEmit'
-        description: Typecheck command.
+        description: Typecheck command. Must be non-empty; empty fails the job.
       test_command:
         type: string
         default: 'npm test -- --coverage'
-        description: Test command.
+        description: Test command. Must be non-empty; empty fails the job.
       build_command:
         type: string
         default: 'npm run build'
-        description: Build command.
+        description: Build command. Must be non-empty; empty fails the job.
       audit_command:
         type: string
         default: ''
@@ -121,12 +121,12 @@ jobs:
         with:
           persist-credentials: false
       - if: inputs.package_manager == 'pnpm'
-        uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
+        uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
         with:
           version: ${{ inputs.pnpm_version }}
           run_install: false
       - if: inputs.package_manager == 'bun'
-        uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.0.2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: ${{ inputs.node_version }}
@@ -165,12 +165,12 @@ jobs:
         with:
           persist-credentials: false
       - if: inputs.package_manager == 'pnpm'
-        uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
+        uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
         with:
           version: ${{ inputs.pnpm_version }}
           run_install: false
       - if: inputs.package_manager == 'bun'
-        uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.0.2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: ${{ inputs.node_version }}
@@ -194,6 +194,7 @@ jobs:
               pnpm) pnpm install --frozen-lockfile ;;
               yarn) yarn install --frozen-lockfile ;;
               bun)  bun install --frozen-lockfile ;;
+              *)    echo "::error::Unknown package_manager: $PACKAGE_MANAGER (expected npm | pnpm | yarn | bun)"; exit 1 ;;
             esac
           fi
       - name: Check for known vulnerabilities
@@ -211,6 +212,7 @@ jobs:
               pnpm) pnpm audit --audit-level=high ;;
               yarn) yarn audit --level high ;;
               bun)  echo "::notice::bun has no first-party audit; skipping" ;;
+              *)    echo "::error::Unknown package_manager: $PACKAGE_MANAGER (expected npm | pnpm | yarn | bun)"; exit 1 ;;
             esac
           fi
 
@@ -224,12 +226,12 @@ jobs:
         with:
           persist-credentials: false
       - if: inputs.package_manager == 'pnpm'
-        uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
+        uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
         with:
           version: ${{ inputs.pnpm_version }}
           run_install: false
       - if: inputs.package_manager == 'bun'
-        uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.0.2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: ${{ inputs.node_version }}
@@ -253,6 +255,7 @@ jobs:
               pnpm) pnpm install --frozen-lockfile ;;
               yarn) yarn install --frozen-lockfile ;;
               bun)  bun install --frozen-lockfile ;;
+              *)    echo "::error::Unknown package_manager: $PACKAGE_MANAGER (expected npm | pnpm | yarn | bun)"; exit 1 ;;
             esac
           fi
       - name: Lint
@@ -261,6 +264,9 @@ jobs:
           LINT_COMMAND: ${{ inputs.lint_command }}
         run: |
           set -euo pipefail
+          if [ -z "$LINT_COMMAND" ]; then
+            echo "::error::lint_command must not be empty"; exit 1
+          fi
           eval "$LINT_COMMAND"
 
   typecheck:
@@ -273,12 +279,12 @@ jobs:
         with:
           persist-credentials: false
       - if: inputs.package_manager == 'pnpm'
-        uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
+        uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
         with:
           version: ${{ inputs.pnpm_version }}
           run_install: false
       - if: inputs.package_manager == 'bun'
-        uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.0.2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: ${{ inputs.node_version }}
@@ -302,6 +308,7 @@ jobs:
               pnpm) pnpm install --frozen-lockfile ;;
               yarn) yarn install --frozen-lockfile ;;
               bun)  bun install --frozen-lockfile ;;
+              *)    echo "::error::Unknown package_manager: $PACKAGE_MANAGER (expected npm | pnpm | yarn | bun)"; exit 1 ;;
             esac
           fi
       - name: Type check
@@ -310,6 +317,9 @@ jobs:
           TYPECHECK_COMMAND: ${{ inputs.typecheck_command }}
         run: |
           set -euo pipefail
+          if [ -z "$TYPECHECK_COMMAND" ]; then
+            echo "::error::typecheck_command must not be empty"; exit 1
+          fi
           eval "$TYPECHECK_COMMAND"
 
   test:
@@ -322,12 +332,12 @@ jobs:
         with:
           persist-credentials: false
       - if: inputs.package_manager == 'pnpm'
-        uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
+        uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
         with:
           version: ${{ inputs.pnpm_version }}
           run_install: false
       - if: inputs.package_manager == 'bun'
-        uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.0.2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: ${{ inputs.node_version }}
@@ -351,6 +361,7 @@ jobs:
               pnpm) pnpm install --frozen-lockfile ;;
               yarn) yarn install --frozen-lockfile ;;
               bun)  bun install --frozen-lockfile ;;
+              *)    echo "::error::Unknown package_manager: $PACKAGE_MANAGER (expected npm | pnpm | yarn | bun)"; exit 1 ;;
             esac
           fi
       - name: Test
@@ -359,6 +370,9 @@ jobs:
           TEST_COMMAND: ${{ inputs.test_command }}
         run: |
           set -euo pipefail
+          if [ -z "$TEST_COMMAND" ]; then
+            echo "::error::test_command must not be empty"; exit 1
+          fi
           eval "$TEST_COMMAND"
 
   build:
@@ -381,12 +395,12 @@ jobs:
         with:
           persist-credentials: false
       - if: inputs.package_manager == 'pnpm'
-        uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
+        uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
         with:
           version: ${{ inputs.pnpm_version }}
           run_install: false
       - if: inputs.package_manager == 'bun'
-        uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.0.2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: ${{ inputs.node_version }}
@@ -410,6 +424,7 @@ jobs:
               pnpm) pnpm install --frozen-lockfile ;;
               yarn) yarn install --frozen-lockfile ;;
               bun)  bun install --frozen-lockfile ;;
+              *)    echo "::error::Unknown package_manager: $PACKAGE_MANAGER (expected npm | pnpm | yarn | bun)"; exit 1 ;;
             esac
           fi
       - name: Build
@@ -418,4 +433,7 @@ jobs:
           BUILD_COMMAND: ${{ inputs.build_command }}
         run: |
           set -euo pipefail
+          if [ -z "$BUILD_COMMAND" ]; then
+            echo "::error::build_command must not be empty"; exit 1
+          fi
           eval "$BUILD_COMMAND"
