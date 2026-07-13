@@ -21,6 +21,9 @@ permissions:
 
 jobs:
   tag:
+    concurrency:
+      group: release-tag-${{ inputs.tag }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -31,15 +34,6 @@ jobs:
           set -euo pipefail
           if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
             echo "Refusing tag '$TAG' — must match vX.Y.Z" >&2
-            exit 1
-          fi
-      - name: Validate sha format (when provided)
-        env:
-          SHA: ${{ inputs.sha }}
-        run: |
-          set -euo pipefail
-          if [ -n "$SHA" ] && ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{7,40}$'; then
-            echo "Refusing sha '$SHA' — must be 7-40 lowercase hex chars" >&2
             exit 1
           fi
       - name: Create tag ref
@@ -55,10 +49,17 @@ jobs:
               -H "Accept: application/vnd.github+json" \
               "https://api.github.com/repos/$REPO/commits/main" | python3 -c "import json,sys; print(json.load(sys.stdin)['sha'])")
           fi
+          # Validate the FINAL sha (supplied or resolved) as a full commit hash
+          # and serialise the payload — never interpolate into JSON.
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "Refusing sha '$SHA' — must be a full 40-char lowercase hex commit hash" >&2
+            exit 1
+          fi
+          PAYLOAD=$(TAG="$TAG" SHA="$SHA" python3 -c "import json,os; print(json.dumps({'ref': 'refs/tags/' + os.environ['TAG'], 'sha': os.environ['SHA']}))")
           echo "Tagging $SHA as $TAG"
           curl -sf --max-time 30 -X POST \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             -H "Content-Type: application/json" \
             "https://api.github.com/repos/$REPO/git/refs" \
-            -d "{\"ref\":\"refs/tags/$TAG\",\"sha\":\"$SHA\"}"
+            -d "$PAYLOAD"
