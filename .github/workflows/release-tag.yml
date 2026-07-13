@@ -33,6 +33,15 @@ jobs:
             echo "Refusing tag '$TAG' — must match vX.Y.Z" >&2
             exit 1
           fi
+      - name: Validate sha format (when provided)
+        env:
+          SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          if [ -n "$SHA" ] && ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{7,40}$'; then
+            echo "Refusing sha '$SHA' — must be 7-40 lowercase hex chars" >&2
+            exit 1
+          fi
       - name: Create tag ref
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
