@@ -172,16 +172,25 @@ def mgmt_api_query(ref: str, token: str, sql: str) -> list[dict]:
             # until the window clears. Honour Retry-After if present, otherwise
             # fall through to the same exponential backoff as 5xx. (Codex P2 on PR #18)
             if e.code == 429:
-                retry_after = e.headers.get("Retry-After", "") if e.headers else ""
-                # Retry-After is either seconds (integer string) or an HTTP date;
-                # we only handle the seconds form defensively — the exp-backoff
-                # below is the safe fallback if parsing fails or a date is sent.
-                try:
-                    delay = max(0, int(retry_after))
-                    if delay and attempt < MGMT_API_RETRIES:
-                        time.sleep(min(delay, 30))  # cap so we don't wait forever on a hostile hint
-                except (TypeError, ValueError):
-                    pass
+                # Read BOTH standard rate-limit hint headers — Supabase may set
+                # Retry-After (RFC 9110), X-RateLimit-Reset (seconds until reset;
+                # GitHub-style), or neither. Exp-backoff is the safe fallback.
+                # We take the LARGEST hint so a 1s Retry-After doesn't override a
+                # 60s reset window and burn all our retry attempts inside it. Cap
+                # at 30s so a hostile header can't hang the job. (Codex P2 on PR #18)
+                hints_s: list[int] = []
+                if e.headers:
+                    for header_name in ("Retry-After", "X-RateLimit-Reset", "RateLimit-Reset"):
+                        raw = e.headers.get(header_name, "")
+                        if not raw:
+                            continue
+                        try:
+                            hints_s.append(max(0, int(raw)))
+                        except (TypeError, ValueError):
+                            # HTTP-date form or malformed — skip; exp-backoff covers it.
+                            continue
+                if hints_s and attempt < MGMT_API_RETRIES:
+                    time.sleep(min(max(hints_s), 30))
                 last_err = f"HTTP 429 (rate limited): {body}"
             elif 400 <= e.code < 500:
                 # Every other 4xx is a definitive answer — bad token, bad ref,
