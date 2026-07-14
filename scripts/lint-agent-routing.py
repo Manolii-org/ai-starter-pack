@@ -234,6 +234,77 @@ def format_violation(v):
     return "\n".join(lines)
 
 
+# ── RULE 7: subagent dispatch must pin an explicit model= ─────────────────────
+# Claude Code v2.1.198 changed the built-in Explore agent (and every built-in
+# subagent that previously defaulted to haiku) to INHERIT the main-session model
+# — capped at opus. Any `Agent(subagent_type="<name>", ...)` call site that
+# omits `model=` therefore silently escalates from OSS routing to Opus pricing.
+# This scanner is intentionally shallow: for each `subagent_type="<name>"` line,
+# it checks a ±6-line window for both `Agent(` and `model=` (or `model:`).
+# Escape a specific line with the trailing comment
+# `# lint-agent-routing:allow-missing-model`.
+_SUBAGENT_RE = re.compile(r"""subagent_type\s*[=:]\s*["'`]([A-Za-z0-9_.\-/]+)["'`]""")
+_MODEL_RE = re.compile(r"""\bmodel\s*[=:]""")
+_AGENT_CALL_RE = re.compile(r"""\bAgent\s*\(""")
+_ALLOW_MARKER = "lint-agent-routing:allow-missing-model"
+_DISPATCH_SCAN_EXTS_SOURCE = {".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".sh"}
+_DISPATCH_SCAN_EXTS_DOCS = {".md"}
+_DISPATCH_SCAN_EXCLUDES = {
+    ".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build",
+    ".next", "coverage",
+}
+
+
+def lint_subagent_dispatches_in_tree(root, include_docs=False):
+    """Return list of violations: source dispatches missing explicit model=."""
+    violations = []
+    root = Path(root).resolve()
+    exts = set(_DISPATCH_SCAN_EXTS_SOURCE)
+    if include_docs:
+        exts |= _DISPATCH_SCAN_EXTS_DOCS
+    for path in root.rglob("*"):
+        if not path.is_file() or path.suffix not in exts:
+            continue
+        rel = path.relative_to(root)
+        if any(part in _DISPATCH_SCAN_EXCLUDES for part in rel.parts):
+            continue
+        if rel.name == "lint-agent-routing.py":
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if "subagent_type" not in text:
+            continue
+        lines = text.splitlines()
+        for i, line in enumerate(lines):
+            m = _SUBAGENT_RE.search(line)
+            if not m:
+                continue
+            if _ALLOW_MARKER in line:
+                continue
+            window = "\n".join(lines[max(0, i - 6): i + 7])
+            if not _AGENT_CALL_RE.search(window):
+                continue
+            if _MODEL_RE.search(window):
+                continue
+            violations.append({
+                "file": str(rel),
+                "line": i + 1,
+                "subagent": m.group(1),
+                "snippet": line.strip()[:160],
+            })
+    return violations
+
+
+def format_subagent_dispatch_violation(v):
+    return (
+        f"  [RULE7_MISSING_MODEL] {v['file']}:{v['line']}\n"
+        f"    subagent_type=\"{v['subagent']}\" has no explicit model= within ±6 lines\n"
+        f"    snippet: {v['snippet']}"
+    )
+
+
 def main():
     import argparse
 
@@ -256,6 +327,25 @@ def main():
         "-v",
         action="store_true",
         help="Show warnings for unknown model identifiers",
+    )
+    parser.add_argument(
+        "--check-subagent-dispatches",
+        metavar="DIR",
+        nargs="?",
+        const=".",
+        default=None,
+        help="Scan DIR (default: repo root) for Agent(subagent_type=...) call sites "
+             "missing an explicit model= argument. Rule 7 — see v2.1.198 Explore regression.",
+    )
+    parser.add_argument(
+        "--no-check-subagent-dispatches",
+        action="store_true",
+        help="Skip the Rule 7 subagent-dispatch scan even when it would run by default.",
+    )
+    parser.add_argument(
+        "--include-docs",
+        action="store_true",
+        help="Extend the Rule 7 scan to .md files (prose examples).",
     )
     args = parser.parse_args()
 
@@ -300,8 +390,42 @@ def main():
         )
         return 2 if has_io_errors else 1
 
+    # ── RULE 7: subagent-dispatch scan (default-on, opt-out via flag) ─────────
+    dispatch_violations = []
+    scan_root = None
+    if not args.no_check_subagent_dispatches and not args.files:
+        scan_root = Path(args.check_subagent_dispatches or ".")
+    elif args.check_subagent_dispatches and not args.no_check_subagent_dispatches:
+        scan_root = Path(args.check_subagent_dispatches)
+    if scan_root is not None:
+        dispatch_violations = lint_subagent_dispatches_in_tree(
+            scan_root, include_docs=args.include_docs
+        )
+        if dispatch_violations:
+            print(
+                f"\n[lint-agent-routing] SUBAGENT DISPATCH VIOLATIONS — "
+                f"{len(dispatch_violations)} issue(s)\n"
+            )
+            for v in dispatch_violations:
+                print(format_subagent_dispatch_violation(v))
+                print()
+            print(
+                "RULE 7 — Subagent dispatches must pin an explicit model=:\n"
+                "  Claude Code v2.1.198 changed built-in subagents (Explore, generate,\n"
+                "  review-internal, work-critic, quick-critic, ...) to inherit the\n"
+                "  main-session model instead of defaulting to haiku. Any dispatch that\n"
+                "  omits model= now silently escalates to Opus pricing.\n"
+                "  Fix: add explicit model=\"haiku\" (or the intended tier per\n"
+                "  .claude/model-routing.json) to the Agent(...) call. To exempt a\n"
+                "  specific line, append the trailing comment\n"
+                "  # lint-agent-routing:allow-missing-model.\n"
+            )
+            return 1
+
     checked = len(agent_files)
     print(f"[lint-agent-routing] OK — {checked} agent(s) checked, 0 violations")
+    if scan_root is not None:
+        print(f"[lint-agent-routing] Rule 7 OK — subagent dispatches under {scan_root} all pin model=")
     return 0
 
 

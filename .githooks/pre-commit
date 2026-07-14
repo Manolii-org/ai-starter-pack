@@ -14,8 +14,18 @@
 set -euo pipefail
 
 STAGED=$(git diff --cached --name-only 2>/dev/null || true)
+REPO_ROOT="$(git rev-parse --show-toplevel)"
 
 if echo "$STAGED" | grep -qE '(\.claude/agents/.*\.md|\.claude/model-routing\.json)'; then
     echo "[pre-commit] Linting agent routing safety rules..."
-    python3 "$(git rev-parse --show-toplevel)/scripts/lint-agent-routing.py"
+    python3 "$REPO_ROOT/scripts/lint-agent-routing.py"
+fi
+
+# RULE 7 — subagent dispatches must pin explicit model= (v2.1.198 Explore
+# silent-Opus regression). Trigger on staged source files that can contain
+# Agent(subagent_type=...) calls.
+if echo "$STAGED" | grep -qE '\.(py|ts|tsx|js|jsx|mjs|cjs|sh)$'; then
+    echo "[pre-commit] Rule 7 — verifying subagent dispatches pin an explicit model..."
+    python3 "$REPO_ROOT/scripts/lint-agent-routing.py" \
+        --check-subagent-dispatches "$REPO_ROOT" || exit 1
 fi
