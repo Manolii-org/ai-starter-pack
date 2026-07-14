@@ -243,7 +243,7 @@ def format_violation(v):
 # it checks a ±6-line window for both `Agent(` and `model=` (or `model:`).
 # Escape a specific line with the trailing comment
 # `# lint-agent-routing:allow-missing-model`.
-_SUBAGENT_RE = re.compile(r"""["'`]?subagent_type["'`]?\s*[=:]\s*["'`]([A-Za-z0-9_.\-/]+)["'`]""")
+_SUBAGENT_RE = re.compile(r"""["'`]?subagent_type["'`]?\s*[=:]\s*["'`]([A-Za-z0-9_.:\-/]+)["'`]""")
 _MODEL_RE = re.compile(r"""["'`]?\bmodel\b["'`]?\s*[=:]""")
 _AGENT_CALL_RE = re.compile(r"""\bAgent\s*\(""")
 _ALLOW_MARKER = "lint-agent-routing:allow-missing-model"
@@ -317,6 +317,9 @@ def _extract_agent_call_spans(text):
                     span_len = len(span_text)
                     buf = list(span_text)
                     for s, e in str_regions:
+                        body = text[s: e]
+                        if len(body) <= 24 and not any(c.isspace() for c in body):
+                            continue
                         rel_s = max(0, s - span_start_abs)
                         rel_e = min(span_len, e - span_start_abs)
                         for k in range(rel_s, rel_e):
