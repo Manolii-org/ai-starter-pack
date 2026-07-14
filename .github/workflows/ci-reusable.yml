@@ -1,6 +1,15 @@
 name: CI (Reusable)
-# Reusable workflow_call form. Caller owns on: + paths-ignore via top-level.
-# Cite: .github/REUSABLE-WORKFLOWS.md
+# Reusable workflow_call form. Caller owns `on:` + paths-ignore via top-level.
+#
+# v1.1.0 (2026-07-12):
+#   - Added `package_manager` input (npm | pnpm | yarn | bun)
+#   - Added `pnpm_version` input (used when package_manager=pnpm)
+#   - Added per-job command overrides: install_command, lint_command,
+#     typecheck_command, test_command, build_command, audit_command
+#   - Added skip toggles: skip_lint, skip_typecheck, skip_test,
+#     skip_build, skip_security_audit
+#   - Cache key now includes package_manager and every root lockfile
+#   - All new inputs are optional with defaults preserving v1.0.0 behaviour
 
 on:
   workflow_call:
@@ -13,6 +22,72 @@ on:
         type: string
         default: '24'
         description: Node.js version.
+      package_manager:
+        type: string
+        default: 'npm'
+        description: Package manager (npm | pnpm | yarn | bun).
+      pnpm_version:
+        type: string
+        default: '10'
+        description: pnpm major version. Only used when package_manager=pnpm.
+      install_command:
+        type: string
+        default: ''
+        description: |
+          Install command. Empty (default) derives per package_manager:
+          npm  -> `npm ci`
+          pnpm -> `pnpm install --frozen-lockfile`
+          yarn -> `yarn install --frozen-lockfile` (Yarn Classic v1)
+          bun  -> `bun install --frozen-lockfile`
+          Yarn Berry (v2+) callers should override with
+          `yarn install --immutable`.
+      lint_command:
+        type: string
+        default: 'npx eslint .'
+        description: Lint command. Must be non-empty; empty fails the job.
+      typecheck_command:
+        type: string
+        default: 'npx tsc --noEmit'
+        description: Typecheck command. Must be non-empty; empty fails the job.
+      test_command:
+        type: string
+        default: 'npm test -- --coverage'
+        description: Test command. Must be non-empty; empty fails the job.
+      build_command:
+        type: string
+        default: 'npm run build'
+        description: Build command. Must be non-empty; empty fails the job.
+      audit_command:
+        type: string
+        default: ''
+        description: |
+          Security-audit command. Empty (default) derives per package_manager:
+          npm  -> `npm audit --audit-level=high`
+          pnpm -> `pnpm audit --audit-level=high`
+          yarn -> `yarn audit --level high` (Yarn Classic v1)
+          bun  -> `bun audit --audit-level=high`
+          Yarn Berry (v2+) callers should override with
+          `yarn npm audit --severity=high`.
+      skip_lint:
+        type: boolean
+        default: false
+        description: Skip the lint job.
+      skip_typecheck:
+        type: boolean
+        default: false
+        description: Skip the typecheck job.
+      skip_test:
+        type: boolean
+        default: false
+        description: Skip the test job.
+      skip_build:
+        type: boolean
+        default: false
+        description: Skip the build job.
+      skip_security_audit:
+        type: boolean
+        default: false
+        description: Skip the security-audit job.
 
 permissions:
   contents: read
@@ -45,118 +120,320 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
+      - if: inputs.package_manager == 'pnpm'
+        uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
+        with:
+          version: ${{ inputs.pnpm_version }}
+          run_install: false
+      - if: inputs.package_manager == 'bun'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: ${{ inputs.node_version }}
-          # Uncomment the appropriate cache line for your package manager:
-          # cache: 'npm'
-          # cache: 'pnpm'
       - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         id: cache-node-modules
         with:
           path: node_modules
-          key: nm-${{ runner.os }}-node-${{ inputs.node_version }}-${{ hashFiles('package-lock.json') }}
+          key: nm-${{ runner.os }}-node-${{ inputs.node_version }}-${{ inputs.package_manager }}-${{ hashFiles('package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lockb', 'bun.lock') }}
       - if: steps.cache-node-modules.outputs.cache-hit != 'true'
-        run: npm ci        # Replace with: pnpm install --frozen-lockfile
+        name: Install
+        shell: bash
+        env:
+          INSTALL_COMMAND: ${{ inputs.install_command }}
+          PACKAGE_MANAGER: ${{ inputs.package_manager }}
+        run: |
+          set -euo pipefail
+          if [ -n "$INSTALL_COMMAND" ]; then
+            eval "$INSTALL_COMMAND"
+          else
+            case "$PACKAGE_MANAGER" in
+              npm)  npm ci ;;
+              pnpm) pnpm install --frozen-lockfile ;;
+              yarn) yarn install --frozen-lockfile ;;
+              bun)  bun install --frozen-lockfile ;;
+              *)    echo "::error::Unknown package_manager: $PACKAGE_MANAGER (expected npm | pnpm | yarn | bun)"; exit 1 ;;
+            esac
+          fi
 
-  # Downstream jobs skip automatically when install is skipped (via needs).
   security-audit:
     name: Security Audit
+    if: needs.install.result == 'success' && inputs.skip_security_audit == false
     needs: [install]
     runs-on: ${{ inputs.runs_on }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
+      - if: inputs.package_manager == 'pnpm'
+        uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
+        with:
+          version: ${{ inputs.pnpm_version }}
+          run_install: false
+      - if: inputs.package_manager == 'bun'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: ${{ inputs.node_version }}
       - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: node_modules
-          key: nm-${{ runner.os }}-node-${{ inputs.node_version }}-${{ hashFiles('package-lock.json') }}
+          key: nm-${{ runner.os }}-node-${{ inputs.node_version }}-${{ inputs.package_manager }}-${{ hashFiles('package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lockb', 'bun.lock') }}
       - name: Fallback install if cache miss
-        run: test -d node_modules || npm ci
+        shell: bash
+        env:
+          INSTALL_COMMAND: ${{ inputs.install_command }}
+          PACKAGE_MANAGER: ${{ inputs.package_manager }}
+        run: |
+          set -euo pipefail
+          test -d node_modules && exit 0
+          if [ -n "$INSTALL_COMMAND" ]; then
+            eval "$INSTALL_COMMAND"
+          else
+            case "$PACKAGE_MANAGER" in
+              npm)  npm ci ;;
+              pnpm) pnpm install --frozen-lockfile ;;
+              yarn) yarn install --frozen-lockfile ;;
+              bun)  bun install --frozen-lockfile ;;
+              *)    echo "::error::Unknown package_manager: $PACKAGE_MANAGER (expected npm | pnpm | yarn | bun)"; exit 1 ;;
+            esac
+          fi
       - name: Check for known vulnerabilities
-        run: npm audit --audit-level=high
+        shell: bash
+        env:
+          AUDIT_COMMAND: ${{ inputs.audit_command }}
+          PACKAGE_MANAGER: ${{ inputs.package_manager }}
+        run: |
+          set -euo pipefail
+          if [ -n "$AUDIT_COMMAND" ]; then
+            eval "$AUDIT_COMMAND"
+          else
+            case "$PACKAGE_MANAGER" in
+              npm)  npm audit --audit-level=high ;;
+              pnpm) pnpm audit --audit-level=high ;;
+              yarn) yarn audit --level high ;;
+              bun)  bun audit --audit-level=high ;;
+              *)    echo "::error::Unknown package_manager: $PACKAGE_MANAGER (expected npm | pnpm | yarn | bun)"; exit 1 ;;
+            esac
+          fi
 
   lint:
     name: Lint
+    if: needs.install.result == 'success' && inputs.skip_lint == false
     needs: [install]
     runs-on: ${{ inputs.runs_on }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
+      - if: inputs.package_manager == 'pnpm'
+        uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
+        with:
+          version: ${{ inputs.pnpm_version }}
+          run_install: false
+      - if: inputs.package_manager == 'bun'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: ${{ inputs.node_version }}
       - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: node_modules
-          key: nm-${{ runner.os }}-node-${{ inputs.node_version }}-${{ hashFiles('package-lock.json') }}
+          key: nm-${{ runner.os }}-node-${{ inputs.node_version }}-${{ inputs.package_manager }}-${{ hashFiles('package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lockb', 'bun.lock') }}
       - name: Fallback install if cache miss
-        run: test -d node_modules || npm ci
-      - run: npx eslint .
+        shell: bash
+        env:
+          INSTALL_COMMAND: ${{ inputs.install_command }}
+          PACKAGE_MANAGER: ${{ inputs.package_manager }}
+        run: |
+          set -euo pipefail
+          test -d node_modules && exit 0
+          if [ -n "$INSTALL_COMMAND" ]; then
+            eval "$INSTALL_COMMAND"
+          else
+            case "$PACKAGE_MANAGER" in
+              npm)  npm ci ;;
+              pnpm) pnpm install --frozen-lockfile ;;
+              yarn) yarn install --frozen-lockfile ;;
+              bun)  bun install --frozen-lockfile ;;
+              *)    echo "::error::Unknown package_manager: $PACKAGE_MANAGER (expected npm | pnpm | yarn | bun)"; exit 1 ;;
+            esac
+          fi
+      - name: Lint
+        shell: bash
+        env:
+          LINT_COMMAND: ${{ inputs.lint_command }}
+        run: |
+          set -euo pipefail
+          if [ -z "$LINT_COMMAND" ]; then
+            echo "::error::lint_command must not be empty"; exit 1
+          fi
+          eval "$LINT_COMMAND"
 
   typecheck:
     name: Type Check
+    if: needs.install.result == 'success' && inputs.skip_typecheck == false
     needs: [install]
     runs-on: ${{ inputs.runs_on }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
+      - if: inputs.package_manager == 'pnpm'
+        uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
+        with:
+          version: ${{ inputs.pnpm_version }}
+          run_install: false
+      - if: inputs.package_manager == 'bun'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: ${{ inputs.node_version }}
       - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: node_modules
-          key: nm-${{ runner.os }}-node-${{ inputs.node_version }}-${{ hashFiles('package-lock.json') }}
+          key: nm-${{ runner.os }}-node-${{ inputs.node_version }}-${{ inputs.package_manager }}-${{ hashFiles('package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lockb', 'bun.lock') }}
       - name: Fallback install if cache miss
-        run: test -d node_modules || npm ci
-      - run: npx tsc --noEmit
+        shell: bash
+        env:
+          INSTALL_COMMAND: ${{ inputs.install_command }}
+          PACKAGE_MANAGER: ${{ inputs.package_manager }}
+        run: |
+          set -euo pipefail
+          test -d node_modules && exit 0
+          if [ -n "$INSTALL_COMMAND" ]; then
+            eval "$INSTALL_COMMAND"
+          else
+            case "$PACKAGE_MANAGER" in
+              npm)  npm ci ;;
+              pnpm) pnpm install --frozen-lockfile ;;
+              yarn) yarn install --frozen-lockfile ;;
+              bun)  bun install --frozen-lockfile ;;
+              *)    echo "::error::Unknown package_manager: $PACKAGE_MANAGER (expected npm | pnpm | yarn | bun)"; exit 1 ;;
+            esac
+          fi
+      - name: Type check
+        shell: bash
+        env:
+          TYPECHECK_COMMAND: ${{ inputs.typecheck_command }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TYPECHECK_COMMAND" ]; then
+            echo "::error::typecheck_command must not be empty"; exit 1
+          fi
+          eval "$TYPECHECK_COMMAND"
 
   test:
     name: Test
+    if: needs.install.result == 'success' && inputs.skip_test == false
     needs: [install]
     runs-on: ${{ inputs.runs_on }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
+      - if: inputs.package_manager == 'pnpm'
+        uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
+        with:
+          version: ${{ inputs.pnpm_version }}
+          run_install: false
+      - if: inputs.package_manager == 'bun'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: ${{ inputs.node_version }}
       - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: node_modules
-          key: nm-${{ runner.os }}-node-${{ inputs.node_version }}-${{ hashFiles('package-lock.json') }}
+          key: nm-${{ runner.os }}-node-${{ inputs.node_version }}-${{ inputs.package_manager }}-${{ hashFiles('package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lockb', 'bun.lock') }}
       - name: Fallback install if cache miss
-        run: test -d node_modules || npm ci
-      - run: npm test -- --coverage
-      # Uncomment to upload coverage to a service (Codecov, Coveralls, etc.):
-      # - uses: codecov/codecov-action@v4
-      #   with:
-      #     token: ${{ secrets.CODECOV_TOKEN }}
-      #     fail_ci_if_error: false
+        shell: bash
+        env:
+          INSTALL_COMMAND: ${{ inputs.install_command }}
+          PACKAGE_MANAGER: ${{ inputs.package_manager }}
+        run: |
+          set -euo pipefail
+          test -d node_modules && exit 0
+          if [ -n "$INSTALL_COMMAND" ]; then
+            eval "$INSTALL_COMMAND"
+          else
+            case "$PACKAGE_MANAGER" in
+              npm)  npm ci ;;
+              pnpm) pnpm install --frozen-lockfile ;;
+              yarn) yarn install --frozen-lockfile ;;
+              bun)  bun install --frozen-lockfile ;;
+              *)    echo "::error::Unknown package_manager: $PACKAGE_MANAGER (expected npm | pnpm | yarn | bun)"; exit 1 ;;
+            esac
+          fi
+      - name: Test
+        shell: bash
+        env:
+          TEST_COMMAND: ${{ inputs.test_command }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TEST_COMMAND" ]; then
+            echo "::error::test_command must not be empty"; exit 1
+          fi
+          eval "$TEST_COMMAND"
 
   build:
     name: Build
-    needs: [security-audit, lint, typecheck, test]
+    # Build waits for the gating jobs (security-audit + lint + typecheck +
+    # test), runs when none of them failed or were cancelled, and treats
+    # skipped gates as green. That keeps v1.0.0 semantics intact when no
+    # skip toggle is set, while letting a consumer skip (say) test without
+    # also blocking build.
+    if: |
+      inputs.skip_build == false
+      && !cancelled()
+      && !contains(needs.*.result, 'failure')
+      && !contains(needs.*.result, 'cancelled')
+      && needs.install.result == 'success'
+    needs: [install, security-audit, lint, typecheck, test]
     runs-on: ${{ inputs.runs_on }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
+      - if: inputs.package_manager == 'pnpm'
+        uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
+        with:
+          version: ${{ inputs.pnpm_version }}
+          run_install: false
+      - if: inputs.package_manager == 'bun'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: ${{ inputs.node_version }}
       - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: node_modules
-          key: nm-${{ runner.os }}-node-${{ inputs.node_version }}-${{ hashFiles('package-lock.json') }}
+          key: nm-${{ runner.os }}-node-${{ inputs.node_version }}-${{ inputs.package_manager }}-${{ hashFiles('package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lockb', 'bun.lock') }}
       - name: Fallback install if cache miss
-        run: test -d node_modules || npm ci
-      - run: npm run build
+        shell: bash
+        env:
+          INSTALL_COMMAND: ${{ inputs.install_command }}
+          PACKAGE_MANAGER: ${{ inputs.package_manager }}
+        run: |
+          set -euo pipefail
+          test -d node_modules && exit 0
+          if [ -n "$INSTALL_COMMAND" ]; then
+            eval "$INSTALL_COMMAND"
+          else
+            case "$PACKAGE_MANAGER" in
+              npm)  npm ci ;;
+              pnpm) pnpm install --frozen-lockfile ;;
+              yarn) yarn install --frozen-lockfile ;;
+              bun)  bun install --frozen-lockfile ;;
+              *)    echo "::error::Unknown package_manager: $PACKAGE_MANAGER (expected npm | pnpm | yarn | bun)"; exit 1 ;;
+            esac
+          fi
+      - name: Build
+        shell: bash
+        env:
+          BUILD_COMMAND: ${{ inputs.build_command }}
+        run: |
+          set -euo pipefail
+          if [ -z "$BUILD_COMMAND" ]; then
+            echo "::error::build_command must not be empty"; exit 1
+          fi
+          eval "$BUILD_COMMAND"

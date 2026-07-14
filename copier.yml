@@ -161,6 +161,10 @@ _exclude:
   # consumed via the marketplace, never rendered into instances.
   - plugin
   - plugin/**
+  # Plugin build sources (manolii-om eval pack + plugin README) — consumed
+  # by scripts/build-plugin.py, never rendered into instances.
+  - plugin-sources
+  - plugin-sources/**
   # Plugin marketplace metadata + the plugin-only eval gate must not render into
   # instances (marketplace.json points at ./plugin; the gate needs build-plugin.py).
   - .claude-plugin

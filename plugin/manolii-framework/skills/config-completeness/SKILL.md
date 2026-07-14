@@ -3,6 +3,7 @@ name: config-completeness
 version: 2.0.0
 description: "Checks config.yaml, fly.toml, and routing JSON diffs for missing sibling parameters — when one entry in a group gets a param, all siblings must too."
 type: skill
+disable-model-invocation: true  # slash/CI-invoked checklist — removed from model-facing catalogue to cut per-session tokens (2026-07-06); delete this line to restore auto-invocation
 model: haiku
 advisor_model: claude-sonnet-4-6
 data_sensitivity: internal

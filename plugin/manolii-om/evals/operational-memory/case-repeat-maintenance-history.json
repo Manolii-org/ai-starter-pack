@@ -1,0 +1,26 @@
+{
+  "skill": "om-staff-answer",
+  "id": "repeat-maintenance-history",
+  "description": "Repeat maintenance issue: cited history from reviewed maintenance_knowledge; if incomplete, says so",
+  "input": "/om-staff-answer manolii-knowledge-layer/contracts/operational-memory/examples/hiha-holiday-rentals.module.json \"The toilet in unit EX-04 is blocked again - has this happened before and who fixed it?\"",
+  "env": {
+    "active_entity": "manolii"
+  },
+  "assertions": [
+    {
+      "type": "output_matches_regex",
+      "pattern": "(?i)(maintenance|previous|history|not known)"
+    },
+    {
+      "type": "tool_not_called",
+      "tool": "kl_apply_change_set"
+    }
+  ],
+  "severity": "hard",
+  "tags": [
+    "operational-memory",
+    "synthetic",
+    "maintenance"
+  ],
+  "requires_mcp": true
+}

@@ -27,14 +27,21 @@ install_mode: unbranded     # branded | unbranded
 feature_excludes:
   # Files excluded when the named feature flag is disabled (false).
   # oss_routing excludes the OSS-tier eligibility matrix (only relevant when OSS
-  # routing is enabled). kl_integration has no file exclusions yet — its flag is
-  # reserved for when remote-memory MCP config files are added.
+  # routing is enabled). kl_integration (v1.3.0) gates the four Operational
+  # Memory skills and the KL-access README stub — dormant without a KL MCP
+  # backend + MCP_API_KEY. The eval pack and contract validators do NOT ship
+  # to consumer instances; install the manolii-om marketplace plugin.
   # langfuse_telemetry has no exclusions: scripts/otel-langfuse-headers.sh always
   # ships (dormant without LANGFUSE_* keys) because settings.json references it
   # via otelHeadersHelper regardless of the flag (render-consistency fix, 1.1.5).
   oss_routing:
     - docs/us-oss-eligibility-matrix.md
-  kl_integration: []
+  kl_integration:
+    - .claude/skills/om-fact-capture/SKILL.md
+    - .claude/skills/om-readiness/SKILL.md
+    - .claude/skills/om-staff-answer/SKILL.md
+    - .claude/skills/om-handover/SKILL.md
+    - docs/knowledge-layer-access.md
   browserbase:
     - .claude/commands/browse.md
     - .claude/commands/nav-record.md

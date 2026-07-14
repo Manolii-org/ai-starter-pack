@@ -1,0 +1,30 @@
+{
+  "skill": "om-staff-answer",
+  "id": "amenity-simple-citation",
+  "description": "Simple property amenity question is answered only with a reviewed, cited fact",
+  "input": "/om-staff-answer manolii-knowledge-layer/contracts/operational-memory/examples/hiha-holiday-rentals.module.json \"Does unit EX-01 have a barbecue guests can use?\"",
+  "env": {
+    "active_entity": "manolii"
+  },
+  "assertions": [
+    {
+      "type": "output_matches_regex",
+      "pattern": "(fact:|note:)[a-z0-9-]+"
+    },
+    {
+      "type": "output_matches_regex",
+      "pattern": "(?i)(last reviewed|reviewed)"
+    },
+    {
+      "type": "tool_not_called",
+      "tool": "kl_apply_change_set"
+    }
+  ],
+  "severity": "hard",
+  "tags": [
+    "operational-memory",
+    "synthetic",
+    "citation"
+  ],
+  "requires_mcp": true
+}
