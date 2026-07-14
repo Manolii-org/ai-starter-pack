@@ -77,7 +77,10 @@ def parse_projects_config(config_str: str) -> dict[str, str]:
         parts = item.split(":", 1)
         if len(parts) != 2:
             raise ValueError(f"invalid project spec '{item}' — expected entity:ref")
-        entity, ref = parts
+        # Defensively strip whitespace around both sides — users occasionally
+        # write `entity : ref` in a config file and the leading/trailing spaces
+        # would otherwise silently corrupt the ref (Gemini medium on PR #18).
+        entity, ref = parts[0].strip(), parts[1].strip()
         if not entity or not ref:
             raise ValueError(f"invalid project spec '{item}' — entity and ref must not be empty")
         projects[entity] = ref
@@ -129,7 +132,13 @@ def mgmt_api_query(ref: str, token: str, sql: str) -> list[dict]:
     exponential backoff.
     """
     url = f"https://api.supabase.com/v1/projects/{ref}/database/query"
-    payload = json.dumps({"query": sql}).encode("utf-8")
+    # Defence-in-depth: even though repo-supplied assertion SQL is expected to
+    # be `SELECT ...`, the Management API's write-capable endpoint would happily
+    # run a writable CTE / function if someone slipped one in. `read_only: true`
+    # asks the API to reject anything that would mutate. If a consumer's
+    # Supabase project pre-dates the flag, the API still runs the query — no
+    # regression, just a stronger guarantee where available. (Codex P1 on PR #18)
+    payload = json.dumps({"query": sql, "read_only": True}).encode("utf-8")
     last_err: str | None = None
     for attempt in range(MGMT_API_RETRIES + 1):
         req = urllib.request.Request(
@@ -147,7 +156,13 @@ def mgmt_api_query(ref: str, token: str, sql: str) -> list[dict]:
         try:
             with urllib.request.urlopen(req, timeout=MGMT_API_TIMEOUT_S) as resp:
                 body = resp.read().decode("utf-8")
-                return json.loads(body) if body else []
+                try:
+                    return json.loads(body) if body else []
+                except json.JSONDecodeError as e:
+                    # A non-JSON body is not a normal drift verdict — surface as
+                    # a RuntimeError so the caller categorises it as exit 2
+                    # (op error) rather than a JSONDecodeError → exit 1 (drift). (Gemini medium)
+                    raise RuntimeError(f"non-JSON response from Management API: {e}") from e
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", errors="replace")[:400]
             # 4xx is a definitive answer — do not retry
@@ -164,10 +179,17 @@ def mgmt_api_query(ref: str, token: str, sql: str) -> list[dict]:
 
 
 def predicate_true(ref: str, token: str, predicate: str) -> bool:
-    sql = f"SELECT EXISTS ({predicate.rstrip(';')}) AS ok;"
+    # Wrap the predicate on its own line so a trailing single-line comment
+    # (`SELECT 1 FROM x -- foo`) does not comment out the closing `) AS ok;`.
+    # Without newlines, `SELECT EXISTS (SELECT ... -- foo) AS ok;` became
+    # `SELECT EXISTS (SELECT ... -- foo) AS ok;` on a single line — the `--`
+    # swallows everything to end-of-line and the syntax breaks. (Codex P1 on PR #18)
+    sql = f"SELECT EXISTS (\n{predicate.rstrip(';')}\n) AS ok;"
     rows = mgmt_api_query(ref, token, sql)
-    if not rows or "ok" not in rows[0]:
-        raise RuntimeError(f"predicate returned no ok column: {rows!r}")
+    # Defensive type checks — a malformed API response used to KeyError /
+    # TypeError past this point and crash with exit 1 (misreporting drift).
+    if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict) or "ok" not in rows[0]:
+        raise RuntimeError(f"predicate returned unexpected format: {rows!r}")
     return bool(rows[0]["ok"])
 
 
@@ -192,9 +214,10 @@ def check_entity(entity: str, ref: str, token: str, annotated: list[MigrationChe
         for predicate in check.asserts:
             try:
                 applied = predicate_true(ref, token, predicate)
-            except RuntimeError as e:
-                # Preserve the specific migration that failed so ops can
-                # distinguish "predicate SQL is malformed" from "endpoint down".
+            except Exception as e:
+                # Catch Exception (not just RuntimeError) so an unexpected
+                # KeyError / TypeError from a malformed API response is
+                # classified as op-error (exit 2), not drift (exit 1). (Gemini medium)
                 result.error = f"{check.name}: {e}"
                 return result
             if not applied:
@@ -204,7 +227,7 @@ def check_entity(entity: str, ref: str, token: str, annotated: list[MigrationChe
     return result
 
 
-def write_report(out_dir: Path, entities: list[str], results: list[EntityResult],
+def write_report(out_dir: Path, results: list[EntityResult],
                  checks: list[MigrationCheck]) -> None:
     """Persist per-entity JSON + a human-readable DRIFT.md."""
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -371,7 +394,7 @@ def main() -> int:
     has_error = any(r.error for r in results)
 
     if args.out:
-        write_report(args.out, list(projects_map.keys()), results, checks)
+        write_report(args.out, results, checks)
 
     if args.json:
         print(json.dumps({
@@ -408,4 +431,14 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # Wrap the whole run so an unhandled exception exits with 2 (op error), not
+    # Python's default 1 (which the CI would misread as "drift detected"). (Gemini high)
+    try:
+        raise SystemExit(main())
+    except SystemExit:
+        raise
+    except Exception as _fatal:  # noqa: BLE001 — intentional catch-all
+        import traceback
+        print(f"FATAL: {type(_fatal).__name__}: {_fatal}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        raise SystemExit(2)

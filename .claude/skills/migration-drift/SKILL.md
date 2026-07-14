@@ -49,7 +49,7 @@ cp ai-starter-pack/templates/supabase-migration-drift/scripts/check-migration-dr
 Add `-- @assert-applied:` to every new migration:
 
 ```sql
--- @assert-applied: SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'orders' AND table_schema = 'public'
+-- @assert-applied: SELECT 1 FROM information_schema.tables WHERE table_name = 'orders' AND table_schema = 'public'
 
 CREATE TABLE public.orders (
   id UUID PRIMARY KEY,
@@ -58,14 +58,15 @@ CREATE TABLE public.orders (
 );
 ```
 
-**Pattern:**
-- **Table addition:** Count from `information_schema.tables`
-- **Column addition:** Count from `information_schema.columns`
-- **Index creation:** Count from `pg_indexes`
-- **RLS policy:** Count from `pg_policies`
-- **Function:** Count from `pg_proc`
+**Pattern:** the predicate should be `SELECT 1 FROM <catalog> WHERE <condition>` — the driver wraps it as `SELECT EXISTS (<predicate>)`, so it must return **≥1 row** iff the migration is applied and **0 rows** otherwise.
 
-The predicate must return a truthy result (count > 0, boolean true) when applied.
+- **Table addition:** `SELECT 1 FROM information_schema.tables WHERE …`
+- **Column addition:** `SELECT 1 FROM information_schema.columns WHERE …`
+- **Index creation:** `SELECT 1 FROM pg_indexes WHERE …`
+- **RLS policy:** `SELECT 1 FROM pg_policies WHERE …`
+- **Function:** `SELECT 1 FROM pg_proc WHERE …`
+
+> ⚠️ **Do not use `SELECT COUNT(*) FROM …`.** Aggregate queries always return one row (containing the count), so `EXISTS(SELECT COUNT(*) …)` is always `true` — the drift check silently reports "applied" even when the object is missing. Use `SELECT 1 FROM … WHERE …` instead.
 
 ## 4. How the Workflow Runs
 

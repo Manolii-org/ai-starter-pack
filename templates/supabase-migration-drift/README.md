@@ -14,13 +14,15 @@ See [ADR-0029](https://github.com/manolii-org/manolii-knowledge-layer/blob/main/
 
 ### 1. Copy Template Files
 
-Copy the three directories into your repo:
+Copy the workflow + script from the ai-starter-pack repo root into your consumer repo:
 
 ```bash
-# From ai-starter-pack/templates/supabase-migration-drift/
-cp -r scripts/.github templates/supabase-migration-drift/.github <your-repo>/
+# Run from the root of ai-starter-pack/
+cp -r templates/supabase-migration-drift/.github <your-repo>/
 cp templates/supabase-migration-drift/scripts/check-migration-drift-mgmt.py <your-repo>/scripts/
 ```
+
+You end up with `<your-repo>/.github/workflows/migration-drift.yml` and `<your-repo>/scripts/check-migration-drift-mgmt.py`.
 
 ### 2. Set Repository Variable
 
@@ -48,7 +50,7 @@ Create a repo secret `SUPABASE_ACCESS_TOKEN` with a Supabase Personal Access Tok
 Every new migration must include a predicate that verifies it was applied. Add a comment to your migration file:
 
 ```sql
--- @assert-applied: SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'my_new_table' AND table_schema = 'public'
+-- @assert-applied: SELECT 1 FROM information_schema.tables WHERE table_name = 'my_new_table' AND table_schema = 'public'
 
 CREATE TABLE public.my_new_table (
   id UUID PRIMARY KEY,
@@ -60,19 +62,21 @@ CREATE TABLE public.my_new_table (
 
 ```sql
 -- Column addition
--- @assert-applied: SELECT COUNT(*) FROM information_schema.columns WHERE table_name = 'users' AND column_name = 'email_verified'
+-- @assert-applied: SELECT 1 FROM information_schema.columns WHERE table_name = 'users' AND column_name = 'email_verified'
 
 -- Index creation
--- @assert-applied: SELECT COUNT(*) FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'idx_users_email'
+-- @assert-applied: SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'idx_users_email'
 
 -- RLS policy
--- @assert-applied: SELECT COUNT(*) FROM pg_policies WHERE tablename = 'posts' AND policyname = 'users_see_own_posts'
+-- @assert-applied: SELECT 1 FROM pg_policies WHERE tablename = 'posts' AND policyname = 'users_see_own_posts'
 
 -- Function
--- @assert-applied: SELECT COUNT(*) FROM pg_proc WHERE proname = 'my_function' AND pronamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
+-- @assert-applied: SELECT 1 FROM pg_proc WHERE proname = 'my_function' AND pronamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
 ```
 
-**Rule:** The predicate must return a truthy result (row count > 0, boolean true, or similar) when the migration is applied.
+**Rule:** the predicate must return **at least one row** when the migration is applied, and **zero rows** when it isn't. The driver wraps it as `SELECT EXISTS (<your predicate>)` — EXISTS is `true` iff the inner query returns any row.
+
+> ⚠️ **Do not use `SELECT COUNT(*) FROM …`** as your predicate. Aggregate queries always return exactly one row (containing the count, which can be 0), so `EXISTS(SELECT COUNT(*) …)` is always `true` — the drift check silently reports "applied" even when the table doesn't exist. Use `SELECT 1 FROM … WHERE …` (or `SELECT 1 FROM pg_class WHERE relname='x'`) — that returns zero rows if the object is missing, and `EXISTS()` correctly reports `false`.
 
 ## How It Works
 
