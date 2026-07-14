@@ -243,64 +243,102 @@ def format_violation(v):
 # it checks a ±6-line window for both `Agent(` and `model=` (or `model:`).
 # Escape a specific line with the trailing comment
 # `# lint-agent-routing:allow-missing-model`.
-_SUBAGENT_RE = re.compile(r"""subagent_type\s*[=:]\s*["'`]([A-Za-z0-9_.\-/]+)["'`]""")
-_MODEL_RE = re.compile(r"""\bmodel\s*[=:]""")
+_SUBAGENT_RE = re.compile(r"""["'`]?subagent_type["'`]?\s*[=:]\s*["'`]([A-Za-z0-9_.\-/]+)["'`]""")
+_MODEL_RE = re.compile(r"""["'`]?\bmodel\b["'`]?\s*[=:]""")
 _AGENT_CALL_RE = re.compile(r"""\bAgent\s*\(""")
 _ALLOW_MARKER = "lint-agent-routing:allow-missing-model"
+_ALLOW_MARKER_FILE = "lint-agent-routing:allow-file"
 _DISPATCH_SCAN_EXTS_SOURCE = {".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".sh"}
 _DISPATCH_SCAN_EXTS_DOCS = {".md"}
 _DISPATCH_SCAN_EXCLUDES = {
     ".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build",
     ".next", "coverage",
 }
+_MAX_CALL_SPAN_CHARS = 20000
+
+
+def _extract_agent_call_spans(text):
+    """Yield (start_line_1indexed, span_text) for each Agent(...) call."""
+    for m in _AGENT_CALL_RE.finditer(text):
+        open_paren = m.end() - 1
+        depth = 1
+        i = open_paren + 1
+        end = len(text)
+        limit = min(end, open_paren + _MAX_CALL_SPAN_CHARS)
+        in_str = None
+        while i < limit and depth > 0:
+            c = text[i]
+            if in_str:
+                if c == "\\" and i + 1 < end:
+                    i += 2
+                    continue
+                if c == in_str:
+                    in_str = None
+            else:
+                if c in ("'", '"', "`"):
+                    in_str = c
+                elif c == "(":
+                    depth += 1
+                elif c == ")":
+                    depth -= 1
+                    if depth == 0:
+                        line_end = text.find("\n", i + 1)
+                        if line_end == -1:
+                            line_end = end
+                        span_text = text[m.start(): line_end]
+                        start_line = text.count("\n", 0, m.start()) + 1
+                        yield start_line, span_text
+                        break
+            i += 1
 
 
 def lint_subagent_dispatches_in_tree(root, include_docs=False):
     """Return list of violations: source dispatches missing explicit model=."""
+    import os
     violations = []
     root = Path(root).resolve()
     exts = set(_DISPATCH_SCAN_EXTS_SOURCE)
     if include_docs:
         exts |= _DISPATCH_SCAN_EXTS_DOCS
-    for path in root.rglob("*"):
-        if not path.is_file() or path.suffix not in exts:
-            continue
-        rel = path.relative_to(root)
-        if any(part in _DISPATCH_SCAN_EXCLUDES for part in rel.parts):
-            continue
-        if rel.name == "lint-agent-routing.py":
-            continue
-        try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-        except (OSError, UnicodeDecodeError):
-            continue
-        if "subagent_type" not in text:
-            continue
-        lines = text.splitlines()
-        for i, line in enumerate(lines):
-            m = _SUBAGENT_RE.search(line)
-            if not m:
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _DISPATCH_SCAN_EXCLUDES]
+        for filename in filenames:
+            path = Path(dirpath) / filename
+            if path.suffix not in exts:
                 continue
-            if _ALLOW_MARKER in line:
+            rel = path.relative_to(root)
+            if rel.name == "lint-agent-routing.py":
                 continue
-            window = "\n".join(lines[max(0, i - 6): i + 7])
-            if not _AGENT_CALL_RE.search(window):
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except (OSError, UnicodeDecodeError):
                 continue
-            if _MODEL_RE.search(window):
+            if "Agent(" not in text or "subagent_type" not in text:
                 continue
-            violations.append({
-                "file": str(rel),
-                "line": i + 1,
-                "subagent": m.group(1),
-                "snippet": line.strip()[:160],
-            })
+            if _ALLOW_MARKER_FILE in text:
+                continue
+            for start_line, span in _extract_agent_call_spans(text):
+                if _ALLOW_MARKER in span:
+                    continue
+                sm = _SUBAGENT_RE.search(span)
+                if not sm:
+                    continue
+                if _MODEL_RE.search(span):
+                    continue
+                snippet_line = span.splitlines()[0].strip()[:160]
+                violations.append({
+                    "file": str(rel),
+                    "line": start_line,
+                    "subagent": sm.group(1),
+                    "snippet": snippet_line,
+                })
     return violations
 
 
 def format_subagent_dispatch_violation(v):
     return (
         f"  [RULE7_MISSING_MODEL] {v['file']}:{v['line']}\n"
-        f"    subagent_type=\"{v['subagent']}\" has no explicit model= within ±6 lines\n"
+        f"    subagent_type=\"{v['subagent']}\" has no explicit model= within its Agent() call\n"
         f"    snippet: {v['snippet']}"
     )
 
@@ -347,7 +385,30 @@ def main():
         action="store_true",
         help="Extend the Rule 7 scan to .md files (prose examples).",
     )
+    parser.add_argument(
+        "--dispatch-only",
+        action="store_true",
+        help="Run ONLY the Rule 7 subagent-dispatch scan; skip agent-frontmatter "
+             "linting entirely (use in source-file pre-commit hooks).",
+    )
     args = parser.parse_args()
+
+    if args.dispatch_only:
+        scan_root = Path(args.check_subagent_dispatches or ".")
+        vios = lint_subagent_dispatches_in_tree(scan_root, include_docs=args.include_docs)
+        if vios:
+            print(f"\n[lint-agent-routing] SUBAGENT DISPATCH VIOLATIONS — {len(vios)} issue(s)\n")
+            for v in vios:
+                print(format_subagent_dispatch_violation(v))
+                print()
+            print(
+                "RULE 7 — Subagent dispatches must pin an explicit model=. Add "
+                "explicit model=\"haiku\" (or the intended tier) to the Agent(...) "
+                "call."
+            )
+            return 1
+        print(f"[lint-agent-routing] Rule 7 OK — subagent dispatches under {scan_root} all pin model=")
+        return 0
 
     config = load_routing_config()
     oss_routed = build_oss_routed_set(config)

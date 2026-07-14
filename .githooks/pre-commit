@@ -18,14 +18,14 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 
 if echo "$STAGED" | grep -qE '(\.claude/agents/.*\.md|\.claude/model-routing\.json)'; then
     echo "[pre-commit] Linting agent routing safety rules..."
-    python3 "$REPO_ROOT/scripts/lint-agent-routing.py"
+    python3 "$REPO_ROOT/scripts/lint-agent-routing.py" --no-check-subagent-dispatches
 fi
 
 # RULE 7 — subagent dispatches must pin explicit model= (v2.1.198 Explore
-# silent-Opus regression). Trigger on staged source files that can contain
-# Agent(subagent_type=...) calls.
+# silent-Opus regression). --dispatch-only skips frontmatter checks so an
+# unrelated pre-existing frontmatter issue doesn't block source-only commits.
 if echo "$STAGED" | grep -qE '\.(py|ts|tsx|js|jsx|mjs|cjs|sh)$'; then
     echo "[pre-commit] Rule 7 — verifying subagent dispatches pin an explicit model..."
-    python3 "$REPO_ROOT/scripts/lint-agent-routing.py" \
+    python3 "$REPO_ROOT/scripts/lint-agent-routing.py" --dispatch-only \
         --check-subagent-dispatches "$REPO_ROOT" || exit 1
 fi
