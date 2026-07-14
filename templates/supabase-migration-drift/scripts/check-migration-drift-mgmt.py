@@ -165,10 +165,30 @@ def mgmt_api_query(ref: str, token: str, sql: str) -> list[dict]:
                     raise RuntimeError(f"non-JSON response from Management API: {e}") from e
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", errors="replace")[:400]
-            # 4xx is a definitive answer — do not retry
-            if 400 <= e.code < 500:
+            # 429 (rate limited) is transient — a mature repo with many annotated
+            # migrations can hit the Supabase Management API quota on a single
+            # scheduled run (one HTTP request per predicate). Treating 429 as
+            # definitive would turn the drift guard into a persistent op-error
+            # until the window clears. Honour Retry-After if present, otherwise
+            # fall through to the same exponential backoff as 5xx. (Codex P2 on PR #18)
+            if e.code == 429:
+                retry_after = e.headers.get("Retry-After", "") if e.headers else ""
+                # Retry-After is either seconds (integer string) or an HTTP date;
+                # we only handle the seconds form defensively — the exp-backoff
+                # below is the safe fallback if parsing fails or a date is sent.
+                try:
+                    delay = max(0, int(retry_after))
+                    if delay and attempt < MGMT_API_RETRIES:
+                        time.sleep(min(delay, 30))  # cap so we don't wait forever on a hostile hint
+                except (TypeError, ValueError):
+                    pass
+                last_err = f"HTTP 429 (rate limited): {body}"
+            elif 400 <= e.code < 500:
+                # Every other 4xx is a definitive answer — bad token, bad ref,
+                # bad SQL — do not retry, exit 2 immediately.
                 raise RuntimeError(f"HTTP {e.code}: {body}") from e
-            last_err = f"HTTP {e.code}: {body}"
+            else:
+                last_err = f"HTTP {e.code}: {body}"
         except urllib.error.URLError as e:
             last_err = f"URLError: {e.reason}"
         except (TimeoutError, ConnectionError) as e:
