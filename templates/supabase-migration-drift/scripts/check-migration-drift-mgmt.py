@@ -360,6 +360,24 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    # `--list` is the DB-free coverage smoke test — it should NOT require
+    # MIGRATION_DRIFT_PROJECTS or SUPABASE_ACCESS_TOKEN so a fresh consumer
+    # repo can run it before any Supabase config exists. Handle it before
+    # any project-config or token validation. (Codex P2 on PR #18)
+    if args.list:
+        try:
+            checks = load_checks(args.migrations_dir)
+        except RuntimeError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 2
+        annotated = [c for c in checks if c.annotated]
+        unverified = [c for c in checks if not c.annotated]
+        print(f"migrations: {len(checks)} total, "
+              f"{len(annotated)} annotated, {len(unverified)} unverified")
+        if not args.json:
+            print("annotated:   " + (", ".join(c.version for c in annotated) or "(none)"))
+        return 0
+
     # Resolve projects config
     projects_config = args.projects or os.environ.get("MIGRATION_DRIFT_PROJECTS", "").strip()
     if not projects_config:
@@ -390,13 +408,6 @@ def main() -> int:
 
     annotated = [c for c in checks if c.annotated]
     unverified = [c for c in checks if not c.annotated]
-
-    if args.list:
-        print(f"migrations: {len(checks)} total, "
-              f"{len(annotated)} annotated, {len(unverified)} unverified")
-        if not args.json:
-            print("annotated:   " + (", ".join(c.version for c in annotated) or "(none)"))
-        return 0
 
     token = os.environ.get("SUPABASE_ACCESS_TOKEN", "").strip()
     if not token:
