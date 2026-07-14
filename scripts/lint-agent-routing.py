@@ -258,7 +258,7 @@ _MAX_CALL_SPAN_CHARS = 20000
 
 
 def _extract_agent_call_spans(text):
-    """Yield (start_line_1indexed, span_text) for each Agent(...) call."""
+    """Yield (start_line, span_text, span_cleaned). String bodies masked in cleaned."""
     for m in _AGENT_CALL_RE.finditer(text):
         open_paren = m.end() - 1
         depth = 1
@@ -266,29 +266,68 @@ def _extract_agent_call_spans(text):
         end = len(text)
         limit = min(end, open_paren + _MAX_CALL_SPAN_CHARS)
         in_str = None
+        str_start = -1
+        str_regions = []
         while i < limit and depth > 0:
             c = text[i]
             if in_str:
+                if len(in_str) == 3:
+                    if text[i: i + 3] == in_str:
+                        str_regions.append((str_start, i))
+                        i += 3
+                        in_str = None
+                        continue
+                    if c == "\\" and i + 1 < end:
+                        i += 2
+                        continue
+                    i += 1
+                    continue
                 if c == "\\" and i + 1 < end:
                     i += 2
                     continue
                 if c == in_str:
+                    str_regions.append((str_start, i))
                     in_str = None
-            else:
-                if c in ("'", '"', "`"):
-                    in_str = c
-                elif c == "(":
-                    depth += 1
-                elif c == ")":
-                    depth -= 1
-                    if depth == 0:
-                        line_end = text.find("\n", i + 1)
-                        if line_end == -1:
-                            line_end = end
-                        span_text = text[m.start(): line_end]
-                        start_line = text.count("\n", 0, m.start()) + 1
-                        yield start_line, span_text
-                        break
+                    i += 1
+                    continue
+                i += 1
+                continue
+            if c in ("'", '"', "`"):
+                if text[i: i + 3] in ('"""', "'''", "```"):
+                    in_str = text[i: i + 3]
+                    i += 3
+                    str_start = i
+                    continue
+                in_str = c
+                i += 1
+                str_start = i
+                continue
+            if c == "(":
+                depth += 1
+                i += 1
+                continue
+            if c == ")":
+                depth -= 1
+                if depth == 0:
+                    line_end = text.find("\n", i + 1)
+                    if line_end == -1:
+                        line_end = end
+                    span_text = text[m.start(): line_end]
+                    span_start_abs = m.start()
+                    span_len = len(span_text)
+                    buf = list(span_text)
+                    for s, e in str_regions:
+                        rel_s = max(0, s - span_start_abs)
+                        rel_e = min(span_len, e - span_start_abs)
+                        for k in range(rel_s, rel_e):
+                            if buf[k] != "\n":
+                                buf[k] = " "
+                    span_cleaned = "".join(buf)
+                    start_line = text.count("\n", 0, m.start()) + 1
+                    yield start_line, span_text, span_cleaned
+                    break
+                i += 1
+                continue
             i += 1
 
 
@@ -317,13 +356,13 @@ def lint_subagent_dispatches_in_tree(root, include_docs=False):
                 continue
             if _ALLOW_MARKER_FILE in text:
                 continue
-            for start_line, span in _extract_agent_call_spans(text):
+            for start_line, span, span_cleaned in _extract_agent_call_spans(text):
                 if _ALLOW_MARKER in span:
                     continue
                 sm = _SUBAGENT_RE.search(span)
                 if not sm:
                     continue
-                if _MODEL_RE.search(span):
+                if _MODEL_RE.search(span_cleaned):
                     continue
                 snippet_line = span.splitlines()[0].strip()[:160]
                 violations.append({
