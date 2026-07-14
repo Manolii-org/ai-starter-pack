@@ -18,6 +18,7 @@ Copy the workflow + script from the ai-starter-pack repo root into your consumer
 
 ```bash
 # Run from the root of ai-starter-pack/
+mkdir -p <your-repo>/scripts
 cp -r templates/supabase-migration-drift/.github <your-repo>/
 cp templates/supabase-migration-drift/scripts/check-migration-drift-mgmt.py <your-repo>/scripts/
 ```

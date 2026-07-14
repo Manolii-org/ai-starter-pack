@@ -33,7 +33,13 @@ Pick the path that matches how you installed:
 **A. Plugin-only install (no local `ai-starter-pack` checkout).** Download the three files directly from the upstream branch:
 
 ```bash
-BASE=https://raw.githubusercontent.com/Manolii-org/ai-starter-pack/main/templates/supabase-migration-drift
+# Pin REF to a release tag or full commit SHA for reproducibility.
+# Fetching from a mutable branch means a compromised push to main could
+# swap in a hostile drift script the next time you re-run this install.
+# Use `main` only for a first look; freeze to a SHA/tag once the template
+# is stable in your repo.
+REF="main"  # ← recommended: replace with a tag (e.g. v1.0.0) or full 40-char SHA
+BASE="https://raw.githubusercontent.com/Manolii-org/ai-starter-pack/${REF}/templates/supabase-migration-drift"
 mkdir -p .github/workflows scripts
 curl -fsSL "$BASE/.github/workflows/migration-drift.yml" -o .github/workflows/migration-drift.yml
 curl -fsSL "$BASE/scripts/check-migration-drift-mgmt.py"  -o scripts/check-migration-drift-mgmt.py
@@ -43,6 +49,7 @@ chmod +x scripts/check-migration-drift-mgmt.py
 **B. You already have `ai-starter-pack` checked out locally.** From the root of `ai-starter-pack`:
 
 ```bash
+mkdir -p <your-repo>/scripts
 cp -r templates/supabase-migration-drift/.github <your-repo>/
 cp    templates/supabase-migration-drift/scripts/check-migration-drift-mgmt.py <your-repo>/scripts/
 ```

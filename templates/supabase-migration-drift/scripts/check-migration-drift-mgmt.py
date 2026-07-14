@@ -83,6 +83,14 @@ def parse_projects_config(config_str: str) -> dict[str, str]:
         entity, ref = parts[0].strip(), parts[1].strip()
         if not entity or not ref:
             raise ValueError(f"invalid project spec '{item}' — entity and ref must not be empty")
+        # Reject duplicate entities. `prod:ref-a,prod:ref-b` was silently
+        # keeping only ref-b, so one of the two projects the operator intended
+        # to check would be dropped without warning. (CodeRabbit major #18)
+        if entity in projects:
+            raise ValueError(
+                f"duplicate entity '{entity}' in config — each entity may only be listed once "
+                f"(previously mapped to '{projects[entity]}', now got '{ref}')"
+            )
         projects[entity] = ref
 
     if not projects:
@@ -208,18 +216,46 @@ def mgmt_api_query(ref: str, token: str, sql: str) -> list[dict]:
 
 
 def predicate_true(ref: str, token: str, predicate: str) -> bool:
+    """Wrap a repo-authored `@assert-applied` predicate and return the EXISTS result.
+
+    APPROVED RAW-SQL EXEMPTION. The `predicate` argument is a SQL fragment
+    read from the migration file's `-- @assert-applied:` header. This is
+    NOT user-supplied input — it is repo-authored code, reviewed at merge
+    time by the same process that reviews the migration DDL itself. The
+    contract accepts an arbitrary SELECT subquery so predicates can express
+    the full range of Postgres catalog checks needed (function signatures
+    with LIKE '%…%' body inspection, index existence with schema filter,
+    CHECK constraint definition string matching, etc.). A parameterised
+    template surface cannot express these — see the KL sibling script
+    `manolii-knowledge-layer/scripts/check-migration-drift.py` for the
+    same contract in the psql-backed variant.
+
+    Guardrails that make this safe in practice:
+      1. The predicate SQL ships in git alongside the migration; if a
+         hostile predicate lands, that's a code-review failure, not a
+         runtime failure of this script.
+      2. The Management API POST includes `read_only: true` (see
+         `mgmt_api_query`), so even a mutating predicate cannot mutate.
+      3. This workflow does NOT run on `pull_request` (see the CI
+         workflow header comment for the two Codex P1 reasons behind that),
+         so an in-flight PR cannot exfiltrate the PAT via a hostile
+         predicate.
+    """
     # Wrap the predicate on its own line so a trailing single-line comment
     # (`SELECT 1 FROM x -- foo`) does not comment out the closing `) AS ok;`.
-    # Without newlines, `SELECT EXISTS (SELECT ... -- foo) AS ok;` became
-    # `SELECT EXISTS (SELECT ... -- foo) AS ok;` on a single line — the `--`
-    # swallows everything to end-of-line and the syntax breaks. (Codex P1 on PR #18)
     sql = f"SELECT EXISTS (\n{predicate.rstrip(';')}\n) AS ok;"
     rows = mgmt_api_query(ref, token, sql)
     # Defensive type checks — a malformed API response used to KeyError /
     # TypeError past this point and crash with exit 1 (misreporting drift).
     if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict) or "ok" not in rows[0]:
         raise RuntimeError(f"predicate returned unexpected format: {rows!r}")
-    return bool(rows[0]["ok"])
+    ok = rows[0]["ok"]
+    # `bool("false")` is True and `bool(None)` is False — either would
+    # silently mis-classify a malformed response. Require the actual JSON
+    # boolean the endpoint contract guarantees. (CodeRabbit major #18)
+    if not isinstance(ok, bool):
+        raise RuntimeError(f"predicate returned non-boolean ok value: {ok!r}")
+    return ok
 
 
 @dataclass
@@ -381,9 +417,19 @@ def main() -> int:
             return 2
         annotated = [c for c in checks if c.annotated]
         unverified = [c for c in checks if not c.annotated]
-        print(f"migrations: {len(checks)} total, "
-              f"{len(annotated)} annotated, {len(unverified)} unverified")
-        if not args.json:
+        if args.json:
+            # `--list --json` must emit ONLY valid JSON so pipes into jq
+            # don't hit a plaintext summary line. (CodeRabbit minor #18)
+            print(json.dumps({
+                "migration_count": len(checks),
+                "annotated_count": len(annotated),
+                "unverified_count": len(unverified),
+                "annotated_versions": [c.version for c in annotated],
+                "unverified_versions": [c.version for c in unverified],
+            }, indent=2))
+        else:
+            print(f"migrations: {len(checks)} total, "
+                  f"{len(annotated)} annotated, {len(unverified)} unverified")
             print("annotated:   " + (", ".join(c.version for c in annotated) or "(none)"))
         return 0
 
