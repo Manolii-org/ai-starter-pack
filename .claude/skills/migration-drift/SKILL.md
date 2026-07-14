@@ -26,12 +26,28 @@ This skill embeds a continuous-verification system: every migration carries a sm
 
 ## 2. Setup
 
-### Copy Template to Your Repo
+### Fetch Template Files Into Your Repo
+
+Pick the path that matches how you installed:
+
+**A. Plugin-only install (no local `ai-starter-pack` checkout).** Download the three files directly from the upstream branch:
 
 ```bash
-cp -r ai-starter-pack/templates/supabase-migration-drift/.github <your-repo>/
-cp ai-starter-pack/templates/supabase-migration-drift/scripts/check-migration-drift-mgmt.py <your-repo>/scripts/
+BASE=https://raw.githubusercontent.com/Manolii-org/ai-starter-pack/main/templates/supabase-migration-drift
+mkdir -p .github/workflows scripts
+curl -fsSL "$BASE/.github/workflows/migration-drift.yml" -o .github/workflows/migration-drift.yml
+curl -fsSL "$BASE/scripts/check-migration-drift-mgmt.py"  -o scripts/check-migration-drift-mgmt.py
+chmod +x scripts/check-migration-drift-mgmt.py
 ```
+
+**B. You already have `ai-starter-pack` checked out locally.** From the root of `ai-starter-pack`:
+
+```bash
+cp -r templates/supabase-migration-drift/.github <your-repo>/
+cp    templates/supabase-migration-drift/scripts/check-migration-drift-mgmt.py <your-repo>/scripts/
+```
+
+The plugin bundle intentionally does NOT ship the `templates/supabase-migration-drift/` tree — the workflow + script are versioned as their own capability so plugin consumers can pin a specific upstream ref (swap `main` above for a tag/SHA) without dragging the template through every plugin bump.
 
 ### Set Repository Configuration
 
