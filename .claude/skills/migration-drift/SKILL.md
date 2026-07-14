@@ -83,6 +83,8 @@ CREATE TABLE public.orders (
 - **Function:** `SELECT 1 FROM pg_proc WHERE …`
 
 > ⚠️ **Do not use `SELECT COUNT(*) FROM …`.** Aggregate queries always return one row (containing the count), so `EXISTS(SELECT COUNT(*) …)` is always `true` — the drift check silently reports "applied" even when the object is missing. Use `SELECT 1 FROM … WHERE …` instead.
+>
+> ⚠️ **Always schema-qualify catalog queries.** Supabase projects carry many schemas (`public`, `auth`, `storage`, `realtime`, `extensions`, plus per-tenant schemas). `information_schema.columns` / `pg_policies` / `pg_indexes` contain rows across all of them, so a predicate that filters only on `table_name` / `tablename` can silently pass because e.g. `auth.users` happens to have the same name. Add `table_schema = 'public'` (or `schemaname = 'public'`) to every predicate.
 
 ## 4. How the Workflow Runs
 

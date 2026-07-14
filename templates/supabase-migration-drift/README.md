@@ -50,7 +50,7 @@ Create a repo secret `SUPABASE_ACCESS_TOKEN` with a Supabase Personal Access Tok
 Every new migration must include a predicate that verifies it was applied. Add a comment to your migration file:
 
 ```sql
--- @assert-applied: SELECT 1 FROM information_schema.tables WHERE table_name = 'my_new_table' AND table_schema = 'public'
+-- @assert-applied: SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'my_new_table'
 
 CREATE TABLE public.my_new_table (
   id UUID PRIMARY KEY,
@@ -58,23 +58,25 @@ CREATE TABLE public.my_new_table (
 );
 ```
 
-**More examples:**
+**More examples** (always schema-qualified — see the trap below):
 
 ```sql
 -- Column addition
--- @assert-applied: SELECT 1 FROM information_schema.columns WHERE table_name = 'users' AND column_name = 'email_verified'
+-- @assert-applied: SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'email_verified'
 
 -- Index creation
 -- @assert-applied: SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'idx_users_email'
 
 -- RLS policy
--- @assert-applied: SELECT 1 FROM pg_policies WHERE tablename = 'posts' AND policyname = 'users_see_own_posts'
+-- @assert-applied: SELECT 1 FROM pg_policies WHERE schemaname = 'public' AND tablename = 'posts' AND policyname = 'users_see_own_posts'
 
 -- Function
 -- @assert-applied: SELECT 1 FROM pg_proc WHERE proname = 'my_function' AND pronamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
 ```
 
 **Rule:** the predicate must return **at least one row** when the migration is applied, and **zero rows** when it isn't. The driver wraps it as `SELECT EXISTS (<your predicate>)` — EXISTS is `true` iff the inner query returns any row.
+
+> ⚠️ **Always schema-qualify.** `information_schema.columns` / `information_schema.tables` / `pg_policies` / `pg_indexes` contain rows across ALL schemas (`public`, `auth`, `storage`, `realtime`, `extensions`, plus any per-tenant schemas you add). A predicate that filters only on `table_name`/`column_name`/`tablename` can silently pass because `auth.users` or `storage.objects` happens to have the same name — the drift check reports the public-table migration as applied even when it wasn't. Add `table_schema = 'public'` (or `schemaname = 'public'`) to every catalog query.
 
 > ⚠️ **Do not use `SELECT COUNT(*) FROM …`** as your predicate. Aggregate queries always return exactly one row (containing the count, which can be 0), so `EXISTS(SELECT COUNT(*) …)` is always `true` — the drift check silently reports "applied" even when the table doesn't exist. Use `SELECT 1 FROM … WHERE …` (or `SELECT 1 FROM pg_class WHERE relname='x'`) — that returns zero rows if the object is missing, and `EXISTS()` correctly reports `false`.
 
