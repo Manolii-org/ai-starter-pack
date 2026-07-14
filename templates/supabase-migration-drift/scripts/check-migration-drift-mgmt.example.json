@@ -1,0 +1,33 @@
+{
+  "_comment": "Example projects configuration for check-migration-drift-mgmt.py",
+  "_format": "This file shows the logical structure of MIGRATION_DRIFT_PROJECTS. In GitHub Actions, the variable is stored as a simple string: entity:ref,entity:ref,...",
+  "_reference_format": "entity:supabase_ref,entity:supabase_ref,...",
+  "example_string": "prod:wccgdisnrbvstnnzppld,staging:xyz789,dev:local-test-ref",
+  "example_expanded": {
+    "description": "Three-entity setup common to Manolii ecosystem (manolii, personal, impaktful) — customize for your project",
+    "entities": {
+      "manolii": {
+        "supabase_ref": "wccgdisnrbvstnnzppld",
+        "provider": "Microsoft 365",
+        "doppler_project": "manolii-knowledge-layer",
+        "notes": "Business data"
+      },
+      "personal": {
+        "supabase_ref": "uymtocwztytehuofpwqw",
+        "provider": "Google Workspace",
+        "doppler_project": "personal-knowledge-layer",
+        "notes": "Personal data"
+      },
+      "impaktful": {
+        "supabase_ref": "lugpenutvjrengstzjwx",
+        "provider": "Google Workspace",
+        "doppler_project": "impaktful-knowledge-layer",
+        "notes": "Startup data"
+      }
+    }
+  },
+  "for_bcp_core": "prod:bcp_core_ref,staging:bcp_staging_ref",
+  "for_manolii_platform": "prod:platform_ref,dev:platform_dev_ref",
+  "for_ensombl": "prod:ensombl_ref",
+  "for_your_project": "prod:<your_ref>,staging:<your_staging_ref>"
+}
