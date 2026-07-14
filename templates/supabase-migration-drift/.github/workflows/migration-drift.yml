@@ -13,11 +13,35 @@ name: Migration drift check
 #   target project via the Management API and checking `@assert-applied`
 #   predicates. (See ADR-0029 in the source repo for full context.)
 #
+# NO `pull_request` TRIGGER — deliberate.
+#   Running this workflow on `pull_request` would create two hard-blocking problems:
+#
+#     1. SECRET EXPOSURE. The job runs the drift script from the PR checkout with
+#        SUPABASE_ACCESS_TOKEN in env. Anyone who can open a same-repo branch PR
+#        could edit the script IN THE SAME PR to exfiltrate the PAT or issue
+#        arbitrary Management API calls. Supabase PATs typically scope across
+#        every project the owning user can reach — a single leak is catastrophic.
+#
+#     2. FALSE FAILURE ON NEW MIGRATIONS. When a PR adds a migration with a
+#        `@assert-applied` predicate, that predicate is expected to be FALSE on
+#        prod/staging until AFTER merge (the merge is what enables the apply).
+#        A pull_request-time live check would fail every migration PR and force
+#        reviewers to apply unreviewed SQL to prod BEFORE merging — the exact
+#        anti-pattern this system was built to prevent.
+#
+#   Static hygiene on PRs (collision numbers / @assert-applied header present /
+#   legacy tree frozen) belongs in a SEPARATE workflow that runs against the
+#   diff and needs no secrets — see manolii-org/manolii-knowledge-layer's
+#   .github/workflows/migration-hygiene.yml for one example.
+#
+#   Live drift is a POST-MERGE + SCHEDULE concern only. Consumers wanting a
+#   pre-merge review-time signal should adopt the static-hygiene companion
+#   workflow, NOT extend this one to `pull_request`.
+#
 # TRIGGERS
-#   - Every PR that touches supabase/migrations/  → fail PR on drift
-#   - Every push to main (post-merge)             → surface drift immediately
-#   - Daily check (0 7 UTC)                       → catch out-of-band applies/rollbacks
-#   - Manual workflow_dispatch                    → on-demand recheck
+#   - Every push to main (post-merge)   → surface drift immediately
+#   - Daily check (0 7 UTC)             → catch out-of-band applies/rollbacks
+#   - Manual workflow_dispatch          → on-demand recheck
 #
 # SETUP REQUIRED
 #   1. Set a repo variable `MIGRATION_DRIFT_PROJECTS` with the format:
@@ -27,12 +51,6 @@ name: Migration drift check
 #      (from your Doppler project or created in Supabase console)
 
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - 'supabase/migrations/**'
-      - 'scripts/check-migration-drift*.py'
-      - '.github/workflows/migration-drift.yml'
   push:
     branches: [main]
     paths:
@@ -42,7 +60,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: migration-drift-${{ github.event.pull_request.number || github.ref }}
+  group: migration-drift-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:

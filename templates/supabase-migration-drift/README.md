@@ -81,10 +81,11 @@ CREATE TABLE public.my_new_table (
 ## How It Works
 
 1. **CI Triggers:**
-   - Every PR touching `supabase/migrations/` → run drift check
-   - Every push to `main` → run drift check
+   - Every push to `main` (post-merge) → run drift check
    - Daily at 07:00 UTC → catch out-of-band applies/rollbacks
    - Manual `workflow_dispatch` → on-demand recheck
+
+   > **Deliberately not run on `pull_request`.** Doing so would (a) expose `SUPABASE_ACCESS_TOKEN` to PR-controlled code — a contributor could edit the drift script in the same PR to exfiltrate the PAT; and (b) fail every migration PR by design, since a newly-added migration's predicate is expected to be false on prod until AFTER the merge applies it. Pre-merge static hygiene (collision numbers, `@assert-applied` present) belongs in a separate no-secret workflow. See the source repo's ADR-0029 for full rationale.
 
 2. **Execution:**
    - The Python script reads all migrations in `supabase/migrations/`

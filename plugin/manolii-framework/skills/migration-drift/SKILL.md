@@ -70,7 +70,7 @@ CREATE TABLE public.orders (
 
 ## 4. How the Workflow Runs
 
-- **Triggers:** PR diffs, push to main, daily 07:00 UTC, manual dispatch
+- **Triggers:** push to main (post-merge), daily 07:00 UTC, manual dispatch. Deliberately NOT `pull_request` — running this on PR-controlled code would expose the Supabase PAT and would false-fail every migration PR by definition. See the workflow header + README for details.
 - **Steps:**
   1. Parse all migrations in `supabase/migrations/`
   2. Extract `@assert-applied:` predicates
