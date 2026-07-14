@@ -71,6 +71,33 @@
     }
   },
   "tier_definitions": {
+    "tier-review": {
+      "provider": "fireworks",
+      "model": "accounts/fireworks/models/deepseek-v4-flash",
+      "litellm_alias": "tier-review",
+      "swebench": null,
+      "baseline_swebench": null,
+      "use_cases": [
+        "editorial-review",
+        "structured-output-review",
+        "code-review-reasoning"
+      ],
+      "data_clearance": [
+        "internal",
+        "public"
+      ],
+      "data_sensitivity_max": "internal",
+      "cost_per_m_input": 0.14,
+      "cost_per_m_output": 0.28,
+      "notes": "Reasoning model: emits chain-of-thought before its (often JSON) answer, so callers MUST set max_tokens >= ~1500 (strict-JSON callers >= 2000, parsed defensively) or output truncates before content and choices[0].message.content is empty. Single-model alias, NO fallback by design \u2014 the use case depends on this model's output shape and a non-reasoning fallback would change semantics; callers handle errors defensively. PRC-origin weights on US infra, eligible at the internal ceiling under the relaxed-origin OSS policy. Verify the Fireworks serverless id with a smoke test before relying.",
+      "fallback_chain": {},
+      "vision": {
+        "supported": false,
+        "modalities": [
+          "text"
+        ]
+      }
+    },
     "tier-0-opus": {
       "provider": "anthropic",
       "model": "claude-opus-4-6",
@@ -517,7 +544,7 @@
       }
     },
     "tier-3-tool-us": {
-      "provider": "together",
+      "provider": "openrouter",
       "model": "google/gemma-4-31b-it",
       "litellm_alias": "tier-3-tool-us",
       "swebench": null,
@@ -534,14 +561,15 @@
         "public"
       ],
       "data_sensitivity_max": "restricted_us_oss_ok",
-      "cost_per_m_input": 0.2,
-      "cost_per_m_output": 0.5,
+      "cost_per_m_input": 0.13,
+      "cost_per_m_output": 0.38,
       "fallback_chain": {
         "primary": {
-          "provider": "together",
+          "provider": "openrouter",
           "litellm_alias": "tier-3-tool-us",
           "model_id_hint": "google/gemma-4-31b-it",
-          "smoke_tested": "2026-04-19",
+          "smoke_tested": null,
+          "notes": "Repointed 2026-06-19 from Together (revoked Gemma 4 31B serverless, HTTP 400 ~2026-04-25) to OpenRouter, which serves Gemma 4 31B IT live across its provider mesh \u2014 same Google DeepMind US-origin weights, preserving the vision capability (mmmu_pro 0.58). Mirrors tier-vision's 2026-05-03 OpenRouter repoint. smoke_tested stays null pending the 3-day restricted_us_oss_ok shadow (see .ai/assessments/tier-3-tool-us-gemma-openrouter-2026-06-19.md).",
           "vision": {
             "supported": true,
             "modalities": [
@@ -552,9 +580,9 @@
             "mmmu_pro": 0.58,
             "max_images_per_request": null,
             "pricing": {
-              "per_1k_images_1mp_usd": 0.3,
+              "per_1k_images_1mp_usd": 0.195,
               "native_unit": "input_token_equivalent",
-              "native_rate_usd": 0.2
+              "native_rate_usd": 0.13
             }
           }
         },
@@ -564,7 +592,7 @@
           "model_id_hint": "accounts/fireworks/models/gpt-oss-20b",
           "cost_per_m_input": 0.075,
           "cost_per_m_output": 0.3,
-          "notes": "GPT-OSS-120B (OpenAI US-origin). Cross-provider from Together primary.",
+          "notes": "GPT-OSS-20B (OpenAI US-origin). Cross-provider from the OpenRouter primary.",
           "vision": {
             "supported": false,
             "modalities": [
@@ -597,9 +625,9 @@
         "mmmu_pro": 0.58,
         "max_images_per_request": null,
         "pricing": {
-          "per_1k_images_1mp_usd": 0.3,
+          "per_1k_images_1mp_usd": 0.195,
           "native_unit": "input_token_equivalent",
-          "native_rate_usd": 0.2
+          "native_rate_usd": 0.13
         }
       }
     },
@@ -951,7 +979,8 @@
         "tier-2-agentic",
         "tier-3-tool",
         "tier-4-extract",
-        "tier-5-latency"
+        "tier-5-latency",
+        "tier-review"
       ],
       "allowed_providers": [
         "anthropic",
@@ -1008,7 +1037,7 @@
         "ANTHROPIC_BASE_URL": {
           "value": "https://your-litellm-proxy.fly.dev",
           "status": "ACTIVE \u2014 set by SessionStart hook (scripts/claude-session-start.sh line 342) when proxy health check passes",
-          "effect": "All Claude Code API traffic routes through the LiteLLM proxy. The proxy passes claude-sonnet-4-6 and claude-opus-4-6 through to Anthropic directly. Intercepts: claude-haiku-4-5-20251001 \u2192 Fireworks M2.7 ($0.30/$1.20); sonnet alias \u2192 Together Gemma 4 31B (US-origin, advisor-guardrailed, restricted_us_oss_ok max). Use claude-sonnet-4-6 (full ID) for Anthropic-direct Sonnet. Auth: ANTHROPIC_API_KEY is set to Bearer ${LITELLM_MASTER_KEY} by the SessionStart hook.",
+          "effect": "All Claude Code API traffic routes through the LiteLLM proxy. The proxy passes claude-sonnet-4-6 and claude-opus-4-6 through to Anthropic directly. Intercepts: claude-haiku-4-5-20251001 \u2192 Fireworks M2.7 ($0.30/$1.20); sonnet alias \u2192 Fireworks DeepSeek V4 Pro (PRC-origin on US infra, advisor-guardrailed, restricted_us_oss_ok max). Use claude-sonnet-4-6 (full ID) for Anthropic-direct Sonnet. Auth: ANTHROPIC_API_KEY is set to Bearer ${LITELLM_MASTER_KEY} by the SessionStart hook.",
           "verified": "2026-04-16: confirmed ANTHROPIC_BASE_URL=https://your-litellm-proxy.fly.dev in runtime env. Proxy alive. Test sub-agent with model=haiku dispatched successfully.",
           "fallback": "If proxy health check fails, SessionStart sets LITELLM_FALLBACK_MODE=1 and routes natively to Anthropic."
         }
@@ -1749,14 +1778,14 @@
       }
     },
     "tier-3-tool-us": {
-      "resolves_to": "together:google/gemma-4-31b-it",
+      "resolves_to": "openrouter:google/gemma-4-31b-it",
       "model_id": "google/gemma-4-31b-it",
       "litellm_alias": "tier-3-tool-us",
       "label": "Tool-heavy (US-origin only, restricted_us_oss_ok)",
       "data_sensitivity_max": "restricted_us_oss_ok",
       "requires_proxy": true,
       "tool_calling_success_rate": 0.864,
-      "notes": "All-US-origin chain: Gemma 4 31B (Together) \u2192 GPT-OSS-20B (Fireworks) \u2192 Llama 3.1 8B (Groq). Safe for client_ai_policy: us_weights_ok. Added 2026-04-19.",
+      "notes": "All-US-origin chain: Gemma 4 31B (OpenRouter, Google DeepMind US-origin) \u2192 GPT-OSS-20B (Fireworks) \u2192 Llama 3.1 8B (Groq). Safe for client_ai_policy: us_weights_ok. Added 2026-04-19; primary repointed to OpenRouter 2026-06-19 (Together revoked Gemma serverless).",
       "vision": {
         "supported": true,
         "modalities": [
@@ -1767,9 +1796,9 @@
         "mmmu_pro": 0.58,
         "max_images_per_request": null,
         "pricing": {
-          "per_1k_images_1mp_usd": 0.3,
+          "per_1k_images_1mp_usd": 0.195,
           "native_unit": "input_token_equivalent",
-          "native_rate_usd": 0.2
+          "native_rate_usd": 0.13
         }
       }
     },
@@ -1827,6 +1856,21 @@
           "native_unit": "input_token_equivalent",
           "native_rate_usd": 0.13
         }
+      }
+    },
+    "tier-review": {
+      "resolves_to": "fireworks:accounts/fireworks/models/deepseek-v4-flash",
+      "model_id": "accounts/fireworks/models/deepseek-v4-flash",
+      "litellm_alias": "tier-review",
+      "label": "Reasoning review (DeepSeek V4 Flash, Fireworks) \u2014 editorial / structured-output / code-review",
+      "data_sensitivity_max": "internal",
+      "requires_proxy": true,
+      "notes": "Reasoning-model review tier for editorial / structured-output / code-review tasks. Emits chain-of-thought before the answer \u2014 smoke tests must budget max_tokens >= ~1500 (see scripts/check-oss-routing.py TIER_MAX_TOKENS). Added 2026-06-18.",
+      "vision": {
+        "supported": false,
+        "modalities": [
+          "text"
+        ]
       }
     },
     "light-main": {
@@ -1996,44 +2040,37 @@
       }
     },
     "sonnet": {
-      "label": "sonnet (Claude Code short alias \u2014 proxy-intercepted, US-origin OSS)",
-      "remapped_to_tier": "tier-3-tool-us",
-      "resolves_to": "together:google/gemma-4-31b-it",
+      "label": "sonnet (Claude Code short alias \u2014 proxy-intercepted, PRC-origin OSS, guardrail-protected)",
+      "remapped_to_tier": "sonnet-guardrailed-prc",
+      "resolves_to": "fireworks:accounts/fireworks/models/deepseek-v4-pro",
       "data_sensitivity_max": "restricted_us_oss_ok",
       "proxy_live_since": "2026-04-20",
-      "warning": "Short alias for claude-sonnet-4-6. When proxy intercept activates: sonnet sub-agent calls route to Gemma 4 31B (Together, US-origin). Advisor guardrail is MANDATORY and FAIL-CLOSED. Use for restricted_us_oss_ok work only; do NOT assign to restricted or anthropic_only agents \u2014 use claude-sonnet-4-6 for those.",
+      "warning": "Short alias for claude-sonnet-4-6. When proxy intercept activates: sonnet sub-agent calls route to DeepSeek V4 Pro (Fireworks, PRC-origin weights on US infra). Repointed 2026-06-17 off together:google/gemma-4-31b-it (Together revoked Gemma 4 31B serverless, HTTP 400). Eligible at restricted_us_oss_ok ONLY because the advisor guardrail is MANDATORY and FAIL-CLOSED (cf. Rule 3). Use for restricted_us_oss_ok work only; do NOT assign to restricted or anthropic_only agents \u2014 use claude-sonnet-4-6 for those.",
       "advisor_guardrail": {
         "mode": "post_call",
         "fail_closed": true,
         "reviewer_model": "groq/llama-3.3-70b-versatile",
         "callback_class": "sonnet_advisor_guardrail.SonnetAdvisorGuardrail",
-        "deploy_note": "Custom Python callback deployed to the LiteLLM proxy container. See deploy/litellm-proxy/sonnet_advisor_guardrail.py. Reviewer switched to Groq Llama 3.3 70B (Meta US-origin) 2026-05-15 — eliminates provider-concentration risk from the Together-primary sonnet path."
+        "deploy_note": "Custom Python callback deployed to the LiteLLM proxy container. See deploy/litellm-proxy/sonnet_advisor_guardrail.py. Reviewer switched to Groq Llama 3.3 70B (Meta US-origin) 2026-05-15 \u2014 eliminates provider-concentration risk from the Together-primary sonnet path."
       },
       "fallback_chain": {
         "primary": {
-          "provider": "together",
+          "provider": "fireworks",
           "litellm_alias": "sonnet",
-          "model_id_hint": "google/gemma-4-31b-it",
+          "model_id_hint": "accounts/fireworks/models/deepseek-v4-pro",
+          "smoke_tested": null,
           "vision": {
-            "supported": true,
+            "supported": false,
             "modalities": [
-              "text",
-              "image",
-              "video"
-            ],
-            "mmmu_pro": 0.58,
-            "max_images_per_request": null,
-            "pricing": {
-              "per_1k_images_1mp_usd": 0.3,
-              "native_unit": "input_token_equivalent",
-              "native_rate_usd": 0.2
-            }
+              "text"
+            ]
           }
         },
         "secondary": {
           "provider": "fireworks",
           "litellm_alias": "sonnet-us-fallback-gptoss120b",
           "model_id_hint": "accounts/fireworks/models/gpt-oss-120b",
+          "smoke_tested": null,
           "vision": {
             "supported": false,
             "modalities": [
@@ -2045,6 +2082,7 @@
           "provider": "groq",
           "litellm_alias": "sonnet-us-fallback-llama8b",
           "model_id_hint": "llama-3.1-8b-instant",
+          "smoke_tested": null,
           "vision": {
             "supported": false,
             "modalities": [
@@ -2054,18 +2092,13 @@
         }
       },
       "vision": {
-        "supported": true,
+        "supported": false,
         "modalities": [
-          "text",
-          "image"
-        ],
-        "mmmu_pro": 0.58,
-        "pricing": {
-          "per_1k_images_1mp_usd": 0.3,
-          "native_unit": "input_token_equivalent",
-          "native_rate_usd": 0.2
-        }
-      }
+          "text"
+        ]
+      },
+      "cost_per_m_input": 1.74,
+      "cost_per_m_output": 3.48
     },
     "sonnet-internal": {
       "label": "sonnet-internal (internal-only, Kimi K2.6 Fireworks dual-key)",

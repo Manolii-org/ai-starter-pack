@@ -33,10 +33,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Use proxy model aliases directly; do not remap to full Claude model IDs.
+# The LiteLLM proxy maps these aliases to OSS models (see deploy/litellm-proxy/README.md).
 MODEL_ALIASES = {
-    "haiku": "claude-haiku-4-5-20251001",
-    "sonnet": "claude-sonnet-4-6",
-    "claude-sonnet-4-6": "claude-sonnet-4-6",
+    "haiku": "haiku",
+    "sonnet": "sonnet",
 }
 
 BROAD_AGENTS = [
@@ -45,7 +46,7 @@ BROAD_AGENTS = [
     "security-deep-dive",
 ]
 
-MAX_DIFF_CHARS = int(os.environ.get("MAX_DIFF_CHARS", "65000"))
+MAX_DIFF_CHARS = int(os.environ.get("BROAD_AGENTS_MAX_DIFF_CHARS", "40000"))
 TIMEOUT_SECS = 120
 
 
@@ -125,21 +126,28 @@ def invoke_agent(
     api_key: str,
     user_message: str,
 ) -> Optional[dict[str, Any]]:
-    """Invoke agent via Anthropic API, return parsed findings."""
+    """Invoke agent via the configured model API, return parsed findings."""
+    # Use proxy alias from frontmatter directly (haiku / sonnet map to OSS models).
     model = MODEL_ALIASES.get(agent_config.model, agent_config.model)
 
-    # For restricted agents, ensure Anthropic direct (never proxy)
-    if agent_config.data_sensitivity == "restricted":
-        if model not in ["claude-sonnet-4-6", "claude-opus-4-1"]:
-            logger.warning(
-                f"Agent {agent_config.name} has restricted sensitivity but model={model} "
-                f"may route via proxy; forcing claude-sonnet-4-6"
-            )
+    # Restricted/anthropic_only broad agents must stay on direct Anthropic even
+    # when the workflow sets ANTHROPIC_BASE_URL to the LiteLLM proxy for OSS agents.
+    if agent_config.data_sensitivity == "restricted" or agent_config.tier == "anthropic_only":
+        base_url = "https://api.anthropic.com"
+        if model in {"haiku", "sonnet"}:
             model = "claude-sonnet-4-6"
+    else:
+        base_url = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
+    api_url = f"{base_url}/v1/messages"
 
     payload = {
         "model": model,
-        "max_tokens": 4096,
+        # 2400 tokens ≈ 9.6K chars keeps the visible text inside the advisor
+        # guardrail's 10K-char review window (longer responses fail closed with
+        # 503). Reasoning tokens (thinking blocks) share this budget but are
+        # excluded from the reviewed text, so real findings output sits well
+        # under the window.
+        "max_tokens": 2400,
         "system": [
             {
                 "type": "text",
@@ -163,7 +171,7 @@ def invoke_agent(
 
     try:
         req = Request(
-            "https://api.anthropic.com/v1/messages",
+            api_url,
             data=json.dumps(payload).encode("utf-8"),
             headers=headers,
             method="POST",
@@ -175,16 +183,31 @@ def invoke_agent(
         return None
 
     try:
-        content = resp_data.get("content", [{}])[0].get("text", "")
+        # Reasoning models (DeepSeek V4 via the proxy) prepend a `thinking`
+        # block to the content array — select text blocks, not content[0].
+        blocks = resp_data.get("content") or []
+        content = "".join(
+            b.get("text", "") for b in blocks
+            if isinstance(b, dict) and b.get("type", "text") == "text"
+        )
         if not content:
             logger.error(f"Agent {agent_config.name} empty response")
             return None
 
         # Strip markdown fences
-        content = re.sub(r"^```json\n?", "", content)
+        content = content.strip()
+        content = re.sub(r"^```(?:json)?\n?", "", content)
         content = re.sub(r"\n?```$", "", content)
 
-        parsed = json.loads(content)
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
+            # OSS models sometimes wrap the JSON in prose — extract the first
+            # top-level array or object instead of failing the agent outright.
+            m = re.search(r"\[[\s\S]*\]|\{[\s\S]*\}", content)
+            if not m:
+                raise
+            parsed = json.loads(m.group(0))
 
         # Normalise to {source, findings:[...]} contract expected by run-judge.py
         if isinstance(parsed, list):

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Renovate preset for repositories rendered from Manolii AI Starter Pack.",
+  "extends": ["config:recommended"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Track AI Starter Pack source pins.",
+      "managerFilePatterns": ["/(^|/)\\.starter-pack-source$/"],
+      "matchStrings": ["pack_version:\\s*(?<currentValue>[^\\s#]+)"],
+      "depNameTemplate": "Manolii-org/ai-starter-pack",
+      "datasourceTemplate": "github-tags",
+      "versioningTemplate": "semver"
+    }
+  ],
+  "packageRules": [
+    {
+      "matchPackageNames": ["Manolii-org/ai-starter-pack"],
+      "labels": ["starter-pack", "dependencies"],
+      "commitMessageTopic": "AI Starter Pack"
+    }
+  ]
+}

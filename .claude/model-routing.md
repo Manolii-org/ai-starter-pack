@@ -48,6 +48,20 @@ When the LiteLLM proxy is enabled, application code routes to these stable tier 
 
 † SWE-bench Pro score. `tier-0-oss-heavy` has **restricted use cases** — see below.
 
+### `tier-review` — reasoning-model review tier (optional)
+
+An optional alias backed by **DeepSeek V4 Flash** (Fireworks) for editorial /
+structured-output review tasks (document or code review that benefits from
+explicit reasoning). It is a *reasoning* model — it emits chain-of-thought
+**before** its answer — so callers **must** set `max_tokens >= ~1500` (strict-JSON
+callers `>= 2000`, parsed defensively) or the response truncates before any
+content is returned (`choices[0].message.content` comes back empty).
+**Single-model alias, no fallback** by design: the use case depends on this
+model's output shape, and a non-reasoning fallback would change output semantics.
+`internal` + `public` clearance only (PRC-origin weights on US infra — not for
+client/restricted data). It ships in `deploy/litellm-proxy/config.yaml`; add a
+matching entry to your instance's `model-routing.json` if you track tiers there.
+
 ---
 
 ## Data Classification

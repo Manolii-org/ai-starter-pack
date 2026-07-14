@@ -87,14 +87,14 @@ _prompt_key() {
   ask "$label (press Enter to skip):" "$var_name"
 }
 
-_prompt_key ANTHROPIC_KEY   "ANTHROPIC_API_KEY  (required for tier-0-opus/sonnet passthrough)" ANTHROPIC_API_KEY
+_prompt_key ANTHROPIC_KEY   "ANTHROPIC_API_KEY  (Claude passthrough + fallback routes)"        ANTHROPIC_API_KEY
 _prompt_key FIREWORKS_KEY   "FIREWORKS_API_KEY  (tier-1-fast, tier-0-oss-heavy)"               FIREWORKS_API_KEY
 _prompt_key TOGETHER_KEY    "TOGETHER_API_KEY   (tier-2-agentic — Kimi K2.6, sonnet alias)"    TOGETHER_API_KEY
 _prompt_key GROQ_KEY        "GROQ_API_KEY       (tier-4-extract, tier-5-latency)"              GROQ_API_KEY
 _prompt_key OPENROUTER_KEY  "OPENROUTER_API_KEY (tier-3-tool — Gemma 4 31B)"                   OPENROUTER_API_KEY
 
-if [ -z "$FIREWORKS_KEY" ] && [ -z "$TOGETHER_KEY" ] && [ -z "$GROQ_KEY" ] && [ -z "$OPENROUTER_KEY" ]; then
-  fail "At least one OSS provider key is required (Fireworks, Together, Groq, or OpenRouter)."
+if [ -z "$ANTHROPIC_KEY" ] && [ -z "$FIREWORKS_KEY" ] && [ -z "$TOGETHER_KEY" ] && [ -z "$GROQ_KEY" ] && [ -z "$OPENROUTER_KEY" ]; then
+  fail "At least one provider key is required (Anthropic, Fireworks, Together, Groq, or OpenRouter)."
 fi
 
 # ── 4. Deploy to Fly.io ───────────────────────────────────────────────────────
@@ -111,7 +111,8 @@ else
   ok "Fly app '$APP_NAME' already exists"
 fi
 
-# Generate LITELLM_MASTER_KEY
+# Generate LITELLM_MASTER_KEY (local run). For CI/shared use, store this in
+# Doppler litellm/prd so clients send the same key.
 LITELLM_MASTER_KEY="$(openssl rand -hex 24)"
 ok "Generated LITELLM_MASTER_KEY"
 
@@ -128,20 +129,9 @@ SECRETS_ARGS=("LITELLM_MASTER_KEY=$LITELLM_MASTER_KEY")
 printf '%s\n' "${SECRETS_ARGS[@]}" | flyctl secrets import --app "$APP_NAME"
 ok "Secrets pushed"
 
-# Deploy — no custom image: the pinned public image in fly.toml [build] is used
-# as-is; config.yaml and the guardrail are injected via [[files]] local_path
-# (resolved against the fly.toml directory). Deploying from the proxy dir lets
-# flyctl auto-discover fly.toml.
-log "Deploying proxy (public image + injected config; this may take ~2 minutes)..."
-_deploy_log="$(mktemp)"
-if ( cd "$PROXY_DIR" && flyctl deploy --app "$APP_NAME" ) >"$_deploy_log" 2>&1; then
-  tail -5 "$_deploy_log"
-  rm -f "$_deploy_log"
-else
-  cat "$_deploy_log"
-  rm -f "$_deploy_log"
-  fail "Deploy failed — full output above (or run 'flyctl deploy' from $PROXY_DIR)."
-fi
+# Deploy
+log "Deploying proxy image (this may take ~2 minutes)..."
+( cd "$PROXY_DIR" && set -o pipefail && timeout 300 flyctl deploy --app "$APP_NAME" --remote-only 2>&1 | tail -5 )
 ok "Deployed"
 
 # ── 5. Health check ───────────────────────────────────────────────────────────
@@ -151,7 +141,7 @@ echo "Verifying deployment..."
 PROXY_URL="https://$APP_NAME.fly.dev"
 sleep 3
 
-if curl -sf "$PROXY_URL/health/liveliness" &>/dev/null; then
+if curl --max-time 30 --connect-timeout 10 -sf "$PROXY_URL/health/liveliness" &>/dev/null; then
   ok "Health check passed: $PROXY_URL"
 else
   log "Health check pending — proxy may still be starting. Try manually:"
@@ -164,12 +154,21 @@ echo "Smoke testing active tiers..."
 
 _smoke_test() {
   local tier="$1"
+  # Reasoning models (DeepSeek V4 on sonnet/haiku) spend thinking tokens from
+  # the max_tokens budget before emitting text — 5 tokens produces an empty
+  # completion and a false FAIL. 128 covers thinking + a short reply while
+  # keeping the smoke cheap. Success also requires non-empty message content.
+  local max_tokens="${2:-128}"
   local result
-  result=$(curl -sf -X POST "$PROXY_URL/v1/chat/completions" \
+  result=$(curl --max-time 30 --connect-timeout 10 -sf -X POST "$PROXY_URL/v1/chat/completions" \
     -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
     -H "Content-Type: application/json" \
-    -d "{\"model\":\"$tier\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":5}" \
-    2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print('OK' if d.get('choices') else 'FAIL')" 2>/dev/null || echo "UNREACHABLE")
+    -d "{\"model\":\"$tier\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":$max_tokens}" \
+    2>/dev/null | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+c = (d.get('choices') or [{}])[0].get('message', {}).get('content') or ''
+print('OK' if c.strip() else 'FAIL')" 2>/dev/null || echo "UNREACHABLE")
   if [ "$result" = "OK" ]; then
     ok "$tier"
   else
@@ -182,7 +181,10 @@ _smoke_test() {
 [ -n "$OPENROUTER_KEY" ] && _smoke_test "tier-3-tool"
 [ -n "$GROQ_KEY"       ] && _smoke_test "tier-4-extract"
 [ -n "$GROQ_KEY"       ] && _smoke_test "tier-5-latency"
-[ -n "$TOGETHER_KEY"   ] && _smoke_test "sonnet"
+# sonnet is Fireworks-primary (DeepSeek V4 Pro) with a mandatory Groq advisor;
+# Together is only an optional fallback hop — gate on the keys the path needs.
+[ -n "$FIREWORKS_KEY" ] && [ -n "$GROQ_KEY" ] && _smoke_test "sonnet"
+[ -n "$FIREWORKS_KEY" ] && _smoke_test "haiku"
 
 # ── 7. Update model-routing.json ─────────────────────────────────────────────
 echo ""

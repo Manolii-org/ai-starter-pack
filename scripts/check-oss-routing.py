@@ -62,7 +62,15 @@ def _urlopen(
         )
     return urllib.request.urlopen(req, timeout=timeout)  # nosec B310
 
-# ── Tier definitions (must match .claude/model-routing.json tier_definitions) ─
+# ── Expected-live tier aliases ───────────────────────────────────────────────
+# Deliberately a HARDCODED, curated subset of the tiers actually deployed in
+# deploy/litellm-proxy/config.yaml — intentionally NOT derived from
+# .claude/model-routing.json tier_definitions. tier_definitions also holds
+# registry-only / not-yet-deployed entries (e.g. tier-vision, tier-3-tool-us);
+# deriving this list from it would make check_model_drift() report those as
+# MISSING on a correctly-deployed proxy. Keep in sync with config.yaml's
+# model_list when a tier is genuinely added to / removed from the deployment.
+# (Fallback aliases ARE supplemented dynamically — see load_fallback_aliases.)
 TIERS: list[str] = [
     "claude-haiku-4-5-20251001",  # intercept → DeepSeek V4 Flash on OpenRouter (tier-1-fast)
     "tier-0-oss-heavy",            # Kimi K2.6 on Fireworks
@@ -72,6 +80,7 @@ TIERS: list[str] = [
     "tier-3-tool-us",              # Gemma 4 31B on Together (US-origin chain)
     "tier-4-extract",              # DeepSeek V4 Flash on OpenRouter
     "tier-5-latency",              # Llama 3.1 8B Instant on Groq
+    "tier-review",                 # DeepSeek V4 Flash on Fireworks (reasoning; needs max_tokens >= ~1500 — see TIER_MAX_TOKENS)
 ]
 
 # Minimal prompt — just enough to get a non-empty response without burning tokens
@@ -81,7 +90,22 @@ SMOKE_PROMPT = "Reply with a single digit: what is 1+1?"
 # exhaust the budget in the thinking phase and return an empty text block, causing
 # a false-negative smoke-test failure.
 MAX_TOKENS = 20
+# Per-tier smoke-test max_tokens overrides. Reasoning models (e.g. tier-review →
+# DeepSeek V4 Flash) emit chain-of-thought BEFORE any answer, so the default 20
+# tokens is exhausted in the thinking phase and the response truncates before
+# content — a false-negative. Give such tiers enough budget to surface an answer.
+TIER_MAX_TOKENS: dict[str, int] = {
+    "tier-review": 2000,
+}
 REQUEST_TIMEOUT = 45  # seconds — generous for cold Groq/Together starts
+# Per-tier socket-timeout overrides (seconds). Reasoning tiers (tier-review) get a
+# larger output budget via TIER_MAX_TOKENS and can legitimately run longer than the
+# 45s default yet still within the proxy's own 60s request_timeout — so the client
+# socket timeout must exceed the proxy timeout, or a healthy slow response would be
+# cut off and false-reported as a failed tier.
+TIER_REQUEST_TIMEOUT: dict[str, int] = {
+    "tier-review": 90,
+}
 
 # Streaming check — prompt long enough to exercise inter-chunk stalls.
 # The incident class was 60-90s stalls on long-form generation; a 20-number
@@ -483,12 +507,20 @@ def check_health(proxy_url: str) -> dict[str, Any]:
 
 
 def check_tier(proxy_url: str, api_key: str, alias: str) -> dict[str, Any]:
+    """Smoke-test one tier alias via a minimal chat completion.
+
+    Applies per-tier overrides so reasoning tiers (e.g. tier-review) get enough
+    output budget (TIER_MAX_TOKENS) and a socket timeout above the proxy's own
+    request_timeout (TIER_REQUEST_TIMEOUT), instead of false-failing on
+    truncation or a healthy-but-slow response.
+    """
     return _chat_messages(
         proxy_url,
         api_key,
         alias,
         SMOKE_PROMPT,
-        max_tokens=MAX_TOKENS,
+        max_tokens=TIER_MAX_TOKENS.get(alias, MAX_TOKENS),
+        timeout=TIER_REQUEST_TIMEOUT.get(alias, REQUEST_TIMEOUT),
     )
 
 
@@ -499,6 +531,7 @@ def _chat_messages(
     prompt: str,
     *,
     max_tokens: int = MAX_TOKENS,
+    timeout: int = REQUEST_TIMEOUT,
     extra_headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     payload = json.dumps({
@@ -522,7 +555,7 @@ def _chat_messages(
     )
     t0 = time.monotonic()
     try:
-        resp = _urlopen(req, timeout=REQUEST_TIMEOUT)
+        resp = _urlopen(req, timeout=timeout)
         resp_data = resp.read()
         elapsed_ms = int((time.monotonic() - t0) * 1000)
         body = json.loads(resp_data)

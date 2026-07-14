@@ -240,7 +240,15 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
             with urllib.request.urlopen(req, timeout=120) as response:
                 result = json.loads(response.read().decode("utf-8"))
 
-            response_text = result["content"][0]["text"]
+            # Reasoning models (e.g. DeepSeek via a proxy alias) prepend a
+            # `thinking` block — select text-type blocks, not content[0].
+            response_text = "".join(
+                b.get("text", "")
+                for b in result.get("content", [])
+                if isinstance(b, dict) and b.get("type", "text") == "text"
+            )
+            if not response_text:
+                raise KeyError("no text blocks in judge response content")
             logger.info(f"Judge response: {response_text[:200]}...")
 
             # Parse JSON, stripping markdown fences if present
@@ -590,13 +598,14 @@ def main() -> int:
     parser.add_argument(
         "--sha",
         default=os.environ.get("GITHUB_SHA", ""),
-        help="Head commit SHA (defaults to GITHUB_SHA env)",
+        help="Head SHA for duplicate-review detection (defaults to GITHUB_SHA env; required)",
     )
 
     args = parser.parse_args()
 
-    # --sha overrides GITHUB_SHA env so the workflow can pass it explicitly
-    sha = args.sha or os.environ.get("GITHUB_SHA", "")
+    sha = args.sha.strip()
+    if not sha:
+        parser.error("--sha or GITHUB_SHA is required for duplicate-review detection")
 
     # --repo overrides GITHUB_REPOSITORY env so the workflow can pass it explicitly
     if args.repo:
