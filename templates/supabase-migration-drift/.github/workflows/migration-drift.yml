@@ -67,6 +67,14 @@ jobs:
   drift-check:
     name: Migration drift
     runs-on: ubuntu-latest
+    # workflow_dispatch lets any user with write access pick the branch/ref that
+    # gets checked out and executed with SUPABASE_ACCESS_TOKEN in env — the same
+    # PAT-exfil vector we closed by not running on `pull_request`. Even if main
+    # is branch-protected, a same-repo feature branch could edit the drift
+    # script and manually dispatch this workflow to steal the PAT. Only allow
+    # manual dispatch from the default branch (schedule + push are already
+    # main-only by trigger config). (Codex P1 on PR #18)
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
     permissions:
       contents: read
     timeout-minutes: 10
