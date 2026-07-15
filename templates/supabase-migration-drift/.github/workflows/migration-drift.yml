@@ -1,0 +1,198 @@
+name: Migration drift check
+
+# Live-drift guardrail that verifies every merged migration carrying an
+# `@assert-applied` header is actually applied on all target Supabase projects.
+#
+# Intended for: bcp-core, manolii-platform, Ensombl, and any project using
+# Supabase for schema management.
+#
+# WHY THIS EXISTS
+#   Supabase projects have no schema_migrations tracking table by default, so
+#   "merged" ≠ "applied". Migrations can merge into main without being applied
+#   to the live database. This workflow detects that drift by connecting to each
+#   target project via the Management API and checking `@assert-applied`
+#   predicates. (See ADR-0029 in the source repo for full context.)
+#
+# NO `pull_request` TRIGGER — deliberate.
+#   Running this workflow on `pull_request` would create two hard-blocking problems:
+#
+#     1. SECRET EXPOSURE. The job runs the drift script from the PR checkout with
+#        SUPABASE_ACCESS_TOKEN in env. Anyone who can open a same-repo branch PR
+#        could edit the script IN THE SAME PR to exfiltrate the PAT or issue
+#        arbitrary Management API calls. Supabase PATs typically scope across
+#        every project the owning user can reach — a single leak is catastrophic.
+#
+#     2. FALSE FAILURE ON NEW MIGRATIONS. When a PR adds a migration with a
+#        `@assert-applied` predicate, that predicate is expected to be FALSE on
+#        prod/staging until AFTER merge (the merge is what enables the apply).
+#        A pull_request-time live check would fail every migration PR and force
+#        reviewers to apply unreviewed SQL to prod BEFORE merging — the exact
+#        anti-pattern this system was built to prevent.
+#
+#   Static hygiene on PRs (collision numbers / @assert-applied header present /
+#   legacy tree frozen) belongs in a SEPARATE workflow that runs against the
+#   diff and needs no secrets — see manolii-org/manolii-knowledge-layer's
+#   .github/workflows/migration-hygiene.yml for one example.
+#
+#   Live drift is a POST-MERGE + SCHEDULE concern only. Consumers wanting a
+#   pre-merge review-time signal should adopt the static-hygiene companion
+#   workflow, NOT extend this one to `pull_request`.
+#
+# TRIGGERS
+#   - Every push to main (post-merge)   → surface drift immediately
+#   - Daily check (0 7 UTC)             → catch out-of-band applies/rollbacks
+#   - Manual workflow_dispatch          → on-demand recheck
+#
+# SETUP REQUIRED
+#   1. Set a repo variable `MIGRATION_DRIFT_PROJECTS` with the format:
+#      entity:supabase_ref,entity:supabase_ref,...
+#      Example: prod:wccgdisnrbvstnnzppld,staging:xyz789
+#   2. Set a repo secret `SUPABASE_ACCESS_TOKEN` with a Supabase PAT
+#      (from your Doppler project or created in Supabase console)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'supabase/migrations/**'
+  schedule:
+    - cron: '0 7 * * *'  # 07:00 UTC daily
+  workflow_dispatch:
+
+concurrency:
+  group: migration-drift-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  drift-check:
+    name: Migration drift
+    runs-on: ubuntu-latest
+    # workflow_dispatch lets any user with write access pick the branch/ref that
+    # gets checked out and executed with SUPABASE_ACCESS_TOKEN in env — the same
+    # PAT-exfil vector we closed by not running on `pull_request`. Even if main
+    # is branch-protected, a same-repo feature branch could edit the drift
+    # script and manually dispatch this workflow to steal the PAT. Only allow
+    # manual dispatch from the default branch (schedule + push are already
+    # main-only by trigger config). (Codex P1 on PR #18)
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: '3.11'
+
+      - name: Verify configuration
+        env:
+          PROJECTS: ${{ vars.MIGRATION_DRIFT_PROJECTS }}
+          TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PROJECTS:-}" ]; then
+            echo "::error::MIGRATION_DRIFT_PROJECTS repo variable not set. Set it to: entity:ref,entity:ref,..."
+            exit 2
+          fi
+          if [ -z "${TOKEN:-}" ]; then
+            echo "::error::SUPABASE_ACCESS_TOKEN repo secret is not set. Add a Supabase PAT (from Doppler or Supabase console)."
+            exit 2
+          fi
+          echo "Configured projects: ${#PROJECTS} chars, token length: ${#TOKEN}"
+
+      - name: Check migration drift
+        id: check
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          PROJECTS: ${{ vars.MIGRATION_DRIFT_PROJECTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p reports/migration-drift-latest
+          set +e
+          python3 scripts/check-migration-drift-mgmt.py \
+            --projects "$PROJECTS" \
+            --migrations-dir supabase/migrations \
+            --json \
+            --out reports/migration-drift-latest \
+            > drift-output.json 2> drift-error.log
+          RC=$?
+          set -e
+          echo "rc=$RC" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Summarise result
+        env:
+          RC: ${{ steps.check.outputs.rc }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### Migration drift check"
+            echo ""
+            case "$RC" in
+              0) echo "✅ All configured Supabase projects are aligned with every annotated migration." ;;
+              1) echo "❌ Drift detected on at least one project. See annotations and the uploaded report." ;;
+              2) echo "⚠️ Operational error checking drift — endpoint unreachable, auth failed, or predicate SQL invalid." ;;
+              *) echo "⚠️ Unexpected exit code: $RC" ;;
+            esac
+            echo ""
+            if [ -f drift-output.json ]; then
+              python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          import json
+          try:
+              d = json.load(open("drift-output.json"))
+          except Exception as e:
+              print(f"(drift-output.json unreadable: {e})")
+              raise SystemExit(0)
+          print("| Entity | Ref | Drifted | Error |")
+          print("|---|---|---|---|")
+          for r in d.get("results", []):
+              err = (r.get("error") or "—")[:80]
+              print(f"| `{r['entity']}` | `{r['ref']}` | {len(r.get('drift', []))} | {err} |")
+          for r in d.get("results", []):
+              if not r.get("drift"): continue
+              print(f"\n**{r['entity']}** missing migrations:")
+              for h in r["drift"]:
+                  print(f"- `{h['version']}` `{h['file']}`")
+          unv = d.get("unverified_versions", [])
+          if unv:
+              seen=sorted(set(unv))
+              print(f"\n{len(seen)} version(s) unverified (no `@assert-applied`).")
+          PY
+            fi
+            if [ -f drift-error.log ] && [ -s drift-error.log ]; then
+              echo ""
+              echo "<details><summary>stderr</summary>"
+              echo ""
+              echo '```'
+              cat drift-error.log
+              echo '```'
+              echo "</details>"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload drift artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: migration-drift-${{ github.run_id }}
+          path: |
+            drift-output.json
+            drift-error.log
+            reports/migration-drift-latest/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Fail job on drift or operational error
+        env:
+          RC: ${{ steps.check.outputs.rc }}
+        run: |
+          # Fail-closed: BOTH drift (1) AND op error (2) exit non-zero so a broken
+          # PAT or unreachable endpoint cannot silently pass.
+          if [ "$RC" != "0" ]; then
+            exit "$RC"
+          fi
