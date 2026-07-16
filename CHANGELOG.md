@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.5.1] - 2026-07-16
+
+Hotfix for the telemetry heartbeat helper shipped in 1.5.0: the synchronous
+boot tick no longer runs the canary. `start()` is typically called from the
+app's event-loop thread, and an async-bridging canary
+(`run_coroutine_threadsafe(...).result()`) can never complete while that
+thread is blocked — 1.5.0 would stall boot ~5s and page a false canary
+failure on every deploy for such consumers. The boot check-in is now
+canary-less (`_tick(run_canary=False)`); the daemon thread's immediate first
+tick runs the canary off-thread, so pipeline breakage still pages at boot.
+
 ## [1.5.0] - 2026-07-16
 
 Added shared telemetry helpers (`plugin/manolii-framework/telemetry/`): the
