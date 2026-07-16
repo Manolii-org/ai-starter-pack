@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.5.0] - 2026-07-16
+
+Added shared telemetry helpers (`plugin/manolii-framework/telemetry/`): the
+drift-sentinel P3 heartbeat + canary helpers (`heartbeat.py`, `heartbeat.ts`)
+with their wire tests, distributed with the pack so consumer copies stop being
+hand-`cp`'d (the 2026-07-16 reverse-drift class — master's canonical went a
+generation stale behind its own mirrors). v2 semantics: operator-intent
+`checkin_margin` conversion, first-check-in-only monitor provisioning,
+canary `status=error` (two-signal), shutdown-race guards, fail-soft contract.
+Consumer dest conventions and change rules: `telemetry/README.md`.
+`self-code-review` P1 gains the config-forwarding rule (operator intent vs
+provider semantics must both be documented at the definition site).
+
 ## [1.4.0] - 2026-07-08
 
 Activated the standalone starter pack as the go-forward distribution source by porting the 1.3.x `tier-review` routing changes, the LiteLLM verifier timeout/token overrides, Buro-proven pricing and fallback-chain fixes, and the monitor workflow parity copy. Added the Renovate preset used by consumers to receive future pack bump PRs.

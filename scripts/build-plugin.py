@@ -249,6 +249,21 @@ def assemble_data(rendered: Path, out: Path) -> dict:
     return {"data": bundled}
 
 
+def assemble_telemetry(out: Path) -> dict:
+    """Bundle the shared telemetry helpers (drift-sentinel P3 heartbeat +
+    canary) from the repo-root telemetry/ source directory. Consumer dest
+    conventions + change rules: telemetry/README.md. Kept byte-identical to
+    Manolii-org/master scripts/lib/heartbeat.{ts,py} — drift-checked daily by
+    master's telemetry_mirrors registry (config/drift-sentinel.json)."""
+    src = REPO / "telemetry"
+    if not src.is_dir():
+        sys.stderr.write("FAIL: telemetry source dir missing: telemetry/\n")
+        sys.exit(1)
+    shutil.copytree(src, out / "telemetry",
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    return {"telemetry": sum(1 for p in (out / "telemetry").rglob("*") if p.is_file())}
+
+
 def read_om_plugin_version() -> str:
     """Read the manolii-om plugin's own version from the committed plugin.json
     if present, else default to 0.1.0. The om plugin bumps independently of
@@ -548,6 +563,7 @@ def main() -> None:
             counts = assemble_plugin(rendered, out)
             counts.update(assemble_hooks_and_scripts(rendered, out))
             counts.update(assemble_data(rendered, out))
+            counts.update(assemble_telemetry(out))
             verify(out, counts, rendered)
             if not args.no_smoke:
                 smoke_test_hooks(out)
