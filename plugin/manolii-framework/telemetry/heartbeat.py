@@ -124,7 +124,7 @@ class Heartbeat:
         # Sentry keeps whatever config was last written (UI or code).
         self._provisioned = False
 
-    def _tick(self) -> None:
+    def _tick(self, run_canary: bool = True) -> None:
         # Shutdown short-circuit: skip the entire tick if stop was already
         # called. Prevents a spurious error check-in when an in-flight tick
         # collides with graceful shutdown (Codex P2 on scrape#70).
@@ -136,7 +136,7 @@ class Heartbeat:
         # instead of waiting for the >Nh silence threshold (which will never
         # trip while the process keeps ticking ok's).
         status: Literal["ok", "error"] = "ok"
-        if self.canary:
+        if self.canary and run_canary:
             try:
                 self.canary()
             except Exception as e:  # noqa: BLE001 — canary failure is exactly what we want to capture
@@ -167,8 +167,11 @@ class Heartbeat:
             self._provisioned = True
 
     def _loop(self) -> None:
-        # First tick already fired synchronously in start() — go straight to
-        # the interval loop.
+        # start() already sent a synchronous canary-LESS boot check-in. Run
+        # one immediate tick WITH the canary here, off the caller's thread,
+        # so a broken pipeline is detected at boot rather than one interval
+        # later (Gemini critical, scrape#74).
+        self._tick()
         while not self._stop.wait(self.interval):
             self._tick()
 
@@ -181,8 +184,14 @@ class Heartbeat:
         # surface that boots and dies (or stops immediately) is deterministically
         # counted as "was here" — an async first tick loses the race when
         # stop() lands before the daemon thread is scheduled (Codex P2,
-        # ai-starter-pack#22).
-        self._tick()
+        # ai-starter-pack#22). The canary is SKIPPED on this one tick: start()
+        # is typically called from the app's event-loop thread (FastAPI
+        # lifespan), and an async-bridging canary (run_coroutine_threadsafe +
+        # blocking result) can never complete while that thread is blocked
+        # here — it would stall boot and page a false canary failure on every
+        # deploy (Gemini critical, scrape#74). The daemon thread's first tick
+        # (immediate, in _loop) runs the canary off-thread instead.
+        self._tick(run_canary=False)
         self._thread = threading.Thread(
             target=self._loop, name=f"heartbeat[{self.surface}]", daemon=True
         )

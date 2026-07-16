@@ -208,11 +208,38 @@ class HeartbeatWireTests(unittest.TestCase):
         h.start()
         h.stop()
         self.assertIsNone(h._thread)
-        # first tick fired SYNCHRONOUSLY in start() — exactly one check-in is
-        # guaranteed even when stop() lands before the daemon thread is ever
-        # scheduled (Codex P2, ai-starter-pack#22). Deterministic, not a race.
-        self.assertEqual(len(self.fake.crons.calls), 1)
+        # The boot check-in fired SYNCHRONOUSLY in start() — at least one
+        # check-in is guaranteed even when stop() lands before the daemon
+        # thread is ever scheduled (Codex P2, ai-starter-pack#22). The daemon
+        # thread's own immediate canary tick may add a second call.
+        self.assertGreaterEqual(len(self.fake.crons.calls), 1)
         self.assertEqual(self.fake.crons.calls[0]["status"], "ok")
+
+    def test_start_sync_boot_tick_skips_canary(self):
+        # start() is typically called from the app's event-loop thread; an
+        # async-bridging canary can never complete there. The synchronous
+        # boot tick must therefore SKIP the canary — even a raising canary
+        # produces a clean ok boot check-in (Gemini/Codex critical,
+        # scrape#74: false canary page on every deploy).
+        def loop_thread_poison():
+            raise RuntimeError("would deadlock/false-page on the loop thread")
+
+        h = hb.Heartbeat(surface="s", interval_seconds=60, canary=loop_thread_poison)
+        h.start()
+        # calls[0] is written synchronously before the thread spawns.
+        self.assertEqual(self.fake.crons.calls[0]["status"], "ok")
+        h.stop()
+
+    def test_tick_run_canary_false_skips_canary(self):
+        def failing_canary():
+            raise RuntimeError("boom")
+
+        h = hb.Heartbeat(surface="s", canary=failing_canary)
+        h._tick(run_canary=False)
+        self.assertEqual(self.fake.crons.calls[0]["status"], "ok")
+        self.assertEqual(self.fake.exceptions, [])
+        h._tick()  # default still runs the canary
+        self.assertEqual(self.fake.crons.calls[1]["status"], "error")
 
 
 if __name__ == "__main__":
