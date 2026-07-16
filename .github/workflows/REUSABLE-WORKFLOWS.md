@@ -52,6 +52,7 @@ env:
 | **secret-scan-reusable** | `runs_on`, `node_version=22`, `python_version=3.12`, `require_gitleaks_license=false` | `GITLEAKS_LICENSE` (optional) |
 | **static-review-reusable** | `runs_on`, `node_version=24`, `python_version=3.14`, `paths_ignore` | none |
 | **mutation-testing-diff-reusable** | `runs_on`, `node_version=24`, `paths_ignore` | none |
+| **claude-md-contract-reusable** | `runs_on`, `python_version=3.12`, `require_contract=false` | none |
 
 **Notes:**
 - `GITHUB_TOKEN` auto-injected by workflow_call (never declare).

@@ -1,0 +1,60 @@
+name: CLAUDE.md Contract (Reusable)
+# Reusable workflow_call form. Caller owns on: + paths via top-level.
+# Cite: .github/REUSABLE-WORKFLOWS.md
+#
+# Validates the per-repo CLAUDE.md interface contract (heading anchors +
+# sync-marker tokens) via scripts/check-claude-md-contract.py against
+# config/claude-md-contract.json. If the repo has no contract file the
+# check is a SKIP by default, so this workflow can roll out fleet-wide
+# ahead of per-repo contract scaffolding; set require_contract to make a
+# missing contract a failure.
+
+on:
+  workflow_call:
+    inputs:
+      runs_on:
+        type: string
+        default: ubuntu-latest
+        description: Runner label.
+      python_version:
+        type: string
+        default: '3.12'
+        description: Python version (checker is stdlib-only).
+      require_contract:
+        type: boolean
+        default: false
+        description: Fail if config/claude-md-contract.json is absent.
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: Validate CLAUDE.md contract
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: ${{ inputs.python_version }}
+      - name: Check contract
+        env:
+          REQUIRE_CONTRACT: ${{ inputs.require_contract }}
+          # Bumped with each pack release; org-internal tag pin per the
+          # hybrid pin policy (tag-mutation risk covered by org write controls).
+          CHECKER_REF: v1.6.0
+        run: |
+          set -euo pipefail
+          CHECKER=scripts/check-claude-md-contract.py
+          if [ ! -f "$CHECKER" ]; then
+            # Consumer repos don't need a local copy — fetch the pinned pack copy.
+            CHECKER=/tmp/check-claude-md-contract.py
+            curl -sSf --max-time 30 -o "$CHECKER" \
+              "https://raw.githubusercontent.com/Manolii-org/ai-starter-pack/${CHECKER_REF}/scripts/check-claude-md-contract.py"
+          fi
+          ARGS=()
+          if [ "$REQUIRE_CONTRACT" = "true" ]; then
+            ARGS+=(--require)
+          fi
+          python3 "$CHECKER" "${ARGS[@]}"

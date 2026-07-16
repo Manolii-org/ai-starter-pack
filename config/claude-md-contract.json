@@ -1,0 +1,21 @@
+{
+  "_purpose": "Per-repo CLAUDE.md interface contract: heading anchors that agents and cross-repo tooling depend on. Checked by scripts/check-claude-md-contract.py via the claude-md-contract reusable workflow (wire it into a pre-commit hook locally if you want earlier feedback — not wired by default). Anchors match case-insensitively as substrings of any heading, so 'Stack' matches 'Stack & Commands'.",
+  "_rule": "Removing or renaming one of these headings requires updating this contract in the same commit. Add repo-specific anchors freely; keep the set cheap (anchors only — no content parity at the per-repo tier).",
+  "required_anchors": {
+    "CLAUDE.md": [
+      {
+        "anchor": "Stack",
+        "referenced_by": ["six-section standalone contract (multi-repo docs strategy 2026-07-16)"]
+      },
+      {
+        "anchor": "Environments & Data",
+        "referenced_by": ["six-section standalone contract — 'which database does staging use?' must be answerable from CLAUDE.md alone"]
+      },
+      {
+        "anchor": "Secrets",
+        "referenced_by": ["six-section standalone contract — Doppler project/config names-only inventory"]
+      }
+    ]
+  },
+  "required_markers": {}
+}
