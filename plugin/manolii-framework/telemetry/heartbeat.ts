@@ -12,10 +12,11 @@
 // must never take down the worker it is meant to observe.
 
 /**
- * Structural type for @sentry/node and @sentry/nextjs. We type
- * `captureCheckIn`'s monitor-config parameter as `unknown` so the actual
- * Sentry SDK — whichever version the consumer has installed — validates it
- * at runtime. Typing it strictly here would fight minor Sentry API drift.
+ * Structural type for @sentry/node and @sentry/nextjs. `captureCheckIn`'s
+ * monitor-config parameter is deliberately loose (`any`, see inline note) so
+ * the actual Sentry SDK — whichever version the consumer has installed —
+ * validates it at runtime. Typing it strictly here would fight minor Sentry
+ * API drift.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type SentryLike = {
