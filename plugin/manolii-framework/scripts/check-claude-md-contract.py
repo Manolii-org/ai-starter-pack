@@ -42,7 +42,10 @@ import sys
 from pathlib import Path
 
 CONTRACT_REL = "config/claude-md-contract.json"
-HEADING_RE = re.compile(r"^#{1,6}\s+(.*?)\s*$")
+# ATX headings may be indented up to three spaces (CommonMark); four+ is a
+# code block and is intentionally not matched.
+HEADING_RE = re.compile(r"^ {0,3}#{1,6}\s+(.*?)\s*$")
+FENCE_RE = re.compile(r"^(`{3,}|~{3,})")
 
 
 def repo_root() -> Path:
@@ -74,17 +77,21 @@ def extract_headings(path: Path) -> list[str]:
     shown in an example snippet cannot satisfy (or shadow) a real section.
     """
     headings: list[str] = []
-    in_fence = False
-    fence_marker = ""
+    fence_char = ""
+    fence_len = 0
     for line in path.read_text(encoding="utf-8").splitlines():
         stripped = line.lstrip()
-        if in_fence:
-            if stripped.startswith(fence_marker):
-                in_fence = False
+        if fence_len:
+            # A fence closes only on a run of the SAME character at least as
+            # long as the opener (CommonMark) — so a ```-block nested inside a
+            # ````-example cannot close the outer fence prematurely.
+            m = FENCE_RE.match(stripped)
+            if m and m.group(1)[0] == fence_char and len(m.group(1)) >= fence_len:
+                fence_char, fence_len = "", 0
             continue
-        if stripped.startswith("```") or stripped.startswith("~~~"):
-            in_fence = True
-            fence_marker = stripped[:3]
+        m = FENCE_RE.match(stripped)
+        if m:
+            fence_char, fence_len = m.group(1)[0], len(m.group(1))
             continue
         m = HEADING_RE.match(line)
         if m:
