@@ -89,12 +89,12 @@ Update checkpoint at top of every round.
 
 **3e. Wait 5 minutes**, then re-poll. If exit condition met → done. Otherwise increment round.
 
-**3f. Before round N+1:** reset the subscription.
+**3f. Before round N+1:** carry the existing subscription forward — `subscribe_pr_activity` is idempotent and the stream does not need resetting. Do NOT unsubscribe+resubscribe: both calls are connector-approval-gated (native claude.ai dialog, unsilenceable by repo config) and the reset buys nothing.
 
 ### Step 4: Escalate at Round 5
 
 If still unresolved after round 5:
-1. Unsubscribe from PR activity
+1. Unsubscribe from PR activity (single attempt, best-effort — the call is connector-approval-gated; if it prompts or fails, skip it and proceed, the subscription lapses with the session)
 2. Post summary comment classifying each remaining issue as:
    - (a) caused by this PR's changes
    - (b) pre-existing / unrelated
