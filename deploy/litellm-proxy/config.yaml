@@ -196,8 +196,7 @@ model_list:
   # Claude Code sends haiku, proxy routes to GPT-OSS 120B (matches tier-1-fast).
   # Cost: GPT-OSS 120B $0.80/$3.20 vs Anthropic Haiku $0.30/$1.20.
   # Note: starter-pack uses GPT-OSS 120B for both tier-1-fast and haiku for
-  # consistency; master uses DeepSeek V4 Flash for haiku (cheaper) per its
-  # own config.yaml. Override here if cost-sensitive.
+  # consistency. Override here if cost-sensitive.
   # data_clearance: internal-only (NOT for client code or restricted data).
   - model_name: claude-haiku-4-5-20251001
     litellm_params:

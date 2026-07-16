@@ -47,8 +47,8 @@ Every OM skill assumes a running Knowledge Layer with:
 
 ## Related documentation
 
-- Contracts source of truth: `manolii-knowledge-layer/contracts/operational-memory/`
-- Architecture and lifecycle: `manolii-knowledge-layer/docs/operational-memory-module.md`
+- Contracts source of truth: `<your-om-contracts-repo>/contracts/operational-memory/`
+- Architecture and lifecycle: `<your-om-contracts-repo>/docs/operational-memory-module.md`
 - Plugin: `.claude-plugin/marketplace.json` → `manolii-om`
 
 ## What this file is not

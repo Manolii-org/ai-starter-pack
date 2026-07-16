@@ -20,7 +20,8 @@ Usage:
 Credential resolution (first found wins):
   1. --proxy-url / --api-key flags
   2. LITELLM_PROXY_URL / LITELLM_MASTER_KEY env vars
-  3. Doppler master/prd via DOPPLER_TOKEN_PRD (fallback)
+  3. your Doppler project/config via DOPPLER_TOKEN_PRD (fallback; also
+     requires DOPPLER_PROJECT — and optionally DOPPLER_CONFIG, default "prd")
 
 Exit codes:
   0  all checks passed
@@ -322,9 +323,25 @@ def _latency_threshold(alias: str) -> dict[str, int]:
 # ── Credential helpers ─────────────────────────────────────────────────────────
 
 def _fetch_from_doppler(
-    token: str, keys: list[str], project: str = "master", config: str = "prd"
+    token: str,
+    keys: list[str],
+    project: str | None = None,
+    config: str | None = None,
 ) -> dict[str, str]:
-    """Read secrets from Doppler using a project service token or workspace token."""
+    """Read secrets from Doppler using a project service token or workspace token.
+
+    ``project`` / ``config`` default to the ``DOPPLER_PROJECT`` /
+    ``DOPPLER_CONFIG`` env vars so consumers can point the routing check at
+    their own Doppler project without editing this script.
+    """
+    project = project or os.environ.get("DOPPLER_PROJECT") or ""
+    config = config or os.environ.get("DOPPLER_CONFIG") or "prd"
+    if not project:
+        raise RuntimeError(
+            "Doppler project unset. Set the DOPPLER_PROJECT env var (or pass "
+            "project=... to _fetch_from_doppler) to the Doppler project that "
+            "holds LITELLM_PROXY_URL / LITELLM_MASTER_KEY."
+        )
     key_csv = ",".join(keys)
     url = (
         f"https://api.doppler.com/v3/configs/config/secrets/download"
@@ -346,6 +363,7 @@ def resolve_credentials(
     langfuse_pk_arg: str | None,
     langfuse_sk_arg: str | None,
     langfuse_host_arg: str | None,
+    skip_langfuse: bool = False,
 ) -> tuple[str, str, str | None, str | None, str]:
     """Return (proxy_url, litellm_key, langfuse_pk, langfuse_sk, langfuse_host).
 
@@ -365,12 +383,12 @@ def resolve_credentials(
 
     doppler_token = os.environ.get("DOPPLER_TOKEN_PRD", "")
     needs_proxy = not proxy_url or not api_key
-    needs_langfuse = not lf_pk or not lf_sk or not lf_host
+    needs_langfuse = (not lf_pk or not lf_sk or not lf_host) and not skip_langfuse
 
     if needs_proxy and not doppler_token:
         raise RuntimeError(
             "Missing credentials. Set LITELLM_PROXY_URL + LITELLM_MASTER_KEY "
-            "env vars, or DOPPLER_TOKEN_PRD for auto-fetch."
+            "env vars, or DOPPLER_TOKEN_PRD + DOPPLER_PROJECT for auto-fetch."
         )
 
     if doppler_token and (needs_proxy or needs_langfuse):
@@ -1174,6 +1192,7 @@ def main() -> int:
             args.langfuse_pk,
             args.langfuse_sk,
             args.langfuse_host,
+            skip_langfuse=args.skip_langfuse,
         )
     except RuntimeError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

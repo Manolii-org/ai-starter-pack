@@ -327,7 +327,7 @@ def assemble_om_plugin(rendered: Path, out: Path) -> dict:
     # Optional vendored contracts mirror — see plugin-sources/manolii-om/README.md.
     # Currently unpopulated; when a future build ships offline schemas, drop them
     # under plugin-sources/manolii-om/contracts-mirror/ with a SOURCE.md pinning
-    # the manolii-knowledge-layer commit. verify_om_plugin enforces the SOURCE.md
+    # the upstream OM-contracts commit. verify_om_plugin enforces the SOURCE.md
     # invariant on the resulting bundle.
     mirror_src = OM_SOURCE_DIR / "contracts-mirror"
     if mirror_src.is_dir():
@@ -342,7 +342,7 @@ def assemble_om_plugin(rendered: Path, out: Path) -> dict:
             "Operational Memory skills for Claude Code — propose-only fact "
             "capture, read-only readiness / staff-answer, and client "
             "handover. Requires a Knowledge Layer MCP backend (contract "
-            "schemas live in manolii-knowledge-layer/contracts/operational-memory/)."
+            "schemas live in <your-om-contracts-repo>/contracts/operational-memory/)."
         ),
         "version": read_om_plugin_version(),
         "author": {"name": "Manolii", "url": "https://github.com/manolii-org"},

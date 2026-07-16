@@ -14,7 +14,7 @@
     {
       "name": "manolii-om",
       "source": "./plugin/manolii-om",
-      "description": "Operational Memory skills for Claude Code — propose-only fact capture, read-only readiness / staff-answer, and client handover. Requires a Knowledge Layer MCP backend (contract schemas live in manolii-knowledge-layer/contracts/operational-memory/)."
+      "description": "Operational Memory skills for Claude Code — propose-only fact capture, read-only readiness / staff-answer, and client handover. Requires a Knowledge Layer MCP backend (contract schemas live in <your-om-contracts-repo>/contracts/operational-memory/)."
     }
   ]
 }
