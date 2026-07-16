@@ -322,9 +322,25 @@ def _latency_threshold(alias: str) -> dict[str, int]:
 # ── Credential helpers ─────────────────────────────────────────────────────────
 
 def _fetch_from_doppler(
-    token: str, keys: list[str], project: str = "master", config: str = "prd"
+    token: str,
+    keys: list[str],
+    project: str | None = None,
+    config: str | None = None,
 ) -> dict[str, str]:
-    """Read secrets from Doppler using a project service token or workspace token."""
+    """Read secrets from Doppler using a project service token or workspace token.
+
+    ``project`` / ``config`` default to the ``DOPPLER_PROJECT`` /
+    ``DOPPLER_CONFIG`` env vars so consumers can point the routing check at
+    their own Doppler project without editing this script.
+    """
+    project = project or os.environ.get("DOPPLER_PROJECT") or ""
+    config = config or os.environ.get("DOPPLER_CONFIG") or "prd"
+    if not project:
+        raise RuntimeError(
+            "Doppler project unset. Set the DOPPLER_PROJECT env var (or pass "
+            "project=... to _fetch_from_doppler) to the Doppler project that "
+            "holds LITELLM_PROXY_URL / LITELLM_MASTER_KEY."
+        )
     key_csv = ",".join(keys)
     url = (
         f"https://api.doppler.com/v3/configs/config/secrets/download"

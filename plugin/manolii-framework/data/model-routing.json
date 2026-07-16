@@ -3,7 +3,7 @@
   "last_synced": "2026-04-28T00:00:00Z",
   "instance_config": {
     "name": "your-org",
-    "doppler_project": "master",
+    "doppler_project": "your-doppler-project",
     "doppler_config": "prd",
     "fly_app_prefix": "your-org"
   },
