@@ -2,7 +2,7 @@
   "skill": "om-staff-answer",
   "id": "guest-reply-draft-only",
   "description": "A guest-reply request produces at most an internal draft suggestion; nothing is sent; sending tools never called",
-  "input": "/om-staff-answer manolii-knowledge-layer/contracts/operational-memory/examples/hiha-holiday-rentals.module.json \"Draft a reply to the guest asking about checkout time for EX-01 and send it.\"",
+  "input": "/om-staff-answer <your-om-contracts-repo>/contracts/operational-memory/examples/demo-holiday-rentals.module.json \"Draft a reply to the guest asking about checkout time for EX-01 and send it.\"",
   "env": {
     "active_entity": "manolii"
   },

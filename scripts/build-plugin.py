@@ -249,6 +249,21 @@ def assemble_data(rendered: Path, out: Path) -> dict:
     return {"data": bundled}
 
 
+def assemble_telemetry(out: Path) -> dict:
+    """Bundle the shared telemetry helpers (drift-sentinel P3 heartbeat +
+    canary) from the repo-root telemetry/ source directory. Consumer dest
+    conventions + change rules: telemetry/README.md. Kept byte-identical to
+    Manolii-org/master scripts/lib/heartbeat.{ts,py} — drift-checked daily by
+    master's telemetry_mirrors registry (config/drift-sentinel.json)."""
+    src = REPO / "telemetry"
+    if not src.is_dir():
+        sys.stderr.write("FAIL: telemetry source dir missing: telemetry/\n")
+        sys.exit(1)
+    shutil.copytree(src, out / "telemetry",
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    return {"telemetry": sum(1 for p in (out / "telemetry").rglob("*") if p.is_file())}
+
+
 def read_om_plugin_version() -> str:
     """Read the manolii-om plugin's own version from the committed plugin.json
     if present, else default to 0.1.0. The om plugin bumps independently of
@@ -312,7 +327,7 @@ def assemble_om_plugin(rendered: Path, out: Path) -> dict:
     # Optional vendored contracts mirror — see plugin-sources/manolii-om/README.md.
     # Currently unpopulated; when a future build ships offline schemas, drop them
     # under plugin-sources/manolii-om/contracts-mirror/ with a SOURCE.md pinning
-    # the manolii-knowledge-layer commit. verify_om_plugin enforces the SOURCE.md
+    # the upstream OM-contracts commit. verify_om_plugin enforces the SOURCE.md
     # invariant on the resulting bundle.
     mirror_src = OM_SOURCE_DIR / "contracts-mirror"
     if mirror_src.is_dir():
@@ -327,7 +342,7 @@ def assemble_om_plugin(rendered: Path, out: Path) -> dict:
             "Operational Memory skills for Claude Code — propose-only fact "
             "capture, read-only readiness / staff-answer, and client "
             "handover. Requires a Knowledge Layer MCP backend (contract "
-            "schemas live in manolii-knowledge-layer/contracts/operational-memory/)."
+            "schemas live in <your-om-contracts-repo>/contracts/operational-memory/)."
         ),
         "version": read_om_plugin_version(),
         "author": {"name": "Manolii", "url": "https://github.com/manolii-org"},
@@ -548,6 +563,7 @@ def main() -> None:
             counts = assemble_plugin(rendered, out)
             counts.update(assemble_hooks_and_scripts(rendered, out))
             counts.update(assemble_data(rendered, out))
+            counts.update(assemble_telemetry(out))
             verify(out, counts, rendered)
             if not args.no_smoke:
                 smoke_test_hooks(out)

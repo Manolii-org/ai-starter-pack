@@ -2,8 +2,7 @@
 
 ## Skills
 
-Sourced from `manolii-org/master` at commit
-`d390d6aebaf9343a4a2e94a4852b58f6cb66d6e7` (2026-07-11):
+Sourced from the maintainer's internal orchestration repo:
 
 - `.claude/skills/om-fact-capture/SKILL.md`
 - `.claude/skills/om-readiness/SKILL.md`
@@ -17,23 +16,20 @@ artifact.
 
 ## Eval pack
 
-Sourced from `manolii-org/master` at the same commit:
+Sourced from the same internal orchestration repo:
 `.ai/evals/operational-memory/` (14 cases + README) → `evals/operational-memory/`.
 
 ## Contract schemas
 
-**Not vendored.** Canonical source of truth:
-`manolii-org/manolii-knowledge-layer` at commit
-`2fdfe2e860ce89b0d540f98cf2614b869d31300b` (2026-07-11),
-path `contracts/operational-memory/`. See `README.md` for the referenced
-files.
+**Not vendored.** Canonical source of truth lives in the maintainer's
+internal knowledge-layer repo under `contracts/operational-memory/`. See
+`README.md` for the referenced files.
 
 ## Refresh procedure
 
 When bumping any of the above:
 
-1. `git -C ../master rev-parse HEAD` and update the commit above.
-2. Recopy the source files verbatim.
-3. Run `python3 scripts/build-plugin.py --plugin manolii-om` and commit the
+1. Recopy the source files verbatim from the internal source.
+2. Run `python3 scripts/build-plugin.py --plugin manolii-om` and commit the
    resulting `plugin/manolii-om/` artifact alongside this SOURCE.md bump.
-4. Bump `plugin/manolii-om/.claude-plugin/plugin.json` `version`.
+3. Bump `plugin/manolii-om/.claude-plugin/plugin.json` `version`.

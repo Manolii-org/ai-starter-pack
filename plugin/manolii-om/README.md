@@ -22,13 +22,13 @@ artifact to `plugin/manolii-om/`.
 
 **The Operational Memory contract schemas are not forked into this plugin.**
 The canonical, versioned schemas live in the Knowledge Layer repo at
-`manolii-knowledge-layer/contracts/operational-memory/`:
+`<your-om-contracts-repo>/contracts/operational-memory/`:
 
 - `module-contract.v1.schema.json`
 - `reviewed-knowledge-item.v1.schema.json`
 - `extensions/hospitality.v1.schema.json`
 - `source-registry-starters.json`
-- `examples/generic.module.json`, `examples/hiha-holiday-rentals.module.json`
+- `examples/generic.module.json`, `examples/demo-holiday-rentals.module.json`
 
 The skills validate manifests via the KL repo's
 `scripts/validate-om-contracts.ts` (invoked as `npx tsx …` from a checkout of

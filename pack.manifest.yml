@@ -4,7 +4,7 @@
 # Edit .brand/branded.yml or .brand/unbranded.yml, not this file directly.
 # Run: python3 scripts/render-pack.py --mode branded|unbranded [flags] --output <dir>
 
-version: "1.4.0"   # see CHANGELOG.md
+version: "1.5.1"   # see CHANGELOG.md
 
 brand:
   ecosystem_name: "{{ECOSYSTEM_NAME}}"

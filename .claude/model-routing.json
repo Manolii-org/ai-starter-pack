@@ -3,7 +3,7 @@
   "last_synced": "2026-04-28T00:00:00Z",
   "instance_config": {
     "name": "your-org",
-    "doppler_project": "master",
+    "doppler_project": "your-doppler-project",
     "doppler_config": "prd",
     "fly_app_prefix": "your-org"
   },
@@ -40,7 +40,7 @@
       "hipaa": true,
       "trains_on_api_data": false,
       "vpc_available": true,
-      "notes": "Broader catalog than Fireworks (~200 open-source models). 2026-04-11 v5.3.2 (post-live-probe): Together is PRIMARY only for tier-2-agentic Kimi K2.5 (-17% input, -7% output, ~2x faster at 417 tok/s vs Fireworks ~150 tok/s) and serves as a cross-provider secondary for tier-1-fast (DeepSeek V3.1) and tier-3-tool (Kimi K2.5). Round-2 attempts to make Together primary for tier-3-tool GLM-4.7 and tier-4-extract Llama 3.1 8B were rolled back after live probing \u2014 both were dedicated-endpoint-only on Together's serverless plan, so tier-3-tool stayed on Fireworks GLM-4.7 and tier-4-extract switched to Groq Llama 3.1 8B Instant. Also hosts GLM-5.1 (zai-org/GLM-5.1, $1.40/$4.40, 202K context \u2014 used as the tier-0-oss-heavy cross-provider fallback) and GLM-5 FP4 at $1.00/$3.20 (28% cheaper than BF16 GLM-5 \u2014 validate quality before adopting). Zero-retention requires enterprise VPC tier \u2014 not available on serverless by default."
+      "notes": "Broad open-source model catalog. Used as a cross-provider secondary for tiers where Fireworks is primary. Some models are dedicated-endpoint-only on Together's serverless plan \u2014 verify serverless availability before pinning as primary. Zero-retention requires enterprise VPC tier \u2014 not available on serverless by default."
     },
     "groq": {
       "label": "Groq (LPU inference \u2014 US-hosted)",
@@ -1071,7 +1071,7 @@
     "provider": "fireworks",
     "api_base": "https://api.fireworks.ai/inference/v1",
     "api_key_env": "FIREWORKS_API_KEY",
-    "api_key_source": "Doppler master/prd",
+    "api_key_source": "your Doppler project/config for LLM provider keys",
     "tier_map": {
       "light": {
         "model_id": "accounts/fireworks/models/llama4-scout-instruct-basic",
@@ -2477,7 +2477,7 @@
         "deploy_after": "2026-05-15",
         "blocker": "Requires new MCP tool \u2014 advisor-tool-2026-03-01 beta cannot be intercepted or replaced at hook level. Custom tool must: (1) accept compressed context payload, (2) make direct Opus API call, (3) return advisory response. Implementation: new MCP tool in your-platform or dedicated stdio MCP server.",
         "activation_gate": "Session context >10K tokens only \u2014 below this threshold Path B overhead (compression pass ~200ms, ~500 tokens) exceeds savings",
-        "activation_env_var": "ADVISOR_CONTEXT_COMPRESSION=1 in Doppler master/prd",
+        "activation_env_var": "ADVISOR_CONTEXT_COMPRESSION=1 in your Doppler config",
         "compression_pipeline": [
           "1. Extract intent from first user turn (1-2 sentences)",
           "2. Summarise tool call log: tool name + outcome only, discard verbose output",

@@ -42,6 +42,13 @@ Before committing, review ALL staged changes (`git diff --staged`) for:
 - Audit/activity log tables with DELETE policies (should be append-only for
   non-service roles)
 - User-controlled input interpolated into AI/LLM prompts without sanitization
+- **Config forwarding without semantic conversion**: a value expressing operator
+  intent ("N minutes silent = page", a timeout, a sample window) passed into a
+  third-party provider config field whose semantics differ, without conversion
+  AND a definition-site docstring naming BOTH reference points (operator meaning
+  + provider's exact semantics with doc link). Canonical failure: Sentry
+  `checkin_margin` is grace AFTER the expected next check-in, not total silence
+  — forwarding the operator's "15 min silent" raw makes it page at 20.
 
 ### P2 — Medium (warn, don't block)
 

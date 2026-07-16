@@ -112,7 +112,7 @@ else
 fi
 
 # Generate LITELLM_MASTER_KEY (local run). For CI/shared use, store this in
-# Doppler litellm/prd so clients send the same key.
+# your Doppler LiteLLM project/config so clients send the same key.
 LITELLM_MASTER_KEY="$(openssl rand -hex 24)"
 ok "Generated LITELLM_MASTER_KEY"
 

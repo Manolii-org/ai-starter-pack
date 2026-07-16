@@ -32,6 +32,10 @@ These constraints must always be followed. They are re-stated here to survive co
 - Watch for self-healing loops (e.g., fixing escaping errors in inline SQL/Python execution). If a fix attempt doesn't resolve the underlying issue after 2 iterations, step back, explain the problem, and try a fundamentally different approach.
 - These guards apply to all files and repos touched in this session.
 
+## Scheduled Self-Wakeups (avoid `send_later` on personal plans)
+
+`send_later` is a Remote MCP connector tool surfaced by claude.ai's **native** permission dialog — repo settings (`bypassPermissions`, `mcp__*` allows, allow-all PreToolUse hooks) cannot silence it, and on personal Max/Pro plans there is no org connector matrix, so every call prompts "Allow once / Deny". **Rule:** for self check-ins / heartbeats, use `create_trigger` with `run_once_at` (same underlying Routine, typically no forced prompt; it self-disables after firing — `delete_trigger` stale one-shots when a loop ends); fall back to `ScheduleWakeup` in remote sessions, then a single background wait. Use `send_later` only as a last resort, single attempt — if it prompts or fails, proceed without it (webhooks/user messages re-wake the session).
+
 ## Model Promotion Checklist
 
 When promoting a new model to primary in your LiteLLM proxy config file:

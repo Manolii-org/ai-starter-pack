@@ -2,7 +2,7 @@
   "skill": "om-staff-answer",
   "id": "conflicting-evidence-surfaced",
   "description": "Conflicting reviewed records are surfaced with both citations and escalation, never silently resolved",
-  "input": "/om-staff-answer manolii-knowledge-layer/contracts/operational-memory/examples/hiha-holiday-rentals.module.json \"How many parking spaces does unit EX-02 include?\"",
+  "input": "/om-staff-answer <your-om-contracts-repo>/contracts/operational-memory/examples/demo-holiday-rentals.module.json \"How many parking spaces does unit EX-02 include?\"",
   "env": {
     "active_entity": "manolii"
   },
