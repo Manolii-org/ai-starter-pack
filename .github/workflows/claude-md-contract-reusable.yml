@@ -41,10 +41,20 @@ jobs:
       - name: Check contract
         env:
           REQUIRE_CONTRACT: ${{ inputs.require_contract }}
+          # Bumped with each pack release; org-internal tag pin per the
+          # hybrid pin policy (tag-mutation risk covered by org write controls).
+          CHECKER_REF: v1.6.0
         run: |
           set -euo pipefail
+          CHECKER=scripts/check-claude-md-contract.py
+          if [ ! -f "$CHECKER" ]; then
+            # Consumer repos don't need a local copy — fetch the pinned pack copy.
+            CHECKER=/tmp/check-claude-md-contract.py
+            curl -sSf --max-time 30 -o "$CHECKER" \
+              "https://raw.githubusercontent.com/Manolii-org/ai-starter-pack/${CHECKER_REF}/scripts/check-claude-md-contract.py"
+          fi
           ARGS=()
           if [ "$REQUIRE_CONTRACT" = "true" ]; then
             ARGS+=(--require)
           fi
-          python3 scripts/check-claude-md-contract.py "${ARGS[@]}"
+          python3 "$CHECKER" "${ARGS[@]}"
