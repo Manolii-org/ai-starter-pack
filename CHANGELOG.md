@@ -1,9 +1,22 @@
 # Changelog
 
-## [Unreleased]
+## [1.6.0] - 2026-07-16
 
 ### Added
 
+- **Per-repo CLAUDE.md interface contract** — `config/claude-md-contract.json`
+  (heading anchors only — cheap by design; `Stack`, `Environments & Data`,
+  `Secrets` as the default set) checked by the new stdlib-only
+  `scripts/check-claude-md-contract.py`. A missing contract file is a SKIP
+  (pass `--require` to enforce), so the check can roll out fleet-wide ahead
+  of per-repo contract scaffolding. Renaming a load-bearing heading now
+  requires updating the contract in the same commit.
+- **`claude-md-contract-reusable.yml`** — reusable workflow running the
+  contract check (`require_contract` input, default false), plus the pack's
+  own caller `claude-md-contract.yml` (require_contract: true). Completes the
+  multi-repo documentation strategy's deferred "per-repo contract checker
+  distribution" item (`manolii-org/master`
+  `reports/multi-repo-docs-strategy-2026-07-16.md` §6).
 - **CLAUDE.md template: `## Environments & Data` + `## Secrets` scaffold sections** —
   every rendered repo now ships an environments matrix placeholder (env × git ref ×
   platform × database) and a Doppler names-only secrets section, so an agent landing

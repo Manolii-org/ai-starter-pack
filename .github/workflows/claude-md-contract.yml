@@ -1,0 +1,28 @@
+name: CLAUDE.md Contract
+# Caller for the reusable workflow — validates this repo's own template
+# CLAUDE.md against config/claude-md-contract.json on every change to
+# either file (or the checker itself).
+
+on:
+  pull_request:
+    paths:
+      - 'CLAUDE.md'
+      - 'config/claude-md-contract.json'
+      - 'scripts/check-claude-md-contract.py'
+      - '.github/workflows/claude-md-contract*.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'CLAUDE.md'
+      - 'config/claude-md-contract.json'
+      - 'scripts/check-claude-md-contract.py'
+      - '.github/workflows/claude-md-contract*.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    uses: ./.github/workflows/claude-md-contract-reusable.yml
+    with:
+      require_contract: true
