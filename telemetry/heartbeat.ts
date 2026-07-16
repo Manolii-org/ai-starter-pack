@@ -212,6 +212,13 @@ export type BeatOnceOpts = {
  * timer makes no sense. Call at the top of the handler; Sentry pages when
  * the next expected check-in doesn't arrive within checkinMarginMinutes.
  *
+ * CONFIG IS CODE-OWNED for beatOnce surfaces: each invocation is a fresh
+ * serverless process with no provisioning state, so monitorConfig is
+ * (re)asserted on every run — Sentry's own documented cron pattern. Tune
+ * thresholds for these surfaces in CODE, not the Sentry UI; UI edits are
+ * overwritten on the next run. (Long-lived startHeartbeat surfaces are the
+ * opposite: config on the first check-in only, UI tuning respected.)
+ *
  * @example
  *   export async function GET() {
  *     await beatOnce({

@@ -167,9 +167,8 @@ class Heartbeat:
             self._provisioned = True
 
     def _loop(self) -> None:
-        # Fire once immediately so a surface that boots and dies within
-        # `interval` is still counted as "was here"
-        self._tick()
+        # First tick already fired synchronously in start() — go straight to
+        # the interval loop.
         while not self._stop.wait(self.interval):
             self._tick()
 
@@ -178,6 +177,12 @@ class Heartbeat:
             return
         # Clear so a stopped Heartbeat can be restarted (test/dynamic reload).
         self._stop.clear()
+        # Fire the first tick SYNCHRONOUSLY before spawning the thread, so a
+        # surface that boots and dies (or stops immediately) is deterministically
+        # counted as "was here" — an async first tick loses the race when
+        # stop() lands before the daemon thread is scheduled (Codex P2,
+        # ai-starter-pack#22).
+        self._tick()
         self._thread = threading.Thread(
             target=self._loop, name=f"heartbeat[{self.surface}]", daemon=True
         )
@@ -217,6 +222,13 @@ def beat_once(
     for hourly) so the helper can subtract it — Sentry's checkin_margin is
     grace AFTER the expected check-in, not total silence. Without
     interval_minutes, the value passes through as Sentry's raw grace.
+
+    CONFIG IS CODE-OWNED for beat_once surfaces: each invocation is a fresh
+    serverless process with no provisioning state, so ``monitor_config`` is
+    (re)asserted on every run — Sentry's own documented cron pattern. Tune
+    thresholds for these surfaces in CODE, not the Sentry UI; UI edits are
+    overwritten on the next run. (Long-lived ``Heartbeat`` surfaces are the
+    opposite: config on the first check-in only, UI tuning respected.)
     """
     # Two-signal principle (report § 3): canary failure ⇒ error check-in so
     # Sentry pages immediately instead of relying on the >Nh silence window.

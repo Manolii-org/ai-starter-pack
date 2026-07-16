@@ -208,8 +208,11 @@ class HeartbeatWireTests(unittest.TestCase):
         h.start()
         h.stop()
         self.assertIsNone(h._thread)
-        # first tick fired on start
+        # first tick fired SYNCHRONOUSLY in start() — exactly one check-in is
+        # guaranteed even when stop() lands before the daemon thread is ever
+        # scheduled (Codex P2, ai-starter-pack#22). Deterministic, not a race.
         self.assertEqual(len(self.fake.crons.calls), 1)
+        self.assertEqual(self.fake.crons.calls[0]["status"], "ok")
 
 
 if __name__ == "__main__":
