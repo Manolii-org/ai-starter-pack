@@ -13,7 +13,7 @@
 
 | Reference | Repo | Path | How resolved | Verified @ commit |
 |---|---|---|---|---|
-| Existing reusable conventions | Manolii-org/ai-starter-pack | REUSABLE-WORKFLOWS.md, .github/workflows/*-reusable.yml | exists in origin repo | 34a75f6 |
+| Existing reusable conventions | Manolii-org/ai-starter-pack | .github/workflows/REUSABLE-WORKFLOWS.md, .github/workflows/*-reusable.yml | exists in origin repo | 34a75f6 |
 | Extraction source: gate | Buro-Built/bcp-core | .github/workflows/pre-production-gate.yml | fetched at pre-flight (clone command below) | post-02 |
 | Extraction source: promote | Buro-Built/bcp-core | .github/workflows/promote-production.yml | fetched at pre-flight | post-03 |
 | Extraction source: smoke | Buro-Built/bcp-core | .github/workflows/smoke-prod.yml | fetched at pre-flight | ed596be |
@@ -61,9 +61,12 @@ the PR body instead of tagging).
 export DOPPLER_TOKEN_PRD="${DOPPLER_TOKEN_PRD:-${MANOLII_MASTER_DOPPLER_TOKEN_PRD:-${BURO_BUILT_MASTER_DOPPLER_TOKEN_PRD:-${DOPPLER_TOKEN:-}}}}"
 # manolii org: GH_TOKEN is the key; lighter bootstrap if scripts absent in this repo — token comes from the session env
 git status && git branch && git checkout -b feat/promotion-reusables origin/main
-git clone https://x-access-token:${GH_TOKEN}@github.com/Buro-Built/bcp-core.git /tmp-src/bcp-core 2>/dev/null || git clone https://x-access-token:${GH_TOKEN}@github.com/Buro-Built/bcp-core.git ../bcp-core
+git clone https://x-access-token:${GH_TOKEN}@github.com/Buro-Built/bcp-core.git ../bcp-core
+# Scrub the credential from the clone's stored remote immediately (git persists the
+# full clone URL, token included, in .git/config as remote.origin.url):
+git -C ../bcp-core remote set-url origin https://github.com/Buro-Built/bcp-core.git
 ```
-NOTE: cross-ORG clone (Manolii session → Buro repo) may be denied by session scope or token reach — the two orgs have separate tokens. If the clone 403s, fetch the three source files read-only via `mcp__github__get_file_contents` (owner Buro-Built, repo bcp-core); if that is also out of scope, STATUS: INCOMPLETE naming the scope gap. Verify manifest paths; read REUSABLE-WORKFLOWS.md conventions (naming, inputs style, pinning policy: third-party actions SHA-pinned + `# vX.Y.Z` trailer; org-internal reusables `@v*` tag).
+NOTE: cross-ORG clone (Manolii session → Buro repo) may be denied by session scope or token reach — the two orgs have separate tokens. If the clone 403s, fetch the three source files read-only via `mcp__github__get_file_contents` (owner Buro-Built, repo bcp-core); if that is also out of scope, STATUS: INCOMPLETE naming the scope gap. Verify manifest paths; read .github/workflows/REUSABLE-WORKFLOWS.md conventions (naming, inputs style, pinning policy: third-party actions SHA-pinned + `# vX.Y.Z` trailer; org-internal reusables `@v*` tag).
 
 ## Stream & Scope Protocol
 
@@ -79,8 +82,8 @@ Rule 0: credential-bearing steps (clone/API fetch) main-thread only. Boilerplate
 
 ## Phases
 
-**P5.1 — Extract + parameterise.** Author the three reusables per Context, transforming the bcp-core sources: replace bcp-specific literals (project IDs, URLs, secret names, project lists) with inputs/secrets; keep the guardrails non-configurable. Adapter contract doc: `docs/db-adapter-contract.md` — the four hooks, their inputs/outputs, a Supabase-branch example (from bcp-core) and a Neon example (sketch, marked untested). Done when: three YAMLs parse; zero hardcoded org/project literals (`grep -nE "buro|bcp|jpitd|qegs" *.yml` clean except comments naming the reference implementation).
-**P5.2 — Consumer docs.** Add a section to `REUSABLE-WORKFLOWS.md`: usage snippets for each workflow (tag-pinned), the ordering flag with migrate-first default + rationale (one line: promote-first has a promoted-code-without-schema window; migrate-first requires an expand/contract guard in the consumer's CI — state it as a documented prerequisite), secret-injection pattern, canary rollout note (bcp-core is the canary consumer). Done when: docs↔inputs greped consistent both ways.
+**P5.1 — Extract + parameterise.** Author the three reusables per Context, transforming the bcp-core sources: replace bcp-specific literals (project IDs, URLs, secret names, project lists) with inputs/secrets; keep the guardrails non-configurable. Adapter contract doc: `docs/db-adapter-contract.md` — the four hooks, their inputs/outputs, a Supabase-branch example (from bcp-core) and a Neon example (sketch, marked untested). Done when: three YAMLs parse; zero hardcoded org/project literals (`grep -nE "buro|bcp|jpitd|qegs" .github/workflows/*-reusable.yml` clean except comments naming the reference implementation).
+**P5.2 — Consumer docs.** Add a section to `.github/workflows/REUSABLE-WORKFLOWS.md`: usage snippets for each workflow (tag-pinned), the ordering flag with migrate-first default + rationale (one line: promote-first has a promoted-code-without-schema window; migrate-first requires an expand/contract guard in the consumer's CI — state it as a documented prerequisite), secret-injection pattern, canary rollout note (bcp-core is the canary consumer). Done when: docs↔inputs greped consistent both ways.
 **P5.3 — Validation.** `workflow_call` workflows can't be dispatched standalone: add a minimal `.github/workflows/selftest-promotion-reusables.yml` (`workflow_dispatch` only) that calls `smoke-prod-reusable.yml` against a public stable URL (e.g. the repo's own GitHub Pages or a well-known 200 endpoint) with a trivial routes_json — proving input plumbing end-to-end. Run it on the branch; record the run URL. Gate/promote reusables: validated by YAML parse + `act`-style static review only (no live Vercel creds in this repo) — say so explicitly in the PR body, and note bcp-core conversion (consuming the reusables) as the real integration test, listed as follow-up. Done when: selftest green.
 
 ## Execution Protocol
