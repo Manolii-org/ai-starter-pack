@@ -170,6 +170,10 @@ _exclude:
   - .claude-plugin
   - .claude-plugin/**
   - .github/workflows/plugin-eval-gate.yml
+  # Pack-only contract caller (require_contract: true would fail legacy
+  # instances whose instance-owned CLAUDE.md predates the anchored sections).
+  # Consumers adopt via their own caller of claude-md-contract-reusable.yml.
+  - .github/workflows/claude-md-contract.yml
   - "*.zip"
 
 # Instance-owned files: written on first copy, never overwritten by

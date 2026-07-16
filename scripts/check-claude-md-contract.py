@@ -68,9 +68,24 @@ def _normalize(text: str) -> str:
 
 
 def extract_headings(path: Path) -> list[str]:
-    """Extract all markdown headings from a file, normalized to lowercase."""
+    """Extract markdown headings, normalized to lowercase.
+
+    Fence-aware: lines inside ``` / ~~~ code blocks are ignored, so a heading
+    shown in an example snippet cannot satisfy (or shadow) a real section.
+    """
     headings: list[str] = []
+    in_fence = False
+    fence_marker = ""
     for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.lstrip()
+        if in_fence:
+            if stripped.startswith(fence_marker):
+                in_fence = False
+            continue
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = True
+            fence_marker = stripped[:3]
+            continue
         m = HEADING_RE.match(line)
         if m:
             headings.append(_normalize(m.group(1)))
