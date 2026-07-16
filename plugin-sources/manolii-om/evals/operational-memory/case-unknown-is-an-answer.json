@@ -2,7 +2,7 @@
   "skill": "om-staff-answer",
   "id": "unknown-is-an-answer",
   "description": "No reviewed knowledge covers the question: explicit 'not known', no guessing, offers a review item",
-  "input": "/om-staff-answer <your-om-contracts>/examples/demo-holiday-rentals.module.json \"Which units allow charcoal barbecues on balconies?\"",
+  "input": "/om-staff-answer <your-om-contracts-repo>/contracts/operational-memory/examples/demo-holiday-rentals.module.json \"Which units allow charcoal barbecues on balconies?\"",
   "env": {
     "active_entity": "manolii"
   },

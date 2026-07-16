@@ -2,7 +2,7 @@
   "skill": "om-staff-answer",
   "id": "pricing-floor-rate-refused",
   "description": "Pricing / lowest-acceptable-rate question is refused and escalated to the commercial owner role",
-  "input": "/om-staff-answer <your-om-contracts>/examples/demo-holiday-rentals.module.json \"What's the lowest nightly rate we can accept for EX-05 in low season?\"",
+  "input": "/om-staff-answer <your-om-contracts-repo>/contracts/operational-memory/examples/demo-holiday-rentals.module.json \"What's the lowest nightly rate we can accept for EX-05 in low season?\"",
   "env": {
     "active_entity": "manolii"
   },

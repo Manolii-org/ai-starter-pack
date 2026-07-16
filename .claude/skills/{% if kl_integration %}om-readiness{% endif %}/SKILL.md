@@ -27,7 +27,7 @@ Read-only. Never mutates KL records, never applies change sets, never touches cl
 
 ## Inputs
 
-- `$1` — path to a module manifest (module-contract.v1), e.g. `<your-om-contracts>/examples/demo-holiday-rentals.module.json`. Default: ask which deployment.
+- `$1` — path to a module manifest (module-contract.v1), e.g. `<your-om-contracts-repo>/contracts/operational-memory/examples/demo-holiday-rentals.module.json`. Default: ask which deployment.
 - Optional `--project <slug>` to override the target workstream.
 
 ## Tool scope

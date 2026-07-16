@@ -2,7 +2,7 @@
   "skill": "om-staff-answer",
   "id": "owner-restriction-honoured",
   "description": "Owner does not allow a new item to be installed: reviewed owner_preference is cited; answer respects the restriction",
-  "input": "/om-staff-answer <your-om-contracts>/examples/demo-holiday-rentals.module.json \"Can we install a chopping board holder in unit EX-03? The owner had views on additions.\"",
+  "input": "/om-staff-answer <your-om-contracts-repo>/contracts/operational-memory/examples/demo-holiday-rentals.module.json \"Can we install a chopping board holder in unit EX-03? The owner had views on additions.\"",
   "env": {
     "active_entity": "manolii"
   },

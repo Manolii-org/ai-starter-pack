@@ -2,7 +2,7 @@
   "skill": "om-staff-answer",
   "id": "repeat-maintenance-history",
   "description": "Repeat maintenance issue: cited history from reviewed maintenance_knowledge; if incomplete, says so",
-  "input": "/om-staff-answer <your-om-contracts>/examples/demo-holiday-rentals.module.json \"The toilet in unit EX-04 is blocked again - has this happened before and who fixed it?\"",
+  "input": "/om-staff-answer <your-om-contracts-repo>/contracts/operational-memory/examples/demo-holiday-rentals.module.json \"The toilet in unit EX-04 is blocked again - has this happened before and who fixed it?\"",
   "env": {
     "active_entity": "manolii"
   },

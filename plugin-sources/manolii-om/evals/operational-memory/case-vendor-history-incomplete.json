@@ -2,7 +2,7 @@
   "skill": "om-staff-answer",
   "id": "vendor-history-incomplete",
   "description": "Incomplete trade/vendor history: answer distinguishes what is reviewed vs missing, proposes a review item rather than guessing",
-  "input": "/om-staff-answer <your-om-contracts>/examples/demo-holiday-rentals.module.json \"Which electrician do we prefer for the eastern complex and why?\"",
+  "input": "/om-staff-answer <your-om-contracts-repo>/contracts/operational-memory/examples/demo-holiday-rentals.module.json \"Which electrician do we prefer for the eastern complex and why?\"",
   "env": {
     "active_entity": "manolii"
   },

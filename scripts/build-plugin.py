@@ -327,7 +327,7 @@ def assemble_om_plugin(rendered: Path, out: Path) -> dict:
             "Operational Memory skills for Claude Code — propose-only fact "
             "capture, read-only readiness / staff-answer, and client "
             "handover. Requires a Knowledge Layer MCP backend (contract "
-            "schemas live in <your-om-contracts>/contracts/operational-memory/)."
+            "schemas live in <your-om-contracts-repo>/contracts/operational-memory/)."
         ),
         "version": read_om_plugin_version(),
         "author": {"name": "Manolii", "url": "https://github.com/manolii-org"},

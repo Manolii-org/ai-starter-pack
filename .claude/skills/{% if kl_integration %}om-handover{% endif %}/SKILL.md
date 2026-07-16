@@ -39,7 +39,7 @@ Read-only compilation. The pack's purpose is client independence: after handover
    - `source-registry.json` — `kl_list_source_registry` export for umbrella + workstream (metadata only; no raw content).
    - `evaluation-results.md` — latest run of the deployment's eval pack (`.ai/evals/operational-memory`), verbatim outcomes; do not editorialise failures away.
    - `export-manifest.md` — what `kl_export_entity` produces, where it lands, and integrity checks.
-   - `recovery.md` — restore-from-export steps (from `<your-om-contracts>/docs/operational-memory-module.md#export-and-recovery`), written for the client's operator.
+   - `recovery.md` — restore-from-export steps (from `<your-om-contracts-repo>/docs/operational-memory-module.md#export-and-recovery`), written for the client's operator.
    - `ownership.md` — client-owns / manolii-owns split from the manifest, plus deletion classes and DSR path.
    - `limitations.md` — `unsupported_capabilities` (verbatim), known gaps from the latest `/om-readiness` report, and every open decision from the manifest/maturity evidence labelled **unresolved**.
 3. Leakage gate before writing: run the sanitisation denylist (`om-validator.ts findLeakage`) over every generated file; credentials, access codes, PII, money values must not appear. Failures abort the pack.
