@@ -362,6 +362,7 @@ def resolve_credentials(
     langfuse_pk_arg: str | None,
     langfuse_sk_arg: str | None,
     langfuse_host_arg: str | None,
+    skip_langfuse: bool = False,
 ) -> tuple[str, str, str | None, str | None, str]:
     """Return (proxy_url, litellm_key, langfuse_pk, langfuse_sk, langfuse_host).
 
@@ -381,7 +382,7 @@ def resolve_credentials(
 
     doppler_token = os.environ.get("DOPPLER_TOKEN_PRD", "")
     needs_proxy = not proxy_url or not api_key
-    needs_langfuse = not lf_pk or not lf_sk or not lf_host
+    needs_langfuse = (not lf_pk or not lf_sk or not lf_host) and not skip_langfuse
 
     if needs_proxy and not doppler_token:
         raise RuntimeError(
@@ -1190,6 +1191,7 @@ def main() -> int:
             args.langfuse_pk,
             args.langfuse_sk,
             args.langfuse_host,
+            skip_langfuse=args.skip_langfuse,
         )
     except RuntimeError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

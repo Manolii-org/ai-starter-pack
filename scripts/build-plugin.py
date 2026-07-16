@@ -312,7 +312,7 @@ def assemble_om_plugin(rendered: Path, out: Path) -> dict:
     # Optional vendored contracts mirror — see plugin-sources/manolii-om/README.md.
     # Currently unpopulated; when a future build ships offline schemas, drop them
     # under plugin-sources/manolii-om/contracts-mirror/ with a SOURCE.md pinning
-    # the manolii-knowledge-layer commit. verify_om_plugin enforces the SOURCE.md
+    # the upstream OM-contracts commit. verify_om_plugin enforces the SOURCE.md
     # invariant on the resulting bundle.
     mirror_src = OM_SOURCE_DIR / "contracts-mirror"
     if mirror_src.is_dir():
