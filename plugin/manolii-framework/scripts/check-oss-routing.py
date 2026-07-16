@@ -20,7 +20,7 @@ Usage:
 Credential resolution (first found wins):
   1. --proxy-url / --api-key flags
   2. LITELLM_PROXY_URL / LITELLM_MASTER_KEY env vars
-  3. Doppler master/prd via DOPPLER_TOKEN_PRD (fallback)
+  3. your Doppler project/config via DOPPLER_TOKEN_PRD (fallback)
 
 Exit codes:
   0  all checks passed

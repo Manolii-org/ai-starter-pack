@@ -2,16 +2,14 @@ name: Monitor LiteLLM Proxy
 
 # Combined liveness + correctness canary for the instance's LiteLLM proxy.
 #
-# Adapted from manolii master's two-layer design (monitor-litellm-health.yml +
-# monitor-litellm-proxy.yml) for GitHub-hosted runners: one workflow, every
-# 3 hours (~10 runner-minutes/day), probing both layers:
+# Two-layer canary for a hosted LiteLLM proxy on GitHub-hosted runners:
+# one workflow, every 3 hours (~10 runner-minutes/day), probing both layers:
 #   Layer 1 — /health/liveliness (process alive, no auth).
 #   Layer 2 — POST /v1/messages with model=sonnet, exercising the full
 #     advisor-guardrail path. Catches the "process alive but every model call
-#     returns fail-closed 503s" failure mode (manolii 2026-05-13→15; buro
-#     2026-06→07 Together Gemma degradation) that a liveness probe cannot see.
+#     returns fail-closed 503s" failure mode that a liveness probe cannot see.
 #
-# Two SEPARATE incident labels on purpose (lesson from manolii 2026-05-15):
+# Two SEPARATE incident labels on purpose:
 # a liveness recovery must never close a correctness incident.
 #   litellm-liveness-down    — owned by the Layer 1 probe
 #   litellm-correctness-down — owned by the Layer 2 probe
