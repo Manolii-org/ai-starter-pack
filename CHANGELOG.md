@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **CLAUDE.md template: `## Environments & Data` + `## Secrets` scaffold sections** —
+  every rendered repo now ships an environments matrix placeholder (env × git ref ×
+  platform × database) and a Doppler names-only secrets section, so an agent landing
+  in a consumer repo without ecosystem context can answer "which database does
+  staging use?" from CLAUDE.md alone. Part of the multi-repo documentation strategy
+  (`manolii-org/master` `reports/multi-repo-docs-strategy-2026-07-16.md`).
+
 ## [1.5.1] - 2026-07-16
 
 Hotfix for the telemetry heartbeat helper shipped in 1.5.0: the synchronous

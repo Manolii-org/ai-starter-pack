@@ -92,6 +92,28 @@ src/
 - {Next.js 15: `headers()` and `cookies()` are now async}
 - {Add your gotchas here}
 
+## Environments & Data
+
+{One row per environment. An agent landing here with no other context must be able to answer "which database does staging use?" from this table alone. Example:}
+
+| Env | Git ref | Platform | Database | Notes |
+|---|---|---|---|---|
+| prod | `main` | {Vercel project `x` \| Fly app `y`} | {Neon branch `main` \| Supabase ref `…`} | {promotion gate?} |
+| staging | {`develop`} | {Vercel preview} | {persistent branch `staging`} | {sync mechanism} |
+| preview | {PR branches} | {per-PR preview} | {ephemeral branch per PR} | {created/deleted by which workflow} |
+
+**Branching model:** {one sentence: how DB branches map to git branches, and which workflow maintains the mapping}
+**Footguns:** {e.g. never test against the prod URL; pooled vs session connection strings}
+
+## Secrets
+
+{Names only — never values. Example:}
+
+- **Doppler project:** `{project-name}`, configs: `{prd, dev}`
+- **Bootstrap:** {how a session loads secrets — hook, script, or `doppler run`}
+- **Exceptions:** {secrets NOT in Doppler, e.g. `DATABASE_URL` via a platform integration}
+- If this repo belongs to a larger ecosystem, its orchestrator repo documents the full secrets topology — link it here.
+
 ## Quality Gate
 
 Before every PR: follow `docs/pre-pr-quality-gate.md`. Six checks: diff self-review, doc↔code verification, tests for changed files, adversarial security tests, rewrite diffing, and config source-of-truth validation. Skipping this gate is the largest source of avoidable review cycles.
