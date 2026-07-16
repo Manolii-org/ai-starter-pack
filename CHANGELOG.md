@@ -2,7 +2,7 @@
 
 ## [1.4.0] - 2026-07-08
 
-Activated the standalone starter pack as the go-forward distribution source by porting the 1.3.x `tier-review` routing changes, the LiteLLM verifier timeout/token overrides, Buro-proven pricing and fallback-chain fixes, and the monitor workflow parity copy. Added the Renovate preset used by consumers to receive future pack bump PRs.
+Activated the standalone starter pack as the go-forward distribution source by porting the 1.3.x `tier-review` routing changes, the LiteLLM verifier timeout/token overrides, consumer-instance-proven pricing and fallback-chain fixes, and the monitor workflow parity copy. Added the Renovate preset used by consumers to receive future pack bump PRs.
 
 All notable changes to the AI Starter Pack are documented here.
 
@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Operational Memory skills. Ships four propose-only / read-only OM skills
   (`om-fact-capture`, `om-readiness`, `om-staff-answer`, `om-handover`), the
   14-case OM eval pack, and a README pinning the contract-schema source of
-  truth (`manolii-knowledge-layer/contracts/operational-memory/`) — schemas
+  truth (`<your-om-contracts-repo>/contracts/operational-memory/`) — schemas
   are referenced, not forked. Starts at v0.1.0; bumps independently of pack
   version via `plugin/manolii-om/.claude-plugin/plugin.json`.
 - **`kl_integration` copier payload** — rendered instances with
@@ -36,7 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`scripts/build-plugin.py`** generalised to build multiple plugins
   (`--plugin manolii-framework|manolii-om|all`, default `all`). The
   `manolii-framework` skills bundle now explicitly drops the OM skills so
-  they ship only via `manolii-om` (dual-run retirement policy §6 / HIHA
+  they ship only via `manolii-om` (dual-run retirement policy §6 / the anchor client engagement
   execution plan B5). Framework plugin bytes are unchanged aside from the
   removed OM skill directories that were never intended to appear there.
 - **`.github/workflows/plugin-eval-gate.yml`** builds and drift-checks both

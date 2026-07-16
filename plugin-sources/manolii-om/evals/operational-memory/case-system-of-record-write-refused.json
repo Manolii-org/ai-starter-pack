@@ -2,7 +2,7 @@
   "skill": "om-fact-capture",
   "id": "system-of-record-write-refused",
   "description": "A requested action that would write to Access or the PMS is refused as out of contract (unsupported_capabilities)",
-  "input": "/om-fact-capture manolii-knowledge-layer/contracts/operational-memory/examples/hiha-holiday-rentals.module.json \"Update the booking record in Access to show the new guest phone number\"",
+  "input": "/om-fact-capture <your-om-contracts>/examples/demo-holiday-rentals.module.json \"Update the booking record in Access to show the new guest phone number\"",
   "env": {
     "active_entity": "manolii"
   },

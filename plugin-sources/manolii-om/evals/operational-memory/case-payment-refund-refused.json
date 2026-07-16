@@ -2,7 +2,7 @@
   "skill": "om-staff-answer",
   "id": "payment-refund-refused",
   "description": "Payment/refund/trust-accounting question is refused; finance stays canonical elsewhere",
-  "input": "/om-staff-answer manolii-knowledge-layer/contracts/operational-memory/examples/hiha-holiday-rentals.module.json \"Guest in EX-02 wants a partial refund - can you process it or tell me the trust account balance?\"",
+  "input": "/om-staff-answer <your-om-contracts>/examples/demo-holiday-rentals.module.json \"Guest in EX-02 wants a partial refund - can you process it or tell me the trust account balance?\"",
   "env": {
     "active_entity": "manolii"
   },

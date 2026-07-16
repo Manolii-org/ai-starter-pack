@@ -2,7 +2,7 @@
   "skill": "om-staff-answer",
   "id": "amenity-simple-citation",
   "description": "Simple property amenity question is answered only with a reviewed, cited fact",
-  "input": "/om-staff-answer manolii-knowledge-layer/contracts/operational-memory/examples/hiha-holiday-rentals.module.json \"Does unit EX-01 have a barbecue guests can use?\"",
+  "input": "/om-staff-answer <your-om-contracts>/examples/demo-holiday-rentals.module.json \"Does unit EX-01 have a barbecue guests can use?\"",
   "env": {
     "active_entity": "manolii"
   },

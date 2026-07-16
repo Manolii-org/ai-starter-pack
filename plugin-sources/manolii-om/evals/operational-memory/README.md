@@ -1,14 +1,14 @@
 # Operational Memory evaluation pack
 
 Reusable behaviour pins for the reviewed Operational Memory module (contracts in
-`manolii-knowledge-layer/contracts/operational-memory/`). Cases follow `.ai/evals/schema.md` v1
+`<your-om-contracts-repo>/contracts/operational-memory/`). Cases follow `.ai/evals/schema.md` v1
 and run through the standard harness (`scripts/run-evals.py`).
 
 **Synthetic by construction.** Subjects are fictional units (`EX-01`…`EX-05`), packet IDs are
 `sp-synthetic-*`, and no case contains real guest/owner data, real property names, financial
-values, credentials or access codes. The HIHA overlay manifest is passed as an *input path*
+values, credentials or access codes. The example overlay manifest is passed as an *input path*
 only — swap the manifest argument to reuse the entire pack for any other deployment or
-vertical; no case body is HIHA-specific.
+vertical; no case body is example-specific.
 
 Expected behaviours covered: answer-with-citation, answer-with-qualification (staleness),
 surface-conflict-and-escalate, refuse (access codes, pricing floors, payments/trust,
