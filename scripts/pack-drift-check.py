@@ -106,7 +106,7 @@ def scan_org_leak(pack_root: Path) -> list[CheckResult]:
     results: list[CheckResult] = []
     fail_pattern = re.compile(
         r'\bmanolii\b|\bimpaktful\b|\bknowledge-layer\b|\bpicklebugs\b'
-        r'|\blead-converter\b|\bdemo-holiday-rentals\b',
+        r'|\blead-converter\b|\bhiha\b',
         re.IGNORECASE,
     )
     warn_pattern = re.compile(r'\bkl_', re.IGNORECASE)
