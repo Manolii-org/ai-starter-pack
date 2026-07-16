@@ -20,7 +20,8 @@ Usage:
 Credential resolution (first found wins):
   1. --proxy-url / --api-key flags
   2. LITELLM_PROXY_URL / LITELLM_MASTER_KEY env vars
-  3. your Doppler project/config via DOPPLER_TOKEN_PRD (fallback)
+  3. your Doppler project/config via DOPPLER_TOKEN_PRD (fallback; also
+     requires DOPPLER_PROJECT — and optionally DOPPLER_CONFIG, default "prd")
 
 Exit codes:
   0  all checks passed
@@ -387,7 +388,7 @@ def resolve_credentials(
     if needs_proxy and not doppler_token:
         raise RuntimeError(
             "Missing credentials. Set LITELLM_PROXY_URL + LITELLM_MASTER_KEY "
-            "env vars, or DOPPLER_TOKEN_PRD for auto-fetch."
+            "env vars, or DOPPLER_TOKEN_PRD + DOPPLER_PROJECT for auto-fetch."
         )
 
     if doppler_token and (needs_proxy or needs_langfuse):
