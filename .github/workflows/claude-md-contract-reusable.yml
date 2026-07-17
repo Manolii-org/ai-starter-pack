@@ -43,7 +43,7 @@ jobs:
           REQUIRE_CONTRACT: ${{ inputs.require_contract }}
           # Bumped with each pack release; org-internal tag pin per the
           # hybrid pin policy (tag-mutation risk covered by org write controls).
-          CHECKER_REF: v1.6.0
+          CHECKER_REF: v1.7.0
         run: |
           set -euo pipefail
           CHECKER=scripts/check-claude-md-contract.py
