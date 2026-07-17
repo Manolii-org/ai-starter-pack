@@ -191,7 +191,7 @@ def build_hooks_config() -> dict:
             "PreCompact":   [{"hooks": [cmd(f'bash "{P}/hooks/pre-compact.sh"', 30)]}],
             "PostCompact":  [{"hooks": [cmd(f'bash "{P}/hooks/post-compact.sh"', 15)]}],
             "Stop": [{"hooks": [
-                cmd(f'bash "{P}/scripts/session-stop-checklist.sh"', 5),
+                cmd(f'bash "{P}/scripts/session-stop-checklist.sh"', 10),
                 cmd(stop_selfcheck, 30),
             ]}],
         }

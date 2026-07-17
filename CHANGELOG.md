@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.7.0] - 2026-07-17
+
+### Added
+
+- **Session retrospective loop (pack parity)** — portable `scripts/session-retrospective.py`
+  (KL-optional; local `.ai/memory/retrospectives/` fallback) with master's record schema
+  including the `failure_class` taxonomy (`scripts/lib/failure_class.py`:
+  `instruction-gap|tooling|environment|planning|memory-context|external-dependency|unclassified`).
+- **Stop-hook wiring** — `session-stop-checklist.sh` (scripts/ + plugin copy) invokes the
+  retrospective with synchronous-with-timeout (inner 8s / outer Stop timeout 10s); on
+  failure writes `.ai/memory/retrospectives/.last-capture-failed` and still exits 0.
+  Plugin `hooks/hooks.json` Stop entry timeout raised to 10s (also `build-plugin.py`).
+- **Memory path migration** — `scripts/migrate-memory-path.sh` moves `.claude/memory/` →
+  `.ai/memory/` with relative symlink + no-clobber conflict archive under
+  `archive/migration-conflicts/`.
+- **Memory scaffolding** — seeded `retrospectives/` (+ zero-row JSONL) so `/learn` /
+  `/remember` never write into a void.
+
+### Notes
+
+- First release after documenting tag pins for consumers; create annotated tag `v1.7.0`
+  on `main` after merge (`git tag -a v1.7.0 <merge-sha> -m "ai-starter-pack v1.7.0"` then
+  `git push origin v1.7.0`). Do not tag from the feature branch.
+
 ## [1.6.0] - 2026-07-16
 
 ### Added

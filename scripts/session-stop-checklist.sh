@@ -19,6 +19,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _HOOK_INPUT=$(cat)
 _SESSION_ID=$(printf '%s' "$_HOOK_INPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('session_id',''))" 2>/dev/null || true)
 python3 "${SCRIPT_DIR}/session-cost-logger.py" ${_SESSION_ID:+--session "$_SESSION_ID"} 2>/dev/null || true
+_SESSION_ID_FOR_RETRO="${_SESSION_ID:-}"
 unset _HOOK_INPUT _SESSION_ID
 
 cat <<'EOF'
@@ -97,6 +98,47 @@ PYEOF
     unset _DOCTOR_SCRIPT
 }
 _doctor_silent
+
+# ── Session retrospective (local durable write; KL optional/background) ───────
+# Synchronous-with-timeout for the local JSONL write. Inner budget (8s) is below
+# the plugin Stop-hook timeout (10s). On timeout/non-zero: write failure marker
+# and still exit 0 so Stop never blocks. Only the KL network leg may background
+# (handled inside the script when credentials exist; --local-only forces local).
+_run_session_retrospective() {
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local retro="${script_dir}/session-retrospective.py"
+    [ -f "$retro" ] || return 0
+
+    local sid="${_RETRO_SESSION_ID:-}"
+    # Capture session_id once if not already set (stdin may already be consumed).
+    if [ -z "$sid" ] && [ -n "${_SESSION_ID_FOR_RETRO:-}" ]; then
+        sid="$_SESSION_ID_FOR_RETRO"
+    fi
+
+    local rc=0
+    # Prefer GNU timeout; fall back to perl alarm if timeout(1) missing.
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 8s python3 "$retro" --mode stop ${sid:+--session-id "$sid"} \
+            >/dev/null 2>&1 || rc=$?
+    else
+        perl -e 'alarm 8; exec @ARGV' python3 "$retro" --mode stop ${sid:+--session-id "$sid"} \
+            >/dev/null 2>&1 || rc=$?
+    fi
+
+    if [ "$rc" -ne 0 ]; then
+        mkdir -p .ai/memory/retrospectives
+        printf '{"timestamp":"%s","exit_code":%s,"event":"session-retrospective-capture-failed"}\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$rc" \
+            > .ai/memory/retrospectives/.last-capture-failed
+        echo "[session-stop] retrospective capture failed (rc=$rc); marker written" >&2
+    fi
+    return 0
+}
+# Preserve session id from cost-logger block if still in scope; else empty.
+_RETRO_SESSION_ID="${_SESSION_ID_FOR_RETRO:-${_RETRO_SESSION_ID:-}}"
+_run_session_retrospective
+unset _RETRO_SESSION_ID _SESSION_ID_FOR_RETRO
 
 # ── Intent-drift check ───────────────────────────────────────────────────────
 # Compares the session diff against the original user prompt (if available).
