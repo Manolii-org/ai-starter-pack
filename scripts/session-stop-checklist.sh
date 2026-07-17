@@ -70,7 +70,7 @@ _branch_fingerprint
 # surfaces only warn-or-higher findings. Signals covered: edit-thrashing,
 # error-loop, repeated-instructions, correction-heavy, rapid-corrections.
 # Silent on clean sessions. Synchronous because doctor runs in <0.2s; capped
-# at 4s to stay within the settings.json Stop-hook timeout of 5s —
+# at 2s to leave headroom for retrospective within the Stop-hook timeout of 10s —
 # backgrounding with disown would lose stdout once the parent hook exits.
 _doctor_silent() {
     local script_dir
@@ -84,7 +84,7 @@ import json, os, subprocess, sys
 try:
     out = subprocess.run(
         ["python3", os.environ["_DOCTOR_SCRIPT"], "--since", "1h", "--json"],
-        capture_output=True, text=True, timeout=4,
+        capture_output=True, text=True, timeout=2,
     )
     data = json.loads(out.stdout or "{}")
     by_sig = data.get("summary", {}).get("by_signal", {})
@@ -100,10 +100,10 @@ PYEOF
 _doctor_silent
 
 # ── Session retrospective (local durable write; KL optional/background) ───────
-# Synchronous-with-timeout for the local JSONL write. Inner budget (8s) is below
-# the plugin Stop-hook timeout (10s). On timeout/non-zero: write failure marker
-# and still exit 0 so Stop never blocks. Only the KL network leg may background
-# (handled inside the script when credentials exist; --local-only forces local).
+# Synchronous-with-timeout for the local JSONL write (--local-only). Inner 8s is
+# below the Stop-hook timeout (10s; settings.json.jinja + plugin hooks.json).
+# On timeout/non-zero: write failure marker and still exit 0. KL network leg is
+# backgrounded below when MCP_API_KEY and KL_ENTITY/RETROSPECTIVE_ENTITY are set.
 _run_session_retrospective() {
     local script_dir
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -117,12 +117,13 @@ _run_session_retrospective() {
     fi
 
     local rc=0
-    # Prefer GNU timeout; fall back to perl alarm if timeout(1) missing.
+    # LOCAL durable write only (sync-with-timeout). Inner 8s < outer Stop 10s.
+    # --local-only guarantees we do not burn the budget on KL HTTP.
     if command -v timeout >/dev/null 2>&1; then
-        timeout 8s python3 "$retro" --mode stop ${sid:+--session-id "$sid"} \
+        timeout 8s python3 "$retro" --mode stop --local-only ${sid:+--session-id "$sid"} \
             >/dev/null 2>&1 || rc=$?
     else
-        perl -e 'alarm 8; exec @ARGV' python3 "$retro" --mode stop ${sid:+--session-id "$sid"} \
+        perl -e 'alarm 8; exec @ARGV' python3 "$retro" --mode stop --local-only ${sid:+--session-id "$sid"} \
             >/dev/null 2>&1 || rc=$?
     fi
 
@@ -132,6 +133,14 @@ _run_session_retrospective() {
             "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$rc" \
             > .ai/memory/retrospectives/.last-capture-failed
         echo "[session-stop] retrospective capture failed (rc=$rc); marker written" >&2
+    else
+        rm -f .ai/memory/retrospectives/.last-capture-failed 2>/dev/null || true
+    fi
+
+    # KL network leg only — backgrounded; never blocks Stop. Skipped if no creds.
+    if [ -n "${MCP_API_KEY:-}" ] && { [ -n "${KL_ENTITY:-}" ] || [ -n "${RETROSPECTIVE_ENTITY:-}" ]; }; then
+        ( python3 "$retro" --mode stop ${sid:+--session-id "$sid"} >/dev/null 2>&1 ) &
+        disown $! 2>/dev/null || true
     fi
     return 0
 }
@@ -213,7 +222,7 @@ except Exception:
 PYEOF
 }
 
-# Run in detached background — Stop hook timeout is 5s; an API call takes 2-10s.
+# Run in detached background — Stop hook timeout is 10s; an API call takes 2-10s.
 # Subshell isolates the exported env vars (_DRIFT_PROMPT, _DRIFT_STATS).
 # disown prevents SIGHUP when the parent shell exits.
 ( _run_intent_drift ) &

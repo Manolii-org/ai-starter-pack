@@ -20,7 +20,7 @@
 
 ### Notes
 
-- First release after documenting tag pins for consumers; create annotated tag `v1.7.0`
+- Create annotated tag `v1.7.0`
   on `main` after merge (`git tag -a v1.7.0 <merge-sha> -m "ai-starter-pack v1.7.0"` then
   `git push origin v1.7.0`). Do not tag from the feature branch.
 

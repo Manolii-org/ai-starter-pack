@@ -493,7 +493,12 @@ def mode_stop(session_id: str, local_only: bool = False) -> None:
 
     body = plain_text_note(branch, merged_sigs, dscore, fclass, diff_stats)
 
-    # Attempt KL first (when configured) so the durable local record reflects kl_written.
+    # LOCAL write first — Stop durability requires the JSONL/snapshot even if KL hangs.
+    snap = _write_local_record(record)
+    print(f"[session-retro] local record: {snap}", file=sys.stderr)
+
+    # KL network leg (optional). Callers that must stay within Stop budget use --local-only
+    # and background a second invocation without --local-only for this path.
     if _kl_ready(entity, local_only):
         assert entity is not None
         safe_branch = branch.replace("/", "-").replace(" ", "-")
@@ -506,6 +511,10 @@ def mode_stop(session_id: str, local_only: bool = False) -> None:
         )
         if wrote:
             record["kl_written"] = True
+            try:
+                snap.write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            except Exception as e:
+                print(f"[session-retro] snap update: {type(e).__name__}", file=sys.stderr)
             kl_assert_fact(
                 entity,
                 "session-retrospectives",
@@ -518,9 +527,6 @@ def mode_stop(session_id: str, local_only: bool = False) -> None:
                 f"last_failure_class.{safe_branch}",
                 fclass,
             )
-
-    snap = _write_local_record(record)
-    print(f"[session-retro] local record: {snap}", file=sys.stderr)
 
 
 def mode_inject() -> None:
