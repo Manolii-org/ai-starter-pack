@@ -11,7 +11,7 @@ Production-grade AI-assisted development from day one. {{ATTRIBUTION_LINE}}
 | **Skills** | `.claude/skills/` (23 dirs) | Persistent context: conventions, security, database, TDD, OSS compat, analytics, curator, governance (assess-model, completeness-check, phase-gate) + 7 PR assessment specialists |
 | **Agents** | `.claude/agents/` (28 files) | Parallel workers: PR assessment pipeline, security review, CI fixer, architecture impact, main-thread-executor, prompt-hardener, test-hardener, critics, `secrets-handler` (credential router), `memory-keeper`, and more |
 | **PR Assessment** | `.github/workflows/pr-assessment.yml` | AI-driven 5-stage review pipeline: pr-classifier → SAST → specialists → broad agents → judge |
-| **Memory** | `.ai/memory/` + `.ai/decisions/` | Persistent JSONL memory (facts, patterns, sessions) + Architecture Decision Records (template + practice guide) |
+| **Memory** | `.ai/memory/` + `.ai/decisions/` | Persistent JSONL memory (facts, patterns, sessions, **retrospectives/**) + ADRs. Canonical path is `.ai/memory/` — run `scripts/migrate-memory-path.sh` if a repo still uses `.claude/memory/`. |
 | **Security** | `.ai/security/token-shapes.json`, `scripts/injection_scan.py`, `canary_tokens.py`, `safe_env.sh` | Provider token-shape patterns, prompt-injection scanner, canary tokens, sanctioned env helpers — wired into the pre/post-tool hooks |
 | **Multi-model routing** | `.claude/model-routing.json`, `.claude/model-routing.md`, `deploy/litellm-proxy/` | 9-tier framework: Anthropic Claude + Fireworks/Together/Groq/OpenRouter OSS models |
 | **Scripts** | `scripts/` (25 files) | Utilities: knowledge index, skill graph, system self-check, model routing, pre-tool enforcement (scope-budget / broad-dispatch / token-leak guards), injection scan, canary tokens, safe-env helpers, pack drift check, session-stop checklist, OTEL/Langfuse headers |
@@ -145,7 +145,7 @@ The script deploys a LiteLLM proxy to Fly.io, pushes your API keys, smoke-tests 
    - `advisor-metrics-hook.py`: Logs advisor() invocations to `.ai/metrics/advisor-usage.jsonl`; fires circuit breaker if invocation rate exceeds threshold
 5. **PreCompact** (`pre-compact.sh`): Generates structured session state summary before compaction so critical context survives
 6. **PostCompact** (`post-compact.sh`): Saves compaction summary keyed by branch; resets call counter; logs to `.ai/compact-metrics.jsonl`
-7. **Stop** (`session-stop-checklist.sh` + `stop.sh`): 
+7. **Stop** (`session-stop-checklist.sh` + `session-retrospective.py` + `stop.sh`): session-end checklist, durable local retrospective (`failure_class`), optional KL flush, doctor signals, optional intent-drift.
    - `session-stop-checklist.sh`: Outputs session-end checklist; branch fingerprint vs main; doctor signal summary; optional intent-drift check
    - `stop.sh`: Writes stop sentinel and session-end record; rebuilds skill graph; runs system self-check
 
@@ -204,7 +204,10 @@ See `.claude/model-routing.md` for the full setup guide.
 | `scripts/classify-message.py` | **UserPromptSubmit hook** — Classifies prompts by keyword heuristics into tier buckets (heavy/standard/light); emits `<model-routing>` block with tier suggestion and agent dispatch rules; tracks cumulative session spend; emits stream-checkpoint warnings on high token usage | Runs automatically on every prompt |
 | `scripts/advisor-metrics-hook.py` | _Legacy._ Logged `advisor()` tool invocations to `.ai/metrics/advisor-usage.jsonl`. No longer wired in (advisor disabled); retained for historical telemetry analysis only | Not invoked |
 | `scripts/pre-tool-use.py` | **PreToolUse hook** — Enforces explicit `model=` parameter on Agent() instantiation (prevents OSS tier bypass); validates PR repo targeting (blocks cross-repo misfires); warns on unsafe git operations | Runs before tools execute |
-| `scripts/session-stop-checklist.sh` | **Stop hook** — Outputs session-end checklist including branch fingerprint vs main, doctor signal summary, optional intent-drift check; prepares final context summary for Stop | Runs at session end |
+| `scripts/session-stop-checklist.sh` | **Stop hook** — Checklist + branch fingerprint + doctor + **session retrospective** (local JSONL, KL-optional) + optional intent-drift | Runs at session end |
+| `scripts/session-retrospective.py` | **Stop / SessionStart / PreCompact** — KL-optional retrospective with `failure_class` taxonomy; local `.ai/memory/retrospectives/`; `--mode inject` at start, `precompact` before compact | Wired in hooks |
+| `scripts/migrate-memory-path.sh` | One-shot `.claude/memory/` → `.ai/memory/` (symlink + no-clobber conflict archive) | Manual / consumer adoption |
+| `scripts/session-cost-logger.py` | Appends per-session token cost estimate to `.ai/metrics/session-costs.jsonl` | Stop checklist |
 | `scripts/model-routing-suggester.py` | Tier suggester — maps incoming prompts to light-main/medium-main/heavy-main tier recommendations; logs tier suggestions to `.ai/metrics/tier-suggestion.jsonl` for telemetry; used by `/plan-review` and `/investigate-fix` workflows | Called by classifier hooks; runs manually via `/recall tier-metrics` |
 | `scripts/otel-langfuse-headers.sh` | Generates OTEL/OTLP auth headers from `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` environment variables; outputs header dict for `otelHeadersHelper` in settings.json; enables Langfuse telemetry | Automatically called by `otelHeadersHelper` in settings.json; disable by unsetting env vars |
 

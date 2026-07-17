@@ -84,5 +84,54 @@ class TestStopLocalMode(unittest.TestCase):
             self.assertNotIn("Bearer", blob)
 
 
+
+class TestMtimeAndKlOnly(unittest.TestCase):
+    def _scratch_with_script(self):
+        import shutil, tempfile
+        td = tempfile.mkdtemp()
+        root = Path(td)
+        (root / "scripts" / "lib").mkdir(parents=True)
+        (root / ".ai" / "session-logs").mkdir(parents=True)
+        (root / ".ai" / "memory" / "retrospectives").mkdir(parents=True)
+        shutil.copy2(PACK_SCRIPTS / "session-retrospective.py", root / "scripts" / "session-retrospective.py")
+        shutil.copy2(PACK_SCRIPTS / "lib" / "failure_class.py", root / "scripts" / "lib" / "failure_class.py")
+        log = root / ".ai" / "session-logs" / "session_t.jsonl"
+        log.write_text(
+            json.dumps({
+                "timestamp": "2026-07-17T10:00:00Z",
+                "message": {"role": "user", "content": "hello"},
+            }) + "\n",
+            encoding="utf-8",
+        )
+        return root, log
+
+    def test_mtime_gate_skips_second_capture(self):
+        root, log = self._scratch_with_script()
+        env = {k: v for k, v in os.environ.items() if k in ("PATH", "HOME", "LANG", "LC_ALL")}
+        env["PATH"] = os.environ.get("PATH", "/usr/bin")
+        cmd = [sys.executable, str(root / "scripts" / "session-retrospective.py"),
+               "--mode", "stop", "--session-id", "m1", "--local-only"]
+        r1 = subprocess.run(cmd, cwd=root, env=env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(r1.returncode, 0, r1.stderr)
+        snaps1 = list((root / ".ai" / "memory" / "retrospectives").glob("*.json"))
+        self.assertTrue(snaps1)
+        r2 = subprocess.run(cmd, cwd=root, env=env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        self.assertIn("mtime-gate", r2.stderr)
+        snaps2 = list((root / ".ai" / "memory" / "retrospectives").glob("*.json"))
+        self.assertEqual(len(snaps1), len(snaps2))
+
+    def test_force_bypasses_mtime_gate(self):
+        root, log = self._scratch_with_script()
+        env = {k: v for k, v in os.environ.items() if k in ("PATH", "HOME", "LANG", "LC_ALL")}
+        env["PATH"] = os.environ.get("PATH", "/usr/bin")
+        base = [sys.executable, str(root / "scripts" / "session-retrospective.py"),
+                "--mode", "stop", "--local-only"]
+        subprocess.run(base + ["--session-id", "a"], cwd=root, env=env, capture_output=True, timeout=10)
+        r = subprocess.run(base + ["--session-id", "b", "--force"], cwd=root, env=env,
+                           capture_output=True, text=True, timeout=10)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("mtime-gate", r.stderr)
+
 if __name__ == "__main__":
     unittest.main()

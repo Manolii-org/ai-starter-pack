@@ -138,8 +138,9 @@ _run_session_retrospective() {
     fi
 
     # KL network leg only — backgrounded; never blocks Stop. Skipped if no creds.
+    # --kl-only flushes the just-written local record without a second JSONL append.
     if [ -n "${MCP_API_KEY:-}" ] && { [ -n "${KL_ENTITY:-}" ] || [ -n "${RETROSPECTIVE_ENTITY:-}" ]; }; then
-        ( python3 "$retro" --mode stop ${sid:+--session-id "$sid"} >/dev/null 2>&1 ) &
+        ( python3 "$retro" --mode kl-only ${sid:+--session-id "$sid"} >/dev/null 2>&1 ) &
         disown $! 2>/dev/null || true
     fi
     return 0

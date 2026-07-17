@@ -160,6 +160,21 @@ timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 $(printf '%s\n' "${health_notes[@]}")
 EOF
 
+
+# Inject local retrospective navigation warnings (best-effort, <1s, never blocks).
+_retro_inject() {
+  local root="${CLAUDE_PLUGIN_ROOT:-}"
+  local candidate=""
+  if [ -n "$root" ] && [ -f "$root/scripts/session-retrospective.py" ]; then
+    candidate="$root/scripts/session-retrospective.py"
+  elif [ -f "scripts/session-retrospective.py" ]; then
+    candidate="scripts/session-retrospective.py"
+  fi
+  [ -n "$candidate" ] || return 0
+  python3 "$candidate" --mode inject >/dev/null 2>&1 || true
+}
+_retro_inject
+
 log "Session health: $health_status"
 for note in "${health_notes[@]}"; do
   log "  $note"

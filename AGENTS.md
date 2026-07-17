@@ -11,6 +11,7 @@ This document defines how AI agents interact with this repository.
 | **Gemini Code Review** | PR read | Secondary automated code review |
 | **Sub-agents** | Scoped per definition | Parallel task execution (see `.claude/agents/`) |
 | **memory-protocol** | `.ai/memory/` JSONL files | Read/write memory with correct formatting (haiku) |
+| **session-retrospective** | `.ai/memory/retrospectives/` | Stop-hook capture; `failure_class` taxonomy; KL-optional |
 | **insight-miner** | `.ai/memory/` JSONL files | Surface patterns and promotion candidates (sonnet) |
 | **pr-classifier** | PR diff (read) | Triages PR diff → routing manifest for skills/agents (haiku) |
 | **diff-reflex** | Uncommitted diff (read) | Lightning pre-commit self-review — CRITICAL issues only (sonnet) |

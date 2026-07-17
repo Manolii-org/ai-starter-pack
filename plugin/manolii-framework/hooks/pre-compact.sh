@@ -27,6 +27,24 @@ if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
     ls -1t "$LOGS_DIR"/session_*.jsonl 2>/dev/null | tail -n +31 | while read -r file; do rm -f "$file"; done
 fi
 
+
+# Stage retrospective signals from the archived transcript (best-effort).
+_retro_precompact() {
+  local dest="${DEST:-}"
+  [ -n "$dest" ] && [ -f "$dest" ] || return 0
+  local candidate=""
+  if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -f "${CLAUDE_PLUGIN_ROOT}/scripts/session-retrospective.py" ]; then
+    candidate="${CLAUDE_PLUGIN_ROOT}/scripts/session-retrospective.py"
+  elif [ -f "$REPO_ROOT/scripts/session-retrospective.py" ]; then
+    candidate="$REPO_ROOT/scripts/session-retrospective.py"
+  elif [ -f "$SCRIPT_DIR/../scripts/session-retrospective.py" ]; then
+    candidate="$SCRIPT_DIR/../scripts/session-retrospective.py"
+  fi
+  [ -n "$candidate" ] || return 0
+  python3 "$candidate" --mode precompact --transcript "$dest" >/dev/null 2>&1 || true
+}
+_retro_precompact
+
 # Log auto-compact-fired only when trigger is "auto" (manual /compact is not a miss)
 if [ "$TRIGGER" = "auto" ]; then
     METRICS="$REPO_ROOT/.ai/compact-metrics.jsonl"

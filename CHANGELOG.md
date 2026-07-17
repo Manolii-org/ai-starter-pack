@@ -18,6 +18,11 @@
 - **Memory scaffolding** — seeded `retrospectives/` (+ zero-row JSONL) so `/learn` /
   `/remember` never write into a void.
 
+- **SessionStart inject + PreCompact staging** — hooks call `--mode inject` / `--mode precompact`.
+- **`--kl-only` + mtime gate** — background KL flush without double local append; unchanged session logs skip re-capture (~0 common path).
+- **`session-cost-logger.py`** — ported so the Stop checklist invocation is no longer a no-op.
+- **Dual-copy sync test** — `scripts/tests/test_plugin_scripts_sync.sh` guards scripts/ ↔ plugin/ drift.
+
 ### Notes
 
 - Create annotated tag `v1.7.0`

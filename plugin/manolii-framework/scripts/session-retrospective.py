@@ -4,7 +4,7 @@
 KL-optional: when MCP_API_KEY + entity are present, writes Amber-tier notes/facts
 via HTTP MCP. Always appends a local JSONL record under .ai/memory/retrospectives/.
 
-Modes: stop | inject | precompact
+Modes: stop | inject | precompact | kl-only
 Entity: KL_ENTITY / RETROSPECTIVE_ENTITY / .ai/config/retrospective.json (never hardcoded).
 Session text summarised here is [UNTRUSTED_EXTERNAL_CONTENT].
 failure_class: scripts/lib/failure_class.py (canonical, shared with master WS1).
@@ -35,6 +35,7 @@ STAGING_DIR = REPO_ROOT / ".ai" / "retrospective-staging"
 SESSION_LOGS_DIR = REPO_ROOT / ".ai" / "session-logs"
 RETROSPECTIVES_DIR = REPO_ROOT / ".ai" / "memory" / "retrospectives"
 RETRO_JSONL = RETROSPECTIVES_DIR / "session-retrospectives.jsonl"
+MTIME_SENTINEL = RETROSPECTIVES_DIR / ".last-capture-mtime"
 NAVIGATION_WARNING_FILE = REPO_ROOT / ".ai" / "recent-navigation-warning.md"
 CONFIG_PATH = REPO_ROOT / ".ai" / "config" / "retrospective.json"
 DEFAULT_KL_MCP_URL = "https://knowledge-layer-cron.vercel.app/api/mcp"
@@ -381,6 +382,111 @@ def _latest_session_log() -> Optional[Path]:
     return logs[0] if logs else None
 
 
+def _session_log_mtime(path: Optional[Path]) -> Optional[float]:
+    if not path or not path.exists():
+        return None
+    try:
+        return path.stat().st_mtime
+    except OSError as e:
+        print(f"[session-retro] mtime: {type(e).__name__}", file=sys.stderr)
+        return None
+
+
+def _mtime_gate_hit(path: Optional[Path], force: bool = False) -> bool:
+    """Return True when Stop can no-op (same session log mtime as last capture)."""
+    if force or os.environ.get("SESSION_RETRO_FORCE"):
+        return False
+    mtime = _session_log_mtime(path)
+    if mtime is None:
+        return False
+    try:
+        if not MTIME_SENTINEL.exists():
+            return False
+        prev = json.loads(MTIME_SENTINEL.read_text(encoding="utf-8"))
+        if float(prev.get("mtime", -1)) == float(mtime) and str(prev.get("path")) == str(path):
+            print("[session-retro] mtime-gate: skip (unchanged session log)", file=sys.stderr)
+            return True
+    except Exception as e:
+        print(f"[session-retro] mtime-gate: {type(e).__name__}", file=sys.stderr)
+    return False
+
+
+def _write_mtime_sentinel(path: Optional[Path]) -> None:
+    mtime = _session_log_mtime(path)
+    if mtime is None:
+        return
+    try:
+        RETROSPECTIVES_DIR.mkdir(parents=True, exist_ok=True)
+        MTIME_SENTINEL.write_text(
+            json.dumps({"path": str(path), "mtime": mtime, "captured_at": _now_iso()}),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        print(f"[session-retro] mtime sentinel: {type(e).__name__}", file=sys.stderr)
+
+
+def mode_kl_only(session_id: str = "") -> None:
+    """Push the latest local retrospective record to KL without appending another local row."""
+    entity = _resolve_entity()
+    if not _kl_ready(entity, local_only=False):
+        print("[session-retro] kl-only: KL not configured; skip", file=sys.stderr)
+        return
+    assert entity is not None
+
+    record: Optional[dict] = None
+    # Prefer newest snapshot json
+    snaps = sorted(RETROSPECTIVES_DIR.glob("*-*.json"), reverse=True) if RETROSPECTIVES_DIR.exists() else []
+    for snap in snaps:
+        if snap.name.startswith("."):
+            continue
+        try:
+            record = json.loads(snap.read_text(encoding="utf-8"))
+            break
+        except Exception as e:
+            print(f"[session-retro] kl-only snap: {type(e).__name__}", file=sys.stderr)
+    if record is None and RETRO_JSONL.exists():
+        try:
+            lines = [ln for ln in RETRO_JSONL.read_text(encoding="utf-8").splitlines() if ln.strip()]
+            if lines:
+                record = json.loads(lines[-1])
+        except Exception as e:
+            print(f"[session-retro] kl-only jsonl: {type(e).__name__}", file=sys.stderr)
+    if not record:
+        print("[session-retro] kl-only: no local record to flush", file=sys.stderr)
+        return
+
+    branch = str(record.get("branch") or _get_branch())
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    dscore = int(record.get("dysfunction_score") or 0)
+    fclass = normalize_failure_class(str(record.get("failure_class") or DEFAULT_FAILURE_CLASS))
+    # Minimal note body — no re-parse of untrusted transcript
+    body = "\n".join([
+        f"## Session Retrospective — {branch}",
+        f"Captured: {record.get('captured_at', _now_iso())}",
+        f"Dysfunction score: {dscore}/10",
+        f"failure_class: {fclass}",
+        "",
+        _UNTRUSTED,
+        f"session_id: {session_id or record.get('session_id') or ''}",
+        "_KL flush of previously captured local record._",
+    ])
+    safe_branch = branch.replace("/", "-").replace(" ", "-")
+    branch_tag = f"branch:{safe_branch}"
+    wrote = kl_create_note(
+        entity,
+        title=f"Session retrospective — {branch} [{today}]",
+        content=body,
+        tags=["session-retrospective", "auto-generated", "session-learnings", branch_tag, "kl-flush"],
+    )
+    if wrote:
+        kl_assert_fact(entity, "session-retrospectives", f"last_dysfunction_score.{safe_branch}", str(dscore))
+        kl_assert_fact(entity, "session-retrospectives", f"last_failure_class.{safe_branch}", fclass)
+        print("[session-retro] kl-only: flushed", file=sys.stderr)
+    else:
+        print("[session-retro] kl-only: KL write failed", file=sys.stderr)
+
+
+
 def mode_precompact(transcript: str) -> None:
     path = Path(transcript) if transcript else _latest_session_log()
     if not path or not path.exists():
@@ -411,8 +517,10 @@ def mode_precompact(transcript: str) -> None:
     }, indent=2), encoding="utf-8")
 
 
-def mode_stop(session_id: str, local_only: bool = False) -> None:
+def mode_stop(session_id: str, local_only: bool = False, force: bool = False) -> None:
     path = _latest_session_log()
+    if _mtime_gate_hit(path, force=force):
+        return
     sigs = extract_signals(path) if path else {}
 
     staged_corrections: list[str] = []
@@ -496,6 +604,7 @@ def mode_stop(session_id: str, local_only: bool = False) -> None:
     # LOCAL write first — Stop durability requires the JSONL/snapshot even if KL hangs.
     snap = _write_local_record(record)
     print(f"[session-retro] local record: {snap}", file=sys.stderr)
+    _write_mtime_sentinel(path)
 
     # KL network leg (optional). Callers that must stay within Stop budget use --local-only
     # and background a second invocation without --local-only for this path.
@@ -577,10 +686,13 @@ def mode_inject() -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Portable session retrospective (KL-optional).")
-    p.add_argument("--mode", choices=["stop", "inject", "precompact"], required=True)
+    p.add_argument("--mode", choices=["stop", "inject", "precompact", "kl-only"], required=True)
     p.add_argument("--session-id", default="")
     p.add_argument("--transcript", default="")
-    p.add_argument("--local-only", action="store_true")
+    p.add_argument("--local-only", action="store_true",
+                   help="Skip KL writes (Stop sync path).")
+    p.add_argument("--force", action="store_true",
+                   help="Bypass mtime gate (always capture).")
     p.add_argument("--dry-run", action="store_true")
     args = p.parse_args()
     if args.dry_run:
@@ -590,9 +702,11 @@ def main() -> None:
         if args.mode == "precompact":
             mode_precompact(args.transcript)
         elif args.mode == "stop":
-            mode_stop(args.session_id, local_only=args.local_only)
+            mode_stop(args.session_id, local_only=args.local_only, force=args.force)
         elif args.mode == "inject":
             mode_inject()
+        elif args.mode == "kl-only":
+            mode_kl_only(args.session_id)
     except Exception as e:
         print(f"[session-retro] fatal: {type(e).__name__}: {e}", file=sys.stderr)
         sys.exit(1)

@@ -68,5 +68,12 @@ jobs:
             exit 1
           fi
 
+
+      - name: Retrospective + memory path tests
+        run: |
+          python3 scripts/tests/test_session_retrospective.py
+          bash scripts/tests/test_migrate_memory_path.sh
+          bash scripts/tests/test_plugin_scripts_sync.sh
+
       - name: Routing lint
         run: python3 scripts/lint-agent-routing.py
