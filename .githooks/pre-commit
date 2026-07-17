@@ -19,3 +19,14 @@ if echo "$STAGED" | grep -qE '(\.claude/agents/.*\.md|\.claude/model-routing\.js
     echo "[pre-commit] Linting agent routing safety rules..."
     python3 "$(git rev-parse --show-toplevel)/scripts/lint-agent-routing.py"
 fi
+
+# Rule 7 — subagent dispatch model= scan. Runs whenever any staged file could
+# hold an Agent(subagent_type=...) call. Uses --dispatch-only so a pre-existing
+# frontmatter violation cannot block a source-only commit.
+# Reference: master/reports/explore-opus-regression-fix-2026-07-12.md
+if echo "$STAGED" | grep -qE '\.(py|ts|tsx|js|jsx|mjs|cjs|sh)$'; then
+    echo "[pre-commit] Linting subagent dispatch model= (Rule 7)..."
+    python3 "$(git rev-parse --show-toplevel)/scripts/lint-agent-routing.py" \
+        --dispatch-only \
+        --check-subagent-dispatches "$(git rev-parse --show-toplevel)"
+fi

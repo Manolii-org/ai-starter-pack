@@ -28,6 +28,7 @@ Exit codes:
 """
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -234,6 +235,172 @@ def format_violation(v):
     return "\n".join(lines)
 
 
+# ── RULE 7: subagent dispatch must pin an explicit model= ─────────────────────
+# Claude Code v2.1.198 changed the built-in Explore agent (and by the same
+# release-channel behaviour, every built-in subagent that previously defaulted
+# to haiku) to INHERIT the main-session model — capped at opus. Any
+# `Agent(subagent_type="<name>", ...)` call site that omits `model=` therefore
+# silently escalates from OSS/haiku routing to Anthropic Opus pricing.
+#
+# Reference: master/reports/explore-opus-regression-fix-2026-07-12.md
+#
+# This is a minimal port of master's Rule 7 for the ai-starter-pack
+# distribution — same paren-balance span extractor and quote-aware masking,
+# so `model=` embedded inside a prompt string does not false-pass.
+_SUBAGENT_RE = re.compile(r"""["'`]?subagent_type["'`]?\s*[=:]\s*["'`]([A-Za-z0-9_.:\-/]+)["'`]""")
+_MODEL_RE = re.compile(r"""["'`]?\bmodel\b["'`]?\s*[=:]""")
+_AGENT_CALL_RE = re.compile(r"""\bAgent\s*\(""")
+_ALLOW_MARKER = "lint-agent-routing:allow-missing-model"
+_ALLOW_MARKER_FILE = "lint-agent-routing:allow-file"
+_DISPATCH_SCAN_EXTS_SOURCE = {".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".sh"}
+_DISPATCH_SCAN_EXTS_DOCS = {".md"}
+_DISPATCH_SCAN_EXCLUDES = {
+    ".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build",
+    ".next", "coverage",
+}
+_MAX_CALL_SPAN_CHARS = 20000
+
+
+def _extract_agent_call_spans(text):
+    """Yield (start_line_1indexed, span_text, span_cleaned) for each Agent(...) call.
+
+    Uses paren-balance with quote awareness (basic backslash escape handling
+    and triple-quoted-string support). span_cleaned has PROSE string bodies
+    (whitespace or >24 chars) replaced with spaces so structural `model=`
+    checks skip over prompt contents. Short bare-identifier strings like
+    "model" / "haiku" stay unmasked so JSON-shape {"model": "haiku"} keys
+    still match _MODEL_RE.
+    """
+    for m in _AGENT_CALL_RE.finditer(text):
+        open_paren = m.end() - 1
+        depth = 1
+        i = open_paren + 1
+        end = len(text)
+        limit = min(end, open_paren + _MAX_CALL_SPAN_CHARS)
+        in_str = None
+        str_start = -1
+        str_regions = []
+        while i < limit and depth > 0:
+            c = text[i]
+            if in_str:
+                if len(in_str) == 3:
+                    if text[i: i + 3] == in_str:
+                        str_regions.append((str_start, i))
+                        i += 3
+                        in_str = None
+                        continue
+                    if c == "\\" and i + 1 < end:
+                        i += 2
+                        continue
+                    i += 1
+                    continue
+                if c == "\\" and i + 1 < end:
+                    i += 2
+                    continue
+                if c == in_str:
+                    str_regions.append((str_start, i))
+                    in_str = None
+                    i += 1
+                    continue
+                i += 1
+                continue
+            if c in ("'", '"', "`"):
+                if text[i: i + 3] in ('"""', "'''", "```"):
+                    in_str = text[i: i + 3]
+                    i += 3
+                    str_start = i
+                    continue
+                in_str = c
+                i += 1
+                str_start = i
+                continue
+            if c == "(":
+                depth += 1
+                i += 1
+                continue
+            if c == ")":
+                depth -= 1
+                if depth == 0:
+                    line_end = text.find("\n", i + 1)
+                    if line_end == -1:
+                        line_end = end
+                    span_text = text[m.start(): line_end]
+                    span_start_abs = m.start()
+                    span_len = len(span_text)
+                    buf = list(span_text)
+                    for s, e in str_regions:
+                        body = text[s: e]
+                        if len(body) <= 24 and not any(ch.isspace() for ch in body):
+                            continue
+                        rel_s = max(0, s - span_start_abs)
+                        rel_e = min(span_len, e - span_start_abs)
+                        for k in range(rel_s, rel_e):
+                            if buf[k] != "\n":
+                                buf[k] = " "
+                    span_cleaned = "".join(buf)
+                    start_line = text.count("\n", 0, m.start()) + 1
+                    yield start_line, span_text, span_cleaned
+                    break
+                i += 1
+                continue
+            i += 1
+
+
+def lint_subagent_dispatches_in_tree(root, include_docs=False):
+    """Return list of violations: source-file dispatches missing explicit model=.
+
+    Args:
+        root: repo root to scan (Path or str).
+        include_docs: also scan .md files (prose examples). Off by default.
+    """
+    violations = []
+    root = Path(root).resolve()
+    exts = set(_DISPATCH_SCAN_EXTS_SOURCE)
+    if include_docs:
+        exts |= _DISPATCH_SCAN_EXTS_DOCS
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _DISPATCH_SCAN_EXCLUDES]
+        for filename in filenames:
+            path = Path(dirpath) / filename
+            if path.suffix not in exts:
+                continue
+            rel = path.relative_to(root)
+            if rel.name == "lint-agent-routing.py":
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except (OSError, UnicodeDecodeError):
+                continue
+            if "Agent(" not in text or "subagent_type" not in text:
+                continue
+            if _ALLOW_MARKER_FILE in text:
+                continue
+            for start_line, span, span_cleaned in _extract_agent_call_spans(text):
+                if _ALLOW_MARKER in span:
+                    continue
+                sub_match = _SUBAGENT_RE.search(span)
+                if not sub_match:
+                    continue
+                if _MODEL_RE.search(span_cleaned):
+                    continue
+                snippet_line = span.splitlines()[0].strip()[:160]
+                violations.append({
+                    "file": str(rel),
+                    "line": start_line,
+                    "subagent": sub_match.group(1),
+                    "snippet": snippet_line,
+                })
+    return violations
+
+
+def format_subagent_dispatch_violation(v):
+    return (
+        f"  [RULE7_MISSING_MODEL] {v['file']}:{v['line']}\n"
+        f"    subagent_type=\"{v['subagent']}\" has no explicit model= within its Agent() call\n"
+        f"    snippet: {v['snippet']}"
+    )
+
+
 def main():
     import argparse
 
@@ -257,7 +424,45 @@ def main():
         action="store_true",
         help="Show warnings for unknown model identifiers",
     )
+    parser.add_argument(
+        "--check-subagent-dispatches",
+        metavar="DIR",
+        nargs="?",
+        const=".",
+        default=None,
+        help="Rule 7: scan DIR (default: repo root) for Agent(subagent_type=...) "
+             "call sites missing an explicit model= argument. See "
+             "master/reports/explore-opus-regression-fix-2026-07-12.md",
+    )
+    parser.add_argument(
+        "--include-docs",
+        action="store_true",
+        help="Extend the Rule 7 scan to .md files (prose examples). Off by default.",
+    )
+    parser.add_argument(
+        "--dispatch-only",
+        action="store_true",
+        help="Run ONLY the Rule 7 subagent-dispatch scan; skip agent-frontmatter "
+             "linting. Use in pre-commit source-file hooks.",
+    )
     args = parser.parse_args()
+
+    if args.dispatch_only:
+        scan_root = Path(args.check_subagent_dispatches or ".")
+        vios = lint_subagent_dispatches_in_tree(scan_root, include_docs=args.include_docs)
+        if vios:
+            print(f"\n[lint-agent-routing] SUBAGENT DISPATCH VIOLATIONS — {len(vios)} issue(s)\n")
+            for v in vios:
+                print(format_subagent_dispatch_violation(v))
+                print()
+            print(
+                "RULE 7 — Subagent dispatches must pin an explicit model=. Add "
+                "explicit model=\"haiku\" (or the intended tier) to the Agent(...) "
+                "call. Reference: master/reports/explore-opus-regression-fix-2026-07-12.md"
+            )
+            return 1
+        print(f"[lint-agent-routing] Rule 7 OK — subagent dispatches under {scan_root} all pin model=")
+        return 0
 
     config = load_routing_config()
     oss_routed = build_oss_routed_set(config)
@@ -302,6 +507,22 @@ def main():
 
     checked = len(agent_files)
     print(f"[lint-agent-routing] OK — {checked} agent(s) checked, 0 violations")
+
+    if args.check_subagent_dispatches is not None:
+        scan_root = Path(args.check_subagent_dispatches)
+        vios = lint_subagent_dispatches_in_tree(scan_root, include_docs=args.include_docs)
+        if vios:
+            print(f"\n[lint-agent-routing] SUBAGENT DISPATCH VIOLATIONS — {len(vios)} issue(s)\n")
+            for v in vios:
+                print(format_subagent_dispatch_violation(v))
+                print()
+            print(
+                "RULE 7 — Subagent dispatches must pin an explicit model=. "
+                "Reference: master/reports/explore-opus-regression-fix-2026-07-12.md"
+            )
+            return 1
+        print(f"[lint-agent-routing] Rule 7 OK — subagent dispatches under {scan_root} all pin model=")
+
     return 0
 
 
