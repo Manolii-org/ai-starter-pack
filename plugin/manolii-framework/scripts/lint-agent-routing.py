@@ -429,10 +429,16 @@ def main():
         metavar="DIR",
         nargs="?",
         const=".",
-        default=None,
+        default=".",
         help="Rule 7: scan DIR (default: repo root) for Agent(subagent_type=...) "
-             "call sites missing an explicit model= argument. See "
+             "call sites missing an explicit model= argument. On by default; use "
+             "--no-check-subagent-dispatches to skip. See "
              "master/reports/explore-opus-regression-fix-2026-07-12.md",
+    )
+    parser.add_argument(
+        "--no-check-subagent-dispatches",
+        action="store_true",
+        help="Skip the Rule 7 subagent-dispatch scan.",
     )
     parser.add_argument(
         "--include-docs",
@@ -508,7 +514,7 @@ def main():
     checked = len(agent_files)
     print(f"[lint-agent-routing] OK — {checked} agent(s) checked, 0 violations")
 
-    if args.check_subagent_dispatches is not None:
+    if not args.no_check_subagent_dispatches and args.check_subagent_dispatches is not None:
         scan_root = Path(args.check_subagent_dispatches)
         vios = lint_subagent_dispatches_in_tree(scan_root, include_docs=args.include_docs)
         if vios:
