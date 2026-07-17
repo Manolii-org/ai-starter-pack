@@ -30,7 +30,21 @@ from failure_class import (  # noqa: E402
     normalize_failure_class,
 )
 
-REPO_ROOT = _SCRIPTS_DIR.parent
+def _resolve_repo_root() -> Path:
+    """Consumer project root — never the plugin install tree.
+
+    Prefer CLAUDE_PROJECT_DIR (set by hooks / smoke tests). Fall back to cwd when
+    it looks like a project; only then use the scripts/ parent (in-tree pack use).
+    """
+    env = (os.environ.get("CLAUDE_PROJECT_DIR") or "").strip()
+    if env:
+        return Path(env).resolve()
+    cwd = Path.cwd().resolve()
+    if (cwd / ".git").exists() or (cwd / ".ai").exists() or (cwd / ".claude").exists():
+        return cwd
+    return _SCRIPTS_DIR.parent
+
+REPO_ROOT = _resolve_repo_root()
 STAGING_DIR = REPO_ROOT / ".ai" / "retrospective-staging"
 SESSION_LOGS_DIR = REPO_ROOT / ".ai" / "session-logs"
 RETROSPECTIVES_DIR = REPO_ROOT / ".ai" / "memory" / "retrospectives"

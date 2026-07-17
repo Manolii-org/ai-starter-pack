@@ -20,10 +20,20 @@ import sys
 import argparse
 import warnings
 from pathlib import Path
+from urllib.parse import urlparse
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 
-REPO_ROOT = Path(__file__).parent.parent
+def _resolve_repo_root() -> Path:
+    env = (os.environ.get("CLAUDE_PROJECT_DIR") or "").strip()
+    if env:
+        return Path(env).resolve()
+    cwd = Path.cwd().resolve()
+    if (cwd / ".git").exists() or (cwd / ".ai").exists():
+        return cwd
+    return Path(__file__).resolve().parent.parent
+
+REPO_ROOT = _resolve_repo_root()
 LOG_PATH = REPO_ROOT / ".ai" / "metrics" / "session-costs.jsonl"
 
 # Anthropic pricing (claude-sonnet-4-6, as of 2026-04-19).
@@ -368,10 +378,11 @@ def fetch_proxy_spend_session(from_time: str | None = None, to_time: str | None 
                 api_base = hidden.get("api_base") or meta.get("api_base") or ""
                 cost   = float(obs.get("calculatedTotalCost") or 0)
 
-                if any(p in api_base for p in ["groq", "fireworks", "together", "openrouter"]):
+                host = (urlparse(api_base).hostname or "").lower() if api_base else ""
+                if any(p in host for p in ("groq", "fireworks", "together", "openrouter")):
                     oss_cost += cost
                     oss_calls += 1
-                elif "anthropic.com" in api_base:
+                elif host == "anthropic.com" or host.endswith(".anthropic.com"):
                     ant_cost += cost
                     ant_calls += 1
 
