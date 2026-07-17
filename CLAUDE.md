@@ -174,6 +174,7 @@ Before every PR: follow `docs/pre-pr-quality-gate.md`. Six checks: diff self-rev
 - `test-hardener` — mutation-testing survivor elimination → test generation → PR
 - `secrets-handler` — restricted-tier router for credential-bearing tool/MCP responses; returns sanitised summaries (sonnet, restricted_us_oss_ok clearance)
 - `memory-keeper` — maintains the committed `.ai/memory/` knowledge base after significant sessions (haiku)
+- Session retrospectives — `scripts/session-retrospective.py` (Stop: local JSONL under `.ai/memory/retrospectives/`; SessionStart `--mode inject`; PreCompact staging). Canonical memory path is `.ai/memory/` (`scripts/migrate-memory-path.sh` for `.claude/memory/` legacy).
 - {Add project-specific agents}
 
 ## Commands

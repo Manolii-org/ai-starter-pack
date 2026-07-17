@@ -191,7 +191,7 @@ def build_hooks_config() -> dict:
             "PreCompact":   [{"hooks": [cmd(f'bash "{P}/hooks/pre-compact.sh"', 30)]}],
             "PostCompact":  [{"hooks": [cmd(f'bash "{P}/hooks/post-compact.sh"', 15)]}],
             "Stop": [{"hooks": [
-                cmd(f'bash "{P}/scripts/session-stop-checklist.sh"', 5),
+                cmd(f'bash "{P}/scripts/session-stop-checklist.sh"', 10),
                 cmd(stop_selfcheck, 30),
             ]}],
         }
@@ -208,7 +208,13 @@ def assemble_hooks_and_scripts(rendered: Path, out: Path) -> dict:
 
     rsrc = rendered / "scripts"
     if rsrc.is_dir():
-        shutil.copytree(rsrc, out / "scripts")
+        # Pack-dev tests live under scripts/tests/ but must not ship in the
+        # consumer plugin artifact (eval-gate drift + install footprint).
+        shutil.copytree(
+            rsrc,
+            out / "scripts",
+            ignore=shutil.ignore_patterns("tests", "__pycache__", "*.pyc"),
+        )
         counts["scripts"] = sum(1 for p in (out / "scripts").rglob("*") if p.is_file())
 
     rhooks = rendered / ".claude" / "hooks"

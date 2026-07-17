@@ -19,6 +19,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _HOOK_INPUT=$(cat)
 _SESSION_ID=$(printf '%s' "$_HOOK_INPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('session_id',''))" 2>/dev/null || true)
 python3 "${SCRIPT_DIR}/session-cost-logger.py" ${_SESSION_ID:+--session "$_SESSION_ID"} 2>/dev/null || true
+_SESSION_ID_FOR_RETRO="${_SESSION_ID:-}"
 unset _HOOK_INPUT _SESSION_ID
 
 cat <<'EOF'
@@ -69,7 +70,7 @@ _branch_fingerprint
 # surfaces only warn-or-higher findings. Signals covered: edit-thrashing,
 # error-loop, repeated-instructions, correction-heavy, rapid-corrections.
 # Silent on clean sessions. Synchronous because doctor runs in <0.2s; capped
-# at 4s to stay within the settings.json Stop-hook timeout of 5s —
+# at 2s to leave headroom for retrospective within the Stop-hook timeout of 10s —
 # backgrounding with disown would lose stdout once the parent hook exits.
 _doctor_silent() {
     local script_dir
@@ -83,7 +84,7 @@ import json, os, subprocess, sys
 try:
     out = subprocess.run(
         ["python3", os.environ["_DOCTOR_SCRIPT"], "--since", "1h", "--json"],
-        capture_output=True, text=True, timeout=4,
+        capture_output=True, text=True, timeout=2,
     )
     data = json.loads(out.stdout or "{}")
     by_sig = data.get("summary", {}).get("by_signal", {})
@@ -97,6 +98,57 @@ PYEOF
     unset _DOCTOR_SCRIPT
 }
 _doctor_silent
+
+# ── Session retrospective (local durable write; KL optional/background) ───────
+# Synchronous-with-timeout for the local JSONL write (--local-only). Inner 8s is
+# below the Stop-hook timeout (10s; settings.json.jinja + plugin hooks.json).
+# On timeout/non-zero: write failure marker and still exit 0. KL network leg is
+# backgrounded below when MCP_API_KEY and KL_ENTITY/RETROSPECTIVE_ENTITY are set.
+_run_session_retrospective() {
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local retro="${script_dir}/session-retrospective.py"
+    [ -f "$retro" ] || return 0
+
+    local sid="${_RETRO_SESSION_ID:-}"
+    # Capture session_id once if not already set (stdin may already be consumed).
+    if [ -z "$sid" ] && [ -n "${_SESSION_ID_FOR_RETRO:-}" ]; then
+        sid="$_SESSION_ID_FOR_RETRO"
+    fi
+
+    local rc=0
+    # LOCAL durable write only (sync-with-timeout). Inner 8s < outer Stop 10s.
+    # --local-only guarantees we do not burn the budget on KL HTTP.
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 8s python3 "$retro" --mode stop --local-only ${sid:+--session-id "$sid"} \
+            >/dev/null 2>&1 || rc=$?
+    else
+        perl -e 'alarm 8; exec @ARGV' python3 "$retro" --mode stop --local-only ${sid:+--session-id "$sid"} \
+            >/dev/null 2>&1 || rc=$?
+    fi
+
+    if [ "$rc" -ne 0 ]; then
+        mkdir -p .ai/memory/retrospectives
+        printf '{"timestamp":"%s","exit_code":%s,"event":"session-retrospective-capture-failed"}\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$rc" \
+            > .ai/memory/retrospectives/.last-capture-failed
+        echo "[session-stop] retrospective capture failed (rc=$rc); marker written" >&2
+    else
+        rm -f .ai/memory/retrospectives/.last-capture-failed 2>/dev/null || true
+    fi
+
+    # KL network leg only — backgrounded; never blocks Stop. Skipped if no creds.
+    # --kl-only flushes the just-written local record without a second JSONL append.
+    if [ -n "${MCP_API_KEY:-}" ] && { [ -n "${KL_ENTITY:-}" ] || [ -n "${RETROSPECTIVE_ENTITY:-}" ]; }; then
+        ( python3 "$retro" --mode kl-only ${sid:+--session-id "$sid"} >/dev/null 2>&1 ) &
+        disown $! 2>/dev/null || true
+    fi
+    return 0
+}
+# Preserve session id from cost-logger block if still in scope; else empty.
+_RETRO_SESSION_ID="${_SESSION_ID_FOR_RETRO:-${_RETRO_SESSION_ID:-}}"
+_run_session_retrospective
+unset _RETRO_SESSION_ID _SESSION_ID_FOR_RETRO
 
 # ── Intent-drift check ───────────────────────────────────────────────────────
 # Compares the session diff against the original user prompt (if available).
@@ -171,7 +223,7 @@ except Exception:
 PYEOF
 }
 
-# Run in detached background — Stop hook timeout is 5s; an API call takes 2-10s.
+# Run in detached background — Stop hook timeout is 10s; an API call takes 2-10s.
 # Subshell isolates the exported env vars (_DRIFT_PROMPT, _DRIFT_STATS).
 # disown prevents SIGHUP when the parent shell exits.
 ( _run_intent_drift ) &

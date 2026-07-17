@@ -29,3 +29,10 @@ __pycache__/
 
 # Rendered output (re-generate with render-pack.py)
 dist/
+
+# Session retrospective runtime (Stop hook) — do not commit
+.ai/memory/retrospectives/.last-capture-failed
+.ai/memory/retrospectives/*.json
+!.ai/memory/retrospectives/.gitkeep
+!.ai/memory/retrospectives/session-retrospectives.jsonl
+.ai/memory/retrospectives/.last-capture-mtime

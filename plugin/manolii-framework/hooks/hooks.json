@@ -81,7 +81,7 @@
           {
             "type": "command",
             "command": "cd \"${CLAUDE_PROJECT_DIR}\" && bash \"${CLAUDE_PLUGIN_ROOT}/scripts/session-stop-checklist.sh\"",
-            "timeout": 5
+            "timeout": 10
           },
           {
             "type": "command",
