@@ -208,7 +208,13 @@ def assemble_hooks_and_scripts(rendered: Path, out: Path) -> dict:
 
     rsrc = rendered / "scripts"
     if rsrc.is_dir():
-        shutil.copytree(rsrc, out / "scripts")
+        # Pack-dev tests live under scripts/tests/ but must not ship in the
+        # consumer plugin artifact (eval-gate drift + install footprint).
+        shutil.copytree(
+            rsrc,
+            out / "scripts",
+            ignore=shutil.ignore_patterns("tests", "__pycache__", "*.pyc"),
+        )
         counts["scripts"] = sum(1 for p in (out / "scripts").rglob("*") if p.is_file())
 
     rhooks = rendered / ".claude" / "hooks"
