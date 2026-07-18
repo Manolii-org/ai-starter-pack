@@ -34,7 +34,19 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent.parent
-ROUTING_CONFIG_PATH = REPO_ROOT / ".claude" / "model-routing.json"
+# When bundled into a Claude Code plugin, the routing config lives at
+# `data/model-routing.json`, not `.claude/model-routing.json`. Search both
+# so `/drift-check` (which runs `${CLAUDE_PLUGIN_ROOT}/scripts/lint-agent-routing.py`)
+# works from the plugin bundle without exiting 2 on a "missing" config.
+# Reference: Codex review, PR #28 (ai-starter-pack), 2026-07-17.
+_ROUTING_CONFIG_CANDIDATES = (
+    REPO_ROOT / ".claude" / "model-routing.json",
+    REPO_ROOT / "data" / "model-routing.json",
+)
+ROUTING_CONFIG_PATH = next(
+    (p for p in _ROUTING_CONFIG_CANDIDATES if p.exists()),
+    _ROUTING_CONFIG_CANDIDATES[0],  # deterministic fallback for the "not found" error msg
+)
 AGENTS_DIR = REPO_ROOT / ".claude" / "agents"
 
 # Sensitivity levels that require Anthropic-only routing.
