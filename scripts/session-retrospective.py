@@ -52,7 +52,6 @@ RETRO_JSONL = RETROSPECTIVES_DIR / "session-retrospectives.jsonl"
 MTIME_SENTINEL = RETROSPECTIVES_DIR / ".last-capture-mtime"
 NAVIGATION_WARNING_FILE = REPO_ROOT / ".ai" / "recent-navigation-warning.md"
 CONFIG_PATH = REPO_ROOT / ".ai" / "config" / "retrospective.json"
-DEFAULT_KL_MCP_URL = "https://knowledge-layer-cron.vercel.app/api/mcp"
 API_TIMEOUT_SECONDS = 15
 _UNTRUSTED = "[UNTRUSTED_EXTERNAL_CONTENT]"
 
@@ -122,8 +121,16 @@ def _kl_ready(entity: Optional[str], local_only: bool) -> bool:
     return bool((os.environ.get("MCP_API_KEY") or "").strip())
 
 
-def _kl_url() -> str:
-    return (os.environ.get("KL_MCP_URL") or DEFAULT_KL_MCP_URL).rstrip("/")
+def _kl_url() -> Optional[str]:
+    """Return the MCP endpoint or None when unset — fail-closed.
+
+    A hardcoded default is a per-deployment secret in disguise: it silently
+    routes writes to whichever endpoint the pack was authored against, which
+    is wrong for consumers running against a different KL. Force the operator
+    to set KL_MCP_URL explicitly; callers must skip the network leg when None.
+    """
+    val = (os.environ.get("KL_MCP_URL") or "").strip()
+    return val.rstrip("/") if val else None
 
 
 def _extract_text(obj: object) -> str:
@@ -169,7 +176,7 @@ def extract_signals(path: Optional[Path]) -> dict:
     if not path or not path.exists():
         return signals
 
-    last_tool: Optional[str] = None
+    last_tool: Optional[tuple] = None  # (tool_name, normalized_input_key)
     tool_streak = 0
     first_ts: Optional[float] = None
     last_ts: Optional[float] = None
@@ -184,6 +191,8 @@ def extract_signals(path: Optional[Path]) -> dict:
                     entry = json.loads(line)
                 except json.JSONDecodeError as e:
                     print(f"[session-retro] json parse: {type(e).__name__}", file=sys.stderr)
+                    continue
+                if not isinstance(entry, dict):
                     continue
 
                 ts = entry.get("timestamp") or entry.get("ts")
@@ -226,15 +235,23 @@ def extract_signals(path: Optional[Path]) -> dict:
                     if btype in ("tool_use", "tool_call") or (name and btype.startswith("tool")):
                         if name:
                             signals["tool_calls_total"] += 1
-                            if name == last_tool:
+                            inp = block.get("input") or block.get("arguments") or {}
+                            # Retry-streak: same tool name AND same input args.
+                            # Just repeating a tool name (e.g. 3 different Read
+                            # file_paths) is not a retry — that's normal work.
+                            try:
+                                inp_key = json.dumps(inp, sort_keys=True, default=str)[:200]
+                            except Exception:
+                                inp_key = str(inp)[:200]
+                            call_key = (name, inp_key)
+                            if call_key == last_tool:
                                 tool_streak += 1
                             else:
-                                last_tool, tool_streak = name, 1
+                                last_tool, tool_streak = call_key, 1
                             if tool_streak >= 3:
                                 signals["tool_retries"][name] = max(
                                     signals["tool_retries"].get(name, 0), tool_streak
                                 )
-                            inp = block.get("input") or block.get("arguments") or {}
                             if isinstance(inp, dict):
                                 fpath = str(
                                     inp.get("file_path") or inp.get("path")
@@ -327,12 +344,38 @@ def _write_local_record(record: dict) -> Path:
     return snap
 
 
+def _mcp_envelope_ok(body: bytes) -> bool:
+    """MCP responds 200 with a JSON envelope even on tool errors — parse it.
+
+    A 200 with {"error": ...} or {"result": {"isError": true, ...}} is a
+    FAILURE, not a success. Only a clean envelope counts.
+    """
+    if not body:
+        return False
+    try:
+        parsed = json.loads(body.decode("utf-8", errors="replace"))
+    except (json.JSONDecodeError, UnicodeError):
+        return False
+    if not isinstance(parsed, dict):
+        return False
+    if "error" in parsed:
+        return False
+    result = parsed.get("result")
+    if isinstance(result, dict) and result.get("isError"):
+        return False
+    return True
+
+
 def kl_create_note(entity: str, title: str, content: str, tags: list[str]) -> bool:
     if os.environ.get("SESSION_RETRO_DRY_RUN"):
         print(f"[session-retro] DRY RUN kl_create_note: {title!r} entity={entity}", file=sys.stderr)
         return True
     api_key = (os.environ.get("MCP_API_KEY") or "").strip()
     if not api_key:
+        return False
+    url = _kl_url()
+    if not url:
+        print("[session-retro] kl_create_note: KL_MCP_URL unset; skip", file=sys.stderr)
         return False
     payload = json.dumps({
         "method": "tools/call",
@@ -347,13 +390,15 @@ def kl_create_note(entity: str, title: str, content: str, tags: list[str]) -> bo
         },
     }).encode()
     req = urllib.request.Request(
-        _kl_url(), data=payload,
+        url, data=payload,
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         method="POST",
     )
     try:
         with urllib.request.urlopen(req, timeout=API_TIMEOUT_SECONDS) as resp:  # nosec B310
-            return resp.status < 400
+            if resp.status >= 400:
+                return False
+            return _mcp_envelope_ok(resp.read())
     except Exception as e:
         print(f"[session-retro] kl_create_note: {type(e).__name__}", file=sys.stderr)
         return False
@@ -365,6 +410,10 @@ def kl_assert_fact(entity: str, project_slug: str, fact_key: str, fact_value: st
         return True
     api_key = (os.environ.get("MCP_API_KEY") or "").strip()
     if not api_key:
+        return False
+    url = _kl_url()
+    if not url:
+        print("[session-retro] kl_assert_fact: KL_MCP_URL unset; skip", file=sys.stderr)
         return False
     payload = json.dumps({
         "method": "tools/call",
@@ -379,13 +428,15 @@ def kl_assert_fact(entity: str, project_slug: str, fact_key: str, fact_value: st
         },
     }).encode()
     req = urllib.request.Request(
-        _kl_url(), data=payload,
+        url, data=payload,
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         method="POST",
     )
     try:
         with urllib.request.urlopen(req, timeout=API_TIMEOUT_SECONDS) as resp:  # nosec B310
-            return resp.status < 400
+            if resp.status >= 400:
+                return False
+            return _mcp_envelope_ok(resp.read())
     except Exception as e:
         print(f"[session-retro] kl_assert_fact: {type(e).__name__}", file=sys.stderr)
         return False
@@ -448,25 +499,47 @@ def mode_kl_only(session_id: str = "") -> None:
     assert entity is not None
 
     record: Optional[dict] = None
-    # Prefer newest snapshot json
+    # Select ONLY the record for this session_id — the wrapper backgrounds a
+    # second invocation of the collector and the newest snapshot may belong
+    # to a different session that ran concurrently. Labelling a stranger's
+    # snapshot with our session_id contaminates KL.
+    if not session_id:
+        print("[session-retro] kl-only: no session_id provided; skip (safety)", file=sys.stderr)
+        return
+
     snaps = sorted(RETROSPECTIVES_DIR.glob("*-*.json"), reverse=True) if RETROSPECTIVES_DIR.exists() else []
     for snap in snaps:
         if snap.name.startswith("."):
             continue
         try:
-            record = json.loads(snap.read_text(encoding="utf-8"))
-            break
+            candidate = json.loads(snap.read_text(encoding="utf-8"))
         except Exception as e:
             print(f"[session-retro] kl-only snap: {type(e).__name__}", file=sys.stderr)
+            continue
+        if not isinstance(candidate, dict):
+            continue
+        if str(candidate.get("session_id") or "") == session_id:
+            record = candidate
+            break
     if record is None and RETRO_JSONL.exists():
         try:
-            lines = [ln for ln in RETRO_JSONL.read_text(encoding="utf-8").splitlines() if ln.strip()]
-            if lines:
-                record = json.loads(lines[-1])
+            for ln in reversed(RETRO_JSONL.read_text(encoding="utf-8").splitlines()):
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    candidate = json.loads(ln)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(candidate, dict):
+                    continue
+                if str(candidate.get("session_id") or "") == session_id:
+                    record = candidate
+                    break
         except Exception as e:
             print(f"[session-retro] kl-only jsonl: {type(e).__name__}", file=sys.stderr)
     if not record:
-        print("[session-retro] kl-only: no local record to flush", file=sys.stderr)
+        print(f"[session-retro] kl-only: no local record for session_id={session_id}", file=sys.stderr)
         return
 
     branch = str(record.get("branch") or _get_branch())
@@ -501,7 +574,13 @@ def mode_kl_only(session_id: str = "") -> None:
 
 
 
-def mode_precompact(transcript: str) -> None:
+def _safe_session_slug(session_id: str) -> str:
+    """Filesystem-safe subset of the session_id (used inside staging filenames)."""
+    slug = re.sub(r"[^A-Za-z0-9._-]", "_", session_id or "")
+    return slug[:64] or "unknown"
+
+
+def mode_precompact(transcript: str, session_id: str = "") -> None:
     path = Path(transcript) if transcript else _latest_session_log()
     if not path or not path.exists():
         return
@@ -521,9 +600,14 @@ def mode_precompact(transcript: str) -> None:
     STAGING_DIR.mkdir(parents=True, exist_ok=True)
     _now = datetime.now(timezone.utc)
     ts = _now.strftime("%Y%m%d_%H%M%S_") + f"{_now.microsecond:06d}"
-    (STAGING_DIR / f"checkpoint_{ts}.json").write_text(json.dumps({
+    slug = _safe_session_slug(session_id)
+    # Session-scoped checkpoint filename AND embedded session_id — so mode_stop
+    # can safely merge only artifacts from THIS session even if concurrent
+    # sessions dropped checkpoints into the shared staging dir.
+    (STAGING_DIR / f"checkpoint_{slug}_{ts}.json").write_text(json.dumps({
         "mode": "precompact",
         "captured_at": _now_iso(),
+        "session_id": session_id or "",
         "transcript": str(path),
         "signals": sigs,
         "dysfunction_score": dscore,
@@ -531,8 +615,14 @@ def mode_precompact(transcript: str) -> None:
     }, indent=2), encoding="utf-8")
 
 
-def mode_stop(session_id: str, local_only: bool = False, force: bool = False) -> None:
-    path = _latest_session_log()
+def mode_stop(session_id: str, local_only: bool = False, force: bool = False,
+              transcript: str = "") -> None:
+    # Prefer the explicit transcript from the Stop-hook payload (piped via the
+    # wrapper) over probing .ai/session-logs (which no code in this repo
+    # populates in the general case).
+    path = Path(transcript) if transcript else _latest_session_log()
+    if path and not path.exists():
+        path = None
     if _mtime_gate_hit(path, force=force):
         return
     sigs = extract_signals(path) if path else {}
@@ -542,25 +632,47 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False) ->
     staged_retries: dict = {}
     staged_edit_churn: dict = {}
     staged_file_reads: dict = {}
+    # Track staging files that belong to THIS session so we can clean them up
+    # after the local record write succeeds. Files without a matching
+    # session_id belong to sibling sessions and are left untouched.
+    consumed_staging: list[Path] = []
+    transcript_str = str(path) if path else ""
     if STAGING_DIR.exists():
         for f in sorted(STAGING_DIR.glob("checkpoint_*.json")) + sorted(STAGING_DIR.glob("correction_*.json")):
             try:
                 ckpt = json.loads(f.read_text(encoding="utf-8"))
-                cs = ckpt.get("signals", {})
-                staged_corrections.extend(cs.get("user_corrections") or [])
-                staged_apologies += int(cs.get("assistant_apologies") or 0)
-                for k, v in (cs.get("tool_retries") or {}).items():
-                    staged_retries[k] = max(staged_retries.get(k, 0), int(v))
-                for fp, count in (cs.get("edit_churn") or {}).items():
-                    staged_edit_churn[fp] = max(staged_edit_churn.get(fp, 0), int(count))
-                for fp, count in (cs.get("file_reads") or {}).items():
-                    staged_file_reads[fp] = staged_file_reads.get(fp, 0) + int(count)
-                if ckpt.get("mode") == "correction" and ckpt.get("snippet"):
-                    staged_corrections.append(str(ckpt["snippet"])[:200])
             except Exception as e:
                 print(f"[session-retro] checkpoint load: {type(e).__name__}", file=sys.stderr)
+                continue
+            if not isinstance(ckpt, dict):
+                continue
+            ckpt_sid = str(ckpt.get("session_id") or "")
+            # Session isolation: skip artifacts from other sessions. Legacy
+            # checkpoints (empty session_id) are matched only when the current
+            # session_id is also empty — else they'd contaminate the merge.
+            if ckpt_sid != (session_id or ""):
+                continue
+            # Skip a checkpoint whose transcript is exactly the one we're
+            # already summarising — its signals are re-derived below.
+            if transcript_str and str(ckpt.get("transcript") or "") == transcript_str:
+                consumed_staging.append(f)
+                continue
+            cs = ckpt.get("signals", {}) if isinstance(ckpt.get("signals"), dict) else {}
+            staged_corrections.extend(cs.get("user_corrections") or [])
+            staged_apologies += int(cs.get("assistant_apologies") or 0)
+            for k, v in (cs.get("tool_retries") or {}).items():
+                staged_retries[k] = max(staged_retries.get(k, 0), int(v))
+            for fp, count in (cs.get("edit_churn") or {}).items():
+                staged_edit_churn[fp] = max(staged_edit_churn.get(fp, 0), int(count))
+            for fp, count in (cs.get("file_reads") or {}).items():
+                staged_file_reads[fp] = staged_file_reads.get(fp, 0) + int(count)
+            if ckpt.get("mode") == "correction" and ckpt.get("snippet"):
+                staged_corrections.append(str(ckpt["snippet"])[:200])
+            consumed_staging.append(f)
 
-    all_corrections = list(sigs.get("user_corrections") or []) + staged_corrections
+    # dict.fromkeys preserves order and dedupes — two precompact checkpoints
+    # in one session would otherwise duplicate their corrections into Stop.
+    all_corrections = list(dict.fromkeys(list(sigs.get("user_corrections") or []) + staged_corrections))
     merged_retries: dict = {}
     for source in (staged_retries, sigs.get("tool_retries") or {}):
         for k, v in source.items():
@@ -620,6 +732,16 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False) ->
     print(f"[session-retro] local record: {snap}", file=sys.stderr)
     _write_mtime_sentinel(path)
 
+    # Drop only the staging artifacts we consumed for THIS session. Leaving
+    # them behind would double-count their signals into any future Stop for a
+    # sibling session that happened to reuse the same session_id (unlikely
+    # but possible after restart).
+    for staging_file in consumed_staging:
+        try:
+            staging_file.unlink(missing_ok=True)
+        except OSError as e:
+            print(f"[session-retro] staging cleanup: {type(e).__name__}", file=sys.stderr)
+
     # KL network leg (optional). Callers that must stay within Stop budget use --local-only
     # and background a second invocation without --local-only for this path.
     if _kl_ready(entity, local_only):
@@ -663,6 +785,8 @@ def mode_inject() -> None:
                 try:
                     rec = json.loads(line)
                 except json.JSONDecodeError:
+                    continue
+                if not isinstance(rec, dict):
                     continue
                 if rec.get("branch") != branch:
                     continue
@@ -714,9 +838,10 @@ def main() -> None:
         print(f"[session-retro] DRY RUN — mode={args.mode}", file=sys.stderr)
     try:
         if args.mode == "precompact":
-            mode_precompact(args.transcript)
+            mode_precompact(args.transcript, session_id=args.session_id)
         elif args.mode == "stop":
-            mode_stop(args.session_id, local_only=args.local_only, force=args.force)
+            mode_stop(args.session_id, local_only=args.local_only, force=args.force,
+                      transcript=args.transcript)
         elif args.mode == "inject":
             mode_inject()
         elif args.mode == "kl-only":

@@ -121,7 +121,9 @@ def classify_from_signals(
     if kind_map.get("timeout", 0) > 0 or error_count >= 6:
         return "external-dependency"
 
-    if any(v >= 3 for v in churn.values()):
+    # Planning failures manifest as EITHER breadth (many files touched)
+    # OR depth (one file rewritten repeatedly). Prior form only caught depth.
+    if len(churn) >= 3 or any(v >= 3 for v in churn.values()):
         return "planning"
 
     if any(v >= 2 for v in reads.values()) or any("Re-read:" in c for c in confusion):

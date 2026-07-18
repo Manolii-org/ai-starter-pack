@@ -36,3 +36,7 @@ dist/
 !.ai/memory/retrospectives/.gitkeep
 !.ai/memory/retrospectives/session-retrospectives.jsonl
 .ai/memory/retrospectives/.last-capture-mtime
+
+.ai/retrospective-staging/
+
+!.claude/memory
