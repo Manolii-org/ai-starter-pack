@@ -851,7 +851,7 @@ def main():
                         f"detected ({_pending_count} pending steps). "
                         "Do NOT compose >1000 words inline — stream times out during extended "
                         "thinking before Write calls. Required: delegate to "
-                        "Agent(subagent_type='generate') with OUTPUT_FILE spec, OR write a "
+                        "Agent(subagent_type='generate', model='haiku') with OUTPUT_FILE spec, OR write a "
                         "skeleton stub first, then fill sections with sequential Edit calls."
                     )
             except FileNotFoundError:
