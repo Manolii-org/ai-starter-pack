@@ -4,6 +4,10 @@ name: CI (Reusable)
 # v1.1.0 (2026-07-12):
 #   - Added `package_manager` input (npm | pnpm | yarn | bun)
 #   - Added `pnpm_version` input (used when package_manager=pnpm)
+# v1.7.2 (2026-07-18):
+#   - `pnpm_version` default is empty: omit `version` so pnpm/action-setup
+#     reads `package.json#packageManager` (avoids Multiple versions of pnpm).
+#     Pass an explicit version only when you must override packageManager.
 #   - Added per-job command overrides: install_command, lint_command,
 #     typecheck_command, test_command, build_command, audit_command
 #   - Added skip toggles: skip_lint, skip_typecheck, skip_test,
@@ -28,8 +32,13 @@ on:
         description: Package manager (npm | pnpm | yarn | bun).
       pnpm_version:
         type: string
-        default: '10'
-        description: pnpm major version. Only used when package_manager=pnpm.
+        default: ''
+        description: |
+          Optional pnpm version for pnpm/action-setup. Empty (default) omits
+          `version` so the action uses package.json `packageManager` (required
+          when that field is set — otherwise action-setup errors with
+          "Multiple versions of pnpm specified"). Pass e.g. '10' or '11.11.0'
+          only to override. Only used when package_manager=pnpm.
       install_command:
         type: string
         default: ''
@@ -120,10 +129,15 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
-      - if: inputs.package_manager == 'pnpm'
+      # Empty pnpm_version => omit `version` (defer to package.json packageManager).
+      - if: inputs.package_manager == 'pnpm' && inputs.pnpm_version != ''
         uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
         with:
           version: ${{ inputs.pnpm_version }}
+          run_install: false
+      - if: inputs.package_manager == 'pnpm' && inputs.pnpm_version == ''
+        uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
+        with:
           run_install: false
       - if: inputs.package_manager == 'bun'
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -164,10 +178,15 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
-      - if: inputs.package_manager == 'pnpm'
+      # Empty pnpm_version => omit `version` (defer to package.json packageManager).
+      - if: inputs.package_manager == 'pnpm' && inputs.pnpm_version != ''
         uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
         with:
           version: ${{ inputs.pnpm_version }}
+          run_install: false
+      - if: inputs.package_manager == 'pnpm' && inputs.pnpm_version == ''
+        uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
+        with:
           run_install: false
       - if: inputs.package_manager == 'bun'
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -225,10 +244,15 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
-      - if: inputs.package_manager == 'pnpm'
+      # Empty pnpm_version => omit `version` (defer to package.json packageManager).
+      - if: inputs.package_manager == 'pnpm' && inputs.pnpm_version != ''
         uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
         with:
           version: ${{ inputs.pnpm_version }}
+          run_install: false
+      - if: inputs.package_manager == 'pnpm' && inputs.pnpm_version == ''
+        uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
+        with:
           run_install: false
       - if: inputs.package_manager == 'bun'
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -278,10 +302,15 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
-      - if: inputs.package_manager == 'pnpm'
+      # Empty pnpm_version => omit `version` (defer to package.json packageManager).
+      - if: inputs.package_manager == 'pnpm' && inputs.pnpm_version != ''
         uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
         with:
           version: ${{ inputs.pnpm_version }}
+          run_install: false
+      - if: inputs.package_manager == 'pnpm' && inputs.pnpm_version == ''
+        uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
+        with:
           run_install: false
       - if: inputs.package_manager == 'bun'
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -331,10 +360,15 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
-      - if: inputs.package_manager == 'pnpm'
+      # Empty pnpm_version => omit `version` (defer to package.json packageManager).
+      - if: inputs.package_manager == 'pnpm' && inputs.pnpm_version != ''
         uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
         with:
           version: ${{ inputs.pnpm_version }}
+          run_install: false
+      - if: inputs.package_manager == 'pnpm' && inputs.pnpm_version == ''
+        uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
+        with:
           run_install: false
       - if: inputs.package_manager == 'bun'
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -394,10 +428,15 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
-      - if: inputs.package_manager == 'pnpm'
+      # Empty pnpm_version => omit `version` (defer to package.json packageManager).
+      - if: inputs.package_manager == 'pnpm' && inputs.pnpm_version != ''
         uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
         with:
           version: ${{ inputs.pnpm_version }}
+          run_install: false
+      - if: inputs.package_manager == 'pnpm' && inputs.pnpm_version == ''
+        uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
+        with:
           run_install: false
       - if: inputs.package_manager == 'bun'
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
