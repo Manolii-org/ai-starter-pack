@@ -15,13 +15,15 @@ _PAYLOAD=""
 if [ -t 0 ]; then :; else _PAYLOAD=$(cat 2>/dev/null || true); fi
 _SID=""; _TP=""
 if [ -n "$_PAYLOAD" ]; then
+    # Coalesce None → '' so a payload with explicit "session_id": null
+    # doesn't leak the literal string "None" into the collector args.
     _SID=$(printf '%s' "$_PAYLOAD" | python3 -c "import sys,json
 try:
-    d=json.load(sys.stdin); print(d.get('session_id','') if isinstance(d,dict) else '')
+    d=json.load(sys.stdin); print((d.get('session_id') or '') if isinstance(d,dict) else '')
 except Exception: pass" 2>/dev/null || true)
     _TP=$(printf '%s' "$_PAYLOAD" | python3 -c "import sys,json
 try:
-    d=json.load(sys.stdin); print(d.get('transcript_path','') if isinstance(d,dict) else '')
+    d=json.load(sys.stdin); print((d.get('transcript_path') or '') if isinstance(d,dict) else '')
 except Exception: pass" 2>/dev/null || true)
 fi
 

@@ -76,6 +76,16 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+_ID_COUNTER = 0
+
+
+def _stable_id_seed() -> int:
+    """Monotonic per-process JSON-RPC request id — small integer, no clock leak."""
+    global _ID_COUNTER
+    _ID_COUNTER += 1
+    return _ID_COUNTER
+
+
 def _get_branch() -> str:
     try:
         r = subprocess.run(
@@ -124,13 +134,16 @@ def _kl_ready(entity: Optional[str], local_only: bool) -> bool:
 def _kl_url() -> Optional[str]:
     """Return the MCP endpoint or None when unset — fail-closed.
 
-    A hardcoded default is a per-deployment secret in disguise: it silently
-    routes writes to whichever endpoint the pack was authored against, which
-    is wrong for consumers running against a different KL. Force the operator
-    to set KL_MCP_URL explicitly; callers must skip the network leg when None.
+    A hardcoded default is a per-deployment secret in disguise. Force the
+    operator to set the URL explicitly; callers skip the network leg when
+    None. Also honours the KNOWLEDGE_LAYER_MCP_URL variable used by the
+    manolii-platform's existing kl-proxy client — Codex P1 (2026-07-18).
     """
-    val = (os.environ.get("KL_MCP_URL") or "").strip()
-    return val.rstrip("/") if val else None
+    for key in ("KL_MCP_URL", "KNOWLEDGE_LAYER_MCP_URL"):
+        val = (os.environ.get(key) or "").strip()
+        if val:
+            return val.rstrip("/")
+    return None
 
 
 def _extract_text(obj: object) -> str:
@@ -270,11 +283,22 @@ def extract_signals(path: Optional[Path]) -> dict:
                                         signals["ai_confusion_events"].append(
                                             f"Re-read: {fpath} x{signals['file_reads'][fpath]}"
                                         )
-                    if btype == "tool_result" and (
-                        block.get("is_error")
-                        or "error" in str(block.get("content", "")).lower()[:80]
-                    ):
-                        signals["error_count"] += 1
+                    # Codex P2: prior heuristic (`"error" in content[:80]`) fired
+                    # on innocuous outputs like "0 errors found" — six such
+                    # results silently forced an external-dependency label.
+                    # Rely on the structured is_error flag; only fall back to
+                    # text sniffing when it's truly error-shaped (leading
+                    # "Error:"/"Traceback"/HTTP 4xx/5xx status).
+                    if btype == "tool_result":
+                        head = str(block.get("content", ""))[:120].strip()
+                        head_lower = head.lower()
+                        text_error = (
+                            head_lower.startswith(("error:", "error ", "err:", "traceback"))
+                            or re.match(r"^(4\d\d|5\d\d)\b", head) is not None
+                            or "exception:" in head_lower
+                        )
+                        if block.get("is_error") or text_error:
+                            signals["error_count"] += 1
     except Exception as e:
         print(f"[session-retro] extract_signals: {type(e).__name__}", file=sys.stderr)
 
@@ -377,7 +401,13 @@ def kl_create_note(entity: str, title: str, content: str, tags: list[str]) -> bo
     if not url:
         print("[session-retro] kl_create_note: KL_MCP_URL unset; skip", file=sys.stderr)
         return False
+    # Codex P1: MCP transport is JSON-RPC 2.0 — endpoints reject requests
+    # missing `jsonrpc` and `id`. The stateless HTTP-MCP shape used by the
+    # KL cron endpoint tolerates a direct `tools/call` without a full
+    # initialize handshake as long as the JSON-RPC envelope is valid.
     payload = json.dumps({
+        "jsonrpc": "2.0",
+        "id": f"retro-{int(_stable_id_seed())}",
         "method": "tools/call",
         "params": {
             "name": "kl_create_note",
@@ -416,6 +446,8 @@ def kl_assert_fact(entity: str, project_slug: str, fact_key: str, fact_value: st
         print("[session-retro] kl_assert_fact: KL_MCP_URL unset; skip", file=sys.stderr)
         return False
     payload = json.dumps({
+        "jsonrpc": "2.0",
+        "id": f"retro-{int(_stable_id_seed())}",
         "method": "tools/call",
         "params": {
             "name": "kl_assert_fact",
@@ -632,6 +664,11 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False,
     staged_retries: dict = {}
     staged_edit_churn: dict = {}
     staged_file_reads: dict = {}
+    # Codex P2: staged error_count must survive into Stop. Compaction can hand
+    # Stop a NEW transcript that has zero errors — without summing the staged
+    # count, six pre-compaction tool errors silently drop and never reach the
+    # `external-dependency` classifier threshold.
+    staged_error_count = 0
     # Track staging files that belong to THIS session so we can clean them up
     # after the local record write succeeds. Files without a matching
     # session_id belong to sibling sessions and are left untouched.
@@ -647,10 +684,12 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False,
             if not isinstance(ckpt, dict):
                 continue
             ckpt_sid = str(ckpt.get("session_id") or "")
-            # Session isolation: skip artifacts from other sessions. Legacy
-            # checkpoints (empty session_id) are matched only when the current
-            # session_id is also empty — else they'd contaminate the merge.
-            if ckpt_sid != (session_id or ""):
+            # Session isolation: skip artifacts that BELONG to another session
+            # (both sides non-empty and different). Legacy checkpoints with
+            # empty session_id are consumed by whichever Stop runs first —
+            # older PreCompact hooks (e.g. .claude/hooks/pre-compact.sh) don't
+            # forward session_id, and rejecting them silently drops signals.
+            if ckpt_sid and session_id and ckpt_sid != session_id:
                 continue
             # Skip a checkpoint whose transcript is exactly the one we're
             # already summarising — its signals are re-derived below.
@@ -666,6 +705,7 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False,
                 staged_edit_churn[fp] = max(staged_edit_churn.get(fp, 0), int(count))
             for fp, count in (cs.get("file_reads") or {}).items():
                 staged_file_reads[fp] = staged_file_reads.get(fp, 0) + int(count)
+            staged_error_count += int(cs.get("error_count") or 0)
             if ckpt.get("mode") == "correction" and ckpt.get("snippet"):
                 staged_corrections.append(str(ckpt["snippet"])[:200])
             consumed_staging.append(f)
@@ -684,6 +724,7 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False,
     for fp, count in (sigs.get("file_reads") or {}).items():
         merged_file_reads[fp] = merged_file_reads.get(fp, 0) + int(count)
 
+    merged_error_count = int(sigs.get("error_count") or 0) + staged_error_count
     merged_sigs = {
         **sigs,
         "user_corrections": all_corrections,
@@ -691,6 +732,7 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False,
         "tool_retries": merged_retries,
         "edit_churn": merged_edit_churn,
         "file_reads": merged_file_reads,
+        "error_count": merged_error_count,
     }
     dscore = dysfunction_score(merged_sigs)
     fclass = normalize_failure_class(classify_from_signals(
@@ -699,7 +741,7 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False,
         tool_retries=merged_retries,
         edit_churn=merged_edit_churn,
         file_reads=merged_file_reads,
-        error_count=int(sigs.get("error_count") or 0),
+        error_count=merged_error_count,
     ))
 
     branch = _get_branch()

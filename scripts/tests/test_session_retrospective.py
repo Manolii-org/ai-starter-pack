@@ -11,7 +11,6 @@ The module filename contains a hyphen so we importlib-load it once per test.
 from __future__ import annotations
 
 import importlib.util
-import io
 import json
 import os
 import sys
@@ -194,6 +193,51 @@ def test_mode_stop_ignores_other_sessions_staging(project, monkeypatch):
     text = jsonl.read_text()
     assert "MUST NOT LEAK" not in text
     # Cleanup would have removed only `ours`; if it didn't, we'd double-count on rerun.
+
+
+def test_mcp_payload_carries_jsonrpc_envelope(project, monkeypatch):
+    """Codex P1: MCP requires jsonrpc + id fields on tools/call."""
+    monkeypatch.setenv("MCP_API_KEY", "key")
+    monkeypatch.setenv("KL_MCP_URL", "https://example.test/api/mcp")
+    mod = _load_module(project)
+    captured = {}
+
+    class FakeResp:
+        status = 200
+        def read(self): return b'{"result": {"content": "ok"}}'
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def fake_urlopen(req, timeout=None):
+        captured["data"] = req.data
+        return FakeResp()
+
+    monkeypatch.setattr(mod.urllib.request, "urlopen", fake_urlopen)
+    ok = mod.kl_create_note("acme", "t", "b", ["x"])
+    assert ok is True
+    body = json.loads(captured["data"])
+    assert body.get("jsonrpc") == "2.0"
+    assert "id" in body and body["id"]
+    assert body.get("method") == "tools/call"
+
+
+def test_stop_merges_staged_error_count(project, monkeypatch):
+    """Codex P2: staged error_count must reach the classifier so pre-compaction
+    tool errors can still produce external-dependency."""
+    mod = _load_module(project)
+    staging_dir = project / ".ai" / "retrospective-staging"
+    # Six pre-compaction errors, no per-Stop transcript signals.
+    (staging_dir / "checkpoint_MINE_20260718_120000_000000.json").write_text(json.dumps({
+        "mode": "precompact",
+        "session_id": "MINE",
+        "transcript": "/pre.jsonl",
+        "signals": {"error_count": 6},
+    }))
+    mod.mode_stop("MINE", local_only=True, transcript="")
+    jsonl = project / ".ai" / "memory" / "retrospectives" / "session-retrospectives.jsonl"
+    rec = json.loads(jsonl.read_text().splitlines()[-1])
+    assert rec["failure_class"] == "external-dependency", \
+        f"expected external-dependency from merged error_count, got {rec['failure_class']}"
 
 
 def test_local_only_still_forbids_kl_even_when_creds_set(project, monkeypatch):
