@@ -49,3 +49,5 @@ feature_excludes:
   langfuse_telemetry: []
   codex_adversarial:
     - .claude/agents/codex-adversarial.md
+  mesh_telemetry:
+    - mesh-contract.yaml.template

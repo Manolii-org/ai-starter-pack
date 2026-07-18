@@ -349,7 +349,7 @@ class TestChoiceRequiredKeysShape(unittest.TestCase):
             "oss_routing",
             "langfuse_telemetry",
             "browserbase",
-            "remote_memory",
+            "kl_integration",
         }
         self.assertEqual(set(m.CHOICE_REQUIRED_KEYS.keys()), expected_features)
 
@@ -372,7 +372,7 @@ class TestChoiceRequiredKeysShape(unittest.TestCase):
             m.CHOICE_REQUIRED_KEYS["browserbase"],
             ["BROWSERBASE_API_KEY", "BROWSERBASE_PROJECT_ID"],
         )
-        self.assertEqual(m.CHOICE_REQUIRED_KEYS["remote_memory"], ["MCP_API_KEY"])
+        self.assertEqual(m.CHOICE_REQUIRED_KEYS["kl_integration"], ["MCP_API_KEY"])
 
 
 class TestParseEnvFile(unittest.TestCase):
