@@ -7,7 +7,12 @@
 set -euo pipefail
 _R=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
 cd "$_R"
-_RETRO="$_R/scripts/session-retrospective.py"
+# Codex P2 2026-07-19: when this wrapper is bundled inside a Claude
+# plugin install, the collector lives at $CLAUDE_PLUGIN_ROOT/scripts,
+# not the consumer's scripts/. Prefer the plugin root when set, fall
+# back to the consumer copy for repos that vendor the wrapper directly.
+_RETRO="${CLAUDE_PLUGIN_ROOT:-$_R}/scripts/session-retrospective.py"
+[ -f "$_RETRO" ] || _RETRO="$_R/scripts/session-retrospective.py"
 [ -f "$_RETRO" ] || exit 0
 
 # Parse Stop-hook JSON payload (fail-open; empty vars if missing/malformed).

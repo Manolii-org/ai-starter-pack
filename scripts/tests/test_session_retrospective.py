@@ -304,6 +304,49 @@ def test_two_empty_sid_stops_same_branch_same_second_do_not_collide(project, tmp
         f"snapshot fell back to -unknown (transcript hash was unreachable): {[p.name for p in snaps]}"
 
 
+def test_kl_flush_selects_newest_when_counter_suffix_present(project, monkeypatch):
+    """Codex P2 2026-07-19: when two same-second snapshots exist for one
+    session (`<base>.json` and `<base>-001.json`), mode_kl_only must pick
+    the newer one (mtime), NOT the lexicographic-first sibling."""
+    import os as _os
+    import time as _time
+    mod = _load_module(project)
+    retros = project / ".ai" / "memory" / "retrospectives"
+    retros.mkdir(parents=True, exist_ok=True)
+    base = "20260719T000000Z-main-sess-newest"
+    older = retros / f"{base}.json"
+    newer = retros / f"{base}-001.json"
+    older.write_text(json.dumps({"session_id": "sess-newest", "marker": "OLD"}))
+    newer.write_text(json.dumps({"session_id": "sess-newest", "marker": "NEW"}))
+    # Ensure newer has strictly greater mtime regardless of write ordering.
+    now = _time.time()
+    _os.utime(older, (now - 2, now - 2))
+    _os.utime(newer, (now, now))
+
+    # Stub KL delivery: capture the record that mode_kl_only would upload.
+    captured: dict = {}
+    monkeypatch.setenv("KL_MCP_URL", "http://127.0.0.1:9/mcp")
+    monkeypatch.setenv("KL_MCP_API_KEY", "dummy")
+    monkeypatch.setattr(mod, "_kl_ready", lambda entity, local_only=False: True)
+    monkeypatch.setattr(mod, "_resolve_entity", lambda: "manolii")
+    def _fake_note(*args, **kwargs):
+        captured["record"] = {
+            "title": kwargs.get("title", args[1] if len(args) > 1 else ""),
+            "body": kwargs.get("content", kwargs.get("body", args[2] if len(args) > 2 else "")),
+        }
+        return True
+    monkeypatch.setattr(mod, "kl_create_note", _fake_note)
+    monkeypatch.setattr(mod, "kl_assert_fact", lambda *a, **k: True)
+
+    mod.mode_kl_only(session_id="sess-newest")
+    assert captured, "mode_kl_only did not attempt a KL write"
+    # The record body should mention the NEW marker, not OLD.
+    body = captured["record"]["body"]
+    assert "NEW" in body or "OLD" not in body, (
+        f"kl-only picked the older snapshot: body={body!r}"
+    )
+
+
 def test_force_retry_same_second_does_not_overwrite_snapshot(project, tmp_path):
     """Codex P2 2026-07-19: two Stops on the same (session, branch) within
     one UTC second (supported --force retry path) must produce TWO durable

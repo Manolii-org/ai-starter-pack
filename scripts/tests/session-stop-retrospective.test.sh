@@ -98,6 +98,25 @@ mkdir -p "$d/scripts"
 if _run_wrapper "$d" </dev/null >/dev/null 2>&1; then _pass "$t"; else _fail "$t"; fi
 rm -rf "$d"
 
+# Test 8: CLAUDE_PLUGIN_ROOT — collector resolved from plugin install, not consumer (Codex P2 2026-07-19)
+t="resolves collector from CLAUDE_PLUGIN_ROOT when consumer has no scripts/session-retrospective.py"
+consumer=$(mktemp -d)
+mkdir -p "$consumer/scripts"
+( cd "$consumer" && git init -q 2>/dev/null || true )
+plugin=$(mktemp -d)
+mkdir -p "$plugin/scripts"
+cat > "$plugin/scripts/session-retrospective.py" <<'PY'
+#!/usr/bin/env python3
+import sys, os, pathlib
+pathlib.Path(os.environ["CLAUDE_PROJECT_DIR"], "plugin-collector-fired").write_text("yes")
+sys.exit(0)
+PY
+chmod +x "$plugin/scripts/session-retrospective.py"
+( cd "$consumer" && CLAUDE_PROJECT_DIR="$consumer" CLAUDE_PLUGIN_ROOT="$plugin" \
+    bash "$WRAPPER" </dev/null >/dev/null 2>&1 )
+if [[ -f "$consumer/plugin-collector-fired" ]]; then _pass "$t"; else _fail "$t (plugin collector did not run)"; fi
+rm -rf "$consumer" "$plugin"
+
 echo
 echo "session-stop-retrospective.test.sh — passed: $PASS  failed: $FAIL"
 [[ "$FAIL" -eq 0 ]] || exit 1

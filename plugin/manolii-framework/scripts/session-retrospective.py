@@ -616,7 +616,19 @@ def mode_kl_only(session_id: str = "") -> None:
         print("[session-retro] kl-only: no session_id provided; skip (safety)", file=sys.stderr)
         return
 
-    snaps = sorted(RETROSPECTIVES_DIR.glob("*-*.json"), reverse=True) if RETROSPECTIVES_DIR.exists() else []
+    # Codex P2 2026-07-19: sort by mtime (newest first), not filename.
+    # Lexicographic reverse-sort puts `<base>.json` ahead of `<base>-001.json`
+    # even though the -001 sibling is the newer capture (the counter suffix
+    # was added by _write_local_record to prevent same-second overwrites).
+    # An mtime sort selects the actual latest snapshot for this session_id.
+    if RETROSPECTIVES_DIR.exists():
+        snaps = sorted(
+            RETROSPECTIVES_DIR.glob("*-*.json"),
+            key=lambda p: (p.stat().st_mtime_ns, p.name),
+            reverse=True,
+        )
+    else:
+        snaps = []
     for snap in snaps:
         if snap.name.startswith("."):
             continue
