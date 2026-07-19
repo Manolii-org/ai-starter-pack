@@ -126,7 +126,16 @@ def classify_from_signals(
     if len(churn) >= 3 or any(v >= 3 for v in churn.values()):
         return "planning"
 
-    if any(v >= 2 for v in reads.values()) or any("Re-read:" in c for c in confusion):
+    # Memory-context: a file re-read enough times WITHOUT edits happening in
+    # between (i.e. the agent forgot what it saw, not that it was iterating on
+    # a change). If we also edited the same file, that's normal iterative
+    # work, not a memory gap. Confusion cues carrying an explicit "Re-read:"
+    # marker still count regardless of edit churn.
+    reread_without_edit = any(
+        read_count >= 2 and churn.get(path, 0) == 0
+        for path, read_count in reads.items()
+    )
+    if reread_without_edit or any("Re-read:" in c for c in confusion):
         return "memory-context"
 
     # Fall through to text classification on corrections / samples / confusion

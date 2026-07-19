@@ -18,9 +18,44 @@ CLAUDE_MEM="$REPO_ROOT/.claude/memory"
 AI_MEM="$REPO_ROOT/.ai/memory"
 ARCHIVE="$AI_MEM/archive/migration-conflicts"
 
-# Case 1: Already migrated (symlink exists)
+# Case 1: Already migrated (symlink exists) — but only trust it if it points
+# at the canonical .ai/memory directory. A stale/wrong-target/dangling symlink
+# from a prior migration attempt would silently mislocate memory writes; heal
+# it in place instead of exiting green.
 if [[ -L "$CLAUDE_MEM" ]]; then
-    echo "already-migrated (symlink)" >&1
+    # Resolve the target relative to the symlink's parent directory so that
+    # the common "../.ai/memory" form resolves to $AI_MEM.
+    link_target=$(readlink "$CLAUDE_MEM")
+    case "$link_target" in
+        /*) resolved="$link_target" ;;
+        *)  resolved="$(dirname "$CLAUDE_MEM")/$link_target" ;;
+    esac
+    # Compare canonical paths; if realpath is missing OR either invocation
+    # fails, apply the SAME python-based fallback to BOTH sides so the
+    # legitimate compat symlink ".claude/../.ai/memory" still equals
+    # ".ai/memory". Asymmetric normalization would heal a valid symlink
+    # on every run.
+    _normalize() {
+        if command -v realpath >/dev/null 2>&1; then
+            local n; n=$(realpath -m "$1" 2>/dev/null || true)
+            [[ -n "$n" ]] && { printf '%s\n' "$n"; return 0; }
+        fi
+        if command -v python3 >/dev/null 2>&1; then
+            python3 -c "import os,sys; print(os.path.normpath(sys.argv[1]))" "$1"
+        else
+            printf '%s\n' "$1"
+        fi
+    }
+    actual=$(_normalize "$resolved")
+    expected=$(_normalize "$AI_MEM")
+    if [[ "$actual" == "$expected" ]] && [[ -d "$expected" ]]; then
+        echo "already-migrated (symlink)" >&1
+        exit 0
+    fi
+    echo "healing stale symlink: $CLAUDE_MEM -> $link_target" >&2
+    mkdir -p "$AI_MEM"
+    ln -sfn "../.ai/memory" "$CLAUDE_MEM"
+    echo "healed compat symlink" >&1
     exit 0
 fi
 

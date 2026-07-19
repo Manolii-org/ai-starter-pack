@@ -80,6 +80,46 @@ def test_mcp_envelope_ok_flags_error_field(project):
     assert mod._mcp_envelope_ok(b"") is False
 
 
+def test_mcp_envelope_ok_parses_sse_stream(project):
+    """MCP Streamable HTTP may return SSE — take the LAST data: event."""
+    mod = _load_module(project)
+    sse_ok = (
+        b"event: message\n"
+        b'data: {"jsonrpc":"2.0","id":"1","result":{"content":"ok"}}\n\n'
+    )
+    assert mod._mcp_envelope_ok(sse_ok) is True
+    # An SSE stream whose terminal event is an error envelope must fail.
+    sse_err = (
+        b'data: {"jsonrpc":"2.0","id":"1","result":{"content":"partial"}}\n\n'
+        b'data: {"jsonrpc":"2.0","id":"1","error":{"code":-32000,"message":"boom"}}\n\n'
+    )
+    assert mod._mcp_envelope_ok(sse_err) is False
+
+
+def test_mcp_request_carries_accept_header(project, monkeypatch):
+    """Codex P1: Streamable HTTP MCP requires an Accept negotiating both JSON and SSE."""
+    monkeypatch.setenv("MCP_API_KEY", "key")
+    monkeypatch.setenv("KL_MCP_URL", "https://example.test/api/mcp")
+    mod = _load_module(project)
+    captured = {}
+
+    class FakeResp:
+        status = 200
+        def read(self): return b'{"result": {"content": "ok"}}'
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def fake_urlopen(req, timeout=None):
+        captured["headers"] = dict(req.headers)
+        return FakeResp()
+
+    monkeypatch.setattr(mod.urllib.request, "urlopen", fake_urlopen)
+    assert mod.kl_create_note("acme", "t", "b", ["x"]) is True
+    # urllib title-cases header names.
+    accept = captured["headers"].get("Accept", "")
+    assert "application/json" in accept and "text/event-stream" in accept
+
+
 def test_mode_kl_only_requires_session_id(project, monkeypatch, capsys):
     monkeypatch.setenv("MCP_API_KEY", "key")
     monkeypatch.setenv("KL_MCP_URL", "https://example.test/api/mcp")
@@ -154,6 +194,88 @@ def test_mode_precompact_writes_session_scoped_checkpoint(project, monkeypatch):
     assert "SID-ABC-123" in staging[0].name
     body = json.loads(staging[0].read_text())
     assert body["session_id"] == "SID-ABC-123"
+
+
+def test_mode_stop_empty_sid_leaves_tagged_checkpoints_alone(project, monkeypatch):
+    """Codex P2: a Stop with NO session_id must not consume every tagged sibling.
+
+    The old guard required BOTH sides to be non-empty before enforcing
+    isolation — so an empty-payload Stop happily merged and deleted every
+    session's tagged checkpoints, leaking their signals into its record
+    and stealing them from the rightful Stop handlers.
+    """
+    mod = _load_module(project)
+    staging_dir = project / ".ai" / "retrospective-staging"
+
+    tagged_a = staging_dir / "checkpoint_SID-A_20260718_120000_000000.json"
+    tagged_a.write_text(json.dumps({
+        "mode": "precompact",
+        "session_id": "SID-A",
+        "transcript": "/nonexistent-a.jsonl",
+        "signals": {"user_corrections": ["leaked from A"]},
+    }))
+    tagged_b = staging_dir / "checkpoint_SID-B_20260718_120500_000000.json"
+    tagged_b.write_text(json.dumps({
+        "mode": "precompact",
+        "session_id": "SID-B",
+        "transcript": "/nonexistent-b.jsonl",
+        "signals": {"user_corrections": ["leaked from B"]},
+    }))
+    # Anonymous legacy checkpoint (no session_id) — SHOULD be consumed.
+    legacy = staging_dir / "checkpoint_20260718_121000_000000.json"
+    legacy.write_text(json.dumps({
+        "mode": "precompact",
+        "session_id": "",
+        "transcript": "/nonexistent-legacy.jsonl",
+        "signals": {"user_corrections": ["legacy fair game"]},
+    }))
+
+    # Stop with an empty session_id — the wrapper permits this.
+    mod.mode_stop("", local_only=True, transcript="")
+
+    assert tagged_a.exists(), "empty-sid Stop must NOT consume SID-A's checkpoint"
+    assert tagged_b.exists(), "empty-sid Stop must NOT consume SID-B's checkpoint"
+    assert not legacy.exists(), "empty-sid Stop SHOULD consume anonymous legacy checkpoint"
+
+    jsonl = project / ".ai" / "memory" / "retrospectives" / "session-retrospectives.jsonl"
+    text = jsonl.read_text() if jsonl.exists() else ""
+    assert "leaked from A" not in text
+    assert "leaked from B" not in text
+
+
+def test_staging_key_pairs_precompact_and_stop_via_transcript(project, tmp_path):
+    """CodeRabbit fix: an empty-sid PreCompact + empty-sid Stop must still
+    route to each other via the transcript-derived staging_key."""
+    mod = _load_module(project)
+    # Build a real transcript so both PreCompact and Stop can canonicalise it.
+    transcript = tmp_path / "session_transcript.jsonl"
+    transcript.write_text('{"role":"user","content":"hi"}\n')
+
+    # Sibling session B's transcript — must not be picked up by Stop A.
+    transcript_b = tmp_path / "other_session.jsonl"
+    transcript_b.write_text('{"role":"user","content":"hi from B"}\n')
+
+    # PreCompact for session A (no session_id) — writes a tx-keyed checkpoint.
+    mod.mode_precompact(str(transcript), session_id="")
+    # PreCompact for session B (also no session_id) — different transcript.
+    mod.mode_precompact(str(transcript_b), session_id="")
+
+    staging_dir = project / ".ai" / "retrospective-staging"
+    ckpts = sorted(staging_dir.glob("checkpoint_*.json"))
+    assert len(ckpts) == 2
+
+    # Both bodies must carry a tx: staging_key derived from their transcript.
+    keys = {json.loads(p.read_text())["staging_key"] for p in ckpts}
+    assert all(k.startswith("tx:") for k in keys), keys
+    assert len(keys) == 2, "two distinct transcripts must yield two distinct keys"
+
+    # Stop for session A (empty sid, A's transcript) — must consume A's
+    # checkpoint and leave B's alone.
+    mod.mode_stop("", local_only=True, transcript=str(transcript))
+    remaining = sorted(staging_dir.glob("checkpoint_*.json"))
+    assert len(remaining) == 1, f"expected only B's checkpoint to remain, got {remaining}"
+    b_body = json.loads(remaining[0].read_text())
+    assert "other_session" in b_body["transcript"], "wrong checkpoint survived"
 
 
 def test_mode_stop_ignores_other_sessions_staging(project, monkeypatch):

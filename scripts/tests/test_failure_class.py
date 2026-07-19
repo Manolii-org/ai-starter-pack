@@ -66,6 +66,20 @@ def test_memory_context_from_rereads():
     assert classify_from_signals(file_reads={"foo.py": 3}) == "memory-context"
 
 
+def test_memory_context_requires_reread_without_edit():
+    """CodeRabbit fix: a re-read paired with an edit is iterative work,
+    not a memory gap. Only unaccompanied rereads flag memory-context."""
+    assert classify_from_signals(
+        file_reads={"foo.py": 2},
+        edit_churn={"foo.py": 1},
+    ) != "memory-context"
+    # But a re-read of a DIFFERENT file (untouched) still flags.
+    assert classify_from_signals(
+        file_reads={"foo.py": 2},
+        edit_churn={"bar.py": 1},
+    ) == "memory-context"
+
+
 def test_unclassified_default():
     assert classify_from_signals() == DEFAULT_FAILURE_CLASS
 

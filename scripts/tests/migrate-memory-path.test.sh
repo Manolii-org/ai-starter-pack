@@ -65,8 +65,17 @@ mkdir -p "$d/.claude/memory" "$d/.ai/memory"
 echo "src" > "$d/.claude/memory/link-target.txt"
 ln -s /nonexistent/path "$d/.ai/memory/link-target.txt"
 bash "$MIGRATE" "$d" >/dev/null 2>&1
-# The dangling link stays; source archived.
-if [[ -L "$d/.ai/memory/link-target.txt" ]]; then _report pass "$t"; else _report fail "$t"; fi
+# The dangling link stays AND the source is archived under
+# .ai/memory/archive/migration-conflicts. Weaker assertions (only
+# checking -L) let a broken migration that deletes the source pass.
+archived=$(find "$d/.ai/memory/archive/migration-conflicts" -type f \
+    -name 'link-target.txt' -print -quit 2>/dev/null || true)
+if [[ -L "$d/.ai/memory/link-target.txt" && ! -e "$d/.ai/memory/link-target.txt" \
+      && -n "$archived" && "$(cat "$archived")" == "src" ]]; then
+    _report pass "$t"
+else
+    _report fail "$t (archived=$archived, link ok=$([[ -L "$d/.ai/memory/link-target.txt" ]] && echo y || echo n))"
+fi
 _teardown "$d"
 
 # Test 5: symlink already present short-circuits
@@ -81,24 +90,45 @@ _teardown "$d"
 # Test 6: rmdir failure hard-exits (fix #6)
 t="unmovable .claude/memory contents fail hard"
 d=$(_setup)
-mkdir -p "$d/.claude/memory/subdir"
-# Because -maxdepth 1, subdir moves as a whole → dir empties → rmdir succeeds.
-# So instead: seed a file whose destination pre-exists as a directory (mv fails).
-rm -rf "$d/.claude/memory/subdir"
 mkdir -p "$d/.claude/memory" "$d/.ai/memory"
-mkdir "$d/.claude/memory/foo"
-touch "$d/.claude/memory/foo/inside"
-# Pre-create dest as a NON-empty dir with a different inner file — mv rejects.
-mkdir -p "$d/.ai/memory/foo"
-touch "$d/.ai/memory/foo/keep"
-# Also pre-fill archive so archive_dest also fails? Simpler: skip this branch —
-# hard verification of the exit-1 requires a mv-refusing situation which POSIX
-# mv actually handles by merging. Assert instead that once .claude/memory is
-# EMPTY, we succeed and symlink is created (baseline sanity, guards regression).
-rm -rf "$d/.ai/memory/foo" "$d/.claude/memory/foo/inside"
-rmdir "$d/.claude/memory/foo"
-bash "$MIGRATE" "$d" >/dev/null 2>&1
-if [[ -L "$d/.claude/memory" ]]; then _report pass "$t (baseline: empty legacy dir succeeds)"; else _report fail "$t"; fi
+# Force the migration's terminal rmdir to fail by shimming rmdir on PATH.
+# This actually exercises the fix #6 hard-exit branch instead of the
+# baseline sanity check the older test used.
+fake_bin=$(mktemp -d)
+printf '#!/usr/bin/env bash\nexit 1\n' > "$fake_bin/rmdir"
+chmod +x "$fake_bin/rmdir"
+if PATH="$fake_bin:$PATH" bash "$MIGRATE" "$d" >/dev/null 2>&1; then
+    _report fail "$t (migration unexpectedly succeeded with rmdir shim)"
+elif [[ -d "$d/.claude/memory" && ! -L "$d/.claude/memory" ]]; then
+    _report pass "$t"
+else
+    _report fail "$t (post-state: -d=$([[ -d "$d/.claude/memory" ]] && echo y || echo n) -L=$([[ -L "$d/.claude/memory" ]] && echo y || echo n))"
+fi
+rm -rf "$fake_bin"
+_teardown "$d"
+
+# Test 7: pre-existing symlink pointing at the WRONG target is healed
+t="wrong-target symlink is healed, not trusted"
+d=$(_setup)
+mkdir -p "$d/.ai/memory" "$d/somewhere/else"
+ln -sfn "../somewhere/else" "$d/.claude/memory"
+bash "$MIGRATE" "$d" >/dev/null
+# After healing, the symlink must resolve to .ai/memory, not somewhere/else.
+resolved=$(readlink "$d/.claude/memory")
+if [[ "$resolved" == "../.ai/memory" ]]; then _report pass "$t"; else _report fail "$t (got: $resolved)"; fi
+_teardown "$d"
+
+# Test 8: pre-existing dangling symlink is healed (target doesn't exist)
+t="dangling compat symlink is healed"
+d=$(_setup)
+ln -sfn "../.ai/memory" "$d/.claude/memory"  # target doesn't exist yet
+bash "$MIGRATE" "$d" >/dev/null
+# After healing, target should exist and symlink should resolve correctly.
+if [[ -d "$d/.ai/memory" ]] && [[ -L "$d/.claude/memory" ]]; then
+    _report pass "$t"
+else
+    _report fail "$t"
+fi
 _teardown "$d"
 
 echo

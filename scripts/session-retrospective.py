@@ -142,7 +142,16 @@ def _kl_url() -> Optional[str]:
     for key in ("KL_MCP_URL", "KNOWLEDGE_LAYER_MCP_URL"):
         val = (os.environ.get(key) or "").strip()
         if val:
-            return val.rstrip("/")
+            u = val.rstrip("/")
+            # MCP_API_KEY travels as Authorization: Bearer — refuse any
+            # scheme that would ship it in cleartext. Loopback http is
+            # allowed for local dev only.
+            if not (u.startswith("https://")
+                    or u.startswith("http://localhost")
+                    or u.startswith("http://127.")):
+                print(f"[session-retro] {key} must be https (or http loopback); skip", file=sys.stderr)
+                return None
+            return u
     return None
 
 
@@ -363,7 +372,18 @@ def _write_local_record(record: dict) -> Path:
         fh.write(json.dumps(record, ensure_ascii=False) + "\n")
     safe_branch = str(record.get("branch", "unknown")).replace("/", "--").replace(" ", "--")
     ts = str(record.get("captured_at", _now_iso())).replace(":", "")
-    snap = RETROSPECTIVES_DIR / f"{ts}-{safe_branch}.json"
+    # Codex P2: captured_at only carries second resolution, so two Stops on
+    # the same branch within one UTC second would collide and the second
+    # write would silently overwrite the first snapshot. Suffix with the
+    # session slug (or a stable transcript-derived key when session_id is
+    # empty) to make the path unique per session, not per branch/second.
+    tag = _safe_session_slug(str(record.get("session_id") or ""))
+    if tag == "unknown":
+        tp = record.get("transcript") or ""
+        if tp:
+            import hashlib
+            tag = "tx" + hashlib.sha256(str(tp).encode("utf-8")).hexdigest()[:8]
+    snap = RETROSPECTIVES_DIR / f"{ts}-{safe_branch}-{tag}.json"
     snap.write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return snap
 
@@ -373,12 +393,27 @@ def _mcp_envelope_ok(body: bytes) -> bool:
 
     A 200 with {"error": ...} or {"result": {"isError": true, ...}} is a
     FAILURE, not a success. Only a clean envelope counts.
+
+    MCP Streamable HTTP transport may respond with either a plain JSON body
+    or an SSE stream (`data: {...}` lines). We accept both: for SSE we take
+    the LAST `data:` payload and evaluate that.
     """
     if not body:
         return False
+    text = body.decode("utf-8", errors="replace").strip()
+    if not text:
+        return False
+    if text.startswith("data:") or "\ndata:" in text:
+        last = None
+        for line in text.splitlines():
+            if line.startswith("data:"):
+                last = line[5:].strip()
+        if last is None:
+            return False
+        text = last
     try:
-        parsed = json.loads(body.decode("utf-8", errors="replace"))
-    except (json.JSONDecodeError, UnicodeError):
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
         return False
     if not isinstance(parsed, dict):
         return False
@@ -421,7 +456,11 @@ def kl_create_note(entity: str, title: str, content: str, tags: list[str]) -> bo
     }).encode()
     req = urllib.request.Request(
         url, data=payload,
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        },
         method="POST",
     )
     try:
@@ -461,7 +500,11 @@ def kl_assert_fact(entity: str, project_slug: str, fact_key: str, fact_value: st
     }).encode()
     req = urllib.request.Request(
         url, data=payload,
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        },
         method="POST",
     )
     try:
@@ -612,6 +655,27 @@ def _safe_session_slug(session_id: str) -> str:
     return slug[:64] or "unknown"
 
 
+def _staging_key(session_id: str, transcript_path: Optional[Path]) -> str:
+    """Return a stable per-session key for staging isolation.
+
+    A Stop payload without session_id (empty/malformed) would otherwise
+    make every anonymous PreCompact + Stop pair collide. Fall back to a
+    hash of the canonical transcript path so each session's PreCompact
+    and Stop still route to the same key even when session_id is absent.
+    """
+    if session_id:
+        return "sid:" + _safe_session_slug(session_id)
+    if transcript_path:
+        try:
+            canonical = str(transcript_path.resolve())
+        except (OSError, RuntimeError):
+            canonical = str(transcript_path)
+        import hashlib
+        digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+        return "tx:" + digest
+    return "anon:unknown"
+
+
 def mode_precompact(transcript: str, session_id: str = "") -> None:
     path = Path(transcript) if transcript else _latest_session_log()
     if not path or not path.exists():
@@ -632,14 +696,18 @@ def mode_precompact(transcript: str, session_id: str = "") -> None:
     STAGING_DIR.mkdir(parents=True, exist_ok=True)
     _now = datetime.now(timezone.utc)
     ts = _now.strftime("%Y%m%d_%H%M%S_") + f"{_now.microsecond:06d}"
-    slug = _safe_session_slug(session_id)
-    # Session-scoped checkpoint filename AND embedded session_id — so mode_stop
-    # can safely merge only artifacts from THIS session even if concurrent
-    # sessions dropped checkpoints into the shared staging dir.
-    (STAGING_DIR / f"checkpoint_{slug}_{ts}.json").write_text(json.dumps({
+    # staging_key is the durable per-session tag: sid:<slug> when session_id
+    # is set, tx:<sha256[:16]> otherwise. Persisted alongside session_id so
+    # mode_stop can pair a checkpoint with its rightful Stop even when the
+    # Stop payload arrives without a session_id.
+    key = _staging_key(session_id, path)
+    # File-safe form: colon → underscore.
+    fs_key = key.replace(":", "_")
+    (STAGING_DIR / f"checkpoint_{fs_key}_{ts}.json").write_text(json.dumps({
         "mode": "precompact",
         "captured_at": _now_iso(),
         "session_id": session_id or "",
+        "staging_key": key,
         "transcript": str(path),
         "signals": sigs,
         "dysfunction_score": dscore,
@@ -660,6 +728,7 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False,
     sigs = extract_signals(path) if path else {}
 
     staged_corrections: list[str] = []
+    staged_confusion: list[str] = []
     staged_apologies = 0
     staged_retries: dict = {}
     staged_edit_churn: dict = {}
@@ -674,6 +743,7 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False,
     # session_id belong to sibling sessions and are left untouched.
     consumed_staging: list[Path] = []
     transcript_str = str(path) if path else ""
+    my_key = _staging_key(session_id, path)
     if STAGING_DIR.exists():
         for f in sorted(STAGING_DIR.glob("checkpoint_*.json")) + sorted(STAGING_DIR.glob("correction_*.json")):
             try:
@@ -684,12 +754,19 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False,
             if not isinstance(ckpt, dict):
                 continue
             ckpt_sid = str(ckpt.get("session_id") or "")
-            # Session isolation: skip artifacts that BELONG to another session
-            # (both sides non-empty and different). Legacy checkpoints with
-            # empty session_id are consumed by whichever Stop runs first —
-            # older PreCompact hooks (e.g. .claude/hooks/pre-compact.sh) don't
-            # forward session_id, and rejecting them silently drops signals.
-            if ckpt_sid and session_id and ckpt_sid != session_id:
+            ckpt_key = str(ckpt.get("staging_key") or "")
+            # Session isolation. Preference order:
+            #   1. If both sides have a staging_key, require an exact match —
+            #      this pairs empty-sid Stops with their tx-keyed PreCompact
+            #      via the transcript-derived fallback (CodeRabbit fix).
+            #   2. If the checkpoint has a session_id but no staging_key
+            #      (older writer), fall back to the sid-vs-sid check.
+            #   3. Fully-legacy checkpoints (no key, no sid) stay first-come-
+            #      first-served so older PreCompact hooks don't drop signals.
+            if ckpt_key:
+                if ckpt_key != my_key:
+                    continue
+            elif ckpt_sid and ckpt_sid != session_id:
                 continue
             # Skip a checkpoint whose transcript is exactly the one we're
             # already summarising — its signals are re-derived below.
@@ -698,6 +775,7 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False,
                 continue
             cs = ckpt.get("signals", {}) if isinstance(ckpt.get("signals"), dict) else {}
             staged_corrections.extend(cs.get("user_corrections") or [])
+            staged_confusion.extend(cs.get("ai_confusion_events") or [])
             staged_apologies += int(cs.get("assistant_apologies") or 0)
             for k, v in (cs.get("tool_retries") or {}).items():
                 staged_retries[k] = max(staged_retries.get(k, 0), int(v))
@@ -725,9 +803,15 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False,
         merged_file_reads[fp] = merged_file_reads.get(fp, 0) + int(count)
 
     merged_error_count = int(sigs.get("error_count") or 0) + staged_error_count
+    # CodeRabbit: merge staged ai_confusion_events so "Re-read:" cues from a
+    # PreCompact still reach both the classifier and the merged_sigs record.
+    all_confusion = list(dict.fromkeys(
+        list(sigs.get("ai_confusion_events") or []) + staged_confusion
+    ))
     merged_sigs = {
         **sigs,
         "user_corrections": all_corrections,
+        "ai_confusion_events": all_confusion,
         "assistant_apologies": int(sigs.get("assistant_apologies") or 0) + staged_apologies,
         "tool_retries": merged_retries,
         "edit_churn": merged_edit_churn,
@@ -737,7 +821,7 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False,
     dscore = dysfunction_score(merged_sigs)
     fclass = normalize_failure_class(classify_from_signals(
         user_corrections=all_corrections,
-        ai_confusion_events=sigs.get("ai_confusion_events"),
+        ai_confusion_events=all_confusion,
         tool_retries=merged_retries,
         edit_churn=merged_edit_churn,
         file_reads=merged_file_reads,
