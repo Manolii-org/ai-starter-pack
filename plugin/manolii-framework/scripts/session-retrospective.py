@@ -51,6 +51,35 @@ SESSION_LOGS_DIR = REPO_ROOT / ".ai" / "session-logs"
 RETROSPECTIVES_DIR = REPO_ROOT / ".ai" / "memory" / "retrospectives"
 RETRO_JSONL = RETROSPECTIVES_DIR / "session-retrospectives.jsonl"
 MTIME_SENTINEL = RETROSPECTIVES_DIR / ".last-capture-mtime"
+_RETRO_LOCK = RETROSPECTIVES_DIR / ".retrospectives.lock"
+
+
+def _retro_lock():
+    """Advisory-lock context manager guarding JSONL appends and sentinel
+    read-modify-write. Codex P2 2026-07-19: concurrent Stop handlers were
+    racing on both, so we serialize with fcntl.flock. Falls back to a no-op
+    context on platforms without fcntl (never observed in prod, but keeps
+    the fail-open contract intact)."""
+    import contextlib
+    try:
+        import fcntl  # POSIX-only; unavailable on Windows.
+    except ImportError:
+        return contextlib.nullcontext()
+
+    @contextlib.contextmanager
+    def _cm():
+        RETROSPECTIVES_DIR.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(_RETRO_LOCK), os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            os.close(fd)
+    return _cm()
 NAVIGATION_WARNING_FILE = REPO_ROOT / ".ai" / "recent-navigation-warning.md"
 CONFIG_PATH = REPO_ROOT / ".ai" / "config" / "retrospective.json"
 API_TIMEOUT_SECONDS = 15
@@ -238,7 +267,39 @@ def _kl_url() -> Optional[str]:
             return _validate_mcp_url(val, key)
     val = _kl_url_from_mcp_json()
     if val:
-        return _validate_mcp_url(val, ".mcp.json:knowledge-layer.url")
+        validated = _validate_mcp_url(val, ".mcp.json:knowledge-layer.url")
+        # Codex P1 2026-07-19: an attacker with repo write access could
+        # replace .mcp.json's knowledge-layer.url with an attacker host and
+        # steal the KL bearer token on the next Stop. Env vars are operator-
+        # controlled (Doppler/SessionStart), but the repo isn't. So file-
+        # derived URLs are only trusted when the operator opts in via
+        # KL_MCP_URL_TRUSTED_HOSTS (comma-separated host allowlist). Absent
+        # that, we fail closed and refuse the network leg.
+        if validated is None:
+            return None
+        allow = (os.environ.get("KL_MCP_URL_TRUSTED_HOSTS") or "").strip()
+        if not allow:
+            print(
+                "[session-retro] .mcp.json-derived KL URL rejected: "
+                "set KL_MCP_URL_TRUSTED_HOSTS to opt in (host allowlist)",
+                file=sys.stderr,
+            )
+            return None
+        try:
+            host = (urllib.parse.urlparse(validated).hostname or "").lower()
+        except Exception:
+            return None
+        allowed_hosts = {h.strip().lower() for h in allow.split(",") if h.strip()}
+        # Loopback is always allowed by _validate_mcp_url; keep the same
+        # exemption here so localhost dev doesn't need the env var.
+        if host in ("localhost", "127.0.0.1", "::1") or host in allowed_hosts:
+            return validated
+        print(
+            f"[session-retro] .mcp.json-derived host '{host}' not in "
+            "KL_MCP_URL_TRUSTED_HOSTS; rejecting",
+            file=sys.stderr,
+        )
+        return None
     return None
 
 
@@ -455,8 +516,9 @@ def plain_text_note(branch: str, signals: dict, dscore: int, fclass: str, diff_s
 
 def _write_local_record(record: dict) -> Path:
     RETROSPECTIVES_DIR.mkdir(parents=True, exist_ok=True)
-    with RETRO_JSONL.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+    with _retro_lock():
+        with RETRO_JSONL.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
     safe_branch = str(record.get("branch", "unknown")).replace("/", "--").replace(" ", "--")
     ts = str(record.get("captured_at", _now_iso())).replace(":", "")
     # Codex P2: captured_at only carries second resolution, so two Stops on
@@ -697,24 +759,51 @@ def _mtime_gate_hit(path: Optional[Path], force: bool = False) -> bool:
 
 
 def _write_mtime_sentinel(path: Optional[Path]) -> None:
+    """Merge this transcript's mtime into the sentinel map under an exclusive
+    lock. Codex P2 2026-07-19: concurrent Stops were racing on the R-M-W —
+    each loaded the same snapshot, added only its own entry, and the last
+    writer dropped the other's mtime state. Lock + atomic os.replace fixes it.
+    """
     mtime = _session_log_mtime(path)
     if mtime is None:
         return
     try:
         RETROSPECTIVES_DIR.mkdir(parents=True, exist_ok=True)
-        entries = _load_mtime_sentinel_map()
-        entries[str(path)] = {"mtime": mtime, "captured_at": _now_iso()}
-        # Cap map size to avoid unbounded growth; keep the 64 most recent.
-        if len(entries) > 64:
-            entries = dict(
-                sorted(entries.items(), key=lambda kv: float(kv[1].get("mtime", 0)), reverse=True)[:64]
-            )
-        MTIME_SENTINEL.write_text(
-            json.dumps({"entries": entries}),
-            encoding="utf-8",
-        )
+        with _retro_lock():
+            entries = _load_mtime_sentinel_map()
+            entries[str(path)] = {"mtime": mtime, "captured_at": _now_iso()}
+            if len(entries) > 64:
+                entries = dict(
+                    sorted(entries.items(), key=lambda kv: float(kv[1].get("mtime", 0)), reverse=True)[:64]
+                )
+            tmp = MTIME_SENTINEL.with_suffix(MTIME_SENTINEL.suffix + ".tmp")
+            tmp.write_text(json.dumps({"entries": entries}), encoding="utf-8")
+            os.replace(tmp, MTIME_SENTINEL)
     except Exception as e:
         print(f"[session-retro] mtime sentinel: {type(e).__name__}", file=sys.stderr)
+
+
+def _append_kl_flush_event(session_id: str, branch: str, dscore: float, fclass: str) -> None:
+    """Codex P2 2026-07-19: after a successful KL upload, append a completion
+    event to the append-only JSONL so downstream consumers of
+    session-retrospectives.jsonl see the flush, not just the initial
+    kl_written=false record. Snapshot-only mutation was invisible to them.
+    """
+    RETROSPECTIVES_DIR.mkdir(parents=True, exist_ok=True)
+    event = {
+        "event": "kl-flushed",
+        "session_id": session_id,
+        "branch": branch,
+        "dysfunction_score": dscore,
+        "failure_class": fclass,
+        "at": _now_iso(),
+    }
+    try:
+        with _retro_lock():
+            with RETRO_JSONL.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(event, ensure_ascii=False) + "\n")
+    except Exception as e:  # noqa: BLE001
+        print(f"[session-retro] kl-flush event: {type(e).__name__}", file=sys.stderr)
 
 
 def mode_kl_only(session_id: str = "") -> None:
@@ -822,6 +911,11 @@ def mode_kl_only(session_id: str = "") -> None:
                 )
         except Exception as e:  # noqa: BLE001
             print(f"[session-retro] kl-only: kl_written update: {type(e).__name__}", file=sys.stderr)
+        # Codex P2 2026-07-19: also emit a JSONL completion event so
+        # consumers of session-retrospectives.jsonl (append-only) can
+        # observe the flush — the snapshot-only mutation above was
+        # invisible to them and they treated successful uploads as pending.
+        _append_kl_flush_event(session_id or str(record.get("session_id") or ""), branch, dscore, fclass)
         print("[session-retro] kl-only: flushed", file=sys.stderr)
     else:
         print("[session-retro] kl-only: KL write failed", file=sys.stderr)

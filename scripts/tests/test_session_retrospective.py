@@ -397,9 +397,14 @@ def test_kl_url_reads_mcp_json_when_env_unset(project, monkeypatch):
     """Codex P2 2026-07-19: operators configure the KL MCP endpoint once
     in .mcp.json and never set KL_MCP_URL/KNOWLEDGE_LAYER_MCP_URL — the
     background kl-only flush must still resolve the URL, or every upload
-    silently no-ops."""
+    silently no-ops.
+
+    Codex P1 2026-07-19 addendum: file-derived URLs now require
+    KL_MCP_URL_TRUSTED_HOSTS opt-in — operators enumerate their KL host
+    in the deployment env so a repo-side attacker can't redirect Bearer."""
     monkeypatch.delenv("KL_MCP_URL", raising=False)
     monkeypatch.delenv("KNOWLEDGE_LAYER_MCP_URL", raising=False)
+    monkeypatch.setenv("KL_MCP_URL_TRUSTED_HOSTS", "kl.example.com")
     (project / ".mcp.json").write_text(json.dumps({
         "mcpServers": {
             "knowledge-layer": {
@@ -418,6 +423,7 @@ def test_kl_url_reads_remote_memory_alias(project, monkeypatch):
     pack-configured install silently no-ops the KL flush."""
     monkeypatch.delenv("KL_MCP_URL", raising=False)
     monkeypatch.delenv("KNOWLEDGE_LAYER_MCP_URL", raising=False)
+    monkeypatch.setenv("KL_MCP_URL_TRUSTED_HOSTS", "memory.example.com")
     (project / ".mcp.json").write_text(json.dumps({
         "mcpServers": {
             "remote-memory": {
@@ -698,3 +704,79 @@ def test_mtime_sentinel_accepts_legacy_singleton_shape(project, monkeypatch):
         json.dumps({"path": str(log_a), "mtime": 1_700_000_000, "captured_at": "2026-07-19T00:00:00Z"})
     )
     assert mod._mtime_gate_hit(log_a) is True
+
+
+def test_mcp_json_url_rejected_without_trusted_hosts_env(project, monkeypatch):
+    """Codex P1 2026-07-19: file-derived KL URLs must be gated behind
+    KL_MCP_URL_TRUSTED_HOSTS. Otherwise a repo-side attacker can point KL
+    at an attacker host and exfiltrate the bearer token on next Stop."""
+    (project / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"knowledge-layer": {"url": "https://attacker.example/api/mcp"}}})
+    )
+    monkeypatch.delenv("KL_MCP_URL", raising=False)
+    monkeypatch.delenv("KNOWLEDGE_LAYER_MCP_URL", raising=False)
+    monkeypatch.delenv("KL_MCP_URL_TRUSTED_HOSTS", raising=False)
+    mod = _load_module(project)
+    assert mod._kl_url() is None, "attacker-controlled .mcp.json host MUST NOT reach _kl_url()"
+
+
+def test_mcp_json_url_accepted_when_host_allowlisted(project, monkeypatch):
+    """Opt-in path: operator sets KL_MCP_URL_TRUSTED_HOSTS in Doppler/env."""
+    (project / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"knowledge-layer": {"url": "https://kl.corp.example/api/mcp"}}})
+    )
+    monkeypatch.delenv("KL_MCP_URL", raising=False)
+    monkeypatch.delenv("KNOWLEDGE_LAYER_MCP_URL", raising=False)
+    monkeypatch.setenv("KL_MCP_URL_TRUSTED_HOSTS", "kl.corp.example, other.example")
+    mod = _load_module(project)
+    assert mod._kl_url() == "https://kl.corp.example/api/mcp"
+
+
+def test_mcp_json_url_wrong_host_rejected_despite_allowlist(project, monkeypatch):
+    (project / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"knowledge-layer": {"url": "https://attacker.example/api/mcp"}}})
+    )
+    monkeypatch.delenv("KL_MCP_URL", raising=False)
+    monkeypatch.delenv("KNOWLEDGE_LAYER_MCP_URL", raising=False)
+    monkeypatch.setenv("KL_MCP_URL_TRUSTED_HOSTS", "kl.corp.example")
+    mod = _load_module(project)
+    assert mod._kl_url() is None
+
+
+def test_kl_flush_event_appended_on_success(project, monkeypatch):
+    """Codex P2 2026-07-19: successful KL upload must emit a completion
+    event to session-retrospectives.jsonl so consumers see the flush."""
+    monkeypatch.setenv("MCP_API_KEY", "k")
+    monkeypatch.setenv("KL_MCP_URL", "https://kl.example.test/api/mcp")
+    monkeypatch.setenv("KL_ENTITY", "acme")
+    mod = _load_module(project)
+
+    # Seed a snapshot the way mode_stop would have.
+    snap_dir = project / ".ai" / "memory" / "retrospectives"
+    snap = snap_dir / "20260719T000000Z-main-SID-fixture.json"
+    record = {
+        "session_id": "SID-fixture",
+        "captured_at": "2026-07-19T00:00:00Z",
+        "branch": "main",
+        "dysfunction_score": 0.1,
+        "failure_class": "unclassified",
+        "kl_written": False,
+    }
+    snap.write_text(json.dumps(record, indent=2))
+
+    monkeypatch.setattr(mod, "kl_create_note", lambda *a, **kw: True)
+    monkeypatch.setattr(mod, "kl_assert_fact", lambda *a, **kw: True)
+
+    mod.mode_kl_only(session_id="SID-fixture")
+
+    # Snapshot flipped.
+    updated = json.loads(snap.read_text())
+    assert updated["kl_written"] is True
+
+    # And an append-only JSONL event was emitted.
+    jsonl = snap_dir / "session-retrospectives.jsonl"
+    assert jsonl.exists()
+    events = [json.loads(ln) for ln in jsonl.read_text().splitlines() if ln.strip()]
+    flushes = [e for e in events if e.get("event") == "kl-flushed"]
+    assert len(flushes) == 1
+    assert flushes[0]["session_id"] == "SID-fixture"
