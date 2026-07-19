@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.7.2 — 2026-07-18
+
+- `ci-reusable`: empty `pnpm_version` (new default) omits `version` for
+  `pnpm/action-setup`, deferring to `package.json#packageManager`. Fixes
+  "Multiple versions of pnpm specified" when callers declare `pnpm@11.x`.
+- Pass an explicit `pnpm_version` only to override `packageManager`.
+
+## 1.7.1 — 2026-07-18
+
+- Annotated pack tags: converted lightweight `v1.3.0`–`v1.6.0`; cut `v1.7.1` on main; floating `v1` → latest.
+- Document go-forward consumer pin `@v1.7.1` + Renovate `github>Manolii-org/ai-starter-pack`.
+- Clarifies dual-run with `manolii-org/master@v1` for routing-lint / shared-config.
+
 ## [1.7.0] - 2026-07-17
 
 ### Added
