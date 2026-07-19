@@ -394,7 +394,21 @@ def _write_local_record(record: dict) -> Path:
         if tp:
             import hashlib
             tag = "tx" + hashlib.sha256(str(tp).encode("utf-8")).hexdigest()[:8]
-    snap = RETROSPECTIVES_DIR / f"{ts}-{safe_branch}-{tag}.json"
+    base = f"{ts}-{safe_branch}-{tag}"
+    snap = RETROSPECTIVES_DIR / f"{base}.json"
+    # Codex P2 2026-07-19: two Stops on the same session+branch within one
+    # UTC second (e.g. --force retry after the transcript re-appears) would
+    # produce identical (ts, tag) and the second write_text would silently
+    # overwrite the first snapshot. Add a numeric counter suffix so every
+    # capture is durable regardless of clock resolution.
+    if snap.exists():
+        counter = 1
+        while True:
+            candidate = RETROSPECTIVES_DIR / f"{base}-{counter:03d}.json"
+            if not candidate.exists():
+                snap = candidate
+                break
+            counter += 1
     snap.write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return snap
 

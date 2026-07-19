@@ -111,6 +111,35 @@ if [[ -d "$CLAUDE_MEM" ]]; then
                 mv -f "$entry" "$dest"
                 echo "preferred legacy .claude/memory/$name over empty seeded destination" >&2
                 ((++moved))
+            elif [[ -d "$dest" && -d "$entry" && ! -L "$dest" && ! -L "$entry" ]]; then
+                # Codex P2 2026-07-19: both sides are directories (e.g.
+                # legacy .claude/memory/retrospectives/ vs seeded
+                # .ai/memory/retrospectives/.gitkeep). Archiving the whole
+                # legacy directory would hide prior records behind the
+                # scaffold. Merge per-item: move each child into $dest,
+                # archiving only children that themselves conflict.
+                merged=0
+                while IFS= read -r -d '' child || [[ -n "$child" ]]; do
+                    [[ -z "$child" ]] && break
+                    child_name=$(basename "$child")
+                    child_dest="$dest/$child_name"
+                    if [[ ! -e "$child_dest" && ! -L "$child_dest" ]]; then
+                        mv "$child" "$child_dest"
+                        merged=$((merged + 1))
+                    else
+                        epoch=$(date +%s)
+                        archive_dir=$(mktemp -d "$ARCHIVE/${name}-${child_name}.${epoch}.XXXXXX")
+                        archive_dest="$archive_dir/$child_name"
+                        mv "$child" "$archive_dest"
+                        echo "conflict: kept .ai/memory/$name/$child_name, archived .claude copy to $archive_dest" >&2
+                        conflicts=$((conflicts + 1))
+                    fi
+                done < <(find "$entry" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+                # Best-effort remove the now-empty legacy subdir; if
+                # something still lives there (perm error, race), leave
+                # it — the terminal rmdir on $CLAUDE_MEM will surface it.
+                rmdir "$entry" 2>/dev/null || true
+                moved=$((moved + merged))
             else
                 # Destination exists, archive the CLAUDE copy into a unique
                 # per-run directory (mktemp -d is collision-proof for the

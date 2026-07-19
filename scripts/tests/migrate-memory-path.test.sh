@@ -153,6 +153,24 @@ else
 fi
 _teardown "$d"
 
+# Test 3c: legacy dir merges into seeded scaffold dir instead of being archived (Codex P2 2026-07-19)
+t="legacy subdirectory merges into seeded scaffold instead of archiving whole tree"
+d=$(_setup)
+mkdir -p "$d/.claude/memory/retrospectives" "$d/.ai/memory/retrospectives"
+: > "$d/.ai/memory/retrospectives/.gitkeep"
+echo '{"session":"s1"}' > "$d/.claude/memory/retrospectives/session-retrospectives.jsonl"
+if ! bash "$MIGRATE" "$d" >/dev/null 2>&1; then
+    _report fail "$t (migration exited non-zero)"
+elif [[ -L "$d/.claude/memory" ]] \
+     && [[ -f "$d/.ai/memory/retrospectives/session-retrospectives.jsonl" ]] \
+     && grep -q '"session":"s1"' "$d/.ai/memory/retrospectives/session-retrospectives.jsonl" \
+     && [[ -f "$d/.ai/memory/retrospectives/.gitkeep" ]]; then
+    _report pass "$t"
+else
+    _report fail "$t (jsonl=$(cat "$d/.ai/memory/retrospectives/session-retrospectives.jsonl" 2>/dev/null))"
+fi
+_teardown "$d"
+
 # Test 8: pre-existing dangling symlink is healed (target doesn't exist)
 t="dangling compat symlink is healed"
 d=$(_setup)

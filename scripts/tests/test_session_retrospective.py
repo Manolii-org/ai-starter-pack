@@ -304,6 +304,26 @@ def test_two_empty_sid_stops_same_branch_same_second_do_not_collide(project, tmp
         f"snapshot fell back to -unknown (transcript hash was unreachable): {[p.name for p in snaps]}"
 
 
+def test_force_retry_same_second_does_not_overwrite_snapshot(project, tmp_path):
+    """Codex P2 2026-07-19: two Stops on the same (session, branch) within
+    one UTC second (supported --force retry path) must produce TWO durable
+    snapshot files, not silently overwrite the first."""
+    mod = _load_module(project)
+    transcript = tmp_path / "sess.jsonl"
+    transcript.write_text('{"role":"user","content":"a"}\n')
+
+    mod.mode_stop("sess-collide", local_only=True, transcript=str(transcript))
+    (project / ".ai" / "memory" / "retrospectives" / ".last-capture-mtime").unlink(
+        missing_ok=True
+    )
+    mod.mode_stop("sess-collide", local_only=True, transcript=str(transcript), force=True)
+
+    snaps = list((project / ".ai" / "memory" / "retrospectives").glob("*.json"))
+    assert len(snaps) >= 2, (
+        f"force-retry produced only {len(snaps)} snapshot(s): {[p.name for p in snaps]}"
+    )
+
+
 def test_staging_key_pairs_precompact_and_stop_via_transcript(project, tmp_path):
     """CodeRabbit fix: an empty-sid PreCompact + empty-sid Stop must still
     route to each other via the transcript-derived staging_key."""
