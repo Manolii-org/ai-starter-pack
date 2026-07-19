@@ -430,26 +430,26 @@ def extract_signals(path: Optional[Path]) -> dict:
                 )
 
                 if role in ("user", "human"):
-                    signals["total_turns"] += 1
-                    if not signals["first_user_message"] and text.strip():
-                        signals["first_user_message"] = text.strip()[:250]
-                    # Codex P2 2026-07-19 (impaktful#1695 line 437): Claude
-                    # tool_result envelopes are also role="user" (as
-                    # modeled by test_retry_streak_survives_tool_result_envelope),
-                    # so command/MCP output like "wrong file" or
-                    # "wrong direction" was being scored as USER corrections
-                    # — inflating dysfunction and pushing sessions into the
-                    # `planning` failure class. Skip the correction regex
-                    # for entries that carry tool_result blocks; only real
-                    # user prompts feed correction detection.
+                    # Codex P2 2026-07-19 (impaktful#1695 line 433 + 437):
+                    # Claude tool_result envelopes are also role="user".
+                    # They are NOT user prompts — treating them as user
+                    # turns both inflated `total_turns` and scored
+                    # command/MCP output like "wrong file" as user
+                    # corrections. Detect the envelope BEFORE
+                    # incrementing anything and skip the entire user-turn
+                    # block if it's a tool_result.
                     _content_for_role = msg.get("content") if isinstance(msg, dict) else entry.get("content")
                     _blocks_for_role = _content_for_role if isinstance(_content_for_role, list) else []
                     _is_tool_result_envelope = any(
                         isinstance(b, dict) and b.get("type") == "tool_result"
                         for b in _blocks_for_role
                     )
-                    if text and not _is_tool_result_envelope and _CORRECTION_RX.search(text):
-                        signals["user_corrections"].append(text.strip()[:200])
+                    if not _is_tool_result_envelope:
+                        signals["total_turns"] += 1
+                        if not signals["first_user_message"] and text.strip():
+                            signals["first_user_message"] = text.strip()[:250]
+                        if text and _CORRECTION_RX.search(text):
+                            signals["user_corrections"].append(text.strip()[:200])
 
                 if role in ("assistant", "ai") and text and _APOLOGY_RX.search(text):
                     signals["assistant_apologies"] += 1

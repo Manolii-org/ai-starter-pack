@@ -1085,6 +1085,14 @@ def test_tool_result_envelope_does_not_score_user_correction(project, tmp_path):
         f"the surviving correction should be the real user prompt, "
         f"got {sigs['user_corrections'][0]!r}"
     )
+    # Codex P2 2026-07-19 (impaktful#1695 line 433): total_turns must ALSO
+    # exclude tool_result envelopes — sessions with heavy tool use were
+    # otherwise reporting prompts + tool outputs as Turns and corrupting
+    # the local retrospective metric.
+    assert sigs["total_turns"] == 1, (
+        f"tool_result envelope must not count toward total_turns; "
+        f"got total_turns={sigs['total_turns']}"
+    )
 
 
 def test_retry_streak_still_fires_for_true_consecutive_calls(project, tmp_path):
