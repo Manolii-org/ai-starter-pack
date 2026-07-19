@@ -1243,10 +1243,45 @@ def _append_kl_flush_event(
     }
     if capture_id:
         event["capture_id"] = capture_id
+    # Codex P2 2026-07-19 (manolii-platform#430 line 1208): make the flush
+    # event append atomic. Match the pattern in _write_local_record — capture
+    # pre-write size, unbuffered os.write, ftruncate back on any exception.
+    # The prior TextIOWrapper("a") variant left partial bytes on ENOSPC or
+    # any partial-write failure; the next _write_local_record then computed
+    # its pre_size from a corrupted tail and fused its narrative row onto
+    # the truncated line — producing one invalid JSONL entry that both the
+    # append-only consumer and the JSONL fallback lose.
     try:
         with _retro_lock():
-            with RETRO_JSONL.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(event, ensure_ascii=False) + "\n")
+            try:
+                pre_size = RETRO_JSONL.stat().st_size
+            except FileNotFoundError:
+                pre_size = 0
+            line_bytes = (json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8")
+            append_fd = os.open(
+                str(RETRO_JSONL),
+                os.O_WRONLY | os.O_APPEND | os.O_CREAT,
+                0o644,
+            )
+            try:
+                try:
+                    written = 0
+                    while written < len(line_bytes):
+                        n = os.write(append_fd, line_bytes[written:])
+                        if n <= 0:
+                            raise OSError("short write on retrospectives JSONL")
+                        written += n
+                except Exception:
+                    try:
+                        os.ftruncate(append_fd, pre_size)
+                    except OSError:
+                        pass
+                    raise
+            finally:
+                try:
+                    os.close(append_fd)
+                except OSError:
+                    pass
     except Exception as e:  # noqa: BLE001
         print(f"[session-retro] kl-flush event: {type(e).__name__}", file=sys.stderr)
 
