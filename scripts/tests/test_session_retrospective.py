@@ -304,10 +304,12 @@ def test_two_empty_sid_stops_same_branch_same_second_do_not_collide(project, tmp
         f"snapshot fell back to -unknown (transcript hash was unreachable): {[p.name for p in snaps]}"
 
 
-def test_kl_flush_selects_newest_when_counter_suffix_present(project, monkeypatch):
-    """Codex P2 2026-07-19: when two same-second snapshots exist for one
-    session (`<base>.json` and `<base>-001.json`), mode_kl_only must pick
-    the newer one (mtime), NOT the lexicographic-first sibling."""
+def test_kl_flush_selects_oldest_unflushed_when_counter_suffix_present(project, monkeypatch):
+    """Codex P2 2026-07-19: queue semantics. When two snapshots exist for
+    one session (`<base>.json` and `<base>-001.json`), mode_kl_only must
+    pick the OLDEST unflushed one so both captures reach KL exactly once
+    in order (older was previously updated to newest-first, then revised
+    to oldest-first to fix the double-upload race for concurrent Stops)."""
     import os as _os
     import time as _time
     mod = _load_module(project)
@@ -350,10 +352,11 @@ def test_kl_flush_selects_newest_when_counter_suffix_present(project, monkeypatc
 
     mod.mode_kl_only(session_id="sess-newest")
     assert captured, "mode_kl_only did not attempt a KL write"
-    # Body must mention the NEW snapshot's branch, not the OLD one.
+    # Body must mention the OLDER snapshot's branch — queue semantics
+    # process oldest-unflushed first so both captures reach KL exactly once.
     body = captured["record"]["body"]
-    assert "new-branch" in body and "old-branch" not in body, (
-        f"kl-only picked the older snapshot: body={body!r}"
+    assert "old-branch" in body and "new-branch" not in body, (
+        f"kl-only picked the newer snapshot instead of oldest-unflushed: body={body!r}"
     )
 
 
@@ -954,3 +957,100 @@ def test_kl_only_dry_run_does_not_mark_flushed(project, monkeypatch):
         events = [json.loads(ln) for ln in jsonl.read_text().splitlines() if ln.strip()]
         assert not [e for e in events if e.get("event") == "kl-flushed"], \
             "dry-run must not emit a kl-flushed event"
+
+
+def test_mode_inject_skips_kl_flushed_events(project, monkeypatch):
+    """Codex P2 2026-07-19: kl-flushed completion events carry branch and
+    dysfunction_score for JSONL consumers, but they're not retrospectives.
+    mode_inject must NOT count them as a second warning row."""
+    mod = _load_module(project)
+    branch = mod._get_branch()
+
+    jsonl = project / ".ai" / "memory" / "retrospectives" / "session-retrospectives.jsonl"
+    jsonl.parent.mkdir(parents=True, exist_ok=True)
+    jsonl.write_text(
+        json.dumps({"branch": branch, "captured_at": "2026-07-19T00:00:00Z",
+                    "dysfunction_score": 8, "failure_class": "tooling"}) + "\n"
+        + json.dumps({"event": "kl-flushed", "branch": branch,
+                      "session_id": "SID", "dysfunction_score": 8,
+                      "failure_class": "tooling",
+                      "at": "2026-07-19T00:01:00Z"}) + "\n"
+    )
+    mod.mode_inject()
+    txt = mod.NAVIGATION_WARNING_FILE.read_text(encoding="utf-8")
+    # Exactly one "- 2026" bulleted warning — the kl-flushed row must NOT
+    # produce a second entry.
+    assert txt.count("- 2026") == 1, f"expected 1 warning row, got:\n{txt}"
+
+
+def test_kl_only_picks_oldest_unflushed_snapshot(project, monkeypatch):
+    """Codex P2 2026-07-19: two Stops for the same session_id before any
+    background kl-only runs create two snapshots. Each background flush
+    must process the OLDEST unflushed snapshot — queue semantics — so
+    both captures reach KL exactly once."""
+    monkeypatch.setenv("MCP_API_KEY", "k")
+    monkeypatch.setenv("KL_MCP_URL", "https://kl.example.test/api/mcp")
+    monkeypatch.setenv("KL_ENTITY", "acme")
+    mod = _load_module(project)
+
+    snap_dir = project / ".ai" / "memory" / "retrospectives"
+    older = snap_dir / "20260719T000000Z-main-SID-first.json"
+    newer = snap_dir / "20260719T000030Z-main-SID-second.json"
+    for p, ts in ((older, 1_700_000_000), (newer, 1_700_000_060)):
+        p.write_text(json.dumps({
+            "session_id": "SID",
+            "branch": "main",
+            "captured_at": "2026-07-19T00:00:00Z",
+            "dysfunction_score": 0.1,
+            "failure_class": "unclassified",
+            "kl_written": False,
+        }, indent=2))
+        os.utime(p, (ts, ts))
+
+    picked_titles = []
+    def track_create(entity, title, content, tags):
+        picked_titles.append(title)
+        return True
+    monkeypatch.setattr(mod, "kl_create_note", track_create)
+    monkeypatch.setattr(mod, "kl_assert_fact", lambda *a, **kw: True)
+
+    # First flush picks the older snapshot and marks it flushed.
+    mod.mode_kl_only(session_id="SID")
+    assert json.loads(older.read_text())["kl_written"] is True, \
+        "first flush should have marked the older snapshot flushed"
+    assert json.loads(newer.read_text())["kl_written"] is False, \
+        "first flush must not touch the newer snapshot"
+
+    # Second flush picks the newer snapshot (older is now kl_written=true).
+    mod.mode_kl_only(session_id="SID")
+    assert json.loads(newer.read_text())["kl_written"] is True
+    assert len(picked_titles) == 2, \
+        f"both captures should reach KL exactly once, got {len(picked_titles)} uploads"
+
+
+def test_release_mtime_reservation_preserves_newer_entry(project, monkeypatch):
+    """Codex line-790 refinement 2026-07-19: rollback must NOT clobber a
+    concurrent handler's newer reservation. Handler A reserves M1 and its
+    capture fails; handler B has meanwhile reserved M2 for the same
+    transcript. A's rollback must leave B's entry intact."""
+    mod = _load_module(project)
+    logs = project / ".ai" / "session-logs"
+    log = logs / "session_concurrent.jsonl"
+    log.write_text("{}\n")
+    # Handler A observes M1.
+    os.utime(log, (1_700_000_000, 1_700_000_000))
+    assert mod._try_reserve_mtime_gate(log) is True
+    reserved_by_a = mod._session_log_mtime(log)
+
+    # Handler B (simulated) observes M2, overwrites the sentinel entry.
+    os.utime(log, (1_700_000_100, 1_700_000_100))
+    entries = mod._load_mtime_sentinel_map()
+    entries[str(log)] = {"mtime": 1_700_000_100.0, "captured_at": "2026-07-19T00:00:00Z"}
+    mod.MTIME_SENTINEL.write_text(json.dumps({"entries": entries}))
+
+    # Handler A's rollback should NOT remove B's newer entry.
+    mod._release_mtime_reservation(log, reserved_mtime=reserved_by_a)
+    entries_after = mod._load_mtime_sentinel_map()
+    assert str(log) in entries_after, \
+        "A's rollback must not clobber B's newer reservation"
+    assert float(entries_after[str(log)]["mtime"]) == 1_700_000_100.0

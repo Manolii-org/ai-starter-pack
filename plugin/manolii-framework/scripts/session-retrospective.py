@@ -773,21 +773,35 @@ def _mtime_gate_hit(path: Optional[Path], force: bool = False) -> bool:
     return False
 
 
-def _release_mtime_reservation(path: Optional[Path]) -> None:
+def _release_mtime_reservation(path: Optional[Path], reserved_mtime: Optional[float] = None) -> None:
     """Codex P2 2026-07-19: if capture fails AFTER _try_reserve_mtime_gate
     recorded the mtime, subsequent Stops for the same unchanged transcript
     would silently skip forever (until it changes or --force). Callers
-    invoke this from their exception handlers so the next Stop retries."""
+    invoke this from their exception handlers so the next Stop retries.
+
+    CodeRabbit refinement 2026-07-19: only remove the entry when its stored
+    mtime still matches the reservation we made — otherwise we'd clobber a
+    newer reservation written by a concurrent Stop after ours failed.
+    """
     if path is None:
         return
     try:
         with _retro_lock():
             entries = _load_mtime_sentinel_map()
-            if str(path) in entries:
-                entries.pop(str(path), None)
-                tmp = MTIME_SENTINEL.with_suffix(MTIME_SENTINEL.suffix + ".tmp")
-                tmp.write_text(json.dumps({"entries": entries}), encoding="utf-8")
-                os.replace(tmp, MTIME_SENTINEL)
+            prev = entries.get(str(path))
+            if prev is None:
+                return
+            if reserved_mtime is not None:
+                try:
+                    if float(prev.get("mtime", -1)) != float(reserved_mtime):
+                        # A newer reservation is in place — leave it alone.
+                        return
+                except (TypeError, ValueError):
+                    return
+            entries.pop(str(path), None)
+            tmp = MTIME_SENTINEL.with_suffix(MTIME_SENTINEL.suffix + ".tmp")
+            tmp.write_text(json.dumps({"entries": entries}), encoding="utf-8")
+            os.replace(tmp, MTIME_SENTINEL)
     except Exception as e:  # noqa: BLE001
         print(f"[session-retro] mtime-release: {type(e).__name__}", file=sys.stderr)
 
@@ -902,13 +916,16 @@ def mode_kl_only(session_id: str = "") -> None:
     # Lexicographic reverse-sort puts `<base>.json` ahead of `<base>-001.json`
     # even though the -001 sibling is the newer capture (the counter suffix
     # was added by _write_local_record to prevent same-second overwrites).
-    # An mtime sort selects the actual latest snapshot for this session_id.
+    # Codex P2 2026-07-19: pick the OLDEST unflushed snapshot for this
+    # session_id — queue semantics. Two Stops before a flush produce two
+    # snapshots; each background kl-only should process the oldest pending
+    # capture, not the newest (which would drop the first flush's actual
+    # target and re-upload the newer one twice).
     if RETROSPECTIVES_DIR.exists():
         snaps = sorted(
             RETROSPECTIVES_DIR.glob("*-*.json"),
             key=lambda p: (p.stat().st_mtime_ns, p.name),
-            reverse=True,
-        )
+        )  # oldest first
     else:
         snaps = []
     matched_snap: Optional[Path] = None
@@ -922,10 +939,15 @@ def mode_kl_only(session_id: str = "") -> None:
             continue
         if not isinstance(candidate, dict):
             continue
-        if str(candidate.get("session_id") or "") == session_id:
-            record = candidate
-            matched_snap = snap
-            break
+        if str(candidate.get("session_id") or "") != session_id:
+            continue
+        # Skip snapshots already delivered — otherwise a re-triggered flush
+        # would re-upload the same note.
+        if candidate.get("kl_written") is True:
+            continue
+        record = candidate
+        matched_snap = snap
+        break
     if record is None and RETRO_JSONL.exists():
         try:
             for ln in reversed(RETRO_JSONL.read_text(encoding="utf-8").splitlines()):
@@ -1230,11 +1252,16 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False,
     # LOCAL write first — Stop durability requires the JSONL/snapshot even if KL hangs.
     # Codex P2 2026-07-19: if this durable write fails after the reservation was
     # recorded, roll the reservation back so the next Stop retries — otherwise the
-    # transcript is silently skipped forever (until it changes or --force).
+    # transcript is silently skipped forever (until it changes or --force). Capture
+    # the reserved mtime up front so the release path only removes THIS handler's
+    # entry (Codex line-790 refinement): a concurrent Stop may have overwritten
+    # the sentinel with a newer mtime, and clobbering it here would let a duplicate
+    # retrospective slip through the next Stop for that newer mtime.
+    reserved_mtime = _session_log_mtime(path)
     try:
         snap = _write_local_record(record)
     except Exception:
-        _release_mtime_reservation(path)
+        _release_mtime_reservation(path, reserved_mtime=reserved_mtime)
         raise
     print(f"[session-retro] local record: {snap}", file=sys.stderr)
     # Sentinel already reserved at the top of mode_stop under the same lock;
@@ -1304,6 +1331,12 @@ def mode_inject() -> None:
                 except json.JSONDecodeError:
                     continue
                 if not isinstance(rec, dict):
+                    continue
+                # Codex P2 2026-07-19: kl-flushed completion events carry
+                # branch + dysfunction_score for downstream JSONL consumers,
+                # but they are NOT retrospectives. Skip them here so a single
+                # session doesn't consume two navigation-warning slots.
+                if rec.get("event") == "kl-flushed":
                     continue
                 if rec.get("branch") != branch:
                     continue
