@@ -77,6 +77,11 @@ jobs:
           python3 -m pytest scripts/tests/test_session_retrospective.py scripts/tests/test_failure_class.py -q
           bash scripts/tests/test_migrate_memory_path.sh
           bash scripts/tests/test_plugin_scripts_sync.sh
+          # Codex P2 2026-07-19: the two hardening bash suites weren't
+          # being invoked by the eval-gate — regressions in wrapper
+          # payload/timeout handling or migrate safety could merge unseen.
+          bash scripts/tests/migrate-memory-path.test.sh
+          bash scripts/tests/session-stop-retrospective.test.sh
 
       - name: Routing lint
         run: python3 scripts/lint-agent-routing.py

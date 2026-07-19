@@ -52,6 +52,17 @@ if [[ -L "$CLAUDE_MEM" ]]; then
         echo "already-migrated (symlink)" >&1
         exit 0
     fi
+    # Codex P1 2026-07-19: if the wrong target is a non-empty directory,
+    # blindly replacing the symlink would orphan whatever memory lives
+    # there (e.g. .claude/memory -> ../old-memory with fact.jsonl inside).
+    # Refuse the automatic heal and let the operator merge the tree.
+    if [[ -e "$actual" && -d "$actual" ]]; then
+        if [[ -n "$(ls -A "$actual" 2>/dev/null)" ]]; then
+            echo "ERROR: refusing to heal $CLAUDE_MEM — its current target $actual is non-empty" >&2
+            echo "       Move the contents into $AI_MEM manually (or delete them) and rerun." >&2
+            exit 1
+        fi
+    fi
     echo "healing stale symlink: $CLAUDE_MEM -> $link_target" >&2
     mkdir -p "$AI_MEM"
     ln -sfn "../.ai/memory" "$CLAUDE_MEM"

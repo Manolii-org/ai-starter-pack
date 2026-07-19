@@ -118,6 +118,25 @@ resolved=$(readlink "$d/.claude/memory")
 if [[ "$resolved" == "../.ai/memory" ]]; then _report pass "$t"; else _report fail "$t (got: $resolved)"; fi
 _teardown "$d"
 
+# Test 7b: wrong-target symlink with NON-EMPTY target refuses to heal (Codex P1)
+t="wrong-target symlink with contents refuses auto-heal"
+d=$(_setup)
+mkdir -p "$d/.ai/memory" "$d/somewhere/else"
+echo "important" > "$d/somewhere/else/fact.jsonl"
+ln -sfn "../somewhere/else" "$d/.claude/memory"
+if bash "$MIGRATE" "$d" >/dev/null 2>&1; then
+    _report fail "$t (migration should have refused non-empty wrong target)"
+else
+    resolved=$(readlink "$d/.claude/memory" 2>/dev/null || true)
+    contents=$(cat "$d/somewhere/else/fact.jsonl" 2>/dev/null || true)
+    if [[ "$resolved" == "../somewhere/else" ]] && [[ "$contents" == "important" ]]; then
+        _report pass "$t"
+    else
+        _report fail "$t (resolved=$resolved contents=$contents)"
+    fi
+fi
+_teardown "$d"
+
 # Test 8: pre-existing dangling symlink is healed (target doesn't exist)
 t="dangling compat symlink is healed"
 d=$(_setup)
