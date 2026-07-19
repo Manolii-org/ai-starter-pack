@@ -316,8 +316,18 @@ def test_kl_flush_selects_newest_when_counter_suffix_present(project, monkeypatc
     base = "20260719T000000Z-main-sess-newest"
     older = retros / f"{base}.json"
     newer = retros / f"{base}-001.json"
-    older.write_text(json.dumps({"session_id": "sess-newest", "marker": "OLD"}))
-    newer.write_text(json.dumps({"session_id": "sess-newest", "marker": "NEW"}))
+    # CodeRabbit 2026-07-19: distinguish snapshots by a field mode_kl_only
+    # actually surfaces in the note body (branch), not a `marker` field it
+    # never reads. Otherwise both assertions pass regardless of which
+    # snapshot won the selector.
+    older.write_text(json.dumps({
+        "session_id": "sess-newest", "branch": "old-branch",
+        "dysfunction_score": 1, "failure_class": "unclassified",
+    }))
+    newer.write_text(json.dumps({
+        "session_id": "sess-newest", "branch": "new-branch",
+        "dysfunction_score": 9, "failure_class": "unclassified",
+    }))
     # Ensure newer has strictly greater mtime regardless of write ordering.
     now = _time.time()
     _os.utime(older, (now - 2, now - 2))
@@ -340,9 +350,9 @@ def test_kl_flush_selects_newest_when_counter_suffix_present(project, monkeypatc
 
     mod.mode_kl_only(session_id="sess-newest")
     assert captured, "mode_kl_only did not attempt a KL write"
-    # The record body should mention the NEW marker, not OLD.
+    # Body must mention the NEW snapshot's branch, not the OLD one.
     body = captured["record"]["body"]
-    assert "NEW" in body or "OLD" not in body, (
+    assert "new-branch" in body and "old-branch" not in body, (
         f"kl-only picked the older snapshot: body={body!r}"
     )
 

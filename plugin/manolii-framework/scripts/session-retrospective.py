@@ -916,7 +916,12 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False,
             for k, v in (cs.get("tool_retries") or {}).items():
                 staged_retries[k] = max(staged_retries.get(k, 0), int(v))
             for fp, count in (cs.get("edit_churn") or {}).items():
-                staged_edit_churn[fp] = max(staged_edit_churn.get(fp, 0), int(count))
+                # CodeRabbit 2026-07-19: sum, not max. The transcript-exact
+                # skip above (`ckpt.transcript == transcript_str`) already
+                # deduplicates the same-transcript case; when compaction
+                # hands Stop a different transcript, the counts are disjoint
+                # and max() would silently drop a file from >=3 back to 2.
+                staged_edit_churn[fp] = staged_edit_churn.get(fp, 0) + int(count)
             for fp, count in (cs.get("file_reads") or {}).items():
                 staged_file_reads[fp] = staged_file_reads.get(fp, 0) + int(count)
             staged_error_count += int(cs.get("error_count") or 0)
@@ -933,7 +938,9 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False,
             merged_retries[k] = max(merged_retries.get(k, 0), int(v))
     merged_edit_churn = dict(staged_edit_churn)
     for fp, count in (sigs.get("edit_churn") or {}).items():
-        merged_edit_churn[fp] = max(merged_edit_churn.get(fp, 0), int(count))
+        # Sum, matching file_reads / error_count. See CodeRabbit
+        # 2026-07-19: staged and current can be disjoint transcripts.
+        merged_edit_churn[fp] = merged_edit_churn.get(fp, 0) + int(count)
     merged_file_reads = dict(staged_file_reads)
     for fp, count in (sigs.get("file_reads") or {}).items():
         merged_file_reads[fp] = merged_file_reads.get(fp, 0) + int(count)
