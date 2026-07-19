@@ -347,6 +347,48 @@ def test_kl_flush_selects_newest_when_counter_suffix_present(project, monkeypatc
     )
 
 
+def test_kl_url_reads_mcp_json_when_env_unset(project, monkeypatch):
+    """Codex P2 2026-07-19: operators configure the KL MCP endpoint once
+    in .mcp.json and never set KL_MCP_URL/KNOWLEDGE_LAYER_MCP_URL — the
+    background kl-only flush must still resolve the URL, or every upload
+    silently no-ops."""
+    monkeypatch.delenv("KL_MCP_URL", raising=False)
+    monkeypatch.delenv("KNOWLEDGE_LAYER_MCP_URL", raising=False)
+    (project / ".mcp.json").write_text(json.dumps({
+        "mcpServers": {
+            "knowledge-layer": {
+                "url": "https://kl.example.com/mcp"
+            }
+        }
+    }))
+    mod = _load_module(project)
+    assert mod._kl_url() == "https://kl.example.com/mcp"
+
+
+def test_kl_url_rejects_http_from_mcp_json(project, monkeypatch):
+    """Even from .mcp.json, plaintext http (non-loopback) must be
+    rejected — MCP_API_KEY travels as Bearer and would leak."""
+    monkeypatch.delenv("KL_MCP_URL", raising=False)
+    monkeypatch.delenv("KNOWLEDGE_LAYER_MCP_URL", raising=False)
+    (project / ".mcp.json").write_text(json.dumps({
+        "mcpServers": {
+            "knowledge-layer": {"url": "http://kl.example.com/mcp"}
+        }
+    }))
+    mod = _load_module(project)
+    assert mod._kl_url() is None
+
+
+def test_kl_url_env_var_wins_over_mcp_json(project, monkeypatch):
+    """Env var takes precedence — operator override always wins."""
+    monkeypatch.setenv("KL_MCP_URL", "https://from-env.example/mcp")
+    (project / ".mcp.json").write_text(json.dumps({
+        "mcpServers": {"knowledge-layer": {"url": "https://from-file.example/mcp"}}
+    }))
+    mod = _load_module(project)
+    assert mod._kl_url() == "https://from-env.example/mcp"
+
+
 def test_snapshot_reservation_is_race_free(project, tmp_path):
     """Codex P2 2026-07-19: two concurrent _write_local_record calls for the
     same (session, branch, captured_at) must produce TWO distinct snapshot

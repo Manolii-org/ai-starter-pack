@@ -132,37 +132,83 @@ def _kl_ready(entity: Optional[str], local_only: bool) -> bool:
     return bool((os.environ.get("MCP_API_KEY") or "").strip())
 
 
+def _validate_mcp_url(url: str, source: str) -> Optional[str]:
+    """Enforce https-or-loopback on any candidate URL. Returns the trimmed
+    URL if safe, else None (with an explanatory stderr message).
+
+    MCP_API_KEY travels as `Authorization: Bearer` — refuse any scheme that
+    would ship it in cleartext. Parse the URL so
+    `http://127.0.0.1@attacker.example/...` and
+    `http://localhost.attacker.example/...` cannot slip past a naive
+    prefix check (Codex P2 2026-07-19).
+    """
+    u = url.strip().rstrip("/")
+    if not u:
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(u)
+    except ValueError:
+        print(f"[session-retro] {source} malformed; skip", file=sys.stderr)
+        return None
+    if parsed.scheme == "https":
+        return u
+    if parsed.scheme == "http":
+        host = (parsed.hostname or "").lower()
+        if host in ("localhost", "127.0.0.1", "::1"):
+            return u
+    print(f"[session-retro] {source} must be https (or http loopback); skip", file=sys.stderr)
+    return None
+
+
+def _kl_url_from_mcp_json() -> Optional[str]:
+    """Read the knowledge-layer endpoint from .mcp.json when no env var
+    is set. Codex P2 2026-07-19: the documented "enable KL by setting
+    MCP_API_KEY + entity" path did not surface the URL — operators
+    configure the endpoint once in .mcp.json (single source of truth for
+    the rest of the tooling), and kl-only silently no-op'd because no
+    env var carried it. Read that same file here to close the gap.
+
+    Fail-closed: any parse/read error returns None (caller skips network).
+    """
+    for candidate in (".mcp.json", ".claude/.mcp.json"):
+        fp = REPO_ROOT / candidate
+        try:
+            if not fp.exists():
+                continue
+            data = json.loads(fp.read_text(encoding="utf-8"))
+        except Exception as e:
+            print(f"[session-retro] .mcp.json parse: {type(e).__name__}", file=sys.stderr)
+            continue
+        servers = (data.get("mcpServers") or {}) if isinstance(data, dict) else {}
+        for key in ("knowledge-layer", "knowledge_layer", "kl"):
+            spec = servers.get(key)
+            if isinstance(spec, dict):
+                url = spec.get("url") or spec.get("endpoint")
+                if isinstance(url, str) and url.strip():
+                    return url
+    return None
+
+
 def _kl_url() -> Optional[str]:
     """Return the MCP endpoint or None when unset — fail-closed.
 
-    A hardcoded default is a per-deployment secret in disguise. Force the
-    operator to set the URL explicitly; callers skip the network leg when
-    None. Also honours the KNOWLEDGE_LAYER_MCP_URL variable used by the
-    manolii-platform's existing kl-proxy client — Codex P1 (2026-07-18).
+    Resolution order:
+      1. KL_MCP_URL env var
+      2. KNOWLEDGE_LAYER_MCP_URL env var (manolii-platform kl-proxy compat)
+      3. .mcp.json `mcpServers.knowledge-layer.url` — Codex P2 (2026-07-19)
+
+    Every candidate is passed through the same https-or-loopback guard so
+    the operator-facing surface is uniform. A hardcoded default remains a
+    per-deployment secret in disguise, so we never invent one; callers
+    skip the network leg when None.
     """
     for key in ("KL_MCP_URL", "KNOWLEDGE_LAYER_MCP_URL"):
-        val = (os.environ.get(key) or "").strip()
-        if val:
-            u = val.rstrip("/")
-            # MCP_API_KEY travels as Authorization: Bearer — refuse any
-            # scheme that would ship it in cleartext. For loopback http
-            # we PARSE the URL to check the real hostname, otherwise
-            # "http://localhost.attacker.example/..." or
-            # "http://127.0.0.1@attacker.example/..." would slip past a
-            # naive prefix check (Codex P2 2026-07-19).
-            try:
-                parsed = urllib.parse.urlsplit(u)
-            except ValueError:
-                print(f"[session-retro] {key} malformed; skip", file=sys.stderr)
-                return None
-            if parsed.scheme == "https":
-                return u
-            if parsed.scheme == "http":
-                host = (parsed.hostname or "").lower()
-                if host == "localhost" or host == "127.0.0.1" or host == "::1":
-                    return u
-            print(f"[session-retro] {key} must be https (or http loopback); skip", file=sys.stderr)
-            return None
+        val = os.environ.get(key) or ""
+        if val.strip():
+            return _validate_mcp_url(val, key)
+    val = _kl_url_from_mcp_json()
+    if val:
+        return _validate_mcp_url(val, ".mcp.json:knowledge-layer.url")
     return None
 
 
