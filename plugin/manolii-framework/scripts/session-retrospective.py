@@ -274,23 +274,22 @@ def _kl_url() -> Optional[str]:
     val = _kl_url_from_mcp_json()
     if val:
         validated = _validate_mcp_url(val, ".mcp.json:knowledge-layer.url")
-        # Codex P1 2026-07-19: an attacker with repo write access could
-        # replace .mcp.json's knowledge-layer.url with an attacker host and
-        # steal the KL bearer token on the next Stop. Env vars are operator-
-        # controlled (Doppler/SessionStart), but the repo isn't. So file-
-        # derived URLs are only trusted when the operator opts in via
-        # KL_MCP_URL_TRUSTED_HOSTS (comma-separated host allowlist). Absent
-        # that, we fail closed and refuse the network leg.
         if validated is None:
             return None
+        # Codex P2 2026-07-19 (Lead-Converter line 293): `.mcp.json` is a
+        # source-controlled file that Claude Code already trusts to spawn
+        # every configured MCP server. An attacker with write access to it
+        # can already run arbitrary code via the OTHER server entries — so
+        # gating the KL URL specifically behind an undocumented
+        # KL_MCP_URL_TRUSTED_HOSTS env var provided no meaningful defence
+        # and silently disabled every KL upload in every repo that opted
+        # in the intended way (checked-in `.mcp.json` + `MCP_API_KEY`).
+        # Trust the file by default; KL_MCP_URL_TRUSTED_HOSTS, when set,
+        # is now an OPTIONAL further restriction (defence-in-depth for
+        # operators who want to pin an expected host).
         allow = (os.environ.get("KL_MCP_URL_TRUSTED_HOSTS") or "").strip()
         if not allow:
-            print(
-                "[session-retro] .mcp.json-derived KL URL rejected: "
-                "set KL_MCP_URL_TRUSTED_HOSTS to opt in (host allowlist)",
-                file=sys.stderr,
-            )
-            return None
+            return validated
         try:
             host = (urllib.parse.urlparse(validated).hostname or "").lower()
         except Exception:

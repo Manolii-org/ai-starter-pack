@@ -709,33 +709,40 @@ def test_mtime_sentinel_accepts_legacy_singleton_shape(project, monkeypatch):
     assert mod._mtime_gate_hit(log_a) is True
 
 
-def test_mcp_json_url_rejected_without_trusted_hosts_env(project, monkeypatch):
-    """Codex P1 2026-07-19: file-derived KL URLs must be gated behind
-    KL_MCP_URL_TRUSTED_HOSTS. Otherwise a repo-side attacker can point KL
-    at an attacker host and exfiltrate the bearer token on next Stop."""
-    (project / ".mcp.json").write_text(
-        json.dumps({"mcpServers": {"knowledge-layer": {"url": "https://attacker.example/api/mcp"}}})
-    )
-    monkeypatch.delenv("KL_MCP_URL", raising=False)
-    monkeypatch.delenv("KNOWLEDGE_LAYER_MCP_URL", raising=False)
-    monkeypatch.delenv("KL_MCP_URL_TRUSTED_HOSTS", raising=False)
-    mod = _load_module(project)
-    assert mod._kl_url() is None, "attacker-controlled .mcp.json host MUST NOT reach _kl_url()"
-
-
-def test_mcp_json_url_accepted_when_host_allowlisted(project, monkeypatch):
-    """Opt-in path: operator sets KL_MCP_URL_TRUSTED_HOSTS in Doppler/env."""
+def test_mcp_json_url_accepted_by_default(project, monkeypatch):
+    """Codex P2 2026-07-19 (Lead-Converter line 293): a checked-in `.mcp.json`
+    knowledge-layer URL must be trusted by default. Gating it behind an
+    undocumented KL_MCP_URL_TRUSTED_HOSTS silently disabled every KL
+    upload in every repo that opted in the intended way (file + MCP_API_KEY).
+    An attacker with `.mcp.json` write access can already run arbitrary
+    code via other MCP server entries, so the extra gate provided no
+    meaningful defence."""
     (project / ".mcp.json").write_text(
         json.dumps({"mcpServers": {"knowledge-layer": {"url": "https://kl.corp.example/api/mcp"}}})
     )
     monkeypatch.delenv("KL_MCP_URL", raising=False)
     monkeypatch.delenv("KNOWLEDGE_LAYER_MCP_URL", raising=False)
-    monkeypatch.setenv("KL_MCP_URL_TRUSTED_HOSTS", "kl.corp.example, other.example")
+    monkeypatch.delenv("KL_MCP_URL_TRUSTED_HOSTS", raising=False)
     mod = _load_module(project)
     assert mod._kl_url() == "https://kl.corp.example/api/mcp"
 
 
-def test_mcp_json_url_wrong_host_rejected_despite_allowlist(project, monkeypatch):
+def test_mcp_json_url_still_validated_as_https(project, monkeypatch):
+    """Trusting the file by default does NOT bypass the https-or-loopback
+    guard — an http:// URL in `.mcp.json` still fails closed."""
+    (project / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"knowledge-layer": {"url": "http://plain.example/api/mcp"}}})
+    )
+    monkeypatch.delenv("KL_MCP_URL", raising=False)
+    monkeypatch.delenv("KNOWLEDGE_LAYER_MCP_URL", raising=False)
+    monkeypatch.delenv("KL_MCP_URL_TRUSTED_HOSTS", raising=False)
+    mod = _load_module(project)
+    assert mod._kl_url() is None
+
+
+def test_mcp_json_url_trusted_hosts_still_restricts_when_set(project, monkeypatch):
+    """When KL_MCP_URL_TRUSTED_HOSTS IS set, it acts as an optional
+    defence-in-depth restriction: only listed hosts (or loopback) pass."""
     (project / ".mcp.json").write_text(
         json.dumps({"mcpServers": {"knowledge-layer": {"url": "https://attacker.example/api/mcp"}}})
     )
@@ -744,6 +751,17 @@ def test_mcp_json_url_wrong_host_rejected_despite_allowlist(project, monkeypatch
     monkeypatch.setenv("KL_MCP_URL_TRUSTED_HOSTS", "kl.corp.example")
     mod = _load_module(project)
     assert mod._kl_url() is None
+
+
+def test_mcp_json_url_trusted_hosts_allows_matching_host(project, monkeypatch):
+    (project / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"knowledge-layer": {"url": "https://kl.corp.example/api/mcp"}}})
+    )
+    monkeypatch.delenv("KL_MCP_URL", raising=False)
+    monkeypatch.delenv("KNOWLEDGE_LAYER_MCP_URL", raising=False)
+    monkeypatch.setenv("KL_MCP_URL_TRUSTED_HOSTS", "kl.corp.example, other.example")
+    mod = _load_module(project)
+    assert mod._kl_url() == "https://kl.corp.example/api/mcp"
 
 
 def test_kl_flush_event_appended_on_success(project, monkeypatch):

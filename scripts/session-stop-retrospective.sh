@@ -3,7 +3,7 @@
 # Reads the Stop-hook JSON payload from stdin (session_id + transcript_path)
 # fail-open, forwards to the collector. On non-zero: writes failure marker and
 # still exits 0 so Stop never blocks. KL network leg backgrounded when
-# MCP_API_KEY + KL_ENTITY|RETROSPECTIVE_ENTITY are set.
+# MCP_API_KEY is set (entity resolved by the collector from env or .ai/config/retrospective.json).
 set -euo pipefail
 _R=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
 cd "$_R"
@@ -77,12 +77,14 @@ fi
 # KL network leg — backgrounded, never blocks Stop. Skipped if:
 #  - local capture failed (avoids uploading a STALE prior snapshot labelled with
 #    the current session_id via mode_kl_only's newest-snapshot lookup)
-#  - no creds/entity in env
-# The wrapper deliberately does NOT trigger bootstrap_env or read
-# .ai/config/retrospective.json here — bootstrap_env is a bigger surface (would
-# block Stop), and file-based entity config is picked up when kl-only runs from
-# a session where SessionStart populated env. Missing-cred case fails-closed.
-if [ "$rc" -eq 0 ] && [ -n "${MCP_API_KEY:-}" ] && { [ -n "${KL_ENTITY:-}" ] || [ -n "${RETROSPECTIVE_ENTITY:-}" ]; }; then
+#  - no MCP_API_KEY (no credential to authenticate with)
+# The wrapper deliberately does NOT trigger bootstrap_env here — that surface
+# would block Stop. Entity resolution is left to the collector's
+# _resolve_entity() (env → .ai/config/retrospective.json → default), so
+# repos that configure `entity` only in the JSON config file (Codex P2
+# Lead-Converter line 85 2026-07-19) still get their kl-only worker
+# scheduled. Missing-cred case still fails-closed on MCP_API_KEY.
+if [ "$rc" -eq 0 ] && [ -n "${MCP_API_KEY:-}" ]; then
     _KL_ARGS=(--mode kl-only)
     [ -n "$_SID" ] && _KL_ARGS+=(--session-id "$_SID")
     ( python3 "$_RETRO" "${_KL_ARGS[@]}" >/dev/null 2>&1 ) &
