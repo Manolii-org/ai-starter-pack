@@ -50,10 +50,27 @@ def test_planning_depth_still_flagged():
     assert classify_from_signals(edit_churn={"foo.py": 4}) == "planning"
 
 
-def test_planning_breadth_now_flagged():
-    """Fix #7: three separate files each edited once should flag planning.
-    Prior form (any(v >= 3)) missed this — breadth churn was silent."""
-    assert classify_from_signals(edit_churn={"a.py": 1, "b.py": 1, "c.py": 1}) == "planning"
+def test_planning_ordinary_three_file_change_is_not_planning():
+    """Codex P2 2026-07-19: source + test + config each edited once is the
+    normal shape of a routine multi-file change, NOT a planning failure.
+    The classifier must require iteration or wider breadth as evidence."""
+    result = classify_from_signals(edit_churn={"src.py": 1, "test.py": 1, "cfg.py": 1})
+    assert result != "planning", f"got {result!r}"
+
+
+def test_planning_breadth_plus_iteration_flagged():
+    """Three files touched AND at least one re-edited — iteration signal
+    combined with breadth is planning."""
+    assert classify_from_signals(
+        edit_churn={"a.py": 2, "b.py": 1, "c.py": 1}
+    ) == "planning"
+
+
+def test_planning_wide_breadth_alone_flagged():
+    """Five or more distinct files is broad enough to flag on its own."""
+    assert classify_from_signals(
+        edit_churn={"a.py": 1, "b.py": 1, "c.py": 1, "d.py": 1, "e.py": 1}
+    ) == "planning"
 
 
 def test_planning_two_files_still_below_threshold():

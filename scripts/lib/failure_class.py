@@ -121,9 +121,18 @@ def classify_from_signals(
     if kind_map.get("timeout", 0) > 0 or error_count >= 6:
         return "external-dependency"
 
-    # Planning failures manifest as EITHER breadth (many files touched)
-    # OR depth (one file rewritten repeatedly). Prior form only caught depth.
-    if len(churn) >= 3 or any(v >= 3 for v in churn.values()):
+    # Planning failures need corroborating dysfunction, not just breadth.
+    # Codex P2 2026-07-19: `len(churn) >= 3` alone tagged every routine
+    # source+test+config change as "planning". Require EITHER:
+    #   - Depth: a single file rewritten >= 3 times (real iteration churn), OR
+    #   - Wide breadth: >= 5 distinct files touched (uncommon in scoped work), OR
+    #   - Breadth + iteration: >= 3 distinct files AND at least one re-edited
+    # so ordinary three-file implementations are NOT misclassified.
+    if (
+        any(v >= 3 for v in churn.values())
+        or len(churn) >= 5
+        or (len(churn) >= 3 and any(v >= 2 for v in churn.values()))
+    ):
         return "planning"
 
     # Memory-context: a file re-read enough times WITHOUT edits happening in
