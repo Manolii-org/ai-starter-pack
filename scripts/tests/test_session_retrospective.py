@@ -1019,6 +1019,39 @@ def test_retry_streak_resets_at_message_boundaries(project, tmp_path):
         f"streak should reset at message boundaries, got {sigs['tool_retries']}"
 
 
+def test_retry_streak_survives_tool_result_envelope(project, tmp_path):
+    """Codex P2 2026-07-19 (manolii-platform line 475): in real Claude
+    transcripts, an assistant tool_use is followed by a SEPARATE user-role
+    tool_result envelope before the assistant can retry. The tool_result
+    envelope contains no tool_use, so a naive per-entry reset would fire
+    between the failed attempt and the retry — every retry restarts at
+    streak=1 and tool_retries never crosses the threshold. Fix: entries
+    carrying a tool_result are transparent to the streak."""
+    mod = _load_module(project)
+    logs = project / ".ai" / "session-logs"
+    log = logs / "session_retry_across_result.jsonl"
+    tool_call = {"type": "tool_use", "name": "Bash",
+                 "input": {"command": "psql -c 'SELECT 1'"}}
+    err_result = {"type": "tool_result", "is_error": True,
+                  "content": "Error: connection refused"}
+    # assistant tool_use → user tool_result(err) → assistant tool_use (retry)
+    # → user tool_result(err) → assistant tool_use (retry). Three attempts
+    # of the same key should reach the retry threshold.
+    entries = [
+        {"message": {"role": "assistant", "content": [tool_call]}},
+        {"message": {"role": "user", "content": [err_result]}},
+        {"message": {"role": "assistant", "content": [tool_call]}},
+        {"message": {"role": "user", "content": [err_result]}},
+        {"message": {"role": "assistant", "content": [tool_call]}},
+    ]
+    log.write_text("\n".join(json.dumps(e) for e in entries) + "\n")
+
+    sigs = mod.extract_signals(log)
+    assert sigs["tool_retries"].get("Bash", 0) >= 3, \
+        f"three same-key attempts across tool_result envelopes should count as retry, " \
+        f"got {sigs['tool_retries']}"
+
+
 def test_retry_streak_still_fires_for_true_consecutive_calls(project, tmp_path):
     """Sanity check the fix doesn't over-reset: three back-to-back identical
     tool_use calls in one assistant message DO cross the retry threshold."""

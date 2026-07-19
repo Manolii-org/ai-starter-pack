@@ -407,7 +407,20 @@ def extract_signals(path: Optional[Path]) -> dict:
                 # Otherwise 3 identical calls separated by ordinary user/
                 # assistant text turns falsely count as a retry sequence and
                 # can force a `tooling` failure class.
+                # Codex P2 2026-07-19 (manolii-platform line 475): in a
+                # normal Claude transcript, an assistant tool_use is
+                # followed by a SEPARATE user-role tool_result envelope
+                # before the assistant can retry. That envelope contains
+                # no tool_use, so a naive reset here fires between the
+                # failed attempt and the retry — every retry restarts at
+                # streak=1 and tool_retries never reaches the threshold.
+                # Fix: an entry that carries a tool_result is transparent
+                # to the streak (neither extends nor resets). Reset only
+                # when the entry is genuinely unrelated (no tool_use, no
+                # tool_result). The `else` branch at line ~431 still
+                # resets when a NEW tool_use has a different key.
                 entry_extended_streak = False
+                entry_has_tool_result = False
                 for block in blocks:
                     if not isinstance(block, dict):
                         continue
@@ -459,6 +472,7 @@ def extract_signals(path: Optional[Path]) -> dict:
                     # text sniffing when it's truly error-shaped (leading
                     # "Error:"/"Traceback"/HTTP 4xx/5xx status).
                     if btype == "tool_result":
+                        entry_has_tool_result = True
                         head = str(block.get("content", ""))[:120].strip()
                         head_lower = head.lower()
                         text_error = (
@@ -471,7 +485,10 @@ def extract_signals(path: Optional[Path]) -> dict:
                 # Codex P2 2026-07-19: if this entry did NOT extend the
                 # streak, it's a message boundary — reset so identical calls
                 # separated by ordinary user/assistant text don't accumulate.
-                if not entry_extended_streak:
+                # Codex P2 2026-07-19 (manolii-platform line 475): a
+                # tool_result envelope is transparent to the streak — the
+                # assistant's retry lives in the NEXT entry.
+                if not entry_extended_streak and not entry_has_tool_result:
                     last_tool, tool_streak = None, 0
     except Exception as e:
         print(f"[session-retro] extract_signals: {type(e).__name__}", file=sys.stderr)
