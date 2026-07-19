@@ -1089,3 +1089,171 @@ def test_forced_dry_run_still_does_not_persist_sentinel(project, monkeypatch):
     monkeypatch.delenv("SESSION_RETRO_DRY_RUN", raising=False)
     # No sentinel written → next Stop can reserve.
     assert mod._try_reserve_mtime_gate(log) is True
+
+
+def test_kl_only_atomic_claim_prevents_duplicate_upload(project, monkeypatch):
+    """Codex P2 2026-07-19 line 994: two concurrent kl-only workers for the
+    same session_id must not both upload the same oldest-unflushed snapshot.
+    The scan + kl_written=true flip live under _retro_lock() so only one
+    worker takes ownership."""
+    import threading
+    monkeypatch.setenv("MCP_API_KEY", "k")
+    monkeypatch.setenv("KL_MCP_URL", "https://kl.example.test/api/mcp")
+    monkeypatch.setenv("KL_ENTITY", "acme")
+    mod = _load_module(project)
+
+    snap_dir = project / ".ai" / "memory" / "retrospectives"
+    snap = snap_dir / "20260719T000000Z-main-SID-only.json"
+    snap.write_text(json.dumps({
+        "session_id": "SID",
+        "branch": "main",
+        "captured_at": "2026-07-19T00:00:00Z",
+        "dysfunction_score": 0.1,
+        "failure_class": "unclassified",
+        "kl_written": False,
+    }, indent=2))
+    os.utime(snap, (1_700_000_000, 1_700_000_000))
+
+    upload_count = 0
+    upload_lock = threading.Lock()
+    # Simulate a slow network so both threads race the claim/upload boundary.
+    def slow_create(entity, title, content, tags):
+        nonlocal upload_count
+        # Sleep OUTSIDE the retrospective lock so a real race is possible
+        # only if the claim was not held under _retro_lock().
+        import time as _t
+        _t.sleep(0.05)
+        with upload_lock:
+            upload_count += 1
+        return True
+    monkeypatch.setattr(mod, "kl_create_note", slow_create)
+    monkeypatch.setattr(mod, "kl_assert_fact", lambda *a, **kw: True)
+
+    barrier = threading.Barrier(4)
+    def worker():
+        barrier.wait()
+        mod.mode_kl_only(session_id="SID")
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert upload_count == 1, \
+        f"atomic claim must serialize: expected exactly 1 upload, got {upload_count}"
+    assert json.loads(snap.read_text())["kl_written"] is True
+
+
+def test_kl_only_rollback_restores_kl_written_on_failure(project, monkeypatch):
+    """Codex P2 2026-07-19 line 994: when the KL network call fails after
+    the atomic claim, kl_written must be rolled back to False so the next
+    retry (or a sibling worker) can pick the snapshot up."""
+    monkeypatch.setenv("MCP_API_KEY", "k")
+    monkeypatch.setenv("KL_MCP_URL", "https://kl.example.test/api/mcp")
+    monkeypatch.setenv("KL_ENTITY", "acme")
+    mod = _load_module(project)
+
+    snap_dir = project / ".ai" / "memory" / "retrospectives"
+    snap = snap_dir / "20260719T000000Z-main-SID-rollback.json"
+    snap.write_text(json.dumps({
+        "session_id": "SID",
+        "branch": "main",
+        "captured_at": "2026-07-19T00:00:00Z",
+        "dysfunction_score": 0.1,
+        "failure_class": "unclassified",
+        "kl_written": False,
+    }, indent=2))
+
+    monkeypatch.setattr(mod, "kl_create_note", lambda *a, **kw: False)
+    monkeypatch.setattr(mod, "kl_assert_fact", lambda *a, **kw: True)
+
+    mod.mode_kl_only(session_id="SID")
+    assert json.loads(snap.read_text())["kl_written"] is False, \
+        "network failure after claim must roll kl_written back to False"
+
+
+def test_kl_only_does_not_fall_back_to_jsonl_when_snap_already_flushed(project, monkeypatch):
+    """Codex P2 2026-07-19 (ai-starter-pack line 965): once a snapshot for
+    the session_id has been flushed, mode_kl_only must NOT fall back to the
+    append-only JSONL and re-upload from a stale narrative row (or a
+    kl-flushed completion event)."""
+    monkeypatch.setenv("MCP_API_KEY", "k")
+    monkeypatch.setenv("KL_MCP_URL", "https://kl.example.test/api/mcp")
+    monkeypatch.setenv("KL_ENTITY", "acme")
+    mod = _load_module(project)
+
+    snap_dir = project / ".ai" / "memory" / "retrospectives"
+    snap = snap_dir / "20260719T000000Z-main-SID-alreadyflushed.json"
+    snap.write_text(json.dumps({
+        "session_id": "SID",
+        "branch": "main",
+        "kl_written": True,  # already delivered
+    }, indent=2))
+    # Stale narrative row in JSONL for the same session_id.
+    jsonl = project / ".ai" / "memory" / "retrospectives" / "session-retrospectives.jsonl"
+    jsonl.write_text(json.dumps({
+        "session_id": "SID",
+        "branch": "main",
+        "captured_at": "2026-07-19T00:00:00Z",
+        "dysfunction_score": 0.1,
+        "failure_class": "unclassified",
+    }) + "\n")
+
+    upload_calls = []
+    monkeypatch.setattr(mod, "kl_create_note",
+                        lambda *a, **kw: upload_calls.append(kw) or True)
+    monkeypatch.setattr(mod, "kl_assert_fact", lambda *a, **kw: True)
+
+    mod.mode_kl_only(session_id="SID")
+    assert upload_calls == [], \
+        "already-flushed snapshot must suppress the JSONL fallback"
+
+
+def test_kl_only_jsonl_fallback_skips_kl_flushed_event_rows(project, monkeypatch):
+    """Codex P2 2026-07-19 (ai-starter-pack line 965): when the JSONL scan
+    IS reachable (no matching snapshot), it must skip completion-event rows
+    so a `kl-flushed` marker isn't uploaded as a retrospective."""
+    monkeypatch.setenv("MCP_API_KEY", "k")
+    monkeypatch.setenv("KL_MCP_URL", "https://kl.example.test/api/mcp")
+    monkeypatch.setenv("KL_ENTITY", "acme")
+    mod = _load_module(project)
+
+    # No snapshots, but JSONL has ONLY a kl-flushed event for the session_id.
+    jsonl = project / ".ai" / "memory" / "retrospectives" / "session-retrospectives.jsonl"
+    jsonl.write_text(json.dumps({
+        "event": "kl-flushed",
+        "session_id": "SID",
+        "branch": "main",
+        "dysfunction_score": 0,
+        "failure_class": "unclassified",
+        "at": "2026-07-19T00:00:00Z",
+    }) + "\n")
+
+    upload_calls = []
+    monkeypatch.setattr(mod, "kl_create_note",
+                        lambda *a, **kw: upload_calls.append(kw) or True)
+    monkeypatch.setattr(mod, "kl_assert_fact", lambda *a, **kw: True)
+
+    mod.mode_kl_only(session_id="SID")
+    assert upload_calls == [], \
+        "kl-flushed event rows must not be uploaded as retrospectives"
+
+
+def test_latest_session_log_uses_mtime_not_lexical_sort(project, monkeypatch):
+    """Codex P2 2026-07-19 (Lead-Converter line 720): session-log filenames
+    contain UUIDs, so reverse-lexical sort can pick an older, unrelated
+    log. The helper must pick by mtime instead."""
+    mod = _load_module(project)
+    logs = project / ".ai" / "session-logs"
+    # UUID-shaped names — lexically 'z…' > 'a…' but 'a…' is the newer file.
+    older = logs / "session_zzzzzzzz-old.jsonl"
+    newer = logs / "session_aaaaaaaa-new.jsonl"
+    older.write_text("{}\n")
+    newer.write_text("{}\n")
+    os.utime(older, (1_700_000_000, 1_700_000_000))
+    os.utime(newer, (1_700_000_500, 1_700_000_500))
+
+    picked = mod._latest_session_log()
+    assert picked == newer, \
+        f"must select newest by mtime; got {picked!r}, expected {newer!r}"

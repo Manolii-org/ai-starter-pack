@@ -716,8 +716,24 @@ def kl_assert_fact(entity: str, project_slug: str, fact_key: str, fact_value: st
 
 
 def _latest_session_log() -> Optional[Path]:
-    logs = sorted(SESSION_LOGS_DIR.glob("session_*.jsonl"), reverse=True)
-    return logs[0] if logs else None
+    # Codex P2 2026-07-19: session-log filenames contain UUIDs, not
+    # timestamps, so lexical reverse-sort can pick an older unrelated
+    # transcript. Sort by mtime instead so the fallback path used when
+    # the Stop payload omits/malforms transcript_path targets the log
+    # most recently written to (the just-closed session).
+    try:
+        logs = list(SESSION_LOGS_DIR.glob("session_*.jsonl"))
+    except OSError:
+        return None
+    if not logs:
+        return None
+    def _mtime(p: Path) -> float:
+        try:
+            return p.stat().st_mtime_ns
+        except OSError:
+            return -1.0
+    logs.sort(key=_mtime, reverse=True)
+    return logs[0]
 
 
 def _session_log_mtime(path: Optional[Path]) -> Optional[float]:
@@ -921,34 +937,73 @@ def mode_kl_only(session_id: str = "") -> None:
     # snapshots; each background kl-only should process the oldest pending
     # capture, not the newest (which would drop the first flush's actual
     # target and re-upload the newer one twice).
-    if RETROSPECTIVES_DIR.exists():
-        snaps = sorted(
-            RETROSPECTIVES_DIR.glob("*-*.json"),
-            key=lambda p: (p.stat().st_mtime_ns, p.name),
-        )  # oldest first
-    else:
-        snaps = []
+    #
+    # Codex P2 2026-07-19 (line 994): ATOMIC CLAIM. Two concurrent kl-only
+    # workers for the same session_id would both scan and both pick the
+    # same oldest unflushed snapshot before either finished its network
+    # call, producing duplicate KL notes + fact writes. Perform the scan
+    # AND the kl_written=true claim under a single _retro_lock() so only
+    # one worker takes ownership of a given snapshot. If the subsequent
+    # network call fails, restore kl_written=false under the lock.
     matched_snap: Optional[Path] = None
-    for snap in snaps:
-        if snap.name.startswith("."):
-            continue
-        try:
-            candidate = json.loads(snap.read_text(encoding="utf-8"))
-        except Exception as e:
-            print(f"[session-retro] kl-only snap: {type(e).__name__}", file=sys.stderr)
-            continue
-        if not isinstance(candidate, dict):
-            continue
-        if str(candidate.get("session_id") or "") != session_id:
-            continue
-        # Skip snapshots already delivered — otherwise a re-triggered flush
-        # would re-upload the same note.
-        if candidate.get("kl_written") is True:
-            continue
-        record = candidate
-        matched_snap = snap
-        break
-    if record is None and RETRO_JSONL.exists():
+    saw_flushed_snap_for_session = False
+    try:
+        with _retro_lock():
+            if RETROSPECTIVES_DIR.exists():
+                snaps = sorted(
+                    RETROSPECTIVES_DIR.glob("*-*.json"),
+                    key=lambda p: (p.stat().st_mtime_ns, p.name),
+                )  # oldest first
+            else:
+                snaps = []
+            for snap in snaps:
+                if snap.name.startswith("."):
+                    continue
+                try:
+                    candidate = json.loads(snap.read_text(encoding="utf-8"))
+                except Exception as e:
+                    print(f"[session-retro] kl-only snap: {type(e).__name__}", file=sys.stderr)
+                    continue
+                if not isinstance(candidate, dict):
+                    continue
+                if str(candidate.get("session_id") or "") != session_id:
+                    continue
+                if candidate.get("kl_written") is True:
+                    # Codex P2 2026-07-19 (ai-starter-pack line 965):
+                    # remember that this session HAS a flushed snapshot so
+                    # we don't fall back to the JSONL scan and re-upload
+                    # from a stale narrative row.
+                    saw_flushed_snap_for_session = True
+                    continue
+                # Claim it: flip kl_written=true BEFORE releasing the lock
+                # so a concurrent worker sees it as taken. Dry-run must NOT
+                # claim — it never uploads and would starve a real flush.
+                if os.environ.get("SESSION_RETRO_DRY_RUN"):
+                    record = candidate
+                    matched_snap = snap
+                    break
+                candidate["kl_written"] = True
+                try:
+                    snap.write_text(
+                        json.dumps(candidate, indent=2, ensure_ascii=False) + "\n",
+                        encoding="utf-8",
+                    )
+                except Exception as e:  # noqa: BLE001
+                    print(f"[session-retro] kl-only claim: {type(e).__name__}", file=sys.stderr)
+                    continue
+                # Store the pre-claim view so rollback restores kl_written=False
+                # without clobbering any other fields written after we claimed.
+                record = candidate
+                matched_snap = snap
+                break
+    except Exception as e:  # noqa: BLE001
+        print(f"[session-retro] kl-only lock: {type(e).__name__}", file=sys.stderr)
+    # Codex P2 2026-07-19 (ai-starter-pack line 965): don't fall back to
+    # JSONL when a flushed snapshot already exists for this session — that
+    # snapshot IS the flush, and re-scanning the append-only log would
+    # re-select either the original narrative row or a kl-flushed event
+    # and upload a duplicate note.
+    if record is None and not saw_flushed_snap_for_session and RETRO_JSONL.exists():
         try:
             for ln in reversed(RETRO_JSONL.read_text(encoding="utf-8").splitlines()):
                 ln = ln.strip()
@@ -959,6 +1014,15 @@ def mode_kl_only(session_id: str = "") -> None:
                 except json.JSONDecodeError:
                     continue
                 if not isinstance(candidate, dict):
+                    continue
+                # Skip completion-event rows — they carry session_id but
+                # aren't retrospectives and would upload as a garbage note.
+                if candidate.get("event") == "kl-flushed":
+                    continue
+                # Skip rows that have already been delivered — a Stop that
+                # succeeded, then a follow-up flush that hits the JSONL
+                # fallback, must not re-upload the same row.
+                if candidate.get("kl_written") is True:
                     continue
                 if str(candidate.get("session_id") or "") == session_id:
                     record = candidate
@@ -994,27 +1058,17 @@ def mode_kl_only(session_id: str = "") -> None:
     )
     if wrote:
         # Codex P2 2026-07-19: SESSION_RETRO_DRY_RUN forces kl_create_note to
-        # return True without any network call. If we then flip kl_written
-        # and emit a kl-flushed event, telemetry would falsely claim delivery
-        # for a session that was never uploaded. Skip the mutation in dry-run.
+        # return True without any network call. If we then emit a kl-flushed
+        # event, telemetry would falsely claim delivery. Skip the mutation
+        # in dry-run. (Dry-run never took the atomic claim above either, so
+        # there is nothing to roll back.)
         if os.environ.get("SESSION_RETRO_DRY_RUN"):
             print("[session-retro] kl-only: dry-run — skipping snapshot/JSONL mutation", file=sys.stderr)
             return
         kl_assert_fact(entity, "session-retrospectives", f"last_dysfunction_score.{safe_branch}", str(dscore))
         kl_assert_fact(entity, "session-retrospectives", f"last_failure_class.{safe_branch}", fclass)
-        # CodeRabbit 2026-07-19: mark the local snapshot as uploaded so
-        # downstream consumers of the JSON snapshot don't see stale
-        # `kl_written: false` after the normal Stop-hook path (which
-        # always runs --local-only and then backgrounds mode_kl_only).
-        try:
-            if matched_snap is not None:
-                record["kl_written"] = True
-                matched_snap.write_text(
-                    json.dumps(record, indent=2, ensure_ascii=False) + "\n",
-                    encoding="utf-8",
-                )
-        except Exception as e:  # noqa: BLE001
-            print(f"[session-retro] kl-only: kl_written update: {type(e).__name__}", file=sys.stderr)
+        # kl_written was already flipped to True under _retro_lock() at claim
+        # time (Codex P2 2026-07-19 line 994) — no post-write update needed.
         # Codex P2 2026-07-19: also emit a JSONL completion event so
         # consumers of session-retrospectives.jsonl (append-only) can
         # observe the flush — the snapshot-only mutation above was
@@ -1022,6 +1076,26 @@ def mode_kl_only(session_id: str = "") -> None:
         _append_kl_flush_event(session_id or str(record.get("session_id") or ""), branch, dscore, fclass)
         print("[session-retro] kl-only: flushed", file=sys.stderr)
     else:
+        # Codex P2 2026-07-19 line 994: network call failed after we claimed
+        # the snapshot under the lock. Roll back kl_written=False so the
+        # next retry (or a sibling worker) can pick it up. Do NOT touch
+        # other fields — a concurrent Stop may have re-serialised the
+        # snapshot with updated data between claim and rollback.
+        if matched_snap is not None and not os.environ.get("SESSION_RETRO_DRY_RUN"):
+            try:
+                with _retro_lock():
+                    try:
+                        current = json.loads(matched_snap.read_text(encoding="utf-8"))
+                    except Exception:
+                        current = None
+                    if isinstance(current, dict):
+                        current["kl_written"] = False
+                        matched_snap.write_text(
+                            json.dumps(current, indent=2, ensure_ascii=False) + "\n",
+                            encoding="utf-8",
+                        )
+            except Exception as e:  # noqa: BLE001
+                print(f"[session-retro] kl-only rollback: {type(e).__name__}", file=sys.stderr)
         print("[session-retro] kl-only: KL write failed", file=sys.stderr)
 
 
