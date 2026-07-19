@@ -66,6 +66,27 @@ def test_memory_context_from_rereads():
     assert classify_from_signals(file_reads={"foo.py": 3}) == "memory-context"
 
 
+def test_reread_confusion_cue_still_gated_by_edit_churn():
+    """Codex P2 2026-07-19: the 'Re-read: <path> xN' confusion cue emitted
+    by extract_signals mirrors the same file_reads count. It must be gated
+    by the SAME edit-churn guard — otherwise edit-and-verify still trips
+    memory-context via the confusion channel."""
+    # Cue + edit on the same file → NOT memory-context
+    assert classify_from_signals(
+        ai_confusion_events=["Re-read: foo.py x3"],
+        edit_churn={"foo.py": 1},
+    ) != "memory-context"
+    # Cue with NO edit → still memory-context
+    assert classify_from_signals(
+        ai_confusion_events=["Re-read: foo.py x3"],
+    ) == "memory-context"
+    # Cue path unedited, another file edited → still memory-context
+    assert classify_from_signals(
+        ai_confusion_events=["Re-read: foo.py x3"],
+        edit_churn={"bar.py": 1},
+    ) == "memory-context"
+
+
 def test_memory_context_requires_reread_without_edit():
     """CodeRabbit fix: a re-read paired with an edit is iterative work,
     not a memory gap. Only unaccompanied rereads flag memory-context."""

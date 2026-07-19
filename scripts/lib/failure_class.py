@@ -129,17 +129,36 @@ def classify_from_signals(
     # Memory-context: a file re-read enough times WITHOUT edits happening in
     # between (i.e. the agent forgot what it saw, not that it was iterating on
     # a change). If we also edited the same file, that's normal iterative
-    # work, not a memory gap. Confusion cues carrying an explicit "Re-read:"
-    # marker still count regardless of edit churn.
+    # work, not a memory gap. The "Re-read: <path> xN" confusion cue emitted
+    # by extract_signals mirrors the same file_reads count, so apply the
+    # SAME edit-churn guard when reading it back — otherwise ordinary
+    # edit-and-verify sessions would still trip memory-context via the
+    # confusion channel (Codex P2 2026-07-19).
     reread_without_edit = any(
         read_count >= 2 and churn.get(path, 0) == 0
         for path, read_count in reads.items()
     )
-    if reread_without_edit or any("Re-read:" in c for c in confusion):
+    reread_cue_without_edit = False
+    for cue in confusion:
+        if not isinstance(cue, str) or not cue.startswith("Re-read: "):
+            continue
+        rest = cue[len("Re-read: "):]
+        # Format: "Re-read: <path> xN" — strip trailing " xN" if present.
+        idx = rest.rfind(" x")
+        cue_path = rest[:idx] if idx > 0 else rest
+        if cue_path and churn.get(cue_path, 0) == 0:
+            reread_cue_without_edit = True
+            break
+    if reread_without_edit or reread_cue_without_edit:
         return "memory-context"
 
-    # Fall through to text classification on corrections / samples / confusion
+    # Fall through to text classification on corrections / samples / confusion.
+    # Strip "Re-read:" cues from the blob — they were ALREADY consulted above
+    # (and gated by edit-churn). Feeding them to _MEMORY_RX here would let a
+    # confused-and-edited session trip memory-context via the text path even
+    # though the structured guard cleared it (Codex P2 follow-up).
+    text_confusion = [c for c in confusion if not (isinstance(c, str) and c.startswith("Re-read: "))]
     blob = "\n".join(
-        corrections + confusion + sample_list + [f"kinds:{sorted(kind_map)}"]
+        corrections + text_confusion + sample_list + [f"kinds:{sorted(kind_map)}"]
     )
     return classify_from_text(blob)
