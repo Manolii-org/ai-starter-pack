@@ -780,3 +780,57 @@ def test_kl_flush_event_appended_on_success(project, monkeypatch):
     flushes = [e for e in events if e.get("event") == "kl-flushed"]
     assert len(flushes) == 1
     assert flushes[0]["session_id"] == "SID-fixture"
+
+
+def test_reserve_mtime_gate_is_atomic_check_and_set(project, monkeypatch):
+    """Codex P2 2026-07-19: two concurrent Stops for the same unchanged
+    transcript must not both pass the gate. Simulate the race: two threads
+    call _try_reserve_mtime_gate on the same path/mtime; exactly ONE must
+    receive the go-ahead."""
+    import threading
+    mod = _load_module(project)
+    logs = project / ".ai" / "session-logs"
+    log = logs / "session_race.jsonl"
+    log.write_text("{}\n")
+    os.utime(log, (1_700_000_000, 1_700_000_000))
+
+    results = []
+    barrier = threading.Barrier(4)
+
+    def worker():
+        barrier.wait()
+        results.append(mod._try_reserve_mtime_gate(log))
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for t in threads: t.start()
+    for t in threads: t.join()
+
+    # Exactly ONE thread got True (the go-ahead); the other three saw
+    # the reservation already present and returned False.
+    assert results.count(True) == 1, f"expected 1 winner, got {results}"
+    assert results.count(False) == 3
+
+
+def test_reserve_mtime_gate_returns_true_when_transcript_missing(project, monkeypatch):
+    """Fail-open contract: if the transcript path is None or unreadable,
+    the reservation must not block capture."""
+    mod = _load_module(project)
+    assert mod._try_reserve_mtime_gate(None) is True
+    assert mod._try_reserve_mtime_gate(project / ".ai" / "session-logs" / "nonexistent.jsonl") is True
+
+
+def test_reserve_mtime_gate_force_bypass(project, monkeypatch):
+    """SESSION_RETRO_FORCE / force=True must always bypass the reservation."""
+    mod = _load_module(project)
+    logs = project / ".ai" / "session-logs"
+    log = logs / "session_force.jsonl"
+    log.write_text("{}\n")
+    os.utime(log, (1_700_000_000, 1_700_000_000))
+    # First call: reservation succeeds.
+    assert mod._try_reserve_mtime_gate(log) is True
+    # Second call without force: reservation collides → False.
+    assert mod._try_reserve_mtime_gate(log) is False
+    # Third call with force=True: bypass.
+    assert mod._try_reserve_mtime_gate(log, force=True) is True
+    monkeypatch.setenv("SESSION_RETRO_FORCE", "1")
+    assert mod._try_reserve_mtime_gate(log) is True

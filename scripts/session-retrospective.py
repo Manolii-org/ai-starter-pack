@@ -741,6 +741,9 @@ def _mtime_gate_hit(path: Optional[Path], force: bool = False) -> bool:
     CodeRabbit 2026-07-19: the sentinel is a transcript-keyed map, not a singleton —
     capturing transcript B must not evict A's entry, otherwise a later unchanged
     Stop for A would miss the gate and write a duplicate retrospective.
+
+    Read-only check kept for callers that don't perform a capture (external
+    monitors); the reservation path below is what mode_stop uses.
     """
     if force or os.environ.get("SESSION_RETRO_FORCE"):
         return False
@@ -756,6 +759,47 @@ def _mtime_gate_hit(path: Optional[Path], force: bool = False) -> bool:
     except Exception as e:
         print(f"[session-retro] mtime-gate: {type(e).__name__}", file=sys.stderr)
     return False
+
+
+def _try_reserve_mtime_gate(path: Optional[Path], force: bool = False) -> bool:
+    """Atomic check-and-reserve: under one lock, verify no capture has recorded
+    this (path, mtime) yet AND immediately record the reservation before
+    releasing the lock. Codex P2 2026-07-19: without atomicity, two concurrent
+    Stops for the same unchanged transcript both pass the read-only gate,
+    reach _write_local_record, and duplicate the retrospective.
+
+    Returns True when the reservation succeeded (caller should proceed with
+    capture). Returns False when the gate had already recorded this mtime
+    (caller should no-op). Fails open: any error path returns True so the
+    capture still runs — better to occasionally duplicate than to silently
+    swallow a Stop.
+    """
+    if force or os.environ.get("SESSION_RETRO_FORCE"):
+        return True
+    mtime = _session_log_mtime(path)
+    if mtime is None:
+        # No transcript or unreadable — no gate to hold. Let capture run.
+        return True
+    try:
+        RETROSPECTIVES_DIR.mkdir(parents=True, exist_ok=True)
+        with _retro_lock():
+            entries = _load_mtime_sentinel_map()
+            prev = entries.get(str(path))
+            if prev and float(prev.get("mtime", -1)) == float(mtime):
+                print("[session-retro] mtime-gate: skip (unchanged session log)", file=sys.stderr)
+                return False
+            entries[str(path)] = {"mtime": mtime, "captured_at": _now_iso()}
+            if len(entries) > 64:
+                entries = dict(
+                    sorted(entries.items(), key=lambda kv: float(kv[1].get("mtime", 0)), reverse=True)[:64]
+                )
+            tmp = MTIME_SENTINEL.with_suffix(MTIME_SENTINEL.suffix + ".tmp")
+            tmp.write_text(json.dumps({"entries": entries}), encoding="utf-8")
+            os.replace(tmp, MTIME_SENTINEL)
+    except Exception as e:  # noqa: BLE001
+        print(f"[session-retro] mtime-reserve: {type(e).__name__}", file=sys.stderr)
+        return True
+    return True
 
 
 def _write_mtime_sentinel(path: Optional[Path]) -> None:
@@ -996,7 +1040,10 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False,
     path = Path(transcript) if transcript else _latest_session_log()
     if path and not path.exists():
         path = None
-    if _mtime_gate_hit(path, force=force):
+    # Codex P2 2026-07-19: atomic check-and-reserve — hold the sentinel lock
+    # across gate lookup AND write so two concurrent Stops for the same
+    # unchanged transcript can't both pass the gate and duplicate the record.
+    if not _try_reserve_mtime_gate(path, force=force):
         return
     sigs = extract_signals(path) if path else {}
 
@@ -1142,7 +1189,8 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False,
     # LOCAL write first — Stop durability requires the JSONL/snapshot even if KL hangs.
     snap = _write_local_record(record)
     print(f"[session-retro] local record: {snap}", file=sys.stderr)
-    _write_mtime_sentinel(path)
+    # Sentinel already reserved at the top of mode_stop under the same lock;
+    # no second write needed here (see Codex P2 2026-07-19 fix).
 
     # Drop only the staging artifacts we consumed for THIS session. Leaving
     # them behind would double-count their signals into any future Stop for a
