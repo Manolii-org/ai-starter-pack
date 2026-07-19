@@ -433,7 +433,22 @@ def extract_signals(path: Optional[Path]) -> dict:
                     signals["total_turns"] += 1
                     if not signals["first_user_message"] and text.strip():
                         signals["first_user_message"] = text.strip()[:250]
-                    if text and _CORRECTION_RX.search(text):
+                    # Codex P2 2026-07-19 (impaktful#1695 line 437): Claude
+                    # tool_result envelopes are also role="user" (as
+                    # modeled by test_retry_streak_survives_tool_result_envelope),
+                    # so command/MCP output like "wrong file" or
+                    # "wrong direction" was being scored as USER corrections
+                    # — inflating dysfunction and pushing sessions into the
+                    # `planning` failure class. Skip the correction regex
+                    # for entries that carry tool_result blocks; only real
+                    # user prompts feed correction detection.
+                    _content_for_role = msg.get("content") if isinstance(msg, dict) else entry.get("content")
+                    _blocks_for_role = _content_for_role if isinstance(_content_for_role, list) else []
+                    _is_tool_result_envelope = any(
+                        isinstance(b, dict) and b.get("type") == "tool_result"
+                        for b in _blocks_for_role
+                    )
+                    if text and not _is_tool_result_envelope and _CORRECTION_RX.search(text):
                         signals["user_corrections"].append(text.strip()[:200])
 
                 if role in ("assistant", "ai") and text and _APOLOGY_RX.search(text):
@@ -1882,26 +1897,43 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False,
                 print("[session-retro] stop-kl: dry-run — skipping snapshot/JSONL mutation", file=sys.stderr)
                 return
             record["kl_written"] = True
+            # Codex P2 2026-07-19 (Lead-Converter#250 line 1892): mirror the
+            # round-K persist-before-flush-event invariant on the DIRECT
+            # stop path. Previously a failed snap.write_text was only
+            # logged and we still appended the kl-flushed event, so a
+            # later kl-drain saw kl_written:false and retried the upload
+            # (duplicate). Only emit the completion event and the fact
+            # assertions when the snapshot commit is durable — otherwise
+            # log and let kl-drain retry after the lease TTL.
+            snap_committed = False
             try:
                 snap.write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+                snap_committed = True
             except Exception as e:
                 print(f"[session-retro] snap update: {type(e).__name__}", file=sys.stderr)
-            # Codex P2 2026-07-19: emit JSONL completion event for the direct-
-            # Stop KL path too — the kl-only path already does this, but
-            # append-only consumers must see BOTH paths' successful uploads.
-            _append_kl_flush_event(session_id or str(record.get("session_id") or ""), branch, dscore, fclass)
-            kl_assert_fact(
-                entity,
-                "session-retrospectives",
-                f"last_dysfunction_score.{safe_branch}",
-                str(dscore),
-            )
-            kl_assert_fact(
-                entity,
-                "session-retrospectives",
-                f"last_failure_class.{safe_branch}",
-                fclass,
-            )
+            if snap_committed:
+                # Codex P2 2026-07-19: emit JSONL completion event for the
+                # direct-Stop KL path too — the kl-only path already does
+                # this, but append-only consumers must see BOTH paths'
+                # successful uploads.
+                _append_kl_flush_event(session_id or str(record.get("session_id") or ""), branch, dscore, fclass)
+                kl_assert_fact(
+                    entity,
+                    "session-retrospectives",
+                    f"last_dysfunction_score.{safe_branch}",
+                    str(dscore),
+                )
+                kl_assert_fact(
+                    entity,
+                    "session-retrospectives",
+                    f"last_failure_class.{safe_branch}",
+                    fclass,
+                )
+            else:
+                print(
+                    "[session-retro] stop-kl: KL upload OK but snapshot commit failed — will retry after lease TTL",
+                    file=sys.stderr,
+                )
 
 
 def mode_inject() -> None:

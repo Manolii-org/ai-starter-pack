@@ -1052,6 +1052,41 @@ def test_retry_streak_survives_tool_result_envelope(project, tmp_path):
         f"got {sigs['tool_retries']}"
 
 
+def test_tool_result_envelope_does_not_score_user_correction(project, tmp_path):
+    """Codex P2 2026-07-19 (impaktful#1695 line 437): Claude tool_result
+    envelopes are role="user" but they are NOT user prompts — they carry
+    command/MCP output. If _CORRECTION_RX runs against their text, a
+    normal failed tool output containing phrases like `wrong file` or
+    `wrong direction` gets scored as a user correction (adds 2 dysfunction
+    points and can push the failure class to `planning`). Guard: entries
+    whose blocks are tool_result must be excluded from correction
+    detection. Only actual user prompts feed user_corrections."""
+    mod = _load_module(project)
+    logs = project / ".ai" / "session-logs"
+    log = logs / "session_tool_result_wrong_file.jsonl"
+    real_correction = {"message": {"role": "user", "content": "actually wrong file, use the other one"}}
+    tool_result_env = {
+        "message": {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "is_error": True, "content": "grep: /tmp/wrong file: No such file or directory"}
+            ],
+        }
+    }
+    entries = [real_correction, tool_result_env]
+    log.write_text("\n".join(json.dumps(e) for e in entries) + "\n")
+
+    sigs = mod.extract_signals(log)
+    assert len(sigs["user_corrections"]) == 1, (
+        f"tool_result envelope should not be scored as a user correction; "
+        f"got corrections={sigs['user_corrections']}"
+    )
+    assert "actually" in sigs["user_corrections"][0], (
+        f"the surviving correction should be the real user prompt, "
+        f"got {sigs['user_corrections'][0]!r}"
+    )
+
+
 def test_retry_streak_still_fires_for_true_consecutive_calls(project, tmp_path):
     """Sanity check the fix doesn't over-reset: three back-to-back identical
     tool_use calls in one assistant message DO cross the retry threshold."""
