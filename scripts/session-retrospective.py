@@ -50,6 +50,12 @@ STAGING_DIR = REPO_ROOT / ".ai" / "retrospective-staging"
 SESSION_LOGS_DIR = REPO_ROOT / ".ai" / "session-logs"
 RETROSPECTIVES_DIR = REPO_ROOT / ".ai" / "memory" / "retrospectives"
 RETRO_JSONL = RETROSPECTIVES_DIR / "session-retrospectives.jsonl"
+# Codex P2 2026-07-19 (Lead-Converter line 990): stale-claim lease. When a
+# background kl-only worker crashes between claim and confirmed upload, the
+# next worker must be able to reclaim the snapshot after this many seconds.
+# Set generously above the wrapper's 8s timeout so a slow-but-live network
+# call is never mistaken for a crashed worker.
+KL_CLAIM_TTL_SEC = 60.0
 MTIME_SENTINEL = RETROSPECTIVES_DIR / ".last-capture-mtime"
 _RETRO_LOCK = RETROSPECTIVES_DIR / ".retrospectives.lock"
 
@@ -528,9 +534,6 @@ def plain_text_note(branch: str, signals: dict, dscore: int, fclass: str, diff_s
 
 def _write_local_record(record: dict) -> Path:
     RETROSPECTIVES_DIR.mkdir(parents=True, exist_ok=True)
-    with _retro_lock():
-        with RETRO_JSONL.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
     safe_branch = str(record.get("branch", "unknown")).replace("/", "--").replace(" ", "--")
     ts = str(record.get("captured_at", _now_iso())).replace(":", "")
     # Codex P2: captured_at only carries second resolution, so two Stops on
@@ -545,36 +548,64 @@ def _write_local_record(record: dict) -> Path:
             import hashlib
             tag = "tx" + hashlib.sha256(str(tp).encode("utf-8")).hexdigest()[:8]
     base = f"{ts}-{safe_branch}-{tag}"
-    # Codex P2 2026-07-19: reserve the snapshot filename ATOMICALLY via
-    # os.open(O_CREAT|O_EXCL). A prior `exists()` + `write_text()` sequence
-    # would race with a concurrent Stop handler that observed the same base
-    # path as absent (or picked the same -NNN candidate) and both would
-    # write to the same file — the JSONL row survives but one snapshot
-    # gets clobbered. Loop across the counter until exclusive-create wins.
+    # Codex P2 2026-07-19 (line 533): write the two artefacts atomically
+    # relative to a caller-triggered retry. Order matters:
+    #   1) Reserve + write the snapshot FIRST via O_CREAT|O_EXCL.
+    #   2) Append the JSONL row SECOND.
+    # If step 1 fails (ENOSPC, permission), NOTHING has been persisted yet,
+    # so mode_stop() can safely release the mtime reservation and let the
+    # next Stop retry with a clean slate. If step 2 fails after step 1
+    # succeeded, unlink the just-written snapshot so we don't leak a
+    # narrative-less snapshot AND so the reservation rollback still leaves
+    # a consistent state. Previous ordering (JSONL then snapshot) leaked a
+    # duplicate JSONL row when the snapshot write failed.
     payload = (json.dumps(record, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
     counter = 0
+    snap: Optional[Path] = None
     while True:
-        snap = RETROSPECTIVES_DIR / (
+        candidate = RETROSPECTIVES_DIR / (
             f"{base}.json" if counter == 0 else f"{base}-{counter:03d}.json"
         )
         try:
-            fd = os.open(str(snap), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            fd = os.open(str(candidate), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
         except FileExistsError:
             counter += 1
             if counter > 9999:
                 # Extreme safety net: fall back to write_text so we never
                 # spin forever on a pathological filesystem state.
-                snap.write_text(payload.decode("utf-8"), encoding="utf-8")
-                return snap
+                candidate.write_text(payload.decode("utf-8"), encoding="utf-8")
+                snap = candidate
+                break
             continue
         try:
             with os.fdopen(fd, "wb") as fh:
                 fh.write(payload)
         except Exception:
-            # If the write fails mid-flight, leave the empty file behind
-            # rather than mask the error — same policy as the prior code.
+            # Snapshot write failed after exclusive-create: unlink so we
+            # don't leave an empty/partial file behind that a later scan
+            # would treat as a real (kl_written:false) capture.
+            try:
+                candidate.unlink()
+            except OSError:
+                pass
             raise
-        return snap
+        snap = candidate
+        break
+
+    # Snapshot is durable — now append the JSONL row. On failure, unlink
+    # the snapshot to keep the two artefacts consistent.
+    try:
+        with _retro_lock():
+            with RETRO_JSONL.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:
+        if snap is not None:
+            try:
+                snap.unlink()
+            except OSError:
+                pass
+        raise
+    return snap  # type: ignore[return-value]
 
 
 def _mcp_envelope_ok(body: bytes) -> bool:
@@ -938,15 +969,35 @@ def mode_kl_only(session_id: str = "") -> None:
     # capture, not the newest (which would drop the first flush's actual
     # target and re-upload the newer one twice).
     #
-    # Codex P2 2026-07-19 (line 994): ATOMIC CLAIM. Two concurrent kl-only
-    # workers for the same session_id would both scan and both pick the
-    # same oldest unflushed snapshot before either finished its network
-    # call, producing duplicate KL notes + fact writes. Perform the scan
-    # AND the kl_written=true claim under a single _retro_lock() so only
-    # one worker takes ownership of a given snapshot. If the subsequent
-    # network call fails, restore kl_written=false under the lock.
+    # Codex P2 2026-07-19 (line 994): ATOMIC CLAIM under a lock so two
+    # concurrent kl-only workers can't select the same oldest snapshot.
+    # Codex P2 2026-07-19 (Lead-Converter line 990): use a LEASE, not a
+    # premature kl_written flip. The claim marker is `kl_in_flight_at:
+    # <iso-ts>`; `kl_written` is only set AFTER the network confirms.
+    # A crash between claim and confirmation leaves a fresh lease behind;
+    # any worker that observes an expired lease (older than KL_CLAIM_TTL_SEC)
+    # may re-claim it. This eliminates the "stuck as delivered" state
+    # while preserving the atomic-claim guarantee.
     matched_snap: Optional[Path] = None
     saw_flushed_snap_for_session = False
+    now_iso = _now_iso()
+    try:
+        now_epoch = datetime.now(timezone.utc).timestamp()
+    except Exception:
+        now_epoch = 0.0
+
+    def _lease_fresh(cand: dict) -> bool:
+        raw = cand.get("kl_in_flight_at")
+        if not isinstance(raw, str) or not raw:
+            return False
+        try:
+            # _now_iso() emits 'YYYY-MM-DDTHH:MM:SSZ' — parse as UTC.
+            claimed = datetime.strptime(raw, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        except Exception:
+            return False
+        age = now_epoch - claimed.timestamp()
+        return age >= 0 and age < KL_CLAIM_TTL_SEC
+
     try:
         with _retro_lock():
             if RETROSPECTIVES_DIR.exists():
@@ -975,14 +1026,20 @@ def mode_kl_only(session_id: str = "") -> None:
                     # from a stale narrative row.
                     saw_flushed_snap_for_session = True
                     continue
-                # Claim it: flip kl_written=true BEFORE releasing the lock
-                # so a concurrent worker sees it as taken. Dry-run must NOT
-                # claim — it never uploads and would starve a real flush.
+                if _lease_fresh(candidate):
+                    # Another live worker is uploading this one — skip it.
+                    continue
+                # Dry-run must NOT persist a lease — it never uploads and
+                # would starve a real flush by holding the claim.
                 if os.environ.get("SESSION_RETRO_DRY_RUN"):
                     record = candidate
                     matched_snap = snap
                     break
-                candidate["kl_written"] = True
+                # Take the lease: durable in-progress marker, but NOT
+                # kl_written. If we crash before confirmation, the lease
+                # expires after KL_CLAIM_TTL_SEC and the next worker retries.
+                candidate["kl_in_flight_at"] = now_iso
+                candidate.pop("kl_written", None)  # defensive: never carry a stale True
                 try:
                     snap.write_text(
                         json.dumps(candidate, indent=2, ensure_ascii=False) + "\n",
@@ -991,8 +1048,6 @@ def mode_kl_only(session_id: str = "") -> None:
                 except Exception as e:  # noqa: BLE001
                     print(f"[session-retro] kl-only claim: {type(e).__name__}", file=sys.stderr)
                     continue
-                # Store the pre-claim view so rollback restores kl_written=False
-                # without clobbering any other fields written after we claimed.
                 record = candidate
                 matched_snap = snap
                 break
@@ -1003,8 +1058,13 @@ def mode_kl_only(session_id: str = "") -> None:
     # snapshot IS the flush, and re-scanning the append-only log would
     # re-select either the original narrative row or a kl-flushed event
     # and upload a duplicate note.
+    # CodeRabbit 2026-07-19 (line 1006-1031): when the snapshot has been
+    # pruned but a prior `kl-flushed` event exists in the JSONL for this
+    # session_id, treat that event as the delivered marker and skip the
+    # narrative row — otherwise each subsequent kl-only re-uploads it.
     if record is None and not saw_flushed_snap_for_session and RETRO_JSONL.exists():
         try:
+            seen_flushed_event = False
             for ln in reversed(RETRO_JSONL.read_text(encoding="utf-8").splitlines()):
                 ln = ln.strip()
                 if not ln:
@@ -1015,9 +1075,14 @@ def mode_kl_only(session_id: str = "") -> None:
                     continue
                 if not isinstance(candidate, dict):
                     continue
-                # Skip completion-event rows — they carry session_id but
-                # aren't retrospectives and would upload as a garbage note.
+                # Completion-event rows carry session_id but aren't
+                # retrospectives — never upload one AS a retrospective.
+                # When the event matches our session_id, record it: the
+                # narrative row it flushed lives earlier in the log
+                # (reverse scan → older).
                 if candidate.get("event") == "kl-flushed":
+                    if str(candidate.get("session_id") or "") == session_id:
+                        seen_flushed_event = True
                     continue
                 # Skip rows that have already been delivered — a Stop that
                 # succeeded, then a follow-up flush that hits the JSONL
@@ -1025,6 +1090,10 @@ def mode_kl_only(session_id: str = "") -> None:
                 if candidate.get("kl_written") is True:
                     continue
                 if str(candidate.get("session_id") or "") == session_id:
+                    if seen_flushed_event:
+                        # Already delivered — a later kl-flushed event in
+                        # the log confirms this row was uploaded.
+                        break
                     record = candidate
                     break
         except Exception as e:
@@ -1067,8 +1136,28 @@ def mode_kl_only(session_id: str = "") -> None:
             return
         kl_assert_fact(entity, "session-retrospectives", f"last_dysfunction_score.{safe_branch}", str(dscore))
         kl_assert_fact(entity, "session-retrospectives", f"last_failure_class.{safe_branch}", fclass)
-        # kl_written was already flipped to True under _retro_lock() at claim
-        # time (Codex P2 2026-07-19 line 994) — no post-write update needed.
+        # Codex P2 2026-07-19 (Lead-Converter line 990): NOW that the upload
+        # has confirmed, commit the delivered state — set kl_written=True and
+        # clear the in-flight lease. Doing this only after network confirms
+        # means a crash/SIGKILL during upload leaves a stale lease (recoverable
+        # after KL_CLAIM_TTL_SEC), not a permanent "delivered" flag on
+        # something that was never actually delivered.
+        if matched_snap is not None:
+            try:
+                with _retro_lock():
+                    try:
+                        current = json.loads(matched_snap.read_text(encoding="utf-8"))
+                    except Exception:
+                        current = None
+                    if isinstance(current, dict):
+                        current["kl_written"] = True
+                        current.pop("kl_in_flight_at", None)
+                        matched_snap.write_text(
+                            json.dumps(current, indent=2, ensure_ascii=False) + "\n",
+                            encoding="utf-8",
+                        )
+            except Exception as e:  # noqa: BLE001
+                print(f"[session-retro] kl-only commit: {type(e).__name__}", file=sys.stderr)
         # Codex P2 2026-07-19: also emit a JSONL completion event so
         # consumers of session-retrospectives.jsonl (append-only) can
         # observe the flush — the snapshot-only mutation above was
@@ -1076,11 +1165,12 @@ def mode_kl_only(session_id: str = "") -> None:
         _append_kl_flush_event(session_id or str(record.get("session_id") or ""), branch, dscore, fclass)
         print("[session-retro] kl-only: flushed", file=sys.stderr)
     else:
-        # Codex P2 2026-07-19 line 994: network call failed after we claimed
-        # the snapshot under the lock. Roll back kl_written=False so the
-        # next retry (or a sibling worker) can pick it up. Do NOT touch
-        # other fields — a concurrent Stop may have re-serialised the
-        # snapshot with updated data between claim and rollback.
+        # Codex P2 2026-07-19 line 994 / Lead-Converter line 990: network
+        # call failed after we took the lease. Clear kl_in_flight_at so the
+        # next retry (or a sibling worker after KL_CLAIM_TTL_SEC would have
+        # expired anyway) can pick it up immediately. Do NOT touch other
+        # fields — a concurrent Stop may have re-serialised the snapshot
+        # between claim and rollback.
         if matched_snap is not None and not os.environ.get("SESSION_RETRO_DRY_RUN"):
             try:
                 with _retro_lock():
@@ -1089,7 +1179,7 @@ def mode_kl_only(session_id: str = "") -> None:
                     except Exception:
                         current = None
                     if isinstance(current, dict):
-                        current["kl_written"] = False
+                        current.pop("kl_in_flight_at", None)
                         matched_snap.write_text(
                             json.dumps(current, indent=2, ensure_ascii=False) + "\n",
                             encoding="utf-8",

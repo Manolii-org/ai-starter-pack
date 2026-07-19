@@ -1145,10 +1145,11 @@ def test_kl_only_atomic_claim_prevents_duplicate_upload(project, monkeypatch):
     assert json.loads(snap.read_text())["kl_written"] is True
 
 
-def test_kl_only_rollback_restores_kl_written_on_failure(project, monkeypatch):
-    """Codex P2 2026-07-19 line 994: when the KL network call fails after
-    the atomic claim, kl_written must be rolled back to False so the next
-    retry (or a sibling worker) can pick the snapshot up."""
+def test_kl_only_rollback_clears_lease_on_failure(project, monkeypatch):
+    """Codex P2 2026-07-19 (Lead-Converter line 990): when the KL network
+    call fails after the lease claim, `kl_in_flight_at` must be cleared and
+    `kl_written` must NOT be True so the next retry (or a sibling worker)
+    can pick the snapshot up immediately."""
     monkeypatch.setenv("MCP_API_KEY", "k")
     monkeypatch.setenv("KL_MCP_URL", "https://kl.example.test/api/mcp")
     monkeypatch.setenv("KL_ENTITY", "acme")
@@ -1169,8 +1170,112 @@ def test_kl_only_rollback_restores_kl_written_on_failure(project, monkeypatch):
     monkeypatch.setattr(mod, "kl_assert_fact", lambda *a, **kw: True)
 
     mod.mode_kl_only(session_id="SID")
-    assert json.loads(snap.read_text())["kl_written"] is False, \
-        "network failure after claim must roll kl_written back to False"
+    after = json.loads(snap.read_text())
+    assert after.get("kl_written") is not True, \
+        "network failure must NOT leave kl_written=True (Codex Lead-Converter line 990)"
+    assert "kl_in_flight_at" not in after, \
+        "failure path must clear the in-flight lease so the next retry can claim"
+
+
+def test_kl_only_stale_lease_is_reclaimed_after_ttl(project, monkeypatch):
+    """Codex P2 2026-07-19 (Lead-Converter line 990): if a worker crashes
+    between claim and confirmation, the lease timestamp expires after
+    KL_CLAIM_TTL_SEC and a new worker can reclaim the snapshot. Otherwise
+    the retrospective would be stuck forever."""
+    monkeypatch.setenv("MCP_API_KEY", "k")
+    monkeypatch.setenv("KL_MCP_URL", "https://kl.example.test/api/mcp")
+    monkeypatch.setenv("KL_ENTITY", "acme")
+    mod = _load_module(project)
+
+    # Snapshot with a lease from FAR in the past → older than any sane TTL.
+    snap_dir = project / ".ai" / "memory" / "retrospectives"
+    snap = snap_dir / "20260719T000000Z-main-SID-stale.json"
+    snap.write_text(json.dumps({
+        "session_id": "SID",
+        "branch": "main",
+        "captured_at": "2026-07-19T00:00:00Z",
+        "dysfunction_score": 0.1,
+        "failure_class": "unclassified",
+        "kl_in_flight_at": "2000-01-01T00:00:00Z",  # ancient
+    }, indent=2))
+
+    uploads = []
+    monkeypatch.setattr(mod, "kl_create_note", lambda *a, **kw: uploads.append(kw) or True)
+    monkeypatch.setattr(mod, "kl_assert_fact", lambda *a, **kw: True)
+
+    mod.mode_kl_only(session_id="SID")
+    assert len(uploads) == 1, "stale lease must be reclaimable and uploaded"
+    after = json.loads(snap.read_text())
+    assert after.get("kl_written") is True
+    assert "kl_in_flight_at" not in after
+
+
+def test_kl_only_fresh_lease_blocks_concurrent_claim(project, monkeypatch):
+    """Codex P2 2026-07-19: a fresh lease (younger than KL_CLAIM_TTL_SEC)
+    must prevent a second worker from picking the same snapshot up. This
+    is the correctness half of the lease semantics — the atomic-claim
+    test covers the lock, this one covers the lease TTL."""
+    monkeypatch.setenv("MCP_API_KEY", "k")
+    monkeypatch.setenv("KL_MCP_URL", "https://kl.example.test/api/mcp")
+    monkeypatch.setenv("KL_ENTITY", "acme")
+    mod = _load_module(project)
+
+    snap_dir = project / ".ai" / "memory" / "retrospectives"
+    snap = snap_dir / "20260719T000000Z-main-SID-fresh-lease.json"
+    # Use *just now* — well within the 60s TTL.
+    from datetime import datetime as _dt, timezone as _tz
+    fresh_iso = _dt.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    snap.write_text(json.dumps({
+        "session_id": "SID",
+        "branch": "main",
+        "kl_in_flight_at": fresh_iso,
+    }, indent=2))
+
+    uploads = []
+    monkeypatch.setattr(mod, "kl_create_note", lambda *a, **kw: uploads.append(kw) or True)
+    monkeypatch.setattr(mod, "kl_assert_fact", lambda *a, **kw: True)
+
+    mod.mode_kl_only(session_id="SID")
+    assert uploads == [], "fresh lease must block a second concurrent claim"
+
+
+def test_kl_only_jsonl_fallback_treats_kl_flushed_event_as_delivered(project, monkeypatch):
+    """CodeRabbit 2026-07-19 (line 1006-1031): when the snapshot has been
+    pruned but the JSONL still contains both a narrative row AND a later
+    `kl-flushed` event for the same session_id, the fallback must treat
+    the event as a delivered marker and NOT re-upload the narrative row."""
+    monkeypatch.setenv("MCP_API_KEY", "k")
+    monkeypatch.setenv("KL_MCP_URL", "https://kl.example.test/api/mcp")
+    monkeypatch.setenv("KL_ENTITY", "acme")
+    mod = _load_module(project)
+
+    # No snapshots. JSONL has the narrative row FOLLOWED BY a kl-flushed event.
+    jsonl = project / ".ai" / "memory" / "retrospectives" / "session-retrospectives.jsonl"
+    jsonl.write_text(
+        json.dumps({
+            "session_id": "SID",
+            "branch": "main",
+            "captured_at": "2026-07-19T00:00:00Z",
+            "dysfunction_score": 0.1,
+            "failure_class": "unclassified",
+        }) + "\n"
+        + json.dumps({
+            "event": "kl-flushed",
+            "session_id": "SID",
+            "branch": "main",
+            "dysfunction_score": 0,
+            "failure_class": "unclassified",
+            "at": "2026-07-19T00:00:01Z",
+        }) + "\n"
+    )
+
+    uploads = []
+    monkeypatch.setattr(mod, "kl_create_note", lambda *a, **kw: uploads.append(kw) or True)
+    monkeypatch.setattr(mod, "kl_assert_fact", lambda *a, **kw: True)
+
+    mod.mode_kl_only(session_id="SID")
+    assert uploads == [], \
+        "kl-flushed event in JSONL must gate the narrative row from re-upload"
 
 
 def test_kl_only_does_not_fall_back_to_jsonl_when_snap_already_flushed(project, monkeypatch):
@@ -1257,3 +1362,40 @@ def test_latest_session_log_uses_mtime_not_lexical_sort(project, monkeypatch):
     picked = mod._latest_session_log()
     assert picked == newer, \
         f"must select newest by mtime; got {picked!r}, expected {newer!r}"
+
+
+def test_write_local_record_atomic_snapshot_failure_does_not_leak_jsonl(project, monkeypatch):
+    """Codex P2 2026-07-19 line 533: if snapshot write fails after JSONL
+    append, mode_stop() rolls back the mtime reservation and the next
+    Stop for the unchanged transcript would append a SECOND JSONL row
+    for the same capture. Fix: write snapshot FIRST, JSONL SECOND, so a
+    snapshot failure never leaks a narrative row into the JSONL."""
+    mod = _load_module(project)
+
+    # Force the exclusive snapshot open to fail. Path via os.open lets us
+    # simulate ENOSPC / EACCES cleanly with a monkeypatched raiser.
+    real_open = os.open
+    def boom_open(path, flags, *a, **kw):
+        # Fail only for retrospective JSON files, not for other opens the
+        # capture path may do (e.g. the lock file).
+        if str(path).endswith(".json") and ".retrospectives" not in str(path):
+            raise OSError("simulated ENOSPC")
+        return real_open(path, flags, *a, **kw)
+    monkeypatch.setattr(mod.os, "open", boom_open)
+
+    record = {
+        "session_id": "SID-atomic",
+        "branch": "main",
+        "captured_at": "2026-07-19T00:00:00Z",
+        "dysfunction_score": 0.1,
+        "failure_class": "unclassified",
+        "transcript": "/tmp/nope.jsonl",
+    }
+    with pytest.raises(OSError):
+        mod._write_local_record(record)
+
+    # The JSONL must NOT contain a leaked row, otherwise a retry would
+    # produce a duplicate on next Stop.
+    jsonl = project / ".ai" / "memory" / "retrospectives" / "session-retrospectives.jsonl"
+    assert not jsonl.exists() or jsonl.read_text() == "", \
+        f"snapshot failure must not leak a JSONL row: contents={jsonl.read_text() if jsonl.exists() else '<absent>'!r}"
