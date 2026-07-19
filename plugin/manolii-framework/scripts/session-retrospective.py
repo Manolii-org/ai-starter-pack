@@ -1266,6 +1266,13 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False,
     print(f"[session-retro] local record: {snap}", file=sys.stderr)
     # Sentinel already reserved at the top of mode_stop under the same lock;
     # no second write needed here (see Codex P2 2026-07-19 fix).
+    # BUT: force=True bypasses the reservation entirely, so a forced capture
+    # would leave no sentinel and the next ordinary Stop for an unchanged
+    # transcript would duplicate. Persist the mtime post-write in that case
+    # (Codex line-1088 2026-07-19). Skip in dry-run — no durable record was
+    # written and telemetry must not lie.
+    if (force or os.environ.get("SESSION_RETRO_FORCE")) and not dry_run and path:
+        _write_mtime_sentinel(path)
 
     # Drop only the staging artifacts we consumed for THIS session. Leaving
     # them behind would double-count their signals into any future Stop for a

@@ -1054,3 +1054,38 @@ def test_release_mtime_reservation_preserves_newer_entry(project, monkeypatch):
     assert str(log) in entries_after, \
         "A's rollback must not clobber B's newer reservation"
     assert float(entries_after[str(log)]["mtime"]) == 1_700_000_100.0
+
+
+def test_forced_capture_persists_mtime_sentinel(project, monkeypatch):
+    """Codex line-1088 2026-07-19: --force bypasses the pre-capture
+    reservation, but the sentinel must be recorded AFTER the successful
+    write so a subsequent ordinary Stop for the unchanged transcript
+    doesn't duplicate the retrospective."""
+    mod = _load_module(project)
+    logs = project / ".ai" / "session-logs"
+    log = logs / "session_force_persist.jsonl"
+    log.write_text("{}\n")
+    os.utime(log, (1_700_000_000, 1_700_000_000))
+
+    # Real Stop capture path with force=True.
+    mod.mode_stop("SID-force", local_only=True, force=True, transcript=str(log))
+
+    # A subsequent ordinary (non-force) Stop must find the transcript gated.
+    assert mod._try_reserve_mtime_gate(log) is False, \
+        "forced capture must persist the mtime sentinel so a follow-up Stop is gated"
+
+
+def test_forced_dry_run_still_does_not_persist_sentinel(project, monkeypatch):
+    """--force + --dry-run must not persist the sentinel (no durable record
+    was written and telemetry must not lie)."""
+    monkeypatch.setenv("SESSION_RETRO_DRY_RUN", "1")
+    mod = _load_module(project)
+    logs = project / ".ai" / "session-logs"
+    log = logs / "session_force_dryrun.jsonl"
+    log.write_text("{}\n")
+    os.utime(log, (1_700_000_000, 1_700_000_000))
+
+    mod.mode_stop("SID-force-dry", local_only=True, force=True, transcript=str(log))
+    monkeypatch.delenv("SESSION_RETRO_DRY_RUN", raising=False)
+    # No sentinel written → next Stop can reserve.
+    assert mod._try_reserve_mtime_gate(log) is True
