@@ -56,8 +56,19 @@ if [[ -L "$CLAUDE_MEM" ]]; then
     # blindly replacing the symlink would orphan whatever memory lives
     # there (e.g. .claude/memory -> ../old-memory with fact.jsonl inside).
     # Refuse the automatic heal and let the operator merge the tree.
-    if [[ -e "$actual" && -d "$actual" ]]; then
-        if [[ -n "$(ls -A "$actual" 2>/dev/null)" ]]; then
+    # Codex P2 2026-07-19 (Lead-Converter#250 line 59): the earlier guard
+    # ONLY handled directory targets. A symlink to an unrelated regular
+    # file (e.g. .claude/memory -> /shared/legacy-facts.jsonl) fell
+    # through to `ln -sfn` and silently orphaned that file for existing
+    # consumers. Reject any non-canonical existing target — regular file
+    # OR non-empty directory — before healing the link.
+    if [[ -e "$actual" ]]; then
+        if [[ -f "$actual" ]]; then
+            echo "ERROR: refusing to heal $CLAUDE_MEM — its current target $actual is a regular file" >&2
+            echo "       Move the file into $AI_MEM manually (or delete it) and rerun." >&2
+            exit 1
+        fi
+        if [[ -d "$actual" && -n "$(ls -A "$actual" 2>/dev/null)" ]]; then
             echo "ERROR: refusing to heal $CLAUDE_MEM — its current target $actual is non-empty" >&2
             echo "       Move the contents into $AI_MEM manually (or delete them) and rerun." >&2
             exit 1

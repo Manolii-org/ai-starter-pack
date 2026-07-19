@@ -927,6 +927,65 @@ def _mtime_gate_hit(path: Optional[Path], force: bool = False) -> bool:
     return False
 
 
+def _release_mtime_reservation_signal_safe(path: Optional[Path], reserved_mtime: Optional[float] = None) -> None:
+    """Codex P2 2026-07-19 (ai-starter-pack#32 line 1604): the ordinary
+    _release_mtime_reservation acquires _retro_lock, which is a blocking
+    fcntl.flock(LOCK_EX). When the mode_stop SIGTERM handler fires while
+    the main thread already holds that lock (typically mid-JSONL-append
+    inside _write_local_record), a second LOCK_EX from the signal handler
+    deadlocks — Linux flock locks conflict even within one process across
+    independent open file descriptions. `timeout 8s` sends TERM but no
+    KILL, so the handler hangs indefinitely and the wrapper blows past
+    its budget without ever writing the failure marker.
+
+    This variant tries a NON-blocking flock. If it fails, we know we (or
+    a peer) already hold the lock — skip the flock and edit the sentinel
+    map anyway. The main-thread signal handler runs while our own lock is
+    held, so the write is still exclusive. In the rare cross-process
+    contention case we accept a best-effort race: leaving a stale
+    reservation behind is a smaller regression than deadlocking past the
+    Stop budget."""
+    if path is None:
+        return
+    try:
+        import fcntl  # POSIX-only.
+        RETROSPECTIVES_DIR.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(_RETRO_LOCK), os.O_CREAT | os.O_RDWR, 0o600)
+        got_lock = False
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                got_lock = True
+            except OSError:
+                got_lock = False  # already held (by us or a peer) — proceed unlocked
+            entries = _load_mtime_sentinel_map()
+            prev = entries.get(str(path))
+            if prev is None:
+                return
+            if reserved_mtime is not None:
+                try:
+                    if float(prev.get("mtime", -1)) != float(reserved_mtime):
+                        return
+                except (TypeError, ValueError):
+                    return
+            entries.pop(str(path), None)
+            tmp = MTIME_SENTINEL.with_suffix(MTIME_SENTINEL.suffix + ".tmp")
+            tmp.write_text(json.dumps({"entries": entries}), encoding="utf-8")
+            os.replace(tmp, MTIME_SENTINEL)
+        finally:
+            if got_lock:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+    except Exception as e:  # noqa: BLE001
+        print(f"[session-retro] mtime-release-signal: {type(e).__name__}", file=sys.stderr)
+
+
 def _release_mtime_reservation(path: Optional[Path], reserved_mtime: Optional[float] = None) -> None:
     """Codex P2 2026-07-19: if capture fails AFTER _try_reserve_mtime_gate
     recorded the mtime, subsequent Stops for the same unchanged transcript
@@ -1601,7 +1660,13 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False,
                 except Exception:  # noqa: BLE001
                     pass
                 try:
-                    _release_mtime_reservation(path, reserved_mtime=reserved_gate_mtime)
+                    # Codex P2 2026-07-19 (ai-starter-pack#32 line 1604):
+                    # use the signal-safe (non-blocking flock) variant so
+                    # this handler can't deadlock when the main thread is
+                    # already holding _retro_lock during a JSONL append.
+                    _release_mtime_reservation_signal_safe(
+                        path, reserved_mtime=reserved_gate_mtime
+                    )
                 except Exception:  # noqa: BLE001
                     pass
             # 128 + SIGTERM(15) = 143, mirroring shell convention.
