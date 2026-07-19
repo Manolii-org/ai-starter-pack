@@ -48,15 +48,34 @@ if command -v timeout >/dev/null 2>&1; then
     timeout 8s python3 "$_RETRO" "${_ARGS[@]}" >/dev/null 2>&1 || rc=$?
 else
     # Portable fallback for images without coreutils `timeout` (macOS default,
-    # some minimal Alpine): use Python's subprocess.run(timeout=…) so Stop
-    # is still bounded. rc=124 mirrors coreutils' timeout convention.
+    # some minimal Alpine): use Python's Popen + wait(timeout) so Stop is
+    # still bounded. rc=124 mirrors coreutils' timeout convention.
+    #
+    # Codex P2 2026-07-19 (Lead-Converter#250 line 57): DO NOT use
+    # subprocess.run(..., timeout=8) — its timeout path calls
+    # process.kill() (SIGKILL), which bypasses mode_stop()'s SIGTERM
+    # handler. The handler is what rolls back a durable mtime
+    # reservation on hang, so SIGKILL leaves the reservation in place
+    # and the next Stop for the unchanged transcript is silently gated
+    # out — the retrospective is permanently lost. Send SIGTERM first
+    # (mirrors coreutils `timeout` default), give the handler a short
+    # grace window, then escalate to SIGKILL.
     python3 - "$_RETRO" "${_ARGS[@]}" <<'PY' >/dev/null 2>&1 || rc=$?
-import sys, subprocess
+import subprocess, sys
 retro, *args = sys.argv[1:]
+p = subprocess.Popen(["python3", retro, *args])
 try:
-    r = subprocess.run(["python3", retro, *args], timeout=8)
-    sys.exit(r.returncode)
+    sys.exit(p.wait(timeout=8))
 except subprocess.TimeoutExpired:
+    p.terminate()  # SIGTERM — mode_stop handler releases reservation
+    try:
+        p.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        p.kill()   # escalation
+        try:
+            p.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
     sys.exit(124)
 PY
 fi

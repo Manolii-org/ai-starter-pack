@@ -665,6 +665,19 @@ def _write_local_record(record: dict) -> Path:
         )
         try:
             fd = os.open(str(candidate), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            # Codex P2 2026-07-19 (Lead-Converter#250 line 703): publish
+            # the in-flight snapshot IMMEDIATELY on exclusive-create
+            # success, BEFORE writing the payload. Between os.open()
+            # returning and the earlier post-write assignment there was
+            # a window in which the file existed on disk (possibly
+            # zero-byte) but the SIGTERM handler saw _INFLIGHT_SNAP=None
+            # and only released the mtime reservation — leaving an
+            # orphaned `kl_written:false` snapshot that a later scan
+            # could pick up for a duplicate flush, and freeing the gate
+            # so the next Stop for the unchanged transcript captured a
+            # duplicate too. Publishing here shrinks the window to the
+            # single os.open() call itself, which is atomic.
+            _INFLIGHT_SNAP = candidate
             break
         except FileExistsError:
             counter += 1
@@ -672,6 +685,8 @@ def _write_local_record(record: dict) -> Path:
                 # Extreme safety net: fall back to write_text so we never
                 # spin forever on a pathological filesystem state.
                 record["capture_id"] = candidate.stem
+                # Publish before write for the same reason as above.
+                _INFLIGHT_SNAP = candidate
                 candidate.write_text(
                     json.dumps(record, indent=2, ensure_ascii=False) + "\n",
                     encoding="utf-8",
@@ -694,13 +709,12 @@ def _write_local_record(record: dict) -> Path:
                 candidate.unlink()
             except OSError:
                 pass
+            # Clear the published in-flight target too — no on-disk file
+            # remains, and a later SIGTERM must not try to unlink it a
+            # second time.
+            _INFLIGHT_SNAP = None
             raise
         snap = candidate
-    # Codex P2 2026-07-19 (Lead-Converter#250 line 1512): publish the
-    # in-flight snapshot path so the mode_stop SIGTERM handler can
-    # unlink it if the wrapper's 8s timeout fires before the JSONL
-    # append commits. Cleared to None on successful record commit.
-    _INFLIGHT_SNAP = snap
 
     # Snapshot is durable — now append the JSONL row. On failure, unlink
     # the snapshot to keep the two artefacts consistent.
@@ -1172,6 +1186,33 @@ def _write_mtime_sentinel(path: Optional[Path]) -> None:
         print(f"[session-retro] mtime sentinel: {type(e).__name__}", file=sys.stderr)
 
 
+_SNAP_COUNTER_RX = re.compile(r"^(?P<base>.+)-(?P<ctr>\d{3})$")
+
+
+def _snap_order_key(p: Path) -> tuple:
+    """Immutable per-capture ordering key.
+
+    Codex P2 2026-07-19 (manolii-platform#430 line 1286): the previous sort
+    used ``p.stat().st_mtime_ns``. When a worker took the ``kl_in_flight_at``
+    lease on an older snapshot, that write bumped its mtime, so a peer sort
+    put the NEWER pending snapshot first and uploaded it out of order —
+    breaking the FIFO invariant that keyed the ``last_dysfunction_score.*``
+    fact chain to the most-recent Stop's numbers. The filename is stable
+    across all mutations (exclusive-create is the only writer of the name)
+    and encodes ``<UTC ts>-<safe_branch>-<tag>[-NNN]``, where the counter
+    suffix is only added by ``_write_local_record`` for same-second
+    collisions and grows monotonically. Sort by ``(base_stem, counter)``
+    with counter=0 for the un-suffixed member so ``<base>.json`` correctly
+    precedes ``<base>-001.json`` — the reverse of a plain lexical sort,
+    which would swap them because ``-`` (0x2d) sorts before ``.`` (0x2e).
+    """
+    stem = p.stem
+    m = _SNAP_COUNTER_RX.match(stem)
+    if m:
+        return (m.group("base"), int(m.group("ctr")))
+    return (stem, 0)
+
+
 def _append_kl_flush_event(
     session_id: str,
     branch: str,
@@ -1280,10 +1321,16 @@ def mode_kl_only(session_id: str = "") -> None:
     try:
         with _retro_lock():
             if RETROSPECTIVES_DIR.exists():
+                # Codex P2 2026-07-19 (manolii-platform#430 line 1286): sort
+                # by an IMMUTABLE filename-derived key. Lease writes on an
+                # older snapshot bump its mtime, which under the old mtime
+                # sort put the NEWER pending snapshot first and let a peer
+                # worker upload B before A finished — an out-of-order flush
+                # that poisoned last_dysfunction_score.* facts.
                 snaps = sorted(
                     RETROSPECTIVES_DIR.glob("*-*.json"),
-                    key=lambda p: (p.stat().st_mtime_ns, p.name),
-                )  # oldest first
+                    key=_snap_order_key,
+                )  # oldest first (capture creation order, not mtime)
             else:
                 snaps = []
             for snap in snaps:
@@ -1639,9 +1686,14 @@ def mode_kl_drain(max_sessions: int = 10) -> None:
     seen_sids: set[str] = set()
     try:
         # Oldest first — process the queue head first.
+        # Codex P2 2026-07-19 (manolii-platform#430 line 1286): use the
+        # immutable filename-derived order key here too. A concurrent
+        # kl-only worker's lease-writes rewrite mtime on the in-flight
+        # snapshot, and mtime-sort would then let the drain skip past the
+        # true head of the queue.
         snaps = sorted(
             RETROSPECTIVES_DIR.glob("*-*.json"),
-            key=lambda p: (p.stat().st_mtime_ns, p.name),
+            key=_snap_order_key,
         )
     except OSError:
         return

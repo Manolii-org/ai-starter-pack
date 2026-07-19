@@ -1770,3 +1770,27 @@ def test_kl_only_jsonl_fallback_uploads_second_capture_after_first_flushed(
     assert "captureB" in uploads[0].get("idempotency_key", ""), (
         f"expected captureB in idempotency_key; got {uploads[0]}"
     )
+
+
+def test_snap_order_key_puts_counter_after_zero(project):
+    """Codex P2 2026-07-19 (manolii-platform#430 line 1286): the immutable
+    filename-derived sort key must place <base>.json BEFORE <base>-001.json
+    even though lexical sort on the raw name puts -001 first (since `-` <
+    `.`). And a lease-write on the older snapshot (bumping its mtime) must
+    NOT change the order — that was the whole point of dropping mtime."""
+    mod = _load_module(project)
+
+    from pathlib import Path
+    base = Path("20260719T000000Z-main-SIDcap")
+    p_zero = Path(str(base) + ".json")
+    p_one = Path(str(base) + "-001.json")
+    p_two = Path(str(base) + "-002.json")
+
+    ordered = sorted([p_one, p_two, p_zero], key=mod._snap_order_key)
+    # counter=0 first, then 001, then 002 — chronological creation order.
+    assert [p.name for p in ordered] == [p_zero.name, p_one.name, p_two.name]
+
+    # Different bases must not interleave counters.
+    other = Path("20260719T000001Z-main-SIDcap-001.json")
+    ordered2 = sorted([other, p_zero], key=mod._snap_order_key)
+    assert ordered2 == [p_zero, other]
