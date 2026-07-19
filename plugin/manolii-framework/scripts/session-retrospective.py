@@ -70,6 +70,15 @@ _RETRO_LOCK = RETROSPECTIVES_DIR / ".retrospectives.lock"
 # bytes before it exits. Both fields reset to None on successful commit.
 _INFLIGHT_SNAP: Optional[Path] = None
 _INFLIGHT_JSONL_PRESIZE: Optional[int] = None
+# Codex P2 2026-07-19 (Lead-Converter#250 line 1850): the previous scheme
+# flipped `_stop_committed[0]=True` inside mode_stop() only AFTER
+# _write_local_record returned. A SIGTERM that landed between the durable
+# snapshot+JSONL commit and that assignment still saw False, so the handler
+# released the mtime reservation and a subsequent Stop for the unchanged
+# transcript would capture a duplicate retrospective. Publish the committed
+# state at module scope INSIDE _write_local_record so the signal handler
+# observes atomicity with the local-record commit.
+_LOCAL_RECORD_COMMITTED = False
 
 
 def _cleanup_inflight_local_record() -> None:
@@ -431,13 +440,16 @@ def extract_signals(path: Optional[Path]) -> dict:
 
                 if role in ("user", "human"):
                     # Codex P2 2026-07-19 (impaktful#1695 line 433 + 437):
-                    # Claude tool_result envelopes are also role="user".
+                    # Claude tool_result envelopes are also role="user"
+                    # (as modeled by
+                    # test_retry_streak_survives_tool_result_envelope).
                     # They are NOT user prompts — treating them as user
-                    # turns both inflated `total_turns` and scored
-                    # command/MCP output like "wrong file" as user
-                    # corrections. Detect the envelope BEFORE
-                    # incrementing anything and skip the entire user-turn
-                    # block if it's a tool_result.
+                    # turns both inflated `total_turns` (line 433) and
+                    # scored command/MCP output like "wrong file" as user
+                    # corrections (line 437, pushed dysfunction +2 and
+                    # misclassified as `planning`). Detect the envelope
+                    # BEFORE incrementing anything and skip the entire
+                    # user-turn block if it's a tool_result.
                     _content_for_role = msg.get("content") if isinstance(msg, dict) else entry.get("content")
                     _blocks_for_role = _content_for_role if isinstance(_content_for_role, list) else []
                     _is_tool_result_envelope = any(
@@ -603,7 +615,12 @@ def plain_text_note(branch: str, signals: dict, dscore: int, fclass: str, diff_s
 
 
 def _write_local_record(record: dict) -> Path:
-    global _INFLIGHT_SNAP, _INFLIGHT_JSONL_PRESIZE
+    global _INFLIGHT_SNAP, _INFLIGHT_JSONL_PRESIZE, _LOCAL_RECORD_COMMITTED
+    # Codex P2 2026-07-19 (Lead-Converter#250 line 1850): reset the committed
+    # flag at entry so a prior in-process capture's state can't shadow a fresh
+    # signal-handler decision. The flag flips True at the tail-end, after
+    # snapshot+JSONL both durable.
+    _LOCAL_RECORD_COMMITTED = False
     RETROSPECTIVES_DIR.mkdir(parents=True, exist_ok=True)
     safe_branch = str(record.get("branch", "unknown")).replace("/", "--").replace(" ", "--")
     ts = str(record.get("captured_at", _now_iso())).replace(":", "")
@@ -630,24 +647,42 @@ def _write_local_record(record: dict) -> Path:
     # narrative-less snapshot AND so the reservation rollback still leaves
     # a consistent state. Previous ordering (JSONL then snapshot) leaked a
     # duplicate JSONL row when the snapshot write failed.
-    payload = (json.dumps(record, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+    # Codex P2 2026-07-19 (manolii-platform#430 line 1308): stamp a stable
+    # capture_id into the record BEFORE writing snapshot/JSONL. The id is
+    # the snapshot's filename stem — unique per capture attempt across
+    # retries, propagated into the JSONL narrative row AND into any later
+    # kl-flushed completion event. The JSONL fallback scan can then key
+    # completion per capture, so a session's earlier flush no longer gates
+    # a later still-pending capture (A, B, then A-flushed → B stays
+    # visible).
     counter = 0
     snap: Optional[Path] = None
+    fd = None
+    candidate: Optional[Path] = None
     while True:
         candidate = RETROSPECTIVES_DIR / (
             f"{base}.json" if counter == 0 else f"{base}-{counter:03d}.json"
         )
         try:
             fd = os.open(str(candidate), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            break
         except FileExistsError:
             counter += 1
             if counter > 9999:
                 # Extreme safety net: fall back to write_text so we never
                 # spin forever on a pathological filesystem state.
-                candidate.write_text(payload.decode("utf-8"), encoding="utf-8")
+                record["capture_id"] = candidate.stem
+                candidate.write_text(
+                    json.dumps(record, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
                 snap = candidate
+                fd = None
                 break
             continue
+    if fd is not None and candidate is not None:
+        record["capture_id"] = candidate.stem
+        payload = (json.dumps(record, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
         try:
             with os.fdopen(fd, "wb") as fh:
                 fh.write(payload)
@@ -661,12 +696,11 @@ def _write_local_record(record: dict) -> Path:
                 pass
             raise
         snap = candidate
-        # Codex P2 2026-07-19 (Lead-Converter#250 line 1512): publish the
-        # in-flight snapshot path so the mode_stop SIGTERM handler can
-        # unlink it if the wrapper's 8s timeout fires before the JSONL
-        # append commits. Cleared to None on successful record commit.
-        _INFLIGHT_SNAP = candidate
-        break
+    # Codex P2 2026-07-19 (Lead-Converter#250 line 1512): publish the
+    # in-flight snapshot path so the mode_stop SIGTERM handler can
+    # unlink it if the wrapper's 8s timeout fires before the JSONL
+    # append commits. Cleared to None on successful record commit.
+    _INFLIGHT_SNAP = snap
 
     # Snapshot is durable — now append the JSONL row. On failure, unlink
     # the snapshot to keep the two artefacts consistent.
@@ -684,31 +718,69 @@ def _write_local_record(record: dict) -> Path:
             except FileNotFoundError:
                 pre_size = 0
             # Publish the pre-append offset so the SIGTERM handler in
-            # mode_stop can truncate a partial write back to it.
+            # mode_stop can truncate a partial write back to it. Set BEFORE
+            # opening the file so an early crash still has a safe target.
             _INFLIGHT_JSONL_PRESIZE = pre_size
-            with RETRO_JSONL.open("a", encoding="utf-8") as fh:
+            # Codex P2 2026-07-19 (ai-starter-pack#32 line 95): use an
+            # unbuffered os.open+os.write pair instead of a TextIOWrapper.
+            # The previous "a"-mode wrapper buffered the row in Python; a
+            # SIGTERM racing between fh.write() and fh.flush() ran the
+            # signal handler's ftruncate() via a second fd BEFORE the
+            # SystemExit unwind flushed the buffered bytes. That unwind
+            # then re-flushed the buffer AFTER the truncate, reintroducing
+            # an orphaned/duplicate line even though the snapshot was
+            # unlinked and the mtime reservation released. Bytes-mode +
+            # buffering=0 removes the Python buffer entirely, so the
+            # ftruncate is durable across the exit.
+            line_bytes = (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8")
+            append_fd = os.open(
+                str(RETRO_JSONL),
+                os.O_WRONLY | os.O_APPEND | os.O_CREAT,
+                0o644,
+            )
+            try:
                 try:
-                    fh.write(json.dumps(record, ensure_ascii=False) + "\n")
-                    fh.flush()
+                    written = 0
+                    while written < len(line_bytes):
+                        n = os.write(append_fd, line_bytes[written:])
+                        if n <= 0:
+                            raise OSError("short write on retrospectives JSONL")
+                        written += n
                 except Exception:
                     # Roll the append back to the pre-write offset so a
                     # later capture cannot fuse onto a half-written line.
                     try:
-                        os.ftruncate(fh.fileno(), pre_size)
+                        os.ftruncate(append_fd, pre_size)
                     except OSError:
                         pass
                     raise
+            finally:
+                try:
+                    os.close(append_fd)
+                except OSError:
+                    pass
     except Exception:
         if snap is not None:
             try:
                 snap.unlink()
             except OSError:
                 pass
+        # Clear in-flight state so a subsequent Stop's SIGTERM handler
+        # does not target a stale path/offset.
         _INFLIGHT_SNAP = None
         _INFLIGHT_JSONL_PRESIZE = None
         raise
+    # Codex P2 2026-07-19 (Lead-Converter#250 line 1850): flip the module-level
+    # committed flag BEFORE clearing inflight state, so the SIGTERM handler in
+    # mode_stop sees "durable, do not roll back" atomically with the JSONL
+    # append that just returned. Previously the flag lived on the mode_stop
+    # local (_stop_committed[0]) and was only set AFTER this function
+    # returned — a race window that allowed the handler to release the mtime
+    # reservation on a durably-committed record and duplicate on the next Stop.
+    _LOCAL_RECORD_COMMITTED = True
     # Commit: local record is durable. Clear in-flight state so the SIGTERM
-    # handler will no longer roll back this snapshot.
+    # handler will no longer roll back this snapshot even if it fires later
+    # in mode_stop (staging cleanup, KL flush, etc).
     _INFLIGHT_SNAP = None
     _INFLIGHT_JSONL_PRESIZE = None
     return snap  # type: ignore[return-value]
@@ -1100,11 +1172,24 @@ def _write_mtime_sentinel(path: Optional[Path]) -> None:
         print(f"[session-retro] mtime sentinel: {type(e).__name__}", file=sys.stderr)
 
 
-def _append_kl_flush_event(session_id: str, branch: str, dscore: float, fclass: str) -> None:
+def _append_kl_flush_event(
+    session_id: str,
+    branch: str,
+    dscore: float,
+    fclass: str,
+    capture_id: str = "",
+) -> None:
     """Codex P2 2026-07-19: after a successful KL upload, append a completion
     event to the append-only JSONL so downstream consumers of
     session-retrospectives.jsonl see the flush, not just the initial
     kl_written=false record. Snapshot-only mutation was invisible to them.
+
+    Codex P2 2026-07-19 (manolii-platform#430 line 1308): the event now carries
+    the delivered capture's ``capture_id`` when present. The JSONL fallback
+    reverse-scan keys per-capture: a completion event marks ONLY the matching
+    capture as delivered, so a later still-pending capture in the same session
+    is no longer suppressed by an earlier flush event. Legacy events without
+    capture_id fall back to session-wide semantics for backwards compat.
     """
     RETROSPECTIVES_DIR.mkdir(parents=True, exist_ok=True)
     event = {
@@ -1115,6 +1200,8 @@ def _append_kl_flush_event(session_id: str, branch: str, dscore: float, fclass: 
         "failure_class": fclass,
         "at": _now_iso(),
     }
+    if capture_id:
+        event["capture_id"] = capture_id
     try:
         with _retro_lock():
             with RETRO_JSONL.open("a", encoding="utf-8") as fh:
@@ -1276,7 +1363,17 @@ def mode_kl_only(session_id: str = "") -> None:
         and RETRO_JSONL.exists()
     ):
         try:
-            seen_flushed_event = False
+            # Codex P2 2026-07-19 (manolii-platform#430 line 1308): key
+            # completion by capture identity, not session-wide. Under the old
+            # scheme the JSONL sequence [A(narrative), B(narrative),
+            # A-flushed] made the reverse scan see A-flushed first, set a
+            # session-wide "delivered" flag, then break on B — so B never
+            # uploaded even though only A had been delivered. Track the set
+            # of delivered capture_ids for this session and skip only their
+            # exact narrative rows. Legacy rows without capture_id retain
+            # the older session-wide semantics for backwards compat.
+            seen_flushed_capture_ids: set[str] = set()
+            seen_flushed_session_wide = False
             for ln in reversed(RETRO_JSONL.read_text(encoding="utf-8").splitlines()):
                 ln = ln.strip()
                 if not ln:
@@ -1289,12 +1386,15 @@ def mode_kl_only(session_id: str = "") -> None:
                     continue
                 # Completion-event rows carry session_id but aren't
                 # retrospectives — never upload one AS a retrospective.
-                # When the event matches our session_id, record it: the
-                # narrative row it flushed lives earlier in the log
-                # (reverse scan → older).
+                # When the event matches our session_id, record its
+                # capture_id (or fall back to session-wide when legacy).
                 if candidate.get("event") == "kl-flushed":
                     if str(candidate.get("session_id") or "") == session_id:
-                        seen_flushed_event = True
+                        cid = str(candidate.get("capture_id") or "")
+                        if cid:
+                            seen_flushed_capture_ids.add(cid)
+                        else:
+                            seen_flushed_session_wide = True
                     continue
                 # Skip rows that have already been delivered — a Stop that
                 # succeeded, then a follow-up flush that hits the JSONL
@@ -1302,9 +1402,14 @@ def mode_kl_only(session_id: str = "") -> None:
                 if candidate.get("kl_written") is True:
                     continue
                 if str(candidate.get("session_id") or "") == session_id:
-                    if seen_flushed_event:
-                        # Already delivered — a later kl-flushed event in
-                        # the log confirms this row was uploaded.
+                    cid = str(candidate.get("capture_id") or "")
+                    # This exact capture is already delivered — keep
+                    # scanning for an older still-pending row.
+                    if cid and cid in seen_flushed_capture_ids:
+                        continue
+                    # Legacy row + any legacy completion event for this
+                    # session — treat as delivered (behaviour parity).
+                    if not cid and seen_flushed_session_wide:
                         break
                     record = candidate
                     break
@@ -1341,17 +1446,26 @@ def mode_kl_only(session_id: str = "") -> None:
     if matched_snap is not None:
         idem_key = matched_snap.name
     else:
-        idem_key = "jsonl:{sid}:{ts}:{br}".format(
+        # Codex P2 2026-07-19 (manolii-platform#430 line 1308): include the
+        # capture_id when the record carries one so two captures for the
+        # same session (A then B) produce distinct idempotency keys — else
+        # upstream dedupe would collapse them into a single delivered note
+        # when timestamps happen to align at second resolution.
+        cid = str(record.get("capture_id") or "")
+        idem_key = "jsonl:{sid}:{ts}:{br}:{cid}".format(
             sid=(record.get("session_id") or session_id or ""),
             ts=(record.get("captured_at") or ""),
             br=(record.get("branch") or branch or ""),
+            cid=cid,
         )
     # Codex P1 2026-07-19 (manolii-platform#430 line 1002): the snapshot
-    # carries the entity it was captured under. If KL_ENTITY is retargeted
-    # between capture and this flush, resolving the CURRENT entity would
-    # deliver the retrospective to the wrong tenant — a cross-entity leak.
-    # Prefer the captured entity; fall back to the freshly resolved one
-    # only for legacy snapshots written before this field existed.
+    # carries the entity it was captured under (mode_stop persists it).
+    # If the operator retargets KL_ENTITY between capture and this flush
+    # (or a per-entity config swap runs), resolving the CURRENT entity
+    # would deliver a manolii session's retrospective to impaktful (or
+    # vice versa) — a cross-entity data leak. Prefer the captured entity;
+    # fall back to the freshly resolved one only for legacy snapshots
+    # written before this field existed.
     captured_entity = record.get("entity") if isinstance(record.get("entity"), str) and record.get("entity") else None
     snap_entity = captured_entity or entity
     # Codex P2 2026-07-19 (manolii-platform#430 line 1056): if both the
@@ -1434,7 +1548,13 @@ def mode_kl_only(session_id: str = "") -> None:
         # durable — otherwise the event would lie about a delivery whose
         # snapshot still says "pending".
         if commit_ok:
-            _append_kl_flush_event(session_id or str(record.get("session_id") or ""), branch, dscore, fclass)
+            _append_kl_flush_event(
+                session_id or str(record.get("session_id") or ""),
+                branch,
+                dscore,
+                fclass,
+                capture_id=str(record.get("capture_id") or ""),
+            )
             print("[session-retro] kl-only: flushed", file=sys.stderr)
         else:
             print(
@@ -1662,14 +1782,19 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False,
     _prev_sigterm = None
     if path is not None and reserved_gate_mtime is not None and not (force or dry_run):
         def _release_and_exit(signum, frame):  # noqa: ARG001
-            if not _stop_committed[0]:
+            # Codex P2 2026-07-19 (Lead-Converter#250 line 1850): also honour
+            # the module-level committed flag. _write_local_record flips it
+            # True atomically with the durable snapshot+JSONL commit — before
+            # this outer local (_stop_committed[0]) can be set — so a SIGTERM
+            # in that narrow window must NOT roll back the mtime reservation.
+            if not _stop_committed[0] and not _LOCAL_RECORD_COMMITTED:
                 # Codex P2 2026-07-19 (Lead-Converter#250 line 1512): if
-                # _write_local_record was mid-flight, unlink the orphan
-                # snapshot and truncate partial JSONL back to its
-                # pre-write offset — SystemExit would otherwise skip the
-                # try/except cleanup and leave a kl_written:false snapshot
-                # plus a truncated JSONL row that the next Stop would
-                # duplicate on top of.
+                # _write_local_record was mid-flight (snapshot exclusively
+                # created but JSONL not yet appended), unlink the orphan
+                # snapshot and truncate any partial JSONL bytes back to
+                # their pre-write offset. Without this, the next Stop
+                # would recapture the same transcript and both snapshots
+                # could be selected for KL flushing.
                 try:
                     _cleanup_inflight_local_record()
                 except Exception:  # noqa: BLE001
@@ -1916,7 +2041,13 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False,
                 # direct-Stop KL path too — the kl-only path already does
                 # this, but append-only consumers must see BOTH paths'
                 # successful uploads.
-                _append_kl_flush_event(session_id or str(record.get("session_id") or ""), branch, dscore, fclass)
+                _append_kl_flush_event(
+                session_id or str(record.get("session_id") or ""),
+                branch,
+                dscore,
+                fclass,
+                capture_id=str(record.get("capture_id") or ""),
+            )
                 kl_assert_fact(
                     entity,
                     "session-retrospectives",

@@ -1064,7 +1064,11 @@ def test_tool_result_envelope_does_not_score_user_correction(project, tmp_path):
     mod = _load_module(project)
     logs = project / ".ai" / "session-logs"
     log = logs / "session_tool_result_wrong_file.jsonl"
+    # A REAL user prompt with a correction phrase.
     real_correction = {"message": {"role": "user", "content": "actually wrong file, use the other one"}}
+    # A tool_result envelope containing the same phrase in its output.
+    # `is_error` + `content` mirrors the shape Claude uses. This must NOT
+    # be counted as a user correction.
     tool_result_env = {
         "message": {
             "role": "user",
@@ -1077,6 +1081,8 @@ def test_tool_result_envelope_does_not_score_user_correction(project, tmp_path):
     log.write_text("\n".join(json.dumps(e) for e in entries) + "\n")
 
     sigs = mod.extract_signals(log)
+    # Exactly ONE correction — the real user prompt. The tool_result envelope
+    # must be excluded even though its text contains the trigger phrase.
     assert len(sigs["user_corrections"]) == 1, (
         f"tool_result envelope should not be scored as a user correction; "
         f"got corrections={sigs['user_corrections']}"
@@ -1694,3 +1700,73 @@ def test_write_local_record_atomic_snapshot_failure_does_not_leak_jsonl(project,
     jsonl = project / ".ai" / "memory" / "retrospectives" / "session-retrospectives.jsonl"
     assert not jsonl.exists() or jsonl.read_text() == "", \
         f"snapshot failure must not leak a JSONL row: contents={jsonl.read_text() if jsonl.exists() else '<absent>'!r}"
+
+
+def test_kl_only_jsonl_fallback_uploads_second_capture_after_first_flushed(
+    project, monkeypatch
+):
+    """Codex P2 2026-07-19 (manolii-platform#430 line 1308): flush events must
+    key by capture identity, not session. Given JSONL ordered as
+    [A(narrative), B(narrative), A-flushed] for the same session_id, the
+    reverse scan under the old session-wide semantics saw A-flushed first,
+    set a "delivered" flag, and broke on B — so B was never uploaded even
+    though only A had been delivered. With per-capture_id flush events, B
+    stays visible until an event with capture_id=B arrives."""
+    monkeypatch.setenv("MCP_API_KEY", "k")
+    monkeypatch.setenv("KL_MCP_URL", "https://kl.example.test/api/mcp")
+    monkeypatch.setenv("KL_ENTITY", "acme")
+    mod = _load_module(project)
+
+    # No snapshots on disk — force the JSONL fallback.
+    jsonl = project / ".ai" / "memory" / "retrospectives" / "session-retrospectives.jsonl"
+    jsonl.parent.mkdir(parents=True, exist_ok=True)
+    jsonl.write_text(
+        # Older narrative row A
+        json.dumps({
+            "session_id": "SID",
+            "branch": "main",
+            "captured_at": "2026-07-19T00:00:00Z",
+            "capture_id": "captureA",
+            "dysfunction_score": 0.1,
+            "failure_class": "unclassified",
+        }) + "\n"
+        # Newer narrative row B (same session, later capture)
+        + json.dumps({
+            "session_id": "SID",
+            "branch": "main",
+            "captured_at": "2026-07-19T00:00:05Z",
+            "capture_id": "captureB",
+            "dysfunction_score": 0.2,
+            "failure_class": "unclassified",
+        }) + "\n"
+        # A-flushed event lands AFTER B's narrative row
+        + json.dumps({
+            "event": "kl-flushed",
+            "session_id": "SID",
+            "branch": "main",
+            "dysfunction_score": 0,
+            "failure_class": "unclassified",
+            "capture_id": "captureA",
+            "at": "2026-07-19T00:00:06Z",
+        }) + "\n"
+    )
+
+    uploads = []
+    monkeypatch.setattr(
+        mod, "kl_create_note", lambda *a, **kw: uploads.append(kw) or True
+    )
+    monkeypatch.setattr(mod, "kl_assert_fact", lambda *a, **kw: True)
+
+    mod.mode_kl_only(session_id="SID")
+
+    # B is the still-pending capture and MUST reach KL despite A's completion
+    # event living later in the log. Under the old session-wide gate, this
+    # would have been 0 uploads.
+    assert len(uploads) == 1, (
+        f"expected B to upload; got uploads={uploads}"
+    )
+    # Idempotency key must reflect B's capture, not A's, so upstream dedupe
+    # doesn't collapse them into one delivered note.
+    assert "captureB" in uploads[0].get("idempotency_key", ""), (
+        f"expected captureB in idempotency_key; got {uploads[0]}"
+    )
