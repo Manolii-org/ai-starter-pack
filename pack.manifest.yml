@@ -19,6 +19,7 @@ features:
   browserbase: false        # Browserbase browser automation. Requires BROWSERBASE_API_KEY.
   langfuse_telemetry: false # OTEL tracing to Langfuse. Requires LANGFUSE_PUBLIC_KEY + SECRET.
   codex_adversarial: false  # Cross-provider adversarial PR review. Requires OPENAI_API_KEY.
+  mesh_telemetry: false     # Agent-mesh contract telemetry (mesh-contract.yaml.template). Requires MESH_ENABLED wiring.
 
 install_mode: unbranded     # branded | unbranded
 
