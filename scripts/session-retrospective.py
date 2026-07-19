@@ -761,6 +761,25 @@ def _mtime_gate_hit(path: Optional[Path], force: bool = False) -> bool:
     return False
 
 
+def _release_mtime_reservation(path: Optional[Path]) -> None:
+    """Codex P2 2026-07-19: if capture fails AFTER _try_reserve_mtime_gate
+    recorded the mtime, subsequent Stops for the same unchanged transcript
+    would silently skip forever (until it changes or --force). Callers
+    invoke this from their exception handlers so the next Stop retries."""
+    if path is None:
+        return
+    try:
+        with _retro_lock():
+            entries = _load_mtime_sentinel_map()
+            if str(path) in entries:
+                entries.pop(str(path), None)
+                tmp = MTIME_SENTINEL.with_suffix(MTIME_SENTINEL.suffix + ".tmp")
+                tmp.write_text(json.dumps({"entries": entries}), encoding="utf-8")
+                os.replace(tmp, MTIME_SENTINEL)
+    except Exception as e:  # noqa: BLE001
+        print(f"[session-retro] mtime-release: {type(e).__name__}", file=sys.stderr)
+
+
 def _try_reserve_mtime_gate(path: Optional[Path], force: bool = False) -> bool:
     """Atomic check-and-reserve: under one lock, verify no capture has recorded
     this (path, mtime) yet AND immediately record the reservation before
@@ -1187,7 +1206,14 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False,
     body = plain_text_note(branch, merged_sigs, dscore, fclass, diff_stats)
 
     # LOCAL write first — Stop durability requires the JSONL/snapshot even if KL hangs.
-    snap = _write_local_record(record)
+    # Codex P2 2026-07-19: if this durable write fails after the reservation was
+    # recorded, roll the reservation back so the next Stop retries — otherwise the
+    # transcript is silently skipped forever (until it changes or --force).
+    try:
+        snap = _write_local_record(record)
+    except Exception:
+        _release_mtime_reservation(path)
+        raise
     print(f"[session-retro] local record: {snap}", file=sys.stderr)
     # Sentinel already reserved at the top of mode_stop under the same lock;
     # no second write needed here (see Codex P2 2026-07-19 fix).

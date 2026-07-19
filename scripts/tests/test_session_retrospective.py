@@ -802,8 +802,10 @@ def test_reserve_mtime_gate_is_atomic_check_and_set(project, monkeypatch):
         results.append(mod._try_reserve_mtime_gate(log))
 
     threads = [threading.Thread(target=worker) for _ in range(4)]
-    for t in threads: t.start()
-    for t in threads: t.join()
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
 
     # Exactly ONE thread got True (the go-ahead); the other three saw
     # the reservation already present and returned False.
@@ -834,3 +836,27 @@ def test_reserve_mtime_gate_force_bypass(project, monkeypatch):
     assert mod._try_reserve_mtime_gate(log, force=True) is True
     monkeypatch.setenv("SESSION_RETRO_FORCE", "1")
     assert mod._try_reserve_mtime_gate(log) is True
+
+
+def test_reservation_released_when_capture_fails(project, monkeypatch):
+    """Codex P2 2026-07-19: if _write_local_record raises after the mtime
+    reservation was recorded, the reservation MUST be rolled back so the
+    next Stop can retry — otherwise the transcript is silently skipped
+    forever until it changes or --force is used."""
+    mod = _load_module(project)
+    logs = project / ".ai" / "session-logs"
+    log = logs / "session_release.jsonl"
+    log.write_text("{}\n")
+    os.utime(log, (1_700_000_000, 1_700_000_000))
+
+    # Force _write_local_record to blow up.
+    def boom(record):
+        raise OSError("disk full (simulated)")
+    monkeypatch.setattr(mod, "_write_local_record", boom)
+
+    with pytest.raises(OSError, match="disk full"):
+        mod.mode_stop("SID-release", local_only=True, transcript=str(log))
+
+    # Reservation must have been rolled back — next call must succeed at the gate.
+    assert mod._try_reserve_mtime_gate(log) is True, \
+        "sentinel entry not released after capture failure — transcript would be stuck"

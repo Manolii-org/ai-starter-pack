@@ -36,6 +36,11 @@ dist/
 !.ai/memory/retrospectives/.gitkeep
 !.ai/memory/retrospectives/session-retrospectives.jsonl
 .ai/memory/retrospectives/.last-capture-mtime
+# Advisory lock file created by _retro_lock() — persists after fcntl
+# release and would otherwise dirty the worktree on every Stop capture.
+# Codex P1 2026-07-19.
+.ai/memory/retrospectives/.retrospectives.lock
+
 
 .ai/retrospective-staging/
 
