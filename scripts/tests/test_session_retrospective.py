@@ -352,7 +352,8 @@ def test_kl_bearer_never_follows_redirect(project, monkeypatch):
     KL endpoint must not cause urllib to replay the Authorization header
     at the redirect target. The no-redirect handler exposes the 3xx
     response directly and _kl_urlopen's callers treat it as failure."""
-    import io, urllib.request as _ur
+    import io
+    import urllib.request as _ur
     monkeypatch.setenv("MCP_API_KEY", "leak-me")
     monkeypatch.setenv("KL_MCP_URL", "https://kl.example/mcp")
     mod = _load_module(project)
