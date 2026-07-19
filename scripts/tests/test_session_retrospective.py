@@ -652,3 +652,49 @@ def test_local_only_still_forbids_kl_even_when_creds_set(project, monkeypatch):
     monkeypatch.setattr(mod, "kl_create_note", fake_create)
     mod.mode_stop("SID", local_only=True, transcript="")
     assert called["n"] == 0, "local_only=True MUST prevent all KL writes"
+
+
+def test_mtime_gate_is_per_transcript(project, monkeypatch):
+    """CodeRabbit 2026-07-19: sentinel is a transcript-keyed map, not a singleton.
+
+    Sequence: stop A → stop B (different transcript) → stop A unchanged.
+    Regression: A's second Stop MUST hit the gate; the old singleton sentinel
+    would have been overwritten by B and let A's re-stop write a duplicate.
+    """
+    mod = _load_module(project)
+    logs_dir = project / ".ai" / "session-logs"
+    log_a = logs_dir / "session_A.jsonl"
+    log_b = logs_dir / "session_B.jsonl"
+    log_a.write_text("{}\n")
+    log_b.write_text("{}\n")
+    # Distinct mtimes.
+    os.utime(log_a, (1_700_000_000, 1_700_000_000))
+    os.utime(log_b, (1_700_000_100, 1_700_000_100))
+
+    # First stop for A: gate miss → then write sentinel.
+    assert mod._mtime_gate_hit(log_a) is False
+    mod._write_mtime_sentinel(log_a)
+
+    # First stop for B: gate miss (different transcript) → write sentinel.
+    assert mod._mtime_gate_hit(log_b) is False
+    mod._write_mtime_sentinel(log_b)
+
+    # Re-stop A unchanged: MUST be gated. Singleton would have been evicted by B.
+    assert mod._mtime_gate_hit(log_a) is True, \
+        "per-transcript sentinel must survive an intervening capture of a different transcript"
+    # Re-stop B unchanged: still gated too.
+    assert mod._mtime_gate_hit(log_b) is True
+
+
+def test_mtime_sentinel_accepts_legacy_singleton_shape(project, monkeypatch):
+    """Backwards compatibility: an on-disk legacy sentinel {path,mtime,captured_at}
+    (pre-migration shape) must still gate its own transcript."""
+    mod = _load_module(project)
+    logs_dir = project / ".ai" / "session-logs"
+    log_a = logs_dir / "session_legacy.jsonl"
+    log_a.write_text("{}\n")
+    os.utime(log_a, (1_700_000_000, 1_700_000_000))
+    mod.MTIME_SENTINEL.write_text(
+        json.dumps({"path": str(log_a), "mtime": 1_700_000_000, "captured_at": "2026-07-19T00:00:00Z"})
+    )
+    assert mod._mtime_gate_hit(log_a) is True

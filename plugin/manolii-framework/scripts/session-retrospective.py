@@ -656,18 +656,39 @@ def _session_log_mtime(path: Optional[Path]) -> Optional[float]:
         return None
 
 
+def _load_mtime_sentinel_map() -> dict:
+    """Load the transcript-keyed sentinel map. Accepts legacy singleton shape."""
+    if not MTIME_SENTINEL.exists():
+        return {}
+    try:
+        data = json.loads(MTIME_SENTINEL.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"[session-retro] mtime-sentinel load: {type(e).__name__}", file=sys.stderr)
+        return {}
+    # Legacy singleton {"path":..., "mtime":..., "captured_at":...} → convert.
+    if isinstance(data, dict) and "path" in data and "mtime" in data and "entries" not in data:
+        return {str(data["path"]): {"mtime": float(data["mtime"]), "captured_at": data.get("captured_at")}}
+    if isinstance(data, dict) and isinstance(data.get("entries"), dict):
+        return dict(data["entries"])
+    return {}
+
+
 def _mtime_gate_hit(path: Optional[Path], force: bool = False) -> bool:
-    """Return True when Stop can no-op (same session log mtime as last capture)."""
+    """Return True when Stop can no-op (same session log mtime as last capture for THIS transcript).
+
+    CodeRabbit 2026-07-19: the sentinel is a transcript-keyed map, not a singleton —
+    capturing transcript B must not evict A's entry, otherwise a later unchanged
+    Stop for A would miss the gate and write a duplicate retrospective.
+    """
     if force or os.environ.get("SESSION_RETRO_FORCE"):
         return False
     mtime = _session_log_mtime(path)
     if mtime is None:
         return False
     try:
-        if not MTIME_SENTINEL.exists():
-            return False
-        prev = json.loads(MTIME_SENTINEL.read_text(encoding="utf-8"))
-        if float(prev.get("mtime", -1)) == float(mtime) and str(prev.get("path")) == str(path):
+        entries = _load_mtime_sentinel_map()
+        prev = entries.get(str(path))
+        if prev and float(prev.get("mtime", -1)) == float(mtime):
             print("[session-retro] mtime-gate: skip (unchanged session log)", file=sys.stderr)
             return True
     except Exception as e:
@@ -681,8 +702,15 @@ def _write_mtime_sentinel(path: Optional[Path]) -> None:
         return
     try:
         RETROSPECTIVES_DIR.mkdir(parents=True, exist_ok=True)
+        entries = _load_mtime_sentinel_map()
+        entries[str(path)] = {"mtime": mtime, "captured_at": _now_iso()}
+        # Cap map size to avoid unbounded growth; keep the 64 most recent.
+        if len(entries) > 64:
+            entries = dict(
+                sorted(entries.items(), key=lambda kv: float(kv[1].get("mtime", 0)), reverse=True)[:64]
+            )
         MTIME_SENTINEL.write_text(
-            json.dumps({"path": str(path), "mtime": mtime, "captured_at": _now_iso()}),
+            json.dumps({"entries": entries}),
             encoding="utf-8",
         )
     except Exception as e:
