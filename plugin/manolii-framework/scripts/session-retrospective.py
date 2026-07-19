@@ -1177,12 +1177,23 @@ def mode_kl_only(session_id: str = "") -> None:
                     except Exception:
                         current = None
                     if isinstance(current, dict):
-                        current["kl_written"] = True
-                        current.pop("kl_in_flight_at", None)
-                        matched_snap.write_text(
-                            json.dumps(current, indent=2, ensure_ascii=False) + "\n",
-                            encoding="utf-8",
-                        )
+                        # Codex P2 2026-07-19 (Lead-Converter line 1200):
+                        # our lease may have expired and been re-claimed by
+                        # another worker. Only commit when the on-disk lease
+                        # is still ours (or the snapshot is already flushed
+                        # by our success path). Otherwise leave the other
+                        # worker's claim intact.
+                        our_lease = record.get("kl_in_flight_at")
+                        if (
+                            current.get("kl_written") is True
+                            or current.get("kl_in_flight_at") == our_lease
+                        ):
+                            current["kl_written"] = True
+                            current.pop("kl_in_flight_at", None)
+                            matched_snap.write_text(
+                                json.dumps(current, indent=2, ensure_ascii=False) + "\n",
+                                encoding="utf-8",
+                            )
             except Exception as e:  # noqa: BLE001
                 print(f"[session-retro] kl-only commit: {type(e).__name__}", file=sys.stderr)
         # Codex P2 2026-07-19: also emit a JSONL completion event so
@@ -1206,11 +1217,18 @@ def mode_kl_only(session_id: str = "") -> None:
                     except Exception:
                         current = None
                     if isinstance(current, dict):
-                        current.pop("kl_in_flight_at", None)
-                        matched_snap.write_text(
-                            json.dumps(current, indent=2, ensure_ascii=False) + "\n",
-                            encoding="utf-8",
-                        )
+                        # Codex P2 2026-07-19 (Lead-Converter line 1200):
+                        # only clear the lease if it is still OUR lease.
+                        # A stale worker (whose TTL expired and was
+                        # re-claimed by another live worker) must NOT
+                        # clear the newer worker's fresh claim.
+                        our_lease = record.get("kl_in_flight_at")
+                        if current.get("kl_in_flight_at") == our_lease:
+                            current.pop("kl_in_flight_at", None)
+                            matched_snap.write_text(
+                                json.dumps(current, indent=2, ensure_ascii=False) + "\n",
+                                encoding="utf-8",
+                            )
             except Exception as e:  # noqa: BLE001
                 print(f"[session-retro] kl-only rollback: {type(e).__name__}", file=sys.stderr)
         print("[session-retro] kl-only: KL write failed", file=sys.stderr)
