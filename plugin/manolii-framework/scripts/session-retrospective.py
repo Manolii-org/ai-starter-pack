@@ -15,6 +15,7 @@ import argparse
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import urllib.parse
@@ -1169,6 +1170,16 @@ def mode_kl_only(session_id: str = "") -> None:
         # means a crash/SIGKILL during upload leaves a stale lease (recoverable
         # after KL_CLAIM_TTL_SEC), not a permanent "delivered" flag on
         # something that was never actually delivered.
+        # Codex P2 2026-07-19 (Lead-Converter line 1196): track whether the
+        # snapshot commit is durable. Only emit the kl-flushed completion
+        # event AFTER the snapshot transition is on disk — otherwise a
+        # transient FS error would leave kl_written=false with an active
+        # lease, and after KL_CLAIM_TTL_SEC the snapshot would be re-selected
+        # and the KL note sent again (duplicate). If the snapshot write
+        # itself fails, we prefer the lease to expire and mode_kl_drain to
+        # retry (KL upload is idempotent from mode_kl_only's perspective
+        # because kl_create_note carries an idempotency key upstream).
+        commit_ok = False
         if matched_snap is not None:
             try:
                 with _retro_lock():
@@ -1184,24 +1195,34 @@ def mode_kl_only(session_id: str = "") -> None:
                         # by our success path). Otherwise leave the other
                         # worker's claim intact.
                         our_lease = record.get("kl_in_flight_at")
-                        if (
-                            current.get("kl_written") is True
-                            or current.get("kl_in_flight_at") == our_lease
-                        ):
+                        if current.get("kl_written") is True:
+                            # Already committed by a peer — safe to emit event.
+                            commit_ok = True
+                        elif current.get("kl_in_flight_at") == our_lease:
                             current["kl_written"] = True
                             current.pop("kl_in_flight_at", None)
                             matched_snap.write_text(
                                 json.dumps(current, indent=2, ensure_ascii=False) + "\n",
                                 encoding="utf-8",
                             )
+                            commit_ok = True
             except Exception as e:  # noqa: BLE001
                 print(f"[session-retro] kl-only commit: {type(e).__name__}", file=sys.stderr)
-        # Codex P2 2026-07-19: also emit a JSONL completion event so
-        # consumers of session-retrospectives.jsonl (append-only) can
-        # observe the flush — the snapshot-only mutation above was
-        # invisible to them and they treated successful uploads as pending.
-        _append_kl_flush_event(session_id or str(record.get("session_id") or ""), branch, dscore, fclass)
-        print("[session-retro] kl-only: flushed", file=sys.stderr)
+        else:
+            # No on-disk snapshot to reconcile (legacy JSONL-only record):
+            # the completion event is the only durable success signal.
+            commit_ok = True
+        # Emit the JSONL completion event ONLY when the snapshot state is
+        # durable — otherwise the event would lie about a delivery whose
+        # snapshot still says "pending".
+        if commit_ok:
+            _append_kl_flush_event(session_id or str(record.get("session_id") or ""), branch, dscore, fclass)
+            print("[session-retro] kl-only: flushed", file=sys.stderr)
+        else:
+            print(
+                "[session-retro] kl-only: KL upload OK but snapshot commit failed — will retry after lease TTL",
+                file=sys.stderr,
+            )
     else:
         # Codex P2 2026-07-19 line 994 / Lead-Converter line 990: network
         # call failed after we took the lease. Clear kl_in_flight_at so the
@@ -1403,6 +1424,33 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False,
     dry_run = bool(os.environ.get("SESSION_RETRO_DRY_RUN"))
     if not _try_reserve_mtime_gate(path, force=force or dry_run):
         return
+    # Codex P2 2026-07-19 (manolii-platform#430 line 1405): the Stop wrapper
+    # SIGTERMs this process after ~8s. Without this handler, the reservation
+    # written by _try_reserve_mtime_gate persists across the kill and the
+    # next ordinary Stop for the same unchanged transcript silently skips
+    # forever — permanently losing that retrospective. Install a SIGTERM
+    # handler that rolls back the reservation IF we haven't yet written the
+    # durable local record. `_stop_committed` flips True immediately after
+    # _write_local_record returns; from that point on, SIGTERM must NOT
+    # roll back (the record already exists and the mtime sentinel legitimately
+    # gates future duplicates). Only install when we have a transcript path
+    # to release — force=True and pathless runs did not reserve anything.
+    reserved_gate_mtime = _session_log_mtime(path) if path else None
+    _stop_committed = [False]
+    _prev_sigterm = None
+    if path is not None and reserved_gate_mtime is not None and not (force or dry_run):
+        def _release_and_exit(signum, frame):  # noqa: ARG001
+            if not _stop_committed[0]:
+                try:
+                    _release_mtime_reservation(path, reserved_mtime=reserved_gate_mtime)
+                except Exception:  # noqa: BLE001
+                    pass
+            # 128 + SIGTERM(15) = 143, mirroring shell convention.
+            sys.exit(143)
+        try:
+            _prev_sigterm = signal.signal(signal.SIGTERM, _release_and_exit)
+        except (ValueError, OSError):
+            _prev_sigterm = None
     sigs = extract_signals(path) if path else {}
 
     staged_corrections: list[str] = []
@@ -1558,6 +1606,14 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False,
     except Exception:
         _release_mtime_reservation(path, reserved_mtime=reserved_mtime)
         raise
+    # Codex P2 2026-07-19 (manolii-platform#430 line 1405): durable record
+    # exists — from here on, SIGTERM must NOT roll back the mtime reservation.
+    _stop_committed[0] = True
+    if _prev_sigterm is not None:
+        try:
+            signal.signal(signal.SIGTERM, _prev_sigterm)
+        except (ValueError, OSError):
+            pass
     print(f"[session-retro] local record: {snap}", file=sys.stderr)
     # Sentinel already reserved at the top of mode_stop under the same lock;
     # no second write needed here (see Codex P2 2026-07-19 fix).

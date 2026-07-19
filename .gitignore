@@ -36,6 +36,11 @@ dist/
 !.ai/memory/retrospectives/.gitkeep
 !.ai/memory/retrospectives/session-retrospectives.jsonl
 .ai/memory/retrospectives/.last-capture-mtime
+# Staging tmp file used by _write_mtime_sentinel() before os.replace().
+# Codex P2 2026-07-19 (manolii-platform#430 .gitignore:76): a crash between
+# NamedTemporaryFile write and os.replace can leave this behind and dirty
+# the worktree on the next status check.
+.ai/memory/retrospectives/.last-capture-mtime.tmp
 # Advisory lock file created by _retro_lock() — persists after fcntl
 # release and would otherwise dirty the worktree on every Stop capture.
 # Codex P1 2026-07-19.
