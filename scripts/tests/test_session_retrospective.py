@@ -347,6 +347,48 @@ def test_kl_flush_selects_newest_when_counter_suffix_present(project, monkeypatc
     )
 
 
+def test_snapshot_reservation_is_race_free(project, tmp_path):
+    """Codex P2 2026-07-19: two concurrent _write_local_record calls for the
+    same (session, branch, captured_at) must produce TWO distinct snapshot
+    files, not clobber each other. Exercises the O_CREAT|O_EXCL loop by
+    firing N threads all racing on the same base filename."""
+    import threading
+    mod = _load_module(project)
+    base_record = {
+        "session_id": "race-sess",
+        "branch": "main",
+        "captured_at": "2026-07-19T00:00:00Z",
+        "marker": "x",
+    }
+    N = 8
+    errors: list = []
+    results: list = []
+    barrier = threading.Barrier(N)
+
+    def worker(i: int):
+        try:
+            barrier.wait(timeout=5)
+            rec = dict(base_record, marker=f"worker-{i}")
+            results.append(mod._write_local_record(rec))
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(N)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert not errors, f"race workers raised: {errors!r}"
+    assert len(results) == N, f"expected {N} snapshot paths, got {len(results)}"
+    # Distinct filenames — the exclusive-create loop must have avoided collisions.
+    names = {p.name for p in results}
+    assert len(names) == N, f"snapshot filenames collided: {sorted(names)}"
+    # Every file must be on disk.
+    for p in results:
+        assert p.exists(), f"race dropped snapshot {p}"
+
+
 def test_force_retry_same_second_does_not_overwrite_snapshot(project, tmp_path):
     """Codex P2 2026-07-19: two Stops on the same (session, branch) within
     one UTC second (supported --force retry path) must produce TWO durable

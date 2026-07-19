@@ -395,22 +395,36 @@ def _write_local_record(record: dict) -> Path:
             import hashlib
             tag = "tx" + hashlib.sha256(str(tp).encode("utf-8")).hexdigest()[:8]
     base = f"{ts}-{safe_branch}-{tag}"
-    snap = RETROSPECTIVES_DIR / f"{base}.json"
-    # Codex P2 2026-07-19: two Stops on the same session+branch within one
-    # UTC second (e.g. --force retry after the transcript re-appears) would
-    # produce identical (ts, tag) and the second write_text would silently
-    # overwrite the first snapshot. Add a numeric counter suffix so every
-    # capture is durable regardless of clock resolution.
-    if snap.exists():
-        counter = 1
-        while True:
-            candidate = RETROSPECTIVES_DIR / f"{base}-{counter:03d}.json"
-            if not candidate.exists():
-                snap = candidate
-                break
+    # Codex P2 2026-07-19: reserve the snapshot filename ATOMICALLY via
+    # os.open(O_CREAT|O_EXCL). A prior `exists()` + `write_text()` sequence
+    # would race with a concurrent Stop handler that observed the same base
+    # path as absent (or picked the same -NNN candidate) and both would
+    # write to the same file — the JSONL row survives but one snapshot
+    # gets clobbered. Loop across the counter until exclusive-create wins.
+    payload = (json.dumps(record, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+    counter = 0
+    while True:
+        snap = RETROSPECTIVES_DIR / (
+            f"{base}.json" if counter == 0 else f"{base}-{counter:03d}.json"
+        )
+        try:
+            fd = os.open(str(snap), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        except FileExistsError:
             counter += 1
-    snap.write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    return snap
+            if counter > 9999:
+                # Extreme safety net: fall back to write_text so we never
+                # spin forever on a pathological filesystem state.
+                snap.write_text(payload.decode("utf-8"), encoding="utf-8")
+                return snap
+            continue
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(payload)
+        except Exception:
+            # If the write fails mid-flight, leave the empty file behind
+            # rather than mask the error — same policy as the prior code.
+            raise
+        return snap
 
 
 def _mcp_envelope_ok(body: bytes) -> bool:
