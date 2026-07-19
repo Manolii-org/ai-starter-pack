@@ -74,12 +74,6 @@ else
     rm -f .ai/memory/retrospectives/.last-capture-failed 2>/dev/null || true
 fi
 
-# IMPAKTFUL HOLD: KL capture for the impaktful entity remains buffered per
-# the 2026-07-04 shadow-review — NEVER schedule a network leg from this repo
-# regardless of env vars. When the entity review lifts the HOLD, replace this
-# `exit 0` with the original conditional.
-exit 0
-
 # KL network leg — backgrounded, never blocks Stop. Skipped if:
 #  - local capture failed (avoids uploading a STALE prior snapshot labelled with
 #    the current session_id via mode_kl_only's newest-snapshot lookup)
