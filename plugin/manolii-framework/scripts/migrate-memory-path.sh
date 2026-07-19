@@ -101,6 +101,16 @@ if [[ -d "$CLAUDE_MEM" ]]; then
                 # Destination doesn't exist, move it
                 mv "$entry" "$dest"
                 ((++moved))
+            elif [[ -f "$dest" && ! -s "$dest" && -f "$entry" && -s "$entry" ]]; then
+                # Codex P2 2026-07-19: destination is a seeded EMPTY file
+                # (e.g. tracked .ai/memory/facts.jsonl scaffolded by the
+                # pack) and the legacy source is non-empty. Archiving the
+                # legacy file would hide the operator's real facts behind
+                # the empty scaffold. Prefer the legacy file — overwrite
+                # the empty destination.
+                mv -f "$entry" "$dest"
+                echo "preferred legacy .claude/memory/$name over empty seeded destination" >&2
+                ((++moved))
             else
                 # Destination exists, archive the CLAUDE copy into a unique
                 # per-run directory (mktemp -d is collision-proof for the

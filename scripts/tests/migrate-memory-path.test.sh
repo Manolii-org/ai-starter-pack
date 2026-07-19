@@ -137,6 +137,22 @@ else
 fi
 _teardown "$d"
 
+# Test 3b: empty seeded destination is replaced by non-empty legacy source (Codex P2)
+t="empty seeded destination is replaced by non-empty legacy file"
+d=$(_setup)
+mkdir -p "$d/.claude/memory" "$d/.ai/memory"
+echo '{"fact": "keep me"}' > "$d/.claude/memory/facts.jsonl"
+: > "$d/.ai/memory/facts.jsonl"
+if ! bash "$MIGRATE" "$d" >/dev/null 2>&1; then
+    _report fail "$t (migration exited non-zero)"
+elif [[ -L "$d/.claude/memory" ]] && [[ -f "$d/.ai/memory/facts.jsonl" ]] && \
+     grep -q '"fact": "keep me"' "$d/.ai/memory/facts.jsonl"; then
+    _report pass "$t"
+else
+    _report fail "$t (contents=$(cat "$d/.ai/memory/facts.jsonl" 2>/dev/null))"
+fi
+_teardown "$d"
+
 # Test 8: pre-existing dangling symlink is healed (target doesn't exist)
 t="dangling compat symlink is healed"
 d=$(_setup)

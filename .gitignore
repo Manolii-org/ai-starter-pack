@@ -40,3 +40,5 @@ dist/
 .ai/retrospective-staging/
 
 !.claude/memory
+
+.ai/recent-navigation-warning.md
