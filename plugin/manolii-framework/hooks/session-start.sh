@@ -179,3 +179,19 @@ log "Session health: $health_status"
 for note in "${health_notes[@]}"; do
   log "  $note"
 done
+
+# WS3: refresh + surface the recent-navigation-warning file so high-
+# dysfunction prior sessions produce an agent-visible warning at
+# SessionStart. Fail-open. Codex P2 2026-07-19.
+_REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+_INJECT="${CLAUDE_PLUGIN_ROOT:-$_REPO_ROOT}/scripts/session-start-inject-warning.sh"
+[ -x "$_INJECT" ] || _INJECT="$_REPO_ROOT/scripts/session-start-inject-warning.sh"
+if [ -x "$_INJECT" ]; then
+    bash "$_INJECT" >/dev/null 2>&1 || true
+fi
+if [ -s "$_REPO_ROOT/.ai/recent-navigation-warning.md" ]; then
+    echo ""
+    echo "=== Recent navigation warning ==="
+    cat "$_REPO_ROOT/.ai/recent-navigation-warning.md" 2>/dev/null || true
+    echo ""
+fi
