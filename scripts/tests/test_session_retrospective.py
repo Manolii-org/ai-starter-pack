@@ -1384,6 +1384,46 @@ def test_kl_only_fresh_lease_blocks_concurrent_claim(project, monkeypatch):
     assert uploads == [], "fresh lease must block a second concurrent claim"
 
 
+def test_kl_only_fresh_lease_also_suppresses_jsonl_fallback(project, monkeypatch):
+    """Codex P2 2026-07-19 (ai-starter-pack line 1047): when the snapshot
+    scan skips a fresh-leased snapshot for this session, the JSONL fallback
+    must ALSO be suppressed — otherwise a concurrent worker would upload
+    the same narrative row without a claim, producing duplicate KL notes."""
+    monkeypatch.setenv("MCP_API_KEY", "k")
+    monkeypatch.setenv("KL_MCP_URL", "https://kl.example.test/api/mcp")
+    monkeypatch.setenv("KL_ENTITY", "acme")
+    mod = _load_module(project)
+
+    from datetime import datetime as _dt, timezone as _tz
+    fresh_iso = _dt.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    snap_dir = project / ".ai" / "memory" / "retrospectives"
+    leased = snap_dir / "20260719T000000Z-main-SID-leased.json"
+    leased.write_text(json.dumps({
+        "session_id": "SID",
+        "branch": "main",
+        "kl_written": False,
+        "kl_in_flight_at": fresh_iso,
+    }, indent=2))
+    # And a corresponding JSONL narrative row for the same session_id.
+    jsonl = project / ".ai" / "memory" / "retrospectives" / "session-retrospectives.jsonl"
+    jsonl.write_text(json.dumps({
+        "session_id": "SID",
+        "branch": "main",
+        "captured_at": "2026-07-19T00:00:00Z",
+        "dysfunction_score": 0.1,
+        "failure_class": "unclassified",
+    }) + "\n")
+
+    uploads = []
+    monkeypatch.setattr(mod, "kl_create_note",
+                        lambda *a, **kw: uploads.append(kw) or True)
+    monkeypatch.setattr(mod, "kl_assert_fact", lambda *a, **kw: True)
+
+    mod.mode_kl_only(session_id="SID")
+    assert uploads == [], \
+        "fresh in-flight lease must suppress the JSONL fallback for the same session_id"
+
+
 def test_kl_only_jsonl_fallback_treats_kl_flushed_event_as_delivered(project, monkeypatch):
     """CodeRabbit 2026-07-19 (line 1006-1031): when the snapshot has been
     pruned but the JSONL still contains both a narrative row AND a later

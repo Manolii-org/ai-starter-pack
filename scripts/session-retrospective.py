@@ -996,6 +996,7 @@ def mode_kl_only(session_id: str = "") -> None:
     # while preserving the atomic-claim guarantee.
     matched_snap: Optional[Path] = None
     saw_flushed_snap_for_session = False
+    saw_active_lease_for_session = False
     now_iso = _now_iso()
     try:
         now_epoch = datetime.now(timezone.utc).timestamp()
@@ -1044,6 +1045,11 @@ def mode_kl_only(session_id: str = "") -> None:
                     continue
                 if _lease_fresh(candidate):
                     # Another live worker is uploading this one — skip it.
+                    # Codex P2 2026-07-19 (ai-starter-pack line 1047): also
+                    # suppress the JSONL fallback for this session_id so we
+                    # don't upload the same narrative row a second time
+                    # without a claim.
+                    saw_active_lease_for_session = True
                     continue
                 # Dry-run must NOT persist a lease — it never uploads and
                 # would starve a real flush by holding the claim.
@@ -1078,7 +1084,12 @@ def mode_kl_only(session_id: str = "") -> None:
     # pruned but a prior `kl-flushed` event exists in the JSONL for this
     # session_id, treat that event as the delivered marker and skip the
     # narrative row — otherwise each subsequent kl-only re-uploads it.
-    if record is None and not saw_flushed_snap_for_session and RETRO_JSONL.exists():
+    if (
+        record is None
+        and not saw_flushed_snap_for_session
+        and not saw_active_lease_for_session
+        and RETRO_JSONL.exists()
+    ):
         try:
             seen_flushed_event = False
             for ln in reversed(RETRO_JSONL.read_text(encoding="utf-8").splitlines()):
