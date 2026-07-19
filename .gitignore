@@ -49,3 +49,11 @@ dist/
 # Keep the parent .gitkeep tracked if present.
 .ai/memory/archive/migration-conflicts/*
 !.ai/memory/archive/migration-conflicts/.gitkeep
+
+# WS3 pack: local memory runtime stores. Scaffolds are tracked via
+# .gitkeep only — the jsonl files fill with per-session telemetry
+# (fact assertions, learned patterns, session summaries) that must
+# not enter git history. Codex P2 2026-07-19.
+.ai/memory/facts.jsonl
+.ai/memory/patterns.jsonl
+.ai/memory/sessions.jsonl

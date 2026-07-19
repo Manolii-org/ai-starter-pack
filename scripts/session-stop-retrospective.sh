@@ -22,13 +22,20 @@ _SID=""; _TP=""
 if [ -n "$_PAYLOAD" ]; then
     # Coalesce None → '' so a payload with explicit "session_id": null
     # doesn't leak the literal string "None" into the collector args.
+    # CodeRabbit 2026-07-19: accept only string values. `or ''` covers
+    # None but forwards lists/objects/booleans/numbers as their Python
+    # repr into the collector CLI. Reject anything not `str` explicitly.
     _SID=$(printf '%s' "$_PAYLOAD" | python3 -c "import sys,json
 try:
-    d=json.load(sys.stdin); print((d.get('session_id') or '') if isinstance(d,dict) else '')
+    d=json.load(sys.stdin)
+    v=d.get('session_id') if isinstance(d,dict) else ''
+    print(v if isinstance(v,str) else '')
 except Exception: pass" 2>/dev/null || true)
     _TP=$(printf '%s' "$_PAYLOAD" | python3 -c "import sys,json
 try:
-    d=json.load(sys.stdin); print((d.get('transcript_path') or '') if isinstance(d,dict) else '')
+    d=json.load(sys.stdin)
+    v=d.get('transcript_path') if isinstance(d,dict) else ''
+    print(v if isinstance(v,str) else '')
 except Exception: pass" 2>/dev/null || true)
 fi
 
@@ -54,14 +61,24 @@ except subprocess.TimeoutExpired:
 PY
 fi
 if [ "$rc" -ne 0 ]; then
-    mkdir -p .ai/memory/retrospectives
-    printf '{"timestamp":"%s","exit_code":%s,"event":"session-retrospective-capture-failed"}\n' \
-        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$rc" \
-        > .ai/memory/retrospectives/.last-capture-failed
+    # CodeRabbit 2026-07-19: keep marker I/O fail-open. A read-only
+    # repo, a conflicting `.ai` regular file, or a full disk would
+    # otherwise let mkdir/printf abort the wrapper under `set -e` and
+    # block Stop. Suppress errors and continue to the closing `exit 0`.
+    if mkdir -p .ai/memory/retrospectives 2>/dev/null; then
+        printf '{"timestamp":"%s","exit_code":%s,"event":"session-retrospective-capture-failed"}\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$rc" \
+            > .ai/memory/retrospectives/.last-capture-failed 2>/dev/null || true
+    fi
 else
     rm -f .ai/memory/retrospectives/.last-capture-failed 2>/dev/null || true
 fi
 
+# IMPAKTFUL HOLD: KL capture for the impaktful entity remains buffered per
+# the 2026-07-04 shadow-review — NEVER schedule a network leg from this repo
+# regardless of env vars. When the entity review lifts the HOLD, replace this
+# `exit 0` with the original conditional.
+exit 0
 
 # KL network leg — backgrounded, never blocks Stop. Skipped if:
 #  - local capture failed (avoids uploading a STALE prior snapshot labelled with

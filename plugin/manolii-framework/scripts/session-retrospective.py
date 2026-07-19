@@ -719,6 +719,7 @@ def mode_kl_only(session_id: str = "") -> None:
         )
     else:
         snaps = []
+    matched_snap: Optional[Path] = None
     for snap in snaps:
         if snap.name.startswith("."):
             continue
@@ -731,6 +732,7 @@ def mode_kl_only(session_id: str = "") -> None:
             continue
         if str(candidate.get("session_id") or "") == session_id:
             record = candidate
+            matched_snap = snap
             break
     if record is None and RETRO_JSONL.exists():
         try:
@@ -779,6 +781,19 @@ def mode_kl_only(session_id: str = "") -> None:
     if wrote:
         kl_assert_fact(entity, "session-retrospectives", f"last_dysfunction_score.{safe_branch}", str(dscore))
         kl_assert_fact(entity, "session-retrospectives", f"last_failure_class.{safe_branch}", fclass)
+        # CodeRabbit 2026-07-19: mark the local snapshot as uploaded so
+        # downstream consumers of the JSON snapshot don't see stale
+        # `kl_written: false` after the normal Stop-hook path (which
+        # always runs --local-only and then backgrounds mode_kl_only).
+        try:
+            if matched_snap is not None:
+                record["kl_written"] = True
+                matched_snap.write_text(
+                    json.dumps(record, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+        except Exception as e:  # noqa: BLE001
+            print(f"[session-retro] kl-only: kl_written update: {type(e).__name__}", file=sys.stderr)
         print("[session-retro] kl-only: flushed", file=sys.stderr)
     else:
         print("[session-retro] kl-only: KL write failed", file=sys.stderr)
