@@ -60,6 +60,44 @@ KL_CLAIM_TTL_SEC = 60.0
 MTIME_SENTINEL = RETROSPECTIVES_DIR / ".last-capture-mtime"
 _RETRO_LOCK = RETROSPECTIVES_DIR / ".retrospectives.lock"
 
+# Codex P2 2026-07-19 (Lead-Converter#250 line 1512): the wrapper's 8s SIGTERM
+# can interrupt _write_local_record() AFTER it has exclusively created the
+# snapshot file but BEFORE the JSONL append (or during a partial write). The
+# normal try/except cleanup in _write_local_record does NOT run when the
+# signal handler in mode_stop calls sys.exit() — SystemExit bypasses `except
+# Exception`. Publish the in-flight state at module scope so the SIGTERM
+# handler can roll back the orphaned snapshot and truncate any partial JSONL
+# bytes before it exits. Both fields reset to None on successful commit.
+_INFLIGHT_SNAP: Optional[Path] = None
+_INFLIGHT_JSONL_PRESIZE: Optional[int] = None
+
+
+def _cleanup_inflight_local_record() -> None:
+    """Roll back a partial snapshot/JSONL pair when a signal aborts
+    _write_local_record() before it commits. Safe to call from a signal
+    handler: swallows every exception, does no I/O beyond unlink/ftruncate.
+    Callers reset the module-level state whether or not this succeeded so a
+    subsequent Stop is not confused by a stale rollback target."""
+    global _INFLIGHT_SNAP, _INFLIGHT_JSONL_PRESIZE
+    partial_snap = _INFLIGHT_SNAP
+    pre_size = _INFLIGHT_JSONL_PRESIZE
+    _INFLIGHT_SNAP = None
+    _INFLIGHT_JSONL_PRESIZE = None
+    if partial_snap is not None:
+        try:
+            partial_snap.unlink()
+        except OSError:
+            pass
+    if pre_size is not None:
+        try:
+            fd = os.open(str(RETRO_JSONL), os.O_RDWR)
+            try:
+                os.ftruncate(fd, pre_size)
+            finally:
+                os.close(fd)
+        except OSError:
+            pass
+
 
 def _retro_lock():
     """Advisory-lock context manager guarding JSONL appends and sentinel
@@ -550,6 +588,7 @@ def plain_text_note(branch: str, signals: dict, dscore: int, fclass: str, diff_s
 
 
 def _write_local_record(record: dict) -> Path:
+    global _INFLIGHT_SNAP, _INFLIGHT_JSONL_PRESIZE
     RETROSPECTIVES_DIR.mkdir(parents=True, exist_ok=True)
     safe_branch = str(record.get("branch", "unknown")).replace("/", "--").replace(" ", "--")
     ts = str(record.get("captured_at", _now_iso())).replace(":", "")
@@ -607,6 +646,11 @@ def _write_local_record(record: dict) -> Path:
                 pass
             raise
         snap = candidate
+        # Codex P2 2026-07-19 (Lead-Converter#250 line 1512): publish the
+        # in-flight snapshot path so the mode_stop SIGTERM handler can
+        # unlink it if the wrapper's 8s timeout fires before the JSONL
+        # append commits. Cleared to None on successful record commit.
+        _INFLIGHT_SNAP = candidate
         break
 
     # Snapshot is durable — now append the JSONL row. On failure, unlink
@@ -624,6 +668,9 @@ def _write_local_record(record: dict) -> Path:
                 pre_size = RETRO_JSONL.stat().st_size
             except FileNotFoundError:
                 pre_size = 0
+            # Publish the pre-append offset so the SIGTERM handler in
+            # mode_stop can truncate a partial write back to it.
+            _INFLIGHT_JSONL_PRESIZE = pre_size
             with RETRO_JSONL.open("a", encoding="utf-8") as fh:
                 try:
                     fh.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -642,7 +689,13 @@ def _write_local_record(record: dict) -> Path:
                 snap.unlink()
             except OSError:
                 pass
+        _INFLIGHT_SNAP = None
+        _INFLIGHT_JSONL_PRESIZE = None
         raise
+    # Commit: local record is durable. Clear in-flight state so the SIGTERM
+    # handler will no longer roll back this snapshot.
+    _INFLIGHT_SNAP = None
+    _INFLIGHT_JSONL_PRESIZE = None
     return snap  # type: ignore[return-value]
 
 
@@ -1209,8 +1262,16 @@ def mode_kl_only(session_id: str = "") -> None:
             ts=(record.get("captured_at") or ""),
             br=(record.get("branch") or branch or ""),
         )
+    # Codex P1 2026-07-19 (manolii-platform#430 line 1002): the snapshot
+    # carries the entity it was captured under. If KL_ENTITY is retargeted
+    # between capture and this flush, resolving the CURRENT entity would
+    # deliver the retrospective to the wrong tenant — a cross-entity leak.
+    # Prefer the captured entity; fall back to the freshly resolved one
+    # only for legacy snapshots written before this field existed.
+    captured_entity = record.get("entity") if isinstance(record.get("entity"), str) and record.get("entity") else None
+    snap_entity = captured_entity or entity
     wrote = kl_create_note(
-        entity,
+        snap_entity,
         title=f"Session retrospective — {branch} [{today}]",
         content=body,
         tags=["session-retrospective", "auto-generated", "session-learnings", branch_tag, "kl-flush"],
@@ -1225,8 +1286,11 @@ def mode_kl_only(session_id: str = "") -> None:
         if os.environ.get("SESSION_RETRO_DRY_RUN"):
             print("[session-retro] kl-only: dry-run — skipping snapshot/JSONL mutation", file=sys.stderr)
             return
-        kl_assert_fact(entity, "session-retrospectives", f"last_dysfunction_score.{safe_branch}", str(dscore))
-        kl_assert_fact(entity, "session-retrospectives", f"last_failure_class.{safe_branch}", fclass)
+        # Codex P1 2026-07-19 (manolii-platform#430 line 1002): use the
+        # snapshot's captured entity for facts too — a cross-entity flush
+        # would put session-retrospectives.last_* facts in the wrong tenant.
+        kl_assert_fact(snap_entity, "session-retrospectives", f"last_dysfunction_score.{safe_branch}", str(dscore))
+        kl_assert_fact(snap_entity, "session-retrospectives", f"last_failure_class.{safe_branch}", fclass)
         # Codex P2 2026-07-19 (Lead-Converter line 990): NOW that the upload
         # has confirmed, commit the delivered state — set kl_written=True and
         # clear the in-flight lease. Doing this only after network confirms
@@ -1504,6 +1568,17 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False,
     if path is not None and reserved_gate_mtime is not None and not (force or dry_run):
         def _release_and_exit(signum, frame):  # noqa: ARG001
             if not _stop_committed[0]:
+                # Codex P2 2026-07-19 (Lead-Converter#250 line 1512): if
+                # _write_local_record was mid-flight, unlink the orphan
+                # snapshot and truncate partial JSONL back to its
+                # pre-write offset — SystemExit would otherwise skip the
+                # try/except cleanup and leave a kl_written:false snapshot
+                # plus a truncated JSONL row that the next Stop would
+                # duplicate on top of.
+                try:
+                    _cleanup_inflight_local_record()
+                except Exception:  # noqa: BLE001
+                    pass
                 try:
                     _release_mtime_reservation(path, reserved_mtime=reserved_gate_mtime)
                 except Exception:  # noqa: BLE001
