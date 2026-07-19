@@ -1051,11 +1051,21 @@ def _append_kl_flush_event(session_id: str, branch: str, dscore: float, fclass: 
 
 def mode_kl_only(session_id: str = "") -> None:
     """Push the latest local retrospective record to KL without appending another local row."""
-    entity = _resolve_entity()
-    if not _kl_ready(entity, local_only=False):
+    # Codex P2 2026-07-19 (manolii-platform#430 line 1056): only bail here
+    # on missing MCP credentials — NOT on missing current-config entity.
+    # A pending snapshot may have been captured under an entity that the
+    # operator has since removed from KL_ENTITY / retrospective.json; that
+    # snapshot still has both its intended destination (record["entity"])
+    # AND live credentials (MCP_API_KEY / KL_MCP_URL are shared), so
+    # kl-drain must be allowed to reach the record-selection path where
+    # snap_entity is derived. Without this, such snapshots stay pending
+    # forever even though delivery is fully possible.
+    # Pass a truthy sentinel to _kl_ready so we probe MCP creds without
+    # gating on the (possibly-missing) current entity; monkeypatch-friendly.
+    if not _kl_ready("__probe__", local_only=False):
         print("[session-retro] kl-only: KL not configured; skip", file=sys.stderr)
         return
-    assert entity is not None
+    entity = _resolve_entity()  # may be None if config was removed post-capture
 
     record: Optional[dict] = None
     # Select ONLY the record for this session_id — the wrapper backgrounds a
@@ -1270,6 +1280,13 @@ def mode_kl_only(session_id: str = "") -> None:
     # only for legacy snapshots written before this field existed.
     captured_entity = record.get("entity") if isinstance(record.get("entity"), str) and record.get("entity") else None
     snap_entity = captured_entity or entity
+    # Codex P2 2026-07-19 (manolii-platform#430 line 1056): if both the
+    # captured entity is absent (legacy snapshot pre-round-M) AND the
+    # current config resolves to nothing, we genuinely have no destination.
+    # Skip cleanly rather than uploading with an empty entity string.
+    if not snap_entity:
+        print("[session-retro] kl-only: no entity for snapshot; skip", file=sys.stderr)
+        return
     wrote = kl_create_note(
         snap_entity,
         title=f"Session retrospective — {branch} [{today}]",
@@ -1401,8 +1418,12 @@ def mode_kl_drain(max_sessions: int = 10) -> None:
     """
     if not RETROSPECTIVES_DIR.exists():
         return
-    entity = _resolve_entity()
-    if not _kl_ready(entity, local_only=False):
+    # Codex P2 2026-07-19 (manolii-platform#430 line 1056): same defer-the-
+    # entity-gate rationale as mode_kl_only. Snapshots carry record["entity"]
+    # from capture; kl-drain must reach them even when the current config no
+    # longer resolves an entity, so the per-record dispatch into mode_kl_only
+    # can pick up snap_entity from the persisted field.
+    if not _kl_ready("__probe__", local_only=False):
         return
     try:
         now_epoch = datetime.now(timezone.utc).timestamp()
