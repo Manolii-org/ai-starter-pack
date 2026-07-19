@@ -1062,7 +1062,10 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False,
     # Codex P2 2026-07-19: atomic check-and-reserve — hold the sentinel lock
     # across gate lookup AND write so two concurrent Stops for the same
     # unchanged transcript can't both pass the gate and duplicate the record.
-    if not _try_reserve_mtime_gate(path, force=force):
+    # Dry-run must NOT reserve (no durable record follows) — otherwise a later
+    # real `--mode stop` on the unchanged transcript would silently skip.
+    dry_run = bool(os.environ.get("SESSION_RETRO_DRY_RUN"))
+    if not _try_reserve_mtime_gate(path, force=force or dry_run):
         return
     sigs = extract_signals(path) if path else {}
 

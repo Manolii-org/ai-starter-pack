@@ -860,3 +860,22 @@ def test_reservation_released_when_capture_fails(project, monkeypatch):
     # Reservation must have been rolled back — next call must succeed at the gate.
     assert mod._try_reserve_mtime_gate(log) is True, \
         "sentinel entry not released after capture failure — transcript would be stuck"
+
+
+def test_dry_run_does_not_reserve_mtime_gate(project, monkeypatch):
+    """Codex P2 2026-07-19: SESSION_RETRO_DRY_RUN must NOT persist a mtime
+    reservation, otherwise a later real --mode stop on the unchanged
+    transcript would return at the gate and silently drop the retrospective."""
+    monkeypatch.setenv("SESSION_RETRO_DRY_RUN", "1")
+    mod = _load_module(project)
+    logs = project / ".ai" / "session-logs"
+    log = logs / "session_dryrun.jsonl"
+    log.write_text("{}\n")
+    os.utime(log, (1_700_000_000, 1_700_000_000))
+
+    mod.mode_stop("SID-dry", local_only=True, transcript=str(log))
+    # After dry-run, the sentinel MUST NOT record this transcript — so the
+    # next reservation attempt (as a real Stop would) succeeds.
+    monkeypatch.delenv("SESSION_RETRO_DRY_RUN", raising=False)
+    assert mod._try_reserve_mtime_gate(log) is True, \
+        "dry-run reserved the mtime gate — a real Stop would now skip"
