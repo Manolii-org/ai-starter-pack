@@ -1385,62 +1385,70 @@ def test_kl_only_fresh_lease_blocks_concurrent_claim(project, monkeypatch):
 
 
 def test_kl_only_stale_rollback_preserves_newer_workers_lease(project, monkeypatch):
-    """Codex P2 2026-07-19 (Lead-Converter line 1200): worker A takes a
-    lease, waits past the TTL. Worker B reclaims and installs a fresh
-    lease. Worker A'\''s network call then fails and rolls back. That
-    rollback must NOT clear B'\''s active claim, or a third worker could
-    take the snapshot concurrently with B and duplicate the KL note."""
+    """Codex P2 2026-07-19 (Lead-Converter line 1200) + CodeRabbit 2026-07-19
+    (impaktful#1695 line 1443): drive mode_kl_only end-to-end so the production
+    ownership check is actually exercised — not mirrored. Worker A claims a
+    snapshot (which starts with an EXPIRED lease so mode_kl_only will treat it
+    as reclaimable and install a fresh 'our_lease'). During A's network call,
+    worker B reclaims and installs a NEWER lease timestamp on disk. A's KL
+    upload then fails and the rollback path runs. Because on-disk lease no
+    longer matches A's captured 'our_lease', the rollback must leave B's fresh
+    lease intact — otherwise a third worker could claim concurrently with B
+    and duplicate the KL note."""
     monkeypatch.setenv("MCP_API_KEY", "k")
     monkeypatch.setenv("KL_MCP_URL", "https://kl.example.test/api/mcp")
     monkeypatch.setenv("KL_ENTITY", "acme")
     mod = _load_module(project)
 
-    from datetime import datetime as _dt, timezone as _tz
-    now_iso = _dt.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    from datetime import datetime as _dt, timezone as _tz, timedelta
     snap_dir = project / ".ai" / "memory" / "retrospectives"
+    snap_dir.mkdir(parents=True, exist_ok=True)
     snap = snap_dir / "20260719T000000Z-main-SID-race.json"
-    # Worker B has JUST claimed with a fresh timestamp (simulated by
-    # writing the fresh lease to disk).
+    # Snapshot starts with a STALE lease (older than KL_CLAIM_TTL_SEC) so
+    # mode_kl_only will treat it as reclaimable and install its own fresh
+    # 'our_lease' via the claim path we want to exercise.
+    stale_lease = "2000-01-01T00:00:00Z"
     snap.write_text(json.dumps({
         "session_id": "SID",
         "branch": "main",
         "kl_written": False,
-        "kl_in_flight_at": now_iso,
+        "kl_in_flight_at": stale_lease,
     }, indent=2))
 
-    # Worker A'\''s stale claim was from long ago — simulate by having the
-    # in-memory `record` carry an older timestamp than what'\''s on disk.
-    monkeypatch.setattr(mod, "kl_create_note", lambda *a, **kw: False)
+    b_lease_holder = {"value": None}
+
+    def fake_create_replaces_lease_then_fails(*args, **kwargs):
+        """Simulate worker B reclaiming the snapshot during A's network call:
+        overwrite the on-disk lease with a strictly-newer timestamp before
+        returning False so mode_kl_only enters its failure/rollback branch."""
+        current = json.loads(snap.read_text(encoding="utf-8"))
+        a_lease = current.get("kl_in_flight_at")
+        # +1s guarantees the newer timestamp is strictly different from A's
+        # now-second precision lease even under a very fast test clock.
+        b_lease_dt = _dt.now(_tz.utc).replace(microsecond=0) + timedelta(seconds=1)
+        b_lease_str = b_lease_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        assert b_lease_str != a_lease, (
+            "test invariant: B's simulated lease must differ from A's"
+        )
+        current["kl_in_flight_at"] = b_lease_str
+        snap.write_text(json.dumps(current, indent=2, ensure_ascii=False) + "\n")
+        b_lease_holder["value"] = b_lease_str
+        return False  # A's KL upload failed
+
+    monkeypatch.setattr(mod, "kl_create_note", fake_create_replaces_lease_then_fails)
     monkeypatch.setattr(mod, "kl_assert_fact", lambda *a, **kw: True)
 
-    # Emulate A'\''s rollback path by calling mode_kl_only with a pre-claimed
-    # record where kl_in_flight_at is stale. We do this by monkeypatching
-    # `datetime.now` inside the module to return a very old timestamp
-    # during claim (so the "our_lease" written to `record` is stale
-    # relative to disk).
-    import scripts  # noqa: F401 — just to keep the import context
-    from datetime import datetime, timezone
-    class _StaleDT(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return datetime(2000, 1, 1, tzinfo=tz or timezone.utc)
-    # However, mode_kl_only computes now_iso ONCE at claim; on the
-    # second run for the same snapshot it would first find the fresh
-    # lease and skip. So instead of driving mode_kl_only, exercise the
-    # rollback logic directly: hand-craft `record` with an old lease
-    # and call the failure-path rollback via a minimal harness.
-    stale_lease = "2000-01-01T00:00:00Z"
-    record = {"kl_in_flight_at": stale_lease, "session_id": "SID"}
-    # Invoke the same "under-lock rollback" inline (mirrors the code in
-    # mode_kl_only'\''s else branch): only clear if our lease matches.
-    with mod._retro_lock():
-        current = json.loads(snap.read_text(encoding="utf-8"))
-        if current.get("kl_in_flight_at") == record.get("kl_in_flight_at"):
-            current.pop("kl_in_flight_at", None)
-            snap.write_text(json.dumps(current, indent=2) + "\n")
-    after = json.loads(snap.read_text())
-    assert after.get("kl_in_flight_at") == now_iso, \
-        "stale rollback must NOT clear B's fresh lease"
+    # Drive the production path.
+    mod.mode_kl_only(session_id="SID")
+
+    after = json.loads(snap.read_text(encoding="utf-8"))
+    assert after.get("kl_in_flight_at") == b_lease_holder["value"], (
+        "production ownership check must NOT clear B's fresh lease when A's "
+        "our_lease no longer matches on-disk"
+    )
+    assert after.get("kl_written") is not True, (
+        "A's KL upload failed — nothing may be marked as delivered"
+    )
 
 
 def test_kl_only_fresh_lease_also_suppresses_jsonl_fallback(project, monkeypatch):

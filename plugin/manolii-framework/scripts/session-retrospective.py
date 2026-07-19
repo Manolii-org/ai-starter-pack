@@ -611,10 +611,31 @@ def _write_local_record(record: dict) -> Path:
 
     # Snapshot is durable — now append the JSONL row. On failure, unlink
     # the snapshot to keep the two artefacts consistent.
+    # Codex P2 2026-07-19 (impaktful#1695 line 617): if the append fails
+    # AFTER writing partial bytes (ENOSPC, disk error, unclean flush), the
+    # JSONL is left with a truncated row. mode_stop then releases the mtime
+    # reservation and the next capture would append onto that truncated
+    # line, producing a concatenated or duplicated record. Capture the
+    # pre-append file size under the lock and ftruncate() back to it on
+    # any write exception before re-raising.
     try:
         with _retro_lock():
+            try:
+                pre_size = RETRO_JSONL.stat().st_size
+            except FileNotFoundError:
+                pre_size = 0
             with RETRO_JSONL.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+                try:
+                    fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    fh.flush()
+                except Exception:
+                    # Roll the append back to the pre-write offset so a
+                    # later capture cannot fuse onto a half-written line.
+                    try:
+                        os.ftruncate(fh.fileno(), pre_size)
+                    except OSError:
+                        pass
+                    raise
     except Exception:
         if snap is not None:
             try:
@@ -1173,11 +1194,21 @@ def mode_kl_only(session_id: str = "") -> None:
     ])
     safe_branch = branch.replace("/", "-").replace(" ", "-")
     branch_tag = f"branch:{safe_branch}"
-    # Codex P2 2026-07-19 (manolii-platform#430 line 700): the snapshot
-    # filename is stable across worker crashes and retries — use it as the
-    # idempotency key so a kl-drain retry (after lease TTL) cannot create
-    # a duplicate KL note.
-    idem_key = matched_snap.name if matched_snap is not None else ""
+    # Codex P2 2026-07-19 (manolii-platform#430 line 700 + line 1186): the
+    # snapshot filename is stable across worker crashes and retries — use it
+    # as the idempotency key so a kl-drain retry (after lease TTL) cannot
+    # create a duplicate KL note. When the record was selected from the
+    # JSONL fallback (no on-disk snapshot), synthesize a key from durable
+    # record fields — session_id + captured_at + branch — so a subsequent
+    # kl-only re-selection of the same JSONL row still dedupes upstream.
+    if matched_snap is not None:
+        idem_key = matched_snap.name
+    else:
+        idem_key = "jsonl:{sid}:{ts}:{br}".format(
+            sid=(record.get("session_id") or session_id or ""),
+            ts=(record.get("captured_at") or ""),
+            br=(record.get("branch") or branch or ""),
+        )
     wrote = kl_create_note(
         entity,
         title=f"Session retrospective — {branch} [{today}]",
