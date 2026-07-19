@@ -17,6 +17,7 @@ import os
 import re
 import subprocess
 import sys
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -144,14 +145,24 @@ def _kl_url() -> Optional[str]:
         if val:
             u = val.rstrip("/")
             # MCP_API_KEY travels as Authorization: Bearer — refuse any
-            # scheme that would ship it in cleartext. Loopback http is
-            # allowed for local dev only.
-            if not (u.startswith("https://")
-                    or u.startswith("http://localhost")
-                    or u.startswith("http://127.")):
-                print(f"[session-retro] {key} must be https (or http loopback); skip", file=sys.stderr)
+            # scheme that would ship it in cleartext. For loopback http
+            # we PARSE the URL to check the real hostname, otherwise
+            # "http://localhost.attacker.example/..." or
+            # "http://127.0.0.1@attacker.example/..." would slip past a
+            # naive prefix check (Codex P2 2026-07-19).
+            try:
+                parsed = urllib.parse.urlsplit(u)
+            except ValueError:
+                print(f"[session-retro] {key} malformed; skip", file=sys.stderr)
                 return None
-            return u
+            if parsed.scheme == "https":
+                return u
+            if parsed.scheme == "http":
+                host = (parsed.hostname or "").lower()
+                if host == "localhost" or host == "127.0.0.1" or host == "::1":
+                    return u
+            print(f"[session-retro] {key} must be https (or http loopback); skip", file=sys.stderr)
+            return None
     return None
 
 
@@ -419,7 +430,16 @@ def _mcp_envelope_ok(body: bytes) -> bool:
         return False
     if "error" in parsed:
         return False
+    # Codex P2 2026-07-19: require an actual result payload, not just a
+    # well-formed envelope. A proxy or partial-write scenario can return
+    # {}, {"jsonrpc":"2.0"} or {"result": null} with status 200; treating
+    # those as success would silently drop the upload and still mark the
+    # retrospective as KL-written.
+    if "result" not in parsed:
+        return False
     result = parsed.get("result")
+    if result is None:
+        return False
     if isinstance(result, dict) and result.get("isError"):
         return False
     return True
@@ -838,6 +858,12 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False,
         "captured_at": _now_iso(),
         "branch": branch,
         "session_id": session_id or "",
+        # Passed through so _write_local_record can compute a
+        # transcript-derived snapshot key when session_id is empty.
+        # Codex P2 2026-07-19: without this, two concurrent empty-sid
+        # Stops on the same branch/second collided at "-unknown.json"
+        # because the tx: fallback had no transcript to hash.
+        "transcript": str(path) if path else "",
         "dysfunction_score": dscore,
         "failure_class": fclass,
         "session_minutes": merged_sigs.get("session_minutes", 0),

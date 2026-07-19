@@ -71,6 +71,39 @@ def test_kl_create_note_skips_when_url_unset(project, monkeypatch, capsys):
     assert "KL_MCP_URL unset" in err
 
 
+def test_kl_url_rejects_spoofed_loopback_prefixes(project, monkeypatch):
+    """Codex P2: naive prefix checks let attacker-controlled hostnames
+    like http://localhost.attacker.example bypass the loopback exemption."""
+    mod = _load_module(project)
+    spoofs = [
+        "http://localhost.attacker.example/api/mcp",
+        "http://127.0.0.1.attacker.example/api/mcp",
+        "http://127.0.0.1@attacker.example/api/mcp",
+    ]
+    for url in spoofs:
+        monkeypatch.setenv("KL_MCP_URL", url)
+        assert mod._kl_url() is None, f"spoofed loopback should be rejected: {url}"
+    # Real loopback + https are still accepted.
+    monkeypatch.setenv("KL_MCP_URL", "http://localhost:8080/api/mcp")
+    assert mod._kl_url() == "http://localhost:8080/api/mcp"
+    monkeypatch.setenv("KL_MCP_URL", "http://127.0.0.1:8080/api/mcp")
+    assert mod._kl_url() == "http://127.0.0.1:8080/api/mcp"
+    monkeypatch.setenv("KL_MCP_URL", "https://kl.example.com/api/mcp")
+    assert mod._kl_url() == "https://kl.example.com/api/mcp"
+
+
+def test_mcp_envelope_ok_requires_non_null_result(project):
+    """Codex P2: a 200 with an empty body, a bare jsonrpc envelope, or
+    result:null must not count as success — a proxy could silently
+    drop the tool call while returning HTTP 200."""
+    mod = _load_module(project)
+    assert mod._mcp_envelope_ok(b'{}') is False
+    assert mod._mcp_envelope_ok(b'{"jsonrpc":"2.0","id":"1"}') is False
+    assert mod._mcp_envelope_ok(b'{"jsonrpc":"2.0","id":"1","result":null}') is False
+    # A minimal but real result payload still passes.
+    assert mod._mcp_envelope_ok(b'{"jsonrpc":"2.0","id":"1","result":{"content":"ok"}}') is True
+
+
 def test_mcp_envelope_ok_flags_error_field(project):
     mod = _load_module(project)
     assert mod._mcp_envelope_ok(b'{"result": {"content": "ok"}}') is True
@@ -241,6 +274,34 @@ def test_mode_stop_empty_sid_leaves_tagged_checkpoints_alone(project, monkeypatc
     text = jsonl.read_text() if jsonl.exists() else ""
     assert "leaked from A" not in text
     assert "leaked from B" not in text
+
+
+def test_two_empty_sid_stops_same_branch_same_second_do_not_collide(project, tmp_path):
+    """Codex P2: mode_stop must propagate its transcript into the record
+    so _write_local_record can derive a tx: snapshot key when session_id
+    is empty. Without this, two empty-sid Stops on the same branch inside
+    one UTC second write the same -unknown.json path and clobber each other.
+    """
+    mod = _load_module(project)
+    # Two distinct transcripts, both processed with empty session_id.
+    t1 = tmp_path / "sess_a.jsonl"
+    t1.write_text('{"role":"user","content":"a"}\n')
+    t2 = tmp_path / "sess_b.jsonl"
+    t2.write_text('{"role":"user","content":"b"}\n')
+
+    mod.mode_stop("", local_only=True, transcript=str(t1))
+    # Force mtime-gate off so a rapid second Stop actually writes.
+    (project / ".ai" / "memory" / "retrospectives" / ".last-capture-mtime").unlink(
+        missing_ok=True
+    )
+    mod.mode_stop("", local_only=True, transcript=str(t2), force=True)
+
+    snaps = list((project / ".ai" / "memory" / "retrospectives").glob("*.json"))
+    # Two distinct snapshot files must exist — one per transcript.
+    assert len(snaps) >= 2, f"expected two snapshots, got {[p.name for p in snaps]}"
+    # Neither should be the naked "-unknown.json" that the old collision produced.
+    assert not any(p.name.endswith("-unknown.json") for p in snaps), \
+        f"snapshot fell back to -unknown (transcript hash was unreachable): {[p.name for p in snaps]}"
 
 
 def test_staging_key_pairs_precompact_and_stop_via_transcript(project, tmp_path):

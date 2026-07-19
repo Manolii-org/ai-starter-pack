@@ -69,9 +69,12 @@ jobs:
           fi
 
 
+      - name: Install pytest
+        run: python3 -m pip install --quiet pytest
+
       - name: Retrospective + memory path tests
         run: |
-          python3 scripts/tests/test_session_retrospective.py
+          python3 -m pytest scripts/tests/test_session_retrospective.py scripts/tests/test_failure_class.py -q
           bash scripts/tests/test_migrate_memory_path.sh
           bash scripts/tests/test_plugin_scripts_sync.sh
 
