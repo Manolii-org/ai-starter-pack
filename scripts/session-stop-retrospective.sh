@@ -87,14 +87,30 @@ fi
 if [ "$rc" -eq 0 ] && [ -n "${MCP_API_KEY:-}" ]; then
     _KL_ARGS=(--mode kl-only)
     [ -n "$_SID" ] && _KL_ARGS+=(--session-id "$_SID")
-    ( python3 "$_RETRO" "${_KL_ARGS[@]}" >/dev/null 2>&1 ) &
+    # CodeRabbit 2026-07-19 (ai-starter-pack#32 line 99): bound the
+    # backgrounded network workers with an explicit `timeout 30s`. A
+    # stalled MCP endpoint would otherwise leave the disowned worker
+    # running indefinitely (kl-drain can walk up to 10 sessions with a
+    # network leg each), and the shell would keep those file
+    # descriptors open. Guarded so images without coreutils `timeout`
+    # (macOS default, minimal Alpine) still run — matching the
+    # synchronous-leg fallback pattern at line 47.
+    if command -v timeout >/dev/null 2>&1; then
+        ( timeout 30s python3 "$_RETRO" "${_KL_ARGS[@]}" >/dev/null 2>&1 ) &
+    else
+        ( python3 "$_RETRO" "${_KL_ARGS[@]}" >/dev/null 2>&1 ) &
+    fi
     disown $! 2>/dev/null || true
     # Codex P2 2026-07-19 (manolii-platform line 94): also drain any
     # prior-session snapshots that never reached KL (transient network
     # failures, aborted flushes). Bounded, oldest-first, skips anything
     # younger than 30s so the current-session worker above owns its
     # own snapshot.
-    ( python3 "$_RETRO" --mode kl-drain >/dev/null 2>&1 ) &
+    if command -v timeout >/dev/null 2>&1; then
+        ( timeout 30s python3 "$_RETRO" --mode kl-drain >/dev/null 2>&1 ) &
+    else
+        ( python3 "$_RETRO" --mode kl-drain >/dev/null 2>&1 ) &
+    fi
     disown $! 2>/dev/null || true
 fi
 

@@ -96,7 +96,7 @@ def classify_from_signals(
       tooling ← heavy tool retries (≥3) or kinds containing tool
       environment ← auth/credential kinds or env-pattern corrections
       external-dependency ← timeout kinds / external patterns
-      planning ← heavy edit churn (≥3 files or any file ≥3 edits)
+      planning ← single file ≥3 edits, OR ≥5 distinct files, OR ≥3 files with one re-edited
       memory-context ← re-reads without edit
       unclassified ← default
     """
