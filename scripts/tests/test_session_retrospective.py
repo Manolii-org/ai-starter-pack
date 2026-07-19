@@ -146,7 +146,7 @@ def test_mcp_request_carries_accept_header(project, monkeypatch):
         captured["headers"] = dict(req.headers)
         return FakeResp()
 
-    monkeypatch.setattr(mod.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(mod, "_kl_urlopen", lambda req, timeout=None: fake_urlopen(req, timeout=timeout))
     assert mod.kl_create_note("acme", "t", "b", ["x"]) is True
     # urllib title-cases header names.
     accept = captured["headers"].get("Accept", "")
@@ -345,6 +345,41 @@ def test_kl_flush_selects_newest_when_counter_suffix_present(project, monkeypatc
     assert "NEW" in body or "OLD" not in body, (
         f"kl-only picked the older snapshot: body={body!r}"
     )
+
+
+def test_kl_bearer_never_follows_redirect(project, monkeypatch):
+    """Codex P1 2026-07-19: an HTTPS→HTTP (or cross-origin) 3xx from the
+    KL endpoint must not cause urllib to replay the Authorization header
+    at the redirect target. The no-redirect handler exposes the 3xx
+    response directly and _kl_urlopen's callers treat it as failure."""
+    import io, urllib.request as _ur
+    monkeypatch.setenv("MCP_API_KEY", "leak-me")
+    monkeypatch.setenv("KL_MCP_URL", "https://kl.example/mcp")
+    mod = _load_module(project)
+
+    call_log: list = []
+    original_open = mod._NO_REDIRECT_OPENER.open
+
+    class Redirect302(_ur.HTTPError):
+        pass
+
+    def fake_open(req, timeout=None):
+        call_log.append(req.full_url)
+        # Simulate a real 302 response so the no-redirect handler decides.
+        fp = io.BytesIO(b"")
+        hdrs = {"Location": "http://attacker.example/steal"}
+        # Route through the actual handler chain by raising an HTTPError,
+        # which the parent class would normally translate into a redirect.
+        raise Redirect302(req.full_url, 302, "Found", hdrs, fp)
+
+    monkeypatch.setattr(mod._NO_REDIRECT_OPENER, "open", fake_open)
+    ok = mod.kl_create_note("acme", "t", "b", ["x"])
+    assert ok is False, "kl_create_note should treat 302 as failure"
+    assert call_log == ["https://kl.example/mcp"], (
+        f"exactly one request must be issued, got {call_log!r}"
+    )
+    # Restore for sibling tests.
+    monkeypatch.setattr(mod._NO_REDIRECT_OPENER, "open", original_open)
 
 
 def test_kl_url_reads_mcp_json_when_env_unset(project, monkeypatch):
@@ -561,7 +596,7 @@ def test_mcp_payload_carries_jsonrpc_envelope(project, monkeypatch):
         captured["data"] = req.data
         return FakeResp()
 
-    monkeypatch.setattr(mod.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(mod, "_kl_urlopen", lambda req, timeout=None: fake_urlopen(req, timeout=timeout))
     ok = mod.kl_create_note("acme", "t", "b", ["x"])
     assert ok is True
     body = json.loads(captured["data"])

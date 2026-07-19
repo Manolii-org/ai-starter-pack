@@ -132,6 +132,32 @@ def _kl_ready(entity: Optional[str], local_only: bool) -> bool:
     return bool((os.environ.get("MCP_API_KEY") or "").strip())
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse ANY 3xx redirect on authenticated KL POSTs.
+
+    Codex P1 2026-07-19: Python's default redirect handler copies request
+    headers — including `Authorization: Bearer <MCP_API_KEY>` — into the
+    follow-up request. A trusted MCP endpoint (or its DNS/proxy) that
+    301/302/303's to an attacker-controlled URL would leak the bearer
+    token, bypassing the up-front _validate_mcp_url guard. Returning None
+    from redirect_request tells urllib to NOT follow the redirect; the
+    3xx response propagates to the caller, which treats it as failure.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401
+        return None
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirectHandler())
+
+
+def _kl_urlopen(req, timeout: int):
+    """Open a KL request with the no-redirect opener so bearer credentials
+    are never forwarded across a 3xx hop. Callers must treat any 3xx
+    response as a failure (KL never legitimately returns 3xx here)."""
+    return _NO_REDIRECT_OPENER.open(req, timeout=timeout)
+
+
 def _validate_mcp_url(url: str, source: str) -> Optional[str]:
     """Enforce https-or-loopback on any candidate URL. Returns the trimmed
     URL if safe, else None (with an explanatory stderr message).
@@ -562,8 +588,8 @@ def kl_create_note(entity: str, title: str, content: str, tags: list[str]) -> bo
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=API_TIMEOUT_SECONDS) as resp:  # nosec B310
-            if resp.status >= 400:
+        with _kl_urlopen(req, timeout=API_TIMEOUT_SECONDS) as resp:  # nosec B310
+            if resp.status >= 300:  # no-redirect opener: any 3xx is treated as failure
                 return False
             return _mcp_envelope_ok(resp.read())
     except Exception as e:
@@ -606,8 +632,8 @@ def kl_assert_fact(entity: str, project_slug: str, fact_key: str, fact_value: st
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=API_TIMEOUT_SECONDS) as resp:  # nosec B310
-            if resp.status >= 400:
+        with _kl_urlopen(req, timeout=API_TIMEOUT_SECONDS) as resp:  # nosec B310
+            if resp.status >= 300:  # no-redirect opener: any 3xx is treated as failure
                 return False
             return _mcp_envelope_ok(resp.read())
     except Exception as e:

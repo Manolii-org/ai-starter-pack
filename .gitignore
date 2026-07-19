@@ -42,3 +42,10 @@ dist/
 !.claude/memory
 
 .ai/recent-navigation-warning.md
+
+# WS3 pack: runtime archive of migration conflicts (see
+# scripts/migrate-memory-path.sh). Contents are per-run mktemp dirs
+# holding legacy memory records; they must not enter git history.
+# Keep the parent .gitkeep tracked if present.
+.ai/memory/archive/migration-conflicts/*
+!.ai/memory/archive/migration-conflicts/.gitkeep
