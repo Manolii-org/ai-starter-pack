@@ -919,3 +919,38 @@ def test_retry_streak_still_fires_for_true_consecutive_calls(project, tmp_path):
     sigs = mod.extract_signals(log)
     assert sigs["tool_retries"].get("Read", 0) >= 3, \
         f"three back-to-back identical calls should still count as retry, got {sigs['tool_retries']}"
+
+
+def test_kl_only_dry_run_does_not_mark_flushed(project, monkeypatch):
+    """Codex P2 2026-07-19: --dry-run makes kl_create_note return True
+    without any network call. mode_kl_only MUST NOT then flip kl_written
+    or emit a kl-flushed event — that would be telemetry lying about
+    delivery that never happened."""
+    monkeypatch.setenv("MCP_API_KEY", "k")
+    monkeypatch.setenv("KL_MCP_URL", "https://kl.example.test/api/mcp")
+    monkeypatch.setenv("KL_ENTITY", "acme")
+    monkeypatch.setenv("SESSION_RETRO_DRY_RUN", "1")
+    mod = _load_module(project)
+
+    snap_dir = project / ".ai" / "memory" / "retrospectives"
+    snap = snap_dir / "20260719T000000Z-main-SID-dry.json"
+    record = {
+        "session_id": "SID-dry",
+        "captured_at": "2026-07-19T00:00:00Z",
+        "branch": "main",
+        "dysfunction_score": 0.1,
+        "failure_class": "unclassified",
+        "kl_written": False,
+    }
+    snap.write_text(json.dumps(record, indent=2))
+
+    # kl_create_note's own dry-run short-circuit returns True.
+    mod.mode_kl_only(session_id="SID-dry")
+
+    updated = json.loads(snap.read_text())
+    assert updated["kl_written"] is False, "dry-run must not flip kl_written"
+    jsonl = snap_dir / "session-retrospectives.jsonl"
+    if jsonl.exists():
+        events = [json.loads(ln) for ln in jsonl.read_text().splitlines() if ln.strip()]
+        assert not [e for e in events if e.get("event") == "kl-flushed"], \
+            "dry-run must not emit a kl-flushed event"

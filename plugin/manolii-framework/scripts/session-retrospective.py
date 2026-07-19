@@ -971,6 +971,13 @@ def mode_kl_only(session_id: str = "") -> None:
         tags=["session-retrospective", "auto-generated", "session-learnings", branch_tag, "kl-flush"],
     )
     if wrote:
+        # Codex P2 2026-07-19: SESSION_RETRO_DRY_RUN forces kl_create_note to
+        # return True without any network call. If we then flip kl_written
+        # and emit a kl-flushed event, telemetry would falsely claim delivery
+        # for a session that was never uploaded. Skip the mutation in dry-run.
+        if os.environ.get("SESSION_RETRO_DRY_RUN"):
+            print("[session-retro] kl-only: dry-run — skipping snapshot/JSONL mutation", file=sys.stderr)
+            return
         kl_assert_fact(entity, "session-retrospectives", f"last_dysfunction_score.{safe_branch}", str(dscore))
         kl_assert_fact(entity, "session-retrospectives", f"last_failure_class.{safe_branch}", fclass)
         # CodeRabbit 2026-07-19: mark the local snapshot as uploaded so
@@ -1256,11 +1263,20 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False,
             tags=["session-retrospective", "auto-generated", "session-learnings", branch_tag],
         )
         if wrote:
+            # Codex P2 2026-07-19: dry-run makes kl_create_note return True
+            # without a network call — never claim delivery in that case.
+            if os.environ.get("SESSION_RETRO_DRY_RUN"):
+                print("[session-retro] stop-kl: dry-run — skipping snapshot/JSONL mutation", file=sys.stderr)
+                return
             record["kl_written"] = True
             try:
                 snap.write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
             except Exception as e:
                 print(f"[session-retro] snap update: {type(e).__name__}", file=sys.stderr)
+            # Codex P2 2026-07-19: emit JSONL completion event for the direct-
+            # Stop KL path too — the kl-only path already does this, but
+            # append-only consumers must see BOTH paths' successful uploads.
+            _append_kl_flush_event(session_id or str(record.get("session_id") or ""), branch, dscore, fclass)
             kl_assert_fact(
                 entity,
                 "session-retrospectives",
