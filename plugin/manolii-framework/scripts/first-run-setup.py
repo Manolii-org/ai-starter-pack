@@ -29,7 +29,7 @@ CHOICE_REQUIRED_KEYS = {
     "oss_routing": ["LITELLM_MASTER_KEY"],
     "langfuse_telemetry": ["LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY"],
     "browserbase": ["BROWSERBASE_API_KEY", "BROWSERBASE_PROJECT_ID"],
-    "remote_memory": ["MCP_API_KEY"],
+    "kl_integration": ["MCP_API_KEY"],
 }
 
 
@@ -345,7 +345,7 @@ def run_setup() -> dict:
     print("  and multi-device access. Requires MCP_API_KEY and a KL server URL")
     print("  added to .mcp.json.")
     print()
-    choices["remote_memory"] = ask_yn(
+    choices["kl_integration"] = ask_yn(
         "  Enable remote memory backend?", default=False
     )
     print()
@@ -374,7 +374,7 @@ def write_setup_complete(choices: dict):
         f"  oss_routing: {'true' if choices['oss_routing'] else 'false'}",
         f"  langfuse_telemetry: {'true' if choices['langfuse_telemetry'] else 'false'}",
         f"  browserbase: {'true' if choices['browserbase'] else 'false'}",
-        f"  remote_memory: {'true' if choices['remote_memory'] else 'false'}",
+        f"  kl_integration: {'true' if choices['kl_integration'] else 'false'}",
         "",
     ]
 
@@ -402,7 +402,7 @@ def print_summary(choices: dict, marker_written: bool = True):
         "oss_routing": "OSS model routing",
         "langfuse_telemetry": "Langfuse OTEL telemetry",
         "browserbase": "Browserbase cloud browser",
-        "remote_memory": "Remote memory backend",
+        "kl_integration": "Remote memory backend",
     }
 
     for key, label in labels.items():
@@ -446,7 +446,7 @@ def print_summary(choices: dict, marker_written: bool = True):
         print("    4. Copy the browserbase entry from .mcp.example.json to .mcp.json")
         print()
 
-    if choices["remote_memory"]:
+    if choices["kl_integration"]:
         has_next_steps = True
         print("  Remote memory backend:")
         print("    1. Deploy a compatible MCP memory server")
