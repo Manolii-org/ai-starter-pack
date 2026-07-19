@@ -365,6 +365,25 @@ def test_kl_url_reads_mcp_json_when_env_unset(project, monkeypatch):
     assert mod._kl_url() == "https://kl.example.com/mcp"
 
 
+def test_kl_url_reads_remote_memory_alias(project, monkeypatch):
+    """Codex P1 2026-07-19: the pack's own first-run setup wizard
+    (`scripts/first-run-setup.py:454-457`) registers the KL MCP server
+    under key `remote-memory`. Without recognising that alias, every
+    pack-configured install silently no-ops the KL flush."""
+    monkeypatch.delenv("KL_MCP_URL", raising=False)
+    monkeypatch.delenv("KNOWLEDGE_LAYER_MCP_URL", raising=False)
+    (project / ".mcp.json").write_text(json.dumps({
+        "mcpServers": {
+            "remote-memory": {
+                "type": "http",
+                "url": "https://memory.example.com/mcp",
+            }
+        }
+    }))
+    mod = _load_module(project)
+    assert mod._kl_url() == "https://memory.example.com/mcp"
+
+
 def test_kl_url_rejects_http_from_mcp_json(project, monkeypatch):
     """Even from .mcp.json, plaintext http (non-loopback) must be
     rejected — MCP_API_KEY travels as Bearer and would leak."""

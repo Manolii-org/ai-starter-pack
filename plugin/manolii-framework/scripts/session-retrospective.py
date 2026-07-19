@@ -180,7 +180,11 @@ def _kl_url_from_mcp_json() -> Optional[str]:
             print(f"[session-retro] .mcp.json parse: {type(e).__name__}", file=sys.stderr)
             continue
         servers = (data.get("mcpServers") or {}) if isinstance(data, dict) else {}
-        for key in ("knowledge-layer", "knowledge_layer", "kl"):
+        # `remote-memory` is the key the pack's own first-run setup wizard
+        # emits (scripts/first-run-setup.py:454-457) — must be recognised
+        # here or every pack-configured install silently skips KL flush.
+        # Codex P1 2026-07-19.
+        for key in ("knowledge-layer", "knowledge_layer", "kl", "remote-memory", "remote_memory"):
             spec = servers.get(key)
             if isinstance(spec, dict):
                 url = spec.get("url") or spec.get("endpoint")
