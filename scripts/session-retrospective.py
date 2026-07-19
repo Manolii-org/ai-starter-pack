@@ -397,6 +397,12 @@ def extract_signals(path: Optional[Path]) -> dict:
 
                 content = msg.get("content") if isinstance(msg, dict) else entry.get("content")
                 blocks = content if isinstance(content, list) else []
+                # Codex P2 2026-07-19: reset the retry streak when a message
+                # boundary intervenes without a tool_use of the streak key.
+                # Otherwise 3 identical calls separated by ordinary user/
+                # assistant text turns falsely count as a retry sequence and
+                # can force a `tooling` failure class.
+                entry_extended_streak = False
                 for block in blocks:
                     if not isinstance(block, dict):
                         continue
@@ -418,6 +424,7 @@ def extract_signals(path: Optional[Path]) -> dict:
                                 tool_streak += 1
                             else:
                                 last_tool, tool_streak = call_key, 1
+                            entry_extended_streak = True
                             if tool_streak >= 3:
                                 signals["tool_retries"][name] = max(
                                     signals["tool_retries"].get(name, 0), tool_streak
@@ -456,6 +463,11 @@ def extract_signals(path: Optional[Path]) -> dict:
                         )
                         if block.get("is_error") or text_error:
                             signals["error_count"] += 1
+                # Codex P2 2026-07-19: if this entry did NOT extend the
+                # streak, it's a message boundary — reset so identical calls
+                # separated by ordinary user/assistant text don't accumulate.
+                if not entry_extended_streak:
+                    last_tool, tool_streak = None, 0
     except Exception as e:
         print(f"[session-retro] extract_signals: {type(e).__name__}", file=sys.stderr)
 

@@ -879,3 +879,43 @@ def test_dry_run_does_not_reserve_mtime_gate(project, monkeypatch):
     monkeypatch.delenv("SESSION_RETRO_DRY_RUN", raising=False)
     assert mod._try_reserve_mtime_gate(log) is True, \
         "dry-run reserved the mtime gate — a real Stop would now skip"
+
+
+def test_retry_streak_resets_at_message_boundaries(project, tmp_path):
+    """Codex P2 2026-07-19: three identical tool_use calls separated by
+    ordinary user/assistant text turns must NOT count as a retry streak.
+    The stream only crosses the retry threshold when the calls are
+    truly consecutive (no non-tool_use message between them)."""
+    mod = _load_module(project)
+    logs = project / ".ai" / "session-logs"
+    log = logs / "session_streak.jsonl"
+    # Assistant sends the same tool_use, then a user text message intervenes,
+    # then assistant sends it again, then user text, then assistant again.
+    entries = []
+    tool_call = {"type": "tool_use", "name": "Read", "input": {"file_path": "/foo.py"}}
+    for _ in range(3):
+        entries.append({"message": {"role": "assistant", "content": [tool_call]}})
+        entries.append({"message": {"role": "user", "content": "please continue"}})
+    log.write_text("\n".join(json.dumps(e) for e in entries) + "\n")
+
+    sigs = mod.extract_signals(log)
+    # Same tool called 3 times but separated by user messages → NOT a retry.
+    assert sigs["tool_retries"].get("Read", 0) < 3, \
+        f"streak should reset at message boundaries, got {sigs['tool_retries']}"
+
+
+def test_retry_streak_still_fires_for_true_consecutive_calls(project, tmp_path):
+    """Sanity check the fix doesn't over-reset: three back-to-back identical
+    tool_use calls in one assistant message DO cross the retry threshold."""
+    mod = _load_module(project)
+    logs = project / ".ai" / "session-logs"
+    log = logs / "session_true_retry.jsonl"
+    tool_call = {"type": "tool_use", "name": "Read", "input": {"file_path": "/foo.py"}}
+    entries = [
+        {"message": {"role": "assistant", "content": [tool_call, tool_call, tool_call]}},
+    ]
+    log.write_text("\n".join(json.dumps(e) for e in entries) + "\n")
+
+    sigs = mod.extract_signals(log)
+    assert sigs["tool_retries"].get("Read", 0) >= 3, \
+        f"three back-to-back identical calls should still count as retry, got {sigs['tool_retries']}"
