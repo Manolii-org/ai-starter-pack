@@ -1189,6 +1189,92 @@ def mode_kl_only(session_id: str = "") -> None:
 
 
 
+def mode_kl_drain(max_sessions: int = 10) -> None:
+    """Retry any prior-session snapshots that never reached KL.
+
+    Codex P2 2026-07-19 (manolii-platform line 94): when kl_create_note()
+    fails transiently, mode_kl_only() clears the lease but future Stops
+    only look at their OWN session_id, so the failed snapshot is stranded
+    at kl_written=false forever. The Stop-hook wrapper backgrounds a
+    single kl-drain call per Stop that walks the retrospectives dir,
+    picks up any snapshot with kl_written!=True and no fresh lease, and
+    invokes the same mode_kl_only path (per session_id) to retry it.
+
+    Bounded to `max_sessions` distinct session_ids per drain to keep
+    Stop cheap even under a pathological backlog. Newest sessions are
+    skipped so a same-second flush doesn't race the drain — anything
+    younger than 30s stays untouched.
+    """
+    if not RETROSPECTIVES_DIR.exists():
+        return
+    entity = _resolve_entity()
+    if not _kl_ready(entity, local_only=False):
+        return
+    try:
+        now_epoch = datetime.now(timezone.utc).timestamp()
+    except Exception:
+        return
+
+    def _lease_fresh(cand: dict) -> bool:
+        raw = cand.get("kl_in_flight_at")
+        if not isinstance(raw, str) or not raw:
+            return False
+        try:
+            claimed = datetime.strptime(raw, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        except Exception:
+            return False
+        age = now_epoch - claimed.timestamp()
+        return age >= 0 and age < KL_CLAIM_TTL_SEC
+
+    pending_sids: list[str] = []
+    seen_sids: set[str] = set()
+    try:
+        # Oldest first — process the queue head first.
+        snaps = sorted(
+            RETROSPECTIVES_DIR.glob("*-*.json"),
+            key=lambda p: (p.stat().st_mtime_ns, p.name),
+        )
+    except OSError:
+        return
+    for snap in snaps:
+        if snap.name.startswith("."):
+            continue
+        try:
+            age_sec = now_epoch - snap.stat().st_mtime_ns / 1_000_000_000.0
+        except OSError:
+            continue
+        # Skip very-recent snapshots so the current session's own kl-only
+        # worker isn't raced by the drain.
+        if age_sec < 30.0:
+            continue
+        try:
+            candidate = json.loads(snap.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(candidate, dict):
+            continue
+        if candidate.get("kl_written") is True:
+            continue
+        if _lease_fresh(candidate):
+            continue
+        sid = str(candidate.get("session_id") or "")
+        if not sid or sid in seen_sids:
+            continue
+        seen_sids.add(sid)
+        pending_sids.append(sid)
+        if len(pending_sids) >= max_sessions:
+            break
+    if not pending_sids:
+        return
+    print(f"[session-retro] kl-drain: retrying {len(pending_sids)} stranded session(s)",
+          file=sys.stderr)
+    for sid in pending_sids:
+        try:
+            mode_kl_only(session_id=sid)
+        except Exception as e:  # noqa: BLE001
+            print(f"[session-retro] kl-drain {sid}: {type(e).__name__}", file=sys.stderr)
+
+
 def _safe_session_slug(session_id: str) -> str:
     """Filesystem-safe subset of the session_id (used inside staging filenames)."""
     slug = re.sub(r"[^A-Za-z0-9._-]", "_", session_id or "")
@@ -1544,7 +1630,9 @@ def mode_inject() -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Portable session retrospective (KL-optional).")
-    p.add_argument("--mode", choices=["stop", "inject", "precompact", "kl-only"], required=True)
+    p.add_argument("--mode",
+                   choices=["stop", "inject", "precompact", "kl-only", "kl-drain"],
+                   required=True)
     p.add_argument("--session-id", default="")
     p.add_argument("--transcript", default="")
     p.add_argument("--local-only", action="store_true",
@@ -1566,6 +1654,8 @@ def main() -> None:
             mode_inject()
         elif args.mode == "kl-only":
             mode_kl_only(args.session_id)
+        elif args.mode == "kl-drain":
+            mode_kl_drain()
     except Exception as e:
         print(f"[session-retro] fatal: {type(e).__name__}: {e}", file=sys.stderr)
         sys.exit(1)

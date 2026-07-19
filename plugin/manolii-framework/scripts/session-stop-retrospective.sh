@@ -89,6 +89,13 @@ if [ "$rc" -eq 0 ] && [ -n "${MCP_API_KEY:-}" ]; then
     [ -n "$_SID" ] && _KL_ARGS+=(--session-id "$_SID")
     ( python3 "$_RETRO" "${_KL_ARGS[@]}" >/dev/null 2>&1 ) &
     disown $! 2>/dev/null || true
+    # Codex P2 2026-07-19 (manolii-platform line 94): also drain any
+    # prior-session snapshots that never reached KL (transient network
+    # failures, aborted flushes). Bounded, oldest-first, skips anything
+    # younger than 30s so the current-session worker above owns its
+    # own snapshot.
+    ( python3 "$_RETRO" --mode kl-drain >/dev/null 2>&1 ) &
+    disown $! 2>/dev/null || true
 fi
 
 exit 0

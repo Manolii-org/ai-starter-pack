@@ -753,6 +753,100 @@ def test_mcp_json_url_trusted_hosts_still_restricts_when_set(project, monkeypatc
     assert mod._kl_url() is None
 
 
+def test_kl_drain_retries_stranded_prior_session_snapshots(project, monkeypatch):
+    """Codex P2 2026-07-19 (manolii-platform line 94): when kl_create_note
+    fails transiently, mode_kl_only clears its lease but future Stops only
+    look at their own session_id. mode_kl_drain must walk all unflushed
+    snapshots and retry them per session_id."""
+    monkeypatch.setenv("MCP_API_KEY", "k")
+    monkeypatch.setenv("KL_MCP_URL", "https://kl.example.test/api/mcp")
+    monkeypatch.setenv("KL_ENTITY", "acme")
+    mod = _load_module(project)
+
+    snap_dir = project / ".ai" / "memory" / "retrospectives"
+    # Stranded snapshot from prior session — old enough to bypass the 30s
+    # safety window and cleared lease (no kl_in_flight_at, kl_written=False).
+    stranded = snap_dir / "20260718T000000Z-main-SID-old-stranded.json"
+    stranded.write_text(json.dumps({
+        "session_id": "SID-old",
+        "branch": "main",
+        "kl_written": False,
+    }, indent=2))
+    # Backdate mtime so age > 30s.
+    os.utime(stranded, (1_700_000_000, 1_700_000_000))
+
+    uploaded_sids = []
+    def track_create(entity, title, content, tags):
+        for tag in tags or []:
+            if tag.startswith("branch:"):
+                pass
+        uploaded_sids.append(title)
+        return True
+    monkeypatch.setattr(mod, "kl_create_note", track_create)
+    monkeypatch.setattr(mod, "kl_assert_fact", lambda *a, **kw: True)
+
+    mod.mode_kl_drain()
+    assert len(uploaded_sids) == 1, \
+        f"drain must retry the stranded snapshot: got {uploaded_sids}"
+    after = json.loads(stranded.read_text())
+    assert after.get("kl_written") is True
+
+
+def test_kl_drain_skips_snapshots_younger_than_30s(project, monkeypatch):
+    """The drain must NOT race the current session's own kl-only worker —
+    snapshots younger than 30s are left for the per-session worker."""
+    monkeypatch.setenv("MCP_API_KEY", "k")
+    monkeypatch.setenv("KL_MCP_URL", "https://kl.example.test/api/mcp")
+    monkeypatch.setenv("KL_ENTITY", "acme")
+    mod = _load_module(project)
+
+    snap_dir = project / ".ai" / "memory" / "retrospectives"
+    fresh = snap_dir / "20260719T000000Z-main-SID-fresh.json"
+    fresh.write_text(json.dumps({
+        "session_id": "SID-fresh",
+        "branch": "main",
+        "kl_written": False,
+    }, indent=2))
+    # Leave the mtime at "now" so age < 30s.
+
+    uploads = []
+    monkeypatch.setattr(mod, "kl_create_note",
+                        lambda *a, **kw: uploads.append(kw) or True)
+    monkeypatch.setattr(mod, "kl_assert_fact", lambda *a, **kw: True)
+
+    mod.mode_kl_drain()
+    assert uploads == [], "drain must skip fresh snapshots (<30s old)"
+
+
+def test_kl_drain_skips_snapshots_with_fresh_lease(project, monkeypatch):
+    """The drain must respect a fresh in-flight lease — another worker is
+    handling that snapshot."""
+    monkeypatch.setenv("MCP_API_KEY", "k")
+    monkeypatch.setenv("KL_MCP_URL", "https://kl.example.test/api/mcp")
+    monkeypatch.setenv("KL_ENTITY", "acme")
+    mod = _load_module(project)
+
+    from datetime import datetime as _dt, timezone as _tz
+    fresh_iso = _dt.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    snap_dir = project / ".ai" / "memory" / "retrospectives"
+    leased = snap_dir / "20260718T000000Z-main-SID-leased.json"
+    leased.write_text(json.dumps({
+        "session_id": "SID-leased",
+        "branch": "main",
+        "kl_written": False,
+        "kl_in_flight_at": fresh_iso,
+    }, indent=2))
+    os.utime(leased, (1_700_000_000, 1_700_000_000))  # snap old enough
+
+    uploads = []
+    monkeypatch.setattr(mod, "kl_create_note",
+                        lambda *a, **kw: uploads.append(kw) or True)
+    monkeypatch.setattr(mod, "kl_assert_fact", lambda *a, **kw: True)
+
+    mod.mode_kl_drain()
+    assert uploads == [], "drain must skip snapshots with a fresh lease"
+
+
 def test_mcp_json_url_trusted_hosts_allows_matching_host(project, monkeypatch):
     (project / ".mcp.json").write_text(
         json.dumps({"mcpServers": {"knowledge-layer": {"url": "https://kl.corp.example/api/mcp"}}})
