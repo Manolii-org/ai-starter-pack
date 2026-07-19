@@ -671,7 +671,7 @@ def _mcp_envelope_ok(body: bytes) -> bool:
     return True
 
 
-def kl_create_note(entity: str, title: str, content: str, tags: list[str]) -> bool:
+def kl_create_note(entity: str, title: str, content: str, tags: list[str], idempotency_key: str = "") -> bool:
     if os.environ.get("SESSION_RETRO_DRY_RUN"):
         print(f"[session-retro] DRY RUN kl_create_note: {title!r} entity={entity}", file=sys.stderr)
         return True
@@ -692,12 +692,28 @@ def kl_create_note(entity: str, title: str, content: str, tags: list[str]) -> bo
         "method": "tools/call",
         "params": {
             "name": "kl_create_note",
-            "arguments": {
-                "entity": entity,
-                "title": title,
-                "content": content,
-                "tags": tags,
-            },
+            "arguments": (
+                # Codex P2 2026-07-19 (manolii-platform#430 line 700): pass a
+                # stable idempotency_key derived from the durable snapshot
+                # identity. If KL accepts the note but the worker dies before
+                # the snapshot commit lands, kl-drain will retry with the
+                # SAME key — KL dedupes and the second call is a no-op.
+                # Without this, retries produce duplicate retrospective notes.
+                {
+                    "entity": entity,
+                    "title": title,
+                    "content": content,
+                    "tags": tags,
+                    "idempotency_key": idempotency_key,
+                }
+                if idempotency_key
+                else {
+                    "entity": entity,
+                    "title": title,
+                    "content": content,
+                    "tags": tags,
+                }
+            ),
         },
     }).encode()
     req = urllib.request.Request(
@@ -1051,7 +1067,17 @@ def mode_kl_only(session_id: str = "") -> None:
                     # don't upload the same narrative row a second time
                     # without a claim.
                     saw_active_lease_for_session = True
-                    continue
+                    # Codex P2 2026-07-19 (manolii-platform#430 line 1054):
+                    # BREAK, not continue — snaps are sorted oldest first,
+                    # and we only reach this branch for our target session
+                    # (line ~1038 filters by session_id). Continuing would
+                    # let this worker claim a NEWER snapshot for the same
+                    # session while the older one is still uploading; the
+                    # two network calls could then finish out of order and
+                    # a stale kl_assert_fact would overwrite fresh values
+                    # for last_dysfunction_score.* / last_failure_class.*.
+                    # FIFO within a session is required for correctness.
+                    break
                 # Dry-run must NOT persist a lease — it never uploads and
                 # would starve a real flush by holding the claim.
                 if os.environ.get("SESSION_RETRO_DRY_RUN"):
@@ -1147,11 +1173,17 @@ def mode_kl_only(session_id: str = "") -> None:
     ])
     safe_branch = branch.replace("/", "-").replace(" ", "-")
     branch_tag = f"branch:{safe_branch}"
+    # Codex P2 2026-07-19 (manolii-platform#430 line 700): the snapshot
+    # filename is stable across worker crashes and retries — use it as the
+    # idempotency key so a kl-drain retry (after lease TTL) cannot create
+    # a duplicate KL note.
+    idem_key = matched_snap.name if matched_snap is not None else ""
     wrote = kl_create_note(
         entity,
         title=f"Session retrospective — {branch} [{today}]",
         content=body,
         tags=["session-retrospective", "auto-generated", "session-learnings", branch_tag, "kl-flush"],
+        idempotency_key=idem_key,
     )
     if wrote:
         # Codex P2 2026-07-19: SESSION_RETRO_DRY_RUN forces kl_create_note to
@@ -1641,11 +1673,15 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False,
         assert entity is not None
         safe_branch = branch.replace("/", "-").replace(" ", "-")
         branch_tag = f"branch:{safe_branch}"
+        # Codex P2 2026-07-19 (manolii-platform#430 line 700): snapshot path
+        # name is stable across worker crashes — reuse it as the KL
+        # idempotency key so a subsequent kl-drain retry can't duplicate.
         wrote = kl_create_note(
             entity,
             title=f"Session retrospective — {branch} [{today}]",
             content=body,
             tags=["session-retrospective", "auto-generated", "session-learnings", branch_tag],
+            idempotency_key=snap.name,
         )
         if wrote:
             # Codex P2 2026-07-19: dry-run makes kl_create_note return True
