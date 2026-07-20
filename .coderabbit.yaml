@@ -1,0 +1,17 @@
+# Repo-local CodeRabbit configuration (not sync-managed).
+# Minimal review-budget guard: CodeRabbit rate limits are a rolling per-org
+# budget, and mechanical sync / dependency PRs were burning it during PR waves
+# (2026-07-20: five simultaneous PRs hit "Review limit reached", 18-59 min
+# waits, stalling auto-merge). Skip drafts and mechanical PR titles so the
+# budget is spent on real changes. Mirrors the auto_review block of the
+# ecosystem-canonical config in manolii-org/master:.coderabbit.yaml.
+
+reviews:
+  auto_review:
+    enabled: true
+    drafts: false
+    ignore_title_keywords:
+      - "chore: sync routing config and mesh artifacts from master"
+      - "chore: sync capability tooling from master"
+      - "chore(deps):"
+      - "fix(deps):"
