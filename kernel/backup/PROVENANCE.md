@@ -1,10 +1,10 @@
 # Kernel file provenance
 
-Source of truth:  @ 
-(PR #2914 tip; includes  Relay ingest helper).
+Source of truth: `manolii-org/master` @ `a7e36184f7f6`
+(PR #2914 tip; includes `scripts/lib/sentry-cron-checkin.sh` Relay ingest helper).
 Files are verbatim copies; refresh this table in the same PR whenever they are
-re-synced. Verify with  against the values below (paths relative
-to ).
+re-synced. Verify with `sha256sum -c` against the values below (paths relative
+to `kernel/backup/`).
 
 | Kernel path | Master path | SHA-256 |
 |---|---|---|
