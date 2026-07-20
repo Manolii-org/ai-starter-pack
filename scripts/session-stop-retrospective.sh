@@ -1,0 +1,136 @@
+#!/bin/bash
+# WS3 Stop-hook wrapper — synchronous-with-timeout (inner 8s < outer 10s).
+# Reads the Stop-hook JSON payload from stdin (session_id + transcript_path)
+# fail-open, forwards to the collector. On non-zero: writes failure marker and
+# still exits 0 so Stop never blocks. KL network leg backgrounded when
+# MCP_API_KEY is set (entity resolved by the collector from env or .ai/config/retrospective.json).
+set -euo pipefail
+_R=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+cd "$_R"
+# Codex P2 2026-07-19: when this wrapper is bundled inside a Claude
+# plugin install, the collector lives at $CLAUDE_PLUGIN_ROOT/scripts,
+# not the consumer's scripts/. Prefer the plugin root when set, fall
+# back to the consumer copy for repos that vendor the wrapper directly.
+_RETRO="${CLAUDE_PLUGIN_ROOT:-$_R}/scripts/session-retrospective.py"
+[ -f "$_RETRO" ] || _RETRO="$_R/scripts/session-retrospective.py"
+[ -f "$_RETRO" ] || exit 0
+
+# Parse Stop-hook JSON payload (fail-open; empty vars if missing/malformed).
+_PAYLOAD=""
+if [ -t 0 ]; then :; else _PAYLOAD=$(cat 2>/dev/null || true); fi
+_SID=""; _TP=""
+if [ -n "$_PAYLOAD" ]; then
+    # Coalesce None → '' so a payload with explicit "session_id": null
+    # doesn't leak the literal string "None" into the collector args.
+    # CodeRabbit 2026-07-19: accept only string values. `or ''` covers
+    # None but forwards lists/objects/booleans/numbers as their Python
+    # repr into the collector CLI. Reject anything not `str` explicitly.
+    _SID=$(printf '%s' "$_PAYLOAD" | python3 -c "import sys,json
+try:
+    d=json.load(sys.stdin)
+    v=d.get('session_id') if isinstance(d,dict) else ''
+    print(v if isinstance(v,str) else '')
+except Exception: pass" 2>/dev/null || true)
+    _TP=$(printf '%s' "$_PAYLOAD" | python3 -c "import sys,json
+try:
+    d=json.load(sys.stdin)
+    v=d.get('transcript_path') if isinstance(d,dict) else ''
+    print(v if isinstance(v,str) else '')
+except Exception: pass" 2>/dev/null || true)
+fi
+
+_ARGS=(--mode stop --local-only)
+[ -n "$_SID" ] && _ARGS+=(--session-id "$_SID")
+[ -n "$_TP" ] && _ARGS+=(--transcript "$_TP")
+
+rc=0
+if command -v timeout >/dev/null 2>&1; then
+    timeout 8s python3 "$_RETRO" "${_ARGS[@]}" >/dev/null 2>&1 || rc=$?
+else
+    # Portable fallback for images without coreutils `timeout` (macOS default,
+    # some minimal Alpine): use Python's Popen + wait(timeout) so Stop is
+    # still bounded. rc=124 mirrors coreutils' timeout convention.
+    #
+    # Codex P2 2026-07-19 (Lead-Converter#250 line 57): DO NOT use
+    # subprocess.run(..., timeout=8) — its timeout path calls
+    # process.kill() (SIGKILL), which bypasses mode_stop()'s SIGTERM
+    # handler. The handler is what rolls back a durable mtime
+    # reservation on hang, so SIGKILL leaves the reservation in place
+    # and the next Stop for the unchanged transcript is silently gated
+    # out — the retrospective is permanently lost. Send SIGTERM first
+    # (mirrors coreutils `timeout` default), give the handler a short
+    # grace window, then escalate to SIGKILL.
+    python3 - "$_RETRO" "${_ARGS[@]}" <<'PY' >/dev/null 2>&1 || rc=$?
+import subprocess, sys
+retro, *args = sys.argv[1:]
+p = subprocess.Popen(["python3", retro, *args])
+try:
+    sys.exit(p.wait(timeout=8))
+except subprocess.TimeoutExpired:
+    p.terminate()  # SIGTERM — mode_stop handler releases reservation
+    try:
+        p.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        p.kill()   # escalation
+        try:
+            p.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+    sys.exit(124)
+PY
+fi
+if [ "$rc" -ne 0 ]; then
+    # CodeRabbit 2026-07-19: keep marker I/O fail-open. A read-only
+    # repo, a conflicting `.ai` regular file, or a full disk would
+    # otherwise let mkdir/printf abort the wrapper under `set -e` and
+    # block Stop. Suppress errors and continue to the closing `exit 0`.
+    if mkdir -p .ai/memory/retrospectives 2>/dev/null; then
+        printf '{"timestamp":"%s","exit_code":%s,"event":"session-retrospective-capture-failed"}\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$rc" \
+            > .ai/memory/retrospectives/.last-capture-failed 2>/dev/null || true
+    fi
+else
+    rm -f .ai/memory/retrospectives/.last-capture-failed 2>/dev/null || true
+fi
+
+# KL network leg — backgrounded, never blocks Stop. Skipped if:
+#  - local capture failed (avoids uploading a STALE prior snapshot labelled with
+#    the current session_id via mode_kl_only's newest-snapshot lookup)
+#  - no MCP_API_KEY (no credential to authenticate with)
+# The wrapper deliberately does NOT trigger bootstrap_env here — that surface
+# would block Stop. Entity resolution is left to the collector's
+# _resolve_entity() (env → .ai/config/retrospective.json → default), so
+# repos that configure `entity` only in the JSON config file (Codex P2
+# Lead-Converter line 85 2026-07-19) still get their kl-only worker
+# scheduled. Missing-cred case still fails-closed on MCP_API_KEY.
+if [ "$rc" -eq 0 ] && [ -n "${MCP_API_KEY:-}" ]; then
+    _KL_ARGS=(--mode kl-only)
+    [ -n "$_SID" ] && _KL_ARGS+=(--session-id "$_SID")
+    # CodeRabbit 2026-07-19 (ai-starter-pack#32 line 99): bound the
+    # backgrounded network workers with an explicit `timeout 30s`. A
+    # stalled MCP endpoint would otherwise leave the disowned worker
+    # running indefinitely (kl-drain can walk up to 10 sessions with a
+    # network leg each), and the shell would keep those file
+    # descriptors open. Guarded so images without coreutils `timeout`
+    # (macOS default, minimal Alpine) still run — matching the
+    # synchronous-leg fallback pattern at line 47.
+    if command -v timeout >/dev/null 2>&1; then
+        ( timeout 30s python3 "$_RETRO" "${_KL_ARGS[@]}" >/dev/null 2>&1 ) &
+    else
+        ( python3 "$_RETRO" "${_KL_ARGS[@]}" >/dev/null 2>&1 ) &
+    fi
+    disown $! 2>/dev/null || true
+    # Codex P2 2026-07-19 (manolii-platform line 94): also drain any
+    # prior-session snapshots that never reached KL (transient network
+    # failures, aborted flushes). Bounded, oldest-first, skips anything
+    # younger than 30s so the current-session worker above owns its
+    # own snapshot.
+    if command -v timeout >/dev/null 2>&1; then
+        ( timeout 30s python3 "$_RETRO" --mode kl-drain >/dev/null 2>&1 ) &
+    else
+        ( python3 "$_RETRO" --mode kl-drain >/dev/null 2>&1 ) &
+    fi
+    disown $! 2>/dev/null || true
+fi
+
+exit 0

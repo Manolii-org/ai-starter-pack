@@ -36,3 +36,34 @@ dist/
 !.ai/memory/retrospectives/.gitkeep
 !.ai/memory/retrospectives/session-retrospectives.jsonl
 .ai/memory/retrospectives/.last-capture-mtime
+# Staging tmp file used by _write_mtime_sentinel() before os.replace().
+# Codex P2 2026-07-19 (manolii-platform#430 .gitignore:76): a crash between
+# NamedTemporaryFile write and os.replace can leave this behind and dirty
+# the worktree on the next status check.
+.ai/memory/retrospectives/.last-capture-mtime.tmp
+# Advisory lock file created by _retro_lock() — persists after fcntl
+# release and would otherwise dirty the worktree on every Stop capture.
+# Codex P1 2026-07-19.
+.ai/memory/retrospectives/.retrospectives.lock
+
+
+.ai/retrospective-staging/
+
+!.claude/memory
+
+.ai/recent-navigation-warning.md
+
+# WS3 pack: runtime archive of migration conflicts (see
+# scripts/migrate-memory-path.sh). Contents are per-run mktemp dirs
+# holding legacy memory records; they must not enter git history.
+# Keep the parent .gitkeep tracked if present.
+.ai/memory/archive/migration-conflicts/*
+!.ai/memory/archive/migration-conflicts/.gitkeep
+
+# WS3 pack: local memory runtime stores. Scaffolds are tracked via
+# .gitkeep only — the jsonl files fill with per-session telemetry
+# (fact assertions, learned patterns, session summaries) that must
+# not enter git history. Codex P2 2026-07-19.
+.ai/memory/facts.jsonl
+.ai/memory/patterns.jsonl
+.ai/memory/sessions.jsonl

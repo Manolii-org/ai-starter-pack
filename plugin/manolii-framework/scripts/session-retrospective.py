@@ -15,8 +15,10 @@ import argparse
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -49,10 +51,91 @@ STAGING_DIR = REPO_ROOT / ".ai" / "retrospective-staging"
 SESSION_LOGS_DIR = REPO_ROOT / ".ai" / "session-logs"
 RETROSPECTIVES_DIR = REPO_ROOT / ".ai" / "memory" / "retrospectives"
 RETRO_JSONL = RETROSPECTIVES_DIR / "session-retrospectives.jsonl"
+# Codex P2 2026-07-19 (Lead-Converter line 990): stale-claim lease. When a
+# background kl-only worker crashes between claim and confirmed upload, the
+# next worker must be able to reclaim the snapshot after this many seconds.
+# Set generously above the wrapper's 8s timeout so a slow-but-live network
+# call is never mistaken for a crashed worker.
+KL_CLAIM_TTL_SEC = 60.0
 MTIME_SENTINEL = RETROSPECTIVES_DIR / ".last-capture-mtime"
+_RETRO_LOCK = RETROSPECTIVES_DIR / ".retrospectives.lock"
+
+# Codex P2 2026-07-19 (Lead-Converter#250 line 1512): the wrapper's 8s SIGTERM
+# can interrupt _write_local_record() AFTER it has exclusively created the
+# snapshot file but BEFORE the JSONL append (or during a partial write). The
+# normal try/except cleanup in _write_local_record does NOT run when the
+# signal handler in mode_stop calls sys.exit() — SystemExit bypasses `except
+# Exception`. Publish the in-flight state at module scope so the SIGTERM
+# handler can roll back the orphaned snapshot and truncate any partial JSONL
+# bytes before it exits. Both fields reset to None on successful commit.
+_INFLIGHT_SNAP: Optional[Path] = None
+_INFLIGHT_JSONL_PRESIZE: Optional[int] = None
+# Codex P2 2026-07-19 (Lead-Converter#250 line 1850): the previous scheme
+# flipped `_stop_committed[0]=True` inside mode_stop() only AFTER
+# _write_local_record returned. A SIGTERM that landed between the durable
+# snapshot+JSONL commit and that assignment still saw False, so the handler
+# released the mtime reservation and a subsequent Stop for the unchanged
+# transcript would capture a duplicate retrospective. Publish the committed
+# state at module scope INSIDE _write_local_record so the signal handler
+# observes atomicity with the local-record commit.
+_LOCAL_RECORD_COMMITTED = False
+
+
+def _cleanup_inflight_local_record() -> None:
+    """Roll back a partial snapshot/JSONL pair when a signal aborts
+    _write_local_record() before it commits. Safe to call from a signal
+    handler: swallows every exception, does no I/O beyond unlink/ftruncate.
+    Callers reset the module-level state whether or not this succeeded so a
+    subsequent Stop is not confused by a stale rollback target."""
+    global _INFLIGHT_SNAP, _INFLIGHT_JSONL_PRESIZE
+    partial_snap = _INFLIGHT_SNAP
+    pre_size = _INFLIGHT_JSONL_PRESIZE
+    _INFLIGHT_SNAP = None
+    _INFLIGHT_JSONL_PRESIZE = None
+    if partial_snap is not None:
+        try:
+            partial_snap.unlink()
+        except OSError:
+            pass
+    if pre_size is not None:
+        try:
+            fd = os.open(str(RETRO_JSONL), os.O_RDWR)
+            try:
+                os.ftruncate(fd, pre_size)
+            finally:
+                os.close(fd)
+        except OSError:
+            pass
+
+
+def _retro_lock():
+    """Advisory-lock context manager guarding JSONL appends and sentinel
+    read-modify-write. Codex P2 2026-07-19: concurrent Stop handlers were
+    racing on both, so we serialize with fcntl.flock. Falls back to a no-op
+    context on platforms without fcntl (never observed in prod, but keeps
+    the fail-open contract intact)."""
+    import contextlib
+    try:
+        import fcntl  # POSIX-only; unavailable on Windows.
+    except ImportError:
+        return contextlib.nullcontext()
+
+    @contextlib.contextmanager
+    def _cm():
+        RETROSPECTIVES_DIR.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(_RETRO_LOCK), os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            os.close(fd)
+    return _cm()
 NAVIGATION_WARNING_FILE = REPO_ROOT / ".ai" / "recent-navigation-warning.md"
 CONFIG_PATH = REPO_ROOT / ".ai" / "config" / "retrospective.json"
-DEFAULT_KL_MCP_URL = "https://knowledge-layer-cron.vercel.app/api/mcp"
 API_TIMEOUT_SECONDS = 15
 _UNTRUSTED = "[UNTRUSTED_EXTERNAL_CONTENT]"
 
@@ -75,6 +158,16 @@ _APOLOGY_RX = re.compile(
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+_ID_COUNTER = 0
+
+
+def _stable_id_seed() -> int:
+    """Monotonic per-process JSON-RPC request id — small integer, no clock leak."""
+    global _ID_COUNTER
+    _ID_COUNTER += 1
+    return _ID_COUNTER
 
 
 def _get_branch() -> str:
@@ -122,8 +215,145 @@ def _kl_ready(entity: Optional[str], local_only: bool) -> bool:
     return bool((os.environ.get("MCP_API_KEY") or "").strip())
 
 
-def _kl_url() -> str:
-    return (os.environ.get("KL_MCP_URL") or DEFAULT_KL_MCP_URL).rstrip("/")
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse ANY 3xx redirect on authenticated KL POSTs.
+
+    Codex P1 2026-07-19: Python's default redirect handler copies request
+    headers — including `Authorization: Bearer <MCP_API_KEY>` — into the
+    follow-up request. A trusted MCP endpoint (or its DNS/proxy) that
+    301/302/303's to an attacker-controlled URL would leak the bearer
+    token, bypassing the up-front _validate_mcp_url guard. Returning None
+    from redirect_request tells urllib to NOT follow the redirect; the
+    3xx response propagates to the caller, which treats it as failure.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401
+        return None
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirectHandler())
+
+
+def _kl_urlopen(req, timeout: int):
+    """Open a KL request with the no-redirect opener so bearer credentials
+    are never forwarded across a 3xx hop. Callers must treat any 3xx
+    response as a failure (KL never legitimately returns 3xx here)."""
+    return _NO_REDIRECT_OPENER.open(req, timeout=timeout)
+
+
+def _validate_mcp_url(url: str, source: str) -> Optional[str]:
+    """Enforce https-or-loopback on any candidate URL. Returns the trimmed
+    URL if safe, else None (with an explanatory stderr message).
+
+    MCP_API_KEY travels as `Authorization: Bearer` — refuse any scheme that
+    would ship it in cleartext. Parse the URL so
+    `http://127.0.0.1@attacker.example/...` and
+    `http://localhost.attacker.example/...` cannot slip past a naive
+    prefix check (Codex P2 2026-07-19).
+    """
+    u = url.strip().rstrip("/")
+    if not u:
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(u)
+    except ValueError:
+        print(f"[session-retro] {source} malformed; skip", file=sys.stderr)
+        return None
+    if parsed.scheme == "https":
+        return u
+    if parsed.scheme == "http":
+        host = (parsed.hostname or "").lower()
+        if host in ("localhost", "127.0.0.1", "::1"):
+            return u
+    print(f"[session-retro] {source} must be https (or http loopback); skip", file=sys.stderr)
+    return None
+
+
+def _kl_url_from_mcp_json() -> Optional[str]:
+    """Read the knowledge-layer endpoint from .mcp.json when no env var
+    is set. Codex P2 2026-07-19: the documented "enable KL by setting
+    MCP_API_KEY + entity" path did not surface the URL — operators
+    configure the endpoint once in .mcp.json (single source of truth for
+    the rest of the tooling), and kl-only silently no-op'd because no
+    env var carried it. Read that same file here to close the gap.
+
+    Fail-closed: any parse/read error returns None (caller skips network).
+    """
+    for candidate in (".mcp.json", ".claude/.mcp.json"):
+        fp = REPO_ROOT / candidate
+        try:
+            if not fp.exists():
+                continue
+            data = json.loads(fp.read_text(encoding="utf-8"))
+        except Exception as e:
+            print(f"[session-retro] .mcp.json parse: {type(e).__name__}", file=sys.stderr)
+            continue
+        servers = (data.get("mcpServers") or {}) if isinstance(data, dict) else {}
+        # `remote-memory` is the key the pack's own first-run setup wizard
+        # emits (scripts/first-run-setup.py:454-457) — must be recognised
+        # here or every pack-configured install silently skips KL flush.
+        # Codex P1 2026-07-19.
+        for key in ("knowledge-layer", "knowledge_layer", "kl", "remote-memory", "remote_memory"):
+            spec = servers.get(key)
+            if isinstance(spec, dict):
+                url = spec.get("url") or spec.get("endpoint")
+                if isinstance(url, str) and url.strip():
+                    return url
+    return None
+
+
+def _kl_url() -> Optional[str]:
+    """Return the MCP endpoint or None when unset — fail-closed.
+
+    Resolution order:
+      1. KL_MCP_URL env var
+      2. KNOWLEDGE_LAYER_MCP_URL env var (manolii-platform kl-proxy compat)
+      3. .mcp.json `mcpServers.knowledge-layer.url` — Codex P2 (2026-07-19)
+
+    Every candidate is passed through the same https-or-loopback guard so
+    the operator-facing surface is uniform. A hardcoded default remains a
+    per-deployment secret in disguise, so we never invent one; callers
+    skip the network leg when None.
+    """
+    for key in ("KL_MCP_URL", "KNOWLEDGE_LAYER_MCP_URL"):
+        val = os.environ.get(key) or ""
+        if val.strip():
+            return _validate_mcp_url(val, key)
+    val = _kl_url_from_mcp_json()
+    if val:
+        validated = _validate_mcp_url(val, ".mcp.json:knowledge-layer.url")
+        if validated is None:
+            return None
+        # Codex P2 2026-07-19 (Lead-Converter line 293): `.mcp.json` is a
+        # source-controlled file that Claude Code already trusts to spawn
+        # every configured MCP server. An attacker with write access to it
+        # can already run arbitrary code via the OTHER server entries — so
+        # gating the KL URL specifically behind an undocumented
+        # KL_MCP_URL_TRUSTED_HOSTS env var provided no meaningful defence
+        # and silently disabled every KL upload in every repo that opted
+        # in the intended way (checked-in `.mcp.json` + `MCP_API_KEY`).
+        # Trust the file by default; KL_MCP_URL_TRUSTED_HOSTS, when set,
+        # is now an OPTIONAL further restriction (defence-in-depth for
+        # operators who want to pin an expected host).
+        allow = (os.environ.get("KL_MCP_URL_TRUSTED_HOSTS") or "").strip()
+        if not allow:
+            return validated
+        try:
+            host = (urllib.parse.urlparse(validated).hostname or "").lower()
+        except Exception:
+            return None
+        allowed_hosts = {h.strip().lower() for h in allow.split(",") if h.strip()}
+        # Loopback is always allowed by _validate_mcp_url; keep the same
+        # exemption here so localhost dev doesn't need the env var.
+        if host in ("localhost", "127.0.0.1", "::1") or host in allowed_hosts:
+            return validated
+        print(
+            f"[session-retro] .mcp.json-derived host '{host}' not in "
+            "KL_MCP_URL_TRUSTED_HOSTS; rejecting",
+            file=sys.stderr,
+        )
+        return None
+    return None
 
 
 def _extract_text(obj: object) -> str:
@@ -169,7 +399,7 @@ def extract_signals(path: Optional[Path]) -> dict:
     if not path or not path.exists():
         return signals
 
-    last_tool: Optional[str] = None
+    last_tool: Optional[tuple] = None  # (tool_name, normalized_input_key)
     tool_streak = 0
     first_ts: Optional[float] = None
     last_ts: Optional[float] = None
@@ -184,6 +414,8 @@ def extract_signals(path: Optional[Path]) -> dict:
                     entry = json.loads(line)
                 except json.JSONDecodeError as e:
                     print(f"[session-retro] json parse: {type(e).__name__}", file=sys.stderr)
+                    continue
+                if not isinstance(entry, dict):
                     continue
 
                 ts = entry.get("timestamp") or entry.get("ts")
@@ -207,17 +439,54 @@ def extract_signals(path: Optional[Path]) -> dict:
                 )
 
                 if role in ("user", "human"):
-                    signals["total_turns"] += 1
-                    if not signals["first_user_message"] and text.strip():
-                        signals["first_user_message"] = text.strip()[:250]
-                    if text and _CORRECTION_RX.search(text):
-                        signals["user_corrections"].append(text.strip()[:200])
+                    # Codex P2 2026-07-19 (impaktful#1695 line 433 + 437):
+                    # Claude tool_result envelopes are also role="user"
+                    # (as modeled by
+                    # test_retry_streak_survives_tool_result_envelope).
+                    # They are NOT user prompts — treating them as user
+                    # turns both inflated `total_turns` (line 433) and
+                    # scored command/MCP output like "wrong file" as user
+                    # corrections (line 437, pushed dysfunction +2 and
+                    # misclassified as `planning`). Detect the envelope
+                    # BEFORE incrementing anything and skip the entire
+                    # user-turn block if it's a tool_result.
+                    _content_for_role = msg.get("content") if isinstance(msg, dict) else entry.get("content")
+                    _blocks_for_role = _content_for_role if isinstance(_content_for_role, list) else []
+                    _is_tool_result_envelope = any(
+                        isinstance(b, dict) and b.get("type") == "tool_result"
+                        for b in _blocks_for_role
+                    )
+                    if not _is_tool_result_envelope:
+                        signals["total_turns"] += 1
+                        if not signals["first_user_message"] and text.strip():
+                            signals["first_user_message"] = text.strip()[:250]
+                        if text and _CORRECTION_RX.search(text):
+                            signals["user_corrections"].append(text.strip()[:200])
 
                 if role in ("assistant", "ai") and text and _APOLOGY_RX.search(text):
                     signals["assistant_apologies"] += 1
 
                 content = msg.get("content") if isinstance(msg, dict) else entry.get("content")
                 blocks = content if isinstance(content, list) else []
+                # Codex P2 2026-07-19: reset the retry streak when a message
+                # boundary intervenes without a tool_use of the streak key.
+                # Otherwise 3 identical calls separated by ordinary user/
+                # assistant text turns falsely count as a retry sequence and
+                # can force a `tooling` failure class.
+                # Codex P2 2026-07-19 (manolii-platform line 475): in a
+                # normal Claude transcript, an assistant tool_use is
+                # followed by a SEPARATE user-role tool_result envelope
+                # before the assistant can retry. That envelope contains
+                # no tool_use, so a naive reset here fires between the
+                # failed attempt and the retry — every retry restarts at
+                # streak=1 and tool_retries never reaches the threshold.
+                # Fix: an entry that carries a tool_result is transparent
+                # to the streak (neither extends nor resets). Reset only
+                # when the entry is genuinely unrelated (no tool_use, no
+                # tool_result). The `else` branch at line ~431 still
+                # resets when a NEW tool_use has a different key.
+                entry_extended_streak = False
+                entry_has_tool_result = False
                 for block in blocks:
                     if not isinstance(block, dict):
                         continue
@@ -226,15 +495,24 @@ def extract_signals(path: Optional[Path]) -> dict:
                     if btype in ("tool_use", "tool_call") or (name and btype.startswith("tool")):
                         if name:
                             signals["tool_calls_total"] += 1
-                            if name == last_tool:
+                            inp = block.get("input") or block.get("arguments") or {}
+                            # Retry-streak: same tool name AND same input args.
+                            # Just repeating a tool name (e.g. 3 different Read
+                            # file_paths) is not a retry — that's normal work.
+                            try:
+                                inp_key = json.dumps(inp, sort_keys=True, default=str)[:200]
+                            except Exception:
+                                inp_key = str(inp)[:200]
+                            call_key = (name, inp_key)
+                            if call_key == last_tool:
                                 tool_streak += 1
                             else:
-                                last_tool, tool_streak = name, 1
+                                last_tool, tool_streak = call_key, 1
+                            entry_extended_streak = True
                             if tool_streak >= 3:
                                 signals["tool_retries"][name] = max(
                                     signals["tool_retries"].get(name, 0), tool_streak
                                 )
-                            inp = block.get("input") or block.get("arguments") or {}
                             if isinstance(inp, dict):
                                 fpath = str(
                                     inp.get("file_path") or inp.get("path")
@@ -253,11 +531,31 @@ def extract_signals(path: Optional[Path]) -> dict:
                                         signals["ai_confusion_events"].append(
                                             f"Re-read: {fpath} x{signals['file_reads'][fpath]}"
                                         )
-                    if btype == "tool_result" and (
-                        block.get("is_error")
-                        or "error" in str(block.get("content", "")).lower()[:80]
-                    ):
-                        signals["error_count"] += 1
+                    # Codex P2: prior heuristic (`"error" in content[:80]`) fired
+                    # on innocuous outputs like "0 errors found" — six such
+                    # results silently forced an external-dependency label.
+                    # Rely on the structured is_error flag; only fall back to
+                    # text sniffing when it's truly error-shaped (leading
+                    # "Error:"/"Traceback"/HTTP 4xx/5xx status).
+                    if btype == "tool_result":
+                        entry_has_tool_result = True
+                        head = str(block.get("content", ""))[:120].strip()
+                        head_lower = head.lower()
+                        text_error = (
+                            head_lower.startswith(("error:", "error ", "err:", "traceback"))
+                            or re.match(r"^(4\d\d|5\d\d)\b", head) is not None
+                            or "exception:" in head_lower
+                        )
+                        if block.get("is_error") or text_error:
+                            signals["error_count"] += 1
+                # Codex P2 2026-07-19: if this entry did NOT extend the
+                # streak, it's a message boundary — reset so identical calls
+                # separated by ordinary user/assistant text don't accumulate.
+                # Codex P2 2026-07-19 (manolii-platform line 475): a
+                # tool_result envelope is transparent to the streak — the
+                # assistant's retry lives in the NEXT entry.
+                if not entry_extended_streak and not entry_has_tool_result:
+                    last_tool, tool_streak = None, 0
     except Exception as e:
         print(f"[session-retro] extract_signals: {type(e).__name__}", file=sys.stderr)
 
@@ -317,43 +615,296 @@ def plain_text_note(branch: str, signals: dict, dscore: int, fclass: str, diff_s
 
 
 def _write_local_record(record: dict) -> Path:
+    global _INFLIGHT_SNAP, _INFLIGHT_JSONL_PRESIZE, _LOCAL_RECORD_COMMITTED
+    # Codex P2 2026-07-19 (Lead-Converter#250 line 1850): reset the committed
+    # flag at entry so a prior in-process capture's state can't shadow a fresh
+    # signal-handler decision. The flag flips True at the tail-end, after
+    # snapshot+JSONL both durable.
+    _LOCAL_RECORD_COMMITTED = False
     RETROSPECTIVES_DIR.mkdir(parents=True, exist_ok=True)
-    with RETRO_JSONL.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(record, ensure_ascii=False) + "\n")
     safe_branch = str(record.get("branch", "unknown")).replace("/", "--").replace(" ", "--")
     ts = str(record.get("captured_at", _now_iso())).replace(":", "")
-    snap = RETROSPECTIVES_DIR / f"{ts}-{safe_branch}.json"
-    snap.write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    return snap
+    # Codex P2: captured_at only carries second resolution, so two Stops on
+    # the same branch within one UTC second would collide and the second
+    # write would silently overwrite the first snapshot. Suffix with the
+    # session slug (or a stable transcript-derived key when session_id is
+    # empty) to make the path unique per session, not per branch/second.
+    tag = _safe_session_slug(str(record.get("session_id") or ""))
+    if tag == "unknown":
+        tp = record.get("transcript") or ""
+        if tp:
+            import hashlib
+            tag = "tx" + hashlib.sha256(str(tp).encode("utf-8")).hexdigest()[:8]
+    base = f"{ts}-{safe_branch}-{tag}"
+    # Codex P2 2026-07-19 (line 533): write the two artefacts atomically
+    # relative to a caller-triggered retry. Order matters:
+    #   1) Reserve + write the snapshot FIRST via O_CREAT|O_EXCL.
+    #   2) Append the JSONL row SECOND.
+    # If step 1 fails (ENOSPC, permission), NOTHING has been persisted yet,
+    # so mode_stop() can safely release the mtime reservation and let the
+    # next Stop retry with a clean slate. If step 2 fails after step 1
+    # succeeded, unlink the just-written snapshot so we don't leak a
+    # narrative-less snapshot AND so the reservation rollback still leaves
+    # a consistent state. Previous ordering (JSONL then snapshot) leaked a
+    # duplicate JSONL row when the snapshot write failed.
+    # Codex P2 2026-07-19 (manolii-platform#430 line 1308): stamp a stable
+    # capture_id into the record BEFORE writing snapshot/JSONL. The id is
+    # the snapshot's filename stem — unique per capture attempt across
+    # retries, propagated into the JSONL narrative row AND into any later
+    # kl-flushed completion event. The JSONL fallback scan can then key
+    # completion per capture, so a session's earlier flush no longer gates
+    # a later still-pending capture (A, B, then A-flushed → B stays
+    # visible).
+    counter = 0
+    snap: Optional[Path] = None
+    fd = None
+    candidate: Optional[Path] = None
+    while True:
+        candidate = RETROSPECTIVES_DIR / (
+            f"{base}.json" if counter == 0 else f"{base}-{counter:03d}.json"
+        )
+        try:
+            fd = os.open(str(candidate), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            # Codex P2 2026-07-19 (Lead-Converter#250 line 703): publish
+            # the in-flight snapshot IMMEDIATELY on exclusive-create
+            # success, BEFORE writing the payload. Between os.open()
+            # returning and the earlier post-write assignment there was
+            # a window in which the file existed on disk (possibly
+            # zero-byte) but the SIGTERM handler saw _INFLIGHT_SNAP=None
+            # and only released the mtime reservation — leaving an
+            # orphaned `kl_written:false` snapshot that a later scan
+            # could pick up for a duplicate flush, and freeing the gate
+            # so the next Stop for the unchanged transcript captured a
+            # duplicate too. Publishing here shrinks the window to the
+            # single os.open() call itself, which is atomic.
+            _INFLIGHT_SNAP = candidate
+            break
+        except FileExistsError:
+            counter += 1
+            if counter > 9999:
+                # Extreme safety net: fall back to write_text so we never
+                # spin forever on a pathological filesystem state.
+                record["capture_id"] = candidate.stem
+                # Publish before write for the same reason as above.
+                _INFLIGHT_SNAP = candidate
+                candidate.write_text(
+                    json.dumps(record, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+                snap = candidate
+                fd = None
+                break
+            continue
+    if fd is not None and candidate is not None:
+        record["capture_id"] = candidate.stem
+        payload = (json.dumps(record, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(payload)
+        except Exception:
+            # Snapshot write failed after exclusive-create: unlink so we
+            # don't leave an empty/partial file behind that a later scan
+            # would treat as a real (kl_written:false) capture.
+            try:
+                candidate.unlink()
+            except OSError:
+                pass
+            # Clear the published in-flight target too — no on-disk file
+            # remains, and a later SIGTERM must not try to unlink it a
+            # second time.
+            _INFLIGHT_SNAP = None
+            raise
+        snap = candidate
+
+    # Snapshot is durable — now append the JSONL row. On failure, unlink
+    # the snapshot to keep the two artefacts consistent.
+    # Codex P2 2026-07-19 (impaktful#1695 line 617): if the append fails
+    # AFTER writing partial bytes (ENOSPC, disk error, unclean flush), the
+    # JSONL is left with a truncated row. mode_stop then releases the mtime
+    # reservation and the next capture would append onto that truncated
+    # line, producing a concatenated or duplicated record. Capture the
+    # pre-append file size under the lock and ftruncate() back to it on
+    # any write exception before re-raising.
+    try:
+        with _retro_lock():
+            try:
+                pre_size = RETRO_JSONL.stat().st_size
+            except FileNotFoundError:
+                pre_size = 0
+            # Publish the pre-append offset so the SIGTERM handler in
+            # mode_stop can truncate a partial write back to it. Set BEFORE
+            # opening the file so an early crash still has a safe target.
+            _INFLIGHT_JSONL_PRESIZE = pre_size
+            # Codex P2 2026-07-19 (ai-starter-pack#32 line 95): use an
+            # unbuffered os.open+os.write pair instead of a TextIOWrapper.
+            # The previous "a"-mode wrapper buffered the row in Python; a
+            # SIGTERM racing between fh.write() and fh.flush() ran the
+            # signal handler's ftruncate() via a second fd BEFORE the
+            # SystemExit unwind flushed the buffered bytes. That unwind
+            # then re-flushed the buffer AFTER the truncate, reintroducing
+            # an orphaned/duplicate line even though the snapshot was
+            # unlinked and the mtime reservation released. Bytes-mode +
+            # buffering=0 removes the Python buffer entirely, so the
+            # ftruncate is durable across the exit.
+            line_bytes = (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8")
+            append_fd = os.open(
+                str(RETRO_JSONL),
+                os.O_WRONLY | os.O_APPEND | os.O_CREAT,
+                0o644,
+            )
+            try:
+                try:
+                    written = 0
+                    while written < len(line_bytes):
+                        n = os.write(append_fd, line_bytes[written:])
+                        if n <= 0:
+                            raise OSError("short write on retrospectives JSONL")
+                        written += n
+                except Exception:
+                    # Roll the append back to the pre-write offset so a
+                    # later capture cannot fuse onto a half-written line.
+                    try:
+                        os.ftruncate(append_fd, pre_size)
+                    except OSError:
+                        pass
+                    raise
+            finally:
+                try:
+                    os.close(append_fd)
+                except OSError:
+                    pass
+    except Exception:
+        if snap is not None:
+            try:
+                snap.unlink()
+            except OSError:
+                pass
+        # Clear in-flight state so a subsequent Stop's SIGTERM handler
+        # does not target a stale path/offset.
+        _INFLIGHT_SNAP = None
+        _INFLIGHT_JSONL_PRESIZE = None
+        raise
+    # Codex P2 2026-07-19 (Lead-Converter#250 line 1850): flip the module-level
+    # committed flag BEFORE clearing inflight state, so the SIGTERM handler in
+    # mode_stop sees "durable, do not roll back" atomically with the JSONL
+    # append that just returned. Previously the flag lived on the mode_stop
+    # local (_stop_committed[0]) and was only set AFTER this function
+    # returned — a race window that allowed the handler to release the mtime
+    # reservation on a durably-committed record and duplicate on the next Stop.
+    _LOCAL_RECORD_COMMITTED = True
+    # Commit: local record is durable. Clear in-flight state so the SIGTERM
+    # handler will no longer roll back this snapshot even if it fires later
+    # in mode_stop (staging cleanup, KL flush, etc).
+    _INFLIGHT_SNAP = None
+    _INFLIGHT_JSONL_PRESIZE = None
+    return snap  # type: ignore[return-value]
 
 
-def kl_create_note(entity: str, title: str, content: str, tags: list[str]) -> bool:
+def _mcp_envelope_ok(body: bytes) -> bool:
+    """MCP responds 200 with a JSON envelope even on tool errors — parse it.
+
+    A 200 with {"error": ...} or {"result": {"isError": true, ...}} is a
+    FAILURE, not a success. Only a clean envelope counts.
+
+    MCP Streamable HTTP transport may respond with either a plain JSON body
+    or an SSE stream (`data: {...}` lines). We accept both: for SSE we take
+    the LAST `data:` payload and evaluate that.
+    """
+    if not body:
+        return False
+    text = body.decode("utf-8", errors="replace").strip()
+    if not text:
+        return False
+    if text.startswith("data:") or "\ndata:" in text:
+        last = None
+        for line in text.splitlines():
+            if line.startswith("data:"):
+                last = line[5:].strip()
+        if last is None:
+            return False
+        text = last
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(parsed, dict):
+        return False
+    if "error" in parsed:
+        return False
+    # Codex P2 2026-07-19: require an actual result payload, not just a
+    # well-formed envelope. A proxy or partial-write scenario can return
+    # {}, {"jsonrpc":"2.0"} or {"result": null} with status 200; treating
+    # those as success would silently drop the upload and still mark the
+    # retrospective as KL-written.
+    if "result" not in parsed:
+        return False
+    result = parsed.get("result")
+    if result is None:
+        return False
+    if isinstance(result, dict) and result.get("isError"):
+        return False
+    return True
+
+
+def kl_create_note(entity: str, title: str, content: str, tags: list[str], idempotency_key: str = "") -> bool:
     if os.environ.get("SESSION_RETRO_DRY_RUN"):
         print(f"[session-retro] DRY RUN kl_create_note: {title!r} entity={entity}", file=sys.stderr)
         return True
     api_key = (os.environ.get("MCP_API_KEY") or "").strip()
     if not api_key:
         return False
+    url = _kl_url()
+    if not url:
+        print("[session-retro] kl_create_note: KL_MCP_URL unset; skip", file=sys.stderr)
+        return False
+    # Codex P1: MCP transport is JSON-RPC 2.0 — endpoints reject requests
+    # missing `jsonrpc` and `id`. The stateless HTTP-MCP shape used by the
+    # KL cron endpoint tolerates a direct `tools/call` without a full
+    # initialize handshake as long as the JSON-RPC envelope is valid.
     payload = json.dumps({
+        "jsonrpc": "2.0",
+        "id": f"retro-{int(_stable_id_seed())}",
         "method": "tools/call",
         "params": {
             "name": "kl_create_note",
-            "arguments": {
-                "entity": entity,
-                "title": title,
-                "content": content,
-                "tags": tags,
-            },
+            "arguments": (
+                # Codex P2 2026-07-19 (manolii-platform#430 line 700): pass a
+                # stable idempotency_key derived from the durable snapshot
+                # identity. If KL accepts the note but the worker dies before
+                # the snapshot commit lands, kl-drain will retry with the
+                # SAME key — KL dedupes and the second call is a no-op.
+                # Without this, retries produce duplicate retrospective notes.
+                {
+                    "entity": entity,
+                    "title": title,
+                    "content": content,
+                    "tags": tags,
+                    "idempotency_key": idempotency_key,
+                }
+                if idempotency_key
+                else {
+                    "entity": entity,
+                    "title": title,
+                    "content": content,
+                    "tags": tags,
+                }
+            ),
         },
     }).encode()
     req = urllib.request.Request(
-        _kl_url(), data=payload,
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        url, data=payload,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        },
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=API_TIMEOUT_SECONDS) as resp:  # nosec B310
-            return resp.status < 400
+        with _kl_urlopen(req, timeout=API_TIMEOUT_SECONDS) as resp:  # nosec B310
+            if resp.status >= 300:  # no-redirect opener: any 3xx is treated as failure
+                return False
+            return _mcp_envelope_ok(resp.read())
     except Exception as e:
         print(f"[session-retro] kl_create_note: {type(e).__name__}", file=sys.stderr)
         return False
@@ -366,7 +917,13 @@ def kl_assert_fact(entity: str, project_slug: str, fact_key: str, fact_value: st
     api_key = (os.environ.get("MCP_API_KEY") or "").strip()
     if not api_key:
         return False
+    url = _kl_url()
+    if not url:
+        print("[session-retro] kl_assert_fact: KL_MCP_URL unset; skip", file=sys.stderr)
+        return False
     payload = json.dumps({
+        "jsonrpc": "2.0",
+        "id": f"retro-{int(_stable_id_seed())}",
         "method": "tools/call",
         "params": {
             "name": "kl_assert_fact",
@@ -379,21 +936,43 @@ def kl_assert_fact(entity: str, project_slug: str, fact_key: str, fact_value: st
         },
     }).encode()
     req = urllib.request.Request(
-        _kl_url(), data=payload,
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        url, data=payload,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        },
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=API_TIMEOUT_SECONDS) as resp:  # nosec B310
-            return resp.status < 400
+        with _kl_urlopen(req, timeout=API_TIMEOUT_SECONDS) as resp:  # nosec B310
+            if resp.status >= 300:  # no-redirect opener: any 3xx is treated as failure
+                return False
+            return _mcp_envelope_ok(resp.read())
     except Exception as e:
         print(f"[session-retro] kl_assert_fact: {type(e).__name__}", file=sys.stderr)
         return False
 
 
 def _latest_session_log() -> Optional[Path]:
-    logs = sorted(SESSION_LOGS_DIR.glob("session_*.jsonl"), reverse=True)
-    return logs[0] if logs else None
+    # Codex P2 2026-07-19: session-log filenames contain UUIDs, not
+    # timestamps, so lexical reverse-sort can pick an older unrelated
+    # transcript. Sort by mtime instead so the fallback path used when
+    # the Stop payload omits/malforms transcript_path targets the log
+    # most recently written to (the just-closed session).
+    try:
+        logs = list(SESSION_LOGS_DIR.glob("session_*.jsonl"))
+    except OSError:
+        return None
+    if not logs:
+        return None
+    def _mtime(p: Path) -> float:
+        try:
+            return p.stat().st_mtime_ns
+        except OSError:
+            return -1.0
+    logs.sort(key=_mtime, reverse=True)
+    return logs[0]
 
 
 def _session_log_mtime(path: Optional[Path]) -> Optional[float]:
@@ -406,18 +985,42 @@ def _session_log_mtime(path: Optional[Path]) -> Optional[float]:
         return None
 
 
+def _load_mtime_sentinel_map() -> dict:
+    """Load the transcript-keyed sentinel map. Accepts legacy singleton shape."""
+    if not MTIME_SENTINEL.exists():
+        return {}
+    try:
+        data = json.loads(MTIME_SENTINEL.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"[session-retro] mtime-sentinel load: {type(e).__name__}", file=sys.stderr)
+        return {}
+    # Legacy singleton {"path":..., "mtime":..., "captured_at":...} → convert.
+    if isinstance(data, dict) and "path" in data and "mtime" in data and "entries" not in data:
+        return {str(data["path"]): {"mtime": float(data["mtime"]), "captured_at": data.get("captured_at")}}
+    if isinstance(data, dict) and isinstance(data.get("entries"), dict):
+        return dict(data["entries"])
+    return {}
+
+
 def _mtime_gate_hit(path: Optional[Path], force: bool = False) -> bool:
-    """Return True when Stop can no-op (same session log mtime as last capture)."""
+    """Return True when Stop can no-op (same session log mtime as last capture for THIS transcript).
+
+    CodeRabbit 2026-07-19: the sentinel is a transcript-keyed map, not a singleton —
+    capturing transcript B must not evict A's entry, otherwise a later unchanged
+    Stop for A would miss the gate and write a duplicate retrospective.
+
+    Read-only check kept for callers that don't perform a capture (external
+    monitors); the reservation path below is what mode_stop uses.
+    """
     if force or os.environ.get("SESSION_RETRO_FORCE"):
         return False
     mtime = _session_log_mtime(path)
     if mtime is None:
         return False
     try:
-        if not MTIME_SENTINEL.exists():
-            return False
-        prev = json.loads(MTIME_SENTINEL.read_text(encoding="utf-8"))
-        if float(prev.get("mtime", -1)) == float(mtime) and str(prev.get("path")) == str(path):
+        entries = _load_mtime_sentinel_map()
+        prev = entries.get(str(path))
+        if prev and float(prev.get("mtime", -1)) == float(mtime):
             print("[session-retro] mtime-gate: skip (unchanged session log)", file=sys.stderr)
             return True
     except Exception as e:
@@ -425,48 +1028,477 @@ def _mtime_gate_hit(path: Optional[Path], force: bool = False) -> bool:
     return False
 
 
+def _release_mtime_reservation_signal_safe(path: Optional[Path], reserved_mtime: Optional[float] = None) -> None:
+    """Codex P2 2026-07-19 (ai-starter-pack#32 line 1604): the ordinary
+    _release_mtime_reservation acquires _retro_lock, which is a blocking
+    fcntl.flock(LOCK_EX). When the mode_stop SIGTERM handler fires while
+    the main thread already holds that lock (typically mid-JSONL-append
+    inside _write_local_record), a second LOCK_EX from the signal handler
+    deadlocks — Linux flock locks conflict even within one process across
+    independent open file descriptions. `timeout 8s` sends TERM but no
+    KILL, so the handler hangs indefinitely and the wrapper blows past
+    its budget without ever writing the failure marker.
+
+    This variant tries a NON-blocking flock. If it fails, we know we (or
+    a peer) already hold the lock — skip the flock and edit the sentinel
+    map anyway. The main-thread signal handler runs while our own lock is
+    held, so the write is still exclusive. In the rare cross-process
+    contention case we accept a best-effort race: leaving a stale
+    reservation behind is a smaller regression than deadlocking past the
+    Stop budget."""
+    if path is None:
+        return
+    try:
+        import fcntl  # POSIX-only.
+        RETROSPECTIVES_DIR.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(_RETRO_LOCK), os.O_CREAT | os.O_RDWR, 0o600)
+        got_lock = False
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                got_lock = True
+            except OSError:
+                got_lock = False  # already held (by us or a peer) — proceed unlocked
+            entries = _load_mtime_sentinel_map()
+            prev = entries.get(str(path))
+            if prev is None:
+                return
+            if reserved_mtime is not None:
+                try:
+                    if float(prev.get("mtime", -1)) != float(reserved_mtime):
+                        return
+                except (TypeError, ValueError):
+                    return
+            entries.pop(str(path), None)
+            tmp = MTIME_SENTINEL.with_suffix(MTIME_SENTINEL.suffix + ".tmp")
+            tmp.write_text(json.dumps({"entries": entries}), encoding="utf-8")
+            os.replace(tmp, MTIME_SENTINEL)
+        finally:
+            if got_lock:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+    except Exception as e:  # noqa: BLE001
+        print(f"[session-retro] mtime-release-signal: {type(e).__name__}", file=sys.stderr)
+
+
+def _release_mtime_reservation(path: Optional[Path], reserved_mtime: Optional[float] = None) -> None:
+    """Codex P2 2026-07-19: if capture fails AFTER _try_reserve_mtime_gate
+    recorded the mtime, subsequent Stops for the same unchanged transcript
+    would silently skip forever (until it changes or --force). Callers
+    invoke this from their exception handlers so the next Stop retries.
+
+    CodeRabbit refinement 2026-07-19: only remove the entry when its stored
+    mtime still matches the reservation we made — otherwise we'd clobber a
+    newer reservation written by a concurrent Stop after ours failed.
+    """
+    if path is None:
+        return
+    try:
+        with _retro_lock():
+            entries = _load_mtime_sentinel_map()
+            prev = entries.get(str(path))
+            if prev is None:
+                return
+            if reserved_mtime is not None:
+                try:
+                    if float(prev.get("mtime", -1)) != float(reserved_mtime):
+                        # A newer reservation is in place — leave it alone.
+                        return
+                except (TypeError, ValueError):
+                    return
+            entries.pop(str(path), None)
+            tmp = MTIME_SENTINEL.with_suffix(MTIME_SENTINEL.suffix + ".tmp")
+            tmp.write_text(json.dumps({"entries": entries}), encoding="utf-8")
+            os.replace(tmp, MTIME_SENTINEL)
+    except Exception as e:  # noqa: BLE001
+        print(f"[session-retro] mtime-release: {type(e).__name__}", file=sys.stderr)
+
+
+def _try_reserve_mtime_gate(path: Optional[Path], force: bool = False) -> bool:
+    """Atomic check-and-reserve: under one lock, verify no capture has recorded
+    this (path, mtime) yet AND immediately record the reservation before
+    releasing the lock. Codex P2 2026-07-19: without atomicity, two concurrent
+    Stops for the same unchanged transcript both pass the read-only gate,
+    reach _write_local_record, and duplicate the retrospective.
+
+    Returns True when the reservation succeeded (caller should proceed with
+    capture). Returns False when the gate had already recorded this mtime
+    (caller should no-op). Fails open: any error path returns True so the
+    capture still runs — better to occasionally duplicate than to silently
+    swallow a Stop.
+    """
+    if force or os.environ.get("SESSION_RETRO_FORCE"):
+        return True
+    mtime = _session_log_mtime(path)
+    if mtime is None:
+        # No transcript or unreadable — no gate to hold. Let capture run.
+        return True
+    try:
+        RETROSPECTIVES_DIR.mkdir(parents=True, exist_ok=True)
+        with _retro_lock():
+            entries = _load_mtime_sentinel_map()
+            prev = entries.get(str(path))
+            if prev and float(prev.get("mtime", -1)) == float(mtime):
+                print("[session-retro] mtime-gate: skip (unchanged session log)", file=sys.stderr)
+                return False
+            entries[str(path)] = {"mtime": mtime, "captured_at": _now_iso()}
+            if len(entries) > 64:
+                entries = dict(
+                    sorted(entries.items(), key=lambda kv: float(kv[1].get("mtime", 0)), reverse=True)[:64]
+                )
+            tmp = MTIME_SENTINEL.with_suffix(MTIME_SENTINEL.suffix + ".tmp")
+            tmp.write_text(json.dumps({"entries": entries}), encoding="utf-8")
+            os.replace(tmp, MTIME_SENTINEL)
+    except Exception as e:  # noqa: BLE001
+        print(f"[session-retro] mtime-reserve: {type(e).__name__}", file=sys.stderr)
+        return True
+    return True
+
+
 def _write_mtime_sentinel(path: Optional[Path]) -> None:
+    """Merge this transcript's mtime into the sentinel map under an exclusive
+    lock. Codex P2 2026-07-19: concurrent Stops were racing on the R-M-W —
+    each loaded the same snapshot, added only its own entry, and the last
+    writer dropped the other's mtime state. Lock + atomic os.replace fixes it.
+    """
     mtime = _session_log_mtime(path)
     if mtime is None:
         return
     try:
         RETROSPECTIVES_DIR.mkdir(parents=True, exist_ok=True)
-        MTIME_SENTINEL.write_text(
-            json.dumps({"path": str(path), "mtime": mtime, "captured_at": _now_iso()}),
-            encoding="utf-8",
-        )
+        with _retro_lock():
+            entries = _load_mtime_sentinel_map()
+            entries[str(path)] = {"mtime": mtime, "captured_at": _now_iso()}
+            if len(entries) > 64:
+                entries = dict(
+                    sorted(entries.items(), key=lambda kv: float(kv[1].get("mtime", 0)), reverse=True)[:64]
+                )
+            tmp = MTIME_SENTINEL.with_suffix(MTIME_SENTINEL.suffix + ".tmp")
+            tmp.write_text(json.dumps({"entries": entries}), encoding="utf-8")
+            os.replace(tmp, MTIME_SENTINEL)
     except Exception as e:
         print(f"[session-retro] mtime sentinel: {type(e).__name__}", file=sys.stderr)
 
 
+_SNAP_COUNTER_RX = re.compile(r"^(?P<base>.+)-(?P<ctr>\d{3})$")
+
+
+def _snap_order_key(p: Path) -> tuple:
+    """Immutable per-capture ordering key.
+
+    Codex P2 2026-07-19 (manolii-platform#430 line 1286): the previous sort
+    used ``p.stat().st_mtime_ns``. When a worker took the ``kl_in_flight_at``
+    lease on an older snapshot, that write bumped its mtime, so a peer sort
+    put the NEWER pending snapshot first and uploaded it out of order —
+    breaking the FIFO invariant that keyed the ``last_dysfunction_score.*``
+    fact chain to the most-recent Stop's numbers. The filename is stable
+    across all mutations (exclusive-create is the only writer of the name)
+    and encodes ``<UTC ts>-<safe_branch>-<tag>[-NNN]``, where the counter
+    suffix is only added by ``_write_local_record`` for same-second
+    collisions and grows monotonically. Sort by ``(base_stem, counter)``
+    with counter=0 for the un-suffixed member so ``<base>.json`` correctly
+    precedes ``<base>-001.json`` — the reverse of a plain lexical sort,
+    which would swap them because ``-`` (0x2d) sorts before ``.`` (0x2e).
+    """
+    stem = p.stem
+    m = _SNAP_COUNTER_RX.match(stem)
+    if m:
+        return (m.group("base"), int(m.group("ctr")))
+    return (stem, 0)
+
+
+def _append_kl_flush_event(
+    session_id: str,
+    branch: str,
+    dscore: float,
+    fclass: str,
+    capture_id: str = "",
+) -> None:
+    """Codex P2 2026-07-19: after a successful KL upload, append a completion
+    event to the append-only JSONL so downstream consumers of
+    session-retrospectives.jsonl see the flush, not just the initial
+    kl_written=false record. Snapshot-only mutation was invisible to them.
+
+    Codex P2 2026-07-19 (manolii-platform#430 line 1308): the event now carries
+    the delivered capture's ``capture_id`` when present. The JSONL fallback
+    reverse-scan keys per-capture: a completion event marks ONLY the matching
+    capture as delivered, so a later still-pending capture in the same session
+    is no longer suppressed by an earlier flush event. Legacy events without
+    capture_id fall back to session-wide semantics for backwards compat.
+    """
+    RETROSPECTIVES_DIR.mkdir(parents=True, exist_ok=True)
+    event = {
+        "event": "kl-flushed",
+        "session_id": session_id,
+        "branch": branch,
+        "dysfunction_score": dscore,
+        "failure_class": fclass,
+        "at": _now_iso(),
+    }
+    if capture_id:
+        event["capture_id"] = capture_id
+    # Codex P2 2026-07-19 (manolii-platform#430 line 1208): make the flush
+    # event append atomic. Match the pattern in _write_local_record — capture
+    # pre-write size, unbuffered os.write, ftruncate back on any exception.
+    # The prior TextIOWrapper("a") variant left partial bytes on ENOSPC or
+    # any partial-write failure; the next _write_local_record then computed
+    # its pre_size from a corrupted tail and fused its narrative row onto
+    # the truncated line — producing one invalid JSONL entry that both the
+    # append-only consumer and the JSONL fallback lose.
+    try:
+        with _retro_lock():
+            try:
+                pre_size = RETRO_JSONL.stat().st_size
+            except FileNotFoundError:
+                pre_size = 0
+            line_bytes = (json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8")
+            append_fd = os.open(
+                str(RETRO_JSONL),
+                os.O_WRONLY | os.O_APPEND | os.O_CREAT,
+                0o644,
+            )
+            try:
+                try:
+                    written = 0
+                    while written < len(line_bytes):
+                        n = os.write(append_fd, line_bytes[written:])
+                        if n <= 0:
+                            raise OSError("short write on retrospectives JSONL")
+                        written += n
+                except Exception:
+                    try:
+                        os.ftruncate(append_fd, pre_size)
+                    except OSError:
+                        pass
+                    raise
+            finally:
+                try:
+                    os.close(append_fd)
+                except OSError:
+                    pass
+    except Exception as e:  # noqa: BLE001
+        print(f"[session-retro] kl-flush event: {type(e).__name__}", file=sys.stderr)
+
+
 def mode_kl_only(session_id: str = "") -> None:
     """Push the latest local retrospective record to KL without appending another local row."""
-    entity = _resolve_entity()
-    if not _kl_ready(entity, local_only=False):
+    # Codex P2 2026-07-19 (manolii-platform#430 line 1056): only bail here
+    # on missing MCP credentials — NOT on missing current-config entity.
+    # A pending snapshot may have been captured under an entity that the
+    # operator has since removed from KL_ENTITY / retrospective.json; that
+    # snapshot still has both its intended destination (record["entity"])
+    # AND live credentials (MCP_API_KEY / KL_MCP_URL are shared), so
+    # kl-drain must be allowed to reach the record-selection path where
+    # snap_entity is derived. Without this, such snapshots stay pending
+    # forever even though delivery is fully possible.
+    # Pass a truthy sentinel to _kl_ready so we probe MCP creds without
+    # gating on the (possibly-missing) current entity; monkeypatch-friendly.
+    if not _kl_ready("__probe__", local_only=False):
         print("[session-retro] kl-only: KL not configured; skip", file=sys.stderr)
         return
-    assert entity is not None
+    entity = _resolve_entity()  # may be None if config was removed post-capture
 
     record: Optional[dict] = None
-    # Prefer newest snapshot json
-    snaps = sorted(RETROSPECTIVES_DIR.glob("*-*.json"), reverse=True) if RETROSPECTIVES_DIR.exists() else []
-    for snap in snaps:
-        if snap.name.startswith("."):
-            continue
+    # Select ONLY the record for this session_id — the wrapper backgrounds a
+    # second invocation of the collector and the newest snapshot may belong
+    # to a different session that ran concurrently. Labelling a stranger's
+    # snapshot with our session_id contaminates KL.
+    if not session_id:
+        print("[session-retro] kl-only: no session_id provided; skip (safety)", file=sys.stderr)
+        return
+
+    # Codex P2 2026-07-19: sort by mtime (newest first), not filename.
+    # Lexicographic reverse-sort puts `<base>.json` ahead of `<base>-001.json`
+    # even though the -001 sibling is the newer capture (the counter suffix
+    # was added by _write_local_record to prevent same-second overwrites).
+    # Codex P2 2026-07-19: pick the OLDEST unflushed snapshot for this
+    # session_id — queue semantics. Two Stops before a flush produce two
+    # snapshots; each background kl-only should process the oldest pending
+    # capture, not the newest (which would drop the first flush's actual
+    # target and re-upload the newer one twice).
+    #
+    # Codex P2 2026-07-19 (line 994): ATOMIC CLAIM under a lock so two
+    # concurrent kl-only workers can't select the same oldest snapshot.
+    # Codex P2 2026-07-19 (Lead-Converter line 990): use a LEASE, not a
+    # premature kl_written flip. The claim marker is `kl_in_flight_at:
+    # <iso-ts>`; `kl_written` is only set AFTER the network confirms.
+    # A crash between claim and confirmation leaves a fresh lease behind;
+    # any worker that observes an expired lease (older than KL_CLAIM_TTL_SEC)
+    # may re-claim it. This eliminates the "stuck as delivered" state
+    # while preserving the atomic-claim guarantee.
+    matched_snap: Optional[Path] = None
+    saw_flushed_snap_for_session = False
+    saw_active_lease_for_session = False
+    now_iso = _now_iso()
+    try:
+        now_epoch = datetime.now(timezone.utc).timestamp()
+    except Exception:
+        now_epoch = 0.0
+
+    def _lease_fresh(cand: dict) -> bool:
+        raw = cand.get("kl_in_flight_at")
+        if not isinstance(raw, str) or not raw:
+            return False
         try:
-            record = json.loads(snap.read_text(encoding="utf-8"))
-            break
-        except Exception as e:
-            print(f"[session-retro] kl-only snap: {type(e).__name__}", file=sys.stderr)
-    if record is None and RETRO_JSONL.exists():
+            # _now_iso() emits 'YYYY-MM-DDTHH:MM:SSZ' — parse as UTC.
+            claimed = datetime.strptime(raw, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        except Exception:
+            return False
+        age = now_epoch - claimed.timestamp()
+        return age >= 0 and age < KL_CLAIM_TTL_SEC
+
+    try:
+        with _retro_lock():
+            if RETROSPECTIVES_DIR.exists():
+                # Codex P2 2026-07-19 (manolii-platform#430 line 1286): sort
+                # by an IMMUTABLE filename-derived key. Lease writes on an
+                # older snapshot bump its mtime, which under the old mtime
+                # sort put the NEWER pending snapshot first and let a peer
+                # worker upload B before A finished — an out-of-order flush
+                # that poisoned last_dysfunction_score.* facts.
+                snaps = sorted(
+                    RETROSPECTIVES_DIR.glob("*-*.json"),
+                    key=_snap_order_key,
+                )  # oldest first (capture creation order, not mtime)
+            else:
+                snaps = []
+            for snap in snaps:
+                if snap.name.startswith("."):
+                    continue
+                try:
+                    candidate = json.loads(snap.read_text(encoding="utf-8"))
+                except Exception as e:
+                    print(f"[session-retro] kl-only snap: {type(e).__name__}", file=sys.stderr)
+                    continue
+                if not isinstance(candidate, dict):
+                    continue
+                if str(candidate.get("session_id") or "") != session_id:
+                    continue
+                if candidate.get("kl_written") is True:
+                    # Codex P2 2026-07-19 (ai-starter-pack line 965):
+                    # remember that this session HAS a flushed snapshot so
+                    # we don't fall back to the JSONL scan and re-upload
+                    # from a stale narrative row.
+                    saw_flushed_snap_for_session = True
+                    continue
+                if _lease_fresh(candidate):
+                    # Another live worker is uploading this one — skip it.
+                    # Codex P2 2026-07-19 (ai-starter-pack line 1047): also
+                    # suppress the JSONL fallback for this session_id so we
+                    # don't upload the same narrative row a second time
+                    # without a claim.
+                    saw_active_lease_for_session = True
+                    # Codex P2 2026-07-19 (manolii-platform#430 line 1054):
+                    # BREAK, not continue — snaps are sorted oldest first,
+                    # and we only reach this branch for our target session
+                    # (line ~1038 filters by session_id). Continuing would
+                    # let this worker claim a NEWER snapshot for the same
+                    # session while the older one is still uploading; the
+                    # two network calls could then finish out of order and
+                    # a stale kl_assert_fact would overwrite fresh values
+                    # for last_dysfunction_score.* / last_failure_class.*.
+                    # FIFO within a session is required for correctness.
+                    break
+                # Dry-run must NOT persist a lease — it never uploads and
+                # would starve a real flush by holding the claim.
+                if os.environ.get("SESSION_RETRO_DRY_RUN"):
+                    record = candidate
+                    matched_snap = snap
+                    break
+                # Take the lease: durable in-progress marker, but NOT
+                # kl_written. If we crash before confirmation, the lease
+                # expires after KL_CLAIM_TTL_SEC and the next worker retries.
+                candidate["kl_in_flight_at"] = now_iso
+                candidate.pop("kl_written", None)  # defensive: never carry a stale True
+                try:
+                    snap.write_text(
+                        json.dumps(candidate, indent=2, ensure_ascii=False) + "\n",
+                        encoding="utf-8",
+                    )
+                except Exception as e:  # noqa: BLE001
+                    print(f"[session-retro] kl-only claim: {type(e).__name__}", file=sys.stderr)
+                    continue
+                record = candidate
+                matched_snap = snap
+                break
+    except Exception as e:  # noqa: BLE001
+        print(f"[session-retro] kl-only lock: {type(e).__name__}", file=sys.stderr)
+    # Codex P2 2026-07-19 (ai-starter-pack line 965): don't fall back to
+    # JSONL when a flushed snapshot already exists for this session — that
+    # snapshot IS the flush, and re-scanning the append-only log would
+    # re-select either the original narrative row or a kl-flushed event
+    # and upload a duplicate note.
+    # CodeRabbit 2026-07-19 (line 1006-1031): when the snapshot has been
+    # pruned but a prior `kl-flushed` event exists in the JSONL for this
+    # session_id, treat that event as the delivered marker and skip the
+    # narrative row — otherwise each subsequent kl-only re-uploads it.
+    if (
+        record is None
+        and not saw_flushed_snap_for_session
+        and not saw_active_lease_for_session
+        and RETRO_JSONL.exists()
+    ):
         try:
-            lines = [ln for ln in RETRO_JSONL.read_text(encoding="utf-8").splitlines() if ln.strip()]
-            if lines:
-                record = json.loads(lines[-1])
+            # Codex P2 2026-07-19 (manolii-platform#430 line 1308): key
+            # completion by capture identity, not session-wide. Under the old
+            # scheme the JSONL sequence [A(narrative), B(narrative),
+            # A-flushed] made the reverse scan see A-flushed first, set a
+            # session-wide "delivered" flag, then break on B — so B never
+            # uploaded even though only A had been delivered. Track the set
+            # of delivered capture_ids for this session and skip only their
+            # exact narrative rows. Legacy rows without capture_id retain
+            # the older session-wide semantics for backwards compat.
+            seen_flushed_capture_ids: set[str] = set()
+            seen_flushed_session_wide = False
+            for ln in reversed(RETRO_JSONL.read_text(encoding="utf-8").splitlines()):
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    candidate = json.loads(ln)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(candidate, dict):
+                    continue
+                # Completion-event rows carry session_id but aren't
+                # retrospectives — never upload one AS a retrospective.
+                # When the event matches our session_id, record its
+                # capture_id (or fall back to session-wide when legacy).
+                if candidate.get("event") == "kl-flushed":
+                    if str(candidate.get("session_id") or "") == session_id:
+                        cid = str(candidate.get("capture_id") or "")
+                        if cid:
+                            seen_flushed_capture_ids.add(cid)
+                        else:
+                            seen_flushed_session_wide = True
+                    continue
+                # Skip rows that have already been delivered — a Stop that
+                # succeeded, then a follow-up flush that hits the JSONL
+                # fallback, must not re-upload the same row.
+                if candidate.get("kl_written") is True:
+                    continue
+                if str(candidate.get("session_id") or "") == session_id:
+                    cid = str(candidate.get("capture_id") or "")
+                    # This exact capture is already delivered — keep
+                    # scanning for an older still-pending row.
+                    if cid and cid in seen_flushed_capture_ids:
+                        continue
+                    # Legacy row + any legacy completion event for this
+                    # session — treat as delivered (behaviour parity).
+                    if not cid and seen_flushed_session_wide:
+                        break
+                    record = candidate
+                    break
         except Exception as e:
             print(f"[session-retro] kl-only jsonl: {type(e).__name__}", file=sys.stderr)
     if not record:
-        print("[session-retro] kl-only: no local record to flush", file=sys.stderr)
+        print(f"[session-retro] kl-only: no local record for session_id={session_id}", file=sys.stderr)
         return
 
     branch = str(record.get("branch") or _get_branch())
@@ -486,22 +1518,287 @@ def mode_kl_only(session_id: str = "") -> None:
     ])
     safe_branch = branch.replace("/", "-").replace(" ", "-")
     branch_tag = f"branch:{safe_branch}"
+    # Codex P2 2026-07-19 (manolii-platform#430 line 700 + line 1186): the
+    # snapshot filename is stable across worker crashes and retries — use it
+    # as the idempotency key so a kl-drain retry (after lease TTL) cannot
+    # create a duplicate KL note. When the record was selected from the
+    # JSONL fallback (no on-disk snapshot), synthesize a key from durable
+    # record fields — session_id + captured_at + branch — so a subsequent
+    # kl-only re-selection of the same JSONL row still dedupes upstream.
+    if matched_snap is not None:
+        idem_key = matched_snap.name
+    else:
+        # Codex P2 2026-07-19 (manolii-platform#430 line 1308): include the
+        # capture_id when the record carries one so two captures for the
+        # same session (A then B) produce distinct idempotency keys — else
+        # upstream dedupe would collapse them into a single delivered note
+        # when timestamps happen to align at second resolution.
+        cid = str(record.get("capture_id") or "")
+        idem_key = "jsonl:{sid}:{ts}:{br}:{cid}".format(
+            sid=(record.get("session_id") or session_id or ""),
+            ts=(record.get("captured_at") or ""),
+            br=(record.get("branch") or branch or ""),
+            cid=cid,
+        )
+    # Codex P1 2026-07-19 (manolii-platform#430 line 1002): the snapshot
+    # carries the entity it was captured under (mode_stop persists it).
+    # If the operator retargets KL_ENTITY between capture and this flush
+    # (or a per-entity config swap runs), resolving the CURRENT entity
+    # would deliver a manolii session's retrospective to impaktful (or
+    # vice versa) — a cross-entity data leak. Prefer the captured entity;
+    # fall back to the freshly resolved one only for legacy snapshots
+    # written before this field existed.
+    captured_entity = record.get("entity") if isinstance(record.get("entity"), str) and record.get("entity") else None
+    snap_entity = captured_entity or entity
+    # Codex P2 2026-07-19 (manolii-platform#430 line 1056): if both the
+    # captured entity is absent (legacy snapshot pre-round-M) AND the
+    # current config resolves to nothing, we genuinely have no destination.
+    # Skip cleanly rather than uploading with an empty entity string.
+    if not snap_entity:
+        print("[session-retro] kl-only: no entity for snapshot; skip", file=sys.stderr)
+        return
     wrote = kl_create_note(
-        entity,
+        snap_entity,
         title=f"Session retrospective — {branch} [{today}]",
         content=body,
         tags=["session-retrospective", "auto-generated", "session-learnings", branch_tag, "kl-flush"],
+        idempotency_key=idem_key,
     )
     if wrote:
-        kl_assert_fact(entity, "session-retrospectives", f"last_dysfunction_score.{safe_branch}", str(dscore))
-        kl_assert_fact(entity, "session-retrospectives", f"last_failure_class.{safe_branch}", fclass)
-        print("[session-retro] kl-only: flushed", file=sys.stderr)
+        # Codex P2 2026-07-19: SESSION_RETRO_DRY_RUN forces kl_create_note to
+        # return True without any network call. If we then emit a kl-flushed
+        # event, telemetry would falsely claim delivery. Skip the mutation
+        # in dry-run. (Dry-run never took the atomic claim above either, so
+        # there is nothing to roll back.)
+        if os.environ.get("SESSION_RETRO_DRY_RUN"):
+            print("[session-retro] kl-only: dry-run — skipping snapshot/JSONL mutation", file=sys.stderr)
+            return
+        # Codex P1 2026-07-19 (manolii-platform#430 line 1002): use the
+        # snapshot's captured entity for facts too — a cross-entity flush
+        # would put session-retrospectives.last_* facts in the wrong tenant.
+        kl_assert_fact(snap_entity, "session-retrospectives", f"last_dysfunction_score.{safe_branch}", str(dscore))
+        kl_assert_fact(snap_entity, "session-retrospectives", f"last_failure_class.{safe_branch}", fclass)
+        # Codex P2 2026-07-19 (Lead-Converter line 990): NOW that the upload
+        # has confirmed, commit the delivered state — set kl_written=True and
+        # clear the in-flight lease. Doing this only after network confirms
+        # means a crash/SIGKILL during upload leaves a stale lease (recoverable
+        # after KL_CLAIM_TTL_SEC), not a permanent "delivered" flag on
+        # something that was never actually delivered.
+        # Codex P2 2026-07-19 (Lead-Converter line 1196): track whether the
+        # snapshot commit is durable. Only emit the kl-flushed completion
+        # event AFTER the snapshot transition is on disk — otherwise a
+        # transient FS error would leave kl_written=false with an active
+        # lease, and after KL_CLAIM_TTL_SEC the snapshot would be re-selected
+        # and the KL note sent again (duplicate). If the snapshot write
+        # itself fails, we prefer the lease to expire and mode_kl_drain to
+        # retry (KL upload is idempotent from mode_kl_only's perspective
+        # because kl_create_note carries an idempotency key upstream).
+        commit_ok = False
+        if matched_snap is not None:
+            try:
+                with _retro_lock():
+                    try:
+                        current = json.loads(matched_snap.read_text(encoding="utf-8"))
+                    except Exception:
+                        current = None
+                    if isinstance(current, dict):
+                        # Codex P2 2026-07-19 (Lead-Converter line 1200):
+                        # our lease may have expired and been re-claimed by
+                        # another worker. Only commit when the on-disk lease
+                        # is still ours (or the snapshot is already flushed
+                        # by our success path). Otherwise leave the other
+                        # worker's claim intact.
+                        our_lease = record.get("kl_in_flight_at")
+                        if current.get("kl_written") is True:
+                            # Already committed by a peer — safe to emit event.
+                            commit_ok = True
+                        elif current.get("kl_in_flight_at") == our_lease:
+                            current["kl_written"] = True
+                            current.pop("kl_in_flight_at", None)
+                            matched_snap.write_text(
+                                json.dumps(current, indent=2, ensure_ascii=False) + "\n",
+                                encoding="utf-8",
+                            )
+                            commit_ok = True
+            except Exception as e:  # noqa: BLE001
+                print(f"[session-retro] kl-only commit: {type(e).__name__}", file=sys.stderr)
+        else:
+            # No on-disk snapshot to reconcile (legacy JSONL-only record):
+            # the completion event is the only durable success signal.
+            commit_ok = True
+        # Emit the JSONL completion event ONLY when the snapshot state is
+        # durable — otherwise the event would lie about a delivery whose
+        # snapshot still says "pending".
+        if commit_ok:
+            _append_kl_flush_event(
+                session_id or str(record.get("session_id") or ""),
+                branch,
+                dscore,
+                fclass,
+                capture_id=str(record.get("capture_id") or ""),
+            )
+            print("[session-retro] kl-only: flushed", file=sys.stderr)
+        else:
+            print(
+                "[session-retro] kl-only: KL upload OK but snapshot commit failed — will retry after lease TTL",
+                file=sys.stderr,
+            )
     else:
+        # Codex P2 2026-07-19 line 994 / Lead-Converter line 990: network
+        # call failed after we took the lease. Clear kl_in_flight_at so the
+        # next retry (or a sibling worker after KL_CLAIM_TTL_SEC would have
+        # expired anyway) can pick it up immediately. Do NOT touch other
+        # fields — a concurrent Stop may have re-serialised the snapshot
+        # between claim and rollback.
+        if matched_snap is not None and not os.environ.get("SESSION_RETRO_DRY_RUN"):
+            try:
+                with _retro_lock():
+                    try:
+                        current = json.loads(matched_snap.read_text(encoding="utf-8"))
+                    except Exception:
+                        current = None
+                    if isinstance(current, dict):
+                        # Codex P2 2026-07-19 (Lead-Converter line 1200):
+                        # only clear the lease if it is still OUR lease.
+                        # A stale worker (whose TTL expired and was
+                        # re-claimed by another live worker) must NOT
+                        # clear the newer worker's fresh claim.
+                        our_lease = record.get("kl_in_flight_at")
+                        if current.get("kl_in_flight_at") == our_lease:
+                            current.pop("kl_in_flight_at", None)
+                            matched_snap.write_text(
+                                json.dumps(current, indent=2, ensure_ascii=False) + "\n",
+                                encoding="utf-8",
+                            )
+            except Exception as e:  # noqa: BLE001
+                print(f"[session-retro] kl-only rollback: {type(e).__name__}", file=sys.stderr)
         print("[session-retro] kl-only: KL write failed", file=sys.stderr)
 
 
 
-def mode_precompact(transcript: str) -> None:
+def mode_kl_drain(max_sessions: int = 10) -> None:
+    """Retry any prior-session snapshots that never reached KL.
+
+    Codex P2 2026-07-19 (manolii-platform line 94): when kl_create_note()
+    fails transiently, mode_kl_only() clears the lease but future Stops
+    only look at their OWN session_id, so the failed snapshot is stranded
+    at kl_written=false forever. The Stop-hook wrapper backgrounds a
+    single kl-drain call per Stop that walks the retrospectives dir,
+    picks up any snapshot with kl_written!=True and no fresh lease, and
+    invokes the same mode_kl_only path (per session_id) to retry it.
+
+    Bounded to `max_sessions` distinct session_ids per drain to keep
+    Stop cheap even under a pathological backlog. Newest sessions are
+    skipped so a same-second flush doesn't race the drain — anything
+    younger than 30s stays untouched.
+    """
+    if not RETROSPECTIVES_DIR.exists():
+        return
+    # Codex P2 2026-07-19 (manolii-platform#430 line 1056): same defer-the-
+    # entity-gate rationale as mode_kl_only. Snapshots carry record["entity"]
+    # from capture; kl-drain must reach them even when the current config no
+    # longer resolves an entity, so the per-record dispatch into mode_kl_only
+    # can pick up snap_entity from the persisted field.
+    if not _kl_ready("__probe__", local_only=False):
+        return
+    try:
+        now_epoch = datetime.now(timezone.utc).timestamp()
+    except Exception:
+        return
+
+    def _lease_fresh(cand: dict) -> bool:
+        raw = cand.get("kl_in_flight_at")
+        if not isinstance(raw, str) or not raw:
+            return False
+        try:
+            claimed = datetime.strptime(raw, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        except Exception:
+            return False
+        age = now_epoch - claimed.timestamp()
+        return age >= 0 and age < KL_CLAIM_TTL_SEC
+
+    pending_sids: list[str] = []
+    seen_sids: set[str] = set()
+    try:
+        # Oldest first — process the queue head first.
+        # Codex P2 2026-07-19 (manolii-platform#430 line 1286): use the
+        # immutable filename-derived order key here too. A concurrent
+        # kl-only worker's lease-writes rewrite mtime on the in-flight
+        # snapshot, and mtime-sort would then let the drain skip past the
+        # true head of the queue.
+        snaps = sorted(
+            RETROSPECTIVES_DIR.glob("*-*.json"),
+            key=_snap_order_key,
+        )
+    except OSError:
+        return
+    for snap in snaps:
+        if snap.name.startswith("."):
+            continue
+        try:
+            age_sec = now_epoch - snap.stat().st_mtime_ns / 1_000_000_000.0
+        except OSError:
+            continue
+        # Skip very-recent snapshots so the current session's own kl-only
+        # worker isn't raced by the drain.
+        if age_sec < 30.0:
+            continue
+        try:
+            candidate = json.loads(snap.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(candidate, dict):
+            continue
+        if candidate.get("kl_written") is True:
+            continue
+        if _lease_fresh(candidate):
+            continue
+        sid = str(candidate.get("session_id") or "")
+        if not sid or sid in seen_sids:
+            continue
+        seen_sids.add(sid)
+        pending_sids.append(sid)
+        if len(pending_sids) >= max_sessions:
+            break
+    if not pending_sids:
+        return
+    print(f"[session-retro] kl-drain: retrying {len(pending_sids)} stranded session(s)",
+          file=sys.stderr)
+    for sid in pending_sids:
+        try:
+            mode_kl_only(session_id=sid)
+        except Exception as e:  # noqa: BLE001
+            print(f"[session-retro] kl-drain {sid}: {type(e).__name__}", file=sys.stderr)
+
+
+def _safe_session_slug(session_id: str) -> str:
+    """Filesystem-safe subset of the session_id (used inside staging filenames)."""
+    slug = re.sub(r"[^A-Za-z0-9._-]", "_", session_id or "")
+    return slug[:64] or "unknown"
+
+
+def _staging_key(session_id: str, transcript_path: Optional[Path]) -> str:
+    """Return a stable per-session key for staging isolation.
+
+    A Stop payload without session_id (empty/malformed) would otherwise
+    make every anonymous PreCompact + Stop pair collide. Fall back to a
+    hash of the canonical transcript path so each session's PreCompact
+    and Stop still route to the same key even when session_id is absent.
+    """
+    if session_id:
+        return "sid:" + _safe_session_slug(session_id)
+    if transcript_path:
+        try:
+            canonical = str(transcript_path.resolve())
+        except (OSError, RuntimeError):
+            canonical = str(transcript_path)
+        import hashlib
+        digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+        return "tx:" + digest
+    return "anon:unknown"
+
+
+def mode_precompact(transcript: str, session_id: str = "") -> None:
     path = Path(transcript) if transcript else _latest_session_log()
     if not path or not path.exists():
         return
@@ -521,9 +1818,18 @@ def mode_precompact(transcript: str) -> None:
     STAGING_DIR.mkdir(parents=True, exist_ok=True)
     _now = datetime.now(timezone.utc)
     ts = _now.strftime("%Y%m%d_%H%M%S_") + f"{_now.microsecond:06d}"
-    (STAGING_DIR / f"checkpoint_{ts}.json").write_text(json.dumps({
+    # staging_key is the durable per-session tag: sid:<slug> when session_id
+    # is set, tx:<sha256[:16]> otherwise. Persisted alongside session_id so
+    # mode_stop can pair a checkpoint with its rightful Stop even when the
+    # Stop payload arrives without a session_id.
+    key = _staging_key(session_id, path)
+    # File-safe form: colon → underscore.
+    fs_key = key.replace(":", "_")
+    (STAGING_DIR / f"checkpoint_{fs_key}_{ts}.json").write_text(json.dumps({
         "mode": "precompact",
         "captured_at": _now_iso(),
+        "session_id": session_id or "",
+        "staging_key": key,
         "transcript": str(path),
         "signals": sigs,
         "dysfunction_score": dscore,
@@ -531,63 +1837,179 @@ def mode_precompact(transcript: str) -> None:
     }, indent=2), encoding="utf-8")
 
 
-def mode_stop(session_id: str, local_only: bool = False, force: bool = False) -> None:
-    path = _latest_session_log()
-    if _mtime_gate_hit(path, force=force):
+def mode_stop(session_id: str, local_only: bool = False, force: bool = False,
+              transcript: str = "") -> None:
+    # Prefer the explicit transcript from the Stop-hook payload (piped via the
+    # wrapper) over probing .ai/session-logs (which no code in this repo
+    # populates in the general case).
+    path = Path(transcript) if transcript else _latest_session_log()
+    if path and not path.exists():
+        path = None
+    # Codex P2 2026-07-19: atomic check-and-reserve — hold the sentinel lock
+    # across gate lookup AND write so two concurrent Stops for the same
+    # unchanged transcript can't both pass the gate and duplicate the record.
+    # Dry-run must NOT reserve (no durable record follows) — otherwise a later
+    # real `--mode stop` on the unchanged transcript would silently skip.
+    dry_run = bool(os.environ.get("SESSION_RETRO_DRY_RUN"))
+    if not _try_reserve_mtime_gate(path, force=force or dry_run):
         return
+    # Codex P2 2026-07-19 (manolii-platform#430 line 1405): the Stop wrapper
+    # SIGTERMs this process after ~8s. Without this handler, the reservation
+    # written by _try_reserve_mtime_gate persists across the kill and the
+    # next ordinary Stop for the same unchanged transcript silently skips
+    # forever — permanently losing that retrospective. Install a SIGTERM
+    # handler that rolls back the reservation IF we haven't yet written the
+    # durable local record. `_stop_committed` flips True immediately after
+    # _write_local_record returns; from that point on, SIGTERM must NOT
+    # roll back (the record already exists and the mtime sentinel legitimately
+    # gates future duplicates). Only install when we have a transcript path
+    # to release — force=True and pathless runs did not reserve anything.
+    reserved_gate_mtime = _session_log_mtime(path) if path else None
+    _stop_committed = [False]
+    _prev_sigterm = None
+    if path is not None and reserved_gate_mtime is not None and not (force or dry_run):
+        def _release_and_exit(signum, frame):  # noqa: ARG001
+            # Codex P2 2026-07-19 (Lead-Converter#250 line 1850): also honour
+            # the module-level committed flag. _write_local_record flips it
+            # True atomically with the durable snapshot+JSONL commit — before
+            # this outer local (_stop_committed[0]) can be set — so a SIGTERM
+            # in that narrow window must NOT roll back the mtime reservation.
+            if not _stop_committed[0] and not _LOCAL_RECORD_COMMITTED:
+                # Codex P2 2026-07-19 (Lead-Converter#250 line 1512): if
+                # _write_local_record was mid-flight (snapshot exclusively
+                # created but JSONL not yet appended), unlink the orphan
+                # snapshot and truncate any partial JSONL bytes back to
+                # their pre-write offset. Without this, the next Stop
+                # would recapture the same transcript and both snapshots
+                # could be selected for KL flushing.
+                try:
+                    _cleanup_inflight_local_record()
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    # Codex P2 2026-07-19 (ai-starter-pack#32 line 1604):
+                    # use the signal-safe (non-blocking flock) variant so
+                    # this handler can't deadlock when the main thread is
+                    # already holding _retro_lock during a JSONL append.
+                    _release_mtime_reservation_signal_safe(
+                        path, reserved_mtime=reserved_gate_mtime
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+            # 128 + SIGTERM(15) = 143, mirroring shell convention.
+            sys.exit(143)
+        try:
+            _prev_sigterm = signal.signal(signal.SIGTERM, _release_and_exit)
+        except (ValueError, OSError):
+            _prev_sigterm = None
     sigs = extract_signals(path) if path else {}
 
     staged_corrections: list[str] = []
+    staged_confusion: list[str] = []
     staged_apologies = 0
     staged_retries: dict = {}
     staged_edit_churn: dict = {}
     staged_file_reads: dict = {}
+    # Codex P2: staged error_count must survive into Stop. Compaction can hand
+    # Stop a NEW transcript that has zero errors — without summing the staged
+    # count, six pre-compaction tool errors silently drop and never reach the
+    # `external-dependency` classifier threshold.
+    staged_error_count = 0
+    # Track staging files that belong to THIS session so we can clean them up
+    # after the local record write succeeds. Files without a matching
+    # session_id belong to sibling sessions and are left untouched.
+    consumed_staging: list[Path] = []
+    transcript_str = str(path) if path else ""
+    my_key = _staging_key(session_id, path)
     if STAGING_DIR.exists():
         for f in sorted(STAGING_DIR.glob("checkpoint_*.json")) + sorted(STAGING_DIR.glob("correction_*.json")):
             try:
                 ckpt = json.loads(f.read_text(encoding="utf-8"))
-                cs = ckpt.get("signals", {})
-                staged_corrections.extend(cs.get("user_corrections") or [])
-                staged_apologies += int(cs.get("assistant_apologies") or 0)
-                for k, v in (cs.get("tool_retries") or {}).items():
-                    staged_retries[k] = max(staged_retries.get(k, 0), int(v))
-                for fp, count in (cs.get("edit_churn") or {}).items():
-                    staged_edit_churn[fp] = max(staged_edit_churn.get(fp, 0), int(count))
-                for fp, count in (cs.get("file_reads") or {}).items():
-                    staged_file_reads[fp] = staged_file_reads.get(fp, 0) + int(count)
-                if ckpt.get("mode") == "correction" and ckpt.get("snippet"):
-                    staged_corrections.append(str(ckpt["snippet"])[:200])
             except Exception as e:
                 print(f"[session-retro] checkpoint load: {type(e).__name__}", file=sys.stderr)
+                continue
+            if not isinstance(ckpt, dict):
+                continue
+            ckpt_sid = str(ckpt.get("session_id") or "")
+            ckpt_key = str(ckpt.get("staging_key") or "")
+            # Session isolation. Preference order:
+            #   1. If both sides have a staging_key, require an exact match —
+            #      this pairs empty-sid Stops with their tx-keyed PreCompact
+            #      via the transcript-derived fallback (CodeRabbit fix).
+            #   2. If the checkpoint has a session_id but no staging_key
+            #      (older writer), fall back to the sid-vs-sid check.
+            #   3. Fully-legacy checkpoints (no key, no sid) stay first-come-
+            #      first-served so older PreCompact hooks don't drop signals.
+            if ckpt_key:
+                if ckpt_key != my_key:
+                    continue
+            elif ckpt_sid and ckpt_sid != session_id:
+                continue
+            # Skip a checkpoint whose transcript is exactly the one we're
+            # already summarising — its signals are re-derived below.
+            if transcript_str and str(ckpt.get("transcript") or "") == transcript_str:
+                consumed_staging.append(f)
+                continue
+            cs = ckpt.get("signals", {}) if isinstance(ckpt.get("signals"), dict) else {}
+            staged_corrections.extend(cs.get("user_corrections") or [])
+            staged_confusion.extend(cs.get("ai_confusion_events") or [])
+            staged_apologies += int(cs.get("assistant_apologies") or 0)
+            for k, v in (cs.get("tool_retries") or {}).items():
+                staged_retries[k] = max(staged_retries.get(k, 0), int(v))
+            for fp, count in (cs.get("edit_churn") or {}).items():
+                # CodeRabbit 2026-07-19: sum, not max. The transcript-exact
+                # skip above (`ckpt.transcript == transcript_str`) already
+                # deduplicates the same-transcript case; when compaction
+                # hands Stop a different transcript, the counts are disjoint
+                # and max() would silently drop a file from >=3 back to 2.
+                staged_edit_churn[fp] = staged_edit_churn.get(fp, 0) + int(count)
+            for fp, count in (cs.get("file_reads") or {}).items():
+                staged_file_reads[fp] = staged_file_reads.get(fp, 0) + int(count)
+            staged_error_count += int(cs.get("error_count") or 0)
+            if ckpt.get("mode") == "correction" and ckpt.get("snippet"):
+                staged_corrections.append(str(ckpt["snippet"])[:200])
+            consumed_staging.append(f)
 
-    all_corrections = list(sigs.get("user_corrections") or []) + staged_corrections
+    # dict.fromkeys preserves order and dedupes — two precompact checkpoints
+    # in one session would otherwise duplicate their corrections into Stop.
+    all_corrections = list(dict.fromkeys(list(sigs.get("user_corrections") or []) + staged_corrections))
     merged_retries: dict = {}
     for source in (staged_retries, sigs.get("tool_retries") or {}):
         for k, v in source.items():
             merged_retries[k] = max(merged_retries.get(k, 0), int(v))
     merged_edit_churn = dict(staged_edit_churn)
     for fp, count in (sigs.get("edit_churn") or {}).items():
-        merged_edit_churn[fp] = max(merged_edit_churn.get(fp, 0), int(count))
+        # Sum, matching file_reads / error_count. See CodeRabbit
+        # 2026-07-19: staged and current can be disjoint transcripts.
+        merged_edit_churn[fp] = merged_edit_churn.get(fp, 0) + int(count)
     merged_file_reads = dict(staged_file_reads)
     for fp, count in (sigs.get("file_reads") or {}).items():
         merged_file_reads[fp] = merged_file_reads.get(fp, 0) + int(count)
 
+    merged_error_count = int(sigs.get("error_count") or 0) + staged_error_count
+    # CodeRabbit: merge staged ai_confusion_events so "Re-read:" cues from a
+    # PreCompact still reach both the classifier and the merged_sigs record.
+    all_confusion = list(dict.fromkeys(
+        list(sigs.get("ai_confusion_events") or []) + staged_confusion
+    ))
     merged_sigs = {
         **sigs,
         "user_corrections": all_corrections,
+        "ai_confusion_events": all_confusion,
         "assistant_apologies": int(sigs.get("assistant_apologies") or 0) + staged_apologies,
         "tool_retries": merged_retries,
         "edit_churn": merged_edit_churn,
         "file_reads": merged_file_reads,
+        "error_count": merged_error_count,
     }
     dscore = dysfunction_score(merged_sigs)
     fclass = normalize_failure_class(classify_from_signals(
         user_corrections=all_corrections,
-        ai_confusion_events=sigs.get("ai_confusion_events"),
+        ai_confusion_events=all_confusion,
         tool_retries=merged_retries,
         edit_churn=merged_edit_churn,
         file_reads=merged_file_reads,
-        error_count=int(sigs.get("error_count") or 0),
+        error_count=merged_error_count,
     ))
 
     branch = _get_branch()
@@ -600,6 +2022,12 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False) ->
         "captured_at": _now_iso(),
         "branch": branch,
         "session_id": session_id or "",
+        # Passed through so _write_local_record can compute a
+        # transcript-derived snapshot key when session_id is empty.
+        # Codex P2 2026-07-19: without this, two concurrent empty-sid
+        # Stops on the same branch/second collided at "-unknown.json"
+        # because the tx: fallback had no transcript to hash.
+        "transcript": str(path) if path else "",
         "dysfunction_score": dscore,
         "failure_class": fclass,
         "session_minutes": merged_sigs.get("session_minutes", 0),
@@ -616,9 +2044,47 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False) ->
     body = plain_text_note(branch, merged_sigs, dscore, fclass, diff_stats)
 
     # LOCAL write first — Stop durability requires the JSONL/snapshot even if KL hangs.
-    snap = _write_local_record(record)
+    # Codex P2 2026-07-19: if this durable write fails after the reservation was
+    # recorded, roll the reservation back so the next Stop retries — otherwise the
+    # transcript is silently skipped forever (until it changes or --force). Capture
+    # the reserved mtime up front so the release path only removes THIS handler's
+    # entry (Codex line-790 refinement): a concurrent Stop may have overwritten
+    # the sentinel with a newer mtime, and clobbering it here would let a duplicate
+    # retrospective slip through the next Stop for that newer mtime.
+    reserved_mtime = _session_log_mtime(path)
+    try:
+        snap = _write_local_record(record)
+    except Exception:
+        _release_mtime_reservation(path, reserved_mtime=reserved_mtime)
+        raise
+    # Codex P2 2026-07-19 (manolii-platform#430 line 1405): durable record
+    # exists — from here on, SIGTERM must NOT roll back the mtime reservation.
+    _stop_committed[0] = True
+    if _prev_sigterm is not None:
+        try:
+            signal.signal(signal.SIGTERM, _prev_sigterm)
+        except (ValueError, OSError):
+            pass
     print(f"[session-retro] local record: {snap}", file=sys.stderr)
-    _write_mtime_sentinel(path)
+    # Sentinel already reserved at the top of mode_stop under the same lock;
+    # no second write needed here (see Codex P2 2026-07-19 fix).
+    # BUT: force=True bypasses the reservation entirely, so a forced capture
+    # would leave no sentinel and the next ordinary Stop for an unchanged
+    # transcript would duplicate. Persist the mtime post-write in that case
+    # (Codex line-1088 2026-07-19). Skip in dry-run — no durable record was
+    # written and telemetry must not lie.
+    if (force or os.environ.get("SESSION_RETRO_FORCE")) and not dry_run and path:
+        _write_mtime_sentinel(path)
+
+    # Drop only the staging artifacts we consumed for THIS session. Leaving
+    # them behind would double-count their signals into any future Stop for a
+    # sibling session that happened to reuse the same session_id (unlikely
+    # but possible after restart).
+    for staging_file in consumed_staging:
+        try:
+            staging_file.unlink(missing_ok=True)
+        except OSError as e:
+            print(f"[session-retro] staging cleanup: {type(e).__name__}", file=sys.stderr)
 
     # KL network leg (optional). Callers that must stay within Stop budget use --local-only
     # and background a second invocation without --local-only for this path.
@@ -626,30 +2092,66 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False) ->
         assert entity is not None
         safe_branch = branch.replace("/", "-").replace(" ", "-")
         branch_tag = f"branch:{safe_branch}"
+        # Codex P2 2026-07-19 (manolii-platform#430 line 700): snapshot path
+        # name is stable across worker crashes — reuse it as the KL
+        # idempotency key so a subsequent kl-drain retry can't duplicate.
         wrote = kl_create_note(
             entity,
             title=f"Session retrospective — {branch} [{today}]",
             content=body,
             tags=["session-retrospective", "auto-generated", "session-learnings", branch_tag],
+            idempotency_key=snap.name,
         )
         if wrote:
+            # Codex P2 2026-07-19: dry-run makes kl_create_note return True
+            # without a network call — never claim delivery in that case.
+            if os.environ.get("SESSION_RETRO_DRY_RUN"):
+                print("[session-retro] stop-kl: dry-run — skipping snapshot/JSONL mutation", file=sys.stderr)
+                return
             record["kl_written"] = True
+            # Codex P2 2026-07-19 (Lead-Converter#250 line 1892): mirror the
+            # round-K persist-before-flush-event invariant on the DIRECT
+            # stop path. Previously a failed snap.write_text was only
+            # logged and we still appended the kl-flushed event, so a
+            # later kl-drain saw kl_written:false and retried the upload
+            # (duplicate). Only emit the completion event and the fact
+            # assertions when the snapshot commit is durable — otherwise
+            # log and let kl-drain retry after the lease TTL.
+            snap_committed = False
             try:
                 snap.write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+                snap_committed = True
             except Exception as e:
                 print(f"[session-retro] snap update: {type(e).__name__}", file=sys.stderr)
-            kl_assert_fact(
-                entity,
-                "session-retrospectives",
-                f"last_dysfunction_score.{safe_branch}",
-                str(dscore),
-            )
-            kl_assert_fact(
-                entity,
-                "session-retrospectives",
-                f"last_failure_class.{safe_branch}",
+            if snap_committed:
+                # Codex P2 2026-07-19: emit JSONL completion event for the
+                # direct-Stop KL path too — the kl-only path already does
+                # this, but append-only consumers must see BOTH paths'
+                # successful uploads.
+                _append_kl_flush_event(
+                session_id or str(record.get("session_id") or ""),
+                branch,
+                dscore,
                 fclass,
+                capture_id=str(record.get("capture_id") or ""),
             )
+                kl_assert_fact(
+                    entity,
+                    "session-retrospectives",
+                    f"last_dysfunction_score.{safe_branch}",
+                    str(dscore),
+                )
+                kl_assert_fact(
+                    entity,
+                    "session-retrospectives",
+                    f"last_failure_class.{safe_branch}",
+                    fclass,
+                )
+            else:
+                print(
+                    "[session-retro] stop-kl: KL upload OK but snapshot commit failed — will retry after lease TTL",
+                    file=sys.stderr,
+                )
 
 
 def mode_inject() -> None:
@@ -663,6 +2165,14 @@ def mode_inject() -> None:
                 try:
                     rec = json.loads(line)
                 except json.JSONDecodeError:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                # Codex P2 2026-07-19: kl-flushed completion events carry
+                # branch + dysfunction_score for downstream JSONL consumers,
+                # but they are NOT retrospectives. Skip them here so a single
+                # session doesn't consume two navigation-warning slots.
+                if rec.get("event") == "kl-flushed":
                     continue
                 if rec.get("branch") != branch:
                     continue
@@ -700,7 +2210,9 @@ def mode_inject() -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Portable session retrospective (KL-optional).")
-    p.add_argument("--mode", choices=["stop", "inject", "precompact", "kl-only"], required=True)
+    p.add_argument("--mode",
+                   choices=["stop", "inject", "precompact", "kl-only", "kl-drain"],
+                   required=True)
     p.add_argument("--session-id", default="")
     p.add_argument("--transcript", default="")
     p.add_argument("--local-only", action="store_true",
@@ -714,13 +2226,16 @@ def main() -> None:
         print(f"[session-retro] DRY RUN — mode={args.mode}", file=sys.stderr)
     try:
         if args.mode == "precompact":
-            mode_precompact(args.transcript)
+            mode_precompact(args.transcript, session_id=args.session_id)
         elif args.mode == "stop":
-            mode_stop(args.session_id, local_only=args.local_only, force=args.force)
+            mode_stop(args.session_id, local_only=args.local_only, force=args.force,
+                      transcript=args.transcript)
         elif args.mode == "inject":
             mode_inject()
         elif args.mode == "kl-only":
             mode_kl_only(args.session_id)
+        elif args.mode == "kl-drain":
+            mode_kl_drain()
     except Exception as e:
         print(f"[session-retro] fatal: {type(e).__name__}: {e}", file=sys.stderr)
         sys.exit(1)
