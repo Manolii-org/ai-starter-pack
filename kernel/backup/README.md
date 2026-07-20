@@ -20,6 +20,7 @@ no copy-pasted workflow bodies. Modeled on the `actions-runner-fleet`
 Layout:
 
 - `scripts/lib/backup-db-lib.sh` — shared dump/encrypt/upload helpers (verbatim from master; see `PROVENANCE.md`)
+- `scripts/lib/sentry-cron-checkin.sh` — Relay ingest check-in helper (preflight + keys-API DSN resolve; verbatim from master)
 - `scripts/backup-pg-dump.sh` — single-database dump entrypoint
 - `scripts/restore-drill.sh`, `scripts/restore-drill-neon-app.sh` — drill logic
   (the `scripts/` sub-layout mirrors master exactly so the files' relative
