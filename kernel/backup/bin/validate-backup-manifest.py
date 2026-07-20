@@ -28,25 +28,22 @@ SECRETY_RE = re.compile(
 
 
 def _schema_validate(manifest: dict, schema: dict, errors: list[str]) -> None:
+    # Fail closed: without jsonschema the nested constraints (storage/systems/
+    # monitoring/drill) cannot be enforced, and a shallow fallback would let
+    # invalid manifests pass outside CI.
     try:
         import jsonschema
-
-        for err in sorted(
-            jsonschema.Draft202012Validator(schema).iter_errors(manifest),
-            key=lambda e: list(e.absolute_path),
-        ):
-            errors.append(f"schema: {'/'.join(str(p) for p in err.absolute_path) or '<root>'}: {err.message}")
-        return
     except ImportError:
-        pass
-    # Minimal structural fallback when jsonschema is unavailable.
-    for field in schema.get("required", []):
-        if field not in manifest:
-            errors.append(f"schema(minimal): missing required field '{field}'")
-    if manifest.get("version") != 0:
-        errors.append("schema(minimal): version must be 0 (draft)")
-    if not isinstance(manifest.get("systems"), list) or not manifest.get("systems"):
-        errors.append("schema(minimal): systems must be a non-empty list")
+        errors.append(
+            "jsonschema is required for full schema validation (pip install jsonschema) — refusing to validate without it"
+        )
+        return
+
+    for err in sorted(
+        jsonschema.Draft202012Validator(schema).iter_errors(manifest),
+        key=lambda e: list(e.absolute_path),
+    ):
+        errors.append(f"schema: {'/'.join(str(p) for p in err.absolute_path) or '<root>'}: {err.message}")
 
 
 def _cross_field(manifest: dict, errors: list[str]) -> None:

@@ -13,13 +13,13 @@ on:
         type: string
       pack_ref:
         description: >-
-          Ref of this pack to validate against. Pin it to the SAME tag as your
-          `uses:` line (e.g. v1) — the github context inside a reusable workflow
-          reflects the CALLER, so the pack cannot reliably discover its own
-          pinned ref and an explicit input keeps the version pin honest.
+          Optional override for the pack ref to validate against. When empty
+          (default), the workflow checks out its own pinned revision via
+          job.workflow_sha — the job context (unlike the github context, which
+          reflects the caller) identifies the CALLED reusable workflow file.
         required: false
         type: string
-        default: main
+        default: ''
 
 permissions:
   contents: read
@@ -38,7 +38,7 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           repository: manolii-org/ai-starter-pack
-          ref: ${{ inputs.pack_ref }}
+          ref: ${{ inputs.pack_ref || job.workflow_sha }}
           path: pack
 
       - name: Kernel script syntax
@@ -53,6 +53,10 @@ jobs:
           awk -F'|' '/^\| scripts\// {gsub(/ /,"",$2); gsub(/ /,"",$4); print $4"  "$2}' PROVENANCE.md | sha256sum -c -
 
       - name: Validate manifest
+        # env indirection: never interpolate caller-controlled input into the
+        # shell script body (zizmor template-injection).
+        env:
+          MANIFEST_PATH: ${{ inputs.manifest_path }}
         run: |
           pip install --quiet pyyaml jsonschema
-          python3 pack/kernel/backup/bin/validate-backup-manifest.py "caller/${{ inputs.manifest_path }}"
+          python3 pack/kernel/backup/bin/validate-backup-manifest.py "caller/$MANIFEST_PATH"
