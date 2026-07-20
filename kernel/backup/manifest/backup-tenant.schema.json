@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/manolii-org/ai-starter-pack/kernel/backup/manifest/backup-tenant.schema.json",
+  "title": "Backup tenant manifest (draft v0 — WS-2 scaffold)",
+  "description": "Declarative per-tenant backup description consumed by the backup kernel. Names and metadata ONLY — never secret values; all credentials resolve at runtime from the tenant's Doppler project.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "tenant", "legal_entity", "storage", "systems", "monitoring", "drill"],
+  "properties": {
+    "version": { "const": 0, "description": "Manifest schema version (draft)." },
+    "tenant": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,40}$", "description": "Stable tenant id (logs, receipts, R2 prefixes)." },
+    "legal_entity": { "type": "string", "minLength": 1, "description": "Who owns the data and the bill (ADR-0024 isolation)." },
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["r2_bucket", "r2_doppler_project"],
+      "properties": {
+        "r2_bucket": { "type": "string", "minLength": 3, "description": "Operational identifier already present in committed code — never a secret." },
+        "r2_doppler_project": { "type": "string", "description": "Doppler project holding BACKUP_CF_* / BACKUP_R2_BUCKET / BACKUP_ENCRYPTION_KEY for this tenant." },
+        "pgdump_prefix": { "type": "string", "default": "pgdump/", "description": "Locked/lifecycle prefix for raw dumps." }
+      }
+    },
+    "systems": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "kind", "doppler_project", "tier", "rpo_target"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,60}$" },
+          "kind": { "enum": ["supabase", "neon", "restic-fs", "vendor-saas"] },
+          "doppler_project": { "type": "string", "description": "Where the kernel resolves the DSN (names like SUPABASE_DB_URL / NEON_DATABASE_URL / DATABASE_URL — see backup-resolve-db-url contract)." },
+          "tier": { "enum": [0, 1, 2, 3] },
+          "rpo_target": { "type": "string", "pattern": "^[0-9]+(h|m|d)$" },
+          "rto_target": { "type": "string", "pattern": "^[0-9]+(h|m|d)$" },
+          "exclude_tables": { "type": "array", "items": { "type": "string" } },
+          "critical_tables": { "type": "array", "items": { "type": "string" } },
+          "split_exports": {
+            "type": "array",
+            "description": "Table families exported on their own cadence (e.g. activity_log daily).",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "tables", "cadence"],
+              "properties": {
+                "name": { "type": "string" },
+                "tables": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+                "cadence": { "type": "string", "description": "5-field cron (UTC)." }
+              }
+            }
+          }
+        }
+      }
+    },
+    "monitoring": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sentry_monitor_slugs"],
+      "properties": {
+        "sentry_monitor_slugs": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,60}$" },
+          "description": "Slugs are never-rename wiring (execution plan §6)."
+        },
+        "sentry_org_note": { "type": "string", "description": "Residency note only (D6) — org can move, slugs cannot." }
+      }
+    },
+    "drill": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cadence", "scope"],
+      "properties": {
+        "cadence": { "type": "string", "description": "5-field cron (UTC). Cadence changes are operator decisions (D1a)." },
+        "scope": { "type": "array", "minItems": 1, "items": { "enum": ["supabase-kl", "neon-app", "activity-log-split", "github-metadata"] } },
+        "receipts_path": { "type": "string", "default": "reports/drill-receipts/" }
+      }
+    },
+    "escrow": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "D5-gated; names only.",
+      "properties": {
+        "keys": { "type": "array", "items": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]+$" } },
+        "custody_note": { "type": "string" }
+      }
+    }
+  }
+}

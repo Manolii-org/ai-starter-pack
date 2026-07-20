@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""Validate a backup tenant manifest against the draft schema + cross-field rules.
+
+Usage: validate-backup-manifest.py <manifest.yaml> [...]
+Exit 0 = all valid; 1 = any invalid. Names/metadata only — this validator also
+FAILS if any value looks like an inlined secret (defence in depth: manifests
+must never carry secret values).
+"""
+from __future__ import annotations
+
+import json
+import re
+import sys
+from pathlib import Path
+
+try:
+    import yaml
+except ImportError:  # pragma: no cover
+    print("ERROR: PyYAML required (pip install pyyaml)", file=sys.stderr)
+    sys.exit(1)
+
+SCHEMA_PATH = Path(__file__).resolve().parent.parent / "manifest" / "backup-tenant.schema.json"
+CRON_RE = re.compile(r"^\S+ \S+ \S+ \S+ \S+$")
+# Anything that looks like credential material rather than a name.
+SECRETY_RE = re.compile(
+    r"(dp\.(pt|st|sa)\.|postgres(ql)?://[^ ]*:[^ ]*@|AKIA[0-9A-Z]{16}|-----BEGIN|Bearer\s+\S{16,})"
+)
+
+
+def _schema_validate(manifest: dict, schema: dict, errors: list[str]) -> None:
+    try:
+        import jsonschema
+
+        for err in sorted(
+            jsonschema.Draft202012Validator(schema).iter_errors(manifest),
+            key=lambda e: list(e.absolute_path),
+        ):
+            errors.append(f"schema: {'/'.join(str(p) for p in err.absolute_path) or '<root>'}: {err.message}")
+        return
+    except ImportError:
+        pass
+    # Minimal structural fallback when jsonschema is unavailable.
+    for field in schema.get("required", []):
+        if field not in manifest:
+            errors.append(f"schema(minimal): missing required field '{field}'")
+    if manifest.get("version") != 0:
+        errors.append("schema(minimal): version must be 0 (draft)")
+    if not isinstance(manifest.get("systems"), list) or not manifest.get("systems"):
+        errors.append("schema(minimal): systems must be a non-empty list")
+
+
+def _cross_field(manifest: dict, errors: list[str]) -> None:
+    def walk(node, path="$"):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                walk(v, f"{path}.{k}")
+        elif isinstance(node, list):
+            for i, v in enumerate(node):
+                walk(v, f"{path}[{i}]")
+        elif isinstance(node, str) and SECRETY_RE.search(node):
+            errors.append(f"secret-shaped value at {path} — manifests carry names only")
+
+    walk(manifest)
+
+    for cron_path, cron in [("drill.cadence", (manifest.get("drill") or {}).get("cadence"))] + [
+        (f"systems[{i}].split_exports[{j}].cadence", se.get("cadence"))
+        for i, s in enumerate(manifest.get("systems") or [])
+        for j, se in enumerate(s.get("split_exports") or [])
+    ]:
+        if cron is not None and not CRON_RE.match(str(cron)):
+            errors.append(f"{cron_path}: not a 5-field cron expression")
+
+    names = [s.get("name") for s in manifest.get("systems") or []]
+    dupes = {n for n in names if names.count(n) > 1}
+    if dupes:
+        errors.append(f"duplicate system names: {sorted(dupes)}")
+
+
+def validate_file(path: Path, schema: dict) -> list[str]:
+    errors: list[str] = []
+    try:
+        manifest = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        return [f"yaml parse error: {exc}"]
+    if not isinstance(manifest, dict):
+        return ["manifest root must be a mapping"]
+    _schema_validate(manifest, schema, errors)
+    _cross_field(manifest, errors)
+    return errors
+
+
+def main(argv: list[str]) -> int:
+    if not argv:
+        print(__doc__, file=sys.stderr)
+        return 1
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    rc = 0
+    for arg in argv:
+        errs = validate_file(Path(arg), schema)
+        if errs:
+            rc = 1
+            for e in errs:
+                print(f"FAIL {arg}: {e}", file=sys.stderr)
+        else:
+            print(f"OK   {arg}")
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

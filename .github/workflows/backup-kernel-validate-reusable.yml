@@ -1,0 +1,49 @@
+name: Backup Kernel Validate (reusable)
+# WS-2 SCAFFOLD: validate-only. Proves the manifest + kernel plumbing for
+# consumers ahead of the Phase-2 cutover. The dump/drill reusable workflows are
+# ported in WS-2 proper — this workflow never touches databases, storage, or
+# secrets, and requires none.
+
+on:
+  workflow_call:
+    inputs:
+      manifest_path:
+        description: 'Path (in the CALLER repo checkout) to the tenant manifest YAML'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout caller repo (manifest)
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          path: caller
+
+      - name: Checkout kernel (this pack)
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          repository: manolii-org/ai-starter-pack
+          ref: ${{ github.job_workflow_sha || 'main' }}
+          path: pack
+
+      - name: Kernel script syntax
+        run: |
+          bash -n pack/kernel/backup/lib/backup-db-lib.sh
+          for f in pack/kernel/backup/bin/*.sh; do bash -n "$f"; done
+
+      - name: Kernel provenance integrity
+        run: |
+          cd pack/kernel/backup
+          # Every table row in PROVENANCE.md must match the shipped file bytes.
+          awk -F'|' '/^\| (lib|bin)\// {gsub(/ /,"",$2); gsub(/ /,"",$4); print $4"  "$2}' PROVENANCE.md | sha256sum -c -
+
+      - name: Validate manifest
+        run: |
+          pip install --quiet pyyaml jsonschema
+          python3 pack/kernel/backup/bin/validate-backup-manifest.py "caller/${{ inputs.manifest_path }}"

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Backup kernel scaffold (`kernel/backup/`, Manolii Resilience Platform PR-H6 /
+  WS-2 start): verbatim kernel scripts with provenance hashes, tenant-manifest
+  draft schema + example + validator, and the validate-only
+  `backup-kernel-validate-reusable.yml`. No consumers yet; master cutover is
+  gated on the Phase-1 exit.
+
 ## 1.7.2 — 2026-07-18
 
 - `ci-reusable`: empty `pnpm_version` (new default) omits `version` for

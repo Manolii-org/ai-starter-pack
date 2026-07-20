@@ -139,3 +139,20 @@ Tag strategy: immutable vX.Y.Z + moving `v1` major alias (regex tracks the movin
 | **`litellm_proxy_url` as input, not secret** | URL is non-sensitive (endpoint address); secret is the key. Simplifies config. |
 | **`paths_ignore` input is internal-only** | Caller owns top-level `on.paths-ignore` for trigger-level filtering. Input gates internal changed-files detection (Semgrep, ESLint, etc.). Decouples concerns. |
 | **Tag v1 alias** | Major version signals API stability. Patch releases (v1.0.1, v1.1.0) are additive non-breaking. Rename/remove/default-change requires v2. |
+
+## Backup Kernel (WS-2 scaffold)
+
+`backup-kernel-validate-reusable.yml` — validate-only entry point for the backup
+kernel (`kernel/backup/`): kernel script syntax, provenance-hash integrity, and
+tenant-manifest validation against `kernel/backup/manifest/backup-tenant.schema.json`.
+Requires no secrets and touches no databases or storage. The dump/drill reusable
+workflows land with the WS-2 cutover (gated on the Manolii Resilience Platform
+Phase-1 exit) — see `kernel/backup/README.md`.
+
+```yaml
+jobs:
+  validate-backup-manifest:
+    uses: manolii-org/ai-starter-pack/.github/workflows/backup-kernel-validate-reusable.yml@v1
+    with:
+      manifest_path: config/backup-tenant.yaml
+```
