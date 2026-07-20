@@ -36,22 +36,33 @@ case "${SENTRY_STATUS}" in
     ;;
 esac
 
+_auth_header_file() {
+  # Token via 0600 file — never on curl argv (ps /proc cmdline exposure).
+  local hf
+  hf="$(mktemp)"
+  chmod 600 "${hf}"
+  printf 'Authorization: Bearer %s\n' "${SENTRY_AUTH_TOKEN}" >"${hf}"
+  printf '%s' "${hf}"
+}
+
 _preflight_monitor() {
   if [ "${SENTRY_CHECKIN_SKIP_PREFLIGHT:-0}" = "1" ]; then
     echo "WARN: skipping monitor preflight (SENTRY_CHECKIN_SKIP_PREFLIGHT=1)"
     return 0
   fi
-  local http_code tmp project_slug
+  local http_code tmp project_slug hf
   tmp="$(mktemp)"
+  hf="$(_auth_header_file)"
   http_code="$(curl -sS --retry 3 --max-time 15 --connect-timeout 5 \
     -o "${tmp}" -w '%{http_code}' \
-    -H "Authorization: Bearer ${SENTRY_AUTH_TOKEN}" \
+    -H @"${hf}" \
     -H "Accept: application/json" \
     "https://sentry.io/api/0/organizations/${SENTRY_ORG}/monitors/${SENTRY_MONITOR_SLUG}/")" || {
     echo "ERROR: curl failed preflight for monitor ${SENTRY_MONITOR_SLUG}" >&2
-    rm -f "${tmp}"
+    rm -f "${tmp}" "${hf}"
     return 1
   }
+  rm -f "${hf}"
   if [ "${http_code}" = "404" ]; then
     echo "ERROR: Sentry monitor '${SENTRY_MONITOR_SLUG}' missing in org '${SENTRY_ORG}' — run scripts/sentry-crons-setup.sh" >&2
     rm -f "${tmp}"
@@ -81,17 +92,19 @@ _resolve_dsn() {
     return 0
   fi
 
-  local keys_json http_code
+  local keys_json http_code hf
   keys_json="$(mktemp)"
+  hf="$(_auth_header_file)"
   http_code="$(curl -sS --retry 3 --max-time 15 --connect-timeout 5 \
     -o "${keys_json}" -w '%{http_code}' \
-    -H "Authorization: Bearer ${SENTRY_AUTH_TOKEN}" \
+    -H @"${hf}" \
     -H "Accept: application/json" \
     "https://sentry.io/api/0/projects/${SENTRY_ORG}/${SENTRY_PROJECT}/keys/")" || {
     echo "ERROR: curl failed resolving DSN keys for ${SENTRY_ORG}/${SENTRY_PROJECT}" >&2
-    rm -f "${keys_json}"
+    rm -f "${keys_json}" "${hf}"
     return 1
   }
+  rm -f "${hf}"
   if [ "${http_code}" != "200" ]; then
     echo "ERROR: keys API HTTP ${http_code} for ${SENTRY_ORG}/${SENTRY_PROJECT}" >&2
     rm -f "${keys_json}"

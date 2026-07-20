@@ -13,4 +13,4 @@ to `kernel/backup/`).
 | scripts/restore-drill.sh | scripts/restore-drill.sh | 38890c4e6991f837ef95d21da1faf96d27cc5615ee6b2de79e0fbe774aab76b7 |
 | scripts/restore-drill-neon-app.sh | scripts/restore-drill-neon-app.sh | 295c0cf9ae6b477f0a442b878a1e12c1fbe5aac8c03e27cdf09db248216f2cf0 |
 | scripts/backup-resolve-db-url.py | scripts/backup-resolve-db-url.py | 9e8e2125c546b8d836328f70d82c1192f614cbe251b7cb3cf5d976d36d8244d7 |
-| scripts/lib/sentry-cron-checkin.sh | scripts/lib/sentry-cron-checkin.sh | 5606a1e30058b056050d1068005b6d852923728828cb419dcd9f254571b728f5 |
+| scripts/lib/sentry-cron-checkin.sh | scripts/lib/sentry-cron-checkin.sh | f40efb8282b793fa8e6a20fabd6e97a3d7cb5f8a52de19d95d3213c3f0d1b71a |
