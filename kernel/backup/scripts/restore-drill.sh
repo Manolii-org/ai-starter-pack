@@ -123,6 +123,21 @@ BRANCH_ID=$(echo "$BRANCH_RESPONSE" | jq -r '.branch.id // empty')
 [ -n "$BRANCH_ID" ] || { echo "ERROR: Neon branch creation failed - no branch ID returned" >&2; echo "$BRANCH_RESPONSE" >&2; exit 1; }
 echo "  Branch: ${BRANCH_ID}"
 
+# Register full cleanup trap IMMEDIATELY (overwrites the tmp-only trap above) —
+# a failure/timeout during the operation polling below must not leak the
+# scratch branch (same hazard fixed in restore-drill-neon-app.sh).
+# Note: Neon's API v2 does not expose a hard/permanent-delete endpoint; the DELETE call marks the
+# branch deleted subject to Neon's platform grace period. RESTORE_DRILL_NEON_PROJECT_ID must point
+# to a dedicated scratch project (not an application project) so any recoverable branch holds only
+# backup data, not live production data.
+trap 'if [ -n "${BRANCH_ID:-}" ] && [ -n "${NEON_PROJECT_ID:-}" ] && [ -n "${NEON_API_KEY:-}" ]; then
+  echo "[cleanup] Deleting Neon branch ${BRANCH_ID}"
+  curl -sS --max-time 30 --connect-timeout 10 \
+    -X DELETE "https://console.neon.tech/api/v2/projects/${NEON_PROJECT_ID}/branches/${BRANCH_ID}" \
+    -H "Authorization: Bearer ${NEON_API_KEY}" > /dev/null 2>&1 || true
+fi
+rm -rf "$DRILL_TMP"' EXIT
+
 # Poll until all branch operations complete — Neon ops can stay 'running'/'scheduling' for several seconds
 OPERATIONS=$(echo "$BRANCH_RESPONSE" | jq -r '.operations[]?.id // empty' 2>/dev/null || true)
 if [ -n "$OPERATIONS" ]; then
@@ -145,18 +160,6 @@ if [ -n "$OPERATIONS" ]; then
   echo "  Branch operations: COMPLETE"
 fi
 
-# Register full cleanup trap (overwrites the tmp-only trap above).
-# Note: Neon's API v2 does not expose a hard/permanent-delete endpoint; the DELETE call marks the
-# branch deleted subject to Neon's platform grace period. RESTORE_DRILL_NEON_PROJECT_ID must point
-# to a dedicated scratch project (not an application project) so any recoverable branch holds only
-# backup data, not live production data.
-trap 'if [ -n "${BRANCH_ID:-}" ] && [ -n "${NEON_PROJECT_ID:-}" ] && [ -n "${NEON_API_KEY:-}" ]; then
-  echo "[cleanup] Deleting Neon branch ${BRANCH_ID}"
-  curl -sS --max-time 30 --connect-timeout 10 \
-    -X DELETE "https://console.neon.tech/api/v2/projects/${NEON_PROJECT_ID}/branches/${BRANCH_ID}" \
-    -H "Authorization: Bearer ${NEON_API_KEY}" > /dev/null 2>&1 || true
-fi
-rm -rf "$DRILL_TMP"' EXIT
 
 # Resolve connection URI — try inline first, fall back to explicit API call
 NEON_BRANCH_DSN=$(echo "$BRANCH_RESPONSE" | jq -r '.connection_uris[0].connection_uri // empty')
@@ -253,9 +256,11 @@ AL_ROWS=""              # integer when restored & verified, else empty
 AL_STATUS="not_found"   # not_found | skipped_optional | verified
 : "${ACTIVITY_LOG_DUMP_OPTIONAL:=0}"
 echo "[7b/9] Checking for activity_log dump in R2: ${BACKUP_R2_BUCKET}/${AL_PREFIX} (optional=${ACTIVITY_LOG_DUMP_OPTIONAL})"
+# `|| AL_LS_RC=$?` keeps set -e from killing the script before the handler
+# below runs — a plain assignment propagates the substitution's exit status.
+AL_LS_RC=0
 AL_LS_OUT="$(AWS_ACCESS_KEY_ID="$BACKUP_CF_TOKEN_ID" AWS_SECRET_ACCESS_KEY="$R2_SECRET" \
-  aws s3 ls --endpoint-url "$R2_ENDPOINT" "s3://${BACKUP_R2_BUCKET}/${AL_PREFIX}" 2>&1)"
-AL_LS_RC=$?
+  aws s3 ls --endpoint-url "$R2_ENDPOINT" "s3://${BACKUP_R2_BUCKET}/${AL_PREFIX}" 2>&1)" || AL_LS_RC=$?
 if [ "$AL_LS_RC" -ne 0 ]; then
   # An empty prefix is NOT an error for `aws s3 ls`; a non-zero exit means the API
   # call itself failed (auth, endpoint, connectivity). Never silently pass.
