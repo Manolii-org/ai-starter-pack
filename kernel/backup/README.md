@@ -19,9 +19,11 @@ no copy-pasted workflow bodies. Modeled on the `actions-runner-fleet`
 
 Layout:
 
-- `lib/backup-db-lib.sh` — shared dump/encrypt/upload helpers (verbatim from master; see `PROVENANCE.md`)
-- `bin/backup-pg-dump.sh` — single-database dump entrypoint
-- `bin/restore-drill.sh`, `bin/restore-drill-neon-app.sh` — drill logic
+- `scripts/lib/backup-db-lib.sh` — shared dump/encrypt/upload helpers (verbatim from master; see `PROVENANCE.md`)
+- `scripts/backup-pg-dump.sh` — single-database dump entrypoint
+- `scripts/restore-drill.sh`, `scripts/restore-drill-neon-app.sh` — drill logic
+  (the `scripts/` sub-layout mirrors master exactly so the files' relative
+  lib-sourcing works verbatim — do not flatten it)
 - `manifest/backup-tenant.schema.json` — tenant manifest draft (JSON Schema)
 - `manifest/examples/manolii.yaml` — example manifest mirroring master's live matrix (names only, no secrets)
 - `bin/validate-backup-manifest.py` — schema + cross-field validation

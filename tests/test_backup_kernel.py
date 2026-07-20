@@ -29,7 +29,7 @@ def _run_validator(*paths: Path) -> subprocess.CompletedProcess:
 
 def test_provenance_hashes_match_shipped_files():
     rows = re.findall(
-        r"^\| ((?:lib|bin)/\S+) \| \S+ \| ([0-9a-f]{64}) \|",
+        r"^\| (scripts/\S+) \| \S+ \| ([0-9a-f]{64}) \|",
         (KERNEL / "PROVENANCE.md").read_text(encoding="utf-8"),
         flags=re.M,
     )
@@ -68,7 +68,15 @@ def test_validator_rejects_bad_cron(tmp_path):
     assert result.returncode == 1
 
 
+def test_validator_reports_structural_garbage_without_crashing(tmp_path):
+    bad = tmp_path / "garbage.yaml"
+    bad.write_text("version: 0\nsystems: 'not-a-list'\ndrill: 'not-a-dict'\n", encoding="utf-8")
+    result = _run_validator(bad)
+    assert result.returncode == 1
+    assert "Traceback" not in result.stderr
+
+
 def test_kernel_scripts_parse():
-    for script in [KERNEL / "lib" / "backup-db-lib.sh", *sorted((KERNEL / "bin").glob("*.sh"))]:
+    for script in [KERNEL / "scripts" / "lib" / "backup-db-lib.sh", *sorted((KERNEL / "scripts").glob("*.sh"))]:
         result = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True)
         assert result.returncode == 0, f"{script}: {result.stderr}"

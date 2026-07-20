@@ -62,18 +62,30 @@ def _cross_field(manifest: dict, errors: list[str]) -> None:
 
     walk(manifest)
 
-    for cron_path, cron in [("drill.cadence", (manifest.get("drill") or {}).get("cadence"))] + [
-        (f"systems[{i}].split_exports[{j}].cadence", se.get("cadence"))
-        for i, s in enumerate(manifest.get("systems") or [])
-        for j, se in enumerate(s.get("split_exports") or [])
-    ]:
+    # Defensive typing throughout: this validator must REPORT structural
+    # problems, never crash on them (schema errors are already collected above).
+    def check_cron(path: str, cron) -> None:
         if cron is not None and not CRON_RE.match(str(cron)):
-            errors.append(f"{cron_path}: not a 5-field cron expression")
+            errors.append(f"{path}: not a 5-field cron expression")
 
-    names = [s.get("name") for s in manifest.get("systems") or []]
-    dupes = {n for n in names if names.count(n) > 1}
-    if dupes:
-        errors.append(f"duplicate system names: {sorted(dupes)}")
+    drill = manifest.get("drill")
+    if isinstance(drill, dict):
+        check_cron("drill.cadence", drill.get("cadence"))
+
+    systems = manifest.get("systems")
+    if isinstance(systems, list):
+        for i, s in enumerate(systems):
+            if not isinstance(s, dict):
+                continue
+            split_exports = s.get("split_exports")
+            if isinstance(split_exports, list):
+                for j, se in enumerate(split_exports):
+                    if isinstance(se, dict):
+                        check_cron(f"systems[{i}].split_exports[{j}].cadence", se.get("cadence"))
+        names = [s.get("name") for s in systems if isinstance(s, dict) and s.get("name") is not None]
+        dupes = {n for n in names if names.count(n) > 1}
+        if dupes:
+            errors.append(f"duplicate system names: {sorted(dupes)}")
 
 
 def validate_file(path: Path, schema: dict) -> list[str]:

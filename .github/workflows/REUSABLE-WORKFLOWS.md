@@ -155,4 +155,5 @@ jobs:
     uses: manolii-org/ai-starter-pack/.github/workflows/backup-kernel-validate-reusable.yml@v1
     with:
       manifest_path: config/backup-tenant.yaml
+      pack_ref: v1   # keep identical to the `uses:` pin — the pack cannot discover its own ref
 ```
