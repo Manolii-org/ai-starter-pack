@@ -1,0 +1,58 @@
+# Example tenant manifest — mirrors manolii-org/master's LIVE matrix as of
+# 2026-07-20 (names/metadata only; no secret values). This file is
+# documentation for the WS-2 scaffold: nothing consumes it operationally yet.
+version: 0
+tenant: manolii
+legal_entity: Manolii Pty Ltd
+storage:
+  r2_bucket: manolii-backups
+  r2_doppler_project: manolii-knowledge-layer
+  pgdump_prefix: pgdump/
+systems:
+  - name: manolii-knowledge-layer
+    kind: supabase
+    doppler_project: manolii-knowledge-layer
+    tier: 0
+    rpo_target: 2h
+    rto_target: 4h
+    exclude_tables: ["public.activity_log", "public.activity_log_*"]
+    critical_tables:
+      - public.pending_actions
+      - public.standing_orders
+      - public.mesh_governance_audit
+      - public.project_facts
+      - public.notes
+    split_exports:
+      - name: activity-log
+        tables: ["public.activity_log", "public.activity_log_*"]
+        cadence: "15 3 * * *"
+  - name: manolii-platform
+    kind: neon
+    doppler_project: manolii-app
+    tier: 0
+    rpo_target: 2h
+  - name: manolii-finance
+    kind: neon
+    doppler_project: manolii-finance
+    tier: 0
+    rpo_target: 2h
+  - name: cryptotrading
+    kind: neon
+    doppler_project: cryptotrading
+    tier: 1
+    rpo_target: 2h
+monitoring:
+  sentry_monitor_slugs:
+    - backup-nightly
+    - backup-pgdump
+    - backup-pgdump-critical
+    - backup-pgdump-activity-log
+    - restore-drill-monthly
+  sentry_org_note: "residency pending D6; slugs never rename"
+drill:
+  cadence: "0 3 1 * *"
+  scope: [supabase-kl, neon-app, activity-log-split, github-metadata]
+  receipts_path: reports/drill-receipts/
+escrow:
+  keys: [BACKUP_ENCRYPTION_KEY, RESTIC_PASSWORD]
+  custody_note: "pending D5"
