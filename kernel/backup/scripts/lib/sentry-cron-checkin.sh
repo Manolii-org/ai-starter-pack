@@ -62,7 +62,7 @@ _preflight_monitor() {
     rm -f "${tmp}"
     return 1
   fi
-  project_slug="$(jq -r '.project.slug // empty' <"${tmp}")"
+  project_slug="$(jq -r '.project.slug // empty' <"${tmp}")" || project_slug=""
   rm -f "${tmp}"
   if [ -z "${project_slug}" ]; then
     echo "ERROR: monitor '${SENTRY_MONITOR_SLUG}' response missing project.slug" >&2
@@ -102,7 +102,7 @@ _resolve_dsn() {
     ([.[] | select(.isActive == true) | .dsn.public] | first)
     // ([.[] | .dsn.public] | first)
     // empty
-  ' <"${keys_json}")"
+  ' <"${keys_json}")" || dsn=""
   rm -f "${keys_json}"
   if [ -z "${dsn}" ] || [ "${dsn}" = "null" ]; then
     echo "ERROR: no public DSN on ${SENTRY_ORG}/${SENTRY_PROJECT}" >&2
