@@ -16,6 +16,7 @@ on:
       litellm_proxy_url: { type: string, default: '', description: 'Proxy base URL for proxy mode; pass vars.LITELLM_PROXY_URL.' }
       model: { type: string, default: '', description: 'Optional model id override; empty = script/action default.' }
       runs_on: { type: string, default: ubuntu-latest }
+      trusted_sync_author_id: { type: number, default: 215220684, description: 'GitHub numeric user id allowed to skip assessment on automated/sync-* PRs (mechanical sync bot). Set 0 to disable the skip entirely.' }
     secrets:
       ANTHROPIC_API_KEY: { required: false, description: 'Required when provider_mode=anthropic.' }
       LITELLM_MASTER_KEY: { required: false, description: 'Required when provider_mode=proxy.' }
@@ -32,12 +33,14 @@ jobs:
     # Skip mechanical sync PRs by HEAD BRANCH, not just title — the sync
     # tooling titles PRs "chore: sync …" (no parenthesis), so the title-only
     # guard never matched and the full pipeline ran on every sync PR.
-    # Same-repo automated/sync-* branches require write access to create;
-    # merge authorization stays with the auto-merge gate's structural verifier.
+    # Gated on same-repo head AND the trusted sync author id so an arbitrary
+    # write-access user naming a branch automated/sync-* cannot dodge
+    # assessment; merge authorization additionally stays with the auto-merge
+    # gate's structural verifier.
     if: |
       !contains(github.event.pull_request.labels.*.name, 'skip-ai-review') &&
       !startsWith(github.event.pull_request.title, 'chore(sync):') &&
-      !(startsWith(github.head_ref, 'automated/sync-') && github.event.pull_request.head.repo.full_name == github.repository)
+      !(startsWith(github.head_ref, 'automated/sync-') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.id == inputs.trusted_sync_author_id)
     outputs:
       invoke_skills: ${{ steps.classify.outputs.invoke_skills }}
       invoke_agents: ${{ steps.classify.outputs.invoke_agents }}
