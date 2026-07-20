@@ -77,6 +77,8 @@ def test_validator_reports_structural_garbage_without_crashing(tmp_path):
 
 
 def test_kernel_scripts_parse():
-    for script in [KERNEL / "scripts" / "lib" / "backup-db-lib.sh", *sorted((KERNEL / "scripts").glob("*.sh"))]:
+    scripts = sorted((KERNEL / "scripts").glob("*.sh")) + sorted((KERNEL / "scripts" / "lib").glob("*.sh"))
+    assert scripts, "expected kernel shell scripts"
+    for script in scripts:
         result = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True)
         assert result.returncode == 0, f"{script}: {result.stderr}"

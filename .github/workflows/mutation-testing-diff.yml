@@ -62,7 +62,8 @@ jobs:
           echo "files<<EOF" >> $GITHUB_OUTPUT
           echo "$CHANGED" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
-          echo "count=$(echo "$CHANGED" | grep -c . || echo 0)" >> $GITHUB_OUTPUT
+          COUNT=$(printf '%s\n' "$CHANGED" | grep -c . || true)
+          echo "count=${COUNT:-0}" >> $GITHUB_OUTPUT
 
       - name: Skip if no source files changed
         if: steps.changed.outputs.count == '0'
