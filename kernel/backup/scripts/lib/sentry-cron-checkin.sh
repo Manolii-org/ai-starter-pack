@@ -41,7 +41,7 @@ _preflight_monitor() {
     echo "WARN: skipping monitor preflight (SENTRY_CHECKIN_SKIP_PREFLIGHT=1)"
     return 0
   fi
-  local body http_code tmp project_slug
+  local http_code tmp project_slug
   tmp="$(mktemp)"
   http_code="$(curl -sS --retry 3 --max-time 15 --connect-timeout 5 \
     -o "${tmp}" -w '%{http_code}' \

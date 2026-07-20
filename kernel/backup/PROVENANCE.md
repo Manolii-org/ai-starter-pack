@@ -1,10 +1,10 @@
 # Kernel file provenance
 
-Source of truth: `manolii-org/master` @ `7d581cfd28a7`
-(PR #2914 tip; includes `scripts/lib/sentry-cron-checkin.sh` Relay ingest helper).
+Source of truth:  @ 
+(PR #2914 tip; includes  Relay ingest helper).
 Files are verbatim copies; refresh this table in the same PR whenever they are
-re-synced. Verify with `sha256sum -c` against the values below (paths relative
-to `kernel/backup/`).
+re-synced. Verify with  against the values below (paths relative
+to ).
 
 | Kernel path | Master path | SHA-256 |
 |---|---|---|
@@ -13,4 +13,4 @@ to `kernel/backup/`).
 | scripts/restore-drill.sh | scripts/restore-drill.sh | 38890c4e6991f837ef95d21da1faf96d27cc5615ee6b2de79e0fbe774aab76b7 |
 | scripts/restore-drill-neon-app.sh | scripts/restore-drill-neon-app.sh | 295c0cf9ae6b477f0a442b878a1e12c1fbe5aac8c03e27cdf09db248216f2cf0 |
 | scripts/backup-resolve-db-url.py | scripts/backup-resolve-db-url.py | 9e8e2125c546b8d836328f70d82c1192f614cbe251b7cb3cf5d976d36d8244d7 |
-| scripts/lib/sentry-cron-checkin.sh | scripts/lib/sentry-cron-checkin.sh | 6acbecafcb829111a8314ac64c68fc09465ea1141365e483d9ac6792c5d140e7 |
+| scripts/lib/sentry-cron-checkin.sh | scripts/lib/sentry-cron-checkin.sh | 5606a1e30058b056050d1068005b6d852923728828cb419dcd9f254571b728f5 |
