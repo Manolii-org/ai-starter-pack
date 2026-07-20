@@ -94,7 +94,7 @@ Update checkpoint at top of every round.
 ### Step 4: Escalate at Round 5
 
 If still unresolved after round 5:
-1. Unsubscribe from PR activity (single attempt, best-effort — the call is connector-approval-gated; if it prompts or fails, skip it and proceed, the subscription lapses with the session)
+1. Do NOT unsubscribe — `unsubscribe_pr_activity` is connector-approval-gated (native claude.ai dialog, unsilenceable by repo config) and buys nothing here: simply stop acting on the stream; the subscription lapses with the session, and merged/closed PRs are auto-unsubscribed by the platform. Call it only if the operator explicitly asks to stop watching.
 2. Post summary comment classifying each remaining issue as:
    - (a) caused by this PR's changes
    - (b) pre-existing / unrelated
