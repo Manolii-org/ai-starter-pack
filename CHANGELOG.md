@@ -7,6 +7,17 @@
   draft schema + example + validator, and the validate-only
   `backup-kernel-validate-reusable.yml`. No consumers yet; master cutover is
   gated on the Phase-1 exit.
+- New composite action `.github/actions/doppler-preflight/action.yml`.
+  Consumers add a `uses: Manolii-org/ai-starter-pack/.github/actions/doppler-preflight@<tag>`
+  step before any workflow reads Doppler secrets, and get a canonical
+  "prove-the-token-can-actually-read-this-project/config" preflight — fails
+  loud on non-zero exit AND on exit-0-empty-stdout (the CLI's soft-invalidation
+  mode). Extracted from the fix that closed the 2026-07-13→18 mesh-daily-intel
+  outage in `manolii-org/master` (master PR #2927). Token-agnostic: caller
+  passes whatever token has the scope they need to probe (master-scoped or
+  workspace). Inputs: `token`, `project` (default `master`), `config` (default
+  `prd`), `probe-secret` (default `MESH_ENABLED`), `runbook-anchor`
+  (default `Doppler token rotation`).
 
 ## 1.7.2 — 2026-07-18
 
