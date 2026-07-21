@@ -95,11 +95,14 @@ backup_run_timed() {
     echo "ERROR: GNU timeout required for ${label} (install coreutils)" >&2
     return 127
   fi
-  # --foreground: deliver SIGTERM/SIGKILL to the child process group in CI.
-  if timeout --foreground "${secs}" "$@"; then
+  # Do NOT use --foreground: outside an interactive prompt it leaves children
+  # of COMMAND untimed (GNU coreutils), which defeats aws/openssl wrappers.
+  # Capture rc via || — after `if cmd; fi`, $? is always 0 (bash if-status).
+  local rc=0
+  timeout "${secs}" "$@" || rc=$?
+  if [ "$rc" -eq 0 ]; then
     return 0
   fi
-  local rc=$?
   if [ "$rc" -eq 124 ]; then
     echo "ERROR: ${label} timed out after ${secs}s" >&2
   fi

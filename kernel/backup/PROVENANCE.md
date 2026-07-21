@@ -1,14 +1,14 @@
 # Kernel file provenance
 
-Source of truth: `manolii-org/master` @ `0213b2784b45`
-(merged PR #2941; restore-drill per-command timeouts via `backup_run_timed`).
+Source of truth: `manolii-org/master` @ `63a718df5701`
+(merged PR #2948; backup_run_timed exit-code capture fix).
 Files are verbatim copies; refresh this table in the same PR whenever they are
 re-synced. Verify with `sha256sum -c` against the values below (paths relative
 to `kernel/backup/`).
 
 | Kernel path | Master path | SHA-256 |
 |---|---|---|
-| scripts/lib/backup-db-lib.sh | scripts/lib/backup-db-lib.sh | 22cc454c919e5ecc878eb67bdfde59468badad3220fa231b0edae792373fd778 |
+| scripts/lib/backup-db-lib.sh | scripts/lib/backup-db-lib.sh | b3946c0d4109168d562f93847802fad38a8b41e0298f39f3471b7e90b8b7bcae |
 | scripts/backup-pg-dump.sh | scripts/backup-pg-dump.sh | f5b89698acb6e77ac10ac28723dd8c7ca52bb28148f1b3a4900f7097508de4ab |
 | scripts/restore-drill.sh | scripts/restore-drill.sh | 98bd2e3aaf49da8f469784378f49e6aca37947673eb9b87a444b7120165edede |
 | scripts/restore-drill-neon-app.sh | scripts/restore-drill-neon-app.sh | 295c0cf9ae6b477f0a442b878a1e12c1fbe5aac8c03e27cdf09db248216f2cf0 |
