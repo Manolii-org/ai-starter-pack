@@ -7,8 +7,11 @@
   draft schema + example + validator, and the validate-only
   `backup-kernel-validate-reusable.yml`. No consumers yet; master cutover is
   gated on the Phase-1 exit.
-- New composite action `.github/actions/doppler-preflight/action.yml`.
-  Consumers add a `uses: Manolii-org/ai-starter-pack/.github/actions/doppler-preflight@<tag>`
+
+## 1.7.4 — 2026-07-21
+
+- New composite action `.github/actions/doppler-preflight/action.yml` (PR #44).
+  Consumers add a `uses: Manolii-org/ai-starter-pack/.github/actions/doppler-preflight@v1.7.4`
   step before any workflow reads Doppler secrets, and get a canonical
   "prove-the-token-can-actually-read-this-project/config" preflight — fails
   loud on non-zero exit AND on exit-0-empty-stdout (the CLI's soft-invalidation
