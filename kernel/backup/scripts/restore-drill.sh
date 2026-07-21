@@ -65,6 +65,14 @@ fi
 
 [ -n "${DOPPLER_TOKEN:-}" ] || { echo "ERROR: DOPPLER_TOKEN env var is required" >&2; exit 1; }
 
+# Per-command ceilings (seconds). Override via env for large tenants / slow links.
+: "${RESTORE_DRILL_AWS_LS_TIMEOUT:=120}"
+: "${RESTORE_DRILL_AWS_CP_TIMEOUT:=900}"
+: "${RESTORE_DRILL_OPENSSL_TIMEOUT:=300}"
+: "${RESTORE_DRILL_PG_LIST_TIMEOUT:=120}"
+: "${RESTORE_DRILL_PG_RESTORE_TIMEOUT:=3600}"
+: "${RESTORE_DRILL_PSQL_TIMEOUT:=60}"
+
 START_TIME=$(date +%s)
 DRILL_TMP=$(mktemp -d)
 RESULT_DIR="$(git -C "$(dirname "$0")/.." rev-parse --show-toplevel 2>/dev/null || pwd)/.backup/drill-results"
@@ -201,16 +209,20 @@ for prefix in "pgdump/${ENTITY}/" "${ENTITY}/"; do
   # backup-<app>-neon-*.dump under pgdump/<entity>/ when the Neon app name matches the
   # entity name (e.g. pgdump/impaktful/ holds both). The Neon dump has no KL tables, so
   # restoring it and querying pending_actions/standing_orders/project_facts returns ERROR.
-  candidate=$(AWS_ACCESS_KEY_ID="$BACKUP_CF_TOKEN_ID" AWS_SECRET_ACCESS_KEY="$R2_SECRET" \
-    aws s3 ls --endpoint-url "$R2_ENDPOINT" "s3://${BACKUP_R2_BUCKET}/${prefix}" \
-    | grep -E 'supabase.*\.(dump\.enc|dump)$' | sort | tail -1 | awk '{print $NF}' || true)
+  LS_OUT=""; LS_RC=0
+  LS_OUT="$(backup_run_timed "$RESTORE_DRILL_AWS_LS_TIMEOUT" "aws s3 ls ${prefix}" -- \
+    env AWS_ACCESS_KEY_ID="$BACKUP_CF_TOKEN_ID" AWS_SECRET_ACCESS_KEY="$R2_SECRET" \
+    aws s3 ls --endpoint-url "$R2_ENDPOINT" "s3://${BACKUP_R2_BUCKET}/${prefix}" 2>&1)" || LS_RC=$?
+  if [ "$LS_RC" -eq 124 ]; then exit 1; fi
+  candidate=$(printf '%s\n' "$LS_OUT" | grep -E 'supabase.*\.(dump\.enc|dump)$' | sort | tail -1 | awk '{print $NF}' || true)
   if [ -n "$candidate" ]; then LATEST_KEY="$candidate"; R2_PREFIX="$prefix"; break; fi
 done
 
 [ -n "$LATEST_KEY" ] || { echo "ERROR: No supabase dump files found in R2 (checked pgdump/${ENTITY}/ and legacy ${ENTITY}/)" >&2; exit 1; }
 echo "  Downloading: ${R2_PREFIX}${LATEST_KEY}"
 
-AWS_ACCESS_KEY_ID="$BACKUP_CF_TOKEN_ID" AWS_SECRET_ACCESS_KEY="$R2_SECRET" \
+backup_run_timed "$RESTORE_DRILL_AWS_CP_TIMEOUT" "aws s3 cp dump" -- \
+  env AWS_ACCESS_KEY_ID="$BACKUP_CF_TOKEN_ID" AWS_SECRET_ACCESS_KEY="$R2_SECRET" \
   aws s3 cp --endpoint-url "$R2_ENDPOINT" \
   "s3://${BACKUP_R2_BUCKET}/${R2_PREFIX}${LATEST_KEY}" \
   "$DRILL_TMP/$(basename "$LATEST_KEY")" || { echo "ERROR: Failed to download dump from R2" >&2; exit 1; }
@@ -221,7 +233,8 @@ DOWNLOADED="$DRILL_TMP/$(basename "$LATEST_KEY")"
 if [[ "$DOWNLOADED" == *.enc ]]; then
   echo "  Decrypting: $(basename "$DOWNLOADED")"
   [ -n "$BACKUP_ENCRYPTION_KEY" ] || { echo "ERROR: BACKUP_ENCRYPTION_KEY required but not set" >&2; exit 1; }
-  BACKUP_ENCRYPTION_KEY="$BACKUP_ENCRYPTION_KEY" \
+  backup_run_timed "$RESTORE_DRILL_OPENSSL_TIMEOUT" "openssl decrypt dump" -- \
+    env BACKUP_ENCRYPTION_KEY="$BACKUP_ENCRYPTION_KEY" \
     openssl enc -d -aes-256-cbc -pbkdf2 -iter 100000 \
     -pass env:BACKUP_ENCRYPTION_KEY \
     -in "$DOWNLOADED" \
@@ -233,7 +246,8 @@ fi
 
 # Step 6 — Validate dump integrity
 echo "[6/9] Validating dump integrity"
-pg_restore --list "$DRILL_TMP/restore.dump" > /dev/null 2>&1 || {
+backup_run_timed "$RESTORE_DRILL_PG_LIST_TIMEOUT" "pg_restore --list" -- \
+  pg_restore --list "$DRILL_TMP/restore.dump" > /dev/null 2>&1 || {
   echo "ERROR: pg_restore --list failed - dump file is corrupt" >&2; exit 1
 }
 echo "  Integrity check: PASS"
@@ -242,10 +256,14 @@ echo "  Integrity check: PASS"
 # Supabase dumps reference Supabase-only extensions/roles/schemas (pg_cron, supabase_vault,
 # cron, vault, authenticated) absent on a vanilla Neon branch, so pg_restore exits non-zero on
 # those benign objects even when every public.* table restores cleanly. Tolerate the non-zero
-# exit here; step 8's row-count verification is the authoritative restorability signal.
+# exit here unless GNU timeout returns 124; step 8's row-count verification is the
+# authoritative restorability signal for non-timeout pg_restore errors.
 echo "[7/9] Restoring to Neon branch (Supabase-only extension/role errors are expected, non-fatal)"
-pg_restore --no-owner --no-acl -d "$NEON_BRANCH_DSN" "$DRILL_TMP/restore.dump" \
-  > "$DRILL_TMP/pg_restore.log" 2>&1 || true
+PG_RESTORE_RC=0
+backup_run_timed "$RESTORE_DRILL_PG_RESTORE_TIMEOUT" "pg_restore full dump" -- \
+  pg_restore --no-owner --no-acl -d "$NEON_BRANCH_DSN" "$DRILL_TMP/restore.dump" \
+  > "$DRILL_TMP/pg_restore.log" 2>&1 || PG_RESTORE_RC=$?
+if [ "$PG_RESTORE_RC" -eq 124 ]; then exit 1; fi
 PG_RESTORE_ERRORS=$(grep -c '^pg_restore: error:' "$DRILL_TMP/pg_restore.log" 2>/dev/null || true)
 echo "  Restore: DONE (non-fatal pg_restore errors: ${PG_RESTORE_ERRORS:-0})"
 
@@ -272,7 +290,8 @@ echo "[7b/9] Checking for activity_log dump in R2: ${BACKUP_R2_BUCKET}/${AL_PREF
 # `|| AL_LS_RC=$?` keeps set -e from killing the script before the handler
 # below runs — a plain assignment propagates the substitution's exit status.
 AL_LS_RC=0
-AL_LS_OUT="$(AWS_ACCESS_KEY_ID="$BACKUP_CF_TOKEN_ID" AWS_SECRET_ACCESS_KEY="$R2_SECRET" \
+AL_LS_OUT="$(backup_run_timed "$RESTORE_DRILL_AWS_LS_TIMEOUT" "aws s3 ls ${AL_PREFIX}" -- \
+  env AWS_ACCESS_KEY_ID="$BACKUP_CF_TOKEN_ID" AWS_SECRET_ACCESS_KEY="$R2_SECRET" \
   aws s3 ls --endpoint-url "$R2_ENDPOINT" "s3://${BACKUP_R2_BUCKET}/${AL_PREFIX}" 2>&1)" || AL_LS_RC=$?
 if [ "$AL_LS_RC" -ne 0 ]; then
   # An empty prefix is NOT an error for `aws s3 ls`; a non-zero exit means the API
@@ -291,7 +310,8 @@ if [ -z "$AL_LATEST" ]; then
   fi
 else
   echo "  Downloading activity_log dump: ${AL_PREFIX}${AL_LATEST}"
-  AWS_ACCESS_KEY_ID="$BACKUP_CF_TOKEN_ID" AWS_SECRET_ACCESS_KEY="$R2_SECRET" \
+  backup_run_timed "$RESTORE_DRILL_AWS_CP_TIMEOUT" "aws s3 cp activity_log dump" -- \
+    env AWS_ACCESS_KEY_ID="$BACKUP_CF_TOKEN_ID" AWS_SECRET_ACCESS_KEY="$R2_SECRET" \
     aws s3 cp --endpoint-url "$R2_ENDPOINT" \
     "s3://${BACKUP_R2_BUCKET}/${AL_PREFIX}${AL_LATEST}" \
     "$DRILL_TMP/$(basename "$AL_LATEST")" \
@@ -300,7 +320,8 @@ else
   AL_DL="$DRILL_TMP/$(basename "$AL_LATEST")"
   if [[ "$AL_DL" == *.enc ]]; then
     [ -n "$BACKUP_ENCRYPTION_KEY" ] || { echo "ERROR: activity_log dump encrypted but BACKUP_ENCRYPTION_KEY not set" >&2; exit 1; }
-    BACKUP_ENCRYPTION_KEY="$BACKUP_ENCRYPTION_KEY" \
+    backup_run_timed "$RESTORE_DRILL_OPENSSL_TIMEOUT" "openssl decrypt activity_log dump" -- \
+      env BACKUP_ENCRYPTION_KEY="$BACKUP_ENCRYPTION_KEY" \
       openssl enc -d -aes-256-cbc -pbkdf2 -iter 100000 \
       -pass env:BACKUP_ENCRYPTION_KEY \
       -in "$AL_DL" \
@@ -312,15 +333,20 @@ else
   fi
 
   # Integrity check before restore — a corrupt dump is a hard failure.
-  pg_restore --list "$DRILL_TMP/restore-activity-log.dump" > /dev/null 2>&1 \
+  backup_run_timed "$RESTORE_DRILL_PG_LIST_TIMEOUT" "pg_restore --list activity_log" -- \
+    pg_restore --list "$DRILL_TMP/restore-activity-log.dump" > /dev/null 2>&1 \
     || { echo "ERROR: pg_restore --list failed on activity_log dump — file is corrupt" >&2; exit 1; }
 
   echo "  Restoring activity_log onto Neon branch (Supabase-only ext/role errors expected, non-fatal)"
-  pg_restore --no-owner --no-acl -d "$NEON_BRANCH_DSN" "$DRILL_TMP/restore-activity-log.dump" \
-    > "$DRILL_TMP/pg_restore_activity_log.log" 2>&1 || true
+  AL_PG_RESTORE_RC=0
+  backup_run_timed "$RESTORE_DRILL_PG_RESTORE_TIMEOUT" "pg_restore activity_log dump" -- \
+    pg_restore --no-owner --no-acl -d "$NEON_BRANCH_DSN" "$DRILL_TMP/restore-activity-log.dump" \
+    > "$DRILL_TMP/pg_restore_activity_log.log" 2>&1 || AL_PG_RESTORE_RC=$?
+  if [ "$AL_PG_RESTORE_RC" -eq 124 ]; then exit 1; fi
   # Verify: activity_log table must be queryable AND row count > 0 (a valid
   # daily dump has at least yesterday's audit rows). psql failure = hard fail.
-  AL_ROWS=$(psql "$NEON_BRANCH_DSN" -tAc "SELECT COUNT(*) FROM public.activity_log" 2>&1) \
+  AL_ROWS=$(backup_run_timed "$RESTORE_DRILL_PSQL_TIMEOUT" "psql count activity_log" -- \
+    psql "$NEON_BRANCH_DSN" -tAc "SELECT COUNT(*) FROM public.activity_log" 2>&1) \
     || { echo "ERROR: activity_log row count query failed after split-restore: $AL_ROWS" >&2; exit 1; }
   case "$AL_ROWS" in
     ''|*[!0-9]*) echo "ERROR: activity_log row count query returned non-numeric result: '$AL_ROWS'" >&2; exit 1 ;;
@@ -346,7 +372,8 @@ for table in public.pending_actions public.standing_orders public.project_facts;
   # query must not contaminate COUNT (step 9 serialises it with --argjson).
   COUNT=""
   for attempt in 1 2 3; do
-    if COUNT=$(psql "$NEON_BRANCH_DSN" -tAc "SELECT COUNT(*) FROM ${table}" 2>"$DRILL_TMP/psql_err.log"); then
+    if COUNT=$(backup_run_timed "$RESTORE_DRILL_PSQL_TIMEOUT" "psql count ${table}" -- \
+      psql "$NEON_BRANCH_DSN" -tAc "SELECT COUNT(*) FROM ${table}" 2>"$DRILL_TMP/psql_err.log"); then
       break
     fi
     COUNT="$(cat "$DRILL_TMP/psql_err.log" 2>/dev/null || true)"
