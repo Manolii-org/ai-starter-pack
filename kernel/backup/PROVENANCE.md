@@ -1,7 +1,7 @@
 # Kernel file provenance
 
-Source of truth: `manolii-org/master` @ `1a046102eee4`
-(PR #2941 tip; restore-drill per-command timeouts via `backup_run_timed`).
+Source of truth: `manolii-org/master` @ `0213b2784b45`
+(merged PR #2941; restore-drill per-command timeouts via `backup_run_timed`).
 Files are verbatim copies; refresh this table in the same PR whenever they are
 re-synced. Verify with `sha256sum -c` against the values below (paths relative
 to `kernel/backup/`).
