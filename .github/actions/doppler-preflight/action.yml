@@ -1,0 +1,78 @@
+name: Doppler preflight
+description: >-
+  Install the Doppler CLI (if absent) and prove a Doppler token can actually
+  read the target project/config by performing a no-fallback read of a known-
+  populated probe secret. Fails loud on non-zero exit AND on exit-0-empty-stdout
+  (the CLI's soft-invalidation mode — same failure class that silently degraded
+  the mesh workflows in manolii-org/master during the 2026-07-13→18 outage).
+
+# Caller responsibility: pass a token whose SCOPE covers the target project.
+# A master-scoped token (typical Doppler service token minted for `master/prd`)
+# cannot read per-workspace projects — the CLI returns HTTP 400. A workspace-
+# scoped/personal token can read any project the workspace owns. Choose the
+# right token for the project you're probing.
+
+inputs:
+  token:
+    description: >-
+      Doppler token (dp.pt.* personal, dp.st.* service, or workspace token)
+      with read access to the target project/config. Never echoed; the caller
+      passes it via a GH Actions secret.
+    required: true
+  project:
+    description: Doppler project to probe.
+    required: false
+    default: master
+  config:
+    description: Doppler config to probe.
+    required: false
+    default: prd
+  probe-secret:
+    description: >-
+      Name of a known-populated secret in <project>/<config> used as the auth-
+      and-scope probe. The value is not exposed; only its presence is checked.
+      Pick a secret you can guarantee is always set in that config (a feature
+      flag, a build-metadata string, etc.) — not a rotating credential.
+    required: false
+    default: MESH_ENABLED
+  runbook-anchor:
+    description: >-
+      Freeform label the failure message uses to point operators at the
+      relevant rotation runbook / heading in the calling repo. Leave blank
+      to omit; the default matches the manolii-org/master convention.
+    required: false
+    default: 'Doppler token rotation'
+
+runs:
+  using: composite
+  steps:
+    - name: Install Doppler CLI (if absent)
+      shell: bash
+      run: |
+        if ! command -v doppler >/dev/null 2>&1; then
+          curl -fsS --connect-timeout 10 --max-time 30 https://cli.doppler.com/install.sh | sh
+        fi
+        doppler --version
+
+    - name: Preflight ${{ inputs.probe-secret }} read from ${{ inputs.project }}/${{ inputs.config }}
+      shell: bash
+      env:
+        # Doppler CLI reads DOPPLER_TOKEN from the ambient env; never echo it.
+        DOPPLER_TOKEN: ${{ inputs.token }}
+        DOPPLER_PROJECT: ${{ inputs.project }}
+        DOPPLER_CONFIG: ${{ inputs.config }}
+        PROBE_SECRET: ${{ inputs.probe-secret }}
+        RUNBOOK_ANCHOR: ${{ inputs.runbook-anchor }}
+      run: |
+        # No-fallback read. `doppler me` proves the token is authentic but not
+        # that it can read <project>/<config> — a wrongly-scoped or soft-
+        # invalidated token silently returns exit 0 with empty stdout. Both
+        # branches (non-zero exit AND exit-0-empty-stdout) fail loud here so
+        # downstream `|| echo <default>` fallbacks on other secrets never mask
+        # a dead token as a green run.
+        VALUE=$(doppler secrets get --plain --project "$DOPPLER_PROJECT" --config "$DOPPLER_CONFIG" "$PROBE_SECRET" 2>/dev/null) || true
+        if [ -z "$VALUE" ]; then
+          echo "::error::${PROBE_SECRET} preflight failed: the Doppler token passed to this action cannot read ${DOPPLER_PROJECT}/${DOPPLER_CONFIG} (invalid, revoked, wrongly-scoped, or soft-invalidated — CLI returned no value for ${PROBE_SECRET}). Rotate the underlying GH Actions repo secret in Settings → Secrets and variables → Actions (mint a fresh read token on Doppler ${DOPPLER_PROJECT}/${DOPPLER_CONFIG} with adequate scope). Runbook: ${RUNBOOK_ANCHOR}"
+          exit 1
+        fi
+        echo "Doppler ${DOPPLER_PROJECT}/${DOPPLER_CONFIG} preflight OK (${PROBE_SECRET} readable)."
