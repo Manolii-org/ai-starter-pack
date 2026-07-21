@@ -75,3 +75,33 @@ backup_verify_dump() {
   fi
   echo "PASS: integrity check passed for ${outfile}"
 }
+
+# Run a long I/O or restore command under GNU timeout so hung aws/openssl/pg_*
+# cannot strand a self-hosted runner until the workflow timeout-minutes fires.
+# Usage: backup_run_timed SECONDS LABEL -- command [args...]
+# Exit 124 → timed out (message printed). Requires `timeout` on PATH (Linux CI).
+backup_run_timed() {
+  local secs="${1:?backup_run_timed: seconds required}"
+  local label="${2:?backup_run_timed: label required}"
+  shift 2
+  if [ "${1:-}" = "--" ]; then
+    shift
+  fi
+  if [ "$#" -lt 1 ]; then
+    echo "ERROR: backup_run_timed ${label}: command required" >&2
+    return 1
+  fi
+  if ! command -v timeout >/dev/null 2>&1; then
+    echo "ERROR: GNU timeout required for ${label} (install coreutils)" >&2
+    return 127
+  fi
+  # --foreground: deliver SIGTERM/SIGKILL to the child process group in CI.
+  if timeout --foreground "${secs}" "$@"; then
+    return 0
+  fi
+  local rc=$?
+  if [ "$rc" -eq 124 ]; then
+    echo "ERROR: ${label} timed out after ${secs}s" >&2
+  fi
+  return "$rc"
+}
