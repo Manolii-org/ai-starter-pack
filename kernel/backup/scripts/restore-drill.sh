@@ -76,11 +76,24 @@ echo "== Restore Drill: ${ENTITY} =="
 
 # Step 1 — Fetch R2 + encryption credentials from per-entity Doppler project
 echo "[1/9] Fetching R2 credentials from Doppler project: ${DOPPLER_PROJECT}"
-ENTITY_SECRETS=$(curl -fsS --max-time 30 --connect-timeout 10 \
+ENTITY_SECRETS_TMP="$(mktemp)"
+ENTITY_HTTP=$(curl -sS --max-time 30 --connect-timeout 10 \
+  -o "${ENTITY_SECRETS_TMP}" -w '%{http_code}' \
   "https://api.doppler.com/v3/configs/config/secrets/download?format=json&project=${DOPPLER_PROJECT}&config=prd" \
   -H "Authorization: Bearer ${DOPPLER_TOKEN}") || {
-  echo "ERROR: Failed to fetch secrets from Doppler project ${DOPPLER_PROJECT}" >&2; exit 1
+  rm -f "${ENTITY_SECRETS_TMP}"
+  echo "ERROR: curl failed fetching secrets from Doppler project ${DOPPLER_PROJECT}" >&2; exit 1
 }
+if [ "${ENTITY_HTTP}" != "200" ]; then
+  # Names/metadata only — Doppler error messages, never secret values
+  ERR_MSG=$(jq -r '(.messages // [])|join("; ") // empty' <"${ENTITY_SECRETS_TMP}" 2>/dev/null || true)
+  rm -f "${ENTITY_SECRETS_TMP}"
+  echo "ERROR: Failed to fetch secrets from Doppler project ${DOPPLER_PROJECT} (HTTP ${ENTITY_HTTP})${ERR_MSG:+ — ${ERR_MSG}}" >&2
+  echo "HINT: backup/restore workflows must use workspace secrets.DOPPLER_TOKEN (not master-scoped DOPPLER_TOKEN_PRD)" >&2
+  exit 1
+fi
+ENTITY_SECRETS="$(cat "${ENTITY_SECRETS_TMP}")"
+rm -f "${ENTITY_SECRETS_TMP}"
 
 BACKUP_CF_TOKEN_ID=$(echo "$ENTITY_SECRETS"   | jq -r '.BACKUP_CF_TOKEN_ID // empty')
 BACKUP_CF_API_TOKEN=$(echo "$ENTITY_SECRETS"  | jq -r '.BACKUP_CF_API_TOKEN // empty')
