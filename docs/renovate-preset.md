@@ -23,7 +23,9 @@ Consumers adopt the ecosystem's dependency policy by extending the pack:
   manually-reviewed PRs, preserving each repo's existing "Automerge: Disabled"
   posture for anything with changeable behaviour.
 - Keeps the ecosystem schedule convention (Monday before 9am, Europe/London)
-  and the `dependencies` label.
+  and the `dependencies` label. AI Starter Pack bump PRs additionally retain
+  the `starter-pack` label and their existing commit-message topic; those
+  metadata rules do not alter the semver manual-review policy.
 
 ## Precedence
 

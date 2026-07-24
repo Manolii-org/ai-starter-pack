@@ -29,6 +29,12 @@
       "description": "Never automerge anything with a version component.",
       "matchUpdateTypes": ["major", "minor", "patch"],
       "automerge": false
+    },
+    {
+      "description": "Preserve pack-bump triage metadata without changing the semver manual-review policy.",
+      "matchPackageNames": ["Manolii-org/ai-starter-pack"],
+      "labels": ["starter-pack", "dependencies"],
+      "commitMessageTopic": "AI Starter Pack"
     }
   ]
 }
