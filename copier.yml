@@ -134,6 +134,11 @@ _exclude:
   - .svn
   - .svn/**
   # Pack-internal scaffolding (never ships)
+  # Renovate preset: consumers extend it remotely via
+  # "github>Manolii-org/ai-starter-pack" — copying it into a rendered repo
+  # would shadow the shared preset with a stale local snapshot.
+  - default.json
+  - docs/renovate-preset.md
   - pack.manifest.yml
   - .brand
   - .brand/**
