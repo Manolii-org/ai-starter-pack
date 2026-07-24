@@ -17,25 +17,18 @@ pytestmark = pytest.mark.skipif(
     reason="template source absent (rendered instance)"
 )
 
-# Gated features: flag name → set of files that only exist when flag is true
-GATED = {
-    "oss_routing": {"docs/us-oss-eligibility-matrix.md"},
-    "browserbase": {
-        ".claude/commands/browse.md",
-        ".claude/commands/nav-record.md",
-        ".claude/commands/nav-replay.md",
-    },
-    "codex_adversarial": {".claude/agents/codex-adversarial.md"},
-    "kl_integration": {
-        ".claude/skills/om-fact-capture/SKILL.md",
-        ".claude/skills/om-readiness/SKILL.md",
-        ".claude/skills/om-staff-answer/SKILL.md",
-        ".claude/skills/om-handover/SKILL.md",
-        "docs/knowledge-layer-access.md",
-    },
-    "langfuse_telemetry": set(),
-    "mesh_telemetry": {"mesh-contract.yaml.template"},
-}
+# Feature flags configure rendered settings and answers, not Copier filenames.
+# Literal Jinja filename conditionals were removed in PR #35 because Copier
+# copied them as invalid brace-containing paths. Optional surfaces therefore
+# ship as dormant, real-named files; runtime/configuration determines use.
+FEATURE_FLAGS = (
+    "oss_routing",
+    "browserbase",
+    "codex_adversarial",
+    "kl_integration",
+    "langfuse_telemetry",
+    "mesh_telemetry",
+)
 
 
 def render(dst, **data):
@@ -131,11 +124,6 @@ def test_default_render_clean(default_render):
         assert "{% if" not in p, f"Path contains unrendered Jinja: {p}"
         assert not p.endswith(".jinja"), f"Path ends with .jinja suffix: {p}"
 
-    # Check gated files absent (all flags off by default)
-    for flag_files in GATED.values():
-        for gated_file in flag_files:
-            assert not (default_render / gated_file).exists(), f"Gated file present: {gated_file}"
-
     # Check internal scaffolding absent
     scaffolding = {
         "pack.manifest.yml",
@@ -151,28 +139,20 @@ def test_default_render_clean(default_render):
     assert (default_render / ".copier-answers.yml").exists(), ".copier-answers.yml missing"
 
 
-def test_flag_matrix():
-    """For each flag in GATED: assert flag_render files = default_render files + GATED[flag]."""
+def test_feature_flags_do_not_change_copier_file_set(default_render):
+    """Feature flags must not reintroduce literal-Jinja or conditional paths."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        default_dst = Path(tmpdir) / "default"
-        default_dst.mkdir()
-        render(default_dst)
-        default_files = file_set(default_dst)
+        flags_dst = Path(tmpdir) / "all-flags"
+        flags_dst.mkdir()
+        render(flags_dst, **{flag: "true" for flag in FEATURE_FLAGS})
+        flags_files = file_set(flags_dst)
+        default_files = file_set(default_render)
 
-        for flag, flag_files in GATED.items():
-            with tempfile.TemporaryDirectory() as flag_tmpdir:
-                flag_dst = Path(flag_tmpdir) / flag
-                flag_dst.mkdir()
-                render(flag_dst, **{flag: "true"})
-                flag_render_files = file_set(flag_dst)
-
-                # flag_render should == default + GATED[flag]
-                expected = default_files | flag_files
-                assert flag_render_files == expected, (
-                    f"{flag}: unexpected diff.\n"
-                    f"Extra: {flag_render_files - expected}\n"
-                    f"Missing: {expected - flag_render_files}"
-                )
+        assert flags_files == default_files, (
+            "Copier file set changed despite feature flags being configuration-only.\n"
+            f"Extra: {flags_files - default_files}\n"
+            f"Missing: {default_files - flags_files}"
+        )
 
 
 def test_brand_answers_match_overlays(branded_render, default_render):
