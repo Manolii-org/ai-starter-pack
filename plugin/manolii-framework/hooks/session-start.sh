@@ -180,9 +180,9 @@ for note in "${health_notes[@]}"; do
   log "  $note"
 done
 
-# WS3: refresh + surface the recent-navigation-warning file so high-
-# dysfunction prior sessions produce an agent-visible warning at
-# SessionStart. Fail-open. Codex P2 2026-07-19.
+# Refresh and surface the recent-navigation warning before the next session
+# proceeds. This is deliberately fail-open: retrospective feedback must never
+# prevent session startup.
 _REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
 _INJECT="${CLAUDE_PLUGIN_ROOT:-$_REPO_ROOT}/scripts/session-start-inject-warning.sh"
 [ -x "$_INJECT" ] || _INJECT="$_REPO_ROOT/scripts/session-start-inject-warning.sh"

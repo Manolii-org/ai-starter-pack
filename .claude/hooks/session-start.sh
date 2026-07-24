@@ -179,3 +179,19 @@ log "Session health: $health_status"
 for note in "${health_notes[@]}"; do
   log "  $note"
 done
+
+# Refresh and surface the recent-navigation warning before the next session
+# proceeds. This is deliberately fail-open: retrospective feedback must never
+# prevent session startup.
+_REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+_INJECT="${CLAUDE_PLUGIN_ROOT:-$_REPO_ROOT}/scripts/session-start-inject-warning.sh"
+[ -x "$_INJECT" ] || _INJECT="$_REPO_ROOT/scripts/session-start-inject-warning.sh"
+if [ -x "$_INJECT" ]; then
+    bash "$_INJECT" >/dev/null 2>&1 || true
+fi
+if [ -s "$_REPO_ROOT/.ai/recent-navigation-warning.md" ]; then
+    echo ""
+    echo "=== Recent navigation warning ==="
+    cat "$_REPO_ROOT/.ai/recent-navigation-warning.md" 2>/dev/null || true
+    echo ""
+fi
