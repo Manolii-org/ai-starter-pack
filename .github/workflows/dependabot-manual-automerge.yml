@@ -1,0 +1,63 @@
+name: Manually arm Dependabot patch auto-merge
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Dependabot pull request number
+        required: true
+        type: string
+      confirm_semver_patch:
+        description: I verified this is a non-security SemVer patch update
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  arm-automerge:
+    if: inputs.confirm_semver_patch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate current PR and enable squash auto-merge
+        env:
+          API_URL: ${{ github.api_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GRAPHQL_URL: ${{ github.graphql_url }}
+          PR: ${{ inputs.pr_number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          case "$PR" in
+            ''|*[!0-9]*) echo "::error::pr_number must contain digits only"; exit 1 ;;
+          esac
+          auth_config=$(mktemp)
+          trap 'rm -f "$auth_config"' EXIT
+          printf 'header = "Authorization: bearer %s"\n' "$GH_TOKEN" > "$auth_config"
+
+          current=$(curl -sS --fail-with-body --max-time 30 --connect-timeout 10 \
+            --config "$auth_config" -H 'Accept: application/vnd.github+json' \
+            "$API_URL/repos/$REPO/pulls/$PR")
+          jq -e '
+            .state == "open" and .draft == false and
+            .user.login == "dependabot[bot]" and
+            .head.repo.full_name == .base.repo.full_name and
+            .base.ref == "main" and
+            ([.labels[].name] | index("security") == null)
+          ' <<<"$current" >/dev/null || {
+            echo "::error::PR must be an open, same-repo, non-draft Dependabot PR targeting main without the security label."
+            exit 1
+          }
+          if [ "$(jq -r '.auto_merge != null' <<<"$current")" = "true" ]; then
+            echo "Auto-merge is already enabled for #$PR."
+            exit 0
+          fi
+          node_id=$(jq -r '.node_id' <<<"$current")
+          curl -sS --fail-with-body --max-time 30 --connect-timeout 10 \
+            --config "$auth_config" -H 'Content-Type: application/json' "$GRAPHQL_URL" \
+            -d '{"query":"mutation($id:ID!){enablePullRequestAutoMerge(input:{pullRequestId:$id,mergeMethod:SQUASH}){pullRequest{number}}}","variables":{"id":"'"$node_id"'"}}' \
+            | jq -e '.data.enablePullRequestAutoMerge.pullRequest.number' >/dev/null
+          echo "Enabled squash auto-merge for Dependabot PR #$PR; required branch checks remain authoritative."
