@@ -173,6 +173,27 @@ the workflow** (`dorny/paths-filter`, or `git diff --name-only`), *not* with a
 workflow-level `paths:` filter. A `paths:` filter prevents the run from being
 created at all, which is the one state these workflows cannot annotate.
 
+### Fail-closed guarantees
+
+Both tier workflows run a `validate` job **before** any gate, and the aggregate
+refuses to report `pass` unless it succeeded. Every rule below closes a path by
+which the required check could go green having verified nothing:
+
+| Rejected | Why it would otherwise fail open |
+|---|---|
+| `gates: []` | 0 expected and 0 actual verdicts — the count check passes and the tier reports `pass` with no gate having run |
+| a gate object missing `applies` | absent key is falsy in the matrix expression, so the gate records a green `skip` instead of running |
+| `applies` that is not a JSON boolean | `"true"` (quoted) is truthy JSON but not a boolean; silently mis-gates |
+| `applies: true` with no `command` | a green "pass" that executed nothing |
+| gate names colliding after slugification | verdict artifacts overwrite each other, silently losing a verdict |
+| a gate that reported no verdict at all | a cancelled or crashed gate job would be counted as passing |
+
+The budget is enforced as the `Run gate` step timeout using the **configured**
+`budget_minutes`, with the job ceiling derived as `budget_minutes + 10` for
+checkout and setup — so a gate cannot quietly run many times longer than the
+tier advertises, and a pre-production caller may raise `budget_minutes` above
+60 for a long migration or load gate without the matrix leg being killed first.
+
 ### Caller example — fast tier on PRs
 
 ```yaml

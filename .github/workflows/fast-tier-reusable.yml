@@ -52,10 +52,11 @@ on:
         type: number
         default: 5
         description: |
-          Wall-clock ceiling for the WHOLE tier. Exceeding it is a tier
+          Wall-clock ceiling per gate. Exceeding it is a tier
           misclassification, not a flake: the offending gate belongs in
-          pre-production. Enforced as a per-gate `timeout-minutes` and
-          re-checked against measured elapsed time in the aggregate.
+          pre-production. Enforced as the `Run gate` step timeout, with the
+          job-level ceiling derived as `budget_minutes + 10` to leave headroom
+          for checkout and setup.
       runs_on:
         type: string
         default: ubuntu-latest
@@ -80,13 +81,98 @@ permissions:
   contents: read
 
 jobs:
+  validate:
+    # Runs BEFORE any gate. Every check here closes a fail-OPEN path — a way for
+    # the required aggregate to report green without a gate having verified
+    # anything. Malformed input must fail loudly, never degrade to "skip".
+    name: fast-tier · validate gate spec
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 5
+    steps:
+      - name: Validate gates JSON
+        env:
+          GATES_JSON: ${{ inputs.gates }}
+        run: |
+          python3 <<'PY'
+          import json, os, sys
+
+          errors = []
+          raw = os.environ.get("GATES_JSON", "")
+          try:
+              gates = json.loads(raw)
+          except json.JSONDecodeError as exc:
+              print(f"::error::`gates` is not valid JSON: {exc}")
+              sys.exit(1)
+
+          if not isinstance(gates, list):
+              print("::error::`gates` must be a JSON array.")
+              sys.exit(1)
+
+          # An empty tier is a VACUOUS PASS: no gate runs, the aggregate finds
+          # 0 expected and 0 actual verdicts, and a required check goes green
+          # having verified nothing. Usually a caller's gate-building step
+          # returning [] by mistake.
+          if not gates:
+              print("::error::`gates` is empty — the fast tier would pass without "
+                    "verifying anything. If nothing applies, pass an explicit gate "
+                    "with applies=false and a skip_reason so the skip is visible.")
+              sys.exit(1)
+
+          seen = set()
+          for i, g in enumerate(gates):
+              at = f"gates[{i}]"
+              if not isinstance(g, dict):
+                  errors.append(f"{at}: must be an object.")
+                  continue
+              name = g.get("name")
+              if not isinstance(name, str) or not name.strip():
+                  errors.append(f"{at}: `name` must be a non-empty string.")
+              else:
+                  # Verdicts travel as artifacts keyed on a slugified name, so
+                  # two names that slugify identically would overwrite each
+                  # other and silently lose a verdict.
+                  slug = "".join(c if (c.isalnum() or c in "._-") else "_" for c in name)
+                  if slug in seen:
+                      errors.append(
+                          f"{at}: name {name!r} collides with an earlier gate after "
+                          "slugification; verdicts would overwrite each other."
+                      )
+                  seen.add(slug)
+              # `applies` MUST be a real boolean. A missing or misspelled key
+              # evaluates falsy in the matrix expression, which would record a
+              # green `skip` for a gate that was meant to run.
+              if "applies" not in g:
+                  errors.append(
+                      f"{at}: missing required `applies`. An absent key evaluates "
+                      "false and would record a green skip for a gate that never ran."
+                  )
+              elif not isinstance(g["applies"], bool):
+                  errors.append(
+                      f"{at}: `applies` must be a JSON boolean, got "
+                      f"{type(g['applies']).__name__} ({g['applies']!r}). "
+                      'Quoted "true" is truthy in JSON but not a boolean here.'
+                  )
+              elif g["applies"]:
+                  cmd = g.get("command")
+                  if not isinstance(cmd, str) or not cmd.strip():
+                      errors.append(f"{at}: applies=true requires a non-empty `command`.")
+
+          if errors:
+              for e in errors:
+                  print(f"::error::{e}")
+              sys.exit(1)
+          print(f"gate spec OK — {len(gates)} gate(s)")
+          PY
+
   gate:
     name: fast · ${{ matrix.gate.name }}
+    needs: validate
     runs-on: ${{ inputs.runs_on }}
-    # `timeout-minutes` cannot read `inputs` in a matrix context on all runner
-    # versions, so the budget is enforced by the aggregate's elapsed-time check
-    # below and by this conservative hard ceiling.
-    timeout-minutes: 30
+    # Outer ceiling with headroom over the tier budget for checkout/setup. The
+    # budget itself is enforced on the `Run gate` step below, so a gate that
+    # blows its budget fails against the CONFIGURED value rather than a
+    # hard-coded one six times larger.
+    timeout-minutes: ${{ inputs.budget_minutes + 10 }}
     strategy:
       fail-fast: false
       max-parallel: ${{ inputs.max_parallel }}
@@ -133,6 +219,9 @@ jobs:
       - name: Run gate
         id: run
         if: ${{ matrix.gate.applies }}
+        # Enforces the CONFIGURED budget. A fast-tier gate that exceeds it is a
+        # tier misclassification, so timing out is the correct loud outcome.
+        timeout-minutes: ${{ inputs.budget_minutes }}
         working-directory: ${{ matrix.gate.working_directory || '.' }}
         run: ${{ matrix.gate.command }}
 
@@ -187,7 +276,7 @@ jobs:
   aggregate:
     name: fast-tier
     # This is the job to name in branch protection.
-    needs: gate
+    needs: [validate, gate]
     if: always()
     runs-on: ${{ inputs.runs_on }}
     timeout-minutes: 5
@@ -210,9 +299,19 @@ jobs:
           # so the expected gate count is derived from the input itself.
           GATES_JSON: ${{ inputs.gates }}
           NEEDS_RESULT: ${{ needs.gate.result }}
+          VALIDATE_RESULT: ${{ needs.validate.result }}
           BUDGET: ${{ inputs.budget_minutes }}
         run: |
           set -euo pipefail
+          # Fail closed if the spec never validated: `if: always()` means this
+          # job runs even when `validate` failed and every gate was skipped,
+          # which would otherwise leave 0 verdicts and 0 expected.
+          if [ "$VALIDATE_RESULT" != "success" ]; then
+            echo "::error::gate spec validation did not succeed (${VALIDATE_RESULT}) — no assurance."
+            echo "verdict=fail" >> "$GITHUB_OUTPUT"
+            echo 'breakdown={"pass":0,"skip":0,"fail":0}' >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
           pass=0; skip=0; fail=0
           declare -a failed=() skipped=()
           shopt -s nullglob
@@ -226,6 +325,14 @@ jobs:
           done
           total=$((pass+skip+fail))
           expected=$(printf '%s' "$GATES_JSON" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
+          # Belt-and-braces: `validate` already rejects an empty tier, but a
+          # zero here would make the `total -ne expected` check below pass
+          # vacuously and emit a green verdict with no gates at all.
+          if [ "$expected" -eq 0 ]; then
+            echo "::error::no gates configured — the fast tier cannot pass vacuously."
+            echo "verdict=fail" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
 
           {
             echo "## Fast tier — merge gate"

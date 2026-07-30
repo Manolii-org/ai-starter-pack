@@ -93,11 +93,99 @@ permissions:
   contents: read
 
 jobs:
+  validate:
+    # Runs BEFORE any gate. Every check here closes a fail-OPEN path — a way for
+    # the required aggregate to report green without a gate having verified
+    # anything. Malformed input must fail loudly, never degrade to "skip".
+    name: pre-production-tier · validate gate spec
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 5
+    steps:
+      - name: Validate gates JSON
+        env:
+          GATES_JSON: ${{ inputs.gates }}
+        run: |
+          python3 <<'PY'
+          import json, os, sys
+
+          errors = []
+          raw = os.environ.get("GATES_JSON", "")
+          try:
+              gates = json.loads(raw)
+          except json.JSONDecodeError as exc:
+              print(f"::error::`gates` is not valid JSON: {exc}")
+              sys.exit(1)
+
+          if not isinstance(gates, list):
+              print("::error::`gates` must be a JSON array.")
+              sys.exit(1)
+
+          # An empty tier is a VACUOUS PASS: no gate runs, the aggregate finds
+          # 0 expected and 0 actual verdicts, and a required check goes green
+          # having verified nothing. Usually a caller's gate-building step
+          # returning [] by mistake.
+          if not gates:
+              print("::error::`gates` is empty — the pre-production tier would pass without "
+                    "verifying anything. If nothing applies, pass an explicit gate "
+                    "with applies=false and a skip_reason so the skip is visible.")
+              sys.exit(1)
+
+          seen = set()
+          for i, g in enumerate(gates):
+              at = f"gates[{i}]"
+              if not isinstance(g, dict):
+                  errors.append(f"{at}: must be an object.")
+                  continue
+              name = g.get("name")
+              if not isinstance(name, str) or not name.strip():
+                  errors.append(f"{at}: `name` must be a non-empty string.")
+              else:
+                  # Verdicts travel as artifacts keyed on a slugified name, so
+                  # two names that slugify identically would overwrite each
+                  # other and silently lose a verdict.
+                  slug = "".join(c if (c.isalnum() or c in "._-") else "_" for c in name)
+                  if slug in seen:
+                      errors.append(
+                          f"{at}: name {name!r} collides with an earlier gate after "
+                          "slugification; verdicts would overwrite each other."
+                      )
+                  seen.add(slug)
+              # `applies` MUST be a real boolean. A missing or misspelled key
+              # evaluates falsy in the matrix expression, which would record a
+              # green `skip` for a gate that was meant to run.
+              if "applies" not in g:
+                  errors.append(
+                      f"{at}: missing required `applies`. An absent key evaluates "
+                      "false and would record a green skip for a gate that never ran."
+                  )
+              elif not isinstance(g["applies"], bool):
+                  errors.append(
+                      f"{at}: `applies` must be a JSON boolean, got "
+                      f"{type(g['applies']).__name__} ({g['applies']!r}). "
+                      'Quoted "true" is truthy in JSON but not a boolean here.'
+                  )
+              elif g["applies"]:
+                  cmd = g.get("command")
+                  if not isinstance(cmd, str) or not cmd.strip():
+                      errors.append(f"{at}: applies=true requires a non-empty `command`.")
+
+          if errors:
+              for e in errors:
+                  print(f"::error::{e}")
+              sys.exit(1)
+          print(f"gate spec OK — {len(gates)} gate(s)")
+          PY
+
   gate:
     name: pre-prod · ${{ matrix.gate.name }}
+    needs: validate
     runs-on: ${{ inputs.runs_on }}
     environment: ${{ inputs.environment }}
-    timeout-minutes: 60
+    # Derived from the configured budget, not hard-coded: a caller raising
+    # budget_minutes above 60 for a legitimate long-running migration or
+    # load gate would otherwise have the whole matrix leg killed at 60 min
+    # before its own step timeout could be honoured. +10 for checkout/setup.
+    timeout-minutes: ${{ inputs.budget_minutes + 10 }}
     strategy:
       fail-fast: false
       max-parallel: ${{ inputs.max_parallel }}
@@ -207,7 +295,7 @@ jobs:
 
   aggregate:
     name: pre-production-tier
-    needs: gate
+    needs: [validate, gate]
     if: always()
     runs-on: ${{ inputs.runs_on }}
     timeout-minutes: 5
@@ -231,8 +319,17 @@ jobs:
         env:
           GATES_JSON: ${{ inputs.gates }}
           NEEDS_RESULT: ${{ needs.gate.result }}
+          VALIDATE_RESULT: ${{ needs.validate.result }}
         run: |
           set -euo pipefail
+          # Fail closed if the spec never validated: `if: always()` means this
+          # job runs even when `validate` failed and every gate was skipped.
+          if [ "$VALIDATE_RESULT" != "success" ]; then
+            echo "::error::gate spec validation did not succeed (${VALIDATE_RESULT}) — no assurance."
+            echo "verdict=fail" >> "$GITHUB_OUTPUT"
+            echo 'breakdown={"pass":0,"skip":0,"fail":0}' >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
           pass=0; skip=0; fail=0
           declare -a failed=() skipped=()
           shopt -s nullglob
@@ -246,6 +343,11 @@ jobs:
           done
           total=$((pass+skip+fail))
           expected=$(printf '%s' "$GATES_JSON" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
+          if [ "$expected" -eq 0 ]; then
+            echo "::error::no gates configured — the pre-production tier cannot pass vacuously."
+            echo "verdict=fail" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
 
           {
             echo "## Pre-production tier — promotion gate"

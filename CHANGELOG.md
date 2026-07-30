@@ -25,10 +25,20 @@
   its absence is indistinguishable from a pass, and a filtered-out *required*
   check stays pending forever.
 
-  Fail-closed in two further places: a gate declaring `applies: true` with no
-  command fails rather than reporting a green that verified nothing, and a
-  missing verdict (cancelled or crashed gate job) fails the tier rather than
-  being counted as a pass.
+  Fail-closed throughout. Both tiers run a `validate` job before any gate, and
+  the aggregate refuses to report `pass` unless it succeeded. Rejected: an
+  empty `gates` array (0 expected + 0 actual verdicts would pass vacuously); a
+  gate missing `applies` or giving a non-boolean (falsy in the matrix
+  expression, so it would record a green `skip` instead of running);
+  `applies: true` with no command; gate names that collide after slugification
+  (verdict artifacts would overwrite each other); and a gate that reported no
+  verdict at all (cancelled or crashed jobs are failures, not passes).
+
+  The budget is enforced as the `Run gate` step timeout from the **configured**
+  `budget_minutes`, with the job ceiling derived as `budget_minutes + 10` — so
+  a fast-tier gate cannot run six times longer than advertised, and a
+  pre-production caller can raise the budget above 60 minutes for a long
+  migration or load gate without the matrix leg being killed first.
 
   Measured motivation (master, 41 head SHAs, 2026-07-30): PR feedback p90
   12.1 → 5.7 min (−53%) and max 15.2 → 7.5 min (−51%), while the median moves
