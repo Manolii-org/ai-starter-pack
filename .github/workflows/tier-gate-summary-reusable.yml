@@ -76,9 +76,15 @@ on:
         default: ''
         description: |
           Shell command implementing the gate. Run with `bash -euo pipefail`.
-          Empty + applies=true is a configuration error and fails the gate —
-          a gate that verifies nothing must declare `applies: false`, never
-          quietly succeed.
+          Empty (or whitespace-only) + applies=true is a configuration error and
+          fails the gate — a gate that verifies nothing must declare
+          `applies: false`, never quietly succeed.
+
+          TRUST BOUNDARY: this is interpolated directly into `run:` and executes
+          as shell on the runner. It MUST be a repository-authored literal.
+          Never derive it from PR-controlled data (branch names, PR titles,
+          changed-file paths, issue or comment bodies) — that is arbitrary code
+          execution, and under `pull_request_target` it would run with secrets.
       runs_on:
         type: string
         default: ubuntu-latest
@@ -97,7 +103,10 @@ on:
       setup_command:
         type: string
         default: ''
-        description: Optional dependency install, run before `command`.
+        description: |
+          Optional dependency install, run before `command`. Same TRUST BOUNDARY
+          as `command`: repository-authored literals only, never PR-controlled
+          data.
       checkout_fetch_depth:
         type: number
         default: 0

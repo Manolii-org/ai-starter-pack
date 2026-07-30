@@ -15,8 +15,11 @@ name: Fast Tier (Reusable)
 # Anything that fails a rule belongs in `pre-production-tier-reusable.yml`.
 #
 # ── Why one aggregate check ──────────────────────────────────────────────
-# Branch protection should name exactly ONE required status from this tier:
-# `fast-tier`. Listing individual gates as required checks is what produces
+# Branch protection should name exactly ONE required status from this tier: the
+# aggregate job, which GitHub reports as `<caller job name> / fast-tier` for a
+# called workflow (e.g. `fast-tier / fast-tier`) — NOT the bare `fast-tier`,
+# which would itself never report.
+# Listing individual gates as required checks is what produces
 # the classic deadlock — a gate removed or renamed leaves a required check
 # that can never report, and every PR blocks forever. With a single
 # aggregate, adding, removing or renaming a gate is a caller-side edit that
@@ -140,6 +143,11 @@ jobs:
               name = g.get("name")
               if not isinstance(name, str) or not name.strip():
                   errors.append(f"{at}: `name` must be a non-empty string.")
+              elif any(ch in name for ch in "\r\n"):
+                  # A newline in a name can close a heredoc block early and
+                  # corrupt $GITHUB_OUTPUT downstream. Reject at the source; the
+                  # aggregate additionally uses a random delimiter.
+                  errors.append(f"{at}: `name` must not contain newlines.")
               else:
                   # Verdicts travel as artifacts keyed on a slugified name, so
                   # two names that slugify identically would overwrite each
@@ -237,6 +245,7 @@ jobs:
       - name: Setup
         if: ${{ matrix.gate.applies && matrix.gate.setup }}
         working-directory: ${{ matrix.gate.working_directory || '.' }}
+        shell: bash -euo pipefail {0}
         run: ${{ matrix.gate.setup }}
 
       - name: Run gate
@@ -246,6 +255,7 @@ jobs:
         # tier misclassification, so timing out is the correct loud outcome.
         timeout-minutes: ${{ inputs.budget_minutes }}
         working-directory: ${{ matrix.gate.working_directory || '.' }}
+        shell: bash -euo pipefail {0}
         run: ${{ matrix.gate.command }}
 
       - name: Emit verdict

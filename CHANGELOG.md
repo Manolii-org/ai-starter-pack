@@ -34,11 +34,14 @@
   (verdict artifacts would overwrite each other); and a gate that reported no
   verdict at all (cancelled or crashed jobs are failures, not passes).
 
-  The budget is enforced as the `Run gate` step timeout from the **configured**
-  `budget_minutes`, with the job ceiling derived as `budget_minutes + 10` — so
-  a fast-tier gate cannot run six times longer than advertised, and a
-  pre-production caller can raise the budget above 60 minutes for a long
-  migration or load gate without the matrix leg being killed first.
+  Two timeouts, and callers must set **both**. `budget_minutes` is the
+  `Run gate` step timeout; `job_timeout_minutes` (fast 15, pre-production 60)
+  is the outer job ceiling covering checkout and setup. They are separate
+  inputs, **not derived** — GitHub Actions expressions have no arithmetic
+  operators, so a computed `budget_minutes + N` fails while evaluating
+  `timeout-minutes` and breaks every caller. Raising a pre-production
+  `budget_minutes` above 60 without also raising `job_timeout_minutes` gets the
+  matrix leg killed at 60 minutes, before the configured step timeout applies.
 
   Measured motivation (master, 41 head SHAs, 2026-07-30): PR feedback p90
   12.1 → 5.7 min (−53%) and max 15.2 → 7.5 min (−51%), while the median moves

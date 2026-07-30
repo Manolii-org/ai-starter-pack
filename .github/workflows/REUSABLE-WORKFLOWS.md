@@ -155,10 +155,16 @@ the value is in the *classification rule*, not the YAML.
 | `pre-production-tier-reusable.yml` | promotion to production | `push` to integration branch, `schedule`, `deployment_status` |
 | `tier-gate-summary-reusable.yml` | — (single-gate primitive) | whatever the caller needs |
 
-**Name exactly one required status check per tier** in branch protection:
-`fast-tier` (the aggregate job). Never list individual gates as required —
-a renamed or removed gate then leaves a required check that can never
-report, and every PR blocks forever.
+**Name exactly one required status check per tier** in branch protection — the
+aggregate job. For a *called* workflow the status GitHub reports is
+`<your caller job name> / <reusable job name>`, so with the caller example
+below (`jobs.fast-tier:`) the string to enter is **`fast-tier / fast-tier`**,
+not the bare `fast-tier`. Entering the bare name gives you a required check
+that never reports — the exact permanent-pending deadlock this paragraph warns
+about.
+
+Never list individual gates as required either: a renamed or removed gate then
+leaves a required check that can never report, and every PR blocks forever.
 
 ### The skip-vs-pass rule
 

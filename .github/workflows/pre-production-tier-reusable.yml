@@ -153,6 +153,11 @@ jobs:
               name = g.get("name")
               if not isinstance(name, str) or not name.strip():
                   errors.append(f"{at}: `name` must be a non-empty string.")
+              elif any(ch in name for ch in "\r\n"):
+                  # A newline in a name can close a heredoc block early and
+                  # corrupt $GITHUB_OUTPUT downstream. Reject at the source; the
+                  # aggregate additionally uses a random delimiter.
+                  errors.append(f"{at}: `name` must not contain newlines.")
               else:
                   # Verdicts travel as artifacts keyed on a slugified name, so
                   # two names that slugify identically would overwrite each
@@ -265,13 +270,26 @@ jobs:
           count=0
           while IFS= read -r line; do
             [ -z "$line" ] && continue
-            case "$line" in *=*) printf '%s\n' "$line" >> "$GITHUB_ENV"; count=$((count+1)) ;; esac
+            case "$line" in
+              *=*)
+                # Register the VALUE for redaction before it can reach a log.
+                # Actions masks the bundled GATE_SECRETS blob (and its whole
+                # KEY=VALUE lines), but NOT an individual value on its own — so
+                # a gate or tool echoing $DATABASE_URL would print it in clear.
+                # `::add-mask::` must precede any use, hence before $GITHUB_ENV.
+                value="${line#*=}"
+                [ -n "$value" ] && echo "::add-mask::${value}"
+                printf '%s\n' "$line" >> "$GITHUB_ENV"
+                count=$((count+1))
+                ;;
+            esac
           done <<< "$GATE_SECRETS"
           echo "Exported ${count} gate variable(s)."
 
       - name: Setup
         if: ${{ matrix.gate.applies && matrix.gate.setup }}
         working-directory: ${{ matrix.gate.working_directory || '.' }}
+        shell: bash -euo pipefail {0}
         run: ${{ matrix.gate.setup }}
 
       - name: Run gate
@@ -279,6 +297,7 @@ jobs:
         if: ${{ matrix.gate.applies }}
         timeout-minutes: ${{ inputs.budget_minutes }}
         working-directory: ${{ matrix.gate.working_directory || '.' }}
+        shell: bash -euo pipefail {0}
         run: ${{ matrix.gate.command }}
 
       - name: Emit verdict
@@ -395,10 +414,16 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
           printf 'breakdown={"pass":%s,"skip":%s,"fail":%s}\n' "$pass" "$skip" "$fail" >> "$GITHUB_OUTPUT"
+          # Random delimiter: gate names are caller-supplied, and a name whose
+          # content includes a line equal to the delimiter would close the block
+          # early and corrupt $GITHUB_OUTPUT (a later `verdict=fail` might then
+          # not parse). `validate` also rejects newlines in names; this is the
+          # defence-in-depth half.
+          DELIM="EOF_$(head -c16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
           {
-            printf 'failed_list<<EOF\n'
+            printf 'failed_list<<%s\n' "$DELIM"
             for s in "${failed[@]}"; do printf -- '- `%s`\n' "$s"; done
-            printf 'EOF\n'
+            printf '%s\n' "$DELIM"
           } >> "$GITHUB_OUTPUT"
 
           if [ "$total" -ne "$expected" ]; then
@@ -455,11 +480,15 @@ jobs:
             }
             // Reuse an open issue for the same ref so a daily schedule cannot
             // manufacture an issue per run.
-            const existing = await github.rest.issues.listForRepo({
+            // PAGINATE: listForRepo returns 30 by default. On a repo with more
+            // than 30 open issues carrying this label the match falls off page
+            // one, `match` is undefined, and a daily schedule opens a duplicate
+            // every run — precisely what the reuse above claims to prevent.
+            const existing = await github.paginate(github.rest.issues.listForRepo, {
               owner: context.repo.owner, repo: context.repo.repo,
-              state: 'open', labels: LABEL,
+              state: 'open', labels: LABEL, per_page: 100,
             });
-            const match = existing.data.find(i => i.title === title);
+            const match = existing.find(i => i.title === title);
             if (match) {
               await github.rest.issues.createComment({
                 owner: context.repo.owner, repo: context.repo.repo,
