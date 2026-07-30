@@ -302,6 +302,12 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
+          # upload-artifact@v4 treats an existing artifact name as IMMUTABLE, so
+          # on "Re-run all jobs" this upload would fail and leave the previous
+          # attempt's verdict in place — the aggregate would then read a STALE
+          # `pass` for a leg that just failed, and the tier would go green on
+          # last attempt's evidence. Promotion must never rest on that.
+          overwrite: true
           name: fast-tier-verdict-${{ strategy.job-index }}
           path: verdicts/
           retention-days: 1
@@ -401,6 +407,11 @@ jobs:
           fi
           if [ "$fail" -gt 0 ]; then
             echo "::error::${fail} fast-tier gate(s) failed — merge blocked."
+            echo "verdict=fail" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          if [ "$NEEDS_RESULT" = "failure" ]; then
+            echo "::error::a fast-tier gate job FAILED. Treating as a tier failure regardless of the verdicts read."
             echo "verdict=fail" >> "$GITHUB_OUTPUT"
             exit 1
           fi

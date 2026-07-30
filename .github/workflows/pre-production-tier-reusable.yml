@@ -75,8 +75,20 @@ on:
         type: string
         default: ''
         description: |
-          Optional GitHub Environment, so staging credentials and any required
-          reviewers are scoped to this tier rather than granted repo-wide.
+          Optional GitHub Environment. It applies the environment's PROTECTION
+          RULES to these gate jobs — required reviewers, wait timers, branch
+          policies — and scopes which runs may reference its secrets.
+
+          It does NOT inject that environment's secrets into your gate commands.
+          Environment secrets are reachable only through the `secrets` context,
+          and a generic reusable workflow cannot map secret names it does not
+          know; expressions inside `command` are not re-evaluated either. A gate
+          referencing $DATABASE_URL would see an EMPTY variable despite the
+          environment approval.
+
+          To give gates credentials, pass them through the `GATE_SECRETS` secret
+          (newline-delimited KEY=VALUE), which this workflow exports into the
+          gate environment and registers for log masking.
       checkout_fetch_depth:
         type: number
         default: 0
@@ -332,6 +344,12 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
+          # upload-artifact@v4 treats an existing artifact name as IMMUTABLE, so
+          # on "Re-run all jobs" this upload would fail and leave the previous
+          # attempt's verdict in place — the aggregate would then read a STALE
+          # `pass` for a leg that just failed, and the tier would go green on
+          # last attempt's evidence. Promotion must never rest on that.
+          overwrite: true
           name: pre-production-verdict-${{ strategy.job-index }}
           path: verdicts/
           retention-days: 7
@@ -431,7 +449,7 @@ jobs:
             echo "verdict=fail" >> "$GITHUB_OUTPUT"
             exit 1
           fi
-          if [ "$fail" -gt 0 ] || [ "$NEEDS_RESULT" = "cancelled" ]; then
+          if [ "$fail" -gt 0 ] || [ "$NEEDS_RESULT" = "failure" ] || [ "$NEEDS_RESULT" = "cancelled" ]; then
             echo "verdict=fail" >> "$GITHUB_OUTPUT"
             exit 1
           fi
