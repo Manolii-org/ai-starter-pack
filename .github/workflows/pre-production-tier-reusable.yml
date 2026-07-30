@@ -331,6 +331,25 @@ jobs:
             [ -z "$line" ] && continue
             case "$line" in
               *=*)
+                key="${line%%=*}"
+                # RESERVED KEYS. `Export gate secrets` runs AFTER
+                # `Start the budget clock`, and both append to $GITHUB_ENV —
+                # last write wins. A `GATE_DEADLINE=` entry in the bundle would
+                # therefore REPLACE the shared budget deadline: a future value
+                # hands Setup and Run gate a full allowance each (the exact
+                # 2x-budget defect this workflow just fixed), a past value
+                # fails every gate instantly with a false timeout. The gate
+                # command variables are reserved for the same reason.
+                # Rejected loudly, not skipped — a silently dropped secret
+                # would surface later as an unexplained empty variable.
+                case "$key" in
+                  GATE_DEADLINE|GATE_SETUP|GATE_COMMAND|GITHUB_*|RUNNER_*)
+                    echo "::error::GATE_SECRETS contains reserved key '${key}'."
+                    echo "::error::It would overwrite this workflow's own environment."
+                    echo "::error::Rename it in the secret bundle."
+                    exit 1
+                    ;;
+                esac
                 # Register the VALUE for redaction before it can reach a log.
                 # Actions masks the bundled GATE_SECRETS blob (and its whole
                 # KEY=VALUE lines), but NOT an individual value on its own — so
@@ -364,8 +383,24 @@ jobs:
             exit 124
           fi
           printf '%s\n' "$GATE_SETUP" > "${RUNNER_TEMP}/gate-setup.sh"
+          # GNU coreutils `timeout`, or the Homebrew-prefixed `gtimeout` on
+          # macOS. FAIL CLOSED if neither exists: `runs_on` is a free-form
+          # label, and on a runner without it the budget simply would not be
+          # enforced — an unenforced budget presented as enforced is the exact
+          # failure this convention exists to prevent. Windows `timeout` has
+          # unrelated semantics and is not accepted.
+          if command -v timeout >/dev/null 2>&1; then
+            TIMEOUT_BIN=timeout
+          elif command -v gtimeout >/dev/null 2>&1; then
+            TIMEOUT_BIN=gtimeout
+          else
+            echo "::error::no GNU \`timeout\` (or \`gtimeout\`) on this runner, so the"
+            echo "::error::gate budget cannot be enforced. Use a Linux runner, or install"
+            echo "::error::GNU coreutils (macOS: \`brew install coreutils\`) in a step before this one."
+            exit 1
+          fi
           rc=0
-          timeout --kill-after=30s "${remaining}s" \
+          "$TIMEOUT_BIN" --kill-after=30s "${remaining}s" \
             bash -euo pipefail "${RUNNER_TEMP}/gate-setup.sh" || rc=$?
           if [ "$rc" -eq 124 ]; then
             echo "::error::setup exceeded the gate budget. A gate that cannot fit its"
@@ -392,8 +427,24 @@ jobs:
             exit 124
           fi
           printf '%s\n' "$GATE_COMMAND" > "${RUNNER_TEMP}/gate-command.sh"
+          # GNU coreutils `timeout`, or the Homebrew-prefixed `gtimeout` on
+          # macOS. FAIL CLOSED if neither exists: `runs_on` is a free-form
+          # label, and on a runner without it the budget simply would not be
+          # enforced — an unenforced budget presented as enforced is the exact
+          # failure this convention exists to prevent. Windows `timeout` has
+          # unrelated semantics and is not accepted.
+          if command -v timeout >/dev/null 2>&1; then
+            TIMEOUT_BIN=timeout
+          elif command -v gtimeout >/dev/null 2>&1; then
+            TIMEOUT_BIN=gtimeout
+          else
+            echo "::error::no GNU \`timeout\` (or \`gtimeout\`) on this runner, so the"
+            echo "::error::gate budget cannot be enforced. Use a Linux runner, or install"
+            echo "::error::GNU coreutils (macOS: \`brew install coreutils\`) in a step before this one."
+            exit 1
+          fi
           rc=0
-          timeout --kill-after=30s "${remaining}s" \
+          "$TIMEOUT_BIN" --kill-after=30s "${remaining}s" \
             bash -euo pipefail "${RUNNER_TEMP}/gate-command.sh" || rc=$?
           if [ "$rc" -eq 124 ]; then
             echo "::error::command exceeded the gate budget. A gate that cannot fit its"

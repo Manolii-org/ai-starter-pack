@@ -290,8 +290,24 @@ jobs:
             exit 124
           fi
           printf '%s\n' "$GATE_SETUP" > "${RUNNER_TEMP}/gate-setup.sh"
+          # GNU coreutils `timeout`, or the Homebrew-prefixed `gtimeout` on
+          # macOS. FAIL CLOSED if neither exists: `runs_on` is a free-form
+          # label, and on a runner without it the budget simply would not be
+          # enforced — an unenforced budget presented as enforced is the exact
+          # failure this convention exists to prevent. Windows `timeout` has
+          # unrelated semantics and is not accepted.
+          if command -v timeout >/dev/null 2>&1; then
+            TIMEOUT_BIN=timeout
+          elif command -v gtimeout >/dev/null 2>&1; then
+            TIMEOUT_BIN=gtimeout
+          else
+            echo "::error::no GNU \`timeout\` (or \`gtimeout\`) on this runner, so the"
+            echo "::error::gate budget cannot be enforced. Use a Linux runner, or install"
+            echo "::error::GNU coreutils (macOS: \`brew install coreutils\`) in a step before this one."
+            exit 1
+          fi
           rc=0
-          timeout --kill-after=30s "${remaining}s" \
+          "$TIMEOUT_BIN" --kill-after=30s "${remaining}s" \
             bash -euo pipefail "${RUNNER_TEMP}/gate-setup.sh" || rc=$?
           if [ "$rc" -eq 124 ]; then
             echo "::error::setup exceeded the gate budget. A gate that cannot fit its"
@@ -318,8 +334,24 @@ jobs:
             exit 124
           fi
           printf '%s\n' "$GATE_COMMAND" > "${RUNNER_TEMP}/gate-command.sh"
+          # GNU coreutils `timeout`, or the Homebrew-prefixed `gtimeout` on
+          # macOS. FAIL CLOSED if neither exists: `runs_on` is a free-form
+          # label, and on a runner without it the budget simply would not be
+          # enforced — an unenforced budget presented as enforced is the exact
+          # failure this convention exists to prevent. Windows `timeout` has
+          # unrelated semantics and is not accepted.
+          if command -v timeout >/dev/null 2>&1; then
+            TIMEOUT_BIN=timeout
+          elif command -v gtimeout >/dev/null 2>&1; then
+            TIMEOUT_BIN=gtimeout
+          else
+            echo "::error::no GNU \`timeout\` (or \`gtimeout\`) on this runner, so the"
+            echo "::error::gate budget cannot be enforced. Use a Linux runner, or install"
+            echo "::error::GNU coreutils (macOS: \`brew install coreutils\`) in a step before this one."
+            exit 1
+          fi
           rc=0
-          timeout --kill-after=30s "${remaining}s" \
+          "$TIMEOUT_BIN" --kill-after=30s "${remaining}s" \
             bash -euo pipefail "${RUNNER_TEMP}/gate-command.sh" || rc=$?
           if [ "$rc" -eq 124 ]; then
             echo "::error::command exceeded the gate budget. A gate that cannot fit its"

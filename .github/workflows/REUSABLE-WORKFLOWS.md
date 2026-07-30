@@ -224,6 +224,19 @@ misclassification.
 still bounds checkout, which the budget clock covers but cannot `timeout`-wrap
 (checkout is an action, not a shell command).
 
+**Runner requirement.** Budget enforcement needs GNU `timeout` (or `gtimeout`,
+the Homebrew coreutils name on macOS). `runs_on` is a free-form label, so both
+tier workflows probe for it and **fail closed** if neither is present — an
+unenforced budget presented as enforced is exactly what this convention exists
+to prevent. Linux runners have it; on macOS add `brew install coreutils`, and
+Windows `timeout` has unrelated semantics and is not accepted.
+
+**Reserved `GATE_SECRETS` keys.** `GATE_DEADLINE`, `GATE_SETUP`,
+`GATE_COMMAND`, and anything prefixed `GITHUB_` / `RUNNER_` are rejected. The
+export step appends to `$GITHUB_ENV` *after* the budget clock is stamped, so a
+`GATE_DEADLINE=` entry would silently replace the shared deadline — a future
+value restores the 2×-budget bug, a past value fails every gate instantly.
+
 They are **separate inputs, not derived** — GitHub Actions expressions have no
 arithmetic operators, so a computed `budget_minutes + N` fails while evaluating
 `timeout-minutes` and breaks every caller before a single gate runs.
