@@ -131,11 +131,22 @@ jobs:
         # Without this, a typo'd input yields a green "pass" that verified
         # precisely nothing — the exact failure mode this workflow exists
         # to prevent.
-        if: inputs.applies && inputs.command == ''
+        # The emptiness test lives in the SCRIPT, not the `if:`. Two reasons:
+        # `command == ''` misses a whitespace-only value (the generated script
+        # would exit 0 having asserted nothing and the gate would report
+        # `pass`), and GitHub Actions expressions have NO `trim()` function —
+        # only contains/startsWith/endsWith/format/join/toJSON/fromJSON/
+        # hashFiles and the status checks. Trimming in bash is the portable fix.
+        if: inputs.applies
         env:
           GATE_NAME: ${{ inputs.gate_name }}
+          GATE_COMMAND: ${{ inputs.command }}
+        shell: bash -euo pipefail {0}
         run: |
-          echo "::error::gate '${GATE_NAME}' declares applies=true but command is empty."
+          if [ -n "${GATE_COMMAND//[[:space:]]/}" ]; then
+            exit 0
+          fi
+          echo "::error::gate '${GATE_NAME}' declares applies=true but command is empty or whitespace-only."
           echo "::error::A gate that verifies nothing must declare applies=false with a skip_reason."
           exit 1
 
@@ -168,12 +179,14 @@ jobs:
       - name: Setup
         if: ${{ inputs.applies && inputs.setup_command != '' }}
         working-directory: ${{ inputs.working_directory }}
+        shell: bash -euo pipefail {0}
         run: ${{ inputs.setup_command }}
 
       - name: Run gate
         id: run
         if: inputs.applies
         working-directory: ${{ inputs.working_directory }}
+        shell: bash -euo pipefail {0}
         run: ${{ inputs.command }}
 
       - name: Record result

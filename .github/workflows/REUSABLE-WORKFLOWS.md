@@ -53,8 +53,8 @@ env:
 | **static-review-reusable** | `runs_on`, `node_version=24`, `python_version=3.14`, `paths_ignore` | none |
 | **mutation-testing-diff-reusable** | `runs_on`, `node_version=24`, `paths_ignore` | none |
 | **claude-md-contract-reusable** | `runs_on`, `python_version=3.12`, `require_contract=false` | none |
-| **fast-tier-reusable** | `gates` (JSON, required), `budget_minutes=5`, `runs_on`, `max_parallel=10`, `checkout_fetch_depth=0` | none |
-| **pre-production-tier-reusable** | `gates` (JSON, required), `budget_minutes=45`, `runs_on`, `max_parallel=4`, `environment`, `checkout_fetch_depth=0`, `open_issue_on_failure=false` | `GATE_SECRETS` (optional) |
+| **fast-tier-reusable** | `gates` (JSON, required), `budget_minutes=5`, `job_timeout_minutes=15`, `runs_on`, `max_parallel=10`, `checkout_fetch_depth=0` | none |
+| **pre-production-tier-reusable** | `gates` (JSON, required), `budget_minutes=45`, `job_timeout_minutes=60`, `runs_on`, `max_parallel=4`, `environment`, `checkout_fetch_depth=0`, `open_issue_on_failure=false` | `GATE_SECRETS` (optional) |
 | **tier-gate-summary-reusable** | `gate_name` (required), `applies` (required), `tier=fast`, `command`, `skip_reason`, `setup_command`, `runs_on`, `working_directory`, `timeout_minutes=10`, `checkout_fetch_depth=0` | none |
 
 **Notes:**
@@ -188,11 +188,26 @@ which the required check could go green having verified nothing:
 | gate names colliding after slugification | verdict artifacts overwrite each other, silently losing a verdict |
 | a gate that reported no verdict at all | a cancelled or crashed gate job would be counted as passing |
 
-The budget is enforced as the `Run gate` step timeout using the **configured**
-`budget_minutes`, with the job ceiling derived as `budget_minutes + 10` for
-checkout and setup — so a gate cannot quietly run many times longer than the
-tier advertises, and a pre-production caller may raise `budget_minutes` above
-60 for a long migration or load gate without the matrix leg being killed first.
+### Two timeouts, and you must set both
+
+`budget_minutes` is enforced as the **`Run gate` step** timeout, so a gate
+cannot quietly run many times longer than the tier advertises.
+`job_timeout_minutes` is the **outer job** ceiling covering checkout and setup.
+
+They are **separate inputs, not derived** — GitHub Actions expressions have no
+arithmetic operators, so a computed `budget_minutes + N` fails while evaluating
+`timeout-minutes` and breaks every caller before a single gate runs.
+
+**Raising one without the other is the footgun.** A pre-production caller who
+sets `budget_minutes: 90` for a long migration or load gate but leaves
+`job_timeout_minutes` at its 60 default will have the whole matrix leg killed
+at 60 minutes, before the step timeout it configured can ever apply. Raise both:
+
+```yaml
+with:
+  budget_minutes: 90
+  job_timeout_minutes: 100   # budget + headroom for checkout/setup
+```
 
 ### Caller example — fast tier on PRs
 
