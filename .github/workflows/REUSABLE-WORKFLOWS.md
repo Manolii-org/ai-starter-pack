@@ -194,11 +194,35 @@ which the required check could go green having verified nothing:
 | gate names colliding after slugification | verdict artifacts overwrite each other, silently losing a verdict |
 | a gate that reported no verdict at all | a cancelled or crashed gate job would be counted as passing |
 
+**One thing is deliberately *not* fail-closed-by-output:** the workflow-level
+`verdict` output is **empty when the tier fails**, because GitHub does not
+propagate `workflow_call` outputs from a failed job. Branch on
+`needs.<job>.result == 'failure'` and treat an empty `verdict` as a failure —
+never as a pass. Keeping the job green so the string survived would make the
+tier fail *open*, which is worse than an awkward output contract.
+
+**Known limitation — `environment` also gates skipped legs.** It is set at job
+level, so a `pre-production` gate with `applies: false` still waits for that
+environment's required reviewers before it can report its skip. With
+`environment` set, keep every gate `applies: true` and put change-detection
+selectivity in the fast tier.
+
 ### Two timeouts, and you must set both
 
-`budget_minutes` is enforced as the **`Run gate` step** timeout, so a gate
-cannot quietly run many times longer than the tier advertises.
-`job_timeout_minutes` is the **outer job** ceiling covering checkout and setup.
+`budget_minutes` is **one deadline shared by setup and the gate command**. A
+`Start the budget clock` step stamps `now + budget_minutes` before checkout;
+`Setup` and `Run gate` each compute what is LEFT of it and wrap their command
+in `timeout`. Exceeding it exits `124` with an error naming the tier
+misclassification.
+
+> Earlier revisions put `timeout-minutes: budget_minutes` on each step
+> separately, which gave a gate with a setup step **twice** its advertised
+> ceiling. If you copy this pattern elsewhere, share one deadline — per-step
+> timeouts do not compose into a wall-clock budget.
+
+`job_timeout_minutes` is the **outer job** ceiling. It is the backstop, and it
+still bounds checkout, which the budget clock covers but cannot `timeout`-wrap
+(checkout is an action, not a shell command).
 
 They are **separate inputs, not derived** — GitHub Actions expressions have no
 arithmetic operators, so a computed `budget_minutes + N` fails while evaluating

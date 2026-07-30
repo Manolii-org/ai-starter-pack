@@ -34,14 +34,22 @@
   (verdict artifacts would overwrite each other); and a gate that reported no
   verdict at all (cancelled or crashed jobs are failures, not passes).
 
-  Two timeouts, and callers must set **both**. `budget_minutes` is the
-  `Run gate` step timeout; `job_timeout_minutes` (fast 15, pre-production 60)
-  is the outer job ceiling covering checkout and setup. They are separate
-  inputs, **not derived** — GitHub Actions expressions have no arithmetic
-  operators, so a computed `budget_minutes + N` fails while evaluating
-  `timeout-minutes` and breaks every caller. Raising a pre-production
-  `budget_minutes` above 60 without also raising `job_timeout_minutes` gets the
-  matrix leg killed at 60 minutes, before the configured step timeout applies.
+  Two timeouts, and callers must set **both**. `budget_minutes` is **one
+  deadline shared by setup and the gate command** — stamped before checkout,
+  with each step wrapping its command in `timeout` against what remains, so a
+  gate with a setup step cannot take twice the advertised ceiling.
+  `job_timeout_minutes` (fast 15, pre-production 60) is the outer job ceiling
+  and the backstop. They are separate inputs, **not derived** — GitHub Actions
+  expressions have no arithmetic operators, so a computed `budget_minutes + N`
+  fails while evaluating `timeout-minutes` and breaks every caller. The
+  consequence runs the other way: raising a pre-production `budget_minutes`
+  above 60 without also raising `job_timeout_minutes` gets the matrix leg
+  killed at 60 minutes, making the extra budget unreachable.
+
+  The workflow-level `verdict` output is **empty when a tier fails** — GitHub
+  does not propagate `workflow_call` outputs from a failed job. Callers must
+  branch on `needs.<job>.result` and treat an empty verdict as a failure.
+  Keeping the job green so the string survived would make the tier fail *open*.
 
   Measured motivation (master, 41 head SHAs, 2026-07-30): PR feedback p90
   12.1 → 5.7 min (−53%) and max 15.2 → 7.5 min (−51%), while the median moves

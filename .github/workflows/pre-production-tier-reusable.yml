@@ -89,6 +89,21 @@ on:
           To give gates credentials, pass them through the `GATE_SECRETS` secret
           (newline-delimited KEY=VALUE), which this workflow exports into the
           gate environment and registers for log masking.
+
+          KNOWN LIMITATION — protection rules apply to SKIPPED gates too.
+          `environment` is set at JOB level, so it covers every matrix leg,
+          including one with `applies: false` that only records a skip. Under a
+          protected environment that leg waits for required reviewers or a wait
+          timer before it can report a skip, which on a `schedule` run means a
+          stalled matrix and a deployment record for work that never happened.
+
+          Attaching the environment only to applicable legs needs the matrix
+          split across two jobs, which would rework this workflow's fail-closed
+          aggregation; that is deliberately NOT done here on an untested
+          workflow. Until it is: with `environment` set, keep every gate
+          `applies: true` (already this tier's documented norm — see `gates`)
+          and put change-detection selectivity in the fast tier, where it
+          belongs and where no environment gates the leg.
       checkout_fetch_depth:
         type: number
         default: 0
@@ -110,7 +125,20 @@ on:
     outputs:
       verdict:
         value: ${{ jobs.aggregate.outputs.verdict }}
-        description: '`pass` or `fail` for the tier as a whole.'
+        description: |
+          `pass` or `fail` for the tier as a whole.
+
+          CAVEAT — EMPTY ON FAILURE. A failing tier fails the `aggregate` job,
+          and GitHub does not propagate `on.workflow_call.outputs` from a
+          failed `workflow_call` job. `needs.<job>.outputs.verdict` is
+          therefore EMPTY on failure, never the string `fail`.
+
+          Keeping the job green so the output survived would make this
+          workflow fail-OPEN for any caller that forgets to wire the verdict —
+          inverting the point of the tier. A red stays red. Callers branching
+          on failure must read the job RESULT (`needs.<job>.result ==
+          'failure'`) and treat an empty `verdict` as a failure, never a pass.
+          Same contract as `tier-gate-summary-reusable.yml`.
       breakdown:
         value: ${{ jobs.aggregate.outputs.breakdown }}
         description: JSON counts of pass / skip / fail across gates.
@@ -222,10 +250,13 @@ jobs:
     needs: validate
     runs-on: ${{ inputs.runs_on }}
     environment: ${{ inputs.environment }}
-    # Derived from the configured budget, not hard-coded: a caller raising
-    # budget_minutes above 60 for a legitimate long-running migration or
-    # load gate would otherwise have the whole matrix leg killed at 60 min
-    # before its own step timeout could be honoured. +10 for checkout/setup.
+    # INDEPENDENT INPUT, not derived. GitHub Actions expressions have no
+    # arithmetic operators, so `budget_minutes + 10` cannot be computed here —
+    # it would fail while evaluating `timeout-minutes`, before any gate runs,
+    # breaking every caller. The consequence is a real footgun in the other
+    # direction: raising `budget_minutes` ALONE does nothing once it passes
+    # this ceiling, because the whole matrix leg is killed here first. Raise
+    # both, or the extra budget is unreachable.
     timeout-minutes: ${{ inputs.job_timeout_minutes }}
     strategy:
       fail-fast: false
@@ -258,6 +289,22 @@ jobs:
             echo "> from this gate."
           } >> "$GITHUB_STEP_SUMMARY"
           echo "::notice title=pre-production gate skipped::${GATE} — ${REASON}. No assurance provided."
+
+      - name: Start the budget clock
+        # ONE deadline shared by setup AND the gate command.
+        #
+        # Each step previously carried its own `timeout-minutes: budget_minutes`,
+        # so a gate WITH a setup step could consume TWICE the advertised
+        # ceiling — the tier's headline number reading stronger than it was
+        # enforced, the same failure class as a skipped gate reading as a
+        # passed one. The clock starts BEFORE checkout so `budget_minutes`
+        # means what it says: total wall-clock for this gate, not "the command
+        # only, plus however long everything else takes".
+        if: ${{ matrix.gate.applies }}
+        env:
+          BUDGET_MINUTES: ${{ inputs.budget_minutes }}
+        shell: bash -euo pipefail {0}
+        run: echo "GATE_DEADLINE=$(( $(date +%s) + BUDGET_MINUTES * 60 ))" >> "$GITHUB_ENV"
 
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         if: ${{ matrix.gate.applies }}
@@ -302,19 +349,57 @@ jobs:
         if: ${{ matrix.gate.applies && matrix.gate.setup }}
         working-directory: ${{ matrix.gate.working_directory || '.' }}
         shell: bash -euo pipefail {0}
-        # The budget bounds SETUP as well as the gate command. Wrapping
-        # only `Run gate` left checkout+setup governed by the far larger
-        # job ceiling, so a 5-minute 'fast' tier could still burn 15.
+        # Backstop only. GATE_DEADLINE below is the real constraint;
+        # this bounds the step if the deadline logic were ever bypassed.
         timeout-minutes: ${{ inputs.budget_minutes }}
-        run: ${{ matrix.gate.setup }}
+        env:
+          GATE_SETUP: ${{ matrix.gate.setup }}
+        run: |
+          # Remaining share of the ONE budget, not a fresh allowance.
+          # `set -u` means an unset GATE_DEADLINE fails the step rather than
+          # silently running unbounded — fail-closed.
+          remaining=$(( GATE_DEADLINE - $(date +%s) ))
+          if [ "$remaining" -le 0 ]; then
+            echo "::error::gate budget exhausted before setup began."
+            exit 124
+          fi
+          printf '%s\n' "$GATE_SETUP" > "${RUNNER_TEMP}/gate-setup.sh"
+          rc=0
+          timeout --kill-after=30s "${remaining}s" \
+            bash -euo pipefail "${RUNNER_TEMP}/gate-setup.sh" || rc=$?
+          if [ "$rc" -eq 124 ]; then
+            echo "::error::setup exceeded the gate budget. A gate that cannot fit its"
+            echo "::error::budget is a tier misclassification — reclassify it, do not raise the budget."
+          fi
+          exit "$rc"
 
       - name: Run gate
         id: run
         if: ${{ matrix.gate.applies }}
+        # Shares the ONE budget with Setup above; see `Start the budget clock`.
         timeout-minutes: ${{ inputs.budget_minutes }}
         working-directory: ${{ matrix.gate.working_directory || '.' }}
         shell: bash -euo pipefail {0}
-        run: ${{ matrix.gate.command }}
+        env:
+          GATE_COMMAND: ${{ matrix.gate.command }}
+        run: |
+          # Remaining share of the ONE budget, not a fresh allowance.
+          # `set -u` means an unset GATE_DEADLINE fails the step rather than
+          # silently running unbounded — fail-closed.
+          remaining=$(( GATE_DEADLINE - $(date +%s) ))
+          if [ "$remaining" -le 0 ]; then
+            echo "::error::gate budget exhausted before command began."
+            exit 124
+          fi
+          printf '%s\n' "$GATE_COMMAND" > "${RUNNER_TEMP}/gate-command.sh"
+          rc=0
+          timeout --kill-after=30s "${remaining}s" \
+            bash -euo pipefail "${RUNNER_TEMP}/gate-command.sh" || rc=$?
+          if [ "$rc" -eq 124 ]; then
+            echo "::error::command exceeded the gate budget. A gate that cannot fit its"
+            echo "::error::budget is a tier misclassification — reclassify it, do not raise the budget."
+          fi
+          exit "$rc"
 
       - name: Emit verdict
         if: always()

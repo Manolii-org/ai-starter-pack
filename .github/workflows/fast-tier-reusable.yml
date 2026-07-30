@@ -88,7 +88,20 @@ on:
     outputs:
       verdict:
         value: ${{ jobs.aggregate.outputs.verdict }}
-        description: '`pass` or `fail` for the tier as a whole.'
+        description: |
+          `pass` or `fail` for the tier as a whole.
+
+          CAVEAT — EMPTY ON FAILURE. A failing tier fails the `aggregate` job,
+          and GitHub does not propagate `on.workflow_call.outputs` from a
+          failed `workflow_call` job. `needs.<job>.outputs.verdict` is
+          therefore EMPTY on failure, never the string `fail`.
+
+          Keeping the job green so the output survived would make this
+          workflow fail-OPEN for any caller that forgets to wire the verdict —
+          inverting the point of the tier. A red stays red. Callers branching
+          on failure must read the job RESULT (`needs.<job>.result ==
+          'failure'`) and treat an empty `verdict` as a failure, never a pass.
+          Same contract as `tier-gate-summary-reusable.yml`.
       breakdown:
         value: ${{ jobs.aggregate.outputs.breakdown }}
         description: JSON counts of pass / skip / fail across gates.
@@ -236,6 +249,22 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           echo "::notice title=fast-tier gate skipped::${GATE} — ${REASON}. No assurance provided."
 
+      - name: Start the budget clock
+        # ONE deadline shared by setup AND the gate command.
+        #
+        # Each step previously carried its own `timeout-minutes: budget_minutes`,
+        # so a gate WITH a setup step could consume TWICE the advertised
+        # ceiling — the tier's headline number reading stronger than it was
+        # enforced, the same failure class as a skipped gate reading as a
+        # passed one. The clock starts BEFORE checkout so `budget_minutes`
+        # means what it says: total wall-clock for this gate, not "the command
+        # only, plus however long everything else takes".
+        if: ${{ matrix.gate.applies }}
+        env:
+          BUDGET_MINUTES: ${{ inputs.budget_minutes }}
+        shell: bash -euo pipefail {0}
+        run: echo "GATE_DEADLINE=$(( $(date +%s) + BUDGET_MINUTES * 60 ))" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         if: ${{ matrix.gate.applies }}
         with:
@@ -246,21 +275,57 @@ jobs:
         if: ${{ matrix.gate.applies && matrix.gate.setup }}
         working-directory: ${{ matrix.gate.working_directory || '.' }}
         shell: bash -euo pipefail {0}
-        # The budget bounds SETUP as well as the gate command. Wrapping
-        # only `Run gate` left checkout+setup governed by the far larger
-        # job ceiling, so a 5-minute 'fast' tier could still burn 15.
+        # Backstop only. GATE_DEADLINE below is the real constraint;
+        # this bounds the step if the deadline logic were ever bypassed.
         timeout-minutes: ${{ inputs.budget_minutes }}
-        run: ${{ matrix.gate.setup }}
+        env:
+          GATE_SETUP: ${{ matrix.gate.setup }}
+        run: |
+          # Remaining share of the ONE budget, not a fresh allowance.
+          # `set -u` means an unset GATE_DEADLINE fails the step rather than
+          # silently running unbounded — fail-closed.
+          remaining=$(( GATE_DEADLINE - $(date +%s) ))
+          if [ "$remaining" -le 0 ]; then
+            echo "::error::gate budget exhausted before setup began."
+            exit 124
+          fi
+          printf '%s\n' "$GATE_SETUP" > "${RUNNER_TEMP}/gate-setup.sh"
+          rc=0
+          timeout --kill-after=30s "${remaining}s" \
+            bash -euo pipefail "${RUNNER_TEMP}/gate-setup.sh" || rc=$?
+          if [ "$rc" -eq 124 ]; then
+            echo "::error::setup exceeded the gate budget. A gate that cannot fit its"
+            echo "::error::budget is a tier misclassification — reclassify it, do not raise the budget."
+          fi
+          exit "$rc"
 
       - name: Run gate
         id: run
         if: ${{ matrix.gate.applies }}
-        # Enforces the CONFIGURED budget. A fast-tier gate that exceeds it is a
-        # tier misclassification, so timing out is the correct loud outcome.
+        # Shares the ONE budget with Setup above; see `Start the budget clock`.
         timeout-minutes: ${{ inputs.budget_minutes }}
         working-directory: ${{ matrix.gate.working_directory || '.' }}
         shell: bash -euo pipefail {0}
-        run: ${{ matrix.gate.command }}
+        env:
+          GATE_COMMAND: ${{ matrix.gate.command }}
+        run: |
+          # Remaining share of the ONE budget, not a fresh allowance.
+          # `set -u` means an unset GATE_DEADLINE fails the step rather than
+          # silently running unbounded — fail-closed.
+          remaining=$(( GATE_DEADLINE - $(date +%s) ))
+          if [ "$remaining" -le 0 ]; then
+            echo "::error::gate budget exhausted before command began."
+            exit 124
+          fi
+          printf '%s\n' "$GATE_COMMAND" > "${RUNNER_TEMP}/gate-command.sh"
+          rc=0
+          timeout --kill-after=30s "${remaining}s" \
+            bash -euo pipefail "${RUNNER_TEMP}/gate-command.sh" || rc=$?
+          if [ "$rc" -eq 124 ]; then
+            echo "::error::command exceeded the gate budget. A gate that cannot fit its"
+            echo "::error::budget is a tier misclassification — reclassify it, do not raise the budget."
+          fi
+          exit "$rc"
 
       - name: Emit verdict
         if: always()
