@@ -246,6 +246,10 @@ jobs:
         if: ${{ matrix.gate.applies && matrix.gate.setup }}
         working-directory: ${{ matrix.gate.working_directory || '.' }}
         shell: bash -euo pipefail {0}
+        # The budget bounds SETUP as well as the gate command. Wrapping
+        # only `Run gate` left checkout+setup governed by the far larger
+        # job ceiling, so a 5-minute 'fast' tier could still burn 15.
+        timeout-minutes: ${{ inputs.budget_minutes }}
         run: ${{ matrix.gate.setup }}
 
       - name: Run gate

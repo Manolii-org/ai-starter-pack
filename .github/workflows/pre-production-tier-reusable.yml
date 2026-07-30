@@ -302,6 +302,10 @@ jobs:
         if: ${{ matrix.gate.applies && matrix.gate.setup }}
         working-directory: ${{ matrix.gate.working_directory || '.' }}
         shell: bash -euo pipefail {0}
+        # The budget bounds SETUP as well as the gate command. Wrapping
+        # only `Run gate` left checkout+setup governed by the far larger
+        # job ceiling, so a 5-minute 'fast' tier could still burn 15.
+        timeout-minutes: ${{ inputs.budget_minutes }}
         run: ${{ matrix.gate.setup }}
 
       - name: Run gate
@@ -465,6 +469,20 @@ jobs:
           FAILED_LIST: ${{ steps.sum.outputs.failed_list }}
         with:
           script: |
+            // AGENTS.md requires an explicit timeout on every external call.
+            // Without one a stalled issues API hangs here until the JOB timeout
+            // kills the step, and the tracking issue that `open_issue_on_failure`
+            // promises is never opened — a silent failure of the one mechanism
+            // that makes a scheduled pre-production red visible to a human.
+            //
+            // A FACTORY, not a constant: `AbortSignal.timeout` starts counting
+            // the moment it is created. One shared signal would give all five
+            // calls 15s BETWEEN them and abort every later call outright once
+            // the first elapsed. Each call gets its own budget.
+            const req = () => ({ request: { signal: AbortSignal.timeout(15_000) } });
+            // Pagination is one logical operation spanning N requests, so it
+            // gets one wider budget rather than 15s per page.
+            const pageReq = { request: { signal: AbortSignal.timeout(60_000) } };
             const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             const title = `[pre-production] gate failure on ${context.ref.replace('refs/heads/', '')}`;
             const body = [
@@ -485,7 +503,7 @@ jobs:
             const LABEL = 'pre-production-gate';
             try {
               await github.rest.issues.getLabel({
-                owner: context.repo.owner, repo: context.repo.repo, name: LABEL,
+                owner: context.repo.owner, repo: context.repo.repo, name: LABEL, ...req(),
               });
             } catch (err) {
               if (err.status !== 404) throw err;
@@ -493,6 +511,7 @@ jobs:
                 owner: context.repo.owner, repo: context.repo.repo, name: LABEL,
                 color: 'B60205',
                 description: 'A pre-production tier gate failed; promotion is blocked.',
+                ...req(),
               });
               core.info(`created missing label: ${LABEL}`);
             }
@@ -504,17 +523,17 @@ jobs:
             // every run — precisely what the reuse above claims to prevent.
             const existing = await github.paginate(github.rest.issues.listForRepo, {
               owner: context.repo.owner, repo: context.repo.repo,
-              state: 'open', labels: LABEL, per_page: 100,
+              state: 'open', labels: LABEL, per_page: 100, ...pageReq,
             });
             const match = existing.find(i => i.title === title);
             if (match) {
               await github.rest.issues.createComment({
                 owner: context.repo.owner, repo: context.repo.repo,
-                issue_number: match.number, body,
+                issue_number: match.number, body, ...req(),
               });
             } else {
               await github.rest.issues.create({
                 owner: context.repo.owner, repo: context.repo.repo,
-                title, body, labels: [LABEL],
+                title, body, labels: [LABEL], ...req(),
               });
             }
