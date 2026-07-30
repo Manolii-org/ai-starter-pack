@@ -47,6 +47,20 @@ on:
           Wall-clock ceiling per gate. Generous by design; the constraint this
           tier respects is "finishes before the next promotion", not
           "finishes before a developer loses focus".
+      job_timeout_minutes:
+        type: number
+        default: 60
+        description: |
+          Outer per-gate JOB ceiling, covering checkout/setup on top of the
+          gate command itself. Keep it above `budget_minutes` (default
+          45 + headroom); the budget is enforced separately on the
+          `Run gate` step.
+
+          This is a separate input rather than a computed
+          `budget_minutes + N` because **GitHub Actions expressions do not
+          support arithmetic operators** — such an expression fails while
+          evaluating `timeout-minutes`, before any gate can run, breaking
+          every caller.
       runs_on:
         type: string
         default: ubuntu-latest
@@ -143,7 +157,17 @@ jobs:
                   # Verdicts travel as artifacts keyed on a slugified name, so
                   # two names that slugify identically would overwrite each
                   # other and silently lose a verdict.
-                  slug = "".join(c if (c.isalnum() or c in "._-") else "_" for c in name)
+                  # Must mirror the RUNTIME slug exactly. The runtime uses
+                  # `tr -c '[:alnum:]._-' '_'`, which operates on UTF-8 BYTES in
+                  # the C locale — so a non-ASCII character like "é" becomes two
+                  # underscores there, while Python's str.isalnum() would keep it.
+                  # Diverging here lets "é" and "__" pass validation and then
+                  # collide on disk, losing a verdict.
+                  slug = "".join(
+                      c if (c.isascii() and (c.isalnum() or c in "._-"))
+                      else "_" * len(c.encode("utf-8"))
+                      for c in name
+                  )
                   if slug in seen:
                       errors.append(
                           f"{at}: name {name!r} collides with an earlier gate after "
@@ -185,7 +209,7 @@ jobs:
     # budget_minutes above 60 for a legitimate long-running migration or
     # load gate would otherwise have the whole matrix leg killed at 60 min
     # before its own step timeout could be honoured. +10 for checkout/setup.
-    timeout-minutes: ${{ inputs.budget_minutes + 10 }}
+    timeout-minutes: ${{ inputs.job_timeout_minutes }}
     strategy:
       fail-fast: false
       max-parallel: ${{ inputs.max_parallel }}
@@ -410,11 +434,30 @@ jobs:
               '',
               'Convention: `docs/cicd-tiering.md`',
             ].join('\n');
+            // Provision the label first. `issues.create` cannot attach a label
+            // that does not exist, and the reuse lookup below searches BY that
+            // label — so on a fresh consumer the first issue would be created
+            // unlabelled (or fail), and every later run would fail to find it
+            // and open a duplicate, defeating the reuse this block promises.
+            const LABEL = 'pre-production-gate';
+            try {
+              await github.rest.issues.getLabel({
+                owner: context.repo.owner, repo: context.repo.repo, name: LABEL,
+              });
+            } catch (err) {
+              if (err.status !== 404) throw err;
+              await github.rest.issues.createLabel({
+                owner: context.repo.owner, repo: context.repo.repo, name: LABEL,
+                color: 'B60205',
+                description: 'A pre-production tier gate failed; promotion is blocked.',
+              });
+              core.info(`created missing label: ${LABEL}`);
+            }
             // Reuse an open issue for the same ref so a daily schedule cannot
             // manufacture an issue per run.
             const existing = await github.rest.issues.listForRepo({
               owner: context.repo.owner, repo: context.repo.repo,
-              state: 'open', labels: 'pre-production-gate',
+              state: 'open', labels: LABEL,
             });
             const match = existing.data.find(i => i.title === title);
             if (match) {
@@ -425,6 +468,6 @@ jobs:
             } else {
               await github.rest.issues.create({
                 owner: context.repo.owner, repo: context.repo.repo,
-                title, body, labels: ['pre-production-gate'],
+                title, body, labels: [LABEL],
               });
             }

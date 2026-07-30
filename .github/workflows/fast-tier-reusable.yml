@@ -54,9 +54,22 @@ on:
         description: |
           Wall-clock ceiling per gate. Exceeding it is a tier
           misclassification, not a flake: the offending gate belongs in
-          pre-production. Enforced as the `Run gate` step timeout, with the
-          job-level ceiling derived as `budget_minutes + 10` to leave headroom
-          for checkout and setup.
+          pre-production. Enforced as the `Run gate` step timeout; the outer
+          job ceiling is the separate `job_timeout_minutes` input.
+      job_timeout_minutes:
+        type: number
+        default: 15
+        description: |
+          Outer per-gate JOB ceiling, covering checkout/setup on top of the
+          gate command itself. Keep it above `budget_minutes` (default
+          5 + headroom); the budget is enforced separately on the
+          `Run gate` step.
+
+          This is a separate input rather than a computed
+          `budget_minutes + N` because **GitHub Actions expressions do not
+          support arithmetic operators** — such an expression fails while
+          evaluating `timeout-minutes`, before any gate can run, breaking
+          every caller.
       runs_on:
         type: string
         default: ubuntu-latest
@@ -131,7 +144,17 @@ jobs:
                   # Verdicts travel as artifacts keyed on a slugified name, so
                   # two names that slugify identically would overwrite each
                   # other and silently lose a verdict.
-                  slug = "".join(c if (c.isalnum() or c in "._-") else "_" for c in name)
+                  # Must mirror the RUNTIME slug exactly. The runtime uses
+                  # `tr -c '[:alnum:]._-' '_'`, which operates on UTF-8 BYTES in
+                  # the C locale — so a non-ASCII character like "é" becomes two
+                  # underscores there, while Python's str.isalnum() would keep it.
+                  # Diverging here lets "é" and "__" pass validation and then
+                  # collide on disk, losing a verdict.
+                  slug = "".join(
+                      c if (c.isascii() and (c.isalnum() or c in "._-"))
+                      else "_" * len(c.encode("utf-8"))
+                      for c in name
+                  )
                   if slug in seen:
                       errors.append(
                           f"{at}: name {name!r} collides with an earlier gate after "
@@ -172,7 +195,7 @@ jobs:
     # budget itself is enforced on the `Run gate` step below, so a gate that
     # blows its budget fails against the CONFIGURED value rather than a
     # hard-coded one six times larger.
-    timeout-minutes: ${{ inputs.budget_minutes + 10 }}
+    timeout-minutes: ${{ inputs.job_timeout_minutes }}
     strategy:
       fail-fast: false
       max-parallel: ${{ inputs.max_parallel }}
