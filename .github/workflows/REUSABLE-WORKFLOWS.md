@@ -53,6 +53,9 @@ env:
 | **static-review-reusable** | `runs_on`, `node_version=24`, `python_version=3.14`, `paths_ignore` | none |
 | **mutation-testing-diff-reusable** | `runs_on`, `node_version=24`, `paths_ignore` | none |
 | **claude-md-contract-reusable** | `runs_on`, `python_version=3.12`, `require_contract=false` | none |
+| **fast-tier-reusable** | `gates` (JSON, required), `budget_minutes=5`, `runs_on`, `max_parallel=10`, `checkout_fetch_depth=0` | none |
+| **pre-production-tier-reusable** | `gates` (JSON, required), `budget_minutes=45`, `runs_on`, `max_parallel=4`, `environment`, `checkout_fetch_depth=0`, `open_issue_on_failure=false` | `GATE_SECRETS` (optional) |
+| **tier-gate-summary-reusable** | `gate_name` (required), `applies` (required), `tier=fast`, `command`, `skip_reason`, `setup_command`, `runs_on`, `working_directory`, `timeout_minutes=10`, `checkout_fetch_depth=0` | none |
 
 **Notes:**
 - `GITHUB_TOKEN` auto-injected by workflow_call (never declare).
@@ -139,6 +142,116 @@ Tag strategy: immutable vX.Y.Z + moving `v1` major alias (regex tracks the movin
 | **`litellm_proxy_url` as input, not secret** | URL is non-sensitive (endpoint address); secret is the key. Simplifies config. |
 | **`paths_ignore` input is internal-only** | Caller owns top-level `on.paths-ignore` for trigger-level filtering. Input gates internal changed-files detection (Semgrep, ESLint, etc.). Decouples concerns. |
 | **Tag v1 alias** | Major version signals API stability. Patch releases (v1.0.1, v1.1.0) are additive non-breaking. Rename/remove/default-change requires v2. |
+
+## CI Tiering (fast / pre-production)
+
+Canonical convention: [`manolii-org/master:docs/cicd-tiering.md`](https://github.com/manolii-org/master/blob/main/docs/cicd-tiering.md).
+These three workflows are its building blocks. Read the convention before wiring them —
+the value is in the *classification rule*, not the YAML.
+
+| Workflow | Blocks | Natural triggers |
+|---|---|---|
+| `fast-tier-reusable.yml` | merge into the integration branch | `pull_request`, `merge_group` |
+| `pre-production-tier-reusable.yml` | promotion to production | `push` to integration branch, `schedule`, `deployment_status` |
+| `tier-gate-summary-reusable.yml` | — (single-gate primitive) | whatever the caller needs |
+
+**Name exactly one required status check per tier** in branch protection:
+`fast-tier` (the aggregate job). Never list individual gates as required —
+a renamed or removed gate then leaves a required check that can never
+report, and every PR blocks forever.
+
+### The skip-vs-pass rule
+
+All three emit one of three verdicts — `pass`, `skip`, `fail` — and a `skip`
+is always rendered as a green check whose summary states in words that
+**nothing was verified**. That is deliberate. GitHub offers no built-in way
+to say "this gate correctly did not apply" that is visually distinct from
+"this gate passed", so selectivity silently reads as assurance.
+
+The consequence for callers: compute `applies` with **change detection inside
+the workflow** (`dorny/paths-filter`, or `git diff --name-only`), *not* with a
+workflow-level `paths:` filter. A `paths:` filter prevents the run from being
+created at all, which is the one state these workflows cannot annotate.
+
+### Caller example — fast tier on PRs
+
+```yaml
+name: Fast Tier
+on:
+  pull_request:
+    branches: [main]
+  merge_group:
+concurrency:
+  group: fast-tier-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      gates: ${{ steps.build.outputs.gates }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with: { fetch-depth: 0, persist-credentials: false }
+      - id: changed
+        uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3
+        with:
+          filters: |
+            py:  ['**/*.py']
+            sql: ['migrations/**']
+      - id: build
+        env:
+          PY:  ${{ steps.changed.outputs.py }}
+          SQL: ${{ steps.changed.outputs.sql }}
+        run: |
+          python3 - <<'EOF' >> "$GITHUB_OUTPUT"
+          import json, os
+          gates = [
+            {"name": "lint", "applies": os.environ["PY"] == "true",
+             "command": "ruff check .",
+             "skip_reason": "no Python changed"},
+            {"name": "migration-safety", "applies": os.environ["SQL"] == "true",
+             "command": "python3 scripts/check-migrations.py",
+             "skip_reason": "no files under migrations/ changed"},
+          ]
+          print("gates=" + json.dumps(gates))
+          EOF
+  fast-tier:
+    needs: detect
+    uses: manolii-org/ai-starter-pack/.github/workflows/fast-tier-reusable.yml@v1
+    with:
+      gates: ${{ needs.detect.outputs.gates }}
+      budget_minutes: 5
+```
+
+### Caller example — pre-production tier after merge
+
+```yaml
+name: Pre-Production Gate
+on:
+  push:
+    branches: [main]
+  schedule: [{ cron: '0 9 * * 1' }]
+  workflow_dispatch:
+permissions:
+  contents: read
+  issues: write
+jobs:
+  pre-production-tier:
+    uses: manolii-org/ai-starter-pack/.github/workflows/pre-production-tier-reusable.yml@v1
+    with:
+      gates: >-
+        [{"name":"e2e","applies":true,"command":"pnpm test:e2e"},
+         {"name":"mutation","applies":true,"command":"pnpm test:mutation"}]
+      environment: staging
+      open_issue_on_failure: true
+    secrets:
+      GATE_SECRETS: ${{ secrets.STAGING_ENV }}
+```
+
+Your promotion workflow then gates on this via `workflow_run`, exactly as
+`bcp-core` and `impaktful_3.0` already do.
 
 ## Backup Kernel (WS-2 scaffold)
 

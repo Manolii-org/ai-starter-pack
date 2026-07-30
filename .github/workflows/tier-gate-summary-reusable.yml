@@ -1,0 +1,218 @@
+name: Tier Gate Summary (Reusable)
+# Reusable workflow_call form. Caller owns `on:`.
+# Cite: .github/workflows/REUSABLE-WORKFLOWS.md
+# Convention: manolii-org/master:docs/cicd-tiering.md
+#
+# PURPOSE — make a SKIPPED gate impossible to mistake for a PASSED gate.
+#
+# The problem this solves is a reporting problem, not a compute problem.
+# GitHub gives a tier gate three ways to "not fail", and two of them are
+# indistinguishable from success at a glance:
+#
+#   1. workflow-level `paths:` filter does not match
+#        -> the run is NEVER CREATED. The check is absent from the PR.
+#           A required check that is absent stays pending forever (merge
+#           blocked); a non-required check that is absent renders as
+#           nothing at all. An observer scanning for red sees no red.
+#   2. `if:` on the job evaluates false
+#        -> the run is created with conclusion `skipped`. GitHub renders
+#           `skipped` with a grey icon that most reviewers read as "fine".
+#           Branch protection treats it as satisfied.
+#   3. the gate genuinely ran and every assertion held
+#        -> conclusion `success`. The ONLY one of the three that carries
+#           assurance.
+#
+# Cases 1 and 2 are *selectivity*. Case 3 is *assurance*. Conflating them is
+# how a repo ends up believing a subsystem is covered when its gate has been
+# silently inert for months.
+#
+# This workflow forces the distinction to be explicit and machine-readable.
+# It ALWAYS runs (the caller must not put a `paths:` filter on it), takes the
+# selectivity decision as an INPUT rather than making it via trigger config,
+# and emits exactly one of three verdicts:
+#
+#   pass  — the gate ran and held.        assurance: YES
+#   skip  — the gate did not apply.       assurance: NO  (and says so, loudly)
+#   fail  — the gate ran and did not hold. assurance: NO
+#
+# A `skip` verdict is a GREEN check (so it cannot deadlock branch protection)
+# whose name, summary and output all state that nothing was verified. The
+# green means "this gate was correctly evaluated", never "your code is fine".
+#
+# Consume the `verdict` output to aggregate tiers, and read the job summary
+# for the human-facing reason.
+
+on:
+  workflow_call:
+    inputs:
+      gate_name:
+        type: string
+        required: true
+        description: |
+          Human-readable gate name, e.g. "migrations" or "python-lint".
+          Appears in the check title and the job summary.
+      tier:
+        type: string
+        default: fast
+        description: |
+          Which tier this gate belongs to: `fast` or `pre-production`.
+          Recorded in the summary so a reader can tell whether a failure
+          blocks merge or only blocks promotion.
+      applies:
+        type: boolean
+        required: true
+        description: |
+          Did this gate's subject matter change? TRUE runs the gate; FALSE
+          emits an explicit `skip`. Compute this from a change-detection step
+          in the caller (e.g. dorny/paths-filter, or `git diff --name-only`)
+          — NOT from a workflow-level `paths:` filter, which would prevent
+          this workflow from running at all and defeat the purpose.
+      skip_reason:
+        type: string
+        default: 'no files in scope changed'
+        description: Why the gate did not apply. Shown verbatim on a `skip`.
+      command:
+        type: string
+        default: ''
+        description: |
+          Shell command implementing the gate. Run with `bash -euo pipefail`.
+          Empty + applies=true is a configuration error and fails the gate —
+          a gate that verifies nothing must declare `applies: false`, never
+          quietly succeed.
+      runs_on:
+        type: string
+        default: ubuntu-latest
+        description: Runner label.
+      working_directory:
+        type: string
+        default: '.'
+        description: Directory to run `command` in.
+      timeout_minutes:
+        type: number
+        default: 10
+        description: |
+          Hard ceiling. A fast-tier gate that exceeds its budget is a tier
+          misclassification, so timing out is the correct, loud outcome
+          rather than something to raise silently.
+      setup_command:
+        type: string
+        default: ''
+        description: Optional dependency install, run before `command`.
+      checkout_fetch_depth:
+        type: number
+        default: 0
+        description: fetch-depth for actions/checkout (0 = full history).
+    outputs:
+      verdict:
+        value: ${{ jobs.gate.outputs.verdict }}
+        description: One of `pass`, `skip`, `fail`.
+      applied:
+        value: ${{ jobs.gate.outputs.applied }}
+        description: '`true` when the gate actually executed its command.'
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    # Deliberately NO `if:` here. This job must always run so that its
+    # conclusion is always meaningful. Selectivity is expressed through the
+    # `applies` input, never through the job's existence.
+    name: ${{ inputs.tier }} · ${{ inputs.gate_name }}
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    outputs:
+      verdict: ${{ steps.verdict.outputs.verdict }}
+      applied: ${{ steps.verdict.outputs.applied }}
+    steps:
+      - name: Reject a gate that would verify nothing
+        # Fail-closed on the one configuration that silently destroys
+        # assurance: claiming the gate applies while giving it no command.
+        # Without this, a typo'd input yields a green "pass" that verified
+        # precisely nothing — the exact failure mode this workflow exists
+        # to prevent.
+        if: inputs.applies && inputs.command == ''
+        env:
+          GATE_NAME: ${{ inputs.gate_name }}
+        run: |
+          echo "::error::gate '${GATE_NAME}' declares applies=true but command is empty."
+          echo "::error::A gate that verifies nothing must declare applies=false with a skip_reason."
+          exit 1
+
+      - name: Record skip
+        if: ${{ !inputs.applies }}
+        env:
+          GATE: ${{ inputs.gate_name }}
+          TIER: ${{ inputs.tier }}
+          REASON: ${{ inputs.skip_reason }}
+        run: |
+          {
+            echo "### ⏭️  SKIPPED — \`${GATE}\` (${TIER} tier)"
+            echo
+            echo "**This gate did not run. Nothing was verified.**"
+            echo
+            echo "Reason: ${REASON}"
+            echo
+            echo "> A green check here means the gate was correctly evaluated as"
+            echo "> out of scope for this change. It does **not** mean the code"
+            echo "> covered by this gate is known-good."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=${TIER} gate skipped::${GATE} did not run — ${REASON}. No assurance provided."
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        if: inputs.applies
+        with:
+          fetch-depth: ${{ inputs.checkout_fetch_depth }}
+          persist-credentials: false
+
+      - name: Setup
+        if: ${{ inputs.applies && inputs.setup_command != '' }}
+        working-directory: ${{ inputs.working_directory }}
+        run: ${{ inputs.setup_command }}
+
+      - name: Run gate
+        id: run
+        if: inputs.applies
+        working-directory: ${{ inputs.working_directory }}
+        run: ${{ inputs.command }}
+
+      - name: Record result
+        id: verdict
+        # `always()` so a failing gate still writes its summary and sets a
+        # `fail` verdict for the aggregator, rather than the caller seeing an
+        # empty output it might coerce to "not failing".
+        if: always()
+        env:
+          GATE: ${{ inputs.gate_name }}
+          TIER: ${{ inputs.tier }}
+          APPLIES: ${{ inputs.applies }}
+          OUTCOME: ${{ steps.run.outcome }}
+        run: |
+          if [ "$APPLIES" != "true" ]; then
+            echo "verdict=skip"   >> "$GITHUB_OUTPUT"
+            echo "applied=false"  >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "applied=true" >> "$GITHUB_OUTPUT"
+          if [ "$OUTCOME" = "success" ]; then
+            echo "verdict=pass" >> "$GITHUB_OUTPUT"
+            {
+              echo "### ✅ PASS — \`${GATE}\` (${TIER} tier)"
+              echo
+              echo "Gate ran and every assertion held."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "verdict=fail" >> "$GITHUB_OUTPUT"
+            {
+              echo "### ❌ FAIL — \`${GATE}\` (${TIER} tier)"
+              echo
+              if [ "$TIER" = "fast" ]; then
+                echo "**Blocks merge.** Fix before this PR can land."
+              else
+                echo "**Blocks promotion, not merge.** This change may still"
+                echo "merge to the integration branch; it must not reach"
+                echo "production until this is resolved."
+              fi
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi

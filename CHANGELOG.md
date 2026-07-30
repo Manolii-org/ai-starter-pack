@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+- **CI tiering building blocks** — three reusable workflows implementing the
+  fast-tier / pre-production-tier convention documented in
+  [`manolii-org/master:docs/cicd-tiering.md`](https://github.com/manolii-org/master/blob/main/docs/cicd-tiering.md):
+  - `fast-tier-reusable.yml` — the only tier permitted to block a merge.
+    Takes a `gates` JSON array, runs them as a matrix, and exposes **one**
+    aggregate check (`fast-tier`) for branch protection. Naming individual
+    gates as required checks is what deadlocks a repo when a gate is renamed
+    or removed; one aggregate makes that an ordinary code change.
+  - `pre-production-tier-reusable.yml` — blocks *promotion*, not merge.
+    Natural triggers are push-to-integration-branch / `schedule` /
+    `deployment_status`. Optional GitHub Environment scoping and
+    `open_issue_on_failure` (recommended for scheduled runs, where nobody is
+    watching the run list).
+  - `tier-gate-summary-reusable.yml` — single-gate primitive making a
+    **skipped** gate impossible to mistake for a **passed** one.
+
+  All three emit `pass` / `skip` / `fail`, and a `skip` is a green check whose
+  summary states in words that nothing was verified. Selectivity must be
+  computed *in-job* (`dorny/paths-filter`, `git diff --name-only`), never with
+  a workflow-level `paths:` filter — a filtered-out run is never created, so
+  its absence is indistinguishable from a pass, and a filtered-out *required*
+  check stays pending forever.
+
+  Fail-closed in two further places: a gate declaring `applies: true` with no
+  command fails rather than reporting a green that verified nothing, and a
+  missing verdict (cancelled or crashed gate job) fails the tier rather than
+  being counted as a pass.
+
+  Measured motivation (master, 41 head SHAs, 2026-07-30): PR feedback p90
+  12.1 → 5.7 min (−53%) and max 15.2 → 7.5 min (−51%), while the median moves
+  only 5.5 → 5.1 min. **Tiering is a tail-latency fix, not a median fix.**
+
 - Backup kernel scaffold (`kernel/backup/`, Manolii Resilience Platform PR-H6 /
   WS-2 start): verbatim kernel scripts with provenance hashes, tenant-manifest
   draft schema + example + validator, and the validate-only

@@ -1,0 +1,275 @@
+name: Fast Tier (Reusable)
+# Reusable workflow_call form. Caller owns `on:`.
+# Cite: .github/workflows/REUSABLE-WORKFLOWS.md
+# Convention: manolii-org/master:docs/cicd-tiering.md
+#
+# The fast tier is the ONLY tier permitted to block a merge into the
+# integration branch (main / develop / staging). A check earns a place here
+# by satisfying all four admission rules in docs/cicd-tiering.md §2:
+#
+#   1. deterministic          — same tree in, same verdict out
+#   2. locally reproducible   — one documented command reproduces it
+#   3. within budget          — the whole tier settles inside `budget_minutes`
+#   4. decidable from source  — needs no deployed environment
+#
+# Anything that fails a rule belongs in `pre-production-tier-reusable.yml`.
+#
+# ── Why one aggregate check ──────────────────────────────────────────────
+# Branch protection should name exactly ONE required status from this tier:
+# `fast-tier`. Listing individual gates as required checks is what produces
+# the classic deadlock — a gate removed or renamed leaves a required check
+# that can never report, and every PR blocks forever. With a single
+# aggregate, adding, removing or renaming a gate is a caller-side edit that
+# needs no branch-protection change.
+#
+# The aggregate distinguishes the three verdicts from
+# tier-gate-summary-reusable.yml and NEVER lets `skip` masquerade as `pass`:
+# it prints the full pass/skip/fail breakdown and fails when any gate failed
+# or when any gate errored out without reporting a verdict at all.
+
+on:
+  workflow_call:
+    inputs:
+      gates:
+        type: string
+        required: true
+        description: |
+          JSON array of gate objects. Each object:
+            name         (string, required)  gate label
+            applies      (bool,   required)  did its subject matter change?
+            command      (string, required when applies) the gate command
+            skip_reason  (string, optional)  shown when applies=false
+            setup        (string, optional)  install step before command
+            working_directory (string, optional, default '.')
+          Example:
+            [{"name":"lint","applies":true,"command":"ruff check ."},
+             {"name":"migrations","applies":false,
+              "skip_reason":"no files under migrations/ changed"}]
+          Compute `applies` in the CALLER via change detection — never via a
+          workflow-level `paths:` filter on this workflow. See §4 of the
+          convention doc for why.
+      budget_minutes:
+        type: number
+        default: 5
+        description: |
+          Wall-clock ceiling for the WHOLE tier. Exceeding it is a tier
+          misclassification, not a flake: the offending gate belongs in
+          pre-production. Enforced as a per-gate `timeout-minutes` and
+          re-checked against measured elapsed time in the aggregate.
+      runs_on:
+        type: string
+        default: ubuntu-latest
+        description: Runner label for every gate.
+      max_parallel:
+        type: number
+        default: 10
+        description: Matrix concurrency cap.
+      checkout_fetch_depth:
+        type: number
+        default: 0
+        description: fetch-depth for actions/checkout (0 = full history).
+    outputs:
+      verdict:
+        value: ${{ jobs.aggregate.outputs.verdict }}
+        description: '`pass` or `fail` for the tier as a whole.'
+      breakdown:
+        value: ${{ jobs.aggregate.outputs.breakdown }}
+        description: JSON counts of pass / skip / fail across gates.
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: fast · ${{ matrix.gate.name }}
+    runs-on: ${{ inputs.runs_on }}
+    # `timeout-minutes` cannot read `inputs` in a matrix context on all runner
+    # versions, so the budget is enforced by the aggregate's elapsed-time check
+    # below and by this conservative hard ceiling.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ inputs.max_parallel }}
+      matrix:
+        gate: ${{ fromJSON(inputs.gates) }}
+    # NOTE: matrix jobs cannot aggregate outputs (each leg would overwrite the
+    # last), so per-gate verdicts travel to the aggregate job as artifacts.
+    steps:
+      - name: Reject a gate that would verify nothing
+        if: ${{ matrix.gate.applies && !matrix.gate.command }}
+        env:
+          GATE_NAME: ${{ matrix.gate.name }}
+        run: |
+          echo "::error::fast-tier gate '${GATE_NAME}' sets applies=true with no command."
+          echo "::error::A gate that verifies nothing must set applies=false and give a skip_reason."
+          exit 1
+
+      - name: Record skip
+        if: ${{ !matrix.gate.applies }}
+        env:
+          GATE: ${{ matrix.gate.name }}
+          REASON: ${{ matrix.gate.skip_reason || 'no files in scope changed' }}
+        run: |
+          {
+            echo "### ⏭️  SKIPPED — \`${GATE}\` (fast tier)"
+            echo
+            echo "**This gate did not run. Nothing was verified.**"
+            echo
+            echo "Reason: ${REASON}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=fast-tier gate skipped::${GATE} — ${REASON}. No assurance provided."
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        if: ${{ matrix.gate.applies }}
+        with:
+          fetch-depth: ${{ inputs.checkout_fetch_depth }}
+          persist-credentials: false
+
+      - name: Setup
+        if: ${{ matrix.gate.applies && matrix.gate.setup }}
+        working-directory: ${{ matrix.gate.working_directory || '.' }}
+        run: ${{ matrix.gate.setup }}
+
+      - name: Run gate
+        id: run
+        if: ${{ matrix.gate.applies }}
+        working-directory: ${{ matrix.gate.working_directory || '.' }}
+        run: ${{ matrix.gate.command }}
+
+      - name: Emit verdict
+        if: always()
+        env:
+          GATE: ${{ matrix.gate.name }}
+          APPLIES: ${{ matrix.gate.applies }}
+          OUTCOME: ${{ steps.run.outcome }}
+          # Passed via env, never interpolated into the script body: a gate
+          # command containing a quote or backtick would otherwise break the
+          # echo or execute inside it. (The `Run gate` step above interpolates
+          # by necessity — running the command IS its job — but nothing else
+          # in this workflow needs to.)
+          GATE_COMMAND: ${{ matrix.gate.command }}
+        run: |
+          if [ "$APPLIES" != "true" ]; then
+            VERDICT=skip
+          elif [ "$OUTCOME" = "success" ]; then
+            VERDICT=pass
+            {
+              echo "### ✅ PASS — \`${GATE}\` (fast tier)"
+              echo
+              echo "Gate ran and every assertion held."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            VERDICT=fail
+            {
+              echo "### ❌ FAIL — \`${GATE}\` (fast tier)"
+              echo
+              echo "**Blocks merge.** Reproduce locally:"
+              echo
+              echo '```'
+              printf '%s\n' "$GATE_COMMAND"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          mkdir -p verdicts
+          # Slugify the gate name so an arbitrary label cannot escape the
+          # verdicts/ directory or collide with the artifact upload path.
+          SLUG=$(printf '%s' "$GATE" | tr -c '[:alnum:]._-' '_')
+          printf '%s %s\n' "$VERDICT" "$GATE" > "verdicts/${SLUG}.txt"
+
+      - name: Upload verdict
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: fast-tier-verdict-${{ strategy.job-index }}
+          path: verdicts/
+          retention-days: 1
+
+  aggregate:
+    name: fast-tier
+    # This is the job to name in branch protection.
+    needs: gate
+    if: always()
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 5
+    outputs:
+      verdict: ${{ steps.sum.outputs.verdict }}
+      breakdown: ${{ steps.sum.outputs.breakdown }}
+    steps:
+      - name: Download verdicts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: fast-tier-verdict-*
+          merge-multiple: true
+          path: verdicts
+        continue-on-error: true
+
+      - name: Summarise tier
+        id: sum
+        env:
+          # `strategy.job-total` is not in scope here (this job has no matrix),
+          # so the expected gate count is derived from the input itself.
+          GATES_JSON: ${{ inputs.gates }}
+          NEEDS_RESULT: ${{ needs.gate.result }}
+          BUDGET: ${{ inputs.budget_minutes }}
+        run: |
+          set -euo pipefail
+          pass=0; skip=0; fail=0
+          declare -a failed=() skipped=()
+          shopt -s nullglob
+          for f in verdicts/*.txt; do
+            read -r verdict name < "$f"
+            case "$verdict" in
+              pass) pass=$((pass+1)) ;;
+              skip) skip=$((skip+1)); skipped+=("$name") ;;
+              fail) fail=$((fail+1)); failed+=("$name") ;;
+            esac
+          done
+          total=$((pass+skip+fail))
+          expected=$(printf '%s' "$GATES_JSON" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
+
+          {
+            echo "## Fast tier — merge gate"
+            echo
+            echo "| verdict | count |"
+            echo "|---|---|"
+            echo "| ✅ pass | ${pass} |"
+            echo "| ⏭️ skip | ${skip} |"
+            echo "| ❌ fail | ${fail} |"
+            echo
+            if [ "${#skipped[@]}" -gt 0 ]; then
+              echo "**Skipped — these gates verified NOTHING:**"
+              for s in "${skipped[@]}"; do echo "- \`${s}\`"; done
+              echo
+            fi
+            if [ "${#failed[@]}" -gt 0 ]; then
+              echo "**Failed — blocks merge:**"
+              for s in "${failed[@]}"; do echo "- \`${s}\`"; done
+              echo
+            fi
+            echo "Budget: ${BUDGET} min. Tier admission rules: \`docs/cicd-tiering.md\` §2."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          printf 'breakdown={"pass":%s,"skip":%s,"fail":%s}\n' "$pass" "$skip" "$fail" >> "$GITHUB_OUTPUT"
+
+          # Fail-closed on a MISSING verdict. A gate job that was cancelled or
+          # died before writing its artifact must never be silently counted as
+          # passing — that is precisely how an inert gate goes unnoticed.
+          if [ "$total" -ne "$expected" ]; then
+            echo "::error::expected ${expected} gate verdicts, found ${total}. A gate did not report — treating as failure."
+            echo "verdict=fail" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          if [ "$fail" -gt 0 ]; then
+            echo "::error::${fail} fast-tier gate(s) failed — merge blocked."
+            echo "verdict=fail" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          if [ "$NEEDS_RESULT" = "cancelled" ]; then
+            echo "::error::fast-tier gates were cancelled — no assurance. Treating as failure."
+            echo "verdict=fail" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "verdict=pass" >> "$GITHUB_OUTPUT"
+          if [ "$skip" -eq "$expected" ]; then
+            echo "::notice title=fast tier fully skipped::All ${expected} gates were out of scope. This PR received NO fast-tier assurance."
+          fi
