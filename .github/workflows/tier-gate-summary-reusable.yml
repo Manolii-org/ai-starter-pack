@@ -114,7 +114,21 @@ on:
     outputs:
       verdict:
         value: ${{ jobs.gate.outputs.verdict }}
-        description: One of `pass`, `skip`, `fail`.
+        description: |
+          One of `pass`, `skip`, `fail`.
+
+          CAVEAT: readable by the caller only on `pass` and `skip`. A failing
+          gate FAILS this job, and GitHub does not propagate
+          `on.workflow_call.outputs` from a failed `workflow_call` job — so
+          `needs.<job>.outputs.verdict` is EMPTY on failure, not `'fail'`.
+
+          That is deliberate. Keeping the job green so the output survives
+          would make this primitive fail-OPEN for any caller that forgets to
+          wire the verdict, which inverts the whole point of the tier
+          convention. A red stays red. Callers that must branch on the failure
+          case should read the job's `result` (`failure()` / `needs.<job>.
+          result == 'failure'`), and treat an empty `verdict` as a failure —
+          never as a pass.
       applied:
         value: ${{ jobs.gate.outputs.applied }}
         description: '`true` when the gate actually executed its command.'
