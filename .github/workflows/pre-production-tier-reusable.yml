@@ -478,7 +478,19 @@ jobs:
           fi
           mkdir -p verdicts
           SLUG=$(printf '%s' "$GATE" | tr -c '[:alnum:]._-' '_')
-          printf '%s %s\n' "$VERDICT" "$GATE" > "verdicts/${SLUG}.txt"
+          # `gate-` prefix, NOT decoration. A legitimate gate name starting with
+          # a dot (".NET tests") slugifies to ".NET_tests" and would produce a
+          # HIDDEN verdict file, which breaks the tier twice over:
+          #   1. upload-artifact@v4 excludes hidden files unless
+          #      `include-hidden-files` is set, so the verdict never uploads;
+          #   2. the aggregate globs `verdicts/*.txt`, and bash `*` does not
+          #      match a leading dot either — so even a local file is missed.
+          # Either way the aggregate finds fewer verdicts than gates and fails
+          # the tier. Fails CLOSED, but on a passing gate: a false red that
+          # nobody could diagnose from the run. The prefix is uniform, so the
+          # collision check in `validate` (which compares SLUG, not the
+          # filename) stays exactly as strict.
+          printf '%s %s\n' "$VERDICT" "$GATE" > "verdicts/gate-${SLUG}.txt"
 
       - name: Upload verdict
         if: always()
