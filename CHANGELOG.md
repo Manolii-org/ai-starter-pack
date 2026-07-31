@@ -2,6 +2,59 @@
 
 ## Unreleased
 
+- **CI tiering building blocks** — three reusable workflows implementing the
+  fast-tier / pre-production-tier convention documented in
+  [`manolii-org/master:docs/cicd-tiering.md`](https://github.com/manolii-org/master/blob/main/docs/cicd-tiering.md):
+  - `fast-tier-reusable.yml` — the only tier permitted to block a merge.
+    Takes a `gates` JSON array, runs them as a matrix, and exposes **one**
+    aggregate check (`fast-tier`) for branch protection. Naming individual
+    gates as required checks is what deadlocks a repo when a gate is renamed
+    or removed; one aggregate makes that an ordinary code change.
+  - `pre-production-tier-reusable.yml` — blocks *promotion*, not merge.
+    Natural triggers are push-to-integration-branch / `schedule` /
+    `deployment_status`. Optional GitHub Environment scoping and
+    `open_issue_on_failure` (recommended for scheduled runs, where nobody is
+    watching the run list).
+  - `tier-gate-summary-reusable.yml` — single-gate primitive making a
+    **skipped** gate impossible to mistake for a **passed** one.
+
+  All three emit `pass` / `skip` / `fail`, and a `skip` is a green check whose
+  summary states in words that nothing was verified. Selectivity must be
+  computed *in-job* (`dorny/paths-filter`, `git diff --name-only`), never with
+  a workflow-level `paths:` filter — a filtered-out run is never created, so
+  its absence is indistinguishable from a pass, and a filtered-out *required*
+  check stays pending forever.
+
+  Fail-closed throughout. Both tiers run a `validate` job before any gate, and
+  the aggregate refuses to report `pass` unless it succeeded. Rejected: an
+  empty `gates` array (0 expected + 0 actual verdicts would pass vacuously); a
+  gate missing `applies` or giving a non-boolean (falsy in the matrix
+  expression, so it would record a green `skip` instead of running);
+  `applies: true` with no command; gate names that collide after slugification
+  (verdict artifacts would overwrite each other); and a gate that reported no
+  verdict at all (cancelled or crashed jobs are failures, not passes).
+
+  Two timeouts, and callers must set **both**. `budget_minutes` is **one
+  deadline shared by setup and the gate command** — stamped before checkout,
+  with each step wrapping its command in `timeout` against what remains, so a
+  gate with a setup step cannot take twice the advertised ceiling.
+  `job_timeout_minutes` (fast 15, pre-production 60) is the outer job ceiling
+  and the backstop. They are separate inputs, **not derived** — GitHub Actions
+  expressions have no arithmetic operators, so a computed `budget_minutes + N`
+  fails while evaluating `timeout-minutes` and breaks every caller. The
+  consequence runs the other way: raising a pre-production `budget_minutes`
+  above 60 without also raising `job_timeout_minutes` gets the matrix leg
+  killed at 60 minutes, making the extra budget unreachable.
+
+  The workflow-level `verdict` output is **empty when a tier fails** — GitHub
+  does not propagate `workflow_call` outputs from a failed job. Callers must
+  branch on `needs.<job>.result` and treat an empty verdict as a failure.
+  Keeping the job green so the string survived would make the tier fail *open*.
+
+  Measured motivation (master, 41 head SHAs, 2026-07-30): PR feedback p90
+  12.1 → 5.7 min (−53%) and max 15.2 → 7.5 min (−51%), while the median moves
+  only 5.5 → 5.1 min. **Tiering is a tail-latency fix, not a median fix.**
+
 - Backup kernel scaffold (`kernel/backup/`, Manolii Resilience Platform PR-H6 /
   WS-2 start): verbatim kernel scripts with provenance hashes, tenant-manifest
   draft schema + example + validator, and the validate-only

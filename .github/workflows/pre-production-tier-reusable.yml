@@ -1,0 +1,695 @@
+name: Pre-Production Tier (Reusable)
+# Reusable workflow_call form. Caller owns `on:`.
+# Cite: .github/workflows/REUSABLE-WORKFLOWS.md
+# Convention: manolii-org/master:docs/cicd-tiering.md
+#
+# The pre-production tier holds every check that is REAL but not fast,
+# deterministic, or source-decidable enough to sit in front of a merge:
+# E2E suites against a staging deploy, mutation testing, LLM review and eval
+# gates, migration rehearsals, visual regression, load tests, licence audits.
+#
+# ── The load-bearing rule ────────────────────────────────────────────────
+# This tier does NOT block merging into the integration branch. It blocks
+# PROMOTION out of it. That is the whole point: a slow or nondeterministic
+# check that gates a merge converts every red into an interruption and
+# trains the team to bypass it. The same check gating a promotion is
+# consulted once per release, when someone is already paying attention.
+#
+# Consequently this workflow's natural triggers are `push` to the integration
+# branch, `schedule`, `deployment_status`, and `workflow_dispatch` — NOT
+# `pull_request`. A caller wiring this to `pull_request` has almost certainly
+# misclassified the check; see §3 of the convention doc.
+#
+# ── Failure is still loud ────────────────────────────────────────────────
+# "Does not block merge" is not "is allowed to rot". On failure this workflow
+# fails the run (so the promotion workflow gating on it via `workflow_run`
+# sees a red) and, when `open_issue_on_failure` is set, files a tracking
+# issue. A pre-production tier nobody looks at is worse than no tier at all,
+# because it manufactures the appearance of coverage.
+
+on:
+  workflow_call:
+    inputs:
+      gates:
+        type: string
+        required: true
+        description: |
+          JSON array of gate objects, same shape as fast-tier-reusable.yml:
+            name, applies, command, skip_reason, setup, working_directory
+          `applies` should normally be `true` here — this tier runs after
+          merge, where "which files changed" is a much weaker signal than it
+          is on a PR. Use `false` only for genuinely inapplicable suites
+          (e.g. no mobile client in this repo).
+      budget_minutes:
+        type: number
+        default: 45
+        description: |
+          Wall-clock ceiling per gate. Generous by design; the constraint this
+          tier respects is "finishes before the next promotion", not
+          "finishes before a developer loses focus".
+
+          PER GATE, NOT PER TIER — same caveat as the fast tier: gates beyond
+          `max_parallel` run in later waves and each restarts its own clock, so
+          worst-case tier settle time is
+          `ceil(gates / max_parallel) x budget_minutes`. It matters less here
+          (the constraint is "before the next promotion"), but the arithmetic
+          is the same.
+      job_timeout_minutes:
+        type: number
+        default: 60
+        description: |
+          Outer per-gate JOB ceiling, covering checkout/setup on top of the
+          gate command itself. Keep it above `budget_minutes` (default
+          45 + headroom). The budget itself is ONE deadline shared by
+          `Setup` and `Run gate` — see the `Start the budget clock` step —
+          not a per-step allowance.
+
+          This is a separate input rather than a computed
+          `budget_minutes + N` because **GitHub Actions expressions do not
+          support arithmetic operators** — such an expression fails while
+          evaluating `timeout-minutes`, before any gate can run, breaking
+          every caller.
+      runs_on:
+        type: string
+        default: ubuntu-latest
+        description: Runner label for every gate.
+      max_parallel:
+        type: number
+        default: 4
+        description: |
+          Matrix concurrency cap. Lower than the fast tier by default: these
+          gates typically contend for a shared staging environment.
+      environment:
+        type: string
+        default: ''
+        description: |
+          Optional GitHub Environment. It applies the environment's PROTECTION
+          RULES to these gate jobs — required reviewers, wait timers, branch
+          policies — and scopes which runs may reference its secrets.
+
+          It does NOT inject that environment's secrets into your gate commands.
+          Environment secrets are reachable only through the `secrets` context,
+          and a generic reusable workflow cannot map secret names it does not
+          know; expressions inside `command` are not re-evaluated either. A gate
+          referencing $DATABASE_URL would see an EMPTY variable despite the
+          environment approval.
+
+          To give gates credentials, pass them through the `GATE_SECRETS` secret
+          (newline-delimited KEY=VALUE), which this workflow exports into the
+          gate environment and registers for log masking.
+
+          KNOWN LIMITATION — protection rules apply to SKIPPED gates too.
+          `environment` is set at JOB level, so it covers every matrix leg,
+          including one with `applies: false` that only records a skip. Under a
+          protected environment that leg waits for required reviewers or a wait
+          timer before it can report a skip, which on a `schedule` run means a
+          stalled matrix and a deployment record for work that never happened.
+
+          Attaching the environment only to applicable legs needs the matrix
+          split across two jobs, which would rework this workflow's fail-closed
+          aggregation; that is deliberately NOT done here on an untested
+          workflow. Until it is: with `environment` set, keep every gate
+          `applies: true` (already this tier's documented norm — see `gates`)
+          and put change-detection selectivity in the fast tier, where it
+          belongs and where no environment gates the leg.
+      checkout_fetch_depth:
+        type: number
+        default: 0
+        description: fetch-depth for actions/checkout (0 = full history).
+      open_issue_on_failure:
+        type: boolean
+        default: false
+        description: |
+          File a tracking issue when a gate fails. Recommended for `schedule`
+          runs, where no human is watching the run list. Requires the caller
+          to grant `issues: write`.
+    secrets:
+      GATE_SECRETS:
+        required: false
+        description: |
+          Optional newline-delimited KEY=VALUE pairs exported into every gate's
+          environment (staging DB URLs, API keys). Prefer a GitHub Environment
+          via the `environment` input where possible.
+    outputs:
+      verdict:
+        value: ${{ jobs.aggregate.outputs.verdict }}
+        description: |
+          `pass` or `fail` for the tier as a whole.
+
+          CAVEAT — EMPTY ON FAILURE. A failing tier fails the `aggregate` job,
+          and GitHub does not propagate `on.workflow_call.outputs` from a
+          failed `workflow_call` job. `needs.<job>.outputs.verdict` is
+          therefore EMPTY on failure, never the string `fail`.
+
+          Keeping the job green so the output survived would make this
+          workflow fail-OPEN for any caller that forgets to wire the verdict —
+          inverting the point of the tier. A red stays red. Callers branching
+          on failure must read the job RESULT (`needs.<job>.result ==
+          'failure'`) and treat an empty `verdict` as a failure, never a pass.
+          Same contract as `tier-gate-summary-reusable.yml`.
+      breakdown:
+        value: ${{ jobs.aggregate.outputs.breakdown }}
+        description: JSON counts of pass / skip / fail across gates.
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    # Runs BEFORE any gate. Every check here closes a fail-OPEN path — a way for
+    # the required aggregate to report green without a gate having verified
+    # anything. Malformed input must fail loudly, never degrade to "skip".
+    name: pre-production-tier · validate gate spec
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 5
+    steps:
+      - name: Validate gates JSON
+        env:
+          GATES_JSON: ${{ inputs.gates }}
+        run: |
+          python3 <<'PY'
+          import json, os, sys
+
+          errors = []
+          raw = os.environ.get("GATES_JSON", "")
+          try:
+              gates = json.loads(raw)
+          except json.JSONDecodeError as exc:
+              print(f"::error::`gates` is not valid JSON: {exc}")
+              sys.exit(1)
+
+          if not isinstance(gates, list):
+              print("::error::`gates` must be a JSON array.")
+              sys.exit(1)
+
+          # An empty tier is a VACUOUS PASS: no gate runs, the aggregate finds
+          # 0 expected and 0 actual verdicts, and a required check goes green
+          # having verified nothing. Usually a caller's gate-building step
+          # returning [] by mistake.
+          if not gates:
+              print("::error::`gates` is empty — the pre-production tier would pass without "
+                    "verifying anything. If nothing applies, pass an explicit gate "
+                    "with applies=false and a skip_reason so the skip is visible.")
+              sys.exit(1)
+
+          seen = set()
+          for i, g in enumerate(gates):
+              at = f"gates[{i}]"
+              if not isinstance(g, dict):
+                  errors.append(f"{at}: must be an object.")
+                  continue
+              name = g.get("name")
+              if not isinstance(name, str) or not name.strip():
+                  errors.append(f"{at}: `name` must be a non-empty string.")
+              elif any(ch in name for ch in "\r\n"):
+                  # A newline in a name can close a heredoc block early and
+                  # corrupt $GITHUB_OUTPUT downstream. Reject at the source; the
+                  # aggregate additionally uses a random delimiter.
+                  errors.append(f"{at}: `name` must not contain newlines.")
+              else:
+                  # Verdicts travel as artifacts keyed on a slugified name, so
+                  # two names that slugify identically would overwrite each
+                  # other and silently lose a verdict.
+                  # Must mirror the RUNTIME slug exactly. The runtime uses
+                  # `tr -c '[:alnum:]._-' '_'`, which operates on UTF-8 BYTES in
+                  # the C locale — so a non-ASCII character like "é" becomes two
+                  # underscores there, while Python's str.isalnum() would keep it.
+                  # Diverging here lets "é" and "__" pass validation and then
+                  # collide on disk, losing a verdict.
+                  slug = "".join(
+                      c if (c.isascii() and (c.isalnum() or c in "._-"))
+                      else "_" * len(c.encode("utf-8"))
+                      for c in name
+                  )
+                  if slug in seen:
+                      errors.append(
+                          f"{at}: name {name!r} collides with an earlier gate after "
+                          "slugification; verdicts would overwrite each other."
+                      )
+                  seen.add(slug)
+              # `applies` MUST be a real boolean. A missing or misspelled key
+              # evaluates falsy in the matrix expression, which would record a
+              # green `skip` for a gate that was meant to run.
+              if "applies" not in g:
+                  errors.append(
+                      f"{at}: missing required `applies`. An absent key evaluates "
+                      "false and would record a green skip for a gate that never ran."
+                  )
+              elif not isinstance(g["applies"], bool):
+                  errors.append(
+                      f"{at}: `applies` must be a JSON boolean, got "
+                      f"{type(g['applies']).__name__} ({g['applies']!r}). "
+                      'Quoted "true" is truthy in JSON but not a boolean here.'
+                  )
+              elif g["applies"]:
+                  cmd = g.get("command")
+                  if not isinstance(cmd, str) or not cmd.strip():
+                      errors.append(f"{at}: applies=true requires a non-empty `command`.")
+
+          if errors:
+              for e in errors:
+                  print(f"::error::{e}")
+              sys.exit(1)
+          print(f"gate spec OK — {len(gates)} gate(s)")
+          PY
+
+  gate:
+    name: pre-prod · ${{ matrix.gate.name }}
+    needs: validate
+    runs-on: ${{ inputs.runs_on }}
+    environment: ${{ inputs.environment }}
+    # INDEPENDENT INPUT, not derived. GitHub Actions expressions have no
+    # arithmetic operators, so `budget_minutes + 10` cannot be computed here —
+    # it would fail while evaluating `timeout-minutes`, before any gate runs,
+    # breaking every caller. The consequence is a real footgun in the other
+    # direction: raising `budget_minutes` ALONE does nothing once it passes
+    # this ceiling, because the whole matrix leg is killed here first. Raise
+    # both, or the extra budget is unreachable.
+    timeout-minutes: ${{ inputs.job_timeout_minutes }}
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ inputs.max_parallel }}
+      matrix:
+        gate: ${{ fromJSON(inputs.gates) }}
+    steps:
+      - name: Reject a gate that would verify nothing
+        if: ${{ matrix.gate.applies && !matrix.gate.command }}
+        env:
+          GATE_NAME: ${{ matrix.gate.name }}
+        run: |
+          echo "::error::pre-production gate '${GATE_NAME}' sets applies=true with no command."
+          exit 1
+
+      - name: Record skip
+        if: ${{ !matrix.gate.applies }}
+        env:
+          GATE: ${{ matrix.gate.name }}
+          REASON: ${{ matrix.gate.skip_reason || 'declared not applicable' }}
+        run: |
+          {
+            echo "### ⏭️  SKIPPED — \`${GATE}\` (pre-production tier)"
+            echo
+            echo "**This gate did not run. Nothing was verified.**"
+            echo
+            echo "Reason: ${REASON}"
+            echo
+            echo "> Promotion on the strength of this run carries no assurance"
+            echo "> from this gate."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=pre-production gate skipped::${GATE} — ${REASON}. No assurance provided."
+
+      - name: Start the budget clock
+        # ONE deadline shared by setup AND the gate command.
+        #
+        # Each step previously carried its own `timeout-minutes: budget_minutes`,
+        # so a gate WITH a setup step could consume TWICE the advertised
+        # ceiling — the tier's headline number reading stronger than it was
+        # enforced, the same failure class as a skipped gate reading as a
+        # passed one. The clock starts BEFORE checkout so `budget_minutes`
+        # means what it says: total wall-clock for this gate, not "the command
+        # only, plus however long everything else takes".
+        if: ${{ matrix.gate.applies }}
+        env:
+          BUDGET_MINUTES: ${{ inputs.budget_minutes }}
+        shell: bash -euo pipefail {0}
+        run: echo "GATE_DEADLINE=$(( $(date +%s) + BUDGET_MINUTES * 60 ))" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        if: ${{ matrix.gate.applies }}
+        with:
+          fetch-depth: ${{ inputs.checkout_fetch_depth }}
+          persist-credentials: false
+
+      - name: Export gate secrets
+        # The `secrets` context is NOT available in a step-level `if:`, so the
+        # empty case is handled inside the script rather than by a condition.
+        if: ${{ matrix.gate.applies }}
+        env:
+          GATE_SECRETS: ${{ secrets.GATE_SECRETS }}
+        run: |
+          if [ -z "${GATE_SECRETS:-}" ]; then
+            echo "No GATE_SECRETS provided — nothing to export."
+            exit 0
+          fi
+          # Append to $GITHUB_ENV so values never reach the run log. Actions
+          # masks registered secrets, but an `echo` of a derived value would
+          # still leak — write straight to the env file.
+          count=0
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            case "$line" in
+              *=*)
+                key="${line%%=*}"
+                # RESERVED KEYS. `Export gate secrets` runs AFTER
+                # `Start the budget clock`, and both append to $GITHUB_ENV —
+                # last write wins. A `GATE_DEADLINE=` entry in the bundle would
+                # therefore REPLACE the shared budget deadline: a future value
+                # hands Setup and Run gate a full allowance each (the exact
+                # 2x-budget defect this workflow just fixed), a past value
+                # fails every gate instantly with a false timeout. The gate
+                # command variables are reserved for the same reason.
+                # Rejected loudly, not skipped — a silently dropped secret
+                # would surface later as an unexplained empty variable.
+                case "$key" in
+                  GATE_DEADLINE|GATE_SETUP|GATE_COMMAND|GITHUB_*|RUNNER_*)
+                    echo "::error::GATE_SECRETS contains reserved key '${key}'."
+                    echo "::error::It would overwrite this workflow's own environment."
+                    echo "::error::Rename it in the secret bundle."
+                    exit 1
+                    ;;
+                esac
+                # Register the VALUE for redaction before it can reach a log.
+                # Actions masks the bundled GATE_SECRETS blob (and its whole
+                # KEY=VALUE lines), but NOT an individual value on its own — so
+                # a gate or tool echoing $DATABASE_URL would print it in clear.
+                # `::add-mask::` must precede any use, hence before $GITHUB_ENV.
+                value="${line#*=}"
+                [ -n "$value" ] && echo "::add-mask::${value}"
+                printf '%s\n' "$line" >> "$GITHUB_ENV"
+                count=$((count+1))
+                ;;
+            esac
+          done <<< "$GATE_SECRETS"
+          echo "Exported ${count} gate variable(s)."
+
+      - name: Setup
+        if: ${{ matrix.gate.applies && matrix.gate.setup }}
+        working-directory: ${{ matrix.gate.working_directory || '.' }}
+        shell: bash -euo pipefail {0}
+        # Backstop only. GATE_DEADLINE below is the real constraint;
+        # this bounds the step if the deadline logic were ever bypassed.
+        timeout-minutes: ${{ inputs.budget_minutes }}
+        env:
+          GATE_SETUP: ${{ matrix.gate.setup }}
+        run: |
+          # Remaining share of the ONE budget, not a fresh allowance.
+          # `set -u` means an unset GATE_DEADLINE fails the step rather than
+          # silently running unbounded — fail-closed.
+          remaining=$(( GATE_DEADLINE - $(date +%s) ))
+          if [ "$remaining" -le 0 ]; then
+            echo "::error::gate budget exhausted before setup began."
+            exit 124
+          fi
+          printf '%s\n' "$GATE_SETUP" > "${RUNNER_TEMP}/gate-setup.sh"
+          # GNU coreutils `timeout`, or the Homebrew-prefixed `gtimeout` on
+          # macOS. FAIL CLOSED if neither exists: `runs_on` is a free-form
+          # label, and on a runner without it the budget simply would not be
+          # enforced — an unenforced budget presented as enforced is the exact
+          # failure this convention exists to prevent. Windows `timeout` has
+          # unrelated semantics and is not accepted.
+          if command -v timeout >/dev/null 2>&1; then
+            TIMEOUT_BIN=timeout
+          elif command -v gtimeout >/dev/null 2>&1; then
+            TIMEOUT_BIN=gtimeout
+          else
+            echo "::error::no GNU \`timeout\` (or \`gtimeout\`) on this runner, so the"
+            echo "::error::gate budget cannot be enforced. Use a Linux runner, or install"
+            echo "::error::GNU coreutils (macOS: \`brew install coreutils\`) in a step before this one."
+            exit 1
+          fi
+          rc=0
+          "$TIMEOUT_BIN" --kill-after=30s "${remaining}s" \
+            bash -euo pipefail "${RUNNER_TEMP}/gate-setup.sh" || rc=$?
+          if [ "$rc" -eq 124 ]; then
+            echo "::error::setup exceeded the gate budget. A gate that cannot fit its"
+            echo "::error::budget is a tier misclassification — reclassify it, do not raise the budget."
+          fi
+          exit "$rc"
+
+      - name: Run gate
+        id: run
+        if: ${{ matrix.gate.applies }}
+        # Shares the ONE budget with Setup above; see `Start the budget clock`.
+        timeout-minutes: ${{ inputs.budget_minutes }}
+        working-directory: ${{ matrix.gate.working_directory || '.' }}
+        shell: bash -euo pipefail {0}
+        env:
+          GATE_COMMAND: ${{ matrix.gate.command }}
+        run: |
+          # Remaining share of the ONE budget, not a fresh allowance.
+          # `set -u` means an unset GATE_DEADLINE fails the step rather than
+          # silently running unbounded — fail-closed.
+          remaining=$(( GATE_DEADLINE - $(date +%s) ))
+          if [ "$remaining" -le 0 ]; then
+            echo "::error::gate budget exhausted before command began."
+            exit 124
+          fi
+          printf '%s\n' "$GATE_COMMAND" > "${RUNNER_TEMP}/gate-command.sh"
+          # GNU coreutils `timeout`, or the Homebrew-prefixed `gtimeout` on
+          # macOS. FAIL CLOSED if neither exists: `runs_on` is a free-form
+          # label, and on a runner without it the budget simply would not be
+          # enforced — an unenforced budget presented as enforced is the exact
+          # failure this convention exists to prevent. Windows `timeout` has
+          # unrelated semantics and is not accepted.
+          if command -v timeout >/dev/null 2>&1; then
+            TIMEOUT_BIN=timeout
+          elif command -v gtimeout >/dev/null 2>&1; then
+            TIMEOUT_BIN=gtimeout
+          else
+            echo "::error::no GNU \`timeout\` (or \`gtimeout\`) on this runner, so the"
+            echo "::error::gate budget cannot be enforced. Use a Linux runner, or install"
+            echo "::error::GNU coreutils (macOS: \`brew install coreutils\`) in a step before this one."
+            exit 1
+          fi
+          rc=0
+          "$TIMEOUT_BIN" --kill-after=30s "${remaining}s" \
+            bash -euo pipefail "${RUNNER_TEMP}/gate-command.sh" || rc=$?
+          if [ "$rc" -eq 124 ]; then
+            echo "::error::command exceeded the gate budget. A gate that cannot fit its"
+            echo "::error::budget is a tier misclassification — reclassify it, do not raise the budget."
+          fi
+          exit "$rc"
+
+      - name: Emit verdict
+        if: always()
+        env:
+          GATE: ${{ matrix.gate.name }}
+          APPLIES: ${{ matrix.gate.applies }}
+          OUTCOME: ${{ steps.run.outcome }}
+        run: |
+          if [ "$APPLIES" != "true" ]; then
+            VERDICT=skip
+          elif [ "$OUTCOME" = "success" ]; then
+            VERDICT=pass
+            {
+              echo "### ✅ PASS — \`${GATE}\` (pre-production tier)"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            VERDICT=fail
+            {
+              echo "### ❌ FAIL — \`${GATE}\` (pre-production tier)"
+              echo
+              echo "**Blocks promotion, not merge.** The integration branch may"
+              echo "keep moving; this must be green before anything reaches"
+              echo "production."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          mkdir -p verdicts
+          SLUG=$(printf '%s' "$GATE" | tr -c '[:alnum:]._-' '_')
+          # `gate-` prefix, NOT decoration. A legitimate gate name starting with
+          # a dot (".NET tests") slugifies to ".NET_tests" and would produce a
+          # HIDDEN verdict file, which breaks the tier twice over:
+          #   1. upload-artifact@v4 excludes hidden files unless
+          #      `include-hidden-files` is set, so the verdict never uploads;
+          #   2. the aggregate globs `verdicts/*.txt`, and bash `*` does not
+          #      match a leading dot either — so even a local file is missed.
+          # Either way the aggregate finds fewer verdicts than gates and fails
+          # the tier. Fails CLOSED, but on a passing gate: a false red that
+          # nobody could diagnose from the run. The prefix is uniform, so the
+          # collision check in `validate` (which compares SLUG, not the
+          # filename) stays exactly as strict.
+          printf '%s %s\n' "$VERDICT" "$GATE" > "verdicts/gate-${SLUG}.txt"
+
+      - name: Upload verdict
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          # upload-artifact@v4 treats an existing artifact name as IMMUTABLE, so
+          # on "Re-run all jobs" this upload would fail and leave the previous
+          # attempt's verdict in place — the aggregate would then read a STALE
+          # `pass` for a leg that just failed, and the tier would go green on
+          # last attempt's evidence. Promotion must never rest on that.
+          overwrite: true
+          name: pre-production-verdict-${{ strategy.job-index }}
+          path: verdicts/
+          retention-days: 7
+
+  aggregate:
+    name: pre-production-tier
+    needs: [validate, gate]
+    if: always()
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    outputs:
+      verdict: ${{ steps.sum.outputs.verdict }}
+      breakdown: ${{ steps.sum.outputs.breakdown }}
+    steps:
+      - name: Download verdicts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: pre-production-verdict-*
+          merge-multiple: true
+          path: verdicts
+        continue-on-error: true
+
+      - name: Summarise tier
+        id: sum
+        env:
+          GATES_JSON: ${{ inputs.gates }}
+          NEEDS_RESULT: ${{ needs.gate.result }}
+          VALIDATE_RESULT: ${{ needs.validate.result }}
+        run: |
+          set -euo pipefail
+          # Fail closed if the spec never validated: `if: always()` means this
+          # job runs even when `validate` failed and every gate was skipped.
+          if [ "$VALIDATE_RESULT" != "success" ]; then
+            echo "::error::gate spec validation did not succeed (${VALIDATE_RESULT}) — no assurance."
+            echo "verdict=fail" >> "$GITHUB_OUTPUT"
+            echo 'breakdown={"pass":0,"skip":0,"fail":0}' >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          pass=0; skip=0; fail=0
+          declare -a failed=() skipped=()
+          shopt -s nullglob
+          for f in verdicts/*.txt; do
+            read -r verdict name < "$f"
+            case "$verdict" in
+              pass) pass=$((pass+1)) ;;
+              skip) skip=$((skip+1)); skipped+=("$name") ;;
+              fail) fail=$((fail+1)); failed+=("$name") ;;
+            esac
+          done
+          total=$((pass+skip+fail))
+          expected=$(printf '%s' "$GATES_JSON" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
+          if [ "$expected" -eq 0 ]; then
+            echo "::error::no gates configured — the pre-production tier cannot pass vacuously."
+            echo "verdict=fail" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          {
+            echo "## Pre-production tier — promotion gate"
+            echo
+            echo "| verdict | count |"
+            echo "|---|---|"
+            echo "| ✅ pass | ${pass} |"
+            echo "| ⏭️ skip | ${skip} |"
+            echo "| ❌ fail | ${fail} |"
+            echo
+            if [ "${#skipped[@]}" -gt 0 ]; then
+              echo "**Skipped — these gates verified NOTHING:**"
+              for s in "${skipped[@]}"; do echo "- \`${s}\`"; done
+              echo
+            fi
+            if [ "${#failed[@]}" -gt 0 ]; then
+              echo "**Failed — blocks promotion:**"
+              for s in "${failed[@]}"; do echo "- \`${s}\`"; done
+              echo
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          printf 'breakdown={"pass":%s,"skip":%s,"fail":%s}\n' "$pass" "$skip" "$fail" >> "$GITHUB_OUTPUT"
+          # Random delimiter: gate names are caller-supplied, and a name whose
+          # content includes a line equal to the delimiter would close the block
+          # early and corrupt $GITHUB_OUTPUT (a later `verdict=fail` might then
+          # not parse). `validate` also rejects newlines in names; this is the
+          # defence-in-depth half.
+          DELIM="EOF_$(head -c16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+          {
+            printf 'failed_list<<%s\n' "$DELIM"
+            for s in "${failed[@]}"; do printf -- '- `%s`\n' "$s"; done
+            printf '%s\n' "$DELIM"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ "$total" -ne "$expected" ]; then
+            echo "::error::expected ${expected} gate verdicts, found ${total}. A gate did not report — treating as failure."
+            echo "verdict=fail" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          if [ "$fail" -gt 0 ] || [ "$NEEDS_RESULT" = "failure" ] || [ "$NEEDS_RESULT" = "cancelled" ]; then
+            echo "verdict=fail" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "verdict=pass" >> "$GITHUB_OUTPUT"
+
+      - name: Open tracking issue
+        # Only on a real failure, and only when the caller opted in. Scheduled
+        # runs have no human watching the run list, so a silent red here is
+        # indistinguishable from never having run.
+        if: ${{ failure() && inputs.open_issue_on_failure }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        env:
+          FAILED_LIST: ${{ steps.sum.outputs.failed_list }}
+        with:
+          script: |
+            // AGENTS.md requires an explicit timeout on every external call.
+            // Without one a stalled issues API hangs here until the JOB timeout
+            // kills the step, and the tracking issue that `open_issue_on_failure`
+            // promises is never opened — a silent failure of the one mechanism
+            // that makes a scheduled pre-production red visible to a human.
+            //
+            // A FACTORY, not a constant: `AbortSignal.timeout` starts counting
+            // the moment it is created. One shared signal would give all five
+            // calls 15s BETWEEN them and abort every later call outright once
+            // the first elapsed. Each call gets its own budget.
+            const req = () => ({ request: { signal: AbortSignal.timeout(15_000) } });
+            // Pagination is one logical operation spanning N requests, so it
+            // gets one wider budget rather than 15s per page.
+            const pageReq = { request: { signal: AbortSignal.timeout(60_000) } };
+            const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const title = `[pre-production] gate failure on ${context.ref.replace('refs/heads/', '')}`;
+            const body = [
+              'A pre-production tier gate failed. **Promotion is blocked** until this is resolved.',
+              '',
+              'Failed gates:',
+              process.env.FAILED_LIST || '(see run summary)',
+              '',
+              `Run: ${run}`,
+              '',
+              'Convention: `docs/cicd-tiering.md`',
+            ].join('\n');
+            // Provision the label first. `issues.create` cannot attach a label
+            // that does not exist, and the reuse lookup below searches BY that
+            // label — so on a fresh consumer the first issue would be created
+            // unlabelled (or fail), and every later run would fail to find it
+            // and open a duplicate, defeating the reuse this block promises.
+            const LABEL = 'pre-production-gate';
+            try {
+              await github.rest.issues.getLabel({
+                owner: context.repo.owner, repo: context.repo.repo, name: LABEL, ...req(),
+              });
+            } catch (err) {
+              if (err.status !== 404) throw err;
+              await github.rest.issues.createLabel({
+                owner: context.repo.owner, repo: context.repo.repo, name: LABEL,
+                color: 'B60205',
+                description: 'A pre-production tier gate failed; promotion is blocked.',
+                ...req(),
+              });
+              core.info(`created missing label: ${LABEL}`);
+            }
+            // Reuse an open issue for the same ref so a daily schedule cannot
+            // manufacture an issue per run.
+            // PAGINATE: listForRepo returns 30 by default. On a repo with more
+            // than 30 open issues carrying this label the match falls off page
+            // one, `match` is undefined, and a daily schedule opens a duplicate
+            // every run — precisely what the reuse above claims to prevent.
+            const existing = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', labels: LABEL, per_page: 100, ...pageReq,
+            });
+            const match = existing.find(i => i.title === title);
+            if (match) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: match.number, body, ...req(),
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo,
+                title, body, labels: [LABEL], ...req(),
+              });
+            }

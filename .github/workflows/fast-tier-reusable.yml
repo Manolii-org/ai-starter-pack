@@ -1,0 +1,561 @@
+name: Fast Tier (Reusable)
+# Reusable workflow_call form. Caller owns `on:`.
+# Cite: .github/workflows/REUSABLE-WORKFLOWS.md
+# Convention: manolii-org/master:docs/cicd-tiering.md
+#
+# The fast tier is the ONLY tier permitted to block a merge into the
+# integration branch (main / develop / staging). A check earns a place here
+# by satisfying all four admission rules in docs/cicd-tiering.md §2:
+#
+#   1. deterministic          — same tree in, same verdict out
+#   2. locally reproducible   — one documented command reproduces it
+#   3. within budget          — the whole tier settles inside `budget_minutes`
+#   4. decidable from source  — needs no deployed environment
+#
+# Anything that fails a rule belongs in `pre-production-tier-reusable.yml`.
+#
+# ── Why one aggregate check ──────────────────────────────────────────────
+# Branch protection should name exactly ONE required status from this tier: the
+# aggregate job, which GitHub reports as `<caller job name> / fast-tier` for a
+# called workflow (e.g. `fast-tier / fast-tier`) — NOT the bare `fast-tier`,
+# which would itself never report.
+# Listing individual gates as required checks is what produces
+# the classic deadlock — a gate removed or renamed leaves a required check
+# that can never report, and every PR blocks forever. With a single
+# aggregate, adding, removing or renaming a gate is a caller-side edit that
+# needs no branch-protection change.
+#
+# The aggregate distinguishes the three verdicts from
+# tier-gate-summary-reusable.yml and NEVER lets `skip` masquerade as `pass`:
+# it prints the full pass/skip/fail breakdown and fails when any gate failed
+# or when any gate errored out without reporting a verdict at all.
+
+on:
+  workflow_call:
+    inputs:
+      gates:
+        type: string
+        required: true
+        description: |
+          JSON array of gate objects. Each object:
+            name         (string, required)  gate label
+            applies      (bool,   required)  did its subject matter change?
+            command      (string, required when applies) the gate command
+            skip_reason  (string, optional)  shown when applies=false
+            setup        (string, optional)  install step before command
+            working_directory (string, optional, default '.')
+          Example:
+            [{"name":"lint","applies":true,"command":"ruff check ."},
+             {"name":"migrations","applies":false,
+              "skip_reason":"no files under migrations/ changed"}]
+          Compute `applies` in the CALLER via change detection — never via a
+          workflow-level `paths:` filter on this workflow. See §4 of the
+          convention doc for why.
+      budget_minutes:
+        type: number
+        default: 5
+        description: |
+          Wall-clock ceiling per gate. Exceeding it is a tier
+          misclassification, not a flake: the offending gate belongs in
+          pre-production. Enforced as ONE deadline covering setup AND the
+          gate command (see `Start the budget clock`); the outer
+          job ceiling is the separate `job_timeout_minutes` input.
+
+          PER GATE, NOT PER TIER. The convention's fast-tier budget
+          (docs/cicd-tiering.md §2 Rule 3) is a ceiling on the whole tier's
+          MEASURED p90 settle time; this input bounds ONE gate. They coincide
+          only while the matrix runs in a single wave. With more gates than
+          `max_parallel`, the matrix serialises into
+          `ceil(gates / max_parallel)` waves and each leg starts its own clock
+          when its wave begins — so worst-case tier settle time is
+          `waves x budget_minutes`, not `budget_minutes`.
+
+          A tier-wide deadline is not enforced here: matrix legs cannot share
+          a start timestamp without an extra coordinating job, and adding
+          untested machinery to a workflow that has never executed is the
+          wrong trade. Size it yourself: keep `gates <= max_parallel` for the
+          fast tier, or treat `waves x budget_minutes` as the real ceiling and
+          verify against the measured p90 the convention actually requires.
+      job_timeout_minutes:
+        type: number
+        default: 15
+        description: |
+          Outer per-gate JOB ceiling, covering checkout/setup on top of the
+          gate command itself. Keep it above `budget_minutes` (default
+          5 + headroom). The budget itself is ONE deadline shared by
+          `Setup` and `Run gate` — see the `Start the budget clock` step —
+          not a per-step allowance.
+
+          This is a separate input rather than a computed
+          `budget_minutes + N` because **GitHub Actions expressions do not
+          support arithmetic operators** — such an expression fails while
+          evaluating `timeout-minutes`, before any gate can run, breaking
+          every caller.
+      runs_on:
+        type: string
+        default: ubuntu-latest
+        description: Runner label for every gate.
+      max_parallel:
+        type: number
+        default: 10
+        description: |
+          Matrix concurrency cap. Load-bearing for the tier budget: gates
+          beyond this run in later waves, and each wave restarts the per-gate
+          clock. See `budget_minutes` — worst-case tier settle time is
+          `ceil(gates / max_parallel) x budget_minutes`.
+      checkout_fetch_depth:
+        type: number
+        default: 0
+        description: fetch-depth for actions/checkout (0 = full history).
+    outputs:
+      verdict:
+        value: ${{ jobs.aggregate.outputs.verdict }}
+        description: |
+          `pass` or `fail` for the tier as a whole.
+
+          CAVEAT — EMPTY ON FAILURE. A failing tier fails the `aggregate` job,
+          and GitHub does not propagate `on.workflow_call.outputs` from a
+          failed `workflow_call` job. `needs.<job>.outputs.verdict` is
+          therefore EMPTY on failure, never the string `fail`.
+
+          Keeping the job green so the output survived would make this
+          workflow fail-OPEN for any caller that forgets to wire the verdict —
+          inverting the point of the tier. A red stays red. Callers branching
+          on failure must read the job RESULT (`needs.<job>.result ==
+          'failure'`) and treat an empty `verdict` as a failure, never a pass.
+          Same contract as `tier-gate-summary-reusable.yml`.
+      breakdown:
+        value: ${{ jobs.aggregate.outputs.breakdown }}
+        description: JSON counts of pass / skip / fail across gates.
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    # Runs BEFORE any gate. Every check here closes a fail-OPEN path — a way for
+    # the required aggregate to report green without a gate having verified
+    # anything. Malformed input must fail loudly, never degrade to "skip".
+    name: fast-tier · validate gate spec
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 5
+    steps:
+      - name: Validate gates JSON
+        env:
+          GATES_JSON: ${{ inputs.gates }}
+        run: |
+          python3 <<'PY'
+          import json, os, sys
+
+          errors = []
+          raw = os.environ.get("GATES_JSON", "")
+          try:
+              gates = json.loads(raw)
+          except json.JSONDecodeError as exc:
+              print(f"::error::`gates` is not valid JSON: {exc}")
+              sys.exit(1)
+
+          if not isinstance(gates, list):
+              print("::error::`gates` must be a JSON array.")
+              sys.exit(1)
+
+          # An empty tier is a VACUOUS PASS: no gate runs, the aggregate finds
+          # 0 expected and 0 actual verdicts, and a required check goes green
+          # having verified nothing. Usually a caller's gate-building step
+          # returning [] by mistake.
+          if not gates:
+              print("::error::`gates` is empty — the fast tier would pass without "
+                    "verifying anything. If nothing applies, pass an explicit gate "
+                    "with applies=false and a skip_reason so the skip is visible.")
+              sys.exit(1)
+
+          seen = set()
+          for i, g in enumerate(gates):
+              at = f"gates[{i}]"
+              if not isinstance(g, dict):
+                  errors.append(f"{at}: must be an object.")
+                  continue
+              name = g.get("name")
+              if not isinstance(name, str) or not name.strip():
+                  errors.append(f"{at}: `name` must be a non-empty string.")
+              elif any(ch in name for ch in "\r\n"):
+                  # A newline in a name can close a heredoc block early and
+                  # corrupt $GITHUB_OUTPUT downstream. Reject at the source; the
+                  # aggregate additionally uses a random delimiter.
+                  errors.append(f"{at}: `name` must not contain newlines.")
+              else:
+                  # Verdicts travel as artifacts keyed on a slugified name, so
+                  # two names that slugify identically would overwrite each
+                  # other and silently lose a verdict.
+                  # Must mirror the RUNTIME slug exactly. The runtime uses
+                  # `tr -c '[:alnum:]._-' '_'`, which operates on UTF-8 BYTES in
+                  # the C locale — so a non-ASCII character like "é" becomes two
+                  # underscores there, while Python's str.isalnum() would keep it.
+                  # Diverging here lets "é" and "__" pass validation and then
+                  # collide on disk, losing a verdict.
+                  slug = "".join(
+                      c if (c.isascii() and (c.isalnum() or c in "._-"))
+                      else "_" * len(c.encode("utf-8"))
+                      for c in name
+                  )
+                  if slug in seen:
+                      errors.append(
+                          f"{at}: name {name!r} collides with an earlier gate after "
+                          "slugification; verdicts would overwrite each other."
+                      )
+                  seen.add(slug)
+              # `applies` MUST be a real boolean. A missing or misspelled key
+              # evaluates falsy in the matrix expression, which would record a
+              # green `skip` for a gate that was meant to run.
+              if "applies" not in g:
+                  errors.append(
+                      f"{at}: missing required `applies`. An absent key evaluates "
+                      "false and would record a green skip for a gate that never ran."
+                  )
+              elif not isinstance(g["applies"], bool):
+                  errors.append(
+                      f"{at}: `applies` must be a JSON boolean, got "
+                      f"{type(g['applies']).__name__} ({g['applies']!r}). "
+                      'Quoted "true" is truthy in JSON but not a boolean here.'
+                  )
+              elif g["applies"]:
+                  cmd = g.get("command")
+                  if not isinstance(cmd, str) or not cmd.strip():
+                      errors.append(f"{at}: applies=true requires a non-empty `command`.")
+
+          if errors:
+              for e in errors:
+                  print(f"::error::{e}")
+              sys.exit(1)
+          print(f"gate spec OK — {len(gates)} gate(s)")
+          PY
+
+  gate:
+    name: fast · ${{ matrix.gate.name }}
+    needs: validate
+    runs-on: ${{ inputs.runs_on }}
+    # Outer ceiling with headroom over the tier budget for checkout/setup. The
+    # budget itself is a shared deadline across setup and the gate, so one that
+    # blows its budget fails against the CONFIGURED value rather than a
+    # hard-coded one six times larger.
+    timeout-minutes: ${{ inputs.job_timeout_minutes }}
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ inputs.max_parallel }}
+      matrix:
+        gate: ${{ fromJSON(inputs.gates) }}
+    # NOTE: matrix jobs cannot aggregate outputs (each leg would overwrite the
+    # last), so per-gate verdicts travel to the aggregate job as artifacts.
+    steps:
+      - name: Reject a gate that would verify nothing
+        if: ${{ matrix.gate.applies && !matrix.gate.command }}
+        env:
+          GATE_NAME: ${{ matrix.gate.name }}
+        run: |
+          echo "::error::fast-tier gate '${GATE_NAME}' sets applies=true with no command."
+          echo "::error::A gate that verifies nothing must set applies=false and give a skip_reason."
+          exit 1
+
+      - name: Record skip
+        if: ${{ !matrix.gate.applies }}
+        env:
+          GATE: ${{ matrix.gate.name }}
+          REASON: ${{ matrix.gate.skip_reason || 'no files in scope changed' }}
+        run: |
+          {
+            echo "### ⏭️  SKIPPED — \`${GATE}\` (fast tier)"
+            echo
+            echo "**This gate did not run. Nothing was verified.**"
+            echo
+            echo "Reason: ${REASON}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=fast-tier gate skipped::${GATE} — ${REASON}. No assurance provided."
+
+      - name: Start the budget clock
+        # ONE deadline shared by setup AND the gate command.
+        #
+        # Each step previously carried its own `timeout-minutes: budget_minutes`,
+        # so a gate WITH a setup step could consume TWICE the advertised
+        # ceiling — the tier's headline number reading stronger than it was
+        # enforced, the same failure class as a skipped gate reading as a
+        # passed one. The clock starts BEFORE checkout so `budget_minutes`
+        # means what it says: total wall-clock for this gate, not "the command
+        # only, plus however long everything else takes".
+        if: ${{ matrix.gate.applies }}
+        env:
+          BUDGET_MINUTES: ${{ inputs.budget_minutes }}
+        shell: bash -euo pipefail {0}
+        run: echo "GATE_DEADLINE=$(( $(date +%s) + BUDGET_MINUTES * 60 ))" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        if: ${{ matrix.gate.applies }}
+        with:
+          fetch-depth: ${{ inputs.checkout_fetch_depth }}
+          persist-credentials: false
+
+      - name: Setup
+        if: ${{ matrix.gate.applies && matrix.gate.setup }}
+        working-directory: ${{ matrix.gate.working_directory || '.' }}
+        shell: bash -euo pipefail {0}
+        # Backstop only. GATE_DEADLINE below is the real constraint;
+        # this bounds the step if the deadline logic were ever bypassed.
+        timeout-minutes: ${{ inputs.budget_minutes }}
+        env:
+          GATE_SETUP: ${{ matrix.gate.setup }}
+        run: |
+          # Remaining share of the ONE budget, not a fresh allowance.
+          # `set -u` means an unset GATE_DEADLINE fails the step rather than
+          # silently running unbounded — fail-closed.
+          remaining=$(( GATE_DEADLINE - $(date +%s) ))
+          if [ "$remaining" -le 0 ]; then
+            echo "::error::gate budget exhausted before setup began."
+            exit 124
+          fi
+          printf '%s\n' "$GATE_SETUP" > "${RUNNER_TEMP}/gate-setup.sh"
+          # GNU coreutils `timeout`, or the Homebrew-prefixed `gtimeout` on
+          # macOS. FAIL CLOSED if neither exists: `runs_on` is a free-form
+          # label, and on a runner without it the budget simply would not be
+          # enforced — an unenforced budget presented as enforced is the exact
+          # failure this convention exists to prevent. Windows `timeout` has
+          # unrelated semantics and is not accepted.
+          if command -v timeout >/dev/null 2>&1; then
+            TIMEOUT_BIN=timeout
+          elif command -v gtimeout >/dev/null 2>&1; then
+            TIMEOUT_BIN=gtimeout
+          else
+            echo "::error::no GNU \`timeout\` (or \`gtimeout\`) on this runner, so the"
+            echo "::error::gate budget cannot be enforced. Use a Linux runner, or install"
+            echo "::error::GNU coreutils (macOS: \`brew install coreutils\`) in a step before this one."
+            exit 1
+          fi
+          rc=0
+          "$TIMEOUT_BIN" --kill-after=30s "${remaining}s" \
+            bash -euo pipefail "${RUNNER_TEMP}/gate-setup.sh" || rc=$?
+          if [ "$rc" -eq 124 ]; then
+            echo "::error::setup exceeded the gate budget. A gate that cannot fit its"
+            echo "::error::budget is a tier misclassification — reclassify it, do not raise the budget."
+          fi
+          exit "$rc"
+
+      - name: Run gate
+        id: run
+        if: ${{ matrix.gate.applies }}
+        # Shares the ONE budget with Setup above; see `Start the budget clock`.
+        timeout-minutes: ${{ inputs.budget_minutes }}
+        working-directory: ${{ matrix.gate.working_directory || '.' }}
+        shell: bash -euo pipefail {0}
+        env:
+          GATE_COMMAND: ${{ matrix.gate.command }}
+        run: |
+          # Remaining share of the ONE budget, not a fresh allowance.
+          # `set -u` means an unset GATE_DEADLINE fails the step rather than
+          # silently running unbounded — fail-closed.
+          remaining=$(( GATE_DEADLINE - $(date +%s) ))
+          if [ "$remaining" -le 0 ]; then
+            echo "::error::gate budget exhausted before command began."
+            exit 124
+          fi
+          printf '%s\n' "$GATE_COMMAND" > "${RUNNER_TEMP}/gate-command.sh"
+          # GNU coreutils `timeout`, or the Homebrew-prefixed `gtimeout` on
+          # macOS. FAIL CLOSED if neither exists: `runs_on` is a free-form
+          # label, and on a runner without it the budget simply would not be
+          # enforced — an unenforced budget presented as enforced is the exact
+          # failure this convention exists to prevent. Windows `timeout` has
+          # unrelated semantics and is not accepted.
+          if command -v timeout >/dev/null 2>&1; then
+            TIMEOUT_BIN=timeout
+          elif command -v gtimeout >/dev/null 2>&1; then
+            TIMEOUT_BIN=gtimeout
+          else
+            echo "::error::no GNU \`timeout\` (or \`gtimeout\`) on this runner, so the"
+            echo "::error::gate budget cannot be enforced. Use a Linux runner, or install"
+            echo "::error::GNU coreutils (macOS: \`brew install coreutils\`) in a step before this one."
+            exit 1
+          fi
+          rc=0
+          "$TIMEOUT_BIN" --kill-after=30s "${remaining}s" \
+            bash -euo pipefail "${RUNNER_TEMP}/gate-command.sh" || rc=$?
+          if [ "$rc" -eq 124 ]; then
+            echo "::error::command exceeded the gate budget. A gate that cannot fit its"
+            echo "::error::budget is a tier misclassification — reclassify it, do not raise the budget."
+          fi
+          exit "$rc"
+
+      - name: Emit verdict
+        if: always()
+        env:
+          GATE: ${{ matrix.gate.name }}
+          APPLIES: ${{ matrix.gate.applies }}
+          OUTCOME: ${{ steps.run.outcome }}
+          # Passed via env, never interpolated into the script body: a gate
+          # command containing a quote or backtick would otherwise break the
+          # echo or execute inside it. (The `Run gate` step above interpolates
+          # by necessity — running the command IS its job — but nothing else
+          # in this workflow needs to.)
+          GATE_COMMAND: ${{ matrix.gate.command }}
+        run: |
+          if [ "$APPLIES" != "true" ]; then
+            VERDICT=skip
+          elif [ "$OUTCOME" = "success" ]; then
+            VERDICT=pass
+            {
+              echo "### ✅ PASS — \`${GATE}\` (fast tier)"
+              echo
+              echo "Gate ran and every assertion held."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            VERDICT=fail
+            {
+              echo "### ❌ FAIL — \`${GATE}\` (fast tier)"
+              echo
+              echo "**Blocks merge.** Reproduce locally:"
+              echo
+              echo '```'
+              printf '%s\n' "$GATE_COMMAND"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          mkdir -p verdicts
+          # Slugify the gate name so an arbitrary label cannot escape the
+          # verdicts/ directory or collide with the artifact upload path.
+          SLUG=$(printf '%s' "$GATE" | tr -c '[:alnum:]._-' '_')
+          # `gate-` prefix, NOT decoration. A legitimate gate name starting with
+          # a dot (".NET tests") slugifies to ".NET_tests" and would produce a
+          # HIDDEN verdict file, which breaks the tier twice over:
+          #   1. upload-artifact@v4 excludes hidden files unless
+          #      `include-hidden-files` is set, so the verdict never uploads;
+          #   2. the aggregate globs `verdicts/*.txt`, and bash `*` does not
+          #      match a leading dot either — so even a local file is missed.
+          # Either way the aggregate finds fewer verdicts than gates and fails
+          # the tier. Fails CLOSED, but on a passing gate: a false red that
+          # nobody could diagnose from the run. The prefix is uniform, so the
+          # collision check in `validate` (which compares SLUG, not the
+          # filename) stays exactly as strict.
+          printf '%s %s\n' "$VERDICT" "$GATE" > "verdicts/gate-${SLUG}.txt"
+
+      - name: Upload verdict
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          # upload-artifact@v4 treats an existing artifact name as IMMUTABLE, so
+          # on "Re-run all jobs" this upload would fail and leave the previous
+          # attempt's verdict in place — the aggregate would then read a STALE
+          # `pass` for a leg that just failed, and the tier would go green on
+          # last attempt's evidence. Promotion must never rest on that.
+          overwrite: true
+          name: fast-tier-verdict-${{ strategy.job-index }}
+          path: verdicts/
+          retention-days: 1
+
+  aggregate:
+    name: fast-tier
+    # This is the job to name in branch protection.
+    needs: [validate, gate]
+    if: always()
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 5
+    outputs:
+      verdict: ${{ steps.sum.outputs.verdict }}
+      breakdown: ${{ steps.sum.outputs.breakdown }}
+    steps:
+      - name: Download verdicts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: fast-tier-verdict-*
+          merge-multiple: true
+          path: verdicts
+        continue-on-error: true
+
+      - name: Summarise tier
+        id: sum
+        env:
+          # `strategy.job-total` is not in scope here (this job has no matrix),
+          # so the expected gate count is derived from the input itself.
+          GATES_JSON: ${{ inputs.gates }}
+          NEEDS_RESULT: ${{ needs.gate.result }}
+          VALIDATE_RESULT: ${{ needs.validate.result }}
+          BUDGET: ${{ inputs.budget_minutes }}
+        run: |
+          set -euo pipefail
+          # Fail closed if the spec never validated: `if: always()` means this
+          # job runs even when `validate` failed and every gate was skipped,
+          # which would otherwise leave 0 verdicts and 0 expected.
+          if [ "$VALIDATE_RESULT" != "success" ]; then
+            echo "::error::gate spec validation did not succeed (${VALIDATE_RESULT}) — no assurance."
+            echo "verdict=fail" >> "$GITHUB_OUTPUT"
+            echo 'breakdown={"pass":0,"skip":0,"fail":0}' >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          pass=0; skip=0; fail=0
+          declare -a failed=() skipped=()
+          shopt -s nullglob
+          for f in verdicts/*.txt; do
+            read -r verdict name < "$f"
+            case "$verdict" in
+              pass) pass=$((pass+1)) ;;
+              skip) skip=$((skip+1)); skipped+=("$name") ;;
+              fail) fail=$((fail+1)); failed+=("$name") ;;
+            esac
+          done
+          total=$((pass+skip+fail))
+          expected=$(printf '%s' "$GATES_JSON" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
+          # Belt-and-braces: `validate` already rejects an empty tier, but a
+          # zero here would make the `total -ne expected` check below pass
+          # vacuously and emit a green verdict with no gates at all.
+          if [ "$expected" -eq 0 ]; then
+            echo "::error::no gates configured — the fast tier cannot pass vacuously."
+            echo "verdict=fail" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          {
+            echo "## Fast tier — merge gate"
+            echo
+            echo "| verdict | count |"
+            echo "|---|---|"
+            echo "| ✅ pass | ${pass} |"
+            echo "| ⏭️ skip | ${skip} |"
+            echo "| ❌ fail | ${fail} |"
+            echo
+            if [ "${#skipped[@]}" -gt 0 ]; then
+              echo "**Skipped — these gates verified NOTHING:**"
+              for s in "${skipped[@]}"; do echo "- \`${s}\`"; done
+              echo
+            fi
+            if [ "${#failed[@]}" -gt 0 ]; then
+              echo "**Failed — blocks merge:**"
+              for s in "${failed[@]}"; do echo "- \`${s}\`"; done
+              echo
+            fi
+            echo "Budget: ${BUDGET} min. Tier admission rules: \`docs/cicd-tiering.md\` §2."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          printf 'breakdown={"pass":%s,"skip":%s,"fail":%s}\n' "$pass" "$skip" "$fail" >> "$GITHUB_OUTPUT"
+
+          # Fail-closed on a MISSING verdict. A gate job that was cancelled or
+          # died before writing its artifact must never be silently counted as
+          # passing — that is precisely how an inert gate goes unnoticed.
+          if [ "$total" -ne "$expected" ]; then
+            echo "::error::expected ${expected} gate verdicts, found ${total}. A gate did not report — treating as failure."
+            echo "verdict=fail" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          if [ "$fail" -gt 0 ]; then
+            echo "::error::${fail} fast-tier gate(s) failed — merge blocked."
+            echo "verdict=fail" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          if [ "$NEEDS_RESULT" = "failure" ]; then
+            echo "::error::a fast-tier gate job FAILED. Treating as a tier failure regardless of the verdicts read."
+            echo "verdict=fail" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          if [ "$NEEDS_RESULT" = "cancelled" ]; then
+            echo "::error::fast-tier gates were cancelled — no assurance. Treating as failure."
+            echo "verdict=fail" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "verdict=pass" >> "$GITHUB_OUTPUT"
+          if [ "$skip" -eq "$expected" ]; then
+            echo "::notice title=fast tier fully skipped::All ${expected} gates were out of scope. This PR received NO fast-tier assurance."
+          fi
