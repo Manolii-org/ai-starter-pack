@@ -53,8 +53,9 @@ on:
         description: |
           Outer per-gate JOB ceiling, covering checkout/setup on top of the
           gate command itself. Keep it above `budget_minutes` (default
-          45 + headroom); the budget is enforced separately on the
-          `Run gate` step.
+          45 + headroom). The budget itself is ONE deadline shared by
+          `Setup` and `Run gate` — see the `Start the budget clock` step —
+          not a per-step allowance.
 
           This is a separate input rather than a computed
           `budget_minutes + N` because **GitHub Actions expressions do not

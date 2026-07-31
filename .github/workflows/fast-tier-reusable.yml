@@ -57,7 +57,8 @@ on:
         description: |
           Wall-clock ceiling per gate. Exceeding it is a tier
           misclassification, not a flake: the offending gate belongs in
-          pre-production. Enforced as the `Run gate` step timeout; the outer
+          pre-production. Enforced as ONE deadline covering setup AND the
+          gate command (see `Start the budget clock`); the outer
           job ceiling is the separate `job_timeout_minutes` input.
       job_timeout_minutes:
         type: number
@@ -65,8 +66,9 @@ on:
         description: |
           Outer per-gate JOB ceiling, covering checkout/setup on top of the
           gate command itself. Keep it above `budget_minutes` (default
-          5 + headroom); the budget is enforced separately on the
-          `Run gate` step.
+          5 + headroom). The budget itself is ONE deadline shared by
+          `Setup` and `Run gate` — see the `Start the budget clock` step —
+          not a per-step allowance.
 
           This is a separate input rather than a computed
           `budget_minutes + N` because **GitHub Actions expressions do not
@@ -213,7 +215,7 @@ jobs:
     needs: validate
     runs-on: ${{ inputs.runs_on }}
     # Outer ceiling with headroom over the tier budget for checkout/setup. The
-    # budget itself is enforced on the `Run gate` step below, so a gate that
+    # budget itself is a shared deadline across setup and the gate, so one that
     # blows its budget fails against the CONFIGURED value rather than a
     # hard-coded one six times larger.
     timeout-minutes: ${{ inputs.job_timeout_minutes }}
