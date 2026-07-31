@@ -374,3 +374,144 @@ def test_selftest_exercises_every_tier_reusable() -> None:
             f"{SELFTEST.name} never calls {workflow.name}; it would ship "
             "unexecuted despite a green self-test."
         )
+
+
+# ── Caller permissions: getting this wrong fails with NO diagnostic ────────
+
+
+def required_caller_permissions(workflow: Path) -> dict[str, str]:
+    """Union of every permission any job in a reusable workflow requests.
+
+    A reusable workflow may only RETAIN or REDUCE the caller's token
+    permissions. Anything here that a caller does not grant kills the run as
+    `startup_failure` — instantly, with no jobs, no check run, no annotation
+    and a 404 from the logs endpoint.
+    """
+    data = load(workflow)
+    needed: dict[str, str] = {}
+    for scope, level in (data.get("permissions") or {}).items():
+        needed[scope] = level
+    for job in data["jobs"].values():
+        for scope, level in (job.get("permissions") or {}).items():
+            if level == "write" or scope not in needed:
+                needed[scope] = level
+    return needed
+
+
+@pytest.mark.parametrize(
+    "workflow", TIER_WORKFLOWS + (SUMMARY,), ids=lambda p: p.stem
+)
+def test_selftest_caller_grants_every_permission_the_reusable_needs(
+    workflow: Path,
+) -> None:
+    """Regression guard for a failure mode with no error message at all.
+
+    The first version of the self-test granted only `contents: read` while
+    `pre-production-tier-reusable.yml`'s aggregate job requests
+    `issues: write`. The run died in zero seconds with nothing to read.
+    Any future job that starts requesting a new permission fails here
+    instead — where the reason is stated.
+    """
+    data = load(SELFTEST)
+    ref = f"./.github/workflows/{workflow.name}"
+    workflow_level = data.get("permissions") or {}
+
+    callers = [j for j in data["jobs"].values() if j.get("uses") == ref]
+    assert callers, f"{SELFTEST.name} does not call {workflow.name}"
+
+    for caller in callers:
+        # A job-level `permissions:` block REPLACES the workflow-level one
+        # rather than merging with it, so check whichever actually applies.
+        granted = caller.get("permissions") or workflow_level
+        for scope, level in required_caller_permissions(workflow).items():
+            if level != "write":
+                continue
+            assert granted.get(scope) == "write", (
+                f"{workflow.name} requests `{scope}: write` but the self-test "
+                f"caller grants `{scope}: {granted.get(scope)}`. A reusable "
+                "workflow cannot elevate the caller's permissions — this "
+                "produces a zero-second startup_failure with no logs, no "
+                "check run and no annotation. Grant it on the calling job, "
+                "and document it in REUSABLE-WORKFLOWS.md for consumers."
+            )
+
+
+def test_caller_permission_requirement_is_documented() -> None:
+    """Consumers hit the same trap, and cannot debug it from the run."""
+    docs = (WORKFLOWS / "REUSABLE-WORKFLOWS.md").read_text(encoding="utf-8")
+    for scope, level in required_caller_permissions(PREPROD).items():
+        if level != "write":
+            continue
+        assert f"{scope}: write" in docs, (
+            f"pre-production-tier-reusable.yml requires `{scope}: write` from "
+            "its caller, but REUSABLE-WORKFLOWS.md never says so. A consumer "
+            "would get an unexplained startup_failure."
+        )
+
+
+# ── The summary primitive's own fail-closed path ──────────────────────────
+#
+# Codex P2 on PR #52, correctly: asserting the self-test merely *references*
+# `tier-gate-summary-reusable.yml` proves nothing about its behaviour. Both
+# self-test calls pass either `applies: false` or a valid command, so a
+# regression letting `applies: true` with an empty command report a green
+# `pass` would leave every test green. Extract and exercise the real check.
+
+
+def run_summary_rejection(command: str) -> subprocess.CompletedProcess:
+    """Run the summary reusable's empty-command rejection against a command."""
+    script = step_run(SUMMARY, "gate", "Reject a gate that would verify nothing")
+    return subprocess.run(
+        ["bash", "-c", script],
+        env={**os.environ, "GATE_NAME": "selftest", "GATE_COMMAND": command},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["", "   ", "\t\n "],
+    ids=["empty", "spaces", "whitespace"],
+)
+def test_summary_rejects_applies_true_with_no_command(command: str) -> None:
+    """`applies: true` with no command is a green pass that ran nothing.
+
+    This is the summary primitive's central fail-closed guarantee and the one
+    that makes the whole tier trustworthy: it is the difference between
+    "this gate was evaluated" and "this gate verified your code".
+    """
+    proc = run_summary_rejection(command)
+    assert proc.returncode != 0, (
+        "tier-gate-summary-reusable.yml accepted applies=true with command="
+        f"{command!r} — it would report a green `pass` having executed "
+        f"nothing.\nstdout: {proc.stdout}\nstderr: {proc.stderr}"
+    )
+    assert "::error::" in proc.stdout, "rejection must annotate the run"
+
+
+def test_summary_accepts_applies_true_with_a_real_command() -> None:
+    proc = run_summary_rejection("test -f README.md")
+    assert proc.returncode == 0, (
+        f"rejected a valid gate:\n{proc.stdout}\n{proc.stderr}"
+    )
+
+
+def test_summary_rejection_runs_exactly_when_the_gate_applies() -> None:
+    """The rejection is gated by a step-level `if:`, not by the script.
+
+    The script above only inspects the command, so which gates it protects is
+    decided entirely by this condition. Invert or drop it and `applies: true`
+    with an empty command sails through — the same fail-open the script
+    exists to prevent, reintroduced one line above it and invisible to a test
+    that only runs the script.
+    """
+    for step in load(SUMMARY)["jobs"]["gate"]["steps"]:
+        if step.get("name") == "Reject a gate that would verify nothing":
+            assert step.get("if") == "inputs.applies", (
+                "the empty-command rejection must run exactly when the gate "
+                f"applies; found if: {step.get('if')!r}"
+            )
+            return
+    raise AssertionError("rejection step not found")

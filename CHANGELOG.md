@@ -33,6 +33,15 @@
     slug collisions, a gate that never reported, a gate job that was cancelled).
     Extraction rather than restatement keeps the workflow the single source of
     truth.
+  - **Documented a consumer-facing trap found by actually running them:**
+    a caller of `pre-production-tier-reusable.yml` MUST grant `issues: write`,
+    even when `open_issue_on_failure` is false. Reusable workflows may only
+    retain or reduce the caller's token permissions, and job permissions
+    resolve when the run graph is built — so omitting it kills the run as a
+    zero-second `startup_failure` with no jobs, no check run, no annotation
+    and a 404 from the logs endpoint. There is nothing to read that says why.
+    Now stated in `REUSABLE-WORKFLOWS.md` and enforced by a test that fails if
+    any tier reusable starts requesting a permission its caller does not grant.
 
   All three emit `pass` / `skip` / `fail`, and a `skip` is a green check whose
   summary states in words that nothing was verified. Selectivity must be

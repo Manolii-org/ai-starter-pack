@@ -179,6 +179,37 @@ the workflow** (`dorny/paths-filter`, or `git diff --name-only`), *not* with a
 workflow-level `paths:` filter. A `paths:` filter prevents the run from being
 created at all, which is the one state these workflows cannot annotate.
 
+### Caller permissions are mandatory, and failing them is silent
+
+A reusable workflow may only **retain or reduce** the caller's `GITHUB_TOKEN`
+permissions — never elevate them. `pre-production-tier-reusable.yml`'s
+`aggregate` job requests `issues: write` (for `open_issue_on_failure`), so a
+caller **must** grant it:
+
+```yaml
+permissions:
+  contents: read
+  issues: write     # required by pre-production-tier-reusable.yml
+```
+
+Two things make this a trap rather than an inconvenience:
+
+1. **It is required even with `open_issue_on_failure: false`.** Job
+   permissions resolve when the run graph is built, long before any step
+   reads the input.
+2. **The failure is invisible.** The run dies instantly as
+   `startup_failure` — no jobs, no check run, no annotation, and
+   `GET /actions/runs/{id}/logs` returns 404. There is nothing to read that
+   says why.
+
+`fast-tier-reusable.yml` and `tier-gate-summary-reusable.yml` need only
+`contents: read`. If you scope permissions per job rather than workflow-wide,
+put the grant on the job that has the `uses:` — `permissions` is one of the
+few keys allowed on a reusable-workflow caller job.
+
+This is verified by `tests/test_tier_reusables.py`, which fails if any tier
+reusable starts requesting a permission the self-test caller does not grant.
+
 ### Fail-closed guarantees
 
 Both tier workflows run a `validate` job **before** any gate, and the aggregate

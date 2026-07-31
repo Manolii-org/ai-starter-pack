@@ -60,6 +60,18 @@ jobs:
 
   preprod-positive:
     name: pre-production · pass+skip
+    # MANDATORY, and not obvious: the reusable's `aggregate` job requests
+    # `issues: write` for `open_issue_on_failure`. A reusable workflow may only
+    # RETAIN or REDUCE the caller's GITHUB_TOKEN permissions, never elevate
+    # them — so without this the run dies with a zero-second `startup_failure`
+    # and NO logs, NO check run and NO annotation to explain it.
+    #
+    # It is required even though `open_issue_on_failure` defaults to false:
+    # job permissions resolve when the run graph is built, long before any
+    # step reads the input. This is how the first version of this file failed.
+    permissions:
+      contents: read
+      issues: write
     uses: ./.github/workflows/pre-production-tier-reusable.yml
     with:
       budget_minutes: 5
