@@ -47,6 +47,13 @@ on:
           Wall-clock ceiling per gate. Generous by design; the constraint this
           tier respects is "finishes before the next promotion", not
           "finishes before a developer loses focus".
+
+          PER GATE, NOT PER TIER — same caveat as the fast tier: gates beyond
+          `max_parallel` run in later waves and each restarts its own clock, so
+          worst-case tier settle time is
+          `ceil(gates / max_parallel) x budget_minutes`. It matters less here
+          (the constraint is "before the next promotion"), but the arithmetic
+          is the same.
       job_timeout_minutes:
         type: number
         default: 60

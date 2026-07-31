@@ -224,6 +224,15 @@ misclassification.
 still bounds checkout, which the budget clock covers but cannot `timeout`-wrap
 (checkout is an action, not a shell command).
 
+**`budget_minutes` is per GATE, not per TIER.** The convention's fast-tier
+budget is a ceiling on the whole tier's *measured p90*; this input bounds one
+gate. They coincide only in a single matrix wave. With more gates than
+`max_parallel` the matrix serialises, each wave restarts the per-gate clock,
+and worst-case tier settle time is `ceil(gates / max_parallel) x
+budget_minutes`. Keep `gates <= max_parallel` for the fast tier, or size
+against that product. A tier-wide deadline is deliberately not enforced —
+matrix legs cannot share a start timestamp without an extra coordinating job.
+
 **Runner requirement.** Budget enforcement needs GNU `timeout` (or `gtimeout`,
 the Homebrew coreutils name on macOS). `runs_on` is a free-form label, so both
 tier workflows probe for it and **fail closed** if neither is present — an

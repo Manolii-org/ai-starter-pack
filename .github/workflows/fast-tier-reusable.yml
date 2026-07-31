@@ -60,6 +60,22 @@ on:
           pre-production. Enforced as ONE deadline covering setup AND the
           gate command (see `Start the budget clock`); the outer
           job ceiling is the separate `job_timeout_minutes` input.
+
+          PER GATE, NOT PER TIER. The convention's fast-tier budget
+          (docs/cicd-tiering.md §2 Rule 3) is a ceiling on the whole tier's
+          MEASURED p90 settle time; this input bounds ONE gate. They coincide
+          only while the matrix runs in a single wave. With more gates than
+          `max_parallel`, the matrix serialises into
+          `ceil(gates / max_parallel)` waves and each leg starts its own clock
+          when its wave begins — so worst-case tier settle time is
+          `waves x budget_minutes`, not `budget_minutes`.
+
+          A tier-wide deadline is not enforced here: matrix legs cannot share
+          a start timestamp without an extra coordinating job, and adding
+          untested machinery to a workflow that has never executed is the
+          wrong trade. Size it yourself: keep `gates <= max_parallel` for the
+          fast tier, or treat `waves x budget_minutes` as the real ceiling and
+          verify against the measured p90 the convention actually requires.
       job_timeout_minutes:
         type: number
         default: 15
@@ -82,7 +98,11 @@ on:
       max_parallel:
         type: number
         default: 10
-        description: Matrix concurrency cap.
+        description: |
+          Matrix concurrency cap. Load-bearing for the tier budget: gates
+          beyond this run in later waves, and each wave restarts the per-gate
+          clock. See `budget_minutes` — worst-case tier settle time is
+          `ceil(gates / max_parallel) x budget_minutes`.
       checkout_fetch_depth:
         type: number
         default: 0
