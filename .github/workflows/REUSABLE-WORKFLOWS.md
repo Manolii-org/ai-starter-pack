@@ -201,6 +201,21 @@ propagate `workflow_call` outputs from a failed job. Branch on
 never as a pass. Keeping the job green so the string survived would make the
 tier fail *open*, which is worse than an awkward output contract.
 
+Every row in that table is covered by a test. `tests/test_tier_reusables.py`
+extracts the shipped `validate` and `aggregate` scripts **out of the workflow
+YAML** and runs them against fail-open inputs, so the workflow stays the single
+source of truth and a regression cannot pass unnoticed. It is not a
+restatement: mutate the aggregate's missing-verdict check or the validator's
+empty-spec check and the suite goes red.
+
+`tier-reusables-selftest.yml` covers the other direction — it calls all three
+reusables by local path ref on any PR that touches them, and asserts the
+verdicts and breakdown counts they actually produce. The negatives cannot live
+there: a job calling a reusable workflow may not use `continue-on-error`
+(callers are restricted to `name`/`uses`/`with`/`secrets`/`needs`/`if`/
+`permissions`), so a deliberately-failing tier would turn the run red with no
+way to invert it. Hence the split.
+
 **Known limitation — `environment` also gates skipped legs.** It is set at job
 level, so a `pre-production` gate with `applies: false` still waits for that
 environment's required reviewers before it can report its skip. With

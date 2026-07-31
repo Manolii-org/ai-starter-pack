@@ -17,6 +17,22 @@
     watching the run list).
   - `tier-gate-summary-reusable.yml` — single-gate primitive making a
     **skipped** gate impossible to mistake for a **passed** one.
+- **CI tiering — the reusables are now executed and tested.** They shipped
+  having never run anywhere; a consumer pinning a tag would have been the
+  first to execute them.
+  - `tier-reusables-selftest.yml` calls all three by local path ref on any PR
+    touching them, and asserts the verdicts and pass/skip/fail breakdown they
+    actually produce — so a skip folded into the pass count fails CI here
+    rather than in a consumer's merge queue.
+  - `tests/test_tier_reusables.py` covers the fail-**closed** direction, which
+    the self-test structurally cannot: a job calling a reusable workflow may
+    not use `continue-on-error`, so a deliberately-failing tier would turn the
+    run red with no way to invert it. The suite extracts the shipped
+    `validate` and `aggregate` scripts out of the workflow YAML and runs them
+    against fail-open inputs (empty/malformed spec, non-boolean `applies`,
+    slug collisions, a gate that never reported, a gate job that was cancelled).
+    Extraction rather than restatement keeps the workflow the single source of
+    truth.
 
   All three emit `pass` / `skip` / `fail`, and a `skip` is a green check whose
   summary states in words that nothing was verified. Selectivity must be
