@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 1.8.0 — 2026-07-31
+
+- **`release-tag.yml` now cuts ANNOTATED tags.** It only ever created
+  `refs/tags/X` pointing straight at the commit, which yields a *lightweight*
+  tag — so `v1.7.4`, the first release cut through it, is a bare commit ref
+  while `v1.7.0`–`v1.7.3` are proper tag objects. Both `README.md` and
+  master's `CLAUDE.md` describe pack releases as annotated. The workflow now
+  creates the tag object first and points the ref at it.
+- **Version bookkeeping caught up.** `pack.manifest.yml` still read `1.7.2`
+  after the `v1.7.3` and `v1.7.4` releases; it and the plugin built from it
+  now read `1.8.0`.
+- **Stale `@v1` pins in `REUSABLE-WORKFLOWS.md` replaced with `@v1.8.0`.**
+  The floating `v1` alias points at `06a1d96` — a commit predating the tier
+  reusables — so the tier caller examples resolved to workflows that do not
+  exist there. No consumer actually uses `@v1` (all 15 live pins across the
+  ecosystem are exact versions), so this was a documentation defect only, but
+  it was on the copy-paste path for adopting the tiers.
+
 - **CI tiering building blocks** — three reusable workflows implementing the
   fast-tier / pre-production-tier convention documented in
   [`manolii-org/master:docs/cicd-tiering.md`](https://github.com/manolii-org/master/blob/main/docs/cicd-tiering.md):
