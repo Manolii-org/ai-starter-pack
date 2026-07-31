@@ -1,0 +1,167 @@
+name: Tier Reusables Self-Test
+# Executes the three tier reusables against THIS repo, by local path ref
+# (`./.github/workflows/...`), so a change to them is proven to run before a
+# consumer ever pins a tag.
+#
+# Why this exists: these workflows are published for other repositories to
+# call. Until this file existed they had never executed anywhere — the pack
+# shipped a contract it had never run. Consumers pin a version tag, so a
+# regression here is invisible until it breaks somebody else's merge queue.
+#
+# SCOPE — positive path only. This proves the reusables EXECUTE: a passing
+# gate and a skipped gate together report `pass`, and the skip stays visible
+# in the breakdown rather than being folded into the pass count.
+#
+# The negative path (a failing gate must fail the tier; a malformed or empty
+# spec must be rejected) is NOT testable here. A job that calls a reusable
+# workflow may not use `continue-on-error` — GitHub restricts such callers to
+# name/uses/with/secrets/needs/if/permissions — so a deliberately-failing
+# tier would turn this whole run red with no way to invert the verdict.
+#
+# Those cases live in `tests/test_tier_reusables.py`, which extracts the
+# shipped validator and aggregate scripts straight out of the workflow YAML
+# and runs them against fail-open inputs. Change the logic in either place
+# and that suite fails. Keep the two in step.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/fast-tier-reusable.yml'
+      - '.github/workflows/pre-production-tier-reusable.yml'
+      - '.github/workflows/tier-gate-summary-reusable.yml'
+      - '.github/workflows/tier-reusables-selftest.yml'
+      - 'tests/test_tier_reusables.py'
+  workflow_dispatch:
+
+# A `paths:` filter is correct HERE and would be wrong in a consumer. This
+# workflow is not a gate on the repo's content — it is a test of three
+# specific files, and it is not a required check. The §4 skip-visibility rule
+# governs gates that make an assurance claim about a diff; this one makes no
+# claim about anything except the files it filters on.
+concurrency:
+  group: tier-selftest-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ── POSITIVE: mixed pass + skip must aggregate to `pass` ────────────────
+  fast-positive:
+    name: fast · pass+skip
+    uses: ./.github/workflows/fast-tier-reusable.yml
+    with:
+      budget_minutes: 3
+      job_timeout_minutes: 10
+      gates: >-
+        [{"name":"ran","applies":true,"command":"test -f README.md"},
+         {"name":"did-not-run","applies":false,
+          "skip_reason":"self-test: exercising the skip path deliberately"}]
+
+  preprod-positive:
+    name: pre-production · pass+skip
+    # MANDATORY, and not obvious: the reusable's `aggregate` job requests
+    # `issues: write` for `open_issue_on_failure`. A reusable workflow may only
+    # RETAIN or REDUCE the caller's GITHUB_TOKEN permissions, never elevate
+    # them — so without this the run dies with a zero-second `startup_failure`
+    # and NO logs, NO check run and NO annotation to explain it.
+    #
+    # It is required even though `open_issue_on_failure` defaults to false:
+    # job permissions resolve when the run graph is built, long before any
+    # step reads the input. This is how the first version of this file failed.
+    permissions:
+      contents: read
+      issues: write
+    uses: ./.github/workflows/pre-production-tier-reusable.yml
+    with:
+      budget_minutes: 5
+      job_timeout_minutes: 15
+      gates: >-
+        [{"name":"ran","applies":true,"command":"test -f README.md"},
+         {"name":"did-not-run","applies":false,
+          "skip_reason":"self-test: exercising the skip path deliberately"}]
+
+  summary-skip:
+    name: summary · skip verdict
+    uses: ./.github/workflows/tier-gate-summary-reusable.yml
+    with:
+      gate_name: selftest-skip
+      applies: false
+      skip_reason: 'self-test: nothing in scope changed'
+
+  summary-pass:
+    name: summary · pass verdict
+    uses: ./.github/workflows/tier-gate-summary-reusable.yml
+    with:
+      gate_name: selftest-pass
+      applies: true
+      command: test -f README.md
+
+  assert-positive:
+    name: assert positive verdicts
+    needs: [fast-positive, preprod-positive, summary-skip, summary-pass]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Assert verdicts and breakdowns
+        env:
+          FAST_VERDICT: ${{ needs.fast-positive.outputs.verdict }}
+          FAST_BREAKDOWN: ${{ needs.fast-positive.outputs.breakdown }}
+          PREPROD_VERDICT: ${{ needs.preprod-positive.outputs.verdict }}
+          PREPROD_BREAKDOWN: ${{ needs.preprod-positive.outputs.breakdown }}
+          SKIP_VERDICT: ${{ needs.summary-skip.outputs.verdict }}
+          PASS_VERDICT: ${{ needs.summary-pass.outputs.verdict }}
+        shell: bash -euo pipefail {0}
+        run: |
+          python3 <<'PY'
+          import json, os, sys
+
+          failures = []
+
+          def want(label, got, expected):
+              if got != expected:
+                  failures.append(f"{label}: expected {expected!r}, got {got!r}")
+
+          want("fast-tier verdict", os.environ["FAST_VERDICT"], "pass")
+          want("pre-production verdict", os.environ["PREPROD_VERDICT"], "pass")
+          want("summary skip verdict", os.environ["SKIP_VERDICT"], "skip")
+          want("summary pass verdict", os.environ["PASS_VERDICT"], "pass")
+
+          # The whole point of the tier: a skip must remain COUNTED and
+          # VISIBLE, not folded into the pass total. If a future change makes
+          # `skip` report as `pass`, the verdict above still reads `pass` and
+          # only this breakdown check catches it.
+          for label, key in (("fast-tier", "FAST_BREAKDOWN"),
+                             ("pre-production", "PREPROD_BREAKDOWN")):
+              raw = os.environ[key]
+              try:
+                  counts = json.loads(raw)
+              except json.JSONDecodeError as exc:
+                  failures.append(f"{label} breakdown is not JSON ({exc}): {raw!r}")
+                  continue
+              want(f"{label} breakdown.pass", counts.get("pass"), 1)
+              want(f"{label} breakdown.skip", counts.get("skip"), 1)
+              want(f"{label} breakdown.fail", counts.get("fail"), 0)
+
+          if failures:
+              for f in failures:
+                  print(f"::error::{f}")
+              sys.exit(1)
+          print("All positive verdicts and breakdowns as expected.")
+          PY
+
+  # ── NEGATIVE path — see the SCOPE note in this file's header ────────────
+  fail-closed-tests:
+    name: fail-closed tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with: { persist-credentials: false }
+      - name: Install test dependencies
+        run: python3 -m pip install --quiet pytest pyyaml
+      - name: Fail-closed suite
+        # Extracts the shipped validator/aggregate scripts out of the workflow
+        # YAML and runs them against fail-open inputs. `-p no:randomly` is not
+        # used; order is irrelevant here.
+        run: python3 -m pytest tests/test_tier_reusables.py -q
