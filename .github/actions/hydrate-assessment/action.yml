@@ -1,0 +1,108 @@
+name: Hydrate PR assessment runtime
+description: >-
+  Fill in any PR-assessment runtime file (runner scripts, agent prompts,
+  specialist skill prompts) the calling repository does not already provide,
+  sourced from this pack at a pinned ref. Caller-owned copies always win, so a
+  repo that vendors its own agent prompts keeps them.
+
+inputs:
+  pack_ref:
+    description: >-
+      Git ref of Manolii-org/ai-starter-pack to hydrate from. Callers pinning an
+      immutable reusable tag should pass the same tag so prompts and workflow
+      move together; the default tracks the moving major alias.
+    required: false
+    default: v1
+  pack_repository:
+    description: Repository to hydrate from. Override only for fork testing.
+    required: false
+    default: Manolii-org/ai-starter-pack
+
+runs:
+  using: composite
+  steps:
+    # Public repo — the caller's default GITHUB_TOKEN is sufficient and no PAT
+    # is needed. persist-credentials:false keeps the pack checkout from
+    # rewriting the caller's git credential helper.
+    - name: Check out pack at pinned ref
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      with:
+        repository: ${{ inputs.pack_repository }}
+        ref: ${{ inputs.pack_ref }}
+        path: .pack-hydrate
+        persist-credentials: false
+
+    - name: Hydrate missing runtime files
+      shell: bash
+      run: |
+        set -euo pipefail
+        src=".pack-hydrate"
+
+        # Keep this list in lockstep with the runners' own hard-coded paths:
+        #   run-pr-classifier.py  -> .claude/agents/pr-classifier.md
+        #   run-broad-agents.py   -> .claude/agents/{systems-consistency,
+        #                            architecture-impact,security-deep-dive}.md
+        #   run-specialists.py    -> .claude/skills/<skill>/SKILL.md for each
+        #                            name in run-pr-classifier.py _VALID_SKILLS
+        #   run-judge.py          -> no prompt file (system prompt is inline)
+        # tests/test_hydrate_assessment.py fails if they drift apart.
+        files=(
+          "scripts/run-pr-classifier.py"
+          "scripts/run-specialists.py"
+          "scripts/run-broad-agents.py"
+          "scripts/run-judge.py"
+          ".claude/agents/pr-classifier.md"
+          ".claude/agents/systems-consistency.md"
+          ".claude/agents/architecture-impact.md"
+          ".claude/agents/security-deep-dive.md"
+          ".claude/skills/shell-security/SKILL.md"
+          ".claude/skills/config-completeness/SKILL.md"
+          ".claude/skills/migration-safety/SKILL.md"
+          ".claude/skills/docs-fact-check/SKILL.md"
+          ".claude/skills/test-adequacy/SKILL.md"
+          ".claude/skills/security-boundary-test/SKILL.md"
+          ".claude/skills/scope-adherence/SKILL.md"
+        )
+
+        hydrated=0
+        kept=0
+        for f in "${files[@]}"; do
+          if [[ -e "$f" ]]; then
+            kept=$((kept + 1))
+            continue
+          fi
+          if [[ ! -e "$src/$f" ]]; then
+            # Fail loud: a path listed here that the pack no longer ships means
+            # the runners and this list have drifted. Silently continuing would
+            # surface later as an opaque FileNotFoundError inside a runner.
+            echo "::error::hydrate-assessment: $f missing from ${{ inputs.pack_repository }}@${{ inputs.pack_ref }}"
+            exit 1
+          fi
+          mkdir -p "$(dirname "$f")"
+          cp "$src/$f" "$f"
+          hydrated=$((hydrated + 1))
+        done
+
+        chmod +x scripts/run-pr-classifier.py scripts/run-specialists.py \
+                 scripts/run-broad-agents.py scripts/run-judge.py 2>/dev/null || true
+
+        echo "hydrate-assessment: $hydrated file(s) taken from the pack, $kept caller-owned file(s) kept."
+
+    # The hydrated tree is scratch: leaving it behind would put a full second
+    # copy of the pack in front of any later step that walks the workspace
+    # (semgrep, skill discovery, artifact upload globs).
+    - name: Remove pack checkout
+      shell: bash
+      run: rm -rf .pack-hydrate
+
+    # The runners import yaml to parse agent/skill frontmatter. GitHub-hosted
+    # images happen to ship PyYAML, so this has been an undeclared dependency;
+    # self-hosted and slim runners do not. Install only when the import fails.
+    - name: Ensure PyYAML
+      shell: bash
+      run: |
+        set -euo pipefail
+        if ! python3 -c "import yaml" 2>/dev/null; then
+          echo "PyYAML not present — installing."
+          python3 -m pip install --quiet --disable-pip-version-check pyyaml
+        fi

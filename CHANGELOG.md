@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- **`pr-assessment-reusable.yml` now hydrates its own runtime.** The four runner
+  scripts and the agent/skill prompts they read were only ever shipped by the
+  Copier template or master's capability sync, so calling the reusable from a
+  repo without a `.claude/` tree failed. Each runner job now probes the
+  workspace and pulls only the files the caller is missing, from this pack at
+  the new `pack_ref` input (default: the `v1` alias). Caller-owned copies always
+  win, and the pack is not checked out at all when nothing is missing — so an
+  unreachable `pack_ref` cannot affect a repo that ships its own runtime.
+  Adopting the pipeline is now a one-file change in the consumer.
+  This removes the `pr-assessment-workflow` retirement blocker recorded in
+  `manolii-org/master:scripts/sync-retirement-queue.json` ("Workflow-only on
+  pack; agents/skills/scripts remain copy-synced").
+- **`release-tag.yml` now moves the `v1` major alias.** `REUSABLE-WORKFLOWS.md`
+  documented `v1` as a moving alias that Renovate tracks, but nothing ever moved
+  it: `v1` pointed at v1.7.2 while releases ran ahead to v1.8.0, so consumers
+  extending the alias silently received stale content.
+- **PyYAML is no longer an undeclared dependency.** The runners import `yaml` to
+  parse frontmatter and relied on GitHub-hosted images happening to ship it;
+  the probe step now installs it when the import fails, so slim and self-hosted
+  runners work.
+- `tests/test_hydrate_assessment.py` derives the required runtime set from the
+  runners themselves (`BROAD_AGENTS`, `_VALID_SKILLS`) and fails if the
+  hydration list drifts from what the scripts actually read.
+
 ## 1.8.0 — 2026-07-31
 
 - **`release-tag.yml` now cuts ANNOTATED tags.** It only ever created

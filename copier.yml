@@ -147,6 +147,11 @@ _exclude:
   # Template-repo-only test (needs copier.yml + .brand; also carries brand
   # literals in assertions that would trip the unbranded brand-leak scan)
   - tests/test_copier_render.py
+  # Template-repo-only test: asserts on pr-assessment-reusable.yml, which is
+  # pack-only — consumers get a caller (pr-assessment.yml) instead. The file
+  # also carries its own skipif guard, so an instance that already has a copy
+  # skips rather than fails.
+  - tests/test_hydrate_assessment.py
   # Build artifacts / caches
   - .ruff_cache
   - .ruff_cache/**
