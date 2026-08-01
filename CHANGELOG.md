@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.9.0 — 2026-08-01
+
 - **`pr-assessment-reusable.yml` now hydrates its own runtime.** The four runner
   scripts and the agent/skill prompts they read were only ever shipped by the
   Copier template or master's capability sync, so calling the reusable from a
