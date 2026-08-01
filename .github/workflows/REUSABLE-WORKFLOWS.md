@@ -53,6 +53,7 @@ env:
 | **static-review-reusable** | `runs_on`, `node_version=24`, `python_version=3.14`, `paths_ignore` | none |
 | **mutation-testing-diff-reusable** | `runs_on`, `node_version=24`, `paths_ignore` | none |
 | **claude-md-contract-reusable** | `runs_on`, `python_version=3.12`, `require_contract=false` | none |
+| **pr-assessment-reusable** | `provider_mode=anthropic`, `litellm_proxy_url`, `model`, `runs_on`, `pack_ref=v1`, `trusted_sync_author_id` | `ANTHROPIC_API_KEY` (anthropic mode) or `LITELLM_MASTER_KEY` (proxy mode) |
 | **fast-tier-reusable** | `gates` (JSON, required), `budget_minutes=5`, `job_timeout_minutes=15`, `runs_on`, `max_parallel=10`, `checkout_fetch_depth=0` | none |
 | **pre-production-tier-reusable** | `gates` (JSON, required), `budget_minutes=45`, `job_timeout_minutes=60`, `runs_on`, `max_parallel=4`, `environment`, `checkout_fetch_depth=0`, `open_issue_on_failure=false` | `GATE_SECRETS` (optional) |
 | **tier-gate-summary-reusable** | `gate_name` (required), `applies` (required), `tier=fast`, `command`, `skip_reason`, `setup_command`, `runs_on`, `working_directory`, `timeout_minutes=10`, `checkout_fetch_depth=0` | none |
@@ -111,6 +112,39 @@ jobs:
       LITELLM_MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY }}
 ```
 
+### pr-assessment: adopting in a repo with no `.claude/` payload
+
+The four runner scripts read prompts off disk — `run-pr-classifier.py` reads
+`.claude/agents/pr-classifier.md`, `run-broad-agents.py` reads the three broad
+agents, `run-specialists.py` reads one `SKILL.md` per routed specialist.
+`run-judge.py` needs no prompt file (its system prompt is inline).
+
+You do **not** have to vendor any of that. Each runner job probes the workspace
+first and hydrates only what is missing, from this pack at `pack_ref`:
+
+| Caller state | What happens |
+|---|---|
+| Ships all 15 runtime files (e.g. a Copier-rendered instance) | Nothing is fetched — probe reports "no hydration" and the pack is never checked out |
+| Ships some (a customised agent prompt, say) | Only the absent files are taken from the pack; **caller-owned copies always win** |
+| Ships none (a repo adopting the pipeline cold) | All 15 are hydrated |
+
+So adopting the pipeline in a repo that has no `.claude/` tree at all is a
+**one-file change** — just the caller above. Because the pack checkout is
+conditional on the probe, an unreachable or mistyped `pack_ref` cannot break a
+repo that needs no hydration.
+
+`pack_ref` defaults to the moving `v1` alias. If you pin the reusable to an
+immutable tag and want prompts and workflow to move together, pass the same tag:
+
+```yaml
+    with:
+      pack_ref: v1.8.0
+```
+
+The hydration list lives in the workflow-level `ASSESSMENT_RUNTIME_FILES` env.
+`tests/test_hydrate_assessment.py` derives the required set from the runners
+themselves (`BROAD_AGENTS`, `_VALID_SKILLS`) and fails if the two drift apart.
+
 ## Renovate Config
 
 Auto-bump reusable-workflow pins via this custom manager:
@@ -131,6 +165,10 @@ Auto-bump reusable-workflow pins via this custom manager:
 ```
 
 Tag strategy: immutable vX.Y.Z + moving `v1` major alias (regex tracks the moving tag).
+The alias is moved by `release-tag.yml` on every release. It was documented as
+moving long before anything moved it — `v1` sat on v1.7.2 while releases ran to
+v1.8.0, so anyone extending the alias silently got stale content. Treat a `v1`
+that lags the newest vX.Y.Z as a release-workflow bug, not as intended pinning.
 
 ## Decision Log
 

@@ -37,6 +37,7 @@ jobs:
             exit 1
           fi
       - name: Create tag ref
+        id: create
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag }}
@@ -84,3 +85,49 @@ jobs:
             -H "Content-Type: application/json" \
             "https://api.github.com/repos/$REPO/git/refs" \
             -d "$PAYLOAD"
+          # Published so the alias step reuses the sha resolved HERE. Re-reading
+          # /commits/$TAG there would race tag-ref replication and 404.
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      # REUSABLE-WORKFLOWS.md documents `v1` as a MOVING major alias that
+      # Renovate tracks, and pr-assessment-reusable.yml defaults its hydration
+      # `pack_ref` to it — but nothing ever moved it, so `v1` sat on v1.7.2
+      # while releases ran ahead to v1.8.0. Consumers extending the alias
+      # silently got stale content. Move it here so the documented contract is
+      # the enforced one.
+      - name: Move major-version alias
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+          SHA: ${{ steps.create.outputs.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          MAJOR="${TAG%%.*}"          # v1.9.0 -> v1
+          # inputs.sha is empty when the caller defaulted to main HEAD, so take
+          # the sha the create step actually tagged.
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "Create step published no usable sha — leaving $MAJOR unmoved" >&2
+            exit 1
+          fi
+          # Lightweight on purpose: a moving alias cannot be an annotated tag
+          # object, and this matches how upstream actions publish @v<major>.
+          PAYLOAD=$(SHA="$SHA" python3 -c "import json,os; print(json.dumps({'sha': os.environ['SHA'], 'force': True}))")
+          # PATCH updates an existing alias; a first-ever major needs POST.
+          if curl -sf --max-time 30 -X PATCH \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "Content-Type: application/json" \
+              "https://api.github.com/repos/$REPO/git/refs/tags/$MAJOR" \
+              -d "$PAYLOAD" >/dev/null; then
+            echo "Moved $MAJOR -> $SHA"
+          else
+            CREATE=$(MAJOR="$MAJOR" SHA="$SHA" python3 -c "import json,os; print(json.dumps({'ref': 'refs/tags/' + os.environ['MAJOR'], 'sha': os.environ['SHA']}))")
+            curl -sf --max-time 30 -X POST \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "Content-Type: application/json" \
+              "https://api.github.com/repos/$REPO/git/refs" \
+              -d "$CREATE"
+            echo "Created $MAJOR -> $SHA"
+          fi
