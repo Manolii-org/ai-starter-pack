@@ -37,6 +37,7 @@ jobs:
             exit 1
           fi
       - name: Create tag ref
+        id: create
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag }}
@@ -84,6 +85,9 @@ jobs:
             -H "Content-Type: application/json" \
             "https://api.github.com/repos/$REPO/git/refs" \
             -d "$PAYLOAD"
+          # Published so the alias step reuses the sha resolved HERE. Re-reading
+          # /commits/$TAG there would race tag-ref replication and 404.
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
 
       # REUSABLE-WORKFLOWS.md documents `v1` as a MOVING major alias that
       # Renovate tracks, and pr-assessment-reusable.yml defaults its hydration
@@ -95,21 +99,19 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag }}
-          SHA: ${{ inputs.sha }}
+          SHA: ${{ steps.create.outputs.sha }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           MAJOR="${TAG%%.*}"          # v1.9.0 -> v1
-          # Resolve the tag we just created rather than trusting inputs.sha,
-          # which is empty when the caller defaulted to main HEAD.
-          SHA=$(curl -sf --max-time 30 -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/$REPO/commits/$TAG" \
-            | python3 -c "import json,sys; print(json.load(sys.stdin)['sha'])")
+          # inputs.sha is empty when the caller defaulted to main HEAD, so take
+          # the sha the create step actually tagged.
           if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
-            echo "Could not resolve $TAG to a commit sha — leaving $MAJOR unmoved" >&2
+            echo "Create step published no usable sha — leaving $MAJOR unmoved" >&2
             exit 1
           fi
+          # Lightweight on purpose: a moving alias cannot be an annotated tag
+          # object, and this matches how upstream actions publish @v<major>.
           PAYLOAD=$(SHA="$SHA" python3 -c "import json,os; print(json.dumps({'sha': os.environ['SHA'], 'force': True}))")
           # PATCH updates an existing alias; a first-ever major needs POST.
           if curl -sf --max-time 30 -X PATCH \
