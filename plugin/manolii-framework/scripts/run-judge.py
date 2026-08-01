@@ -29,6 +29,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Hidden marker stamped into every posted review, used for idempotency.
+REVIEW_MARKER = "<!-- pr-assessment-v1 -->"
+# The judge posts through the Actions GITHUB_TOKEN, so its reviews are authored by
+# github-actions[bot] — an identity a PR author cannot forge, unlike the marker text.
+# Both must match before a review counts as "the judge already spoke for this SHA".
+JUDGE_REVIEW_AUTHOR = "github-actions[bot]"
+# GitHub caps per_page at 100; the page cap is a runaway guard, not a real limit.
+_REVIEWS_PER_PAGE = 100
+_MAX_REVIEW_PAGES = 100
+
 
 class Finding:
     """Represents a single PR assessment finding."""
@@ -287,7 +297,7 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
 
         # Format review body
         body_lines = [
-            "<!-- pr-assessment-v1 -->",
+            REVIEW_MARKER,
             "## PR Assessment Review",
         ]
 
@@ -349,38 +359,63 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
             return False
 
     def _review_exists_at_sha(self) -> bool:
-        """Check if a review with marker already exists at this SHA."""
+        """Check if a review by the judge with the marker already exists at this SHA.
+
+        Requires BOTH the marker AND the judge's author identity. The marker is public
+        text — anyone who can review the PR can paste it, and a PR that discusses this
+        file contains it. Matching on the marker alone lets an unrelated review suppress
+        a genuine judge verdict, which is a silent loss: the assessment reports success
+        and posts nothing.
+
+        PAGINATES. The reviews endpoint returns 30 per page by default, oldest-first,
+        and the review we care about is the newest. Unpaginated, any PR with more than
+        30 reviews stops matching its own earlier verdict and posts a duplicate on
+        every re-run.
+        """
         if not self.token or not self.repo:
             return False
 
-        try:
-            url = (
-                f"https://api.github.com/repos/{self.repo}/pulls/"
-                f"{self.pr_number}/reviews"
-            )
-            req = urllib.request.Request(
-                url,
-                headers={
-                    "Authorization": f"Bearer {self.token}",
-                    "Accept": "application/vnd.github.v3+json",
-                },
-                method="GET",
-            )
+        for page in range(1, _MAX_REVIEW_PAGES + 1):
+            try:
+                url = (
+                    f"https://api.github.com/repos/{self.repo}/pulls/"
+                    f"{self.pr_number}/reviews"
+                    f"?per_page={_REVIEWS_PER_PAGE}&page={page}"
+                )
+                req = urllib.request.Request(
+                    url,
+                    headers={
+                        "Authorization": f"Bearer {self.token}",
+                        "Accept": "application/vnd.github.v3+json",
+                    },
+                    method="GET",
+                )
 
-            with urllib.request.urlopen(req, timeout=10) as response:
-                reviews = json.loads(response.read().decode("utf-8"))
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    reviews = json.loads(response.read().decode("utf-8"))
+            except Exception as e:
+                # Fail open, as before: a lookup failure must not block the verdict.
+                logger.error(f"Failed to check existing reviews (page {page}): {e}")
+                return False
+
+            if not isinstance(reviews, list):
+                logger.error("Unexpected reviews response shape — skipping duplicate check")
+                return False
 
             for review in reviews:
-                if review.get("commit_id") == self.sha:
-                    body = review.get("body", "")
-                    if "pr-assessment-v1" in body:
-                        return True
+                author = (review.get("user") or {}).get("login")
+                if (
+                    review.get("commit_id") == self.sha
+                    and author == JUDGE_REVIEW_AUTHOR
+                    and REVIEW_MARKER in (review.get("body") or "")
+                ):
+                    return True
 
-            return False
+            if len(reviews) < _REVIEWS_PER_PAGE:
+                return False
 
-        except Exception as e:
-            logger.error(f"Failed to check existing reviews: {e}")
-            return False
+        logger.error(f"Hit the {_MAX_REVIEW_PAGES}-page cap scanning reviews")
+        return False
 
     def write_log_entry(
         self,
