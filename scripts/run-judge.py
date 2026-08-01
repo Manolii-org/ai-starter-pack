@@ -542,7 +542,7 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
         try:
             request_body = {
                 "body": (
-                    "<!-- pr-assessment-v1 -->\n"
+                    f"{REVIEW_MARKER}\n"
                     "## PR Assessment\n"
                     "No actionable findings produced by specialist agents."
                 ),
@@ -579,7 +579,7 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
         try:
             request_body = {
                 "body": (
-                    "<!-- pr-assessment-v1 -->\n"
+                    f"{REVIEW_MARKER}\n"
                     "## PR Assessment\n"
                     "⚠️ Assessment system encountered an error. "
                     "Manual review recommended."

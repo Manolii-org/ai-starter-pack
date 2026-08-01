@@ -122,11 +122,48 @@ def test_api_error_fails_open(judge, monkeypatch):
     assert judge._review_exists_at_sha() is False
 
 
-def test_posted_body_uses_the_marker_constant():
-    """The body builder and the lookup must not drift apart on the marker text."""
+def test_malformed_response_fails_open(judge, monkeypatch):
+    """A non-list payload must not be iterated as if it were reviews."""
+
+    def not_a_list(req, timeout=None):
+        return _FakeResponse(json.dumps({"message": "Not Found"}).encode())
+
+    monkeypatch.setattr(rj.urllib.request, "urlopen", not_a_list)
+    assert judge._review_exists_at_sha() is False
+
+
+def test_page_cap_is_bounded(judge, monkeypatch):
+    """A server that never returns a short page must not spin the loop forever."""
+    calls = {"n": 0}
+
+    def always_full(req, timeout=None):
+        calls["n"] += 1
+        # Always a full page, never the SHA — the only exit is the page cap.
+        page = [_review(rj.REVIEW_MARKER, commit_id="other")] * rj._REVIEWS_PER_PAGE
+        return _FakeResponse(json.dumps(page).encode())
+
+    monkeypatch.setattr(rj.urllib.request, "urlopen", always_full)
+    assert judge._review_exists_at_sha() is False
+    assert calls["n"] == rj._MAX_REVIEW_PAGES, (
+        f"expected the walk to stop at the {rj._MAX_REVIEW_PAGES}-page cap, "
+        f"got {calls['n']} requests"
+    )
+
+
+def test_marker_text_appears_exactly_once_in_the_source():
+    """Every posting path must build its body from REVIEW_MARKER, not a literal.
+
+    Counting the RAW marker text, not a quoted literal: the earlier form
+    `'"<!-- pr-assessment-v1 -->"'` missed `"<!-- pr-assessment-v1 -->\\n"` in
+    _post_no_findings_comment and _post_advisory_warning, so it passed while two
+    hardcoded copies survived. A stale copy is not cosmetic — the lookup matches on
+    REVIEW_MARKER, so a drifted posting path posts reviews the dedup cannot see, and
+    every re-run adds another.
+    """
     source = (REPO_ROOT / "scripts" / "run-judge.py").read_text()
-    assert source.count('"<!-- pr-assessment-v1 -->"') == 1, (
-        "the marker literal should exist once, as REVIEW_MARKER"
+    assert source.count("<!-- pr-assessment-v1 -->") == 1, (
+        "the marker text must appear once, as REVIEW_MARKER — "
+        "every other site should interpolate the constant"
     )
 
 
