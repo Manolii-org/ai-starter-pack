@@ -8,6 +8,19 @@ Consumers adopt the ecosystem's dependency policy by extending the pack:
 }
 ```
 
+Consumers that pin the preset to a release tag are also tracked:
+
+```json
+{
+  "extends": ["github>Manolii-org/ai-starter-pack#v1.9.0"]
+}
+```
+
+The preset's regex manager scans `renovate.json` for that form and opens the
+next pack-bump PR. This is separate from the `.starter-pack-source` manager:
+without the `renovate.json` manager, Renovate can resolve a pinned preset but
+cannot discover that the pin itself is a dependency to update.
+
 ## What it does
 
 - **Automerges pin/digest rotations only** (GitHub-action digests, docker
