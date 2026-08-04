@@ -138,6 +138,9 @@ _exclude:
   # "github>Manolii-org/ai-starter-pack" — copying it into a rendered repo
   # would shadow the shared preset with a stale local snapshot.
   - default.json
+  # Maintainer config: governs this source repository and must not overwrite a
+  # consumer-owned Renovate configuration during copy/update.
+  - renovate.json
   - docs/renovate-preset.md
   - pack.manifest.yml
   - .brand
@@ -147,6 +150,9 @@ _exclude:
   # Template-repo-only test (needs copier.yml + .brand; also carries brand
   # literals in assertions that would trip the unbranded brand-leak scan)
   - tests/test_copier_render.py
+  # Template-repo-only test: asserts on default.json and the maintainer-only
+  # renovate.json, both excluded from rendered consumers.
+  - tests/test_renovate_config.py
   # Template-repo-only test: asserts on pr-assessment-reusable.yml, which is
   # pack-only — consumers get a caller (pr-assessment.yml) instead. The file
   # also carries its own skipif guard, so an instance that already has a copy

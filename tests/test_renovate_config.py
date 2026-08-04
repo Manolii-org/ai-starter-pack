@@ -2,6 +2,8 @@ import json
 import re
 from pathlib import Path
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -10,6 +12,13 @@ def test_pack_is_governed_by_ecosystem_renovate_policy() -> None:
     config = json.loads((ROOT / "renovate.json").read_text())
 
     assert config["extends"] == ["github>manolii-org/master"]
+
+
+def test_pack_only_renovate_files_are_not_rendered_into_consumers() -> None:
+    copier_config = yaml.safe_load((ROOT / "copier.yml").read_text())
+    exclusions = set(copier_config["_exclude"])
+
+    assert {"renovate.json", "tests/test_renovate_config.py"} <= exclusions
 
 
 def test_preset_pin_manager_extracts_supported_consumer_pins() -> None:

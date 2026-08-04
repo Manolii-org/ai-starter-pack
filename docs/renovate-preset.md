@@ -21,9 +21,9 @@ next pack-bump PR. This is separate from the `.starter-pack-source` manager:
 without the `renovate.json` manager, Renovate can resolve a pinned preset but
 cannot discover that the pin itself is a dependency to update.
 
-> **Bootstrap note:** a pinned preset is immutable. Consumers still on v1.9.0
-> or earlier cannot load this manager from a newer pack commit. Ecosystem
-> consumers are bootstrapped by the independently updated Manolii master or
+> **Bootstrap note:** a pinned preset does not follow later releases. Consumers
+> still on v1.9.0 or earlier cannot load this manager from a newer pack commit.
+> Ecosystem consumers are bootstrapped by the independently updated Manolii master or
 > Buro org-local preset; a standalone consumer needs one final manual bump to
 > the first release containing this manager. From that release onward, this
 > manager discovers subsequent preset tags automatically.
