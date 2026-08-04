@@ -11,6 +11,15 @@
       "depNameTemplate": "Manolii-org/ai-starter-pack",
       "datasourceTemplate": "github-tags",
       "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "description": "Track versioned AI Starter Pack preset pins in consumer Renovate configuration.",
+      "managerFilePatterns": ["/(^|/)renovate\\.json$/"],
+      "matchStrings": ["github>[Mm]anolii-org/ai-starter-pack#(?<currentValue>v?[^\\\"\\s]+)"],
+      "depNameTemplate": "Manolii-org/ai-starter-pack",
+      "datasourceTemplate": "github-tags",
+      "versioningTemplate": "semver"
     }
   ],
   "timezone": "Europe/London",
