@@ -82,19 +82,30 @@ primary_region = "lax"
   cpus = 2
 ```
 
-### 4. Point heavy CI jobs at Fly (not Autofix)
+### 4. Point heavy CI jobs at Fly (house-guard — not Autofix)
 
-In long-running **CI** workflows only, change:
-
-```yaml
-runs-on: ubuntu-latest
-```
-
-to:
+For fleet tenants (Manolii / Impaktful / Buro), heavy **product CI** must use the
+house-guard expression — **not** a static label list. Static labels have no
+kill-switch; inverting the fallback to `ubuntu-latest` while
+`CI_RUNNER_OVERRIDE` is deleted is the Impaktful #1737 regression
+(warm Fly idle + hosted burn).
 
 ```yaml
-runs-on: [self-hosted, fly, linux]
+runs-on: >-
+  ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      && fromJSON(vars.CI_RUNNER_OVERRIDE || '["self-hosted","fly"]')
+      || 'ubuntu-latest' }}
 ```
+
+**Kill-switch:** set `CI_RUNNER_OVERRIDE=["ubuntu-latest"]`. Never invert the
+fallback. Do **not** set override to Fly repo-wide (quality/autofix often prefer
+OVERRIDE first). Register paths in `manolii-org/master`
+`config/fleet-consumer-product-ci.yaml` for the scheduled canary.
+
+`ci-reusable.yml` still defaults `runs_on: ubuntu-latest` for non-fleet pack
+consumers — fleet tenants must pass a Fly house-guard expression (or migrate to
+a fleet-aware caller). Labels registered by the fleet image are `self-hosted`
++ `fly` (no extra `linux` required).
 
 Keep Autofix / auto-merge / bot-review-relay control-plane jobs on `ubuntu-latest`.
 Pack Autofix also enforces `max_successful_fixes` (default 1) and the dual-ownership
