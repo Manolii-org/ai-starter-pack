@@ -8,7 +8,7 @@ name: PR Autofix Loop
 #     whose body starts with '**[@' (from bot-review-relay.yml).
 #   - Optional CI failure path via workflow_run (conclusion=failure).
 #   - Skips when latest commit message starts with [autofix] (loop break).
-  - Per-PR cap: skips after max_successful_fixes (standalone default 1).
+# - Per-PR cap: skips after max_successful_fixes (standalone default 1).
 # For proxy mode, delegate to reusable form with provider_mode inputs.
 # See docs/pr-autofix-loop-policy.md.
 

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.9.4 — 2026-08-05
+
+- **Hotfix: Autofix workflow YAML headers.** v1.9.3 accidentally inserted an
+  uncommented `Per-PR cap` bullet into the file header of both
+  `pr-autofix-loop.yml` and `pr-autofix-loop-reusable.yml`, which is invalid
+  YAML. Comment the bullet; no behavioural change.
+
 ## 1.9.3 — 2026-08-05
 
 - **SHA-pin `anthropics/claude-code-action`.** Standalone and reusable Autofix
