@@ -10,7 +10,7 @@ name: PR Autofix Loop (Reusable)
 #     whose body starts with '**[@' (from bot-review-relay.yml).
 #   - Optional CI failure path via caller workflow_run (conclusion=failure).
 #   - Skips when latest commit message starts with [autofix] (loop break).
-  - Per-PR cap: skips after max_successful_fixes successful [autofix] commits (default 1).
+# - Per-PR cap: skips after max_successful_fixes successful [autofix] commits (default 1).
 # Master auto-address-review.yml is NOT used here — pack Autofix owns relays.
 # See REUSABLE-WORKFLOWS.md + docs/fly-runner-setup.md.
 
