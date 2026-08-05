@@ -2,6 +2,8 @@ name: PR Autofix Loop (Reusable)
 # Reusable workflow_call form of pr-autofix-loop.yml.
 # Caller owns the `on:` triggers (issue_comment, pull_request_review, pull_request_review_comment).
 # Dual provider_mode: anthropic (direct ANTHROPIC_API_KEY) | proxy (LiteLLM via ANTHROPIC_BASE_URL + LITELLM_MASTER_KEY).
+# Control-plane contract (pack >= v1.9.1): keep runs_on at ubuntu-latest (hosted). Do not
+# route Autofix onto Fly pools shared with heavy CI — see docs/fly-runner-setup.md.
 # See REUSABLE-WORKFLOWS.md for caller wiring examples and secret passing conventions.
 
 on:
@@ -10,6 +12,7 @@ on:
       provider_mode: { type: string, default: anthropic, description: 'anthropic (direct ANTHROPIC_API_KEY) | proxy (LiteLLM via ANTHROPIC_BASE_URL + LITELLM_MASTER_KEY).' }
       litellm_proxy_url: { type: string, default: '', description: 'Proxy base URL for proxy mode; pass vars.LITELLM_PROXY_URL.' }
       model: { type: string, default: '', description: 'Optional model id override; empty = script/action default.' }
+      # Default hosted. Override only with an operator-approved isolated pool — never shared Fly CI.
       runs_on: { type: string, default: ubuntu-latest }
     secrets:
       ANTHROPIC_API_KEY: { required: false, description: 'Required when provider_mode=anthropic.' }

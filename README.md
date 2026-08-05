@@ -8,16 +8,16 @@ Canonical home for the AI Starter Pack: a [Copier](https://copier.readthedocs.io
 
 ## Consumer pins (Prompt 11)
 
-Go-forward release: **`v1.9.0`** (annotated tag on `main`).
+Go-forward release: **`v1.9.1`** (annotated tag on `main`).
 
 ```yaml
 # Reusable workflows
-uses: Manolii-org/ai-starter-pack/.github/workflows/ci-reusable.yml@v1.9.0
+uses: Manolii-org/ai-starter-pack/.github/workflows/ci-reusable.yml@v1.9.1
 # Plugin
-# /plugin install manolii-framework@v1.9.0
+# /plugin install manolii-framework@v1.9.1
 ```
 
-Renovate preset: `extends: ["github>Manolii-org/ai-starter-pack"]` (optionally pin `#v1.9.0`).
+Renovate preset: `extends: ["github>Manolii-org/ai-starter-pack"]` (optionally pin `#v1.9.1`).
 
 Legacy `manolii-org/master@v1` still serves `routing-lint` / `shared-config` until those move to the pack — dual Renovate extends are expected during dual-run.
 
