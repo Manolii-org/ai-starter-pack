@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 1.9.3 — 2026-08-05
+
+- **SHA-pin `anthropics/claude-code-action`.** Standalone and reusable Autofix
+  pin immutable `9db594c7a0e82298c121c18b7f08aa1579ce7341` (`# v1.0.185`) —
+  no more floating `@beta`.
+- **Per-PR successful-fix budget.** Reusable input `max_successful_fixes`
+  (default `1`) skips further Autofix once that many `[autofix]` commits exist
+  on the PR; standalone hard-defaults to 1. Posts a budget-exhausted PR comment.
+- **Dual-ownership XOR lint.** `scripts/lint-autofix-xor.py` +
+  `tests/test_autofix_xor_ownership.py` fail closed if pack Autofix relay-accept
+  coexists with `auto-address-review.yml`, or if workflow YAML contains literal
+  bracketed redaction placeholders.
+- **Cost alarm path.** `docs/autofix-cost-alarms.md` documents Langfuse / proxy
+  alarm wiring for proxy Autofix without hardcoding credentials.
+
 ## 1.9.2 — 2026-08-05
 
 - **`bot-review-relay.yml` stays hosted.** Like `pr-autofix-loop-reusable.yml`,
