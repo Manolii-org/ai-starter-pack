@@ -9,6 +9,10 @@ name: PR Assessment
 # AI-driven PR review pipeline. Runs on every PR against main/master.
 # Stages: pr-classifier → specialist skills → broad agents → judge
 #
+# Fleet tenants: LLM jobs use Fly house-guard; SAST stays ubuntu-latest.
+# Kill-switch: CI_RUNNER_OVERRIDE=["ubuntu-latest"]. Non-fleet: set OVERRIDE
+# to ubuntu or leave without fly-labeled runners.
+#
 # Requires:
 #   ANTHROPIC_API_KEY — for Claude API calls (or LITELLM_PROXY_URL + LLM_API_KEY)
 #   GH_TOKEN (GITHUB_TOKEN) — for judge to post review comments
@@ -36,7 +40,10 @@ permissions:
 jobs:
   classify:
     name: Classify PR
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+          && fromJSON(vars.CI_RUNNER_OVERRIDE || '["self-hosted","fly"]')
+          || 'ubuntu-latest' }}
     if: |
       !contains(github.event.pull_request.labels.*.name, 'skip-ai-review') &&
       !startsWith(github.event.pull_request.title, 'chore(sync):')
@@ -135,7 +142,10 @@ jobs:
 
   specialists:
     name: Specialist Skills
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+          && fromJSON(vars.CI_RUNNER_OVERRIDE || '["self-hosted","fly"]')
+          || 'ubuntu-latest' }}
     needs: [classify, sast]
     if: needs.classify.outputs.invoke_skills != ''
     steps:
@@ -167,7 +177,10 @@ jobs:
 
   broad-agents:
     name: Broad Agents
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+          && fromJSON(vars.CI_RUNNER_OVERRIDE || '["self-hosted","fly"]')
+          || 'ubuntu-latest' }}
     needs: [classify, sast]
     if: needs.classify.outputs.depth == 'broad'
     steps:
@@ -199,7 +212,10 @@ jobs:
 
   judge:
     name: Judge
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+          && fromJSON(vars.CI_RUNNER_OVERRIDE || '["self-hosted","fly"]')
+          || 'ubuntu-latest' }}
     needs: [classify, specialists, broad-agents]
     if: always() && needs.classify.result == 'success' && needs.classify.outputs.depth != 'none'
     steps:
