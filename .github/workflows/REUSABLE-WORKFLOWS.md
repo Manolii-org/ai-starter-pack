@@ -3,7 +3,7 @@
 Canonical home for AI Starter Pack reusable GitHub Actions workflows. Consumed via:
 
 ```yaml
-uses: manolii-org/ai-starter-pack/.github/workflows/<name>-reusable.yml@v1.9.1
+uses: manolii-org/ai-starter-pack/.github/workflows/<name>-reusable.yml@v1.9.2
 ```
 
 Frozen at v1 (additive=non-breaking; rename/remove/default-change=v2).
@@ -84,7 +84,7 @@ permissions:
 
 jobs:
   ci:
-    uses: manolii-org/ai-starter-pack/.github/workflows/ci-reusable.yml@v1.9.0
+    uses: manolii-org/ai-starter-pack/.github/workflows/ci-reusable.yml@v1.9.2
     with:
       runs_on: ubuntu-latest
       node_version: '24'
@@ -105,7 +105,7 @@ permissions:
 
 jobs:
   assessment:
-    uses: manolii-org/ai-starter-pack/.github/workflows/pr-assessment-reusable.yml@v1.9.0
+    uses: manolii-org/ai-starter-pack/.github/workflows/pr-assessment-reusable.yml@v1.9.2
     with:
       provider_mode: proxy
       litellm_proxy_url: ${{ vars.LITELLM_PROXY_URL }}
@@ -139,7 +139,7 @@ immutable tag and want prompts and workflow to move together, pass the same tag:
 
 ```yaml
     with:
-      pack_ref: v1.9.0
+      pack_ref: v1.9.2
 ```
 
 The hydration list lives in the workflow-level `ASSESSMENT_RUNTIME_FILES` env.
@@ -392,7 +392,7 @@ jobs:
           EOF
   fast-tier:
     needs: detect
-    uses: manolii-org/ai-starter-pack/.github/workflows/fast-tier-reusable.yml@v1.9.0
+    uses: manolii-org/ai-starter-pack/.github/workflows/fast-tier-reusable.yml@v1.9.2
     with:
       gates: ${{ needs.detect.outputs.gates }}
       budget_minutes: 5
@@ -412,7 +412,7 @@ permissions:
   issues: write
 jobs:
   pre-production-tier:
-    uses: manolii-org/ai-starter-pack/.github/workflows/pre-production-tier-reusable.yml@v1.9.0
+    uses: manolii-org/ai-starter-pack/.github/workflows/pre-production-tier-reusable.yml@v1.9.2
     with:
       gates: >-
         [{"name":"e2e","applies":true,"command":"pnpm test:e2e"},
@@ -438,10 +438,10 @@ Phase-1 exit) — see `kernel/backup/README.md`.
 ```yaml
 jobs:
   validate-backup-manifest:
-    uses: manolii-org/ai-starter-pack/.github/workflows/backup-kernel-validate-reusable.yml@v1.9.0
+    uses: manolii-org/ai-starter-pack/.github/workflows/backup-kernel-validate-reusable.yml@v1.9.2
     with:
       manifest_path: config/backup-tenant.yaml
-      pack_ref: v1.9.0   # keep identical to the `uses:` pin — the pack cannot discover its own ref
+      pack_ref: v1.9.2   # keep identical to the `uses:` pin — the pack cannot discover its own ref
 ```
 
 ## pr-autofix-loop-reusable
@@ -450,6 +450,15 @@ Thin caller for review-comment Autofix. **Keep `runs_on` at `ubuntu-latest`**
 (hosted control-plane). See `docs/fly-runner-setup.md`.
 
 Caller owns triggers + concurrency. OSS / Buro universes use `provider_mode: proxy`.
+
+**Optional `workflow_run`:** The reusable supports `workflow_run` triggers to retry
+failed CI (e.g., when Static Review, PR Assessment, or Secret Scan workflows fail).
+Autofix will only run on Pull Requests, not scheduled runs or other workflow_run events.
+
+**Relay acceptance:** Autofix processes comments starting with `**[@` posted by
+`github-actions[bot]` (typically relayed by `bot-review-relay.yml`). The pack owns
+relay transport — do **not** install `manolii-org/master` `auto-address-review.yml`
+on the same repo alongside pack Autofix (creates duplicate processing).
 
 ```yaml
 name: PR Autofix Loop
@@ -460,6 +469,9 @@ on:
     types: [submitted]
   pull_request_review_comment:
     types: [created]
+  workflow_run:
+    workflows: [Static Review, PR Assessment, Secret Scan, CI]
+    types: [completed]
 
 concurrency:
   group: pr-autofix-${{ github.event.pull_request.number || github.event.issue.number }}
@@ -472,7 +484,7 @@ permissions:
 
 jobs:
   autofix:
-    uses: Manolii-org/ai-starter-pack/.github/workflows/pr-autofix-loop-reusable.yml@v1.9.1
+    uses: Manolii-org/ai-starter-pack/.github/workflows/pr-autofix-loop-reusable.yml@v1.9.2
     with:
       provider_mode: proxy
       litellm_proxy_url: ${{ vars.LITELLM_PROXY_URL }}
@@ -486,3 +498,13 @@ jobs:
 Product repos that deliberately keep Autofix off (e.g. Buro `bcp-core` ADR-0006)
 should not add this caller.
 
+
+## bot-review-relay
+
+Portable relay for github-actions[bot] review comments from a master copy or external
+source. Like `pr-autofix-loop-reusable.yml`, stays on **`ubuntu-latest`** (hosted
+control-plane). See `docs/fly-runner-setup.md`.
+
+Relayed comments are accepted by Autofix when they start with `**[@` — the pack
+handles the integration. Do **not** install the master `auto-address-review.yml`
+on the same repository.

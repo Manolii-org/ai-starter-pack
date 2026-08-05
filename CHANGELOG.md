@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+## 1.9.2 — 2026-08-05
+
+- **`bot-review-relay.yml` stays hosted.** Like `pr-autofix-loop-reusable.yml`,
+  the bot-review relay control-plane must remain on GitHub-hosted runners
+  (added note to `docs/fly-runner-setup.md`).
+- **Autofix accepts relayed github-actions[bot] comments.** The Autofix loop
+  in the pack now processes comments **starting with `**[@`** posted by
+  `github-actions[bot]` (relayed by `bot-review-relay.yml` from a separate
+  master copy). Pack owns relay transport; do **not** install
+  `manolii-org/master` `auto-address-review.yml` on the same repo alongside
+  pack Autofix (creates duplicate processing).
+- **Optional `workflow_run` CI failure path.** Both standalone
+  `pr-autofix-loop.yml` and `pr-autofix-loop-reusable.yml` can now trigger on
+  `workflow_run` to retry failed CI (documented in
+  `.github/workflows/REUSABLE-WORKFLOWS.md`; example caller includes workflow_run trigger for Static Review, PR Assessment, Secret Scan, and CI).
+- **[autofix] HEAD commit loop break.** Fixes the edge case where Autofix
+  pushes a commit, then the commit hash appears in a new review and re-triggers
+  Autofix on its own commit (infinite loop risk on fast feedback). Loop now
+  checks `git log -1 --format=%B` for the commit it is about to push and skips
+  identical fixes.
+- **Docs and caller examples updated.** All reference pins to `pr-autofix-loop-reusable.yml`
+  in `REUSABLE-WORKFLOWS.md` bumped to `@v1.9.2`; new `workflow_run`
+  example block added showing CI triggers (Static Review, PR Assessment, Secret Scan).
+
 ## 1.9.1 — 2026-08-05
 
 - **Autofix control-plane stays on GitHub-hosted runners.** `docs/fly-runner-setup.md`

@@ -96,7 +96,7 @@ to:
 runs-on: [self-hosted, fly, linux]
 ```
 
-Keep Autofix / auto-merge / bot-relay control-plane jobs on `ubuntu-latest`.
+Keep Autofix / auto-merge / bot-review-relay control-plane jobs on `ubuntu-latest`.
 
 ### 5. Register and start
 
