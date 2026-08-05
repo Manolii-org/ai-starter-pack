@@ -97,6 +97,9 @@ runs-on: [self-hosted, fly, linux]
 ```
 
 Keep Autofix / auto-merge / bot-review-relay control-plane jobs on `ubuntu-latest`.
+Pack Autofix also enforces `max_successful_fixes` (default 1) and the dual-ownership
+XOR with master `auto-address-review.yml` — see `docs/autofix-cost-alarms.md` and
+`scripts/lint-autofix-xor.py`.
 
 ### 5. Register and start
 

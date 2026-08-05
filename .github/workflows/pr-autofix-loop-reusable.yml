@@ -5,11 +5,12 @@ name: PR Autofix Loop (Reusable)
 # Dual provider_mode: anthropic | proxy (LiteLLM).
 #
 # Control-plane contract (pack >= v1.9.1): runs_on default ubuntu-latest.
-# Effectiveness contract (pack >= v1.9.2):
+# Effectiveness contract (pack >= v1.9.3):
 #   - Accepts relayed bot reviews: issue_comment from github-actions[bot]
 #     whose body starts with '**[@' (from bot-review-relay.yml).
 #   - Optional CI failure path via caller workflow_run (conclusion=failure).
 #   - Skips when latest commit message starts with [autofix] (loop break).
+  - Per-PR cap: skips after max_successful_fixes successful [autofix] commits (default 1).
 # Master auto-address-review.yml is NOT used here — pack Autofix owns relays.
 # See REUSABLE-WORKFLOWS.md + docs/fly-runner-setup.md.
 
@@ -21,6 +22,7 @@ on:
       model: { type: string, default: '', description: 'Optional model id override' }
       # Default hosted. Override only with an operator-approved isolated pool — never shared Fly CI.
       runs_on: { type: string, default: ubuntu-latest }
+      max_successful_fixes: { type: string, default: '1', description: 'Max [autofix] commits per PR before skip (default 1)' }
     secrets:
       ANTHROPIC_API_KEY: { required: false, description: 'Required when provider_mode=anthropic.' }
       LITELLM_MASTER_KEY: { required: false, description: 'Required when provider_mode=proxy.' }
@@ -191,14 +193,38 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Run autofix with Claude Code
+
+      - name: Enforce per-PR successful-fix budget
+        id: budget
         if: steps.ref.outputs.skip != 'true' && steps.pr.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUM: ${{ steps.pr.outputs.number }}
+          MAX_FIXES: ${{ inputs.max_successful_fixes }}
+        run: |
+          set -euo pipefail
+          MAX_FIXES="${MAX_FIXES:-1}"
+          # Count commits on this PR whose subject starts with [autofix]
+          COUNT=$(gh api "repos/${{ github.repository }}/pulls/${PR_NUM}/commits" --paginate \
+            --jq '[.[].commit.message | split("\n")[0] | select(startswith("[autofix]"))] | length' 2>/dev/null || echo 0)
+          echo "successful_fix_commits=$COUNT" >> "$GITHUB_OUTPUT"
+          if [[ "$COUNT" -ge "$MAX_FIXES" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Per-PR autofix budget reached ($COUNT >= $MAX_FIXES successful [autofix] commits); skipping"
+            gh pr comment "$PR_NUM" --body "<!-- pack-autofix:budget-exhausted -->
+**[autofix-budget]** Skipping further Autofix — this PR already has ${COUNT} successful \`[autofix]\` commit(s) (cap ${MAX_FIXES}). Remove an autofix commit or raise \`max_successful_fixes\` if a further pass is intentional." || true
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run autofix with Claude Code
+        if: steps.ref.outputs.skip != 'true' && steps.pr.outputs.skip != 'true' && steps.budget.outputs.skip != 'true'
         env:
           REVIEW_BODY: ${{ github.event.review.body || github.event.comment.body || 'No body' }}
           EVENT_NAME: ${{ github.event_name }}
           WR_NAME: ${{ steps.pr.outputs.trigger_workflow }}
           WR_URL: ${{ steps.pr.outputs.trigger_run_url }}
-        uses: anthropics/claude-code-action@beta  # TODO: pin to SHA once stable release available
+        uses: anthropics/claude-code-action@9db594c7a0e82298c121c18b7f08aa1579ce7341 # v1.0.185
         with:
           anthropic_api_key: ${{ env.ANTHROPIC_API_KEY }}
           github_token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
