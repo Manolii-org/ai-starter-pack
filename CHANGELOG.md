@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 1.9.1 — 2026-08-05
+
+- **Autofix control-plane stays on GitHub-hosted runners.** `docs/fly-runner-setup.md`
+  no longer tells consumers to move `pr-autofix-loop.yml` onto Fly. Autofix /
+  Claude Code Action jobs must remain on `ubuntu-latest` so they do not compete
+  with heavy CI on shared self-hosted pools (Manolii master #3601 / #3602). Fly
+  remains documented for **heavy CI only**.
+- **Documented `pr-autofix-loop-reusable.yml`.** `REUSABLE-WORKFLOWS.md` now
+  covers the reusable Autofix caller, including `provider_mode=proxy` for
+  OSS-only universes (Buro / LiteLLM) and the hosted `runs_on` default.
+- Standalone `pr-autofix-loop.yml` header comments record the same hosted
+  contract and point proxy consumers at the reusable form.
+
 ## 1.9.0 — 2026-08-01
 
 - **`pr-assessment-reusable.yml` now hydrates its own runtime.** The four runner

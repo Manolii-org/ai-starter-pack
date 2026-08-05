@@ -1,15 +1,37 @@
 # Fly.io Self-Hosted GitHub Actions Runners
 
-GitHub-hosted `ubuntu-latest` runners are capped at 6 hours and charged per minute. For the PR autofix loop (`pr-autofix-loop.yml`) to run long Claude Code sessions reliably, Fly.io self-hosted runners are recommended.
+GitHub-hosted `ubuntu-latest` runners are capped at 6 hours and charged per
+minute. Fly.io self-hosted runners are useful for **heavy CI** (long test
+matrices, large builds). They are **not** the default for Autofix control-plane
+jobs.
 
-## Why Fly.io Runners
+## Autofix control-plane (required hosted)
+
+`pr-autofix-loop.yml` / `pr-autofix-loop-reusable.yml` must keep their Claude
+Code Action / control-plane jobs on **`ubuntu-latest`** (or another
+GitHub-hosted label).
+
+Do **not** point Autofix at `[self-hosted, fly]`. Putting Autofix on the same
+Fly pool as heavy CI caused queue starvation across Manolii consumers
+(2026-08 remediation: master #3601 / #3602). The portable pack contract matches
+that posture:
+
+- `runs-on: ubuntu-latest` (hard default)
+- `cancel-in-progress: true` on the caller concurrency group
+- Optional Fly runners remain available for **CI** jobs only
+
+`pr-autofix-loop-reusable.yml` accepts a `runs_on` input for emergency
+experiments; leave it at the default unless you have an explicit operator
+override and a separate runner pool that will not compete with CI.
+
+## Why Fly.io runners (heavy CI only)
 
 - Sessions up to 24h (vs 6h on GitHub-hosted)
 - Persistent volume for credential caching between jobs
-- ~$0.01-0.03/job vs GitHub Actions minutes billing
+- Lower per-job cost than GitHub Actions minutes for long builds
 - Runner stays warm between jobs (no cold-start penalty)
 
-## Setup
+## Setup (heavy CI)
 
 ### 1. Prerequisites
 
@@ -60,16 +82,21 @@ primary_region = "lax"
   cpus = 2
 ```
 
-### 4. Update pr-autofix-loop.yml to use the runner
+### 4. Point heavy CI jobs at Fly (not Autofix)
 
-In `.github/workflows/pr-autofix-loop.yml`, change:
+In long-running **CI** workflows only, change:
+
 ```yaml
 runs-on: ubuntu-latest
 ```
+
 to:
+
 ```yaml
 runs-on: [self-hosted, fly, linux]
 ```
+
+Keep Autofix / auto-merge / bot-relay control-plane jobs on `ubuntu-latest`.
 
 ### 5. Register and start
 
@@ -81,7 +108,7 @@ The runner will register with GitHub automatically and appear under Settings →
 
 ## Scaling
 
-To handle parallel PRs, scale to multiple machines:
+To handle parallel CI jobs, scale to multiple machines:
 
 ```bash
 flyctl scale count 3 --app {YOUR_ORG}-gh-runner
@@ -89,4 +116,4 @@ flyctl scale count 3 --app {YOUR_ORG}-gh-runner
 
 ## Cost estimate
 
-At ~10 PR fix jobs/day x 5 min average: ~$0.30-1.50/day depending on machine size.
+At ~10 long CI jobs/day × 5 min average: ~$0.30–1.50/day depending on machine size.

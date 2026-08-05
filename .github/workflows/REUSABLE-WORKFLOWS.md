@@ -3,7 +3,7 @@
 Canonical home for AI Starter Pack reusable GitHub Actions workflows. Consumed via:
 
 ```yaml
-uses: manolii-org/ai-starter-pack/.github/workflows/<name>-reusable.yml@v1.9.0
+uses: manolii-org/ai-starter-pack/.github/workflows/<name>-reusable.yml@v1.9.1
 ```
 
 Frozen at v1 (additive=non-breaking; rename/remove/default-change=v2).
@@ -54,6 +54,7 @@ env:
 | **mutation-testing-diff-reusable** | `runs_on`, `node_version=24`, `paths_ignore` | none |
 | **claude-md-contract-reusable** | `runs_on`, `python_version=3.12`, `require_contract=false` | none |
 | **pr-assessment-reusable** | `provider_mode=anthropic`, `litellm_proxy_url`, `model`, `runs_on`, `pack_ref=v1`, `trusted_sync_author_id` | `ANTHROPIC_API_KEY` (anthropic mode) or `LITELLM_MASTER_KEY` (proxy mode) |
+| **pr-autofix-loop-reusable** | `provider_mode=anthropic`, `litellm_proxy_url`, `model`, `runs_on=ubuntu-latest` (hosted control-plane — do not use shared Fly CI) | `ANTHROPIC_API_KEY` (anthropic) or `LITELLM_MASTER_KEY` (proxy); `GH_PAT` optional |
 | **fast-tier-reusable** | `gates` (JSON, required), `budget_minutes=5`, `job_timeout_minutes=15`, `runs_on`, `max_parallel=10`, `checkout_fetch_depth=0` | none |
 | **pre-production-tier-reusable** | `gates` (JSON, required), `budget_minutes=45`, `job_timeout_minutes=60`, `runs_on`, `max_parallel=4`, `environment`, `checkout_fetch_depth=0`, `open_issue_on_failure=false` | `GATE_SECRETS` (optional) |
 | **tier-gate-summary-reusable** | `gate_name` (required), `applies` (required), `tier=fast`, `command`, `skip_reason`, `setup_command`, `runs_on`, `working_directory`, `timeout_minutes=10`, `checkout_fetch_depth=0` | none |
@@ -442,3 +443,46 @@ jobs:
       manifest_path: config/backup-tenant.yaml
       pack_ref: v1.9.0   # keep identical to the `uses:` pin — the pack cannot discover its own ref
 ```
+
+## pr-autofix-loop-reusable
+
+Thin caller for review-comment Autofix. **Keep `runs_on` at `ubuntu-latest`**
+(hosted control-plane). See `docs/fly-runner-setup.md`.
+
+Caller owns triggers + concurrency. OSS / Buro universes use `provider_mode: proxy`.
+
+```yaml
+name: PR Autofix Loop
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review:
+    types: [submitted]
+  pull_request_review_comment:
+    types: [created]
+
+concurrency:
+  group: pr-autofix-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  autofix:
+    uses: Manolii-org/ai-starter-pack/.github/workflows/pr-autofix-loop-reusable.yml@v1.9.1
+    with:
+      provider_mode: proxy
+      litellm_proxy_url: ${{ vars.LITELLM_PROXY_URL }}
+      model: sonnet
+      runs_on: ubuntu-latest
+    secrets:
+      LITELLM_MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY }}
+      GH_PAT: ${{ secrets.GH_PAT }}
+```
+
+Product repos that deliberately keep Autofix off (e.g. Buro `bcp-core` ADR-0006)
+should not add this caller.
+

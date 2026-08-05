@@ -2,6 +2,13 @@ name: PR Autofix Loop
 # Autonomous PR fix loop — triggered by review comments and review submissions.
 # Uses Claude Code Action to read context, apply fixes, and commit to the PR branch.
 #
+# Control-plane contract (pack >= v1.9.1, aligns with Manolii master #3601/#3602):
+#   - runs-on: ubuntu-latest (hosted) — do NOT move Autofix onto Fly/self-hosted
+#     pools that also run heavy CI (queue starvation).
+#   - cancel-in-progress: true
+# Prefer the reusable form for OSS/proxy consumers:
+#   .github/workflows/pr-autofix-loop-reusable.yml (provider_mode=anthropic|proxy).
+#
 # Required GitHub secrets:
 #   ANTHROPIC_API_KEY — Claude API key for autofix
 #   GH_PAT (optional) — Personal access token with repo scope; falls back to GITHUB_TOKEN
