@@ -31,3 +31,11 @@ def test_deleted_review_agent_definition_and_dispatches_are_absent() -> None:
         generate = (agents_dir / "generate.md").read_text(encoding="utf-8")
         assert "route to `review-internal` agent" in generate, agents_dir
         assert "route to `review` agent" not in generate, agents_dir
+
+
+def test_persistent_instructions_do_not_dispatch_deleted_review_agent() -> None:
+    instructions = (ROOT / ".claude" / "persistent-instructions.md").read_text(encoding="utf-8")
+    assert "review.md" not in instructions
+    assert "review-internal.md" in instructions
+    assert "security-deep-dive.md" in instructions
+    assert "restricted" in instructions and "no-AI" in instructions
