@@ -26,7 +26,7 @@ Three tiers defined in `model-routing.json → platforms.claude_code.tier_map`:
 Override any default per-task with the `model` parameter on the Agent tool:
 
 ```text
-Agent(subagent_type="review", model="opus", prompt="...")
+Agent(subagent_type="review-internal", model="opus", prompt="...")
 ```
 
 ---
@@ -95,7 +95,7 @@ Defined in `model-routing.json → agent_routing`:
 | Agent | Default model | Rationale |
 |-------|--------------|-----------|
 | `default`, `generate`, `deployment-verifier` | `haiku` | Mechanical tasks; low reasoning required |
-| `review`, `deep-analyse`, `security-reviewer`, `migration-planner` | `sonnet` | May handle sensitive code; Anthropic-pinned |
+| `deep-analyse`, `security-reviewer`, `migration-planner` | `sonnet` | May handle sensitive code; Anthropic-pinned |
 | `test-architect`, `performance-auditor`, `incident-diagnostician` | `sonnet` | Moderate reasoning required |
 | `ecosystem-coordinator` | `opus` | Cross-repo planning; highest reasoning needed |
 

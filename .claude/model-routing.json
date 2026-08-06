@@ -2236,7 +2236,6 @@
     }
   },
   "dispatch_restricted_agents": [
-    "review",
     "security-deep-dive"
   ],
   "agent_routing": {
@@ -2247,7 +2246,6 @@
     "infra": "haiku",
     "ecosystem-auditor": "tier-3-tool",
     "qa": "tier-3-tool",
-    "review": "claude-sonnet-4-6",
     "review-internal": "tier-1-fast",
     "deep-analyse": "tier-1-fast",
     "orchestrator": "sonnet",
