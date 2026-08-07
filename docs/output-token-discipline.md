@@ -97,7 +97,7 @@ These helpers are CLI-only and compatible with Claude Code Web Bash tool executi
 
 Word caps, format-locks, and terse-return contracts are **overridden** in the following contexts. Always emit full grammar with explicit conjunctions and reasoning:
 
-- **Security warnings & CVE-class findings.** Dropped articles → ambiguity → wrong call. The `review` agent and any CVE-tagged finding inside `security-deep-dive`'s JSON `message`/`fix` fields keep prose grammar.
+- **Security warnings & CVE-class findings.** Dropped articles → ambiguity → wrong call. The `review-internal` agent and any CVE-tagged finding inside `security-deep-dive`'s JSON `message`/`fix` fields keep prose grammar.
 - **Irreversible / destructive operation confirmations.** `DROP`, `rm -rf`, `git push --force`, secret rotation, schema drops, mass deletes. State the operation, the blast radius, and the rollback path in full sentences before executing.
 - **Multi-step sequences where step order is load-bearing.** Migrations, deploy chains, multi-repo coordinations. Use numbered steps with explicit conjunctions ("first", "then", "only after"). Fragments that omit ordering risk misexecution.
 - **Safety-critical actions.** Merge contacts, bulk delete, send email — operations that need full grammar in approval prompts and audit-log entries for defensibility.

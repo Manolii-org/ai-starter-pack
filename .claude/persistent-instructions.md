@@ -167,7 +167,7 @@ Sub-agents inherit all MCP server connections by default, adding startup overhea
 
 - **Default tasks** (research, search, code exploration): \`default.md\` — GitHub MCP only
 - **Code/content generation** (boilerplate, scaffolding, tests): \`generate.md\` — no MCP (file reads via built-in tools)
-- **Code review / security audit**: \`review.md\` — no MCP (works from git diff); Anthropic-pinned (may handle sensitive code)
+- **Own-repo code review**: \`review-internal.md\` — no MCP (works from git diff); internal data only. **Security audit**: \`security-deep-dive.md\` with its declared policy. For client material, select an explicitly classified, policy-eligible path; \`restricted\` remains governance no-AI.
 - **Architecture + deep analysis**: \`deep-analyse.md\` — no MCP; OSS-routed
 - **Infrastructure tasks**: add only the relevant infra MCP servers (Vercel, Fly.io, Neon, etc.)
 - **QA/browser testing**: add playwright/browserbase MCP only

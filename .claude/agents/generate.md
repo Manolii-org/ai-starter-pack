@@ -52,7 +52,7 @@ SQL migrations are a supported use case **with these guardrails**:
 1. Always generate both `up` and `down` migration files — never up-only
 2. Generated migrations must be idempotent (`CREATE TABLE IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`)
 3. Destructive operations (`DROP`, `DELETE`, `TRUNCATE`) must include an explicit rollback in the `down` file
-4. After generation, route to `review` agent for correctness check before applying
+4. After generation, route to `review-internal` agent for correctness check before applying
 5. Do NOT auto-apply migrations — this agent generates files only; execution is manual
 
 ## Generation Protocol
