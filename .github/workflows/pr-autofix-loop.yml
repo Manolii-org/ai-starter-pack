@@ -192,8 +192,7 @@ jobs:
           if [[ "$COUNT" -ge "$MAX_FIXES" ]]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "::notice::Per-PR autofix budget reached ($COUNT >= $MAX_FIXES successful [autofix] commits); skipping"
-            gh pr comment "$PR_NUM" --body "<!-- pack-autofix:budget-exhausted -->
-**[autofix-budget]** Skipping further Autofix — this PR already has ${COUNT} successful \`[autofix]\` commit(s) (cap ${MAX_FIXES}). Remove an autofix commit or raise \`max_successful_fixes\` if a further pass is intentional." || true
+            gh pr comment "$PR_NUM" --body "<!-- pack-autofix:budget-exhausted --> [autofix-budget] Skipping further Autofix — this PR already has ${COUNT} successful [autofix] commit(s) (cap ${MAX_FIXES}). Remove an autofix commit or raise max_successful_fixes if a further pass is intentional." || true
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
