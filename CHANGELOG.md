@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 1.9.6 — 2026-08-12
+
+- **Repair the standalone Autofix workflow YAML.** Apply the same budget-comment
+  correction shipped for the reusable workflow in v1.9.5; validate every
+  shipped Autofix workflow in the regression test.
+- **Synchronize release bookkeeping.** Update the manifest and consumer examples
+  that remained on v1.9.4 when v1.9.5 was tagged.
+
+## 1.9.5 — 2026-08-11
+
+- **Repair reusable Autofix workflow YAML.** Keep the budget-exhausted comment
+  inside its shell block so GitHub can schedule the reusable workflow instead of
+  producing a zero-job workflow-file failure.
+- **Use the workflow token fallback.** Pass `github.token` to Claude Code Action
+  when callers do not provide the optional elevated `GH_PAT` secret.
+
 ## 1.9.4 — 2026-08-05
 
 - **Hotfix: Autofix workflow YAML headers.** v1.9.3 accidentally inserted an
@@ -549,4 +565,3 @@ Initial stable release.
 - Husky git hooks (pre-commit, commit-msg, pre-push)
 - CI/CD workflows (lint, test, PR assessment, secret scanning, mutation testing)
 - Comprehensive documentation (quality gates, token discipline, OSS delegation, browser automation)
-
