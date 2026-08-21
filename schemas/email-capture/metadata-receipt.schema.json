@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "$id": "https://schemas.manolii.com/email-capture/v1/metadata-receipt.schema.json",
+  "title": "metadata-receipt",
+  "required": [
+    "schema_version",
+    "operation",
+    "result",
+    "duration_ms"
+  ],
+  "properties": {
+    "schema_version": {
+      "pattern": "^1\\."
+    },
+    "operation": {
+      "type": "string"
+    },
+    "result": {
+      "enum": [
+        "passed",
+        "failed"
+      ]
+    },
+    "duration_ms": {
+      "type": "number"
+    },
+    "mode": {
+      "type": "string"
+    },
+    "entity": {
+      "type": "string"
+    },
+    "repository": {
+      "type": "string"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "error_code": {
+      "type": "string"
+    },
+    "cleanup_state": {
+      "type": "string"
+    },
+    "assertion_count": {
+      "type": "integer"
+    },
+    "message_count": {
+      "type": "integer"
+    }
+  }
+}

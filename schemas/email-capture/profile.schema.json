@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "$id": "https://schemas.manolii.com/email-capture/v1/profile.schema.json",
+  "title": "profile",
+  "required": [
+    "schema_version",
+    "mode",
+    "backend",
+    "environment"
+  ],
+  "properties": {
+    "schema_version": {
+      "pattern": "^1\\."
+    },
+    "mode": {
+      "enum": [
+        "off",
+        "hermetic"
+      ]
+    },
+    "backend": {
+      "enum": [
+        "memory",
+        "mailpit",
+        "maildev",
+        "inbucket"
+      ]
+    },
+    "endpoint": {
+      "type": "string"
+    },
+    "environment": {
+      "type": "string"
+    },
+    "ttl_seconds": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 86400
+    }
+  }
+}

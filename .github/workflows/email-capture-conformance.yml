@@ -1,0 +1,39 @@
+name: Email Capture Conformance
+on:
+  workflow_call:
+    inputs:
+      backend: {type: string, required: false, default: memory}
+      endpoint: {type: string, required: false, default: /tmp/email-capture.json}
+permissions:
+  contents: read
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      EMAIL_CAPTURE_MODE: hermetic
+      EMAIL_CAPTURE_BACKEND: ${{ inputs.backend }}
+      EMAIL_CAPTURE_ENDPOINT: ${{ inputs.endpoint }}
+      EMAIL_CAPTURE_ENVIRONMENT: ci
+    steps:
+      - uses: actions/checkout@v4
+      - name: Allocate and mask transient recipient
+        id: allocate
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          req=$(printf '{"schema_version":"1.0","entity":"%s","repository":"%s","environment":"ci","run_id":"%s"}' "${GITHUB_REPOSITORY_OWNER}" "${GITHUB_REPOSITORY}" "${GITHUB_RUN_ID}")
+          bin/email-capture allocate --request "$req" > "${RUNNER_TEMP}/allocation.json"
+          test "$(stat -c %a "${RUNNER_TEMP}/allocation.json")" = 600
+          recipient=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["recipient"])' "${RUNNER_TEMP}/allocation.json")
+          echo "::add-mask::$recipient"
+      - name: Conformance
+        run: python3 -m unittest discover -s tests/email_capture -v
+      - name: Release allocation
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test -f "${RUNNER_TEMP}/allocation.json"; then bin/email-capture release --allocation "@${RUNNER_TEMP}/allocation.json"; fi
+          rm -f "${RUNNER_TEMP}/allocation.json"

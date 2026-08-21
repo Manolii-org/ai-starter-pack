@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "$id": "https://schemas.manolii.com/email-capture/v1/capabilities.schema.json",
+  "title": "capabilities",
+  "required": [
+    "schema_version",
+    "backend",
+    "allocation_scope",
+    "cursor",
+    "mime",
+    "attachments",
+    "purge_scope"
+  ],
+  "properties": {
+    "schema_version": {
+      "pattern": "^1\\."
+    },
+    "backend": {
+      "type": "string"
+    },
+    "allocation_scope": {
+      "type": "string"
+    },
+    "cursor": {
+      "type": "string"
+    },
+    "mime": {
+      "type": "boolean"
+    },
+    "attachments": {
+      "type": "boolean"
+    },
+    "purge_scope": {
+      "type": "string"
+    }
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "$id": "https://schemas.manolii.com/email-capture/v1/typed-error.schema.json",
+  "title": "typed-error",
+  "required": [
+    "schema_version",
+    "code",
+    "detail",
+    "retryable"
+  ],
+  "properties": {
+    "schema_version": {
+      "pattern": "^1\\."
+    },
+    "code": {
+      "enum": [
+        "CONFIG_INVALID",
+        "CAPABILITY_UNSUPPORTED",
+        "CAPTURE_INFRA_UNAVAILABLE",
+        "MESSAGE_TIMEOUT",
+        "MESSAGE_AMBIGUOUS",
+        "MESSAGE_REPLAYED",
+        "ASSERTION_FAILED",
+        "CLEANUP_INCOMPLETE",
+        "AUTHORIZATION_DENIED"
+      ]
+    },
+    "detail": {
+      "type": "string"
+    },
+    "retryable": {
+      "type": "boolean"
+    }
+  }
+}
