@@ -30,13 +30,16 @@ class Profile:
         if version.split(".")[0] != "1" or canonical and legacy: raise CaptureError("CONFIG_INVALID","unsupported or mixed configuration")
         mode, backend = raw.get("mode","off"), raw.get("backend","memory")
         environment = raw.get("environment", os.environ.get("NODE_ENV","test"))
+        ttl=raw.get("ttl_seconds",900)
+        if not isinstance(mode,str) or not isinstance(backend,str) or not isinstance(environment,str) or not isinstance(ttl,int) or isinstance(ttl,bool) or not 1<=ttl<=86400: raise CaptureError("CONFIG_INVALID","invalid profile field type or TTL")
         if mode not in {"off","hermetic"} or backend not in {"memory","mailpit","maildev","inbucket"}: raise CaptureError("CONFIG_INVALID","unknown mode or backend")
         if mode != "off" and environment.lower() in {"prod","production","staging"}: raise CaptureError("CONFIG_INVALID","capture forbidden in deployed environment")
         endpoint=raw.get("endpoint","")
         if mode=="hermetic" and backend!="memory":
+            if not isinstance(endpoint,str) or not endpoint: raise CaptureError("CONFIG_INVALID","HTTP backend requires endpoint")
             parsed=urllib.parse.urlparse(endpoint)
             if parsed.scheme!="http" or parsed.hostname not in {"localhost","127.0.0.1","::1"}: raise CaptureError("AUTHORIZATION_DENIED","receiver must be local HTTP")
-        return cls(mode,backend,endpoint,environment,int(raw.get("ttl_seconds",900)))
+        return cls(mode,backend,endpoint,environment,ttl)
 
 class Backend(Protocol):
     def capabilities(self)->dict[str,Any]: ...
@@ -45,11 +48,11 @@ class Backend(Protocol):
     def health(self)->bool: ...
 
 class HttpBackend:
-    def __init__(self, profile:Profile): self.profile=profile
+    def __init__(self, profile:Profile): self.profile=profile; self.request_timeout=10.0
     def _request(self,path:str,method:str="GET")->Any:
         try:
             request=urllib.request.Request(self.profile.endpoint.rstrip("/")+path,method=method)
-            with urllib.request.urlopen(request,timeout=10) as r: return json.load(r) if r.length != 0 else None
+            with urllib.request.urlopen(request,timeout=self.request_timeout) as r: return json.load(r) if r.length != 0 else None
         except (OSError,urllib.error.URLError,json.JSONDecodeError) as e: raise CaptureError("CAPTURE_INFRA_UNAVAILABLE",type(e).__name__) from None
     def capabilities(self): return {"schema_version":VERSION,"backend":self.profile.backend,"allocation_scope":"recipient","cursor":"received_at_id","mime":True,"attachments":True,"purge_scope":"allocation"}
     def health(self):
@@ -119,6 +122,7 @@ def allocate(req:dict[str,Any],profile:Profile)->dict[str,Any]:
 def await_messages(b:Backend,a:dict[str,Any],timeout:float=30,count:int=1,not_before:str|None=None)->list[dict[str,Any]]:
     deadline=time.monotonic()+timeout; seen=set(); cursor=a.get("cursor","0:")
     while True:
+        if isinstance(b,HttpBackend): b.request_timeout=max(.01,min(10.0,deadline-time.monotonic()))
         rows=sorted(b.list(a),key=lambda m:(m["received_at"],m["opaque_id"]))
         rows=[m for m in rows if (not not_before or m["received_at"]>=not_before)]
         ids=[m["opaque_id"] for m in rows]

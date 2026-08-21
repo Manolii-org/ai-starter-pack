@@ -23,7 +23,9 @@ def main(argv=None):
         elif ns.command=="assert": emit(assert_messages(read_json(ns.messages),read_json(ns.rules)))
         elif ns.command=="release": b.purge(read_json(ns.allocation)); emit(receipt("release","passed",started,mode=profile.mode,cleanup_state="complete"))
         elif ns.command=="capabilities": emit(b.capabilities())
-        else: emit(receipt("doctor","passed" if b.health() else "failed",started,mode=profile.mode))
+        else:
+            healthy=b.health(); emit(receipt("doctor","passed" if healthy else "failed",started,mode=profile.mode))
+            return 0 if healthy else 2
         return 0
     except CaptureError as e: emit(e.as_dict()); return 2
     except (OSError,ValueError,KeyError) as e: emit(CaptureError("CONFIG_INVALID",type(e).__name__).as_dict()); return 2

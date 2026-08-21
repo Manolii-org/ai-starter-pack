@@ -31,7 +31,12 @@ Standalone by default: all external integrations (OSS routing, remote memory, br
 export EMAIL_CAPTURE_MODE=hermetic EMAIL_CAPTURE_BACKEND=mailpit \
   EMAIL_CAPTURE_ENDPOINT=http://127.0.0.1:8025 EMAIL_CAPTURE_ENVIRONMENT=ci
 bin/email-capture doctor
-bin/email-capture allocate --request '{"schema_version":"1.0","entity":"example","repository":"app","environment":"ci","run_id":"local-1"}'
+umask 077
+bin/email-capture allocate --request '{"schema_version":"1.0","entity":"example","repository":"app","environment":"ci","run_id":"local-1"}' > allocation.json
+# Mask the recipient immediately; never print allocation.json.
+bin/email-capture await --allocation @allocation.json --output messages.json
+bin/email-capture release --allocation @allocation.json
+rm -f allocation.json messages.json
 ```
 
 Capture is fail-closed in staging/production. Disable it with `EMAIL_CAPTURE_MODE=off`; this never changes business-provider configuration.
