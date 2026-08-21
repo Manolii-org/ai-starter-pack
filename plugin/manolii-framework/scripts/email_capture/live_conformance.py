@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import os
 import smtplib
+import sys
 import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from email.message import EmailMessage
 
 from email_capture.core import Profile, allocate, assert_messages, await_messages, backend, extract, release_allocation
