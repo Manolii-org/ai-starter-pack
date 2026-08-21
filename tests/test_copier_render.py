@@ -40,6 +40,7 @@ def render(dst, **data):
         "copy",
         "--defaults",
         "--quiet",
+        "--vcs-ref=HEAD",
     ]
     for k, v in data.items():
         cmd.append(f"--data={k}={v}")
