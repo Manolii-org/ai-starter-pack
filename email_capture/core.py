@@ -1,5 +1,5 @@
 from __future__ import annotations
-import hashlib, json, os, re, secrets, stat, time, urllib.error, urllib.request
+import hashlib, json, os, re, secrets, stat, tempfile, time, urllib.error, urllib.parse, urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email import policy
@@ -32,7 +32,11 @@ class Profile:
         environment = raw.get("environment", os.environ.get("NODE_ENV","test"))
         if mode not in {"off","hermetic"} or backend not in {"memory","mailpit","maildev","inbucket"}: raise CaptureError("CONFIG_INVALID","unknown mode or backend")
         if mode != "off" and environment.lower() in {"prod","production","staging"}: raise CaptureError("CONFIG_INVALID","capture forbidden in deployed environment")
-        return cls(mode,backend,raw.get("endpoint",""),environment,int(raw.get("ttl_seconds",900)))
+        endpoint=raw.get("endpoint","")
+        if mode=="hermetic" and backend!="memory":
+            parsed=urllib.parse.urlparse(endpoint)
+            if parsed.scheme!="http" or parsed.hostname not in {"localhost","127.0.0.1","::1"}: raise CaptureError("AUTHORIZATION_DENIED","receiver must be local HTTP")
+        return cls(mode,backend,endpoint,environment,int(raw.get("ttl_seconds",900)))
 
 class Backend(Protocol):
     def capabilities(self)->dict[str,Any]: ...
@@ -42,23 +46,34 @@ class Backend(Protocol):
 
 class HttpBackend:
     def __init__(self, profile:Profile): self.profile=profile
-    def _json(self,path:str)->Any:
+    def _request(self,path:str,method:str="GET")->Any:
         try:
-            with urllib.request.urlopen(self.profile.endpoint.rstrip("/")+path,timeout=10) as r: return json.load(r)
+            request=urllib.request.Request(self.profile.endpoint.rstrip("/")+path,method=method)
+            with urllib.request.urlopen(request,timeout=10) as r: return json.load(r) if r.length != 0 else None
         except (OSError,urllib.error.URLError,json.JSONDecodeError) as e: raise CaptureError("CAPTURE_INFRA_UNAVAILABLE",type(e).__name__) from None
     def capabilities(self): return {"schema_version":VERSION,"backend":self.profile.backend,"allocation_scope":"recipient","cursor":"received_at_id","mime":True,"attachments":True,"purge_scope":"allocation"}
     def health(self):
         self.list({"recipient":"healthcheck.invalid"}); return True
-    def purge(self,allocation): return None # logical release; never global-delete shared receiver
-    def list(self,allocation):
+    def purge(self,allocation):
+        rows=self._matching_raw(allocation)
+        for row in rows:
+            identifier=row.get("ID",row.get("id",row.get("key")))
+            if not identifier: raise CaptureError("CLEANUP_INCOMPLETE","message lacks deletable id")
+            if self.profile.backend=="mailpit": self._request(f"/api/v1/messages/{identifier}","DELETE")
+            elif self.profile.backend=="maildev": self._request(f"/email/{identifier}","DELETE")
+            else: self._request(f"/api/v1/mailbox/{allocation['recipient'].split('@',1)[0]}/{identifier}","DELETE")
+    def _matching_raw(self,allocation):
         if self.profile.backend in {"mailpit","maildev"}:
-            data=self._json("/api/v1/messages" if self.profile.backend=="mailpit" else "/email")
+            data=self._request("/api/v1/messages" if self.profile.backend=="mailpit" else "/email")
             rows=data.get("messages",data) if isinstance(data,dict) else data
-            return [normalise_http(x,self.profile.backend) for x in rows if allocation["recipient"].lower() in json.dumps(x.get("To",x.get("to",x.get("envelope",{})))).lower()]
-        if self.profile.backend=="inbucket":
-            local=allocation["recipient"].split("@",1)[0]
-            rows=self._json(f"/api/v1/mailbox/{local}")
-            return [normalise_http(x,"inbucket") for x in rows]
+            return [x for x in rows if allocation["recipient"].lower() in json.dumps(x.get("To",x.get("to",x.get("envelope",{})))).lower()]
+        local=allocation["recipient"].split("@",1)[0]
+        return self._request(f"/api/v1/mailbox/{local}")
+    def list(self,allocation):
+        rows=self._matching_raw(allocation)
+        if self.profile.backend=="mailpit": rows=[self._request(f"/api/v1/message/{x['ID']}") for x in rows]
+        elif self.profile.backend=="maildev": rows=[self._request(f"/email/{x['id']}") for x in rows]
+        return [normalise_http(x,self.profile.backend) for x in rows]
         raise CaptureError("CAPABILITY_UNSUPPORTED","backend has no HTTP adapter")
 
 class MemoryBackend:
@@ -78,10 +93,12 @@ def normalise_http(x:dict[str,Any],backend:str)->dict[str,Any]:
     received=x.get("received_at") or x.get("Created") or x.get("date") or datetime.now(timezone.utc).isoformat()
     opaque=hashlib.sha256(f'{backend}:{x.get("ID",x.get("id",x.get("key",received)))}'.encode()).hexdigest()[:24]
     headers=x.get("headers",{}) if isinstance(x.get("headers",{}),dict) else {}
-    return {"schema_version":VERSION,"opaque_id":opaque,"received_at":received,"envelope":{"from":x.get("from",[]),"to":x.get("to",[])},"subject":x.get("subject",x.get("Subject","")),"headers":headers,"content":{"text_present":bool(x.get("text") or x.get("Text")),"html_present":bool(x.get("html") or x.get("HTML")),"text":x.get("text",x.get("Text","")),"html":x.get("html",x.get("HTML",""))},"attachments":[{"filename":a.get("filename",a.get("FileName","")),"content_type":a.get("content_type",a.get("ContentType","application/octet-stream")),"size":int(a.get("size",a.get("Size",0)))} for a in x.get("attachments",x.get("Attachments",[]))]}
+    return {"schema_version":VERSION,"opaque_id":opaque,"received_at":received,"envelope":{"from":x.get("from",[]),"to":x.get("to",[])},"subject":x.get("subject",x.get("Subject","")),"headers":headers,"content":{"text_present":bool(x.get("text") or x.get("Text")),"html_present":bool(x.get("html") or x.get("HTML")),"text":x.get("text",x.get("Text","")),"html":x.get("html",x.get("HTML",""))},"attachments":[{"filename":a.get("filename",a.get("FileName","")),"content_type":a.get("content_type",a.get("ContentType","application/octet-stream")),"size":int(a.get("size",a.get("Size",0)))} for a in (x.get("attachments",x.get("Attachments",[])) if isinstance(x.get("attachments",x.get("Attachments",[])),list) else [])]}
 
-def backend(profile:Profile)->Backend: return MemoryBackend(profile) if profile.backend=="memory" else HttpBackend(profile)
-def _scope(req): return "\0".join(str(req.get(k,"")) for k in ("entity","repository","environment","run_id"))
+def backend(profile:Profile)->Backend:
+    if profile.mode=="off": raise CaptureError("CAPABILITY_UNSUPPORTED","capture mode is off")
+    return MemoryBackend(profile) if profile.backend=="memory" else HttpBackend(profile)
+def _scope(req): return json.dumps({k:req.get(k,"") for k in ("entity","repository","environment","run_id")},sort_keys=True,separators=(",",":"))
 def allocate(req:dict[str,Any],profile:Profile)->dict[str,Any]:
     for key in ("entity","repository","environment","run_id"):
         if not req.get(key): raise CaptureError("CONFIG_INVALID",f"missing {key}")
@@ -108,7 +125,10 @@ def await_messages(b:Backend,a:dict[str,Any],timeout:float=30,count:int=1,not_be
         if len(ids)!=len(set(ids)): raise CaptureError("MESSAGE_REPLAYED","duplicate opaque message id")
         fresh=[m for m in rows if f'{m["received_at"]}:{m["opaque_id"]}'>cursor]
         if len(fresh)>count: raise CaptureError("MESSAGE_AMBIGUOUS","more messages than expected")
-        if len(fresh)==count: return fresh
+        if len(fresh)==count:
+            advanced=f'{fresh[-1]["received_at"]}:{fresh[-1]["opaque_id"]}'
+            a["cursor"]=advanced
+            return fresh,advanced
         if time.monotonic()>=deadline: raise CaptureError("MESSAGE_TIMEOUT","bounded wait expired")
         time.sleep(min(.25,max(0,deadline-time.monotonic())))
 def extract(message:dict[str,Any],kind:str,name:str|None=None)->list[str]:

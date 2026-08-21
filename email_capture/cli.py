@@ -8,7 +8,7 @@ def emit(value): print(json.dumps(value,separators=(",",":"),sort_keys=True))
 def main(argv=None):
     p=argparse.ArgumentParser(prog="email-capture"); p.add_argument("--profile"); sub=p.add_subparsers(dest="command",required=True)
     a=sub.add_parser("allocate"); a.add_argument("--request",required=True)
-    w=sub.add_parser("await"); w.add_argument("--allocation",required=True); w.add_argument("--timeout",type=float,default=30); w.add_argument("--count",type=int,default=1); w.add_argument("--not-before")
+    w=sub.add_parser("await"); w.add_argument("--allocation",required=True); w.add_argument("--timeout",type=float,default=30); w.add_argument("--count",type=int,default=1); w.add_argument("--not-before"); w.add_argument("--output",required=True)
     s=sub.add_parser("assert"); s.add_argument("--messages",required=True); s.add_argument("--rules",required=True)
     r=sub.add_parser("release"); r.add_argument("--allocation",required=True)
     sub.add_parser("capabilities"); sub.add_parser("doctor")
@@ -16,7 +16,10 @@ def main(argv=None):
     try:
         profile=Profile.load(ns.profile); b=backend(profile)
         if ns.command=="allocate": emit(allocate(read_json(ns.request),profile))
-        elif ns.command=="await": emit(await_messages(b,read_json(ns.allocation),ns.timeout,ns.count,ns.not_before))
+        elif ns.command=="await":
+            messages,cursor=await_messages(b,read_json(ns.allocation),ns.timeout,ns.count,ns.not_before)
+            target=Path(ns.output); target.write_text(json.dumps(messages)); os.chmod(target,0o600)
+            emit({"schema_version":"1.0","result":"passed","message_count":len(messages),"cursor":cursor})
         elif ns.command=="assert": emit(assert_messages(read_json(ns.messages),read_json(ns.rules)))
         elif ns.command=="release": b.purge(read_json(ns.allocation)); emit(receipt("release","passed",started,mode=profile.mode,cleanup_state="complete"))
         elif ns.command=="capabilities": emit(b.capabilities())

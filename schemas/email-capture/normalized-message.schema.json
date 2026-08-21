@@ -16,7 +16,8 @@
   ],
   "properties": {
     "schema_version": {
-      "pattern": "^1\\."
+      "pattern": "^1\\.",
+      "type": "string"
     },
     "opaque_id": {
       "type": "string"

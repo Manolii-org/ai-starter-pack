@@ -15,7 +15,8 @@
   ],
   "properties": {
     "schema_version": {
-      "pattern": "^1\\."
+      "pattern": "^1\\.",
+      "type": "string"
     },
     "backend": {
       "type": "string"
