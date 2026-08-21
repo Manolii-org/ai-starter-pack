@@ -47,12 +47,29 @@ class Backend(Protocol):
     def purge(self, allocation:dict[str,Any])->None: ...
     def health(self)->bool: ...
 
+def _atomic_json(path:Path,value:Any)->None:
+    """Atomically replace private JSON state without following destination symlinks."""
+    path.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+    os.chmod(path.parent,0o700)
+    if path.is_symlink(): raise CaptureError("AUTHORIZATION_DENIED","state path must not be a symlink")
+    fd,name=tempfile.mkstemp(prefix=".email-capture-",dir=path.parent)
+    try:
+        os.fchmod(fd,0o600)
+        with os.fdopen(fd,"w") as handle: json.dump(value,handle)
+        os.replace(name,path)
+    finally:
+        if os.path.exists(name): os.unlink(name)
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Reject redirects so a local endpoint cannot bounce requests off-host."""
+    def redirect_request(self,req,fp,code,msg,headers,newurl): raise CaptureError("AUTHORIZATION_DENIED","receiver redirects are forbidden")
+
 class HttpBackend:
     def __init__(self, profile:Profile): self.profile=profile; self.request_timeout=10.0
     def _request(self,path:str,method:str="GET")->Any:
         try:
             request=urllib.request.Request(self.profile.endpoint.rstrip("/")+path,method=method)
-            with urllib.request.urlopen(request,timeout=self.request_timeout) as r: return json.load(r) if r.length != 0 else None
+            with urllib.request.build_opener(_NoRedirect()).open(request,timeout=self.request_timeout) as r: return json.load(r) if r.length != 0 else None
         except (OSError,urllib.error.URLError,json.JSONDecodeError) as e: raise CaptureError("CAPTURE_INFRA_UNAVAILABLE",type(e).__name__) from None
     def capabilities(self): return {"schema_version":VERSION,"backend":self.profile.backend,"allocation_scope":"recipient","cursor":"received_at_id","mime":True,"attachments":True,"purge_scope":"allocation"}
     def health(self):
@@ -88,7 +105,7 @@ class MemoryBackend:
     def list(self,a): return [normalise_http(x,"memory") for x in self._read() if a["recipient"] in x.get("to",[])]
     def purge(self,a):
         rows=[x for x in self._read() if a["recipient"] not in x.get("to",[])]
-        self.path.write_text(json.dumps(rows)); os.chmod(self.path,stat.S_IRUSR|stat.S_IWUSR)
+        _atomic_json(self.path,rows)
     def capabilities(self): return {"schema_version":VERSION,"backend":"memory","allocation_scope":"recipient","cursor":"received_at_id","mime":True,"attachments":True,"purge_scope":"allocation"}
     def health(self): return True
 
@@ -106,7 +123,8 @@ def allocate(req:dict[str,Any],profile:Profile)->dict[str,Any]:
     for key in ("entity","repository","environment","run_id"):
         if not req.get(key): raise CaptureError("CONFIG_INVALID",f"missing {key}")
     scope_hash=hashlib.sha256(_scope(req).encode()).hexdigest()
-    registry=Path(os.environ.get("EMAIL_CAPTURE_ALLOCATION_REGISTRY", "/tmp/email-capture-allocations.json"))
+    private_root=Path(os.environ.get("EMAIL_CAPTURE_PRIVATE_DIR",os.environ.get("RUNNER_TEMP",tempfile.gettempdir()))) / "email-capture"
+    registry=Path(os.environ.get("EMAIL_CAPTURE_ALLOCATION_REGISTRY",str(private_root / "allocations.json")))
     try:
         records=json.loads(registry.read_text()) if registry.exists() else {}
     except json.JSONDecodeError:
@@ -117,7 +135,7 @@ def allocate(req:dict[str,Any],profile:Profile)->dict[str,Any]:
     domain=req.get("domain","capture.test"); now=datetime.now(timezone.utc).isoformat()
     result={"schema_version":VERSION,"allocation_id":digest,"recipient":f"ec-{digest}@{domain}","created_at":now,"expires_at":time.time()+profile.ttl_seconds,"cursor":"0:","scope":{k:req[k] for k in ("entity","repository","environment","run_id")}}
     records={k:v for k,v in records.items() if float(v.get("expires_at",0))>time.time()}; records[scope_hash]=result
-    registry.write_text(json.dumps(records)); os.chmod(registry,stat.S_IRUSR|stat.S_IWUSR)
+    _atomic_json(registry,records)
     return result
 def await_messages(b:Backend,a:dict[str,Any],timeout:float=30,count:int=1,not_before:str|None=None)->list[dict[str,Any]]:
     deadline=time.monotonic()+timeout; seen=set(); cursor=a.get("cursor","0:")
