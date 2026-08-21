@@ -44,7 +44,6 @@ jobs:
       EMAIL_CAPTURE_ENDPOINT: http://127.0.0.1:${{ matrix.api_port }}
       EMAIL_CAPTURE_SMTP_HOST: 127.0.0.1
       EMAIL_CAPTURE_SMTP_PORT: ${{ matrix.smtp_port }}
-      EMAIL_CAPTURE_PRIVATE_DIR: ${{ runner.temp }}
     steps:
       - uses: actions/checkout@v4
       - name: Start pinned receiver
