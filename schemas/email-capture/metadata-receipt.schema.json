@@ -50,6 +50,9 @@
     },
     "message_count": {
       "type": "integer"
+    },
+    "cursor": {
+      "type": "string"
     }
   }
 }

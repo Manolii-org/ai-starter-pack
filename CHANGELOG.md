@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.9.7 — 2026-08-21
+
+- **Ship email-capture v0.1.1.** Include the portable hermetic inbox CLI, eight
+  Draft 2020-12 contracts, private allocation/message files, receiver SPI,
+  metadata-only receipts, and live Mailpit/MailDev/Inbucket conformance.
+- **Close v0.1.0 correctness gaps.** Persist cursors, wait through bounded
+  negatives, reject unstable timestamps, retire released allocations, enforce
+  content/attachment limits, and use receiver-specific detail/delete APIs.
+
+
 ## 1.9.6 — 2026-08-12
 
 - **Repair the standalone Autofix workflow YAML.** Apply the same budget-comment
