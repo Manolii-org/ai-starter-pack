@@ -139,6 +139,25 @@ def test_default_render_clean(default_render):
     assert (default_render / ".copier-answers.yml").exists(), ".copier-answers.yml missing"
 
 
+def test_email_capture_framework_renders(default_render):
+    """The portable executable, contracts, and CI interface ship together."""
+    expected = {
+        "bin/email-capture",
+        "email_capture/core.py",
+        "email_capture/cli.py",
+        "schemas/email-capture/profile.schema.json",
+        "schemas/email-capture/normalized-message.schema.json",
+        ".github/workflows/email-capture-conformance.yml",
+        ".github/workflows/email-capture-live-conformance.yml",
+        ".claude/commands/email-capture.md",
+        ".codex/commands/email-capture.md",
+        ".cursor/commands/email-capture.md",
+    }
+    missing = expected - file_set(default_render)
+    assert not missing, f"rendered email-capture framework is incomplete: {sorted(missing)}"
+    assert (default_render / "bin/email-capture").stat().st_mode & 0o111
+
+
 def test_feature_flags_do_not_change_copier_file_set(default_render):
     """Feature flags must not reintroduce literal-Jinja or conditional paths."""
     with tempfile.TemporaryDirectory() as tmpdir:

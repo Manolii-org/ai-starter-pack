@@ -24,7 +24,7 @@ jobs:
           set -euo pipefail
           umask 077
           req=$(printf '{"schema_version":"1.0","entity":"%s","repository":"%s","environment":"ci","run_id":"%s"}' "${GITHUB_REPOSITORY_OWNER}" "${GITHUB_REPOSITORY}" "${GITHUB_RUN_ID}")
-          bin/email-capture allocate --request "$req" > "${RUNNER_TEMP}/allocation.json"
+          bin/email-capture allocate --request "$req" --output "${RUNNER_TEMP}/allocation.json"
           test "$(stat -c %a "${RUNNER_TEMP}/allocation.json")" = 600
           recipient=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["recipient"])' "${RUNNER_TEMP}/allocation.json")
           echo "::add-mask::$recipient"

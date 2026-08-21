@@ -1,0 +1,74 @@
+name: Email Capture Live Conformance
+on:
+  pull_request:
+    paths:
+      - 'email_capture/**'
+      - 'schemas/email-capture/**'
+      - 'scripts/email_capture/**'
+      - 'tests/email_capture/**'
+      - '.github/workflows/email-capture-*.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'email_capture/**'
+      - 'schemas/email-capture/**'
+      - 'scripts/email_capture/**'
+      - 'tests/email_capture/**'
+      - '.github/workflows/email-capture-*.yml'
+permissions:
+  contents: read
+jobs:
+  live-conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - backend: mailpit
+            image: axllent/mailpit:v1.30.7
+            api_port: 8025
+            smtp_port: 1025
+          - backend: maildev
+            image: maildev/maildev:2.2.1
+            api_port: 1080
+            smtp_port: 1025
+          - backend: inbucket
+            image: inbucket/inbucket:3.1.1
+            api_port: 9000
+            smtp_port: 2500
+    env:
+      EMAIL_CAPTURE_MODE: hermetic
+      EMAIL_CAPTURE_ENVIRONMENT: ci
+      EMAIL_CAPTURE_BACKEND: ${{ matrix.backend }}
+      EMAIL_CAPTURE_ENDPOINT: http://127.0.0.1:${{ matrix.api_port }}
+      EMAIL_CAPTURE_SMTP_HOST: 127.0.0.1
+      EMAIL_CAPTURE_SMTP_PORT: ${{ matrix.smtp_port }}
+      EMAIL_CAPTURE_PRIVATE_DIR: ${{ runner.temp }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start pinned receiver
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --detach --name email-capture-receiver \
+            --publish "${EMAIL_CAPTURE_SMTP_PORT}:${EMAIL_CAPTURE_SMTP_PORT}" \
+            --publish "${{ matrix.api_port }}:${{ matrix.api_port }}" \
+            "${{ matrix.image }}"
+      - name: Await receiver health
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            if bin/email-capture doctor >/dev/null 2>&1; then exit 0; fi
+            sleep 1
+          done
+          echo "receiver health check failed; logs suppressed by restricted-data policy"
+          exit 1
+      - name: Run unit and live conformance
+        run: |
+          python3 -m unittest discover -s tests/email_capture -v
+          python3 scripts/email_capture/live_conformance.py
+      - name: Stop receiver
+        if: always()
+        run: docker rm --force email-capture-receiver >/dev/null 2>&1 || true

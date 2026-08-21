@@ -5,7 +5,7 @@
 
 ## Evidence and boundaries
 
-The Phase 0 harness compared Mailpit, MailDev, and Inbucket for health, allocation isolation, ordering, MIME/HTML/link/header/attachment normalisation, and scoped cleanup. Mailpit is maintained, MIT-licensed, multi-architecture, exposes SMTP plus a REST API, and avoids MailDev's global-delete legacy. Inbucket remains a Buro exception through **2026-11-21** because Supabase CLI owns local Auth routing and replacing its managed receiver increases platform drift. MailDev remains an Impaktful compatibility exception through **v1.1 / 2026-11-21** while its two legacy seams migrate.
+The v0.1.1 live conformance workflow exercises Mailpit, MailDev, and Inbucket for health, allocation isolation, ordering, MIME/HTML/link/header/attachment normalisation, and scoped cleanup; fast unit tests also use deterministic receiver HTTP doubles. Mailpit is maintained, MIT-licensed, multi-architecture, exposes SMTP plus a REST API, and avoids MailDev's global-delete legacy. Inbucket remains a Buro exception through **2026-11-21** because Supabase CLI owns local Auth routing and replacing its managed receiver increases platform drift. MailDev remains an Impaktful compatibility exception through **v1.1 / 2026-11-21** while its two legacy seams migrate.
 
 Message content, recipient, subject, links, codes, headers, attachment bytes, and credentials are transient restricted data. Only operation, result, duration, non-secret scope, counts, typed error, and cleanup state may enter receipts. The portable Python 3 standard-library executable parses locally and has no telemetry or AI path.
 
