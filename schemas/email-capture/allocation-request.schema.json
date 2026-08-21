@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "$id": "https://schemas.manolii.com/email-capture/v1/allocation-request.schema.json",
+  "title": "allocation-request",
+  "required": [
+    "schema_version",
+    "entity",
+    "repository",
+    "environment",
+    "run_id"
+  ],
+  "properties": {
+    "schema_version": {
+      "pattern": "^1\\.",
+      "type": "string"
+    },
+    "entity": {
+      "type": "string",
+      "minLength": 1
+    },
+    "repository": {
+      "type": "string",
+      "minLength": 1
+    },
+    "environment": {
+      "type": "string",
+      "minLength": 1
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "domain": {
+      "type": "string"
+    }
+  }
+}

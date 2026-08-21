@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "$id": "https://schemas.manolii.com/email-capture/v1/assertion-set.schema.json",
+  "title": "assertion-set",
+  "required": [
+    "schema_version",
+    "exact_count"
+  ],
+  "properties": {
+    "schema_version": {
+      "pattern": "^1\\.",
+      "type": "string"
+    },
+    "exact_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "negative": {
+      "type": "boolean"
+    },
+    "extract": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "enum": [
+              "link",
+              "code",
+              "header"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "exact_count": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    }
+  }
+}
