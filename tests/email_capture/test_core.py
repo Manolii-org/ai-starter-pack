@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from email_capture.core import CaptureError, MemoryBackend, Profile, allocate, assert_messages, await_messages, backend, extract, normalise_message, receipt, release_allocation
@@ -34,6 +35,11 @@ class CaptureTests(unittest.TestCase):
         release_allocation(self.backend, self.allocation)
         replacement = allocate(self.request, self.profile)
         self.assertNotEqual(self.allocation["allocation_id"], replacement["allocation_id"])
+
+    def test_concurrent_allocation_is_idempotent(self):
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            allocations = list(executor.map(lambda _index: allocate(self.request, self.profile), range(32)))
+        self.assertEqual({item["allocation_id"] for item in allocations}, {self.allocation["allocation_id"]})
 
     def test_isolation_cursor_extraction_and_scoped_release(self):
         rows = [
@@ -91,6 +97,11 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(extract(inbucket, "header", "x-test"), ["yes"])
         self.assertEqual(inbucket["content"]["text"], "123456")
         self.assertEqual(mailpit["attachments"][0]["size"], 4)
+
+    def test_display_name_recipient_is_allocation_scoped(self):
+        self._write_messages([{"id": "1", "date": "2026-08-21T00:00:00Z", "to": [f"Synthetic User <{self.allocation['recipient']}>"]}])
+        messages, _cursor = await_messages(self.backend, self.allocation, 0.1)
+        self.assertEqual(len(messages), 1)
 
     def test_limits_and_domain_validation(self):
         with self.assertRaisesRegex(CaptureError, "CONFIG_INVALID"):

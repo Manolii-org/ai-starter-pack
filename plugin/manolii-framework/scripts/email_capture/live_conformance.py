@@ -11,7 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from email.message import EmailMessage
 
-from email_capture.core import Profile, allocate, assert_messages, await_messages, backend, extract, release_allocation
+from email_capture.core import CaptureError, Profile, allocate, assert_messages, await_messages, backend, release_allocation
 
 
 def main() -> int:
@@ -43,6 +43,9 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
+    except CaptureError as error:
+        print('{"schema_version":"1.0","result":"failed","error_code":"' + error.code + '","detail":"' + error.safe_detail + '"}')
+        raise SystemExit(2) from None
     except Exception as error:
         print('{"schema_version":"1.0","result":"failed","error_code":"CONFORMANCE_FAILED","detail":"' + type(error).__name__ + '"}')
         raise SystemExit(2) from None

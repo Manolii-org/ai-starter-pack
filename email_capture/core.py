@@ -1,6 +1,7 @@
 """Hermetic virtual-inbox contracts and backend adapters."""
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -11,7 +12,9 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from contextlib import contextmanager
 from dataclasses import dataclass
+from email.utils import getaddresses
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -301,8 +304,11 @@ def _addresses(value: Any) -> list[Any]:
 def _summary_contains_recipient(row: dict[str, Any], recipient: str) -> bool:
     """Match the envelope recipient without searching bodies or subjects."""
     values = row.get("To", row.get("to", row.get("envelope", {}).get("to", [])))
+    rendered: list[str] = []
     for value in _addresses(values):
         address = value.get("Address", value.get("address", "")) if isinstance(value, dict) else str(value)
+        rendered.append(address)
+    for _display_name, address in getaddresses(rendered):
         if address.lower() == recipient:
             return True
     return False
@@ -376,6 +382,21 @@ def _registry_path() -> Path:
     return Path(os.environ.get("EMAIL_CAPTURE_ALLOCATION_REGISTRY", str(root / "allocations.json")))
 
 
+@contextmanager
+def _registry_lock():
+    """Serialize registry read-modify-write operations across local processes."""
+    path = _registry_path().with_suffix(".lock")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
 def _read_registry() -> dict[str, Any]:
     path = _registry_path()
     if not path.exists():
@@ -400,33 +421,35 @@ def allocate(request: dict[str, Any], profile: Profile) -> dict[str, Any]:
     if not isinstance(domain, str) or len(domain) > 253 or not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", domain.lower()):
         raise CaptureError("CONFIG_INVALID", "invalid allocation domain")
     scope_hash = hashlib.sha256(_scope(request).encode()).hexdigest()
-    records = _read_registry()
-    existing = records.get(scope_hash)
-    if isinstance(existing, dict) and float(existing.get("expires_at", 0)) > time.time():
-        return existing
-    now = time.time()
-    records = {key: value for key, value in records.items() if float(value.get("expires_at", 0)) > now}
-    digest = secrets.token_hex(16)
-    result = {
-        "schema_version": VERSION,
-        "allocation_id": digest,
-        "recipient": f"ec-{digest}@{domain.lower()}",
-        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
-        "expires_at": now + profile.ttl_seconds,
-        "cursor": "0:",
-        "scope": {key: request[key] for key in _SCOPE_KEYS},
-    }
-    records[scope_hash] = result
-    atomic_write_json(_registry_path(), records)
-    return result
+    with _registry_lock():
+        records = _read_registry()
+        existing = records.get(scope_hash)
+        if isinstance(existing, dict) and float(existing.get("expires_at", 0)) > time.time():
+            return existing
+        now = time.time()
+        records = {key: value for key, value in records.items() if float(value.get("expires_at", 0)) > now}
+        digest = secrets.token_hex(16)
+        result = {
+            "schema_version": VERSION,
+            "allocation_id": digest,
+            "recipient": f"ec-{digest}@{domain.lower()}",
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+            "expires_at": now + profile.ttl_seconds,
+            "cursor": "0:",
+            "scope": {key: request[key] for key in _SCOPE_KEYS},
+        }
+        records[scope_hash] = result
+        atomic_write_json(_registry_path(), records)
+        return result
 
 
 def release_allocation(selected_backend: Backend, allocation: dict[str, Any]) -> None:
     """Idempotently purge messages and retire the allocation registry entry."""
     selected_backend.purge(allocation)
-    records = _read_registry()
-    retained = {key: value for key, value in records.items() if value.get("allocation_id") != allocation.get("allocation_id")}
-    atomic_write_json(_registry_path(), retained)
+    with _registry_lock():
+        records = _read_registry()
+        retained = {key: value for key, value in records.items() if value.get("allocation_id") != allocation.get("allocation_id")}
+        atomic_write_json(_registry_path(), retained)
 
 
 def await_messages(selected_backend: Backend, allocation: dict[str, Any], timeout: float = 30, count: int = 1, not_before: str | None = None) -> tuple[list[dict[str, Any]], str]:
