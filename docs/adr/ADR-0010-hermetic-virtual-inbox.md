@@ -1,6 +1,6 @@
 # ADR-0010: LOCK_HERMETIC_ONLY virtual inbox v1
 
-**Status:** Accepted (2026-08-21)  
+**Status:** Accepted (2026-08-21)
 **Decision:** The v1 contract is hermetic-only. Mailpit is the default receiver; MailDev and Supabase Inbucket are compatibility adapters, not separate contracts.
 
 ## Evidence and boundaries

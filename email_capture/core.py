@@ -83,7 +83,7 @@ def normalise_http(x:dict[str,Any],backend:str)->dict[str,Any]:
 def backend(profile:Profile)->Backend: return MemoryBackend(profile) if profile.backend=="memory" else HttpBackend(profile)
 def _scope(req): return "\0".join(str(req.get(k,"")) for k in ("entity","repository","environment","run_id"))
 def allocate(req:dict[str,Any],profile:Profile)->dict[str,Any]:
-    for key in ("entity","repository","environment","run_id"): 
+    for key in ("entity","repository","environment","run_id"):
         if not req.get(key): raise CaptureError("CONFIG_INVALID",f"missing {key}")
     scope_hash=hashlib.sha256(_scope(req).encode()).hexdigest()
     registry=Path(os.environ.get("EMAIL_CAPTURE_ALLOCATION_REGISTRY", "/tmp/email-capture-allocations.json"))
