@@ -126,8 +126,10 @@ def _validate_local_endpoint(endpoint: str) -> None:
 
 def atomic_write_json(path: Path, value: Any) -> None:
     """Atomically write mode-0600 JSON without following destination symlinks."""
+    parent_existed = path.parent.exists()
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(path.parent, 0o700)
+    if not parent_existed:
+        os.chmod(path.parent, 0o700)
     if path.is_symlink():
         raise CaptureError("AUTHORIZATION_DENIED", "private output must not be a symlink")
     fd, name = tempfile.mkstemp(prefix=".email-capture-", dir=path.parent)
@@ -241,6 +243,9 @@ class HttpBackend:
                 detail = self._request(f"/api/v1/mailbox/{mailbox}/{urllib.parse.quote(identifier, safe='')}")
             if not isinstance(detail, dict):
                 raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "receiver detail has invalid shape")
+            receiver_time = summary.get("Created") or summary.get("created") or summary.get("time") or summary.get("date")
+            if isinstance(receiver_time, str) and receiver_time:
+                detail["received_at"] = receiver_time
             details.append(normalise_message(detail, self.profile.backend))
         return details
 

@@ -134,6 +134,17 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(output_path.stat().st_mode & 0o777, 0o600)
         self.assertNotEqual(json.loads(allocation_path.read_text())["cursor"], "0:")
 
+    def test_atomic_output_does_not_change_existing_parent_mode(self):
+        shared = Path(self.temp.name) / "shared"
+        shared.mkdir(mode=0o755)
+        profile_path = shared / "profile.json"
+        profile_path.write_text(json.dumps({"schema_version": "1.0", "mode": "hermetic", "backend": "memory", "endpoint": self.profile.endpoint, "environment": "test"}))
+        output_path = shared / "allocation.json"
+        before = shared.stat().st_mode & 0o777
+        request = json.dumps({**self.request, "run_id": "parent-mode"})
+        subprocess.run(["bin/email-capture", "--profile", str(profile_path), "allocate", "--request", request, "--output", str(output_path)], check=True, capture_output=True, text=True)
+        self.assertEqual(shared.stat().st_mode & 0o777, before)
+
 
 if __name__ == "__main__":
     unittest.main()

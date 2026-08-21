@@ -29,7 +29,7 @@ class ReceiverHandler(BaseHTTPRequestHandler):
             if self.path == "/api/v1/info": return self._send({"version": "test"})
             if self.path.startswith("/api/v1/messages?"): return self._send({"messages": [{"ID": "m1", "To": [{"Address": self.recipient}], "Created": "2026-08-21T00:00:00Z"}]})
             if self.path.endswith("/headers"): return self._send({"X-Test": ["yes"]})
-            return self._send({"ID": "m1", "Date": "2026-08-21T00:00:00Z", "From": {"Address": "sender@test"}, "To": [{"Address": self.recipient}], "Text": "Code 123456", "Attachments": []})
+            return self._send({"ID": "m1", "Date": "1999-01-01T00:00:00Z", "From": {"Address": "sender@test"}, "To": [{"Address": self.recipient}], "Text": "Code 123456", "Attachments": []})
         if self.backend == "maildev":
             if self.path == "/healthz": return self._send(True)
             row = {"id": "d1", "time": "2026-08-21T00:00:00Z", "from": [{"address": "sender@test"}], "to": [{"address": self.recipient}], "text": "Code 123456", "headers": {}}
@@ -71,6 +71,7 @@ class HttpAdapterTests(unittest.TestCase):
                 self.assertTrue(adapter.health())
                 messages = adapter.list(self.allocation)
                 self.assertEqual(messages[0]["content"]["text"], "Code 123456")
+                self.assertEqual(messages[0]["received_at"], "2026-08-21T00:00:00Z")
                 adapter.purge(self.allocation)
                 deletes = [request for request in ReceiverHandler.requests if request[0] == "DELETE"]
                 self.assertTrue(deletes)
