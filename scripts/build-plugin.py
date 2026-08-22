@@ -161,10 +161,33 @@ def build_hooks_config() -> dict:
     canonical settings.json gains/loses a hook event)."""
     P = "${CLAUDE_PLUGIN_ROOT}"
 
+    # Working-directory probe. A bare `cd "${CLAUDE_PROJECT_DIR}"` is unsafe:
+    # CLAUDE_PROJECT_DIR is UNSET in Claude Code Web multi-repo sessions (verified
+    # live on CLI 2.1.239, 2026-08-22), so it degrades to `cd ""` — which lands in
+    # $HOME. Every hook then reads and WRITES relative state (.ai/memory/*,
+    # .ai/guards.json, .ai/sessions/*) outside any repo. The Stop self-check is the
+    # worst case: its `>> .ai/memory/...` sink is deliberately cwd-relative.
+    #
+    # Resolution order, mirroring the canonical settings.json dispatcher:
+    #   1. $CLAUDE_PROJECT_DIR, only when it is actually a directory
+    #   2. the enclosing git toplevel
+    #   3. a single child of $PWD carrying the .ai/hook-root marker (the multi-repo
+    #      case; ambiguous when 0 or 2+ match, so it is skipped then)
+    #   4. $PWD — never empty, so `cd` cannot silently target $HOME
+    CWD_PROBE = (
+        '_R="${CLAUDE_PROJECT_DIR:-}"; '
+        '{ [ -n "$_R" ] && [ -d "$_R" ]; } || '
+        '_R="$(git rev-parse --show-toplevel 2>/dev/null)"; '
+        'if [ -z "$_R" ]; then _n=0; for _c in "$PWD"/*; do '
+        '[ -f "$_c/.ai/hook-root" ] && { _R="$_c"; _n=$((_n+1)); }; done; '
+        '[ "$_n" -eq 1 ] || _R=""; fi; '
+        'cd "${_R:-$PWD}"'
+    )
+
     def cmd(c: str, timeout: int) -> dict:
         return {
             "type": "command",
-            "command": f'cd "${{CLAUDE_PROJECT_DIR}}" && {c}',
+            "command": f"{CWD_PROBE} && {c}",
             "timeout": timeout,
         }
 
