@@ -71,6 +71,30 @@ ALLOWED_CONTEXT = re.compile(
 SELF = Path(__file__).resolve()
 
 
+def is_affirmative(line: str) -> bool:
+    """True when this line carries at least one live instruction to use the tool.
+
+    Every mention on the line is examined, not just the first. CodeRabbit #71
+    (follow-up): checking only `INSTRUCTION.search(...)` meant an affirmative
+    instruction sharing a line with an EARLIER negation was silently skipped —
+    "Never use TodoWrite for tracking. Use TodoWrite to track progress." scanned
+    clean. Measured 2026-08-22.
+
+    Each mention is judged against the text between the PREVIOUS mention and itself,
+    so a negation attached to one mention cannot shield a later one, and a negation
+    later in the line cannot launder an earlier affirmative. Sole source of truth for
+    the verdict — `scan()` and the self-check both call it, so they cannot disagree.
+    """
+    if ALLOWED_CONTEXT.search(line):
+        return False
+    prev_end = 0
+    for m in INSTRUCTION.finditer(line):
+        if not NEGATION.search(line[prev_end : m.start()]):
+            return True
+        prev_end = m.end()
+    return False
+
+
 def scan() -> list[str]:
     """Walk model-facing text and return every affirmative withdrawn-tool instruction."""
     hits: list[str] = []
@@ -86,12 +110,7 @@ def scan() -> list[str]:
             except (OSError, UnicodeDecodeError):
                 continue
             for n, line in enumerate(lines, 1):
-                if "TodoWrite" not in line:
-                    continue
-                if ALLOWED_CONTEXT.search(line):
-                    continue
-                m = INSTRUCTION.search(line)
-                if not m or NEGATION.search(line[: m.start()]):
+                if "TodoWrite" not in line or not is_affirmative(line):
                     continue
                 shown = line.strip()
                 if len(shown) > 120:
@@ -108,12 +127,7 @@ def check_negated_instructions_are_not_flagged() -> list[str]:
     exited 1 — CI blocked by the very wording the guard wants to see. Measured
     2026-08-22: all four phrasings below matched identically before the NEGATION filter.
     """
-    def flagged(line: str) -> bool:
-        """True when this line would be reported as a violation."""
-        if ALLOWED_CONTEXT.search(line):
-            return False
-        m = INSTRUCTION.search(line)
-        return bool(m) and not NEGATION.search(line[: m.start()])
+    flagged = is_affirmative  # the same predicate scan() uses — never a parallel copy
 
     problems: list[str] = []
     for text in (
@@ -129,6 +143,11 @@ def check_negated_instructions_are_not_flagged() -> list[str]:
         "Use TodoWrite to track progress.",
         "Track your steps with TodoWrite.",
         "TodoWrite for the remaining items.",
+        # Shared-line cases — CodeRabbit #71 follow-up. A negation attached to an
+        # EARLIER mention must not shield a live instruction later on the same line.
+        # Both scanned clean before `is_affirmative` walked every match.
+        "Never use TodoWrite for tracking. Use TodoWrite to track progress.",
+        "Do not use TodoWrite here; use TodoWrite in the planning phase.",
     ):
         if not flagged(text):
             problems.append(f"affirmative instruction NOT flagged: {text!r}")
