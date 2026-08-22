@@ -11,7 +11,7 @@ A structured workflow for investigating bugs, diagnosing root causes, implementi
 ## Process Steps
 
 ### 1. Save Instructions
-Record the current step in `.ai/sessions/active-task.json` as a non-null `active_step_id`. That exact key is what the compaction contract checks (`.claude/persistent-instructions.md`) before preserving the file verbatim — any other key name and the active task is lost on compaction.
+Record the current step in `.ai/sessions/active-task.json` as a non-null `active_step_id`, and **re-read that file at the start of every step**. The re-read is what makes this work anywhere: the file is on disk, so recovering your place after a compaction never depends on the compacted context having carried it. Use that exact key — where `.claude/persistent-instructions.md` is installed it preserves the file verbatim on a non-null `active_step_id`, which is a bonus, not the mechanism. A plugin-only install has no such contract (verified: the packaged tree ships no `persistent-instructions.md`, and `hooks/pre-compact.sh` states its stdout is not injected into compaction context), so any other key name — or skipping the re-read — loses the task.
 
 ### 2. Investigate the Issue
 - Read relevant code in the affected area

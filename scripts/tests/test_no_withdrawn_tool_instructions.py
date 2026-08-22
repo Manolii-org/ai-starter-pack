@@ -59,6 +59,18 @@ NEGATION = re.compile(
     re.IGNORECASE,
 )
 
+# …but a negation can itself be negated. Codex #71: the `{0,3}` slack — there so
+# "Do not ever use" and "No longer use" read as prohibitions — also swallowed
+# "Do not FORGET to use TodoWrite" and "Don't HESITATE to use TodoWrite", which are
+# emphatic INSTRUCTIONS. Both scanned clean, measured 2026-08-22. A reversing verb
+# inside the slack cancels the negation. Matched against the NEGATION span only, so
+# the same word elsewhere in the line is irrelevant.
+DOUBLE_NEGATIVE = re.compile(
+    r"\b(?:forget|forgetting|hesitate|fail|failing|neglect|neglecting|omit|omitting"
+    r"|miss|missing)\b",
+    re.IGNORECASE,
+)
+
 # Contexts where a mention is inert and must NOT be flagged. These are TWO different
 # kinds of exemption and conflating them is what let one part of a line silence the
 # rest of it (CodeRabbit #71 follow-up).
@@ -119,7 +131,8 @@ def is_affirmative(line: str) -> bool:
     token_spans = [t.span() for t in ALLOWED_TOKEN.finditer(line)]
     prev_end = 0
     for m in INSTRUCTION.finditer(line):
-        negated = NEGATION.search(line[prev_end : m.start()])
+        neg = NEGATION.search(line[prev_end : m.start()])
+        negated = bool(neg) and not DOUBLE_NEGATIVE.search(neg.group(0))
         inert = any(s < m.end() and m.start() < e for s, e in token_spans)  # overlap
         if not negated and not inert:
             return True
@@ -180,6 +193,9 @@ def check_exemptions_are_scoped_to_the_mention() -> list[str]:
         "permissions.allow includes TodoWrite(*)",
         "Permission entry: TodoWrite(*) — inert on current models.",
         "TodoWrite was withdrawn in 2.1.233; do not use TodoWrite.",
+        # the slack DOUBLE_NEGATIVE must not over-reach: adverbs still negate
+        "Do not ever use TodoWrite.",
+        "Never again use TodoWrite for tracking.",
     ):
         if flagged(text):
             problems.append(f"prohibition wrongly flagged: {text!r}")
@@ -202,6 +218,12 @@ def check_exemptions_are_scoped_to_the_mention() -> list[str]:
         "Withdrawn in 2.1.233, but use TodoWrite to track every step.",
         "With CLAUDE_CODE_ENABLE_TODO_TOOLS unset, use TodoWrite to track progress.",
         "Set CLAUDE_CODE_ENABLE_TODO_TOOLS=1 to use TodoWrite on older models.",
+        # Codex #71: a reversing verb inside the negation's slack makes the sentence an
+        # emphatic INSTRUCTION, not a prohibition. Both scanned clean before
+        # DOUBLE_NEGATIVE.
+        "Do not forget to use TodoWrite to track progress.",
+        "Don't hesitate to use TodoWrite.",
+        "Try not to neglect using TodoWrite for the remaining items.",
     ):
         if not flagged(text):
             problems.append(f"affirmative instruction NOT flagged: {text!r}")
