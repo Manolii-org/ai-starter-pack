@@ -49,25 +49,33 @@ INSTRUCTION = re.compile(
 # CodeRabbit #71: `INSTRUCTION` matches "Do not use TodoWrite" because it contains
 # "use TodoWrite", so text that correctly forbids the withdrawn tool — exactly what a
 # migrated instruction file should say — failed the guard and exited 1. Verified
-# 2026-08-22: all four of "Do not use TodoWrite", "Do NOT use TodoWrite",
-# "Never use TodoWrite" and the affirmative "Use TodoWrite to track progress" were
-# flagged identically. Matched against the text immediately BEFORE the mention, so a
-# negation elsewhere in a long line cannot launder an affirmative instruction.
+# 2026-08-22: "Do not use TodoWrite", "Do NOT use TodoWrite", "Never use TodoWrite"
+# and the affirmative "Use TodoWrite to track progress" were flagged identically.
+#
+# The negation must attach DIRECTLY to the matched instruction, so only adverbs may sit
+# between them — never another verb, because a verb takes the negation for itself and
+# leaves the instruction affirmative:
+#
+#     "Do not ever use TodoWrite"        negation -> use      PROHIBITION
+#     "Do not forget to use TodoWrite"   negation -> forget   INSTRUCTION
+#     "Do not skip using TodoWrite"      negation -> skip     INSTRUCTION
+#
+# This was a `(?:\w+\s+){0,3}` gap plus a blacklist of reversing verbs
+# (forget/hesitate/neglect/…). Codex #71 made the structural objection: any blacklist
+# is incomplete, and demonstrated it — "skip", "avoid", "postpone", "delay" and
+# "shy away from" all still scanned clean. So the gap is now an ALLOWLIST of adverbs.
+# An unrecognised word means the negation does not attach to this instruction, and the
+# line is FLAGGED — the guard fails closed on wording it has not seen before, and a
+# real prohibition with a novel adverb fails loudly in CI rather than passing silently.
+NEGATION_ADVERBS = (
+    r"ever|again|now|then|really|actually|simply|just|blindly|routinely|normally"
+    r"|typically|usually|generally|directly|otherwise|henceforth|anymore|any\s+more"
+    r"|longer|under\s+any\s+circumstances|on\s+any\s+account"
+)
 NEGATION = re.compile(
     r"(?:do\s*n[o']?t|don't|never|no\s+longer|stop|avoid|without|instead\s+of"
-    r"|rather\s+than|not)\s+(?:\w+\s+){0,3}$",
-    re.IGNORECASE,
-)
-
-# …but a negation can itself be negated. Codex #71: the `{0,3}` slack — there so
-# "Do not ever use" and "No longer use" read as prohibitions — also swallowed
-# "Do not FORGET to use TodoWrite" and "Don't HESITATE to use TodoWrite", which are
-# emphatic INSTRUCTIONS. Both scanned clean, measured 2026-08-22. A reversing verb
-# inside the slack cancels the negation. Matched against the NEGATION span only, so
-# the same word elsewhere in the line is irrelevant.
-DOUBLE_NEGATIVE = re.compile(
-    r"\b(?:forget|forgetting|hesitate|fail|failing|neglect|neglecting|omit|omitting"
-    r"|miss|missing)\b",
+    r"|rather\s+than|not)\s+"
+    rf"(?:(?:{NEGATION_ADVERBS})\s+){{0,2}}$",
     re.IGNORECASE,
 )
 
@@ -131,8 +139,14 @@ def is_affirmative(line: str) -> bool:
     token_spans = [t.span() for t in ALLOWED_TOKEN.finditer(line)]
     prev_end = 0
     for m in INSTRUCTION.finditer(line):
-        neg = NEGATION.search(line[prev_end : m.start()])
-        negated = bool(neg) and not DOUBLE_NEGATIVE.search(neg.group(0))
+        seg = line[prev_end : m.start()]
+        neg = NEGATION.search(seg)
+        # A negation that is ITSELF negated cancels. The trigger list contains verbs
+        # (`stop`, `avoid`) which can be negated in turn — "Do not avoid using
+        # TodoWrite" is an instruction, and read naively the trailing "avoid " matched
+        # as the negation. Looking left of the match catches that without enumerating
+        # which triggers are verbs.
+        negated = bool(neg) and not NEGATION.search(seg[: neg.start()])
         inert = any(s < m.end() and m.start() < e for s, e in token_spans)  # overlap
         if not negated and not inert:
             return True
@@ -193,9 +207,12 @@ def check_exemptions_are_scoped_to_the_mention() -> list[str]:
         "permissions.allow includes TodoWrite(*)",
         "Permission entry: TodoWrite(*) — inert on current models.",
         "TodoWrite was withdrawn in 2.1.233; do not use TodoWrite.",
-        # the slack DOUBLE_NEGATIVE must not over-reach: adverbs still negate
+        # the adverb allowlist must not over-reach: adverbs still negate
         "Do not ever use TodoWrite.",
         "Never again use TodoWrite for tracking.",
+        "Do not under any circumstances use TodoWrite.",
+        "Never really use TodoWrite for this.",
+        "Avoid using TodoWrite entirely.",
     ):
         if flagged(text):
             problems.append(f"prohibition wrongly flagged: {text!r}")
@@ -219,11 +236,23 @@ def check_exemptions_are_scoped_to_the_mention() -> list[str]:
         "With CLAUDE_CODE_ENABLE_TODO_TOOLS unset, use TodoWrite to track progress.",
         "Set CLAUDE_CODE_ENABLE_TODO_TOOLS=1 to use TodoWrite on older models.",
         # Codex #71: a reversing verb inside the negation's slack makes the sentence an
-        # emphatic INSTRUCTION, not a prohibition. Both scanned clean before
-        # DOUBLE_NEGATIVE.
+        # emphatic INSTRUCTION, not a prohibition. Both scanned clean while any
+        # word could sit in the gap.
         "Do not forget to use TodoWrite to track progress.",
         "Don't hesitate to use TodoWrite.",
         "Try not to neglect using TodoWrite for the remaining items.",
+        # Codex #71 again: the blacklist that handled the three above could not cover
+        # these. An intervening VERB of any kind takes the negation, so the allowlist
+        # rejects all of them without needing to enumerate reversing verbs.
+        "Do not skip using TodoWrite for this task.",
+        "Do not postpone using TodoWrite.",
+        "Do not delay using TodoWrite.",
+        "Do not shy away from using TodoWrite.",
+        # a negated NEGATION-TRIGGER — `avoid`/`stop` are in the trigger list, so
+        # without the cancel the trailing trigger matched and the line read as a
+        # prohibition.
+        "Do not avoid using TodoWrite.",
+        "Do not stop using TodoWrite.",
     ):
         if not flagged(text):
             problems.append(f"affirmative instruction NOT flagged: {text!r}")
