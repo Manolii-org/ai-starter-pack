@@ -292,7 +292,7 @@ required for the orchestrator to resume without re-reading the task from scratch
 
 **PRESERVE** (structured, in this order):
 1. ACTIVE TASK: current task description, branch name, PR number/URL/status (+ full active-task.json if active_step_id is non-null)
-2. REMAINING PLAN: any open TodoWrite items or steps not yet completed
+2. REMAINING PLAN: any open plan items or steps not yet completed
 3. DECISIONS + WHY: every architectural/strategic decision made, with 1-sentence rationale
 4. MODIFIED FILES: list of files changed and what changed (not the content — just what)
 5. BLOCKERS & DEFERRED: unresolved errors, open questions, explicitly deferred items
