@@ -41,6 +41,7 @@ failures: list[str] = []
 
 
 def fail(case: str, detail: str) -> None:
+    """Record a failure; checks accumulate so one run reports every problem."""
     failures.append(f"[{case}] {detail}")
 
 
@@ -116,6 +117,7 @@ def check_probe_ignores_nonexistent_dir() -> None:
 
 
 def check_probe_honours_valid_var() -> None:
+    """An existing CLAUDE_PROJECT_DIR wins over every fallback."""
     probe = _probe()
     with tempfile.TemporaryDirectory() as td:
         root = Path(td).resolve()
@@ -198,6 +200,7 @@ def check_still_runs_when_home_is_a_linked_worktree() -> None:
         main.mkdir()
         env = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"}
         def git(*a: str, cwd: Path = main) -> None:
+            """Run a git command in the synthetic repo, isolated from user/system config."""
             subprocess.run(["git", *a], cwd=cwd, check=True,
                            capture_output=True, env={**os.environ, **env})
         git("init", "-q", ".")
@@ -339,6 +342,7 @@ def check_generated_hooks_all_use_the_probe() -> None:
 
 
 def main() -> int:
+    """Run every check and report all failures at once. 0 = all pass."""
     for fn in (
         check_probe_never_lands_in_home_when_var_unset,
         check_probe_ignores_empty_var,

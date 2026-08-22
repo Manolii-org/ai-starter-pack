@@ -61,6 +61,7 @@ failures: list[str] = []
 
 
 def main() -> int:
+    """Compare the pack's shipped guards against the declared set. 0 = they agree."""
     if not HOOK.exists():
         print(f"✗ {HOOK.relative_to(REPO)} is missing — the pack must ship a PreToolUse hook")
         return 1

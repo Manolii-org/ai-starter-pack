@@ -72,6 +72,7 @@ SELF = Path(__file__).resolve()
 
 
 def scan() -> list[str]:
+    """Walk model-facing text and return every affirmative withdrawn-tool instruction."""
     hits: list[str] = []
     for rel in SCAN_DIRS:
         root = REPO / rel.replace("...", ".")
@@ -108,6 +109,7 @@ def check_negated_instructions_are_not_flagged() -> list[str]:
     2026-08-22: all four phrasings below matched identically before the NEGATION filter.
     """
     def flagged(line: str) -> bool:
+        """True when this line would be reported as a violation."""
         if ALLOWED_CONTEXT.search(line):
             return False
         m = INSTRUCTION.search(line)
@@ -134,6 +136,7 @@ def check_negated_instructions_are_not_flagged() -> list[str]:
 
 
 def main() -> int:
+    """Check negation handling, then scan the tree. 0 = no live instructions found."""
     problems = check_negated_instructions_are_not_flagged()
     if problems:
         print("Negation handling is wrong:\n")

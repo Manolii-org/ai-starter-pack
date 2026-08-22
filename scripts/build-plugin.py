@@ -232,6 +232,7 @@ def build_hooks_config() -> dict:
     )
 
     def cmd(c: str, timeout: int) -> dict:
+        """Wrap one hook command so it runs only after the root probe succeeds."""
         # `( … )` around the payload is load-bearing (CodeRabbit #71, Major). `&&`
         # binds only to the FIRST segment of `c`; several commands are compound. The
         # Stop self-check is `python3 … && python3 …; _rc=$?; mkdir -p .ai/memory; echo
@@ -556,6 +557,7 @@ def smoke_test_hooks(out: Path) -> None:
     cfg = json.loads((out / "hooks" / "hooks.json").read_text())
 
     def snapshot() -> dict:
+        """Record file counts per bundled directory, for the build summary."""
         return {p: p.stat().st_mtime_ns for p in out.rglob("*")
                 if p.is_file() and "__pycache__" not in p.parts and p.suffix != ".pyc"}
 
@@ -613,6 +615,7 @@ def smoke_test_hooks(out: Path) -> None:
 
 
 def main() -> None:
+    """CLI entry point: render the Copier template, bundle the plugin, verify it."""
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--install-mode", default="branded", choices=["branded", "unbranded"])
     ap.add_argument("--out",
