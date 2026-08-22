@@ -11,7 +11,9 @@ A structured workflow for investigating bugs, diagnosing root causes, implementi
 ## Process Steps
 
 ### 1. Save Instructions
-Record the current step in `.ai/sessions/active-task.json` as a non-null `active_step_id`, and **re-read that file at the start of every step**. The re-read is what makes this work anywhere: the file is on disk, so recovering your place after a compaction never depends on the compacted context having carried it. Use that exact key — where `.claude/persistent-instructions.md` is installed it preserves the file verbatim on a non-null `active_step_id`, which is a bonus, not the mechanism. A plugin-only install has no such contract (verified: the packaged tree ships no `persistent-instructions.md`, and `hooks/pre-compact.sh` states its stdout is not injected into compaction context), so any other key name — or skipping the re-read — loses the task.
+Record the current step in `.ai/sessions/active-task.json` as a non-null `active_step_id`, and **re-read that file before any action that depends on knowing which step you are on** — not only at step boundaries. Use that exact key: where `.claude/persistent-instructions.md` is installed, it preserves the file verbatim on a non-null `active_step_id` and the checkpoint survives compaction automatically.
+
+> **Known limitation, plugin-only installs.** The packaged plugin ships no `persistent-instructions.md`, and `hooks/pre-compact.sh` states its stdout is not injected into compaction context. So there is no automatic post-compaction consumer: if compaction fires *mid-step*, recovery depends on this directive itself surviving into the compacted context. Writing the checkpoint still costs nothing and makes recovery possible; it is not guaranteed. Installing the full template closes this.
 
 ### 2. Investigate the Issue
 - Read relevant code in the affected area

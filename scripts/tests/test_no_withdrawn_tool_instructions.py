@@ -109,8 +109,33 @@ ALLOWED_TOKEN = re.compile(
 SELF = Path(__file__).resolve()
 
 
+def affirmative_spans(text: str) -> list[tuple[int, int]]:
+    """Spans of every LIVE instruction in `text` — the verdict, with positions.
+
+    Separated from `is_affirmative` so `scan()` can report the source line a match
+    actually falls on after joining wrapped lines into a block.
+    """
+    spans: list[tuple[int, int]] = []
+    token_spans = [t.span() for t in ALLOWED_TOKEN.finditer(text)]
+    prev_end = 0
+    for m in INSTRUCTION.finditer(text):
+        seg = text[prev_end : m.start()]
+        neg = NEGATION.search(seg)
+        # A negation that is ITSELF negated cancels. The trigger list contains verbs
+        # (`stop`, `avoid`) which can be negated in turn — "Do not avoid using
+        # TodoWrite" is an instruction, and read naively the trailing "avoid " matched
+        # as the negation. Looking left of the match catches that without enumerating
+        # which triggers are verbs.
+        negated = bool(neg) and not NEGATION.search(seg[: neg.start()])
+        inert = any(s < m.end() and m.start() < e for s, e in token_spans)  # overlap
+        if not negated and not inert:
+            spans.append(m.span())
+        prev_end = m.end()
+    return spans
+
+
 def is_affirmative(line: str) -> bool:
-    """True when this line carries at least one live instruction to use the tool.
+    """True when this text carries at least one live instruction to use the tool.
 
     Every mention on the line is examined, not just the first. CodeRabbit #71
     (follow-up): checking only `INSTRUCTION.search(...)` meant an affirmative
@@ -136,22 +161,41 @@ def is_affirmative(line: str) -> bool:
     Sole source of truth for the verdict — `scan()` and the self-check both call it,
     so they cannot disagree.
     """
-    token_spans = [t.span() for t in ALLOWED_TOKEN.finditer(line)]
-    prev_end = 0
-    for m in INSTRUCTION.finditer(line):
-        seg = line[prev_end : m.start()]
-        neg = NEGATION.search(seg)
-        # A negation that is ITSELF negated cancels. The trigger list contains verbs
-        # (`stop`, `avoid`) which can be negated in turn — "Do not avoid using
-        # TodoWrite" is an instruction, and read naively the trailing "avoid " matched
-        # as the negation. Looking left of the match catches that without enumerating
-        # which triggers are verbs.
-        negated = bool(neg) and not NEGATION.search(seg[: neg.start()])
-        inert = any(s < m.end() and m.start() < e for s, e in token_spans)  # overlap
-        if not negated and not inert:
-            return True
-        prev_end = m.end()
-    return False
+    return bool(affirmative_spans(line))
+
+
+def _blocks(lines: list[str]) -> list[tuple[int, str, dict[int, int]]]:
+    """Group consecutive non-blank lines into blocks -> (first line no, text, offset->line).
+
+    Codex #71: `scan()` evaluated one line at a time, so ordinary Markdown prose
+    wrapping split an instruction in half and it passed. Measured 2026-08-22 —
+    "Track progress with\nTodoWrite.", "Open\nTodoWrite." and "Continue using\nTodoWrite."
+    each matched when read whole and matched NOTHING line by line. Prose wraps for
+    width, so this needs no ill intent to happen.
+
+    A blank line ends a block, which keeps the join from reaching across paragraphs and
+    inventing an instruction out of two unrelated sentences. The offset map exists so a
+    hit is still reported on the line the mention actually falls on, not the block head.
+    """
+    blocks: list[tuple[int, str, dict[int, int]]] = []
+    buf: list[str] = []
+    offsets: dict[int, int] = {}
+    start = 0
+    for n, line in enumerate(lines, 1):
+        if not line.strip():
+            if buf:
+                blocks.append((start, " ".join(buf), offsets))
+                buf, offsets, start = [], {}, 0
+            continue
+        if not buf:
+            start = n
+        base = sum(len(b) + 1 for b in buf)
+        for i in range(len(line) + 1):
+            offsets[base + i] = n
+        buf.append(line)
+    if buf:
+        blocks.append((start, " ".join(buf), offsets))
+    return blocks
 
 
 def scan() -> list[str]:
@@ -168,13 +212,17 @@ def scan() -> list[str]:
                 lines = path.read_text(encoding="utf-8").splitlines()
             except (OSError, UnicodeDecodeError):
                 continue
-            for n, line in enumerate(lines, 1):
-                if "TodoWrite" not in line or not is_affirmative(line):
+            for start_line, block, offsets in _blocks(lines):
+                if "TodoWrite" not in block:
                     continue
-                shown = line.strip()
-                if len(shown) > 120:
-                    shown = shown[:117] + "…"
-                hits.append(f"{path.relative_to(REPO)}:{n}: {shown}")
+                for span_start, _ in affirmative_spans(block):
+                    n = offsets[span_start]
+                    shown = lines[n - 1].strip()
+                    if len(shown) > 120:
+                        shown = shown[:117] + "…"
+                    wrapped = "" if n == start_line and len(offsets) == len(block) else " (wrapped)"
+                    hits.append(f"{path.relative_to(REPO)}:{n}:{wrapped} {shown}")
+                    break
     return hits
 
 
@@ -259,11 +307,41 @@ def check_exemptions_are_scoped_to_the_mention() -> list[str]:
     return problems
 
 
+def check_wrapped_instructions_are_not_split() -> list[str]:
+    """Prose wrapping must not hide an instruction, and must not invent one.
+
+    Codex #71: `scan()` read one line at a time, so an instruction split across a
+    Markdown line break passed. Measured 2026-08-22 — each of these matched when read
+    whole and matched NOTHING line by line. No ill intent required; prose wraps for
+    width.
+
+    The paragraph join has an obvious failure mode of its own, so the second half of
+    this check guards it: a blank line must end the block, or two unrelated sentences
+    could be welded into an instruction neither of them makes.
+    """
+    problems: list[str] = []
+    for text in (
+        "Track progress with\nTodoWrite.",
+        "Open\nTodoWrite.",
+        "Continue using\nTodoWrite.",
+    ):
+        lines = text.split("\n")
+        if any(is_affirmative(l) for l in lines):
+            problems.append(f"premise broken — a single line already matches: {text!r}")
+        if not any(is_affirmative(b) for _, b, _ in _blocks(lines)):
+            problems.append(f"wrapped instruction not caught: {text!r}")
+    split_para = ["Sentence ending in track progress with", "", "TodoWrite is withdrawn."]
+    if any(is_affirmative(b) for _, b, _ in _blocks(split_para)):
+        problems.append("blank line failed to end the block — joined across paragraphs")
+    return problems
+
+
 def main() -> int:
     """Check negation handling, then scan the tree. 0 = no live instructions found."""
     problems = check_exemptions_are_scoped_to_the_mention()
+    problems += check_wrapped_instructions_are_not_split()
     if problems:
-        print("Negation handling is wrong:\n")
+        print("Instruction detection is wrong:\n")
         for p in problems:
             print(f"  ✗ {p}")
         return 1
