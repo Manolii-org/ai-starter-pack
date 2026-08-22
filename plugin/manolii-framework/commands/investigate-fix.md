@@ -11,7 +11,7 @@ A structured workflow for investigating bugs, diagnosing root causes, implementi
 ## Process Steps
 
 ### 1. Save Instructions
-Use TodoWrite to track which step you are on so context compaction doesn't lose the flow.
+Track which step you are on in `.ai/sessions/active-task.json` so context compaction doesn't lose the flow.
 
 ### 2. Investigate the Issue
 - Read relevant code in the affected area

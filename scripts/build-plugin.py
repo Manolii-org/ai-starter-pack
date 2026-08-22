@@ -161,10 +161,71 @@ def build_hooks_config() -> dict:
     canonical settings.json gains/loses a hook event)."""
     P = "${CLAUDE_PLUGIN_ROOT}"
 
+    # Working-directory probe.
+    #
+    # The original `cd "${CLAUDE_PROJECT_DIR}" && …` is unsafe because
+    # CLAUDE_PROJECT_DIR is UNSET in Claude Code Web multi-repo sessions (verified
+    # live, CLI 2.1.239, 2026-08-22).
+    #
+    # CORRECTION (Codex review, ai-starter-pack#71 — P1): an earlier version of this
+    # comment claimed `cd ""` "lands in $HOME". It does not. Measured: `cd ""` is a
+    # NO-OP — it returns 0 and leaves the working directory unchanged; only a bare
+    # `cd` with no argument goes to $HOME. So the real failure is subtler: the hook
+    # runs in whatever directory Claude Code launched it from, and per the 2.1.239
+    # changelog that is "the project root or home directory". When it is $HOME, every
+    # hook reads and WRITES repo-relative state (.ai/memory/*, .ai/guards.json,
+    # .ai/sessions/*) into the home directory. The Stop self-check is the worst case:
+    # its `>> .ai/memory/...` sink is deliberately cwd-relative.
+    #
+    # Resolution order, mirroring the canonical settings.json dispatcher:
+    #   1. $CLAUDE_PROJECT_DIR, only when it is actually a directory
+    #   2. the enclosing git toplevel
+    #   3. a single child of $PWD carrying the .ai/hook-root marker (the multi-repo
+    #      case; ambiguous when 0 or 2+ match, so it is skipped then)
+    #   4. $PWD
+    #
+    # Then the part that actually closes the hole. Steps 1-3 all fail when the hook
+    # starts in $HOME — git rev-parse finds nothing there, and this pack ships no
+    # .ai/hook-root marker for step 3 to find (a Manolii-ecosystem convention, not a
+    # pack one). Step 4 would then hand back $HOME itself. So resolving to a bare
+    # $HOME that is not a repository is treated as FAILURE TO RESOLVE, and the hook
+    # skips with exit 0 rather than running somewhere it would pollute. Fail-open on
+    # the permission decision, fail-safe on the filesystem. A genuine repository at
+    # $HOME still proceeds, hence the .git test.
+    CWD_PROBE = (
+        '_R="${CLAUDE_PROJECT_DIR:-}"; '
+        '{ [ -n "$_R" ] && [ -d "$_R" ]; } || '
+        '_R="$(git rev-parse --show-toplevel 2>/dev/null)"; '
+        'if [ -z "$_R" ]; then _n=0; for _c in "$PWD"/*; do '
+        '[ -f "$_c/.ai/hook-root" ] && { _R="$_c"; _n=$((_n+1)); }; done; '
+        '[ "$_n" -eq 1 ] || _R=""; fi; '
+        '[ -n "$_R" ] || _R="$PWD"; '
+        # `-e`, not `-d` (Codex #71, P2). A LINKED WORKTREE and a SUBMODULE checkout
+        # store `.git` as a regular FILE containing `gitdir: …`, not a directory —
+        # verified with `git worktree add`: `git rev-parse --show-toplevel` returned the
+        # worktree path while `[ -d .git ]` was false, so a genuine repository at $HOME
+        # was skipped. `-e` accepts both shapes; the `git -C` fallback additionally
+        # accepts an unusual layout, and must agree that $_R is the top level so a repo
+        # merely ABOVE $HOME does not qualify.
+        'if [ "$_R" = "${HOME:-}" ] && [ ! -e "$_R/.git" ] && '
+        '[ "$(git -C "$_R" rev-parse --show-toplevel 2>/dev/null)" != "$_R" ]; then '
+        'echo "[manolii-hook] no repository root resolved (would run in the home '
+        'directory) — skipping to avoid writing .ai/ state outside a repo" >&2; '
+        'exit 0; fi; '
+        # `cd` alone is NOT sufficient (Codex #71, second P1). Several bundled
+        # entrypoints read CLAUDE_PROJECT_DIR directly and fall back to their OWN
+        # __file__ location, not cwd — hooks/post-tool.py:50, hooks/pre-compact.sh:14,
+        # scripts/system-self-check.py:22 (whose comment even states it expects to run
+        # after `cd $CLAUDE_PROJECT_DIR`). Left unset, those three resolve their state
+        # root to the PLUGIN INSTALL TREE. Exporting the resolved root fixes all of
+        # them at once and keeps cwd and the variable in agreement.
+        'CLAUDE_PROJECT_DIR="$_R"; export CLAUDE_PROJECT_DIR; cd "$_R"'
+    )
+
     def cmd(c: str, timeout: int) -> dict:
         return {
             "type": "command",
-            "command": f'cd "${{CLAUDE_PROJECT_DIR}}" && {c}',
+            "command": f"{CWD_PROBE} && {c}",
             "timeout": timeout,
         }
 
