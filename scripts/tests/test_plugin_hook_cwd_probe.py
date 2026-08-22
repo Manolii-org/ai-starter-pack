@@ -63,6 +63,47 @@ def _probe() -> str:
     return out
 
 
+GIT_ISOLATED = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"}
+
+
+def _git(*args: str, cwd: Path) -> None:
+    """Run one git command, isolated from user/system config and bounded by a timeout."""
+    subprocess.run(
+        ["git", *args], cwd=cwd, check=True, capture_output=True,
+        env={**os.environ, **GIT_ISOLATED}, timeout=30,
+    )
+
+
+def _init_repo(path: Path) -> Path:
+    """Create a REAL git repository at `path` and return it.
+
+    CodeRabbit #71: these fixtures used to be `(path / ".git").mkdir()` — an empty
+    directory, which is not a repository. Measured 2026-08-22: `git rev-parse
+    --show-toplevel` inside one returns "fatal: not a git repository". The probe's
+    guard is `[ ! -e "$_R/.git" ] && [ git -C … != "$_R" ]`, so `-e` matched the empty
+    directory and short-circuited — the `git -C` branch never ran. The cases passed
+    while proving only that `-e` sees a directory, and would have kept passing if the
+    git confirmation were deleted. A real repo exercises both.
+    """
+    path.mkdir(parents=True, exist_ok=True)
+    _git("init", "-q", ".", cwd=path)
+    _git("config", "user.email", "t@example.invalid", cwd=path)
+    _git("config", "user.name", "t", cwd=path)
+    # Guard the premise once, for every fixture: git itself must agree this is the
+    # top level. Without this the helper could silently regress to the empty-directory
+    # form and the cases above would go back to proving nothing.
+    top = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"], cwd=path, capture_output=True,
+        text=True, env={**os.environ, **GIT_ISOLATED}, timeout=30,
+    )
+    if top.returncode != 0 or Path(top.stdout.strip()).resolve() != path.resolve():
+        raise AssertionError(
+            f"fixture at {path} is not a git top level: rc={top.returncode} "
+            f"out={top.stdout.strip()!r} err={top.stderr.strip()[:120]!r}"
+        )
+    return path
+
+
 def _run(probe: str, cwd: Path, env_extra: dict[str, str | None]) -> str:
     """Execute `<probe> && pwd -P` and return the resulting directory."""
     env = dict(os.environ)
@@ -177,8 +218,7 @@ def check_still_runs_when_home_is_itself_a_repo() -> None:
     """The refusal must not fire when $HOME genuinely IS the repository."""
     probe = _probe()
     with tempfile.TemporaryDirectory() as td:
-        home_repo = Path(td).resolve()
-        (home_repo / ".git").mkdir()
+        home_repo = _init_repo(Path(td).resolve())
         landed = _run(probe, home_repo, {"CLAUDE_PROJECT_DIR": None, "HOME": str(home_repo)})
     if landed != str(home_repo):
         fail("home-is-repo", f"a real repo at $HOME must still be used; landed in {landed}")
@@ -196,21 +236,12 @@ def check_still_runs_when_home_is_a_linked_worktree() -> None:
     probe = _probe()
     with tempfile.TemporaryDirectory() as td:
         root = Path(td).resolve()
-        main = root / "main-repo"
-        main.mkdir()
-        env = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"}
-        def git(*a: str, cwd: Path = main) -> None:
-            """Run a git command in the synthetic repo, isolated from user/system config."""
-            subprocess.run(["git", *a], cwd=cwd, check=True,
-                           capture_output=True, env={**os.environ, **env})
-        git("init", "-q", ".")
-        git("config", "user.email", "t@example.invalid")
-        git("config", "user.name", "t")
+        main = _init_repo(root / "main-repo")
         (main / "a.txt").write_text("x")
-        git("add", "-A")
-        git("commit", "-qm", "init")
+        _git("add", "-A", cwd=main)
+        _git("commit", "-qm", "init", cwd=main)
         wt = root / "linked"
-        git("worktree", "add", "-q", str(wt), "-b", "wt")
+        _git("worktree", "add", "-q", str(wt), "-b", "wt", cwd=main)
         if (wt / ".git").is_dir():                     # guards the premise itself
             fail("home-worktree", "expected .git to be a FILE in a linked worktree")
             return
@@ -286,8 +317,7 @@ def check_exports_resolved_root_for_entrypoints() -> None:
     """
     probe = _probe()
     with tempfile.TemporaryDirectory() as td:
-        repo = Path(td).resolve()
-        (repo / ".git").mkdir()
+        repo = _init_repo(Path(td).resolve())
         r = subprocess.run(
             ["sh", "-c", f'{probe} && printf "%s" "$CLAUDE_PROJECT_DIR"'],
             cwd=repo, env={k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"},
