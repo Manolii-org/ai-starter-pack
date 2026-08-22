@@ -182,6 +182,32 @@ def check_still_runs_when_home_is_itself_a_repo() -> None:
         fail("home-is-repo", f"a real repo at $HOME must still be used; landed in {landed}")
 
 
+def check_exports_resolved_root_for_entrypoints() -> None:
+    """Codex #71 (second P1): `cd` alone leaves CLAUDE_PROJECT_DIR unset.
+
+    Three bundled entrypoints read the variable directly and fall back to their OWN
+    __file__ location rather than cwd — hooks/post-tool.py:50,
+    hooks/pre-compact.sh:14, scripts/system-self-check.py:22 (whose comment states it
+    expects to run after `cd $CLAUDE_PROJECT_DIR`). Unset, all three resolve their
+    state root to the PLUGIN INSTALL TREE, so compact state, transcript archives and
+    self-checks target the wrong place. The probe must export the root it resolved.
+    """
+    probe = _probe()
+    with tempfile.TemporaryDirectory() as td:
+        repo = Path(td).resolve()
+        (repo / ".git").mkdir()
+        r = subprocess.run(
+            ["sh", "-c", f'{probe} && printf "%s" "$CLAUDE_PROJECT_DIR"'],
+            cwd=repo, env={k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"},
+            capture_output=True, text=True, timeout=30,
+        )
+    exported = r.stdout.strip()
+    if not exported:
+        fail("export-root", "probe resolved a root but left CLAUDE_PROJECT_DIR unset")
+    elif exported != str(repo):
+        fail("export-root", f"exported {exported!r}, expected {repo}")
+
+
 def check_generated_hooks_all_use_the_probe() -> None:
     """No generated hook command may keep the unguarded bare cd."""
     committed = REPO / "plugin" / "manolii-framework" / "hooks" / "hooks.json"
@@ -206,6 +232,7 @@ def main() -> int:
         check_probe_is_ambiguous_safe_with_two_markers,
         check_refuses_to_run_in_a_non_repo_home,
         check_still_runs_when_home_is_itself_a_repo,
+        check_exports_resolved_root_for_entrypoints,
         check_generated_hooks_all_use_the_probe,
     ):
         try:
@@ -218,7 +245,7 @@ def main() -> int:
         for f in failures:
             print(f"  ✗ {f}")
         return 1
-    print("✔ plugin hook cwd probe: 9 cases pass (never runs in a non-repo $HOME)")
+    print("✔ plugin hook cwd probe: 10 cases pass (resolves, exports, never runs in a non-repo $HOME)")
     return 0
 
 

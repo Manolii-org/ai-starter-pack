@@ -204,7 +204,14 @@ def build_hooks_config() -> dict:
         'echo "[manolii-hook] no repository root resolved (would run in the home '
         'directory) — skipping to avoid writing .ai/ state outside a repo" >&2; '
         'exit 0; fi; '
-        'cd "$_R"'
+        # `cd` alone is NOT sufficient (Codex #71, second P1). Several bundled
+        # entrypoints read CLAUDE_PROJECT_DIR directly and fall back to their OWN
+        # __file__ location, not cwd — hooks/post-tool.py:50, hooks/pre-compact.sh:14,
+        # scripts/system-self-check.py:22 (whose comment even states it expects to run
+        # after `cd $CLAUDE_PROJECT_DIR`). Left unset, those three resolve their state
+        # root to the PLUGIN INSTALL TREE. Exporting the resolved root fixes all of
+        # them at once and keeps cwd and the variable in agreement.
+        'CLAUDE_PROJECT_DIR="$_R"; export CLAUDE_PROJECT_DIR; cd "$_R"'
     )
 
     def cmd(c: str, timeout: int) -> dict:
