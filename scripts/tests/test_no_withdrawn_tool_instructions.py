@@ -73,14 +73,18 @@ ALLOWED_TOKEN = re.compile(
     r"|\|(?:Bash|Edit|Write|Read)\|"   # native-tool-name regex alternation
 )
 
-# LINE — the line's SUBJECT is the withdrawal or its restore flag, so every mention on
-# it is discussion rather than instruction. Deliberately line-scoped: narrowing these
-# to overlap would flag the guard's own explanatory prose and the changelog citations
-# that justify it.
-ALLOWED_LINE = re.compile(
-    r"CLAUDE_CODE_ENABLE_TODO_TOOLS"   # discussing the restore flag
-    r"|2\.1\.233"                      # citing the changelog entry
-)
+# There is deliberately NO line-scoped exemption. An earlier version had one for
+# `CLAUDE_CODE_ENABLE_TODO_TOOLS` and `2.1.233`, on the reasoning that such lines are
+# ABOUT the withdrawal. Codex #71 showed that reasoning creates a hole big enough to
+# drive the regression through — "Withdrawn in 2.1.233, but use TodoWrite to track
+# every step" and "With CLAUDE_CODE_ENABLE_TODO_TOOLS unset, use TodoWrite to track
+# progress" both scanned clean.
+#
+# The deciding measurement: ZERO lines in the scanned tree relied on it. The two cases
+# it existed to protect were ones this file invented, not repository content — so the
+# exemption was paying a real hole for a hypothetical benefit. A line that genuinely
+# needs to document the restore flag can phrase it as a prohibition (NEGATION covers
+# that), or add an exemption then, with a real line to justify it.
 
 SELF = Path(__file__).resolve()
 
@@ -108,14 +112,10 @@ def is_affirmative(line: str) -> bool:
       * ALLOWED_TOKEN — must OVERLAP the mention's span. These patterns mark an inert
         occurrence of the name itself, so proximity is not enough; anything short of
         overlap is a different mention.
-      * ALLOWED_LINE — genuinely line-scoped, and checked first. Those lines are ABOUT
-        the withdrawal, so every mention on them is discussion.
 
     Sole source of truth for the verdict — `scan()` and the self-check both call it,
     so they cannot disagree.
     """
-    if ALLOWED_LINE.search(line):
-        return False
     token_spans = [t.span() for t in ALLOWED_TOKEN.finditer(line)]
     prev_end = 0
     for m in INSTRUCTION.finditer(line):
@@ -180,7 +180,6 @@ def check_exemptions_are_scoped_to_the_mention() -> list[str]:
         "permissions.allow includes TodoWrite(*)",
         "Permission entry: TodoWrite(*) — inert on current models.",
         "TodoWrite was withdrawn in 2.1.233; do not use TodoWrite.",
-        "Set CLAUDE_CODE_ENABLE_TODO_TOOLS=1 to use TodoWrite on older models.",
     ):
         if flagged(text):
             problems.append(f"prohibition wrongly flagged: {text!r}")
@@ -198,6 +197,11 @@ def check_exemptions_are_scoped_to_the_mention() -> list[str]:
         # it. Both scanned clean while that check ran whole-line.
         "Allow-list carries TodoWrite(*). Use TodoWrite to track progress.",
         "See permissions.allow for details. Use TodoWrite to track progress.",
+        # Codex #71: a withdrawal/restore-flag mention earlier in the line must not
+        # exempt a live instruction after it. Both scanned clean under ALLOWED_LINE.
+        "Withdrawn in 2.1.233, but use TodoWrite to track every step.",
+        "With CLAUDE_CODE_ENABLE_TODO_TOOLS unset, use TodoWrite to track progress.",
+        "Set CLAUDE_CODE_ENABLE_TODO_TOOLS=1 to use TodoWrite on older models.",
     ):
         if not flagged(text):
             problems.append(f"affirmative instruction NOT flagged: {text!r}")

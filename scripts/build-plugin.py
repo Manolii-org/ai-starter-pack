@@ -200,13 +200,16 @@ def build_hooks_config() -> dict:
         '[ -f "$_c/.ai/hook-root" ] && { _R="$_c"; _n=$((_n+1)); }; done; '
         '[ "$_n" -eq 1 ] || _R=""; fi; '
         '[ -n "$_R" ] || _R="$PWD"; '
-        # `-e`, not `-d` (Codex #71, P2). A LINKED WORKTREE and a SUBMODULE checkout
-        # store `.git` as a regular FILE containing `gitdir: …`, not a directory —
-        # verified with `git worktree add`: `git rev-parse --show-toplevel` returned the
-        # worktree path while `[ -d .git ]` was false, so a genuine repository at $HOME
-        # was skipped. `-e` accepts both shapes; the `git -C` fallback additionally
-        # accepts an unusual layout, and must agree that $_R is the top level so a repo
-        # merely ABOVE $HOME does not qualify.
+        # Validity comes from GIT, never from a `.git` entry existing (Codex #71, P2).
+        # The earlier `[ ! -e "$_R/.git" ] &&` short-circuit accepted any `.git` entry,
+        # including a stale or empty one. Reproduced 2026-08-22 with an empty
+        # `$HOME/.git`: `git rev-parse` said "fatal: not a git repository", yet the probe
+        # returned the home path — the original bug, reachable again through a leftover
+        # directory. The `-e` test was added for worktrees, but it was never needed:
+        # `git rev-parse --show-toplevel` resolves BOTH layouts (measured — it returns
+        # the worktree path where `.git` is a FILE), so the existence test bought
+        # nothing and cost the guard. Requiring the top level to EQUAL $_R also keeps a
+        # repository merely ABOVE $HOME from qualifying.
         # Both sides are CANONICALISED before comparing (Codex #71, P2). A string
         # compare misses every other spelling of the same directory: HOME reached
         # through a symlink, or carrying a trailing slash, while $PWD holds the
@@ -216,8 +219,8 @@ def build_hooks_config() -> dict:
         # empty, and the -n test then keeps the guard from firing on everything.
         '_RP="$(cd "$_R" 2>/dev/null && pwd -P)"; '
         '_HP="$(cd "${HOME:-/nonexistent}" 2>/dev/null && pwd -P)"; '
-        'if [ -n "$_HP" ] && [ "$_RP" = "$_HP" ] && [ ! -e "$_R/.git" ] && '
-        '[ "$(git -C "$_R" rev-parse --show-toplevel 2>/dev/null)" != "$_R" ]; then '
+        '_GT="$(cd "$_R" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null)"; '
+        'if [ -n "$_HP" ] && [ "$_RP" = "$_HP" ] && [ "$_GT" != "$_RP" ]; then '
         'echo "[manolii-hook] no repository root resolved (would run in the home '
         'directory) — skipping to avoid writing .ai/ state outside a repo" >&2; '
         'exit 0; fi; '

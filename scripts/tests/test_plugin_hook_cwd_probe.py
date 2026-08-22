@@ -79,11 +79,15 @@ def _init_repo(path: Path) -> Path:
 
     CodeRabbit #71: these fixtures used to be `(path / ".git").mkdir()` — an empty
     directory, which is not a repository. Measured 2026-08-22: `git rev-parse
-    --show-toplevel` inside one returns "fatal: not a git repository". The probe's
-    guard is `[ ! -e "$_R/.git" ] && [ git -C … != "$_R" ]`, so `-e` matched the empty
-    directory and short-circuited — the `git -C` branch never ran. The cases passed
-    while proving only that `-e` sees a directory, and would have kept passing if the
-    git confirmation were deleted. A real repo exercises both.
+    --show-toplevel` inside one returns "fatal: not a git repository".
+
+    At the time the probe's guard opened with `[ ! -e "$_R/.git" ] &&`, so the empty
+    directory short-circuited it and the cases proved only that `-e` sees a directory.
+    Codex then pointed out that the same short-circuit let a stale `.git` put hooks
+    back in $HOME — citing this docstring's own statement that the shape is not a
+    repository. The `-e` test is gone; validity now comes from git alone
+    (`check_refuses_when_home_has_a_stale_git_entry` covers it). These fixtures must
+    still be real repositories, because that is now the only thing the guard accepts.
     """
     path.mkdir(parents=True, exist_ok=True)
     _git("init", "-q", ".", cwd=path)
@@ -212,6 +216,31 @@ def check_refuses_to_run_in_a_non_repo_home() -> None:
         landed = _run(probe, fake_home, {"CLAUDE_PROJECT_DIR": None, "HOME": str(fake_home)})
     if landed != "<skipped>":
         fail("home-refusal", f"probe should skip rather than run in a non-repo $HOME; landed in {landed}")
+
+
+def check_refuses_when_home_has_a_stale_git_entry() -> None:
+    """A `.git` entry is not a repository — only git's own answer counts.
+
+    Codex #71 (P2): the guard opened with `[ ! -e "$_R/.git" ] &&`, so ANY `.git` entry
+    short-circuited the git validation. A non-repository $HOME carrying a stale or empty
+    `.git` therefore ran every hook in the home directory — the original bug, reachable
+    again through a leftover directory. Reproduced 2026-08-22: `git rev-parse` returned
+    "fatal: not a git repository" while the probe returned the home path.
+
+    The existence test was there for worktrees, and was never needed for them: `git
+    rev-parse --show-toplevel` resolves a gitfile layout too (see the worktree case
+    below, which still passes without it). So it bought nothing and cost the guard.
+    """
+    probe = _probe()
+    with tempfile.TemporaryDirectory() as td:
+        fake_home = Path(td).resolve()
+        (fake_home / ".git").mkdir()          # deliberately NOT a repository
+        landed = _run(probe, fake_home, {"CLAUDE_PROJECT_DIR": None, "HOME": str(fake_home)})
+    if landed != "<skipped>":
+        fail(
+            "stale-git",
+            f"an empty .git must not pass as a repository; probe ran in {landed}",
+        )
 
 
 def check_still_runs_when_home_is_itself_a_repo() -> None:
@@ -381,6 +410,7 @@ def main() -> int:
         check_probe_finds_single_hook_root_marker,
         check_probe_is_ambiguous_safe_with_two_markers,
         check_refuses_to_run_in_a_non_repo_home,
+        check_refuses_when_home_has_a_stale_git_entry,
         check_still_runs_when_home_is_itself_a_repo,
         check_still_runs_when_home_is_a_linked_worktree,
         check_refuses_when_home_is_reached_through_a_symlink,
@@ -398,7 +428,7 @@ def main() -> int:
         for f in failures:
             print(f"  ✗ {f}")
         return 1
-    print("✔ plugin hook cwd probe: 13 cases pass (resolves, exports, never runs in a non-repo $HOME)")
+    print("✔ plugin hook cwd probe: 14 cases pass (resolves, exports, never runs in a non-repo $HOME)")
     return 0
 
 
