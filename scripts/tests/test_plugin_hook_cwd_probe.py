@@ -70,7 +70,7 @@ def _run(probe: str, cwd: Path, env_extra: dict[str, str | None]) -> str:
     return r.stdout.strip()
 
 
-def test_probe_never_lands_in_home_when_var_unset() -> None:
+def check_probe_never_lands_in_home_when_var_unset() -> None:
     """The regression itself: unset CLAUDE_PROJECT_DIR, non-git cwd, no marker."""
     probe = _probe()
     home = str(Path.home().resolve())
@@ -83,7 +83,7 @@ def test_probe_never_lands_in_home_when_var_unset() -> None:
         fail("unset-var", f"expected fallback to $PWD ({scratch}), landed in {landed}")
 
 
-def test_probe_ignores_empty_var() -> None:
+def check_probe_ignores_empty_var() -> None:
     """An explicitly empty value must be treated as absent, not as `cd ""`."""
     probe = _probe()
     with tempfile.TemporaryDirectory() as td:
@@ -93,7 +93,7 @@ def test_probe_ignores_empty_var() -> None:
         fail("empty-var", f"empty CLAUDE_PROJECT_DIR should fall through to $PWD; landed in {landed}")
 
 
-def test_probe_ignores_nonexistent_dir() -> None:
+def check_probe_ignores_nonexistent_dir() -> None:
     """A stale path (deleted worktree) must fall through, not fail the hook."""
     probe = _probe()
     with tempfile.TemporaryDirectory() as td:
@@ -103,7 +103,7 @@ def test_probe_ignores_nonexistent_dir() -> None:
         fail("stale-var", f"nonexistent CLAUDE_PROJECT_DIR should fall through; landed in {landed}")
 
 
-def test_probe_honours_valid_var() -> None:
+def check_probe_honours_valid_var() -> None:
     probe = _probe()
     with tempfile.TemporaryDirectory() as td:
         root = Path(td).resolve()
@@ -115,7 +115,7 @@ def test_probe_honours_valid_var() -> None:
         fail("valid-var", f"expected {target}, landed in {landed}")
 
 
-def test_probe_finds_single_hook_root_marker() -> None:
+def check_probe_finds_single_hook_root_marker() -> None:
     """Multi-repo case: exactly one sibling carries .ai/hook-root."""
     probe = _probe()
     with tempfile.TemporaryDirectory() as td:
@@ -129,7 +129,7 @@ def test_probe_finds_single_hook_root_marker() -> None:
         fail("single-marker", f"expected the marked repo {marked}, landed in {landed}")
 
 
-def test_probe_is_ambiguous_safe_with_two_markers() -> None:
+def check_probe_is_ambiguous_safe_with_two_markers() -> None:
     """Two markers is ambiguous — must fall back to $PWD, not guess."""
     probe = _probe()
     with tempfile.TemporaryDirectory() as td:
@@ -142,7 +142,7 @@ def test_probe_is_ambiguous_safe_with_two_markers() -> None:
         fail("two-markers", f"ambiguous marker set should fall back to $PWD ({root}); landed in {landed}")
 
 
-def test_generated_hooks_all_use_the_probe() -> None:
+def check_generated_hooks_all_use_the_probe() -> None:
     """No generated hook command may keep the unguarded bare cd."""
     committed = REPO / "plugin" / "manolii-framework" / "hooks" / "hooks.json"
     if not committed.exists():
@@ -158,13 +158,13 @@ def test_generated_hooks_all_use_the_probe() -> None:
 
 def main() -> int:
     for fn in (
-        test_probe_never_lands_in_home_when_var_unset,
-        test_probe_ignores_empty_var,
-        test_probe_ignores_nonexistent_dir,
-        test_probe_honours_valid_var,
-        test_probe_finds_single_hook_root_marker,
-        test_probe_is_ambiguous_safe_with_two_markers,
-        test_generated_hooks_all_use_the_probe,
+        check_probe_never_lands_in_home_when_var_unset,
+        check_probe_ignores_empty_var,
+        check_probe_ignores_nonexistent_dir,
+        check_probe_honours_valid_var,
+        check_probe_finds_single_hook_root_marker,
+        check_probe_is_ambiguous_safe_with_two_markers,
+        check_generated_hooks_all_use_the_probe,
     ):
         try:
             fn()
@@ -178,6 +178,25 @@ def main() -> int:
         return 1
     print("✔ plugin hook cwd probe: 7 cases pass (never lands in $HOME)")
     return 0
+
+
+def test_all_checks_pass() -> None:
+    """pytest entry point — the only test this module exposes to collection.
+
+    CI runs `coverage run -m pytest scripts/tests/test_*.py`
+    (.github/workflows/quality-base.yml:203). The checks above deliberately
+    ACCUMULATE into `failures` so one CLI run reports every problem at once — but a
+    function that only appends and returns None is invisible to pytest. Measured
+    before this fix: `pytest -q test_fork_dispatch.py` reported **7 passed** while
+    `python3 test_fork_dispatch.py` exited 1 with 4 real failures, and
+    test_no_withdrawn_tool_instructions.py collected **zero** tests. Every guard in
+    this directory was therefore inert in CI.
+
+    Fix: the individual checks are named `check_*` (not collected), and this single
+    collected test funnels them through `main()` so both invocation modes agree.
+    Found by Codex review on PR #4433.
+    """
+    assert main() == 0, "see captured stdout for the failing checks"
 
 
 if __name__ == "__main__":

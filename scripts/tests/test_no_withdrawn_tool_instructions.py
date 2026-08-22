@@ -99,5 +99,24 @@ def main() -> int:
     return 0
 
 
+def test_all_checks_pass() -> None:
+    """pytest entry point — the only test this module exposes to collection.
+
+    CI runs `coverage run -m pytest scripts/tests/test_*.py`
+    (.github/workflows/quality-base.yml:203). Modules in this directory report through
+    `main()`'s exit code rather than assertions, so without a collected test that
+    checks it, pytest sees nothing to fail. Measured
+    before this fix: `pytest -q test_fork_dispatch.py` reported **7 passed** while
+    `python3 test_fork_dispatch.py` exited 1 with 4 real failures, and
+    test_no_withdrawn_tool_instructions.py collected **zero** tests. Every guard in
+    this directory was therefore inert in CI.
+
+    Fix: the individual checks are named `check_*` (not collected), and this single
+    collected test funnels them through `main()` so both invocation modes agree.
+    Found by Codex review on PR #4433.
+    """
+    assert main() == 0, "see captured stdout for the failing checks"
+
+
 if __name__ == "__main__":
     sys.exit(main())
