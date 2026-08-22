@@ -3,11 +3,21 @@
 
 Why this exists: the generated plugin hooks used to open with a bare
 `cd "${CLAUDE_PROJECT_DIR}" && …`. In Claude Code Web *multi-repo* sessions
-`CLAUDE_PROJECT_DIR` is UNSET (verified live, CLI 2.1.239, 2026-08-22), so that
-degrades to `cd ""` — which succeeds and lands in $HOME. Every hook then reads and
-writes repo-relative state (.ai/memory/*, .ai/guards.json, .ai/sessions/*) outside
-any repository. The Stop self-check is the worst case: its `>> .ai/memory/...`
-sink is deliberately cwd-relative.
+`CLAUDE_PROJECT_DIR` is UNSET (verified live, CLI 2.1.239, 2026-08-22).
+
+CORRECTION (Codex review, #71 — P1): an earlier version of this file claimed that
+`cd ""` "lands in $HOME". It does not. Measured: `cd ""` is a NO-OP — rc=0, working
+directory unchanged; only a bare `cd` with no argument goes to $HOME. The real
+failure is subtler. The hook simply runs wherever Claude Code launched it, and per
+the 2.1.239 changelog that is "the project root or home directory". When it is
+$HOME, every hook reads and writes repo-relative state (.ai/memory/*,
+.ai/guards.json, .ai/sessions/*) into the home directory. The Stop self-check is
+the worst case: its `>> .ai/memory/...` sink is deliberately cwd-relative.
+
+Codex also showed the first fix was incomplete: in $HOME, `git rev-parse` finds
+nothing and this pack ships no `.ai/hook-root` marker, so the probe fell back to
+$PWD — which IS $HOME. Resolving to a non-repository $HOME is now treated as
+failure to resolve, and the hook skips (exit 0) rather than polluting.
 
 This asserts behaviour, not string shape: each case actually EXECUTES the probe
 under a controlled environment and checks where it lands. A shape-only assertion
@@ -67,7 +77,9 @@ def _run(probe: str, cwd: Path, env_extra: dict[str, str | None]) -> str:
     )
     if r.returncode != 0:
         raise AssertionError(f"probe exited {r.returncode}: {r.stderr.strip()[:200]}")
-    return r.stdout.strip()
+    # An empty stdout means the probe short-circuited before `pwd` — i.e. it refused
+    # to resolve a root. Surfaced as the sentinel "<skipped>" so cases can assert it.
+    return r.stdout.strip() or "<skipped>"
 
 
 def check_probe_never_lands_in_home_when_var_unset() -> None:
@@ -142,6 +154,34 @@ def check_probe_is_ambiguous_safe_with_two_markers() -> None:
         fail("two-markers", f"ambiguous marker set should fall back to $PWD ({root}); landed in {landed}")
 
 
+def check_refuses_to_run_in_a_non_repo_home() -> None:
+    """Codex #71 P1: the fallback must LEAVE $HOME, not settle in it.
+
+    In $HOME with no CLAUDE_PROJECT_DIR, `git rev-parse` returns nothing and this
+    pack ships no `.ai/hook-root` marker, so steps 1-3 all fail and step 4 ($PWD)
+    hands back $HOME itself. Running there is exactly the bug. The probe now treats
+    that as failure-to-resolve and skips with exit 0 — fail-open on the permission
+    decision, fail-safe on the filesystem.
+    """
+    probe = _probe()
+    with tempfile.TemporaryDirectory() as td:
+        fake_home = Path(td).resolve()          # a $HOME that is NOT a git repo
+        landed = _run(probe, fake_home, {"CLAUDE_PROJECT_DIR": None, "HOME": str(fake_home)})
+    if landed != "<skipped>":
+        fail("home-refusal", f"probe should skip rather than run in a non-repo $HOME; landed in {landed}")
+
+
+def check_still_runs_when_home_is_itself_a_repo() -> None:
+    """The refusal must not fire when $HOME genuinely IS the repository."""
+    probe = _probe()
+    with tempfile.TemporaryDirectory() as td:
+        home_repo = Path(td).resolve()
+        (home_repo / ".git").mkdir()
+        landed = _run(probe, home_repo, {"CLAUDE_PROJECT_DIR": None, "HOME": str(home_repo)})
+    if landed != str(home_repo):
+        fail("home-is-repo", f"a real repo at $HOME must still be used; landed in {landed}")
+
+
 def check_generated_hooks_all_use_the_probe() -> None:
     """No generated hook command may keep the unguarded bare cd."""
     committed = REPO / "plugin" / "manolii-framework" / "hooks" / "hooks.json"
@@ -164,6 +204,8 @@ def main() -> int:
         check_probe_honours_valid_var,
         check_probe_finds_single_hook_root_marker,
         check_probe_is_ambiguous_safe_with_two_markers,
+        check_refuses_to_run_in_a_non_repo_home,
+        check_still_runs_when_home_is_itself_a_repo,
         check_generated_hooks_all_use_the_probe,
     ):
         try:
@@ -176,7 +218,7 @@ def main() -> int:
         for f in failures:
             print(f"  ✗ {f}")
         return 1
-    print("✔ plugin hook cwd probe: 7 cases pass (never lands in $HOME)")
+    print("✔ plugin hook cwd probe: 9 cases pass (never runs in a non-repo $HOME)")
     return 0
 
 
