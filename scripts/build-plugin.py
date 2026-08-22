@@ -207,7 +207,16 @@ def build_hooks_config() -> dict:
         # was skipped. `-e` accepts both shapes; the `git -C` fallback additionally
         # accepts an unusual layout, and must agree that $_R is the top level so a repo
         # merely ABOVE $HOME does not qualify.
-        'if [ "$_R" = "${HOME:-}" ] && [ ! -e "$_R/.git" ] && '
+        # Both sides are CANONICALISED before comparing (Codex #71, P2). A string
+        # compare misses every other spelling of the same directory: HOME reached
+        # through a symlink, or carrying a trailing slash, while $PWD holds the
+        # physical path. Both reproduced 2026-08-22 — the refusal was bypassed and the
+        # hook ran in the home directory, the exact bug this guard exists to stop.
+        # `cd … && pwd -P` is the portable POSIX realpath. An unset HOME leaves _HP
+        # empty, and the -n test then keeps the guard from firing on everything.
+        '_RP="$(cd "$_R" 2>/dev/null && pwd -P)"; '
+        '_HP="$(cd "${HOME:-/nonexistent}" 2>/dev/null && pwd -P)"; '
+        'if [ -n "$_HP" ] && [ "$_RP" = "$_HP" ] && [ ! -e "$_R/.git" ] && '
         '[ "$(git -C "$_R" rev-parse --show-toplevel 2>/dev/null)" != "$_R" ]; then '
         'echo "[manolii-hook] no repository root resolved (would run in the home '
         'directory) — skipping to avoid writing .ai/ state outside a repo" >&2; '
@@ -223,9 +232,18 @@ def build_hooks_config() -> dict:
     )
 
     def cmd(c: str, timeout: int) -> dict:
+        # `( … )` around the payload is load-bearing (CodeRabbit #71, Major). `&&`
+        # binds only to the FIRST segment of `c`; several commands are compound. The
+        # Stop self-check is `python3 … && python3 …; _rc=$?; mkdir -p .ai/memory; echo
+        # … >> .ai/memory/eval-failures.jsonl`, so a failing `cd "$_R"` skipped the
+        # python calls while the semicolon-separated logging still ran — recreating the
+        # very home-directory `.ai/` write the probe exists to prevent. Reproduced
+        # 2026-08-22: without the group, `.ai/memory/eval-failures.jsonl` appeared in
+        # the original directory; with it, nothing. The subshell keeps every part of
+        # the payload behind the probe's success.
         return {
             "type": "command",
-            "command": f"{CWD_PROBE} && {c}",
+            "command": f"{CWD_PROBE} && ( {c} )",
             "timeout": timeout,
         }
 

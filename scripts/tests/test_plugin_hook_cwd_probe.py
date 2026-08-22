@@ -216,6 +216,61 @@ def check_still_runs_when_home_is_a_linked_worktree() -> None:
         fail("home-worktree", f"a worktree at $HOME must still be used; landed in {landed}")
 
 
+def check_refuses_when_home_is_reached_through_a_symlink() -> None:
+    """A string compare misses other spellings of the same directory.
+
+    Codex #71 (P2): the refusal was `[ "$_R" = "${HOME:-}" ]`. When HOME is reached
+    through a symlink — or merely carries a trailing slash — while $PWD holds the
+    physical path, the strings differ and the guard never fires, so the hook runs in the
+    home directory after all. Both spellings reproduced 2026-08-22: each returned the
+    physical path where the exact-match control correctly skipped. Both sides are now
+    canonicalised with `cd … && pwd -P`.
+    """
+    probe = _probe()
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td).resolve()
+        real = root / "real"
+        real.mkdir()
+        link = root / "link"
+        link.symlink_to(real)
+        for label, home in (("symlink", str(link)), ("trailing-slash", f"{real}/")):
+            landed = _run(probe, real, {"CLAUDE_PROJECT_DIR": None, "HOME": home})
+            if landed != "<skipped>":
+                fail(
+                    "home-spelling",
+                    f"HOME as a {label} bypassed the refusal; landed in {landed}",
+                )
+
+
+def check_payload_is_grouped_so_a_failed_cd_runs_nothing() -> None:
+    """`&&` binds to the first segment only — the payload needs its own group.
+
+    CodeRabbit #71 (Major): hook payloads are compound. The Stop self-check ends with
+    `; _rc=$?; mkdir -p .ai/memory; echo … >> .ai/memory/eval-failures.jsonl`, so a
+    failing `cd "$_R"` skipped the python calls while the logging still ran in the
+    original directory — recreating the home-directory `.ai/` write the probe prevents.
+    Reproduced 2026-08-22 with a deliberately unreachable target.
+    """
+    payload = (
+        'true; mkdir -p .ai/memory; echo x >> .ai/memory/eval-failures.jsonl'
+    )
+    with tempfile.TemporaryDirectory() as td:
+        here = Path(td).resolve()
+        subprocess.run(
+            ["sh", "-c", f'cd "{here}/gone" && ( {payload} )'],
+            cwd=here, capture_output=True, text=True, timeout=30,
+        )
+        if (here / ".ai" / "memory" / "eval-failures.jsonl").exists():
+            fail("grouping", "a grouped payload still wrote state after a failed cd")
+        # …and confirm the ungrouped form is genuinely unsafe, so this case has teeth.
+        subprocess.run(
+            ["sh", "-c", f'cd "{here}/gone" && {payload}'],
+            cwd=here, capture_output=True, text=True, timeout=30,
+        )
+        if not (here / ".ai" / "memory" / "eval-failures.jsonl").exists():
+            fail("grouping", "premise broken: the UNGROUPED form no longer leaks, so this case proves nothing")
+
+
 def check_exports_resolved_root_for_entrypoints() -> None:
     """Codex #71 (second P1): `cd` alone leaves CLAUDE_PROJECT_DIR unset.
 
@@ -243,17 +298,44 @@ def check_exports_resolved_root_for_entrypoints() -> None:
 
 
 def check_generated_hooks_all_use_the_probe() -> None:
-    """No generated hook command may keep the unguarded bare cd."""
+    """EVERY committed hook command must begin with the current probe, and group its payload.
+
+    CodeRabbit #71 (Major): this only rejected the legacy bare `cd` string. If `cmd()`
+    ever stopped prepending CWD_PROBE, every hook would run without root resolution and
+    this check would still pass — absence of the old bug is not presence of the fix.
+    It now asserts the positive property against the builder's own probe.
+    """
     committed = REPO / "plugin" / "manolii-framework" / "hooks" / "hooks.json"
     if not committed.exists():
         return  # artifact not built in this checkout; builder tests above still apply
-    blob = json.dumps(json.loads(committed.read_text(encoding="utf-8")))
-    if 'cd \\"${CLAUDE_PROJECT_DIR}\\" &&' in blob or 'cd "${CLAUDE_PROJECT_DIR}" &&' in blob:
-        fail(
-            "artifact-stale",
-            "plugin/manolii-framework/hooks/hooks.json still contains a bare "
-            "`cd \"${CLAUDE_PROJECT_DIR}\" &&`. Rebuild it: python3 scripts/build-plugin.py",
-        )
+    cfg = json.loads(committed.read_text(encoding="utf-8"))
+    probe = _probe()
+    commands = [
+        hook["command"]
+        for event in cfg.get("hooks", {}).values()
+        for matcher in event
+        for hook in matcher.get("hooks", [])
+        if hook.get("type") == "command"
+    ]
+    if not commands:
+        fail("artifact-empty", "hooks.json declares no command hooks — did the build change shape?")
+        return
+    for c in commands:
+        if not c.startswith(probe):
+            fail(
+                "artifact-stale",
+                "a hooks.json command does not begin with the current CWD_PROBE — rebuild "
+                f"(python3 scripts/build-plugin.py). Got: {c[:120]!r}",
+            )
+            return
+        # The payload must be grouped, or `&&` binds only to its first segment.
+        if not c[len(probe):].lstrip().startswith("&& ("):
+            fail(
+                "artifact-ungrouped",
+                "a hooks.json command does not wrap its payload in `( … )`, so "
+                f"semicolon-separated parts run even when the probe's cd fails. Got: {c[:160]!r}",
+            )
+            return
 
 
 def main() -> int:
@@ -267,6 +349,8 @@ def main() -> int:
         check_refuses_to_run_in_a_non_repo_home,
         check_still_runs_when_home_is_itself_a_repo,
         check_still_runs_when_home_is_a_linked_worktree,
+        check_refuses_when_home_is_reached_through_a_symlink,
+        check_payload_is_grouped_so_a_failed_cd_runs_nothing,
         check_exports_resolved_root_for_entrypoints,
         check_generated_hooks_all_use_the_probe,
     ):
@@ -280,7 +364,7 @@ def main() -> int:
         for f in failures:
             print(f"  ✗ {f}")
         return 1
-    print("✔ plugin hook cwd probe: 11 cases pass (resolves, exports, never runs in a non-repo $HOME)")
+    print("✔ plugin hook cwd probe: 13 cases pass (resolves, exports, never runs in a non-repo $HOME)")
     return 0
 
 

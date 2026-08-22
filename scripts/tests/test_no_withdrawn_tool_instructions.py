@@ -45,6 +45,20 @@ INSTRUCTION = re.compile(
     re.IGNORECASE,
 )
 
+# A PROHIBITION is the opposite of an instruction, and must not be flagged.
+# CodeRabbit #71: `INSTRUCTION` matches "Do not use TodoWrite" because it contains
+# "use TodoWrite", so text that correctly forbids the withdrawn tool — exactly what a
+# migrated instruction file should say — failed the guard and exited 1. Verified
+# 2026-08-22: all four of "Do not use TodoWrite", "Do NOT use TodoWrite",
+# "Never use TodoWrite" and the affirmative "Use TodoWrite to track progress" were
+# flagged identically. Matched against the text immediately BEFORE the mention, so a
+# negation elsewhere in a long line cannot launder an affirmative instruction.
+NEGATION = re.compile(
+    r"(?:do\s*n[o']?t|don't|never|no\s+longer|stop|avoid|without|instead\s+of"
+    r"|rather\s+than|not)\s+(?:\w+\s+){0,3}$",
+    re.IGNORECASE,
+)
+
 # Contexts where the bare name is inert and must NOT be flagged.
 ALLOWED_CONTEXT = re.compile(
     r"TodoWrite\(\*\)"                 # permission allow-list entry
@@ -73,7 +87,10 @@ def scan() -> list[str]:
             for n, line in enumerate(lines, 1):
                 if "TodoWrite" not in line:
                     continue
-                if ALLOWED_CONTEXT.search(line) or not INSTRUCTION.search(line):
+                if ALLOWED_CONTEXT.search(line):
+                    continue
+                m = INSTRUCTION.search(line)
+                if not m or NEGATION.search(line[: m.start()]):
                     continue
                 shown = line.strip()
                 if len(shown) > 120:
@@ -82,7 +99,47 @@ def scan() -> list[str]:
     return hits
 
 
+def check_negated_instructions_are_not_flagged() -> list[str]:
+    """A prohibition must pass; an affirmative instruction must still fail.
+
+    CodeRabbit #71: `INSTRUCTION` matched "Do not use TodoWrite" via its "use TodoWrite"
+    substring, so a file that correctly forbids the withdrawn tool tripped the guard and
+    exited 1 — CI blocked by the very wording the guard wants to see. Measured
+    2026-08-22: all four phrasings below matched identically before the NEGATION filter.
+    """
+    def flagged(line: str) -> bool:
+        if ALLOWED_CONTEXT.search(line):
+            return False
+        m = INSTRUCTION.search(line)
+        return bool(m) and not NEGATION.search(line[: m.start()])
+
+    problems: list[str] = []
+    for text in (
+        "Do not use TodoWrite.",
+        "Do NOT use TodoWrite; it was withdrawn in 2.1.233.",
+        "Never use TodoWrite for tracking.",
+        "No longer use TodoWrite — write to .ai/sessions/active-task.json instead.",
+        "Track state in active-task.json instead of using TodoWrite.",
+    ):
+        if flagged(text):
+            problems.append(f"prohibition wrongly flagged: {text!r}")
+    for text in (
+        "Use TodoWrite to track progress.",
+        "Track your steps with TodoWrite.",
+        "TodoWrite for the remaining items.",
+    ):
+        if not flagged(text):
+            problems.append(f"affirmative instruction NOT flagged: {text!r}")
+    return problems
+
+
 def main() -> int:
+    problems = check_negated_instructions_are_not_flagged()
+    if problems:
+        print("Negation handling is wrong:\n")
+        for p in problems:
+            print(f"  ✗ {p}")
+        return 1
     hits = scan()
     if hits:
         print("Withdrawn-tool instructions found:\n")

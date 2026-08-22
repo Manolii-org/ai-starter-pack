@@ -11,7 +11,7 @@ A structured workflow for investigating bugs, diagnosing root causes, implementi
 ## Process Steps
 
 ### 1. Save Instructions
-Track which step you are on in `.ai/sessions/active-task.json` so context compaction doesn't lose the flow.
+Record the current step in `.ai/sessions/active-task.json` as a non-null `active_step_id`. That exact key is what the compaction contract checks (`.claude/persistent-instructions.md`) before preserving the file verbatim — any other key name and the active task is lost on compaction.
 
 ### 2. Investigate the Issue
 - Read relevant code in the affected area
