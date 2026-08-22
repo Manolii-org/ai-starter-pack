@@ -200,7 +200,15 @@ def build_hooks_config() -> dict:
         '[ -f "$_c/.ai/hook-root" ] && { _R="$_c"; _n=$((_n+1)); }; done; '
         '[ "$_n" -eq 1 ] || _R=""; fi; '
         '[ -n "$_R" ] || _R="$PWD"; '
-        'if [ "$_R" = "${HOME:-}" ] && [ ! -d "$_R/.git" ]; then '
+        # `-e`, not `-d` (Codex #71, P2). A LINKED WORKTREE and a SUBMODULE checkout
+        # store `.git` as a regular FILE containing `gitdir: …`, not a directory —
+        # verified with `git worktree add`: `git rev-parse --show-toplevel` returned the
+        # worktree path while `[ -d .git ]` was false, so a genuine repository at $HOME
+        # was skipped. `-e` accepts both shapes; the `git -C` fallback additionally
+        # accepts an unusual layout, and must agree that $_R is the top level so a repo
+        # merely ABOVE $HOME does not qualify.
+        'if [ "$_R" = "${HOME:-}" ] && [ ! -e "$_R/.git" ] && '
+        '[ "$(git -C "$_R" rev-parse --show-toplevel 2>/dev/null)" != "$_R" ]; then '
         'echo "[manolii-hook] no repository root resolved (would run in the home '
         'directory) — skipping to avoid writing .ai/ state outside a repo" >&2; '
         'exit 0; fi; '

@@ -182,6 +182,40 @@ def check_still_runs_when_home_is_itself_a_repo() -> None:
         fail("home-is-repo", f"a real repo at $HOME must still be used; landed in {landed}")
 
 
+def check_still_runs_when_home_is_a_linked_worktree() -> None:
+    """A worktree / submodule keeps `.git` as a FILE, not a directory.
+
+    Codex #71 (P2): the refusal was `[ ! -d "$_R/.git" ]`, so a genuine repository at
+    $HOME that happens to be a linked worktree or a submodule checkout was skipped —
+    `git rev-parse --show-toplevel` resolved it correctly while `-d` did not. Verified
+    with `git worktree add` on 2026-08-22: `.git` was a regular file containing
+    `gitdir: …`. The guard now uses `-e` plus a `git -C` confirmation.
+    """
+    probe = _probe()
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td).resolve()
+        main = root / "main-repo"
+        main.mkdir()
+        env = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"}
+        def git(*a: str, cwd: Path = main) -> None:
+            subprocess.run(["git", *a], cwd=cwd, check=True,
+                           capture_output=True, env={**os.environ, **env})
+        git("init", "-q", ".")
+        git("config", "user.email", "t@example.invalid")
+        git("config", "user.name", "t")
+        (main / "a.txt").write_text("x")
+        git("add", "-A")
+        git("commit", "-qm", "init")
+        wt = root / "linked"
+        git("worktree", "add", "-q", str(wt), "-b", "wt")
+        if (wt / ".git").is_dir():                     # guards the premise itself
+            fail("home-worktree", "expected .git to be a FILE in a linked worktree")
+            return
+        landed = _run(probe, wt, {"CLAUDE_PROJECT_DIR": None, "HOME": str(wt)})
+    if landed != str(wt):
+        fail("home-worktree", f"a worktree at $HOME must still be used; landed in {landed}")
+
+
 def check_exports_resolved_root_for_entrypoints() -> None:
     """Codex #71 (second P1): `cd` alone leaves CLAUDE_PROJECT_DIR unset.
 
@@ -232,6 +266,7 @@ def main() -> int:
         check_probe_is_ambiguous_safe_with_two_markers,
         check_refuses_to_run_in_a_non_repo_home,
         check_still_runs_when_home_is_itself_a_repo,
+        check_still_runs_when_home_is_a_linked_worktree,
         check_exports_resolved_root_for_entrypoints,
         check_generated_hooks_all_use_the_probe,
     ):
@@ -245,7 +280,7 @@ def main() -> int:
         for f in failures:
             print(f"  ✗ {f}")
         return 1
-    print("✔ plugin hook cwd probe: 10 cases pass (resolves, exports, never runs in a non-repo $HOME)")
+    print("✔ plugin hook cwd probe: 11 cases pass (resolves, exports, never runs in a non-repo $HOME)")
     return 0
 
 
