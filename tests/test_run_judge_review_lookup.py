@@ -167,8 +167,23 @@ def test_marker_text_appears_exactly_once_in_the_source():
     )
 
 
+PLUGIN_JUDGE_COPY = REPO_ROOT / "plugin" / "manolii-framework" / "scripts" / "run-judge.py"
+
+
+@pytest.mark.skipif(
+    not PLUGIN_JUDGE_COPY.exists(),
+    reason="plugin/ is pack-internal (copier.yml _exclude) — absent in rendered instances",
+)
 def test_plugin_copy_is_in_sync():
-    """The pack ships two copies; a fix applied to one only is a silent regression."""
+    """The pack ships two copies; a fix applied to one only is a silent regression.
+
+    Guarded on the plugin copy's existence. `plugin/**` is a build artifact
+    excluded from rendered consumers by copier.yml, but this whole test module
+    IS shipped — so without the guard every rendered project inherited a test
+    that failed on first run with FileNotFoundError. The parity check still runs
+    (unskipped) in the pack repo, which is the only place both copies exist and
+    the only place drift is possible.
+    """
     a = (REPO_ROOT / "scripts" / "run-judge.py").read_text()
-    b = (REPO_ROOT / "plugin" / "manolii-framework" / "scripts" / "run-judge.py").read_text()
+    b = PLUGIN_JUDGE_COPY.read_text()
     assert a == b, "scripts/run-judge.py and the plugin copy have drifted"

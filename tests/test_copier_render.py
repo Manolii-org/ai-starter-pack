@@ -88,10 +88,35 @@ def branded_render(tmp_path_factory):
 DOUBLED_BACKSLASH_ESCAPE_RE = re.compile(r"\\\\[nrt]")
 
 
+def _template_source_for(relpath):
+    """Template file a rendered path came from, or None if it is generated.
+
+    Copier renders `x` from `x` or from `x.jinja`; anything else (e.g.
+    .copier-answers.yml) has no source counterpart.
+    """
+    direct = ROOT / relpath
+    if direct.is_file():
+        return direct
+    jinja = ROOT / f"{relpath}.jinja"
+    return jinja if jinja.is_file() else None
+
+
 def test_no_render_corruption(default_render):
     """Post-render corruption lint: verify no blind-sed artifacts remain.
 
     Covers §8-N2 defect class: doubled backslash escapes, tier-mixing, OSS-only markers.
+
+    The doubled-backslash check is RENDER-RELATIVE, not absolute. The defect
+    class is "rendering doubled a backslash", so the test asserts the render
+    introduced no escape that the template source did not already contain.
+    An absolute scan cannot express that: `\\n` is legitimate, unremarkable
+    content in ordinary source files — a docstring quoting a Python string
+    literal (tests/test_run_judge_review_lookup.py) and a JSON fixture holding
+    an escaped newline (tests/test_tier_reusables.py) both carry one, and both
+    were flagged as "corruption" while their rendered and source counts were
+    identical. That false positive made this test permanently red on main, and
+    a permanently red lint is a disabled lint. Files with no template source
+    (generated output) keep the strict zero-tolerance check.
     """
     for p in default_render.rglob("*"):
         if not p.is_file():
@@ -102,8 +127,20 @@ def test_no_render_corruption(default_render):
             continue
         assert "(not OSS)" not in text, f"{p} contains '(not OSS)' marker"
         assert "restricted/restricted" not in text, f"{p} contains tier-mixing 'restricted/restricted'"
-        assert not DOUBLED_BACKSLASH_ESCAPE_RE.search(text), (
-            f"{p} contains doubled-backslash escape (\\\\n, \\\\r, or \\\\t)"
+
+        rendered_escapes = len(DOUBLED_BACKSLASH_ESCAPE_RE.findall(text))
+        if not rendered_escapes:
+            continue
+        source = _template_source_for(p.relative_to(default_render))
+        source_escapes = (
+            len(DOUBLED_BACKSLASH_ESCAPE_RE.findall(source.read_text(errors="ignore")))
+            if source
+            else 0
+        )
+        assert rendered_escapes <= source_escapes, (
+            f"{p} gained doubled-backslash escapes during render "
+            f"(rendered={rendered_escapes}, template source={source_escapes}); "
+            f"source={source or 'GENERATED (none permitted)'}"
         )
 
 
