@@ -59,12 +59,26 @@ NEGATION = re.compile(
     re.IGNORECASE,
 )
 
-# Contexts where the bare name is inert and must NOT be flagged.
-ALLOWED_CONTEXT = re.compile(
+# Contexts where a mention is inert and must NOT be flagged. These are TWO different
+# kinds of exemption and conflating them is what let one part of a line silence the
+# rest of it (CodeRabbit #71 follow-up).
+#
+# TOKEN — an inert OCCURRENCE of the name. Scoped by overlap with the mention itself,
+# so an allow-list entry earlier in the line cannot exempt a live instruction later
+# in it: "Allow-list carries TodoWrite(*). Use TodoWrite to track progress." is a real
+# instruction and is now flagged, where the whole-line check passed it.
+ALLOWED_TOKEN = re.compile(
     r"TodoWrite\(\*\)"                 # permission allow-list entry
     r"|permissions\.allow"             # prose describing an allow-list
     r"|\|(?:Bash|Edit|Write|Read)\|"   # native-tool-name regex alternation
-    r"|CLAUDE_CODE_ENABLE_TODO_TOOLS"  # discussing the restore flag
+)
+
+# LINE — the line's SUBJECT is the withdrawal or its restore flag, so every mention on
+# it is discussion rather than instruction. Deliberately line-scoped: narrowing these
+# to overlap would flag the guard's own explanatory prose and the changelog citations
+# that justify it.
+ALLOWED_LINE = re.compile(
+    r"CLAUDE_CODE_ENABLE_TODO_TOOLS"   # discussing the restore flag
     r"|2\.1\.233"                      # citing the changelog entry
 )
 
@@ -80,16 +94,34 @@ def is_affirmative(line: str) -> bool:
     "Never use TodoWrite for tracking. Use TodoWrite to track progress." scanned
     clean. Measured 2026-08-22.
 
-    Each mention is judged against the text between the PREVIOUS mention and itself,
-    so a negation attached to one mention cannot shield a later one, and a negation
-    later in the line cannot launder an earlier affirmative. Sole source of truth for
-    the verdict — `scan()` and the self-check both call it, so they cannot disagree.
+    Both of the mention-scoped exemptions were a way for one part of a line to silence
+    the rest of it. Each scanned clean while its check ran whole-line:
+
+      NEGATION       "Never use TodoWrite here. Use TodoWrite to track progress."
+      ALLOWED_TOKEN  "Allow-list carries TodoWrite(*). Use TodoWrite to track progress."
+
+    Each is now scoped so it cannot reach past its own mention:
+
+      * NEGATION — searched in `line[prev_end:m.start()]`, the text since the previous
+        mention. So a negation cannot reach a later mention, and one appearing *after*
+        an affirmative cannot reach back to launder it.
+      * ALLOWED_TOKEN — must OVERLAP the mention's span. These patterns mark an inert
+        occurrence of the name itself, so proximity is not enough; anything short of
+        overlap is a different mention.
+      * ALLOWED_LINE — genuinely line-scoped, and checked first. Those lines are ABOUT
+        the withdrawal, so every mention on them is discussion.
+
+    Sole source of truth for the verdict — `scan()` and the self-check both call it,
+    so they cannot disagree.
     """
-    if ALLOWED_CONTEXT.search(line):
+    if ALLOWED_LINE.search(line):
         return False
+    token_spans = [t.span() for t in ALLOWED_TOKEN.finditer(line)]
     prev_end = 0
     for m in INSTRUCTION.finditer(line):
-        if not NEGATION.search(line[prev_end : m.start()]):
+        negated = NEGATION.search(line[prev_end : m.start()])
+        inert = any(s < m.end() and m.start() < e for s, e in token_spans)  # overlap
+        if not negated and not inert:
             return True
         prev_end = m.end()
     return False
@@ -119,13 +151,20 @@ def scan() -> list[str]:
     return hits
 
 
-def check_negated_instructions_are_not_flagged() -> list[str]:
-    """A prohibition must pass; an affirmative instruction must still fail.
+def check_exemptions_are_scoped_to_the_mention() -> list[str]:
+    """Both directions of the predicate, exercised together.
 
-    CodeRabbit #71: `INSTRUCTION` matched "Do not use TodoWrite" via its "use TodoWrite"
-    substring, so a file that correctly forbids the withdrawn tool tripped the guard and
-    exited 1 — CI blocked by the very wording the guard wants to see. Measured
-    2026-08-22: all four phrasings below matched identically before the NEGATION filter.
+    A guard needs both or neither is trustworthy: exemptions that fail to exempt block
+    CI on correct wording, and exemptions that over-reach let a live instruction ship.
+    Every case here was measured against the code that preceded it (CodeRabbit #71 and
+    its two follow-ups, 2026-08-22).
+
+    1. `INSTRUCTION` matched "Do not use TodoWrite" via its "use TodoWrite" substring,
+       so a file that correctly FORBIDS the tool failed the guard.
+    2. Only the first match on a line was examined, so an affirmative sharing a line
+       with an earlier negation was skipped.
+    3. The allowed-context check ran whole-line, so an allow-list entry anywhere on a
+       line exempted every instruction on it.
     """
     flagged = is_affirmative  # the same predicate scan() uses — never a parallel copy
 
@@ -136,6 +175,12 @@ def check_negated_instructions_are_not_flagged() -> list[str]:
         "Never use TodoWrite for tracking.",
         "No longer use TodoWrite — write to .ai/sessions/active-task.json instead.",
         "Track state in active-task.json instead of using TodoWrite.",
+        # Inert occurrences of the name — an allow-list entry, and lines whose SUBJECT
+        # is the withdrawal itself. These are why the exemptions exist at all.
+        "permissions.allow includes TodoWrite(*)",
+        "Permission entry: TodoWrite(*) — inert on current models.",
+        "TodoWrite was withdrawn in 2.1.233; do not use TodoWrite.",
+        "Set CLAUDE_CODE_ENABLE_TODO_TOOLS=1 to use TodoWrite on older models.",
     ):
         if flagged(text):
             problems.append(f"prohibition wrongly flagged: {text!r}")
@@ -148,6 +193,11 @@ def check_negated_instructions_are_not_flagged() -> list[str]:
         # Both scanned clean before `is_affirmative` walked every match.
         "Never use TodoWrite for tracking. Use TodoWrite to track progress.",
         "Do not use TodoWrite here; use TodoWrite in the planning phase.",
+        # …and the same shape via the ALLOWED_TOKEN filter rather than NEGATION. An
+        # inert occurrence earlier in the line must not exempt a live instruction after
+        # it. Both scanned clean while that check ran whole-line.
+        "Allow-list carries TodoWrite(*). Use TodoWrite to track progress.",
+        "See permissions.allow for details. Use TodoWrite to track progress.",
     ):
         if not flagged(text):
             problems.append(f"affirmative instruction NOT flagged: {text!r}")
@@ -156,7 +206,7 @@ def check_negated_instructions_are_not_flagged() -> list[str]:
 
 def main() -> int:
     """Check negation handling, then scan the tree. 0 = no live instructions found."""
-    problems = check_negated_instructions_are_not_flagged()
+    problems = check_exemptions_are_scoped_to_the_mention()
     if problems:
         print("Negation handling is wrong:\n")
         for p in problems:
