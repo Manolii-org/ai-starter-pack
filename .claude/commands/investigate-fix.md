@@ -11,7 +11,13 @@ A structured workflow for investigating bugs, diagnosing root causes, implementi
 ## Process Steps
 
 ### 1. Save Instructions
-Record the current step in `.ai/sessions/active-task.json` as a non-null `active_step_id`, and **re-read that file before any action that depends on knowing which step you are on** — not only at step boundaries. Use that exact key: where `.claude/persistent-instructions.md` is installed, it preserves the file verbatim on a non-null `active_step_id` and the checkpoint survives compaction automatically.
+Maintain `.ai/sessions/active-task.json` with a non-null `active_step_id` naming the step you are actually on. Three duties, and all three are required — the checkpoint is the replacement for a withdrawn tool, so it has to carry the state that tool used to:
+
+- **Write** it when you begin step 1.
+- **Update** it at **every** step transition, before starting the new step. A checkpoint written once and never advanced survives compaction still naming step 1, and sends recovery back to the beginning — which is worse than having none, because it is *confidently* wrong rather than absent.
+- **Re-read** it before any action that depends on knowing which step you are on — not only at step boundaries.
+
+Use that exact key: where `.claude/persistent-instructions.md` is installed, it preserves the file verbatim on a non-null `active_step_id`, so the checkpoint survives compaction automatically. Step 10 clears it once the work is done.
 
 > **Known limitation, plugin-only installs.** The packaged plugin ships no `persistent-instructions.md`, and `hooks/pre-compact.sh` states its stdout is not injected into compaction context. So there is no automatic post-compaction consumer: if compaction fires *mid-step*, recovery depends on this directive itself surviving into the compacted context. Writing the checkpoint still costs nothing and makes recovery possible; it is not guaranteed. Installing the full template closes this.
 
