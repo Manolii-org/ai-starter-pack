@@ -15,22 +15,33 @@ ROUTING_COPIES = (
 )
 
 
+# The source-repository marker. `copier.yml` exists only in the pack itself —
+# it is in the template's own `_exclude`, so no rendered instance has one.
+IS_PACK_REPO = (ROOT / "copier.yml").is_file()
+
+
 def _present(paths: "tuple[Path, ...]") -> "list[Path]":
-    """Surfaces that exist here — every one of them must satisfy the guard.
+    """Surfaces this repository owns, and must therefore satisfy the guard.
 
     `plugin/**` is a pack-internal build artifact excluded from rendered
     consumers (copier.yml `_exclude`), but this test module IS shipped, so
     iterating the tuple blindly made every rendered project fail on first run
-    with FileNotFoundError. Filtering keeps both surfaces checked in the pack
-    repo (where both exist) and checks the shipped `.claude/` surface in a
-    consumer.
+    with FileNotFoundError.
+
+    Gated on the source-repo marker rather than on each path's existence.
+    Existence-based filtering silently adopts a consumer-owned
+    `plugin/manolii-framework` — a plugin checkout, or a different installed
+    pack version — and enforces THIS pack's routing assertions against it, so
+    version skew turns the rendered suite red again. Presence of `copier.yml`
+    is what actually means "these plugin sources are ours".
 
     The empty case is a hard failure, not a silent skip: `.claude/` ships
     everywhere, so nothing present means the surface was renamed or dropped and
     this guard would otherwise pass vacuously.
     """
-    found = [p for p in paths if p.exists()]
-    assert found, f"no agent-routing surface found among: {[str(p) for p in paths]}"
+    owned = paths if IS_PACK_REPO else tuple(p for p in paths if "plugin" not in p.parts)
+    found = [p for p in owned if p.exists()]
+    assert found, f"no agent-routing surface found among: {[str(p) for p in owned]}"
     return found
 
 

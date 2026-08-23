@@ -168,21 +168,27 @@ def test_marker_text_appears_exactly_once_in_the_source():
 
 
 PLUGIN_JUDGE_COPY = REPO_ROOT / "plugin" / "manolii-framework" / "scripts" / "run-judge.py"
+# Source-repository marker: `copier.yml` is in the template's own `_exclude`,
+# so it exists in the pack and in no rendered instance.
+IS_PACK_REPO = (REPO_ROOT / "copier.yml").is_file()
 
 
 @pytest.mark.skipif(
-    not PLUGIN_JUDGE_COPY.exists(),
+    not (IS_PACK_REPO and PLUGIN_JUDGE_COPY.exists()),
     reason="plugin/ is pack-internal (copier.yml _exclude) — absent in rendered instances",
 )
 def test_plugin_copy_is_in_sync():
     """The pack ships two copies; a fix applied to one only is a silent regression.
 
-    Guarded on the plugin copy's existence. `plugin/**` is a build artifact
-    excluded from rendered consumers by copier.yml, but this whole test module
-    IS shipped — so without the guard every rendered project inherited a test
-    that failed on first run with FileNotFoundError. The parity check still runs
-    (unskipped) in the pack repo, which is the only place both copies exist and
-    the only place drift is possible.
+    Guarded on the source-repo marker, not just the plugin copy's existence.
+    `plugin/**` is a build artifact excluded from rendered consumers by
+    copier.yml, but this whole test module IS shipped — so without a guard every
+    rendered project inherited a test that failed on first run with
+    FileNotFoundError. Keying on presence ALONE would then byte-compare a
+    consumer's own `plugin/manolii-framework` (a plugin checkout, or a different
+    installed pack version) against this repo's `scripts/run-judge.py`, so
+    version skew would turn the rendered suite red again. The parity check runs
+    unskipped in the pack, the only place both copies are ours and drift is real.
     """
     a = (REPO_ROOT / "scripts" / "run-judge.py").read_text()
     b = PLUGIN_JUDGE_COPY.read_text()

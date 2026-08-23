@@ -101,21 +101,39 @@ def _template_source_for(relpath):
     return jinja if jinja.is_file() else None
 
 
+def _escape_occurrences(text):
+    """Every doubled-backslash escape with its surrounding context, in order.
+
+    Context, not a count. A bare count is blind to three real corruptions the
+    §8-N2 defect class covers: the render deleting one escape while adding
+    another elsewhere (net zero), rewriting `\\n` into `\\t` in place, and
+    moving an escape to a different line. Each leaves the total unchanged.
+    """
+    return [
+        (m.group(0), text[max(0, m.start() - 40):m.end() + 40])
+        for m in DOUBLED_BACKSLASH_ESCAPE_RE.finditer(text)
+    ]
+
+
 def test_no_render_corruption(default_render):
     """Post-render corruption lint: verify no blind-sed artifacts remain.
 
     Covers §8-N2 defect class: doubled backslash escapes, tier-mixing, OSS-only markers.
 
     The doubled-backslash check is RENDER-RELATIVE, not absolute. The defect
-    class is "rendering doubled a backslash", so the test asserts the render
-    introduced no escape that the template source did not already contain.
-    An absolute scan cannot express that: `\\n` is legitimate, unremarkable
-    content in ordinary source files — a docstring quoting a Python string
-    literal (tests/test_run_judge_review_lookup.py) and a JSON fixture holding
-    an escaped newline (tests/test_tier_reusables.py) both carry one, and both
-    were flagged as "corruption" while their rendered and source counts were
-    identical. That false positive made this test permanently red on main, and
-    a permanently red lint is a disabled lint. Files with no template source
+    class is "rendering mangled a backslash", so the test asserts the rendered
+    file's escapes are IDENTICAL — same sequences, same surrounding context, same
+    order — to its template source's. An absolute scan cannot express that:
+    `\\n` is legitimate, unremarkable content in ordinary source files — a
+    docstring quoting a Python string literal (tests/test_run_judge_review_lookup.py)
+    and a JSON fixture holding an escaped newline (tests/test_tier_reusables.py)
+    both carry one, and both were flagged as "corruption" while their rendered
+    and source escapes were identical. That false positive made this test
+    permanently red on main, and a permanently red lint is a disabled lint.
+
+    Comparing occurrences rather than totals is deliberate: `rendered <= source`
+    passes a render that swaps one escape for another, which is exactly the
+    corruption this guard claims to detect. Files with no template source
     (generated output) keep the strict zero-tolerance check.
     """
     for p in default_render.rglob("*"):
@@ -128,18 +146,17 @@ def test_no_render_corruption(default_render):
         assert "(not OSS)" not in text, f"{p} contains '(not OSS)' marker"
         assert "restricted/restricted" not in text, f"{p} contains tier-mixing 'restricted/restricted'"
 
-        rendered_escapes = len(DOUBLED_BACKSLASH_ESCAPE_RE.findall(text))
+        rendered_escapes = _escape_occurrences(text)
         if not rendered_escapes:
             continue
         source = _template_source_for(p.relative_to(default_render))
         source_escapes = (
-            len(DOUBLED_BACKSLASH_ESCAPE_RE.findall(source.read_text(errors="ignore")))
-            if source
-            else 0
+            _escape_occurrences(source.read_text(errors="ignore")) if source else []
         )
-        assert rendered_escapes <= source_escapes, (
-            f"{p} gained doubled-backslash escapes during render "
-            f"(rendered={rendered_escapes}, template source={source_escapes}); "
+        assert rendered_escapes == source_escapes, (
+            f"{p} doubled-backslash escapes differ from the template source "
+            f"(rendered={[e for e, _ in rendered_escapes]}, "
+            f"source={[e for e, _ in source_escapes]}); "
             f"source={source or 'GENERATED (none permitted)'}"
         )
 
