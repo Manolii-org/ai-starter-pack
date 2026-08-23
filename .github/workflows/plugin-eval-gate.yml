@@ -8,40 +8,20 @@ name: Plugin Eval Gate
 on:
   push:
     branches: [main, "claude/**"]
-    paths:
-      - ".claude/**"
-      - "scripts/**"
-      - "plugin/**"
-      - "plugin-sources/**"
-      - "copier.yml"
-      - "pack.manifest.yml"
-      - ".claude-plugin/**"
-      - ".github/workflows/plugin-eval-gate.yml"
-      # Scanned by test_no_withdrawn_tool_instructions.py. A guard that reads a
-      # path but is not triggered by it is not a gate — see the SCAN_* coverage
-      # check in that file, which fails if these drift apart again.
-      - "docs/**"
-      - "CLAUDE.md"
-      - "AGENTS.md"
+    paths: ["**"]
   pull_request:
-    paths:
-      - ".claude/**"
-      - "scripts/**"
-      - "plugin/**"
-      - "plugin-sources/**"
-      - "copier.yml"
-      - "pack.manifest.yml"
-      - ".claude-plugin/**"
-      - ".github/workflows/plugin-eval-gate.yml"
-      - "docs/**"
-      - "CLAUDE.md"
-      - "AGENTS.md"
+    paths: ["**"]
 
 jobs:
   eval-gate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Copier's overwrite contract checks the recorded release tag. A shallow
+          # checkout makes that local tag unavailable and turns the test into an
+          # infrastructure failure rather than a template assertion.
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -80,7 +60,7 @@ jobs:
 
 
       - name: Install pytest
-        run: python3 -m pip install --quiet pytest
+        run: python3 -m pip install --quiet pytest jsonschema pyyaml
 
       - name: Retrospective + memory path tests
         run: |
@@ -92,6 +72,11 @@ jobs:
           # payload/timeout handling or migrate safety could merge unseen.
           bash scripts/tests/migrate-memory-path.test.sh
           bash scripts/tests/session-stop-retrospective.test.sh
+
+      - name: Copier template and repository tests
+        # `tests/` is the consumer-rendering contract. Keep copier installed above:
+        # without it, nine subprocess cases error before exercising the template.
+        run: python3 -m pytest tests/ -q
 
       - name: Plugin hook + drift guards
         run: |
