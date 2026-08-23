@@ -13,6 +13,7 @@ on:
       - "scripts/**"
       - "plugin/**"
       - "plugin-sources/**"
+      - "tests/**"
       - "copier.yml"
       - "pack.manifest.yml"
       - ".claude-plugin/**"
@@ -29,6 +30,7 @@ on:
       - "scripts/**"
       - "plugin/**"
       - "plugin-sources/**"
+      - "tests/**"
       - "copier.yml"
       - "pack.manifest.yml"
       - ".claude-plugin/**"
@@ -42,6 +44,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Copier's overwrite contract checks the recorded release tag. A shallow
+          # checkout makes that local tag unavailable and turns the test into an
+          # infrastructure failure rather than a template assertion.
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -92,6 +99,11 @@ jobs:
           # payload/timeout handling or migrate safety could merge unseen.
           bash scripts/tests/migrate-memory-path.test.sh
           bash scripts/tests/session-stop-retrospective.test.sh
+
+      - name: Copier template and repository tests
+        # `tests/` is the consumer-rendering contract. Keep copier installed above:
+        # without it, nine subprocess cases error before exercising the template.
+        run: python3 -m pytest tests/ -q
 
       - name: Plugin hook + drift guards
         run: |

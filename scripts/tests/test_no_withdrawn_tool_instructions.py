@@ -105,14 +105,14 @@ INSTRUCTION_VERBS = (
 # motivated it.
 INSTRUCTION_GAP = r"(?:(?:the|a|an|your|its|new|first|initial|running)\s+){0,3}"
 INSTRUCTION = re.compile(
-    rf"(?:{INSTRUCTION_VERBS})\s+{INSTRUCTION_GAP}`?TodoWrite`?"
+    rf"\b(?:{INSTRUCTION_VERBS})\s+{INSTRUCTION_GAP}`?TodoWrite`?"
     # A bare `TodoWrite items` alternative used to sit here and was dropped: it flagged
     # "TodoWrite items are no longer available." — documentation, not an instruction.
     # Measured before removing it: every positive case that reads as `… items` is
     # already caught through the verb path ("Open your TodoWrite items before
     # starting."), so it cost nothing and blocked accurate docs, which is the failure
     # mode this file rejects polarity inversion to avoid.
-    r"|`?TodoWrite`?\s+(?:for|to\s+track)",
+    r"|(?<!\w)`?TodoWrite`?\s+(?:for|to\s+track)",
     re.IGNORECASE,
 )
 
@@ -159,9 +159,10 @@ NEGATION = re.compile(
 # in it: "Allow-list carries TodoWrite(*). Use TodoWrite to track progress." is a real
 # instruction and is now flagged, where the whole-line check passed it.
 ALLOWED_TOKEN = re.compile(
-    r"TodoWrite\(\*\)"                 # permission allow-list entry
-    r"|permissions\.allow"             # prose describing an allow-list
-    r"|\|(?:Bash|Edit|Write|Read)\|"   # native-tool-name regex alternation
+    r"TodoWrite\(\*\)"  # permission allow-list entry
+    # Include the NAME so overlap scoping exempts this occurrence only.
+    r"|permissions\.allow\s*(?:(?:includes?|contains?|carries?)\s+|[:=]\s*)`?TodoWrite`?"
+    r"|\|(?:Bash|Edit|Write|Read)\|`?TodoWrite`?\|"  # native-tool regex
 )
 
 # There is deliberately NO line-scoped exemption. An earlier version had one for
@@ -319,7 +320,12 @@ def _flag(path: Path, hits: list[str], repo: Path = REPO) -> None:
         return
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeDecodeError):
+    except (OSError, UnicodeDecodeError) as exc:
+        try:
+            shown_path = path.relative_to(repo)
+        except ValueError:
+            shown_path = path
+        hits.append(f"{shown_path}: unreadable: {type(exc).__name__}: {exc}")
         return
     for _start_line, block, offsets in _blocks(lines):
         # Case-INSENSITIVE, matching `INSTRUCTION`'s own re.IGNORECASE. Codex #71 on
@@ -417,6 +423,9 @@ def check_exemptions_are_scoped_to_the_mention() -> list[str]:
         # it. Both scanned clean while that check ran whole-line.
         "Allow-list carries TodoWrite(*). Use TodoWrite to track progress.",
         "See permissions.allow for details. Use TodoWrite to track progress.",
+        "permissions.allow: TodoWrite. Use TodoWrite to track progress.",
+        "permissions.allow: Read. Use TodoWrite to track progress.",
+        "Tool regex: |Bash|TodoWrite|. Use TodoWrite to track progress.",
         # Codex #71: a withdrawal/restore-flag mention earlier in the line must not
         # exempt a live instruction after it. Both scanned clean under ALLOWED_LINE.
         "Withdrawn in 2.1.233, but use TodoWrite to track every step.",
@@ -483,6 +492,12 @@ def check_exemptions_are_scoped_to_the_mention() -> list[str]:
         # the dropped bare-`items` alternative — documentation, not a directive
         "TodoWrite items are no longer available.",
         "The TodoWrite items were removed in 2.1.233.",
+        "Recall TodoWrite was withdrawn.",
+        "Recreate TodoWrite documentation.",
+        "Reuse TodoWrite documentation.",
+        "permissions.allow: TodoWrite for legacy clients.",
+        "permissions.allow includes TodoWrite for legacy clients.",
+        "Tool regex: |Bash|TodoWrite| for legacy clients.",
     ):
         if flagged(text):
             problems.append(f"inert mention wrongly flagged by widened grammar: {text!r}")
@@ -650,6 +665,40 @@ def check_workflow_triggers_cover_every_scanned_path() -> list[str]:
     return problems
 
 
+def check_unreadable_files_fail_closed() -> list[str]:
+    """A declared scan target must not disappear behind a read error."""
+    from unittest import mock
+
+    import tempfile
+
+    failures = (
+        OSError("permission denied"),
+        UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
+    )
+    problems: list[str] = []
+    with tempfile.TemporaryDirectory(dir=REPO / "docs") as td:
+        candidate = Path(td) / "unreadable-fixture.md"
+        candidate.write_text("fixture exists before the simulated read failure\n")
+        for failure in failures:
+            hits: list[str] = []
+            original_read_text = Path.read_text
+
+            def fail_candidate(path: Path, *args: object, **kwargs: object) -> str:
+                if path == candidate:
+                    raise failure
+                return original_read_text(path, *args, **kwargs)
+
+            with mock.patch.object(
+                Path, "read_text", autospec=True, side_effect=fail_candidate
+            ) as read_text:
+                _flag(candidate, hits)
+            if not read_text.called:
+                problems.append(f"{type(failure).__name__} fixture did not reach file read")
+            elif not any(f"unreadable: {type(failure).__name__}:" in hit for hit in hits):
+                problems.append(f"{type(failure).__name__} was silently skipped")
+    return problems
+
+
 def main() -> int:
     """Check negation handling, then scan the tree. 0 = no live instructions found."""
     problems = check_exemptions_are_scoped_to_the_mention()
@@ -658,6 +707,7 @@ def main() -> int:
     problems += check_workflow_triggers_cover_every_scanned_path()
     problems += check_markdown_structure_ends_a_block()
     problems += check_the_scan_prefilter_is_case_insensitive()
+    problems += check_unreadable_files_fail_closed()
     if problems:
         print("Instruction detection is wrong:\n")
         for p in problems:
