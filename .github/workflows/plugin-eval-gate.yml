@@ -8,36 +8,9 @@ name: Plugin Eval Gate
 on:
   push:
     branches: [main, "claude/**"]
-    paths:
-      - ".claude/**"
-      - "scripts/**"
-      - "plugin/**"
-      - "plugin-sources/**"
-      - "tests/**"
-      - "copier.yml"
-      - "pack.manifest.yml"
-      - ".claude-plugin/**"
-      - ".github/workflows/plugin-eval-gate.yml"
-      # Scanned by test_no_withdrawn_tool_instructions.py. A guard that reads a
-      # path but is not triggered by it is not a gate — see the SCAN_* coverage
-      # check in that file, which fails if these drift apart again.
-      - "docs/**"
-      - "CLAUDE.md"
-      - "AGENTS.md"
+    paths: ["**"]
   pull_request:
-    paths:
-      - ".claude/**"
-      - "scripts/**"
-      - "plugin/**"
-      - "plugin-sources/**"
-      - "tests/**"
-      - "copier.yml"
-      - "pack.manifest.yml"
-      - ".claude-plugin/**"
-      - ".github/workflows/plugin-eval-gate.yml"
-      - "docs/**"
-      - "CLAUDE.md"
-      - "AGENTS.md"
+    paths: ["**"]
 
 jobs:
   eval-gate:
@@ -87,7 +60,7 @@ jobs:
 
 
       - name: Install pytest
-        run: python3 -m pip install --quiet pytest
+        run: python3 -m pip install --quiet pytest jsonschema pyyaml
 
       - name: Retrospective + memory path tests
         run: |
