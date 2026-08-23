@@ -660,6 +660,8 @@ def check_workflow_triggers_cover_every_scanned_path() -> list[str]:
     required |= set(SCAN_ROOT_FILES)
     for event in ("push", "pull_request"):
         listed = set((triggers.get(event) or {}).get("paths") or [])
+        if listed & {"**", "**/*"}:  # universal path filters cover every scanned input
+            continue
         for pattern in sorted(required - listed):
             problems.append(f"{event}.paths does not cover scanned path {pattern!r}")
     return problems
