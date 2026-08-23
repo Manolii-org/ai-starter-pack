@@ -25,9 +25,18 @@ a legitimate consumer shape:
   * all three together        — a Copier-template repo that adopted the pack via
                                 the zip flow has precisely that shape.
 
-Cite the `.jinja`, not the 4-line `README-STARTER-PACK.md` beside it: the
-template is what a consumer actually receives as their README, and it is the
-only place this text exists.
+Cite the `.jinja`, not the 4-line `README-STARTER-PACK.md` beside it. The
+basename means two different things depending on where you are standing, which
+is what makes it easy to cite wrongly:
+
+  * in THIS repo, `README-STARTER-PACK.md` is a 4-line License stub, and
+    `README-STARTER-PACK.md.jinja` is the template (real Jinja — line 3 holds
+    `{{ATTRIBUTION_LINE}}`);
+  * in a consumer, the `.jinja` is absent and `README-STARTER-PACK.md` is what
+    Copier rendered FROM it.
+
+So the template is the authoritative source for the README a consumer receives
+— not a file they get — and it is the only place the quoted text exists.
 
 A false positive there is not cosmetic: it drops a CONSUMER into the pack-only
 branch and fails their suite over `plugin/` paths they were never meant to have.
