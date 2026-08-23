@@ -161,10 +161,93 @@ def build_hooks_config() -> dict:
     canonical settings.json gains/loses a hook event)."""
     P = "${CLAUDE_PLUGIN_ROOT}"
 
+    # Working-directory probe.
+    #
+    # The original `cd "${CLAUDE_PROJECT_DIR}" && …` is unsafe because
+    # CLAUDE_PROJECT_DIR is UNSET in Claude Code Web multi-repo sessions (verified
+    # live, CLI 2.1.239, 2026-08-22).
+    #
+    # CORRECTION (Codex review, ai-starter-pack#71 — P1): an earlier version of this
+    # comment claimed `cd ""` "lands in $HOME". It does not. Measured: `cd ""` is a
+    # NO-OP — it returns 0 and leaves the working directory unchanged; only a bare
+    # `cd` with no argument goes to $HOME. So the real failure is subtler: the hook
+    # runs in whatever directory Claude Code launched it from, and per the 2.1.239
+    # changelog that is "the project root or home directory". When it is $HOME, every
+    # hook reads and WRITES repo-relative state (.ai/memory/*, .ai/guards.json,
+    # .ai/sessions/*) into the home directory. The Stop self-check is the worst case:
+    # its `>> .ai/memory/...` sink is deliberately cwd-relative.
+    #
+    # Resolution order, mirroring the canonical settings.json dispatcher:
+    #   1. $CLAUDE_PROJECT_DIR, only when it is actually a directory
+    #   2. the enclosing git toplevel
+    #   3. a single child of $PWD carrying the .ai/hook-root marker (the multi-repo
+    #      case; ambiguous when 0 or 2+ match, so it is skipped then)
+    #   4. $PWD
+    #
+    # Then the part that actually closes the hole. Steps 1-3 all fail when the hook
+    # starts in $HOME — git rev-parse finds nothing there, and this pack ships no
+    # .ai/hook-root marker for step 3 to find (a Manolii-ecosystem convention, not a
+    # pack one). Step 4 would then hand back $HOME itself. So resolving to a bare
+    # $HOME that is not a repository is treated as FAILURE TO RESOLVE, and the hook
+    # skips with exit 0 rather than running somewhere it would pollute. Fail-open on
+    # the permission decision, fail-safe on the filesystem. A genuine repository at
+    # $HOME still proceeds, hence the .git test.
+    CWD_PROBE = (
+        '_R="${CLAUDE_PROJECT_DIR:-}"; '
+        '{ [ -n "$_R" ] && [ -d "$_R" ]; } || '
+        '_R="$(git rev-parse --show-toplevel 2>/dev/null)"; '
+        'if [ -z "$_R" ]; then _n=0; for _c in "$PWD"/*; do '
+        '[ -f "$_c/.ai/hook-root" ] && { _R="$_c"; _n=$((_n+1)); }; done; '
+        '[ "$_n" -eq 1 ] || _R=""; fi; '
+        '[ -n "$_R" ] || _R="$PWD"; '
+        # Validity comes from GIT, never from a `.git` entry existing (Codex #71, P2).
+        # The earlier `[ ! -e "$_R/.git" ] &&` short-circuit accepted any `.git` entry,
+        # including a stale or empty one. Reproduced 2026-08-22 with an empty
+        # `$HOME/.git`: `git rev-parse` said "fatal: not a git repository", yet the probe
+        # returned the home path — the original bug, reachable again through a leftover
+        # directory. The `-e` test was added for worktrees, but it was never needed:
+        # `git rev-parse --show-toplevel` resolves BOTH layouts (measured — it returns
+        # the worktree path where `.git` is a FILE), so the existence test bought
+        # nothing and cost the guard. Requiring the top level to EQUAL $_R also keeps a
+        # repository merely ABOVE $HOME from qualifying.
+        # Both sides are CANONICALISED before comparing (Codex #71, P2). A string
+        # compare misses every other spelling of the same directory: HOME reached
+        # through a symlink, or carrying a trailing slash, while $PWD holds the
+        # physical path. Both reproduced 2026-08-22 — the refusal was bypassed and the
+        # hook ran in the home directory, the exact bug this guard exists to stop.
+        # `cd … && pwd -P` is the portable POSIX realpath. An unset HOME leaves _HP
+        # empty, and the -n test then keeps the guard from firing on everything.
+        '_RP="$(cd "$_R" 2>/dev/null && pwd -P)"; '
+        '_HP="$(cd "${HOME:-/nonexistent}" 2>/dev/null && pwd -P)"; '
+        '_GT="$(cd "$_R" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null)"; '
+        'if [ -n "$_HP" ] && [ "$_RP" = "$_HP" ] && [ "$_GT" != "$_RP" ]; then '
+        'echo "[manolii-hook] no repository root resolved (would run in the home '
+        'directory) — skipping to avoid writing .ai/ state outside a repo" >&2; '
+        'exit 0; fi; '
+        # `cd` alone is NOT sufficient (Codex #71, second P1). Several bundled
+        # entrypoints read CLAUDE_PROJECT_DIR directly and fall back to their OWN
+        # __file__ location, not cwd — hooks/post-tool.py:50, hooks/pre-compact.sh:14,
+        # scripts/system-self-check.py:22 (whose comment even states it expects to run
+        # after `cd $CLAUDE_PROJECT_DIR`). Left unset, those three resolve their state
+        # root to the PLUGIN INSTALL TREE. Exporting the resolved root fixes all of
+        # them at once and keeps cwd and the variable in agreement.
+        'CLAUDE_PROJECT_DIR="$_R"; export CLAUDE_PROJECT_DIR; cd "$_R"'
+    )
+
     def cmd(c: str, timeout: int) -> dict:
+        """Wrap one hook command so it runs only after the root probe succeeds."""
+        # `( … )` around the payload is load-bearing (CodeRabbit #71, Major). `&&`
+        # binds only to the FIRST segment of `c`; several commands are compound. The
+        # Stop self-check is `python3 … && python3 …; _rc=$?; mkdir -p .ai/memory; echo
+        # … >> .ai/memory/eval-failures.jsonl`, so a failing `cd "$_R"` skipped the
+        # python calls while the semicolon-separated logging still ran — recreating the
+        # very home-directory `.ai/` write the probe exists to prevent. Reproduced
+        # 2026-08-22: without the group, `.ai/memory/eval-failures.jsonl` appeared in
+        # the original directory; with it, nothing. The subshell keeps every part of
+        # the payload behind the probe's success.
         return {
             "type": "command",
-            "command": f'cd "${{CLAUDE_PROJECT_DIR}}" && {c}',
+            "command": f"{CWD_PROBE} && ( {c} )",
             "timeout": timeout,
         }
 
@@ -477,6 +560,7 @@ def smoke_test_hooks(out: Path) -> None:
     cfg = json.loads((out / "hooks" / "hooks.json").read_text())
 
     def snapshot() -> dict:
+        """Record file counts per bundled directory, for the build summary."""
         return {p: p.stat().st_mtime_ns for p in out.rglob("*")
                 if p.is_file() and "__pycache__" not in p.parts and p.suffix != ".pyc"}
 
@@ -534,6 +618,7 @@ def smoke_test_hooks(out: Path) -> None:
 
 
 def main() -> None:
+    """CLI entry point: render the Copier template, bundle the plugin, verify it."""
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--install-mode", default="branded", choices=["branded", "unbranded"])
     ap.add_argument("--out",

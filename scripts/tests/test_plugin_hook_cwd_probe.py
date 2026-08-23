@@ -1,0 +1,455 @@
+#!/usr/bin/env python3
+"""Behavioural test for the plugin hooks' working-directory probe.
+
+Why this exists: the generated plugin hooks used to open with a bare
+`cd "${CLAUDE_PROJECT_DIR}" && …`. In Claude Code Web *multi-repo* sessions
+`CLAUDE_PROJECT_DIR` is UNSET (verified live, CLI 2.1.239, 2026-08-22).
+
+CORRECTION (Codex review, #71 — P1): an earlier version of this file claimed that
+`cd ""` "lands in $HOME". It does not. Measured: `cd ""` is a NO-OP — rc=0, working
+directory unchanged; only a bare `cd` with no argument goes to $HOME. The real
+failure is subtler. The hook simply runs wherever Claude Code launched it, and per
+the 2.1.239 changelog that is "the project root or home directory". When it is
+$HOME, every hook reads and writes repo-relative state (.ai/memory/*,
+.ai/guards.json, .ai/sessions/*) into the home directory. The Stop self-check is
+the worst case: its `>> .ai/memory/...` sink is deliberately cwd-relative.
+
+Codex also showed the first fix was incomplete: in $HOME, `git rev-parse` finds
+nothing and this pack ships no `.ai/hook-root` marker, so the probe fell back to
+$PWD — which IS $HOME. Resolving to a non-repository $HOME is now treated as
+failure to resolve, and the hook skips (exit 0) rather than polluting.
+
+This asserts behaviour, not string shape: each case actually EXECUTES the probe
+under a controlled environment and checks where it lands. A shape-only assertion
+would pass on a probe that still resolves to $HOME.
+
+Run: python3 scripts/tests/test_plugin_hook_cwd_probe.py
+"""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(REPO / "scripts"))
+
+failures: list[str] = []
+
+
+def fail(case: str, detail: str) -> None:
+    """Record a failure; checks accumulate so one run reports every problem."""
+    failures.append(f"[{case}] {detail}")
+
+
+def _probe() -> str:
+    """Extract the probe from the builder without importing its whole CLI."""
+    src = (REPO / "scripts" / "build-plugin.py").read_text(encoding="utf-8")
+    start = src.find("CWD_PROBE = (")
+    if start == -1:
+        raise AssertionError("CWD_PROBE not found in build-plugin.py")
+    end = src.find("\n    )", start)
+    body = src[start:end]
+    parts = [
+        line.strip().removeprefix("CWD_PROBE = (").strip()
+        for line in body.splitlines()
+    ]
+    out = "".join(p[1:-1] for p in parts if p.startswith(("'", '"')) and len(p) > 1)
+    if not out:
+        raise AssertionError("could not reassemble CWD_PROBE literal")
+    return out
+
+
+GIT_ISOLATED = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"}
+
+
+def _git(*args: str, cwd: Path) -> None:
+    """Run one git command, isolated from user/system config and bounded by a timeout."""
+    subprocess.run(
+        ["git", *args], cwd=cwd, check=True, capture_output=True,
+        env={**os.environ, **GIT_ISOLATED}, timeout=30,
+    )
+
+
+def _init_repo(path: Path) -> Path:
+    """Create a REAL git repository at `path` and return it.
+
+    CodeRabbit #71: these fixtures used to be `(path / ".git").mkdir()` — an empty
+    directory, which is not a repository. Measured 2026-08-22: `git rev-parse
+    --show-toplevel` inside one returns "fatal: not a git repository".
+
+    At the time the probe's guard opened with `[ ! -e "$_R/.git" ] &&`, so the empty
+    directory short-circuited it and the cases proved only that `-e` sees a directory.
+    Codex then pointed out that the same short-circuit let a stale `.git` put hooks
+    back in $HOME — citing this docstring's own statement that the shape is not a
+    repository. The `-e` test is gone; validity now comes from git alone
+    (`check_refuses_when_home_has_a_stale_git_entry` covers it). These fixtures must
+    still be real repositories, because that is now the only thing the guard accepts.
+    """
+    path.mkdir(parents=True, exist_ok=True)
+    _git("init", "-q", ".", cwd=path)
+    _git("config", "user.email", "t@example.invalid", cwd=path)
+    _git("config", "user.name", "t", cwd=path)
+    # Guard the premise once, for every fixture: git itself must agree this is the
+    # top level. Without this the helper could silently regress to the empty-directory
+    # form and the cases above would go back to proving nothing.
+    top = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"], cwd=path, capture_output=True,
+        text=True, env={**os.environ, **GIT_ISOLATED}, timeout=30,
+    )
+    if top.returncode != 0 or Path(top.stdout.strip()).resolve() != path.resolve():
+        raise AssertionError(
+            f"fixture at {path} is not a git top level: rc={top.returncode} "
+            f"out={top.stdout.strip()!r} err={top.stderr.strip()[:120]!r}"
+        )
+    return path
+
+
+def _run(probe: str, cwd: Path, env_extra: dict[str, str | None]) -> str:
+    """Execute `<probe> && pwd -P` and return the resulting directory."""
+    env = dict(os.environ)
+    env.pop("CLAUDE_PROJECT_DIR", None)
+    for k, v in env_extra.items():
+        if v is None:
+            env.pop(k, None)
+        else:
+            env[k] = v
+    r = subprocess.run(
+        ["sh", "-c", f"{probe} && pwd -P"],
+        cwd=cwd, env=env, capture_output=True, text=True, timeout=30,
+    )
+    if r.returncode != 0:
+        raise AssertionError(f"probe exited {r.returncode}: {r.stderr.strip()[:200]}")
+    # An empty stdout means the probe short-circuited before `pwd` — i.e. it refused
+    # to resolve a root. Surfaced as the sentinel "<skipped>" so cases can assert it.
+    return r.stdout.strip() or "<skipped>"
+
+
+def check_probe_never_lands_in_home_when_var_unset() -> None:
+    """The regression itself: unset CLAUDE_PROJECT_DIR, non-git cwd, no marker."""
+    probe = _probe()
+    home = str(Path.home().resolve())
+    with tempfile.TemporaryDirectory() as td:
+        scratch = Path(td).resolve()
+        landed = _run(probe, scratch, {"CLAUDE_PROJECT_DIR": None})
+    if landed == home:
+        fail("unset-var", f"probe landed in $HOME ({home}) — the original bug")
+    if landed != str(scratch):
+        fail("unset-var", f"expected fallback to $PWD ({scratch}), landed in {landed}")
+
+
+def check_probe_ignores_empty_var() -> None:
+    """An explicitly empty value must be treated as absent, not as `cd ""`."""
+    probe = _probe()
+    with tempfile.TemporaryDirectory() as td:
+        scratch = Path(td).resolve()
+        landed = _run(probe, scratch, {"CLAUDE_PROJECT_DIR": ""})
+    if landed != str(scratch):
+        fail("empty-var", f"empty CLAUDE_PROJECT_DIR should fall through to $PWD; landed in {landed}")
+
+
+def check_probe_ignores_nonexistent_dir() -> None:
+    """A stale path (deleted worktree) must fall through, not fail the hook."""
+    probe = _probe()
+    with tempfile.TemporaryDirectory() as td:
+        scratch = Path(td).resolve()
+        landed = _run(probe, scratch, {"CLAUDE_PROJECT_DIR": str(scratch / "gone")})
+    if landed != str(scratch):
+        fail("stale-var", f"nonexistent CLAUDE_PROJECT_DIR should fall through; landed in {landed}")
+
+
+def check_probe_honours_valid_var() -> None:
+    """An existing CLAUDE_PROJECT_DIR wins over every fallback."""
+    probe = _probe()
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td).resolve()
+        target = root / "proj"
+        target.mkdir()
+        (root / "elsewhere").mkdir()
+        landed = _run(probe, root / "elsewhere", {"CLAUDE_PROJECT_DIR": str(target)})
+    if landed != str(target):
+        fail("valid-var", f"expected {target}, landed in {landed}")
+
+
+def check_probe_finds_single_hook_root_marker() -> None:
+    """Multi-repo case: exactly one sibling carries .ai/hook-root."""
+    probe = _probe()
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td).resolve()
+        marked = root / "master"
+        (marked / ".ai").mkdir(parents=True)
+        (marked / ".ai" / "hook-root").write_text("", encoding="utf-8")
+        (root / "other-repo").mkdir()
+        landed = _run(probe, root, {"CLAUDE_PROJECT_DIR": None})
+    if landed != str(marked):
+        fail("single-marker", f"expected the marked repo {marked}, landed in {landed}")
+
+
+def check_probe_is_ambiguous_safe_with_two_markers() -> None:
+    """Two markers is ambiguous — must fall back to $PWD, not guess."""
+    probe = _probe()
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td).resolve()
+        for name in ("a", "b"):
+            (root / name / ".ai").mkdir(parents=True)
+            (root / name / ".ai" / "hook-root").write_text("", encoding="utf-8")
+        landed = _run(probe, root, {"CLAUDE_PROJECT_DIR": None})
+    if landed != str(root):
+        fail("two-markers", f"ambiguous marker set should fall back to $PWD ({root}); landed in {landed}")
+
+
+def check_refuses_to_run_in_a_non_repo_home() -> None:
+    """Codex #71 P1: the fallback must LEAVE $HOME, not settle in it.
+
+    In $HOME with no CLAUDE_PROJECT_DIR, `git rev-parse` returns nothing and this
+    pack ships no `.ai/hook-root` marker, so steps 1-3 all fail and step 4 ($PWD)
+    hands back $HOME itself. Running there is exactly the bug. The probe now treats
+    that as failure-to-resolve and skips with exit 0 — fail-open on the permission
+    decision, fail-safe on the filesystem.
+    """
+    probe = _probe()
+    with tempfile.TemporaryDirectory() as td:
+        fake_home = Path(td).resolve()          # a $HOME that is NOT a git repo
+        landed = _run(probe, fake_home, {"CLAUDE_PROJECT_DIR": None, "HOME": str(fake_home)})
+    if landed != "<skipped>":
+        fail("home-refusal", f"probe should skip rather than run in a non-repo $HOME; landed in {landed}")
+
+
+def check_refuses_when_home_has_a_stale_git_entry() -> None:
+    """A `.git` entry is not a repository — only git's own answer counts.
+
+    Codex #71 (P2): the guard opened with `[ ! -e "$_R/.git" ] &&`, so ANY `.git` entry
+    short-circuited the git validation. A non-repository $HOME carrying a stale or empty
+    `.git` therefore ran every hook in the home directory — the original bug, reachable
+    again through a leftover directory. Reproduced 2026-08-22: `git rev-parse` returned
+    "fatal: not a git repository" while the probe returned the home path.
+
+    The existence test was there for worktrees, and was never needed for them: `git
+    rev-parse --show-toplevel` resolves a gitfile layout too (see the worktree case
+    below, which still passes without it). So it bought nothing and cost the guard.
+    """
+    probe = _probe()
+    with tempfile.TemporaryDirectory() as td:
+        fake_home = Path(td).resolve()
+        (fake_home / ".git").mkdir()          # deliberately NOT a repository
+        landed = _run(probe, fake_home, {"CLAUDE_PROJECT_DIR": None, "HOME": str(fake_home)})
+    if landed != "<skipped>":
+        fail(
+            "stale-git",
+            f"an empty .git must not pass as a repository; probe ran in {landed}",
+        )
+
+
+def check_still_runs_when_home_is_itself_a_repo() -> None:
+    """The refusal must not fire when $HOME genuinely IS the repository."""
+    probe = _probe()
+    with tempfile.TemporaryDirectory() as td:
+        home_repo = _init_repo(Path(td).resolve())
+        landed = _run(probe, home_repo, {"CLAUDE_PROJECT_DIR": None, "HOME": str(home_repo)})
+    if landed != str(home_repo):
+        fail("home-is-repo", f"a real repo at $HOME must still be used; landed in {landed}")
+
+
+def check_still_runs_when_home_is_a_linked_worktree() -> None:
+    """A worktree / submodule keeps `.git` as a FILE, not a directory.
+
+    Codex #71 (P2): the refusal was `[ ! -d "$_R/.git" ]`, so a genuine repository at
+    $HOME that happens to be a linked worktree or a submodule checkout was skipped —
+    `git rev-parse --show-toplevel` resolved it correctly while `-d` did not. Verified
+    with `git worktree add` on 2026-08-22: `.git` was a regular file containing
+    `gitdir: …`. The guard now uses `-e` plus a `git -C` confirmation.
+    """
+    probe = _probe()
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td).resolve()
+        main = _init_repo(root / "main-repo")
+        (main / "a.txt").write_text("x")
+        _git("add", "-A", cwd=main)
+        _git("commit", "-qm", "init", cwd=main)
+        wt = root / "linked"
+        _git("worktree", "add", "-q", str(wt), "-b", "wt", cwd=main)
+        if (wt / ".git").is_dir():                     # guards the premise itself
+            fail("home-worktree", "expected .git to be a FILE in a linked worktree")
+            return
+        landed = _run(probe, wt, {"CLAUDE_PROJECT_DIR": None, "HOME": str(wt)})
+    if landed != str(wt):
+        fail("home-worktree", f"a worktree at $HOME must still be used; landed in {landed}")
+
+
+def check_refuses_when_home_is_reached_through_a_symlink() -> None:
+    """A string compare misses other spellings of the same directory.
+
+    Codex #71 (P2): the refusal was `[ "$_R" = "${HOME:-}" ]`. When HOME is reached
+    through a symlink — or merely carries a trailing slash — while $PWD holds the
+    physical path, the strings differ and the guard never fires, so the hook runs in the
+    home directory after all. Both spellings reproduced 2026-08-22: each returned the
+    physical path where the exact-match control correctly skipped. Both sides are now
+    canonicalised with `cd … && pwd -P`.
+    """
+    probe = _probe()
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td).resolve()
+        real = root / "real"
+        real.mkdir()
+        link = root / "link"
+        link.symlink_to(real)
+        for label, home in (("symlink", str(link)), ("trailing-slash", f"{real}/")):
+            landed = _run(probe, real, {"CLAUDE_PROJECT_DIR": None, "HOME": home})
+            if landed != "<skipped>":
+                fail(
+                    "home-spelling",
+                    f"HOME as a {label} bypassed the refusal; landed in {landed}",
+                )
+
+
+def check_payload_is_grouped_so_a_failed_cd_runs_nothing() -> None:
+    """`&&` binds to the first segment only — the payload needs its own group.
+
+    CodeRabbit #71 (Major): hook payloads are compound. The Stop self-check ends with
+    `; _rc=$?; mkdir -p .ai/memory; echo … >> .ai/memory/eval-failures.jsonl`, so a
+    failing `cd "$_R"` skipped the python calls while the logging still ran in the
+    original directory — recreating the home-directory `.ai/` write the probe prevents.
+    Reproduced 2026-08-22 with a deliberately unreachable target.
+    """
+    payload = (
+        'true; mkdir -p .ai/memory; echo x >> .ai/memory/eval-failures.jsonl'
+    )
+    with tempfile.TemporaryDirectory() as td:
+        here = Path(td).resolve()
+        subprocess.run(
+            ["sh", "-c", f'cd "{here}/gone" && ( {payload} )'],
+            cwd=here, capture_output=True, text=True, timeout=30,
+        )
+        if (here / ".ai" / "memory" / "eval-failures.jsonl").exists():
+            fail("grouping", "a grouped payload still wrote state after a failed cd")
+        # …and confirm the ungrouped form is genuinely unsafe, so this case has teeth.
+        subprocess.run(
+            ["sh", "-c", f'cd "{here}/gone" && {payload}'],
+            cwd=here, capture_output=True, text=True, timeout=30,
+        )
+        if not (here / ".ai" / "memory" / "eval-failures.jsonl").exists():
+            fail("grouping", "premise broken: the UNGROUPED form no longer leaks, so this case proves nothing")
+
+
+def check_exports_resolved_root_for_entrypoints() -> None:
+    """Codex #71 (second P1): `cd` alone leaves CLAUDE_PROJECT_DIR unset.
+
+    Three bundled entrypoints read the variable directly and fall back to their OWN
+    __file__ location rather than cwd — hooks/post-tool.py:50,
+    hooks/pre-compact.sh:14, scripts/system-self-check.py:22 (whose comment states it
+    expects to run after `cd $CLAUDE_PROJECT_DIR`). Unset, all three resolve their
+    state root to the PLUGIN INSTALL TREE, so compact state, transcript archives and
+    self-checks target the wrong place. The probe must export the root it resolved.
+    """
+    probe = _probe()
+    with tempfile.TemporaryDirectory() as td:
+        repo = _init_repo(Path(td).resolve())
+        r = subprocess.run(
+            ["sh", "-c", f'{probe} && printf "%s" "$CLAUDE_PROJECT_DIR"'],
+            cwd=repo, env={k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"},
+            capture_output=True, text=True, timeout=30,
+        )
+    exported = r.stdout.strip()
+    if not exported:
+        fail("export-root", "probe resolved a root but left CLAUDE_PROJECT_DIR unset")
+    elif exported != str(repo):
+        fail("export-root", f"exported {exported!r}, expected {repo}")
+
+
+def check_generated_hooks_all_use_the_probe() -> None:
+    """EVERY committed hook command must begin with the current probe, and group its payload.
+
+    CodeRabbit #71 (Major): this only rejected the legacy bare `cd` string. If `cmd()`
+    ever stopped prepending CWD_PROBE, every hook would run without root resolution and
+    this check would still pass — absence of the old bug is not presence of the fix.
+    It now asserts the positive property against the builder's own probe.
+    """
+    committed = REPO / "plugin" / "manolii-framework" / "hooks" / "hooks.json"
+    if not committed.exists():
+        return  # artifact not built in this checkout; builder tests above still apply
+    cfg = json.loads(committed.read_text(encoding="utf-8"))
+    probe = _probe()
+    commands = [
+        hook["command"]
+        for event in cfg.get("hooks", {}).values()
+        for matcher in event
+        for hook in matcher.get("hooks", [])
+        if hook.get("type") == "command"
+    ]
+    if not commands:
+        fail("artifact-empty", "hooks.json declares no command hooks — did the build change shape?")
+        return
+    for c in commands:
+        if not c.startswith(probe):
+            fail(
+                "artifact-stale",
+                "a hooks.json command does not begin with the current CWD_PROBE — rebuild "
+                f"(python3 scripts/build-plugin.py). Got: {c[:120]!r}",
+            )
+            return
+        # The payload must be grouped, or `&&` binds only to its first segment.
+        if not c[len(probe):].lstrip().startswith("&& ("):
+            fail(
+                "artifact-ungrouped",
+                "a hooks.json command does not wrap its payload in `( … )`, so "
+                f"semicolon-separated parts run even when the probe's cd fails. Got: {c[:160]!r}",
+            )
+            return
+
+
+def main() -> int:
+    """Run every check and report all failures at once. 0 = all pass."""
+    for fn in (
+        check_probe_never_lands_in_home_when_var_unset,
+        check_probe_ignores_empty_var,
+        check_probe_ignores_nonexistent_dir,
+        check_probe_honours_valid_var,
+        check_probe_finds_single_hook_root_marker,
+        check_probe_is_ambiguous_safe_with_two_markers,
+        check_refuses_to_run_in_a_non_repo_home,
+        check_refuses_when_home_has_a_stale_git_entry,
+        check_still_runs_when_home_is_itself_a_repo,
+        check_still_runs_when_home_is_a_linked_worktree,
+        check_refuses_when_home_is_reached_through_a_symlink,
+        check_payload_is_grouped_so_a_failed_cd_runs_nothing,
+        check_exports_resolved_root_for_entrypoints,
+        check_generated_hooks_all_use_the_probe,
+    ):
+        try:
+            fn()
+        except Exception as exc:  # a broken harness is a failure, not a pass
+            fail(fn.__name__, f"{type(exc).__name__}: {exc}")
+
+    if failures:
+        print("Plugin hook cwd-probe check FAILED:\n")
+        for f in failures:
+            print(f"  ✗ {f}")
+        return 1
+    print("✔ plugin hook cwd probe: 14 cases pass (resolves, exports, never runs in a non-repo $HOME)")
+    return 0
+
+
+def test_all_checks_pass() -> None:
+    """pytest entry point — the only test this module exposes to collection.
+
+    CI runs `coverage run -m pytest scripts/tests/test_*.py`
+    (.github/workflows/quality-base.yml:203). The checks above deliberately
+    ACCUMULATE into `failures` so one CLI run reports every problem at once — but a
+    function that only appends and returns None is invisible to pytest. Measured
+    before this fix: `pytest -q test_fork_dispatch.py` reported **7 passed** while
+    `python3 test_fork_dispatch.py` exited 1 with 4 real failures, and
+    test_no_withdrawn_tool_instructions.py collected **zero** tests. Every guard in
+    this directory was therefore inert in CI.
+
+    Fix: the individual checks are named `check_*` (not collected), and this single
+    collected test funnels them through `main()` so both invocation modes agree.
+    Found by Codex review on PR #4433.
+    """
+    assert main() == 0, "see captured stdout for the failing checks"
+
+
+if __name__ == "__main__":
+    sys.exit(main())

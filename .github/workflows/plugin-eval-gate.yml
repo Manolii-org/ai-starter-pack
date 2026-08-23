@@ -17,6 +17,12 @@ on:
       - "pack.manifest.yml"
       - ".claude-plugin/**"
       - ".github/workflows/plugin-eval-gate.yml"
+      # Scanned by test_no_withdrawn_tool_instructions.py. A guard that reads a
+      # path but is not triggered by it is not a gate — see the SCAN_* coverage
+      # check in that file, which fails if these drift apart again.
+      - "docs/**"
+      - "CLAUDE.md"
+      - "AGENTS.md"
   pull_request:
     paths:
       - ".claude/**"
@@ -26,6 +32,10 @@ on:
       - "copier.yml"
       - "pack.manifest.yml"
       - ".claude-plugin/**"
+      - ".github/workflows/plugin-eval-gate.yml"
+      - "docs/**"
+      - "CLAUDE.md"
+      - "AGENTS.md"
 
 jobs:
   eval-gate:
@@ -82,6 +92,17 @@ jobs:
           # payload/timeout handling or migrate safety could merge unseen.
           bash scripts/tests/migrate-memory-path.test.sh
           bash scripts/tests/session-stop-retrospective.test.sh
+
+      - name: Plugin hook + drift guards
+        run: |
+          # Codex P2 2026-08-22 (#71): these three guards were only documented for
+          # manual execution — the explicit pytest list above did not include them,
+          # so the cwd-probe behaviour, the withdrawn-tool scan and the declared
+          # guard subset could all regress while CI stayed green. That is precisely
+          # the drift they exist to detect.
+          python3 scripts/tests/test_plugin_hook_cwd_probe.py
+          python3 scripts/tests/test_no_withdrawn_tool_instructions.py
+          python3 scripts/tests/test_hook_guard_coverage.py
 
       - name: Routing lint
         run: python3 scripts/lint-agent-routing.py

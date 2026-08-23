@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cd \"${CLAUDE_PROJECT_DIR}\" && python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/pre-tool-use.py\"",
+            "command": "_R=\"${CLAUDE_PROJECT_DIR:-}\"; { [ -n \"$_R\" ] && [ -d \"$_R\" ]; } || _R=\"$(git rev-parse --show-toplevel 2>/dev/null)\"; if [ -z \"$_R\" ]; then _n=0; for _c in \"$PWD\"/*; do [ -f \"$_c/.ai/hook-root\" ] && { _R=\"$_c\"; _n=$((_n+1)); }; done; [ \"$_n\" -eq 1 ] || _R=\"\"; fi; [ -n \"$_R\" ] || _R=\"$PWD\"; _RP=\"$(cd \"$_R\" 2>/dev/null && pwd -P)\"; _HP=\"$(cd \"${HOME:-/nonexistent}\" 2>/dev/null && pwd -P)\"; _GT=\"$(cd \"$_R\" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null)\"; if [ -n \"$_HP\" ] && [ \"$_RP\" = \"$_HP\" ] && [ \"$_GT\" != \"$_RP\" ]; then echo \"[manolii-hook] no repository root resolved (would run in the home directory) \u2014 skipping to avoid writing .ai/ state outside a repo\" >&2; exit 0; fi; CLAUDE_PROJECT_DIR=\"$_R\"; export CLAUDE_PROJECT_DIR; cd \"$_R\" && ( python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/pre-tool-use.py\" )",
             "timeout": 5
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cd \"${CLAUDE_PROJECT_DIR}\" && bash \"${CLAUDE_PLUGIN_ROOT}/hooks/session-start.sh\"",
+            "command": "_R=\"${CLAUDE_PROJECT_DIR:-}\"; { [ -n \"$_R\" ] && [ -d \"$_R\" ]; } || _R=\"$(git rev-parse --show-toplevel 2>/dev/null)\"; if [ -z \"$_R\" ]; then _n=0; for _c in \"$PWD\"/*; do [ -f \"$_c/.ai/hook-root\" ] && { _R=\"$_c\"; _n=$((_n+1)); }; done; [ \"$_n\" -eq 1 ] || _R=\"\"; fi; [ -n \"$_R\" ] || _R=\"$PWD\"; _RP=\"$(cd \"$_R\" 2>/dev/null && pwd -P)\"; _HP=\"$(cd \"${HOME:-/nonexistent}\" 2>/dev/null && pwd -P)\"; _GT=\"$(cd \"$_R\" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null)\"; if [ -n \"$_HP\" ] && [ \"$_RP\" = \"$_HP\" ] && [ \"$_GT\" != \"$_RP\" ]; then echo \"[manolii-hook] no repository root resolved (would run in the home directory) \u2014 skipping to avoid writing .ai/ state outside a repo\" >&2; exit 0; fi; CLAUDE_PROJECT_DIR=\"$_R\"; export CLAUDE_PROJECT_DIR; cd \"$_R\" && ( bash \"${CLAUDE_PLUGIN_ROOT}/hooks/session-start.sh\" )",
             "timeout": 30
           }
         ]
@@ -27,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cd \"${CLAUDE_PROJECT_DIR}\" && python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/classify-message.py\"",
+            "command": "_R=\"${CLAUDE_PROJECT_DIR:-}\"; { [ -n \"$_R\" ] && [ -d \"$_R\" ]; } || _R=\"$(git rev-parse --show-toplevel 2>/dev/null)\"; if [ -z \"$_R\" ]; then _n=0; for _c in \"$PWD\"/*; do [ -f \"$_c/.ai/hook-root\" ] && { _R=\"$_c\"; _n=$((_n+1)); }; done; [ \"$_n\" -eq 1 ] || _R=\"\"; fi; [ -n \"$_R\" ] || _R=\"$PWD\"; _RP=\"$(cd \"$_R\" 2>/dev/null && pwd -P)\"; _HP=\"$(cd \"${HOME:-/nonexistent}\" 2>/dev/null && pwd -P)\"; _GT=\"$(cd \"$_R\" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null)\"; if [ -n \"$_HP\" ] && [ \"$_RP\" = \"$_HP\" ] && [ \"$_GT\" != \"$_RP\" ]; then echo \"[manolii-hook] no repository root resolved (would run in the home directory) \u2014 skipping to avoid writing .ai/ state outside a repo\" >&2; exit 0; fi; CLAUDE_PROJECT_DIR=\"$_R\"; export CLAUDE_PROJECT_DIR; cd \"$_R\" && ( python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/classify-message.py\" )",
             "timeout": 15
           }
         ]
@@ -36,7 +36,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cd \"${CLAUDE_PROJECT_DIR}\" && python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/user-prompt.py\"",
+            "command": "_R=\"${CLAUDE_PROJECT_DIR:-}\"; { [ -n \"$_R\" ] && [ -d \"$_R\" ]; } || _R=\"$(git rev-parse --show-toplevel 2>/dev/null)\"; if [ -z \"$_R\" ]; then _n=0; for _c in \"$PWD\"/*; do [ -f \"$_c/.ai/hook-root\" ] && { _R=\"$_c\"; _n=$((_n+1)); }; done; [ \"$_n\" -eq 1 ] || _R=\"\"; fi; [ -n \"$_R\" ] || _R=\"$PWD\"; _RP=\"$(cd \"$_R\" 2>/dev/null && pwd -P)\"; _HP=\"$(cd \"${HOME:-/nonexistent}\" 2>/dev/null && pwd -P)\"; _GT=\"$(cd \"$_R\" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null)\"; if [ -n \"$_HP\" ] && [ \"$_RP\" = \"$_HP\" ] && [ \"$_GT\" != \"$_RP\" ]; then echo \"[manolii-hook] no repository root resolved (would run in the home directory) \u2014 skipping to avoid writing .ai/ state outside a repo\" >&2; exit 0; fi; CLAUDE_PROJECT_DIR=\"$_R\"; export CLAUDE_PROJECT_DIR; cd \"$_R\" && ( python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/user-prompt.py\" )",
             "timeout": 15
           }
         ]
@@ -47,7 +47,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cd \"${CLAUDE_PROJECT_DIR}\" && python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/post-tool.py\"",
+            "command": "_R=\"${CLAUDE_PROJECT_DIR:-}\"; { [ -n \"$_R\" ] && [ -d \"$_R\" ]; } || _R=\"$(git rev-parse --show-toplevel 2>/dev/null)\"; if [ -z \"$_R\" ]; then _n=0; for _c in \"$PWD\"/*; do [ -f \"$_c/.ai/hook-root\" ] && { _R=\"$_c\"; _n=$((_n+1)); }; done; [ \"$_n\" -eq 1 ] || _R=\"\"; fi; [ -n \"$_R\" ] || _R=\"$PWD\"; _RP=\"$(cd \"$_R\" 2>/dev/null && pwd -P)\"; _HP=\"$(cd \"${HOME:-/nonexistent}\" 2>/dev/null && pwd -P)\"; _GT=\"$(cd \"$_R\" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null)\"; if [ -n \"$_HP\" ] && [ \"$_RP\" = \"$_HP\" ] && [ \"$_GT\" != \"$_RP\" ]; then echo \"[manolii-hook] no repository root resolved (would run in the home directory) \u2014 skipping to avoid writing .ai/ state outside a repo\" >&2; exit 0; fi; CLAUDE_PROJECT_DIR=\"$_R\"; export CLAUDE_PROJECT_DIR; cd \"$_R\" && ( python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/post-tool.py\" )",
             "timeout": 30
           }
         ]
@@ -58,7 +58,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cd \"${CLAUDE_PROJECT_DIR}\" && bash \"${CLAUDE_PLUGIN_ROOT}/hooks/pre-compact.sh\"",
+            "command": "_R=\"${CLAUDE_PROJECT_DIR:-}\"; { [ -n \"$_R\" ] && [ -d \"$_R\" ]; } || _R=\"$(git rev-parse --show-toplevel 2>/dev/null)\"; if [ -z \"$_R\" ]; then _n=0; for _c in \"$PWD\"/*; do [ -f \"$_c/.ai/hook-root\" ] && { _R=\"$_c\"; _n=$((_n+1)); }; done; [ \"$_n\" -eq 1 ] || _R=\"\"; fi; [ -n \"$_R\" ] || _R=\"$PWD\"; _RP=\"$(cd \"$_R\" 2>/dev/null && pwd -P)\"; _HP=\"$(cd \"${HOME:-/nonexistent}\" 2>/dev/null && pwd -P)\"; _GT=\"$(cd \"$_R\" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null)\"; if [ -n \"$_HP\" ] && [ \"$_RP\" = \"$_HP\" ] && [ \"$_GT\" != \"$_RP\" ]; then echo \"[manolii-hook] no repository root resolved (would run in the home directory) \u2014 skipping to avoid writing .ai/ state outside a repo\" >&2; exit 0; fi; CLAUDE_PROJECT_DIR=\"$_R\"; export CLAUDE_PROJECT_DIR; cd \"$_R\" && ( bash \"${CLAUDE_PLUGIN_ROOT}/hooks/pre-compact.sh\" )",
             "timeout": 30
           }
         ]
@@ -69,7 +69,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cd \"${CLAUDE_PROJECT_DIR}\" && bash \"${CLAUDE_PLUGIN_ROOT}/hooks/post-compact.sh\"",
+            "command": "_R=\"${CLAUDE_PROJECT_DIR:-}\"; { [ -n \"$_R\" ] && [ -d \"$_R\" ]; } || _R=\"$(git rev-parse --show-toplevel 2>/dev/null)\"; if [ -z \"$_R\" ]; then _n=0; for _c in \"$PWD\"/*; do [ -f \"$_c/.ai/hook-root\" ] && { _R=\"$_c\"; _n=$((_n+1)); }; done; [ \"$_n\" -eq 1 ] || _R=\"\"; fi; [ -n \"$_R\" ] || _R=\"$PWD\"; _RP=\"$(cd \"$_R\" 2>/dev/null && pwd -P)\"; _HP=\"$(cd \"${HOME:-/nonexistent}\" 2>/dev/null && pwd -P)\"; _GT=\"$(cd \"$_R\" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null)\"; if [ -n \"$_HP\" ] && [ \"$_RP\" = \"$_HP\" ] && [ \"$_GT\" != \"$_RP\" ]; then echo \"[manolii-hook] no repository root resolved (would run in the home directory) \u2014 skipping to avoid writing .ai/ state outside a repo\" >&2; exit 0; fi; CLAUDE_PROJECT_DIR=\"$_R\"; export CLAUDE_PROJECT_DIR; cd \"$_R\" && ( bash \"${CLAUDE_PLUGIN_ROOT}/hooks/post-compact.sh\" )",
             "timeout": 15
           }
         ]
@@ -80,12 +80,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cd \"${CLAUDE_PROJECT_DIR}\" && bash \"${CLAUDE_PLUGIN_ROOT}/scripts/session-stop-checklist.sh\"",
+            "command": "_R=\"${CLAUDE_PROJECT_DIR:-}\"; { [ -n \"$_R\" ] && [ -d \"$_R\" ]; } || _R=\"$(git rev-parse --show-toplevel 2>/dev/null)\"; if [ -z \"$_R\" ]; then _n=0; for _c in \"$PWD\"/*; do [ -f \"$_c/.ai/hook-root\" ] && { _R=\"$_c\"; _n=$((_n+1)); }; done; [ \"$_n\" -eq 1 ] || _R=\"\"; fi; [ -n \"$_R\" ] || _R=\"$PWD\"; _RP=\"$(cd \"$_R\" 2>/dev/null && pwd -P)\"; _HP=\"$(cd \"${HOME:-/nonexistent}\" 2>/dev/null && pwd -P)\"; _GT=\"$(cd \"$_R\" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null)\"; if [ -n \"$_HP\" ] && [ \"$_RP\" = \"$_HP\" ] && [ \"$_GT\" != \"$_RP\" ]; then echo \"[manolii-hook] no repository root resolved (would run in the home directory) \u2014 skipping to avoid writing .ai/ state outside a repo\" >&2; exit 0; fi; CLAUDE_PROJECT_DIR=\"$_R\"; export CLAUDE_PROJECT_DIR; cd \"$_R\" && ( bash \"${CLAUDE_PLUGIN_ROOT}/scripts/session-stop-checklist.sh\" )",
             "timeout": 10
           },
           {
             "type": "command",
-            "command": "cd \"${CLAUDE_PROJECT_DIR}\" && python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/system-self-check.py\" > /dev/null 2>&1 && python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/build-skill-graph.py\" > /dev/null 2>&1; _rc=$?; mkdir -p .ai/memory; echo \"{\\\"timestamp\\\":\\\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\\\",\\\"exit_code\\\":$_rc,\\\"event\\\":\\\"stop-hook-self-check\\\"}\" >> .ai/memory/eval-failures.jsonl",
+            "command": "_R=\"${CLAUDE_PROJECT_DIR:-}\"; { [ -n \"$_R\" ] && [ -d \"$_R\" ]; } || _R=\"$(git rev-parse --show-toplevel 2>/dev/null)\"; if [ -z \"$_R\" ]; then _n=0; for _c in \"$PWD\"/*; do [ -f \"$_c/.ai/hook-root\" ] && { _R=\"$_c\"; _n=$((_n+1)); }; done; [ \"$_n\" -eq 1 ] || _R=\"\"; fi; [ -n \"$_R\" ] || _R=\"$PWD\"; _RP=\"$(cd \"$_R\" 2>/dev/null && pwd -P)\"; _HP=\"$(cd \"${HOME:-/nonexistent}\" 2>/dev/null && pwd -P)\"; _GT=\"$(cd \"$_R\" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null)\"; if [ -n \"$_HP\" ] && [ \"$_RP\" = \"$_HP\" ] && [ \"$_GT\" != \"$_RP\" ]; then echo \"[manolii-hook] no repository root resolved (would run in the home directory) \u2014 skipping to avoid writing .ai/ state outside a repo\" >&2; exit 0; fi; CLAUDE_PROJECT_DIR=\"$_R\"; export CLAUDE_PROJECT_DIR; cd \"$_R\" && ( python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/system-self-check.py\" > /dev/null 2>&1 && python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/build-skill-graph.py\" > /dev/null 2>&1; _rc=$?; mkdir -p .ai/memory; echo \"{\\\"timestamp\\\":\\\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\\\",\\\"exit_code\\\":$_rc,\\\"event\\\":\\\"stop-hook-self-check\\\"}\" >> .ai/memory/eval-failures.jsonl )",
             "timeout": 30
           }
         ]
