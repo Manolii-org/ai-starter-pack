@@ -38,9 +38,45 @@ REPO = Path(__file__).resolve().parent.parent.parent
 SCAN_DIRS = ("...claude", "plugin", "docs")
 SCAN_SUFFIXES = (".md",)
 
+# Root instruction files sit under NO scanned directory, and they are the
+# highest-impact model-facing text the pack ships — a consumer's generated
+# CLAUDE.md/AGENTS.md is read on every turn. A reintroduction there passed this
+# guard silently. (Codex review #71; the identical fix landed in
+# manolii-org/master via Codex review #4433 and failed to propagate here — the
+# two copies of this file have drifted and should be compared on every change.)
+SCAN_ROOT_FILES = ("CLAUDE.md", "AGENTS.md")
+
 # Prose that directs the model to use the tool.
+#
+# The verb set is an ALLOWLIST and the determiner gap is a closed set, so the
+# pattern stays fail-loud on wording it has not seen rather than matching any
+# sentence that happens to contain the name. Codex #71 measured the original
+# `use|using|open|via|with` set against ordinary directive phrasing: "Invoke
+# TodoWrite.", "Call TodoWrite.", "Run TodoWrite at each step.", "Update
+# TodoWrite as you go.", "Create a TodoWrite list." and even "Use the TodoWrite
+# tool to track progress." ALL scanned clean, because `use` had to sit
+# immediately adjacent to the name. Only the bare "Use TodoWrite …" form was
+# caught — the one phrasing the migration had already removed.
+INSTRUCTION_VERBS = (
+    r"use|using|invoke|invoking|call|calling|run|running|update|updating"
+    r"|create|creating|add|adding|maintain|maintaining|open|opening"
+    r"|track(?:ed|ing)?\s+(?:with|in|via)|via|with"
+)
+# Determiners/adjectives that may sit between the verb and the name. Closed set:
+# "call to TodoWrite" (descriptive prose about a removed call) must stay unmatched,
+# so `to` is deliberately absent.
+#
+# KNOWN LIMITATION, stated rather than papered over: a verb separated from the name
+# by a free noun phrase — "Add the remaining steps to a new TodoWrite entry." — is
+# NOT matched. Widening the gap to arbitrary words is the fix that looks obvious and
+# is wrong: it is the same unbounded-gap mistake the NEGATION allowlist above exists
+# to undo, and it would make any sentence mentioning the name near any verb a hit.
+# The guard is a floor on the phrasings that actually occur in instruction files, not
+# a parser. If such a phrasing ever appears in the tree, add its shape here with the
+# line that motivated it.
+INSTRUCTION_GAP = r"(?:(?:the|a|an|your|its|new|first|initial|running)\s+){0,3}"
 INSTRUCTION = re.compile(
-    r"(?:use|using|track(?:ed|ing)?\s+(?:with|in|via)|open|via|with)\s+`?TodoWrite`?"
+    rf"(?:{INSTRUCTION_VERBS})\s+{INSTRUCTION_GAP}`?TodoWrite`?"
     r"|`?TodoWrite`?\s+(?:for|to\s+track|items)",
     re.IGNORECASE,
 )
@@ -198,31 +234,55 @@ def _blocks(lines: list[str]) -> list[tuple[int, str, dict[int, int]]]:
     return blocks
 
 
-def scan() -> list[str]:
-    """Walk model-facing text and return every affirmative withdrawn-tool instruction."""
+def _flag(path: Path, hits: list[str], repo: Path = REPO) -> None:
+    """Append every affirmative withdrawn-tool instruction in `path` to `hits`.
+
+    Factored out of `scan()` so root files and scanned directories share ONE code
+    path. A second, hand-written loop for the root files would be free to drift out
+    of block-awareness — which is precisely how the root-file gap arose in the first
+    place.
+    """
+    if path.resolve() == SELF or path.suffix not in SCAN_SUFFIXES:
+        return
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return
+    for _start_line, block, offsets in _blocks(lines):
+        if "TodoWrite" not in block:
+            continue
+        for span_start, span_end in affirmative_spans(block):
+            n = offsets[span_start]
+            shown = lines[n - 1].strip()
+            if len(shown) > 120:
+                shown = shown[:117] + "…"
+            # `(wrapped)` means THIS MATCH straddles a line break, so the quoted source
+            # line shows only part of it. The previous condition compared `len(offsets)`
+            # with `len(block)`; those differ by exactly one for every block (the map
+            # carries an end-of-line offset per line), so the tag was unconditional and
+            # said nothing. Compare the lines the match's own endpoints land on instead.
+            wrapped = "" if offsets[span_end - 1] == n else " (wrapped)"
+            hits.append(f"{path.relative_to(repo)}:{n}:{wrapped} {shown}")
+            break
+
+
+def scan(repo: Path = REPO) -> list[str]:
+    """Walk model-facing text and return every affirmative withdrawn-tool instruction.
+
+    `repo` is a parameter solely so `check_root_instruction_files_are_scanned` can
+    point the real walk at a fixture tree. Nothing in the pack passes it.
+    """
     hits: list[str] = []
+    for name in SCAN_ROOT_FILES:
+        candidate = repo / name
+        if candidate.is_file():
+            _flag(candidate, hits, repo)
     for rel in SCAN_DIRS:
-        root = REPO / rel.replace("...", ".")
+        root = repo / rel.replace("...", ".")
         if not root.is_dir():
             continue
         for path in sorted(root.rglob("*")):
-            if path.resolve() == SELF or path.suffix not in SCAN_SUFFIXES:
-                continue
-            try:
-                lines = path.read_text(encoding="utf-8").splitlines()
-            except (OSError, UnicodeDecodeError):
-                continue
-            for start_line, block, offsets in _blocks(lines):
-                if "TodoWrite" not in block:
-                    continue
-                for span_start, _ in affirmative_spans(block):
-                    n = offsets[span_start]
-                    shown = lines[n - 1].strip()
-                    if len(shown) > 120:
-                        shown = shown[:117] + "…"
-                    wrapped = "" if n == start_line and len(offsets) == len(block) else " (wrapped)"
-                    hits.append(f"{path.relative_to(REPO)}:{n}:{wrapped} {shown}")
-                    break
+            _flag(path, hits, repo)
     return hits
 
 
@@ -301,9 +361,71 @@ def check_exemptions_are_scoped_to_the_mention() -> list[str]:
         # prohibition.
         "Do not avoid using TodoWrite.",
         "Do not stop using TodoWrite.",
+        # Codex #71: the directive grammar recognised only `use|using|open|via|with`
+        # AND required the verb to be immediately adjacent to the name. Every line
+        # below scanned clean — ordinary phrasings of exactly the instruction this
+        # guard exists to stop. Measured 2026-08-23.
+        "Use the TodoWrite tool to track progress.",
+        "Invoke TodoWrite.",
+        "Call TodoWrite.",
+        "Run TodoWrite at each step.",
+        "Update TodoWrite as you go.",
+        "Create a TodoWrite list.",
+        "Maintain your TodoWrite list as the plan changes.",
+        "Add a TodoWrite entry for each step.",
+        "Open your TodoWrite items before starting.",
     ):
         if not flagged(text):
             problems.append(f"affirmative instruction NOT flagged: {text!r}")
+    # Counter-cases for the WIDER grammar specifically. Broadening a detector is only
+    # safe if it is measured in both directions: each of these mentions the name near
+    # a verb without directing the model at the tool, and each must stay clean.
+    for text in (
+        "Do not invoke TodoWrite.",
+        "Never call TodoWrite on current models.",
+        "No longer create TodoWrite entries — write to active-task.json.",
+        "Do not update TodoWrite; it is withdrawn.",
+        # descriptive prose about code, not an instruction. `to` is deliberately
+        # absent from INSTRUCTION_GAP so these stay unmatched.
+        "Removed the call to TodoWrite from the hook.",
+        "This migration drops every reference to TodoWrite.",
+        "TodoWrite was withdrawn in 2.1.233.",
+        "The TodoWrite tool no longer exists on Opus 5.",
+    ):
+        if flagged(text):
+            problems.append(f"inert mention wrongly flagged by widened grammar: {text!r}")
+    return problems
+
+
+def check_root_instruction_files_are_scanned(tmp_root: Path | None = None) -> list[str]:
+    """`CLAUDE.md` / `AGENTS.md` sit under no scanned directory and were skipped.
+
+    Codex #71: the pack shipped both as agent-facing templates while `scan()` walked
+    only `.claude/`, `plugin/` and `docs/`, so "Use TodoWrite to track progress." in a
+    generated CLAUDE.md passed CI with the same runtime effect as one under `.claude/`.
+    Verified 2026-08-23: this check fails against the previous `scan()`.
+
+    Driven through the real `scan()` against a fixture tree rather than asserting on
+    `SCAN_ROOT_FILES`'s contents — a constant can be present while nothing reads it,
+    which is the shape of the bug being fixed.
+    """
+    import tempfile
+
+    problems: list[str] = []
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        for name in SCAN_ROOT_FILES:
+            (root / name).write_text("Use TodoWrite to track progress.\n", encoding="utf-8")
+        hits = scan(root)
+        for name in SCAN_ROOT_FILES:
+            if not any(h.startswith(f"{name}:") for h in hits):
+                problems.append(f"root instruction file not scanned: {name}")
+        # …and the fixture must not be flagging on a technicality: a clean root file
+        # produces nothing.
+        for name in SCAN_ROOT_FILES:
+            (root / name).write_text("Do not use TodoWrite.\n", encoding="utf-8")
+        if scan(root):
+            problems.append("clean root instruction files were flagged")
     return problems
 
 
@@ -340,6 +462,7 @@ def main() -> int:
     """Check negation handling, then scan the tree. 0 = no live instructions found."""
     problems = check_exemptions_are_scoped_to_the_mention()
     problems += check_wrapped_instructions_are_not_split()
+    problems += check_root_instruction_files_are_scanned()
     if problems:
         print("Instruction detection is wrong:\n")
         for p in problems:
