@@ -147,12 +147,16 @@ def test_no_render_corruption(default_render):
         assert "restricted/restricted" not in text, f"{p} contains tier-mixing 'restricted/restricted'"
 
         rendered_escapes = _escape_occurrences(text)
-        if not rendered_escapes:
-            continue
         source = _template_source_for(p.relative_to(default_render))
         source_escapes = (
             _escape_occurrences(source.read_text(errors="ignore")) if source else []
         )
+        # No early return on an empty RENDERED list. The invariant is equality,
+        # so a render that deletes or collapses the source's only escape is a
+        # violation too — and skipping straight past it was exactly the case an
+        # `if not rendered_escapes: continue` waved through.
+        if not rendered_escapes and not source_escapes:
+            continue
         assert rendered_escapes == source_escapes, (
             f"{p} doubled-backslash escapes differ from the template source "
             f"(rendered={[e for e, _ in rendered_escapes]}, "

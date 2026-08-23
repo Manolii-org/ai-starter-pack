@@ -17,15 +17,20 @@ ROUTING_COPIES = (
 
 PLUGIN_ROOT = ROOT / "plugin"
 
-# Rendered-instance marker, stated POSITIVELY. Copier writes
-# `.copier-answers.yml` into every destination it renders; the source pack has
-# none. Keying on the absence of `copier.yml` was wrong: `_exclude` only stops
-# THIS pack's copier.yml from being copied, so a destination that is itself a
-# Copier template keeps its own — and if it also carries a
-# `plugin/manolii-framework`, the pack-only assertions would run against
-# consumer-owned files and the version-skew failure returns. A rendered
-# destination cannot shed `.copier-answers.yml`, template or not.
-IS_RENDERED_INSTANCE = (ROOT / ".copier-answers.yml").is_file()
+# Source-pack identity marker. `pack.manifest.yml` is pack-internal scaffolding
+# listed in copier.yml `_exclude`, so it exists HERE and reaches no consumer by
+# any install path.
+#
+# Two earlier markers were both wrong, in opposite directions:
+#   - `copier.yml` present — a destination that is itself a Copier template has
+#     its own, `_exclude` only stops OURS from being copied.
+#   - `.copier-answers.yml` absent — the prebuilt release zip ships without one
+#     by design (README-STARTER-PACK.md "Copier updates for zip-based installs"),
+#     so a zip consumer looked exactly like the source pack.
+# Either way a consumer carrying its own `plugin/manolii-framework` had this
+# pack's routing and byte-parity assertions enforced against it. A marker named
+# for this pack and excluded from every ship path is what actually identifies us.
+IS_PACK_REPO = (ROOT / "pack.manifest.yml").is_file()
 
 
 def _present(paths: "tuple[Path, ...]") -> "list[Path]":
@@ -49,17 +54,26 @@ def _present(paths: "tuple[Path, ...]") -> "list[Path]":
     including the consumer's own `.claude/` ones — emptying the tuple and
     failing the assertion below purely because of where the repo was cloned.
 
-    The empty case is a hard failure, not a silent skip: `.claude/` ships
-    everywhere, so nothing present means the surface was renamed or dropped and
-    this guard would otherwise pass vacuously.
+    In the source pack the check is fail-CLOSED on every owned path: we commit
+    both surfaces, so a deleted or renamed one is a regression, not something to
+    skip. Filtering by existence there would have let a dropped plugin surface
+    pass silently as long as the `.claude` one survived — which is the opposite
+    of this helper's purpose. Only a consumer filters, and only the
+    pack-excluded plugin paths.
     """
-    owned = (
-        tuple(p for p in paths if PLUGIN_ROOT not in p.parents)
-        if IS_RENDERED_INSTANCE
-        else paths
+    if IS_PACK_REPO:
+        missing = [p for p in paths if not p.exists()]
+        assert not missing, (
+            f"owned agent-routing surface missing from the pack: "
+            f"{[str(p) for p in missing]} — deleted or renamed?"
+        )
+        return list(paths)
+
+    consumer_owned = [p for p in paths if PLUGIN_ROOT not in p.parents]
+    found = [p for p in consumer_owned if p.exists()]
+    assert found, (
+        f"no agent-routing surface found among: {[str(p) for p in consumer_owned]}"
     )
-    found = [p for p in owned if p.exists()]
-    assert found, f"no agent-routing surface found among: {[str(p) for p in owned]}"
     return found
 
 

@@ -168,16 +168,17 @@ def test_marker_text_appears_exactly_once_in_the_source():
 
 
 PLUGIN_JUDGE_COPY = REPO_ROOT / "plugin" / "manolii-framework" / "scripts" / "run-judge.py"
-# Rendered-instance marker, stated positively: Copier writes
-# `.copier-answers.yml` into every destination it renders and the source pack
-# has none. `copier.yml`'s absence is NOT equivalent — a destination that is
-# itself a Copier template keeps its own copy, and would then byte-compare its
-# own plugin sources against ours.
-IS_RENDERED_INSTANCE = (REPO_ROOT / ".copier-answers.yml").is_file()
+# Source-pack identity marker: `pack.manifest.yml` is pack-internal scaffolding
+# in copier.yml `_exclude`, so it exists here and reaches no consumer by any
+# install path. `copier.yml`'s presence and `.copier-answers.yml`'s absence were
+# both tried and both misidentify a real consumer shape — a destination that is
+# itself a Copier template, and the prebuilt release zip respectively. See
+# tests/test_deprecated_agent_routing.py for the full reasoning.
+IS_PACK_REPO = (REPO_ROOT / "pack.manifest.yml").is_file()
 
 
 @pytest.mark.skipif(
-    IS_RENDERED_INSTANCE or not PLUGIN_JUDGE_COPY.exists(),
+    not (IS_PACK_REPO and PLUGIN_JUDGE_COPY.exists()),
     reason="plugin/ is pack-internal (copier.yml _exclude) — absent in rendered instances",
 )
 def test_plugin_copy_is_in_sync():
