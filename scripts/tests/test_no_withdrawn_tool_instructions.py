@@ -316,7 +316,7 @@ def _flag(path: Path, hits: list[str], repo: Path = REPO) -> None:
     of block-awareness — which is precisely how the root-file gap arose in the first
     place.
     """
-    if path.resolve() == SELF or path.suffix not in SCAN_SUFFIXES:
+    if path.resolve() == SELF or path.suffix not in SCAN_SUFFIXES or not path.is_file():
         return
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -679,6 +679,13 @@ def check_unreadable_files_fail_closed() -> list[str]:
     )
     problems: list[str] = []
     with tempfile.TemporaryDirectory(dir=REPO / "docs") as td:
+        directory = Path(td) / "not-a-file.md"
+        directory.mkdir()
+        directory_hits: list[str] = []
+        _flag(directory, directory_hits)
+        if directory_hits:
+            problems.append("directory with a Markdown suffix was treated as an unreadable file")
+
         candidate = Path(td) / "unreadable-fixture.md"
         candidate.write_text("fixture exists before the simulated read failure\n")
         for failure in failures:
