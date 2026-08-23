@@ -158,6 +158,11 @@ _exclude:
   # also carries its own skipif guard, so an instance that already has a copy
   # skips rather than fails.
   - tests/test_hydrate_assessment.py
+  # Template-repo-only test: asserts on plugin/manolii-framework/, a build
+  # artifact excluded below. Shipping it would require guessing at runtime
+  # whether a checkout is the pack or a consumer; every filename signal
+  # tried was defeated by a legitimate consumer shape (see the module).
+  - tests/test_pack_plugin_parity.py
   # Build artifacts / caches
   - .ruff_cache
   - .ruff_cache/**

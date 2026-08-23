@@ -165,10 +165,3 @@ def test_marker_text_appears_exactly_once_in_the_source():
         "the marker text must appear once, as REVIEW_MARKER — "
         "every other site should interpolate the constant"
     )
-
-
-def test_plugin_copy_is_in_sync():
-    """The pack ships two copies; a fix applied to one only is a silent regression."""
-    a = (REPO_ROOT / "scripts" / "run-judge.py").read_text()
-    b = (REPO_ROOT / "plugin" / "manolii-framework" / "scripts" / "run-judge.py").read_text()
-    assert a == b, "scripts/run-judge.py and the plugin copy have drifted"
