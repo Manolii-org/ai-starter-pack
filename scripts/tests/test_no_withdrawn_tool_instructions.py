@@ -250,7 +250,7 @@ _FENCE = re.compile(r"^\s*(?:```|~~~)")
 
 
 def _blocks(lines: list[str]) -> list[tuple[int, str, dict[int, int]]]:
-    """Group consecutive non-blank lines into blocks -> (first line no, text, offset->line).
+    """Group lines belonging to one prose unit -> (first line no, text, offset->line).
 
     Codex #71: `scan()` evaluated one line at a time, so ordinary Markdown prose
     wrapping split an instruction in half and it passed. Measured 2026-08-22 —
@@ -258,9 +258,14 @@ def _blocks(lines: list[str]) -> list[tuple[int, str, dict[int, int]]]:
     each matched when read whole and matched NOTHING line by line. Prose wraps for
     width, so this needs no ill intent to happen.
 
-    A blank line ends a block, which keeps the join from reaching across paragraphs and
-    inventing an instruction out of two unrelated sentences. The offset map exists so a
-    hit is still reported on the line the mention actually falls on, not the block head.
+    A block ends at a blank line OR at Markdown structure — a heading, a list-item
+    marker, or a fence delimiter (see `check_markdown_structure_ends_a_block`). Both
+    exist for the same reason: joining across either invents an instruction out of two
+    lines that never made one. Blank lines were the original terminator; the structural
+    ones were added after joining welded "## Use" onto the prose beneath it.
+
+    The offset map exists so a hit is still reported on the line the mention actually
+    falls on, not the block head.
     """
     blocks: list[tuple[int, str, dict[int, int]]] = []
     buf: list[str] = []
@@ -548,7 +553,7 @@ def check_the_scan_prefilter_is_case_insensitive() -> list[str]:
     return problems
 
 
-def check_root_instruction_files_are_scanned(tmp_root: Path | None = None) -> list[str]:
+def check_root_instruction_files_are_scanned() -> list[str]:
     """`CLAUDE.md` / `AGENTS.md` sit under no scanned directory and were skipped.
 
     Codex #71: the pack shipped both as agent-facing templates while `scan()` walked
