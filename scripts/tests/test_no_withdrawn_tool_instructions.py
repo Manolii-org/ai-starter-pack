@@ -60,20 +60,49 @@ SCAN_ROOT_FILES = ("CLAUDE.md", "AGENTS.md")
 INSTRUCTION_VERBS = (
     r"use|using|invoke|invoking|call|calling|run|running|update|updating"
     r"|create|creating|add|adding|maintain|maintaining|open|opening"
-    r"|track(?:ed|ing)?\s+(?:with|in|via)|via|with"
+    r"|keep|keeping|mirror|mirroring"
+    # "…recorded in TodoWrite", "…belongs in TodoWrite" — the directive arrives as a
+    # preposition rather than a bare verb. Same shape as the existing `track … with`
+    # entry, so these are more of the same rule, not new machinery.
+    r"|(?:track|record|log|captur)(?:e|ed|ing)?\s+(?:with|in|into|via)"
+    r"|belongs?\s+in"
+    r"|via|with"
 )
 # Determiners/adjectives that may sit between the verb and the name. Closed set:
 # "call to TodoWrite" (descriptive prose about a removed call) must stay unmatched,
 # so `to` is deliberately absent.
 #
-# KNOWN LIMITATION, stated rather than papered over: a verb separated from the name
-# by a free noun phrase — "Add the remaining steps to a new TodoWrite entry." — is
-# NOT matched. Widening the gap to arbitrary words is the fix that looks obvious and
-# is wrong: it is the same unbounded-gap mistake the NEGATION allowlist above exists
-# to undo, and it would make any sentence mentioning the name near any verb a hit.
-# The guard is a floor on the phrasings that actually occur in instruction files, not
-# a parser. If such a phrasing ever appears in the tree, add its shape here with the
-# line that motivated it.
+# KNOWN LIMITATION, stated rather than papered over. A verb separated from the name by
+# a FREE NOUN PHRASE is not matched. Measured 2026-08-23, still bypassing:
+#
+#     "Add the remaining steps to a new TodoWrite entry."
+#     "Mirror the plan into TodoWrite."
+#     "Log each step in TodoWrite."
+#     "Capture the plan in TodoWrite."
+#
+# Widening the gap to arbitrary words is the fix that looks obvious and is wrong: it is
+# the unbounded-gap mistake the NEGATION allowlist exists to undo, and it would make any
+# sentence mentioning the name near any verb a hit.
+#
+# INVERTING THE POLARITY was the other candidate — flag every mention unless it is
+# negated or an inert token — and it was measured, not assumed: 0 hits across the real
+# tree, so it is *safe today*. It was still rejected, because it flags legitimate
+# documentation ABOUT the withdrawal, which `docs/` is entitled to contain and which the
+# counter-cases below require to stay clean:
+#
+#     "TodoWrite was withdrawn in 2.1.233."
+#     "Removed the call to TodoWrite from the hook."
+#     "The TodoWrite tool no longer exists on Opus 5."
+#
+# That trades a bypass class for a false-positive class that blocks correct docs in CI —
+# and a guard that cries wolf on accurate documentation gets disabled, which is a worse
+# end state than a known floor. The trade-off is real and reasonable people could pick
+# the other side; whoever revisits it should re-run both measurements rather than
+# inherit this call.
+#
+# So: this guard is a FLOOR on the phrasings that occur in instruction files, not a
+# parser. When a new shape appears in the tree, add it here with the line that
+# motivated it.
 INSTRUCTION_GAP = r"(?:(?:the|a|an|your|its|new|first|initial|running)\s+){0,3}"
 INSTRUCTION = re.compile(
     rf"(?:{INSTRUCTION_VERBS})\s+{INSTRUCTION_GAP}`?TodoWrite`?"
@@ -374,6 +403,13 @@ def check_exemptions_are_scoped_to_the_mention() -> list[str]:
         "Maintain your TodoWrite list as the plan changes.",
         "Add a TodoWrite entry for each step.",
         "Open your TodoWrite items before starting.",
+        # CodeRabbit #71 merge-risk on 3e81ecd: "some withdrawn-tool instructions may
+        # still bypass the gate". True when measured — these three did. Each is the
+        # directive arriving as a preposition or a state verb rather than an
+        # imperative, which the verb list did not cover.
+        "Keep TodoWrite up to date.",
+        "Progress should be recorded in TodoWrite.",
+        "Each step belongs in TodoWrite.",
     ):
         if not flagged(text):
             problems.append(f"affirmative instruction NOT flagged: {text!r}")
@@ -385,6 +421,9 @@ def check_exemptions_are_scoped_to_the_mention() -> list[str]:
         "Never call TodoWrite on current models.",
         "No longer create TodoWrite entries — write to active-task.json.",
         "Do not update TodoWrite; it is withdrawn.",
+        # the widened verb/preposition set must still lose to a negation
+        "Do not keep TodoWrite up to date.",
+        "Never record progress in TodoWrite.",
         # descriptive prose about code, not an instruction. `to` is deliberately
         # absent from INSTRUCTION_GAP so these stay unmatched.
         "Removed the call to TodoWrite from the hook.",
