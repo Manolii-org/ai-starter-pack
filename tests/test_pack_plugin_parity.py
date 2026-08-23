@@ -14,13 +14,29 @@ a legitimate consumer shape:
                                 has its own; `_exclude` only stops OURS being
                                 copied.
   * `.copier-answers.yml` absent — the prebuilt release zip ships without one by
-                                design (README-STARTER-PACK.md, "Copier updates
-                                for zip-based installs").
+                                design: README-STARTER-PACK.md.jinja:353
+                                ("Copier updates for zip-based installs"),
+                                :355 "The prebuilt release zip intentionally
+                                ships **without** `.copier-answers.yml`".
   * `pack.manifest.yml` present — rendered consumers are told by their own
                                 shipped README that feature flags live in a file
-                                of exactly that name.
+                                of exactly that name
+                                (README-STARTER-PACK.md.jinja:30).
   * all three together        — a Copier-template repo that adopted the pack via
                                 the zip flow has precisely that shape.
+
+Cite the `.jinja`, not the 4-line `README-STARTER-PACK.md` beside it. The
+basename means two different things depending on where you are standing, which
+is what makes it easy to cite wrongly:
+
+  * in THIS repo, `README-STARTER-PACK.md` is a 4-line License stub, and
+    `README-STARTER-PACK.md.jinja` is the template (real Jinja — line 3 holds
+    `{{ATTRIBUTION_LINE}}`);
+  * in a consumer, the `.jinja` is absent and `README-STARTER-PACK.md` is what
+    Copier rendered FROM it.
+
+So the template is the authoritative source for the README a consumer receives
+— not a file they get — and it is the only place the quoted text exists.
 
 A false positive there is not cosmetic: it drops a CONSUMER into the pack-only
 branch and fails their suite over `plugin/` paths they were never meant to have.
