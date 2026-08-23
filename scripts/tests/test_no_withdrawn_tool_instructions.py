@@ -458,11 +458,48 @@ def check_wrapped_instructions_are_not_split() -> list[str]:
     return problems
 
 
+def check_workflow_triggers_cover_every_scanned_path() -> list[str]:
+    """Every path this guard READS must also TRIGGER it, or it is not a gate.
+
+    Codex #71, immediately after the root-file fix landed: `scan()` was extended to
+    `CLAUDE.md` / `AGENTS.md`, and the workflow's `paths:` filters were not. Verified
+    2026-08-23 — neither filter listed `CLAUDE.md`, `AGENTS.md` or `docs/**`, so a PR
+    touching only those files never ran this check and a withdrawn-tool directive in
+    any of them could merge with the gate simply absent (`docs/**` had been in that
+    state since before this PR; the root-file fix widened an existing gap).
+
+    That is a nastier failure than a scanner bug: the guard reports success by never
+    running. Nothing in CI distinguishes "passed" from "not triggered".
+
+    Both filters are checked. `pull_request` alone would leave the push-to-branch
+    route uncovered, and vice versa.
+    """
+    problems: list[str] = []
+    wf = REPO / ".github/workflows/plugin-eval-gate.yml"
+    if not wf.is_file():
+        return [f"workflow not found: {wf.relative_to(REPO)}"]
+    try:
+        import yaml
+    except ImportError:  # pragma: no cover - pyyaml is a CI build dep
+        return ["pyyaml unavailable — cannot verify trigger coverage"]
+    # `on:` is the YAML 1.1 boolean True, not the string "on".
+    triggers = yaml.safe_load(wf.read_text(encoding="utf-8")).get(True) or {}
+
+    required = {rel.replace("...", ".").rstrip("/") + "/**" for rel in SCAN_DIRS}
+    required |= set(SCAN_ROOT_FILES)
+    for event in ("push", "pull_request"):
+        listed = set((triggers.get(event) or {}).get("paths") or [])
+        for pattern in sorted(required - listed):
+            problems.append(f"{event}.paths does not cover scanned path {pattern!r}")
+    return problems
+
+
 def main() -> int:
     """Check negation handling, then scan the tree. 0 = no live instructions found."""
     problems = check_exemptions_are_scoped_to_the_mention()
     problems += check_wrapped_instructions_are_not_split()
     problems += check_root_instruction_files_are_scanned()
+    problems += check_workflow_triggers_cover_every_scanned_path()
     if problems:
         print("Instruction detection is wrong:\n")
         for p in problems:

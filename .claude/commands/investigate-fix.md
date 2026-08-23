@@ -83,6 +83,25 @@ h. **EXIT CONDITIONS — all three must be true simultaneously:**
 
 i. **Maximum 5 rounds.** If issues persist after 5 rounds — stop and escalate with a summary of what was tried, what keeps failing, and the likely root cause.
 
+### 10. Checkpoint Cleanup
+
+Once step 9's exit conditions are **all** true, clear the checkpoint:
+
+```bash
+rm -f .ai/sessions/active-task.json
+```
+
+Step 1 writes a non-null `active_step_id` and nothing else ever clears it, so without
+this the finished run's checkpoint persists indefinitely — and `.claude/persistent-instructions.md`
+preserves the file verbatim on *every* later compaction while that key is non-null.
+A completed task then keeps being re-injected as if it were live, crowding out the
+context the session actually needs.
+
+**Leave the file in place** on any other ending: escalation at 9(i), an abandoned
+session, or any step still `partial` / `failed`. There, a surviving checkpoint is the
+mechanism working as designed — it is only noise once the work is genuinely done.
+Same rule as `.claude/agents/orchestrator.md` Phase 4.
+
 ---
 
 ## Audit Flow

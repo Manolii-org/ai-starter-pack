@@ -17,6 +17,12 @@ on:
       - "pack.manifest.yml"
       - ".claude-plugin/**"
       - ".github/workflows/plugin-eval-gate.yml"
+      # Scanned by test_no_withdrawn_tool_instructions.py. A guard that reads a
+      # path but is not triggered by it is not a gate — see the SCAN_* coverage
+      # check in that file, which fails if these drift apart again.
+      - "docs/**"
+      - "CLAUDE.md"
+      - "AGENTS.md"
   pull_request:
     paths:
       - ".claude/**"
@@ -26,6 +32,10 @@ on:
       - "copier.yml"
       - "pack.manifest.yml"
       - ".claude-plugin/**"
+      - ".github/workflows/plugin-eval-gate.yml"
+      - "docs/**"
+      - "CLAUDE.md"
+      - "AGENTS.md"
 
 jobs:
   eval-gate:
