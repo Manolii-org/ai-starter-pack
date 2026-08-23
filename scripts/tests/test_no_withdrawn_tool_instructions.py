@@ -106,7 +106,13 @@ INSTRUCTION_VERBS = (
 INSTRUCTION_GAP = r"(?:(?:the|a|an|your|its|new|first|initial|running)\s+){0,3}"
 INSTRUCTION = re.compile(
     rf"(?:{INSTRUCTION_VERBS})\s+{INSTRUCTION_GAP}`?TodoWrite`?"
-    r"|`?TodoWrite`?\s+(?:for|to\s+track|items)",
+    # A bare `TodoWrite items` alternative used to sit here and was dropped: it flagged
+    # "TodoWrite items are no longer available." — documentation, not an instruction.
+    # Measured before removing it: every positive case that reads as `… items` is
+    # already caught through the verb path ("Open your TodoWrite items before
+    # starting."), so it cost nothing and blocked accurate docs, which is the failure
+    # mode this file rejects polarity inversion to avoid.
+    r"|`?TodoWrite`?\s+(?:for|to\s+track)",
     re.IGNORECASE,
 )
 
@@ -229,6 +235,20 @@ def is_affirmative(line: str) -> bool:
     return bool(affirmative_spans(line))
 
 
+# Markdown structure that must END a block. Joining across these welds two unrelated
+# lines into a sentence neither of them makes. CodeRabbit #71 on 3e81ecd, measured:
+#
+#   ["## Use", "TodoWrite was withdrawn."]  -> "## Use TodoWrite was withdrawn."  FLAGGED
+#   ["### Update", "TodoWrite items are …"] -> "### Update TodoWrite items are …" FLAGGED
+#
+# The second is a false positive THIS PR introduced, by adding `update` to the verb set
+# one commit earlier — a heading named "Update" above prose about the withdrawal is
+# ordinary Markdown, not a contrived case.
+_HEADING = re.compile(r"^\s{0,3}#{1,6}(?:\s|$)")
+_LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s")
+_FENCE = re.compile(r"^\s*(?:```|~~~)")
+
+
 def _blocks(lines: list[str]) -> list[tuple[int, str, dict[int, int]]]:
     """Group consecutive non-blank lines into blocks -> (first line no, text, offset->line).
 
@@ -246,20 +266,39 @@ def _blocks(lines: list[str]) -> list[tuple[int, str, dict[int, int]]]:
     buf: list[str] = []
     offsets: dict[int, int] = {}
     start = 0
+
+    def flush() -> None:
+        nonlocal buf, offsets, start
+        if buf:
+            blocks.append((start, " ".join(buf), offsets))
+        buf, offsets, start = [], {}, 0
+
     for n, line in enumerate(lines, 1):
         if not line.strip():
-            if buf:
-                blocks.append((start, " ".join(buf), offsets))
-                buf, offsets, start = [], {}, 0
+            flush()
             continue
+        if _FENCE.match(line):
+            # A fence delimiter is structure, not content: end the block and drop it.
+            flush()
+            continue
+        if _HEADING.match(line):
+            # A heading stands ALONE — flushing is not enough, because the prose that
+            # follows would then simply join the heading instead of the text above it,
+            # which is the exact defect.
+            flush()
+            blocks.append((n, line, {i: n for i in range(len(line) + 1)}))
+            continue
+        if _LIST_ITEM.match(line):
+            # A new item ends the previous one; its own continuation lines still join,
+            # so an instruction wrapped inside one item is still caught.
+            flush()
         if not buf:
             start = n
         base = sum(len(b) + 1 for b in buf)
         for i in range(len(line) + 1):
             offsets[base + i] = n
         buf.append(line)
-    if buf:
-        blocks.append((start, " ".join(buf), offsets))
+    flush()
     return blocks
 
 
@@ -278,7 +317,13 @@ def _flag(path: Path, hits: list[str], repo: Path = REPO) -> None:
     except (OSError, UnicodeDecodeError):
         return
     for _start_line, block, offsets in _blocks(lines):
-        if "TodoWrite" not in block:
+        # Case-INSENSITIVE, matching `INSTRUCTION`'s own re.IGNORECASE. Codex #71 on
+        # 3e81ecd: this fast path was an exact-case `"TodoWrite" not in block`, so the
+        # pattern's case-insensitivity never reached repository files. Measured —
+        # is_affirmative("Use TODOWRITE to track progress.") was True while scan() on a
+        # CLAUDE.md containing that exact line returned []. A prefilter stricter than
+        # the predicate it guards silently narrows it.
+        if "todowrite" not in block.lower():
             continue
         for span_start, span_end in affirmative_spans(block):
             n = offsets[span_start]
@@ -430,9 +475,76 @@ def check_exemptions_are_scoped_to_the_mention() -> list[str]:
         "This migration drops every reference to TodoWrite.",
         "TodoWrite was withdrawn in 2.1.233.",
         "The TodoWrite tool no longer exists on Opus 5.",
+        # the dropped bare-`items` alternative — documentation, not a directive
+        "TodoWrite items are no longer available.",
+        "The TodoWrite items were removed in 2.1.233.",
     ):
         if flagged(text):
             problems.append(f"inert mention wrongly flagged by widened grammar: {text!r}")
+    return problems
+
+
+def check_markdown_structure_ends_a_block() -> list[str]:
+    """Headings, list items and fences must terminate a block, not join across it.
+
+    CodeRabbit #71 on 3e81ecd. `_blocks()` joined every non-blank line, so ordinary
+    Markdown welded two unrelated lines into a sentence neither made. Measured before
+    the fix — both flagged:
+
+        ["## Use", "TodoWrite was withdrawn."]
+        ["### Update", "TodoWrite items are no longer available."]
+
+    The second was a false positive introduced by THIS PR, one commit earlier, when
+    `update` joined the verb set. A heading called "Update" above prose about the
+    withdrawal is ordinary documentation.
+
+    Both directions, as ever: the join must stop at structure, and must still happen
+    inside a paragraph or a single list item, or the wrapped-instruction fix regresses.
+    """
+    problems: list[str] = []
+    for lines in (
+        ["## Use", "TodoWrite was withdrawn."],
+        ["### Update", "TodoWrite items are no longer available."],
+        ["- Keep", "- TodoWrite is gone."],
+        ["1. Run", "2. TodoWrite is unavailable."],
+        ["Run", "```", "TodoWrite", "```"],
+    ):
+        if any(is_affirmative(b) for _s, b, _o in _blocks(lines)):
+            problems.append(f"joined across Markdown structure: {lines!r}")
+    for lines in (
+        ["Track progress with", "TodoWrite."],
+        ["- Track progress with", "  TodoWrite."],
+    ):
+        if not any(is_affirmative(b) for _s, b, _o in _blocks(lines)):
+            problems.append(f"wrapped instruction no longer caught: {lines!r}")
+    return problems
+
+
+def check_the_scan_prefilter_is_case_insensitive() -> list[str]:
+    """`scan()`'s fast path must not be stricter than the predicate it guards.
+
+    Codex #71 on 3e81ecd: the prefilter was an exact-case `"TodoWrite" not in block`
+    while `INSTRUCTION` carries `re.IGNORECASE`, so the pattern's case-insensitivity
+    never reached repository files. Measured — `is_affirmative` said True and `scan()`
+    said nothing:
+
+        is_affirmative("Use TODOWRITE to track progress.")  -> True
+        scan(<CLAUDE.md containing that line>)              -> []
+
+    Driven through the real `scan()`, because the defect lived in the walk rather than
+    in the predicate; asserting on `is_affirmative` alone would have missed it entirely.
+    """
+    import tempfile
+
+    problems: list[str] = []
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        for variant in ("TODOWRITE", "todowrite", "TodoWrite"):
+            (root / "CLAUDE.md").write_text(
+                f"Use {variant} to track progress.\n", encoding="utf-8"
+            )
+            if not scan(root):
+                problems.append(f"scan() missed a cased variant: {variant!r}")
     return problems
 
 
@@ -539,6 +651,8 @@ def main() -> int:
     problems += check_wrapped_instructions_are_not_split()
     problems += check_root_instruction_files_are_scanned()
     problems += check_workflow_triggers_cover_every_scanned_path()
+    problems += check_markdown_structure_ends_a_block()
+    problems += check_the_scan_prefilter_is_case_insensitive()
     if problems:
         print("Instruction detection is wrong:\n")
         for p in problems:
