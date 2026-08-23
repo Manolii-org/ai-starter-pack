@@ -168,17 +168,24 @@ def test_marker_text_appears_exactly_once_in_the_source():
 
 
 PLUGIN_JUDGE_COPY = REPO_ROOT / "plugin" / "manolii-framework" / "scripts" / "run-judge.py"
-# Source-pack identity marker: `pack.manifest.yml` is pack-internal scaffolding
-# in copier.yml `_exclude`, so it exists here and reaches no consumer by any
-# install path. `copier.yml`'s presence and `.copier-answers.yml`'s absence were
-# both tried and both misidentify a real consumer shape — a destination that is
-# itself a Copier template, and the prebuilt release zip respectively. See
-# tests/test_deprecated_agent_routing.py for the full reasoning.
-IS_PACK_REPO = (REPO_ROOT / "pack.manifest.yml").is_file()
+# Source-pack identity — three signals required together. No single filename
+# works: each of `copier.yml` present, `.copier-answers.yml` absent, and
+# `pack.manifest.yml` present matches a real consumer shape on its own. Full
+# reasoning in tests/test_deprecated_agent_routing.py.
+IS_PACK_REPO = (
+    (REPO_ROOT / "copier.yml").is_file()
+    and not (REPO_ROOT / ".copier-answers.yml").is_file()
+    and (REPO_ROOT / "pack.manifest.yml").is_file()
+)
 
 
+# Gated on identity ONLY, never on the copy's existence. Adding
+# `PLUGIN_JUDGE_COPY.exists()` here meant that deleting or renaming the pack's
+# own committed copy made pytest SKIP rather than fail — silently retiring the
+# drift guard exactly when the artifact it guards went missing. In the pack the
+# copy must exist, and its absence is a failure this test should report.
 @pytest.mark.skipif(
-    not (IS_PACK_REPO and PLUGIN_JUDGE_COPY.exists()),
+    not IS_PACK_REPO,
     reason="plugin/ is pack-internal (copier.yml _exclude) — absent in rendered instances",
 )
 def test_plugin_copy_is_in_sync():

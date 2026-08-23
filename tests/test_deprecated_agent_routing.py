@@ -17,20 +17,29 @@ ROUTING_COPIES = (
 
 PLUGIN_ROOT = ROOT / "plugin"
 
-# Source-pack identity marker. `pack.manifest.yml` is pack-internal scaffolding
-# listed in copier.yml `_exclude`, so it exists HERE and reaches no consumer by
-# any install path.
+# Source-pack identity. NO single filename works — three were tried and each
+# matched a real consumer shape:
+#   - `copier.yml` present: a destination that is itself a Copier template has
+#     its own; `_exclude` only stops OURS from being copied.
+#   - `.copier-answers.yml` absent: the prebuilt release zip ships without one
+#     by design (README-STARTER-PACK.md, "Copier updates for zip-based installs").
+#   - `pack.manifest.yml` present: rendered consumers are told by their OWN
+#     shipped README (README-STARTER-PACK.md §"Scope & What's Not Included")
+#     that feature flags live in a file of exactly that name.
 #
-# Two earlier markers were both wrong, in opposite directions:
-#   - `copier.yml` present — a destination that is itself a Copier template has
-#     its own, `_exclude` only stops OURS from being copied.
-#   - `.copier-answers.yml` absent — the prebuilt release zip ships without one
-#     by design (README-STARTER-PACK.md "Copier updates for zip-based installs"),
-#     so a zip consumer looked exactly like the source pack.
-# Either way a consumer carrying its own `plugin/manolii-framework` had this
-# pack's routing and byte-parity assertions enforced against it. A marker named
-# for this pack and excluded from every ship path is what actually identifies us.
-IS_PACK_REPO = (ROOT / "pack.manifest.yml").is_file()
+# So require all three signals together. A consumer would have to be a Copier
+# template, AND have shed its answers file, AND carry a pack.manifest.yml before
+# being mistaken for the source pack. Each condition is individually plausible;
+# the conjunction is not.
+#
+# Getting this wrong is not symmetric. A false NEGATIVE only skips a pack-only
+# guard here; a false POSITIVE enters the fail-closed branch below and fails a
+# CONSUMER's shipped suite — which is the bug this whole change exists to fix.
+IS_PACK_REPO = (
+    (ROOT / "copier.yml").is_file()
+    and not (ROOT / ".copier-answers.yml").is_file()
+    and (ROOT / "pack.manifest.yml").is_file()
+)
 
 
 def _present(paths: "tuple[Path, ...]") -> "list[Path]":
