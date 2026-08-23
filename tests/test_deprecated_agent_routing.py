@@ -15,9 +15,17 @@ ROUTING_COPIES = (
 )
 
 
-# The source-repository marker. `copier.yml` exists only in the pack itself —
-# it is in the template's own `_exclude`, so no rendered instance has one.
-IS_PACK_REPO = (ROOT / "copier.yml").is_file()
+PLUGIN_ROOT = ROOT / "plugin"
+
+# Rendered-instance marker, stated POSITIVELY. Copier writes
+# `.copier-answers.yml` into every destination it renders; the source pack has
+# none. Keying on the absence of `copier.yml` was wrong: `_exclude` only stops
+# THIS pack's copier.yml from being copied, so a destination that is itself a
+# Copier template keeps its own — and if it also carries a
+# `plugin/manolii-framework`, the pack-only assertions would run against
+# consumer-owned files and the version-skew failure returns. A rendered
+# destination cannot shed `.copier-answers.yml`, template or not.
+IS_RENDERED_INSTANCE = (ROOT / ".copier-answers.yml").is_file()
 
 
 def _present(paths: "tuple[Path, ...]") -> "list[Path]":
@@ -28,18 +36,28 @@ def _present(paths: "tuple[Path, ...]") -> "list[Path]":
     iterating the tuple blindly made every rendered project fail on first run
     with FileNotFoundError.
 
-    Gated on the source-repo marker rather than on each path's existence.
+    Gated on the rendered-instance marker rather than on each path's existence.
     Existence-based filtering silently adopts a consumer-owned
     `plugin/manolii-framework` — a plugin checkout, or a different installed
     pack version — and enforces THIS pack's routing assertions against it, so
-    version skew turns the rendered suite red again. Presence of `copier.yml`
-    is what actually means "these plugin sources are ours".
+    version skew turns the rendered suite red again.
+
+    The plugin paths are matched against `ROOT / "plugin"` exactly, via
+    `Path.parents`. Testing `"plugin" in p.parts` looked equivalent and was not:
+    these are ABSOLUTE paths, so a checkout that merely lives under a directory
+    named `plugin` (`/workspace/plugin/my-project`) matched every candidate —
+    including the consumer's own `.claude/` ones — emptying the tuple and
+    failing the assertion below purely because of where the repo was cloned.
 
     The empty case is a hard failure, not a silent skip: `.claude/` ships
     everywhere, so nothing present means the surface was renamed or dropped and
     this guard would otherwise pass vacuously.
     """
-    owned = paths if IS_PACK_REPO else tuple(p for p in paths if "plugin" not in p.parts)
+    owned = (
+        tuple(p for p in paths if PLUGIN_ROOT not in p.parents)
+        if IS_RENDERED_INSTANCE
+        else paths
+    )
     found = [p for p in owned if p.exists()]
     assert found, f"no agent-routing surface found among: {[str(p) for p in owned]}"
     return found

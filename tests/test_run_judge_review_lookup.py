@@ -168,22 +168,25 @@ def test_marker_text_appears_exactly_once_in_the_source():
 
 
 PLUGIN_JUDGE_COPY = REPO_ROOT / "plugin" / "manolii-framework" / "scripts" / "run-judge.py"
-# Source-repository marker: `copier.yml` is in the template's own `_exclude`,
-# so it exists in the pack and in no rendered instance.
-IS_PACK_REPO = (REPO_ROOT / "copier.yml").is_file()
+# Rendered-instance marker, stated positively: Copier writes
+# `.copier-answers.yml` into every destination it renders and the source pack
+# has none. `copier.yml`'s absence is NOT equivalent — a destination that is
+# itself a Copier template keeps its own copy, and would then byte-compare its
+# own plugin sources against ours.
+IS_RENDERED_INSTANCE = (REPO_ROOT / ".copier-answers.yml").is_file()
 
 
 @pytest.mark.skipif(
-    not (IS_PACK_REPO and PLUGIN_JUDGE_COPY.exists()),
+    IS_RENDERED_INSTANCE or not PLUGIN_JUDGE_COPY.exists(),
     reason="plugin/ is pack-internal (copier.yml _exclude) — absent in rendered instances",
 )
 def test_plugin_copy_is_in_sync():
     """The pack ships two copies; a fix applied to one only is a silent regression.
 
-    Guarded on the source-repo marker, not just the plugin copy's existence.
-    `plugin/**` is a build artifact excluded from rendered consumers by
-    copier.yml, but this whole test module IS shipped — so without a guard every
-    rendered project inherited a test that failed on first run with
+    Guarded on the rendered-instance marker, not just the plugin copy's
+    existence. `plugin/**` is a build artifact excluded from rendered consumers
+    by copier.yml, but this whole test module IS shipped — so without a guard
+    every rendered project inherited a test that failed on first run with
     FileNotFoundError. Keying on presence ALONE would then byte-compare a
     consumer's own `plugin/manolii-framework` (a plugin checkout, or a different
     installed pack version) against this repo's `scripts/run-judge.py`, so
