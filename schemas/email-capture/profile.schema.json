@@ -119,7 +119,7 @@
                 "endpoint": {
                   "type": "string",
                   "minLength": 8,
-                  "pattern": "^(https://[^\\s?#]+|http://(localhost|127\\.0\\.0\\.1|\\[::1\\])(:[0-9]+)?(/[^\\s?#]*)?)$"
+                  "pattern": "^(https://[^\\s?#@]+|http://(localhost|127\\.0\\.0\\.1|\\[::1\\])(:[0-9]+)?(/[^\\s?#@]*)?)$"
                 }
               }
             }
@@ -145,7 +145,7 @@
                 "endpoint": {
                   "type": "string",
                   "minLength": 8,
-                  "pattern": "^https://[^\\s?#]+$"
+                  "pattern": "^https://[^\\s?#@]+$"
                 }
               }
             }

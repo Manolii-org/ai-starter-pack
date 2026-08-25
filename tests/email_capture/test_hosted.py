@@ -22,6 +22,7 @@ class HostedHandler(BaseHTTPRequestHandler):
     list_payload = None
     detail_override = None
     delete_empty = False
+    health_raw = None
 
     def log_message(self, *_args):
         return
@@ -39,6 +40,13 @@ class HostedHandler(BaseHTTPRequestHandler):
         if self.headers.get("Authorization") != f"Bearer {self.token}":
             return self._send(401, {"error": "denied"})
         if self.path == "/health":
+            if self.health_raw is not None:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(self.health_raw)))
+                self.end_headers()
+                self.wfile.write(self.health_raw)
+                return
             if self.health_oversize:
                 blob = b"x" * (2 * 1024 * 1024 + 64)
                 self.send_response(200)
@@ -98,6 +106,7 @@ class HostedCaptureTests(unittest.TestCase):
         HostedHandler.list_payload = None
         HostedHandler.detail_override = None
         HostedHandler.delete_empty = False
+        HostedHandler.health_raw = None
         self.old_env = dict(os.environ)
         self.endpoint = f"http://127.0.0.1:{self.server.server_port}"
         os.environ["EMAIL_CAPTURE_HOSTED_TOKEN"] = HostedHandler.token
@@ -342,6 +351,8 @@ class HostedCaptureTests(unittest.TestCase):
         staging_pattern = nested[1]["then"]["properties"]["endpoint"]["pattern"]
         self.assertIn("http://", test_pattern)
         self.assertNotIn("http://", staging_pattern)
+        self.assertIn("@]", test_pattern)
+        self.assertIn("@]", staging_pattern)
 
     def test_off_mode_hosted_backend_loads_without_endpoint(self):
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
@@ -373,6 +384,38 @@ class HostedCaptureTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(CaptureError, "CAPTURE_INFRA_UNAVAILABLE"):
             adapter.list({"recipient": HostedHandler.recipient})
+
+
+    def test_blank_summary_to_is_infra_failure(self):
+        adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))
+        HostedHandler.list_payload = {"messages": [{"id": "h1", "to": "", "received_at": "2026-08-25T00:00:00Z"}]}
+        with self.assertRaisesRegex(CaptureError, "CAPTURE_INFRA_UNAVAILABLE"):
+            adapter.list({"recipient": HostedHandler.recipient})
+
+    def test_malformed_cc_blocks_exclusive_delete(self):
+        adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))
+        HostedHandler.detail_override = {
+            "id": "h1",
+            "date": "1999-01-01T00:00:00Z",
+            "from": "sender@test",
+            "to": [HostedHandler.recipient],
+            "cc": [{}],
+            "subject": "ok",
+            "text": "ok",
+            "html": "",
+            "headers": {},
+            "attachments": [],
+        }
+        with self.assertRaisesRegex(CaptureError, "CAPTURE_INFRA_UNAVAILABLE"):
+            adapter.purge({"recipient": HostedHandler.recipient})
+        self.assertEqual(HostedHandler.deleted, [])
+
+    def test_invalid_utf8_json_is_infra_failure(self):
+        adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))
+        HostedHandler.health_raw = b'{"ok": true, "x": "\xff"}'.replace(b"\\xff", b"\xff")
+        HostedHandler.health_raw = b'{"ok":true}\xff'
+        with self.assertRaisesRegex(CaptureError, "CAPTURE_INFRA_UNAVAILABLE"):
+            adapter.health()
 
     def test_canary_cli_emits_metadata_only(self):
         with tempfile.TemporaryDirectory() as temp:

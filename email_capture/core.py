@@ -394,7 +394,7 @@ class HostedHttpBackend:
             raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "hosted response was empty")
         try:
             return json.loads(body)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
             raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "receiver returned invalid JSON") from None
 
     def capabilities(self) -> dict[str, Any]:
@@ -467,6 +467,7 @@ class HostedHttpBackend:
             if _message_id(detail) != requested_id:
                 raise CaptureError("AUTHORIZATION_DENIED", "delete id is outside allocation")
             _require_well_formed_recipient_field(detail)
+            _require_envelope_fields_well_formed(detail)
             if not _summary_contains_recipient(detail, recipient):
                 raise CaptureError("AUTHORIZATION_DENIED", "delete recipient is outside allocation")
             if not _allocation_exclusively_owns(detail, recipient):
@@ -538,9 +539,9 @@ def _recipient_field_value(row: dict[str, Any]) -> tuple[bool, Any]:
 
 
 def _recipient_values_are_well_formed(value: Any) -> bool:
-    """Reject null/non-address recipient values; empty lists are well-formed."""
+    """Reject null/blank/non-address recipient values; empty lists are well-formed."""
     if isinstance(value, str):
-        return True
+        return bool(value.strip())
     if isinstance(value, list):
         return all(_single_recipient_is_well_formed(item) for item in value)
     return _single_recipient_is_well_formed(value)
@@ -548,11 +549,23 @@ def _recipient_values_are_well_formed(value: Any) -> bool:
 
 def _single_recipient_is_well_formed(value: Any) -> bool:
     if isinstance(value, str):
-        return True
+        return bool(value.strip())
     if isinstance(value, dict):
         address = value.get("Address", value.get("address"))
-        return isinstance(address, str)
+        return isinstance(address, str) and bool(address.strip())
     return False
+
+
+def _require_envelope_fields_well_formed(row: dict[str, Any]) -> None:
+    """Fail closed if any present To/Cc/Bcc field is malformed before DELETE."""
+    for key in ("To", "to", "Cc", "cc", "Bcc", "bcc"):
+        if key in row and not _recipient_values_are_well_formed(row[key]):
+            raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "receiver envelope recipients are malformed")
+    envelope = row.get("envelope")
+    if isinstance(envelope, dict):
+        for key in ("to", "cc", "bcc"):
+            if key in envelope and not _recipient_values_are_well_formed(envelope[key]):
+                raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "receiver envelope recipients are malformed")
 
 
 def _require_well_formed_recipient_field(row: dict[str, Any]) -> None:
