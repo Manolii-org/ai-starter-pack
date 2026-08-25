@@ -7,7 +7,7 @@
 
 The hosted backend speaks a small HTTPS JSON API: `GET /health`, `GET /messages?to=`, `GET /messages/{id}`, `DELETE /messages/{id}`. List rows must carry a well-formed recipient value (not `null`). `DELETE` runs only when the detail envelope is exclusively owned by the allocation recipient. Requests send `Authorization: Bearer` from `EMAIL_CAPTURE_HOSTED_TOKEN` only, refuse redirects, and never log bodies, recipients, or tokens. Receipts stay metadata-only. Default fidelity is `provider-to-capture`; `deployed-substitution` is explicit.
 
-Hermetic jobs remain the required CI path. Hosted capture may run as a manual/canary job against staging, preview, preprod, or test. Production profiles fail closed. Consumers pin this pack tag; they own vendor credentials and sender routing.
+Hermetic jobs remain the required CI path. Hosted capture may run as a manual/canary job against staging, preprod, preview, ci, or test. Production profiles fail closed. Consumers pin this pack tag; they own vendor credentials and sender routing.
 
 ## Still gated
 

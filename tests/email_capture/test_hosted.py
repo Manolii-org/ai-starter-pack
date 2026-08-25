@@ -353,6 +353,10 @@ class HostedCaptureTests(unittest.TestCase):
         self.assertNotIn("http://", staging_pattern)
         self.assertIn("@]", test_pattern)
         self.assertIn("@]", staging_pattern)
+        import re
+        self.assertIsNone(re.fullmatch(staging_pattern, "https://:443"))
+        self.assertIsNotNone(re.fullmatch(staging_pattern, "https://capture.example.test"))
+        self.assertIn("environment", hosted["required"])
 
     def test_off_mode_hosted_backend_loads_without_endpoint(self):
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
@@ -416,6 +420,31 @@ class HostedCaptureTests(unittest.TestCase):
         HostedHandler.health_raw = b'{"ok":true}\xff'
         with self.assertRaisesRegex(CaptureError, "CAPTURE_INFRA_UNAVAILABLE"):
             adapter.health()
+
+    def test_empty_or_angle_only_to_is_infra_failure(self):
+        adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))
+        for value in ([], ["<>"]):
+            HostedHandler.list_payload = {"messages": [{"id": "h1", "to": value, "received_at": "2026-08-25T00:00:00Z"}]}
+            with self.assertRaisesRegex(CaptureError, "CAPTURE_INFRA_UNAVAILABLE"):
+                adapter.list({"recipient": HostedHandler.recipient})
+
+    def test_unparseable_cc_blocks_delete(self):
+        adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))
+        HostedHandler.detail_override = {
+            "id": "h1",
+            "date": "1999-01-01T00:00:00Z",
+            "from": "sender@test",
+            "to": [HostedHandler.recipient],
+            "cc": "other@example.com <",
+            "subject": "ok",
+            "text": "ok",
+            "html": "",
+            "headers": {},
+            "attachments": [],
+        }
+        with self.assertRaisesRegex(CaptureError, "CAPTURE_INFRA_UNAVAILABLE"):
+            adapter.purge({"recipient": HostedHandler.recipient})
+        self.assertEqual(HostedHandler.deleted, [])
 
     def test_canary_cli_emits_metadata_only(self):
         with tempfile.TemporaryDirectory() as temp:

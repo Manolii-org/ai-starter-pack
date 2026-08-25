@@ -538,13 +538,18 @@ def _recipient_field_value(row: dict[str, Any]) -> tuple[bool, Any]:
     return False, None
 
 
-def _recipient_values_are_well_formed(value: Any) -> bool:
-    """Reject null/blank/non-address recipient values; empty lists are well-formed."""
-    if isinstance(value, str):
-        return bool(value.strip())
+def _recipient_values_are_well_formed(value: Any, *, require_address: bool = False) -> bool:
+    """Reject null/blank/unparseable recipient values. Empty optional lists are allowed."""
     if isinstance(value, list):
-        return all(_single_recipient_is_well_formed(item) for item in value)
-    return _single_recipient_is_well_formed(value)
+        if not all(_single_recipient_is_well_formed(item) for item in value):
+            return False
+        parsed = _parsed_addresses(value)
+        if require_address:
+            return bool(parsed)
+        return len(value) == 0 or bool(parsed)
+    if not _single_recipient_is_well_formed(value):
+        return False
+    return bool(_parsed_addresses(value))
 
 
 def _single_recipient_is_well_formed(value: Any) -> bool:
@@ -559,12 +564,12 @@ def _single_recipient_is_well_formed(value: Any) -> bool:
 def _require_envelope_fields_well_formed(row: dict[str, Any]) -> None:
     """Fail closed if any present To/Cc/Bcc field is malformed before DELETE."""
     for key in ("To", "to", "Cc", "cc", "Bcc", "bcc"):
-        if key in row and not _recipient_values_are_well_formed(row[key]):
+        if key in row and not _recipient_values_are_well_formed(row[key], require_address=key in {"To", "to"}):
             raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "receiver envelope recipients are malformed")
     envelope = row.get("envelope")
     if isinstance(envelope, dict):
         for key in ("to", "cc", "bcc"):
-            if key in envelope and not _recipient_values_are_well_formed(envelope[key]):
+            if key in envelope and not _recipient_values_are_well_formed(envelope[key], require_address=key == "to"):
                 raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "receiver envelope recipients are malformed")
 
 
@@ -572,7 +577,7 @@ def _require_well_formed_recipient_field(row: dict[str, Any]) -> None:
     present, value = _recipient_field_value(row)
     if not present:
         raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "receiver summary is missing recipients")
-    if not _recipient_values_are_well_formed(value):
+    if not _recipient_values_are_well_formed(value, require_address=True):
         raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "receiver summary recipients are malformed")
 
 
