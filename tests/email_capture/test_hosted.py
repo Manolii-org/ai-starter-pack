@@ -361,6 +361,8 @@ class HostedCaptureTests(unittest.TestCase):
         self.assertIsNone(re.fullmatch(staging_pattern, "https://."))
         self.assertIsNone(re.fullmatch(staging_pattern, "https://example..com"))
         self.assertIsNone(re.fullmatch(staging_pattern, "https://capture.example:99999"))
+        self.assertIsNone(re.fullmatch(test_pattern, "http://localhost:99999"))
+        self.assertIsNotNone(re.fullmatch(test_pattern, "http://127.0.0.1:54324"))
         self.assertIsNone(re.fullmatch(staging_pattern, "https://user:pass@host.example"))
         self.assertIsNotNone(re.fullmatch(staging_pattern, "https://capture.example.test"))
         self.assertIn("environment", hosted["required"])
@@ -507,17 +509,51 @@ class HostedCaptureTests(unittest.TestCase):
             def __init__(self):
                 self.data = b'{"ok":true}'
                 self.index = 0
+                self.timeout = 10
 
-            def read(self, _size):
+            def settimeout(self, value):
+                self.timeout = value
+
+            def read(self, size):
+                if size >= 64:
+                    time.sleep(3)
+                    if self.timeout is not None and self.timeout < 3:
+                        raise TimeoutError("timed out")
+                    remaining = self.data[self.index:]
+                    self.index = len(self.data)
+                    return remaining
                 if self.index >= len(self.data):
                     return b""
-                time.sleep(0.08)
+                time.sleep(0.03)
+                if self.timeout is not None and self.timeout <= 0.03:
+                    raise TimeoutError("timed out")
                 chunk = self.data[self.index:self.index + 1]
                 self.index += 1
                 return chunk
 
+        started = time.monotonic()
         with self.assertRaisesRegex(CaptureError, "MESSAGE_TIMEOUT"):
-            _read_bounded_http_body(Drip(), deadline=time.monotonic() + 0.2)
+            _read_bounded_http_body(Drip(), deadline=time.monotonic() + 0.15)
+        self.assertLess(time.monotonic() - started, 1.0)
+
+    def test_envelope_only_recipients_are_normalized(self):
+        adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))
+        HostedHandler.list_payload = {
+            "messages": [{"id": "h1", "envelope": {"to": [HostedHandler.recipient]}, "received_at": "2026-08-25T00:00:00Z"}],
+        }
+        HostedHandler.detail_override = {
+            "id": "h1",
+            "date": "2026-08-25T00:00:00Z",
+            "from": "sender@test",
+            "envelope": {"to": [HostedHandler.recipient]},
+            "subject": "ok",
+            "text": "ok",
+            "html": "",
+            "headers": {},
+            "attachments": [],
+        }
+        messages = adapter.list({"recipient": HostedHandler.recipient})
+        self.assertEqual(messages[0]["envelope"]["to"], [HostedHandler.recipient])
 
     def test_same_second_fractional_timestamps_stay_ordered(self):
         from email_capture.core import _canonical_received_at

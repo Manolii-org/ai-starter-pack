@@ -32,19 +32,53 @@ MAX_CONTENT_BYTES = 1024 * 1024
 HOSTED_MAX_BODY_BYTES = 2 * 1024 * 1024
 
 
+def _apply_remaining_read_timeout(response: Any, deadline: float) -> None:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise CaptureError("MESSAGE_TIMEOUT", "bounded wait expired")
+    timeout = max(0.01, remaining)
+    for candidate in (
+        response,
+        getattr(response, "fp", None),
+        getattr(getattr(response, "fp", None), "raw", None),
+        getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None),
+    ):
+        if candidate is None:
+            continue
+        setter = getattr(candidate, "settimeout", None)
+        if callable(setter):
+            try:
+                setter(timeout)
+            except OSError:
+                continue
+        elif hasattr(candidate, "timeout"):
+            try:
+                candidate.timeout = timeout
+            except (AttributeError, TypeError, OSError):
+                continue
+
+
 def _read_bounded_http_body(response: Any, limit: int = HOSTED_MAX_BODY_BYTES, deadline: float | None = None) -> bytes:
     chunks: list[bytes] = []
     total = 0
+    chunk_size = 1 if deadline is not None else 4096
     while True:
-        if deadline is not None and time.monotonic() >= deadline:
-            raise CaptureError("MESSAGE_TIMEOUT", "bounded wait expired")
-        chunk = response.read(4096)
+        if deadline is not None:
+            _apply_remaining_read_timeout(response, deadline)
+        try:
+            chunk = response.read(chunk_size)
+        except (TimeoutError, OSError) as error:
+            if deadline is not None and (isinstance(error, TimeoutError) or "timed out" in str(error).lower()):
+                raise CaptureError("MESSAGE_TIMEOUT", "bounded wait expired") from None
+            raise
         if not chunk:
             break
         total += len(chunk)
         if total > limit:
             raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "hosted response exceeded size limit")
         chunks.append(chunk)
+        if deadline is not None and time.monotonic() >= deadline:
+            raise CaptureError("MESSAGE_TIMEOUT", "bounded wait expired")
     return b"".join(chunks)
 
 
@@ -756,11 +790,12 @@ def normalise_message(row: dict[str, Any], backend_name: str) -> dict[str, Any]:
             "size": size,
         })
     opaque = hashlib.sha256(f"{backend_name}:{identifier}".encode()).hexdigest()[:24]
+    present, recipient_value = _recipient_field_value(row)
     return {
         "schema_version": VERSION,
         "opaque_id": opaque,
         "received_at": received,
-        "envelope": {"from": _addresses(row.get("from", row.get("From"))), "to": _addresses(row.get("to", row.get("To")))},
+        "envelope": {"from": _addresses(row.get("from", row.get("From"))), "to": _addresses(recipient_value if present else row.get("to", row.get("To")))},
         "subject": _required_string_field(row, "subject", "Subject"),
         "headers": headers,
         "content": {"text_present": bool(text), "html_present": bool(html), "text": text or "", "html": html or ""},
