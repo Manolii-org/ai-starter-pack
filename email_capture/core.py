@@ -729,16 +729,22 @@ def _message_id(row: dict[str, Any]) -> str:
 
 def _canonical_received_at(received: str) -> str:
     """Parse RFC3339 receive times into a single UTC form for cursor comparison."""
-    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})", received):
+    matched = re.fullmatch(
+        r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})",
+        received,
+    )
+    if not matched:
         raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "message receive time is not sortable")
+    head, fraction, zone = matched.groups()
+    fraction = ((fraction or "") + "000000")[:6]
+    iso = f"{head}.{fraction}{'+00:00' if zone == 'Z' else zone}"
     try:
-        parsed = datetime.fromisoformat(received.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(iso)
     except ValueError as error:
         raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "message receive time is not sortable") from error
     if parsed.tzinfo is None:
         raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "message receive time is not sortable")
-    utc = parsed.astimezone(timezone.utc)
-    return utc.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    return parsed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def normalise_message(row: dict[str, Any], backend_name: str) -> dict[str, Any]:

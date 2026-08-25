@@ -559,8 +559,10 @@ class HostedCaptureTests(unittest.TestCase):
         from email_capture.core import _canonical_received_at
         earlier = _canonical_received_at("2026-08-25T00:00:00Z")
         later = _canonical_received_at("2026-08-25T00:00:00.5Z")
+        odd = _canonical_received_at("2026-08-25T00:00:00.12345Z")
         self.assertEqual(earlier, "2026-08-25T00:00:00.000000Z")
         self.assertEqual(later, "2026-08-25T00:00:00.500000Z")
+        self.assertEqual(odd, "2026-08-25T00:00:00.123450Z")
         self.assertLess(earlier, later)
         self.assertGreater(f"{later}:bbb", f"{earlier}:aaa")
 
@@ -639,6 +641,7 @@ class HostedCaptureTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
                 check=True,
+                timeout=30,
                 cwd=repo_root,
                 env={**os.environ, "EMAIL_CAPTURE_HOSTED_TOKEN": HostedHandler.token},
             )
