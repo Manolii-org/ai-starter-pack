@@ -1,0 +1,26 @@
+# Email-capture journeys
+
+The CLI is journey-agnostic: `allocate` / `await` / `assert` / `extract` / `release`. Completeness is a **consumer** property: every application path that actually sends mail must be proven against the contract. Do not invent mailbox tests for `generateLink` / in-app URL flows (`NO_EVIDENCED_SENDER`).
+
+## Lanes
+
+| Lane | What it proves | Required for Buro go-live |
+|---|---|---|
+| Hermetic Mailpit/MailDev/Inbucket | Job-local SMTP + capture CLI | Yes, for every evidenced sender |
+| Hosted SPI (`mode=hosted`) | Vendor-neutral HTTPS inbox | No, until pack tags `v0.2.0` and vendor/DPA/concurrency/KL skip pass |
+| Real-delivery canary | DNS/provider receipt to an entity mailbox | Separate from capture; still denied from KL |
+
+## Buro `bcp-core` (evidenced senders)
+
+Both product paths use Auth `resetPasswordForEmail` and `supabase/templates/recovery.html` (`type=recovery`).
+
+| Journey | Entry point | Capture job |
+|---|---|---|
+| Forgot password | `/signin/forgot` | `e2e/buro-email-recovery.mjs` |
+| Pending activation | `/signin` → **Email me a sign-in link** (`password_set_at` is null) | `e2e/buro-email-activation.mjs` |
+
+Not mailbox-tested until a sender exists: signup confirmation (`enable_confirmations` off locally; production invite-only), GoTrue invite, email-change, magic-link `generateLink` e2e, partner/space invite URLs.
+
+## Knowledge Layer
+
+Skip ingest only when the authenticated mailbox is an owned capture address. To/Cc/Bcc never authorize skip. That exclusion stays on KL until `needs-human` is cleared.
