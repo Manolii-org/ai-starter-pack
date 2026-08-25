@@ -8,9 +8,11 @@
   `needs.classify.result == 'success'` so Semgrep/Bandit cannot start
   when classify is skipped (empty `depth` is not the string `'none'`).
   Standalone `concurrency` + `cancel-in-progress` cancels in-flight
-  LLM/SAST when a ready PR is converted back to draft. Reusable
-  `classify` requires `github.event_name == 'pull_request'` so
-  `workflow_dispatch` never reaches `git diff` against `github.base_ref`
+  LLM/SAST when a ready PR is converted back to draft. Do not put
+  `paths` / `paths-ignore` on that workflow: GitHub filters
+  `converted_to_draft` the same way, which would leave in-flight LLM/SAST
+  running. Reusable `classify` requires `github.event_name == 'pull_request'`
+  so `workflow_dispatch` never reaches `git diff` against `github.base_ref`
   or a judge comment on an empty PR number.
 - **CI cost conventions.** `docs/ci-cost-conventions.md` — wait-loop extraction,
   no unfiltered browser/`supabase start` PR workflows, job-level concurrency

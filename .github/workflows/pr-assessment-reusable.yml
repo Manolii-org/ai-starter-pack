@@ -4,9 +4,9 @@ name: PR Assessment (Reusable)
 # Skip drafts on pull_request only. classify requires event_name == pull_request
 # and draft != true, so workflow_dispatch / other caller events never reach
 # git diff against github.base_ref or a judge comment on an empty PR number.
-# Callers must list ready_for_review and converted_to_draft, and set
-# concurrency cancel-in-progress so converting back to draft cancels in-flight
-# LLM/SAST.
+# Callers must list ready_for_review and converted_to_draft, set concurrency
+# cancel-in-progress, and must not add paths / paths-ignore on the caller
+# (GitHub filters converted_to_draft the same way, which blocks cancel).
 # Downstream jobs require needs.classify.result == 'success' so SAST cannot
 # start when classify is skipped (empty depth is not the string 'none').
 # Dual provider_mode: anthropic (direct ANTHROPIC_API_KEY) | proxy (LiteLLM via ANTHROPIC_BASE_URL + LITELLM_MASTER_KEY).

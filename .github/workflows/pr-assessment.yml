@@ -9,6 +9,9 @@ name: PR Assessment
 # AI-driven PR review pipeline. Skip drafts (qualification is lint/secret-scan);
 # run on ready_for_review and later non-draft synchronize. converted_to_draft
 # starts a skip run; concurrency cancel-in-progress aborts in-flight LLM/SAST.
+# Do not add on.pull_request paths / paths-ignore: GitHub applies those filters
+# to converted_to_draft too, so a revert-to-ignored-files push plus draft
+# conversion never occupies this concurrency group.
 # Stages: pr-classifier → specialist skills → broad agents → judge
 # Downstream jobs require needs.classify.result == 'success' so Semgrep/Bandit
 # cannot start when classify is skipped (empty depth is not the string 'none').
@@ -25,11 +28,6 @@ name: PR Assessment
 
 on:
   pull_request:
-    # Instance runtime artifacts (written by the Stop hook and
-    # build-skill-graph.py) — never assessment-worthy on their own.
-    paths-ignore:
-      - '.ai/memory/eval-failures.jsonl'
-      - '.ai/skill-graph.md'
     branches: [main, master, develop]
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
 

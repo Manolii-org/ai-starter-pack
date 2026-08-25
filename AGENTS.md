@@ -70,9 +70,10 @@ Agents use tools in this priority order:
 
 See `docs/ci-cost-conventions.md`. Skip drafts on PR Assessment; Autofix is
 not draft-gated. Require `needs.classify.result == 'success'` so SAST cannot
-start when classify is skipped; do not add unfiltered browser/`supabase start`
-PR workflows; extract `gh run list` wait loops to `scripts/ci/` with a
-fake-`gh` test.
+start when classify is skipped. Do not add `paths` / `paths-ignore` on PR
+Assessment (`converted_to_draft` is filtered too and cannot cancel in-flight
+LLM/SAST). Do not add unfiltered browser/`supabase start` PR workflows;
+extract `gh run list` wait loops to `scripts/ci/` with a fake-`gh` test.
 
 ## Sub-Agent Invocation
 

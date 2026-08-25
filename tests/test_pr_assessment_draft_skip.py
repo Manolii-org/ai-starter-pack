@@ -18,9 +18,14 @@ def _on(spec: dict) -> dict:
 @pytest.mark.skipif(not STANDALONE.exists(), reason="pr-assessment.yml not in this checkout")
 def test_standalone_listens_for_ready_and_skips_drafts() -> None:
     spec = yaml.safe_load(STANDALONE.read_text(encoding="utf-8"))
-    types = set((_on(spec).get("pull_request") or {}).get("types") or [])
+    pr = _on(spec).get("pull_request") or {}
+    types = set(pr.get("types") or [])
     assert "ready_for_review" in types
     assert "converted_to_draft" in types
+    # Path filters also apply to converted_to_draft and would block
+    # concurrency cancel after a revert-to-ignored-files push.
+    assert not pr.get("paths")
+    assert not pr.get("paths-ignore")
     classify = spec["jobs"]["classify"].get("if") or ""
     assert "draft != true" in classify
 

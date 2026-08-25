@@ -98,8 +98,11 @@ Callers of `pr-assessment-reusable` must include `ready_for_review` and
 `ready_for_review`, a PR opened as a draft never starts assessment when it
 is marked ready. `converted_to_draft` starts a skip run; callers must also
 set workflow-level `concurrency` with `cancel-in-progress: true` so an
-in-flight LLM/SAST run is cancelled. Downstream jobs require classify
-success so SAST does not start when classify is skipped.
+in-flight LLM/SAST run is cancelled. Do not add `paths` or `paths-ignore`
+on the caller: GitHub applies those filters to `converted_to_draft`, so a
+revert that leaves only ignored files plus convert-to-draft never occupies
+the concurrency group. Downstream jobs require classify success so SAST
+does not start when classify is skipped.
 `workflow_dispatch` is not a supported assessment path: `classify` does
 not run, and later jobs would otherwise read empty `github.base_ref` and
 `github.event.pull_request.number`.
