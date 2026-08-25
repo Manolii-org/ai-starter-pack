@@ -91,6 +91,33 @@ class CaptureTests(unittest.TestCase):
         with self.assertRaisesRegex(CaptureError, "ASSERTION_FAILED"):
             await_messages(self.backend, self.allocation, 0.03, count=0)
 
+    def test_http_deadline_negative_does_not_raise_message_timeout(self):
+        """Mailpit backends install request_timeout. v0.2.0 raised MESSAGE_TIMEOUT
+        when the negative window elapsed, so Buro recovery `count=0` failed on empty."""
+        from email_capture.core import _remaining_request_timeout
+
+        class DeadlineBackend:
+            def __init__(self):
+                self.request_timeout = 10.0
+
+            def list(self, allocation):
+                _remaining_request_timeout(self)
+                return []
+
+        class AlwaysTimeoutBackend:
+            request_timeout = 10.0
+
+            def list(self, allocation):
+                raise CaptureError("MESSAGE_TIMEOUT", "bounded wait expired")
+
+        deadline_backend = DeadlineBackend()
+        messages, cursor = await_messages(deadline_backend, self.allocation, 0.04, count=0)
+        self.assertEqual((messages, cursor), ([], "0:"))
+        with self.assertRaisesRegex(CaptureError, "MESSAGE_TIMEOUT"):
+            await_messages(deadline_backend, self.allocation, 0.04, count=1)
+        messages, cursor = await_messages(AlwaysTimeoutBackend(), self.allocation, 0.04, count=0)
+        self.assertEqual((messages, cursor), ([], "0:"))
+
     def test_receiver_specific_normalisation(self):
         inbucket = normalise_message({"id": "i1", "date": "2026-08-21T00:00:00Z", "from": "from@test", "to": ["to@test"], "subject": "s", "body": {"text": "123456", "html": "<b>x</b>"}, "header": {"X-Test": ["yes"]}, "attachments": [{"filename": "a.txt", "content-type": "text/plain"}]}, "inbucket")
         mailpit = normalise_message({"ID": "m1", "Date": "2026-08-21T00:00:00Z", "From": {"Address": "from@test"}, "To": [{"Address": "to@test"}], "Text": "body", "Attachments": [{"FileName": "a.txt", "ContentType": "text/plain", "Size": 4}]}, "mailpit")
