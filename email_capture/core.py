@@ -428,8 +428,7 @@ class HostedHttpBackend:
             if not isinstance(row, dict):
                 raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "receiver summary has invalid shape")
             _message_id(row)
-            if not _summary_has_recipient_field(row):
-                raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "receiver summary is missing recipients")
+            _require_well_formed_recipient_field(row)
             if _summary_contains_recipient(row, recipient):
                 matched.append(row)
         return matched
@@ -445,6 +444,7 @@ class HostedHttpBackend:
                 raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "receiver detail has invalid shape")
             if _message_id(detail) != requested_id:
                 raise CaptureError("AUTHORIZATION_DENIED", "detail id is outside allocation")
+            _require_well_formed_recipient_field(detail)
             if not _summary_contains_recipient(detail, recipient):
                 raise CaptureError("AUTHORIZATION_DENIED", "detail recipient is outside allocation")
             receiver_time = summary.get("received_at") or summary.get("Created") or summary.get("created") or summary.get("date")
@@ -466,8 +466,11 @@ class HostedHttpBackend:
                 raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "receiver detail has invalid shape")
             if _message_id(detail) != requested_id:
                 raise CaptureError("AUTHORIZATION_DENIED", "delete id is outside allocation")
+            _require_well_formed_recipient_field(detail)
             if not _summary_contains_recipient(detail, recipient):
                 raise CaptureError("AUTHORIZATION_DENIED", "delete recipient is outside allocation")
+            if not _allocation_exclusively_owns(detail, recipient):
+                continue
             self._request(f"/messages/{identifier}", "DELETE")
 
 
@@ -523,24 +526,91 @@ def _required_string_field(row: dict[str, Any], *names: str) -> str:
     return ""
 
 
-def _summary_has_recipient_field(row: dict[str, Any]) -> bool:
-    if "To" in row or "to" in row:
-        return True
+def _recipient_field_value(row: dict[str, Any]) -> tuple[bool, Any]:
+    if "To" in row:
+        return True, row["To"]
+    if "to" in row:
+        return True, row["to"]
     envelope = row.get("envelope")
-    return isinstance(envelope, dict) and "to" in envelope
+    if isinstance(envelope, dict) and "to" in envelope:
+        return True, envelope["to"]
+    return False, None
+
+
+def _recipient_values_are_well_formed(value: Any) -> bool:
+    """Reject null/non-address recipient values; empty lists are well-formed."""
+    if isinstance(value, str):
+        return True
+    if isinstance(value, list):
+        return all(_single_recipient_is_well_formed(item) for item in value)
+    return _single_recipient_is_well_formed(value)
+
+
+def _single_recipient_is_well_formed(value: Any) -> bool:
+    if isinstance(value, str):
+        return True
+    if isinstance(value, dict):
+        address = value.get("Address", value.get("address"))
+        return isinstance(address, str)
+    return False
+
+
+def _require_well_formed_recipient_field(row: dict[str, Any]) -> None:
+    present, value = _recipient_field_value(row)
+    if not present:
+        raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "receiver summary is missing recipients")
+    if not _recipient_values_are_well_formed(value):
+        raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "receiver summary recipients are malformed")
+
+
+def _summary_has_recipient_field(row: dict[str, Any]) -> bool:
+    present, value = _recipient_field_value(row)
+    return present and _recipient_values_are_well_formed(value)
+
+
+def _parsed_addresses(value: Any) -> list[str]:
+    rendered: list[str] = []
+    for item in _addresses(value):
+        address = item.get("Address", item.get("address", "")) if isinstance(item, dict) else str(item)
+        rendered.append(address)
+    parsed: list[str] = []
+    for _display_name, address in getaddresses(rendered):
+        if address:
+            parsed.append(address.lower())
+    return parsed
+
+
+def _envelope_addresses(row: dict[str, Any]) -> list[str]:
+    """Collect To/Cc/Bcc envelope addresses used for exclusive-ownership deletes."""
+    collected: list[str] = []
+    for key in ("To", "to", "Cc", "cc", "Bcc", "bcc"):
+        if key in row:
+            collected.extend(_parsed_addresses(row[key]))
+    envelope = row.get("envelope")
+    if isinstance(envelope, dict):
+        for key in ("to", "cc", "bcc"):
+            if key in envelope:
+                collected.extend(_parsed_addresses(envelope[key]))
+    unique: list[str] = []
+    seen: set[str] = set()
+    for address in collected:
+        if address not in seen:
+            seen.add(address)
+            unique.append(address)
+    return unique
+
+
+def _allocation_exclusively_owns(row: dict[str, Any], recipient: str) -> bool:
+    addresses = _envelope_addresses(row)
+    return bool(addresses) and all(address == recipient for address in addresses)
 
 
 def _summary_contains_recipient(row: dict[str, Any], recipient: str) -> bool:
     """Match the envelope recipient without searching bodies or subjects."""
-    values = row.get("To", row.get("to", row.get("envelope", {}).get("to", [])))
-    rendered: list[str] = []
-    for value in _addresses(values):
-        address = value.get("Address", value.get("address", "")) if isinstance(value, dict) else str(value)
-        rendered.append(address)
-    for _display_name, address in getaddresses(rendered):
-        if address.lower() == recipient:
-            return True
-    return False
+    present, values = _recipient_field_value(row)
+    if not present:
+        return False
+    return recipient in _parsed_addresses(values)
 
 
 def _message_id(row: dict[str, Any]) -> str:

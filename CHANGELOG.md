@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- **Ship email-capture v0.2.0.** Add hosted capture SPI (`mode=hosted` / `backend=hosted`), HTTPS message API (loopback HTTP only in `environment=test`), env-only `EMAIL_CAPTURE_HOSTED_TOKEN`, `canary` CLI, and optional fidelity. Hermetic Mailpit/MailDev/Inbucket CI is unchanged and remains fail-closed in staging/production.
+- **Ship email-capture v0.2.0.** Add hosted capture SPI (`mode=hosted` / `backend=hosted`), HTTPS message API (loopback HTTP only in `environment=test`), env-only `EMAIL_CAPTURE_HOSTED_TOKEN`, `canary` CLI, and optional fidelity. Hermetic Mailpit/MailDev/Inbucket CI is unchanged and remains fail-closed in staging/production. Hosted summaries with null `to` fail closed; shared multi-recipient messages are not deleted; profile schema encodes the hosted env allowlist and HTTPS/loopback endpoint pattern.
 
 ## 1.9.7 — 2026-08-21
 

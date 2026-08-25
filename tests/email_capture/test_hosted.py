@@ -307,6 +307,44 @@ class HostedCaptureTests(unittest.TestCase):
         with self.assertRaisesRegex(CaptureError, "CAPTURE_INFRA_UNAVAILABLE"):
             adapter.list({"recipient": HostedHandler.recipient})
 
+    def test_null_summary_to_is_infra_failure(self):
+        adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))
+        HostedHandler.list_payload = {"messages": [{"id": "h1", "to": None, "received_at": "2026-08-25T00:00:00Z"}]}
+        with self.assertRaisesRegex(CaptureError, "CAPTURE_INFRA_UNAVAILABLE"):
+            adapter.list({"recipient": HostedHandler.recipient})
+
+    def test_purge_skips_shared_multi_recipient_messages(self):
+        adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))
+        shared = [HostedHandler.recipient, "other@capture.test"]
+        HostedHandler.list_payload = {"messages": [{"id": "h1", "to": shared, "received_at": "2026-08-25T00:00:00Z"}]}
+        HostedHandler.detail_override = {
+            "id": "h1",
+            "date": "1999-01-01T00:00:00Z",
+            "from": "sender@test",
+            "to": shared,
+            "cc": [],
+            "subject": "shared",
+            "text": "keep",
+            "html": "",
+            "headers": {},
+            "attachments": [],
+        }
+        adapter.purge({"recipient": HostedHandler.recipient})
+        self.assertEqual(HostedHandler.deleted, [])
+
+    def test_hosted_schema_rejects_production_and_empty_endpoint(self):
+        schema = json.loads((Path(__file__).resolve().parents[2] / "schemas/email-capture/profile.schema.json").read_text())
+        hosted_thens = []
+        for block in schema["allOf"]:
+            cond = block.get("if", {}).get("properties", {})
+            if cond.get("backend") == {"const": "hosted"} or cond.get("mode") == {"const": "hosted"}:
+                hosted_thens.append(block["then"]["properties"])
+        self.assertTrue(hosted_thens)
+        for props in hosted_thens:
+            self.assertEqual(props["environment"]["enum"], ["test", "ci", "preview", "preprod", "staging"])
+            self.assertIn("https://", props["endpoint"]["pattern"])
+            self.assertNotIn("production", props["environment"]["enum"])
+
     def test_canary_cli_emits_metadata_only(self):
         with tempfile.TemporaryDirectory() as temp:
             profile_path = Path(temp) / "profile.json"
