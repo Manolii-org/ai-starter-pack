@@ -566,6 +566,41 @@ class HostedCaptureTests(unittest.TestCase):
         self.assertLess(earlier, later)
         self.assertGreater(f"{later}:bbb", f"{earlier}:aaa")
 
+    def test_not_before_second_precision_keeps_same_second_mail(self):
+        adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))
+        HostedHandler.list_payload = {
+            "messages": [{"id": "h1", "to": [HostedHandler.recipient], "received_at": "2026-08-25T10:00:00.5Z"}],
+        }
+        HostedHandler.detail_override = {
+            "id": "h1",
+            "date": "2026-08-25T10:00:00.5Z",
+            "from": "sender@test",
+            "to": [HostedHandler.recipient],
+            "subject": "ok",
+            "text": "ok",
+            "html": "",
+            "headers": {},
+            "attachments": [],
+        }
+        got, _cursor = await_messages(
+            adapter,
+            {"recipient": HostedHandler.recipient, "cursor": "0:"},
+            timeout=0,
+            not_before="2026-08-25T10:00:00Z",
+        )
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["received_at"], "2026-08-25T10:00:00.500000Z")
+
+    def test_invalid_not_before_is_config_error(self):
+        adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))
+        with self.assertRaisesRegex(CaptureError, "CONFIG_INVALID"):
+            await_messages(
+                adapter,
+                {"recipient": HostedHandler.recipient, "cursor": "0:"},
+                timeout=0,
+                not_before="yesterday",
+            )
+
     def test_nonsortable_summary_timestamp_is_infra_failure(self):
         adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))
         HostedHandler.list_payload = {"messages": [{"id": "h1", "to": [HostedHandler.recipient], "received_at": "zzz"}]}
@@ -612,7 +647,15 @@ class HostedCaptureTests(unittest.TestCase):
             EMAIL_CAPTURE_ENVIRONMENT="staging",
             EMAIL_CAPTURE_HOSTED_TOKEN=HostedHandler.token,
         )
-        for endpoint in ("https://example.com:abc", "https://.", "https://example..com", "https://exa mple.com"):
+        for endpoint in (
+            "https://example.com:abc",
+            "https://.",
+            "https://example..com",
+            "https://exa mple.com",
+            "https://capture",
+            "https://localhost",
+            "https://[::1]",
+        ):
             os.environ["EMAIL_CAPTURE_ENDPOINT"] = endpoint
             with self.assertRaisesRegex(CaptureError, "CONFIG_INVALID"):
                 Profile.load()

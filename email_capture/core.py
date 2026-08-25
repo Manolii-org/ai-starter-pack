@@ -270,6 +270,8 @@ def _validate_hosted_endpoint(endpoint: str, environment: str) -> None:
     if parsed.username is not None or parsed.password is not None or parsed.query or parsed.fragment:
         raise CaptureError("AUTHORIZATION_DENIED", "hosted endpoint must not embed credentials")
     if parsed.scheme == "https" and parsed.hostname:
+        if "." not in parsed.hostname:
+            raise CaptureError("CONFIG_INVALID", "hosted HTTPS hostname must be dotted")
         return
     loopback = parsed.hostname in {"localhost", "127.0.0.1", "::1"}
     if parsed.scheme == "http" and loopback and environment == "test":
@@ -903,6 +905,11 @@ def await_messages(selected_backend: Backend, allocation: dict[str, Any], timeou
     """Wait for an exact fresh count, including a full bounded negative window."""
     if timeout < 0 or count < 0:
         raise CaptureError("CONFIG_INVALID", "timeout and count must be non-negative")
+    if not_before:
+        try:
+            not_before = _canonical_received_at(not_before)
+        except CaptureError as exc:
+            raise CaptureError("CONFIG_INVALID", "invalid --not-before timestamp") from exc
     deadline = time.monotonic() + timeout
     cursor = allocation.get("cursor", "0:")
     original_timeout = getattr(selected_backend, "request_timeout", None)
