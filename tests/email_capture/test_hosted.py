@@ -17,6 +17,8 @@ class HostedHandler(BaseHTTPRequestHandler):
     token = ""
     requests = []
     deleted = []
+    health_payload = {"ok": True}
+    health_oversize = False
 
     def log_message(self, *_args):
         return
@@ -34,7 +36,15 @@ class HostedHandler(BaseHTTPRequestHandler):
         if self.headers.get("Authorization") != f"Bearer {self.token}":
             return self._send(401, {"error": "denied"})
         if self.path == "/health":
-            return self._send(200, {"ok": True})
+            if self.health_oversize:
+                blob = b"x" * (2 * 1024 * 1024 + 64)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(blob)))
+                self.end_headers()
+                self.wfile.write(blob)
+                return
+            return self._send(200, self.health_payload)
         if self.path.startswith("/messages?"):
             return self._send(200, {"messages": [{"id": "h1", "to": [self.recipient], "received_at": "2026-08-25T00:00:00Z"}]})
         if self.path.endswith("/h1"):
@@ -73,6 +83,8 @@ class HostedCaptureTests(unittest.TestCase):
     def setUp(self):
         HostedHandler.requests = []
         HostedHandler.deleted = []
+        HostedHandler.health_payload = {"ok": True}
+        HostedHandler.health_oversize = False
         self.old_env = dict(os.environ)
         self.endpoint = f"http://127.0.0.1:{self.server.server_port}"
         os.environ["EMAIL_CAPTURE_HOSTED_TOKEN"] = HostedHandler.token
@@ -145,6 +157,22 @@ class HostedCaptureTests(unittest.TestCase):
         self.assertEqual(HostedHandler.deleted, ["/messages/h1"])
         self.assertTrue(all(auth == f"Bearer {HostedHandler.token}" for _method, _path, auth in HostedHandler.requests))
         self.assertEqual(backend(Profile("hosted", "hosted", self.endpoint, "test")).capabilities()["fidelity"], "provider-to-capture")
+
+
+    def test_health_requires_explicit_ok_true(self):
+        adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))
+        for payload in ({}, [], {"ok": 0}, {"ok": False}):
+            HostedHandler.health_payload = payload
+            with self.assertRaisesRegex(CaptureError, "CAPTURE_INFRA_UNAVAILABLE"):
+                adapter.health()
+        HostedHandler.health_payload = {"ok": True}
+        self.assertTrue(adapter.health())
+
+    def test_hosted_response_body_is_bounded(self):
+        adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))
+        HostedHandler.health_oversize = True
+        with self.assertRaisesRegex(CaptureError, "size limit"):
+            adapter.health()
 
     def test_canary_cli_emits_metadata_only(self):
         with tempfile.TemporaryDirectory() as temp:

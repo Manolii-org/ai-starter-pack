@@ -28,6 +28,21 @@ _SCOPE_KEYS = ("entity", "repository", "environment", "run_id")
 MAX_ATTACHMENTS = 20
 MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 MAX_CONTENT_BYTES = 1024 * 1024
+HOSTED_MAX_BODY_BYTES = 2 * 1024 * 1024
+
+
+def _read_bounded_http_body(response: Any, limit: int = HOSTED_MAX_BODY_BYTES) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = response.read(65536)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "hosted response exceeded size limit")
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 class CaptureError(Exception):
@@ -337,17 +352,23 @@ class HostedHttpBackend:
         )
         try:
             with self._opener.open(request, timeout=self.request_timeout) as response:
-                body = response.read()
+                body = _read_bounded_http_body(response)
         except CaptureError:
             raise
         except urllib.error.HTTPError as error:
+            try:
+                _read_bounded_http_body(error)
+            except CaptureError:
+                pass
+            except OSError:
+                pass
             if error.code in {401, 403}:
                 raise CaptureError("AUTHORIZATION_DENIED", f"hosted HTTP {error.code}") from None
             raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", f"hosted HTTP {error.code}") from None
         except (OSError, urllib.error.URLError) as error:
             raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", type(error).__name__) from None
         if not body:
-            return None
+            raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "hosted response was empty")
         try:
             return json.loads(body)
         except json.JSONDecodeError:
@@ -368,11 +389,9 @@ class HostedHttpBackend:
 
     def health(self) -> bool:
         payload = self._request("/health")
-        if payload is None:
+        if isinstance(payload, dict) and payload.get("ok") is True:
             return True
-        if isinstance(payload, dict) and payload.get("ok") is False:
-            return False
-        return True
+        raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "hosted health payload was not ok:true")
 
     def _matching_summaries(self, allocation: dict[str, Any]) -> list[dict[str, Any]]:
         recipient = allocation["recipient"].lower()
