@@ -953,12 +953,7 @@ def await_messages(selected_backend: Backend, allocation: dict[str, Any], timeou
                 else:
                     selected_backend._deadline = deadline
                     selected_backend.request_timeout = max(0.01, min(10.0, deadline - time.monotonic()))
-            try:
-                rows = sorted(selected_backend.list(allocation), key=lambda message: (message["received_at"], message["opaque_id"]))
-            except CaptureError as exc:
-                if exc.code == "MESSAGE_TIMEOUT" and count == 0:
-                    return [], cursor
-                raise
+            rows = sorted(selected_backend.list(allocation), key=lambda message: (message["received_at"], message["opaque_id"]))
             first_poll = False
             rows = [message for message in rows if not not_before or message["received_at"] >= not_before]
             ids = [message["opaque_id"] for message in rows]

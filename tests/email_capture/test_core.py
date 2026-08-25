@@ -104,7 +104,7 @@ class CaptureTests(unittest.TestCase):
                 _remaining_request_timeout(self)
                 return []
 
-        class AlwaysTimeoutBackend:
+        class IncompleteReadBackend:
             request_timeout = 10.0
 
             def list(self, allocation):
@@ -115,8 +115,8 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual((messages, cursor), ([], "0:"))
         with self.assertRaisesRegex(CaptureError, "MESSAGE_TIMEOUT"):
             await_messages(deadline_backend, self.allocation, 0.04, count=1)
-        messages, cursor = await_messages(AlwaysTimeoutBackend(), self.allocation, 0.04, count=0)
-        self.assertEqual((messages, cursor), ([], "0:"))
+        with self.assertRaisesRegex(CaptureError, "MESSAGE_TIMEOUT"):
+            await_messages(IncompleteReadBackend(), self.allocation, 0.04, count=0)
 
     def test_receiver_specific_normalisation(self):
         inbucket = normalise_message({"id": "i1", "date": "2026-08-21T00:00:00Z", "from": "from@test", "to": ["to@test"], "subject": "s", "body": {"text": "123456", "html": "<b>x</b>"}, "header": {"X-Test": ["yes"]}, "attachments": [{"filename": "a.txt", "content-type": "text/plain"}]}, "inbucket")
