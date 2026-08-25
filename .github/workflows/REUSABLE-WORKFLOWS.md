@@ -92,12 +92,18 @@ jobs:
 
 ### Proxy Mode
 
+Callers of `pr-assessment-reusable` must include `ready_for_review` in
+`on.pull_request.types`. The reusable skips drafts on `pull_request` and still
+runs on `workflow_dispatch`. Downstream jobs require classify success so SAST
+does not start when classify is skipped.
+
 ```yaml
 name: PR Assessment
 
 on:
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read

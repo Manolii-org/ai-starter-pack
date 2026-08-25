@@ -66,6 +66,18 @@ Agents use tools in this priority order:
 - Migrations require rollback plans
 - Use explicit timeouts on all external calls (`AbortSignal.timeout()` in JS/TS, `timeout` in Bash/curl, `asyncio.timeout()` in Python)
 
+## CI cost (GitHub Actions minutes)
+
+See `docs/ci-cost-conventions.md`. In short:
+
+- Skip drafts on PR Assessment and other LLM jobs; always listen for `ready_for_review`.
+- Downstream jobs of a skippable classify step must require `needs.classify.result == 'success'`.
+- Do not add unfiltered `pull_request` workflows that install browsers or `supabase start`.
+- Playwright (or similar) that is internally detect-gated must **not** also use `on.paths` if the check might become required.
+- CI wait loops that poll `gh run list` belong in `scripts/ci/` with a fake-`gh` test; capture `gh` exit status (no process substitution); wait on the SHA you will deploy including in-flight ancestor runs. Do not add an always-on workflow to enforce this.
+- Put `concurrency:` on the job that holds a shared lock, not the whole workflow, when a cheap detect job exists.
+- `workflow_run` waiters that assume an open PR must skip when that SHA has no open PR.
+
 ## Sub-Agent Invocation
 
 Sub-agents are defined in `.claude/agents/` and invoked via the Agent tool:

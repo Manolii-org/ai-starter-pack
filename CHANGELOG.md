@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **PR Assessment skips drafts.** Standalone and reusable skip
+  `pull_request.draft` and listen for `ready_for_review`. Downstream jobs
+  require `needs.classify.result == 'success'` so Semgrep/Bandit cannot start
+  when classify is skipped (empty `depth` is not the string `'none'`).
+- **CI cost conventions.** `docs/ci-cost-conventions.md` — wait-loop extraction,
+  no unfiltered browser/`supabase start` PR workflows, job-level concurrency
+  for shared locks, no `on.paths` on internally detect-gated required e2e.
+
 ## 1.9.7 — 2026-08-21
 
 - **Ship email-capture v0.1.1.** Include the portable hermetic inbox CLI, eight

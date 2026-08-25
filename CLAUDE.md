@@ -72,7 +72,8 @@ src/
 4. Use `AbortSignal.timeout()` for all external HTTP calls
 5. Fix root causes, not symptoms — every fix needs a `Root cause:` explanation
 6. Every API route needs a security marker: `// PUBLIC:`, `// USER:`, `// ADMIN:`, `// WEBHOOK:`
-7. {Add project-specific rules here}
+7. Follow `docs/ci-cost-conventions.md` for GitHub Actions minutes: skip drafts on LLM PR jobs (keep `ready_for_review`); path-filter non-required browser/`supabase start` PR workflows; do not add `on.paths` to internally detect-gated e2e that might become required; extract `gh run list` wait loops to `scripts/ci/` with a fake-`gh` test; put shared `concurrency:` on the job that holds the lock, not a detect-only workflow
+8. {Add project-specific rules here}
 
 ## Framework Rules
 
