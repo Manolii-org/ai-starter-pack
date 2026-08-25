@@ -212,6 +212,10 @@ def _validate_hosted_endpoint(endpoint: str, environment: str) -> None:
     if not endpoint:
         raise CaptureError("CONFIG_INVALID", "HTTP backend requires endpoint")
     parsed = urllib.parse.urlparse(endpoint)
+    try:
+        parsed.port
+    except ValueError as exc:
+        raise CaptureError("CONFIG_INVALID", "hosted endpoint authority is invalid") from exc
     if parsed.username is not None or parsed.password is not None or parsed.query or parsed.fragment:
         raise CaptureError("AUTHORIZATION_DENIED", "hosted endpoint must not embed credentials")
     if parsed.scheme == "https" and parsed.hostname:
@@ -828,31 +832,37 @@ def await_messages(selected_backend: Backend, allocation: dict[str, Any], timeou
         raise CaptureError("CONFIG_INVALID", "timeout and count must be non-negative")
     deadline = time.monotonic() + timeout
     cursor = allocation.get("cursor", "0:")
-    while True:
-        if hasattr(selected_backend, "request_timeout"):
-            selected_backend._deadline = deadline
-            selected_backend.request_timeout = max(0.01, min(10.0, deadline - time.monotonic()))
-        rows = sorted(selected_backend.list(allocation), key=lambda message: (message["received_at"], message["opaque_id"]))
-        rows = [message for message in rows if not not_before or message["received_at"] >= not_before]
-        ids = [message["opaque_id"] for message in rows]
-        if len(ids) != len(set(ids)):
-            raise CaptureError("MESSAGE_REPLAYED", "duplicate opaque message id")
-        fresh = [message for message in rows if f'{message["received_at"]}:{message["opaque_id"]}' > cursor]
-        if count == 0:
-            if fresh:
-                raise CaptureError("ASSERTION_FAILED", "bounded negative assertion failed")
-            if time.monotonic() >= deadline:
-                return [], cursor
-        else:
-            if len(fresh) > count:
-                raise CaptureError("MESSAGE_AMBIGUOUS", "more messages than expected")
-            if len(fresh) == count:
-                advanced = f'{fresh[-1]["received_at"]}:{fresh[-1]["opaque_id"]}'
-                allocation["cursor"] = advanced
-                return fresh, advanced
-            if time.monotonic() >= deadline:
-                raise CaptureError("MESSAGE_TIMEOUT", "bounded wait expired")
-        time.sleep(min(0.25, max(0, deadline - time.monotonic())))
+    original_timeout = getattr(selected_backend, "request_timeout", None)
+    try:
+        while True:
+            if hasattr(selected_backend, "request_timeout"):
+                selected_backend._deadline = deadline
+                selected_backend.request_timeout = max(0.01, min(10.0, deadline - time.monotonic()))
+            rows = sorted(selected_backend.list(allocation), key=lambda message: (message["received_at"], message["opaque_id"]))
+            rows = [message for message in rows if not not_before or message["received_at"] >= not_before]
+            ids = [message["opaque_id"] for message in rows]
+            if len(ids) != len(set(ids)):
+                raise CaptureError("MESSAGE_REPLAYED", "duplicate opaque message id")
+            fresh = [message for message in rows if f'{message["received_at"]}:{message["opaque_id"]}' > cursor]
+            if count == 0:
+                if fresh:
+                    raise CaptureError("ASSERTION_FAILED", "bounded negative assertion failed")
+                if time.monotonic() >= deadline:
+                    return [], cursor
+            else:
+                if len(fresh) > count:
+                    raise CaptureError("MESSAGE_AMBIGUOUS", "more messages than expected")
+                if len(fresh) == count:
+                    advanced = f'{fresh[-1]["received_at"]}:{fresh[-1]["opaque_id"]}'
+                    allocation["cursor"] = advanced
+                    return fresh, advanced
+                if time.monotonic() >= deadline:
+                    raise CaptureError("MESSAGE_TIMEOUT", "bounded wait expired")
+            time.sleep(min(0.25, max(0, deadline - time.monotonic())))
+    finally:
+        selected_backend._deadline = None
+        if original_timeout is not None:
+            selected_backend.request_timeout = original_timeout
 
 
 def extract(message: dict[str, Any], kind: str, name: str | None = None) -> list[str]:

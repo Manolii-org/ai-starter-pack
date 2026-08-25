@@ -9,7 +9,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from email_capture.core import CaptureError, HostedHttpBackend, Profile, backend
+from email_capture.core import CaptureError, HostedHttpBackend, Profile, await_messages, backend
 
 
 class HostedHandler(BaseHTTPRequestHandler):
@@ -485,6 +485,25 @@ class HostedCaptureTests(unittest.TestCase):
         adapter._deadline = 0
         with self.assertRaisesRegex(CaptureError, "MESSAGE_TIMEOUT"):
             adapter.health()
+
+    def test_invalid_hosted_authority_is_config_error(self):
+        os.environ.update(
+            EMAIL_CAPTURE_MODE="hosted",
+            EMAIL_CAPTURE_BACKEND="hosted",
+            EMAIL_CAPTURE_ENDPOINT="https://example.com:abc",
+            EMAIL_CAPTURE_ENVIRONMENT="staging",
+            EMAIL_CAPTURE_HOSTED_TOKEN=HostedHandler.token,
+        )
+        with self.assertRaisesRegex(CaptureError, "CONFIG_INVALID"):
+            Profile.load()
+
+    def test_await_timeout_clears_deadline_for_later_ops(self):
+        adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))
+        HostedHandler.list_payload = {"messages": []}
+        with self.assertRaisesRegex(CaptureError, "MESSAGE_TIMEOUT"):
+            await_messages(adapter, {"recipient": HostedHandler.recipient, "cursor": "0:"}, timeout=0.01)
+        self.assertIsNone(getattr(adapter, "_deadline", "missing"))
+        self.assertTrue(adapter.health())
 
     def test_canary_cli_emits_metadata_only(self):
         with tempfile.TemporaryDirectory() as temp:
