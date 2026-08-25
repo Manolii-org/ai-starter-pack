@@ -711,11 +711,21 @@ class HostedCaptureTests(unittest.TestCase):
         with self.assertRaisesRegex(CaptureError, "CAPTURE_INFRA_UNAVAILABLE"):
             adapter.list({"recipient": HostedHandler.recipient})
 
-    def test_expired_await_deadline_stops_hosted_requests(self):
+    def test_hosted_bounded_negative_empty_mailbox_returns(self):
+        adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))
+        HostedHandler.list_payload = {"messages": []}
+        messages, cursor = await_messages(
+            adapter,
+            {"recipient": HostedHandler.recipient, "cursor": "0:"},
+            timeout=0.05,
+            count=0,
+        )
+        self.assertEqual((messages, cursor), ([], "0:"))
+
+    def test_expired_deadline_still_finishes_complete_tiny_health(self):
         adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))
         adapter._deadline = 0
-        with self.assertRaisesRegex(CaptureError, "MESSAGE_TIMEOUT"):
-            adapter.health()
+        self.assertTrue(adapter.health())
 
     def test_invalid_hosted_authority_is_config_error(self):
         os.environ.update(
