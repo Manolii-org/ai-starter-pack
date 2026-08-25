@@ -351,10 +351,11 @@ class HostedCaptureTests(unittest.TestCase):
         staging_pattern = nested[1]["then"]["properties"]["endpoint"]["pattern"]
         self.assertIn("http://", test_pattern)
         self.assertNotIn("http://", staging_pattern)
-        self.assertIn("@]", test_pattern)
-        self.assertIn("@]", staging_pattern)
         import re
         self.assertIsNone(re.fullmatch(staging_pattern, "https://:443"))
+        self.assertIsNone(re.fullmatch(staging_pattern, "https://."))
+        self.assertIsNone(re.fullmatch(staging_pattern, "https://example..com"))
+        self.assertIsNone(re.fullmatch(staging_pattern, "https://user:pass@host.example"))
         self.assertIsNotNone(re.fullmatch(staging_pattern, "https://capture.example.test"))
         self.assertIn("environment", hosted["required"])
 
@@ -463,6 +464,30 @@ class HostedCaptureTests(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_reordered_to_aliases_are_the_same_set(self):
+        adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))
+        HostedHandler.detail_override = {
+            "id": "h1",
+            "date": "1999-01-01T00:00:00Z",
+            "from": "sender@test",
+            "To": [HostedHandler.recipient, "other@capture.test"],
+            "to": ["other@capture.test", HostedHandler.recipient],
+            "subject": "ok",
+            "text": "ok",
+            "html": "",
+            "headers": {},
+            "attachments": [],
+        }
+        messages = adapter.list({"recipient": HostedHandler.recipient})
+        self.assertEqual(len(messages), 1)
+
+    def test_zero_timeout_still_polls_once(self):
+        adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))
+        HostedHandler.list_payload = {"messages": []}
+        with self.assertRaisesRegex(CaptureError, "MESSAGE_TIMEOUT"):
+            await_messages(adapter, {"recipient": HostedHandler.recipient, "cursor": "0:"}, timeout=0)
+        self.assertTrue(any(method == "GET" and path.startswith("/messages") for method, path, _auth in HostedHandler.requests))
+
     def test_conflicting_to_aliases_are_infra_failure(self):
         adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))
         HostedHandler.detail_override = {
@@ -490,12 +515,13 @@ class HostedCaptureTests(unittest.TestCase):
         os.environ.update(
             EMAIL_CAPTURE_MODE="hosted",
             EMAIL_CAPTURE_BACKEND="hosted",
-            EMAIL_CAPTURE_ENDPOINT="https://example.com:abc",
             EMAIL_CAPTURE_ENVIRONMENT="staging",
             EMAIL_CAPTURE_HOSTED_TOKEN=HostedHandler.token,
         )
-        with self.assertRaisesRegex(CaptureError, "CONFIG_INVALID"):
-            Profile.load()
+        for endpoint in ("https://example.com:abc", "https://.", "https://example..com"):
+            os.environ["EMAIL_CAPTURE_ENDPOINT"] = endpoint
+            with self.assertRaisesRegex(CaptureError, "CONFIG_INVALID"):
+                Profile.load()
 
     def test_await_timeout_clears_deadline_for_later_ops(self):
         adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))

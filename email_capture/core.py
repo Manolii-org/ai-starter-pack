@@ -216,6 +216,13 @@ def _validate_hosted_endpoint(endpoint: str, environment: str) -> None:
         parsed.port
     except ValueError as exc:
         raise CaptureError("CONFIG_INVALID", "hosted endpoint authority is invalid") from exc
+    if parsed.hostname:
+        try:
+            parsed.hostname.encode("idna")
+        except UnicodeError as exc:
+            raise CaptureError("CONFIG_INVALID", "hosted endpoint hostname is invalid") from exc
+        if ".." in parsed.hostname or parsed.hostname.startswith(".") or parsed.hostname.endswith("."):
+            raise CaptureError("CONFIG_INVALID", "hosted endpoint hostname is invalid")
     if parsed.username is not None or parsed.password is not None or parsed.query or parsed.fragment:
         raise CaptureError("AUTHORIZATION_DENIED", "hosted endpoint must not embed credentials")
     if parsed.scheme == "https" and parsed.hostname:
@@ -613,7 +620,7 @@ def _require_consistent_to_aliases(row: dict[str, Any]) -> None:
     envelope = row.get("envelope")
     if isinstance(envelope, dict) and "to" in envelope:
         groups.append(tuple(_parsed_addresses(envelope["to"])))
-    if len(groups) >= 2 and any(group != groups[0] for group in groups[1:]):
+    if len(groups) >= 2 and any(set(group) != set(groups[0]) for group in groups[1:]):
         raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "conflicting recipient aliases")
 
 
@@ -833,12 +840,18 @@ def await_messages(selected_backend: Backend, allocation: dict[str, Any], timeou
     deadline = time.monotonic() + timeout
     cursor = allocation.get("cursor", "0:")
     original_timeout = getattr(selected_backend, "request_timeout", None)
+    first_poll = True
     try:
         while True:
             if hasattr(selected_backend, "request_timeout"):
-                selected_backend._deadline = deadline
-                selected_backend.request_timeout = max(0.01, min(10.0, deadline - time.monotonic()))
+                if first_poll:
+                    selected_backend._deadline = None
+                    selected_backend.request_timeout = max(0.01, min(10.0, float(original_timeout or 10.0)))
+                else:
+                    selected_backend._deadline = deadline
+                    selected_backend.request_timeout = max(0.01, min(10.0, deadline - time.monotonic()))
             rows = sorted(selected_backend.list(allocation), key=lambda message: (message["received_at"], message["opaque_id"]))
+            first_poll = False
             rows = [message for message in rows if not not_before or message["received_at"] >= not_before]
             ids = [message["opaque_id"] for message in rows]
             if len(ids) != len(set(ids)):
