@@ -87,6 +87,53 @@
           "endpoint"
         ]
       }
+    },
+    {
+      "if": {
+        "properties": {
+          "mode": {
+            "const": "hosted"
+          }
+        },
+        "required": [
+          "mode"
+        ]
+      },
+      "then": {
+        "properties": {
+          "backend": {
+            "const": "hosted"
+          }
+        },
+        "required": [
+          "backend",
+          "endpoint"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "mode": {
+            "const": "hermetic"
+          }
+        },
+        "required": [
+          "mode"
+        ]
+      },
+      "then": {
+        "properties": {
+          "backend": {
+            "enum": [
+              "memory",
+              "mailpit",
+              "maildev",
+              "inbucket"
+            ]
+          }
+        }
+      }
     }
   ]
 }
