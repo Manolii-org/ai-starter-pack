@@ -7,9 +7,14 @@ the product repo. Do not copy those into pack workflows.
 ## 1. Skip drafts on expensive PR automation
 
 `pull_request`-triggered LLM jobs (PR Assessment) skip
-`github.event.pull_request.draft`. Always list `ready_for_review` in
-`on.pull_request.types` or marking ready never starts the job. Put the skip
-on the **job** `if:` so no runner starts (`$0`).
+`github.event.pull_request.draft`. Always list `ready_for_review` and
+`converted_to_draft` in `on.pull_request.types`. Without `ready_for_review`,
+marking ready never starts the job. `converted_to_draft` starts a skip run;
+pair it with workflow-level `concurrency` and `cancel-in-progress: true` so
+an in-flight LLM/SAST run is cancelled. Put the skip on the **job** `if:` so
+no runner starts (`$0`). Reusable callers must also require
+`github.event_name == 'pull_request'` on `classify` — a missing PR payload
+is not a supported assessment path.
 
 Autofix (`pr-autofix-loop.yml`) is **not** draft-gated. It runs on
 `issue_comment`, `pull_request_review`, `pull_request_review_comment`, and

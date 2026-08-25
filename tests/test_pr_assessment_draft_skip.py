@@ -20,6 +20,7 @@ def test_standalone_listens_for_ready_and_skips_drafts() -> None:
     spec = yaml.safe_load(STANDALONE.read_text(encoding="utf-8"))
     types = set((_on(spec).get("pull_request") or {}).get("types") or [])
     assert "ready_for_review" in types
+    assert "converted_to_draft" in types
     classify = spec["jobs"]["classify"].get("if") or ""
     assert "draft != true" in classify
 
@@ -40,7 +41,8 @@ def test_reusable_skips_drafts_on_pull_request_only() -> None:
     spec = yaml.safe_load(REUSABLE.read_text(encoding="utf-8"))
     classify = spec["jobs"]["classify"].get("if") or ""
     assert "draft != true" in classify
-    assert "github.event_name != 'pull_request'" in classify
+    assert "github.event_name == 'pull_request'" in classify
+    assert "github.event_name != 'pull_request'" not in classify
 
 
 @pytest.mark.skipif(

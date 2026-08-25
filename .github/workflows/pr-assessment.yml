@@ -7,7 +7,8 @@ name: PR Assessment
 # config-completeness-ignore: run
 
 # AI-driven PR review pipeline. Skip drafts (qualification is lint/secret-scan);
-# run on ready_for_review and later non-draft synchronize.
+# run on ready_for_review and later non-draft synchronize. converted_to_draft
+# starts a skip run; concurrency cancel-in-progress aborts in-flight LLM/SAST.
 # Stages: pr-classifier → specialist skills → broad agents → judge
 # Downstream jobs require needs.classify.result == 'success' so Semgrep/Bandit
 # cannot start when classify is skipped (empty depth is not the string 'none').
@@ -30,7 +31,7 @@ on:
       - '.ai/memory/eval-failures.jsonl'
       - '.ai/skill-graph.md'
     branches: [main, master, develop]
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
 
 concurrency:
   group: pr-assessment-${{ github.ref }}

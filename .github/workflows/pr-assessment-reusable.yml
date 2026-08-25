@@ -1,10 +1,12 @@
 name: PR Assessment (Reusable)
 # Reusable workflow_call form of pr-assessment.yml.
 # Caller owns the `on:` triggers; this file only defines the jobs.
-# Skip drafts on pull_request only. Callers must still list ready_for_review
-# or marking a draft ready never starts assessment. Non-PR caller events are
-# not draft-gated; they are not a supported full-assessment path either
-# (jobs still read github.base_ref / the PR number from the caller event).
+# Skip drafts on pull_request only. classify requires event_name == pull_request
+# and draft != true, so workflow_dispatch / other caller events never reach
+# git diff against github.base_ref or a judge comment on an empty PR number.
+# Callers must list ready_for_review and converted_to_draft, and set
+# concurrency cancel-in-progress so converting back to draft cancels in-flight
+# LLM/SAST.
 # Downstream jobs require needs.classify.result == 'success' so SAST cannot
 # start when classify is skipped (empty depth is not the string 'none').
 # Dual provider_mode: anthropic (direct ANTHROPIC_API_KEY) | proxy (LiteLLM via ANTHROPIC_BASE_URL + LITELLM_MASTER_KEY).
@@ -72,7 +74,8 @@ jobs:
     # assessment; merge authorization additionally stays with the auto-merge
     # gate's structural verifier.
     if: |
-      (github.event_name != 'pull_request' || github.event.pull_request.draft != true) &&
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.draft != true &&
       !contains(github.event.pull_request.labels.*.name, 'skip-ai-review') &&
       !startsWith(github.event.pull_request.title, 'chore(sync):') &&
       !(startsWith(github.head_ref, 'automated/sync-') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.id == inputs.trusted_sync_author_id)

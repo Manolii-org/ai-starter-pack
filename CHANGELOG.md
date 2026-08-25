@@ -3,9 +3,15 @@
 ## Unreleased
 
 - **PR Assessment skips drafts.** Standalone and reusable skip
-  `pull_request.draft` and listen for `ready_for_review`. Downstream jobs
-  require `needs.classify.result == 'success'` so Semgrep/Bandit cannot start
+  `pull_request.draft` and listen for `ready_for_review` and
+  `converted_to_draft`. Downstream jobs require
+  `needs.classify.result == 'success'` so Semgrep/Bandit cannot start
   when classify is skipped (empty `depth` is not the string `'none'`).
+  Standalone `concurrency` + `cancel-in-progress` cancels in-flight
+  LLM/SAST when a ready PR is converted back to draft. Reusable
+  `classify` requires `github.event_name == 'pull_request'` so
+  `workflow_dispatch` never reaches `git diff` against `github.base_ref`
+  or a judge comment on an empty PR number.
 - **CI cost conventions.** `docs/ci-cost-conventions.md` — wait-loop extraction,
   no unfiltered browser/`supabase start` PR workflows, job-level concurrency
   for shared locks, no `on.paths` on internally detect-gated required e2e.
