@@ -446,6 +446,46 @@ class HostedCaptureTests(unittest.TestCase):
             adapter.purge({"recipient": HostedHandler.recipient})
         self.assertEqual(HostedHandler.deleted, [])
 
+    def test_hosted_requires_explicit_environment(self):
+        os.environ.pop("NODE_ENV", None)
+        os.environ.pop("EMAIL_CAPTURE_ENVIRONMENT", None)
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
+            json.dump({
+                "schema_version": "1.0",
+                "mode": "hosted",
+                "backend": "hosted",
+                "endpoint": "https://capture.example.test",
+            }, handle)
+            path = handle.name
+        try:
+            with self.assertRaisesRegex(CaptureError, "CONFIG_INVALID"):
+                Profile.load(path)
+        finally:
+            os.unlink(path)
+
+    def test_conflicting_to_aliases_are_infra_failure(self):
+        adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))
+        HostedHandler.detail_override = {
+            "id": "h1",
+            "date": "1999-01-01T00:00:00Z",
+            "from": "sender@test",
+            "To": [HostedHandler.recipient],
+            "to": ["other@capture.test"],
+            "subject": "ok",
+            "text": "secret-for-other",
+            "html": "",
+            "headers": {},
+            "attachments": [],
+        }
+        with self.assertRaisesRegex(CaptureError, "CAPTURE_INFRA_UNAVAILABLE"):
+            adapter.list({"recipient": HostedHandler.recipient})
+
+    def test_expired_await_deadline_stops_hosted_requests(self):
+        adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))
+        adapter._deadline = 0
+        with self.assertRaisesRegex(CaptureError, "MESSAGE_TIMEOUT"):
+            adapter.health()
+
     def test_canary_cli_emits_metadata_only(self):
         with tempfile.TemporaryDirectory() as temp:
             profile_path = Path(temp) / "profile.json"

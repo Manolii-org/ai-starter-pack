@@ -128,7 +128,12 @@ class Profile:
         version = raw.get("schema_version", VERSION)
         mode = raw.get("mode", "off")
         backend_name = raw.get("backend", "memory")
-        environment = raw.get("environment", os.environ.get("NODE_ENV", "test"))
+        if mode == "hosted":
+            if "environment" not in raw or not str(raw.get("environment") or "").strip():
+                raise CaptureError("CONFIG_INVALID", "hosted capture requires an explicit environment")
+            environment = raw["environment"]
+        else:
+            environment = raw.get("environment", os.environ.get("NODE_ENV", "test"))
         ttl = raw.get("ttl_seconds", 900)
         endpoint = raw.get("endpoint", "")
         fidelity = raw.get("fidelity", "provider-to-capture")
@@ -172,6 +177,18 @@ class Backend(Protocol):
     def list(self, allocation: dict[str, Any]) -> list[dict[str, Any]]: ...
     def purge(self, allocation: dict[str, Any]) -> None: ...
     def health(self) -> bool: ...
+
+
+def _remaining_request_timeout(backend: Any) -> float:
+    """Apply the await deadline to every HTTP request, not only the first."""
+    timeout = float(getattr(backend, "request_timeout", 10.0))
+    deadline = getattr(backend, "_deadline", None)
+    if deadline is None:
+        return timeout
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise CaptureError("MESSAGE_TIMEOUT", "bounded wait expired")
+    return max(0.01, min(timeout, remaining))
 
 
 def _validate_local_endpoint(endpoint: str) -> None:
@@ -250,7 +267,7 @@ class HttpBackend:
             method=method,
         )
         try:
-            with self._opener.open(request, timeout=self.request_timeout) as response:
+            with self._opener.open(request, timeout=_remaining_request_timeout(self)) as response:
                 body = response.read()
         except CaptureError:
             raise
@@ -372,7 +389,7 @@ class HostedHttpBackend:
             method=method,
         )
         try:
-            with self._opener.open(request, timeout=self.request_timeout) as response:
+            with self._opener.open(request, timeout=_remaining_request_timeout(self)) as response:
                 body = _read_bounded_http_body(response)
         except CaptureError:
             raise
@@ -429,6 +446,7 @@ class HostedHttpBackend:
                 raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "receiver summary has invalid shape")
             _message_id(row)
             _require_well_formed_recipient_field(row)
+            _require_consistent_to_aliases(row)
             if _summary_contains_recipient(row, recipient):
                 matched.append(row)
         return matched
@@ -445,6 +463,7 @@ class HostedHttpBackend:
             if _message_id(detail) != requested_id:
                 raise CaptureError("AUTHORIZATION_DENIED", "detail id is outside allocation")
             _require_well_formed_recipient_field(detail)
+            _require_consistent_to_aliases(detail)
             if not _summary_contains_recipient(detail, recipient):
                 raise CaptureError("AUTHORIZATION_DENIED", "detail recipient is outside allocation")
             receiver_time = summary.get("received_at") or summary.get("Created") or summary.get("created") or summary.get("date")
@@ -467,6 +486,7 @@ class HostedHttpBackend:
             if _message_id(detail) != requested_id:
                 raise CaptureError("AUTHORIZATION_DENIED", "delete id is outside allocation")
             _require_well_formed_recipient_field(detail)
+            _require_consistent_to_aliases(detail)
             _require_envelope_fields_well_formed(detail)
             if not _summary_contains_recipient(detail, recipient):
                 raise CaptureError("AUTHORIZATION_DENIED", "delete recipient is outside allocation")
@@ -579,6 +599,19 @@ def _require_well_formed_recipient_field(row: dict[str, Any]) -> None:
         raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "receiver summary is missing recipients")
     if not _recipient_values_are_well_formed(value, require_address=True):
         raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "receiver summary recipients are malformed")
+
+def _require_consistent_to_aliases(row: dict[str, Any]) -> None:
+    """Reject To/to/envelope.to aliases that name different recipients."""
+    groups: list[tuple[str, ...]] = []
+    for key in ("To", "to"):
+        if key in row:
+            groups.append(tuple(_parsed_addresses(row[key])))
+    envelope = row.get("envelope")
+    if isinstance(envelope, dict) and "to" in envelope:
+        groups.append(tuple(_parsed_addresses(envelope["to"])))
+    if len(groups) >= 2 and any(group != groups[0] for group in groups[1:]):
+        raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "conflicting recipient aliases")
+
 
 
 def _summary_has_recipient_field(row: dict[str, Any]) -> bool:
@@ -797,6 +830,7 @@ def await_messages(selected_backend: Backend, allocation: dict[str, Any], timeou
     cursor = allocation.get("cursor", "0:")
     while True:
         if hasattr(selected_backend, "request_timeout"):
+            selected_backend._deadline = deadline
             selected_backend.request_timeout = max(0.01, min(10.0, deadline - time.monotonic()))
         rows = sorted(selected_backend.list(allocation), key=lambda message: (message["received_at"], message["opaque_id"]))
         rows = [message for message in rows if not not_before or message["received_at"] >= not_before]
