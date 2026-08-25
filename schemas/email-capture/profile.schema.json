@@ -74,40 +74,6 @@
     {
       "if": {
         "properties": {
-          "backend": {
-            "const": "hosted"
-          }
-        },
-        "required": [
-          "backend"
-        ]
-      },
-      "then": {
-        "required": [
-          "endpoint"
-        ],
-        "properties": {
-          "environment": {
-            "type": "string",
-            "enum": [
-              "test",
-              "ci",
-              "preview",
-              "preprod",
-              "staging"
-            ]
-          },
-          "endpoint": {
-            "type": "string",
-            "minLength": 8,
-            "pattern": "^(https://[^\\s?#]+|http://(localhost|127\\.0\\.0\\.1|\\[::1\\])(:[0-9]+)?(/[^\\s?#]*)?)$"
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
           "mode": {
             "const": "hosted"
           }
@@ -117,6 +83,10 @@
         ]
       },
       "then": {
+        "required": [
+          "backend",
+          "endpoint"
+        ],
         "properties": {
           "backend": {
             "const": "hosted"
@@ -130,16 +100,56 @@
               "preprod",
               "staging"
             ]
-          },
-          "endpoint": {
-            "type": "string",
-            "minLength": 8,
-            "pattern": "^(https://[^\\s?#]+|http://(localhost|127\\.0\\.0\\.1|\\[::1\\])(:[0-9]+)?(/[^\\s?#]*)?)$"
           }
         },
-        "required": [
-          "backend",
-          "endpoint"
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "environment": {
+                  "const": "test"
+                }
+              },
+              "required": [
+                "environment"
+              ]
+            },
+            "then": {
+              "properties": {
+                "endpoint": {
+                  "type": "string",
+                  "minLength": 8,
+                  "pattern": "^(https://[^\\s?#]+|http://(localhost|127\\.0\\.0\\.1|\\[::1\\])(:[0-9]+)?(/[^\\s?#]*)?)$"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "environment": {
+                  "enum": [
+                    "ci",
+                    "preview",
+                    "preprod",
+                    "staging"
+                  ]
+                }
+              },
+              "required": [
+                "environment"
+              ]
+            },
+            "then": {
+              "properties": {
+                "endpoint": {
+                  "type": "string",
+                  "minLength": 8,
+                  "pattern": "^https://[^\\s?#]+$"
+                }
+              }
+            }
+          }
         ]
       }
     },

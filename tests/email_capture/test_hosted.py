@@ -334,16 +334,45 @@ class HostedCaptureTests(unittest.TestCase):
 
     def test_hosted_schema_rejects_production_and_empty_endpoint(self):
         schema = json.loads((Path(__file__).resolve().parents[2] / "schemas/email-capture/profile.schema.json").read_text())
-        hosted_thens = []
-        for block in schema["allOf"]:
-            cond = block.get("if", {}).get("properties", {})
-            if cond.get("backend") == {"const": "hosted"} or cond.get("mode") == {"const": "hosted"}:
-                hosted_thens.append(block["then"]["properties"])
-        self.assertTrue(hosted_thens)
-        for props in hosted_thens:
-            self.assertEqual(props["environment"]["enum"], ["test", "ci", "preview", "preprod", "staging"])
-            self.assertIn("https://", props["endpoint"]["pattern"])
-            self.assertNotIn("production", props["environment"]["enum"])
+        hosted = next(block["then"] for block in schema["allOf"] if block.get("if", {}).get("properties", {}).get("mode") == {"const": "hosted"})
+        self.assertEqual(hosted["properties"]["environment"]["enum"], ["test", "ci", "preview", "preprod", "staging"])
+        self.assertFalse(any(block.get("if", {}).get("properties", {}).get("backend") == {"const": "hosted"} for block in schema["allOf"]))
+        nested = hosted["allOf"]
+        test_pattern = nested[0]["then"]["properties"]["endpoint"]["pattern"]
+        staging_pattern = nested[1]["then"]["properties"]["endpoint"]["pattern"]
+        self.assertIn("http://", test_pattern)
+        self.assertNotIn("http://", staging_pattern)
+
+    def test_off_mode_hosted_backend_loads_without_endpoint(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
+            json.dump({
+                "schema_version": "1.0",
+                "mode": "off",
+                "backend": "hosted",
+                "environment": "production",
+            }, handle)
+            path = handle.name
+        try:
+            loaded = Profile.load(path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(loaded.mode, "off")
+
+    def test_malformed_attachment_size_is_infra_failure(self):
+        adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))
+        HostedHandler.detail_override = {
+            "id": "h1",
+            "date": "1999-01-01T00:00:00Z",
+            "from": "sender@test",
+            "to": [HostedHandler.recipient],
+            "subject": "ok",
+            "text": "ok",
+            "html": "",
+            "headers": {},
+            "attachments": [{"filename": "a.bin", "size": "unknown"}],
+        }
+        with self.assertRaisesRegex(CaptureError, "CAPTURE_INFRA_UNAVAILABLE"):
+            adapter.list({"recipient": HostedHandler.recipient})
 
     def test_canary_cli_emits_metadata_only(self):
         with tempfile.TemporaryDirectory() as temp:

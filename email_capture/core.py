@@ -452,7 +452,7 @@ class HostedHttpBackend:
                 detail["received_at"] = receiver_time
             try:
                 details.append(normalise_message(detail, "hosted"))
-            except (TypeError, AttributeError) as error:
+            except (TypeError, AttributeError, ValueError) as error:
                 raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", type(error).__name__) from None
         return details
 
@@ -650,7 +650,17 @@ def normalise_message(row: dict[str, Any], backend_name: str) -> dict[str, Any]:
     for attachment in attachments:
         if not isinstance(attachment, dict):
             continue
-        size = int(attachment.get("size", attachment.get("Size", 0)) or 0)
+        raw_size = attachment.get("size", attachment.get("Size", 0))
+        if raw_size in (None, ""):
+            raw_size = 0
+        if isinstance(raw_size, bool) or not isinstance(raw_size, (int, str)):
+            raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "attachment size is malformed")
+        try:
+            size = int(raw_size)
+        except (TypeError, ValueError) as error:
+            raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "attachment size is malformed") from error
+        if size < 0:
+            raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "attachment size is malformed")
         if size > MAX_ATTACHMENT_BYTES:
             raise CaptureError("CAPABILITY_UNSUPPORTED", "attachment size limit exceeded")
         normalized_attachments.append({
