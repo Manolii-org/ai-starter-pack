@@ -1,5 +1,6 @@
 """Hosted capture profile, HTTP adapter, and canary CLI tests."""
 import json
+import secrets
 import os
 import subprocess
 import tempfile
@@ -13,7 +14,7 @@ from email_capture.core import CaptureError, HostedHttpBackend, Profile, backend
 
 class HostedHandler(BaseHTTPRequestHandler):
     recipient = "ec-test@capture.test"
-    token = "hosted-test-token"
+    token = ""
     requests = []
     deleted = []
 
@@ -59,6 +60,7 @@ class HostedHandler(BaseHTTPRequestHandler):
 class HostedCaptureTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        HostedHandler.token = secrets.token_hex(16)
         cls.server = ThreadingHTTPServer(("127.0.0.1", 0), HostedHandler)
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
@@ -141,7 +143,7 @@ class HostedCaptureTests(unittest.TestCase):
         self.assertEqual(messages[0]["received_at"], "2026-08-25T00:00:00Z")
         adapter.purge({"recipient": HostedHandler.recipient})
         self.assertEqual(HostedHandler.deleted, ["/messages/h1"])
-        self.assertTrue(all(auth == "Bearer hosted-test-token" for _method, _path, auth in HostedHandler.requests))
+        self.assertTrue(all(auth == f"Bearer {HostedHandler.token}" for _method, _path, auth in HostedHandler.requests))
         self.assertEqual(backend(Profile("hosted", "hosted", self.endpoint, "test")).capabilities()["fidelity"], "provider-to-capture")
 
     def test_canary_cli_emits_metadata_only(self):

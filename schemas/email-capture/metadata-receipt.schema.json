@@ -55,7 +55,10 @@
       "type": "string"
     },
     "fidelity": {
-      "type": "string"
+      "enum": [
+        "provider-to-capture",
+        "deployed-substitution"
+      ]
     }
   }
 }
