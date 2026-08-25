@@ -25,7 +25,7 @@ Standalone by default: all external integrations (OSS routing, remote memory, br
 
 ## Hermetic virtual inbox
 
-`bin/email-capture` is the single portable, backend-neutral executable for Mailpit (default), MailDev, Inbucket, and an in-memory conformance backend. It provides `allocate`, `await`, `assert`, `release`, `capabilities`, and `doctor`; all input can be inline JSON or `@mode-0600-file`. See `schemas/email-capture/` for the Draft 2020-12 v1 contract and `docs/adr/ADR-0010-hermetic-virtual-inbox.md` for data boundaries and exceptions.
+`bin/email-capture` is the single portable, backend-neutral executable for Mailpit (default), MailDev, Inbucket, an in-memory conformance backend, and an optional hosted HTTPS capture API. It provides `allocate`, `await`, `assert`, `release`, `capabilities`, `doctor`, and `canary`; all input can be inline JSON or `@mode-0600-file`. See `schemas/email-capture/` for the Draft 2020-12 v1 contract, `docs/adr/ADR-0010-hermetic-virtual-inbox.md` for the hermetic lock, and `docs/adr/ADR-0010b-hosted-capture-lane.md` for hosted bounds.
 
 ```bash
 export EMAIL_CAPTURE_MODE=hermetic EMAIL_CAPTURE_BACKEND=mailpit \
@@ -39,4 +39,4 @@ bin/email-capture release --allocation @allocation.json
 rm -f allocation.json messages.json
 ```
 
-Capture is fail-closed in staging/production. Disable it with `EMAIL_CAPTURE_MODE=off`; this never changes business-provider configuration.
+Hermetic capture is fail-closed in staging/production. Hosted capture is allowlisted for `test|ci|preview|preprod|staging` over HTTPS, with the bearer token only in `EMAIL_CAPTURE_HOSTED_TOKEN`. Disable either with `EMAIL_CAPTURE_MODE=off`; this never changes business-provider configuration.

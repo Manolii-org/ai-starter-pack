@@ -1,2 +1,2 @@
-"""Backend-neutral hermetic virtual inbox framework."""
-__version__ = "0.1.1"
+"""Backend-neutral hermetic and hosted virtual inbox framework."""
+__version__ = "0.2.0"

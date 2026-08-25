@@ -48,6 +48,12 @@ class CaptureError(Exception):
         }
 
 
+_HERMETIC_BACKENDS = {"memory", "mailpit", "maildev", "inbucket"}
+_HOSTED_ENVIRONMENTS = {"test", "ci", "preview", "preprod", "staging"}
+_PRODUCTION_ENVIRONMENTS = {"prod", "production", "prd"}
+_FIDELITIES = {"provider-to-capture", "deployed-substitution"}
+
+
 @dataclass(frozen=True)
 class Profile:
     """Validated capture configuration."""
@@ -57,6 +63,7 @@ class Profile:
     endpoint: str
     environment: str
     ttl_seconds: int = 900
+    fidelity: str = "provider-to-capture"
 
     @classmethod
     def load(cls, path: str | None = None) -> "Profile":
@@ -77,26 +84,49 @@ class Profile:
             legacy = any(key in os.environ for key in ("MAILDEV_URL", "MAILDEV_WEB_URL", "INBUCKET_URL", "EMAIL_CAPTURE_API_URL", "SMTP_HOST", "SMTP_PORT"))
             if canonical and legacy:
                 raise CaptureError("CONFIG_INVALID", "mixed canonical and legacy configuration")
+        credential_keys = {"token", "hosted_token", "api_key", "authorization"}
+        if path is None:
+            raw = {key: value for key, value in raw.items() if key not in credential_keys}
+        elif any(key in raw for key in credential_keys):
+            raise CaptureError("CONFIG_INVALID", "credentials must not appear in profile JSON")
         version = raw.get("schema_version", VERSION)
         mode = raw.get("mode", "off")
         backend_name = raw.get("backend", "memory")
         environment = raw.get("environment", os.environ.get("NODE_ENV", "test"))
         ttl = raw.get("ttl_seconds", 900)
         endpoint = raw.get("endpoint", "")
-        values = (version, mode, backend_name, environment, endpoint)
+        fidelity = raw.get("fidelity", "provider-to-capture")
+        values = (version, mode, backend_name, environment, endpoint, fidelity)
         if not all(isinstance(value, str) for value in values):
             raise CaptureError("CONFIG_INVALID", "profile fields have invalid types")
         if not isinstance(ttl, int) or isinstance(ttl, bool) or not 1 <= ttl <= 86400:
             raise CaptureError("CONFIG_INVALID", "TTL must be between 1 and 86400 seconds")
         if version.split(".")[0] != "1":
             raise CaptureError("CONFIG_INVALID", "unsupported schema major version")
-        if mode not in {"off", "hermetic"} or backend_name not in {"memory", "mailpit", "maildev", "inbucket"}:
+        if mode not in {"off", "hermetic", "hosted"}:
             raise CaptureError("CONFIG_INVALID", "unknown mode or backend")
-        if mode != "off" and environment.lower() in {"prod", "production", "staging"}:
+        if mode == "hermetic" and backend_name not in _HERMETIC_BACKENDS:
+            raise CaptureError("CONFIG_INVALID", "unknown mode or backend")
+        if mode == "hosted" and backend_name != "hosted":
+            raise CaptureError("CONFIG_INVALID", "hosted mode requires hosted backend")
+        if mode == "off" and backend_name not in _HERMETIC_BACKENDS | {"hosted"}:
+            raise CaptureError("CONFIG_INVALID", "unknown mode or backend")
+        if fidelity not in _FIDELITIES:
+            raise CaptureError("CONFIG_INVALID", "unknown fidelity")
+        env = environment.lower()
+        if mode == "hermetic" and env in {"prod", "production", "staging"}:
             raise CaptureError("CONFIG_INVALID", "capture forbidden in deployed environment")
+        if mode == "hosted" and env in _PRODUCTION_ENVIRONMENTS:
+            raise CaptureError("CONFIG_INVALID", "hosted capture forbidden in production")
+        if mode == "hosted" and env not in _HOSTED_ENVIRONMENTS:
+            raise CaptureError("CONFIG_INVALID", "hosted capture environment is not allowlisted")
+        if mode == "hosted":
+            _validate_hosted_endpoint(endpoint, env)
+            if not os.environ.get("EMAIL_CAPTURE_HOSTED_TOKEN"):
+                raise CaptureError("AUTHORIZATION_DENIED", "hosted token must come from EMAIL_CAPTURE_HOSTED_TOKEN")
         if mode == "hermetic" and backend_name != "memory":
             _validate_local_endpoint(endpoint)
-        return cls(mode, backend_name, endpoint, environment, ttl)
+        return cls(mode, backend_name, endpoint, environment, ttl, fidelity)
 
 
 class Backend(Protocol):
@@ -122,6 +152,21 @@ def _validate_local_endpoint(endpoint: str) -> None:
         or parsed.fragment
     ):
         raise CaptureError("AUTHORIZATION_DENIED", "receiver must be local HTTP")
+
+
+def _validate_hosted_endpoint(endpoint: str, environment: str) -> None:
+    """Allow HTTPS capture APIs; loopback HTTP only in the local test environment."""
+    if not endpoint:
+        raise CaptureError("CONFIG_INVALID", "HTTP backend requires endpoint")
+    parsed = urllib.parse.urlparse(endpoint)
+    if parsed.username is not None or parsed.password is not None or parsed.query or parsed.fragment:
+        raise CaptureError("AUTHORIZATION_DENIED", "hosted endpoint must not embed credentials")
+    if parsed.scheme == "https" and parsed.hostname:
+        return
+    loopback = parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+    if parsed.scheme == "http" and loopback and environment == "test":
+        return
+    raise CaptureError("AUTHORIZATION_DENIED", "hosted receiver must be HTTPS")
 
 
 def atomic_write_json(path: Path, value: Any) -> None:
@@ -264,6 +309,99 @@ class HttpBackend:
             self._request(path, "DELETE")
 
 
+class HostedHttpBackend:
+    """HTTPS capture adapter for vendor or consumer-hosted message APIs."""
+
+    def __init__(self, profile: Profile):
+        self.profile = profile
+        self.request_timeout = 10.0
+        self._opener = urllib.request.build_opener(_NoRedirect())
+
+    def _token(self) -> str:
+        token = os.environ.get("EMAIL_CAPTURE_HOSTED_TOKEN", "")
+        if not token or token != token.strip() or any(ch.isspace() for ch in token):
+            raise CaptureError("AUTHORIZATION_DENIED", "hosted token is missing or malformed")
+        return token
+
+    def _request(self, path: str, method: str = "GET") -> Any:
+        """Perform one bounded authenticated request without following redirects."""
+        headers = {
+            "Accept": "application/json",
+            "Authorization": f"Bearer {self._token()}",
+            "User-Agent": "email-capture/1.0",
+        }
+        request = urllib.request.Request(
+            self.profile.endpoint.rstrip("/") + path,
+            headers=headers,
+            method=method,
+        )
+        try:
+            with self._opener.open(request, timeout=self.request_timeout) as response:
+                body = response.read()
+        except CaptureError:
+            raise
+        except urllib.error.HTTPError as error:
+            if error.code in {401, 403}:
+                raise CaptureError("AUTHORIZATION_DENIED", f"hosted HTTP {error.code}") from None
+            raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", f"hosted HTTP {error.code}") from None
+        except (OSError, urllib.error.URLError) as error:
+            raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", type(error).__name__) from None
+        if not body:
+            return None
+        try:
+            return json.loads(body)
+        except json.JSONDecodeError:
+            raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "receiver returned invalid JSON") from None
+
+    def capabilities(self) -> dict[str, Any]:
+        return {
+            "schema_version": VERSION,
+            "backend": "hosted",
+            "allocation_scope": "recipient",
+            "cursor": "received_at_id",
+            "mime": True,
+            "attachments": True,
+            "attachment_size": True,
+            "purge_scope": "allocation",
+            "fidelity": self.profile.fidelity,
+        }
+
+    def health(self) -> bool:
+        payload = self._request("/health")
+        if payload is None:
+            return True
+        if isinstance(payload, dict) and payload.get("ok") is False:
+            return False
+        return True
+
+    def _matching_summaries(self, allocation: dict[str, Any]) -> list[dict[str, Any]]:
+        recipient = allocation["recipient"].lower()
+        query = urllib.parse.urlencode({"to": recipient})
+        data = self._request(f"/messages?{query}")
+        rows = data.get("messages", []) if isinstance(data, dict) else data
+        if not isinstance(rows, list):
+            raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "receiver list has invalid shape")
+        return [row for row in rows if isinstance(row, dict) and _summary_contains_recipient(row, recipient)]
+
+    def list(self, allocation: dict[str, Any]) -> list[dict[str, Any]]:
+        details: list[dict[str, Any]] = []
+        for summary in self._matching_summaries(allocation):
+            identifier = urllib.parse.quote(_message_id(summary), safe="")
+            detail = self._request(f"/messages/{identifier}")
+            if not isinstance(detail, dict):
+                raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "receiver detail has invalid shape")
+            receiver_time = summary.get("received_at") or summary.get("Created") or summary.get("created") or summary.get("date")
+            if isinstance(receiver_time, str) and receiver_time:
+                detail["received_at"] = receiver_time
+            details.append(normalise_message(detail, "hosted"))
+        return details
+
+    def purge(self, allocation: dict[str, Any]) -> None:
+        for row in self._matching_summaries(allocation):
+            identifier = urllib.parse.quote(_message_id(row), safe="")
+            self._request(f"/messages/{identifier}", "DELETE")
+
+
 class MemoryBackend:
     """File-backed backend used for fast contract tests."""
 
@@ -375,7 +513,11 @@ def backend(profile: Profile) -> Backend:
     """Construct an enabled backend only."""
     if profile.mode == "off":
         raise CaptureError("CAPABILITY_UNSUPPORTED", "capture mode is off")
-    return MemoryBackend(profile) if profile.backend == "memory" else HttpBackend(profile)
+    if profile.backend == "memory":
+        return MemoryBackend(profile)
+    if profile.backend == "hosted":
+        return HostedHttpBackend(profile)
+    return HttpBackend(profile)
 
 
 def _scope(request: dict[str, Any]) -> str:
@@ -464,7 +606,7 @@ def await_messages(selected_backend: Backend, allocation: dict[str, Any], timeou
     deadline = time.monotonic() + timeout
     cursor = allocation.get("cursor", "0:")
     while True:
-        if isinstance(selected_backend, HttpBackend):
+        if hasattr(selected_backend, "request_timeout"):
             selected_backend.request_timeout = max(0.01, min(10.0, deadline - time.monotonic()))
         rows = sorted(selected_backend.list(allocation), key=lambda message: (message["received_at"], message["opaque_id"]))
         rows = [message for message in rows if not not_before or message["received_at"] >= not_before]
@@ -522,5 +664,5 @@ def assert_messages(messages: list[dict[str, Any]], rules: dict[str, Any]) -> di
 
 def receipt(operation: str, result: str, started: float, **metadata: Any) -> dict[str, Any]:
     """Emit only allowlisted metadata."""
-    allowlist = {"mode", "entity", "repository", "run_id", "error_code", "cleanup_state", "assertion_count", "message_count", "cursor"}
+    allowlist = {"mode", "entity", "repository", "run_id", "error_code", "cleanup_state", "assertion_count", "message_count", "cursor", "fidelity"}
     return {"schema_version": VERSION, "operation": operation, "result": result, "duration_ms": round((time.monotonic() - started) * 1000), **{key: value for key, value in metadata.items() if key in allowlist}}

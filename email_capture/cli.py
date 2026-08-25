@@ -50,6 +50,7 @@ def main(argv: list[str] | None = None) -> int:
     release_parser.add_argument("--allocation", required=True)
     commands.add_parser("capabilities")
     commands.add_parser("doctor")
+    commands.add_parser("canary")
     arguments = parser.parse_args(argv)
     started = time.monotonic()
     try:
@@ -75,9 +76,15 @@ def main(argv: list[str] | None = None) -> int:
             emit(receipt("release", "passed", started, mode=profile.mode, cleanup_state="complete"))
         elif arguments.command == "capabilities":
             emit(selected_backend.capabilities())
+        elif arguments.command == "canary":
+            if profile.mode != "hosted":
+                raise CaptureError("CAPABILITY_UNSUPPORTED", "canary requires hosted mode")
+            healthy = selected_backend.health()
+            emit(receipt("canary", "passed" if healthy else "failed", started, mode=profile.mode, fidelity=profile.fidelity))
+            return 0 if healthy else 2
         else:
             healthy = selected_backend.health()
-            emit(receipt("doctor", "passed" if healthy else "failed", started, mode=profile.mode))
+            emit(receipt("doctor", "passed" if healthy else "failed", started, mode=profile.mode, fidelity=profile.fidelity))
             return 0 if healthy else 2
         return 0
     except CaptureError as error:

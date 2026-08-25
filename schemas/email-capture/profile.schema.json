@@ -18,7 +18,8 @@
     "mode": {
       "enum": [
         "off",
-        "hermetic"
+        "hermetic",
+        "hosted"
       ]
     },
     "backend": {
@@ -26,7 +27,8 @@
         "memory",
         "mailpit",
         "maildev",
-        "inbucket"
+        "inbucket",
+        "hosted"
       ]
     },
     "endpoint": {
@@ -39,6 +41,12 @@
       "type": "integer",
       "minimum": 1,
       "maximum": 86400
+    },
+    "fidelity": {
+      "enum": [
+        "provider-to-capture",
+        "deployed-substitution"
+      ]
     }
   },
   "allOf": [
@@ -51,6 +59,23 @@
               "maildev",
               "inbucket"
             ]
+          }
+        },
+        "required": [
+          "backend"
+        ]
+      },
+      "then": {
+        "required": [
+          "endpoint"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "backend": {
+            "const": "hosted"
           }
         },
         "required": [

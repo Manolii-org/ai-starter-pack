@@ -53,6 +53,9 @@
     },
     "cursor": {
       "type": "string"
+    },
+    "fidelity": {
+      "type": "string"
     }
   }
 }

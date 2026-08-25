@@ -38,6 +38,12 @@
     },
     "attachment_size": {
       "type": "boolean"
+    },
+    "fidelity": {
+      "enum": [
+        "provider-to-capture",
+        "deployed-substitution"
+      ]
     }
   }
 }

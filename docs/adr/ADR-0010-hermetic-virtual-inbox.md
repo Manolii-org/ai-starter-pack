@@ -11,7 +11,7 @@ Message content, recipient, subject, links, codes, headers, attachment bytes, an
 
 Owner: Manolii Developer Platform. CI placement: job-local service/process. Capacity: one receiver per job; no central quota or bill. Rollback: set `EMAIL_CAPTURE_MODE=off`, pin the prior tag, and remove the receiver service without changing the business sender.
 
-Hosted capture, vendor procurement, gateway, DNS, real-delivery canaries, and business-mailbox ingestion are separately gated and `NOT_APPLICABLE` to this lock. Reconsider hosted capture only after a deployed synthetic sender and the Phase 0 deletion, residency, key-scope, concurrency, and ingestion-exclusion gates pass.
+This lock still governs hermetic v1. The opt-in hosted SPI lives in ADR-0010b and does not relax Mailpit CI, production fail-closed behavior, or broker prohibition. Vendor procurement, DNS, real-delivery canaries, and making hosted a required promotion gate remain separately gated.
 
 ## Exceptions
 
