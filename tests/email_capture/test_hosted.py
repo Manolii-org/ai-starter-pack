@@ -10,7 +10,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from email_capture.core import CaptureError, HostedHttpBackend, Profile, await_messages, backend
+from email_capture.core import CaptureError, HostedHttpBackend, Profile, _read_bounded_http_body, await_messages, backend
 
 
 class HostedHandler(BaseHTTPRequestHandler):
@@ -360,6 +360,7 @@ class HostedCaptureTests(unittest.TestCase):
         self.assertIsNone(re.fullmatch(staging_pattern, "https://:443"))
         self.assertIsNone(re.fullmatch(staging_pattern, "https://."))
         self.assertIsNone(re.fullmatch(staging_pattern, "https://example..com"))
+        self.assertIsNone(re.fullmatch(staging_pattern, "https://capture.example:99999"))
         self.assertIsNone(re.fullmatch(staging_pattern, "https://user:pass@host.example"))
         self.assertIsNotNone(re.fullmatch(staging_pattern, "https://capture.example.test"))
         self.assertIn("environment", hosted["required"])
@@ -493,6 +494,31 @@ class HostedCaptureTests(unittest.TestCase):
             await_messages(adapter, {"recipient": HostedHandler.recipient, "cursor": "0:"}, timeout=0)
         self.assertTrue(any(method == "GET" and path.startswith("/messages") for method, path, _auth in HostedHandler.requests))
 
+    def test_offset_timestamps_normalize_to_utc(self):
+        adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))
+        HostedHandler.list_payload = {
+            "messages": [{"id": "h1", "to": [HostedHandler.recipient], "received_at": "2026-08-25T00:30:00+01:00"}],
+        }
+        messages = adapter.list({"recipient": HostedHandler.recipient})
+        self.assertEqual(messages[0]["received_at"], "2026-08-24T23:30:00Z")
+
+    def test_hosted_body_read_respects_deadline(self):
+        class Drip:
+            def __init__(self):
+                self.data = b'{"ok":true}'
+                self.index = 0
+
+            def read(self, _size):
+                if self.index >= len(self.data):
+                    return b""
+                time.sleep(0.08)
+                chunk = self.data[self.index:self.index + 1]
+                self.index += 1
+                return chunk
+
+        with self.assertRaisesRegex(CaptureError, "MESSAGE_TIMEOUT"):
+            _read_bounded_http_body(Drip(), deadline=time.monotonic() + 0.2)
+
     def test_nonsortable_summary_timestamp_is_infra_failure(self):
         adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))
         HostedHandler.list_payload = {"messages": [{"id": "h1", "to": [HostedHandler.recipient], "received_at": "zzz"}]}
@@ -539,7 +565,7 @@ class HostedCaptureTests(unittest.TestCase):
             EMAIL_CAPTURE_ENVIRONMENT="staging",
             EMAIL_CAPTURE_HOSTED_TOKEN=HostedHandler.token,
         )
-        for endpoint in ("https://example.com:abc", "https://.", "https://example..com"):
+        for endpoint in ("https://example.com:abc", "https://.", "https://example..com", "https://exa mple.com"):
             os.environ["EMAIL_CAPTURE_ENDPOINT"] = endpoint
             with self.assertRaisesRegex(CaptureError, "CONFIG_INVALID"):
                 Profile.load()

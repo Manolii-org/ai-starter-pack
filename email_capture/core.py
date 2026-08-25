@@ -9,7 +9,7 @@ import re
 import secrets
 import tempfile
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -32,11 +32,13 @@ MAX_CONTENT_BYTES = 1024 * 1024
 HOSTED_MAX_BODY_BYTES = 2 * 1024 * 1024
 
 
-def _read_bounded_http_body(response: Any, limit: int = HOSTED_MAX_BODY_BYTES) -> bytes:
+def _read_bounded_http_body(response: Any, limit: int = HOSTED_MAX_BODY_BYTES, deadline: float | None = None) -> bytes:
     chunks: list[bytes] = []
     total = 0
     while True:
-        chunk = response.read(65536)
+        if deadline is not None and time.monotonic() >= deadline:
+            raise CaptureError("MESSAGE_TIMEOUT", "bounded wait expired")
+        chunk = response.read(4096)
         if not chunk:
             break
         total += len(chunk)
@@ -222,7 +224,14 @@ def _validate_hosted_endpoint(endpoint: str, environment: str) -> None:
             parsed.hostname.encode("idna")
         except UnicodeError as exc:
             raise CaptureError("CONFIG_INVALID", "hosted endpoint hostname is invalid") from exc
-        if ".." in parsed.hostname or parsed.hostname.startswith(".") or parsed.hostname.endswith("."):
+        hostname = parsed.hostname
+        loopback = hostname in {"localhost", "127.0.0.1", "::1"}
+        labels = hostname.split(".")
+        dns_ok = loopback or (
+            not any(ch.isspace() or ch == "%" for ch in hostname)
+            and all(re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label) for label in labels)
+        )
+        if ".." in hostname or hostname.startswith(".") or hostname.endswith(".") or not dns_ok:
             raise CaptureError("CONFIG_INVALID", "hosted endpoint hostname is invalid")
     if parsed.username is not None or parsed.password is not None or parsed.query or parsed.fragment:
         raise CaptureError("AUTHORIZATION_DENIED", "hosted endpoint must not embed credentials")
@@ -402,12 +411,12 @@ class HostedHttpBackend:
         )
         try:
             with self._opener.open(request, timeout=_remaining_request_timeout(self)) as response:
-                body = _read_bounded_http_body(response)
+                body = _read_bounded_http_body(response, deadline=getattr(self, "_deadline", None))
         except CaptureError:
             raise
         except urllib.error.HTTPError as error:
             try:
-                _read_bounded_http_body(error)
+                _read_bounded_http_body(error, deadline=getattr(self, "_deadline", None))
             except CaptureError:
                 pass
             except OSError:
@@ -684,8 +693,8 @@ def _message_id(row: dict[str, Any]) -> str:
     return identifier
 
 
-def _require_sortable_received_at(received: str) -> None:
-    """Reject timestamps that would invert await_messages cursor ordering."""
+def _canonical_received_at(received: str) -> str:
+    """Parse RFC3339 receive times into a single UTC form for cursor comparison."""
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})", received):
         raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "message receive time is not sortable")
     try:
@@ -694,6 +703,10 @@ def _require_sortable_received_at(received: str) -> None:
         raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "message receive time is not sortable") from error
     if parsed.tzinfo is None:
         raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "message receive time is not sortable")
+    utc = parsed.astimezone(timezone.utc)
+    if utc.microsecond:
+        return utc.strftime("%Y-%m-%dT%H:%M:%S.") + f"{utc.microsecond:06d}".rstrip("0") + "Z"
+    return utc.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def normalise_message(row: dict[str, Any], backend_name: str) -> dict[str, Any]:
@@ -702,7 +715,7 @@ def normalise_message(row: dict[str, Any], backend_name: str) -> dict[str, Any]:
     received = row.get("received_at") or row.get("Created") or row.get("created") or row.get("date") or row.get("Date") or row.get("time")
     if not isinstance(received, str) or not received:
         raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "message lacks stable receive time")
-    _require_sortable_received_at(received)
+    received = _canonical_received_at(received)
     body = row.get("body", {}) if isinstance(row.get("body", {}), dict) else {}
     text = row.get("text", row.get("Text", body.get("text", "")))
     html = row.get("html", row.get("HTML", body.get("html", "")))
