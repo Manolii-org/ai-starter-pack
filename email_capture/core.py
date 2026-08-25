@@ -70,11 +70,18 @@ _FIDELITIES = {"provider-to-capture", "deployed-substitution"}
 
 
 
+_PROFILE_JSON_KEYS = {
+    "schema_version", "mode", "backend", "endpoint", "environment", "ttl_seconds", "fidelity",
+}
+
 def _is_credential_profile_key(key: str) -> bool:
     """Reject env-style and short credential keys in profile JSON."""
     folded = key.strip().lower().replace("-", "_")
     if folded.startswith("email_capture_"):
         folded = folded[len("email_capture_"):]
+    tokens = set(folded.split("_"))
+    if tokens & {"token", "password", "secret", "authorization", "api_key", "apikey", "bearer"}:
+        return True
     return folded in {"token", "hosted_token", "api_key", "authorization"} or "hosted_token" in folded
 
 @dataclass(frozen=True)
@@ -108,9 +115,16 @@ class Profile:
             if canonical and legacy:
                 raise CaptureError("CONFIG_INVALID", "mixed canonical and legacy configuration")
         if path is None:
-            raw = {key: value for key, value in raw.items() if not _is_credential_profile_key(key)}
-        elif any(_is_credential_profile_key(key) for key in raw):
-            raise CaptureError("CONFIG_INVALID", "credentials must not appear in profile JSON")
+            raw = {
+                key: value for key, value in raw.items()
+                if key in _PROFILE_JSON_KEYS and not _is_credential_profile_key(key)
+            }
+        else:
+            if any(_is_credential_profile_key(key) for key in raw):
+                raise CaptureError("CONFIG_INVALID", "credentials must not appear in profile JSON")
+            unknown = set(raw) - _PROFILE_JSON_KEYS
+            if unknown:
+                raise CaptureError("CONFIG_INVALID", "profile JSON contains unknown properties")
         version = raw.get("schema_version", VERSION)
         mode = raw.get("mode", "off")
         backend_name = raw.get("backend", "memory")
@@ -409,7 +423,16 @@ class HostedHttpBackend:
         if not isinstance(data, dict) or not isinstance(data.get("messages"), list):
             raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "receiver list has invalid shape")
         rows = data["messages"]
-        return [row for row in rows if isinstance(row, dict) and _summary_contains_recipient(row, recipient)]
+        matched: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "receiver summary has invalid shape")
+            _message_id(row)
+            if not _summary_has_recipient_field(row):
+                raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "receiver summary is missing recipients")
+            if _summary_contains_recipient(row, recipient):
+                matched.append(row)
+        return matched
 
     def list(self, allocation: dict[str, Any]) -> list[dict[str, Any]]:
         details: list[dict[str, Any]] = []
@@ -490,6 +513,23 @@ def _addresses(value: Any) -> list[Any]:
     return value if isinstance(value, list) else [value]
 
 
+def _required_string_field(row: dict[str, Any], *names: str) -> str:
+    for name in names:
+        if name in row:
+            value = row[name]
+            if not isinstance(value, str):
+                raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", f"{name} must be a string")
+            return value
+    return ""
+
+
+def _summary_has_recipient_field(row: dict[str, Any]) -> bool:
+    if "To" in row or "to" in row:
+        return True
+    envelope = row.get("envelope")
+    return isinstance(envelope, dict) and "to" in envelope
+
+
 def _summary_contains_recipient(row: dict[str, Any], recipient: str) -> bool:
     """Match the envelope recipient without searching bodies or subjects."""
     values = row.get("To", row.get("to", row.get("envelope", {}).get("to", [])))
@@ -554,7 +594,7 @@ def normalise_message(row: dict[str, Any], backend_name: str) -> dict[str, Any]:
         "opaque_id": opaque,
         "received_at": received,
         "envelope": {"from": _addresses(row.get("from", row.get("From"))), "to": _addresses(row.get("to", row.get("To")))},
-        "subject": row.get("subject", row.get("Subject", "")),
+        "subject": _required_string_field(row, "subject", "Subject"),
         "headers": headers,
         "content": {"text_present": bool(text), "html_present": bool(html), "text": text or "", "html": html or ""},
         "attachments": normalized_attachments,

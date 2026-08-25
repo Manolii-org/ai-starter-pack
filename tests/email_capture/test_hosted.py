@@ -267,6 +267,46 @@ class HostedCaptureTests(unittest.TestCase):
             adapter.purge({"recipient": HostedHandler.recipient})
         self.assertEqual(HostedHandler.deleted, [])
 
+
+    def test_unknown_and_secret_profile_keys_are_rejected(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
+            json.dump({
+                "schema_version": "1.0",
+                "mode": "hosted",
+                "backend": "hosted",
+                "endpoint": self.endpoint,
+                "environment": "test",
+                "password": "nope",
+            }, handle)
+            path = handle.name
+        try:
+            with self.assertRaisesRegex(CaptureError, "CONFIG_INVALID"):
+                Profile.load(path)
+        finally:
+            os.unlink(path)
+
+    def test_malformed_summary_to_is_infra_failure(self):
+        adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))
+        HostedHandler.list_payload = {"messages": [{"id": "h1", "received_at": "2026-08-25T00:00:00Z"}]}
+        with self.assertRaisesRegex(CaptureError, "CAPTURE_INFRA_UNAVAILABLE"):
+            adapter.list({"recipient": HostedHandler.recipient})
+
+    def test_non_string_subject_is_infra_failure(self):
+        adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))
+        HostedHandler.detail_override = {
+            "id": "h1",
+            "date": "1999-01-01T00:00:00Z",
+            "from": "sender@test",
+            "to": [HostedHandler.recipient],
+            "subject": [],
+            "text": "ok",
+            "html": "",
+            "headers": {},
+            "attachments": [],
+        }
+        with self.assertRaisesRegex(CaptureError, "CAPTURE_INFRA_UNAVAILABLE"):
+            adapter.list({"recipient": HostedHandler.recipient})
+
     def test_canary_cli_emits_metadata_only(self):
         with tempfile.TemporaryDirectory() as temp:
             profile_path = Path(temp) / "profile.json"
