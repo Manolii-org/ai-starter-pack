@@ -1,8 +1,10 @@
 name: PR Assessment (Reusable)
 # Reusable workflow_call form of pr-assessment.yml.
 # Caller owns the `on:` triggers; this file only defines the jobs.
-# Skip drafts on pull_request (keep workflow_dispatch). Callers must still
-# list ready_for_review or marking a draft ready never starts assessment.
+# Skip drafts on pull_request only. Callers must still list ready_for_review
+# or marking a draft ready never starts assessment. Non-PR caller events are
+# not draft-gated; they are not a supported full-assessment path either
+# (jobs still read github.base_ref / the PR number from the caller event).
 # Downstream jobs require needs.classify.result == 'success' so SAST cannot
 # start when classify is skipped (empty depth is not the string 'none').
 # Dual provider_mode: anthropic (direct ANTHROPIC_API_KEY) | proxy (LiteLLM via ANTHROPIC_BASE_URL + LITELLM_MASTER_KEY).
