@@ -154,12 +154,13 @@ class HostedCaptureTests(unittest.TestCase):
                 "endpoint": self.endpoint,
                 "environment": "test",
             }))
+            repo_root = Path(__file__).resolve().parents[2]
             run = subprocess.run(
-                ["bin/email-capture", "--profile", str(profile_path), "canary"],
+                [str(repo_root / "bin/email-capture"), "--profile", str(profile_path), "canary"],
                 capture_output=True,
                 text=True,
                 check=True,
-                cwd="/tmp/ai-starter-pack",
+                cwd=repo_root,
                 env={**os.environ, "EMAIL_CAPTURE_HOSTED_TOKEN": HostedHandler.token},
             )
             payload = json.loads(run.stdout)
