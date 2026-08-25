@@ -66,6 +66,15 @@ Agents use tools in this priority order:
 - Migrations require rollback plans
 - Use explicit timeouts on all external calls (`AbortSignal.timeout()` in JS/TS, `timeout` in Bash/curl, `asyncio.timeout()` in Python)
 
+## CI cost (GitHub Actions minutes)
+
+See `docs/ci-cost-conventions.md`. Skip drafts on PR Assessment; Autofix is
+not draft-gated. Require `needs.classify.result == 'success'` so SAST cannot
+start when classify is skipped. Do not add `paths` / `paths-ignore` on PR
+Assessment (`converted_to_draft` is filtered too and cannot cancel in-flight
+LLM/SAST). Do not add unfiltered browser/`supabase start` PR workflows;
+extract `gh run list` wait loops to `scripts/ci/` with a fake-`gh` test.
+
 ## Sub-Agent Invocation
 
 Sub-agents are defined in `.claude/agents/` and invoked via the Agent tool:

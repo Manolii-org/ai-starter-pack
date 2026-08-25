@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- **Document consumer email-capture journeys.** `docs/email-capture-journeys.md` records evidenced senders versus `NO_EVIDENCED_SENDER` (no mailbox tests for `generateLink` / in-app URL flows). Hosted SPI exists in v0.2.0; hermetic Mailpit jobs remain the Buro go-live lane.
+- **Ship email-capture v0.2.0.** Add hosted capture SPI (`mode=hosted` / `backend=hosted`), HTTPS message API (loopback HTTP only in `environment=test`), env-only `EMAIL_CAPTURE_HOSTED_TOKEN`, `canary` CLI, and optional fidelity. Hermetic Mailpit/MailDev/Inbucket CI is unchanged and remains fail-closed in staging/production. Hosted summaries with null `to` fail closed; shared multi-recipient messages are not deleted; profile schema encodes the hosted env allowlist and HTTPS/loopback endpoint pattern. Canonicalize `--not-before` to the same UTC microsecond form as `received_at`. Reject undotted HTTPS hosts (`https://capture`, `https://localhost`) at runtime to match the profile schema. Fail closed on malformed hosted attachment containers, unparseable Cc/Bcc list elements before exclusive delete, and v0.1.1 second-precision persisted cursors. Clear await deadlines only on backends that install them.
+- **PR Assessment skips drafts.** Standalone and reusable skip
+  `pull_request.draft` and listen for `ready_for_review` and
+  `converted_to_draft`. Downstream jobs require
+  `needs.classify.result == 'success'` so Semgrep/Bandit cannot start
+  when classify is skipped (empty `depth` is not the string `'none'`).
+  Standalone `concurrency` + `cancel-in-progress` cancels in-flight
+  LLM/SAST when a ready PR is converted back to draft. Do not put
+  `paths` / `paths-ignore` on that workflow: GitHub filters
+  `converted_to_draft` the same way, which would leave in-flight LLM/SAST
+  running. Reusable `classify` requires `github.event_name == 'pull_request'`
+  so `workflow_dispatch` never reaches `git diff` against `github.base_ref`
+  or a judge comment on an empty PR number.
+- **CI cost conventions.** `docs/ci-cost-conventions.md` — wait-loop extraction,
+  no unfiltered browser/`supabase start` PR workflows, job-level concurrency
+  for shared locks, no `on.paths` on internally detect-gated required e2e.
+  Autofix is **not** draft-gated. Path-filter examples: `mutation-testing-diff.yml`
+  (`on.pull_request.paths`) and `static-review.yml` `changed-files`. Do not cite
+  `ci.yml` `detect` (existence check only).
+
 ## 1.9.7 — 2026-08-21
 
 - **Ship email-capture v0.1.1.** Include the portable hermetic inbox CLI, eight

@@ -18,7 +18,8 @@
     "mode": {
       "enum": [
         "off",
-        "hermetic"
+        "hermetic",
+        "hosted"
       ]
     },
     "backend": {
@@ -26,7 +27,8 @@
         "memory",
         "mailpit",
         "maildev",
-        "inbucket"
+        "inbucket",
+        "hosted"
       ]
     },
     "endpoint": {
@@ -39,6 +41,12 @@
       "type": "integer",
       "minimum": 1,
       "maximum": 86400
+    },
+    "fidelity": {
+      "enum": [
+        "provider-to-capture",
+        "deployed-substitution"
+      ]
     }
   },
   "allOf": [
@@ -61,6 +69,113 @@
         "required": [
           "endpoint"
         ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "mode": {
+            "const": "hosted"
+          }
+        },
+        "required": [
+          "mode"
+        ]
+      },
+      "then": {
+        "required": [
+          "backend",
+          "endpoint",
+          "environment"
+        ],
+        "properties": {
+          "backend": {
+            "const": "hosted"
+          },
+          "environment": {
+            "type": "string",
+            "enum": [
+              "test",
+              "ci",
+              "preview",
+              "preprod",
+              "staging"
+            ]
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "environment": {
+                  "const": "test"
+                }
+              },
+              "required": [
+                "environment"
+              ]
+            },
+            "then": {
+              "properties": {
+                "endpoint": {
+                  "type": "string",
+                  "minLength": 8,
+                  "pattern": "^(https://[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+(?::(?:0|[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?(?:/[^\\s?#@]*)?|http://(localhost|127\\.0\\.0\\.1|\\[::1\\])(?::(?:0|[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?(/[^\\s?#@]*)?)$"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "environment": {
+                  "enum": [
+                    "ci",
+                    "preview",
+                    "preprod",
+                    "staging"
+                  ]
+                }
+              },
+              "required": [
+                "environment"
+              ]
+            },
+            "then": {
+              "properties": {
+                "endpoint": {
+                  "type": "string",
+                  "minLength": 8,
+                  "pattern": "^https://[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+(?::(?:0|[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?(?:/[^\\s?#@]*)?$"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "mode": {
+            "const": "hermetic"
+          }
+        },
+        "required": [
+          "mode"
+        ]
+      },
+      "then": {
+        "properties": {
+          "backend": {
+            "enum": [
+              "memory",
+              "mailpit",
+              "maildev",
+              "inbucket"
+            ]
+          }
+        }
       }
     }
   ]

@@ -7,7 +7,7 @@ The CLI is journey-agnostic: `allocate` / `await` / `assert` / `release` (`capab
 | Lane | What it proves | Required for Buro go-live |
 |---|---|---|
 | Hermetic Mailpit/MailDev/Inbucket | Job-local SMTP + capture CLI (profiles: `off` or `hermetic`) | Yes, for every evidenced sender |
-| Hosted capture | Reserved. Not a valid profile on this lock (`docs/email-capture.md` accepts only `off` or `hermetic`). Reconsider only after the gates in `docs/adr/ADR-0010-hermetic-virtual-inbox.md`: deployed synthetic sender plus Phase 0 deletion, residency, key-scope, concurrency, and ingestion-exclusion. | No |
+| Hosted capture | Pack SPI `mode=hosted` (v0.2.0): HTTPS `/health` + `/messages`, env-only token, fail-closed production. Consumer canary only when a dedicated capture inbox and `EMAIL_CAPTURE_HOSTED_*` secrets exist. Not a substitute for hermetic evidenced-sender jobs. | No |
 | Real-delivery canary | DNS/provider receipt to an entity mailbox | Separate from capture; still denied from KL |
 
 ## Buro `bcp-core` (evidenced senders)

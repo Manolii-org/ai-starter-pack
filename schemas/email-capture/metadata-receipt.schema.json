@@ -53,6 +53,12 @@
     },
     "cursor": {
       "type": "string"
+    },
+    "fidelity": {
+      "enum": [
+        "provider-to-capture",
+        "deployed-substitution"
+      ]
     }
   }
 }
