@@ -217,14 +217,20 @@ class Backend(Protocol):
 
 
 def _remaining_request_timeout(backend: Any) -> float:
-    """Apply the await deadline to every HTTP request, not only the first."""
+    """Apply the await deadline to every HTTP request, not only the first.
+
+    When the await window has already elapsed, return a tiny timeout so the
+    last poll can finish. ``await_messages`` then returns success for
+    ``count=0`` (bounded negative) or ``MESSAGE_TIMEOUT`` for a positive wait.
+    Raising here made Mailpit negatives fail even when the mailbox stayed empty.
+    """
     timeout = float(getattr(backend, "request_timeout", 10.0))
     deadline = getattr(backend, "_deadline", None)
     if deadline is None:
         return timeout
     remaining = deadline - time.monotonic()
     if remaining <= 0:
-        raise CaptureError("MESSAGE_TIMEOUT", "bounded wait expired")
+        return 0.01
     return max(0.01, min(timeout, remaining))
 
 
@@ -947,7 +953,12 @@ def await_messages(selected_backend: Backend, allocation: dict[str, Any], timeou
                 else:
                     selected_backend._deadline = deadline
                     selected_backend.request_timeout = max(0.01, min(10.0, deadline - time.monotonic()))
-            rows = sorted(selected_backend.list(allocation), key=lambda message: (message["received_at"], message["opaque_id"]))
+            try:
+                rows = sorted(selected_backend.list(allocation), key=lambda message: (message["received_at"], message["opaque_id"]))
+            except CaptureError as exc:
+                if exc.code == "MESSAGE_TIMEOUT" and count == 0:
+                    return [], cursor
+                raise
             first_poll = False
             rows = [message for message in rows if not not_before or message["received_at"] >= not_before]
             ids = [message["opaque_id"] for message in rows]
