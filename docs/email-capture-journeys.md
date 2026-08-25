@@ -1,6 +1,6 @@
 # Email-capture journeys
 
-The CLI is journey-agnostic: `allocate` / `await` / `assert` / `extract` / `release`. Completeness is a **consumer** property: every application path that actually sends mail must be proven against the contract. Do not invent mailbox tests for `generateLink` / in-app URL flows (`NO_EVIDENCED_SENDER`).
+The CLI is journey-agnostic: `allocate` / `await` / `assert` / `release` (`capabilities` and `doctor` are probes). Link and code extraction run inside `assert` (and in consumer Python helpers via `email_capture.core.extract`); there is no `extract` subcommand. Completeness is a **consumer** property: every application path that actually sends mail must be proven against the contract. Do not invent mailbox tests for `generateLink` / in-app URL flows (`NO_EVIDENCED_SENDER`).
 
 ## Lanes
 
