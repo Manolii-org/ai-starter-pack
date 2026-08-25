@@ -69,6 +69,14 @@ _PRODUCTION_ENVIRONMENTS = {"prod", "production", "prd"}
 _FIDELITIES = {"provider-to-capture", "deployed-substitution"}
 
 
+
+def _is_credential_profile_key(key: str) -> bool:
+    """Reject env-style and short credential keys in profile JSON."""
+    folded = key.strip().lower().replace("-", "_")
+    if folded.startswith("email_capture_"):
+        folded = folded[len("email_capture_"):]
+    return folded in {"token", "hosted_token", "api_key", "authorization"} or "hosted_token" in folded
+
 @dataclass(frozen=True)
 class Profile:
     """Validated capture configuration."""
@@ -99,10 +107,9 @@ class Profile:
             legacy = any(key in os.environ for key in ("MAILDEV_URL", "MAILDEV_WEB_URL", "INBUCKET_URL", "EMAIL_CAPTURE_API_URL", "SMTP_HOST", "SMTP_PORT"))
             if canonical and legacy:
                 raise CaptureError("CONFIG_INVALID", "mixed canonical and legacy configuration")
-        credential_keys = {"token", "hosted_token", "api_key", "authorization"}
         if path is None:
-            raw = {key: value for key, value in raw.items() if key not in credential_keys}
-        elif any(key in raw for key in credential_keys):
+            raw = {key: value for key, value in raw.items() if not _is_credential_profile_key(key)}
+        elif any(_is_credential_profile_key(key) for key in raw):
             raise CaptureError("CONFIG_INVALID", "credentials must not appear in profile JSON")
         version = raw.get("schema_version", VERSION)
         mode = raw.get("mode", "off")
@@ -420,12 +427,24 @@ class HostedHttpBackend:
             receiver_time = summary.get("received_at") or summary.get("Created") or summary.get("created") or summary.get("date")
             if isinstance(receiver_time, str) and receiver_time:
                 detail["received_at"] = receiver_time
-            details.append(normalise_message(detail, "hosted"))
+            try:
+                details.append(normalise_message(detail, "hosted"))
+            except (TypeError, AttributeError) as error:
+                raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", type(error).__name__) from None
         return details
 
     def purge(self, allocation: dict[str, Any]) -> None:
+        recipient = allocation["recipient"].lower()
         for row in self._matching_summaries(allocation):
-            identifier = urllib.parse.quote(_message_id(row), safe="")
+            requested_id = _message_id(row)
+            identifier = urllib.parse.quote(requested_id, safe="")
+            detail = self._request(f"/messages/{identifier}")
+            if not isinstance(detail, dict):
+                raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "receiver detail has invalid shape")
+            if _message_id(detail) != requested_id:
+                raise CaptureError("AUTHORIZATION_DENIED", "delete id is outside allocation")
+            if not _summary_contains_recipient(detail, recipient):
+                raise CaptureError("AUTHORIZATION_DENIED", "delete recipient is outside allocation")
             self._request(f"/messages/{identifier}", "DELETE")
 
 
@@ -501,6 +520,12 @@ def normalise_message(row: dict[str, Any], backend_name: str) -> dict[str, Any]:
     body = row.get("body", {}) if isinstance(row.get("body", {}), dict) else {}
     text = row.get("text", row.get("Text", body.get("text", "")))
     html = row.get("html", row.get("HTML", body.get("html", "")))
+    if text is None:
+        text = ""
+    if html is None:
+        html = ""
+    if not isinstance(text, str) or not isinstance(html, str):
+        raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "message body fields have invalid types")
     headers = row.get("headers", row.get("header", {}))
     if not isinstance(headers, dict):
         headers = {}

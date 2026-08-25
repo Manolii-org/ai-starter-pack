@@ -216,6 +216,57 @@ class HostedCaptureTests(unittest.TestCase):
         adapter.purge({"recipient": HostedHandler.recipient})
         self.assertEqual(HostedHandler.deleted, ["/messages/h1"])
 
+
+    def test_env_style_token_key_in_profile_json_is_rejected(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
+            json.dump({
+                "schema_version": "1.0",
+                "mode": "hosted",
+                "backend": "hosted",
+                "endpoint": self.endpoint,
+                "environment": "test",
+                "EMAIL_CAPTURE_HOSTED_TOKEN": HostedHandler.token,
+            }, handle)
+            path = handle.name
+        try:
+            with self.assertRaisesRegex(CaptureError, "CONFIG_INVALID"):
+                Profile.load(path)
+        finally:
+            os.unlink(path)
+
+    def test_malformed_detail_body_is_infra_failure(self):
+        adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))
+        HostedHandler.detail_override = {
+            "id": "h1",
+            "date": "1999-01-01T00:00:00Z",
+            "from": "sender@test",
+            "to": [HostedHandler.recipient],
+            "subject": "secret",
+            "text": [],
+            "html": "",
+            "headers": {},
+            "attachments": [],
+        }
+        with self.assertRaisesRegex(CaptureError, "CAPTURE_INFRA_UNAVAILABLE"):
+            adapter.list({"recipient": HostedHandler.recipient})
+
+    def test_purge_revalidates_detail_before_delete(self):
+        adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))
+        HostedHandler.detail_override = {
+            "id": "h1",
+            "date": "1999-01-01T00:00:00Z",
+            "from": "sender@test",
+            "to": ["other@capture.test"],
+            "subject": "leaked",
+            "text": "nope",
+            "html": "",
+            "headers": {},
+            "attachments": [],
+        }
+        with self.assertRaisesRegex(CaptureError, "AUTHORIZATION_DENIED"):
+            adapter.purge({"recipient": HostedHandler.recipient})
+        self.assertEqual(HostedHandler.deleted, [])
+
     def test_canary_cli_emits_metadata_only(self):
         with tempfile.TemporaryDirectory() as temp:
             profile_path = Path(temp) / "profile.json"
