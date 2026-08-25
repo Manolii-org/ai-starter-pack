@@ -423,6 +423,41 @@ class HostedCaptureTests(unittest.TestCase):
             adapter.purge({"recipient": HostedHandler.recipient})
         self.assertEqual(HostedHandler.deleted, [])
 
+    def test_unparseable_cc_element_blocks_exclusive_delete(self):
+        adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))
+        HostedHandler.detail_override = {
+            "id": "h1",
+            "date": "1999-01-01T00:00:00Z",
+            "from": "sender@test",
+            "to": [HostedHandler.recipient],
+            "cc": [HostedHandler.recipient, "<>"],
+            "subject": "ok",
+            "text": "ok",
+            "html": "",
+            "headers": {},
+            "attachments": [],
+        }
+        with self.assertRaisesRegex(CaptureError, "CAPTURE_INFRA_UNAVAILABLE"):
+            adapter.purge({"recipient": HostedHandler.recipient})
+        self.assertEqual(HostedHandler.deleted, [])
+
+    def test_hosted_attachment_container_must_be_object_list(self):
+        adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))
+        for attachments in ({"filename": "a.bin"}, ["not-an-object"]):
+            HostedHandler.detail_override = {
+                "id": "h1",
+                "date": "1999-01-01T00:00:00Z",
+                "from": "sender@test",
+                "to": [HostedHandler.recipient],
+                "subject": "ok",
+                "text": "ok",
+                "html": "",
+                "headers": {},
+                "attachments": attachments,
+            }
+            with self.assertRaisesRegex(CaptureError, "CAPTURE_INFRA_UNAVAILABLE"):
+                adapter.list({"recipient": HostedHandler.recipient})
+
     def test_invalid_utf8_json_is_infra_failure(self):
         adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))
         HostedHandler.health_raw = b'{"ok": true, "x": "\xff"}'.replace(b"\\xff", b"\xff")
@@ -590,6 +625,48 @@ class HostedCaptureTests(unittest.TestCase):
         )
         self.assertEqual(len(got), 1)
         self.assertEqual(got[0]["received_at"], "2026-08-25T10:00:00.500000Z")
+
+    def test_legacy_second_precision_cursor_sees_same_second_mail(self):
+        adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))
+        HostedHandler.list_payload = {
+            "messages": [{"id": "h1", "to": [HostedHandler.recipient], "received_at": "2026-08-25T10:00:00.5Z"}],
+        }
+        HostedHandler.detail_override = {
+            "id": "h1",
+            "date": "2026-08-25T10:00:00.5Z",
+            "from": "sender@test",
+            "to": [HostedHandler.recipient],
+            "subject": "ok",
+            "text": "ok",
+            "html": "",
+            "headers": {},
+            "attachments": [],
+        }
+        got, _cursor = await_messages(
+            adapter,
+            {"recipient": HostedHandler.recipient, "cursor": "2026-08-25T10:00:00Z:old"},
+            timeout=0,
+        )
+        self.assertEqual(len(got), 1)
+
+    def test_slotted_backend_await_does_not_require_deadline_attr(self):
+        class Slotted:
+            __slots__ = ()
+
+            def capabilities(self):
+                return {}
+
+            def list(self, allocation):
+                return []
+
+            def purge(self, allocation):
+                return None
+
+            def health(self):
+                return True
+
+        with self.assertRaisesRegex(CaptureError, "MESSAGE_TIMEOUT"):
+            await_messages(Slotted(), {"recipient": HostedHandler.recipient, "cursor": "0:"}, timeout=0)
 
     def test_invalid_not_before_is_config_error(self):
         adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))

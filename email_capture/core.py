@@ -526,6 +526,7 @@ class HostedHttpBackend:
             receiver_time = summary.get("received_at") or summary.get("Created") or summary.get("created") or summary.get("date")
             if isinstance(receiver_time, str) and receiver_time:
                 detail["received_at"] = receiver_time
+            _require_hosted_attachments_shape(detail)
             try:
                 details.append(normalise_message(detail, "hosted"))
             except (TypeError, AttributeError, ValueError) as error:
@@ -618,12 +619,11 @@ def _recipient_field_value(row: dict[str, Any]) -> tuple[bool, Any]:
 def _recipient_values_are_well_formed(value: Any, *, require_address: bool = False) -> bool:
     """Reject null/blank/unparseable recipient values. Empty optional lists are allowed."""
     if isinstance(value, list):
+        if not value:
+            return not require_address
         if not all(_single_recipient_is_well_formed(item) for item in value):
             return False
-        parsed = _parsed_addresses(value)
-        if require_address:
-            return bool(parsed)
-        return len(value) == 0 or bool(parsed)
+        return all(bool(_parsed_addresses([item])) for item in value)
     if not _single_recipient_is_well_formed(value):
         return False
     return bool(_parsed_addresses(value))
@@ -648,6 +648,16 @@ def _require_envelope_fields_well_formed(row: dict[str, Any]) -> None:
         for key in ("to", "cc", "bcc"):
             if key in envelope and not _recipient_values_are_well_formed(envelope[key], require_address=key == "to"):
                 raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "receiver envelope recipients are malformed")
+
+
+def _require_hosted_attachments_shape(row: dict[str, Any]) -> None:
+    """Hosted details must present attachments as a list of objects, or omit them."""
+    for key in ("attachments", "Attachments"):
+        if key not in row:
+            continue
+        value = row[key]
+        if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+            raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "hosted attachments are malformed")
 
 
 def _require_well_formed_recipient_field(row: dict[str, Any]) -> None:
@@ -727,6 +737,19 @@ def _message_id(row: dict[str, Any]) -> str:
     if not isinstance(identifier, str) or not identifier:
         raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "message lacks stable id")
     return identifier
+
+
+def _canonical_cursor(cursor: str) -> str:
+    """Normalize persisted v0.1.1 second-precision cursors to the v0.2.0 stamp form."""
+    if not cursor or cursor == "0:":
+        return cursor or "0:"
+    if ":" not in cursor:
+        raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "cursor is not sortable")
+    stamp, rest = cursor.rsplit(":", 1)
+    try:
+        return f"{_canonical_received_at(stamp)}:{rest}"
+    except CaptureError as error:
+        raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "cursor receive time is not sortable") from error
 
 
 def _canonical_received_at(received: str) -> str:
@@ -911,12 +934,13 @@ def await_messages(selected_backend: Backend, allocation: dict[str, Any], timeou
         except CaptureError as exc:
             raise CaptureError("CONFIG_INVALID", "invalid --not-before timestamp") from exc
     deadline = time.monotonic() + timeout
-    cursor = allocation.get("cursor", "0:")
+    cursor = _canonical_cursor(str(allocation.get("cursor", "0:")))
+    supports_deadline = hasattr(selected_backend, "request_timeout")
     original_timeout = getattr(selected_backend, "request_timeout", None)
     first_poll = True
     try:
         while True:
-            if hasattr(selected_backend, "request_timeout"):
+            if supports_deadline:
                 if first_poll and timeout == 0:
                     selected_backend._deadline = None
                     selected_backend.request_timeout = max(0.01, min(10.0, float(original_timeout or 10.0)))
@@ -946,9 +970,10 @@ def await_messages(selected_backend: Backend, allocation: dict[str, Any], timeou
                     raise CaptureError("MESSAGE_TIMEOUT", "bounded wait expired")
             time.sleep(min(0.25, max(0, deadline - time.monotonic())))
     finally:
-        selected_backend._deadline = None
-        if original_timeout is not None:
-            selected_backend.request_timeout = original_timeout
+        if supports_deadline:
+            selected_backend._deadline = None
+            if original_timeout is not None:
+                selected_backend.request_timeout = original_timeout
 
 
 def extract(message: dict[str, Any], kind: str, name: str | None = None) -> list[str]:
