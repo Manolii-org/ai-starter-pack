@@ -368,6 +368,8 @@ class HostedHttpBackend:
         except (OSError, urllib.error.URLError) as error:
             raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", type(error).__name__) from None
         if not body:
+            if method == "DELETE":
+                return None
             raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "hosted response was empty")
         try:
             return json.loads(body)
@@ -397,18 +399,24 @@ class HostedHttpBackend:
         recipient = allocation["recipient"].lower()
         query = urllib.parse.urlencode({"to": recipient})
         data = self._request(f"/messages?{query}")
-        rows = data.get("messages", []) if isinstance(data, dict) else data
-        if not isinstance(rows, list):
+        if not isinstance(data, dict) or not isinstance(data.get("messages"), list):
             raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "receiver list has invalid shape")
+        rows = data["messages"]
         return [row for row in rows if isinstance(row, dict) and _summary_contains_recipient(row, recipient)]
 
     def list(self, allocation: dict[str, Any]) -> list[dict[str, Any]]:
         details: list[dict[str, Any]] = []
+        recipient = allocation["recipient"].lower()
         for summary in self._matching_summaries(allocation):
-            identifier = urllib.parse.quote(_message_id(summary), safe="")
+            requested_id = _message_id(summary)
+            identifier = urllib.parse.quote(requested_id, safe="")
             detail = self._request(f"/messages/{identifier}")
             if not isinstance(detail, dict):
                 raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "receiver detail has invalid shape")
+            if _message_id(detail) != requested_id:
+                raise CaptureError("AUTHORIZATION_DENIED", "detail id is outside allocation")
+            if not _summary_contains_recipient(detail, recipient):
+                raise CaptureError("AUTHORIZATION_DENIED", "detail recipient is outside allocation")
             receiver_time = summary.get("received_at") or summary.get("Created") or summary.get("created") or summary.get("date")
             if isinstance(receiver_time, str) and receiver_time:
                 detail["received_at"] = receiver_time

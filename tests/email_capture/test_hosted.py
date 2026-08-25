@@ -19,6 +19,9 @@ class HostedHandler(BaseHTTPRequestHandler):
     deleted = []
     health_payload = {"ok": True}
     health_oversize = False
+    list_payload = None
+    detail_override = None
+    delete_empty = False
 
     def log_message(self, *_args):
         return
@@ -46,8 +49,11 @@ class HostedHandler(BaseHTTPRequestHandler):
                 return
             return self._send(200, self.health_payload)
         if self.path.startswith("/messages?"):
-            return self._send(200, {"messages": [{"id": "h1", "to": [self.recipient], "received_at": "2026-08-25T00:00:00Z"}]})
+            payload = self.list_payload if self.list_payload is not None else {"messages": [{"id": "h1", "to": [self.recipient], "received_at": "2026-08-25T00:00:00Z"}]}
+            return self._send(200, payload)
         if self.path.endswith("/h1"):
+            if self.detail_override is not None:
+                return self._send(200, self.detail_override)
             return self._send(200, {
                 "id": "h1",
                 "date": "1999-01-01T00:00:00Z",
@@ -64,6 +70,10 @@ class HostedHandler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         self.requests.append(("DELETE", self.path, self.headers.get("Authorization")))
         self.deleted.append(self.path)
+        if self.delete_empty:
+            self.send_response(204)
+            self.end_headers()
+            return
         self._send(200, {"ok": True})
 
 
@@ -85,6 +95,9 @@ class HostedCaptureTests(unittest.TestCase):
         HostedHandler.deleted = []
         HostedHandler.health_payload = {"ok": True}
         HostedHandler.health_oversize = False
+        HostedHandler.list_payload = None
+        HostedHandler.detail_override = None
+        HostedHandler.delete_empty = False
         self.old_env = dict(os.environ)
         self.endpoint = f"http://127.0.0.1:{self.server.server_port}"
         os.environ["EMAIL_CAPTURE_HOSTED_TOKEN"] = HostedHandler.token
@@ -173,6 +186,35 @@ class HostedCaptureTests(unittest.TestCase):
         HostedHandler.health_oversize = True
         with self.assertRaisesRegex(CaptureError, "size limit"):
             adapter.health()
+
+
+    def test_list_requires_messages_field(self):
+        adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))
+        HostedHandler.list_payload = {}
+        with self.assertRaisesRegex(CaptureError, "CAPTURE_INFRA_UNAVAILABLE"):
+            adapter.list({"recipient": HostedHandler.recipient})
+
+    def test_detail_must_match_allocation(self):
+        adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))
+        HostedHandler.detail_override = {
+            "id": "other",
+            "date": "1999-01-01T00:00:00Z",
+            "from": "sender@test",
+            "to": ["other@capture.test"],
+            "subject": "leaked",
+            "text": "secret-from-other-allocation",
+            "html": "",
+            "headers": {},
+            "attachments": [],
+        }
+        with self.assertRaisesRegex(CaptureError, "AUTHORIZATION_DENIED"):
+            adapter.list({"recipient": HostedHandler.recipient})
+
+    def test_delete_accepts_empty_204(self):
+        adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))
+        HostedHandler.delete_empty = True
+        adapter.purge({"recipient": HostedHandler.recipient})
+        self.assertEqual(HostedHandler.deleted, ["/messages/h1"])
 
     def test_canary_cli_emits_metadata_only(self):
         with tempfile.TemporaryDirectory() as temp:
