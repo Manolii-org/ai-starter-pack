@@ -6,8 +6,8 @@ The CLI is journey-agnostic: `allocate` / `await` / `assert` / `release` (`capab
 
 | Lane | What it proves | Required for Buro go-live |
 |---|---|---|
-| Hermetic Mailpit/MailDev/Inbucket | Job-local SMTP + capture CLI | Yes, for every evidenced sender |
-| Hosted SPI (`mode=hosted`) | Vendor-neutral HTTPS inbox | No, until pack tags `v0.2.0` and vendor/DPA/concurrency/KL skip pass |
+| Hermetic Mailpit/MailDev/Inbucket | Job-local SMTP + capture CLI (profiles: `off` or `hermetic`) | Yes, for every evidenced sender |
+| Hosted capture | Reserved. Not a valid profile on this lock (`docs/email-capture.md` accepts only `off` or `hermetic`). Reconsider only after the gates in `docs/adr/ADR-0010-hermetic-virtual-inbox.md`: deployed synthetic sender plus Phase 0 deletion, residency, key-scope, concurrency, and ingestion-exclusion. | No |
 | Real-delivery canary | DNS/provider receipt to an entity mailbox | Separate from capture; still denied from KL |
 
 ## Buro `bcp-core` (evidenced senders)
@@ -19,7 +19,7 @@ Both product paths use Auth `resetPasswordForEmail` and `supabase/templates/reco
 | Forgot password | `/signin/forgot` | `e2e/buro-email-recovery.mjs` |
 | Pending activation | `/signin` → **Email me a sign-in link** (`password_set_at` is null) | `e2e/buro-email-activation.mjs` |
 
-Not mailbox-tested until a sender exists: signup confirmation (`enable_confirmations` off locally; production invite-only), GoTrue invite, email-change, magic-link `generateLink` e2e, partner/space invite URLs.
+Not mailbox-tested until a sender exists: signup confirmation (`enable_confirmations` off locally; production invite-only), GoTrue invite, and email-change. URL-only `generateLink` and in-app partner/space invite URLs stay `NO_EVIDENCED_SENDER`.
 
 ## Knowledge Layer
 
