@@ -6,8 +6,11 @@ name: PR Assessment
 # config-completeness-ignore: name
 # config-completeness-ignore: run
 
-# AI-driven PR review pipeline. Runs on every PR against main/master.
+# AI-driven PR review pipeline. Skip drafts (qualification is lint/secret-scan);
+# run on ready_for_review and later non-draft synchronize.
 # Stages: pr-classifier → specialist skills → broad agents → judge
+# Downstream jobs require needs.classify.result == 'success' so Semgrep/Bandit
+# cannot start when classify is skipped (empty depth is not the string 'none').
 #
 # Fleet tenants: LLM jobs use Fly house-guard; SAST stays ubuntu-latest.
 # Kill-switch: CI_RUNNER_OVERRIDE=["ubuntu-latest"]. Non-fleet: set OVERRIDE
@@ -27,7 +30,7 @@ on:
       - '.ai/memory/eval-failures.jsonl'
       - '.ai/skill-graph.md'
     branches: [main, master, develop]
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, ready_for_review]
 
 concurrency:
   group: pr-assessment-${{ github.ref }}
@@ -45,6 +48,7 @@ jobs:
           && fromJSON(vars.CI_RUNNER_OVERRIDE || '["self-hosted","fly"]')
           || 'ubuntu-latest' }}
     if: |
+      github.event.pull_request.draft != true &&
       !contains(github.event.pull_request.labels.*.name, 'skip-ai-review') &&
       !startsWith(github.event.pull_request.title, 'chore(sync):')
     outputs:
@@ -92,7 +96,7 @@ jobs:
     name: SAST (Semgrep + Bandit)
     runs-on: ubuntu-latest
     needs: [classify]
-    if: needs.classify.outputs.depth != 'none'
+    if: needs.classify.result == 'success' && needs.classify.outputs.depth != 'none'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -147,7 +151,7 @@ jobs:
           && fromJSON(vars.CI_RUNNER_OVERRIDE || '["self-hosted","fly"]')
           || 'ubuntu-latest' }}
     needs: [classify, sast]
-    if: needs.classify.outputs.invoke_skills != ''
+    if: needs.classify.result == 'success' && needs.classify.outputs.invoke_skills != ''
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -182,7 +186,7 @@ jobs:
           && fromJSON(vars.CI_RUNNER_OVERRIDE || '["self-hosted","fly"]')
           || 'ubuntu-latest' }}
     needs: [classify, sast]
-    if: needs.classify.outputs.depth == 'broad'
+    if: needs.classify.result == 'success' && needs.classify.outputs.depth == 'broad'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:

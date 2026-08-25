@@ -1,6 +1,10 @@
 name: PR Assessment (Reusable)
 # Reusable workflow_call form of pr-assessment.yml.
 # Caller owns the `on:` triggers; this file only defines the jobs.
+# Skip drafts on pull_request (keep workflow_dispatch). Callers must still
+# list ready_for_review or marking a draft ready never starts assessment.
+# Downstream jobs require needs.classify.result == 'success' so SAST cannot
+# start when classify is skipped (empty depth is not the string 'none').
 # Dual provider_mode: anthropic (direct ANTHROPIC_API_KEY) | proxy (LiteLLM via ANTHROPIC_BASE_URL + LITELLM_MASTER_KEY).
 # See REUSABLE-WORKFLOWS.md for caller examples and secret passing conventions.
 # config-completeness-ignore: uses
@@ -66,6 +70,7 @@ jobs:
     # assessment; merge authorization additionally stays with the auto-merge
     # gate's structural verifier.
     if: |
+      (github.event_name != 'pull_request' || github.event.pull_request.draft != true) &&
       !contains(github.event.pull_request.labels.*.name, 'skip-ai-review') &&
       !startsWith(github.event.pull_request.title, 'chore(sync):') &&
       !(startsWith(github.head_ref, 'automated/sync-') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.id == inputs.trusted_sync_author_id)
@@ -200,7 +205,7 @@ jobs:
     name: SAST (Semgrep + Bandit)
     runs-on: ${{ inputs.runs_on }}
     needs: [classify]
-    if: needs.classify.outputs.depth != 'none'
+    if: needs.classify.result == 'success' && needs.classify.outputs.depth != 'none'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -252,7 +257,7 @@ jobs:
     name: Specialist Skills
     runs-on: ${{ inputs.runs_on }}
     needs: [classify, sast]
-    if: needs.classify.outputs.invoke_skills != ''
+    if: needs.classify.result == 'success' && needs.classify.outputs.invoke_skills != ''
     # Provider env — all steps inherit; empty ANTHROPIC_BASE_URL is a no-op for anthropic mode.
     env:
       ANTHROPIC_API_KEY: ${{ inputs.provider_mode == 'proxy' && secrets.LITELLM_MASTER_KEY || secrets.ANTHROPIC_API_KEY }}
@@ -368,7 +373,7 @@ jobs:
     name: Broad Agents
     runs-on: ${{ inputs.runs_on }}
     needs: [classify, sast]
-    if: needs.classify.outputs.depth == 'broad'
+    if: needs.classify.result == 'success' && needs.classify.outputs.depth == 'broad'
     # Provider env — all steps inherit; empty ANTHROPIC_BASE_URL is a no-op for anthropic mode.
     env:
       ANTHROPIC_API_KEY: ${{ inputs.provider_mode == 'proxy' && secrets.LITELLM_MASTER_KEY || secrets.ANTHROPIC_API_KEY }}
