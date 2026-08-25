@@ -9,6 +9,7 @@ import re
 import secrets
 import tempfile
 import time
+from datetime import datetime
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -683,12 +684,25 @@ def _message_id(row: dict[str, Any]) -> str:
     return identifier
 
 
+def _require_sortable_received_at(received: str) -> None:
+    """Reject timestamps that would invert await_messages cursor ordering."""
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})", received):
+        raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "message receive time is not sortable")
+    try:
+        parsed = datetime.fromisoformat(received.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "message receive time is not sortable") from error
+    if parsed.tzinfo is None:
+        raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "message receive time is not sortable")
+
+
 def normalise_message(row: dict[str, Any], backend_name: str) -> dict[str, Any]:
     """Map receiver-specific detail records into the v1 message shape."""
     identifier = _message_id(row)
     received = row.get("received_at") or row.get("Created") or row.get("created") or row.get("date") or row.get("Date") or row.get("time")
     if not isinstance(received, str) or not received:
         raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "message lacks stable receive time")
+    _require_sortable_received_at(received)
     body = row.get("body", {}) if isinstance(row.get("body", {}), dict) else {}
     text = row.get("text", row.get("Text", body.get("text", "")))
     html = row.get("html", row.get("HTML", body.get("html", "")))
@@ -844,7 +858,7 @@ def await_messages(selected_backend: Backend, allocation: dict[str, Any], timeou
     try:
         while True:
             if hasattr(selected_backend, "request_timeout"):
-                if first_poll:
+                if first_poll and timeout == 0:
                     selected_backend._deadline = None
                     selected_backend.request_timeout = max(0.01, min(10.0, float(original_timeout or 10.0)))
                 else:

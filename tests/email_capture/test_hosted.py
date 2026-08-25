@@ -4,6 +4,7 @@ import secrets
 import os
 import subprocess
 import tempfile
+import time
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -23,6 +24,7 @@ class HostedHandler(BaseHTTPRequestHandler):
     detail_override = None
     delete_empty = False
     health_raw = None
+    list_delay = 0
 
     def log_message(self, *_args):
         return
@@ -57,6 +59,8 @@ class HostedHandler(BaseHTTPRequestHandler):
                 return
             return self._send(200, self.health_payload)
         if self.path.startswith("/messages?"):
+            if self.list_delay:
+                time.sleep(self.list_delay)
             payload = self.list_payload if self.list_payload is not None else {"messages": [{"id": "h1", "to": [self.recipient], "received_at": "2026-08-25T00:00:00Z"}]}
             return self._send(200, payload)
         if self.path.endswith("/h1"):
@@ -107,6 +111,7 @@ class HostedCaptureTests(unittest.TestCase):
         HostedHandler.detail_override = None
         HostedHandler.delete_empty = False
         HostedHandler.health_raw = None
+        HostedHandler.list_delay = 0
         self.old_env = dict(os.environ)
         self.endpoint = f"http://127.0.0.1:{self.server.server_port}"
         os.environ["EMAIL_CAPTURE_HOSTED_TOKEN"] = HostedHandler.token
@@ -487,6 +492,22 @@ class HostedCaptureTests(unittest.TestCase):
         with self.assertRaisesRegex(CaptureError, "MESSAGE_TIMEOUT"):
             await_messages(adapter, {"recipient": HostedHandler.recipient, "cursor": "0:"}, timeout=0)
         self.assertTrue(any(method == "GET" and path.startswith("/messages") for method, path, _auth in HostedHandler.requests))
+
+    def test_nonsortable_summary_timestamp_is_infra_failure(self):
+        adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))
+        HostedHandler.list_payload = {"messages": [{"id": "h1", "to": [HostedHandler.recipient], "received_at": "zzz"}]}
+        with self.assertRaisesRegex(CaptureError, "CAPTURE_INFRA_UNAVAILABLE"):
+            adapter.list({"recipient": HostedHandler.recipient})
+
+    def test_positive_timeout_bounds_first_hosted_poll(self):
+        adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))
+        HostedHandler.list_payload = {"messages": []}
+        HostedHandler.list_delay = 2
+        started = time.monotonic()
+        with self.assertRaises(CaptureError) as ctx:
+            await_messages(adapter, {"recipient": HostedHandler.recipient, "cursor": "0:"}, timeout=0.3)
+        self.assertLess(time.monotonic() - started, 1.5)
+        self.assertIn(ctx.exception.code, {"MESSAGE_TIMEOUT", "CAPTURE_INFRA_UNAVAILABLE"})
 
     def test_conflicting_to_aliases_are_infra_failure(self):
         adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))
