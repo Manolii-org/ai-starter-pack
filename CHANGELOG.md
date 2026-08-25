@@ -9,6 +9,9 @@
 - **CI cost conventions.** `docs/ci-cost-conventions.md` — wait-loop extraction,
   no unfiltered browser/`supabase start` PR workflows, job-level concurrency
   for shared locks, no `on.paths` on internally detect-gated required e2e.
+  Autofix is **not** draft-gated. Path-filter examples: `mutation-testing-diff.yml`
+  (`on.pull_request.paths`) and `static-review.yml` `changed-files`. Do not cite
+  `ci.yml` `detect` (existence check only).
 
 ## 1.9.7 — 2026-08-21
 

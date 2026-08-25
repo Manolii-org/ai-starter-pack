@@ -6,9 +6,16 @@ the product repo. Do not copy those into pack workflows.
 
 ## 1. Skip drafts on expensive PR automation
 
-PR Assessment, Autofix, and other LLM jobs skip `pull_request.draft`. Always
-list `ready_for_review` in `on.pull_request.types` or marking ready never
-starts the job. Put the skip on the **job** `if:` so no runner starts (`$0`).
+`pull_request`-triggered LLM jobs (PR Assessment) skip
+`github.event.pull_request.draft`. Always list `ready_for_review` in
+`on.pull_request.types` or marking ready never starts the job. Put the skip
+on the **job** `if:` so no runner starts (`$0`).
+
+Autofix (`pr-autofix-loop.yml`) is **not** draft-gated. It runs on
+`issue_comment`, `pull_request_review`, `pull_request_review_comment`, and
+failing `workflow_run`. Review payloads can include `pull_request.draft`;
+the shipped job `if:` still does not inspect it. Do not tell consumers
+Autofix is `$0` on drafts.
 
 When classify can be skipped, every downstream job must also require
 `needs.classify.result == 'success'`. An empty output is **not** the string
@@ -22,8 +29,14 @@ Required fast-tier names and secret-scan stay unconditional on drafts.
 A `pull_request` workflow that installs Playwright browsers or runs
 `supabase start` (or an equivalent local stack) without `paths:` / internal
 detect-gating bills minutes on every docs-only push. Path-filter non-required
-jobs. Pack `email-capture-live-conformance.yml` is the model: path-filtered,
-not an unfiltered PR matrix.
+jobs. Copier template model: `mutation-testing-diff.yml`
+(`on.pull_request.paths`). Internal detect without `on.paths`:
+`static-review.yml` `changed-files` job (`git diff --name-only` against the
+PR base). Do **not** cite `ci.yml` `detect` for this — it only tests whether
+a package manifest or lockfile exists in the tree, so docs-only PRs in a
+Node repo still run install/test. Cite only workflows that ship in this
+template. Semgrep in `static-review.yml` still runs on every PR; Bandit /
+Shellcheck / ESLint are the jobs gated on those path outputs.
 
 Do **not** add `on.paths` to a Playwright (or similar) workflow that is
 already internally detect-gated if that check might become required. GitHub
