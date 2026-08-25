@@ -179,7 +179,7 @@ class HostedCaptureTests(unittest.TestCase):
         self.assertTrue(adapter.health())
         messages = adapter.list({"recipient": HostedHandler.recipient})
         self.assertEqual(messages[0]["content"]["text"], "Code 654321")
-        self.assertEqual(messages[0]["received_at"], "2026-08-25T00:00:00Z")
+        self.assertEqual(messages[0]["received_at"], "2026-08-25T00:00:00.000000Z")
         adapter.purge({"recipient": HostedHandler.recipient})
         self.assertEqual(HostedHandler.deleted, ["/messages/h1"])
         self.assertTrue(all(auth == f"Bearer {HostedHandler.token}" for _method, _path, auth in HostedHandler.requests))
@@ -500,7 +500,7 @@ class HostedCaptureTests(unittest.TestCase):
             "messages": [{"id": "h1", "to": [HostedHandler.recipient], "received_at": "2026-08-25T00:30:00+01:00"}],
         }
         messages = adapter.list({"recipient": HostedHandler.recipient})
-        self.assertEqual(messages[0]["received_at"], "2026-08-24T23:30:00Z")
+        self.assertEqual(messages[0]["received_at"], "2026-08-24T23:30:00.000000Z")
 
     def test_hosted_body_read_respects_deadline(self):
         class Drip:
@@ -518,6 +518,15 @@ class HostedCaptureTests(unittest.TestCase):
 
         with self.assertRaisesRegex(CaptureError, "MESSAGE_TIMEOUT"):
             _read_bounded_http_body(Drip(), deadline=time.monotonic() + 0.2)
+
+    def test_same_second_fractional_timestamps_stay_ordered(self):
+        from email_capture.core import _canonical_received_at
+        earlier = _canonical_received_at("2026-08-25T00:00:00Z")
+        later = _canonical_received_at("2026-08-25T00:00:00.5Z")
+        self.assertEqual(earlier, "2026-08-25T00:00:00.000000Z")
+        self.assertEqual(later, "2026-08-25T00:00:00.500000Z")
+        self.assertLess(earlier, later)
+        self.assertGreater(f"{later}:bbb", f"{earlier}:aaa")
 
     def test_nonsortable_summary_timestamp_is_infra_failure(self):
         adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))

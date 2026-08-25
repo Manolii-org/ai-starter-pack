@@ -704,9 +704,7 @@ def _canonical_received_at(received: str) -> str:
     if parsed.tzinfo is None:
         raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "message receive time is not sortable")
     utc = parsed.astimezone(timezone.utc)
-    if utc.microsecond:
-        return utc.strftime("%Y-%m-%dT%H:%M:%S.") + f"{utc.microsecond:06d}".rstrip("0") + "Z"
-    return utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return utc.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def normalise_message(row: dict[str, Any], backend_name: str) -> dict[str, Any]:
