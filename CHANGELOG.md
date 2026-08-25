@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Finish a complete hosted empty list at the await deadline.** `_read_bounded_http_body` no longer raises `MESSAGE_TIMEOUT` merely because `remaining <= 0` after a finished JSON body. Truncated/dripped reads still time out. Bounded-negative `count=0` against an empty hosted mailbox returns success.
 - **Do not treat incomplete mailbox reads as a successful negative.** `await_messages(count=0)` still completes an empty window after the last 0.01s poll. A `MESSAGE_TIMEOUT` from `list()` (hosted body read cut off mid-response) stays a timeout, not a false empty mailbox.
 - **Fix bounded-negative await on HTTP backends.** v0.2.0 raised `MESSAGE_TIMEOUT` from `_remaining_request_timeout` when the window elapsed, so Mailpit `count=0` waits failed even when the mailbox stayed empty. The last poll uses a 0.01s timeout; negatives return success. Positive waits still time out.
 - **Document consumer email-capture journeys.** `docs/email-capture-journeys.md` records evidenced senders versus `NO_EVIDENCED_SENDER` (no mailbox tests for `generateLink` / in-app URL flows). Hosted SPI exists in v0.2.0; hermetic Mailpit jobs remain the Buro go-live lane.

@@ -34,9 +34,9 @@ HOSTED_MAX_BODY_BYTES = 2 * 1024 * 1024
 
 def _apply_remaining_read_timeout(response: Any, deadline: float) -> None:
     remaining = deadline - time.monotonic()
-    if remaining <= 0:
-        raise CaptureError("MESSAGE_TIMEOUT", "bounded wait expired")
-    timeout = max(0.01, remaining)
+    # Elapsed windows still get one tiny syscall so a complete empty JSON body
+    # can finish. Truncation is MESSAGE_TIMEOUT via TimeoutError, not remaining<=0.
+    timeout = 0.01 if remaining <= 0 else max(0.01, remaining)
     for candidate in (
         response,
         getattr(response, "fp", None),
@@ -62,6 +62,7 @@ def _read_bounded_http_body(response: Any, limit: int = HOSTED_MAX_BODY_BYTES, d
     chunks: list[bytes] = []
     total = 0
     chunk_size = 1 if deadline is not None else 4096
+    overrun_started: float | None = None
     while True:
         if deadline is not None:
             _apply_remaining_read_timeout(response, deadline)
@@ -78,7 +79,10 @@ def _read_bounded_http_body(response: Any, limit: int = HOSTED_MAX_BODY_BYTES, d
             raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "hosted response exceeded size limit")
         chunks.append(chunk)
         if deadline is not None and time.monotonic() >= deadline:
-            raise CaptureError("MESSAGE_TIMEOUT", "bounded wait expired")
+            if overrun_started is None:
+                overrun_started = time.monotonic()
+            if time.monotonic() - overrun_started > 0.2:
+                raise CaptureError("MESSAGE_TIMEOUT", "bounded wait expired")
     return b"".join(chunks)
 
 
