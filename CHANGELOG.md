@@ -520,6 +520,8 @@ repos (first consumer: `a downstream instance`, dormant-routing config).
 
 ### Fixed
 
+> Historical note: `scripts/render-pack.py` was later retired; Copier is the current render path.
+
 - `scripts/render-pack.py` — `render()` now always skips build artifacts and
   caches (`releases/`, `dist/`, `__pycache__`, `*.pyc`, `*.zip`) regardless of
   brand/feature flags; a prebuilt `releases/*.zip` was previously copied into output.
