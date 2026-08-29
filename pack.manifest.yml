@@ -2,8 +2,11 @@
 #
 # Controls brand injection and feature flags for rendered output.
 # Edit .brand/branded.yml or .brand/unbranded.yml, not this file directly.
-# Render: copier copy --defaults --data install_mode=branded|unbranded \
-#         [--data <flag>=true ...] . <output-dir>      (see copier.yml)
+# Render (one mode per run — copy a line as-is):
+#   copier copy --defaults --data install_mode=branded   . <output-dir>
+#   copier copy --defaults --data install_mode=unbranded . <output-dir>
+# Enable features by repeating --data, e.g. --data oss_routing=true
+# (see copier.yml for the full question/flag set)
 
 version: "1.9.7"   # see CHANGELOG.md
 
