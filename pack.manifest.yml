@@ -13,7 +13,7 @@ brand:
   org_name: "{{ORG_NAME}}"
 
 # Feature flags — set at first-session by Claude Code guided setup,
-# or pass as flags to render-pack.py for pre-rendered artifacts.
+# or pass as `--data <flag>=true` to copier for pre-rendered artifacts.
 features:
   oss_routing: false        # Claude + OSS proxy (Fireworks/Together/Groq). Requires setup-litellm.sh.
   kl_integration: false     # Remote knowledge layer memory backend (kl_* MCP tools).
