@@ -295,7 +295,13 @@ class TestPackDriftIntegration(unittest.TestCase):
             self.assertFalse(any(r.status == "FAIL" for r in results))
 
     def test_readme_counts_reports_mismatch(self):
-        """README-COUNTS should compare README count to agent files."""
+        """README-COUNTS should compare the README count to actual agent files.
+
+        Asserts on the Agents row specifically. A bare ``any(status == WARN)``
+        is vacuous now that the check covers four sections: the absent
+        Commands/Skills/Hooks rows warn on their own, so the assertion would
+        hold even when the Agents count matched.
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             pack_root = Path(tmpdir)
             agents = pack_root / ".claude" / "agents"
@@ -304,7 +310,37 @@ class TestPackDriftIntegration(unittest.TestCase):
             (agents / "one.md").write_text("---\nmodel: haiku\n---\n# One\n", encoding="utf-8")
 
             results = pack_drift_check.check_readme_counts(pack_root)
-            self.assertTrue(any(r.status == "WARN" for r in results))
+            agent_warnings = [r for r in results
+                              if r.status == "WARN" and "Agents: README says 2, actual 1" in r.detail]
+            self.assertEqual(len(agent_warnings), 1, f"expected one Agents mismatch, got {results}")
+
+            # Control: a correct count must NOT produce an Agents warning.
+            (pack_root / "README-STARTER-PACK.md").write_text("**Agents** (1 files)\n", encoding="utf-8")
+            results = pack_drift_check.check_readme_counts(pack_root)
+            self.assertFalse([r for r in results if r.status == "WARN" and "Agents:" in r.detail],
+                             "matching Agents count must not warn")
+
+    def test_readme_counts_prefers_jinja_over_stub(self):
+        """The template repo ships both a .jinja doc and a small .md stub.
+
+        Reading the stub first is what made this check permanently blind: it
+        found no count rows, returned WARN, and six counts drifted behind that
+        warning. The .jinja must win when both are present.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pack_root = Path(tmpdir)
+            agents = pack_root / ".claude" / "agents"
+            agents.mkdir(parents=True)
+            (agents / "one.md").write_text("# One\n", encoding="utf-8")
+            # Stub carries no counts; the real document states the correct one.
+            (pack_root / "README-STARTER-PACK.md").write_text("## License\n", encoding="utf-8")
+            (pack_root / "README-STARTER-PACK.md.jinja").write_text("**Agents** (1 files)\n", encoding="utf-8")
+
+            results = pack_drift_check.check_readme_counts(pack_root)
+            self.assertIn("PASS", [r.status for r in results],
+                          "should have read the .jinja and matched, not the stub")
+            self.assertFalse([r for r in results if "Could not find" in r.detail and "Agents" in r.detail],
+                             "stub shadowed the real document")
 
 
 if __name__ == "__main__":

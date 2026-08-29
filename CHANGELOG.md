@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- **The README's component counts had drifted, and the guard for it was blind.**
+  `check_readme_counts` read `README-STARTER-PACK.md` first and only fell back to
+  the `.jinja`. Both exist in the template repo — the `.md` is a 135-byte licence
+  stub, the `.jinja` is the real 24KB document — so the check always read the stub,
+  found no count row, and returned WARN. Six of the eight counts drifted behind
+  that permanent warning (commands 47→48, skills 23→28, agents 28→27, scripts
+  25→33, docs 8→15, workflows 5→28). Prefer the `.jinja` when present, extend the
+  check from agents-only to agents/commands/skills/hooks, and correct the counts.
+  Consumers were never affected: a render produces the full document from the
+  `.jinja`; only the maintainer-side check read the stub.
+- **README documented three hooks that do not run.** The Hook Lifecycle section
+  named `pre-tool.py` as the PreToolUse hook (it is `scripts/pre-tool-use.py`, a
+  different file), listed `advisor-metrics-hook.py` as an active PostToolUse hook,
+  and described `stop.sh` as part of the Stop chain. All three contradicted the
+  README's own Scripts table further down. `.claude/hooks/pre-tool.py` and
+  `.claude/hooks/stop.sh` now carry a NOT WIRED header so an editor learns they
+  are inert before changing them, and `advisor-metrics-hook.py`'s docstring no
+  longer claims a settings.json entry it never had.
+- **Quick Start step 1 pointed at a retired path.** It told consumers to
+  `cp -r /path/to/master/templates/ai-starter-pack/`, the pre-standalone monorepo
+  location. Replaced with the `copier copy` / `copier update` flow that `README.md`
+  already documents as canonical.
+
 - **Stop hook logged `exit_code: 0` for every session.** In `.claude/settings.json`
   the self-check's `$?` sat in the same word as `$(date -u …)`; the command
   substitution runs during expansion and clobbers the status, so a failing

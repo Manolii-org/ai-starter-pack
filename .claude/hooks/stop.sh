@@ -1,5 +1,14 @@
 #!/usr/bin/env bash
 # Stop hook — session-end cleanup, self-check, and skill graph rebuild.
+#
+# NOT WIRED. settings.json's Stop event runs two other commands:
+# `scripts/session-stop-checklist.sh`, then `system-self-check.py` +
+# `build-skill-graph.py` inline. Nothing invokes this file, and build-plugin.py
+# excludes it from the plugin bundle. It duplicates the second command's work
+# (self-check, skill graph) plus a stop sentinel and session-end log.
+# Editing it does not change Stop behaviour; add a third Stop entry in
+# settings.json if you want the sentinel and session-end log.
+#
 # Receives hook JSON on stdin. Always exits 0 — never blocks Claude from stopping.
 set -o pipefail
 trap 'exit 0' ERR

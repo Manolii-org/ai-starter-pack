@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
-"""PostToolUse hook: detect advisor tool calls, log to .ai/metrics/advisor-usage.jsonl.
+"""Legacy PostToolUse hook: detect advisor tool calls, log to .ai/metrics/advisor-usage.jsonl.
 
-Additive hook — does NOT replace scripts/post-tool-use.py.
-Wired as a separate entry in settings.json PostToolUse hooks array.
+NOT WIRED. `advisor()` is disabled (settings.json `ADVISOR_BETA_ENABLED=false`)
+and no hook entry invokes this script; it is retained for historical telemetry
+analysis only. The earlier claim here — "wired as a separate entry in
+settings.json PostToolUse hooks array" — was never true of the shipped
+settings.json and contradicted the Scripts table in README-STARTER-PACK.md,
+which has always listed this script as "Not invoked".
+
+To actually enable it, add a second PostToolUse entry in settings.json; it is
+additive and does not replace .claude/hooks/post-tool.py.
 """
 import json
 import os

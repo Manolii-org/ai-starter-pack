@@ -177,36 +177,63 @@ def scan_provider_names(pack_root: Path) -> list[CheckResult]:
 
 
 def check_readme_counts(pack_root: Path) -> list[CheckResult]:
-    """Check C: verify README agent count."""
-    readme_path = pack_root / 'README-STARTER-PACK.md'
+    """Check C: verify the README component counts match the tree.
+
+    Source-of-truth order matters. In the TEMPLATE repo both
+    ``README-STARTER-PACK.md.jinja`` (the real 24KB document) and a small
+    ``README-STARTER-PACK.md`` stub exist; in a RENDERED consumer only the
+    plain ``.md`` exists and it is the full document. Preferring the plain
+    ``.md`` first — as this check used to — meant that in the template repo it
+    always read the stub, never found a count row, and returned WARN forever.
+    Six of the eight counts had silently drifted behind that permanent warning.
+    Prefer ``.jinja`` when present, so the check reads the real document in both
+    layouts.
+    """
+    readme_path = pack_root / 'README-STARTER-PACK.md.jinja'
     if not readme_path.exists():
-        # Copier template source stores the README under a .jinja suffix
-        readme_path = pack_root / 'README-STARTER-PACK.md.jinja'
+        readme_path = pack_root / 'README-STARTER-PACK.md'
     if not readme_path.exists():
         return [CheckResult('WARN', 'README-COUNTS', 'README-STARTER-PACK.md not found')]
 
     with open(readme_path, 'r', encoding='utf-8', errors='ignore') as f:
         content = f.read()
 
-    # Look for "(N files)" near "Agents"
-    agents_section = re.search(r'\*\*Agents\*\*.*?\((\d+) files\)', content)
-    if not agents_section:
-        return [CheckResult('WARN', 'README-COUNTS', 'Could not find "(N files)" pattern near Agents')]
-
-    readme_count = int(agents_section.group(1))
-    agents_dir = pack_root / '.claude' / 'agents'
+    # label -> (relative dir, unit word, counts_dirs)
     # '.md' in name (not glob '*.md') so Copier conditional filenames like
-    # '{% if codex_adversarial %}codex-adversarial.md{% endif %}' still count
-    actual_count = (len([f for f in agents_dir.iterdir() if f.is_file() and '.md' in f.name])
-                    if agents_dir.is_dir() else 0)
+    # '{% if codex_adversarial %}codex-adversarial.md{% endif %}' still count.
+    targets = [
+        ('Agents', '.claude/agents', 'files', False),
+        ('Commands', '.claude/commands', 'files', False),
+        ('Skills', '.claude/skills', 'dirs', True),
+        ('Hooks', '.claude/hooks', 'files', False),
+    ]
 
-    if readme_count != actual_count:
-        return [CheckResult(
-            status='WARN',
-            check_name='README-COUNTS',
-            detail=f'README says {readme_count}, actual {actual_count}'
-        )]
-    return [CheckResult('PASS', 'README-COUNTS', '')]
+    results: list[CheckResult] = []
+    for label, rel, unit, count_dirs in targets:
+        row = re.search(rf'\*\*{label}\*\*.*?\((\d+) {unit}\)', content)
+        if not row:
+            results.append(CheckResult(
+                'WARN', 'README-COUNTS',
+                f'Could not find "(N {unit})" pattern near {label}'))
+            continue
+        directory = pack_root / rel
+        if not directory.is_dir():
+            results.append(CheckResult('WARN', 'README-COUNTS', f'{rel} not found'))
+            continue
+        if count_dirs:
+            actual = len([d for d in directory.iterdir() if d.is_dir()])
+        elif label == 'Hooks':
+            actual = len([f for f in directory.iterdir() if f.is_file()])
+        else:
+            actual = len([f for f in directory.iterdir() if f.is_file() and '.md' in f.name])
+        stated = int(row.group(1))
+        if stated != actual:
+            results.append(CheckResult(
+                'WARN', 'README-COUNTS',
+                f'{label}: README says {stated}, actual {actual}'))
+        else:
+            results.append(CheckResult('PASS', 'README-COUNTS', ''))
+    return results
 
 
 # Whitespace-tolerant: Jinja accepts {%if x%} / {% if  x %} variants in names

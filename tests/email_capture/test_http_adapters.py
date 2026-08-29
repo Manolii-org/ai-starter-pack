@@ -94,6 +94,7 @@ class HttpAdapterTests(unittest.TestCase):
         # a fixed sequence would run out on the pre-fix code (which evaluates the
         # /headers request before the failing subscript) and mask the real defect.
         def _request(path, *_a, **_k):
+            """Return the listing for /api/v1/messages, an empty body for anything else."""
             return summaries if path.startswith("/api/v1/messages") else None
 
         adapter._request = _request
