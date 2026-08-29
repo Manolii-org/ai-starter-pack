@@ -1,6 +1,6 @@
 name: CLAUDE.md Contract (Reusable)
 # Reusable workflow_call form. Caller owns on: + paths via top-level.
-# Cite: .github/REUSABLE-WORKFLOWS.md
+# Cite: .github/workflows/REUSABLE-WORKFLOWS.md
 #
 # Validates the per-repo CLAUDE.md interface contract (heading anchors +
 # sync-marker tokens) via scripts/check-claude-md-contract.py against

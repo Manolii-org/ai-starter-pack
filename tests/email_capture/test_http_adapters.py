@@ -4,7 +4,7 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from email_capture.core import HttpBackend, Profile
+from email_capture.core import CaptureError, HttpBackend, Profile
 
 
 class ReceiverHandler(BaseHTTPRequestHandler):
@@ -78,6 +78,29 @@ class HttpAdapterTests(unittest.TestCase):
                 if backend_name == "mailpit":
                     self.assertEqual(deletes[-1][1:], ("/api/v1/messages", {"IDs": ["m1"]}))
                 ReceiverHandler.requests = []
+
+    def test_mailpit_non_object_detail_is_a_typed_infra_error(self):
+        """A null/non-object mailpit detail body must fail closed as retryable infra.
+
+        The mailpit branch assigned `detail["headers"]` before the shape check, so
+        an empty or non-JSON-object detail response raised a bare TypeError. The
+        CLI catches TypeError as CONFIG_INVALID (retryable=False), so a transient
+        receiver fault was reported as a permanent configuration error.
+        """
+        adapter = HttpBackend(Profile("hermetic", "mailpit", self.endpoint, "test"))
+        summaries = {"messages": [{"ID": "m1", "To": [{"Address": ReceiverHandler.recipient}]}]}
+
+        # Every call after the listing returns an empty body. Unbounded on purpose:
+        # a fixed sequence would run out on the pre-fix code (which evaluates the
+        # /headers request before the failing subscript) and mask the real defect.
+        def _request(path, *_a, **_k):
+            return summaries if path.startswith("/api/v1/messages") else None
+
+        adapter._request = _request
+        with self.assertRaises(CaptureError) as caught:
+            adapter.list(self.allocation)
+        self.assertEqual(caught.exception.code, "CAPTURE_INFRA_UNAVAILABLE")
+        self.assertTrue(caught.exception.as_dict()["retryable"])
 
 
 if __name__ == "__main__":

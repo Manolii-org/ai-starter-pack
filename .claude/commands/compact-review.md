@@ -56,7 +56,7 @@ Recommendations:
 
 ### 4. Tune if needed
 
-- **Miss rate > 10%**: Review which tool calls preceded auto-compact misses. Add those patterns to `.claude/hooks/compact-trigger.py` TIER1 tools or the git push detection.
-- **Calls/cycle < 20**: Raise `MIN_CALLS_BEFORE_TRIGGER` in `.claude/hooks/compact-trigger.py`.
+- **Miss rate > 10%**: Review which tool calls preceded auto-compact misses. Add those patterns to `.claude/hooks/post-tool.py` TIER1 tools or the git push detection.
+- **Calls/cycle < 20**: Raise `MIN_CALLS_BEFORE_TRIGGER` in `.claude/hooks/post-tool.py`.
 - **Calls/cycle > 60**: Lower `COUNTER_TRIGGER_THRESHOLD` (e.g., 30 instead of 40).
 - **Summary size > 8000 chars**: Tighten the DISCARD section in `.claude/hooks/pre-compact.sh`.

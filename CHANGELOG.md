@@ -2,6 +2,45 @@
 
 ## Unreleased
 
+- **Stop hook logged `exit_code: 0` for every session.** In `.claude/settings.json`
+  the self-check's `$?` sat in the same word as `$(date -u …)`; the command
+  substitution runs during expansion and clobbers the status, so a failing
+  `system-self-check.py` / `build-skill-graph.py` was recorded as a success.
+  Captured into `_rc` before the `echo`, and `mkdir -p .ai/memory` added so the
+  append cannot fail on a fresh checkout. Both already existed in the generated
+  plugin `hooks.json`; only the canonical template lagged, which is why
+  `build-plugin.py`'s "mirrors settings.json verbatim" comment had gone stale.
+- **Stop hook checklist never ran.** `settings.json` invoked
+  `scripts/session-stop-checklist.sh` directly while the file was mode 0644 —
+  exit 126, `Permission denied`, on every session end. Invoked via `bash` (the
+  form the plugin already used) and the executable bit restored.
+  `scripts/otel-langfuse-headers.sh` (the `otelHeadersHelper`) got the same
+  treatment.
+- **`email-capture` misreported a receiver fault as a config error.** The mailpit
+  branch of `HttpBackend.list` assigned `detail["headers"]` before its
+  `isinstance(detail, dict)` check, so an empty or non-object detail body raised a
+  bare `TypeError`. The CLI maps `TypeError` to `CONFIG_INVALID`, turning a
+  retryable infra failure into a permanent one. Shape-checked before the
+  mutation; regression test in `tests/email_capture/test_http_adapters.py`.
+- **`ci.yml` restored stale `node_modules`.** The cache key was labelled `node20`
+  while `setup-node` installed 24, and hashed only `package-lock.json` although
+  the `detect` job also accepts pnpm/yarn/bun lockfiles — a non-npm consumer got
+  a constant key and never invalidated the cache. Now mirrors `ci-reusable.yml`.
+- **Least privilege on the last two unscoped workflows.** `ci.yml` and
+  `plugin-eval-gate.yml` were the only workflows without a `permissions:` block;
+  both now declare `contents: read`.
+- **Telemetry wire tests now actually gate.** `telemetry/README.md` names
+  `python3 telemetry/tests/test_heartbeat.py` as required, but no workflow ran
+  it — the same "documented for manual execution only" gap closed for the three
+  hook guards in #71. Added to `plugin-eval-gate.yml`.
+- **Broken in-repo references.** Four reusable workflows cited
+  `.github/REUSABLE-WORKFLOWS.md` (the file is under `.github/workflows/`);
+  `/compact-review` pointed at a non-existent `.claude/hooks/compact-trigger.py`
+  for constants that live in `.claude/hooks/post-tool.py`; `.githooks/pre-commit`
+  offered a `scripts/install-hooks.sh` that does not exist; `pack.manifest.yml`
+  and `.gitignore` still named the removed `scripts/render-pack.py` instead of
+  copier.
+
 - **Finish a complete hosted empty list at the await deadline.** `_read_bounded_http_body` no longer raises `MESSAGE_TIMEOUT` merely because `remaining <= 0` after a finished JSON body. Truncated/dripped reads still time out. Bounded-negative `count=0` against an empty hosted mailbox returns success.
 - **Do not treat incomplete mailbox reads as a successful negative.** `await_messages(count=0)` still completes an empty window after the last 0.01s poll. A `MESSAGE_TIMEOUT` from `list()` (hosted body read cut off mid-response) stays a timeout, not a false empty mailbox.
 - **Fix bounded-negative await on HTTP backends.** v0.2.0 raised `MESSAGE_TIMEOUT` from `_remaining_request_timeout` when the window elapsed, so Mailpit `count=0` waits failed even when the mailbox stayed empty. The last poll uses a 0.01s timeout; negatives return success. Positive waits still time out.

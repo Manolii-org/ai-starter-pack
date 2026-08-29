@@ -27,7 +27,7 @@ __pycache__/
 *.swp
 *.swo
 
-# Rendered output (re-generate with render-pack.py)
+# Rendered output (re-generate with `copier copy` — see copier.yml)
 dist/
 
 # Session retrospective runtime (Stop hook) — do not commit

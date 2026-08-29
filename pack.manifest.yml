@@ -2,7 +2,8 @@
 #
 # Controls brand injection and feature flags for rendered output.
 # Edit .brand/branded.yml or .brand/unbranded.yml, not this file directly.
-# Run: python3 scripts/render-pack.py --mode branded|unbranded [flags] --output <dir>
+# Render: copier copy --defaults --data install_mode=branded|unbranded \
+#         [--data <flag>=true ...] . <output-dir>      (see copier.yml)
 
 version: "1.9.7"   # see CHANGELOG.md
 

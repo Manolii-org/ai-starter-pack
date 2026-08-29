@@ -400,6 +400,12 @@ class HttpBackend:
             identifier = _message_id(summary)
             if self.profile.backend == "mailpit":
                 detail = self._request(f"/api/v1/message/{urllib.parse.quote(identifier, safe='')}")
+                # Shape-check BEFORE mutating: a null / non-object detail body would
+                # otherwise raise a bare TypeError here, which the CLI reports as
+                # CONFIG_INVALID (non-retryable) instead of the retryable
+                # CAPTURE_INFRA_UNAVAILABLE this receiver failure actually is.
+                if not isinstance(detail, dict):
+                    raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "receiver detail has invalid shape")
                 detail["headers"] = self._request(f"/api/v1/message/{urllib.parse.quote(identifier, safe='')}/headers")
             elif self.profile.backend == "maildev":
                 detail = self._request(f"/email/{urllib.parse.quote(identifier, safe='')}")
