@@ -1,6 +1,6 @@
 name: Static Review (Reusable)
 # Reusable workflow_call form. Caller owns on: + paths-ignore via top-level.
-# Cite: .github/REUSABLE-WORKFLOWS.md
+# Cite: .github/workflows/REUSABLE-WORKFLOWS.md
 #
 # SAST on changed files only — Semgrep (all languages), Bandit (Python),
 # Shellcheck (shell scripts), ESLint (JS/TS).

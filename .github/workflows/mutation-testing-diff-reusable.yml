@@ -1,6 +1,6 @@
 name: Mutation Testing (Diff) (Reusable)
 # Reusable workflow_call form. Caller owns on: + paths-ignore via top-level.
-# Cite: .github/REUSABLE-WORKFLOWS.md
+# Cite: .github/workflows/REUSABLE-WORKFLOWS.md
 #
 # Runs mutation testing only on lines changed in a PR.
 # Requires: project must have a test runner configured (Vitest, Jest, or pytest).

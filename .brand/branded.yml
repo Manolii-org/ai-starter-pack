@@ -1,5 +1,5 @@
 # Manolii-branded overlay
-# Used when running: render-pack.py --mode branded
+# Used when running: copier copy --data install_mode=branded
 brand:
   ecosystem_name: "Manolii"
   attribution_line: "Based on proven patterns from the Manolii ecosystem."

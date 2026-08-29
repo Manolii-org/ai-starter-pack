@@ -1,5 +1,5 @@
 # Unbranded / white-label overlay
-# Used when running: render-pack.py --mode unbranded
+# Used when running: copier copy --data install_mode=unbranded
 # Output contains zero Manolii/Adrian/gstack identifiers.
 brand:
   ecosystem_name: ""

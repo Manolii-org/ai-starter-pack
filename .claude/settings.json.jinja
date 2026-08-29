@@ -123,12 +123,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "_R=$(git rev-parse --show-toplevel 2>/dev/null || echo \"$PWD\"); cd \"$_R\" && scripts/session-stop-checklist.sh",
+            "command": "_R=$(git rev-parse --show-toplevel 2>/dev/null || echo \"$PWD\"); cd \"$_R\" && bash scripts/session-stop-checklist.sh",
             "timeout": 10
           },
           {
             "type": "command",
-            "command": "_R=$(git rev-parse --show-toplevel 2>/dev/null || echo \"$PWD\"); cd \"$_R\" && python3 scripts/system-self-check.py > /dev/null 2>&1 && python3 scripts/build-skill-graph.py > /dev/null 2>&1; echo \"{\\\"timestamp\\\":\\\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\\\",\\\"exit_code\\\":$?,\\\"event\\\":\\\"stop-hook-self-check\\\"}\" >> .ai/memory/eval-failures.jsonl",
+            "command": "_R=$(git rev-parse --show-toplevel 2>/dev/null || echo \"$PWD\"); cd \"$_R\" && python3 scripts/system-self-check.py > /dev/null 2>&1 && python3 scripts/build-skill-graph.py > /dev/null 2>&1; _rc=$?; mkdir -p .ai/memory; echo \"{\\\"timestamp\\\":\\\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\\\",\\\"exit_code\\\":$_rc,\\\"event\\\":\\\"stop-hook-self-check\\\"}\" >> .ai/memory/eval-failures.jsonl",
             "timeout": 30
           }
         ]

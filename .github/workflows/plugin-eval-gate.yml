@@ -12,6 +12,10 @@ on:
   pull_request:
     paths: ["**"]
 
+# Least privilege: the gate only builds and diffs the plugin artifact.
+permissions:
+  contents: read
+
 jobs:
   eval-gate:
     runs-on: ubuntu-latest
@@ -88,6 +92,16 @@ jobs:
           python3 scripts/tests/test_plugin_hook_cwd_probe.py
           python3 scripts/tests/test_no_withdrawn_tool_instructions.py
           python3 scripts/tests/test_hook_guard_coverage.py
+
+      - name: Telemetry heartbeat wire tests
+        # telemetry/README.md § "Rules for changing these files" names
+        # `python3 telemetry/tests/test_heartbeat.py` as a required gate, but no
+        # workflow invoked it — the pack ships heartbeat.py to consumers and
+        # mirrors it byte-for-byte, so a regression here propagates silently.
+        # Not folded into the `pytest tests/` step: the plugin bundles a copy at
+        # plugin/manolii-framework/telemetry/tests/test_heartbeat.py and the
+        # duplicate basename breaks pytest's rootdir collection. Stdlib only.
+        run: python3 telemetry/tests/test_heartbeat.py
 
       - name: Routing lint
         run: python3 scripts/lint-agent-routing.py

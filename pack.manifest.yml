@@ -2,7 +2,11 @@
 #
 # Controls brand injection and feature flags for rendered output.
 # Edit .brand/branded.yml or .brand/unbranded.yml, not this file directly.
-# Run: python3 scripts/render-pack.py --mode branded|unbranded [flags] --output <dir>
+# Render (one mode per run — copy a line as-is):
+#   copier copy --defaults --data install_mode=branded   . <output-dir>
+#   copier copy --defaults --data install_mode=unbranded . <output-dir>
+# Enable features by repeating --data, e.g. --data oss_routing=true
+# (see copier.yml for the full question/flag set)
 
 version: "1.9.7"   # see CHANGELOG.md
 
@@ -12,7 +16,7 @@ brand:
   org_name: "{{ORG_NAME}}"
 
 # Feature flags — set at first-session by Claude Code guided setup,
-# or pass as flags to render-pack.py for pre-rendered artifacts.
+# or pass as `--data <flag>=true` to copier for pre-rendered artifacts.
 features:
   oss_routing: false        # Claude + OSS proxy (Fireworks/Together/Groq). Requires setup-litellm.sh.
   kl_integration: false     # Remote knowledge layer memory backend (kl_* MCP tools).
