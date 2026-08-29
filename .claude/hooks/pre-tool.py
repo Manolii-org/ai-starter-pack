@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 """Pre-Tool Use Hook (Bash matcher) — 5s budget.
 
+NOT WIRED. settings.json's PreToolUse entry runs `scripts/pre-tool-use.py`
+(model-routing/OSS guard, PR repo targeting, token-leak guard) — a different
+file. Nothing invokes this one, and build-plugin.py excludes it from the plugin
+bundle. Editing it does not change PreToolUse behaviour; edit
+`scripts/pre-tool-use.py` instead, or add a second PreToolUse entry in
+settings.json to enable the commit reminders below.
+
 Only intercepts git commit commands. Warns about:
 1. High edit count without a session report
 2. Staged changes without a self-code-review

@@ -7,17 +7,17 @@ Production-grade AI-assisted development from day one. {{ATTRIBUTION_LINE}}
 | Component | Files | Purpose |
 |-----------|-------|---------|
 | **Hooks** | `.claude/hooks/` (7 files) | Full session lifecycle: credential loading, prompt tracking, edit monitoring, compaction, stop, response-hygiene + injection scanning |
-| **Commands** | `.claude/commands/` (47 files) | Slash commands: `/wrap-up`, `/tdd`, `/doctor`, `/watch-pr`, `/sprint-fan-out`, `/investigate`, `/retro`, `/freeze`, `/guard`, `/design-shotgun`, etc. |
-| **Skills** | `.claude/skills/` (23 dirs) | Persistent context: conventions, security, database, TDD, OSS compat, analytics, curator, governance (assess-model, completeness-check, phase-gate) + 7 PR assessment specialists |
-| **Agents** | `.claude/agents/` (28 files) | Parallel workers: PR assessment pipeline, security review, CI fixer, architecture impact, main-thread-executor, prompt-hardener, test-hardener, critics, `secrets-handler` (credential router), `memory-keeper`, and more |
+| **Commands** | `.claude/commands/` (48 files) | Slash commands: `/wrap-up`, `/tdd`, `/doctor`, `/watch-pr`, `/sprint-fan-out`, `/investigate`, `/retro`, `/freeze`, `/guard`, `/design-shotgun`, etc. |
+| **Skills** | `.claude/skills/` (28 dirs) | Persistent context: conventions, security, database, TDD, OSS compat, analytics, curator, governance (assess-model, completeness-check, phase-gate) + 7 PR assessment specialists |
+| **Agents** | `.claude/agents/` (27 files) | Parallel workers: PR assessment pipeline, security review, CI fixer, architecture impact, main-thread-executor, prompt-hardener, test-hardener, critics, `secrets-handler` (credential router), `memory-keeper`, and more |
 | **PR Assessment** | `.github/workflows/pr-assessment.yml` | AI-driven 5-stage review pipeline: pr-classifier → SAST → specialists → broad agents → judge |
 | **Memory** | `.ai/memory/` + `.ai/decisions/` | Persistent JSONL memory (facts, patterns, sessions, **retrospectives/**) + ADRs. Canonical path is `.ai/memory/` — run `scripts/migrate-memory-path.sh` if a repo still uses `.claude/memory/`. |
 | **Security** | `.ai/security/token-shapes.json`, `scripts/injection_scan.py`, `canary_tokens.py`, `safe_env.sh` | Provider token-shape patterns, prompt-injection scanner, canary tokens, sanctioned env helpers — wired into the pre/post-tool hooks |
 | **Multi-model routing** | `.claude/model-routing.json`, `.claude/model-routing.md`, `deploy/litellm-proxy/` | 9-tier framework: Anthropic Claude + Fireworks/Together/Groq/OpenRouter OSS models |
-| **Scripts** | `scripts/` (25 files) | Utilities: knowledge index, skill graph, system self-check, model routing, pre-tool enforcement (scope-budget / broad-dispatch / token-leak guards), injection scan, canary tokens, safe-env helpers, pack drift check, session-stop checklist, OTEL/Langfuse headers |
+| **Scripts** | `scripts/` (33 files) | Utilities: knowledge index, skill graph, system self-check, model routing, pre-tool enforcement (scope-budget / broad-dispatch / token-leak guards), injection scan, canary tokens, safe-env helpers, pack drift check, session-stop checklist, OTEL/Langfuse headers |
 | **Husky** | `.husky/` (3 files) | Git hooks: pre-commit, commit-msg, pre-push |
-| **CI** | `.github/workflows/` (5 files) | CI, PR assessment, static review, secret scanning, mutation testing |
-| **Docs** | `docs/` (8 files) | Quality gate, output-token discipline, OSS delegation; security (MCP response hygiene, token-leak hygiene); governance (model-change protocol, model-config schema, US-OSS eligibility) |
+| **CI** | `.github/workflows/` (28 files) | CI, PR assessment, static review, secret scanning, mutation testing, tier gates, plus the reusable-workflow library consumers call by tag |
+| **Docs** | `docs/` (15 files) | Quality gate, output-token discipline, OSS delegation; security (MCP response hygiene, token-leak hygiene); governance (model-change protocol, model-config schema, US-OSS eligibility) |
 | **Config** | `.claude/settings.json`, `.mcp.json` | Hook wiring, MCP server setup (Context7 + GitHub included), permissions |
 | **Templates** | `CLAUDE.md`, `AGENTS.md` | Fill-in project documentation |
 
@@ -42,10 +42,15 @@ organisation-specific identifiers.
 
 ## Quick Start
 
-### 1. Copy the template
+### 1. Render the template
+
+The pack is a [Copier](https://copier.readthedocs.io) template. Render it into a
+new or existing project, then pull later pack releases with `copier update`:
 
 ```bash
-cp -r /path/to/master/templates/ai-starter-pack/ ./
+copier copy gh:manolii-org/ai-starter-pack ./
+# later, to take pack updates:
+copier update
 ```
 
 ### 2. Install dev dependencies
@@ -137,17 +142,25 @@ The script deploys a LiteLLM proxy to Fly.io, pushes your API keys, smoke-tests 
 2. **UserPromptSubmit** (`user-prompt.py` + `classify-message.py`): 
    - `user-prompt.py`: First prompt — sets up Husky, checks for active plans. Every prompt — checks for unresolved PR comments
    - `classify-message.py`: Classifies prompts for model tier routing (heavy/standard/light by keyword heuristics); emits `<model-routing>` block with tier suggestion and agent dispatch rules; tracks session spend; emits stream-checkpoint warnings
-3. **PreToolUse** (`pre-tool.py`): 
+3. **PreToolUse** (`scripts/pre-tool-use.py`):
    - Enforces explicit `model=` parameter on Agent() calls to prevent OSS tier bypass
    - PR repository targeting guard — blocks cross-repo PR misfires
-4. **PostToolUse** (`post-tool.py` + `advisor-metrics-hook.py`):
-   - `post-tool.py`: Unified hook — tracks edit count and modified files, reminds about lint/typecheck every 15 edits, API route security reminders, tool-call counter with `/smart-compact` recommendations
-   - `advisor-metrics-hook.py`: Logs advisor() invocations to `.ai/metrics/advisor-usage.jsonl`; fires circuit breaker if invocation rate exceeds threshold
+   - Token-leak guard on Bash commands that would print a secret-named variable
+   - Note: `.claude/hooks/pre-tool.py` is a *different*, unwired file (a commit-time
+     session-report reminder). Editing it does not change PreToolUse behaviour.
+4. **PostToolUse** (`post-tool.py`):
+   - `post-tool.py`: Unified hook — tracks edit count and modified files, reminds about lint/typecheck every 15 edits, API route security reminders, tool-call counter with `/smart-compact` recommendations, and external-response hygiene (secret-shape + prompt-injection scan)
+   - `advisor-metrics-hook.py` is **not** wired: `advisor()` is disabled
+     (`ADVISOR_BETA_ENABLED=false`) and the script is retained for historical
+     telemetry analysis only — see the Scripts table below
 5. **PreCompact** (`pre-compact.sh`): Generates structured session state summary before compaction so critical context survives
 6. **PostCompact** (`post-compact.sh`): Saves compaction summary keyed by branch; resets call counter; logs to `.ai/compact-metrics.jsonl`
-7. **Stop** (`session-stop-checklist.sh` + `session-retrospective.py` + `stop.sh`): session-end checklist, durable local retrospective (`failure_class`), optional KL flush, doctor signals, optional intent-drift.
-   - `session-stop-checklist.sh`: Outputs session-end checklist; branch fingerprint vs main; doctor signal summary; optional intent-drift check
-   - `stop.sh`: Writes stop sentinel and session-end record; rebuilds skill graph; runs system self-check
+7. **Stop** (two commands: `session-stop-checklist.sh`, then a self-check + skill-graph rebuild): session-end checklist, durable local retrospective (`failure_class`), optional KL flush, doctor signals, optional intent-drift.
+   - `session-stop-checklist.sh`: Outputs session-end checklist; branch fingerprint vs main; doctor signal summary; invokes `session-retrospective.py`; optional intent-drift check
+   - second command: runs `system-self-check.py` then `build-skill-graph.py`, and appends the combined exit code to `.ai/memory/eval-failures.jsonl`
+   - Note: `.claude/hooks/stop.sh` is **not** wired. It duplicates the second
+     command's work (sentinel, skill graph, self-check) but nothing invokes it;
+     editing it does not change Stop behaviour.
 
 ### Memory System
 
@@ -240,11 +253,11 @@ Telemetry data is used for:
   hooks/
     session-start.sh         # Credential loading, compact summary injection
     user-prompt.py           # PR comments, plan check, Husky init
-    pre-tool.py              # Commit gate (session report reminder)
+    pre-tool.py              # NOT WIRED — commit gate (session report reminder)
     post-tool.py             # Edit tracking, lint reminders, tool-call counter (unified)
     pre-compact.sh           # Pre-compaction session state summary
     post-compact.sh          # Save compact summary, reset counter, log metrics
-    stop.sh                  # Stop sentinel, session-end log, skill graph, self-check
+    stop.sh                  # NOT WIRED — stop sentinel, session-end log, skill graph, self-check
   commands/
     wrap-up.md               # End-of-session orchestrator
     smart-compact.md         # Intelligent context compaction
