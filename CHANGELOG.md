@@ -16,6 +16,9 @@
 - **Bare root pytest now works for maintainers.** Importlib collection avoids
   duplicate heartbeat-module basenames without hiding generated plugin tests;
   the maintainer-only `pytest.ini` is excluded from consumer renders.
+- **Shellcheck accepts shell-file deletions.** Standalone and reusable static
+  review now exclude deleted paths before invoking Shellcheck instead of
+  failing because the deleted file is absent from the checkout.
 
 ### Upgrade note
 
