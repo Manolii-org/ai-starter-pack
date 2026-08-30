@@ -38,7 +38,9 @@ Find the guard by id and remove it from the array. If `default: true`, REFUSE â€
 - Always read the current `.ai/guards.json` first; never assume schema.
 - Validate JSON before writing (use Python's `json.dumps(obj, indent=2)`).
 - After any modification, print a one-line confirmation: `Guard <id> added/removed.` and a 3-line summary of remaining guards.
-- Consider adding a `guards-config` guard to protect `.ai/guards.json` from accidental modification. Editing a guarded file requires `/unfreeze <id> --reason "..."` first.
+- The shipped `guards-config` guard protects policy changes to `.ai/guards.json`.
+  Editing `session_unfreezes` alone is the deliberate bootstrap exception;
+  other manifest changes require `/unfreeze guards-config --reason "..."` first.
 
 ## See also
 - `/freeze <id>` â€” thin alias for `/guard add`

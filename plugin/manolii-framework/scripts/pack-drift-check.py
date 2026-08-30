@@ -198,6 +198,25 @@ def check_readme_counts(pack_root: Path) -> list[CheckResult]:
     with open(readme_path, 'r', encoding='utf-8', errors='ignore') as f:
         content = f.read()
 
+    # In the template source, component totals vary with Copier flags. Evaluate
+    # the table with every optional surface enabled so it can be compared with
+    # the complete source inventory. Rendered consumers already contain plain
+    # integer totals and take this path as a no-op.
+    if readme_path.suffix == '.jinja':
+        try:
+            from jinja2 import Template
+            content = Template(content).render(
+                ATTRIBUTION_LINE='',
+                oss_routing=True,
+                kl_integration=True,
+                browserbase=True,
+                codex_adversarial=True,
+                mesh_telemetry=True,
+                langfuse_telemetry=True,
+            )
+        except Exception as exc:
+            return [CheckResult('WARN', 'README-COUNTS', f'could not render README counts: {exc}')]
+
     # label -> (relative dir, unit word, counts_dirs)
     # '.md' in name (not glob '*.md') so Copier conditional filenames like
     # '{% if codex_adversarial %}codex-adversarial.md{% endif %}' still count.
@@ -238,6 +257,9 @@ def check_readme_counts(pack_root: Path) -> list[CheckResult]:
 
 # Whitespace-tolerant: Jinja accepts {%if x%} / {% if  x %} variants in names
 CONDITIONAL_NAME_RE = re.compile(r'^\{%\s*if\s+(\w+)\s*%\}(.+)\{%\s*endif\s*%\}(\.jinja)?$')
+CONDITIONAL_EXCLUDE_RE = re.compile(
+    r'^\{%\s*if\s+not\s+(\w+)\s*%\}(.+)\{%\s*endif\s*%\}$'
+)
 
 
 def copier_bool_flags(pack_root: Path) -> set[str] | None:
@@ -263,10 +285,10 @@ def copier_bool_flags(pack_root: Path) -> set[str] | None:
 def check_feature_excludes(pack_root: Path) -> list[CheckResult]:
     """Check D: validate feature-gated files against copier.yml conditionals.
 
-    Since the Copier migration, the source of truth for feature exclusion is
-    the conditional filename ('{% if <flag> %}name{% endif %}') paired with a
-    bool question in copier.yml — not pack.manifest.yml feature_excludes
-    (legacy, cross-checked as WARN until its Phase-D retirement).
+    The source of truth is a conditional ``copier.yml`` ``_exclude`` entry
+    paired with a bool question. Conditional filenames remain supported for
+    older templates, but the pack no longer uses them because Copier can emit
+    brace-containing paths. ``pack.manifest.yml`` is a legacy cross-check.
     """
     if yaml is None:
         return [CheckResult('WARN', 'FEATURE-EXCLUDES', 'PyYAML not installed — skipped')]
@@ -277,6 +299,30 @@ def check_feature_excludes(pack_root: Path) -> list[CheckResult]:
 
     results = []
     skip_dirs = SKIP_DIRS
+
+    # Copier `_exclude` is the current gating mechanism. Validate every
+    # conditional entry against a declared bool and a real source path.
+    copier_config = yaml.safe_load((pack_root / 'copier.yml').read_text(encoding='utf-8'))
+    conditional_exclude_count = 0
+    for entry in copier_config.get('_exclude', []):
+        if not isinstance(entry, str) or '{%' not in entry:
+            continue
+        match = CONDITIONAL_EXCLUDE_RE.match(entry)
+        if not match:
+            results.append(CheckResult(
+                'FAIL', 'FEATURE-EXCLUDES',
+                f'copier.yml _exclude entry is malformed: {entry}'))
+            continue
+        conditional_exclude_count += 1
+        flag, rel = match.groups()
+        if flag not in flags:
+            results.append(CheckResult(
+                'FAIL', 'FEATURE-EXCLUDES',
+                f'copier.yml _exclude uses unknown bool flag "{flag}"'))
+        if not any(path.exists() for path in template_source_variants(pack_root, rel, flag)):
+            results.append(CheckResult(
+                'FAIL', 'FEATURE-EXCLUDES',
+                f'copier.yml _exclude target does not exist: {rel}'))
 
     # 1) Every conditional filename must reference a declared bool flag.
     # os.walk with in-place pruning: rglob would still traverse skipped trees
@@ -306,7 +352,7 @@ def check_feature_excludes(pack_root: Path) -> list[CheckResult]:
                     detail=f'{rel} — gated by unknown copier.yml flag "{flag}"'
                 ))
 
-    if conditional_count == 0:
+    if conditional_count == 0 and conditional_exclude_count == 0:
         results.append(CheckResult(
             status='WARN',
             check_name='FEATURE-EXCLUDES',
@@ -339,7 +385,8 @@ def check_feature_excludes(pack_root: Path) -> list[CheckResult]:
 
     if not any(r.status == 'FAIL' for r in results):
         results.append(CheckResult('PASS', 'FEATURE-EXCLUDES',
-                                   f'{conditional_count} conditional file(s) validated against copier.yml'))
+                                   f'{conditional_count} conditional filename(s) and '
+                                   f'{conditional_exclude_count} conditional _exclude entry(s) validated'))
     return results
 
 

@@ -2,6 +2,7 @@
 """Test suite for security hooks — pre-tool-use.py and post-tool.py."""
 import json
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -45,6 +46,66 @@ class TestPreToolUseHook(unittest.TestCase):
         # Should either be None (no decision) or not a block decision
         if response:
             self.assertNotEqual(response.get("decision"), "block")
+
+    def test_path_guard_blocks_and_unfreeze_is_audited(self):
+        """A guarded edit blocks until session-unfrozen, then writes an audit row."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            (repo / ".ai").mkdir()
+            guards = {
+                "guards": [{"id": "critical", "paths": ["critical.txt"],
+                            "reason": "protected", "default": True}],
+                "session_unfreezes": [],
+                "bypass_log": ".ai/bypass-log.jsonl",
+            }
+            (repo / ".ai/guards.json").write_text(json.dumps(guards))
+            payload = {
+                "tool_name": "Write",
+                "tool_input": {"file_path": str(repo / "critical.txt"), "content": "new"},
+                "cwd": str(repo),
+            }
+            response = self.run_hook(payload)
+            self.assertEqual(response.get("decision"), "block")
+            self.assertIn("[GUARD:critical]", response.get("reason", ""))
+
+            guards["session_unfreezes"] = ["critical"]
+            (repo / ".ai/guards.json").write_text(json.dumps(guards))
+            self.assertIsNone(self.run_hook(payload))
+            audit = (repo / ".ai/bypass-log.jsonl").read_text()
+            self.assertIn('"scope": "pretool/guard-unfreeze"', audit)
+            self.assertIn("unfreeze:critical:active", audit)
+
+            (repo / ".ai/bypass-log.jsonl").unlink()
+            (repo / ".ai/bypass-log.jsonl").mkdir()
+            response = self.run_hook(payload)
+            self.assertEqual(response.get("decision"), "block")
+            self.assertIn("[GUARD:audit-write]", response.get("reason", ""))
+
+    def test_stop_hook_clears_session_unfreezes(self):
+        """Stop resets temporary unfreezes without changing guard definitions."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            (repo / ".ai").mkdir()
+            guards = {
+                "guards": [{"id": "critical", "paths": ["critical.txt"]}],
+                "session_unfreezes": ["critical"],
+            }
+            path = repo / ".ai/guards.json"
+            path.write_text(json.dumps(guards))
+            subprocess.run(
+                ["bash", str(self.pack_root / "scripts/session-stop-checklist.sh")],
+                input="{}",
+                text=True,
+                capture_output=True,
+                cwd=repo,
+                timeout=10,
+                check=True,
+            )
+            updated = json.loads(path.read_text())
+            self.assertEqual(updated["session_unfreezes"], [])
+            self.assertEqual(updated["guards"], guards["guards"])
 
     def test_token_leak_secret_variable_blocked(self):
         """Bash command with SECRET variable leak should be blocked."""

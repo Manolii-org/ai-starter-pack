@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+### Fixed
+
+- **Guard commands now enforce what they promise.** Added the portable
+  `scripts/guard_check.py` engine to the PreToolUse chain, audit every edit
+  allowed through a session unfreeze, and clear `session_unfreezes` at Stop.
+- **Feature flags now control optional files.** Copier `_exclude` conditionals
+  omit disabled OSS, Operational Memory, Browserbase, Codex, and mesh surfaces;
+  render-contract tests cover default and all-enabled inventories.
+- **README inventory now describes rendered consumers.** Counts vary with the
+  selected feature flags, the repository stub points to the real template
+  source, and the two unwired legacy hook examples were removed.
+- **Bare root pytest now works for maintainers.** Importlib collection avoids
+  duplicate heartbeat-module basenames without hiding generated plugin tests;
+  the maintainer-only `pytest.ini` is excluded from consumer renders.
+
+### Upgrade note
+
+- Feature flags now govern file presence, not only recorded configuration.
+  Before `copier update`, enable any flag whose optional files a consumer uses;
+  disabled Browserbase, Operational Memory, OSS-eligibility, Codex-adversarial,
+  and mesh files are removed by the update contract.
+- Consumers that manually wired `.claude/hooks/pre-tool.py` or
+  `.claude/hooks/stop.sh` must move that custom behavior to a project-owned hook
+  before updating. Neither file was ever wired by the shipped settings, and
+  both have been removed to keep the pack's hook inventory executable.
+
 - **The README's component counts had drifted, and the guard for it was blind.**
   `check_readme_counts` read `README-STARTER-PACK.md` first and only fell back to
   the `.jinja`. Both exist in the template repo — the `.md` is a 135-byte licence
