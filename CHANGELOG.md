@@ -21,6 +21,10 @@
 - **Shellcheck accepts shell-file deletions.** Standalone and reusable static
   review now exclude deleted paths before invoking Shellcheck instead of
   failing because the deleted file is absent from the checkout.
+- **Reusable secret scan validates on push.** The optional Gitleaks license is
+  promoted to job `env` before step conditions; GitHub forbids direct `secrets`
+  context access in step-level `if`, which previously created a jobless failed
+  run for every pushed commit.
 
 ### Upgrade note
 
