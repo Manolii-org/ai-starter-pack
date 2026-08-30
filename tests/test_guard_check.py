@@ -403,6 +403,32 @@ class TestCheckEdit:
         )
         assert result["action"] == "allow"
 
+    def test_replace_all_checks_every_occurrence_in_guarded_region(self, tmp_path):
+        """Edit replace_all reconstruction matches the tool's real semantics."""
+        json_file = tmp_path / "config.json"
+        json_file.write_text(
+            '{"other":"same","permissions":"same"}', encoding="utf-8"
+        )
+        guards_file = tmp_path / ".ai" / "guards.json"
+        guards_file.parent.mkdir(parents=True)
+        guards_file.write_text(json.dumps({
+            "guards": [{
+                "id": "permissions",
+                "paths": ["config.json"],
+                "regions": [{"json_path": "permissions"}],
+            }],
+            "session_unfreezes": [],
+        }), encoding="utf-8")
+
+        result = check_edit(
+            str(json_file),
+            tmp_path,
+            edit_old="same",
+            edit_new="changed",
+            replace_all=True,
+        )
+        assert result["action"] == "block"
+
 
 class TestCheckBash:
     """Test Bash command write-pattern detection."""
@@ -502,6 +528,7 @@ class TestCheckBash:
         }), encoding="utf-8")
         assert check_bash("cp /tmp/new secret.json", tmp_path)["action"] == "block"
         assert check_bash('mv /tmp/new "secret.json"', tmp_path)["action"] == "block"
+        assert check_bash('cp "source" secret.json', tmp_path)["action"] == "block"
 
     def test_delete_destination_is_detected(self, tmp_path):
         """Deleting a guarded path cannot bypass enforcement."""

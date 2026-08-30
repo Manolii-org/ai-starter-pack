@@ -135,7 +135,11 @@ def _resolve_path(obj: Any, path: str) -> Any:
 
 
 def _region_changed(
-    file_path: Path, json_path: str, edit_old: str | None, edit_new: str | None
+    file_path: Path,
+    json_path: str,
+    edit_old: str | None,
+    edit_new: str | None,
+    replace_all: bool = False,
 ) -> bool:
     """For JSON-region guards: True if the edit changes the value at json_path.
 
@@ -155,7 +159,7 @@ def _region_changed(
         if edit_old is not None:
             if edit_old not in old_text:
                 return True  # fragment not found; cannot reconstruct — block
-            new = json.loads(old_text.replace(edit_old, edit_new, 1))
+            new = json.loads(old_text.replace(edit_old, edit_new, -1 if replace_all else 1))
         else:
             new = json.loads(edit_new)
     except (json.JSONDecodeError, OSError):
@@ -184,6 +188,7 @@ def check_edit(
     repo_root: Path,
     edit_old: str | None = None,
     edit_new: str | None = None,
+    replace_all: bool = False,
 ) -> dict[str, Any]:
     """Check if an edit to target_path is allowed under current guards.
 
@@ -252,7 +257,9 @@ def check_edit(
             if edit_old is not None:
                 if edit_old not in old_text:
                     raise ValueError("edit_old fragment not present in file")
-                new_text = old_text.replace(edit_old, edit_new, 1)
+                new_text = old_text.replace(
+                    edit_old, edit_new, -1 if replace_all else 1
+                )
             else:
                 new_text = edit_new
             old = json.loads(old_text)
@@ -303,7 +310,9 @@ def check_edit(
         if regions:
             file_p = repo_root / target_rel
             any_changed = any(
-                _region_changed(file_p, r["json_path"], edit_old, edit_new)
+                _region_changed(
+                    file_p, r["json_path"], edit_old, edit_new, replace_all
+                )
                 for r in regions
                 if "json_path" in r
             )
@@ -421,6 +430,18 @@ def check_bash(command: str, repo_root: Path) -> dict[str, Any]:
                 continue
             candidates.add((rm_match.start(), operand))
 
+    # Parse common replacement utilities independently of quote scrubbing.
+    # Their final operand is the destination, even when the source is quoted.
+    for copy_match in re.finditer(
+        r'\b(?:cp|mv|install)\s+([^;&|\n]+)', without_heredocs
+    ):
+        try:
+            operands = shlex.split(copy_match.group(1))
+        except ValueError:
+            operands = []
+        if operands:
+            candidates.add((copy_match.start(), operands[-1]))
+
     unfrozen_guard_ids: list[str] = []
     for position, candidate in sorted(candidates):
         # Skip special files
@@ -480,6 +501,7 @@ def main() -> int:
             repo_root,
             edit_old=args.get("old_string"),
             edit_new=edit_new,
+            replace_all=bool(args.get("replace_all", False)),
         )
     elif tool == "Bash":
         decision = check_bash(args.get("command", ""), repo_root)

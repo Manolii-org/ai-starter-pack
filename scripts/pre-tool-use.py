@@ -74,6 +74,7 @@ def _path_guard() -> None:
                 repo_root,
                 tool_input.get("old_string"),
                 edit_new,
+                replace_all=bool(tool_input.get("replace_all", False)),
             )
     except Exception as exc:
         print(json.dumps({
