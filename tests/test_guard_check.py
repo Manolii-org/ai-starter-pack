@@ -8,6 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from guard_check import (
+    clear_session_unfreezes,
     check_edit,
     check_bash,
     _path_matches,
@@ -15,6 +16,22 @@ from guard_check import (
     _load_guards,
     _region_changed,
 )
+
+
+def test_clear_session_unfreezes_is_atomic_and_preserves_guards(tmp_path):
+    """The updateable SessionStart helper clears only temporary bypasses."""
+    guards_file = tmp_path / ".ai" / "guards.json"
+    guards_file.parent.mkdir(parents=True)
+    guards = {
+        "guards": [{"id": "critical", "paths": ["critical.txt"]}],
+        "session_unfreezes": ["critical"],
+    }
+    guards_file.write_text(json.dumps(guards), encoding="utf-8")
+
+    assert clear_session_unfreezes(tmp_path)
+    updated = json.loads(guards_file.read_text(encoding="utf-8"))
+    assert updated["session_unfreezes"] == []
+    assert updated["guards"] == guards["guards"]
 
 
 class TestPathMatches:
@@ -485,6 +502,28 @@ class TestCheckBash:
         }), encoding="utf-8")
         assert check_bash("cp /tmp/new secret.json", tmp_path)["action"] == "block"
         assert check_bash('mv /tmp/new "secret.json"', tmp_path)["action"] == "block"
+
+    def test_delete_destination_is_detected(self, tmp_path):
+        """Deleting a guarded path cannot bypass enforcement."""
+        guards_file = tmp_path / ".ai" / "guards.json"
+        guards_file.parent.mkdir(parents=True)
+        guards_file.write_text(json.dumps({
+            "guards": [{"id": "g1", "paths": [".ai/guards.json"]}],
+            "session_unfreezes": [],
+        }), encoding="utf-8")
+        assert check_bash("rm -f .ai/guards.json", tmp_path)["action"] == "block"
+        assert check_bash("rm harmless.txt .ai/guards.json", tmp_path)["action"] == "block"
+
+    def test_target_after_cd_is_resolved_from_effective_directory(self, tmp_path):
+        """A command-local cd cannot make a guarded relative target invisible."""
+        guards_file = tmp_path / ".ai" / "guards.json"
+        guards_file.parent.mkdir(parents=True)
+        guards_file.write_text(json.dumps({
+            "guards": [{"id": "g1", "paths": [".claude/settings.json"]}],
+            "session_unfreezes": [],
+        }), encoding="utf-8")
+        result = check_bash("cd .claude && echo data > settings.json", tmp_path)
+        assert result["action"] == "block"
 
     def test_any_blocked_target_wins_in_multi_target_command(self, tmp_path):
         """An unfrozen target cannot hide another blocked target in one command."""

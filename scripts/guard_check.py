@@ -13,7 +13,9 @@ from __future__ import annotations
 import fnmatch
 import json
 import re
+import shlex
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +33,7 @@ _BASH_WRITE_PATTERNS = [
     re.compile(r'\bdd\s+(?:if=\S+\s+)?of=(\S+)'),# dd of=path
     re.compile(r'\b(?:cp|mv|install)\s+(?:-\S+\s+)*\S+\s+(\S+)'),
     re.compile(r'\btruncate\s+(?:-\S+\s+)*(\S+)'),
+    re.compile(r'\brm\s+(?:-\S+\s+)*(\S+)'),
 ]
 
 # Applied to the raw command after heredoc bodies have been removed. The normal
@@ -42,7 +45,12 @@ _BASH_QUOTED_WRITE_PATTERNS = [
     re.compile(r'\btee\s+(?:-a\s+)?(["\'])(.+?)\1'),
     re.compile(r'\b(?:cp|mv|install)\s+(?:-\S+\s+)*\S+\s+(["\'])(.+?)\1'),
     re.compile(r'\btruncate\s+(?:-\S+\s+)*(["\'])(.+?)\1'),
+    re.compile(r'\brm\s+(?:-\S+\s+)*(["\'])(.+?)\1'),
 ]
+
+_CD_PATTERN = re.compile(
+    r'(?:^|[;&|]\s*)cd\s+(?:(["\'])(.+?)\1|(\S+))\s*(?:&&|;)',
+)
 
 
 def _load_guards(repo_root: Path) -> dict[str, Any]:
@@ -63,6 +71,40 @@ def _load_guards(repo_root: Path) -> dict[str, Any]:
             file=sys.stderr,
         )
         return {"guards": [], "session_unfreezes": [], "_load_failed": True}
+
+
+def clear_session_unfreezes(repo_root: Path) -> bool:
+    """Atomically clear temporary guard bypasses at a true SessionStart.
+
+    This lives in an updateable script rather than the instance-owned
+    ``.claude/hooks/session-start.sh`` so existing Copier consumers receive the
+    lifecycle fix on ``copier update``.
+    """
+    path = repo_root / GUARDS_FILE
+    if not path.exists():
+        return True
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("guard policy root must be a JSON object")
+        if not data.get("session_unfreezes"):
+            return True
+        data["session_unfreezes"] = []
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=path.parent, delete=False
+        ) as handle:
+            handle.write(json.dumps(data, indent=2) + "\n")
+            temporary = Path(handle.name)
+        temporary.replace(path)
+        return True
+    except (json.JSONDecodeError, OSError, ValueError) as exc:
+        print(
+            f"guard_check: could not clear session_unfreezes "
+            f"({type(exc).__name__}: {exc}); temporary bypasses may remain active",
+            file=sys.stderr,
+        )
+        return False
 
 
 def _path_matches(target_rel: str, patterns: list[str]) -> bool:
@@ -351,24 +393,52 @@ def check_bash(command: str, repo_root: Path) -> dict[str, Any]:
     Returns the same shape as check_edit (first violation encountered).
     """
     scrubbed = _strip_quoted(command)
-    candidates: set[str] = set()
+    candidates: set[tuple[int, str]] = set()
 
     for pat in _BASH_WRITE_PATTERNS:
         for m in pat.finditer(scrubbed):
-            candidates.add(m.group(1).strip("'\""))
+            candidates.add((m.start(), m.group(1).strip("'\"")))
 
     without_heredocs = _strip_heredoc_bodies(command)
     for pattern in _BASH_QUOTED_WRITE_PATTERNS:
         for match in pattern.finditer(without_heredocs):
-            candidates.add(match.group(2))
+            candidates.add((match.start(), match.group(2)))
+
+    # `rm` accepts multiple operands; regex capture groups only retain one.
+    # Tokenise each simple rm segment so a benign first operand cannot conceal
+    # a guarded later deletion (shell operators delimit the supported segment).
+    for rm_match in re.finditer(r'\brm\s+([^;&|\n]+)', without_heredocs):
+        try:
+            operands = shlex.split(rm_match.group(1))
+        except ValueError:
+            operands = []
+        options_done = False
+        for operand in operands:
+            if not options_done and operand == "--":
+                options_done = True
+                continue
+            if not options_done and operand.startswith("-"):
+                continue
+            candidates.add((rm_match.start(), operand))
 
     unfrozen_guard_ids: list[str] = []
-    for candidate in sorted(candidates):
+    for position, candidate in sorted(candidates):
         # Skip special files
         if candidate.startswith("/dev/") or candidate == "-":
             continue
 
-        decision = check_edit(candidate, repo_root)
+        # Resolve relative targets from the most recent successful-looking
+        # `cd path &&`/`cd path;` prefix. This covers the common command chains
+        # emitted by agents without attempting to implement a shell parser.
+        effective_dir = repo_root
+        for cd_match in _CD_PATTERN.finditer(without_heredocs, 0, position):
+            cd_target = cd_match.group(2) or cd_match.group(3)
+            cd_path = Path(cd_target)
+            effective_dir = cd_path if cd_path.is_absolute() else effective_dir / cd_path
+        target = Path(candidate)
+        if not target.is_absolute():
+            target = effective_dir / target
+        decision = check_edit(str(target), repo_root)
         if decision["action"] == "block":
             return decision
         if decision["action"] == "allow_unfreeze":
@@ -394,6 +464,9 @@ def main() -> int:
 
     Outputs decision JSON to stdout. Exit code 2 if action is "block".
     """
+    if len(sys.argv) == 2 and sys.argv[1] == "--clear-session-unfreezes":
+        return 0 if clear_session_unfreezes(Path.cwd()) else 1
+
     payload = json.loads(sys.stdin.read())
     tool = payload.get("tool", "")
     args = payload.get("args", {})

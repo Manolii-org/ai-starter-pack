@@ -265,7 +265,10 @@ def build_hooks_config() -> dict:
     return {
         "hooks": {
             "PreToolUse":   [{"hooks": [cmd(f'python3 "{P}/scripts/pre-tool-use.py"', 5)]}],
-            "SessionStart": [{"hooks": [cmd(f'bash "{P}/hooks/session-start.sh"', 30)]}],
+            "SessionStart": [{"hooks": [cmd(
+                f'python3 "{P}/scripts/guard_check.py" --clear-session-unfreezes || true; '
+                f'bash "{P}/hooks/session-start.sh"', 30
+            )]}],
             "UserPromptSubmit": [
                 {"hooks": [cmd(f'python3 "{P}/scripts/classify-message.py"', 15)]},
                 {"hooks": [cmd(f'python3 "{P}/hooks/user-prompt.py"', 15)]},

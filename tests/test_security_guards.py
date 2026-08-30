@@ -134,17 +134,15 @@ class TestPreToolUseHook(unittest.TestCase):
             after_stop = json.loads(path.read_text())
             self.assertEqual(after_stop["session_unfreezes"], ["critical"])
 
-            env = {
-                "HOME": str(repo),
-                "PATH": os.environ["PATH"],
-                "CLAUDE_PLUGIN_ROOT": str(self.pack_root),
-            }
             subprocess.run(
-                ["bash", str(self.pack_root / ".claude/hooks/session-start.sh")],
+                [
+                    "python3",
+                    str(self.pack_root / "scripts/guard_check.py"),
+                    "--clear-session-unfreezes",
+                ],
                 text=True,
                 capture_output=True,
                 cwd=repo,
-                env=env,
                 timeout=15,
                 check=True,
             )

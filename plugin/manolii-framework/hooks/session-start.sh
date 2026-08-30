@@ -10,36 +10,6 @@ HEALTH_FILE=".git/.session-health"
 
 log() { echo "[session-start] $*" >&2; }
 
-# A Claude Stop hook runs after every completed response, not only when the
-# interactive session closes. Clear temporary unfreezes here at the actual next
-# SessionStart so `/unfreeze` remains usable across turns in one session.
-clear_session_unfreezes() {
-  [[ -f ".ai/guards.json" ]] || return 0
-  if ! timeout 10 python3 - <<'PYEOF'
-import json
-import os
-import tempfile
-from pathlib import Path
-
-path = Path(".ai/guards.json")
-data = json.loads(path.read_text(encoding="utf-8"))
-if data.get("session_unfreezes"):
-    data["session_unfreezes"] = []
-    with tempfile.NamedTemporaryFile(
-        "w", encoding="utf-8", dir=path.parent, delete=False
-    ) as handle:
-        handle.write(json.dumps(data, indent=2) + "\n")
-        temporary = Path(handle.name)
-    os.replace(temporary, path)
-PYEOF
-  then
-    log "WARNING: could not clear session_unfreezes; temporary bypasses may remain active — inspect .ai/guards.json"
-    return 1
-  fi
-}
-
-clear_session_unfreezes || true
-
 # --- Credential Loading ---
 
 load_from_cache() {

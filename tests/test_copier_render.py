@@ -332,6 +332,10 @@ def test_skip_if_exists_contract():
         # Write sentinel to a skip_if_exists file
         claude_file = dst / "CLAUDE.md"
         claude_file.write_text("LOCAL\n")
+        session_hook = dst / ".claude/hooks/session-start.sh"
+        session_hook.write_text("#!/bin/sh\necho LOCAL\n")
+        settings = dst / ".claude/settings.json"
+        settings.write_text("{}\n")
 
         # Re-render with --overwrite
         cmd = [
@@ -342,12 +346,18 @@ def test_skip_if_exists_contract():
             "--defaults",
             "--quiet",
             "--overwrite",
+            "--vcs-ref=HEAD",
             str(ROOT),
             str(dst),
         ]
         subprocess.run(cmd, check=True)
 
         # Sentinel should survive
+        assert claude_file.read_text() == "LOCAL\n"
+        assert session_hook.read_text() == "#!/bin/sh\necho LOCAL\n"
+        # The lifecycle migration is deliberately outside the instance-owned
+        # hook, so an update still wires cleanup for existing consumers.
+        assert "guard_check.py --clear-session-unfreezes" in settings.read_text()
         assert claude_file.read_text() == "LOCAL\n", "CLAUDE.md was overwritten"
 
         # But other files should be updated

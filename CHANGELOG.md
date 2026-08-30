@@ -36,6 +36,9 @@
   `.claude/hooks/stop.sh` must move that custom behavior to a project-owned hook
   before updating. Neither file was ever wired by the shipped settings, and
   both have been removed to keep the pack's hook inventory executable.
+- Existing consumers receive guard-bypass cleanup through the updateable
+  `.claude/settings.json` and `scripts/guard_check.py`; the instance-owned
+  `.claude/hooks/session-start.sh` remains untouched by `copier update`.
 
 - **The README's component counts had drifted, and the guard for it was blind.**
   `check_readme_counts` read `README-STARTER-PACK.md` first and only fell back to
