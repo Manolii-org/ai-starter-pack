@@ -1,7 +1,7 @@
 ---
 name: unfreeze
 version: 1.0.0
-description: Temporarily permit edits to a guarded path (session-scoped, auto-clears at Stop)
+description: Temporarily permit edits to a guarded path (auto-clears at next SessionStart)
 type: command
 requires_mcp: []
 required_entities: []
@@ -14,7 +14,7 @@ blast_radius: medium
 
 Based on proven patterns from the Manolii ecosystem.
 
-Adds a guard id to the `session_unfreezes` array in `.ai/guards.json`. The PreToolUse hook will allow edits to that guard's paths and log each event to `.ai/bypass-log.jsonl` (scope: `pretool/guard-unfreeze`). The Stop hook clears the array at session end so unfreezes never persist across sessions.
+Adds a guard id to the `session_unfreezes` array in `.ai/guards.json`. The PreToolUse hook will allow edits to that guard's paths and log each event to `.ai/bypass-log.jsonl` (scope: `pretool/guard-unfreeze`). SessionStart clears the array before a new session begins, so the bypass remains usable across turns but never carries into the next session.
 
 ## Usage
 
@@ -34,7 +34,7 @@ The reason is mandatory. Future Edits/Writes/Bash commands targeting paths under
     ```
     {"ts": "<utc-iso>", "scope": "command/unfreeze", "head": "<git head>", "user": "operator", "reason": "unfreeze:<id>:<operator-reason>"}
     ```
-6. Print: `Unfrozen: <id>. Edits permitted until /wrap-up or Stop hook clears. All edits will be logged.`
+6. Print: `Unfrozen: <id>. Edits permitted for this session; the next SessionStart clears it. All edits will be logged.`
 
 ## What this is NOT
 
@@ -42,9 +42,9 @@ The reason is mandatory. Future Edits/Writes/Bash commands targeting paths under
 - Not a global bypass — only the named guard's paths are unfrozen; other guards still enforce.
 - Not silent — every permitted edit while unfrozen creates a bypass-log entry.
 
-## Stop-hook auto-clear
+## SessionStart auto-clear
 
-`scripts/session-stop-checklist.sh` resets `session_unfreezes` to `[]` on every Stop. If you start a new session and want the same unfreeze, run the command again.
+`.claude/hooks/session-start.sh` resets `session_unfreezes` to `[]` at the start of every session. If a later session needs the same bypass, run the command again.
 
 ## See also
 - `/guard list` — view all guards

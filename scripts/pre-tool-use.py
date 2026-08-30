@@ -29,6 +29,113 @@ if not isinstance(data, dict):
 
 tool_name = data.get("tool_name", "")
 
+
+def _path_guard() -> None:
+    """Enforce the portable path guards declared in ``.ai/guards.json``."""
+    if tool_name not in ("Edit", "Write", "NotebookEdit", "Bash"):
+        return
+    try:
+        from guard_check import check_bash, check_edit
+    except Exception as exc:
+        print(f"[path-guard] unavailable: {exc}", file=sys.stderr)
+        return
+
+    repo_root = Path(data.get("cwd") or ".")
+    try:
+        import subprocess
+
+        resolved = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            cwd=repo_root,
+        )
+        if resolved.returncode == 0 and resolved.stdout.strip():
+            repo_root = Path(resolved.stdout.strip())
+    except Exception as exc:
+        print(f"[path-guard] repo-root probe failed: {exc}", file=sys.stderr)
+
+    tool_input = data.get("tool_input") or {}
+    try:
+        if tool_name == "Bash":
+            decision = check_bash(tool_input.get("command", ""), repo_root)
+        else:
+            target = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
+            if not target:
+                return
+            edit_new = (
+                tool_input["new_string"]
+                if "new_string" in tool_input
+                else tool_input.get("content")
+            )
+            decision = check_edit(
+                target,
+                repo_root,
+                tool_input.get("old_string"),
+                edit_new,
+                replace_all=bool(tool_input.get("replace_all", False)),
+            )
+    except Exception as exc:
+        print(json.dumps({
+            "decision": "block",
+            "reason": (
+                f"[GUARD:engine-error] Path guards could not be evaluated: {exc}. "
+                "Repair the guard engine before retrying the write."
+            ),
+        }))
+        sys.exit(0)
+
+    if decision.get("action") == "block":
+        guard_id = decision.get("guard_id")
+        print(json.dumps({
+            "decision": "block",
+            "reason": (
+                f"[GUARD:{guard_id}] {decision.get('reason')} "
+                f"To proceed: /unfreeze {guard_id} --reason \"...\" "
+                "(session-scoped; auto-clears at the next SessionStart)."
+            ),
+        }))
+        sys.exit(0)
+
+    if decision.get("action") == "allow_unfreeze":
+        try:
+            import datetime
+            import subprocess
+
+            head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                cwd=repo_root,
+            ).stdout.strip()
+            bypass_log = repo_root / ".ai" / "bypass-log.jsonl"
+            bypass_log.parent.mkdir(parents=True, exist_ok=True)
+            with bypass_log.open("a", encoding="utf-8") as handle:
+                for guard_id in decision.get("guard_ids", [decision.get("guard_id")]):
+                    entry = {
+                        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                        "scope": "pretool/guard-unfreeze",
+                        "head": head,
+                        "user": "agent",
+                        "reason": f"unfreeze:{guard_id}:active",
+                    }
+                    handle.write(json.dumps(entry) + "\n")
+        except Exception as exc:
+            print(json.dumps({
+                "decision": "block",
+                "reason": (
+                    "[GUARD:audit-write] The path was session-unfrozen, but its "
+                    f"required bypass audit row could not be written: {exc}. "
+                    "Restore .ai/bypass-log.jsonl writability before retrying."
+                ),
+            }))
+            sys.exit(0)
+
+
+_path_guard()
+
 # ── PR repo targeting guard ───────────────────────────────────────────────────
 if tool_name == "mcp__github__create_pull_request":
     def _pr_guard() -> None:

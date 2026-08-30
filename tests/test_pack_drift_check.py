@@ -196,6 +196,20 @@ class TestFeatureExcludesCopier(unittest.TestCase):
             self.assertGreater(len(fail_results), 0)
             self.assertTrue(any("otherflag" in r.detail for r in fail_results))
 
+    def test_conditional_exclude_validates_flag_and_target(self):
+        """Conditional `_exclude` entries are the supported feature gate."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pack_root = Path(tmpdir)
+            (pack_root / "feature").mkdir()
+            (pack_root / "copier.yml").write_text(
+                "myflag:\n  type: bool\n  default: false\n"
+                "_exclude:\n"
+                "  - '{% if not myflag %}feature{% endif %}'\n"
+            )
+            results = pack_drift_check.check_feature_excludes(pack_root)
+            self.assertFalse([r for r in results if r.status == "FAIL"])
+            self.assertTrue(any("1 conditional _exclude" in r.detail for r in results))
+
     def test_malformed_conditional_filename(self):
         """Malformed conditional (contains {% but does not match pattern) should FAIL."""
         with tempfile.TemporaryDirectory() as tmpdir:

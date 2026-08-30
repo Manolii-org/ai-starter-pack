@@ -265,7 +265,10 @@ def build_hooks_config() -> dict:
     return {
         "hooks": {
             "PreToolUse":   [{"hooks": [cmd(f'python3 "{P}/scripts/pre-tool-use.py"', 5)]}],
-            "SessionStart": [{"hooks": [cmd(f'bash "{P}/hooks/session-start.sh"', 30)]}],
+            "SessionStart": [{"hooks": [cmd(
+                f'python3 "{P}/scripts/guard_check.py" --clear-session-unfreezes || true; '
+                f'bash "{P}/hooks/session-start.sh"', 30
+            )]}],
             "UserPromptSubmit": [
                 {"hooks": [cmd(f'python3 "{P}/scripts/classify-message.py"', 15)]},
                 {"hooks": [cmd(f'python3 "{P}/hooks/user-prompt.py"', 15)]},
@@ -302,8 +305,11 @@ def assemble_hooks_and_scripts(rendered: Path, out: Path) -> dict:
 
     rhooks = rendered / ".claude" / "hooks"
     if rhooks.is_dir():
-        shutil.copytree(rhooks, out / "hooks",
-                        ignore=shutil.ignore_patterns("pre-tool.py", "stop.sh"))
+        shutil.copytree(
+            rhooks,
+            out / "hooks",
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        )
     (out / "hooks").mkdir(parents=True, exist_ok=True)
     counts["hooks"] = sum(1 for p in (out / "hooks").iterdir() if p.is_file())
 

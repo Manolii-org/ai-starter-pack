@@ -17,10 +17,9 @@ pytestmark = pytest.mark.skipif(
     reason="template source absent (rendered instance)"
 )
 
-# Feature flags configure rendered settings and answers, not Copier filenames.
-# Literal Jinja filename conditionals were removed in PR #35 because Copier
-# copied them as invalid brace-containing paths. Optional surfaces therefore
-# ship as dormant, real-named files; runtime/configuration determines use.
+# Feature flags control optional surfaces through conditional copier `_exclude`
+# entries. Literal Jinja filenames remain forbidden because Copier used to copy
+# them as invalid brace-containing paths.
 FEATURE_FLAGS = (
     "oss_routing",
     "browserbase",
@@ -217,8 +216,8 @@ def test_email_capture_framework_renders(default_render):
     assert (default_render / "bin/email-capture").stat().st_mode & 0o111
 
 
-def test_feature_flags_do_not_change_copier_file_set(default_render):
-    """Feature flags must not reintroduce literal-Jinja or conditional paths."""
+def test_feature_flags_gate_optional_surfaces(default_render):
+    """Disabled flags omit optional files; enabling all flags restores them."""
     with tempfile.TemporaryDirectory() as tmpdir:
         flags_dst = Path(tmpdir) / "all-flags"
         flags_dst.mkdir()
@@ -226,11 +225,57 @@ def test_feature_flags_do_not_change_copier_file_set(default_render):
         flags_files = file_set(flags_dst)
         default_files = file_set(default_render)
 
-        assert flags_files == default_files, (
-            "Copier file set changed despite feature flags being configuration-only.\n"
-            f"Extra: {flags_files - default_files}\n"
-            f"Missing: {default_files - flags_files}"
-        )
+        optional = {
+            "docs/us-oss-eligibility-matrix.md",
+            ".claude/skills/om-fact-capture/SKILL.md",
+            ".claude/skills/om-readiness/SKILL.md",
+            ".claude/skills/om-staff-answer/SKILL.md",
+            ".claude/skills/om-handover/SKILL.md",
+            "docs/knowledge-layer-access.md",
+            ".claude/commands/browse.md",
+            ".claude/commands/nav-record.md",
+            ".claude/commands/nav-replay.md",
+            ".claude/agents/codex-adversarial.md",
+            "mesh-contract.yaml.template",
+        }
+        assert not (optional & default_files), "default render leaked disabled features"
+        assert optional <= flags_files, "all-flags render omitted enabled features"
+        assert flags_files - default_files == optional
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [
+        ({}, {"Hooks": 5, "Commands": 45, "Skills": 24, "Agents": 26,
+              "Scripts": 33, "Husky": 3, "CI": 26, "Docs": 12}),
+        ({flag: "true" for flag in FEATURE_FLAGS},
+         {"Hooks": 5, "Commands": 48, "Skills": 28, "Agents": 27,
+              "Scripts": 33, "Husky": 3, "CI": 26, "Docs": 14}),
+    ],
+)
+def test_rendered_readme_counts_match_rendered_tree(flags, expected):
+    """Every advertised component count describes the selected render."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        dst = Path(tmpdir) / "render"
+        dst.mkdir()
+        render(dst, **flags)
+        readme = (dst / "README-STARTER-PACK.md").read_text(encoding="utf-8")
+        locations = {
+            "Hooks": (".claude/hooks", "files"),
+            "Commands": (".claude/commands", "files"),
+            "Skills": (".claude/skills", "dirs"),
+            "Agents": (".claude/agents", "files"),
+            "Scripts": ("scripts", "files"),
+            "Husky": (".husky", "files"),
+            "CI": (".github/workflows", "files"),
+            "Docs": ("docs", "files"),
+        }
+        for label, count in expected.items():
+            directory, unit = locations[label]
+            entries = list((dst / directory).iterdir())
+            actual = sum(p.is_dir() if unit == "dirs" else p.is_file() for p in entries)
+            assert actual == count, f"test expectation drift for {label}"
+            assert re.search(rf"\*\*{label}\*\*.*\({actual} {unit}\)", readme)
 
 
 def test_brand_answers_match_overlays(branded_render, default_render):
@@ -287,6 +332,10 @@ def test_skip_if_exists_contract():
         # Write sentinel to a skip_if_exists file
         claude_file = dst / "CLAUDE.md"
         claude_file.write_text("LOCAL\n")
+        session_hook = dst / ".claude/hooks/session-start.sh"
+        session_hook.write_text("#!/bin/sh\necho LOCAL\n")
+        settings = dst / ".claude/settings.json"
+        settings.write_text("{}\n")
 
         # Re-render with --overwrite
         cmd = [
@@ -297,12 +346,18 @@ def test_skip_if_exists_contract():
             "--defaults",
             "--quiet",
             "--overwrite",
+            "--vcs-ref=HEAD",
             str(ROOT),
             str(dst),
         ]
         subprocess.run(cmd, check=True)
 
         # Sentinel should survive
+        assert claude_file.read_text() == "LOCAL\n"
+        assert session_hook.read_text() == "#!/bin/sh\necho LOCAL\n"
+        # The lifecycle migration is deliberately outside the instance-owned
+        # hook, so an update still wires cleanup for existing consumers.
+        assert "guard_check.py --clear-session-unfreezes" in settings.read_text()
         assert claude_file.read_text() == "LOCAL\n", "CLAUDE.md was overwritten"
 
         # But other files should be updated

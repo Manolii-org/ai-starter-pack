@@ -105,7 +105,10 @@ jobs:
         env:
           BASE_REF: ${{ github.base_ref }}
         run: |
-          CHANGED_SH=$(git diff --name-only "origin/${BASE_REF}...HEAD" | grep '\.sh$')
+          # Deleted shell files must not be passed to shellcheck: the path no
+          # longer exists in the checkout. Keep rename destinations and all
+          # added/copied/modified files.
+          CHANGED_SH=$(git diff --name-only --diff-filter=ACMR "origin/${BASE_REF}...HEAD" -- '*.sh')
           if [ -n "$CHANGED_SH" ]; then
             shellcheck --severity=warning $CHANGED_SH
           fi

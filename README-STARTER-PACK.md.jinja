@@ -6,18 +6,18 @@ Production-grade AI-assisted development from day one. {{ATTRIBUTION_LINE}}
 
 | Component | Files | Purpose |
 |-----------|-------|---------|
-| **Hooks** | `.claude/hooks/` (7 files) | Full session lifecycle: credential loading, prompt tracking, edit monitoring, compaction, stop, response-hygiene + injection scanning |
-| **Commands** | `.claude/commands/` (48 files) | Slash commands: `/wrap-up`, `/tdd`, `/doctor`, `/watch-pr`, `/sprint-fan-out`, `/investigate`, `/retro`, `/freeze`, `/guard`, `/design-shotgun`, etc. |
-| **Skills** | `.claude/skills/` (28 dirs) | Persistent context: conventions, security, database, TDD, OSS compat, analytics, curator, governance (assess-model, completeness-check, phase-gate) + 7 PR assessment specialists |
-| **Agents** | `.claude/agents/` (27 files) | Parallel workers: PR assessment pipeline, security review, CI fixer, architecture impact, main-thread-executor, prompt-hardener, test-hardener, critics, `secrets-handler` (credential router), `memory-keeper`, and more |
+| **Hooks** | `.claude/hooks/` (5 files) | Full session lifecycle: credential loading, prompt tracking, edit monitoring, compaction, stop, response-hygiene + injection scanning |
+| **Commands** | `.claude/commands/` ({{ 45 + (3 if browserbase else 0) }} files) | Slash commands: `/wrap-up`, `/tdd`, `/doctor`, `/watch-pr`, `/sprint-fan-out`, `/investigate`, `/retro`, `/freeze`, `/guard`, `/design-shotgun`, etc. |
+| **Skills** | `.claude/skills/` ({{ 24 + (4 if kl_integration else 0) }} dirs) | Persistent context: conventions, security, database, TDD, OSS compat, analytics, curator, governance (assess-model, completeness-check, phase-gate) + 7 PR assessment specialists |
+| **Agents** | `.claude/agents/` ({{ 26 + (1 if codex_adversarial else 0) }} files) | Parallel workers: PR assessment pipeline, security review, CI fixer, architecture impact, main-thread-executor, prompt-hardener, test-hardener, critics, `secrets-handler` (credential router), `memory-keeper`, and more |
 | **PR Assessment** | `.github/workflows/pr-assessment.yml` | AI-driven 5-stage review pipeline: pr-classifier → SAST → specialists → broad agents → judge |
 | **Memory** | `.ai/memory/` + `.ai/decisions/` | Persistent JSONL memory (facts, patterns, sessions, **retrospectives/**) + ADRs. Canonical path is `.ai/memory/` — run `scripts/migrate-memory-path.sh` if a repo still uses `.claude/memory/`. |
 | **Security** | `.ai/security/token-shapes.json`, `scripts/injection_scan.py`, `canary_tokens.py`, `safe_env.sh` | Provider token-shape patterns, prompt-injection scanner, canary tokens, sanctioned env helpers — wired into the pre/post-tool hooks |
 | **Multi-model routing** | `.claude/model-routing.json`, `.claude/model-routing.md`, `deploy/litellm-proxy/` | 9-tier framework: Anthropic Claude + Fireworks/Together/Groq/OpenRouter OSS models |
 | **Scripts** | `scripts/` (33 files) | Utilities: knowledge index, skill graph, system self-check, model routing, pre-tool enforcement (scope-budget / broad-dispatch / token-leak guards), injection scan, canary tokens, safe-env helpers, pack drift check, session-stop checklist, OTEL/Langfuse headers |
 | **Husky** | `.husky/` (3 files) | Git hooks: pre-commit, commit-msg, pre-push |
-| **CI** | `.github/workflows/` (28 files) | CI, PR assessment, static review, secret scanning, mutation testing, tier gates, plus the reusable-workflow library consumers call by tag |
-| **Docs** | `docs/` (15 files) | Quality gate, output-token discipline, OSS delegation; security (MCP response hygiene, token-leak hygiene); governance (model-change protocol, model-config schema, US-OSS eligibility) |
+| **CI** | `.github/workflows/` (26 files) | CI, PR assessment, static review, secret scanning, mutation testing, tier gates, plus the reusable-workflow library consumers call by tag |
+| **Docs** | `docs/` ({{ 12 + (1 if oss_routing else 0) + (1 if kl_integration else 0) }} files) | Quality gate, output-token discipline, OSS delegation; security (MCP response hygiene, token-leak hygiene); governance (model-change protocol, model-config schema{% if oss_routing %}, US-OSS eligibility{% endif %}){% if kl_integration %}; remote-memory access{% endif %} |
 | **Config** | `.claude/settings.json`, `.mcp.json` | Hook wiring, MCP server setup (Context7 + GitHub included), permissions |
 | **Templates** | `CLAUDE.md`, `AGENTS.md` | Fill-in project documentation |
 
@@ -138,16 +138,16 @@ The script deploys a LiteLLM proxy to Fly.io, pushes your API keys, smoke-tests 
 
 ### Hook Lifecycle
 
-1. **SessionStart** (`session-start.sh`): Loads credentials from Doppler (1hr cache), exports `GH_TOKEN`, injects last compact summary into context
+1. **SessionStart** (`session-start.sh`): Clears prior-session unfreezes, loads credentials from Doppler (1hr cache), exports `GH_TOKEN`, injects last compact summary into context
 2. **UserPromptSubmit** (`user-prompt.py` + `classify-message.py`): 
    - `user-prompt.py`: First prompt — sets up Husky, checks for active plans. Every prompt — checks for unresolved PR comments
    - `classify-message.py`: Classifies prompts for model tier routing (heavy/standard/light by keyword heuristics); emits `<model-routing>` block with tier suggestion and agent dispatch rules; tracks session spend; emits stream-checkpoint warnings
 3. **PreToolUse** (`scripts/pre-tool-use.py`):
    - Enforces explicit `model=` parameter on Agent() calls to prevent OSS tier bypass
+   - Enforces `.ai/guards.json` for Edit/Write/NotebookEdit and write-style Bash;
+     session unfreezes are audit-logged and cleared at the next SessionStart
    - PR repository targeting guard — blocks cross-repo PR misfires
    - Token-leak guard on Bash commands that would print a secret-named variable
-   - Note: `.claude/hooks/pre-tool.py` is a *different*, unwired file (a commit-time
-     session-report reminder). Editing it does not change PreToolUse behaviour.
 4. **PostToolUse** (`post-tool.py`):
    - `post-tool.py`: Unified hook — tracks edit count and modified files, reminds about lint/typecheck every 15 edits, API route security reminders, tool-call counter with `/smart-compact` recommendations, and external-response hygiene (secret-shape + prompt-injection scan)
    - `advisor-metrics-hook.py` is **not** wired: `advisor()` is disabled
@@ -158,9 +158,6 @@ The script deploys a LiteLLM proxy to Fly.io, pushes your API keys, smoke-tests 
 7. **Stop** (two commands: `session-stop-checklist.sh`, then a self-check + skill-graph rebuild): session-end checklist, durable local retrospective (`failure_class`), optional KL flush, doctor signals, optional intent-drift.
    - `session-stop-checklist.sh`: Outputs session-end checklist; branch fingerprint vs main; doctor signal summary; invokes `session-retrospective.py`; optional intent-drift check
    - second command: runs `system-self-check.py` then `build-skill-graph.py`, and appends the combined exit code to `.ai/memory/eval-failures.jsonl`
-   - Note: `.claude/hooks/stop.sh` is **not** wired. It duplicates the second
-     command's work (sentinel, skill graph, self-check) but nothing invokes it;
-     editing it does not change Stop behaviour.
 
 ### Memory System
 
@@ -217,6 +214,7 @@ See `.claude/model-routing.md` for the full setup guide.
 | `scripts/classify-message.py` | **UserPromptSubmit hook** — Classifies prompts by keyword heuristics into tier buckets (heavy/standard/light); emits `<model-routing>` block with tier suggestion and agent dispatch rules; tracks cumulative session spend; emits stream-checkpoint warnings on high token usage | Runs automatically on every prompt |
 | `scripts/advisor-metrics-hook.py` | _Legacy._ Logged `advisor()` tool invocations to `.ai/metrics/advisor-usage.jsonl`. No longer wired in (advisor disabled); retained for historical telemetry analysis only | Not invoked |
 | `scripts/pre-tool-use.py` | **PreToolUse hook** — Enforces explicit `model=` parameter on Agent() instantiation (prevents OSS tier bypass); validates PR repo targeting (blocks cross-repo misfires); warns on unsafe git operations | Runs before tools execute |
+| `scripts/guard_check.py` | Portable path/region guard engine for Edit, Write, NotebookEdit, and write-style Bash; supports session-scoped audited unfreezes | Imported by `scripts/pre-tool-use.py` |
 | `scripts/session-stop-checklist.sh` | **Stop hook** — Checklist + branch fingerprint + doctor + **session retrospective** (local JSONL, KL-optional) + optional intent-drift | Runs at session end |
 | `scripts/session-retrospective.py` | **Stop / SessionStart / PreCompact** — KL-optional retrospective with `failure_class` taxonomy; local `.ai/memory/retrospectives/`; `--mode inject` at start, `precompact` before compact | Wired in hooks |
 | `scripts/migrate-memory-path.sh` | One-shot `.claude/memory/` → `.ai/memory/` (symlink + no-clobber conflict archive) | Manual / consumer adoption |
@@ -253,11 +251,9 @@ Telemetry data is used for:
   hooks/
     session-start.sh         # Credential loading, compact summary injection
     user-prompt.py           # PR comments, plan check, Husky init
-    pre-tool.py              # NOT WIRED — commit gate (session report reminder)
     post-tool.py             # Edit tracking, lint reminders, tool-call counter (unified)
     pre-compact.sh           # Pre-compaction session state summary
     post-compact.sh          # Save compact summary, reset counter, log metrics
-    stop.sh                  # NOT WIRED — stop sentinel, session-end log, skill graph, self-check
   commands/
     wrap-up.md               # End-of-session orchestrator
     smart-compact.md         # Intelligent context compaction

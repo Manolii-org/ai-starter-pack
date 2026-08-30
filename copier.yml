@@ -168,6 +168,10 @@ _exclude:
   - .ruff_cache/**
   - .pytest_cache
   - .pytest_cache/**
+  # Maintainer-only pytest collection policy. Consumers keep their own test
+  # configuration; this repo needs importlib mode because generated telemetry
+  # wire tests intentionally share a basename with their canonical source.
+  - pytest.ini
   - node_modules
   - node_modules/**
   - .venv
@@ -195,6 +199,19 @@ _exclude:
   # instances whose instance-owned CLAUDE.md predates the anchored sections).
   # Consumers adopt via their own caller of claude-md-contract-reusable.yml.
   - .github/workflows/claude-md-contract.yml
+  # Feature-dependent files. Empty rendered entries are ignored by Copier;
+  # each exclusion is active only while its corresponding flag is disabled.
+  - "{% if not oss_routing %}docs/us-oss-eligibility-matrix.md{% endif %}"
+  - "{% if not kl_integration %}.claude/skills/om-fact-capture{% endif %}"
+  - "{% if not kl_integration %}.claude/skills/om-readiness{% endif %}"
+  - "{% if not kl_integration %}.claude/skills/om-staff-answer{% endif %}"
+  - "{% if not kl_integration %}.claude/skills/om-handover{% endif %}"
+  - "{% if not kl_integration %}docs/knowledge-layer-access.md{% endif %}"
+  - "{% if not browserbase %}.claude/commands/browse.md{% endif %}"
+  - "{% if not browserbase %}.claude/commands/nav-record.md{% endif %}"
+  - "{% if not browserbase %}.claude/commands/nav-replay.md{% endif %}"
+  - "{% if not codex_adversarial %}.claude/agents/codex-adversarial.md{% endif %}"
+  - "{% if not mesh_telemetry %}mesh-contract.yaml.template{% endif %}"
   - "*.zip"
 
 # Instance-owned files: written on first copy, never overwritten by

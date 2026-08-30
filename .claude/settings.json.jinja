@@ -59,7 +59,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "_R=$(git rev-parse --show-toplevel 2>/dev/null || echo \"$PWD\"); cd \"$_R\" && bash .claude/hooks/session-start.sh",
+            "command": "_R=$(git rev-parse --show-toplevel 2>/dev/null || echo \"$PWD\"); cd \"$_R\" && { python3 scripts/guard_check.py --clear-session-unfreezes || true; bash .claude/hooks/session-start.sh; }",
             "timeout": 30
           }
         ]

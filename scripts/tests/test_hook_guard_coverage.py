@@ -9,15 +9,15 @@ manolii-org/master is 2,336 and carries a strictly larger guard set. Measured
     OSS-GUARD              8        6
     BROAD-DISPATCH         1        1
     RETURN-CAP             0        1
-    GUARD: (path guards)   0        3
+    GUARD: (path guards)   2        3
     TOP-TIER-SUBAGENT      0        1
     DEPRECATED-AGENT       0        1
     TIER-MISMATCH          0        2
-    guards.json            0        2
+    guards.json            2        2
 
-That gap may be deliberate — a pack shipped to external consumers has no reason
-to carry Manolii's `.ai/guards.json` path guards or ecosystem-specific agent
-routing. But nothing recorded the intent and nothing detected drift, so
+That gap may be deliberate — a pack shipped to external consumers should carry
+portable path guards without inheriting Manolii-specific agent routing. But
+nothing recorded the intent and nothing detected drift, so
 "deliberate subset" and "silent rot" were indistinguishable. This file does not
 force parity; it makes the subset EXPLICIT and monitored.
 
@@ -44,17 +44,17 @@ HOOK = REPO / "scripts" / "pre-tool-use.py"
 REQUIRED: dict[str, int] = {
     "OSS-GUARD": 1,        # model-routing tier enforcement on Agent dispatch
     "BROAD-DISPATCH": 1,   # breadth-signal nudge toward an orchestrator
+    "GUARD:": 1,           # portable .ai/guards.json path enforcement
+    "guards.json": 1,       # guard manifest is read by the hook
 }
 
 # Guards deliberately NOT shipped, with the reason. Presence here is a signal to
 # review the declaration, not automatically a bug.
 OMITTED: dict[str, str] = {
     "RETURN-CAP": "return-cap discipline is orchestrator policy, not a pack default",
-    "GUARD:": "path guards read .ai/guards.json, which is Manolii-ecosystem-specific",
     "TOP-TIER-SUBAGENT": "opus-pinning rules are orchestrator routing policy",
     "DEPRECATED-AGENT": "names agents that exist only in the orchestrator repo",
     "TIER-MISMATCH": "depends on the orchestrator's tier_definitions",
-    "guards.json": "see GUARD: above",
 }
 
 failures: list[str] = []

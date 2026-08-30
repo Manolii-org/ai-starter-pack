@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 PAIRS=(
   session-retrospective.py
   session-stop-checklist.sh
+  guard_check.py
   migrate-memory-path.sh
   session-cost-logger.py
   lib/failure_class.py
