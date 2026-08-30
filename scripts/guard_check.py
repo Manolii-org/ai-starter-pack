@@ -29,19 +29,40 @@ _BASH_WRITE_PATTERNS = [
     # (?:\S+\s+)? group is optional to capture the path either way.
     re.compile(r'\bsed\s+-i\S*\s+(?:\S+\s+)?(\S+)'),
     re.compile(r'\bdd\s+(?:if=\S+\s+)?of=(\S+)'),# dd of=path
+    re.compile(r'\b(?:cp|mv|install)\s+(?:-\S+\s+)*\S+\s+(\S+)'),
+    re.compile(r'\btruncate\s+(?:-\S+\s+)*(\S+)'),
+]
+
+# Applied to the raw command after heredoc bodies have been removed. The normal
+# patterns intentionally scrub quoted strings to avoid matching prose, but a
+# shell-quoted destination is still a real write target.
+_BASH_QUOTED_WRITE_PATTERNS = [
+    re.compile(r'(?:^|[^>])>\s*(["\'])(.+?)\1'),
+    re.compile(r'>>\s*(["\'])(.+?)\1'),
+    re.compile(r'\btee\s+(?:-a\s+)?(["\'])(.+?)\1'),
+    re.compile(r'\b(?:cp|mv|install)\s+(?:-\S+\s+)*\S+\s+(["\'])(.+?)\1'),
+    re.compile(r'\btruncate\s+(?:-\S+\s+)*(["\'])(.+?)\1'),
 ]
 
 
 def _load_guards(repo_root: Path) -> dict[str, Any]:
-    """Load guards.json. Return empty config (no guards) on any error."""
+    """Load guards.json, distinguishing absence from unreadable policy."""
     f = repo_root / GUARDS_FILE
     if not f.exists():
         return {"guards": [], "session_unfreezes": []}
     try:
         with f.open("r", encoding="utf-8") as fh:
-            return json.load(fh)
-    except (json.JSONDecodeError, OSError):
-        return {"guards": [], "session_unfreezes": []}
+            loaded = json.load(fh)
+        if not isinstance(loaded, dict):
+            raise ValueError("guard policy root must be a JSON object")
+        return loaded
+    except (json.JSONDecodeError, OSError, ValueError) as exc:
+        print(
+            f"guard_check: {GUARDS_FILE} unreadable "
+            f"({type(exc).__name__}: {exc}); failing closed",
+            file=sys.stderr,
+        )
+        return {"guards": [], "session_unfreezes": [], "_load_failed": True}
 
 
 def _path_matches(target_rel: str, patterns: list[str]) -> bool:
@@ -136,6 +157,12 @@ def check_edit(
         {"action": "allow_unfreeze", "guard_id": "...", "operator_reason": "..."} — in session_unfreezes
     """
     cfg = _load_guards(repo_root)
+    if cfg.get("_load_failed"):
+        return {
+            "action": "block",
+            "reason": f"{GUARDS_FILE} could not be parsed; guards cannot be evaluated",
+            "guard_id": "guards-config",
+        }
     target_path_p = Path(target_path)
 
     # Normalise to an absolute, symlink-resolved path before relativising so
@@ -159,6 +186,14 @@ def check_edit(
         target_rel = str(target_abs)
 
     session_unfreezes = cfg.get("session_unfreezes", [])
+    if not isinstance(session_unfreezes, list) or not all(
+        isinstance(guard_id, str) for guard_id in session_unfreezes
+    ):
+        return {
+            "action": "block",
+            "reason": f"{GUARDS_FILE} has an invalid session_unfreezes list",
+            "guard_id": "guards-config",
+        }
 
     # Edits to GUARDS_FILE itself that ONLY modify session_unfreezes are permitted.
     # Without this, the guards-config guard creates a circular chain: unfreezing any
@@ -205,7 +240,19 @@ def check_edit(
                 file=sys.stderr,
             )
 
+    unfrozen_matches: list[str] = []
     for guard in cfg.get("guards", []):
+        if (
+            not isinstance(guard, dict)
+            or not isinstance(guard.get("id"), str)
+            or not isinstance(guard.get("paths"), list)
+            or not all(isinstance(pattern, str) for pattern in guard.get("paths", []))
+        ):
+            return {
+                "action": "block",
+                "reason": f"{GUARDS_FILE} contains an invalid guard entry",
+                "guard_id": "guards-config",
+            }
         if not _path_matches(target_rel, guard.get("paths", [])):
             continue
 
@@ -221,7 +268,18 @@ def check_edit(
             if not any_changed:
                 continue  # Region untouched; this guard does not block
 
-        return _decision_for_guard(guard, session_unfreezes)
+        decision = _decision_for_guard(guard, session_unfreezes)
+        if decision["action"] == "block":
+            return decision
+        unfrozen_matches.append(decision["guard_id"])
+
+    if unfrozen_matches:
+        return {
+            "action": "allow_unfreeze",
+            "guard_id": unfrozen_matches[0],
+            "guard_ids": unfrozen_matches,
+            "operator_reason": "session_unfreeze_active",
+        }
 
     return {"action": "allow"}
 
@@ -268,6 +326,20 @@ def _strip_quoted(command: str) -> str:
     return "".join(out)
 
 
+def _strip_heredoc_bodies(command: str) -> str:
+    """Blank heredoc bodies while preserving command arguments and quotes."""
+    out = list(command)
+    for match in re.finditer(r"<<-?\s*['\"]?(\w+)['\"]?[^\n]*\n", command):
+        marker = match.group(1)
+        end = command.find(f"\n{marker}", match.end())
+        if end < 0:
+            continue
+        for index in range(match.end(), end):
+            if out[index] not in (" ", "\n", "\t"):
+                out[index] = " "
+    return "".join(out)
+
+
 def check_bash(command: str, repo_root: Path) -> dict[str, Any]:
     """Heuristic: scan Bash command for write redirects and check each target.
 
@@ -285,14 +357,31 @@ def check_bash(command: str, repo_root: Path) -> dict[str, Any]:
         for m in pat.finditer(scrubbed):
             candidates.add(m.group(1).strip("'\""))
 
-    for candidate in candidates:
+    without_heredocs = _strip_heredoc_bodies(command)
+    for pattern in _BASH_QUOTED_WRITE_PATTERNS:
+        for match in pattern.finditer(without_heredocs):
+            candidates.add(match.group(2))
+
+    unfrozen_guard_ids: list[str] = []
+    for candidate in sorted(candidates):
         # Skip special files
         if candidate.startswith("/dev/") or candidate == "-":
             continue
 
         decision = check_edit(candidate, repo_root)
-        if decision["action"] in ("block", "allow_unfreeze"):
+        if decision["action"] == "block":
             return decision
+        if decision["action"] == "allow_unfreeze":
+            unfrozen_guard_ids.extend(decision.get("guard_ids", [decision["guard_id"]]))
+
+    if unfrozen_guard_ids:
+        unique_ids = list(dict.fromkeys(unfrozen_guard_ids))
+        return {
+            "action": "allow_unfreeze",
+            "guard_id": unique_ids[0],
+            "guard_ids": unique_ids,
+            "operator_reason": "session_unfreeze_active",
+        }
 
     return {"action": "allow"}
 
@@ -312,11 +401,12 @@ def main() -> int:
 
     if tool in ("Edit", "Write", "NotebookEdit"):
         target = args.get("file_path") or args.get("notebook_path", "")
+        edit_new = args["new_string"] if "new_string" in args else args.get("content")
         decision = check_edit(
             target,
             repo_root,
             edit_old=args.get("old_string"),
-            edit_new=args.get("new_string") or args.get("content"),
+            edit_new=edit_new,
         )
     elif tool == "Bash":
         decision = check_bash(args.get("command", ""), repo_root)

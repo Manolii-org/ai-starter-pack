@@ -120,12 +120,12 @@ class TestLoadGuards:
         assert result["session_unfreezes"] == ["test-1"]
 
     def test_malformed_json(self, tmp_path):
-        """Malformed JSON returns empty config."""
+        """Malformed JSON is distinguished from an absent guard policy."""
         guards_file = tmp_path / ".ai" / "guards.json"
         guards_file.parent.mkdir(parents=True)
         guards_file.write_text("{ invalid json }", encoding="utf-8")
         result = _load_guards(tmp_path)
-        assert result == {"guards": [], "session_unfreezes": []}
+        assert result["_load_failed"] is True
 
 
 class TestRegionChanged:
@@ -259,6 +259,43 @@ class TestCheckEdit:
         result = check_edit("model-routing.json", tmp_path)
         assert result["action"] == "allow_unfreeze"
         assert result["guard_id"] == "test-guard"
+
+    def test_overlapping_active_guard_wins_over_unfrozen_guard(self, tmp_path):
+        """Unfreezing one matching guard cannot bypass another matching guard."""
+        guards_file = tmp_path / ".ai" / "guards.json"
+        guards_file.parent.mkdir(parents=True)
+        guards_file.write_text(json.dumps({
+            "guards": [
+                {"id": "broad", "paths": ["*.json"]},
+                {"id": "specific", "paths": ["secret.json"]},
+            ],
+            "session_unfreezes": ["broad"],
+        }), encoding="utf-8")
+
+        result = check_edit("secret.json", tmp_path)
+        assert result["action"] == "block"
+        assert result["guard_id"] == "specific"
+
+    def test_malformed_guard_policy_fails_closed(self, tmp_path):
+        """A present but unreadable policy cannot silently disable protection."""
+        guards_file = tmp_path / ".ai" / "guards.json"
+        guards_file.parent.mkdir(parents=True)
+        guards_file.write_text("{broken", encoding="utf-8")
+        result = check_edit("anything.txt", tmp_path)
+        assert result["action"] == "block"
+        assert result["guard_id"] == "guards-config"
+
+    def test_invalid_guard_entry_fails_closed(self, tmp_path):
+        """Schema-invalid entries return a policy block instead of raising."""
+        guards_file = tmp_path / ".ai" / "guards.json"
+        guards_file.parent.mkdir(parents=True)
+        guards_file.write_text(json.dumps({
+            "guards": [{"paths": ["*.json"]}],
+            "session_unfreezes": [],
+        }), encoding="utf-8")
+        result = check_edit("secret.json", tmp_path)
+        assert result["action"] == "block"
+        assert result["guard_id"] == "guards-config"
 
     def test_guards_file_unfreeze_only_edit_allowed(self, tmp_path):
         """Edit to .ai/guards.json touching only session_unfreezes is allowed."""
@@ -426,6 +463,43 @@ class TestCheckBash:
         # The > secret.json is inside a string, so should be ignored
         result = check_bash('echo "redirect > secret.json"', tmp_path)
         assert result["action"] == "allow"
+
+    def test_quoted_redirect_target_is_detected(self, tmp_path):
+        """Shell quoting a destination does not bypass its guard."""
+        guards_file = tmp_path / ".ai" / "guards.json"
+        guards_file.parent.mkdir(parents=True)
+        guards_file.write_text(json.dumps({
+            "guards": [{"id": "g1", "paths": ["secret.json"]}],
+            "session_unfreezes": [],
+        }), encoding="utf-8")
+        assert check_bash('echo data > "secret.json"', tmp_path)["action"] == "block"
+        assert check_bash("echo data | tee 'secret.json'", tmp_path)["action"] == "block"
+
+    def test_copy_and_move_destinations_are_detected(self, tmp_path):
+        """Common file-replacement commands cannot bypass path guards."""
+        guards_file = tmp_path / ".ai" / "guards.json"
+        guards_file.parent.mkdir(parents=True)
+        guards_file.write_text(json.dumps({
+            "guards": [{"id": "g1", "paths": ["secret.json"]}],
+            "session_unfreezes": [],
+        }), encoding="utf-8")
+        assert check_bash("cp /tmp/new secret.json", tmp_path)["action"] == "block"
+        assert check_bash('mv /tmp/new "secret.json"', tmp_path)["action"] == "block"
+
+    def test_any_blocked_target_wins_in_multi_target_command(self, tmp_path):
+        """An unfrozen target cannot hide another blocked target in one command."""
+        guards_file = tmp_path / ".ai" / "guards.json"
+        guards_file.parent.mkdir(parents=True)
+        guards_file.write_text(json.dumps({
+            "guards": [
+                {"id": "open", "paths": ["open.json"]},
+                {"id": "closed", "paths": ["closed.json"]},
+            ],
+            "session_unfreezes": ["open"],
+        }), encoding="utf-8")
+        result = check_bash("echo x > open.json; echo y > closed.json", tmp_path)
+        assert result["action"] == "block"
+        assert result["guard_id"] == "closed"
 
     def test_dev_special_files_ignored(self, tmp_path):
         """Writes to /dev/* are not guarded."""

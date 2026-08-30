@@ -90,7 +90,7 @@ jobs:
           # Deleted shell files must not be passed to shellcheck: the path no
           # longer exists in the checkout. Keep rename destinations and all
           # added/copied/modified files.
-          CHANGED_SH=$(git diff --name-only --diff-filter=ACMR origin/${{ github.base_ref }}...HEAD | grep '\.sh$')
+          CHANGED_SH=$(git diff --name-only --diff-filter=ACMR origin/${{ github.base_ref }}...HEAD -- '*.sh')
           if [ -n "$CHANGED_SH" ]; then
             shellcheck --severity=warning $CHANGED_SH
           fi

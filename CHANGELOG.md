@@ -6,7 +6,9 @@
 
 - **Guard commands now enforce what they promise.** Added the portable
   `scripts/guard_check.py` engine to the PreToolUse chain, audit every edit
-  allowed through a session unfreeze, and clear `session_unfreezes` at Stop.
+  allowed through a session unfreeze, and clear `session_unfreezes` at the next
+  SessionStart (Stop runs after every response, so clearing there made the
+  bypass unusable across turns).
 - **Feature flags now control optional files.** Copier `_exclude` conditionals
   omit disabled OSS, Operational Memory, Browserbase, Codex, and mesh surfaces;
   render-contract tests cover default and all-enabled inventories.

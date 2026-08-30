@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Test suite for security hooks — pre-tool-use.py and post-tool.py."""
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -82,8 +83,35 @@ class TestPreToolUseHook(unittest.TestCase):
             self.assertEqual(response.get("decision"), "block")
             self.assertIn("[GUARD:audit-write]", response.get("reason", ""))
 
-    def test_stop_hook_clears_session_unfreezes(self):
-        """Stop resets temporary unfreezes without changing guard definitions."""
+    def test_empty_edit_replacement_preserves_region_evaluation(self):
+        """Deleting an unrelated JSON field does not become an unknown edit."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            (repo / ".ai").mkdir()
+            target = repo / "config.json"
+            target.write_text('{"protected":"x","other":"delete"}', encoding="utf-8")
+            (repo / ".ai/guards.json").write_text(json.dumps({
+                "guards": [{
+                    "id": "protected-region",
+                    "paths": ["config.json"],
+                    "regions": [{"json_path": "protected"}],
+                }],
+                "session_unfreezes": [],
+            }))
+            payload = {
+                "tool_name": "Edit",
+                "tool_input": {
+                    "file_path": str(target),
+                    "old_string": ',"other":"delete"',
+                    "new_string": "",
+                },
+                "cwd": str(repo),
+            }
+            self.assertIsNone(self.run_hook(payload))
+
+    def test_unfreeze_survives_stop_and_next_session_start_clears_it(self):
+        """A bypass works across response-level Stops but not across sessions."""
         with tempfile.TemporaryDirectory() as tmpdir:
             repo = Path(tmpdir)
             subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
@@ -101,6 +129,23 @@ class TestPreToolUseHook(unittest.TestCase):
                 capture_output=True,
                 cwd=repo,
                 timeout=10,
+                check=True,
+            )
+            after_stop = json.loads(path.read_text())
+            self.assertEqual(after_stop["session_unfreezes"], ["critical"])
+
+            env = {
+                "HOME": str(repo),
+                "PATH": os.environ["PATH"],
+                "CLAUDE_PLUGIN_ROOT": str(self.pack_root),
+            }
+            subprocess.run(
+                ["bash", str(self.pack_root / ".claude/hooks/session-start.sh")],
+                text=True,
+                capture_output=True,
+                cwd=repo,
+                env=env,
+                timeout=15,
                 check=True,
             )
             updated = json.loads(path.read_text())

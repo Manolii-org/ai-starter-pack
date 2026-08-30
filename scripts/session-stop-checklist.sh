@@ -22,31 +22,6 @@ python3 "${SCRIPT_DIR}/session-cost-logger.py" ${_SESSION_ID:+--session "$_SESSI
 _SESSION_ID_FOR_RETRO="${_SESSION_ID:-}"
 unset _HOOK_INPUT _SESSION_ID
 
-# Session unfreezes are temporary by contract. Clear them before emitting the
-# final checklist so a permissive session can never leak into the next one.
-if [ -f ".ai/guards.json" ]; then
-  python3 - <<'PYEOF' 2>/dev/null || true
-import json
-import os
-import tempfile
-from pathlib import Path
-
-path = Path(".ai/guards.json")
-try:
-    data = json.loads(path.read_text(encoding="utf-8"))
-except (json.JSONDecodeError, OSError):
-    raise SystemExit(0)
-if data.get("session_unfreezes"):
-    data["session_unfreezes"] = []
-    with tempfile.NamedTemporaryFile(
-        "w", encoding="utf-8", dir=path.parent, delete=False
-    ) as handle:
-        handle.write(json.dumps(data, indent=2) + "\n")
-        temporary = Path(handle.name)
-    os.replace(temporary, path)
-PYEOF
-fi
-
 cat <<'EOF'
 Session ending checklist:
 - Run /extract-insights if decisions were made

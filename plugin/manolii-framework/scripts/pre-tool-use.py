@@ -64,15 +64,26 @@ def _path_guard() -> None:
             target = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
             if not target:
                 return
+            edit_new = (
+                tool_input["new_string"]
+                if "new_string" in tool_input
+                else tool_input.get("content")
+            )
             decision = check_edit(
                 target,
                 repo_root,
                 tool_input.get("old_string"),
-                tool_input.get("new_string") or tool_input.get("content"),
+                edit_new,
             )
     except Exception as exc:
-        print(f"[path-guard] decision failed: {exc}", file=sys.stderr)
-        return
+        print(json.dumps({
+            "decision": "block",
+            "reason": (
+                f"[GUARD:engine-error] Path guards could not be evaluated: {exc}. "
+                "Repair the guard engine before retrying the write."
+            ),
+        }))
+        sys.exit(0)
 
     if decision.get("action") == "block":
         guard_id = decision.get("guard_id")
@@ -81,7 +92,7 @@ def _path_guard() -> None:
             "reason": (
                 f"[GUARD:{guard_id}] {decision.get('reason')} "
                 f"To proceed: /unfreeze {guard_id} --reason \"...\" "
-                "(session-scoped; auto-clears at Stop)."
+                "(session-scoped; auto-clears at the next SessionStart)."
             ),
         }))
         sys.exit(0)
@@ -100,15 +111,16 @@ def _path_guard() -> None:
             ).stdout.strip()
             bypass_log = repo_root / ".ai" / "bypass-log.jsonl"
             bypass_log.parent.mkdir(parents=True, exist_ok=True)
-            entry = {
-                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                "scope": "pretool/guard-unfreeze",
-                "head": head,
-                "user": "agent",
-                "reason": f"unfreeze:{decision.get('guard_id')}:active",
-            }
             with bypass_log.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(entry) + "\n")
+                for guard_id in decision.get("guard_ids", [decision.get("guard_id")]):
+                    entry = {
+                        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                        "scope": "pretool/guard-unfreeze",
+                        "head": head,
+                        "user": "agent",
+                        "reason": f"unfreeze:{guard_id}:active",
+                    }
+                    handle.write(json.dumps(entry) + "\n")
         except Exception as exc:
             print(json.dumps({
                 "decision": "block",

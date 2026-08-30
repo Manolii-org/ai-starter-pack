@@ -138,14 +138,14 @@ The script deploys a LiteLLM proxy to Fly.io, pushes your API keys, smoke-tests 
 
 ### Hook Lifecycle
 
-1. **SessionStart** (`session-start.sh`): Loads credentials from Doppler (1hr cache), exports `GH_TOKEN`, injects last compact summary into context
+1. **SessionStart** (`session-start.sh`): Clears prior-session unfreezes, loads credentials from Doppler (1hr cache), exports `GH_TOKEN`, injects last compact summary into context
 2. **UserPromptSubmit** (`user-prompt.py` + `classify-message.py`): 
    - `user-prompt.py`: First prompt — sets up Husky, checks for active plans. Every prompt — checks for unresolved PR comments
    - `classify-message.py`: Classifies prompts for model tier routing (heavy/standard/light by keyword heuristics); emits `<model-routing>` block with tier suggestion and agent dispatch rules; tracks session spend; emits stream-checkpoint warnings
 3. **PreToolUse** (`scripts/pre-tool-use.py`):
    - Enforces explicit `model=` parameter on Agent() calls to prevent OSS tier bypass
    - Enforces `.ai/guards.json` for Edit/Write/NotebookEdit and write-style Bash;
-     session unfreezes are audit-logged and automatically cleared at Stop
+     session unfreezes are audit-logged and cleared at the next SessionStart
    - PR repository targeting guard — blocks cross-repo PR misfires
    - Token-leak guard on Bash commands that would print a secret-named variable
 4. **PostToolUse** (`post-tool.py`):
