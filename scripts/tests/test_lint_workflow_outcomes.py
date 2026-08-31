@@ -25,7 +25,7 @@ def write(
     p = tmp_path / ".github/workflows/deploy.yml"
     p.parent.mkdir(parents=True)
     publisher = (
-        "const conclusions = { DEFERRED: 'neutral', POLICY_HELD: 'neutral', FAILED: 'failure' }; github.rest.checks.create({name: `operation — ${outcome}`, conclusion, output: { summary }});"
+        "const outcome = condition ? 'DEFERRED' : condition2 ? 'POLICY_HELD' : 'FAILED'; const conclusions = { DEFERRED: 'neutral', POLICY_HELD: 'neutral', FAILED: 'failure' }; const summary = `${outcome}: evidence`; github.rest.checks.create({name: `operation — ${outcome}`, conclusion, output: { summary }});"
         if publish
         else "echo DEFERRED POLICY_HELD FAILED"
     )
@@ -105,6 +105,26 @@ def test_rejects_echo_only_reporter(tmp_path):
     assert any(
         "check-run" in x for x in LINT.lint(tmp_path, write(tmp_path, publish=False))
     )
+
+
+def test_rejects_commented_out_check_publisher(tmp_path):
+    config = write(tmp_path)
+    workflow = tmp_path / ".github/workflows/deploy.yml"
+    workflow.write_text(
+        workflow.read_text().replace(
+            "github.rest.checks.create", "// github.rest.checks.create"
+        )
+    )
+    assert any("must publish a GitHub check-run" in item for item in LINT.lint(tmp_path, config))
+
+
+def test_rejects_summary_without_selected_outcome(tmp_path):
+    config = write(tmp_path)
+    workflow = tmp_path / ".github/workflows/deploy.yml"
+    workflow.write_text(
+        workflow.read_text().replace("`${outcome}: evidence`", "`evidence only`")
+    )
+    assert any("summary cannot identify" in item for item in LINT.lint(tmp_path, config))
 
 
 def test_rejects_non_string_reporter_name(tmp_path):

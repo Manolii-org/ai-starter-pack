@@ -119,6 +119,11 @@ def lint_contract(repo: Path, relative: str, contract: dict) -> list[str]:
     if reporter is None:
         errors.append(f"{relative}: outcome_reporter_job {reporter_name!r} is missing")
         return errors
+    active_reporter = "\n".join(
+        re.sub(r"(^|\s)//.*$", r"\1", line)
+        for line in reporter.splitlines()
+        if not line.lstrip().startswith(("#", "//"))
+    )
     conditions = re.findall(r"(?m)^    if:\s*(.+?)\s*$", reporter)
     if conditions != ["${{ always() }}"]:
         errors.append(
@@ -130,26 +135,36 @@ def lint_contract(repo: Path, relative: str, contract: dict) -> list[str]:
         errors.append(
             f"{relative}: outcome reporter does not need load-bearing job(s): {', '.join(missing)}"
         )
-    if "github.rest.checks.create" not in reporter:
+    if "github.rest.checks.create" not in active_reporter:
         errors.append(f"{relative}: outcome reporter must publish a GitHub check-run")
-    if "name: `" not in reporter or "${outcome}" not in reporter:
+    if "name: `" not in active_reporter or "${outcome}" not in active_reporter:
         errors.append(f"{relative}: check-run name must contain the selected outcome")
-    if not re.search(r"output:[\s\S]{0,200}\bsummary\b", reporter):
+    if not re.search(r"output:[\s\S]{0,200}\bsummary\b", active_reporter):
         errors.append(f"{relative}: check-run must publish an outcome summary")
     for outcome in outcomes:
-        if outcome not in reporter:
+        if outcome not in active_reporter:
             errors.append(f"{relative}: outcome reporter does not publish {outcome}")
+        has_dynamic_summary = re.search(
+            r"(?:const|let)\s+summary\s*=[^;\n]*\$\{(?:process\.env\.)?OUTCOME|(?:const|let)\s+summary\s*=[^;\n]*\$\{outcome",
+            active_reporter,
+            re.I,
+        )
+        has_literal_summary = re.search(
+            rf"summary\s*=\s*['\"`][^\n]*{outcome}", active_reporter, re.I
+        )
+        if not (has_dynamic_summary or has_literal_summary):
+            errors.append(f"{relative}: summary cannot identify selected outcome {outcome}")
     if "FAILED" in outcomes and not (
-        re.search(r"FAILED[^\n]{0,120}failure", reporter, re.I)
-        or re.search(r"outcome\s*===\s*['\"]FAILED['\"][^\n]{0,120}['\"]failure['\"]", reporter)
+        re.search(r"FAILED[^\n]{0,120}failure", active_reporter, re.I)
+        or re.search(r"outcome\s*===\s*['\"]FAILED['\"][^\n]{0,120}['\"]failure['\"]", active_reporter)
     ):
         errors.append(f"{relative}: FAILED must map to a failure conclusion")
     for held in ("DEFERRED", "POLICY_HELD"):
         has_explicit_neutral = re.search(
-            rf"{held}[^\n]{{0,120}}neutral", reporter, re.I
+            rf"{held}[^\n]{{0,120}}neutral", active_reporter, re.I
         )
         has_neutral_fallback = re.search(
-            r"const\s+conclusion\s*=.*:\s*['\"]neutral['\"]\s*;", reporter
+            r"const\s+conclusion\s*=.*:\s*['\"]neutral['\"]\s*;", active_reporter
         )
         if held in outcomes and not (has_explicit_neutral or has_neutral_fallback):
             errors.append(f"{relative}: {held} must map to a neutral diagnostic conclusion")
