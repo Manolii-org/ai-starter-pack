@@ -1,0 +1,70 @@
+name: Publish workflow outcome
+
+on:
+  workflow_call:
+    inputs:
+      outcome:
+        description: EXECUTED, NO_CHANGES, DEFERRED, POLICY_HELD, or FAILED
+        required: true
+        type: string
+      operation:
+        description: Human-readable operation name
+        required: true
+        type: string
+      summary:
+        description: Evidence or reason for the outcome
+        required: true
+        type: string
+      head_sha:
+        description: Commit receiving the check-run
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  checks: write
+  contents: read
+
+jobs:
+  publish:
+    name: ${{ inputs.operation }} — ${{ inputs.outcome }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Validate and publish named conclusion
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          OUTCOME: ${{ inputs.outcome }}
+          OPERATION: ${{ inputs.operation }}
+          SUMMARY: ${{ inputs.summary }}
+          HEAD_SHA: ${{ inputs.head_sha || github.sha }}
+        with:
+          script: |
+            const conclusions = {
+              EXECUTED: 'success',
+              NO_CHANGES: 'success',
+              DEFERRED: 'neutral',
+              POLICY_HELD: 'neutral',
+              FAILED: 'failure',
+            };
+            const conclusion = conclusions[process.env.OUTCOME];
+            if (!conclusion) {
+              core.setFailed(`Unsupported workflow outcome: ${process.env.OUTCOME}`);
+              return;
+            }
+            await github.rest.checks.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              head_sha: process.env.HEAD_SHA,
+              name: `${process.env.OPERATION} — ${process.env.OUTCOME}`,
+              status: 'completed',
+              conclusion,
+              output: {
+                title: `${process.env.OPERATION}: ${process.env.OUTCOME}`,
+                summary: `${process.env.OUTCOME}: ${process.env.SUMMARY}`,
+              },
+              request: { timeout: 20000 },
+            });
+            if (['DEFERRED', 'POLICY_HELD', 'FAILED'].includes(process.env.OUTCOME)) {
+              core.setFailed(process.env.SUMMARY);
+            }

@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "workflows": {
+    ".github/workflows/release-tag.yml": {
+      "load_bearing_jobs": [
+        "tag"
+      ],
+      "outcome_reporter_job": "outcome",
+      "outcomes": [
+        "EXECUTED",
+        "FAILED"
+      ],
+      "load_bearing_steps": {
+        "tag": [
+          "Create tag ref",
+          "Move major-version alias"
+        ]
+      }
+    }
+  }
+}

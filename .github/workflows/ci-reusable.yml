@@ -114,6 +114,16 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
+      - name: Enforce explicit workflow outcomes when adopted
+        run: |
+          if [ -f scripts/lint-workflow-outcomes.py ] && [ -f config/workflow-outcomes.json ]; then
+            python3 scripts/lint-workflow-outcomes.py
+          elif [ -f scripts/lint-workflow-outcomes.py ] || [ -f config/workflow-outcomes.json ]; then
+            echo "::error::Partial workflow-outcome adoption; both linter and contract are required"
+            exit 1
+          else
+            echo "Workflow-outcome capability not adopted in this consumer yet"
+          fi
       - id: detect
         # Lockfiles count too: a PR that deletes package.json but leaves a
         # lockfile still runs CI (and fails loudly at install) instead of
