@@ -19,16 +19,18 @@ def write(
     reporter_if: str = "${{ always() }}",
     publish: bool = True,
     reporter_name="outcome",
+    needs="[apply]",
 ) -> Path:
     p = tmp_path / ".github/workflows/deploy.yml"
     p.parent.mkdir(parents=True)
     publisher = (
-        "github.rest.checks.create({name: `operation — ${outcome}`, conclusion}); // DEFERRED POLICY_HELD FAILED"
+        "github.rest.checks.create({name: `operation — ${outcome}`, conclusion, output: { summary }}); // DEFERRED POLICY_HELD FAILED"
         if publish
         else "echo DEFERRED POLICY_HELD FAILED"
     )
+    needs_yaml = "needs:\n      - apply" if needs == "block" else f"needs: {needs}"
     p.write_text(
-        f"""name: deploy\njobs:\n  apply:\n    runs-on: ubuntu-latest\n    steps:\n      - name: Apply\n        run: |\n          {apply_run}\n  {reporter_name}:\n    needs: [apply]\n    if: {reporter_if}\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/github-script@0123456789012345678901234567890123456789\n        with:\n          script: |\n            {publisher}\n"""
+        f"""name: deploy\njobs:\n  apply:\n    runs-on: ubuntu-latest\n    steps:\n      - name: Apply\n        run: |\n          {apply_run}\n  {reporter_name}:\n    {needs_yaml}\n    if: {reporter_if}\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/github-script@0123456789012345678901234567890123456789\n        with:\n          script: |\n            {publisher}\n"""
     )
     c = tmp_path / "config/workflow-outcomes.json"
     c.parent.mkdir()
@@ -40,6 +42,7 @@ def write(
                     ".github/workflows/deploy.yml": {
                         "load_bearing_jobs": ["apply"],
                         "outcome_reporter_job": reporter_name,
+                        "outcomes": ["DEFERRED", "POLICY_HELD", "FAILED"],
                     }
                 },
             }
@@ -54,7 +57,13 @@ def test_accepts_structured_publisher(tmp_path):
 
 @pytest.mark.parametrize(
     "command",
-    ["echo 'missing; skipping'", "echo 'deferring'; exit 0", "echo 'policy hold'"],
+    [
+        "echo 'missing; skipping'",
+        "echo 'deferring'; exit 0",
+        "echo 'policy hold'",
+        "[ -f receipt.json ] || exit 0",
+        "return 0",
+    ],
 )
 def test_rejects_any_skip_semantics_in_load_bearing_job(tmp_path, command):
     assert any(
@@ -69,6 +78,11 @@ def test_rejects_conditional_reporter(tmp_path):
             tmp_path, write(tmp_path, reporter_if="${{ always() && false }}")
         )
     )
+
+
+@pytest.mark.parametrize("needs", ["apply", "[apply]", "block"])
+def test_accepts_all_github_needs_shapes(tmp_path, needs):
+    assert LINT.lint(tmp_path, write(tmp_path, needs=needs)) == []
 
 
 def test_rejects_echo_only_reporter(tmp_path):
@@ -87,3 +101,25 @@ def test_rejects_non_string_reporter_name(tmp_path):
 
 def test_committed_registry_is_valid():
     assert LINT.lint(ROOT, ROOT / "config/workflow-outcomes.json") == []
+
+
+def test_committed_registry_is_not_an_empty_noop():
+    config = json.loads((ROOT / "config/workflow-outcomes.json").read_text())
+    assert config["workflows"]
+
+
+def test_consumer_quality_workflows_execute_outcome_lint():
+    candidates = (
+        ROOT / ".github/workflows/quality-base.yml",
+        ROOT / "templates/ai-starter-pack/core/.github/workflows/quality-base.yml",
+        ROOT / ".github/workflows/ci-reusable.yml",
+    )
+    found = False
+    for path in candidates:
+        if not path.is_file():
+            continue
+        found = True
+        text = path.read_text()
+        assert "python3 scripts/lint-workflow-outcomes.py" in text
+        assert "Partial workflow-outcome adoption" in text
+    assert found, "no managed consumer quality workflow was found"

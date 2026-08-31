@@ -17,6 +17,7 @@ on:
         default: ""
 
 permissions:
+  checks: write
   contents: write
 
 jobs:
@@ -131,3 +132,31 @@ jobs:
               -d "$CREATE"
             echo "Created $MAJOR -> $SHA"
           fi
+
+
+  outcome:
+    name: release tag — explicit outcome
+    needs: tag
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Publish release-tag outcome check
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          TAG_RESULT: ${{ needs.tag.result }}
+        with:
+          script: |
+            const outcome = process.env.TAG_RESULT === 'success' ? 'EXECUTED' : 'FAILED';
+            const summary = `${outcome}: release-tag operation ${process.env.TAG_RESULT}.`;
+            await github.rest.checks.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              head_sha: context.sha,
+              name: `release tag — ${outcome}`,
+              status: 'completed',
+              conclusion: outcome === 'FAILED' ? 'failure' : 'success',
+              output: { title: `Release tag: ${outcome}`, summary },
+              request: { timeout: 20000 },
+            });
+            if (outcome === 'FAILED') core.setFailed(summary);

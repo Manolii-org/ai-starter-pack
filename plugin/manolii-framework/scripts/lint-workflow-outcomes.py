@@ -13,6 +13,7 @@ SKIP_WORDS = re.compile(
     r"\b(skip(?:ped|ping)?|defer(?:red|ring)?|hold|no[- ]?op|absent|missing|not set)\b",
     re.I,
 )
+OUTCOMES = {"EXECUTED", "NO_CHANGES", "DEFERRED", "POLICY_HELD", "FAILED"}
 
 
 def load_json(path: Path) -> dict:
@@ -55,8 +56,26 @@ def announces_green_skip(block: str) -> bool:
         for line in command.splitlines()
         if not line.lstrip().startswith("#")
     )
+    if re.search(r"\b(?:exit|return)\s+0\b", executable):
+        return True
     announcements = re.findall(r"(?im)^\s*(?:echo|printf)\b[^\n]*", executable)
     return any(SKIP_WORDS.search(line) for line in announcements)
+
+
+def parse_needs(block: str) -> set[str]:
+    """Parse GitHub Actions scalar, inline-list, and block-list needs syntax."""
+    scalar = re.search(r"(?m)^    needs:[ \t]*([^\n#]+?)[ \t]*$", block)
+    if scalar:
+        value = scalar.group(1).strip()
+        if value.startswith("[") and value.endswith("]"):
+            return {item.strip() for item in value[1:-1].split(",") if item.strip()}
+        return {value}
+    list_match = re.search(
+        r"(?ms)^    needs:\s*$\n(?P<items>(?:      - [A-Za-z0-9_-]+\s*$\n?)+)", block
+    )
+    if not list_match:
+        return set()
+    return set(re.findall(r"(?m)^      - ([A-Za-z0-9_-]+)\s*$", list_match.group("items")))
 
 
 def lint_contract(repo: Path, relative: str, contract: dict) -> list[str]:
@@ -67,6 +86,7 @@ def lint_contract(repo: Path, relative: str, contract: dict) -> list[str]:
     text = path.read_text(encoding="utf-8")
     load_bearing = contract.get("load_bearing_jobs", [])
     reporter_name = contract.get("outcome_reporter_job")
+    outcomes = contract.get("outcomes", [])
     if (
         not isinstance(load_bearing, list)
         or not load_bearing
@@ -76,6 +96,16 @@ def lint_contract(repo: Path, relative: str, contract: dict) -> list[str]:
         return errors
     if not isinstance(reporter_name, str) or not reporter_name:
         errors.append(f"{relative}: outcome_reporter_job must be a non-empty string")
+        return errors
+    if (
+        not isinstance(outcomes, list)
+        or not outcomes
+        or not all(isinstance(item, str) and item in OUTCOMES for item in outcomes)
+        or "FAILED" not in outcomes
+    ):
+        errors.append(
+            f"{relative}: outcomes must be a non-empty supported list containing FAILED"
+        )
         return errors
     for name in load_bearing:
         block = job_block(text, name)
@@ -94,10 +124,7 @@ def lint_contract(repo: Path, relative: str, contract: dict) -> list[str]:
         errors.append(
             f"{relative}: outcome reporter must use exactly if: ${{{{ always() }}}}"
         )
-    needs_match = re.search(r"(?m)^    needs:\s*\[([^]]*)\]\s*$", reporter)
-    needs = (
-        {x.strip() for x in needs_match.group(1).split(",")} if needs_match else set()
-    )
+    needs = parse_needs(reporter)
     missing = sorted(set(load_bearing) - needs)
     if missing:
         errors.append(
@@ -105,7 +132,11 @@ def lint_contract(repo: Path, relative: str, contract: dict) -> list[str]:
         )
     if "github.rest.checks.create" not in reporter:
         errors.append(f"{relative}: outcome reporter must publish a GitHub check-run")
-    for outcome in ("DEFERRED", "POLICY_HELD", "FAILED"):
+    if "name: `" not in reporter or "${outcome}" not in reporter:
+        errors.append(f"{relative}: check-run name must contain the selected outcome")
+    if not re.search(r"output:[\s\S]{0,200}\bsummary\b", reporter):
+        errors.append(f"{relative}: check-run must publish an outcome summary")
+    for outcome in outcomes:
         if outcome not in reporter:
             errors.append(f"{relative}: outcome reporter does not publish {outcome}")
     return errors
