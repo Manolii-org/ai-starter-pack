@@ -238,7 +238,7 @@ def lint_contract(repo: Path, relative: str, contract: dict) -> list[str]:
                 errors.append(
                     f"{relative}: load-bearing step {step_name!r} is missing from job {name!r}"
                 )
-            elif re.search(r"(?m)^        if:\s*", step):
+            elif re.search(r"(?m)^        (?:if|['\"]if['\"])\s*:\s*", step):
                 errors.append(
                     f"{relative}: load-bearing step {step_name!r} must not be conditional"
                 )
@@ -256,7 +256,9 @@ def lint_contract(repo: Path, relative: str, contract: dict) -> list[str]:
         for line in without_block_comments.splitlines()
         if not line.lstrip().startswith(("#", "//"))
     )
-    conditions = re.findall(r"(?m)^    if:\s*(.+?)\s*$", reporter)
+    conditions = re.findall(
+        r"(?m)^    (?:if|['\"]if['\"])\s*:\s*(.+?)\s*$", reporter
+    )
     if conditions != ["${{ always() }}"]:
         errors.append(
             f"{relative}: outcome reporter must use exactly if: ${{{{ always() }}}}"
