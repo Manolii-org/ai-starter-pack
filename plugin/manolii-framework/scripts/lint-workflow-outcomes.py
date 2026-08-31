@@ -87,6 +87,51 @@ def step_block(job: str, step_name: str) -> str | None:
     return job[match.start() : end]
 
 
+def has_effective_checks_write(workflow: str, reporter: str) -> bool:
+    """Return whether the reporter's effective Actions permission can create checks."""
+    job_permissions = re.search(r"(?m)^    permissions:[ \t]*(?P<scalar>[^\n]*)$", reporter)
+    if job_permissions:
+        scalar = job_permissions.group("scalar").split("#", 1)[0].strip()
+        tail = reporter[job_permissions.end() :]
+        mapping_match = re.match(r"\n(?P<map>(?:      [^\n]+\n?)+)", tail)
+        mapping = mapping_match.group("map") if mapping_match else ""
+        return scalar == "write-all" or bool(
+            re.search(r"(?m)^      checks:\s*write\s*(?:#.*)?$", mapping)
+        )
+    before_jobs = workflow.split("\njobs:", 1)[0]
+    workflow_permissions = re.search(
+        r"(?m)^permissions:[ \t]*(?P<scalar>[^\n]*)$", before_jobs
+    )
+    if not workflow_permissions:
+        return False
+    scalar = workflow_permissions.group("scalar").split("#", 1)[0].strip()
+    tail = before_jobs[workflow_permissions.end() :]
+    mapping_match = re.match(r"\n(?P<map>(?:  [^\n]+\n?)+)", tail)
+    mapping = mapping_match.group("map") if mapping_match else ""
+    return scalar == "write-all" or bool(
+        re.search(r"(?m)^  checks:\s*write\s*(?:#.*)?$", mapping)
+    )
+
+
+def conclusion_mappings(reporter: str) -> dict[str, str]:
+    """Parse the required explicit outcome-to-conclusion object."""
+    match = re.search(
+        r"(?ms)\b(?:const|let)\s+conclusions\s*=\s*\{(?P<body>.*?)\}\s*;",
+        reporter,
+    )
+    if not match or not re.search(
+        r"\bconclusion\s*:\s*conclusions\s*\[\s*outcome\s*\]", reporter
+    ):
+        return {}
+    return {
+        outcome: conclusion
+        for outcome, conclusion in re.findall(
+            r"\b([A-Z_]+)\s*:\s*['\"](success|neutral|failure)['\"]",
+            match.group("body"),
+        )
+    }
+
+
 def lint_contract(repo: Path, relative: str, contract: dict) -> list[str]:
     errors: list[str] = []
     path = repo / relative
@@ -104,8 +149,19 @@ def lint_contract(repo: Path, relative: str, contract: dict) -> list[str]:
     ):
         errors.append(f"{relative}: load_bearing_jobs must be a non-empty string list")
         return errors
-    if not isinstance(load_bearing_steps, dict):
-        errors.append(f"{relative}: load_bearing_steps must be an object")
+    if (
+        not isinstance(load_bearing_steps, dict)
+        or set(load_bearing_steps) != set(load_bearing)
+        or not all(
+            isinstance(steps, list)
+            and steps
+            and all(isinstance(step, str) and step for step in steps)
+            for steps in load_bearing_steps.values()
+        )
+    ):
+        errors.append(
+            f"{relative}: load_bearing_steps must name a non-empty step list for every load-bearing job"
+        )
         return errors
     if not isinstance(reporter_name, str) or not reporter_name:
         errors.append(f"{relative}: outcome_reporter_job must be a non-empty string")
@@ -160,7 +216,7 @@ def lint_contract(repo: Path, relative: str, contract: dict) -> list[str]:
         )
     if "github.rest.checks.create" not in active_reporter:
         errors.append(f"{relative}: outcome reporter must publish a GitHub check-run")
-    if "checks: write" not in text:
+    if not has_effective_checks_write(text, reporter):
         errors.append(f"{relative}: outcome reporter requires checks: write permission")
     if "name: `" not in active_reporter or "${outcome}" not in active_reporter:
         errors.append(f"{relative}: check-run name must contain the selected outcome")
@@ -184,29 +240,21 @@ def lint_contract(repo: Path, relative: str, contract: dict) -> list[str]:
         )
         if not (has_dynamic_summary or has_literal_summary):
             errors.append(f"{relative}: summary cannot identify selected outcome {outcome}")
-    if "FAILED" in outcomes and not (
-        re.search(r"FAILED[^\n]{0,120}failure", active_reporter, re.I)
-        or re.search(r"outcome\s*===\s*['\"]FAILED['\"][^\n]{0,120}['\"]failure['\"]", active_reporter)
-    ):
-        errors.append(f"{relative}: FAILED must map to a failure conclusion")
-    for held in ("DEFERRED", "POLICY_HELD"):
-        has_explicit_neutral = re.search(
-            rf"{held}[^\n]{{0,120}}neutral", active_reporter, re.I
+    mappings = conclusion_mappings(active_reporter)
+    expected = {
+        outcome: (
+            "failure"
+            if outcome == "FAILED"
+            else "neutral"
+            if outcome in {"DEFERRED", "POLICY_HELD"}
+            else "success"
         )
-        has_neutral_fallback = re.search(
-            r"const\s+conclusion\s*=.*:\s*['\"]neutral['\"]\s*;", active_reporter
+        for outcome in outcomes
+    }
+    if any(mappings.get(outcome) != conclusion for outcome, conclusion in expected.items()):
+        errors.append(
+            f"{relative}: conclusions must explicitly map each declared outcome to {expected} and publish conclusions[outcome]"
         )
-        if held in outcomes and not (has_explicit_neutral or has_neutral_fallback):
-            errors.append(f"{relative}: {held} must map to a neutral diagnostic conclusion")
-    for successful in ("EXECUTED", "NO_CHANGES"):
-        if successful in outcomes and not (
-            re.search(rf"{successful}[^\n]{{0,120}}success", active_reporter, re.I)
-            or re.search(
-                r"outcome\s*===\s*['\"]FAILED['\"]\s*\?\s*['\"]failure['\"]\s*:\s*['\"]success['\"]",
-                active_reporter,
-            )
-        ):
-            errors.append(f"{relative}: {successful} must map to a success conclusion")
     return errors
 
 

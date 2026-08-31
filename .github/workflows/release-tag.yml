@@ -154,13 +154,14 @@ jobs:
           script: |
             const outcome = process.env.TAG_RESULT === 'success' ? 'EXECUTED' : 'FAILED';
             const summary = `${outcome}: release-tag operation ${process.env.TAG_RESULT}.`;
+            const conclusions = { EXECUTED: 'success', FAILED: 'failure' };
             await github.rest.checks.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
               head_sha: process.env.TAGGED_SHA || context.sha,
               name: `release tag — ${outcome}`,
               status: 'completed',
-              conclusion: outcome === 'FAILED' ? 'failure' : 'success',
+              conclusion: conclusions[outcome],
               output: { title: `Release tag: ${outcome}`, summary },
               request: { timeout: 20000 },
             });

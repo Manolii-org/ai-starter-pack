@@ -26,7 +26,7 @@ def write(
     p = tmp_path / ".github/workflows/deploy.yml"
     p.parent.mkdir(parents=True)
     publisher = (
-        "const outcome = condition ? 'DEFERRED' : condition2 ? 'POLICY_HELD' : 'FAILED'; const conclusions = { DEFERRED: 'neutral', POLICY_HELD: 'neutral', FAILED: 'failure' }; const summary = `${outcome}: evidence`; github.rest.checks.create({name: `operation — ${outcome}`, conclusion, output: { summary }});"
+        "const outcome = condition ? 'DEFERRED' : condition2 ? 'POLICY_HELD' : 'FAILED'; const conclusions = { DEFERRED: 'neutral', POLICY_HELD: 'neutral', FAILED: 'failure' }; const summary = `${outcome}: evidence`; github.rest.checks.create({name: `operation — ${outcome}`, conclusion: conclusions[outcome], output: { summary }});"
         if publish
         else "echo DEFERRED POLICY_HELD FAILED"
     )
@@ -91,6 +91,14 @@ def test_rejects_conditional_load_bearing_step(tmp_path):
     assert any("must not be conditional" in item for item in errors)
 
 
+def test_requires_steps_for_every_load_bearing_job(tmp_path):
+    config = write(tmp_path)
+    data = json.loads(config.read_text())
+    data["workflows"][".github/workflows/deploy.yml"]["load_bearing_steps"] = {}
+    config.write_text(json.dumps(data))
+    assert any("every load-bearing job" in item for item in LINT.lint(tmp_path, config))
+
+
 @pytest.mark.parametrize("needs", ["apply", "[apply]", "block"])
 def test_accepts_all_github_needs_shapes(tmp_path, needs):
     assert LINT.lint(tmp_path, write(tmp_path, needs=needs)) == []
@@ -116,7 +124,29 @@ def test_rejects_failed_outcome_mapped_to_success(tmp_path):
     config = write(tmp_path)
     workflow = tmp_path / ".github/workflows/deploy.yml"
     workflow.write_text(workflow.read_text().replace("FAILED: 'failure'", "FAILED: 'success'"))
-    assert any("FAILED must map" in item for item in LINT.lint(tmp_path, config))
+    assert any("conclusions must explicitly map" in item for item in LINT.lint(tmp_path, config))
+
+
+def test_rejects_reporter_job_permission_override(tmp_path):
+    config = write(tmp_path)
+    workflow = tmp_path / ".github/workflows/deploy.yml"
+    workflow.write_text(
+        workflow.read_text().replace(
+            "    needs: [apply]", "    permissions:\n      contents: read\n    needs: [apply]"
+        )
+    )
+    assert any("checks: write" in item for item in LINT.lint(tmp_path, config))
+
+
+def test_accepts_reporter_job_checks_write(tmp_path):
+    config = write(tmp_path)
+    workflow = tmp_path / ".github/workflows/deploy.yml"
+    workflow.write_text(
+        workflow.read_text().replace(
+            "    needs: [apply]", "    permissions:\n      checks: write\n    needs: [apply]"
+        )
+    )
+    assert LINT.lint(tmp_path, config) == []
 
 
 def test_rejects_echo_only_reporter(tmp_path):
