@@ -9,6 +9,7 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 import jsonschema
 
@@ -37,6 +38,7 @@ def build_receipt() -> dict:
     target_sha = required("INPUT_TARGET_SHA")
     repo = required("INPUT_REPO")
     github_repo = required("GITHUB_REPOSITORY")
+    canonical_url = required("INPUT_CANONICAL_URL")
     if emit_when not in EMIT_KINDS:
         raise ValueError(f"emit_when must be one of {sorted(EMIT_KINDS)}")
     if result not in RESULTS:
@@ -47,6 +49,9 @@ def build_receipt() -> dict:
         raise ValueError("target_sha must be a full 40-character lowercase hex SHA")
     if repo.lower() != github_repo.lower():
         raise ValueError("repo must match GITHUB_REPOSITORY")
+    canonical = urlparse(canonical_url)
+    if not canonical.scheme or not canonical.netloc:
+        raise ValueError("canonical_url must be an absolute URI")
 
     rollback = {
         "mode": rollback_mode,
@@ -61,7 +66,7 @@ def build_receipt() -> dict:
         "promoted_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "promote_run_url": required("INPUT_PROMOTE_RUN_URL"),
         "gate_run_url": optional_url("INPUT_GATE_RUN_URL"),
-        "canonical_url": required("INPUT_CANONICAL_URL"),
+        "canonical_url": canonical_url,
         "post_promote_verify": {
             "workflow": required("INPUT_VERIFY_WORKFLOW"),
             "run_url": optional_url("INPUT_VERIFY_RUN_URL"),

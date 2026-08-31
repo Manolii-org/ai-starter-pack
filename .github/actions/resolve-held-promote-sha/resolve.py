@@ -3,24 +3,35 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
-import subprocess
 import sys
 from urllib.parse import quote
 
 
-def gh_json(path: str) -> object:
-    process = subprocess.run(
-        ["gh", "api", path], capture_output=True, text=True, timeout=30, check=False
+async def gh_json(path: str) -> object:
+    process = await asyncio.create_subprocess_exec(
+        "gh",
+        "api",
+        path,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
     )
+    try:
+        async with asyncio.timeout(30):
+            stdout, stderr = await process.communicate()
+    except TimeoutError as exc:
+        process.kill()
+        await process.wait()
+        raise RuntimeError(f"gh api {path} timed out") from exc
     if process.returncode != 0:
-        raise RuntimeError(process.stderr.strip() or f"gh api {path} failed")
-    return json.loads(process.stdout)
+        raise RuntimeError(stderr.decode().strip() or f"gh api {path} failed")
+    return json.loads(stdout)
 
 
-def main() -> int:
+async def main() -> int:
     try:
         sha = os.environ.get("INPUT_SHA", "").strip()
         repo = os.environ.get("GITHUB_REPOSITORY", "").strip()
@@ -28,11 +39,11 @@ def main() -> int:
             raise ValueError("sha is required and must be a full 40-character lowercase hex SHA")
         if not repo:
             raise ValueError("GITHUB_REPOSITORY is required")
-        metadata = gh_json(f"repos/{repo}")
+        metadata = await gh_json(f"repos/{repo}")
         default_branch = metadata.get("default_branch") if isinstance(metadata, dict) else None
         if not default_branch:
             raise ValueError("repository default branch could not be resolved")
-        comparison = gh_json(
+        comparison = await gh_json(
             f"repos/{repo}/compare/{quote(default_branch, safe='')}...{sha}"
         )
         status = comparison.get("status") if isinstance(comparison, dict) else None
@@ -47,10 +58,10 @@ def main() -> int:
                 stream.write(f"sha={sha}\ndefault_branch={default_branch}\n")
         print(f"resolved held promote SHA {sha} on {default_branch} ({status})")
         return 0
-    except (ValueError, RuntimeError, json.JSONDecodeError, OSError, subprocess.TimeoutExpired) as exc:
+    except (ValueError, RuntimeError, json.JSONDecodeError, OSError) as exc:
         print(f"::error::held promote SHA resolution failed: {exc}", file=sys.stderr)
         return 1
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(asyncio.run(main()))

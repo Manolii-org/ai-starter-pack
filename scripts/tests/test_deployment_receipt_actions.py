@@ -86,6 +86,16 @@ def test_emitter_rejects_cross_repo_receipt(tmp_path):
     assert "repo must match GITHUB_REPOSITORY" in process.stderr
 
 
+def test_emitter_rejects_non_uri_canonical_url(tmp_path):
+    env = emitter_env(tmp_path)
+    env["INPUT_CANONICAL_URL"] = "not-a-url"
+    process = subprocess.run(
+        [sys.executable, str(EMITTER)], env=env, capture_output=True, text=True, timeout=30
+    )
+    assert process.returncode == 1
+    assert "canonical_url must be an absolute URI" in process.stderr
+
+
 def _fake_gh(tmp_path: Path, status: str = "behind") -> Path:
     executable = tmp_path / "gh"
     executable.write_text(
@@ -183,3 +193,12 @@ def test_release_pointer_uploads_safely_and_bounds_api_calls():
     )
     assert '-f name="deployment-receipt.json"' in script
     assert "trap rollback_pointer ERR" in script
+
+
+def test_both_examples_run_receipt_after_a_failed_smoke():
+    examples = yaml.safe_load((ROOT / "docs/examples/held-promote-receipts.yml").read_text())
+    assert len(examples) == 2
+    for step in examples:
+        condition = step["if"]
+        assert "always()" in condition
+        assert "!cancelled()" in condition

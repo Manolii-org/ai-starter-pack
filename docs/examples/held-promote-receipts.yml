@@ -24,7 +24,7 @@
 # Fly/image deploy: call only when the real deploy step succeeded. A dry run or
 # failed deploy must not mint promotion evidence.
 - name: Emit successful image deployment receipt
-  if: ${{ steps.deploy.outcome == 'success' }}
+  if: ${{ always() && !cancelled() && steps.deploy.outcome == 'success' }}
   uses: Manolii-org/ai-starter-pack/.github/actions/emit-deployment-receipt@v1.10.0
   with:
     emit_when: deploy-succeeded

@@ -17,7 +17,7 @@ uses: Manolii-org/ai-starter-pack/.github/workflows/ci-reusable.yml@v1.10.0
 # /plugin install manolii-framework@v1.10.0
 ```
 
-Renovate preset: `extends: ["github>Manolii-org/ai-starter-pack"]` (optionally pin `#v1.9.1`).
+Renovate preset: `extends: ["github>Manolii-org/ai-starter-pack"]` (optionally pin `#v1.10.0`).
 
 Legacy `manolii-org/master@v1` still serves `routing-lint` / `shared-config` until those move to the pack — dual Renovate extends are expected during dual-run.
 
