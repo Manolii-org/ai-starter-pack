@@ -20,17 +20,18 @@ def write(
     publish: bool = True,
     reporter_name="outcome",
     needs="[apply]",
+    scalar="|",
 ) -> Path:
     p = tmp_path / ".github/workflows/deploy.yml"
     p.parent.mkdir(parents=True)
     publisher = (
-        "github.rest.checks.create({name: `operation — ${outcome}`, conclusion, output: { summary }}); // DEFERRED POLICY_HELD FAILED"
+        "const conclusions = { DEFERRED: 'neutral', POLICY_HELD: 'neutral', FAILED: 'failure' }; github.rest.checks.create({name: `operation — ${outcome}`, conclusion, output: { summary }});"
         if publish
         else "echo DEFERRED POLICY_HELD FAILED"
     )
     needs_yaml = "needs:\n      - apply" if needs == "block" else f"needs: {needs}"
     p.write_text(
-        f"""name: deploy\njobs:\n  apply:\n    runs-on: ubuntu-latest\n    steps:\n      - name: Apply\n        run: |\n          {apply_run}\n  {reporter_name}:\n    {needs_yaml}\n    if: {reporter_if}\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/github-script@0123456789012345678901234567890123456789\n        with:\n          script: |\n            {publisher}\n"""
+        f"""name: deploy\njobs:\n  apply:\n    runs-on: ubuntu-latest\n    steps:\n      - name: Apply\n        run: {scalar}\n          {apply_run}\n  {reporter_name}:\n    {needs_yaml}\n    if: {reporter_if}\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/github-script@0123456789012345678901234567890123456789\n        with:\n          script: |\n            {publisher}\n"""
     )
     c = tmp_path / "config/workflow-outcomes.json"
     c.parent.mkdir()
@@ -83,6 +84,21 @@ def test_rejects_conditional_reporter(tmp_path):
 @pytest.mark.parametrize("needs", ["apply", "[apply]", "block"])
 def test_accepts_all_github_needs_shapes(tmp_path, needs):
     assert LINT.lint(tmp_path, write(tmp_path, needs=needs)) == []
+
+
+@pytest.mark.parametrize("scalar", ["|", "|-", "|+", ">", ">-", ">+"])
+def test_scans_all_yaml_block_scalar_modifiers(tmp_path, scalar):
+    errors = LINT.lint(
+        tmp_path, write(tmp_path, apply_run="echo 'missing; skipping'", scalar=scalar)
+    )
+    assert any("classify outside" in item for item in errors)
+
+
+def test_rejects_failed_outcome_mapped_to_success(tmp_path):
+    config = write(tmp_path)
+    workflow = tmp_path / ".github/workflows/deploy.yml"
+    workflow.write_text(workflow.read_text().replace("FAILED: 'failure'", "FAILED: 'success'"))
+    assert any("FAILED must map" in item for item in LINT.lint(tmp_path, config))
 
 
 def test_rejects_echo_only_reporter(tmp_path):

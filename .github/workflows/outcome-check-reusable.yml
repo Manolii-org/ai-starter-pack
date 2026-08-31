@@ -62,8 +62,8 @@ jobs:
               output: {
                 title: `${process.env.OPERATION}: ${process.env.OUTCOME}`,
                 summary: `${process.env.OUTCOME}: ${process.env.SUMMARY}`,
-                request: { timeout: 20000 },
               },
+              request: { timeout: 20000 },
             });
             if (['DEFERRED', 'POLICY_HELD', 'FAILED'].includes(process.env.OUTCOME)) {
               core.setFailed(process.env.SUMMARY);

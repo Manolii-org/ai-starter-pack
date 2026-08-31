@@ -16,6 +16,7 @@ def test_reusable_exposes_all_terminal_outcomes_and_neutral_holds() -> None:
     assert "FAILED: 'failure'" in text
     assert "['DEFERRED', 'POLICY_HELD', 'FAILED'].includes" in text
     assert "request: { timeout: 20000 }" in text
+    assert "summary: `${process.env.OUTCOME}: ${process.env.SUMMARY}`,\n              },\n              request:" in text
 
 
 def test_reusable_has_bounded_permissions_and_immutable_action_pin() -> None:

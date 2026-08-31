@@ -41,7 +41,7 @@ def announces_green_skip(block: str) -> bool:
         if not match:
             continue
         inline = match.group(1)
-        if inline and inline != "|":
+        if inline and not re.fullmatch(r"[|>][+-]?", inline):
             commands.append(inline)
             continue
         following: list[str] = []
@@ -139,6 +139,20 @@ def lint_contract(repo: Path, relative: str, contract: dict) -> list[str]:
     for outcome in outcomes:
         if outcome not in reporter:
             errors.append(f"{relative}: outcome reporter does not publish {outcome}")
+    if "FAILED" in outcomes and not (
+        re.search(r"FAILED[^\n]{0,120}failure", reporter, re.I)
+        or re.search(r"outcome\s*===\s*['\"]FAILED['\"][^\n]{0,120}['\"]failure['\"]", reporter)
+    ):
+        errors.append(f"{relative}: FAILED must map to a failure conclusion")
+    for held in ("DEFERRED", "POLICY_HELD"):
+        has_explicit_neutral = re.search(
+            rf"{held}[^\n]{{0,120}}neutral", reporter, re.I
+        )
+        has_neutral_fallback = re.search(
+            r"const\s+conclusion\s*=.*:\s*['\"]neutral['\"]\s*;", reporter
+        )
+        if held in outcomes and not (has_explicit_neutral or has_neutral_fallback):
+            errors.append(f"{relative}: {held} must map to a neutral diagnostic conclusion")
     return errors
 
 
