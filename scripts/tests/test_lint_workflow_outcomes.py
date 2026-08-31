@@ -91,6 +91,26 @@ def test_rejects_conditional_load_bearing_step(tmp_path):
     assert any("must not be conditional" in item for item in errors)
 
 
+@pytest.mark.parametrize("key", ['"if"', "'if'", "if "])
+def test_rejects_equivalent_conditional_step_keys(tmp_path, key):
+    config = write(tmp_path)
+    workflow = tmp_path / ".github/workflows/deploy.yml"
+    workflow.write_text(
+        workflow.read_text().replace(
+            "        run: |", f"        {key}: ${{{{ false }}}}\n        run: |", 1
+        )
+    )
+    assert any("must not be conditional" in item for item in LINT.lint(tmp_path, config))
+
+
+@pytest.mark.parametrize("key", ['"if"', "'if'", "if "])
+def test_accepts_equivalent_reporter_if_keys(tmp_path, key):
+    config = write(tmp_path)
+    workflow = tmp_path / ".github/workflows/deploy.yml"
+    workflow.write_text(workflow.read_text().replace("    if: ${{ always() }}", f"    {key}: ${{{{ always() }}}}"))
+    assert LINT.lint(tmp_path, config) == []
+
+
 @pytest.mark.parametrize(
     ("needle", "replacement"),
     [
@@ -321,4 +341,7 @@ def test_consumer_quality_workflows_execute_outcome_lint():
         text = path.read_text()
         assert "python3 scripts/lint-workflow-outcomes.py" in text
         assert "Partial workflow-outcome adoption" in text
+        if path.name != "ci.yml":
+            assert 'workflows == {} else "invalid"' in text
+            assert "still the empty scaffold" in text
     assert found, "no managed consumer quality workflow was found"

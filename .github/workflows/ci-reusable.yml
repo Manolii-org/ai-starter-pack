@@ -117,7 +117,15 @@ jobs:
       - name: Enforce explicit workflow outcomes when adopted
         run: |
           if [ -f scripts/lint-workflow-outcomes.py ] && [ -f config/workflow-outcomes.json ]; then
-            python3 scripts/lint-workflow-outcomes.py
+            adoption=$(python3 -c 'import json; data=json.load(open("config/workflow-outcomes.json")); workflows=data.get("workflows"); print("adopted" if isinstance(workflows, dict) and workflows else "scaffold" if workflows == {} else "invalid")')
+            if [ "${adoption}" = adopted ]; then
+              python3 scripts/lint-workflow-outcomes.py
+            elif [ "${adoption}" = scaffold ]; then
+              echo "Workflow-outcome contract is still the empty scaffold; enforcement awaits repository-specific adoption"
+            else
+              echo "::error::Invalid workflow-outcome contract shape"
+              exit 1
+            fi
           elif [ -f scripts/lint-workflow-outcomes.py ] || [ -f config/workflow-outcomes.json ]; then
             echo "::error::Partial workflow-outcome adoption; both linter and contract are required"
             exit 1
