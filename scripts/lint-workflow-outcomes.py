@@ -37,7 +37,7 @@ def announces_green_skip(block: str) -> bool:
     lines = block.splitlines()
     commands: list[str] = []
     for index, line in enumerate(lines):
-        match = re.match(r"^\s{8}run:\s*(.*)$", line)
+        match = re.match(r"^\s{8}(?:-\s+)?run:\s*(.*)$", line)
         if not match:
             continue
         inline = match.group(1)

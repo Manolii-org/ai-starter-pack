@@ -104,6 +104,14 @@ def test_scans_all_yaml_block_scalar_modifiers(tmp_path, scalar):
     assert any("classify outside" in item for item in errors)
 
 
+@pytest.mark.parametrize(
+    "block",
+    ["        - run: echo 'missing; skipping'", "        - run: |\n            exit 0"],
+)
+def test_scans_single_key_run_steps(block):
+    assert LINT.announces_green_skip(block)
+
+
 def test_rejects_failed_outcome_mapped_to_success(tmp_path):
     config = write(tmp_path)
     workflow = tmp_path / ".github/workflows/deploy.yml"
