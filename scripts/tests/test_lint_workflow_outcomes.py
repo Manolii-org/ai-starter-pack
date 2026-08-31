@@ -91,6 +91,30 @@ def test_rejects_conditional_load_bearing_step(tmp_path):
     assert any("must not be conditional" in item for item in errors)
 
 
+@pytest.mark.parametrize(
+    ("needle", "replacement"),
+    [
+        ("    runs-on: ubuntu-latest", "    continue-on-error: true\n    runs-on: ubuntu-latest"),
+        ("        run: |", "        continue-on-error: true\n        run: |"),
+    ],
+)
+def test_rejects_tolerated_load_bearing_failures(tmp_path, needle, replacement):
+    config = write(tmp_path)
+    workflow = tmp_path / ".github/workflows/deploy.yml"
+    workflow.write_text(workflow.read_text().replace(needle, replacement, 1))
+    assert any("must not continue on error" in item for item in LINT.lint(tmp_path, config))
+
+
+@pytest.mark.parametrize("key", ['"continue-on-error"', "'continue-on-error'", "continue-on-error "])
+def test_rejects_equivalent_continue_on_error_keys(tmp_path, key):
+    config = write(tmp_path)
+    workflow = tmp_path / ".github/workflows/deploy.yml"
+    workflow.write_text(
+        workflow.read_text().replace("        run: |", f"        {key}: true\n        run: |", 1)
+    )
+    assert any("must not continue on error" in item for item in LINT.lint(tmp_path, config))
+
+
 def test_requires_steps_for_every_load_bearing_job(tmp_path):
     config = write(tmp_path)
     data = json.loads(config.read_text())
@@ -122,6 +146,11 @@ def test_scans_single_key_run_steps(block):
 
 def test_scans_anonymous_multiline_run_body():
     block = "      - run: |\n        echo 'deferred; skipping'\n        exit 0"
+    assert LINT.announces_green_skip(block)
+
+
+def test_scans_commented_block_scalar_indicator():
+    block = "      - run: | # explanatory comment\n        exit 0"
     assert LINT.announces_green_skip(block)
 
 
@@ -268,6 +297,13 @@ def test_committed_registry_is_valid():
 def test_committed_registry_is_not_an_empty_noop():
     config = json.loads((ROOT / "config/workflow-outcomes.json").read_text())
     assert config["workflows"]
+
+
+def test_rejects_empty_workflow_registry(tmp_path):
+    config = tmp_path / "config/workflow-outcomes.json"
+    config.parent.mkdir()
+    config.write_text('{"version": 1, "workflows": {}}')
+    assert any("non-empty object" in item for item in LINT.lint(tmp_path, config))
 
 
 def test_consumer_quality_workflows_execute_outcome_lint():

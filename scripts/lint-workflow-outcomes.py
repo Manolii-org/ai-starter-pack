@@ -42,7 +42,7 @@ def announces_green_skip(block: str) -> bool:
         if not match:
             continue
         inline = match.group(1)
-        if inline and not re.fullmatch(r"[|>][+-]?", inline):
+        if inline and not re.fullmatch(r"[|>][+-]?(?:\s+#.*)?", inline):
             commands.append(inline)
             continue
         key_indent = len(line) - len(line.lstrip())
@@ -227,6 +227,11 @@ def lint_contract(repo: Path, relative: str, contract: dict) -> list[str]:
             errors.append(
                 f"{relative}: load-bearing job {name!r} contains skip/defer/hold semantics; classify outside it"
             )
+        continue_key = r"(?:continue-on-error|['\"]continue-on-error['\"])\s*:"
+        if block and re.search(rf"(?m)^    {continue_key}\s*", block):
+            errors.append(
+                f"{relative}: load-bearing job {name!r} must not continue on error"
+            )
         for step_name in load_bearing_steps.get(name, []):
             step = step_block(block or "", step_name)
             if step is None:
@@ -236,6 +241,10 @@ def lint_contract(repo: Path, relative: str, contract: dict) -> list[str]:
             elif re.search(r"(?m)^        if:\s*", step):
                 errors.append(
                     f"{relative}: load-bearing step {step_name!r} must not be conditional"
+                )
+            elif re.search(rf"(?m)^        {continue_key}\s*", step):
+                errors.append(
+                    f"{relative}: load-bearing step {step_name!r} must not continue on error"
                 )
     reporter = job_block(text, reporter_name)
     if reporter is None:
@@ -310,8 +319,8 @@ def lint_contract(repo: Path, relative: str, contract: dict) -> list[str]:
 def lint(repo: Path, config_path: Path) -> list[str]:
     config = load_json(config_path)
     workflows = config.get("workflows", {})
-    if not isinstance(workflows, dict):
-        return [f"{config_path}: workflows must be an object"]
+    if not isinstance(workflows, dict) or not workflows:
+        return [f"{config_path}: workflows must be a non-empty object"]
     errors: list[str] = []
     for relative, contract in workflows.items():
         if not isinstance(contract, dict):
