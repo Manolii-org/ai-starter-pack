@@ -1,0 +1,9 @@
+version: 1
+
+# Repository-owned declarations consumed by scripts/lint-workflow-outcomes.py.
+# Add a workflow here when its name implies that work was applied, promoted,
+# synchronised, or otherwise completed. The reporter must publish explicit
+# DEFERRED, POLICY_HELD, and FAILED states and must depend on every load-bearing
+# job. An empty initial registry is deliberate: contracts are added with each
+# workflow migration rather than falsely certifying legacy workflows.
+workflows: {}
