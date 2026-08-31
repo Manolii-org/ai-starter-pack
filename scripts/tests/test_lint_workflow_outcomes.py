@@ -133,6 +133,14 @@ def test_named_step_stops_at_anonymous_following_step():
     assert "cleanup" not in block
 
 
+@pytest.mark.parametrize("quoted", ['"Apply"', "'Apply'"])
+def test_accepts_quoted_load_bearing_step_names(tmp_path, quoted):
+    config = write(tmp_path)
+    workflow = tmp_path / ".github/workflows/deploy.yml"
+    workflow.write_text(workflow.read_text().replace("- name: Apply", f"- name: {quoted}"))
+    assert LINT.lint(tmp_path, config) == []
+
+
 def test_rejects_failed_outcome_mapped_to_success(tmp_path):
     config = write(tmp_path)
     workflow = tmp_path / ".github/workflows/deploy.yml"
@@ -183,6 +191,13 @@ def test_requires_mapping_on_created_check(tmp_path):
         )
     )
     assert any("conclusions must explicitly map" in item for item in LINT.lint(tmp_path, config))
+
+
+def test_accepts_semicolon_free_conclusions_object(tmp_path):
+    config = write(tmp_path)
+    workflow = tmp_path / ".github/workflows/deploy.yml"
+    workflow.write_text(workflow.read_text().replace("FAILED: 'failure' };", "FAILED: 'failure' }"))
+    assert LINT.lint(tmp_path, config) == []
 
 
 def test_rejects_echo_only_reporter(tmp_path):

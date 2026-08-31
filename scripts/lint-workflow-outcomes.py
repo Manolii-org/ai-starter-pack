@@ -80,8 +80,15 @@ def parse_needs(block: str) -> set[str]:
 
 
 def step_block(job: str, step_name: str) -> str | None:
-    match = re.search(rf"(?m)^      - name:\s*{re.escape(step_name)}\s*$", job)
-    if not match:
+    match = None
+    for candidate in re.finditer(r"(?m)^      - name:\s*(?P<name>.+?)\s*$", job):
+        value = candidate.group("name").split(" #", 1)[0].strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        if value == step_name:
+            match = candidate
+            break
+    if match is None:
         return None
     next_step = re.search(r"(?m)^      - ", job[match.end() :])
     end = match.end() + next_step.start() if next_step else len(job)
@@ -150,7 +157,7 @@ def check_create_arguments(reporter: str) -> str:
 def conclusion_mappings(reporter: str) -> dict[str, str]:
     """Parse the required explicit outcome-to-conclusion object."""
     match = re.search(
-        r"(?ms)\b(?:const|let)\s+conclusions\s*=\s*\{(?P<body>.*?)\}\s*;",
+        r"(?ms)\b(?:const|let)\s+conclusions\s*=\s*\{(?P<body>.*?)\}\s*;?",
         reporter,
     )
     check_arguments = check_create_arguments(reporter)
