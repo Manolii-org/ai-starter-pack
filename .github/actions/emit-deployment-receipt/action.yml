@@ -46,7 +46,7 @@ runs:
   steps:
     - name: Install receipt schema validator
       shell: bash
-      run: python3 -m pip install --quiet 'jsonschema==4.25.1'
+      run: timeout 60s python3 -m pip install --quiet --timeout 15 --retries 2 'jsonschema==4.25.1'
 
     - name: Build and validate deployment receipt
       shell: bash
@@ -116,19 +116,24 @@ runs:
         NEW_RENAMED=false
 
         rollback_pointer() {
-          set +e
-          if [ "$NEW_RENAMED" = true ]; then
-            api --method PATCH "repos/$REPO/releases/assets/$NEW_ID" \
-              -f name="$TEMP_NAME" >/dev/null
-          fi
-          if [ "$OLD_RENAMED" = true ]; then
-            api --method PATCH "repos/$REPO/releases/assets/$OLD_ID" \
-              -f name="deployment-receipt.json" >/dev/null
-          fi
-          if [ "$TAG_MOVED" = true ]; then
-            api --method PATCH "repos/$REPO/git/refs/tags/production-receipt" \
-              -f sha="$OLD_TAG_SHA" -F force=true >/dev/null
-          fi
+          rc=$?
+          trap - ERR
+          (
+            set +e
+            if [ "$NEW_RENAMED" = true ]; then
+              api --method PATCH "repos/$REPO/releases/assets/$NEW_ID" \
+                -f name="$TEMP_NAME" >/dev/null
+            fi
+            if [ "$OLD_RENAMED" = true ]; then
+              api --method PATCH "repos/$REPO/releases/assets/$OLD_ID" \
+                -f name="deployment-receipt.json" >/dev/null
+            fi
+            if [ "$TAG_MOVED" = true ]; then
+              api --method PATCH "repos/$REPO/git/refs/tags/production-receipt" \
+                -f sha="$OLD_TAG_SHA" -F force=true >/dev/null
+            fi
+          )
+          exit "$rc"
         }
         trap rollback_pointer ERR
 

@@ -44,6 +44,12 @@ For `deploy-succeeded`, call the action only when the real deploy step succeeded
 never emit on a dry run. Complete examples for both modes live at
 [`docs/examples/held-promote-receipts.yml`](../../docs/examples/held-promote-receipts.yml).
 
+The `production-receipt` tag and canonical asset are a shared mutable pointer.
+**Callers must serialize every invocation for a product** with their existing
+promotion `concurrency` group and `cancel-in-progress: false`; a composite action
+cannot declare job/workflow concurrency on the caller's behalf. Concurrent
+receipt writers are unsupported and may not invoke this action.
+
 ## Two Forms
 
 **Standalone:** Self-triggering (`on: push`, `on: pull_request`) — includes full trigger config. Use in a single repository.

@@ -193,6 +193,24 @@ def test_release_pointer_uploads_safely_and_bounds_api_calls():
     )
     assert '-f name="deployment-receipt.json"' in script
     assert "trap rollback_pointer ERR" in script
+    assert 'exit "$rc"' in script
+
+
+def test_composite_bounds_schema_dependency_install():
+    action = yaml.safe_load(
+        (ROOT / ".github/actions/emit-deployment-receipt/action.yml").read_text()
+    )
+    install = next(
+        step for step in action["runs"]["steps"]
+        if step["name"] == "Install receipt schema validator"
+    )
+    assert install["run"].startswith("timeout 60s python3 -m pip install")
+
+
+def test_docs_require_single_writer_concurrency():
+    docs = (ROOT / ".github/workflows/REUSABLE-WORKFLOWS.md").read_text()
+    assert "Callers must serialize every invocation for a product" in docs
+    assert "cancel-in-progress: false" in docs
 
 
 def test_both_examples_run_receipt_after_a_failed_smoke():

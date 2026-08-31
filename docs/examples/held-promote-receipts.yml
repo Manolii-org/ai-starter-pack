@@ -1,5 +1,8 @@
 # Step-level examples for a product-owned deployment adapter. Pin an immutable
 # pack release tag; do not copy these actions through capability sync.
+# The caller workflow/job must serialize promotion with one product-specific
+# concurrency group and cancel-in-progress: false; the Release pointer has one
+# writer at a time.
 
 # Held Vercel promote: run after alias confirmation and after smoke has a final
 # outcome. The caller must use `always() && !cancelled()` and defer its job-fail
