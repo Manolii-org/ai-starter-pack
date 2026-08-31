@@ -144,6 +144,11 @@ def lint_contract(repo: Path, relative: str, contract: dict) -> list[str]:
     for outcome in outcomes:
         if outcome not in active_reporter:
             errors.append(f"{relative}: outcome reporter does not publish {outcome}")
+        selects_outcome = re.search(
+            rf"\boutcome\s*=[^;\n]*['\"]{outcome}['\"]", active_reporter
+        ) or re.search(r"\boutcome\s*=\s*process\.env\.OUTCOME\b", active_reporter)
+        if not selects_outcome:
+            errors.append(f"{relative}: no executable branch selects outcome {outcome}")
         has_dynamic_summary = re.search(
             r"(?:const|let)\s+summary\s*=[^;\n]*\$\{(?:process\.env\.)?OUTCOME|(?:const|let)\s+summary\s*=[^;\n]*\$\{outcome",
             active_reporter,
