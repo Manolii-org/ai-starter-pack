@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/manolii-org/master/main/schemas/deployment-receipt.schema.json",
+  "title": "Manolii deployment receipt",
+  "description": "Minimal durable evidence for a production promotion. Emitted after the bake is durable and smoke/verify has a final enum result, including failure. post_promote_verify is whatever the contract's verification.workflow runs (often read-only smoke, not a full Playwright suite).",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "repo",
+    "target_sha",
+    "promoted_at",
+    "promote_run_url",
+    "post_promote_verify",
+    "rollback"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": 1},
+    "repo": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
+    "target_sha": {"type": "string", "minLength": 7, "maxLength": 64},
+    "promoted_at": {"type": "string", "format": "date-time"},
+    "gate_run_url": {"type": ["string", "null"], "format": "uri"},
+    "promote_run_url": {"type": "string", "format": "uri"},
+    "migration_pending": {"type": ["integer", "null"], "minimum": 0},
+    "post_promote_verify": {
+      "type": "object",
+      "required": ["workflow", "result"],
+      "additionalProperties": false,
+      "properties": {
+        "workflow": {"type": "string", "minLength": 1},
+        "run_url": {"type": ["string", "null"], "format": "uri"},
+        "result": {"enum": ["success", "failure", "skipped"]}
+      }
+    },
+    "canonical_url": {"type": ["string", "null"]},
+    "live_origin": {"type": ["string", "null"], "format": "uri"},
+    "rollback": {
+      "type": "object",
+      "required": ["mode"],
+      "additionalProperties": false,
+      "properties": {
+        "mode": {"enum": ["alias-promote", "image-revert", "provider-rollback", "manual", "not-applicable"]},
+        "previous_deployment_id": {"type": ["string", "null"], "description": "Deployment identifier captured before the alias move."}
+      }
+    }
+  }
+}

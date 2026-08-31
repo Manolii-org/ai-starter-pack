@@ -8,13 +8,13 @@ Canonical home for the AI Starter Pack: a [Copier](https://copier.readthedocs.io
 
 ## Consumer pins (Prompt 11)
 
-Go-forward release: **`v1.9.6`** (annotated tag on `main`).
+Go-forward release: **`v1.10.0`** (annotated tag on `main`).
 
 ```yaml
 # Reusable workflows
-uses: Manolii-org/ai-starter-pack/.github/workflows/ci-reusable.yml@v1.9.6
+uses: Manolii-org/ai-starter-pack/.github/workflows/ci-reusable.yml@v1.10.0
 # Plugin
-# /plugin install manolii-framework@v1.9.6
+# /plugin install manolii-framework@v1.10.0
 ```
 
 Renovate preset: `extends: ["github>Manolii-org/ai-starter-pack"]` (optionally pin `#v1.9.1`).

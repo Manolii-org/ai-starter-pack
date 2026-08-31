@@ -8,7 +8,7 @@
 # Enable features by repeating --data, e.g. --data oss_routing=true
 # (see copier.yml for the full question/flag set)
 
-version: "1.9.7"   # see CHANGELOG.md
+version: "1.10.0"   # see CHANGELOG.md
 
 brand:
   ecosystem_name: "{{ECOSYSTEM_NAME}}"

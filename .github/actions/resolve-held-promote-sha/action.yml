@@ -1,0 +1,23 @@
+name: Resolve held promote SHA
+description: Require an explicit full SHA that is on the repository default branch
+inputs:
+  sha:
+    description: Full 40-character lowercase commit SHA to promote
+    required: true
+outputs:
+  sha:
+    description: Validated target SHA
+    value: ${{ steps.resolve.outputs.sha }}
+  default_branch:
+    description: Repository default branch used for comparison
+    value: ${{ steps.resolve.outputs.default_branch }}
+runs:
+  using: composite
+  steps:
+    - name: Resolve held promote SHA
+      id: resolve
+      shell: bash
+      env:
+        INPUT_SHA: ${{ inputs.sha }}
+        GH_TOKEN: ${{ github.token }}
+      run: python3 "$GITHUB_ACTION_PATH/resolve.py"
