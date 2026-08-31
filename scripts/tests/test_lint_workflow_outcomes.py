@@ -120,6 +120,11 @@ def test_scans_single_key_run_steps(block):
     assert LINT.announces_green_skip(block)
 
 
+def test_scans_anonymous_multiline_run_body():
+    block = "      - run: |\n        echo 'deferred; skipping'\n        exit 0"
+    assert LINT.announces_green_skip(block)
+
+
 def test_named_step_stops_at_anonymous_following_step():
     job = """  apply:
     steps:
@@ -217,6 +222,17 @@ def test_rejects_commented_out_check_publisher(tmp_path):
     assert any("must publish a GitHub check-run" in item for item in LINT.lint(tmp_path, config))
 
 
+def test_rejects_block_commented_check_publisher(tmp_path):
+    config = write(tmp_path)
+    workflow = tmp_path / ".github/workflows/deploy.yml"
+    text = workflow.read_text()
+    workflow.write_text(
+        text.replace("const outcome", "/* const outcome").replace("output: { summary }});", "output: { summary }}); */")
+    )
+    errors = LINT.lint(tmp_path, config)
+    assert any("must publish a GitHub check-run" in item for item in errors)
+
+
 def test_rejects_summary_without_selected_outcome(tmp_path):
     config = write(tmp_path)
     workflow = tmp_path / ".github/workflows/deploy.yml"
@@ -257,6 +273,7 @@ def test_committed_registry_is_not_an_empty_noop():
 def test_consumer_quality_workflows_execute_outcome_lint():
     candidates = (
         ROOT / ".github/workflows/quality-base.yml",
+        ROOT / ".github/workflows/ci.yml",
         ROOT / "templates/ai-starter-pack/core/.github/workflows/quality-base.yml",
         ROOT / ".github/workflows/ci-reusable.yml",
     )

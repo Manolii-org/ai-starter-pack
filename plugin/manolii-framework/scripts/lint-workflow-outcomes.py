@@ -45,9 +45,10 @@ def announces_green_skip(block: str) -> bool:
         if inline and not re.fullmatch(r"[|>][+-]?", inline):
             commands.append(inline)
             continue
+        key_indent = len(line) - len(line.lstrip())
         following: list[str] = []
         for candidate in lines[index + 1 :]:
-            if candidate and len(candidate) - len(candidate.lstrip()) <= 8:
+            if candidate and len(candidate) - len(candidate.lstrip()) <= key_indent:
                 break
             following.append(candidate)
         commands.append("\n".join(following))
@@ -240,9 +241,10 @@ def lint_contract(repo: Path, relative: str, contract: dict) -> list[str]:
     if reporter is None:
         errors.append(f"{relative}: outcome_reporter_job {reporter_name!r} is missing")
         return errors
+    without_block_comments = re.sub(r"/\*.*?\*/", "", reporter, flags=re.S)
     active_reporter = "\n".join(
         re.sub(r"(^|\s)//.*$", r"\1", line)
-        for line in reporter.splitlines()
+        for line in without_block_comments.splitlines()
         if not line.lstrip().startswith(("#", "//"))
     )
     conditions = re.findall(r"(?m)^    if:\s*(.+?)\s*$", reporter)
