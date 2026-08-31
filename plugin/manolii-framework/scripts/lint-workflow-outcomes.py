@@ -14,6 +14,7 @@ SKIP_WORDS = re.compile(
     re.I,
 )
 OUTCOMES = {"EXECUTED", "NO_CHANGES", "DEFERRED", "POLICY_HELD", "FAILED"}
+WRITE_VALUE = r"(?:write|['\"]write['\"])"
 
 
 def load_json(path: Path) -> dict:
@@ -96,7 +97,7 @@ def has_effective_checks_write(workflow: str, reporter: str) -> bool:
         mapping_match = re.match(r"\n(?P<map>(?:      [^\n]+\n?)+)", tail)
         mapping = mapping_match.group("map") if mapping_match else ""
         return scalar == "write-all" or bool(
-            re.search(r"(?m)^      checks:\s*write\s*(?:#.*)?$", mapping)
+            re.search(rf"(?m)^      checks:\s*{WRITE_VALUE}\s*(?:#.*)?$", mapping)
         )
     before_jobs = workflow.split("\njobs:", 1)[0]
     workflow_permissions = re.search(
@@ -109,8 +110,41 @@ def has_effective_checks_write(workflow: str, reporter: str) -> bool:
     mapping_match = re.match(r"\n(?P<map>(?:  [^\n]+\n?)+)", tail)
     mapping = mapping_match.group("map") if mapping_match else ""
     return scalar == "write-all" or bool(
-        re.search(r"(?m)^  checks:\s*write\s*(?:#.*)?$", mapping)
+        re.search(rf"(?m)^  checks:\s*{WRITE_VALUE}\s*(?:#.*)?$", mapping)
     )
+
+
+def check_create_arguments(reporter: str) -> str:
+    """Extract the object passed to github.rest.checks.create()."""
+    marker = "github.rest.checks.create("
+    start = reporter.find(marker)
+    if start < 0:
+        return ""
+    object_start = reporter.find("{", start + len(marker))
+    if object_start < 0:
+        return ""
+    depth = 0
+    quote: str | None = None
+    escaped = False
+    for index in range(object_start, len(reporter)):
+        char = reporter[index]
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if char in "'\"`":
+            quote = char
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return reporter[object_start : index + 1]
+    return ""
 
 
 def conclusion_mappings(reporter: str) -> dict[str, str]:
@@ -119,8 +153,9 @@ def conclusion_mappings(reporter: str) -> dict[str, str]:
         r"(?ms)\b(?:const|let)\s+conclusions\s*=\s*\{(?P<body>.*?)\}\s*;",
         reporter,
     )
+    check_arguments = check_create_arguments(reporter)
     if not match or not re.search(
-        r"\bconclusion\s*:\s*conclusions\s*\[\s*outcome\s*\]", reporter
+        r"\bconclusion\s*:\s*conclusions\s*\[\s*outcome\s*\]", check_arguments
     ):
         return {}
     return {

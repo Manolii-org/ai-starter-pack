@@ -162,6 +162,29 @@ def test_accepts_reporter_job_checks_write(tmp_path):
     assert LINT.lint(tmp_path, config) == []
 
 
+@pytest.mark.parametrize("value", ['"write"', "'write'"])
+def test_accepts_quoted_checks_write(tmp_path, value):
+    config = write(tmp_path)
+    workflow = tmp_path / ".github/workflows/deploy.yml"
+    workflow.write_text(workflow.read_text().replace("checks: write", f"checks: {value}"))
+    assert LINT.lint(tmp_path, config) == []
+
+
+def test_requires_mapping_on_created_check(tmp_path):
+    config = write(tmp_path)
+    workflow = tmp_path / ".github/workflows/deploy.yml"
+    workflow.write_text(
+        workflow.read_text().replace(
+            "github.rest.checks.create({name:",
+            "const unrelated = { conclusion: conclusions[outcome] }; github.rest.checks.create({name:",
+        ).replace(
+            ", conclusion: conclusions[outcome], output:",
+            ", conclusion: 'success', output:",
+        )
+    )
+    assert any("conclusions must explicitly map" in item for item in LINT.lint(tmp_path, config))
+
+
 def test_rejects_echo_only_reporter(tmp_path):
     assert any(
         "check-run" in x for x in LINT.lint(tmp_path, write(tmp_path, publish=False))
