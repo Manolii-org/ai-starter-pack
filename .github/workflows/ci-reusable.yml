@@ -117,7 +117,7 @@ jobs:
       - name: Enforce explicit workflow outcomes when adopted
         run: |
           if [ -f scripts/lint-workflow-outcomes.py ] && [ -f config/workflow-outcomes.json ]; then
-            adoption=$(python3 -c 'import json; data=json.load(open("config/workflow-outcomes.json")); workflows=data.get("workflows"); print("adopted" if isinstance(workflows, dict) and workflows else "scaffold" if workflows == {} else "invalid")')
+            adoption=$(python3 -c 'import json; data=json.load(open("config/workflow-outcomes.json")); workflows=data.get("workflows"); print("adopted" if isinstance(workflows, dict) and workflows else "scaffold" if data == {"version": 1, "workflows": {}} else "invalid")')
             if [ "${adoption}" = adopted ]; then
               python3 scripts/lint-workflow-outcomes.py
             elif [ "${adoption}" = scaffold ]; then
