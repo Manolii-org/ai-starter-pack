@@ -37,7 +37,7 @@ def announces_green_skip(block: str) -> bool:
     lines = block.splitlines()
     commands: list[str] = []
     for index, line in enumerate(lines):
-        match = re.match(r"^\s{8}(?:-\s+)?run:\s*(.*)$", line)
+        match = re.match(r"^(?:\s{8}run|\s{6}-\s+run):\s*(.*)$", line)
         if not match:
             continue
         inline = match.group(1)
@@ -82,7 +82,7 @@ def step_block(job: str, step_name: str) -> str | None:
     match = re.search(rf"(?m)^      - name:\s*{re.escape(step_name)}\s*$", job)
     if not match:
         return None
-    next_step = re.search(r"(?m)^      - (?:name:|uses:)", job[match.end() :])
+    next_step = re.search(r"(?m)^      - ", job[match.end() :])
     end = match.end() + next_step.start() if next_step else len(job)
     return job[match.start() : end]
 
@@ -238,7 +238,12 @@ def lint_contract(repo: Path, relative: str, contract: dict) -> list[str]:
         has_literal_summary = re.search(
             rf"summary\s*=\s*['\"`][^\n]*{outcome}", active_reporter, re.I
         )
-        if not (has_dynamic_summary or has_literal_summary):
+        has_dynamic_property = re.search(
+            r"\bsummary\s*:\s*`[^`]*\$\{(?:process\.env\.)?OUTCOME|\bsummary\s*:\s*`[^`]*\$\{outcome",
+            active_reporter,
+            re.I,
+        )
+        if not (has_dynamic_summary or has_literal_summary or has_dynamic_property):
             errors.append(f"{relative}: summary cannot identify selected outcome {outcome}")
     mappings = conclusion_mappings(active_reporter)
     expected = {
