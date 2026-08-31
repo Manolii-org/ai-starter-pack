@@ -78,6 +78,15 @@ def parse_needs(block: str) -> set[str]:
     return set(re.findall(r"(?m)^      - ([A-Za-z0-9_-]+)\s*$", list_match.group("items")))
 
 
+def step_block(job: str, step_name: str) -> str | None:
+    match = re.search(rf"(?m)^      - name:\s*{re.escape(step_name)}\s*$", job)
+    if not match:
+        return None
+    next_step = re.search(r"(?m)^      - (?:name:|uses:)", job[match.end() :])
+    end = match.end() + next_step.start() if next_step else len(job)
+    return job[match.start() : end]
+
+
 def lint_contract(repo: Path, relative: str, contract: dict) -> list[str]:
     errors: list[str] = []
     path = repo / relative
@@ -87,12 +96,16 @@ def lint_contract(repo: Path, relative: str, contract: dict) -> list[str]:
     load_bearing = contract.get("load_bearing_jobs", [])
     reporter_name = contract.get("outcome_reporter_job")
     outcomes = contract.get("outcomes", [])
+    load_bearing_steps = contract.get("load_bearing_steps", {})
     if (
         not isinstance(load_bearing, list)
         or not load_bearing
         or not all(isinstance(x, str) and x for x in load_bearing)
     ):
         errors.append(f"{relative}: load_bearing_jobs must be a non-empty string list")
+        return errors
+    if not isinstance(load_bearing_steps, dict):
+        errors.append(f"{relative}: load_bearing_steps must be an object")
         return errors
     if not isinstance(reporter_name, str) or not reporter_name:
         errors.append(f"{relative}: outcome_reporter_job must be a non-empty string")
@@ -115,6 +128,16 @@ def lint_contract(repo: Path, relative: str, contract: dict) -> list[str]:
             errors.append(
                 f"{relative}: load-bearing job {name!r} contains skip/defer/hold semantics; classify outside it"
             )
+        for step_name in load_bearing_steps.get(name, []):
+            step = step_block(block or "", step_name)
+            if step is None:
+                errors.append(
+                    f"{relative}: load-bearing step {step_name!r} is missing from job {name!r}"
+                )
+            elif re.search(r"(?m)^        if:\s*", step):
+                errors.append(
+                    f"{relative}: load-bearing step {step_name!r} must not be conditional"
+                )
     reporter = job_block(text, reporter_name)
     if reporter is None:
         errors.append(f"{relative}: outcome_reporter_job {reporter_name!r} is missing")
@@ -137,6 +160,8 @@ def lint_contract(repo: Path, relative: str, contract: dict) -> list[str]:
         )
     if "github.rest.checks.create" not in active_reporter:
         errors.append(f"{relative}: outcome reporter must publish a GitHub check-run")
+    if "checks: write" not in text:
+        errors.append(f"{relative}: outcome reporter requires checks: write permission")
     if "name: `" not in active_reporter or "${outcome}" not in active_reporter:
         errors.append(f"{relative}: check-run name must contain the selected outcome")
     if not re.search(r"output:[\s\S]{0,200}\bsummary\b", active_reporter):
@@ -173,6 +198,15 @@ def lint_contract(repo: Path, relative: str, contract: dict) -> list[str]:
         )
         if held in outcomes and not (has_explicit_neutral or has_neutral_fallback):
             errors.append(f"{relative}: {held} must map to a neutral diagnostic conclusion")
+    for successful in ("EXECUTED", "NO_CHANGES"):
+        if successful in outcomes and not (
+            re.search(rf"{successful}[^\n]{{0,120}}success", active_reporter, re.I)
+            or re.search(
+                r"outcome\s*===\s*['\"]FAILED['\"]\s*\?\s*['\"]failure['\"]\s*:\s*['\"]success['\"]",
+                active_reporter,
+            )
+        ):
+            errors.append(f"{relative}: {successful} must map to a success conclusion")
     return errors
 
 

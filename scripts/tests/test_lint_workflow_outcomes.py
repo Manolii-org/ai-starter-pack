@@ -21,6 +21,7 @@ def write(
     reporter_name="outcome",
     needs="[apply]",
     scalar="|",
+    apply_if=None,
 ) -> Path:
     p = tmp_path / ".github/workflows/deploy.yml"
     p.parent.mkdir(parents=True)
@@ -30,8 +31,9 @@ def write(
         else "echo DEFERRED POLICY_HELD FAILED"
     )
     needs_yaml = "needs:\n      - apply" if needs == "block" else f"needs: {needs}"
+    apply_if_yaml = f"        if: {apply_if}\n" if apply_if else ""
     p.write_text(
-        f"""name: deploy\njobs:\n  apply:\n    runs-on: ubuntu-latest\n    steps:\n      - name: Apply\n        run: {scalar}\n          {apply_run}\n  {reporter_name}:\n    {needs_yaml}\n    if: {reporter_if}\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/github-script@0123456789012345678901234567890123456789\n        with:\n          script: |\n            {publisher}\n"""
+        f"""name: deploy\npermissions:\n  checks: write\njobs:\n  apply:\n    runs-on: ubuntu-latest\n    steps:\n      - name: Apply\n{apply_if_yaml}        run: {scalar}\n          {apply_run}\n  {reporter_name}:\n    {needs_yaml}\n    if: {reporter_if}\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/github-script@0123456789012345678901234567890123456789\n        with:\n          script: |\n            {publisher}\n"""
     )
     c = tmp_path / "config/workflow-outcomes.json"
     c.parent.mkdir()
@@ -42,6 +44,7 @@ def write(
                 "workflows": {
                     ".github/workflows/deploy.yml": {
                         "load_bearing_jobs": ["apply"],
+                        "load_bearing_steps": {"apply": ["Apply"]},
                         "outcome_reporter_job": reporter_name,
                         "outcomes": ["DEFERRED", "POLICY_HELD", "FAILED"],
                     }
@@ -79,6 +82,13 @@ def test_rejects_conditional_reporter(tmp_path):
             tmp_path, write(tmp_path, reporter_if="${{ always() && false }}")
         )
     )
+
+
+def test_rejects_conditional_load_bearing_step(tmp_path):
+    errors = LINT.lint(
+        tmp_path, write(tmp_path, apply_if="${{ env.DEPLOY_TOKEN != '' }}")
+    )
+    assert any("must not be conditional" in item for item in errors)
 
 
 @pytest.mark.parametrize("needs", ["apply", "[apply]", "block"])

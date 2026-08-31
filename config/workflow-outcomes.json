@@ -9,7 +9,13 @@
       "outcomes": [
         "EXECUTED",
         "FAILED"
-      ]
+      ],
+      "load_bearing_steps": {
+        "tag": [
+          "Create tag ref",
+          "Move major-version alias"
+        ]
+      }
     }
   }
 }
