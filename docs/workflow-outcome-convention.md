@@ -20,20 +20,17 @@ that the held operation happened.
 ## Contract and lint
 
 Repositories declare load-bearing jobs and an outcome reporter in
-`config/workflow-outcomes.yaml`. Run:
+`config/workflow-outcomes.json`. Run:
 
 ```bash
 python3 scripts/lint-workflow-outcomes.py
 ```
 
-The reporter must use `if: always()`, depend on every load-bearing job, and name
-`DEFERRED`, `POLICY_HELD`, and `FAILED`. The linter also rejects explicit
-skip/defer/hold branches that exit zero inside load-bearing jobs.
-
-A classifier step that intentionally selects `DEFERRED` may be listed under
-`allowed_deferred_steps`. This is not a general suppression: the workflow still
-needs the unconditional outcome reporter, and the configured value must exactly
-match the step's human-readable `name`.
+The reporter must use exactly `if: ${{ always() }}`, depend on every
+load-bearing job, and publish a GitHub check-run covering `DEFERRED`,
+`POLICY_HELD`, and `FAILED`. Classification belongs in a separate prerequisite
+job: the linter rejects skip/defer/hold semantics anywhere in a load-bearing
+job, including implicit green branches without an explicit `exit 0`.
 
 The reporter is diagnostic only. It must never bypass an environment approval,
 production acknowledgement, advisory lock, backup, dry run, or reviewer gate.

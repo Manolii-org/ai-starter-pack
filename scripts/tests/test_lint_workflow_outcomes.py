@@ -1,11 +1,8 @@
 from __future__ import annotations
-
 import importlib.util
+import json
 from pathlib import Path
-
 import pytest
-import yaml
-
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location(
@@ -16,92 +13,77 @@ LINT = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(LINT)
 
 
-def write_contract(tmp_path: Path, workflow: dict) -> Path:
-    path = tmp_path / ".github/workflows/deploy.yml"
-    path.parent.mkdir(parents=True)
-    path.write_text(yaml.safe_dump(workflow, sort_keys=False), encoding="utf-8")
-    config = tmp_path / "config/workflow-outcomes.yaml"
-    config.parent.mkdir()
-    config.write_text(
-        yaml.safe_dump(
+def write(
+    tmp_path: Path,
+    apply_run: str = "./apply",
+    reporter_if: str = "${{ always() }}",
+    publish: bool = True,
+    reporter_name="outcome",
+) -> Path:
+    p = tmp_path / ".github/workflows/deploy.yml"
+    p.parent.mkdir(parents=True)
+    publisher = (
+        "github.rest.checks.create({name: `operation — ${outcome}`, conclusion}); // DEFERRED POLICY_HELD FAILED"
+        if publish
+        else "echo DEFERRED POLICY_HELD FAILED"
+    )
+    p.write_text(
+        f"""name: deploy\njobs:\n  apply:\n    runs-on: ubuntu-latest\n    steps:\n      - name: Apply\n        run: |\n          {apply_run}\n  {reporter_name}:\n    needs: [apply]\n    if: {reporter_if}\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/github-script@0123456789012345678901234567890123456789\n        with:\n          script: |\n            {publisher}\n"""
+    )
+    c = tmp_path / "config/workflow-outcomes.json"
+    c.parent.mkdir()
+    c.write_text(
+        json.dumps(
             {
                 "version": 1,
                 "workflows": {
                     ".github/workflows/deploy.yml": {
                         "load_bearing_jobs": ["apply"],
-                        "outcome_reporter_job": "outcome",
+                        "outcome_reporter_job": reporter_name,
                     }
                 },
-            },
-            sort_keys=False,
-        ),
-        encoding="utf-8",
-    )
-    return config
-
-
-def reporter(needs: list[str] | None = None, condition: str = "${{ always() }}") -> dict:
-    return {
-        "needs": needs or ["apply"],
-        "if": condition,
-        "runs-on": "ubuntu-latest",
-        "steps": [
-            {
-                "name": "Publish DEFERRED, POLICY_HELD, or FAILED check",
-                "run": "echo DEFERRED POLICY_HELD FAILED",
             }
-        ],
-    }
-
-
-def test_accepts_explicit_terminal_outcome_reporter(tmp_path: Path) -> None:
-    config = write_contract(
-        tmp_path,
-        {
-            "jobs": {
-                "apply": {"runs-on": "ubuntu-latest", "steps": [{"run": "./apply"}]},
-                "outcome": reporter(),
-            }
-        },
+        )
     )
-    assert LINT.lint(tmp_path, config) == []
+    return c
+
+
+def test_accepts_structured_publisher(tmp_path):
+    assert LINT.lint(tmp_path, write(tmp_path)) == []
 
 
 @pytest.mark.parametrize(
     "command",
-    [
-        'echo "pre-production gate active; deferring"; exit 0',
-        '[ -n "$TOKEN" ] || { echo "secret missing; skipping"; exit 0; }',
-        'echo "policy hold" && exit 0',
-    ],
+    ["echo 'missing; skipping'", "echo 'deferring'; exit 0", "echo 'policy hold'"],
 )
-def test_rejects_green_skip_in_load_bearing_job(tmp_path: Path, command: str) -> None:
-    config = write_contract(
-        tmp_path,
-        {
-            "jobs": {
-                "apply": {"runs-on": "ubuntu-latest", "steps": [{"name": "Apply", "run": command}]},
-                "outcome": reporter(),
-            }
-        },
+def test_rejects_any_skip_semantics_in_load_bearing_job(tmp_path, command):
+    assert any(
+        "classify outside" in x for x in LINT.lint(tmp_path, write(tmp_path, command))
     )
-    assert any("can report success after skipping work" in item for item in LINT.lint(tmp_path, config))
 
 
-def test_reporter_must_run_always_and_need_every_load_bearing_job(tmp_path: Path) -> None:
-    config = write_contract(
-        tmp_path,
-        {
-            "jobs": {
-                "apply": {"runs-on": "ubuntu-latest", "steps": [{"run": "./apply"}]},
-                "outcome": reporter(needs=["other"], condition="${{ success() }}"),
-            }
-        },
+def test_rejects_conditional_reporter(tmp_path):
+    assert any(
+        "exactly if" in x
+        for x in LINT.lint(
+            tmp_path, write(tmp_path, reporter_if="${{ always() && false }}")
+        )
     )
-    errors = LINT.lint(tmp_path, config)
-    assert any("if: always()" in item for item in errors)
-    assert any("does not need load-bearing" in item for item in errors)
 
 
-def test_committed_registry_is_valid() -> None:
-    assert LINT.lint(ROOT, ROOT / "config/workflow-outcomes.yaml") == []
+def test_rejects_echo_only_reporter(tmp_path):
+    assert any(
+        "check-run" in x for x in LINT.lint(tmp_path, write(tmp_path, publish=False))
+    )
+
+
+def test_rejects_non_string_reporter_name(tmp_path):
+    c = write(tmp_path)
+    data = json.loads(c.read_text())
+    data["workflows"][".github/workflows/deploy.yml"]["outcome_reporter_job"] = {}
+    c.write_text(json.dumps(data))
+    assert any("non-empty string" in x for x in LINT.lint(tmp_path, c))
+
+
+def test_committed_registry_is_valid():
+    assert LINT.lint(ROOT, ROOT / "config/workflow-outcomes.json") == []
