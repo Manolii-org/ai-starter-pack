@@ -83,13 +83,75 @@ runs:
         RECEIPT: ${{ runner.temp }}/deployment-receipt.json
       run: |
         set -euo pipefail
-        if gh release view production-receipt --repo "$REPO" >/dev/null 2>&1; then
-          gh release edit production-receipt --repo "$REPO" --target "$TARGET_SHA"
+        api() { timeout 30s gh api "$@"; }
+        release() { timeout 30s gh release "$@"; }
+
+        if release view production-receipt --repo "$REPO" >/dev/null 2>&1; then
+          OLD_TAG_SHA=$(api "repos/$REPO/git/ref/tags/production-receipt" --jq '.object.sha')
         else
-          gh release create production-receipt --repo "$REPO" \
+          release create production-receipt --repo "$REPO" \
             --target "$TARGET_SHA" --title "Production deployment receipt" \
             --notes "Durable pointer to the latest production deployment receipt." \
             --latest=false
+          OLD_TAG_SHA="$TARGET_SHA"
         fi
-        gh release upload production-receipt "$RECEIPT" \
-          --repo "$REPO" --clobber
+
+        # Upload first under a unique name. Replacing the canonical asset in one
+        # upload command would delete the only durable copy before its successor
+        # has arrived.
+        TEMP_NAME="deployment-receipt-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${TARGET_SHA}.json"
+        TEMP_RECEIPT="${RUNNER_TEMP}/${TEMP_NAME}"
+        cp "$RECEIPT" "$TEMP_RECEIPT"
+        release upload production-receipt "$TEMP_RECEIPT" --repo "$REPO"
+
+        RELEASE_JSON=$(api "repos/$REPO/releases/tags/production-receipt")
+        NEW_ID=$(printf '%s' "$RELEASE_JSON" | python3 -c \
+          'import json,sys; d=json.load(sys.stdin); n=sys.argv[1]; print(next(a["id"] for a in d["assets"] if a["name"] == n))' \
+          "$TEMP_NAME")
+        OLD_ID=$(printf '%s' "$RELEASE_JSON" | python3 -c \
+          'import json,sys; d=json.load(sys.stdin); print(next((a["id"] for a in d["assets"] if a["name"] == "deployment-receipt.json"), ""))')
+        BACKUP_NAME=""
+        TAG_MOVED=false
+        OLD_RENAMED=false
+        NEW_RENAMED=false
+
+        rollback_pointer() {
+          set +e
+          if [ "$NEW_RENAMED" = true ]; then
+            api --method PATCH "repos/$REPO/releases/assets/$NEW_ID" \
+              -f name="$TEMP_NAME" >/dev/null
+          fi
+          if [ "$OLD_RENAMED" = true ]; then
+            api --method PATCH "repos/$REPO/releases/assets/$OLD_ID" \
+              -f name="deployment-receipt.json" >/dev/null
+          fi
+          if [ "$TAG_MOVED" = true ]; then
+            api --method PATCH "repos/$REPO/git/refs/tags/production-receipt" \
+              -f sha="$OLD_TAG_SHA" -F force=true >/dev/null
+          fi
+        }
+        trap rollback_pointer ERR
+
+        # Release target_commitish is ignored once its tag exists. Move the tag
+        # ref explicitly, then switch the already-uploaded asset into place.
+        api --method PATCH "repos/$REPO/git/refs/tags/production-receipt" \
+          -f sha="$TARGET_SHA" -F force=true >/dev/null
+        TAG_MOVED=true
+        if [ -n "$OLD_ID" ]; then
+          BACKUP_NAME="deployment-receipt.previous-${OLD_ID}.json"
+          api --method PATCH "repos/$REPO/releases/assets/$OLD_ID" \
+            -f name="$BACKUP_NAME" >/dev/null
+          OLD_RENAMED=true
+        fi
+        api --method PATCH "repos/$REPO/releases/assets/$NEW_ID" \
+          -f name="deployment-receipt.json" >/dev/null
+        NEW_RENAMED=true
+        trap - ERR
+
+        # The new canonical asset and tag are durable. Cleanup cannot invalidate
+        # that pointer, so a cleanup failure is a warning rather than a false
+        # promotion failure.
+        if [ -n "$OLD_ID" ] && ! api --method DELETE \
+            "repos/$REPO/releases/assets/$OLD_ID" >/dev/null; then
+          echo "::warning::old receipt backup $BACKUP_NAME could not be deleted"
+        fi

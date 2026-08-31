@@ -164,3 +164,22 @@ def test_composite_uploads_before_release_pointer():
         if step["name"] == "Upload deployment receipt artifact"
     )
     assert upload["with"]["retention-days"] == 30
+
+
+def test_release_pointer_uploads_safely_and_bounds_api_calls():
+    action = yaml.safe_load(
+        (ROOT / ".github/actions/emit-deployment-receipt/action.yml").read_text()
+    )
+    release_step = next(
+        step for step in action["runs"]["steps"]
+        if step["name"] == "Write durable production receipt pointer"
+    )
+    script = release_step["run"]
+    assert "timeout 30s gh api" in script
+    assert "timeout 30s gh release" in script
+    assert "--clobber" not in script
+    assert script.index("release upload production-receipt") < script.index(
+        "git/refs/tags/production-receipt"
+    )
+    assert '-f name="deployment-receipt.json"' in script
+    assert "trap rollback_pointer ERR" in script
