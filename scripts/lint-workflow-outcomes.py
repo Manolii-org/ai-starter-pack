@@ -42,7 +42,7 @@ def announces_green_skip(block: str) -> bool:
         if not match:
             continue
         inline = match.group(1)
-        if inline and not re.fullmatch(r"[|>][+-]?", inline):
+        if inline and not re.fullmatch(r"[|>][+-]?(?:\s+#.*)?", inline):
             commands.append(inline)
             continue
         key_indent = len(line) - len(line.lstrip())
@@ -227,7 +227,8 @@ def lint_contract(repo: Path, relative: str, contract: dict) -> list[str]:
             errors.append(
                 f"{relative}: load-bearing job {name!r} contains skip/defer/hold semantics; classify outside it"
             )
-        if block and re.search(r"(?m)^    continue-on-error:\s*", block):
+        continue_key = r"(?:continue-on-error|['\"]continue-on-error['\"])\s*:"
+        if block and re.search(rf"(?m)^    {continue_key}\s*", block):
             errors.append(
                 f"{relative}: load-bearing job {name!r} must not continue on error"
             )
@@ -241,7 +242,7 @@ def lint_contract(repo: Path, relative: str, contract: dict) -> list[str]:
                 errors.append(
                     f"{relative}: load-bearing step {step_name!r} must not be conditional"
                 )
-            elif re.search(r"(?m)^        continue-on-error:\s*", step):
+            elif re.search(rf"(?m)^        {continue_key}\s*", step):
                 errors.append(
                     f"{relative}: load-bearing step {step_name!r} must not continue on error"
                 )

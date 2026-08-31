@@ -105,6 +105,16 @@ def test_rejects_tolerated_load_bearing_failures(tmp_path, needle, replacement):
     assert any("must not continue on error" in item for item in LINT.lint(tmp_path, config))
 
 
+@pytest.mark.parametrize("key", ['"continue-on-error"', "'continue-on-error'", "continue-on-error "])
+def test_rejects_equivalent_continue_on_error_keys(tmp_path, key):
+    config = write(tmp_path)
+    workflow = tmp_path / ".github/workflows/deploy.yml"
+    workflow.write_text(
+        workflow.read_text().replace("        run: |", f"        {key}: true\n        run: |", 1)
+    )
+    assert any("must not continue on error" in item for item in LINT.lint(tmp_path, config))
+
+
 def test_requires_steps_for_every_load_bearing_job(tmp_path):
     config = write(tmp_path)
     data = json.loads(config.read_text())
@@ -136,6 +146,11 @@ def test_scans_single_key_run_steps(block):
 
 def test_scans_anonymous_multiline_run_body():
     block = "      - run: |\n        echo 'deferred; skipping'\n        exit 0"
+    assert LINT.announces_green_skip(block)
+
+
+def test_scans_commented_block_scalar_indicator():
+    block = "      - run: | # explanatory comment\n        exit 0"
     assert LINT.announces_green_skip(block)
 
 
