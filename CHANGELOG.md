@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Added
+
+- **Deployment receipt control-flow composites.** Add tagged step-level actions
+  that fail closed on empty/non-default-branch held promote SHAs and emit a
+  schema-valid final deployment receipt to both a 30-day Actions artifact and
+  the durable `production-receipt` Release asset. Product-owned provider,
+  migration, Auth, and smoke commands stay local to each consumer adapter.
+
 ### Fixed
 
 - **Guard commands now enforce what they promise.** Added the portable

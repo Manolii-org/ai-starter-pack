@@ -1,0 +1,162 @@
+name: Emit deployment receipt
+description: Build, validate, upload, and durably publish a final deployment receipt
+inputs:
+  emit_when:
+    description: Promotion kind (alias-confirmed or deploy-succeeded)
+    required: true
+  target_sha:
+    description: Full SHA of the bake that became durable
+    required: true
+  canonical_url:
+    description: Held alias or promote target
+    required: true
+  live_origin:
+    description: Optional public HOST_SURFACE origin
+    required: false
+    default: ""
+  previous_deployment_id:
+    description: Deployment ID captured before the alias move
+    required: false
+    default: ""
+  verify_workflow:
+    description: Post-promote verification workflow
+    required: true
+  verify_result:
+    description: Final verification result (success, failure, or skipped)
+    required: true
+  verify_run_url:
+    description: Optional verification run URL
+    required: false
+    default: ""
+  gate_run_url:
+    description: Optional pre-production gate run URL
+    required: false
+    default: ""
+  promote_run_url:
+    description: Promotion workflow run URL
+    required: true
+  repo:
+    description: Product repository in owner/name form
+    required: true
+  rollback_mode:
+    description: Rollback mode declared by the deployment contract
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Install receipt schema validator
+      shell: bash
+      run: timeout 60s python3 -m pip install --quiet --timeout 15 --retries 2 'jsonschema==4.25.1'
+
+    - name: Build and validate deployment receipt
+      shell: bash
+      env:
+        INPUT_EMIT_WHEN: ${{ inputs.emit_when }}
+        INPUT_TARGET_SHA: ${{ inputs.target_sha }}
+        INPUT_CANONICAL_URL: ${{ inputs.canonical_url }}
+        INPUT_LIVE_ORIGIN: ${{ inputs.live_origin }}
+        INPUT_PREVIOUS_DEPLOYMENT_ID: ${{ inputs.previous_deployment_id }}
+        INPUT_VERIFY_WORKFLOW: ${{ inputs.verify_workflow }}
+        INPUT_VERIFY_RESULT: ${{ inputs.verify_result }}
+        INPUT_VERIFY_RUN_URL: ${{ inputs.verify_run_url }}
+        INPUT_GATE_RUN_URL: ${{ inputs.gate_run_url }}
+        INPUT_PROMOTE_RUN_URL: ${{ inputs.promote_run_url }}
+        INPUT_REPO: ${{ inputs.repo }}
+        INPUT_ROLLBACK_MODE: ${{ inputs.rollback_mode }}
+        RECEIPT_OUTPUT: ${{ runner.temp }}/deployment-receipt.json
+      run: python3 "$GITHUB_ACTION_PATH/emit.py"
+
+    - name: Upload deployment receipt artifact
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: deployment-receipt-${{ github.run_id }}
+        path: ${{ runner.temp }}/deployment-receipt.json
+        retention-days: 30
+        if-no-files-found: error
+
+    - name: Write durable production receipt pointer
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ inputs.repo }}
+        TARGET_SHA: ${{ inputs.target_sha }}
+        RECEIPT: ${{ runner.temp }}/deployment-receipt.json
+      run: |
+        set -euo pipefail
+        api() { timeout 30s gh api "$@"; }
+        release() { timeout 30s gh release "$@"; }
+
+        if release view production-receipt --repo "$REPO" >/dev/null 2>&1; then
+          OLD_TAG_SHA=$(api "repos/$REPO/git/ref/tags/production-receipt" --jq '.object.sha')
+        else
+          release create production-receipt --repo "$REPO" \
+            --target "$TARGET_SHA" --title "Production deployment receipt" \
+            --notes "Durable pointer to the latest production deployment receipt." \
+            --latest=false
+          OLD_TAG_SHA="$TARGET_SHA"
+        fi
+
+        # Upload first under a unique name. Replacing the canonical asset in one
+        # upload command would delete the only durable copy before its successor
+        # has arrived.
+        TEMP_NAME="deployment-receipt-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${TARGET_SHA}.json"
+        TEMP_RECEIPT="${RUNNER_TEMP}/${TEMP_NAME}"
+        cp "$RECEIPT" "$TEMP_RECEIPT"
+        release upload production-receipt "$TEMP_RECEIPT" --repo "$REPO"
+
+        RELEASE_JSON=$(api "repos/$REPO/releases/tags/production-receipt")
+        NEW_ID=$(printf '%s' "$RELEASE_JSON" | python3 -c \
+          'import json,sys; d=json.load(sys.stdin); n=sys.argv[1]; print(next(a["id"] for a in d["assets"] if a["name"] == n))' \
+          "$TEMP_NAME")
+        OLD_ID=$(printf '%s' "$RELEASE_JSON" | python3 -c \
+          'import json,sys; d=json.load(sys.stdin); print(next((a["id"] for a in d["assets"] if a["name"] == "deployment-receipt.json"), ""))')
+        BACKUP_NAME=""
+        TAG_MOVED=false
+        OLD_RENAMED=false
+        NEW_RENAMED=false
+
+        rollback_pointer() {
+          rc=$?
+          trap - ERR
+          (
+            set +e
+            if [ "$NEW_RENAMED" = true ]; then
+              api --method PATCH "repos/$REPO/releases/assets/$NEW_ID" \
+                -f name="$TEMP_NAME" >/dev/null
+            fi
+            if [ "$OLD_RENAMED" = true ]; then
+              api --method PATCH "repos/$REPO/releases/assets/$OLD_ID" \
+                -f name="deployment-receipt.json" >/dev/null
+            fi
+            if [ "$TAG_MOVED" = true ]; then
+              api --method PATCH "repos/$REPO/git/refs/tags/production-receipt" \
+                -f sha="$OLD_TAG_SHA" -F force=true >/dev/null
+            fi
+          )
+          exit "$rc"
+        }
+        trap rollback_pointer ERR
+
+        # Release target_commitish is ignored once its tag exists. Move the tag
+        # ref explicitly, then switch the already-uploaded asset into place.
+        api --method PATCH "repos/$REPO/git/refs/tags/production-receipt" \
+          -f sha="$TARGET_SHA" -F force=true >/dev/null
+        TAG_MOVED=true
+        if [ -n "$OLD_ID" ]; then
+          BACKUP_NAME="deployment-receipt.previous-${OLD_ID}.json"
+          api --method PATCH "repos/$REPO/releases/assets/$OLD_ID" \
+            -f name="$BACKUP_NAME" >/dev/null
+          OLD_RENAMED=true
+        fi
+        api --method PATCH "repos/$REPO/releases/assets/$NEW_ID" \
+          -f name="deployment-receipt.json" >/dev/null
+        NEW_RENAMED=true
+        trap - ERR
+
+        # The new canonical asset and tag are durable. Cleanup cannot invalidate
+        # that pointer, so a cleanup failure is a warning rather than a false
+        # promotion failure.
+        if [ -n "$OLD_ID" ] && ! api --method DELETE \
+            "repos/$REPO/releases/assets/$OLD_ID" >/dev/null; then
+          echo "::warning::old receipt backup $BACKUP_NAME could not be deleted"
+        fi

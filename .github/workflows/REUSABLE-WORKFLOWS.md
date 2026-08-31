@@ -3,10 +3,52 @@
 Canonical home for AI Starter Pack reusable GitHub Actions workflows. Consumed via:
 
 ```yaml
-uses: manolii-org/ai-starter-pack/.github/workflows/<name>-reusable.yml@v1.9.6
+uses: manolii-org/ai-starter-pack/.github/workflows/<name>-reusable.yml@v1.10.0
 ```
 
 Frozen at v1 (additive=non-breaking; rename/remove/default-change=v2).
+
+## Deployment control-flow actions
+
+Two step-level composite actions keep product-owned provider commands local while
+sharing the receipt and pin-SHA controls introduced in v1.10.0:
+
+```yaml
+- id: resolve
+  uses: Manolii-org/ai-starter-pack/.github/actions/resolve-held-promote-sha@v1.10.0
+  with:
+    sha: ${{ inputs.sha }}
+
+- uses: Manolii-org/ai-starter-pack/.github/actions/emit-deployment-receipt@v1.10.0
+  with:
+    emit_when: alias-confirmed
+    target_sha: ${{ steps.resolve.outputs.sha }}
+    canonical_url: https://held.example.com
+    verify_workflow: .github/workflows/smoke-prod.yml
+    verify_result: ${{ steps.smoke.outcome }}
+    promote_run_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    repo: ${{ github.repository }}
+    rollback_mode: alias-promote
+```
+
+`resolve-held-promote-sha` rejects empty/non-40-hex pins and accepts only
+`identical` or `behind` from `default-branch...sha`. It never substitutes
+`GITHUB_SHA`. `emit-deployment-receipt` requires a final verification enum,
+schema-validates against its vendored receipt schema, uploads the artifact for
+30 days, then clobbers the `production-receipt` Release asset. Callers need
+`permissions: contents: write`; a Release failure fails the calling job.
+
+The caller owns ordering: alias/apex confirm, non-job-killing smoke, receipt
+action under `always() && !cancelled()`, then the final smoke-failure guard.
+For `deploy-succeeded`, call the action only when the real deploy step succeeded;
+never emit on a dry run. Complete examples for both modes live at
+[`docs/examples/held-promote-receipts.yml`](../../docs/examples/held-promote-receipts.yml).
+
+The `production-receipt` tag and canonical asset are a shared mutable pointer.
+**Callers must serialize every invocation for a product** with their existing
+promotion `concurrency` group and `cancel-in-progress: false`; a composite action
+cannot declare job/workflow concurrency on the caller's behalf. Concurrent
+receipt writers are unsupported and may not invoke this action.
 
 ## Two Forms
 
@@ -84,7 +126,7 @@ permissions:
 
 jobs:
   ci:
-    uses: manolii-org/ai-starter-pack/.github/workflows/ci-reusable.yml@v1.9.6
+    uses: manolii-org/ai-starter-pack/.github/workflows/ci-reusable.yml@v1.10.0
     with:
       runs_on: ubuntu-latest
       node_version: '24'
@@ -125,7 +167,7 @@ permissions:
 
 jobs:
   assessment:
-    uses: manolii-org/ai-starter-pack/.github/workflows/pr-assessment-reusable.yml@v1.9.6
+    uses: manolii-org/ai-starter-pack/.github/workflows/pr-assessment-reusable.yml@v1.10.0
     with:
       provider_mode: proxy
       litellm_proxy_url: ${{ vars.LITELLM_PROXY_URL }}
@@ -159,7 +201,7 @@ immutable tag and want prompts and workflow to move together, pass the same tag:
 
 ```yaml
     with:
-      pack_ref: v1.9.6
+      pack_ref: v1.10.0
 ```
 
 The hydration list lives in the workflow-level `ASSESSMENT_RUNTIME_FILES` env.
@@ -412,7 +454,7 @@ jobs:
           EOF
   fast-tier:
     needs: detect
-    uses: manolii-org/ai-starter-pack/.github/workflows/fast-tier-reusable.yml@v1.9.6
+    uses: manolii-org/ai-starter-pack/.github/workflows/fast-tier-reusable.yml@v1.10.0
     with:
       gates: ${{ needs.detect.outputs.gates }}
       budget_minutes: 5
@@ -432,7 +474,7 @@ permissions:
   issues: write
 jobs:
   pre-production-tier:
-    uses: manolii-org/ai-starter-pack/.github/workflows/pre-production-tier-reusable.yml@v1.9.6
+    uses: manolii-org/ai-starter-pack/.github/workflows/pre-production-tier-reusable.yml@v1.10.0
     with:
       gates: >-
         [{"name":"e2e","applies":true,"command":"pnpm test:e2e"},
@@ -458,10 +500,10 @@ Phase-1 exit) — see `kernel/backup/README.md`.
 ```yaml
 jobs:
   validate-backup-manifest:
-    uses: manolii-org/ai-starter-pack/.github/workflows/backup-kernel-validate-reusable.yml@v1.9.6
+    uses: manolii-org/ai-starter-pack/.github/workflows/backup-kernel-validate-reusable.yml@v1.10.0
     with:
       manifest_path: config/backup-tenant.yaml
-      pack_ref: v1.9.6   # keep identical to the `uses:` pin — the pack cannot discover its own ref
+      pack_ref: v1.10.0   # keep identical to the `uses:` pin — the pack cannot discover its own ref
 ```
 
 ## pr-autofix-loop-reusable
@@ -509,7 +551,7 @@ permissions:
 
 jobs:
   autofix:
-    uses: Manolii-org/ai-starter-pack/.github/workflows/pr-autofix-loop-reusable.yml@v1.9.6
+    uses: Manolii-org/ai-starter-pack/.github/workflows/pr-autofix-loop-reusable.yml@v1.10.0
     with:
       provider_mode: proxy
       litellm_proxy_url: ${{ vars.LITELLM_PROXY_URL }}
