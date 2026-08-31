@@ -342,6 +342,6 @@ def test_consumer_quality_workflows_execute_outcome_lint():
         assert "python3 scripts/lint-workflow-outcomes.py" in text
         assert "Partial workflow-outcome adoption" in text
         if path.name != "ci.yml":
-            assert 'workflows == {} else "invalid"' in text
+            assert 'data == {"version": 1, "workflows": {}} else "invalid"' in text
             assert "still the empty scaffold" in text
     assert found, "no managed consumer quality workflow was found"
