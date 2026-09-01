@@ -9,13 +9,14 @@
 # guard until after this action completes.
 - name: Emit held-alias deployment receipt
   if: ${{ always() && !cancelled() && steps.apex.outcome == 'success' }}
-  uses: Manolii-org/ai-starter-pack/.github/actions/emit-deployment-receipt@v1.10.0
+  uses: Manolii-org/ai-starter-pack/.github/actions/emit-deployment-receipt@v1.11.4
   with:
     emit_when: alias-confirmed
     target_sha: ${{ steps.resolve.outputs.sha }}
     canonical_url: https://held.example.com
     live_origin: https://example.com
     previous_deployment_id: ${{ steps.previous.outputs.deployment_id }}
+    migration_pending: ${{ steps.migrations.outputs.pending_count }}
     verify_workflow: .github/workflows/smoke-prod.yml
     verify_result: ${{ steps.smoke.outcome }}
     verify_run_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -28,7 +29,7 @@
 # failed deploy must not mint promotion evidence.
 - name: Emit successful image deployment receipt
   if: ${{ always() && !cancelled() && steps.deploy.outcome == 'success' }}
-  uses: Manolii-org/ai-starter-pack/.github/actions/emit-deployment-receipt@v1.10.0
+  uses: Manolii-org/ai-starter-pack/.github/actions/emit-deployment-receipt@v1.11.4
   with:
     emit_when: deploy-succeeded
     target_sha: ${{ github.sha }}

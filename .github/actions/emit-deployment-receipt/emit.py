@@ -31,6 +31,15 @@ def optional_url(name: str) -> str | None:
     return os.environ.get(name, "").strip() or None
 
 
+def optional_nonnegative_integer(name: str) -> int | None:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        return None
+    if not value.isdecimal():
+        raise ValueError("migration_pending must be a non-negative integer")
+    return int(value)
+
+
 def build_receipt() -> dict:
     emit_when = required("INPUT_EMIT_WHEN")
     result = required("INPUT_VERIFY_RESULT")
@@ -77,6 +86,9 @@ def build_receipt() -> dict:
     live_origin = optional_url("INPUT_LIVE_ORIGIN")
     if live_origin is not None:
         receipt["live_origin"] = live_origin
+    migration_pending = optional_nonnegative_integer("INPUT_MIGRATION_PENDING")
+    if migration_pending is not None:
+        receipt["migration_pending"] = migration_pending
     return receipt
 
 
