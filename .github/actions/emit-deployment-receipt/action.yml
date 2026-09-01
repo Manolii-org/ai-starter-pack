@@ -18,6 +18,10 @@ inputs:
     description: Deployment ID captured before the alias move
     required: false
     default: ""
+  migration_pending:
+    description: Optional non-negative count of migrations pending when the bake became durable
+    required: false
+    default: ""
   verify_workflow:
     description: Post-promote verification workflow
     required: true
@@ -56,6 +60,7 @@ runs:
         INPUT_CANONICAL_URL: ${{ inputs.canonical_url }}
         INPUT_LIVE_ORIGIN: ${{ inputs.live_origin }}
         INPUT_PREVIOUS_DEPLOYMENT_ID: ${{ inputs.previous_deployment_id }}
+        INPUT_MIGRATION_PENDING: ${{ inputs.migration_pending }}
         INPUT_VERIFY_WORKFLOW: ${{ inputs.verify_workflow }}
         INPUT_VERIFY_RESULT: ${{ inputs.verify_result }}
         INPUT_VERIFY_RUN_URL: ${{ inputs.verify_run_url }}

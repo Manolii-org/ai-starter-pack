@@ -28,6 +28,7 @@ def emitter_env(tmp_path: Path, result: str = "success") -> dict[str, str]:
         "INPUT_CANONICAL_URL": "https://held.example.com",
         "INPUT_LIVE_ORIGIN": "",
         "INPUT_PREVIOUS_DEPLOYMENT_ID": "dpl_previous",
+        "INPUT_MIGRATION_PENDING": "",
         "INPUT_VERIFY_WORKFLOW": ".github/workflows/smoke-prod.yml",
         "INPUT_VERIFY_RESULT": result,
         "INPUT_VERIFY_RUN_URL": "https://github.com/o/r/actions/runs/2",
@@ -59,6 +60,30 @@ def test_emitter_executes_and_schema_validates(tmp_path, result):
     assert receipt["target_sha"] == SHA
     assert receipt["post_promote_verify"]["result"] == result
     assert "live_origin" not in receipt
+
+
+@pytest.mark.parametrize(("value", "expected"), [("0", 0), ("1", 1), ("12", 12)])
+def test_emitter_preserves_optional_migration_pending(tmp_path, value, expected):
+    env = emitter_env(tmp_path)
+    env["INPUT_MIGRATION_PENDING"] = value
+    process = subprocess.run(
+        [sys.executable, str(EMITTER)], env=env, capture_output=True, text=True, timeout=30
+    )
+    assert process.returncode == 0, process.stderr
+    receipt = json.loads((tmp_path / "deployment-receipt.json").read_text())
+    assert receipt["migration_pending"] == expected
+
+
+@pytest.mark.parametrize("value", ["-1", "true", "1.5"])
+def test_emitter_rejects_invalid_migration_pending(tmp_path, value):
+    env = emitter_env(tmp_path)
+    env["INPUT_MIGRATION_PENDING"] = value
+    process = subprocess.run(
+        [sys.executable, str(EMITTER)], env=env, capture_output=True, text=True, timeout=30
+    )
+    assert process.returncode == 1
+    assert "migration_pending must be a non-negative integer" in process.stderr
+    assert not (tmp_path / "deployment-receipt.json").exists()
 
 
 @pytest.mark.parametrize(
