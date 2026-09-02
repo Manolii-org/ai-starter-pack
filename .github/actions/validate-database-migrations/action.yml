@@ -1,0 +1,37 @@
+name: Validate database migrations
+description: Fail fast on migration identifier, journal, and revision-graph conflicts
+inputs:
+  adapter:
+    description: Migration adapter (alembic, drizzle, flyway, prisma, or supabase)
+    required: true
+  path:
+    description: Repository-relative migration path
+    required: true
+  journal:
+    description: Optional repository-relative Drizzle journal path
+    required: false
+    default: ""
+  baseline:
+    description: Optional repository-relative JSON allowlist for immutable historical duplicate groups
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: Validate migration tree
+      shell: bash
+      env:
+        MIGRATION_ADAPTER: ${{ inputs.adapter }}
+        MIGRATION_PATH: ${{ inputs.path }}
+        MIGRATION_JOURNAL: ${{ inputs.journal }}
+        MIGRATION_BASELINE: ${{ inputs.baseline }}
+      run: |
+        set -euo pipefail
+        args=(--adapter "$MIGRATION_ADAPTER" --path "$MIGRATION_PATH")
+        if [ -n "$MIGRATION_JOURNAL" ]; then
+          args+=(--journal "$MIGRATION_JOURNAL")
+        fi
+        if [ -n "$MIGRATION_BASELINE" ]; then
+          args+=(--baseline "$MIGRATION_BASELINE")
+        fi
+        python3 "${{ github.action_path }}/validate.py" "${args[@]}"
