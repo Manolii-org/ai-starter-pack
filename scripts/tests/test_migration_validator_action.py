@@ -59,6 +59,16 @@ def test_alembic_rejects_disconnected_cycle_hidden_behind_one_head(tmp_path):
     assert any("contains a cycle" in error for error in validator.validate_alembic(tmp_path))
 
 
+def test_alembic_rejects_repeated_metadata_assignments(tmp_path):
+    (tmp_path / "revision.py").write_text(
+        'revision = "first"\nrevision = "effective"\ndown_revision = None\n'
+    )
+    assert any(
+        "revision must be a non-empty string literal" in error
+        for error in validator.validate_alembic(tmp_path)
+    )
+
+
 def test_supabase_accepts_legacy_and_timestamp_identifiers(tmp_path):
     (tmp_path / "00165_legacy.sql").write_text("select 1;\n")
     (tmp_path / "20260902120000_native.sql").write_text("select 2;\n")
