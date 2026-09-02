@@ -4,6 +4,11 @@
 
 ### Added
 
+- **Portable migration-tree validation.** Add a provider-neutral composite
+  action for Drizzle journals, Alembic revision graphs, Supabase legacy/native
+  identifiers, Prisma migration directories, and Flyway versions. Reviewed
+  baselines may preserve exact immutable historical Supabase collision groups
+  while any new member still fails before database startup.
 - **Deployment receipt control-flow composites.** Add tagged step-level actions
   that fail closed on empty/non-default-branch held promote SHAs and emit a
   schema-valid final deployment receipt to both a 30-day Actions artifact and
