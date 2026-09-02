@@ -144,6 +144,26 @@ def validate_alembic(path: Path) -> list[str]:
     heads = sorted(set(revisions) - referenced)
     if len(heads) != 1:
         errors.append(f"{path}: expected one Alembic head, found {len(heads)} ({', '.join(heads)})")
+    elif not errors:
+        visited: set[str] = set()
+        active: set[str] = set()
+
+        def visit(revision: str) -> None:
+            if revision in active:
+                errors.append(f"{path}: Alembic revision graph contains a cycle at {revision}")
+                return
+            if revision in visited:
+                return
+            active.add(revision)
+            for parent in parents.get(revision, ()):
+                visit(parent)
+            active.remove(revision)
+            visited.add(revision)
+
+        for revision in revisions:
+            visit(revision)
+        if len(visited) != len(revisions):
+            errors.append(f"{path}: Alembic revision graph is disconnected")
     return errors
 
 
@@ -175,6 +195,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--baseline", type=Path, help="JSON allowlist for immutable historical duplicate groups")
     args = parser.parse_args(argv)
     allowed_duplicates: dict[str, list[str]] = {}
+    if args.baseline and args.adapter != "supabase":
+        print("Migration validation failed:\n- --baseline is supported only for the supabase adapter", file=sys.stderr)
+        return 1
     if args.baseline:
         try:
             baseline = json.loads(args.baseline.read_text(encoding="utf-8"))
@@ -200,7 +223,7 @@ def main(argv: list[str] | None = None) -> int:
             args.path,
             pattern,
             ignored_suffixes=ignored,
-            allowed_duplicates=allowed_duplicates,
+            allowed_duplicates=allowed_duplicates if args.adapter == "supabase" else None,
         )
     if errors:
         print("Migration validation failed:", file=sys.stderr)

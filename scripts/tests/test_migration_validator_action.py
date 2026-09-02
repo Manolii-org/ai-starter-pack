@@ -51,6 +51,14 @@ def test_alembic_rejects_multiple_heads_or_missing_parent(tmp_path, second_paren
     assert any(expected in error for error in errors)
 
 
+def test_alembic_rejects_disconnected_cycle_hidden_behind_one_head(tmp_path):
+    (tmp_path / "root.py").write_text('revision = "root"\ndown_revision = None\n')
+    (tmp_path / "head.py").write_text('revision = "head"\ndown_revision = "root"\n')
+    (tmp_path / "cycle_a.py").write_text('revision = "cycle_a"\ndown_revision = "cycle_b"\n')
+    (tmp_path / "cycle_b.py").write_text('revision = "cycle_b"\ndown_revision = "cycle_a"\n')
+    assert any("contains a cycle" in error for error in validator.validate_alembic(tmp_path))
+
+
 def test_supabase_accepts_legacy_and_timestamp_identifiers(tmp_path):
     (tmp_path / "00165_legacy.sql").write_text("select 1;\n")
     (tmp_path / "20260902120000_native.sql").write_text("select 2;\n")
@@ -96,3 +104,12 @@ def test_composite_action_invokes_bundled_validator():
     action = (VALIDATOR.parent / "action.yml").read_text()
     assert 'python3 "${{ github.action_path }}/validate.py"' in action
     assert "--adapter" in action and "--path" in action
+
+
+def test_cli_rejects_baseline_for_flyway(tmp_path, capsys):
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(json.dumps({"allowed_duplicate_identifiers": {}}))
+    assert validator.main([
+        "--adapter", "flyway", "--path", str(tmp_path), "--baseline", str(baseline),
+    ]) == 1
+    assert "supported only for the supabase adapter" in capsys.readouterr().err
