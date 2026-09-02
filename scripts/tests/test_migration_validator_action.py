@@ -69,6 +69,13 @@ def test_alembic_rejects_repeated_metadata_assignments(tmp_path):
     )
 
 
+def test_alembic_allows_annotation_only_declarations_before_bindings(tmp_path):
+    (tmp_path / "revision.py").write_text(
+        'revision: str\nrevision = "one"\ndown_revision: str | None\ndown_revision = None\n'
+    )
+    assert validator.validate_alembic(tmp_path) == []
+
+
 def test_supabase_accepts_legacy_and_timestamp_identifiers(tmp_path):
     (tmp_path / "00165_legacy.sql").write_text("select 1;\n")
     (tmp_path / "20260902120000_native.sql").write_text("select 2;\n")
