@@ -101,7 +101,10 @@ def _literal_assignment(tree: ast.Module, name: str) -> object:
     for node in tree.body:
         if isinstance(node, (ast.Assign, ast.AnnAssign)):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            if any(isinstance(target, ast.Name) and target.id == name for target in targets):
+            if (
+                any(isinstance(target, ast.Name) and target.id == name for target in targets)
+                and node.value is not None
+            ):
                 values.append(node.value)
     if len(values) != 1:
         return object()
