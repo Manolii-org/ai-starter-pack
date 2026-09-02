@@ -97,15 +97,18 @@ def validate_drizzle(path: Path, journal: Path | None) -> list[str]:
 
 
 def _literal_assignment(tree: ast.Module, name: str) -> object:
+    values: list[ast.expr] = []
     for node in tree.body:
         if isinstance(node, (ast.Assign, ast.AnnAssign)):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             if any(isinstance(target, ast.Name) and target.id == name for target in targets):
-                try:
-                    return ast.literal_eval(node.value)
-                except (ValueError, TypeError):
-                    return object()
-    return object()
+                values.append(node.value)
+    if len(values) != 1:
+        return object()
+    try:
+        return ast.literal_eval(values[0])
+    except (ValueError, TypeError):
+        return object()
 
 
 def validate_alembic(path: Path) -> list[str]:
