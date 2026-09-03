@@ -2,7 +2,7 @@ name: Validate database migrations
 description: Fail fast on migration identifier, journal, and revision-graph conflicts
 inputs:
   adapter:
-    description: Migration adapter (alembic, drizzle, flyway, prisma, or supabase)
+    description: Migration adapter (alembic, drizzle, flyway, prisma, sequential-sql, or supabase)
     required: true
   path:
     description: Repository-relative migration path

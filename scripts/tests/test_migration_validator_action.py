@@ -117,6 +117,41 @@ def test_prisma_requires_unique_timestamp_directories_with_sql(tmp_path):
     assert any("migration.sql is missing" in error for error in errors)
 
 
+def test_sequential_sql_accepts_three_digit_history_and_rollback_companions(tmp_path):
+    (tmp_path / "001_first.sql").write_text("select 1;\n")
+    (tmp_path / "001_first_down.sql").write_text("select 1;\n")
+    (tmp_path / "002_second.sql").write_text("select 2;\n")
+    assert validator.validate_names(
+        tmp_path,
+        validator.SEQUENTIAL_SQL_NAME,
+        ignored_suffixes=("_rollback.sql", "_down.sql", ".rollback.sql", ".down.sql"),
+    ) == []
+
+
+def test_sequential_sql_exact_baseline_rejects_new_duplicate(tmp_path):
+    for name in ("016_one.sql", "016_two.sql"):
+        (tmp_path / name).write_text("select 1;\n")
+    allowed = {"016": ["016_one.sql", "016_two.sql"]}
+    assert validator.validate_names(tmp_path, validator.SEQUENTIAL_SQL_NAME, allowed_duplicates=allowed) == []
+    (tmp_path / "016_three.sql").write_text("select 3;\n")
+    assert any(
+        "duplicate migration identifier 016" in error
+        for error in validator.validate_names(tmp_path, validator.SEQUENTIAL_SQL_NAME, allowed_duplicates=allowed)
+    )
+
+
+def test_sequential_sql_cli_accepts_exact_baseline(tmp_path):
+    for name in ("016_one.sql", "016_two.sql"):
+        (tmp_path / name).write_text("select 1;\n")
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(json.dumps({"allowed_duplicate_identifiers": {
+        "016": ["016_one.sql", "016_two.sql"],
+    }}))
+    assert validator.main([
+        "--adapter", "sequential-sql", "--path", str(tmp_path), "--baseline", str(baseline),
+    ]) == 0
+
+
 def test_composite_action_invokes_bundled_validator():
     action = (VALIDATOR.parent / "action.yml").read_text()
     assert 'python3 "${{ github.action_path }}/validate.py"' in action
@@ -129,4 +164,4 @@ def test_cli_rejects_baseline_for_flyway(tmp_path, capsys):
     assert validator.main([
         "--adapter", "flyway", "--path", str(tmp_path), "--baseline", str(baseline),
     ]) == 1
-    assert "supported only for the supabase adapter" in capsys.readouterr().err
+    assert "supported only for the sequential-sql and supabase adapters" in capsys.readouterr().err
