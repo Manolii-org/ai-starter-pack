@@ -10,6 +10,7 @@ import re
 import sys
 
 DRIZZLE_NAME = re.compile(r"^(?P<id>\d+)_[A-Za-z0-9][A-Za-z0-9_-]*\.sql$")
+SEQUENTIAL_SQL_NAME = re.compile(r"^(?P<id>\d+)_[A-Za-z0-9][A-Za-z0-9_-]*\.sql$")
 SUPABASE_NAME = re.compile(r"^(?P<id>(?:\d{5}|\d{14}))_[A-Za-z0-9][A-Za-z0-9_-]*\.sql$")
 FLYWAY_NAME = re.compile(r"^V(?P<id>[0-9][0-9.]*)__[A-Za-z0-9][A-Za-z0-9_-]*\.sql$", re.I)
 PRISMA_NAME = re.compile(r"^(?P<id>\d{14})_[A-Za-z0-9][A-Za-z0-9_-]*$")
@@ -195,14 +196,14 @@ def validate_prisma(path: Path) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--adapter", required=True, choices=["alembic", "drizzle", "flyway", "prisma", "supabase"])
+    parser.add_argument("--adapter", required=True, choices=["alembic", "drizzle", "flyway", "prisma", "sequential-sql", "supabase"])
     parser.add_argument("--path", required=True, type=Path)
     parser.add_argument("--journal", type=Path)
     parser.add_argument("--baseline", type=Path, help="JSON allowlist for immutable historical duplicate groups")
     args = parser.parse_args(argv)
     allowed_duplicates: dict[str, list[str]] = {}
-    if args.baseline and args.adapter != "supabase":
-        print("Migration validation failed:\n- --baseline is supported only for the supabase adapter", file=sys.stderr)
+    if args.baseline and args.adapter not in {"sequential-sql", "supabase"}:
+        print("Migration validation failed:\n- --baseline is supported only for the sequential-sql and supabase adapters", file=sys.stderr)
         return 1
     if args.baseline:
         try:
@@ -223,13 +224,17 @@ def main(argv: list[str] | None = None) -> int:
     elif args.adapter == "prisma":
         errors = validate_prisma(args.path)
     else:
-        pattern = SUPABASE_NAME if args.adapter == "supabase" else FLYWAY_NAME
-        ignored = (".rollback.sql", ".down.sql") if args.adapter == "supabase" else ()
+        pattern = (
+            SEQUENTIAL_SQL_NAME if args.adapter == "sequential-sql"
+            else SUPABASE_NAME if args.adapter == "supabase"
+            else FLYWAY_NAME
+        )
+        ignored = ("_rollback.sql", "_down.sql", ".rollback.sql", ".down.sql") if args.adapter in {"sequential-sql", "supabase"} else ()
         errors = validate_names(
             args.path,
             pattern,
             ignored_suffixes=ignored,
-            allowed_duplicates=allowed_duplicates if args.adapter == "supabase" else None,
+            allowed_duplicates=allowed_duplicates if args.adapter in {"sequential-sql", "supabase"} else None,
         )
     if errors:
         print("Migration validation failed:", file=sys.stderr)
