@@ -7,7 +7,7 @@ Neon-hosted Postgres repositories may select `drizzle`, `prisma`, `alembic`, `fl
 documented custom applier uses numeric identifiers outside the Supabase CLI formats.
 
 ```yaml
-- uses: Manolii-org/ai-starter-pack/.github/actions/validate-database-migrations@<immutable-release-commit>
+- uses: Manolii-org/ai-starter-pack/.github/actions/validate-database-migrations@cd95a131fdd51ca1eebf4f84fa15005e15b982a2 # v1.12.2
   with:
     adapter: drizzle
     path: drizzle
