@@ -143,6 +143,31 @@ def test_emitter_rejects_ambiguous_v1_and_v2_migration_inputs(tmp_path):
     assert "mutually exclusive" in process.stderr
 
 
+def test_emitter_does_not_echo_invalid_migration_instance_values(tmp_path):
+    sentinel = "postgresql://user:super-secret@example.test/db"
+    evidence = tmp_path / "migration.json"
+    evidence.write_text(json.dumps({
+        "status": "success",
+        "adapter": "supabase-management-api-ledger",
+        "targets": [{
+            "database_id": sentinel,
+            "result": "success",
+            "expected_identifiers": [],
+            "applied_identifiers": [],
+        }],
+    }))
+    env = emitter_env(tmp_path)
+    env["INPUT_MIGRATION_EVIDENCE_FILE"] = str(evidence)
+
+    process = subprocess.run(
+        [sys.executable, str(EMITTER)], env=env, capture_output=True, text=True, timeout=30
+    )
+
+    assert process.returncode == 1
+    assert sentinel not in process.stderr
+    assert "database_id:pattern" in process.stderr
+
+
 @pytest.mark.parametrize("value", ["-1", "true", "1.5"])
 def test_emitter_rejects_invalid_migration_pending(tmp_path, value):
     env = emitter_env(tmp_path)
@@ -314,3 +339,11 @@ def test_both_examples_run_receipt_after_a_failed_smoke():
         condition = step["if"]
         assert "always()" in condition
         assert "!cancelled()" in condition
+
+
+def test_database_example_uses_v2_evidence_and_current_release():
+    examples = yaml.safe_load((ROOT / "docs/examples/held-promote-receipts.yml").read_text())
+    held = examples[0]
+    assert held["uses"].endswith("@v1.13.1")
+    assert "migration_evidence_file" in held["with"]
+    assert "migration_pending" not in held["with"]
