@@ -19,12 +19,12 @@ sharing the receipt and pin-SHA controls introduced in v1.10.0:
   with:
     sha: ${{ inputs.sha }}
 
-- uses: Manolii-org/ai-starter-pack/.github/actions/emit-deployment-receipt@v1.11.4
+- uses: Manolii-org/ai-starter-pack/.github/actions/emit-deployment-receipt@v1.13.1
   with:
     emit_when: alias-confirmed
     target_sha: ${{ steps.resolve.outputs.sha }}
     canonical_url: https://held.example.com
-    migration_pending: ${{ steps.migrations.outputs.pending_count }}
+    migration_evidence_file: ${{ steps.migrations.outputs.receipt_evidence_file }}
     verify_workflow: .github/workflows/smoke-prod.yml
     verify_result: ${{ steps.smoke.outcome }}
     promote_run_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

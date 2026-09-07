@@ -122,6 +122,21 @@ def build_receipt() -> dict:
     return receipt
 
 
+def validate_receipt(receipt: dict, schema: dict) -> None:
+    """Fail with paths and validators only; never echo receipt instance data."""
+    validator = jsonschema.Draft202012Validator(
+        schema,
+        format_checker=jsonschema.FormatChecker(),
+    )
+    errors = sorted(validator.iter_errors(receipt), key=lambda error: list(error.absolute_path))
+    if errors:
+        details = ", ".join(
+            f"{'.'.join(str(part) for part in error.absolute_path) or '<root>'}:{error.validator}"
+            for error in errors
+        )
+        raise ValueError(f"receipt violates schema at {details}")
+
+
 def main() -> int:
     try:
         receipt = build_receipt()
@@ -131,7 +146,7 @@ def main() -> int:
             else "deployment-receipt.schema.json"
         )
         schema = json.loads((Path(__file__).parent / schema_name).read_text())
-        jsonschema.validate(receipt, schema, format_checker=jsonschema.FormatChecker())
+        validate_receipt(receipt, schema)
         output = Path(os.environ.get("RECEIPT_OUTPUT", "deployment-receipt.json"))
         output.write_text(json.dumps(receipt, indent=2) + "\n")
         print(f"deployment receipt validates: {output}")
