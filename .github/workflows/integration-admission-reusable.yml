@@ -1,0 +1,237 @@
+name: Integration Admission (Reusable)
+
+# Portable deterministic combined-state planner/executor. The caller owns `on:` and must
+# pass the event's base/head SHAs. Commands are loaded from the trusted base ref, never from
+# the candidate's edited configuration, before candidate source is checked out for testing.
+
+on:
+  workflow_call:
+    inputs:
+      config_path:
+        type: string
+        default: config/integration-admission.json
+      base_sha:
+        type: string
+        required: true
+      head_sha:
+        type: string
+        required: true
+      installation_id:
+        type: string
+        required: true
+      accepted_producer:
+        type: string
+        required: true
+      pack_ref:
+        type: string
+        default: v1
+        description: Immutable pack tag recommended; moving v1 is supported for controlled rollout.
+      evidence_bundle_json:
+        type: string
+        default: '[]'
+        description: Provenance-validated evidence candidates supplied by a trusted caller/broker.
+      runs_on:
+        type: string
+        default: ubuntu-latest
+      shadow:
+        type: boolean
+        default: true
+      timeout_minutes:
+        type: number
+        default: 15
+    outputs:
+      plan:
+        value: ${{ jobs.plan.outputs.plan }}
+      verdict:
+        value: ${{ jobs.integration-admission.outputs.verdict }}
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    name: Integration Admission · plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      plan: ${{ steps.plan.outputs.plan }}
+      lanes: ${{ steps.plan.outputs.lanes }}
+      blocked: ${{ steps.plan.outputs.blocked }}
+      bootstrap: ${{ steps.trusted-config.outputs.bootstrap }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.head_sha }}
+          persist-credentials: false
+
+      - name: Hydrate admission engine from the pinned pack
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          repository: Manolii-org/ai-starter-pack
+          ref: ${{ inputs.pack_ref }}
+          path: .integration-admission-pack
+          sparse-checkout: scripts/ci/integration_admission.py
+          persist-credentials: false
+
+      - name: Build trusted configuration and evidence inputs
+        id: trusted-config
+        env:
+          BASE_SHA: ${{ inputs.base_sha }}
+          CONFIG_PATH: ${{ inputs.config_path }}
+          EVIDENCE_BUNDLE_JSON: ${{ inputs.evidence_bundle_json }}
+          SHADOW: ${{ inputs.shadow }}
+        shell: bash -euo pipefail {0}
+        run: |
+          if [[ ! "$BASE_SHA" =~ ^[0-9a-fA-F]{40}$ ]] || [[ ! "${{ inputs.head_sha }}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "::error::base_sha and head_sha must be full 40-character Git object IDs."
+            exit 1
+          fi
+          mkdir -p .integration-admission/evidence
+          if git cat-file -e "${BASE_SHA}:${CONFIG_PATH}" 2>/dev/null; then
+            git show "${BASE_SHA}:${CONFIG_PATH}" > .integration-admission/trusted-config.json
+            echo "bootstrap=false" >> "$GITHUB_OUTPUT"
+          elif [ "$SHADOW" = "true" ]; then
+            cp "$CONFIG_PATH" .integration-admission/trusted-config.json
+            echo "bootstrap=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::Base has no admission config; validating candidate config in non-executing bootstrap mode."
+          else
+            echo "::error::Base ref has no trusted admission config at ${CONFIG_PATH}. Bootstrap in shadow mode first."
+            exit 1
+          fi
+          printf '%s' "$EVIDENCE_BUNDLE_JSON" | python3 -c '
+          import json, pathlib, sys
+          value = json.load(sys.stdin)
+          if not isinstance(value, list):
+              raise SystemExit("evidence_bundle_json must be an array")
+          out = pathlib.Path(".integration-admission/evidence")
+          for index, item in enumerate(value):
+              if not isinstance(item, dict):
+                  raise SystemExit(f"evidence[{index}] must be an object")
+              (out / f"{index:04d}.json").write_text(json.dumps(item, sort_keys=True))
+          '
+          git diff --name-only -z "$BASE_SHA" "${{ inputs.head_sha }}" |
+            python3 -c 'import json,sys,pathlib; pathlib.Path(".integration-admission/changed.json").write_text(json.dumps([p.decode("utf-8", "surrogateescape") for p in sys.stdin.buffer.read().split(b"\0") if p]))'
+
+      - name: Plan admission
+        id: plan
+        env:
+          REPOSITORY: ${{ github.repository }}
+          INSTALLATION_ID: ${{ inputs.installation_id }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          ACCEPTED_PRODUCER: ${{ inputs.accepted_producer }}
+        shell: bash -euo pipefail {0}
+        run: |
+          TREE_OID=$(git rev-parse "${HEAD_SHA}^{tree}")
+          set +e
+          python3 .integration-admission-pack/scripts/ci/integration_admission.py \
+            --config .integration-admission/trusted-config.json --root . plan \
+            --changed-files-json .integration-admission/changed.json \
+            --evidence-dir .integration-admission/evidence \
+            --repository "$REPOSITORY" --installation-id "$INSTALLATION_ID" \
+            --tree-oid "$TREE_OID" --accepted-producer "$ACCEPTED_PRODUCER" \
+            --output .integration-admission/plan.json
+          status=$?
+          set -e
+          [ "$status" -eq 0 ] || [ "$status" -eq 2 ] || exit "$status"
+          plan=$(jq -c . .integration-admission/plan.json)
+          echo "plan=$plan" >> "$GITHUB_OUTPUT"
+          echo "lanes=$(jq -c '.lanes | to_entries | map({lane:.key, work:.value})' .integration-admission/plan.json)" >> "$GITHUB_OUTPUT"
+          echo "blocked=$(jq -r .blocked .integration-admission/plan.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload compact plan
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: integration-admission-plan-${{ inputs.head_sha }}
+          path: .integration-admission/plan.json
+          retention-days: 7
+
+  execute:
+    name: Integration Admission · ${{ matrix.item.lane }}
+    needs: plan
+    if: ${{ needs.plan.outputs.bootstrap != 'true' && needs.plan.outputs.blocked != 'true' && needs.plan.outputs.lanes != '[]' }}
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    strategy:
+      fail-fast: false
+      matrix:
+        item: ${{ fromJSON(needs.plan.outputs.lanes) }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.head_sha }}
+          persist-credentials: false
+
+      - name: Execute affected surfaces with shared lane setup
+        env:
+          WORK_JSON: ${{ toJSON(matrix.item.work) }}
+        shell: bash -euo pipefail {0}
+        run: |
+          printf '%s' "$WORK_JSON" | jq -e 'type == "array"' >/dev/null
+          count=$(printf '%s' "$WORK_JSON" | jq 'length')
+          for ((i=0; i<count; i++)); do
+            surface=$(printf '%s' "$WORK_JSON" | jq -r ".[${i}].surface")
+            directory=$(printf '%s' "$WORK_JSON" | jq -r ".[${i}].working_directory")
+            commands=$(printf '%s' "$WORK_JSON" | jq -c ".[${i}].commands")
+            echo "::group::Integration Admission surface: ${surface}"
+            command_count=$(printf '%s' "$commands" | jq 'length')
+            for ((j=0; j<command_count; j++)); do
+              command=$(printf '%s' "$commands" | jq -r ".[${j}]")
+              (cd "$directory" && bash -euo pipefail -c "$command")
+            done
+            echo "::endgroup::"
+          done
+
+  integration-admission:
+    name: Integration Admission
+    needs: [plan, execute]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      verdict: ${{ steps.verdict.outputs.verdict }}
+    steps:
+      - name: Publish aggregate verdict
+        id: verdict
+        env:
+          PLAN_RESULT: ${{ needs.plan.result }}
+          EXECUTE_RESULT: ${{ needs.execute.result }}
+          BLOCKED: ${{ needs.plan.outputs.blocked }}
+          SHADOW: ${{ inputs.shadow }}
+          BOOTSTRAP: ${{ needs.plan.outputs.bootstrap }}
+          PLAN_JSON: ${{ needs.plan.outputs.plan }}
+        shell: bash -euo pipefail {0}
+        run: |
+          if [ "$PLAN_RESULT" != "success" ]; then
+            echo "verdict=blocked_infrastructure" >> "$GITHUB_OUTPUT"
+            echo "::error::Admission planner did not complete successfully."
+            exit 1
+          fi
+          if [ "$BLOCKED" = "true" ]; then
+            echo "verdict=blocked_configuration" >> "$GITHUB_OUTPUT"
+            if [ "$SHADOW" = "true" ]; then
+              echo "::warning::Shadow admission found unmapped files; enforcement would block."
+              exit 0
+            fi
+            echo "::error::Admission found unmapped files."
+            exit 1
+          fi
+          if [ "$BOOTSTRAP" = "true" ]; then
+            echo "verdict=bootstrap_shadow" >> "$GITHUB_OUTPUT"
+            echo "::warning::Candidate config validated in bootstrap shadow mode; no candidate command executed."
+            exit 0
+          fi
+          if [ "$EXECUTE_RESULT" != "success" ] && [ "$EXECUTE_RESULT" != "skipped" ]; then
+            echo "verdict=executed_fail" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          if [ -z "$PLAN_JSON" ]; then
+            echo "verdict=blocked_evidence" >> "$GITHUB_OUTPUT"
+            echo "::error::Admission plan output is missing."
+            exit 1
+          fi
+          if [ "$(printf '%s' "$PLAN_JSON" | jq '.lanes | length')" -eq 0 ]; then
+            echo "verdict=reused_or_not_applicable" >> "$GITHUB_OUTPUT"
+          else
+            echo "verdict=executed_pass" >> "$GITHUB_OUTPUT"
+          fi

@@ -4,6 +4,11 @@
 
 ### Added
 
+- **Integration Admission foundation.** Add a deterministic reusable merge-candidate
+  planner that maps changes through declared surface dependencies, distinguishes exact-tree
+  from input-closure evidence reuse, groups required execution by runtime lane, reads command
+  authority from the trusted base ref, and publishes one stable aggregate. The reusable is
+  shadow-first and introduces no deployment trigger or secret requirement.
 - **Portable migration-tree validation.** Add a provider-neutral composite
   action for Drizzle journals, Alembic revision graphs, Supabase legacy/native
   identifiers, Prisma migration directories, and Flyway versions. Reviewed
