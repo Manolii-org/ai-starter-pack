@@ -40,6 +40,31 @@ def optional_nonnegative_integer(name: str) -> int | None:
     return int(value)
 
 
+def migration_evidence() -> dict | None:
+    """Load caller-produced v2 evidence without re-querying the database."""
+    value = os.environ.get("INPUT_MIGRATION_EVIDENCE_FILE", "").strip()
+    if not value:
+        return None
+    path = Path(value)
+    if path.stat().st_size > 1_000_000:
+        raise ValueError("migration_evidence_file exceeds 1 MB")
+    evidence = json.loads(path.read_text())
+    if not isinstance(evidence, dict):
+        raise ValueError("migration_evidence_file must contain a JSON object")
+    for index, target in enumerate(evidence.get("targets", [])):
+        if not isinstance(target, dict):
+            continue
+        if target.get("result") == "success" and set(target.get("expected_identifiers", [])) != set(target.get("applied_identifiers", [])):
+            raise ValueError(
+                f"migration target {index} reports success without identifier parity"
+            )
+        if target.get("result") == "inspection-unavailable" and target.get("applied_identifiers"):
+            raise ValueError(
+                f"migration target {index} cannot have applied identifiers when inspection is unavailable"
+            )
+    return evidence
+
+
 def build_receipt() -> dict:
     emit_when = required("INPUT_EMIT_WHEN")
     result = required("INPUT_VERIFY_RESULT")
@@ -68,8 +93,12 @@ def build_receipt() -> dict:
             "INPUT_PREVIOUS_DEPLOYMENT_ID", ""
         ).strip() or None,
     }
+    migration = migration_evidence()
+    migration_pending = optional_nonnegative_integer("INPUT_MIGRATION_PENDING")
+    if migration is not None and migration_pending is not None:
+        raise ValueError("migration_evidence_file and migration_pending are mutually exclusive")
     receipt = {
-        "schema_version": 1,
+        "schema_version": 2 if migration is not None else 1,
         "repo": repo,
         "target_sha": target_sha,
         "promoted_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -83,10 +112,11 @@ def build_receipt() -> dict:
         },
         "rollback": rollback,
     }
+    if migration is not None:
+        receipt["migration"] = migration
     live_origin = optional_url("INPUT_LIVE_ORIGIN")
     if live_origin is not None:
         receipt["live_origin"] = live_origin
-    migration_pending = optional_nonnegative_integer("INPUT_MIGRATION_PENDING")
     if migration_pending is not None:
         receipt["migration_pending"] = migration_pending
     return receipt
@@ -95,9 +125,12 @@ def build_receipt() -> dict:
 def main() -> int:
     try:
         receipt = build_receipt()
-        schema = json.loads(
-            (Path(__file__).parent / "deployment-receipt.schema.json").read_text()
+        schema_name = (
+            "deployment-receipt.v2.schema.json"
+            if receipt["schema_version"] == 2
+            else "deployment-receipt.schema.json"
         )
+        schema = json.loads((Path(__file__).parent / schema_name).read_text())
         jsonschema.validate(receipt, schema, format_checker=jsonschema.FormatChecker())
         output = Path(os.environ.get("RECEIPT_OUTPUT", "deployment-receipt.json"))
         output.write_text(json.dumps(receipt, indent=2) + "\n")

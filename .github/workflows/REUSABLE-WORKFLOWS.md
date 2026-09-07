@@ -41,6 +41,13 @@ schema-validates against its vendored receipt schema, uploads the artifact for
 When known, callers may preserve the non-negative migration backlog count with
 `migration_pending`; omitting it leaves the optional receipt field absent.
 
+Database-backed adapters should instead pass `migration_evidence_file`, pointing
+to a canonical v2 `migration` object produced by the adapter's existing ledger
+check. The action then emits and validates a v2 receipt. It never queries a
+database or starts another workflow, so adoption adds no deployment dispatch,
+approval, runner job, or duplicate smoke. `migration_pending` and
+`migration_evidence_file` are mutually exclusive.
+
 The caller owns ordering: alias/apex confirm, non-job-killing smoke, receipt
 action under `always() && !cancelled()`, then the final smoke-failure guard.
 For `deploy-succeeded`, call the action only when the real deploy step succeeded;
