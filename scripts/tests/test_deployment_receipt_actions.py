@@ -29,6 +29,7 @@ def emitter_env(tmp_path: Path, result: str = "success") -> dict[str, str]:
         "INPUT_LIVE_ORIGIN": "",
         "INPUT_PREVIOUS_DEPLOYMENT_ID": "dpl_previous",
         "INPUT_MIGRATION_PENDING": "",
+        "INPUT_MIGRATION_EVIDENCE_FILE": "",
         "INPUT_VERIFY_WORKFLOW": ".github/workflows/smoke-prod.yml",
         "INPUT_VERIFY_RESULT": result,
         "INPUT_VERIFY_RUN_URL": "https://github.com/o/r/actions/runs/2",
@@ -72,6 +73,74 @@ def test_emitter_preserves_optional_migration_pending(tmp_path, value, expected)
     assert process.returncode == 0, process.stderr
     receipt = json.loads((tmp_path / "deployment-receipt.json").read_text())
     assert receipt["migration_pending"] == expected
+
+
+def test_emitter_builds_v2_from_existing_migration_evidence(tmp_path):
+    evidence = tmp_path / "migration.json"
+    evidence.write_text(json.dumps({
+        "status": "success",
+        "adapter": "supabase-management-api-ledger",
+        "targets": [{
+            "database_id": "prod",
+            "result": "success",
+            "expected_identifiers": ["00198", "00199"],
+            "applied_identifiers": ["00198", "00199"],
+            "verification_run_url": "https://github.com/o/r/actions/runs/3",
+        }],
+    }))
+    env = emitter_env(tmp_path)
+    env["INPUT_MIGRATION_EVIDENCE_FILE"] = str(evidence)
+
+    process = subprocess.run(
+        [sys.executable, str(EMITTER)], env=env, capture_output=True, text=True, timeout=30
+    )
+
+    assert process.returncode == 0, process.stderr
+    receipt = json.loads((tmp_path / "deployment-receipt.json").read_text())
+    schema = json.loads(
+        (ROOT / ".github/actions/emit-deployment-receipt/deployment-receipt.v2.schema.json").read_text()
+    )
+    jsonschema.validate(receipt, schema, format_checker=jsonschema.FormatChecker())
+    assert receipt["schema_version"] == 2
+    assert receipt["migration"] == json.loads(evidence.read_text())
+
+
+def test_emitter_rejects_success_without_migration_identifier_parity(tmp_path):
+    evidence = tmp_path / "migration.json"
+    evidence.write_text(json.dumps({
+        "status": "success",
+        "adapter": "supabase-management-api-ledger",
+        "targets": [{
+            "database_id": "prod",
+            "result": "success",
+            "expected_identifiers": ["00199"],
+            "applied_identifiers": [],
+        }],
+    }))
+    env = emitter_env(tmp_path)
+    env["INPUT_MIGRATION_EVIDENCE_FILE"] = str(evidence)
+
+    process = subprocess.run(
+        [sys.executable, str(EMITTER)], env=env, capture_output=True, text=True, timeout=30
+    )
+
+    assert process.returncode == 1
+    assert "without identifier parity" in process.stderr
+
+
+def test_emitter_rejects_ambiguous_v1_and_v2_migration_inputs(tmp_path):
+    evidence = tmp_path / "migration.json"
+    evidence.write_text(json.dumps({"status": "not-applicable", "adapter": None, "targets": []}))
+    env = emitter_env(tmp_path)
+    env["INPUT_MIGRATION_PENDING"] = "0"
+    env["INPUT_MIGRATION_EVIDENCE_FILE"] = str(evidence)
+
+    process = subprocess.run(
+        [sys.executable, str(EMITTER)], env=env, capture_output=True, text=True, timeout=30
+    )
+
+    assert process.returncode == 1
+    assert "mutually exclusive" in process.stderr
 
 
 @pytest.mark.parametrize("value", ["-1", "true", "1.5"])

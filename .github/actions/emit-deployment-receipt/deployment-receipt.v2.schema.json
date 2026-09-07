@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/manolii-org/master/main/schemas/deployment-receipt.v2.schema.json",
+  "title": "Manolii deployment receipt v2",
+  "description": "Durable production-promotion evidence with explicit database migration applicability. Database identifiers are opaque metadata; SQL, DSNs, credentials, and client data are forbidden.",
+  "type": "object",
+  "required": ["schema_version", "repo", "target_sha", "promoted_at", "promote_run_url", "migration", "post_promote_verify", "rollback"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": 2},
+    "repo": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
+    "target_sha": {"type": "string", "minLength": 7, "maxLength": 64},
+    "promoted_at": {"type": "string", "format": "date-time"},
+    "gate_run_url": {"type": ["string", "null"], "format": "uri"},
+    "promote_run_url": {"type": "string", "format": "uri"},
+    "migration": {
+      "type": "object",
+      "required": ["status", "targets"],
+      "additionalProperties": false,
+      "properties": {
+        "status": {"enum": ["not-applicable", "not-run", "success", "partial", "failure", "inspection-unavailable"]},
+        "adapter": {"type": ["string", "null"], "minLength": 1},
+        "targets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["database_id", "result", "expected_identifiers", "applied_identifiers"],
+            "additionalProperties": false,
+            "properties": {
+              "database_id": {"type": "string", "pattern": "^[A-Za-z0-9_.:-]+$", "description": "Opaque non-secret identifier."},
+              "result": {"enum": ["success", "failure", "skipped", "inspection-unavailable"]},
+              "expected_identifiers": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 200}},
+              "applied_identifiers": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 200}},
+              "verification_run_url": {"type": ["string", "null"], "format": "uri"}
+            }
+          }
+        }
+      },
+      "allOf": [
+        {"if": {"properties": {"status": {"const": "not-applicable"}}}, "then": {"properties": {"adapter": {"type": "null"}, "targets": {"maxItems": 0}}}},
+        {"if": {"properties": {"status": {"enum": ["success", "partial", "failure"]}}}, "then": {"required": ["adapter"], "properties": {"adapter": {"type": "string"}, "targets": {"minItems": 1}}}},
+        {"if": {"properties": {"status": {"const": "success"}}}, "then": {"properties": {"targets": {"items": {"properties": {"result": {"const": "success"}}}}}}},
+        {"if": {"properties": {"status": {"const": "partial"}}}, "then": {"properties": {"targets": {"contains": {"properties": {"result": {"const": "success"}}}, "allOf": [{"contains": {"properties": {"result": {"enum": ["failure", "skipped", "inspection-unavailable"]}}}}]}}}},
+        {"if": {"properties": {"status": {"const": "failure"}}}, "then": {"properties": {"targets": {"contains": {"properties": {"result": {"const": "failure"}}}, "not": {"contains": {"properties": {"result": {"const": "success"}}}}}}}},
+        {"if": {"properties": {"status": {"const": "not-run"}}}, "then": {"required": ["adapter"], "properties": {"adapter": {"type": "string"}, "targets": {"maxItems": 0}}}},
+        {"if": {"properties": {"status": {"const": "inspection-unavailable"}}}, "then": {"required": ["adapter"], "properties": {"adapter": {"type": "string"}, "targets": {"minItems": 1, "items": {"properties": {"result": {"const": "inspection-unavailable"}}}}}}}
+      ]
+    },
+    "post_promote_verify": {
+      "type": "object",
+      "required": ["workflow", "result"],
+      "additionalProperties": false,
+      "properties": {
+        "workflow": {"type": "string", "minLength": 1},
+        "run_url": {"type": ["string", "null"], "format": "uri"},
+        "result": {"enum": ["success", "failure", "skipped"]}
+      }
+    },
+    "canonical_url": {"type": ["string", "null"]},
+    "live_origin": {"type": ["string", "null"], "format": "uri"},
+    "rollback": {
+      "type": "object",
+      "required": ["mode"],
+      "additionalProperties": false,
+      "properties": {
+        "mode": {"enum": ["alias-promote", "image-revert", "provider-rollback", "manual", "not-applicable"]},
+        "previous_deployment_id": {"type": ["string", "null"]}
+      }
+    }
+  }
+}
