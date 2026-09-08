@@ -200,3 +200,34 @@ def test_dependency_change_invalidates_composed_evidence(tmp_path: Path) -> None
     )
     assert plan["surfaces"]["api"]["verdict"] == "execution_required"
     assert set(plan["lanes"]) == {"node", "database"}
+
+
+def test_executable_mode_change_invalidates_composed_evidence(tmp_path: Path) -> None:
+    write_repo(tmp_path)
+    value = config()
+    files = module.git_files(tmp_path)
+    before = module.surface_input_digest(tmp_path, value, "api", files)
+    subprocess.run(
+        ["git", "update-index", "--chmod=+x", "api/a.py"], cwd=tmp_path, check=True
+    )
+    after = module.surface_input_digest(tmp_path, value, "api", module.git_files(tmp_path))
+    assert after != before
+
+
+def test_gitlink_oid_is_part_of_input_digest(tmp_path: Path) -> None:
+    write_repo(tmp_path)
+    value = config()
+    value["surfaces"]["api"]["paths"].append("vendor/**")
+    first = "1" * 40
+    second = "2" * 40
+    subprocess.run(
+        ["git", "update-index", "--add", "--cacheinfo", "160000", first, "vendor/lib"],
+        cwd=tmp_path, check=True,
+    )
+    before = module.surface_input_digest(tmp_path, value, "api", module.git_files(tmp_path))
+    subprocess.run(
+        ["git", "update-index", "--cacheinfo", "160000", second, "vendor/lib"],
+        cwd=tmp_path, check=True,
+    )
+    after = module.surface_input_digest(tmp_path, value, "api", module.git_files(tmp_path))
+    assert after != before

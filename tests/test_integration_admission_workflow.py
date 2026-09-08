@@ -25,6 +25,7 @@ def test_candidate_config_is_never_the_command_authority() -> None:
     assert "trusted-config.json" in text
     assert "repository: Manolii-org/ai-starter-pack" in text
     assert "${{ inputs.pack_ref }}" in text
+    assert "sparse-checkout-cone-mode: false" in text
     assert "bootstrap=true" in text
     assert "BOOTSTRAP" in text
     assert "full 40-character Git object IDs" in text

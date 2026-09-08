@@ -145,22 +145,37 @@ def affected_surfaces(config: dict[str, Any], changed: list[str]) -> tuple[set[s
     return closure, unknown
 
 
-def git_files(root: Path) -> list[str]:
+def git_files(root: Path) -> dict[str, tuple[str, str]]:
     proc = subprocess.run(
-        ["git", "ls-files", "-z"], cwd=root, capture_output=True, check=False
+        ["git", "ls-files", "--stage", "-z"], cwd=root, capture_output=True, check=False
     )
     if proc.returncode:
         raise AdmissionError(proc.stderr.decode(errors="replace").strip() or "git ls-files failed")
-    return [item.decode(errors="surrogateescape") for item in proc.stdout.split(b"\0") if item]
+    entries: dict[str, tuple[str, str]] = {}
+    for item in proc.stdout.split(b"\0"):
+        if not item:
+            continue
+        metadata, raw_path = item.split(b"\t", 1)
+        mode, oid, stage = metadata.decode("ascii").split()
+        if stage != "0":
+            raise AdmissionError("unmerged index entries cannot produce reusable evidence")
+        entries[raw_path.decode(errors="surrogateescape")] = (mode, oid)
+    return entries
 
 
-def file_digest(root: Path, patterns: list[str], files: list[str]) -> str:
+def file_digest(root: Path, patterns: list[str], files: dict[str, tuple[str, str]]) -> str:
     selected = sorted({path for path in files if any(matches(path, pattern) for pattern in patterns)})
     entries = []
     for relative in selected:
+        mode, object_oid = files[relative]
         path = root / relative
-        if path.is_file():
-            entries.append({"path": relative, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+        if mode in {"120000", "160000"}:
+            content_identity = {"git_object": object_oid}
+        elif path.is_file():
+            content_identity = {"sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+        else:
+            raise AdmissionError(f"tracked input is absent from the working tree: {relative}")
+        entries.append({"path": relative, "mode": mode, **content_identity})
     return canonical_digest(entries)
 
 
@@ -168,7 +183,10 @@ def contract_digest(config: dict[str, Any]) -> str:
     return canonical_digest({"engine_version": ENGINE_VERSION, "config": config})
 
 
-def surface_input_digest(root: Path, config: dict[str, Any], name: str, files: list[str]) -> str:
+def surface_input_digest(
+    root: Path, config: dict[str, Any], name: str,
+    files: dict[str, tuple[str, str]],
+) -> str:
     surfaces = config["surfaces"]
     influencers = {name}
     changed = True

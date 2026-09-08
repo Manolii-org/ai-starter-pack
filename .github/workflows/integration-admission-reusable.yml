@@ -72,6 +72,7 @@ jobs:
           ref: ${{ inputs.pack_ref }}
           path: .integration-admission-pack
           sparse-checkout: scripts/ci/integration_admission.py
+          sparse-checkout-cone-mode: false
           persist-credentials: false
 
       - name: Build trusted configuration and evidence inputs
