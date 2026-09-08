@@ -1,0 +1,9 @@
+{
+  "kind": "runtime_scaffold",
+  "product_version": "0.4.1",
+  "profile": "replace-with-owner-profile",
+  "release": "litellm-product/releases/0.4.1/release.json",
+  "runtime_app": "replace-with-owner-fly-app",
+  "runtime_owner": "replace-with-legal-entity",
+  "usage_accounting_entity": "replace-with-legal-entity"
+}

@@ -119,7 +119,9 @@ The 9-tier multi-model framework ships pre-configured. For Claude Code sessions 
 bash scripts/setup-litellm.sh
 ```
 
-The script deploys a LiteLLM proxy to Fly.io, pushes your API keys, smoke-tests all tiers, and sets `litellm_proxy.enabled=true` in `.claude/model-routing.json`. Then set `USE_LITELLM_PROXY=true` in your app environment. See `.claude/model-routing.md` for details.
+For new deployments, first download and verify the public provenance-attested product bundle as documented in `litellm-product/README.md`, then create an owner-controlled profile from `config/litellm-product-profile.example.json`. The checked `deploy/litellm-proxy/config.yaml` and `setup-litellm.sh` flow remain supported for existing consumers, but are deprecated as product sources. They use only the consumer's own Fly and provider credentials and never require access to a Manolii production deployment.
+
+The legacy script deploys a LiteLLM proxy to Fly.io, pushes your API keys, smoke-tests all tiers, and sets `litellm_proxy.enabled=true` in `.claude/model-routing.json`. Then set `USE_LITELLM_PROXY=true` in your app environment. See `.claude/model-routing.md` for details.
 
 ## Customization Points
 

@@ -1,0 +1,178 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://manolii.com/schemas/litellm-product-contract.schema.json",
+  "title": "LiteLLM product contract",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "product_version",
+    "canonical_runtime_source",
+    "invariants",
+    "core_aliases",
+    "modules",
+    "profiles",
+    "extensions",
+    "exceptions",
+    "release_states"
+  ],
+  "properties": {
+    "$schema": {"type": "string"},
+    "schema_version": {"const": 1},
+    "product_version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+    "status": {"enum": ["foundation", "active", "deprecated"]},
+    "canonical_runtime_source": {"type": "string", "minLength": 1},
+    "terminology": {"type": "object", "additionalProperties": {"type": "string", "minLength": 1}},
+    "invariants": {
+      "type": "object",
+      "required": ["restricted_is_no_ai", "proxy_opus_routes_forbidden", "secrets_cross_instance_forbidden", "config_attestation_required", "fallback_owners"],
+      "properties": {
+        "restricted_is_no_ai": {"const": true},
+        "proxy_opus_routes_forbidden": {"const": true},
+        "secrets_cross_instance_forbidden": {"const": true},
+        "config_attestation_required": {"const": true},
+        "fallback_owners": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"enum": ["proxy", "application", "none"]}
+        }
+      },
+      "additionalProperties": false
+    },
+    "core_aliases": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"$ref": "#/$defs/alias"}
+    },
+    "modules": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"$ref": "#/$defs/module"}
+    },
+    "profiles": {
+      "type": "object",
+      "required": ["manolii", "impaktful", "buro"],
+      "additionalProperties": {"$ref": "#/$defs/profile"}
+    },
+    "extensions": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/extension"}
+    },
+    "exceptions": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/exception"}
+    },
+    "release_states": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    }
+  },
+  "$defs": {
+    "alias": {
+      "type": "object",
+      "required": ["capability", "fallback_owner", "required_profiles"],
+      "properties": {
+        "capability": {"type": "string", "minLength": 1},
+        "fallback_owner": {"enum": ["proxy", "application", "none"]},
+        "required_profiles": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+        "required_modules": {"type": "array", "uniqueItems": true, "items": {"type": "string"}}
+      },
+      "additionalProperties": false
+    },
+    "module": {
+      "type": "object",
+      "required": ["class", "mandatory_profiles"],
+      "properties": {
+        "class": {"enum": ["compatibility", "cost", "efficiency", "observability", "safety"]},
+        "mandatory_profiles": {"type": "array", "uniqueItems": true, "items": {"type": "string"}}
+      },
+      "additionalProperties": false
+    },
+    "profile": {
+      "type": "object",
+      "required": ["kind", "served_entities", "model_policy", "extensions"],
+      "properties": {
+        "kind": {"enum": ["runtime", "logical"]},
+        "runtime_profile": {"type": "string"},
+        "served_entities": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
+        "deployment": {"type": "object"},
+        "source": {
+          "type": "object",
+          "required": ["repository", "path"],
+          "properties": {
+            "repository": {"type": "string", "pattern": "^[^/]+/[^/]+$"},
+            "path": {"type": "string", "minLength": 1}
+          },
+          "additionalProperties": false
+        },
+        "model_policy": {"enum": ["mixed", "oss_only", "named_proprietary_exceptions", "inherit_runtime_with_entity_attribution"]},
+        "denied_providers": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "attribution": {"$ref": "#/$defs/attribution"},
+        "enabled_modules": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+        "known_module_gaps": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+        "equivalent_controls": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/equivalent_control"}
+        },
+        "extensions": {"type": "array", "uniqueItems": true, "items": {"type": "string"}}
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {"properties": {"model_policy": {"const": "inherit_runtime_with_entity_attribution"}}, "required": ["model_policy"]},
+          "then": {"required": ["attribution"]}
+        }
+      ]
+    },
+    "attribution": {
+      "type": "object",
+      "required": ["field", "value"],
+      "properties": {
+        "field": {"type": "string", "minLength": 1},
+        "value": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "equivalent_control": {
+      "type": "object",
+      "required": ["module", "control", "owner", "evidence", "review_by"],
+      "properties": {
+        "module": {"type": "string", "minLength": 1},
+        "control": {"type": "string", "minLength": 1},
+        "owner": {"type": "string", "minLength": 1},
+        "evidence": {"type": "string", "minLength": 1},
+        "review_by": {"type": "string", "format": "date"}
+      },
+      "additionalProperties": false
+    },
+    "extension": {
+      "type": "object",
+      "required": ["owner", "aliases"],
+      "properties": {
+        "owner": {"type": "string", "minLength": 1},
+        "aliases": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
+        "proprietary_aliases": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+        "fallback_owner": {"enum": ["proxy", "application", "none"]}
+      },
+      "additionalProperties": false
+    },
+    "exception": {
+      "type": "object",
+      "required": ["id", "profile", "policy", "model_family", "providers", "aliases", "workload", "owner", "evidence", "review_by"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "profile": {"type": "string", "minLength": 1},
+        "policy": {"const": "named_proprietary_exceptions"},
+        "model_family": {"type": "string", "minLength": 1},
+        "providers": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "aliases": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
+        "workload": {"type": "string", "minLength": 1},
+        "owner": {"type": "string", "minLength": 1},
+        "evidence": {"type": "string", "minLength": 1},
+        "review_by": {"type": "string", "format": "date"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

@@ -4,6 +4,11 @@
 
 ### Added
 
+- **Provenance-attested LiteLLM product releases.** Publish deterministic, SHA-256
+  checked public product bundles from immutable canonical source revisions. Consumers
+  can verify both checksum and GitHub build provenance without a Manolii production or
+  private-repository credential, then create an independently owned runtime profile.
+
 - **Integration Admission foundation.** Add a deterministic reusable merge-candidate
   planner that maps changes through declared surface dependencies, distinguishes exact-tree
   from input-closure evidence reuse, groups required execution by runtime lane, reads command
@@ -45,6 +50,12 @@
   run for every pushed commit.
 
 ### Upgrade note
+
+- The full `deploy/litellm-proxy/config.yaml` remains available for existing consumers
+  but is no longer a canonical product source. New deployments should consume the
+  versioned product bundle and profile scaffold. Existing deployments must qualify
+  aliases, callbacks, controls and rollback before migrating; there is no flag-day
+  replacement.
 
 - Feature flags now govern file presence, not only recorded configuration.
   Before `copier update`, enable any flag whose optional files a consumer uses;

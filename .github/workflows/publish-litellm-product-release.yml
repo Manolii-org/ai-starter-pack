@@ -1,0 +1,71 @@
+name: Publish LiteLLM Product Release
+
+on:
+  push:
+    tags:
+      - 'litellm-product-v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Product version already committed under litellm-product/releases
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Resolve and validate version
+        id: release
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "push" ]; then
+            version="${REF_NAME#litellm-product-v}"
+            [ "$version" != "$REF_NAME" ] || { echo "Unexpected release tag: $REF_NAME" >&2; exit 1; }
+          else
+            version="$INPUT_VERSION"
+          fi
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid product version" >&2; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=litellm-product-v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build deterministic asset
+        run: python3 scripts/build-litellm-product-asset.py --version '${{ steps.release.outputs.version }}'
+
+      - name: Attest asset provenance
+        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        with:
+          subject-path: dist/litellm-product-${{ steps.release.outputs.version }}.tar.gz
+
+      - name: Publish public release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            git fetch --tags origin "$TAG"
+            [ "$(git rev-parse "$TAG^{commit}")" = "$GITHUB_SHA" ] || {
+              echo "Manual publication must run at the existing release tag commit" >&2
+              exit 1
+            }
+          fi
+          gh release create "$TAG" \
+            "dist/litellm-product-$VERSION.tar.gz" \
+            "dist/litellm-product-$VERSION.tar.gz.sha256" \
+            --verify-tag \
+            --title "LiteLLM Product $VERSION" \
+            --notes "Provenance-attested, non-secret canonical product source bundle. Verify with: gh attestation verify litellm-product-$VERSION.tar.gz --repo $GITHUB_REPOSITORY"
