@@ -108,6 +108,7 @@ env:
 | **pr-assessment-reusable** | `provider_mode=anthropic`, `litellm_proxy_url`, `model`, `runs_on`, `pack_ref=v1`, `trusted_sync_author_id` | `ANTHROPIC_API_KEY` (anthropic mode) or `LITELLM_MASTER_KEY` (proxy mode) |
 | **pr-autofix-loop-reusable** | `provider_mode=anthropic`, `litellm_proxy_url`, `model`, `runs_on=ubuntu-latest` (hosted control-plane — do not use shared Fly CI), `max_successful_fixes=1` | `ANTHROPIC_API_KEY` (anthropic) or `LITELLM_MASTER_KEY` (proxy); `GH_PAT` optional |
 | **fast-tier-reusable** | `gates` (JSON, required), `budget_minutes=5`, `job_timeout_minutes=15`, `runs_on`, `max_parallel=10`, `checkout_fetch_depth=0` | none |
+| **integration-admission-reusable** | `config_path`, `base_sha`, `head_sha`, `installation_id`, `accepted_producer`, `pack_ref=v1`, `evidence_bundle_json=[]`, `runs_on`, `shadow=true`, `timeout_minutes=15` | none |
 | **pre-production-tier-reusable** | `gates` (JSON, required), `budget_minutes=45`, `job_timeout_minutes=60`, `runs_on`, `max_parallel=4`, `environment`, `checkout_fetch_depth=0`, `open_issue_on_failure=false` | `GATE_SECRETS` (optional) |
 | **tier-gate-summary-reusable** | `gate_name` (required), `applies` (required), `tier=fast`, `command`, `skip_reason`, `setup_command`, `runs_on`, `working_directory`, `timeout_minutes=10`, `checkout_fetch_depth=0` | none |
 
