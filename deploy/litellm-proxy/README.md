@@ -1,4 +1,11 @@
-# LiteLLM Proxy — Deploy Pattern (No Custom Image)
+# LiteLLM Proxy — Legacy Effective-config Example
+
+> **Deprecated as a product source.** This full effective config remains supported for
+> existing onboarding, but it is not canonical. New consumers must start from the
+> provenance-attested release in `litellm-product/README.md`, create an owner profile
+> from `config/litellm-product-profile.example.json`, and validate their independently
+> owned effective config. No Manolii deployment or private-repository credential is
+> required.
 
 This directory deploys the multi-model routing proxy to Fly.io using the
 **pinned public upstream image** plus **deploy-time file injection** — there is

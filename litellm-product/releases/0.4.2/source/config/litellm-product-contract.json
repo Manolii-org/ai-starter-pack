@@ -1,0 +1,336 @@
+{
+  "$schema": "../schemas/litellm-product-contract.schema.json",
+  "schema_version": 1,
+  "product_version": "0.4.2",
+  "status": "active",
+  "canonical_runtime_source": "deploy/litellm-proxy",
+  "terminology": {
+    "aligned": "same product release with no unapproved or expired deviations",
+    "capability_equivalent": "an alias satisfies the same behavioral contract although its backend may differ",
+    "instance": "one deployed runtime and its isolated credentials",
+    "logical_profile": "consumer policy that shares another profile's runtime",
+    "named_proprietary_exceptions": "proprietary routes are denied except for enumerated workload-scoped exceptions"
+  },
+  "invariants": {
+    "restricted_is_no_ai": true,
+    "proxy_opus_routes_forbidden": true,
+    "secrets_cross_instance_forbidden": true,
+    "config_attestation_required": true,
+    "fallback_owners": [
+      "proxy",
+      "application",
+      "none"
+    ]
+  },
+  "core_aliases": {
+    "tier-0-oss-heavy": {
+      "capability": "long agentic and reasoning workloads",
+      "fallback_owner": "proxy",
+      "required_profiles": [
+        "manolii",
+        "buro"
+      ]
+    },
+    "tier-1-fast": {
+      "capability": "low-latency single-step text generation",
+      "fallback_owner": "proxy",
+      "required_profiles": [
+        "manolii",
+        "buro"
+      ]
+    },
+    "tier-2-agentic": {
+      "capability": "multi-step tool and agent workflows",
+      "fallback_owner": "proxy",
+      "required_profiles": [
+        "manolii",
+        "buro"
+      ]
+    },
+    "tier-3-tool": {
+      "capability": "high-density structured tool calling",
+      "fallback_owner": "proxy",
+      "required_profiles": [
+        "manolii",
+        "buro"
+      ]
+    },
+    "tier-4-extract": {
+      "capability": "bounded extraction and transformation",
+      "fallback_owner": "proxy",
+      "required_profiles": [
+        "manolii",
+        "buro"
+      ]
+    },
+    "tier-5-latency": {
+      "capability": "lowest-latency non-critical text work",
+      "fallback_owner": "proxy",
+      "required_profiles": [
+        "manolii",
+        "buro"
+      ]
+    },
+    "claude-haiku-4-5-20251001": {
+      "capability": "Claude-client compatibility alias for the fast OSS tier",
+      "fallback_owner": "proxy",
+      "required_profiles": [
+        "manolii",
+        "buro"
+      ]
+    },
+    "haiku": {
+      "capability": "Short Claude-client compatibility alias for the fast OSS tier",
+      "fallback_owner": "proxy",
+      "required_profiles": [
+        "manolii",
+        "buro"
+      ]
+    },
+    "claude-sonnet-4-6": {
+      "capability": "Current Claude-client compatibility alias for guardrailed reasoning",
+      "fallback_owner": "proxy",
+      "required_profiles": [
+        "manolii",
+        "buro"
+      ],
+      "required_modules": [
+        "advisor_guard"
+      ]
+    },
+    "tier-0-sonnet": {
+      "capability": "Legacy compatibility alias for guardrailed reasoning",
+      "fallback_owner": "proxy",
+      "required_profiles": [
+        "manolii",
+        "buro"
+      ],
+      "required_modules": [
+        "advisor_guard"
+      ]
+    },
+    "sonnet": {
+      "capability": "guardrailed reasoning and critic workloads",
+      "fallback_owner": "proxy",
+      "required_profiles": [
+        "manolii",
+        "buro"
+      ],
+      "required_modules": [
+        "advisor_guard"
+      ]
+    }
+  },
+  "modules": {
+    "advisor_guard": {
+      "class": "safety",
+      "mandatory_profiles": [
+        "manolii",
+        "buro"
+      ]
+    },
+    "authentication_fail_fast": {
+      "class": "safety",
+      "mandatory_profiles": [
+        "manolii",
+        "buro"
+      ]
+    },
+    "budget_guard": {
+      "class": "cost",
+      "mandatory_profiles": [
+        "manolii",
+        "buro"
+      ]
+    },
+    "cache_affinity": {
+      "class": "efficiency",
+      "mandatory_profiles": []
+    },
+    "data_sensitivity_guard": {
+      "class": "safety",
+      "mandatory_profiles": [
+        "manolii",
+        "buro"
+      ]
+    },
+    "error_reporting": {
+      "class": "observability",
+      "mandatory_profiles": [
+        "manolii",
+        "buro"
+      ]
+    },
+    "openai_compat_sanitize": {
+      "class": "compatibility",
+      "mandatory_profiles": [
+        "manolii",
+        "buro"
+      ]
+    },
+    "stream_monitoring": {
+      "class": "observability",
+      "mandatory_profiles": []
+    },
+    "usage_telemetry": {
+      "class": "observability",
+      "mandatory_profiles": [
+        "manolii",
+        "buro"
+      ]
+    },
+    "product_attestation": {
+      "class": "observability",
+      "mandatory_profiles": [
+        "manolii",
+        "buro"
+      ]
+    }
+  },
+  "profiles": {
+    "manolii": {
+      "kind": "runtime",
+      "served_entities": [
+        "manolii",
+        "impaktful"
+      ],
+      "deployment": {
+        "fly_app": "manolii-litellm",
+        "region": "lax",
+        "credential_scope": "manolii:master/prd"
+      },
+      "source": {
+        "repository": "manolii-org/master",
+        "path": "deploy/litellm-proxy/config.yaml"
+      },
+      "model_policy": "mixed",
+      "enabled_modules": [
+        "advisor_guard",
+        "authentication_fail_fast",
+        "budget_guard",
+        "cache_affinity",
+        "data_sensitivity_guard",
+        "error_reporting",
+        "openai_compat_sanitize",
+        "product_attestation",
+        "stream_monitoring",
+        "usage_telemetry"
+      ],
+      "extensions": [
+        "manolii_candidates",
+        "cursor_composer"
+      ]
+    },
+    "impaktful": {
+      "kind": "logical",
+      "runtime_profile": "manolii",
+      "served_entities": [
+        "impaktful"
+      ],
+      "model_policy": "inherit_runtime_with_entity_attribution",
+      "attribution": {
+        "field": "usage_accounting_entity",
+        "value": "impaktful"
+      },
+      "extensions": []
+    },
+    "buro": {
+      "kind": "runtime",
+      "served_entities": [
+        "buro"
+      ],
+      "deployment": {
+        "fly_app": "buro-litellm",
+        "region": "syd",
+        "credential_scope": "buro-built:buro-litellm/prd"
+      },
+      "source": {
+        "repository": "Buro-Built/buromaster",
+        "path": "deploy/litellm-proxy/config.yaml"
+      },
+      "model_policy": "named_proprietary_exceptions",
+      "denied_providers": [
+        "anthropic"
+      ],
+      "enabled_modules": [
+        "advisor_guard",
+        "authentication_fail_fast",
+        "budget_guard",
+        "cache_affinity",
+        "error_reporting",
+        "openai_compat_sanitize",
+        "data_sensitivity_guard",
+        "product_attestation"
+      ],
+      "known_module_gaps": [],
+      "equivalent_controls": [
+        {
+          "module": "usage_telemetry",
+          "control": "content-free Langfuse usage telemetry with mandatory entity:buro metadata",
+          "owner": "Buro",
+          "evidence": "Buro proxy disables message logging and injects entity:buro on every request; deployment smoke verifies the production profile",
+          "review_by": "2026-12-07"
+        }
+      ],
+      "extensions": [
+        "buro_ensombl"
+      ]
+    }
+  },
+  "extensions": {
+    "manolii_candidates": {
+      "owner": "manolii",
+      "aliases": [
+        "candidate-glm53-heavy",
+        "candidate-glm53-tool",
+        "candidate-luna-critic",
+        "candidate-luna-vision"
+      ]
+    },
+    "cursor_composer": {
+      "owner": "manolii",
+      "aliases": [
+        "composer-2.5",
+        "tier-2-agentic-composer25"
+      ]
+    },
+    "buro_ensombl": {
+      "owner": "buro",
+      "aliases": [
+        "tier-review",
+        "ensombl-review-luna"
+      ],
+      "proprietary_aliases": [
+        "ensombl-review-luna"
+      ],
+      "fallback_owner": "application"
+    }
+  },
+  "exceptions": [
+    {
+      "id": "buro-ensombl-openai-luna",
+      "profile": "buro",
+      "policy": "named_proprietary_exceptions",
+      "model_family": "openai/gpt-5.6-luna",
+      "providers": [
+        "openai"
+      ],
+      "aliases": [
+        "ensombl-review-luna"
+      ],
+      "workload": "Ensombl editorial JSON review",
+      "owner": "Buro",
+      "evidence": "Buro production Luna qualification and candidate-retirement decision dated 2026-09-07",
+      "review_by": "2026-10-07"
+    }
+  ],
+  "release_states": [
+    "not_applicable",
+    "planned",
+    "deployed_unverified",
+    "verified",
+    "held_by_exception",
+    "rolled_back",
+    "blocked_on_human"
+  ]
+}
