@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 from pathlib import Path
+
+import yaml
 
 from litellm.integrations.custom_logger import CustomLogger
 from litellm.proxy._types import UserAPIKeyAuth
@@ -36,9 +39,36 @@ def load_attestation(path: Path | None = None) -> dict:
     return value
 
 
+def verify_attested_sources(attestation: dict, config_path: Path | None = None) -> None:
+    """Fail closed unless the running config and callback bundle match the receipt."""
+    target = config_path or Path(
+        os.environ.get("LITELLM_PRODUCT_CONFIG_PATH", str(Path(__file__).resolve().with_name("config.yaml")))
+    )
+    config = yaml.safe_load(target.read_text(encoding="utf-8"))
+    if not isinstance(config, dict):
+        raise ValueError("LiteLLM product config must be a YAML object")
+    config_bytes = json.dumps(config, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    config_digest = hashlib.sha256(config_bytes).hexdigest()
+    if config_digest != attestation["config_sha256"]:
+        raise ValueError("LiteLLM product config digest does not match attestation")
+
+    callbacks = sorted(set(config.get("litellm_settings", {}).get("callbacks", [])))
+    bundle = hashlib.sha256(config_bytes)
+    source_dir = Path(__file__).resolve().parent
+    for callback in callbacks:
+        module = callback.split(".", 1)[0]
+        callback_path = source_dir / f"{module}.py"
+        if not callback_path.is_file():
+            raise ValueError(f"configured callback source is missing: {callback_path.name}")
+        bundle.update(callback_path.name.encode() + b"\0" + callback_path.read_bytes())
+    if bundle.hexdigest() != attestation["bundle_sha256"]:
+        raise ValueError("LiteLLM product callback bundle digest does not match attestation")
+
+
 class ProductAttestation(CustomLogger):
     def __init__(self) -> None:
         self.attestation = load_attestation()
+        verify_attested_sources(self.attestation)
         expected = os.environ.get("LITELLM_PRODUCT_PROFILE")
         if expected and self.attestation["profile"] != expected:
             raise ValueError(

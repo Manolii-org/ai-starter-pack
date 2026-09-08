@@ -81,8 +81,9 @@ def build_attestation(
     for callback in callbacks:
         module = callback.split(".", 1)[0]
         path = source_dir / f"{module}.py"
-        if path.is_file():
-            callback_files.append(path)
+        if not path.is_file():
+            raise ValueError(f"configured callback source is missing: {path.name}")
+        callback_files.append(path)
 
     config_bytes = _canonical_bytes(proxy_config)
     bundle = hashlib.sha256(config_bytes)

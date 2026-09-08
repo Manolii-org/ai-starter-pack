@@ -1,9 +1,32 @@
 {
-  "kind": "runtime_scaffold",
-  "product_version": "0.4.1",
+  "product_version": "0.4.2",
   "profile": "replace-with-owner-profile",
-  "release": "litellm-product/releases/0.4.1/release.json",
-  "runtime_app": "replace-with-owner-fly-app",
-  "runtime_owner": "replace-with-legal-entity",
-  "usage_accounting_entity": "replace-with-legal-entity"
+  "release": "litellm-product/releases/0.4.2/release.json",
+  "profile_definition": {
+    "deployment": {
+      "credential_scope": "replace-with-owner-secret-scope",
+      "fly_app": "replace-with-owner-fly-app",
+      "region": "replace-with-approved-region"
+    },
+    "enabled_modules": [
+      "advisor_guard",
+      "authentication_fail_fast",
+      "budget_guard",
+      "cache_affinity",
+      "data_sensitivity_guard",
+      "error_reporting",
+      "openai_compat_sanitize",
+      "product_attestation",
+      "stream_monitoring",
+      "usage_telemetry"
+    ],
+    "extensions": [],
+    "kind": "runtime",
+    "model_policy": "mixed",
+    "served_entities": ["replace-with-legal-entity"],
+    "source": {
+      "path": "deploy/litellm-proxy/config.yaml",
+      "repository": "replace-with-owner-repository"
+    }
+  }
 }

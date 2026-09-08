@@ -13,23 +13,38 @@ SPEC.loader.exec_module(MODULE)
 
 
 def test_checked_release_is_valid_and_profile_matches():
-    release_dir, metadata = MODULE.load_release("0.4.1")
+    release_dir, metadata = MODULE.load_release("0.4.2")
     MODULE.validate_release(release_dir, metadata)
     profile = json.loads((ROOT / "config/litellm-product-profile.example.json").read_text())
     assert profile["product_version"] == metadata["product_version"]
-    assert profile["release"] == "litellm-product/releases/0.4.1/release.json"
+    assert profile["release"] == "litellm-product/releases/0.4.2/release.json"
 
 
 def test_asset_is_deterministic(tmp_path):
-    release_dir, metadata = MODULE.load_release("0.4.1")
+    release_dir, metadata = MODULE.load_release("0.4.2")
     first = tmp_path / "first.tar.gz"
     second = tmp_path / "second.tar.gz"
     assert MODULE.build_asset(release_dir, metadata, first) == MODULE.build_asset(release_dir, metadata, second)
     assert first.read_bytes() == second.read_bytes()
 
 
+def test_asset_excludes_unvalidated_sibling(tmp_path):
+    release_dir, metadata = MODULE.load_release("0.4.2")
+    import shutil
+
+    copied = tmp_path / "release"
+    shutil.copytree(release_dir, copied)
+    (copied / "internal-note.txt").write_text("must not ship")
+    asset = tmp_path / "asset.tar.gz"
+    MODULE.build_asset(copied, metadata, asset)
+    import tarfile
+
+    with tarfile.open(asset) as archive:
+        assert all(not name.endswith("internal-note.txt") for name in archive.getnames())
+
+
 def test_source_drift_fails_closed(tmp_path):
-    release_dir, metadata = MODULE.load_release("0.4.1")
+    release_dir, metadata = MODULE.load_release("0.4.2")
     copied = tmp_path / "release"
     import shutil
 
@@ -45,6 +60,6 @@ def test_source_drift_fails_closed(tmp_path):
 
 
 def test_manifest_digest_is_pinned():
-    release_dir, metadata = MODULE.load_release("0.4.1")
+    release_dir, metadata = MODULE.load_release("0.4.2")
     content = (release_dir / "source/config/litellm-product-source-manifest.json").read_bytes()
     assert hashlib.sha256(content).hexdigest() == metadata["manifest_sha256"]

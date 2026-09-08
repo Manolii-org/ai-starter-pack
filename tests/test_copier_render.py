@@ -247,10 +247,10 @@ def test_feature_flags_gate_optional_surfaces(default_render):
     ("flags", "expected"),
     [
         ({}, {"Hooks": 5, "Commands": 45, "Skills": 24, "Agents": 26,
-              "Scripts": 35, "Husky": 3, "CI": 29, "Docs": 13}),
+              "Scripts": 36, "Husky": 3, "CI": 29, "Docs": 13}),
         ({flag: "true" for flag in FEATURE_FLAGS},
          {"Hooks": 5, "Commands": 48, "Skills": 28, "Agents": 27,
-              "Scripts": 35, "Husky": 3, "CI": 29, "Docs": 15}),
+              "Scripts": 36, "Husky": 3, "CI": 29, "Docs": 15}),
     ],
 )
 def test_rendered_readme_counts_match_rendered_tree(flags, expected):

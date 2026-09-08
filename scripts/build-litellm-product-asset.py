@@ -74,9 +74,16 @@ def validate_release(release_dir: Path, metadata: dict[str, object]) -> None:
 
 def build_asset(release_dir: Path, metadata: dict[str, object], output: Path) -> str:
     validate_release(release_dir, metadata)
+    files = metadata["files"]
+    assert isinstance(files, dict)
+    included = [
+        release_dir / "release.json",
+        release_dir / "source/config/litellm-product-source-manifest.json",
+        *(release_dir / "source" / name for name in files),
+    ]
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w", format=tarfile.PAX_FORMAT) as archive:
-        for path in sorted(p for p in release_dir.rglob("*") if p.is_file()):
+        for path in sorted(included):
             relative = path.relative_to(release_dir)
             info = tarfile.TarInfo(f"litellm-product-{metadata['product_version']}/{relative.as_posix()}")
             content = path.read_bytes()

@@ -56,13 +56,11 @@ jobs:
           VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
-          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
-            git fetch --tags origin "$TAG"
-            [ "$(git rev-parse "$TAG^{commit}")" = "$GITHUB_SHA" ] || {
-              echo "Manual publication must run at the existing release tag commit" >&2
-              exit 1
-            }
-          fi
+          git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
+          [ "$(git rev-parse "$TAG^{commit}")" = "$GITHUB_SHA" ] || {
+            echo "Release tag no longer targets the workflow commit" >&2
+            exit 1
+          }
           gh release create "$TAG" \
             "dist/litellm-product-$VERSION.tar.gz" \
             "dist/litellm-product-$VERSION.tar.gz.sha256" \

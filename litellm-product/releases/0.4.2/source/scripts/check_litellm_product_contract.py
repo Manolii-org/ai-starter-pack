@@ -354,10 +354,21 @@ def profile_source_findings(
             if exception.get("profile") == profile_name
             for alias in exception.get("aliases", [])
         }
-        for item in model_entries:
-            alias = item.get("model_name")
-            exception = exception_by_alias.get(alias)
-            if exception is None:
+        entries_by_alias = {item.get("model_name"): item for item in model_entries}
+        router_aliases = proxy_config.get("router_settings", {}).get("model_group_alias", {}) or {}
+        for alias, exception in exception_by_alias.items():
+            terminal_alias = alias
+            visited: set[str] = set()
+            while terminal_alias in router_aliases:
+                if terminal_alias in visited:
+                    errors.append(f"profile {profile_name}: router alias cycle while resolving exception {alias!r}")
+                    terminal_alias = ""
+                    break
+                visited.add(terminal_alias)
+                terminal_alias = str(router_aliases[terminal_alias])
+            item = entries_by_alias.get(terminal_alias)
+            if item is None:
+                errors.append(f"profile {profile_name}: exception alias {alias!r} has no terminal model entry")
                 continue
             params = item["litellm_params"]
             provider = _transport_provider(params)
@@ -366,7 +377,7 @@ def profile_source_findings(
             allowed_models = {family, *(f"{candidate}/{family}" for candidate in exception["providers"])}
             if provider not in exception["providers"] or model not in allowed_models:
                 errors.append(
-                    f"profile {profile_name}: exception alias {alias!r} uses unapproved "
+                    f"profile {profile_name}: exception alias {alias!r} resolves to {terminal_alias!r} with unapproved "
                     f"provider/model {provider!r}/{model!r}"
                 )
 

@@ -1,7 +1,7 @@
 {
   "$schema": "../schemas/litellm-product-contract.schema.json",
   "schema_version": 1,
-  "product_version": "0.4.1",
+  "product_version": "0.4.2",
   "status": "active",
   "canonical_runtime_source": "deploy/litellm-proxy",
   "terminology": {
