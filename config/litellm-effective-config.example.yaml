@@ -1,0 +1,17 @@
+# Honest owner-owned effective-config scaffold.
+# This is not a Manolii or Buro production export. Replace every backend with
+# routes your legal entity has approved. Do not copy another entity's config.yaml.
+model_list:
+  - model_name: tier-1-fast
+    litellm_params:
+      model: owner-approved-provider/owner-approved-model
+  - model_name: tier-2-agentic
+    litellm_params:
+      model: owner-approved-provider/owner-approved-model
+  - model_name: sonnet
+    litellm_params:
+      model: owner-approved-provider/owner-approved-model
+router_settings:
+  model_group_alias: {}
+litellm_settings:
+  callbacks: []

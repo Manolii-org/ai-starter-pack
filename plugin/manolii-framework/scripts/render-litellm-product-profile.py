@@ -24,8 +24,31 @@ def render(contract: dict, scaffold: dict) -> dict:
         raise ValueError("contract profiles must be an object")
     if profile in profiles:
         raise ValueError(f"profile already exists in contract: {profile}")
+    scaffold_version = scaffold.get("product_version")
+    contract_version = contract.get("product_version")
+    if scaffold_version is not None and scaffold_version != contract_version:
+        raise ValueError(
+            f"scaffold product_version {scaffold_version!r} does not match contract {contract_version!r}"
+        )
+    kind = definition.get("kind")
+    if kind == "logical":
+        runtime = definition.get("runtime_profile")
+        if not isinstance(runtime, str) or runtime not in profiles:
+            raise ValueError("logical profile must name an existing runtime_profile")
     rendered = copy.deepcopy(contract)
     rendered["profiles"][profile] = copy.deepcopy(definition)
+    if kind == "runtime":
+        core = rendered.get("core_aliases")
+        if not isinstance(core, dict):
+            raise ValueError("contract core_aliases must be an object")
+        for spec in core.values():
+            if not isinstance(spec, dict):
+                continue
+            required = spec.get("required_profiles")
+            if not isinstance(required, list):
+                raise ValueError("core alias required_profiles must be an array")
+            if profile not in required:
+                spec["required_profiles"] = [*required, profile]
     return rendered
 
 

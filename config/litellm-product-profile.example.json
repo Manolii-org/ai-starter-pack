@@ -1,7 +1,7 @@
 {
-  "product_version": "0.4.2",
+  "product_version": "0.4.3",
   "profile": "replace-with-owner-profile",
-  "release": "litellm-product/releases/0.4.2/release.json",
+  "release": "litellm-product/releases/0.4.3/release.json",
   "profile_definition": {
     "deployment": {
       "credential_scope": "replace-with-owner-secret-scope",
