@@ -1,0 +1,15 @@
+{
+  "asset": "litellm-product-0.4.3.tar.gz",
+  "files": {
+    "config/litellm-product-contract.json": "280a56894a791c6c4719a0a9dd72ec72c086a26edf37a29d1e7fb24aa948c24d",
+    "deploy/litellm-proxy/product_attestation.py": "c0143bee279da6243120b6ff2f0c7a86ef7bf7440a7d3e699ed7e979a38a182f",
+    "schemas/litellm-product-contract.schema.json": "91670b14ffc145a51696209dfdfe0c41d06b89ce849b822fc2991666747b78d1",
+    "scripts/build_litellm_product_release.py": "c061f4a3304f0e2e1ebf815198aa799c3a1dc5f390e63cf4b988273ea8e46a34",
+    "scripts/check_litellm_product_contract.py": "9370121eb659be9b14e7b88db0e900b9355f7c173ec0bf05921d7dc79d7299b4"
+  },
+  "manifest_sha256": "972cb6dc067e15bbd1b76bd124f0759bd63bff99eeea81b3f77b0b216e714eb9",
+  "product_version": "0.4.3",
+  "schema_version": 1,
+  "source_repository": "Manolii-org/master",
+  "source_revision": "ab78c746adf228f0a4475dac4b3b30a0f76a3101"
+}

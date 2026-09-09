@@ -9,27 +9,31 @@ build-provenance attestation from this public repository. Consumers need no Mano
 production or private-repository credential:
 
 ```bash
-gh release download litellm-product-v0.4.2 \
+gh release download litellm-product-v0.4.3 \
   --repo Manolii-org/ai-starter-pack \
-  --pattern 'litellm-product-0.4.2.tar.gz*'
-sha256sum -c litellm-product-0.4.2.tar.gz.sha256
-gh attestation verify litellm-product-0.4.2.tar.gz \
+  --pattern 'litellm-product-0.4.3.tar.gz*'
+sha256sum -c litellm-product-0.4.3.tar.gz.sha256
+gh attestation verify litellm-product-0.4.3.tar.gz \
   --repo Manolii-org/ai-starter-pack
 ```
 
 Start an independently owned runtime profile from
-`config/litellm-product-profile.example.json`. Validate the effective config against
+`config/litellm-product-profile.example.json`. Use
+`config/litellm-effective-config.example.yaml` as a placeholder effective-config
+scaffold — it is not a production export from any legal entity. The renderer adds a
+new runtime profile to every core alias `required_profiles` list so contract
+validation actually requires those aliases. Validate the effective config against
 the downloaded contract before deployment. Render a contract containing the new profile:
 
 ```bash
 python3 scripts/render-litellm-product-profile.py \
-  --contract litellm-product/releases/0.4.2/source/config/litellm-product-contract.json \
+  --contract litellm-product/releases/0.4.3/source/config/litellm-product-contract.json \
   --profile config/litellm-product-profile.example.json \
   --output /tmp/litellm-product-contract.json
-python3 litellm-product/releases/0.4.2/source/scripts/check_litellm_product_contract.py \
+python3 litellm-product/releases/0.4.3/source/scripts/check_litellm_product_contract.py \
   --contract /tmp/litellm-product-contract.json \
   --profile your-owner-profile \
-  --proxy-config deploy/litellm-proxy/config.yaml
+  --proxy-config config/litellm-effective-config.example.yaml
 ```
 
 Replace every placeholder first; the renderer rejects the example name. Provider keys, proxy keys, Fly apps,
@@ -45,3 +49,5 @@ telemetry and rollback remain owned by the consuming legal entity.
    merge commit, and push it. The release workflow attests and publishes the asset.
 
 Never overwrite an existing version or tag. Publish a new product version instead.
+
+Existing tag `litellm-product-v0.4.2` remains immutable. New product versions add a sibling `releases/X.Y.Z` tree.
