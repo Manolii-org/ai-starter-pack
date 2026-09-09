@@ -33,7 +33,12 @@ def render(contract: dict, scaffold: dict) -> dict:
     kind = definition.get("kind")
     if kind == "logical":
         runtime = definition.get("runtime_profile")
-        if not isinstance(runtime, str) or runtime not in profiles:
+        runtime_definition = profiles.get(runtime) if isinstance(runtime, str) else None
+        if (
+            not isinstance(runtime, str)
+            or not isinstance(runtime_definition, dict)
+            or runtime_definition.get("kind") != "runtime"
+        ):
             raise ValueError("logical profile must name an existing runtime_profile")
     rendered = copy.deepcopy(contract)
     rendered["profiles"][profile] = copy.deepcopy(definition)

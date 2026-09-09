@@ -13,8 +13,20 @@ SPEC.loader.exec_module(MODULE)
 RELEASES = ROOT / "litellm-product/releases"
 
 
+def _version_key(name: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in name.split("."))
+
+
 def _versions() -> list[str]:
-    return sorted(path.name for path in RELEASES.iterdir() if path.is_dir())
+    return sorted(
+        (path.name for path in RELEASES.iterdir() if path.is_dir()),
+        key=_version_key,
+    )
+
+
+def test_release_directory_order_is_semantic():
+    assert _version_key("0.4.10") > _version_key("0.4.9")
+    assert sorted(["0.4.10", "0.4.2", "0.4.9"], key=_version_key)[-1] == "0.4.10"
 
 
 def test_every_release_is_valid():

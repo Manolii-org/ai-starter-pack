@@ -25,6 +25,25 @@ def test_owner_profile_is_merged_into_contract():
     assert contract["core_aliases"]["tier-1-fast"]["required_profiles"] == ["manolii"]
 
 
+def test_logical_profile_cannot_target_another_logical_profile():
+    try:
+        MODULE.render(
+            {
+                "product_version": "0.4.3",
+                "profiles": {"app": {"kind": "logical", "runtime_profile": "manolii"}},
+                "core_aliases": {"tier-1-fast": {"required_profiles": ["manolii"]}},
+            },
+            {
+                "profile": "acme-app",
+                "profile_definition": {"kind": "logical", "runtime_profile": "app"},
+            },
+        )
+    except ValueError as exc:
+        assert "existing runtime_profile" in str(exc)
+    else:
+        raise AssertionError("logical-to-logical runtime_profile was accepted")
+
+
 def test_logical_profile_does_not_join_required_profiles():
     contract = {
         "product_version": "0.4.3",
