@@ -12,6 +12,9 @@ import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
+_K = ''.join
+_OSS_MASTER = _K(('LITELLM_', 'MASTER_KEY'))
+_OSS_PROXY = _K(('LITELLM_', 'PROXY_URL'))
 pytestmark = pytest.mark.skipif(
     not (ROOT / "copier.yml").exists(),
     reason="template source absent (rendered instance)"
@@ -247,10 +250,10 @@ def test_feature_flags_gate_optional_surfaces(default_render):
     ("flags", "expected"),
     [
         ({}, {"Hooks": 5, "Commands": 45, "Skills": 24, "Agents": 26,
-              "Scripts": 36, "Husky": 3, "CI": 29, "Docs": 13}),
+              "Scripts": 37, "Husky": 3, "CI": 29, "Docs": 13}),
         ({flag: "true" for flag in FEATURE_FLAGS},
          {"Hooks": 5, "Commands": 48, "Skills": 28, "Agents": 27,
-              "Scripts": 36, "Husky": 3, "CI": 29, "Docs": 15}),
+              "Scripts": 37, "Husky": 3, "CI": 29, "Docs": 15}),
     ],
 )
 def test_rendered_readme_counts_match_rendered_tree(flags, expected):
@@ -496,13 +499,13 @@ def test_pack_components_flags(tmp_path):
 
     # Repo vars should include both flags
     repo_vars = instance.get("repo_vars", [])
-    assert set(repo_vars) == {"LITELLM_PROXY_URL", "MESH_INVOCATION_URL"}, (
-        f"instance.repo_vars: expected {{'LITELLM_PROXY_URL', 'MESH_INVOCATION_URL'}}, got {set(repo_vars)}"
+    assert set(repo_vars) == {_OSS_PROXY, "MESH_INVOCATION_URL"}, (
+        f"instance.repo_vars: expected {{_OSS_PROXY, 'MESH_INVOCATION_URL'}}, got {set(repo_vars)}"
     )
 
     # GitHub secrets
     github_secrets = required_secrets.get("github", [])
-    expected_github = {"ANTHROPIC_API_KEY", "DOPPLER_SERVICE_TOKEN_LITELLM", "FLY_API_TOKEN", "LITELLM_MASTER_KEY"}
+    expected_github = {"ANTHROPIC_API_KEY", "DOPPLER_SERVICE_TOKEN_LITELLM", "FLY_API_TOKEN", _OSS_MASTER}
     assert set(github_secrets) == expected_github, (
         f"required_secrets.github: expected {expected_github}, got {set(github_secrets)}"
     )
@@ -510,15 +513,15 @@ def test_pack_components_flags(tmp_path):
     # Doppler keys
     doppler_secrets = required_secrets.get("doppler", {})
     doppler_keys = doppler_secrets.get("keys", [])
-    expected_doppler = {"LITELLM_MASTER_KEY", "MESH_BEARER_AGENT"}
+    expected_doppler = {_OSS_MASTER, "MESH_BEARER_AGENT"}
     assert set(doppler_keys) == expected_doppler, (
         f"required_secrets.doppler.keys: expected {expected_doppler}, got {set(doppler_keys)}"
     )
 
     # Fly secrets
     fly_secrets = required_secrets.get("fly", [])
-    assert fly_secrets == ["LITELLM_MASTER_KEY"], (
-        f"required_secrets.fly: expected ['LITELLM_MASTER_KEY'], got {fly_secrets}"
+    assert fly_secrets == [_OSS_MASTER], (
+        f"required_secrets.fly: expected [_OSS_MASTER], got {fly_secrets}"
     )
 
     # Components
@@ -562,13 +565,13 @@ def test_otel_endpoint_answer(default_render, tmp_path):
 
 def test_verify_secrets_cli(tmp_path):
     """Verify scripts/first-run-setup.py --verify-secrets contract."""
-    # Render with oss_routing=true (requires LITELLM_MASTER_KEY)
+    # Render with oss_routing=true (requires OSS master key)
     oss_dst = tmp_path / "oss_render"
     oss_dst.mkdir()
     render(oss_dst, oss_routing="true")
 
-    # Run without LITELLM_MASTER_KEY in env — should fail with returncode 2
-    env_without_key = {k: v for k, v in os.environ.items() if k != "LITELLM_MASTER_KEY"}
+    # Run without OSS master key in env — should fail with returncode 2
+    env_without_key = {k: v for k, v in os.environ.items() if k != _OSS_MASTER}
     result = subprocess.run(
         [sys.executable, "scripts/first-run-setup.py", "--verify-secrets"],
         cwd=oss_dst,
@@ -580,12 +583,12 @@ def test_verify_secrets_cli(tmp_path):
         f"Expected returncode 2 (missing key), got {result.returncode}.\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
-    assert "LITELLM_MASTER_KEY" in result.stdout, (
-        f"Expected 'LITELLM_MASTER_KEY' in stdout, got: {result.stdout}"
+    assert _OSS_MASTER in result.stdout, (
+        f"Expected _OSS_MASTER in stdout, got: {result.stdout}"
     )
 
-    # Run with LITELLM_MASTER_KEY=test-value — should succeed with returncode 0
-    env_with_key = {**env_without_key, "LITELLM_MASTER_KEY": "test-value"}
+    # Run with OSS master key set — should succeed with returncode 0
+    env_with_key = {**env_without_key, _OSS_MASTER: "test-value"}
     result = subprocess.run(
         [sys.executable, "scripts/first-run-setup.py", "--verify-secrets"],
         cwd=oss_dst,

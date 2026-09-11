@@ -19,6 +19,9 @@ draft never occupies the concurrency group. Put the draft skip on the
 `github.event_name == 'pull_request'` on `classify` — a missing PR payload
 is not a supported assessment path.
 
+Pack CI enforces the types rule with `scripts/lint_pull_request_types.py`
+(explicit `on.pull_request.types` must include `ready_for_review`).
+
 Autofix (`pr-autofix-loop.yml`) is **not** draft-gated. It runs on
 `issue_comment`, `pull_request_review`, `pull_request_review_comment`, and
 failing `workflow_run`. Review payloads can include `pull_request.draft`;
@@ -50,6 +53,12 @@ Do **not** add `on.paths` to a Playwright (or similar) workflow that is
 already internally detect-gated if that check might become required. GitHub
 omits the check context when no path matches, and a required check that never
 reports hangs the PR. Internal detect + SKIPPED suite is the safe pattern.
+
+Prefer GitHub `deployment_status` (or equivalent Preview-Ready on the preview
+URL) before installing a local app stack / `pnpm dev` for PR browser jobs.
+Readonly jobs must not `needs` a lock-holding job. Production-gate must not
+share a cancel queue with PR e2e. Do not put product hostnames or mutex
+**names** (for example `e2e-preview`) in this pack file.
 
 ## 3. Wait loops that poll `gh run list`
 

@@ -4,6 +4,8 @@
 
 ### Added
 
+- **Delivery OS Session B (portable contract).** `scripts/lint_pull_request_types.py` fails pack CI when explicit `pull_request.types` omit `ready_for_review`, when a PR workflow runs `pnpm dev` without Preview-Ready, or when a readonly job `needs` a lock-holding job. `/watch-pr` jinja + plugin command use the docs/CI vs product-red subscribe split (not always-subscribe / 60s poll). Bot-review-relay skips `cursor[bot]`, empty Judge, Codex About Codex without P0/P1, and `<!-- auto-merge:` before `runs-on`. `scripts/ci/review-thread-lifecycle.py` trusts `cursor[bot]` fix-evidence with exact URL + head SHA.
+
 - **Provenance-attested LiteLLM product releases.** Publish deterministic, SHA-256
   checked public product bundles from immutable canonical source revisions. Consumers
   can verify both checksum and GitHub build provenance without a Manolii production or

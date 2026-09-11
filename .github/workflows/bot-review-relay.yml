@@ -76,11 +76,23 @@ jobs:
     if: >
       endsWith(github.actor, '[bot]') &&
       github.actor != 'github-actions[bot]' &&
+      github.actor != 'cursor[bot]' &&
+      (github.event_name != 'issue_comment' || (github.actor != 'vercel[bot]' && !startsWith(github.event.comment.body, '[vc]:'))) &&
       !contains(github.event.comment.body, 'auto-generated reply by CodeRabbit') &&
       !contains(github.event.review.body, 'auto-generated reply by CodeRabbit') &&
       !contains(github.event.comment.body, 'skip review by coderabbit.ai') &&
       !contains(github.event.comment.body, 'rate limited by coderabbit.ai') &&
       !contains(github.event.comment.body, 'BUGBOT_FREE_TIER_DISABLED_UPSELL') &&
+      !contains(github.event.comment.body, '<!-- auto-merge:') &&
+      !contains(github.event.review.body, '<!-- auto-merge:') &&
+      !((contains(github.event.comment.body, '<!-- pr-assessment-v1 -->') || contains(github.event.review.body, '<!-- pr-assessment-v1 -->')) &&
+        (contains(github.event.comment.body, 'No actionable findings') || contains(github.event.comment.body, 'No 4-gate findings') ||
+         contains(github.event.review.body, 'No actionable findings') || contains(github.event.review.body, 'No 4-gate findings'))) &&
+      !((contains(github.event.comment.body, 'About Codex') || contains(github.event.review.body, 'About Codex') ||
+         contains(github.event.comment.body, 'codex-pull-request-review-summary') || contains(github.event.review.body, 'codex-pull-request-review-summary') ||
+         contains(github.event.comment.body, 'Codex review is running') || contains(github.event.review.body, 'Codex review is running')) &&
+        !contains(github.event.comment.body, 'P0') && !contains(github.event.comment.body, 'P1') &&
+        !contains(github.event.review.body, 'P0') && !contains(github.event.review.body, 'P1')) &&
       !(github.actor == 'gemini-code-assist[bot]' &&
         contains(github.event.comment.body, 'has been sunset')) &&
       (github.event_name != 'issue_comment' || (
@@ -164,7 +176,7 @@ jobs:
             // body starts with '**[@' (repos without master auto-address-review).
             // Master still skips these to auto-address-review — do not install
             // both auto-address and pack Autofix relay-accept on the same repo.
-            const MENTION_BREAK = '​';
+            const MENTION_BREAK = '\u200b';
             let header = `**[@${MENTION_BREAK}${author}]**`;
             if (eventName === 'pull_request_review_comment') {
               const path = context.payload.comment.path;

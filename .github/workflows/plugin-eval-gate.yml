@@ -105,3 +105,11 @@ jobs:
 
       - name: Routing lint
         run: python3 scripts/lint-agent-routing.py
+
+      - name: Delivery OS portable contract
+        run: |
+          python3 scripts/lint_pull_request_types.py --root .
+          python3 -m pytest \
+            scripts/tests/test_lint_pull_request_types.py \
+            scripts/tests/test_watch_pr_subscribe_split.py \
+            scripts/tests/test_review_thread_lifecycle.py -q
