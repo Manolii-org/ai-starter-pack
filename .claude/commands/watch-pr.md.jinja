@@ -1,6 +1,6 @@
 ---
 name: watch-pr
-version: 2.0.0
+version: 2.1.0
 description: "Persistent PR resolution loop — subscribes to activity, monitors CI, review comments (Human/CodeRabbit/Gemini/bots), and merge conflicts. Loops until PR is clear or max rounds reached."
 type: command
 requires_mcp: [github]
@@ -49,19 +49,35 @@ git rev-parse --abbrev-ref HEAD
 
 Call `mcp__github__list_pull_requests(owner, repo, state:"open")` and match by branch name, or use the supplied PR_NUMBER.
 
-### Step 2: Subscribe to PR Activity
+### Step 2: Subscribe (split — do not always subscribe PR activity)
+
+If auto-merge is (or will be) armed **and** every changed path is inside
+`reports/**`, `docs/**`, `reports/INDEX.md`, `.github/pull_request_template.md`,
+`.github/PULL_REQUEST_TEMPLATE.md`: **must not** call
+`mcp__github__subscribe_pr_activity` / `subscribe_github_pr`. Optional CI
+subscribe or none. Arm a ≥20-minute heartbeat only if CI subscribe is on.
+
+Product-red (any other path): subscribe PR **and** CI when the surface has
+it, plus a bounded ≥20-minute heartbeat. Cursor Cloud:
+`subscribe_github_pr` / `subscribe_github_ci`. Claude Code:
+`mcp__github__subscribe_pr_activity` only (no CI-only MCP equivalent —
+do **not** invent a GitHub MCP CI-subscribe tool).
 
 ```
 mcp__github__subscribe_pr_activity(owner, repo, pr_number)
+subscribe_github_ci(owner, repo, pr_number)   # Cursor Cloud only
 ```
+
+Docs/CI with **none** (no CI subscribe): do **not** enter the 60s poll /
+5-minute wait. GitHub auto-merge + Judge is the waiter. End the turn.
 
 ### Step 3: Outer Loop (max 5 rounds)
 
 Track state as: **"Round N/5: [found issues] -> [dispatched fix] -> [waiting]"**
 
-Update checkpoint at top of every round.
+Update checkpoint at top of every round. Skip this loop for docs/CI `none`.
 
-**3a. Poll every 60s:**
+**3a. Product-red / CI-subscribe only — event-led, not a 60s sleep loop:**
 - `mcp__github__pull_request_read` → check `head.sha` vs current `HEAD`
 - Check CI status per SHA
 - Check `mergeable` flag: `null` = still computing (re-poll), `false` = conflict, `true` = clean
@@ -87,7 +103,7 @@ Update checkpoint at top of every round.
 
 **3d. Dispatch `/pr-resolve` with the collected issue list.**
 
-**3e. Wait 5 minutes**, then re-poll. If exit condition met → done. Otherwise increment round.
+**3e. Re-arm the ≥20-minute heartbeat** (not a foreground 5-minute wait). If exit condition met → done. Otherwise increment round.
 
 **3f. Before round N+1:** carry the existing subscription forward — `subscribe_pr_activity` is idempotent and the stream does not need resetting. Do NOT unsubscribe+resubscribe: both calls are connector-approval-gated (native claude.ai dialog, unsilenceable by repo config) and the reset buys nothing.
 
