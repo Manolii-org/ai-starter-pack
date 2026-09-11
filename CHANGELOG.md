@@ -1,1 +1,1 @@
-LOAD_FROM_FILE
+file:///tmp/ai-starter-pack/CHANGELOG.md
