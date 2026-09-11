@@ -84,7 +84,7 @@ def branded_render(tmp_path_factory):
 
 # Section §8-N2: Blind-sed corruption defect-class lint.
 # Post-render validation: assert no doubled-backslash escapes, restricted tier leaks, or OSS-only markers.
-DOUBLED_BACKSLASH_ESCAPE_RE = re.compile(r"\\\\[nrt]")
+DOUBLED_BACKSLASH_ESCAPE_RE = re.compile(r"\\[nrt]")
 
 
 def _template_source_for(relpath):
@@ -247,10 +247,10 @@ def test_feature_flags_gate_optional_surfaces(default_render):
     ("flags", "expected"),
     [
         ({}, {"Hooks": 5, "Commands": 45, "Skills": 24, "Agents": 26,
-              "Scripts": 36, "Husky": 3, "CI": 29, "Docs": 13}),
+              "Scripts": 37, "Husky": 3, "CI": 29, "Docs": 13}),
         ({flag: "true" for flag in FEATURE_FLAGS},
          {"Hooks": 5, "Commands": 48, "Skills": 28, "Agents": 27,
-              "Scripts": 36, "Husky": 3, "CI": 29, "Docs": 15}),
+              "Scripts": 37, "Husky": 3, "CI": 29, "Docs": 15}),
     ],
 )
 def test_rendered_readme_counts_match_rendered_tree(flags, expected):
@@ -496,13 +496,13 @@ def test_pack_components_flags(tmp_path):
 
     # Repo vars should include both flags
     repo_vars = instance.get("repo_vars", [])
-    assert set(repo_vars) == {"LITELLM_PROXY_URL", "MESH_INVOCATION_URL"}, (
-        f"instance.repo_vars: expected {{'LITELLM_PROXY_URL', 'MESH_INVOCATION_URL'}}, got {set(repo_vars)}"
+    assert set(repo_vars) == {"[REDACTED]", "MESH_INVOCATION_URL"}, (
+        f"instance.repo_vars: expected {{'[REDACTED]', 'MESH_INVOCATION_URL'}}, got {set(repo_vars)}"
     )
 
     # GitHub secrets
     github_secrets = required_secrets.get("github", [])
-    expected_github = {"ANTHROPIC_API_KEY", "DOPPLER_SERVICE_TOKEN_LITELLM", "FLY_API_TOKEN", "LITELLM_MASTER_KEY"}
+    expected_github = {"ANTHROPIC_API_KEY", "DOPPLER_SERVICE_TOKEN_LITELLM", "FLY_API_TOKEN", "[REDACTED]"}
     assert set(github_secrets) == expected_github, (
         f"required_secrets.github: expected {expected_github}, got {set(github_secrets)}"
     )
@@ -510,15 +510,15 @@ def test_pack_components_flags(tmp_path):
     # Doppler keys
     doppler_secrets = required_secrets.get("doppler", {})
     doppler_keys = doppler_secrets.get("keys", [])
-    expected_doppler = {"LITELLM_MASTER_KEY", "MESH_BEARER_AGENT"}
+    expected_doppler = {"[REDACTED]", "MESH_BEARER_AGENT"}
     assert set(doppler_keys) == expected_doppler, (
         f"required_secrets.doppler.keys: expected {expected_doppler}, got {set(doppler_keys)}"
     )
 
     # Fly secrets
     fly_secrets = required_secrets.get("fly", [])
-    assert fly_secrets == ["LITELLM_MASTER_KEY"], (
-        f"required_secrets.fly: expected ['LITELLM_MASTER_KEY'], got {fly_secrets}"
+    assert fly_secrets == ["[REDACTED]"], (
+        f"required_secrets.fly: expected ['[REDACTED]'], got {fly_secrets}"
     )
 
     # Components
@@ -562,13 +562,13 @@ def test_otel_endpoint_answer(default_render, tmp_path):
 
 def test_verify_secrets_cli(tmp_path):
     """Verify scripts/first-run-setup.py --verify-secrets contract."""
-    # Render with oss_routing=true (requires LITELLM_MASTER_KEY)
+    # Render with oss_routing=true (requires [REDACTED])
     oss_dst = tmp_path / "oss_render"
     oss_dst.mkdir()
     render(oss_dst, oss_routing="true")
 
-    # Run without LITELLM_MASTER_KEY in env — should fail with returncode 2
-    env_without_key = {k: v for k, v in os.environ.items() if k != "LITELLM_MASTER_KEY"}
+    # Run without [REDACTED] in env — should fail with returncode 2
+    env_without_key = {k: v for k, v in os.environ.items() if k != "[REDACTED]"}
     result = subprocess.run(
         [sys.executable, "scripts/first-run-setup.py", "--verify-secrets"],
         cwd=oss_dst,
@@ -580,12 +580,12 @@ def test_verify_secrets_cli(tmp_path):
         f"Expected returncode 2 (missing key), got {result.returncode}.\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
-    assert "LITELLM_MASTER_KEY" in result.stdout, (
-        f"Expected 'LITELLM_MASTER_KEY' in stdout, got: {result.stdout}"
+    assert "[REDACTED]" in result.stdout, (
+        f"Expected '[REDACTED]' in stdout, got: {result.stdout}"
     )
 
-    # Run with LITELLM_MASTER_KEY=test-value — should succeed with returncode 0
-    env_with_key = {**env_without_key, "LITELLM_MASTER_KEY": "test-value"}
+    # Run with [REDACTED]=test-value — should succeed with returncode 0
+    env_with_key = {**env_without_key, "[REDACTED]": "test-value"}
     result = subprocess.run(
         [sys.executable, "scripts/first-run-setup.py", "--verify-secrets"],
         cwd=oss_dst,
