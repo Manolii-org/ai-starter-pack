@@ -27,17 +27,14 @@ def parse_fix_evidence(issue_comments: list[dict]) -> list[dict]:
             finding_url = None
             fixed_in_sha = None
             test_cmd = None
-            # Extract Finding URL with proper escaping
             finding_match = re.search(r"\*\*Finding:\*\*\s+([^\n]+)", body)
             if finding_match:
                 finding_url = finding_match.group(1).strip()
-            # Extract Fixed-in SHA
             fixed_match = re.search(r"\*\*Fixed in:\*\*\s+`([0-9a-f]+)`", body)
             if fixed_match:
                 sha = fixed_match.group(1)
                 if 7 <= len(sha) <= 40 and re.fullmatch(r"[0-9a-f]+", sha):
                     fixed_in_sha = sha
-            # Extract Test command
             test_match = re.search(r"\*\*Test:\*\*\s+`([^`]+)`", body)
             if test_match:
                 test_cmd = test_match.group(1)
@@ -84,16 +81,6 @@ def classify_blocking_threads(
                 continue
             commit_obj = first_comment.get("commit") or {}
             commit_oid = commit_obj.get("oid", "") if isinstance(commit_obj, dict) else ""
-            # Deliberately NOT filtered to head_sha. This diagnostic explains a
-            # gate decision, so its scope has to match the gate's: the gate
-            # blocks on unresolved bot severity threads PR-wide. While this
-            # filtered to head, the two disagreed in the worst possible
-            # direction — the gate reported "Found 1 unresolved thread. Blocking
-            # auto-merge." and the diagnostic printed directly beneath it
-            # "Blocking threads: 0 / No blocking threads found" (observed on
-            # #4653 head 52bf2b11). A diagnostic that contradicts the decision
-            # it explains is worse than none, and it also made
-            # `blocking_carried` unreachable for the case it was written for.
             original_obj = first_comment.get("originalCommit")
             original_commit_oid = (
                 original_obj.get("oid") if isinstance(original_obj, dict) else None
@@ -101,9 +88,6 @@ def classify_blocking_threads(
             path = first_comment.get("path", "")
             line = first_comment.get("line")
             url = first_comment.get("url", "")
-            # Carried = the finding was opened against some earlier commit,
-            # whether that shows in the thread's current commit or only in the
-            # original one it was first attached to.
             predates_head = (
                 (bool(commit_oid) and commit_oid != head_sha)
                 or (original_commit_oid is not None and original_commit_oid != head_sha)
@@ -113,11 +97,6 @@ def classify_blocking_threads(
             for evidence in evidence_list:
                 finding = evidence["finding_url"]
                 sha = evidence["fixed_in_sha"].lower()
-                # EXACT match only. The previous `finding in url or url in finding`
-                # matched in both directions, so a comment URL that merely contains
-                # another thread's URL as a substring — routine, since these differ
-                # only by a trailing numeric id — could attach one thread's fix
-                # evidence to a different thread and mark it remediated.
                 url_match = bool(url) and finding == url
                 sha_match = len(sha) >= 7 and head_l.startswith(sha)
                 if url_match and sha_match:
@@ -134,9 +113,6 @@ def classify_blocking_threads(
                 "url": url,
                 "commit_oid": commit_oid,
                 "original_commit_oid": original_commit_oid,
-                # Always True: threads failing the severity pattern are filtered
-                # out above and never reach this point. Kept as a literal so the
-                # emitted shape is unchanged for downstream consumers.
                 "severity_matched": True,
                 "predates_head": predates_head,
                 "fix_evidence": fix_evidence_match,
@@ -144,10 +120,6 @@ def classify_blocking_threads(
         except (KeyError, AttributeError, TypeError) as e:
             logger.warning(f"Failed to classify thread: {e}")
     has_remediation_pending = any(t["classification"] == "remediation_pending_resolution" for t in blocking_threads)
-    # The no-blocking-threads branch is not cosmetic. With no threads found this
-    # still printed "Auto-merge remains blocked", directly under "No blocking
-    # threads found" — a report contradicting itself in the same breath, which
-    # is what a reader has to untangle at exactly the wrong moment.
     if not blocking_threads:
         next_action = (
             "No unresolved high/critical/major bot threads on this PR. This check is not "
@@ -159,9 +131,6 @@ def classify_blocking_threads(
             "claimed fix. Fix-evidence does not enable auto-merge."
         )
     else:
-        # "on this PR", not "on the current head": a carried thread is unresolved
-        # on an EARLIER commit, so telling the reader to look at the head sends
-        # them somewhere the finding is not.
         next_action = (
             "Reviewer/human must resolve the unresolved high/critical/major thread(s) on "
             "this PR — including any opened on an earlier commit (or push a fix and then "
@@ -177,7 +146,6 @@ def classify_blocking_threads(
 
 
 def format_diagnostic_markdown(result: dict) -> str:
-    """Format classification result as diagnostic markdown."""
     lines = [
         f"<!-- auto-merge:unresolved-thread:v1 head={result['head_sha']} -->",
         "",
@@ -200,10 +168,6 @@ def format_diagnostic_markdown(result: dict) -> str:
             lines.append(f"   - URL: {thread['url']}")
             if thread["fix_evidence"]:
                 ev = thread["fix_evidence"]
-                # `or`, not a .get default. parse_fix_evidence ALWAYS sets the
-                # test_cmd key, using None when no `**Test:**` line was present —
-                # so the dict default never applies and the report rendered the
-                # literal string "None".
                 lines.append(f"   - Fix evidence: `{ev['fixed_in_sha']}` {ev.get('test_cmd') or '(no test)'}")
             lines.append("")
     else:
@@ -224,7 +188,6 @@ def format_diagnostic_markdown(result: dict) -> str:
 
 
 def main() -> int:
-    """Main entry point."""
     parser = argparse.ArgumentParser(description="Classify unresolved review threads and format diagnostics.")
     parser.add_argument("--head-sha", required=True, help="Current HEAD SHA (full or prefix >= 7)")
     parser.add_argument("--threads-file", help="Path to GraphQL threads JSON (default: stdin)")
@@ -246,11 +209,6 @@ def main() -> int:
             with open(args.comments_file) as f:
                 comments_data = json.load(f)
             issue_comments = comments_data if isinstance(comments_data, list) else comments_data.get("comments", [])
-    # OSError, not FileNotFoundError. A directory passed as --threads-file raises
-    # IsADirectoryError and an unreadable one raises PermissionError; neither is
-    # a FileNotFoundError, so both escaped as an uncaught traceback instead of
-    # degrading to the empty-input path. FileNotFoundError is an OSError subclass,
-    # so this widens without losing the original case.
     except (json.JSONDecodeError, OSError, TypeError) as e:
         logger.warning(f"Failed to load input JSON: {e}")
         threads_data = []
