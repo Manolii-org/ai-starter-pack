@@ -60,6 +60,19 @@ permissions:
 
 jobs:
   relay:
+    # Every guard that can be evaluated from the event payload MUST live here,
+    # not in the script below. A job whose `if` is false is skipped without
+    # allocating a runner; a script-level `return` still costs a full billed
+    # minute (GitHub bills a 1-minute minimum per job). The 2026-08-01 relay
+    # loop burned ~5,900 runner-minutes precisely because the self-relay guard
+    # sat in JavaScript instead of here.
+    #
+    # Loop shape being defended against (PRs #3498/#3499, 2,500 comments each):
+    #   CodeRabbit comments -> we relay it as github-actions[bot]
+    #   -> CodeRabbit replies to our relay -> we relay that -> ...
+    # GitHub's GITHUB_TOKEN recursion guard does NOT break this, because the
+    # cycle leaves GitHub through a third-party App and re-enters as a fresh
+    # external event. The cycle is cut at the `auto-generated reply` marker.
     if: >
       endsWith(github.actor, '[bot]') &&
       github.actor != 'github-actions[bot]' &&
@@ -92,6 +105,8 @@ jobs:
         github.event.pull_request.comments < 500
       ))
     timeout-minutes: 15
+    # Hosted by default — CodeRabbit floods this workflow; Fly queue starvation
+    # blocked Autofix Preflight (2026-08-04). Failover still honours CI_RUNNER_OVERRIDE.
     runs-on: ${{ fromJSON(vars.CI_RUNNER_OVERRIDE || '["ubuntu-latest"]') }}
     steps:
       - name: Relay bot review comment
@@ -100,28 +115,116 @@ jobs:
           script: |
             const eventName = context.eventName;
             let author, body, prNumber;
+
             if (eventName === 'pull_request_review') {
-              author = context.payload.review.user.login;
-              body = context.payload.review.body;
-              prNumber = context.payload.pull_request.number;
+              author    = context.payload.review.user.login;
+              body      = context.payload.review.body;
+              prNumber  = context.payload.pull_request.number;
             } else if (eventName === 'pull_request_review_comment') {
-              author = context.payload.comment.user.login;
-              body = context.payload.comment.body;
-              prNumber = context.payload.pull_request.number;
+              author    = context.payload.comment.user.login;
+              body      = context.payload.comment.body;
+              prNumber  = context.payload.pull_request.number;
             } else if (eventName === 'issue_comment') {
-              if (!context.payload.issue.pull_request) { return; }
-              author = context.payload.comment.user.login;
-              body = context.payload.comment.body;
-              prNumber = context.payload.issue.number;
+              // Only act on PR comments, not plain issue comments
+              if (!context.payload.issue.pull_request) {
+                console.log('Not a PR comment — skipping');
+                return;
+              }
+              author    = context.payload.comment.user.login;
+              body      = context.payload.comment.body;
+              prNumber  = context.payload.issue.number;
             }
-            if (!author || !author.endsWith('[bot]') || author === 'github-actions[bot]' || !body || body.trim() === '') { return; }
+
+            // Guard against malformed payloads with missing user objects
+            if (!author) {
+              console.log('Skipping — could not determine comment author');
+              return;
+            }
+
+            // Only relay bot accounts (GitHub convention: login ends with [bot])
+            if (!author.endsWith('[bot]')) {
+              console.log(`Skipping — @${author} is not a bot`);
+              return;
+            }
+
+            // Prevent infinite loops: never relay our own relay comments
+            if (author === 'github-actions[bot]') {
+              console.log('Skipping — this is our own relay comment');
+              return;
+            }
+
+            // Skip reviews with no body (e.g. Gemini approved with no summary)
+            if (!body || body.trim() === '') {
+              console.log(`Skipping — @${author} posted an empty body`);
+              return;
+            }
+
+            // Build a minimal header — just enough for the LLM to know the source.
+            // For inline review comments, include file + line so the LLM has context.
+            //
+            // ROOT CAUSE OF THE 2026-08-01 RELAY LOOP: this header used to emit a
+            // LIVE @-mention of the very bot whose comment was being relayed
+            // (`**[@coderabbitai[bot]]**`). CodeRabbit read that as being addressed,
+            // replied, we relayed the reply, and the cycle re-entered GitHub as a
+            // fresh external event. PRs #3498/#3499 hit 2,500 comments each.
+            //
+            // MENTION_BREAK is a zero-width space between '@' and the login. It
+            // renders invisibly, so the header still reads as `[@author]`, but
+            // GitHub no longer resolves it to a mention and no bot is notified.
+            // The literal '**[@' prefix is preserved deliberately:
+            // pack pr-autofix-loop(-reusable) accepts relayed comments when the
+            // body starts with '**[@' (repos without master auto-address-review).
+            // Master still skips these to auto-address-review — do not install
+            // both auto-address and pack Autofix relay-accept on the same repo.
             const MENTION_BREAK = '\u200b';
             let header = `**[@${MENTION_BREAK}${author}]**`;
             if (eventName === 'pull_request_review_comment') {
               const path = context.payload.comment.path;
               const line = context.payload.comment.line || context.payload.comment.original_line;
-              header = line ? `**[@${MENTION_BREAK}${author} on \`${path}\` line ${line}]**` : `**[@${MENTION_BREAK}${author} on \`${path}\`]**`;
+              header = line
+                ? `**[@${MENTION_BREAK}${author} on \`${path}\` line ${line}]**`
+                : `**[@${MENTION_BREAK}${author} on \`${path}\`]**`;
             }
-            const breakMentions = (s) => s.replace(/@(?=[A-Za-z0-9])/g, `@${MENTION_BREAK}`);
-            const relayBody = breakMentions(`${header}\n\n${body}`).replaceAll('<!--', '&lt;!--').replaceAll('-->', '--&gt;');
-            await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: prNumber, body: relayBody });
+
+            // Relayed comments are authored by github-actions[bot], which is also
+            // the trusted producer of several hidden automation control markers.
+            // Sanitize the complete output, not only `body`: PR authors control
+            // filenames interpolated into `header`, so that field is untrusted too.
+            // Keep the text readable while preventing any present or future
+            // `<!-- namespace:... -->` control marker from inheriting our identity.
+            // Break EVERY mention in the relayed output, not just the one in
+            // `header`. #3506 broke the header alone and the loop survived,
+            // because the relay copies the source comment VERBATIM and bot
+            // comments carry their own mentions inside the payload — CodeRabbit
+            // signs off with "Comment `@coderabbitai help` ...". Observed live on
+            // PR #3510 (2026-08-02): the relay reposted a CodeRabbit comment and
+            // CodeRabbit replied "@github-actions[bot] Acknowledged", i.e. the
+            // exact bot-to-bot cycle #3506 set out to cut, one hop further in.
+            //
+            // Code spans do not help: GitHub will not render a mention inside
+            // backticks, but third-party Apps receive the raw webhook body and
+            // parse it themselves, so `@coderabbitai` in a code span still
+            // triggers them. Only altering the bytes works.
+            //
+            // The lookahead requires a word character after '@', so the header's
+            // already-broken `@${MENTION_BREAK}` is not double-broken, and the
+            // literal '**[@' prefix pack Autofix routes on is preserved.
+            const breakMentions = (s) =>
+              s.replace(/@(?=[A-Za-z0-9])/g, `@${MENTION_BREAK}`);
+
+            const relayBody = breakMentions(`${header}\n\n${body}`)
+              .replaceAll('<!--', '&lt;!--')
+              .replaceAll('-->', '--&gt;');
+
+            try {
+              await github.rest.issues.createComment({
+                owner:        context.repo.owner,
+                repo:         context.repo.repo,
+                issue_number: prNumber,
+                body:         relayBody,
+              });
+              console.log(`Relayed @${author} comment on PR #${prNumber}`);
+            } catch (error) {
+              console.error(`Failed to relay @${author} comment on PR #${prNumber}: ${error.message}`);
+              throw error; // Re-throw so the workflow step fails visibly
+            }
