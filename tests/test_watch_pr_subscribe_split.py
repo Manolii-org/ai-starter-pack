@@ -34,6 +34,8 @@ class WatchPrSubscribeSplitTests(unittest.TestCase):
             self.assertIn("docs/**", text)
             self.assertIn("reports/INDEX.md", text)
             self.assertIn(".github/pull_request_template.md", text)
+            self.assertIn(".github/PULL_REQUEST_TEMPLATE.md", text)
+            self.assertIn("mergeQueueEntry { id }", text)
             self.assertIn("Docs/CI with **none**", text)
             self.assertIn("do **not** enter the 60s poll", text)
             self.assertNotIn("Poll every 60s", text)
