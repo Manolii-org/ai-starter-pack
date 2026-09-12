@@ -67,3 +67,6 @@ dist/
 .ai/memory/facts.jsonl
 .ai/memory/patterns.jsonl
 .ai/memory/sessions.jsonl
+.ai/memory/instruction-loads.jsonl
+.ai/memory/*.lock
+.ai/memory/archive/

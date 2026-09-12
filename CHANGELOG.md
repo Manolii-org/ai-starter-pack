@@ -4,6 +4,11 @@
 
 ### Added
 
+- **Claude instruction-load observability.** Portable `InstructionsLoaded`
+  handler and verifier with local, ignored, content-free receipts, sidecar
+  locking, and consumer-configurable canary paths. Render the hook only when
+  `claude_hooks=true`. Codex and Cursor do not emit this event.
+
 - **Provenance-attested LiteLLM product releases.** Publish deterministic, SHA-256
   checked public product bundles from immutable canonical source revisions. Consumers
   can verify both checksum and GitHub build provenance without a Manolii production or

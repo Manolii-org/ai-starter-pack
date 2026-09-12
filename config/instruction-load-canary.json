@@ -1,0 +1,9 @@
+{
+  "schema": "manolii.instruction-load-canary/v1",
+  "requirements": [
+    {
+      "path": "CLAUDE.md",
+      "reason": "session_start"
+    }
+  ]
+}

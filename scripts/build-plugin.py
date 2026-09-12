@@ -276,6 +276,9 @@ def build_hooks_config() -> dict:
             "PostToolUse":  [{"hooks": [cmd(f'python3 "{P}/hooks/post-tool.py"', 30)]}],
             "PreCompact":   [{"hooks": [cmd(f'bash "{P}/hooks/pre-compact.sh"', 30)]}],
             "PostCompact":  [{"hooks": [cmd(f'bash "{P}/hooks/post-compact.sh"', 15)]}],
+            "InstructionsLoaded": [{"hooks": [
+                cmd(f'python3 "{P}/scripts/instruction-load-audit.py"', 5)
+            ]}],
             "Stop": [{"hooks": [
                 cmd(f'bash "{P}/scripts/session-stop-checklist.sh"', 10),
                 cmd(stop_selfcheck, 30),
