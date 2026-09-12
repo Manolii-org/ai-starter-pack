@@ -2,11 +2,11 @@
 
 ## Unreleased
 
-## 1.12.0 — 2026-09-12
+## 1.14.0 — 2026-09-12
 
-Pack bookkeeping #104 labelled this block `1.11.0`, but annotated tag
-`v1.11.0` already existed (2026-08-31, `2845356813c85612c7563c1bee65beab87cf209b`,
-#87). `release-tag.yml` cannot move an existing tag. This cut is `v1.12.0`.
+`release-tag.yml` only creates new refs. `git matching-refs tags/v1` already
+has `v1.10.0` through `v1.13.1` (latest `v1.13.1` = `8c07778`, 2026-09-07).
+#104/#105 assumed 1.11.0 then 1.12.0 were free. Next unused tag is `v1.14.0`.
 
 ### Added
 
