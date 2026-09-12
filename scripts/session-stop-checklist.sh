@@ -20,7 +20,11 @@ _HOOK_INPUT=$(cat)
 _SESSION_ID=$(printf '%s' "$_HOOK_INPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('session_id',''))" 2>/dev/null || true)
 python3 "${SCRIPT_DIR}/session-cost-logger.py" ${_SESSION_ID:+--session "$_SESSION_ID"} 2>/dev/null || true
 if [ -f "${SCRIPT_DIR}/rotate-jsonl-receipt.py" ]; then
-  timeout 1 python3 "${SCRIPT_DIR}/rotate-jsonl-receipt.py" >/dev/null 2>&1 || true
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 1 python3 "${SCRIPT_DIR}/rotate-jsonl-receipt.py" >/dev/null 2>&1 || true
+  else
+    perl -e 'alarm 1; exec @ARGV' python3 "${SCRIPT_DIR}/rotate-jsonl-receipt.py" >/dev/null 2>&1 || true
+  fi
 fi
 _SESSION_ID_FOR_RETRO="${_SESSION_ID:-}"
 unset _HOOK_INPUT _SESSION_ID

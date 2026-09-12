@@ -147,6 +147,39 @@ def test_main_waits_for_sidecar_lock(tmp_path, monkeypatch):
     assert stored["session_id"] == "lock-test"
 
 
+def test_claude_project_dir_is_receipt_and_digest_root(tmp_path, monkeypatch):
+    plugin_root = tmp_path / "plugin-install"
+    consumer = tmp_path / "consumer"
+    plugin_root.mkdir()
+    consumer.mkdir()
+    instruction = consumer / "CLAUDE.md"
+    instruction.write_text("consumer-instruction\n", encoding="utf-8")
+    monkeypatch.delenv("INSTRUCTION_LOAD_AUDIT_PATH", raising=False)
+    monkeypatch.delenv("INSTRUCTION_LOAD_ROOT", raising=False)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(consumer))
+    monkeypatch.setattr(MODULE, "ROOT", plugin_root)
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        __import__("io").StringIO(
+            json.dumps(
+                {
+                    "hook_event_name": "InstructionsLoaded",
+                    "session_id": "plugin-session",
+                    "file_path": str(instruction),
+                    "load_reason": "session_start",
+                }
+            )
+        ),
+    )
+    assert MODULE.main([]) == 0
+    destination = consumer / ".ai" / "memory" / "instruction-loads.jsonl"
+    stored = json.loads(destination.read_text(encoding="utf-8"))
+    assert stored["file_path"] == "CLAUDE.md"
+    assert stored["observed_sha256"] == hashlib.sha256(instruction.read_bytes()).hexdigest()
+    assert not (plugin_root / ".ai").exists()
+
+
 def _append_from_child(script_path: str, destination: str, payload: str, root: str = "") -> None:
     import importlib.util
     import io

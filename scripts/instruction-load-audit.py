@@ -20,12 +20,26 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_RECEIPT = ROOT / ".ai" / "memory" / "instruction-loads.jsonl"
 
 
 def runtime_root() -> Path:
+    """Prefer the consumer checkout, never the plugin install tree."""
     override = os.environ.get("INSTRUCTION_LOAD_ROOT")
-    return Path(override) if override else ROOT
+    if override:
+        return Path(override)
+    project = (os.environ.get("CLAUDE_PROJECT_DIR") or "").strip()
+    if project:
+        path = Path(project)
+        if path.is_dir():
+            return path
+    return ROOT
+
+
+def default_receipt_path() -> Path:
+    explicit = os.environ.get("INSTRUCTION_LOAD_AUDIT_PATH")
+    if explicit:
+        return Path(explicit)
+    return runtime_root() / ".ai" / "memory" / "instruction-loads.jsonl"
 
 
 def sanitise_path(raw_path: object, *, root: Path = ROOT) -> str:
@@ -95,7 +109,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.dry_run:
             print(rendered)
             return 0
-        destination = Path(os.environ.get("INSTRUCTION_LOAD_AUDIT_PATH", DEFAULT_RECEIPT))
+        destination = default_receipt_path()
         destination.parent.mkdir(parents=True, exist_ok=True)
         # Lock a stable sidecar rather than the receipt inode. Rotation replaces
         # the receipt, so locking the receipt itself can let an appender retain

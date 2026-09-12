@@ -14,8 +14,26 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_RECEIPT = ROOT / ".ai" / "memory" / "instruction-loads.jsonl"
 DEFAULT_MAX_BYTES = 256 * 1024
+
+
+def runtime_root() -> Path:
+    override = os.environ.get("INSTRUCTION_LOAD_ROOT")
+    if override:
+        return Path(override)
+    project = (os.environ.get("CLAUDE_PROJECT_DIR") or "").strip()
+    if project:
+        path = Path(project)
+        if path.is_dir():
+            return path
+    return ROOT
+
+
+def default_receipt_path() -> Path:
+    explicit = os.environ.get("INSTRUCTION_LOAD_AUDIT_PATH")
+    if explicit:
+        return Path(explicit)
+    return runtime_root() / ".ai" / "memory" / "instruction-loads.jsonl"
 
 
 def _archive_destination(source: Path) -> Path:
@@ -61,12 +79,13 @@ def rotate_file(source: Path, *, max_bytes: int, dry_run: bool) -> Path | None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--path", type=Path, default=DEFAULT_RECEIPT)
+    parser.add_argument("--path", type=Path, default=None)
     parser.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
+    source = args.path if args.path is not None else default_receipt_path()
     try:
-        rotate_file(args.path, max_bytes=args.max_bytes, dry_run=args.dry_run)
+        rotate_file(source, max_bytes=args.max_bytes, dry_run=args.dry_run)
     except OSError as exc:
         print(f"[rotate-jsonl-receipt] {exc}", file=sys.stderr)
     return 0
