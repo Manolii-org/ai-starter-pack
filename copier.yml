@@ -65,6 +65,11 @@ mesh_telemetry:
   help: Agent-mesh cost/outcome telemetry contract (ships mesh-contract.yaml.template; instance gains MESH_INVOCATION_URL repo var + bearer secret).
   default: false
 
+claude_hooks:
+  type: bool
+  help: Wire Claude Code InstructionsLoaded observability. Codex and Cursor do not emit this host event.
+  default: true
+
 # ── Instance identity (provenance — pack-components.yml, ADR-0023 Decision 4) ─
 instance_name:
   type: str

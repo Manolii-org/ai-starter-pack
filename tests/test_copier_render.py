@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Test suite for Copier template rendering (copier.yml)."""
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -247,10 +248,10 @@ def test_feature_flags_gate_optional_surfaces(default_render):
     ("flags", "expected"),
     [
         ({}, {"Hooks": 5, "Commands": 45, "Skills": 24, "Agents": 26,
-              "Scripts": 36, "Husky": 3, "CI": 29, "Docs": 13}),
+              "Scripts": 39, "Husky": 3, "CI": 29, "Docs": 14}),
         ({flag: "true" for flag in FEATURE_FLAGS},
          {"Hooks": 5, "Commands": 48, "Skills": 28, "Agents": 27,
-              "Scripts": 36, "Husky": 3, "CI": 29, "Docs": 15}),
+              "Scripts": 39, "Husky": 3, "CI": 29, "Docs": 16}),
     ],
 )
 def test_rendered_readme_counts_match_rendered_tree(flags, expected):
@@ -614,3 +615,32 @@ def test_verify_secrets_cli(tmp_path):
         f"Expected returncode 0 (default render has no doppler keys), got {result.returncode}.\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
+
+
+def test_claude_hooks_render_includes_handler_and_event(default_render):
+    settings = json.loads((default_render / ".claude" / "settings.json").read_text())
+    assert "InstructionsLoaded" in settings["hooks"]
+    handler = default_render / "scripts" / "instruction-load-audit.py"
+    verifier = default_render / "scripts" / "verify-instruction-load-audit.py"
+    assert handler.is_file() and os.access(handler, os.X_OK)
+    assert verifier.is_file()
+    ignore = (default_render / ".gitignore").read_text()
+    assert "instruction-loads.jsonl" in ignore
+    assert ".ai/memory/*.lock" in ignore
+    canary = json.loads((default_render / "config" / "instruction-load-canary.json").read_text())
+    assert canary["requirements"][0]["path"] == "CLAUDE.md"
+    command = settings["hooks"]["InstructionsLoaded"][0]["hooks"][0]["command"]
+    assert "instruction-load-audit.py" in command
+    assert handler.exists()
+
+
+def test_claude_hooks_false_does_not_claim_host_event(tmp_path):
+    dst = tmp_path / "no-claude"
+    dst.mkdir()
+    render(dst, claude_hooks="false")
+    settings = json.loads((dst / ".claude" / "settings.json").read_text())
+    assert "InstructionsLoaded" not in settings.get("hooks", {})
+    docs = (dst / "docs" / "instruction-load-observability.md").read_text()
+    assert "Codex and Cursor do not emit this event" in docs
+    agents = (dst / "AGENTS.md").read_text()
+    assert "do not invent one" in agents

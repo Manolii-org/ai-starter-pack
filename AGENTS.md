@@ -39,6 +39,9 @@ Agents use tools in this priority order:
    - `git`, `gh`, `npm`/`pnpm`, `curl`
    - Via Bash tool
 
+Claude Code may record `InstructionsLoaded` receipts (`docs/instruction-load-observability.md`).
+Codex and Cursor do not emit that host event; do not invent one.
+
 ## Security Boundaries
 
 ### Allowed
