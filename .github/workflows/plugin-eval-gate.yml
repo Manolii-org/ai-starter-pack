@@ -68,7 +68,13 @@ jobs:
 
       - name: Retrospective + memory path tests
         run: |
-          python3 -m pytest scripts/tests/test_session_retrospective.py scripts/tests/test_failure_class.py -q
+          python3 -m pytest \
+            scripts/tests/test_session_retrospective.py \
+            scripts/tests/test_failure_class.py \
+            scripts/tests/test_instruction_load_audit.py \
+            scripts/tests/test_verify_instruction_load_audit.py \
+            scripts/tests/test_rotate_jsonl_receipt.py \
+            -q
           bash scripts/tests/test_migrate_memory_path.sh
           bash scripts/tests/test_plugin_scripts_sync.sh
           # Codex P2 2026-07-19: the two hardening bash suites weren't

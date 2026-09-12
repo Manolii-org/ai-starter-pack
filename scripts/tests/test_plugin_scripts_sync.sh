@@ -9,6 +9,9 @@ PAIRS=(
   migrate-memory-path.sh
   session-cost-logger.py
   lib/failure_class.py
+  instruction-load-audit.py
+  verify-instruction-load-audit.py
+  rotate-jsonl-receipt.py
 )
 fail=0
 for rel in "${PAIRS[@]}"; do
