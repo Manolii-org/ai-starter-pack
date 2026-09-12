@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.11.0 — 2026-09-12
+
 ### Added
 
 - **Claude instruction-load observability.** Portable `InstructionsLoaded`
