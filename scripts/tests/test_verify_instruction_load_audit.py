@@ -21,27 +21,25 @@ def test_load_rows_filters_session_and_schema(tmp_path):
     assert len(MODULE.load_rows(receipt, "wanted")) == 1
 
 
-def test_verify_requires_matching_reason_and_current_digest(tmp_path, monkeypatch):
+def test_verify_requires_matching_reason_and_current_digest(tmp_path):
     instruction = tmp_path / "CLAUDE.md"
     instruction.write_text("rules\n", encoding="utf-8")
-    monkeypatch.setattr(MODULE, "ROOT", tmp_path)
     digest = hashlib.sha256(instruction.read_bytes()).hexdigest()
     rows = [{
         "file_path": "CLAUDE.md", "load_reason": "session_start",
         "observed_sha256": digest,
     }]
-    assert MODULE.verify(rows, [("CLAUDE.md", "session_start")]) == []
-    assert MODULE.verify(rows, [("CLAUDE.md", "compact")]) == ["missing CLAUDE.md:compact"]
+    assert MODULE.verify(rows, [("CLAUDE.md", "session_start")], root=tmp_path) == []
+    assert MODULE.verify(rows, [("CLAUDE.md", "compact")], root=tmp_path) == ["missing CLAUDE.md:compact"]
 
 
-def test_verify_rejects_stale_digest(tmp_path, monkeypatch):
+def test_verify_rejects_stale_digest(tmp_path):
     (tmp_path / "CLAUDE.md").write_text("current\n", encoding="utf-8")
-    monkeypatch.setattr(MODULE, "ROOT", tmp_path)
     rows = [{
         "file_path": "CLAUDE.md", "load_reason": "session_start",
         "observed_sha256": "0" * 64,
     }]
-    assert MODULE.verify(rows, [("CLAUDE.md", "session_start")]) == [
+    assert MODULE.verify(rows, [("CLAUDE.md", "session_start")], root=tmp_path) == [
         "digest mismatch CLAUDE.md:session_start"
     ]
 
@@ -70,6 +68,27 @@ def test_main_fails_closed_without_a_session_id(tmp_path, monkeypatch, capsys):
     receipt.write_text("", encoding="utf-8")
     assert MODULE.main(["--receipt", str(receipt)]) == 1
     assert "no session id" in capsys.readouterr().err
+
+
+def test_invalid_canary_fails_closed(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "wanted")
+    receipt = tmp_path / "instruction-loads.jsonl"
+    receipt.write_text("", encoding="utf-8")
+    canary = tmp_path / "config" / "instruction-load-canary.json"
+    canary.parent.mkdir()
+    canary.write_text("[]", encoding="utf-8")
+    assert MODULE.main(["--receipt", str(receipt), "--root", str(tmp_path), "--session-id", "wanted"]) == 1
+    assert "INSTRUCTION-AUDIT-FAIL" in capsys.readouterr().err
+
+
+def test_null_requirement_fails_closed(tmp_path, capsys):
+    receipt = tmp_path / "instruction-loads.jsonl"
+    receipt.write_text("", encoding="utf-8")
+    canary = tmp_path / "config" / "instruction-load-canary.json"
+    canary.parent.mkdir()
+    canary.write_text('{"requirements":[null]}', encoding="utf-8")
+    assert MODULE.main(["--receipt", str(receipt), "--root", str(tmp_path), "--session-id", "wanted"]) == 1
+    assert "INSTRUCTION-AUDIT-FAIL" in capsys.readouterr().err
 
 
 def test_archive_discovery_matches_real_rotation_naming(tmp_path, monkeypatch):

@@ -10,23 +10,52 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_RECEIPT = ROOT / ".ai" / "memory" / "instruction-loads.jsonl"
-DEFAULT_CANARY = ROOT / "config" / "instruction-load-canary.json"
 
 
-def default_requirements(root: Path = ROOT) -> list[tuple[str, str]]:
+def runtime_root() -> Path:
+    override = os.environ.get("INSTRUCTION_LOAD_ROOT")
+    if override:
+        return Path(override)
+    project = (os.environ.get("CLAUDE_PROJECT_DIR") or "").strip()
+    if project:
+        path = Path(project)
+        if path.is_dir():
+            return path
+    return ROOT
+
+
+def default_receipt_path(root: Path | None = None) -> Path:
+    explicit = os.environ.get("INSTRUCTION_LOAD_AUDIT_PATH")
+    if explicit:
+        return Path(explicit)
+    return (root or runtime_root()) / ".ai" / "memory" / "instruction-loads.jsonl"
+
+
+def load_requirements(root: Path) -> list[tuple[str, str]]:
     canary = root / "config" / "instruction-load-canary.json"
-    if canary.is_file():
+    if not canary.is_file():
+        return [("CLAUDE.md", "session_start")]
+    try:
         data = json.loads(canary.read_text(encoding="utf-8"))
-        rows = []
-        for item in data.get("requirements") or []:
-            path = str(item.get("path") or "")
-            reason = str(item.get("reason") or "")
-            if path and reason:
-                rows.append((path, reason))
-        if rows:
-            return rows
-    return [("CLAUDE.md", "session_start")]
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid canary JSON in {canary}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"canary must be an object: {canary}")
+    items = data.get("requirements")
+    if not isinstance(items, list):
+        raise ValueError(f"canary requirements must be a list: {canary}")
+    rows: list[tuple[str, str]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            raise ValueError(f"canary requirement must be an object: {canary}")
+        path = str(item.get("path") or "")
+        reason = str(item.get("reason") or "")
+        if not path or not reason:
+            raise ValueError(f"canary requirement needs path and reason: {canary}")
+        rows.append((path, reason))
+    if not rows:
+        raise ValueError(f"canary has no requirements: {canary}")
+    return rows
 
 
 def receipt_sources(path: Path) -> list[Path]:
@@ -65,10 +94,11 @@ def load_rows(path: Path, session_id: str) -> list[dict]:
     return rows
 
 
-def verify(rows: list[dict], requirements: list[tuple[str, str]]) -> list[str]:
+def verify(rows: list[dict], requirements: list[tuple[str, str]], *, root: Path | None = None) -> list[str]:
+    checkout = root if root is not None else runtime_root()
     failures = []
     for relative, reason in requirements:
-        path = ROOT / relative
+        path = checkout / relative
         expected = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
         matches = [
             row for row in rows
@@ -85,7 +115,8 @@ def verify(rows: list[dict], requirements: list[tuple[str, str]]) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--receipt", type=Path, default=DEFAULT_RECEIPT)
+    parser.add_argument("--receipt", type=Path, default=None)
+    parser.add_argument("--root", type=Path, default=None)
     parser.add_argument(
         "--session-id", default=os.environ.get("CLAUDE_CODE_SESSION_ID", ""),
         help="Session whose observations must satisfy the requirements. "
@@ -97,6 +128,8 @@ def main(argv: list[str] | None = None) -> int:
         metavar="PATH:REASON",
     )
     args = parser.parse_args(argv)
+    checkout = args.root if args.root is not None else runtime_root()
+    receipt = args.receipt if args.receipt is not None else default_receipt_path(checkout)
     if not args.session_id:
         print(
             "INSTRUCTION-AUDIT-FAIL: no session id (pass --session-id or set "
@@ -104,17 +137,17 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
-    requirements = []
-    if args.require:
-        for value in args.require:
-            if ":" not in value:
-                parser.error("--require must be PATH:REASON")
-            requirements.append(tuple(value.rsplit(":", 1)))
-    else:
-        requirements = default_requirements()
     try:
-        rows = load_rows(args.receipt, args.session_id)
-        failures = verify(rows, requirements)
+        requirements = []
+        if args.require:
+            for value in args.require:
+                if ":" not in value:
+                    parser.error("--require must be PATH:REASON")
+                requirements.append(tuple(value.rsplit(":", 1)))
+        else:
+            requirements = load_requirements(checkout)
+        rows = load_rows(receipt, args.session_id)
+        failures = verify(rows, requirements, root=checkout)
     except (OSError, ValueError) as exc:
         print(f"INSTRUCTION-AUDIT-FAIL: {exc}", file=sys.stderr)
         return 1
