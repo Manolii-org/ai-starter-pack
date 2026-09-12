@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Changed
+
+- **`/watch-pr` subscribe split (v2.1.0).** Docs/CI auto-merge PRs (paths ⊆
+  `reports/**`, `docs/**`, `reports/INDEX.md`,
+  `.github/pull_request_template.md`, `.github/PULL_REQUEST_TEMPLATE.md`)
+  must not call `subscribe_github_pr` / `subscribe_pr_activity`. Optional CI
+  subscribe; ≥20-minute heartbeat only if CI subscribe is on. Product-red
+  keeps PR+CI subscribe and the ≥20-minute heartbeat. No 60s poll loop; do
+  not invent `mcp__github__subscribe_ci`. Template:
+  `.claude/commands/watch-pr.md.jinja`. Plugin command rebuilt from it.
+
 ## 1.14.0 — 2026-09-12
 
 `release-tag.yml` only creates new refs. `git matching-refs tags/v1` already
