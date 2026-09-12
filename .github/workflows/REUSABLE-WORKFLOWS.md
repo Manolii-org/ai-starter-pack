@@ -3,7 +3,7 @@
 Canonical home for AI Starter Pack reusable GitHub Actions workflows. Consumed via:
 
 ```yaml
-uses: manolii-org/ai-starter-pack/.github/workflows/<name>-reusable.yml@v1.11.0
+uses: manolii-org/ai-starter-pack/.github/workflows/<name>-reusable.yml@v1.12.0
 ```
 
 Frozen at v1 (additive=non-breaking; rename/remove/default-change=v2).
@@ -15,7 +15,7 @@ sharing the receipt and pin-SHA controls introduced in v1.10.0:
 
 ```yaml
 - id: resolve
-  uses: Manolii-org/ai-starter-pack/.github/actions/resolve-held-promote-sha@v1.11.0
+  uses: Manolii-org/ai-starter-pack/.github/actions/resolve-held-promote-sha@v1.12.0
   with:
     sha: ${{ inputs.sha }}
 
@@ -137,7 +137,7 @@ permissions:
 
 jobs:
   ci:
-    uses: manolii-org/ai-starter-pack/.github/workflows/ci-reusable.yml@v1.11.0
+    uses: manolii-org/ai-starter-pack/.github/workflows/ci-reusable.yml@v1.12.0
     with:
       runs_on: ubuntu-latest
       node_version: '24'
@@ -178,7 +178,7 @@ permissions:
 
 jobs:
   assessment:
-    uses: manolii-org/ai-starter-pack/.github/workflows/pr-assessment-reusable.yml@v1.11.0
+    uses: manolii-org/ai-starter-pack/.github/workflows/pr-assessment-reusable.yml@v1.12.0
     with:
       provider_mode: proxy
       litellm_proxy_url: ${{ vars.LITELLM_PROXY_URL }}
@@ -212,7 +212,7 @@ immutable tag and want prompts and workflow to move together, pass the same tag:
 
 ```yaml
     with:
-      pack_ref: v1.11.0
+      pack_ref: v1.12.0
 ```
 
 The hydration list lives in the workflow-level `ASSESSMENT_RUNTIME_FILES` env.
@@ -465,7 +465,7 @@ jobs:
           EOF
   fast-tier:
     needs: detect
-    uses: manolii-org/ai-starter-pack/.github/workflows/fast-tier-reusable.yml@v1.11.0
+    uses: manolii-org/ai-starter-pack/.github/workflows/fast-tier-reusable.yml@v1.12.0
     with:
       gates: ${{ needs.detect.outputs.gates }}
       budget_minutes: 5
@@ -485,7 +485,7 @@ permissions:
   issues: write
 jobs:
   pre-production-tier:
-    uses: manolii-org/ai-starter-pack/.github/workflows/pre-production-tier-reusable.yml@v1.11.0
+    uses: manolii-org/ai-starter-pack/.github/workflows/pre-production-tier-reusable.yml@v1.12.0
     with:
       gates: >-
         [{"name":"e2e","applies":true,"command":"pnpm test:e2e"},
@@ -511,10 +511,10 @@ Phase-1 exit) — see `kernel/backup/README.md`.
 ```yaml
 jobs:
   validate-backup-manifest:
-    uses: manolii-org/ai-starter-pack/.github/workflows/backup-kernel-validate-reusable.yml@v1.11.0
+    uses: manolii-org/ai-starter-pack/.github/workflows/backup-kernel-validate-reusable.yml@v1.12.0
     with:
       manifest_path: config/backup-tenant.yaml
-      pack_ref: v1.11.0   # keep identical to the `uses:` pin — the pack cannot discover its own ref
+      pack_ref: v1.12.0   # keep identical to the `uses:` pin — the pack cannot discover its own ref
 ```
 
 ## pr-autofix-loop-reusable
@@ -562,7 +562,7 @@ permissions:
 
 jobs:
   autofix:
-    uses: Manolii-org/ai-starter-pack/.github/workflows/pr-autofix-loop-reusable.yml@v1.11.0
+    uses: Manolii-org/ai-starter-pack/.github/workflows/pr-autofix-loop-reusable.yml@v1.12.0
     with:
       provider_mode: proxy
       litellm_proxy_url: ${{ vars.LITELLM_PROXY_URL }}
