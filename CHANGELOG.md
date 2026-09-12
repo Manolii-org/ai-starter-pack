@@ -2,7 +2,11 @@
 
 ## Unreleased
 
-## 1.11.0 — 2026-09-12
+## 1.12.0 — 2026-09-12
+
+Pack bookkeeping #104 labelled this block `1.11.0`, but annotated tag
+`v1.11.0` already existed (2026-08-31, `2845356813c85612c7563c1bee65beab87cf209b`,
+#87). `release-tag.yml` cannot move an existing tag. This cut is `v1.12.0`.
 
 ### Added
 
@@ -161,6 +165,16 @@
   Autofix is **not** draft-gated. Path-filter examples: `mutation-testing-diff.yml`
   (`on.pull_request.paths`) and `static-review.yml` `changed-files`. Do not cite
   `ci.yml` `detect` (existence check only).
+
+## 1.11.0 — 2026-08-31
+
+Annotated tag `v1.11.0` points at `2845356813c85612c7563c1bee65beab87cf209b`
+(#87 workflow outcome semantics). Manifest lagged at `1.10.0`. Do not retag.
+
+## 1.10.0
+
+Annotated tag `v1.10.0` points at `ce6cc57bd03aa1c590dab426e4063a4b4f5d1b5f`
+(held-promotion receipt composites, #86). Do not retag.
 
 ## 1.9.7 — 2026-08-21
 
