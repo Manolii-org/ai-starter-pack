@@ -15,9 +15,12 @@ evidence as its producer.
 ## Consumer contract
 
 Call `.github/workflows/integration-admission-reusable.yml` from an unfiltered
-`pull_request`/`merge_group` caller and pass trusted event-derived base/head SHAs. Supply a
-repository-local `config/integration-admission.json` derived from the schema and example.
-Pin the reusable and `pack_ref` to the same immutable tag.
+`pull_request`/`merge_group` caller **only when the consumer has opted in**.
+Wave H (2026-09-14) does **not** turn this planner on for every PR. Pass trusted
+event-derived base/head SHAs. Supply a repository-local
+`config/integration-admission.json` derived from the schema and example.
+Pin the reusable and `pack_ref` to the same immutable tag. Do not bump
+consumer pins solely to pick up this document.
 
 ```yaml
 name: Integration Admission
