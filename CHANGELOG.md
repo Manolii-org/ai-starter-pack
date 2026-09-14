@@ -13,6 +13,18 @@
   not invent `mcp__github__subscribe_ci`. Template:
   `.claude/commands/watch-pr.md.jinja`. Plugin command rebuilt from it.
 
+## 1.15.1 — 2026-09-14
+
+### Fixed
+
+- **Detect Project treats synced empty outcome scaffolds as scaffold.** Pack
+  `ci-reusable` previously required `config/workflow-outcomes.json` to equal
+  exactly `{"version":1,"workflows":{}}`. Consumer sync adds `_sync_metadata`,
+  which made Detect Project fail with `Invalid workflow-outcome contract shape`
+  on pin drafts. Optional `_sync_metadata` is now ignored for scaffold
+  classification. Adopted (non-empty `workflows`) and other extra keys are
+  unchanged. Does not weaken adopted-contract lint.
+
 ## 1.14.0 — 2026-09-12
 
 `release-tag.yml` only creates new refs. `git matching-refs tags/v1` already
