@@ -112,6 +112,10 @@ model_list:
     litellm_params:
       model: openrouter/google/gemma-4-31b-it
       api_key: os.environ/OPENROUTER_API_KEY
+      extra_body:
+        provider:
+          data_collection: deny
+          zdr: true
   - model_name: tier-3-tool-fallback-kimi-together
     litellm_params:
       # Different provider + different model family for resilience.
