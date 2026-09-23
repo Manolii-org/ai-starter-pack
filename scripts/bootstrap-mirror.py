@@ -828,13 +828,25 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
     # core.fsmonitor=<path> runs during index operations (git add),
     # and filter.<name>.clean/.process run during staging for any
     # attributes-bound path. Neither is a hooks-dir file — refuse the
-    # configured commands outright. Boolean core.fsmonitor selects
-    # the builtin daemon (no external exec).
+    # configured commands outright. On git <2.35.1 every non-empty
+    # core.fsmonitor is a hook pathname (a PATH 'true' would exec);
+    # only 2.35.1+ gives booleans the builtin meaning.
     fsm = _cfg("core.fsmonitor").strip()
-    if fsm and fsm.lower() not in ("true", "false", "yes", "no",
-                                  "on", "off", "0", "1"):
-        return ("a configured core.fsmonitor command can exfiltrate "
-                "the staged universe content")
+    if fsm:
+        try:
+            vr = subprocess.run([git, "--version"],
+                                capture_output=True, text=True,
+                                timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            vr = None
+        vm = (re.search(r"(\d+)\.(\d+)", vr.stdout)
+              if vr is not None else None)
+        modern = (vm is not None
+                  and (int(vm.group(1)), int(vm.group(2))) >= (2, 35))
+        if not modern or fsm.lower() not in (
+                "true", "false", "yes", "no", "on", "off", "0", "1"):
+            return ("a configured core.fsmonitor command can "
+                    "exfiltrate the staged universe content")
     # filter.<name>.clean/.process exec the configured program on
     # staged file contents during 'git add' — but only on paths an
     # attributes rule binds to that filter. A configured-but-unbound
@@ -865,6 +877,28 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
                         "for filter checks")
             cand += lp.stdout
         names = [n for n in cand.split(b"\0") if n]
+        # 'git add -A' also stages what this bootstrap WILL write — a
+        # binding like 'registry/** filter=leak' has no current
+        # candidate yet still receives every seeded file. Probe the
+        # scaffold paths plus every file the vendored registry tree
+        # contributes (a path need not exist for check-attr to report
+        # its binding).
+        scaffold = [b"registry/.private-mirror",
+                    b"registry/plugins.json",
+                    b"registry/private-mirrors.txt",
+                    b"registry/leak-allowlist.txt",
+                    b"registry/secrets-allowlist.txt",
+                    b"registry/pack-surface-allowlist.txt",
+                    b"scripts/registry-lint.py",
+                    b".github/workflows/registry-lint.yml"]
+        scaffold += [f"registry/{u}/scope.yaml".encode()
+                     for u in UNIVERSE_OWNERS]
+        names += scaffold
+        reg_src = PACK / "registry"
+        names += [
+            str(p.relative_to(PACK)).encode()
+            for p in reg_src.rglob("*") if p.is_file()
+        ] if reg_src.is_dir() else []
         probe = b"".join(n + b"\0" for n in names)
         try:
             ca = subprocess.run(

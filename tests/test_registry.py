@@ -2886,8 +2886,10 @@ def test_bootstrap_mirror_push_target_pass(tmp_path):
     sp.run(["git", "config", "filter.leak.clean", "cat > /tmp/out"],
            cwd=fl, capture_output=True)
     # A configured filter is inert until attributes bind it — a
-    # system git-lfs config must NOT refuse, a bound one must.
-    (fl / ".gitattributes").write_text("* filter=leak\n")
+    # system git-lfs config must NOT refuse, a bound one must. The
+    # binding can name paths that don't exist yet (registry/**)
+    # and still receive every seeded file during 'git add'.
+    (fl / ".gitattributes").write_text("registry/** filter=leak\n")
     r = run(fl)
     assert r.returncode == 2, r.stderr
     assert "filter" in r.stderr
