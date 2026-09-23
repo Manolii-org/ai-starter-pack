@@ -46,8 +46,14 @@ policy). Nothing else may land under a non-platform scope here:
   and a live `gh api repos/<slug>` result reporting `visibility ==
   "private"` for a GitHub-hosted origin. To stand one up: create the
   repo private, add the marker, vendor `registry/platform/**` +
-  `plugins.json` + `scripts/registry-lint.py`, and write
+  `plugins.json` + `scripts/registry-lint.py` +
+  `schemas/registry-scope.schema.json`, and write
   `registry/private-mirrors.txt` with the sha256 of its own slug.
+  `scripts/bootstrap-mirror.py` performs all of this — seeding the
+  scope, vendoring the platform tree + schema + lint, writing the
+  reduced lint workflow below, and regenerating the ratchet allowlists
+  against the mirror's own checkout (it requires the checkout's origin
+  slug to match `--slug` and a private `gh api` visibility result).
   Do NOT vendor the canonical `.github/workflows/registry-lint.yml` — its
   other steps invoke `build-registry.py`, `ai-resolve.py`, the manifest
   schema, and `tests/test_registry.py`, none of which the mirror ships.
@@ -58,8 +64,8 @@ policy). Nothing else may land under a non-platform scope here:
   on:
     pull_request:
       paths: ['**']
+    # no branch filter: mirror default branches may not be `main`
     push:
-      branches: [main]
       paths: ['**']
   permissions:
     contents: read

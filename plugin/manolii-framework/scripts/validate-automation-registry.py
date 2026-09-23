@@ -134,12 +134,16 @@ def validate(doc: dict, errors: list[str]) -> None:
 
         unknown = set(auto) - ALLOWED_AUTO_KEYS
         if unknown:
-            fail(f"{name}: unknown automation keys {sorted(unknown)} (schema is closed)", errors)
+            # keys may be non-strings (YAML `1: value`) — sort via str so
+            # the report is consolidated, not a TypeError
+            fail(f"{name}: unknown automation keys "
+                 f"{sorted(unknown, key=str)} (schema is closed)", errors)
 
         trigger = auto.get("trigger") or {}
         unknown_t = set(trigger) - ALLOWED_TRIGGER_KEYS
         if unknown_t:
-            fail(f"{name}: unknown trigger keys {sorted(unknown_t)}", errors)
+            fail(f"{name}: unknown trigger keys "
+                 f"{sorted(unknown_t, key=str)}", errors)
         ttype = trigger.get("type")
         if not isinstance(ttype, str):
             fail(f"{name}: trigger.type must be a string (got {ttype!r})", errors)
