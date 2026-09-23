@@ -600,3 +600,51 @@ control-plane). See `docs/fly-runner-setup.md`.
 Relayed comments are accepted by Autofix when they start with `**[@` — the pack
 handles the integration. Do **not** install the master `auto-address-review.yml`
 on the same repository.
+
+## migration-run-gate (v1.17.0+)
+
+Reusable job that runs REAL migrations against a throwaway DB service
+container — apply, downgrade-N, re-apply, single-head assertion. Pairs with
+`validate-database-migrations` (graph check): that one proves the revision
+graph is sound, this one proves the migrations actually execute.
+
+```yaml
+jobs:
+  migration-run:
+    uses: Manolii-org/ai-starter-pack/.github/workflows/migration-run-gate-reusable.yml@v1.17.0
+    with:
+      db_image: mcr.microsoft.com/mssql/server:2022-latest
+      db_ports_json: '["1433:1433"]'
+      db_env_json: '{"ACCEPT_EULA":"Y","MSSQL_SA_PASSWORD":"<ci-throwaway-pw>"}'
+      migrations_env_json: >-
+        {"MODE":"UAT","TESTING":"1",
+         "ALEMBIC_DATABASE_URL":"mssql+pyodbc://sa:<ci-throwaway-pw>@localhost:1433/master?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes"}
+      install_command: pip install uv && uv sync --dev
+      setup_command: <install msodbcsql18 — see header comment in the reusable>
+      run_prefix: uv run
+      downgrade_steps: "1"
+```
+
+Postgres is identical shape with `postgres:16`, `pg_isready` health options,
+and a `postgresql://` URL. The `ALEMBIC_DATABASE_URL` convention is the
+recommended env override in each instance's `alembic/env.py` — it makes the
+same var usable for local dev without secrets-manager access.
+
+## check-guarded-paths (v1.17.0+)
+
+Step-level composite action enforcing `.ai/guards.json` at merge time —
+diffs `base...head`, fails when a block-mode guard's paths changed without a
+`guard-ok:<id>` PR label or `Guarded-Path: <id>` commit trailer. See
+[`docs/guarded-paths.md`](../../docs/guarded-paths.md) for the taxonomy and a
+ready-to-paste caller job.
+
+## Registry + contract schemas and validators
+
+- `schemas/automation-registry.schema.json` + `scripts/validate-automation-registry.py`
+- `schemas/deployment-contract.schema.json` + `scripts/check-deployment-contract.py`
+
+Instance-owned config validated nightly in the control repo: every scheduled
+automation registered with owner + risk tier, and every product repo's lane
+model diffed against its real workflows (trigger branch, required jobs,
+rollback, concurrency group). Both scripts support `--mode local` (sibling
+checkouts) and `--mode github` (`gh api`).

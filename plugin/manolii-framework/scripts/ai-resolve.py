@@ -80,10 +80,9 @@ SCRIPT_DEP_KEYS = ("requires_scripts",)
 # consumer fetch them) — the only exemption that lets an unbundled script
 # reference materialise instead of being skipped as an unsatisfiable dep.
 CONSUMER_SCRIPT_KEYS = ("consumer_scripts",)
-# Path extraction for SCRIPT_REF matches — captures the path RELATIVE to
-# scripts/ (nested helpers like scripts/audit/tool.py count too); used to
-# distinguish bundled plugin scripts (a real dependency) from consumer-
-# repository commands.
+# Path extraction for SCRIPT_REF matches (relative to scripts/) — used to
+# distinguish bundled plugin scripts (a real dependency) from
+# consumer-repository commands.
 SCRIPT_NAME = re.compile(
     rb"scripts/((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs))\b")
 
@@ -128,9 +127,8 @@ def script_dep_block(plugin_dir: Path, src_bytes: bytes,
     consumer_scripts.
 
     Under a tag:/sha: pin, `pinned_scripts` carries the scripts/-relative
-    paths the PINNED git tree holds in scripts/ — the worktree's is_file()
-    would honour ignored/untracked plants and index-hidden deletions the pin
-    never saw."""
+    paths the PINNED git tree holds — the worktree's is_file() would honour
+    ignored/untracked plants and index-hidden deletions the pin never saw."""
     sdir = plugin_dir / "scripts"
     declared = declared_consumer_scripts(src_bytes)
     for m in SCRIPT_REF.finditer(src_bytes):
@@ -263,14 +261,10 @@ def atomic_replace(dst: Path, fill, src: Path | None = None) -> None:
     pre-plant a symlink or hard link there, so writes can never follow a
     link out of the tree. os.replace then unlinks any existing dst entry,
     so a destination hard-linked to a file outside the owned tree keeps
-    its shared inode (and the external peer) untouched.
-
-    When `src` is given, its mode+timestamps are applied to the temp BEFORE
-    the rename — mkstemp creates 0600, so deferring metadata to a
-    post-replace copystat would install a silently non-executable file
-    whenever the stat copy failed. A metadata-limited filesystem raises
-    here, while dst is still untouched, instead of completing a partial
-    install under a passing lock."""
+    its shared inode (and the external peer) untouched. With `src`, the
+    source's mode/mtime land on the temp BEFORE the swap — a metadata
+    failure then leaves the old destination intact rather than
+    publishing a 0600 temp."""
     fd, tmp_name = tempfile.mkstemp(dir=dst.parent,
                                     prefix=f".{dst.name}.", suffix=".tmp")
     tmp = Path(tmp_name)
@@ -278,9 +272,7 @@ def atomic_replace(dst: Path, fill, src: Path | None = None) -> None:
         with os.fdopen(fd, "wb") as f:
             fill(f)
         if src is not None:
-            st = os.stat(src)
-            os.chmod(tmp, st.st_mode & 0o7777)
-            os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns))
+            shutil.copystat(src, tmp)   # keep copy2's mode/mtime semantics
         os.replace(tmp, dst)
     finally:
         if tmp.exists():

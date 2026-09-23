@@ -177,6 +177,28 @@ def test_lockfile_paths_are_repo_relative(tmp_path):
     assert ".claude/skills/demo/SKILL.md" in lock["files"]
 
 
+
+def test_nested_script_dependency_not_materialised(tmp_path):
+    """A skill invoking a NESTED bundled helper (`python3 scripts/audit/tool.py`)
+    is as unrunnable in resolver mode as a flat one — the dep scan must see
+    through subdirectories."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [
+            ("skills/auditor/SKILL.md",
+             "Run `python3 scripts/audit/tool.py --strict`"),
+            ("scripts/audit/tool.py", "# nested bundled helper"),
+            ("skills/plain/SKILL.md", "self-contained"),
+        ],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 0, r.stdout
+    skills = consumer / ".claude" / "skills"
+    assert not (skills / "auditor" / "SKILL.md").exists()
+    assert (skills / "plain" / "SKILL.md").is_file()
 def test_apply_prune_removes_orphans(tmp_path):
     reg_root = make_registry(tmp_path / "src", {
         "platform/framework": [("skills/demo/SKILL.md",
@@ -700,29 +722,6 @@ def test_script_dependent_skills_not_materialised(tmp_path):
     assert r.returncode == 0, r.stdout
     skills = consumer / ".claude" / "skills"
     assert not (skills / "analytics" / "SKILL.md").exists()
-    assert (skills / "plain" / "SKILL.md").is_file()
-
-
-def test_nested_script_dependency_not_materialised(tmp_path):
-    """A skill invoking a NESTED bundled helper (`python3 scripts/audit/tool.py`)
-    is as unrunnable in resolver mode as a flat one — the dep scan must see
-    through subdirectories."""
-    reg_root = make_registry(tmp_path / "src", {
-        "platform/framework": [
-            ("skills/auditor/SKILL.md",
-             "Run `python3 scripts/audit/tool.py --strict`"),
-            ("scripts/audit/tool.py", "# nested bundled helper"),
-            ("skills/plain/SKILL.md", "self-contained"),
-        ],
-    })
-    consumer = tmp_path / "consumer"
-    consumer.mkdir()
-    m = write_manifest(consumer, "manolii",
-                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
-    r = run_resolver(m, reg_root, consumer, "--apply")
-    assert r.returncode == 0, r.stdout
-    skills = consumer / ".claude" / "skills"
-    assert not (skills / "auditor" / "SKILL.md").exists()
     assert (skills / "plain" / "SKILL.md").is_file()
 
 
@@ -1712,12 +1711,11 @@ def test_public_boundary_scope_yaml_only_passes(tmp_path):
     assert not [f for f in mod.results if f.status == "FAIL"]
 
 
-def test_public_boundary_private_mirror_marker_waives(tmp_path, monkeypatch):
+def test_public_boundary_private_mirror_marker_waives(tmp_path):
     """registry/.private-mirror marks a private mirror — the boundary is
-    waived there, but ONLY when (a) the origin remote verifies this isn't
-    the canonical public repo, (b) the slug is declared, and (c)
-    MIRROR_VISIBILITY is asserted from outside the checkout (a public
-    fork can carry both marker and digest)."""
+    waived there, but ONLY when the origin remote verifies this isn't
+    the canonical public repo (a bare committable marker cannot waive
+    the guard)."""
     import subprocess as sp
     reg_root = make_registry(tmp_path / "src", {
         "platform/framework": [("skills/demo/x.md", "x")],
@@ -1737,23 +1735,10 @@ def test_public_boundary_private_mirror_marker_waives(tmp_path, monkeypatch):
     mod.REGISTRY = reg_root / "registry"
     mod.REPO = reg_root
     mod.PRIVATE_MIRRORS_PATH = reg_root / "registry/private-mirrors.txt"
-    # Without the external assertion the waiver must still refuse.
+    mod._repo_visibility = lambda slug: "private"  # stub the live gh api call
     mod.results = []
-    monkeypatch.delenv("MIRROR_VISIBILITY", raising=False)
-    mod.check_public_boundary()
-    assert any("MIRROR_VISIBILITY" in f.detail
-               for f in mod.results if f.status == "FAIL")
-    mod.results = []
-    monkeypatch.setenv("MIRROR_VISIBILITY", "private")
     mod.check_public_boundary()
     assert not [f for f in mod.results if f.status == "FAIL"]
-    # `internal` is NOT an acceptable assertion — on GitHub Enterprise it
-    # grants every enterprise member (incl. other orgs) read access.
-    mod.results = []
-    monkeypatch.setenv("MIRROR_VISIBILITY", "internal")
-    mod.check_public_boundary()
-    assert any("MIRROR_VISIBILITY" in f.detail
-               for f in mod.results if f.status == "FAIL")
 
 
 def test_public_boundary_marker_undeclared_remote_fails(tmp_path):
@@ -1887,15 +1872,15 @@ def test_secrets_stale_allowlist_entry_fails(tmp_path):
                for f in fails), "stale secrets allowlist entry did not FAIL"
 
 
-def test_pack_surface_mirror_mode_exempts_own_org_only(tmp_path,
-                                                      monkeypatch):
+
+def test_pack_surface_mirror_mode_exempts_own_org_only(tmp_path):
     """In a verified private mirror the OWNING org's slug is legitimate
     (a buro mirror names Buro-Built/* on purpose), while other orgs'
     slugs and infra ids still FAIL — the cross-org boundary holds.
-    Mirror mode also requires the external MIRROR_VISIBILITY assertion
-    (committed files alone cannot prove the repo is private)."""
+    Mirror mode requires the live `gh api` visibility assertion
+    (committed files alone cannot prove the repo is private) — stubbed
+    here."""
     import subprocess as sp
-    monkeypatch.setenv("MIRROR_VISIBILITY", "private")
     repo = tmp_path / "mirror"
     (repo / "registry").mkdir(parents=True)
     (repo / "x.md").write_text(
@@ -1919,6 +1904,7 @@ def test_pack_surface_mirror_mode_exempts_own_org_only(tmp_path,
     mod.REGISTRY = repo / "registry"
     mod.PRIVATE_MIRRORS_PATH = repo / "registry/private-mirrors.txt"
     mod.PACK_SURFACE_ALLOWLIST = repo / "registry" / "pack-surface-allowlist.txt"
+    mod._repo_visibility = lambda slug: "private"
     mod.results = []
     mod.check_pack_surface()
     flagged = {f.detail.split(" — ", 1)[0]
@@ -1927,7 +1913,6 @@ def test_pack_surface_mirror_mode_exempts_own_org_only(tmp_path,
     assert "x.md:2" in flagged, "cross-org slug not flagged"
     assert "x.md:3" in flagged, "infra id not flagged"
     assert "x.md:1" not in flagged, "own-org slug wrongly flagged"
-
 
 def _bootstrap_env(tmp_path):
     """env for bootstrap subprocess calls: a `gh` stub reporting 'private'
@@ -1939,7 +1924,6 @@ def _bootstrap_env(tmp_path):
     gh.write_text("#!/bin/sh\necho private\n")
     gh.chmod(0o755)
     return dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}")
-
 
 def test_bootstrap_mirror_seed(tmp_path):
     """bootstrap-mirror.py seeds a complete lint-clean mirror scaffold:
@@ -1983,15 +1967,12 @@ def test_bootstrap_mirror_seed(tmp_path):
     # unchanged inside registry/platform/**.
     assert (root / "registry/secrets-allowlist.txt").is_file()
     # Generated workflow must not invoke files the scaffold never seeds,
-    # and must carry the API-side privacy assertion that feeds
-    # MIRROR_VISIBILITY into the lint env.
+    # and must authenticate the lint's own `gh api` visibility check.
     wf = (root / ".github/workflows/registry-lint.yml").read_text()
     assert "registry-lint.py" in wf
-    assert "Assert mirror privacy" in wf
-    assert "MIRROR_VISIBILITY" in wf
+    assert "GH_TOKEN" in wf
     assert "build-registry.py" not in wf
     assert "pytest" not in wf
-
 
 def test_bootstrap_mirror_fails_closed(tmp_path):
     """Seeding refuses (rc 2, nothing written) when repo visibility cannot
@@ -2073,7 +2054,6 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     r = run(plain, _bootstrap_env(tmp_path))
     assert r.returncode == 2, r.stderr
 
-
 def test_bootstrap_mirror_dirty_clone_no_ratchet(tmp_path):
     """A first seed into a clone that ALREADY has tracked files gets merge
     semantics too — hits in pre-existing files are the org's own content
@@ -2104,7 +2084,6 @@ def test_bootstrap_mirror_dirty_clone_no_ratchet(tmp_path):
     assert any(e.startswith("registry/platform/") for e in entries), \
         "vendored platform hits must still be seeded"
 
-
 def test_bootstrap_mirror_refresh_aborts_on_bad_index(tmp_path):
     """An established mirror whose plugins.json is momentarily malformed
     (e.g. mid conflict-resolution) must NOT be overwritten with the
@@ -2132,7 +2111,6 @@ def test_bootstrap_mirror_refresh_aborts_on_bad_index(tmp_path):
         cwd=pack, capture_output=True, text=True, env=env)
     assert r.returncode == 2, r.stderr
     assert idx.read_text() == "{malformed\n", "index clobbered on abort"
-
 
 def test_bootstrap_mirror_refresh_preserves_index(tmp_path):
     """--refresh-platform overwrites the vendored platform tree but MERGES
@@ -2170,7 +2148,6 @@ def test_bootstrap_mirror_refresh_preserves_index(tmp_path):
                  (root / "registry/plugins.json").read_text())["plugins"]}
     assert ("impaktful", "dqms") in names, "mirror plugin dropped on refresh"
     assert ("platform", "framework") in names
-
 
 def test_bootstrap_mirror_no_refresh_keeps_platform_index(tmp_path):
     """An established-mirror rerun WITHOUT --refresh-platform keeps the
@@ -2211,7 +2188,6 @@ def test_bootstrap_mirror_no_refresh_keeps_platform_index(tmp_path):
              for p in json.loads(idx_path.read_text())["plugins"]}
     assert dropped not in names, \
         "no-refresh rerun re-imported a platform entry the tree lacks"
-
 
 def test_bootstrap_mirror_refresh_preserves_owned_state(tmp_path):
     """On an established mirror, refresh must not (a) clobber the org's own
@@ -2268,8 +2244,6 @@ def test_bootstrap_mirror_refresh_preserves_owned_state(tmp_path):
         "live mirror-owned ratchet entry dropped on refresh"
     assert "registry/cpdcheck/new.md" not in entries, \
         "refresh ratcheted a new mirror-owned violation"
-
-
 def test_pack_surface_scans_tracked_skip_dir(tmp_path):
     """A slug committed under a skip-listed dir is still published —
     the scan enumerates tracked files, not directory names."""

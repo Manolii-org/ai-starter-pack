@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://manolii.dev/schemas/automation-registry.schema.json",
+  "title": "Automation Registry",
+  "description": "Instance-owned inventory of every scheduled/event-driven automation. Required because scheduled workflows fail silently — the registry is what a nightly drift check uses to prove they still exist, parse, and carry ownership.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "automations"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "automations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "repo", "workflow", "trigger", "risk_tier", "owner"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "repo": {"type": "string", "minLength": 1, "description": "owner/repo"},
+          "workflow": {"type": "string", "minLength": 1, "description": "repo-relative workflow path"},
+          "trigger": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["type"],
+            "properties": {
+              "type": {"enum": ["schedule", "push", "pull_request", "workflow_dispatch", "webhook", "other"]},
+              "cron": {"type": "string", "minLength": 1, "description": "required when type=schedule"},
+              "description": {"type": "string"}
+            },
+            "if": {"properties": {"type": {"const": "schedule"}}, "required": ["type"]},
+            "then": {"required": ["cron"]}
+          },
+          "risk_tier": {"enum": ["green", "amber", "red"], "description": "green=advisory, amber=write-scoped, red=production-impacting"},
+          "owner": {"type": "string", "minLength": 1, "description": "team or handle accountable when it breaks"},
+          "description": {"type": "string"},
+          "required_secrets": {"type": "array", "items": {"type": "string"}, "uniqueItems": true, "description": "names only — never values"},
+          "deadman": {"type": "boolean", "default": false, "description": "true = automation is expected to emit a liveness signal; declared so operators know a dead-man monitor is required — the structural validator records the flag but cannot assert a runtime signal"}
+        }
+      }
+    }
+  }
+}

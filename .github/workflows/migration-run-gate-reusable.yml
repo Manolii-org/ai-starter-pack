@@ -1,0 +1,231 @@
+name: Migration Run Gate (Reusable)
+# Reusable workflow_call form. Caller owns `on:`.
+# Cite: .github/workflows/REUSABLE-WORKFLOWS.md
+#
+# Executes REAL migration runs against a throwaway database service
+# container, which the graph-level `validate-database-migrations` action
+# cannot do: apply, downgrade, re-apply, and single-head assertion.
+#
+# Provider-agnostic: the caller supplies the service image, env, health
+# options, and the SQLAlchemy-style URL the migration tool reads. Known-good
+# recipes:
+#
+#   postgres:
+#     db_image:    postgres:16
+#     db_ports_json: '["5432:5432"]'
+#     db_env_json: '{"POSTGRES_PASSWORD":"ci-migration-pw","POSTGRES_DB":"appdb"}'
+#     db_options: >-
+#       --health-cmd "pg_isready -U postgres"
+#       --health-interval 5s --health-timeout 5s --health-retries 10
+#
+#   mssql:
+#     db_image:    mcr.microsoft.com/mssql/server:2022-latest
+#     db_ports_json: '["1433:1433"]'
+#     db_env_json: >-
+#       {"ACCEPT_EULA":"Y","MSSQL_SA_PASSWORD":"ci-Migration-P@ssw0rd!"}
+#     db_options: ''
+#     setup_command: install the msodbcsql18 driver (see caller example)
+#
+# The URL is passed to migration commands via `migrations_env_json` — e.g.
+# '{"ALEMBIC_DATABASE_URL":"postgresql://postgres:ci-migration-pw@localhost:5432/appdb"}'.
+# Instances decide which env var their alembic env.py honours; the pack
+# recommends the conventional ALEMBIC_DATABASE_URL override so the same var
+# also works for local development without secrets-manager access.
+#
+# Security: never pass production credentials — the service container is
+# throwaway and the URL/password pair describes IT, not a real database.
+
+on:
+  workflow_call:
+    inputs:
+      db_image:
+        type: string
+        required: true
+        description: Container image for the throwaway database.
+      db_ports_json:
+        type: string
+        required: true
+        description: JSON array of "host:container" port mappings, e.g. '["5432:5432"]'.
+      db_env_json:
+        type: string
+        required: true
+        description: JSON object of env vars for the db service container.
+      db_options:
+        type: string
+        required: false
+        default: ''
+        description: Extra options string for the service container (health checks).
+      migrations_env_json:
+        type: string
+        required: true
+        description: JSON object of env vars for the migration steps (URL, mode flags).
+      workdir:
+        type: string
+        required: false
+        default: '.'
+        description: Directory holding alembic.ini / the migration tool config.
+        # a non-standard versions/ tree is still reached via the ini's
+        # script_location — set workdir to the directory holding it.
+      adapter:
+        type: string
+        required: false
+        default: 'alembic'
+        description: Migration adapter. Only 'alembic' is implemented today.
+      python_version:
+        type: string
+        required: false
+        default: '3.12'
+      runs_on:
+        type: string
+        required: false
+        default: 'ubuntu-latest'
+      install_command:
+        type: string
+        required: true
+        description: Dependency install, e.g. "uv sync --dev" or "pip install -r requirements.txt".
+      setup_command:
+        type: string
+        required: false
+        default: ''
+        description: Optional extra setup, e.g. ODBC driver install for mssql.
+      run_prefix:
+        type: string
+        required: false
+        default: ''
+        description: Command prefix for migration steps, e.g. "uv run" or "" for a venv/pip shell.
+      downgrade_steps:
+        type: string
+        required: false
+        default: '1'
+        description: N in `alembic downgrade -N`. '0' skips the downgrade leg.
+      alembic_check:
+        type: boolean
+        required: false
+        default: false
+        description: Also run `alembic check` (model↔migration drift) as an informational step.
+      url_env_var:
+        type: string
+        required: false
+        default: 'ALEMBIC_DATABASE_URL'
+        description: Env var (inside migrations_env_json) holding the database URL — the readiness probe reads it; falls back to DATABASE_URL.
+
+env:
+  ADAPTER: ${{ inputs.adapter }}
+
+jobs:
+  migration-run:
+    runs-on: ${{ inputs.runs_on }}
+    env:
+      # pass caller-controlled values through env, not shell source — a value
+      # like `1; malicious-command` must never reach the run: program
+      DOWNGRADE_STEPS: ${{ inputs.downgrade_steps }}
+      PROBE_URL_VAR: ${{ inputs.url_env_var }}
+      # an env-var value is never re-parsed for shell metacharacters — a
+      # `;`-carrying prefix stays literal argv words instead of a command
+      RUN_PREFIX: ${{ inputs.run_prefix }}
+    # covers service-container startup too — a stalled registry pull/health
+    # init happens before any step-level or shell `timeout` can apply
+    timeout-minutes: 45
+    services:
+      db:
+        image: ${{ inputs.db_image }}
+        ports: ${{ fromJSON(inputs.db_ports_json) }}
+        env: ${{ fromJSON(inputs.db_env_json) }}
+        options: ${{ inputs.db_options }}
+    steps:
+      - name: Adapter guard
+        run: |
+          if [ "$ADAPTER" != "alembic" ]; then
+            echo "::error::migration-run-gate implements 'alembic' only today (got '$ADAPTER')."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Install dependencies
+        working-directory: ${{ inputs.workdir }}
+        timeout-minutes: 20
+        run: ${{ inputs.install_command }}
+
+      - name: Extra setup
+        if: ${{ inputs.setup_command != '' }}
+        timeout-minutes: 20
+        run: ${{ inputs.setup_command }}
+
+      - name: Wait for database
+        working-directory: ${{ inputs.workdir }}
+        env: ${{ fromJSON(inputs.migrations_env_json) }}
+        run: |
+          set -e
+          PROBE='import os,sys; import sqlalchemy; url=os.environ.get(os.environ.get("PROBE_URL_VAR","ALEMBIC_DATABASE_URL")) or os.environ.get("DATABASE_URL",""); sqlalchemy.create_engine(url).connect().close()'
+          # url_env_var names an env var — enforce identifier shape so a
+          # caller-supplied value can't carry shell syntax into the probe
+          case "$PROBE_URL_VAR" in
+            ''|[0-9]*|*[!A-Za-z0-9_]*)
+              echo "::error::url_env_var must be an env-var identifier (got '$PROBE_URL_VAR')"
+              exit 1 ;;
+          esac
+          export PROBE_URL_VAR
+          for i in $(seq 1 30); do
+            # `timeout` bounds each probe — a stalled driver handshake must not
+            # hang the whole job (a single unbounded connect can outlive the runner).
+            if timeout 15 $RUN_PREFIX python -c "$PROBE" 2>/dev/null; then
+              echo "database ready after ${i} probe(s)"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::database service never became ready"
+          exit 1
+
+      - name: Apply all migrations (upgrade head)
+        working-directory: ${{ inputs.workdir }}
+        env: ${{ fromJSON(inputs.migrations_env_json) }}
+        # bounded: a lock-waiting upgrade must not eat the runner's job limit
+        run: timeout 300 $RUN_PREFIX alembic upgrade head
+
+      - name: Downgrade N steps
+        if: ${{ inputs.downgrade_steps != '0' }}
+        working-directory: ${{ inputs.workdir }}
+        env: ${{ fromJSON(inputs.migrations_env_json) }}
+        run: |
+          # digits-only — the input documents an integer count, not a
+          # command fragment; reject anything else before the shell sees it
+          case "$DOWNGRADE_STEPS" in
+            ''|*[!0-9]*)
+              echo "::error::downgrade_steps must be a non-negative integer (got '$DOWNGRADE_STEPS')"
+              exit 1 ;;
+          esac
+          timeout 300 $RUN_PREFIX alembic downgrade "-$DOWNGRADE_STEPS"
+
+      - name: Re-apply (upgrade head)
+        if: ${{ inputs.downgrade_steps != '0' }}
+        working-directory: ${{ inputs.workdir }}
+        env: ${{ fromJSON(inputs.migrations_env_json) }}
+        run: timeout 300 $RUN_PREFIX alembic upgrade head
+
+      - name: Single head assertion
+        working-directory: ${{ inputs.workdir }}
+        env: ${{ fromJSON(inputs.migrations_env_json) }}
+        run: |
+          heads=$(timeout 60 $RUN_PREFIX alembic heads | grep -c ' (head)' || true)
+          if [ "$heads" -ne 1 ]; then
+            echo "::error::Expected exactly 1 alembic head, found $heads — merge migration branches."
+            timeout 60 $RUN_PREFIX alembic heads
+            exit 1
+          fi
+
+      - name: Model↔migration drift (informational)
+        if: ${{ inputs.alembic_check }}
+        working-directory: ${{ inputs.workdir }}
+        env: ${{ fromJSON(inputs.migrations_env_json) }}
+        run: |
+          if ! timeout 120 $RUN_PREFIX alembic check; then
+            echo "::warning::alembic check reports model/migration drift — generate a migration."
+          fi
