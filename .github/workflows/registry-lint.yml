@@ -47,7 +47,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install deps
-        run: pip install pyyaml copier pytest jsonschema
+        run: timeout 120 pip install pyyaml copier pytest jsonschema
       - name: Lint the registry
         run: python3 scripts/registry-lint.py
       - name: Freshness — platform plugins are regenerated output

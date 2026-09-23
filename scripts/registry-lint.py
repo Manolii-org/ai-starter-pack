@@ -150,7 +150,18 @@ def check_index() -> None:
         sdir = REGISTRY / scope
         if not sdir.is_dir():
             continue
+        scope_root = sdir.resolve()
         for child in sdir.iterdir():
+            # A symlinked plugin dir aliases another scope's tree — the
+            # resolver would distribute the target's content under this
+            # plugin's name/scope. The resolved dir must also stay inside
+            # its declared scope.
+            if (child.is_symlink()
+                    or not child.resolve().is_relative_to(scope_root)):
+                report("FAIL", "INDEX",
+                       f"plugin dir is a symlink or escapes its scope: "
+                       f"{scope}/{child.name} — refusing to follow")
+                continue
             # Every dir under a scope is a plugin candidate — requiring
             # .claude-plugin/plugin.json here would let an unindexed dir that
             # also lacks its manifest pass INDEX and escape MANIFEST too.
@@ -187,6 +198,12 @@ def check_manifests() -> None:
             if key not in m:
                 report("FAIL", "MANIFEST", f"{rel}: missing '{key}'")
                 bad += 1
+        v = m.get("version")
+        if "version" in m and (not isinstance(v, str)
+                               or not re.fullmatch(r"v?\d+(?:\.\d+){0,2}", v)):
+            report("FAIL", "MANIFEST",
+                   f"{rel}: 'version' must be a semver string (x[.y[.z]]), got {v!r}")
+            bad += 1
         if m.get("name") != plugin_dir.name:
             report("FAIL", "MANIFEST",
                    f"{rel}: name '{m.get('name')}' != dir '{plugin_dir.name}'")

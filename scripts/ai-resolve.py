@@ -60,6 +60,10 @@ LOCK_PATH = ".ai/capability-lock.json"
 REQUIRES_RE = re.compile(
     r"^(platform|manolii|buro|impaktful|cpdcheck|repo|personal)/([a-z0-9][a-z0-9-]*)$"
 )
+SEMVER_REF = re.compile(r"v?\d+(?:\.\d+){0,2}")
+# A materialised file that needs a sibling script — the resolver does not
+# materialise scripts/, so these references can never run in resolver mode.
+SCRIPT_REF = re.compile(rb"scripts/[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs)\b")
 
 
 @dataclass
@@ -182,12 +186,23 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
     if not plugin_dir.is_dir():
         plan.conflicts.append((repo_root / req, f"missing plugin dir: {entry['path']}"))
         return
+    if plugin_dir.resolve() != plugin_dir:
+        # A symlinked plugin dir (or ancestor) aliases another scope's tree —
+        # materialising it would distribute the target's content under this
+        # plugin's name. Registry lint rejects the same shape at the gate.
+        plan.conflicts.append((
+            repo_root / req,
+            "plugin dir contains a symlink — refusing to materialise through it",
+        ))
+        return
 
     manifest_file = plugin_dir / ".claude-plugin" / "plugin.json"
     version = "0.0.0"
     if manifest_file.is_file():
         try:
             version = json.loads(manifest_file.read_text(encoding="utf-8"))["version"]
+            if not isinstance(version, str):
+                version = "0.0.0"
         except (json.JSONDecodeError, KeyError):
             pass
     if ref.startswith(("sha:", "tag:")):
@@ -208,12 +223,31 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                 f"(HEAD {head[:12]}) — check out the pin or use a version range",
             ))
             return
-    elif not version_satisfies(version, ref):
-        plan.conflicts.append((
-            repo_root / req,
-            f"ref '{ref}' not satisfied by registry version {version}",
-        ))
-        return
+        # HEAD may equal the pin while the worktree is dirty — materialising
+        # would copy uncommitted bytes while recording the pinned ref.
+        dirty = subprocess.run(
+            ["git", "-C", str(plugin_dir), "status", "--porcelain",
+             "--untracked-files=all", "--", "."],
+            capture_output=True, text=True, timeout=10)
+        if dirty.returncode == 0 and dirty.stdout.strip():
+            plan.conflicts.append((
+                repo_root / req,
+                f"pinned ref '{ref}' requires a clean worktree — uncommitted "
+                f"changes under {entry['path']}/",
+            ))
+            return
+    else:
+        body = ref[1:] if ref.startswith("^") else ref
+        if not SEMVER_REF.fullmatch(body):
+            plan.conflicts.append((repo_root / req, f"malformed ref '{ref}' — "
+                "supported: ^x[.y[.z]], x[.y[.z]], tag:<tag>, sha:<sha>"))
+            return
+        if not version_satisfies(version, ref):
+            plan.conflicts.append((
+                repo_root / req,
+                f"ref '{ref}' not satisfied by registry version {version}",
+            ))
+            return
 
     materialised: dict[str, str] = {}
     for comp, files in collect_component_files(plugin_dir).items():
@@ -223,15 +257,17 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
             dst = target_root / rel
             rel_dst = dst.relative_to(repo_root).as_posix()
             src_bytes = src.read_bytes()
-            if b"CLAUDE_PLUGIN_ROOT" in src_bytes:
-                # Commands referencing the plugin install root cannot run in a
-                # resolver install — there is no plugin root. Materialising
-                # them would ship a documented command that fails on invoke;
-                # script wiring is a later-phase concern (docs/registry.md).
+            if (b"CLAUDE_PLUGIN_ROOT" in src_bytes
+                    or SCRIPT_REF.search(src_bytes)):
+                # Files depending on the plugin install root or on sibling
+                # scripts/ cannot run in a resolver install — the resolver
+                # does not materialise scripts (surface wiring is a later
+                # phase). Shipping them would document commands/skills that
+                # fail on invoke.
                 plan.advisories.append(
-                    f"{req}: {rel} references CLAUDE_PLUGIN_ROOT — not runnable in "
-                    f"resolver mode (needs marketplace install or script wiring); "
-                    f"not materialised")
+                    f"{req}: {rel} depends on the plugin root or scripts/ — "
+                    f"not runnable in resolver mode (needs marketplace install "
+                    f"or script wiring); not materialised")
                 continue
             # Any symlink in the destination chain — dst itself or an ancestor
             # — makes mkdir/copy2 write through it: outside the repo or across
@@ -301,14 +337,21 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
     })
 
 
-def load_lock(repo_root: Path) -> dict:
+def load_lock(repo_root: Path) -> tuple[dict, str | None]:
+    """(lock doc, error) — a lock that exists but can't be parsed must never
+    masquerade as an empty ownership map: --check would report OK while
+    resolver-installed files stay behind, and the next --apply would
+    overwrite the lock and lose their ownership permanently."""
     p = repo_root / LOCK_PATH
-    if p.is_file():
-        try:
-            return json.loads(p.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return {}
-    return {}
+    if not p.is_file():
+        return {}, None
+    try:
+        doc = json.loads(p.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        return {}, f"unparseable JSON: {e}"
+    if not isinstance(doc, dict):
+        return {}, "not a JSON object"
+    return doc, None
 
 
 def main() -> int:
@@ -334,7 +377,7 @@ def main() -> int:
     universe = str(manifest["universe"])
     registry_root = find_registry_root(Path(args.registry).resolve())
     index = load_plugins_index(registry_root)
-    lock = load_lock(repo_root)
+    lock, lock_err = load_lock(repo_root)
 
     locked_dig = locked_digests(lock)
     plan = Plan()
@@ -401,6 +444,12 @@ def main() -> int:
         plan.conflicts.append((
             lock_file,
             "lockfile destination contains a symlink — refusing to write through it",
+        ))
+    if lock_err:
+        plan.conflicts.append((
+            lock_file,
+            f"capability lock is malformed ({lock_err}) — refusing to infer an "
+            f"empty ownership map (repair or delete {LOCK_PATH})",
         ))
 
     # ---- report ----

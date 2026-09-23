@@ -406,7 +406,7 @@ def test_plugin_root_commands_not_materialised(tmp_path):
                        [{"plugin": "platform/framework", "ref": "1.0.0"}])
     r = run_resolver(m, reg_root, consumer, "--apply")
     assert r.returncode == 0, r.stdout
-    assert "CLAUDE_PLUGIN_ROOT" in r.stdout
+    assert "plugin root or scripts/" in r.stdout
     cmds = consumer / ".claude" / "commands"
     assert not (cmds / "doctor.md").exists()
     assert (cmds / "standalone.md").is_file()
@@ -517,6 +517,126 @@ def test_tag_pin_verified_against_checkout(tmp_path):
     r = run_resolver(m, bare, consumer, "--apply")
     assert r.returncode == 1
     assert "needs a verifiable git checkout" in r.stdout
+
+
+def test_dirty_worktree_rejects_pin(tmp_path):
+    """A tag pin matching HEAD must still fail when the plugin subtree has
+    uncommitted changes — else dirty bytes ship under the pinned ref."""
+    import subprocess as sp
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "x")],
+    })
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    sp.run(["git", "init", "-q"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "add", "-A"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "commit", "-qm", "init"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "tag", "v1.0.0"], cwd=reg_root, env=env, check=True)
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "tag:v1.0.0"}])
+    # dirty the plugin subtree — same HEAD, uncommitted bytes
+    (reg_root / "registry" / "platform" / "framework" / "skills" / "demo"
+     / "x.md").write_text("dirty")
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 1
+    assert "clean worktree" in r.stdout
+
+
+def test_malformed_lock_conflicts(tmp_path):
+    """A corrupt capability-lock.json must not masquerade as an empty
+    ownership map — --apply would overwrite it and lose installed files."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "x")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    ai = consumer / ".ai"
+    ai.mkdir()
+    (ai / "capability-lock.json").write_text('{"files": {<<<truncated')
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 1
+    assert "malformed" in r.stdout
+
+
+def test_malformed_ref_conflicts(tmp_path):
+    """^1.typo must be a conflict, not a silently broadened 1.x range."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "x")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "^1.typo"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 1
+    assert "malformed ref" in r.stdout
+
+
+def test_script_dependent_skills_not_materialised(tmp_path):
+    """A skill that calls a sibling script it doesn't ship cannot run in
+    resolver mode — advisory-skip it, never write it."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [
+            ("skills/analytics/SKILL.md",
+             "Run `python3 scripts/session-analytics.py --days 7`"),
+            ("skills/plain/SKILL.md", "self-contained"),
+        ],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 0, r.stdout
+    skills = consumer / ".claude" / "skills"
+    assert not (skills / "analytics" / "SKILL.md").exists()
+    assert (skills / "plain" / "SKILL.md").is_file()
+
+
+def test_index_fails_on_symlinked_plugin_dir(tmp_path):
+    """A symlinked plugin dir aliases another scope's tree — INDEX must
+    refuse to follow it."""
+    mod = load_lint_module()
+    reg = tmp_path / "registry"
+    pdir = reg / "platform" / "framework"
+    pdir.mkdir(parents=True)
+    for sub in (".claude-plugin", ".devin-plugin"):
+        (pdir / sub).mkdir()
+        (pdir / sub / "plugin.json").write_text(
+            '{"name": "framework", "version": "1.0.0", "description": "x"}')
+    (reg / "plugins.json").write_text(json.dumps({"plugins": [
+        {"scope": "platform", "name": "framework",
+         "path": "registry/platform/framework"}]}))
+    (reg / "platform" / "alias").symlink_to("framework")
+    mod.REGISTRY = reg
+    mod.results = []
+    mod.check_index()
+    fails = [f for f in mod.results
+             if f.check == "INDEX" and f.status == "FAIL"]
+    assert any("symlink" in f.detail for f in fails)
+
+
+def test_manifest_version_must_be_semver(tmp_path):
+    """version: null must not pass the manifest gate — the resolver calls
+    string methods on it."""
+    mod = load_lint_module()
+    reg = tmp_path / "registry"
+    pdir = reg / "platform" / "framework"
+    (pdir / ".claude-plugin").mkdir(parents=True)
+    (pdir / ".claude-plugin" / "plugin.json").write_text(
+        '{"name": "framework", "version": null, "description": "x"}')
+    (pdir / ".devin-plugin").mkdir()
+    (pdir / ".devin-plugin" / "plugin.json").write_text('{"name": "framework"}')
+    mod.REGISTRY = reg
+    mod.results = []
+    mod.check_manifests()
+    fails = [f for f in mod.results
+             if f.check == "MANIFEST" and f.status == "FAIL"]
+    assert any("version" in f.detail for f in fails)
 
 
 def seed_catalog(reg: Path, patterns: list[str] | None = None) -> None:
