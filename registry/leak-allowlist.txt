@@ -12,6 +12,17 @@ platform/framework/hooks/hooks.json#a6aef04b
 platform/framework/hooks/hooks.json#b46edcf0
 platform/framework/hooks/hooks.json#ca9dd52c
 platform/framework/hooks/hooks.json#ce6c0922
+platform/framework/schemas/automation-registry.schema.json#5440f2c5
+platform/framework/schemas/deployment-contract.schema.json#6408b098
+platform/framework/schemas/email-capture/allocation-request.schema.json#8e7d904d
+platform/framework/schemas/email-capture/allocation-response.schema.json#da386a91
+platform/framework/schemas/email-capture/assertion-set.schema.json#0f29d271
+platform/framework/schemas/email-capture/capabilities.schema.json#e1d073b8
+platform/framework/schemas/email-capture/metadata-receipt.schema.json#42992fa2
+platform/framework/schemas/email-capture/normalized-message.schema.json#654f74ec
+platform/framework/schemas/email-capture/profile.schema.json#543fd5c2
+platform/framework/schemas/email-capture/typed-error.schema.json#6510ed0b
+platform/framework/schemas/integration-admission.schema.json#5bc815b8
 platform/framework/scripts/ai-resolve.py#9e24a13c
 platform/framework/scripts/ai-resolve.py#bd083a9c
 platform/framework/scripts/build-litellm-product-asset.py#1ee9c293

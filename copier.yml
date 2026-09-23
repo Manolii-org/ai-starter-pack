@@ -212,7 +212,6 @@ _exclude:
   - schemas/registry-scope.schema.json
   - scripts/build-registry.py
   - scripts/registry-lint.py
-  - scripts/bootstrap-mirror.py
   - tests/test_registry.py
   - .github/workflows/registry-lint.yml
   # Pack-only contract caller (require_contract: true would fail legacy
