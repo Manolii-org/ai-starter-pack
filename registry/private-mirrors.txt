@@ -1,16 +1,28 @@
 # Trusted private mirrors — one sha256(lowercase owner/repo slug) per line.
 #
-# A registry/.private-mirror marker waives the PUBLIC boundary check ONLY
-# when the digest of `git remote get-url origin`'s slug appears here.
-# Digests are NOT a confidentiality boundary: mirror slugs are enumerable
-# by construction, so hashing hides nothing. Their purpose is narrower —
-# keep a committed, auditable, CODEOWNERS-gated trust record without
-# writing cross-org identifiers into this public repo (a plaintext
-# owner/repo list would trip the PACK-SURFACE scan this gate
-# complements). The security boundary is the committed marker plus the
-# live gh-api visibility check; this file is only the allowlist. A
-# mirror owner proves their entry by publishing the slug alongside the
-# PR that adds it, out of band.
+# This file has two different roles depending on the checkout:
+#
+#   * In THIS (canonical, public) repo it is the governed record of
+#     sanctioned mirrors: an entry exists only through a CODEOWNERS-
+#     reviewed PR, and a mirror owner proves their entry by publishing
+#     the slug alongside that PR, out of band. Nothing here is
+#     consulted by a mirror's lint — it is the audit answer to
+#     "is this mirror sanctioned", not a machine authorization.
+#   * In each MIRROR checkout it is the operative waiver file:
+#     bootstrap-mirror.py writes only that checkout's own self-digest,
+#     and registry-lint.py waives the PUBLIC boundary check only when
+#     the origin slug's digest appears in ITS local copy — together
+#     with the committed registry/.private-mirror marker and a live
+#     `gh api` visibility == 'private' result. Any private repo can
+#     self-add its own digest locally; what makes it *sanctioned* is
+#     being listed in this canonical file, verifiable by comparing the
+#     list against live repos.
+#
+# Digests are NOT a confidentiality boundary: mirror slugs are
+# enumerable by construction, so hashing hides nothing. Their purpose
+# is narrower — a committed, auditable trust record without writing
+# cross-org identifiers into this public repo (a plaintext owner/repo
+# list would trip the PACK-SURFACE scan this gate complements).
 #
 # To add a mirror:  printf '%s' 'owner/repo' | sha256sum   (lowercase slug)
 #
