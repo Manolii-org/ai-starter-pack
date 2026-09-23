@@ -10,4 +10,6 @@
 #
 # To add a mirror:  printf '%s' 'owner/repo' | sha256sum   (lowercase slug)
 #
-# (no mirrors declared yet)
+00aeee4ebe05c7d51c19c26c4f2ee48b5b0380b3d3a82b786c52b3a178e116a3
+b4be739aa6f7b04f3930d3790f3a719e2913cfedcd9e27373dce38d7724c7fea
+22c0ee12903e6998e0799c046ac2e5d3e21935d0c9e51b2023a30ce8fcb985ed
