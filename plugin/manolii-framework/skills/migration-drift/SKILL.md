@@ -3,6 +3,7 @@ name: migration-drift
 description: Detect Supabase migrations that are merged but not applied to live databases
 author: Manolii-org
 version: 1.0
+consumer_scripts: ['scripts/check-migration-drift-mgmt.py']
 ---
 
 # Migration Drift Detection

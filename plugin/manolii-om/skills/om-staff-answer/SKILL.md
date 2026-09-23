@@ -9,8 +9,6 @@ max_tokens: 3000
 safety_tier: green
 requires_mcp:
   - knowledge-layer
-required_entities:
-  - manolii
 allowed-tools:
   - Read
   - Bash

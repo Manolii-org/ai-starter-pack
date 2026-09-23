@@ -1,0 +1,19 @@
+{
+  "name": "capability-registry",
+  "version": "0.1.0",
+  "description": "Meta-plugin: installs the platform-scope capability baseline from the capability registry (registry/platform/*). Universe plugins are pinned per-org by the org's Devin plugin manifest — forbidden/optional globs there enforce universe isolation.",
+  "requiredPlugins": [
+    {
+      "source": "git-subdir",
+      "url": "https://github.com/manolii-org/ai-starter-pack.git",
+      "path": "registry/platform/framework"
+    },
+    {
+      "source": "git-subdir",
+      "url": "https://github.com/manolii-org/ai-starter-pack.git",
+      "path": "registry/platform/om"
+    }
+  ],
+  "optionalPlugins": [],
+  "forbiddenPlugins": []
+}

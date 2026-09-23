@@ -200,6 +200,20 @@ _exclude:
   - .claude-plugin
   - .claude-plugin/**
   - .github/workflows/plugin-eval-gate.yml
+  # Capability registry (docs/registry.md) — the canonical scope-organised
+  # store + its pack-side machinery. Consumers declare deps in ai-manifest.yaml
+  # and materialise via scripts/ai-resolve.py (which ships); they never render
+  # the registry itself or the meta-plugin manifest.
+  - registry
+  - registry/**
+  - .devin-plugin
+  - .devin-plugin/**
+  - schemas/ai-manifest.schema.json
+  - schemas/registry-scope.schema.json
+  - scripts/build-registry.py
+  - scripts/registry-lint.py
+  - tests/test_registry.py
+  - .github/workflows/registry-lint.yml
   # Pack-only contract caller (require_contract: true would fail legacy
   # instances whose instance-owned CLAUDE.md predates the anchored sections).
   # Consumers adopt via their own caller of claude-md-contract-reusable.yml.
@@ -226,3 +240,4 @@ _skip_if_exists:
   - .claude/model-routing.json
   - .claude/mcp.json
   - .claude/hooks/session-start.sh
+  - ai-manifest.yaml

@@ -97,15 +97,16 @@ class TestPackDriftShouldScanFile(unittest.TestCase):
             result = pack_drift_check.should_scan_file(security_file, pack_root)
             self.assertTrue(result)
 
-    def test_should_skip_unsupported_extension(self):
-        """Should skip files with unsupported extensions."""
+    def test_should_scan_unsupported_extension(self):
+        """Every file is scanned — an extension allowlist was an evasion
+        path (rename a leak to .bin and the gate went blind)."""
         with tempfile.TemporaryDirectory() as tmpdir:
             pack_root = Path(tmpdir)
             bin_file = pack_root / "binary.bin"
             bin_file.touch()
-            
+
             result = pack_drift_check.should_scan_file(bin_file, pack_root)
-            self.assertFalse(result)
+            self.assertTrue(result)
 
 
 class TestPackDriftScanOrgLeak(unittest.TestCase):
@@ -359,3 +360,64 @@ class TestPackDriftIntegration(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPackDriftPublicBoundary(unittest.TestCase):
+    """Public-repo boundary: registry/ excluded (registry-lint owns that
+    tree's org-name policy); every file extension is in scope."""
+
+    def test_skips_registry_dir(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pack_root = Path(tmpdir)
+            reg = pack_root / "registry" / "platform" / "framework"
+            reg.mkdir(parents=True)
+            org_name = "man" + "olii"
+            (reg / "x.md").write_text(f"{org_name} inside registry/")
+            (pack_root / "README.md").write_text("clean")
+            results = pack_drift_check.scan_org_leak(pack_root)
+            fails = [r for r in results
+                     if r.status == "FAIL" and "registry/" in r.detail]
+            self.assertEqual(len(fails), 0)
+
+    def test_scans_non_suffix_file(self):
+        """No suffix allowlist — an extensionless file with an org name
+        must FAIL (binary-ish names, no extension evasion)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pack_root = Path(tmpdir)
+            org_name = "man" + "olii"
+            (pack_root / "LICENSE-odd").write_text(f"{org_name} ltd")
+            results = pack_drift_check.scan_org_leak(pack_root)
+            fails = [r for r in results if r.status == "FAIL"]
+            self.assertGreater(len(fails), 0)
+
+    def test_publisher_files_exempt(self):
+        """LICENSE/CODEOWNERS legitimately name the publisher — exempt."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pack_root = Path(tmpdir)
+            org_name = "man" + "olii"
+            (pack_root / "LICENSE").write_text(f"Copyright {org_name}")
+            results = pack_drift_check.scan_org_leak(pack_root)
+            fails = [r for r in results
+                     if r.status == "FAIL" and "LICENSE" in r.detail]
+            self.assertEqual(len(fails), 0)
+
+    def test_nested_publisher_basename_not_exempt(self):
+        """Exemptions are exact paths / telemetry-scoped suffixes — a
+        customer/heartbeat.ts or private/LICENSE sharing only a basename
+        must still scan."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pack_root = Path(tmpdir)
+            org_name = "man" + "olii"
+            (pack_root / "customer").mkdir()
+            (pack_root / "private").mkdir()
+            (pack_root / "customer/heartbeat.ts").write_text(org_name)
+            (pack_root / "private/LICENSE").write_text(org_name)
+            # But the canonical generated copies DO stay exempt:
+            (pack_root / "telemetry").mkdir()
+            (pack_root / "telemetry/heartbeat.ts").write_text(org_name)
+            results = pack_drift_check.scan_org_leak(pack_root)
+            fails = [r for r in results if r.status == "FAIL"]
+            flagged = " ".join(r.detail for r in fails)
+            self.assertIn("customer/heartbeat.ts", flagged)
+            self.assertIn("private/LICENSE", flagged)
+            self.assertNotIn("telemetry/heartbeat.ts", flagged)

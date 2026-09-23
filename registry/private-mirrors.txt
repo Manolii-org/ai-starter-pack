@@ -1,0 +1,13 @@
+# Trusted private mirrors — one sha256(lowercase owner/repo slug) per line.
+#
+# A registry/.private-mirror marker waives the PUBLIC boundary check ONLY
+# when the digest of `git remote get-url origin`'s slug appears here.
+# Digests, not plaintext slugs: this repo is public, so committing mirror
+# names would both disclose the private repos AND trip the PACK-SURFACE
+# scan this gate complements. The digest is still a committed, auditable,
+# CODEOWNERS-gated trust record — a mirror owner proves their entry by
+# publishing the slug alongside the PR that adds it, out of band.
+#
+# To add a mirror:  printf '%s' 'owner/repo' | sha256sum   (lowercase slug)
+#
+# (no mirrors declared yet)

@@ -248,10 +248,10 @@ def test_feature_flags_gate_optional_surfaces(default_render):
     ("flags", "expected"),
     [
         ({}, {"Hooks": 5, "Commands": 45, "Skills": 24, "Agents": 26,
-              "Scripts": 40, "Husky": 3, "CI": 29, "Docs": 16}),
+              "Scripts": 41, "Husky": 3, "CI": 29, "Docs": 17}),
         ({flag: "true" for flag in FEATURE_FLAGS},
          {"Hooks": 5, "Commands": 48, "Skills": 28, "Agents": 27,
-              "Scripts": 40, "Husky": 3, "CI": 29, "Docs": 18}),
+              "Scripts": 41, "Husky": 3, "CI": 29, "Docs": 19}),
     ],
 )
 def test_rendered_readme_counts_match_rendered_tree(flags, expected):
@@ -318,7 +318,7 @@ def test_skip_if_exists_contract():
     copier_config = yaml.safe_load((ROOT / "copier.yml").read_text())
     skip_if_exists = set(copier_config.get("_skip_if_exists", []))
 
-    expected = {"CLAUDE.md", ".claude/model-routing.json", ".claude/mcp.json", ".claude/hooks/session-start.sh"}
+    expected = {"CLAUDE.md", ".claude/model-routing.json", ".claude/mcp.json", ".claude/hooks/session-start.sh", "ai-manifest.yaml"}
     assert skip_if_exists == expected, (
         f"_skip_if_exists mismatch.\n"
         f"Expected: {expected}\n"

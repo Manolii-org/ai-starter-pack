@@ -1,0 +1,17 @@
+# Scope contract — registry-native (see schemas/registry-scope.schema.json).
+# Reuses the mesh-contract promotion_policy shape; NOT a mesh-contract (that
+# schema's ip_owner enum cannot express non-mesh owners like Ensombl).
+
+schema_version: 1
+scope: platform
+parent_scope: null
+ip_owner: "Manolii Pty Ltd"
+visibility: all-universes
+description: >
+  Entity-agnostic capabilities every universe may consume. Content here must be
+  free of universe-specific identifiers, KL entity data, and secrets — enforced
+  by scripts/registry-lint.py.
+surfaces: [claude-code, devin, cursor, codex, openhands]
+promotion_policy:
+  auto_promote: false
+  cost_threshold_usd: null

@@ -1,0 +1,13 @@
+schema_version: 1
+scope: cpdcheck
+parent_scope: platform
+ip_owner: "Ensombl Pty Ltd"
+visibility: cpdcheck
+description: >
+  Universe scope — capabilities owned by and visible only to the cpdcheck universe.
+  Only repos whose ai-manifest.yaml declares universe: cpdcheck may require plugins
+  from this scope; the resolver fails closed otherwise.
+surfaces: [claude-code, devin, cursor, codex, openhands]
+promotion_policy:
+  auto_promote: false
+  cost_threshold_usd: null

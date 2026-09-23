@@ -1,0 +1,12 @@
+schema_version: 1
+scope: repo
+parent_scope: null
+ip_owner: "(owning repo)"
+visibility: local-only
+description: >
+  Reserved scope — repo-local capabilities. Assets here are never published
+  cross-repo; they materialise only inside the owning repository.
+surfaces: [claude-code, devin, cursor, codex, openhands]
+promotion_policy:
+  auto_promote: false
+  cost_threshold_usd: null

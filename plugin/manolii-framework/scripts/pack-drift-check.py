@@ -38,6 +38,11 @@ class CheckResult(NamedTuple):
 SKIP_DIRS = frozenset({
     '.git', 'releases', 'dist', 'build', '.next', 'node_modules',
     '__pycache__', '.brand', '.venv', 'venv', '.ruff_cache', '.pytest_cache',
+    # registry/** has its own org-name policy — registry-lint.py's per-line
+    # ratchet (leak-allowlist.txt). Scanning it here double-gates the same
+    # bytes against a stricter contract the registry content cannot meet
+    # (platform seeds legitimately name org ids in detector data/examples).
+    'registry',
 })
 
 
@@ -61,7 +66,11 @@ def should_scan_file(path: Path, pack_root: Path) -> bool:
         return False
     if any(part in SKIP_DIRS for part in rel_parts):
         return False
-    return path.is_file() and path.suffix.lower() in {'.md', '.py', '.sh', '.json', '.yml', '.yaml'}
+    # Every regular file — no extension allowlist: an org identifier in a
+    # .toml/.ts/.jinja/.env/extensionless file leaks just as well into this
+    # PUBLIC repo (or into a consumer's render). Reads tolerate binary bytes
+    # via errors='ignore' downstream.
+    return path.is_file()
 
 
 # Leak detectors legitimately contain the marker list they search for — scanning
@@ -75,6 +84,22 @@ DETECTOR_FILES = {
     'copier.yml',
     'tests/test_copier_render.py',
 }
+
+# Publisher-identity files: this pack is public and carries its publisher's
+# name on purpose — its LICENSE, CODEOWNERS, starter README template and
+# telemetry schema legitimately name it. Exemptions are EXACT paths (root
+# files) plus tight generated-copy SUFFIXES (the heartbeat telemetry module
+# only ever lives under <tree>/telemetry/, canonical or generated) — a
+# basename-wide rule would exempt a planted customer/heartbeat.ts or
+# private/LICENSE as well. Org-LEAK only — secrets are never exempt.
+PUBLISHER_PATHS = {
+    '.github/CODEOWNERS', 'LICENSE', 'LICENSE.md', 'LICENSE.txt',
+    '.gitignore', 'README-STARTER-PACK.md.jinja',
+}
+PUBLISHER_SUFFIXES = (
+    'telemetry/heartbeat.ts',
+    'telemetry/tests/heartbeat.test.ts',
+)
 
 
 def template_source_variants(pack_root: Path, path_glob: str, feature: str) -> list[Path]:
@@ -116,7 +141,8 @@ def scan_org_leak(pack_root: Path) -> list[CheckResult]:
         if not should_scan_file(path, pack_root):
             continue
         rel = path.relative_to(pack_root).as_posix()
-        if rel in DETECTOR_FILES:
+        if (rel in DETECTOR_FILES or rel in PUBLISHER_PATHS
+                or rel.endswith(PUBLISHER_SUFFIXES)):
             continue
         try:
             with open(path, 'r', encoding='utf-8', errors='ignore') as f:
