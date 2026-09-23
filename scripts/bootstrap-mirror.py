@@ -342,11 +342,13 @@ def _push_targets_ok(root: Path, slug: str) -> bool:
         urls = [ln.strip() for ln in r.stdout.splitlines() if ln.strip()] \
             if r.returncode == 0 else []
     else:
-        # Literal URL: pushes apply pushInsteadOf when any such rule
-        # exists, otherwise insteadOf — the same chain `get-url --push`
-        # applies to remote names.
-        urls = [_rewrite(remote, _rules("pushinsteadof")
-                         or _rules("insteadof"))]
+        # Literal URL: a matching pushInsteadOf rule wins; when none
+        # matches THIS url git falls back to insteadOf rules — the
+        # same per-URL chain `get-url --push` applies to remote names.
+        eff = _rewrite(remote, _rules("pushinsteadof"))
+        if eff == remote:
+            eff = _rewrite(remote, _rules("insteadof"))
+        urls = [eff]
     if not urls:
         return False
     for url in urls:

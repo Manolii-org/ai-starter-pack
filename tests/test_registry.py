@@ -2180,6 +2180,29 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     assert "redirect" in r.stderr
     assert not (pv / "registry").exists()
 
+    # When NO pushInsteadOf rule matches the URL destination, git falls
+    # back to insteadOf rules — a URL pushDefault at the verified slug
+    # with an unrelated pushInsteadOf rule AND a github→gitlab
+    # insteadOf still redirects the push → refuse.
+    pf = tmp_path / "pushdefault-url-fallback"
+    pf.mkdir()
+    sp.run(["git", "init", "-q"], cwd=pf, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=pf, capture_output=True)
+    sp.run(["git", "config", "remote.pushDefault",
+            "https://github.com/Buro-Built/buro-registry.git"], cwd=pf,
+           capture_output=True)
+    sp.run(["git", "config",
+            "url.ssh://git@bitbucket.org/.pushInsteadOf",
+            "ssh://git@bitbucket.org/"], cwd=pf, capture_output=True)
+    sp.run(["git", "config", "url.https://gitlab.com/.insteadOf",
+            "https://github.com/"], cwd=pf, capture_output=True)
+    r = run(pf, _bootstrap_env(tmp_path))
+    assert r.returncode == 2, r.stderr
+    assert "redirect" in r.stderr
+    assert not (pf / "registry").exists()
+
     # A non-GitHub origin that parses to a valid-looking slug — gh would
     # verify an UNRELATED github.com repo of the same name → refuse.
     gl = tmp_path / "gitlab"
