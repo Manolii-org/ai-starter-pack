@@ -178,8 +178,11 @@ def fetch_workflow(repo: str, wf_path: str, branch: str,
             if out.returncode == 0:
                 return out.stdout, None
             return None, f"{wf_path} absent on branch '{branch}' in {repo_dir.name}"
-        p = repo_dir / wf_path
-        if not p.exists():
+        # keep the worktree fallback inside THIS checkout — an absolute
+        # workflow path or `..` traversal would verify a sibling repo's file
+        base = repo_dir.resolve()
+        p = (repo_dir / wf_path).resolve()
+        if not p.is_relative_to(base) or not p.is_file():
             return None, f"{wf_path} not found at {branch} or in worktree of {repo_dir.name}"
         return p.read_text(encoding="utf-8", errors="replace"), None
     ref = urllib.parse.quote(branch, safe="")

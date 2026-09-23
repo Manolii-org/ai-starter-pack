@@ -193,7 +193,7 @@ def _workflow_trigger_ok(spec: dict, trigger: dict) -> str | None:
         want = str(trigger.get("cron", ""))
         if want and want not in crons:
             return f"registered cron {want!r} not in on.schedule {crons!r}"
-        return None
+        # fall through — a valid cron on a job-less workflow must not verify
     # webhook/other have no `on:` counterpart a file can declare
     if ttype in ("push", "pull_request", "workflow_dispatch"):
         if ttype not in on:
@@ -230,12 +230,18 @@ def _runnable_job(job) -> bool:
 
 
 def check_workflow_files(doc: dict, args: argparse.Namespace, errors: list[str]) -> None:
-    for auto in doc.get("automations", []):
+    automations = doc.get("automations")
+    if not isinstance(automations, list):
+        return  # structural errors already recorded by validate()
+    for auto in automations:
+        if not isinstance(auto, dict):
+            continue  # non-mapping entries already reported by validate()
         name = auto.get("name", "?")
         repo = auto.get("repo", "")
         workflow = auto.get("workflow", "")
-        if not repo or not workflow:
-            continue
+        if not isinstance(repo, str) or not isinstance(workflow, str) \
+                or not repo or not workflow:
+            continue  # missing/non-string fields already reported by validate()
         if "*" in repo:
             continue  # wildcard declaration — applies fleet-wide, no single file to fetch
         text = None
@@ -326,8 +332,12 @@ def main() -> int:
     # deadman:true is a declaration for operators — a structural check cannot
     # assert a runtime liveness signal, so surface the obligation instead.
     if isinstance(doc, dict):
-        deadman = [a.get("name", "?") for a in doc.get("automations", [])
-                   if isinstance(a, dict) and a.get("deadman") is True]
+        autos = doc.get("automations")
+        # iterate only a real list — `automations: true`/null already failed
+        # structural validation; a TypeError here would destroy the report
+        deadman = [a.get("name", "?") for a in autos
+                   if isinstance(a, dict) and a.get("deadman") is True] \
+            if isinstance(autos, list) else []
         for name in deadman:
             print(f"note: '{name}' declares deadman — verify its liveness "
                   "signal is wired in monitoring (not assertable here)",
