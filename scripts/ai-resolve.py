@@ -801,6 +801,10 @@ def main() -> int:
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--apply", action="store_true")
     mode.add_argument("--check", action="store_true")
+    # Explicit no-mutate spelling for wrappers/CI — dry run is the default
+    # (absence of --apply/--check), but callers must not have to rely on an
+    # implicit mode.
+    mode.add_argument("--dry-run", action="store_true")
     ap.add_argument("--prune", action="store_true",
                     help="with --apply, also remove lockfile-tracked files no longer required")
     args = ap.parse_args()
