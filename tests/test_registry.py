@@ -703,6 +703,29 @@ def test_script_dependent_skills_not_materialised(tmp_path):
     assert (skills / "plain" / "SKILL.md").is_file()
 
 
+def test_nested_script_dependency_not_materialised(tmp_path):
+    """A skill invoking a NESTED bundled helper (`python3 scripts/audit/tool.py`)
+    is as unrunnable in resolver mode as a flat one — the dep scan must see
+    through subdirectories."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [
+            ("skills/auditor/SKILL.md",
+             "Run `python3 scripts/audit/tool.py --strict`"),
+            ("scripts/audit/tool.py", "# nested bundled helper"),
+            ("skills/plain/SKILL.md", "self-contained"),
+        ],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 0, r.stdout
+    skills = consumer / ".claude" / "skills"
+    assert not (skills / "auditor" / "SKILL.md").exists()
+    assert (skills / "plain" / "SKILL.md").is_file()
+
+
 def test_consumer_repo_script_reference_materialises(tmp_path):
     """A skill whose `python3 scripts/x.py` refers to a script the plugin
     does NOT ship AND that declares consumer_scripts: [...] is a

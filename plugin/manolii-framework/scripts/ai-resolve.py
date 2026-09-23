@@ -69,8 +69,8 @@ SEMVER_REF = re.compile(r"v?\d+(?:\.\d+){0,2}")
 # bare `scripts/x.py` mention in prose or sample output is not a dependency.
 SCRIPT_REF = re.compile(
     rb"(?:python3?|bash|sh|zsh|node|npx|tsx|deno|ruby|perl|uv\s+run|pipenv\s+run)"
-    rb"\s+[^\n|&;`]*?scripts/[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs)\b"
-    rb"|\./scripts/[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs)\b")
+    rb"\s+[^\n|&;`]*?scripts/(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs)\b"
+    rb"|\./scripts/(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs)\b")
 # Backticked `scripts/x.py` is NOT an invocation context — prose uses it for
 # mentions. A real dependency that no interpreter/./ prefix expresses must be
 # declared explicitly: `requires_scripts: [...]` in the file's frontmatter.
@@ -80,9 +80,12 @@ SCRIPT_DEP_KEYS = ("requires_scripts",)
 # consumer fetch them) — the only exemption that lets an unbundled script
 # reference materialise instead of being skipped as an unsatisfiable dep.
 CONSUMER_SCRIPT_KEYS = ("consumer_scripts",)
-# Basename extraction for SCRIPT_REF matches — used to distinguish bundled
-# plugin scripts (a real dependency) from consumer-repository commands.
-SCRIPT_NAME = re.compile(rb"scripts/([A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs))\b")
+# Path extraction for SCRIPT_REF matches — captures the path RELATIVE to
+# scripts/ (nested helpers like scripts/audit/tool.py count too); used to
+# distinguish bundled plugin scripts (a real dependency) from consumer-
+# repository commands.
+SCRIPT_NAME = re.compile(
+    rb"scripts/((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs))\b")
 
 
 def _frontmatter(src_bytes: bytes) -> dict:
@@ -124,9 +127,10 @@ def script_dep_block(plugin_dir: Path, src_bytes: bytes,
     requires_scripts dep, or an unbundled invocation that isn't listed in
     consumer_scripts.
 
-    Under a tag:/sha: pin, `pinned_scripts` carries the basenames the PINNED
-    git tree holds in scripts/ — the worktree's is_file() would honour
-    ignored/untracked plants and index-hidden deletions the pin never saw."""
+    Under a tag:/sha: pin, `pinned_scripts` carries the scripts/-relative
+    paths the PINNED git tree holds in scripts/ — the worktree's is_file()
+    would honour ignored/untracked plants and index-hidden deletions the pin
+    never saw."""
     sdir = plugin_dir / "scripts"
     declared = declared_consumer_scripts(src_bytes)
     for m in SCRIPT_REF.finditer(src_bytes):
@@ -252,20 +256,31 @@ def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def atomic_replace(dst: Path, fill) -> None:
+def atomic_replace(dst: Path, fill, src: Path | None = None) -> None:
     """Install `dst` through an exclusively-created sibling temp + rename.
 
     tempfile.mkstemp picks a random name with O_EXCL — a consumer cannot
     pre-plant a symlink or hard link there, so writes can never follow a
     link out of the tree. os.replace then unlinks any existing dst entry,
     so a destination hard-linked to a file outside the owned tree keeps
-    its shared inode (and the external peer) untouched."""
+    its shared inode (and the external peer) untouched.
+
+    When `src` is given, its mode+timestamps are applied to the temp BEFORE
+    the rename — mkstemp creates 0600, so deferring metadata to a
+    post-replace copystat would install a silently non-executable file
+    whenever the stat copy failed. A metadata-limited filesystem raises
+    here, while dst is still untouched, instead of completing a partial
+    install under a passing lock."""
     fd, tmp_name = tempfile.mkstemp(dir=dst.parent,
                                     prefix=f".{dst.name}.", suffix=".tmp")
     tmp = Path(tmp_name)
     try:
         with os.fdopen(fd, "wb") as f:
             fill(f)
+        if src is not None:
+            st = os.stat(src)
+            os.chmod(tmp, st.st_mode & 0o7777)
+            os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns))
         os.replace(tmp, dst)
     finally:
         if tmp.exists():
@@ -555,8 +570,8 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
             ))
             return
         pinned_scripts = {
-            ln.rsplit("/", 1)[-1] for ln in stree.stdout.splitlines()
-            if ln and ln.rsplit("/", 1)[0] == rel_sdir
+            ln[len(rel_sdir) + 1:] for ln in stree.stdout.splitlines()
+            if ln and ln.startswith(rel_sdir + "/")
         }
     for comp, files in component_files.items():
         target_root = repo_root / COMPONENT_TARGETS[comp]
@@ -786,6 +801,10 @@ def main() -> int:
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--apply", action="store_true")
     mode.add_argument("--check", action="store_true")
+    # Explicit no-mutate spelling for wrappers/CI — dry run is the default
+    # (absence of --apply/--check), but callers must not have to rely on an
+    # implicit mode.
+    mode.add_argument("--dry-run", action="store_true")
     ap.add_argument("--prune", action="store_true",
                     help="with --apply, also remove lockfile-tracked files no longer required")
     args = ap.parse_args()
@@ -962,11 +981,7 @@ def main() -> int:
         for src, dst in plan.writes:
             dst.parent.mkdir(parents=True, exist_ok=True)
             atomic_replace(dst, lambda f, s=src: shutil.copyfileobj(
-                s.open("rb"), f))
-            try:
-                shutil.copystat(src, dst)   # keep copy2's mode/mtime semantics
-            except OSError:
-                pass
+                s.open("rb"), f), src=src)
         if args.prune:
             for f in plan.removals:
                 if f.is_file() or f.is_symlink():
