@@ -2055,6 +2055,36 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     assert r.returncode == 2, r.stderr
     assert not (root / "registry").exists()
 
+    # A pushurl redirecting `git push` to a different repo than the
+    # verified fetch url → refuse (seeded content would land elsewhere).
+    pu = tmp_path / "pushurl"
+    pu.mkdir()
+    sp.run(["git", "init", "-q"], cwd=pu, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=pu, capture_output=True)
+    sp.run(["git", "config", "remote.origin.pushurl",
+            "https://github.com/Other-Org/public-repo.git"], cwd=pu,
+           capture_output=True)
+    r = run(pu, _bootstrap_env(tmp_path))
+    assert r.returncode == 2, r.stderr
+    assert "redirect" in r.stderr
+    assert not (pu / "registry").exists()
+
+    # A pushInsteadOf rewrite doing the same redirect → refuse.
+    pi = tmp_path / "pushinsteadof"
+    pi.mkdir()
+    sp.run(["git", "init", "-q"], cwd=pi, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=pi, capture_output=True)
+    sp.run(["git", "config", "url.https://gitlab.com/.pushInsteadOf",
+            "https://github.com/"], cwd=pi, capture_output=True)
+    r = run(pi, _bootstrap_env(tmp_path))
+    assert r.returncode == 2, r.stderr
+    assert "redirect" in r.stderr
+    assert not (pi / "registry").exists()
+
     # A non-GitHub origin that parses to a valid-looking slug — gh would
     # verify an UNRELATED github.com repo of the same name → refuse.
     gl = tmp_path / "gitlab"

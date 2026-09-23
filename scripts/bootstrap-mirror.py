@@ -159,7 +159,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          vis=$(gh api "repos/${{ github.repository }}" --jq .visibility)
+          vis=$(timeout 30 gh api "repos/${{ github.repository }}" --jq .visibility)
           # 'internal' is not private enough: on GitHub Enterprise it
           # grants every enterprise member (incl. other orgs) read access.
           if [ "$vis" != "private" ]; then
@@ -255,6 +255,66 @@ def _origin_slug(root: Path) -> str | None:
     url = r.stdout.strip()
     m = _GH_HTTPS.match(url) or _GH_SCP.match(url)
     return m.group(1).lower() if m else None
+
+
+def _push_targets_ok(root: Path, slug: str) -> bool:
+    """Every effective PUSH destination must resolve to the verified slug.
+    `git push` honours remote.origin.pushurl (any number) and
+    url.<base>.pushInsteadOf rewrites — either can redirect the seeded
+    universe content to a different, possibly public, repo even though
+    the fetch URL bound to the private one. pushInsteadOf applies over
+    BOTH the fetch url and explicit pushurls, so evaluate the effective
+    URL in each case.
+
+    Config semantics: for `url.<base>.pushInsteadOf = <prefix>`, any URL
+    starting with <prefix> is rewritten to start with <base> — the
+    config VALUE is the match prefix, the key's middle part is the
+    replacement."""
+    def _cfg(*args: str) -> list[str]:
+        try:
+            r = subprocess.run(["git", "-C", str(root), "config", *args],
+                               capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            return []
+        return [ln for ln in r.stdout.splitlines() if ln] \
+            if r.returncode == 0 else []
+
+    def _gh(url: str) -> str | None:
+        m = _GH_HTTPS.match(url) or _GH_SCP.match(url)
+        return m.group(1).lower() if m else None
+
+    pushurls = _cfg("--get-all", "remote.origin.pushurl")
+    rules: list[tuple[str, str]] = []
+    for line in _cfg("--get-regexp", r"^url\..*\.pushinsteadof$"):
+        key, _, prefix = line.partition(" ")
+        repl = key[len("url."):-len(".pushinsteadof")]
+        if prefix:
+            rules.append((prefix, repl))
+
+    # No explicit pushurl → pushes go to the (already-verified) fetch url.
+    targets = pushurls or [_gh_origin_url(root)]
+    for t in targets:
+        eff = t
+        # git applies the single longest matching pushInsteadOf prefix.
+        for prefix, repl in sorted(rules, key=lambda r: -len(r[0])):
+            if eff.startswith(prefix):
+                eff = repl + eff[len(prefix):]
+                break
+        if _gh(eff) != slug:
+            return False
+    return True
+
+
+def _gh_origin_url(root: Path) -> str:
+    """Raw configured fetch url for origin ('' when absent)."""
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(root), "config", "--get",
+             "remote.origin.url"],
+            capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return r.stdout.strip() if r.returncode == 0 else ""
 
 
 def check_visibility(slug: str) -> str | None:
@@ -479,6 +539,16 @@ def main() -> int:
         sys.stderr.write(
             f"FAIL: --universe {args.universe} requires the mirror to live "
             f"under {expected_owner}, but origin is '{origin}'\n")
+        return 2
+
+    # Pushes must land on the verified repo too — a pushurl or
+    # pushInsteadOf rewrite can redirect `git push` to a different
+    # (possibly public) repo than the fetch url we just bound.
+    if not _push_targets_ok(root, slug):
+        sys.stderr.write(
+            "FAIL: a remote.origin.pushurl or url.*.pushInsteadOf rule "
+            f"redirects `git push` away from '{slug}' — the seeded "
+            "universe content could land in a different repo; refusing\n")
         return 2
 
     vis = check_visibility(slug)
