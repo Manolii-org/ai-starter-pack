@@ -467,7 +467,9 @@ def _match_exec_in(paths: list[str]) -> bool:
     seen = 0
     for p in paths:
         if seen >= 64:
-            break
+            # More sources than we can scan — approving a partial
+            # scan would let a later file carry 'Match exec'.
+            return True
         seen += 1
         try:
             if os.path.getsize(p) > 1 << 20:
@@ -822,6 +824,64 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
         if (hooks_dir / name).exists():
             return (f"a '{name}' hook can exfiltrate the staged "
                     "universe content during the add/commit/push")
+    # External programs git execs on the staged content itself:
+    # core.fsmonitor=<path> runs during index operations (git add),
+    # and filter.<name>.clean/.process run during staging for any
+    # attributes-bound path. Neither is a hooks-dir file — refuse the
+    # configured commands outright. Boolean core.fsmonitor selects
+    # the builtin daemon (no external exec).
+    fsm = _cfg("core.fsmonitor").strip()
+    if fsm and fsm.lower() not in ("true", "false", "yes", "no",
+                                  "on", "off", "0", "1"):
+        return ("a configured core.fsmonitor command can exfiltrate "
+                "the staged universe content")
+    # filter.<name>.clean/.process exec the configured program on
+    # staged file contents during 'git add' — but only on paths an
+    # attributes rule binds to that filter. A configured-but-unbound
+    # filter (e.g. a system-wide git-lfs install) is inert, so refuse
+    # on a LIVE binding, not mere presence. `check-attr` resolves
+    # every attributes source (.gitattributes, info/attributes,
+    # core.attributesFile); candidates are every path 'git add -A'
+    # would stage — tracked plus untracked.
+    filt = set()
+    for ln in _cfg_lines("--get-regexp",
+                         r"^filter\..*\.(clean|process)$"):
+        parts = ln.split(None, 1)
+        if len(parts) > 1 and parts[1].strip():
+            filt.add(parts[0][len("filter."):].rsplit(".", 1)[0])
+    if filt:
+        cand = b""
+        for ls_args in (["ls-files", "-z"],
+                        ["ls-files", "-o", "-z", "--exclude-standard"]):
+            try:
+                lp = subprocess.run(
+                    [git, "-C", str(root), *ls_args],
+                    capture_output=True, timeout=20)
+            except (OSError, subprocess.TimeoutExpired):
+                return ("candidate paths could not be enumerated "
+                        "for filter checks")
+            if lp.returncode != 0:
+                return ("candidate paths could not be enumerated "
+                        "for filter checks")
+            cand += lp.stdout
+        names = [n for n in cand.split(b"\0") if n]
+        probe = b"".join(n + b"\0" for n in names)
+        try:
+            ca = subprocess.run(
+                [git, "-C", str(root), "check-attr", "-z",
+                 "--stdin", "filter"],
+                input=probe, capture_output=True, timeout=20)
+        except (OSError, subprocess.TimeoutExpired):
+            return ("attributes could not be resolved "
+                    "for filter checks")
+        if ca.returncode != 0:
+            return ("attributes could not be resolved "
+                    "for filter checks")
+        recs = ca.stdout.split(b"\0")
+        for i in range(0, len(recs) - 2, 3):
+            if recs[i + 2].decode("utf-8", "replace") in filt:
+                return ("an attributes-bound clean/process filter can "
+                        "exfiltrate the staged universe content")
 
     def _rewrite(url: str, rules: list[tuple[str, str]]) -> str:
         for prefix, repl in sorted(rules, key=lambda r: -len(r[0])):
@@ -998,8 +1058,12 @@ def check_visibility(slug: str) -> str | None:
             "executable — visibility cannot be verified.\n")
         return None
     try:
+        # GH_HOST can point gh at an Enterprise instance — a private
+        # same-slug repo there would pass while the bound github.com
+        # repo is public. Pin the query to github.com.
         r = subprocess.run(
-            [gh, "api", f"repos/{slug}", "--jq", ".visibility"],
+            [gh, "api", f"repos/{slug}", "--jq", ".visibility",
+             "--hostname", "github.com"],
             capture_output=True, text=True, timeout=15)
     except (OSError, subprocess.TimeoutExpired):
         r = None

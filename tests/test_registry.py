@@ -1938,7 +1938,8 @@ def _bootstrap_env(tmp_path):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     gh = bin_dir / "gh"
-    gh.write_text("#!/bin/sh\necho private\n")
+    gh.write_text("#!/bin/sh\necho \"$@\" > \"" + str(tmp_path / "gh_args")
+                  + "\"\necho private\n")
     gh.chmod(0o755)
     # Isolate the harness machine's GLOBAL git config — e.g. a Devin box
     # rewrites every github.com url through its auth proxy via
@@ -1973,6 +1974,11 @@ def test_bootstrap_mirror_seed(tmp_path):
          "--universe", "buro", "--slug", "buro-built/buro-registry"],
         cwd=pack, capture_output=True, text=True, env=env)
     assert r.returncode == 0, r.stderr
+    # The visibility query must be pinned to github.com — GH_HOST
+    # could otherwise point gh at an Enterprise instance where a
+    # private same-slug repo passes while the bound repo is public.
+    assert "--hostname" in (tmp_path / "gh_args").read_text()
+    assert "github.com" in (tmp_path / "gh_args").read_text()
     assert (root / "registry/.private-mirror").is_file()
     assert (root / "registry/buro/scope.yaml").is_file()
     assert (root / "registry/platform").is_dir()
@@ -2854,6 +2860,39 @@ def test_bootstrap_mirror_push_target_pass(tmp_path):
     assert "post-index-change" in r.stderr
     assert not (rt / "registry").exists()
 
+    # core.fsmonitor=<path> executes an external command during index
+    # operations — a non-boolean value must refuse.
+    fm = tmp_path / "fsm"
+    fm.mkdir()
+    sp.run(["git", "init", "-q"], cwd=fm, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=fm, capture_output=True)
+    sp.run(["git", "config", "core.fsmonitor", "/tmp/leak"],
+           cwd=fm, capture_output=True)
+    r = run(fm)
+    assert r.returncode == 2, r.stderr
+    assert "fsmonitor" in r.stderr
+    assert not (fm / "registry").exists()
+
+    # filter.<name>.clean/.process runs the configured program on
+    # staged file contents during 'git add' — refuse when configured.
+    fl = tmp_path / "fil"
+    fl.mkdir()
+    sp.run(["git", "init", "-q"], cwd=fl, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=fl, capture_output=True)
+    sp.run(["git", "config", "filter.leak.clean", "cat > /tmp/out"],
+           cwd=fl, capture_output=True)
+    # A configured filter is inert until attributes bind it — a
+    # system git-lfs config must NOT refuse, a bound one must.
+    (fl / ".gitattributes").write_text("* filter=leak\n")
+    r = run(fl)
+    assert r.returncode == 2, r.stderr
+    assert "filter" in r.stderr
+    assert not (fl / "registry").exists()
+
 
 def _load_bootstrap():
     import importlib.util
@@ -3086,6 +3125,12 @@ def test_bootstrap_ssh_effective_config(monkeypatch, tmp_path):
     qcfg = tmp_path / "ssh_quoted_exec"
     qcfg.write_text('Match "exec" "test -e /tmp/marker"\n')
     assert mod._match_exec_in([str(qcfg)]) is True
+    # Reaching the source cap must fail closed — a partial scan can
+    # leave a 'Match exec' in an unscanned Include'd file.
+    benign = tmp_path / "ssh_benign"
+    benign.write_text("Host *\n")
+    assert mod._match_exec_in([str(benign)] * 64) is False
+    assert mod._match_exec_in([str(benign)] * 65) is True
 
     # A PATH-resolved binary outside the system dirs earns no trust —
     # a wrapper can attest to itself.
