@@ -344,10 +344,26 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
     def _rules(suffix: str) -> list[tuple[str, str]]:
         # url.<base>.<suffix> = <prefix>: URLs starting with <prefix>
         # (the value) are rewritten to start with <base> (the key's
-        # middle part). Longest matching prefix wins.
+        # middle part). Longest matching prefix wins. Records are read
+        # NUL-separated (`--get-regexp -z` emits 'key\nvalue\0') — a
+        # <base> may legitimately contain spaces (e.g. an
+        # `url."ext::… ".insteadOf` helper URL), and splitting the
+        # entry on whitespace would corrupt the key and silently drop
+        # the rewrite rule.
         out: list[tuple[str, str]] = []
-        for line in _cfg_lines("--get-regexp", rf"^url\..*\.{suffix}$"):
-            key, _, prefix = line.partition(" ")
+        try:
+            r = subprocess.run(
+                ["git", "-C", str(root), "config", "--get-regexp", "-z",
+                 rf"^url\..*\.{suffix}$"],
+                capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            return []
+        if r.returncode != 0:
+            return []
+        for rec in r.stdout.split("\0"):
+            if not rec:
+                continue
+            key, _, prefix = rec.partition("\n")
             repl = key[len("url."):-len(f".{suffix}")]
             if prefix:
                 out.append((prefix, repl))

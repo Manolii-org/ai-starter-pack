@@ -2475,6 +2475,25 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     assert "tls verification" in r.stderr
     assert not (eq / "registry").exists()
 
+    # An insteadOf <base> containing spaces still applies — dropping
+    # the rule via whitespace parsing would pass the pre-rewrite
+    # github.com URL while git pushes to the rewritten helper.
+    es = tmp_path / "extspace"
+    es.mkdir()
+    sp.run(["git", "init", "-q"], cwd=es, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=es, capture_output=True)
+    sp.run(["git", "config", "remote.pushDefault",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=es, capture_output=True)
+    sp.run(["git", "config",
+            'url."ext::echo something ".insteadOf',
+            "https://github.com/"], cwd=es, capture_output=True)
+    r = run(es, _bootstrap_env(tmp_path))
+    assert r.returncode == 2, r.stderr
+    assert not (es / "registry").exists()
+
     # Credentials in the URL query or fragment must not reach stderr.
     cq = tmp_path / "credquery"
     cq.mkdir()
