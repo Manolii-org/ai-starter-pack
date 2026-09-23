@@ -521,7 +521,14 @@ def workflow_triggers_branch(spec: dict, branch: str) -> bool:
                 matched = not neg
         return matched
 
-    on = spec.get("on") or spec.get(True) or {}
+    # select `on:` by KEY PRESENCE — a falsy declaration (`on: false`,
+    # `on: []`) is unloadable, not "unfiltered"
+    if "on" in spec:
+        on = spec["on"]
+    elif True in spec:       # YAML 1.1 parses bare `on:` as the key True
+        on = spec[True]
+    else:
+        on = {}
     if isinstance(on, str):  # `on: push` scalar shorthand — unfiltered
         on = {on: None}
     if isinstance(on, list):  # `on: [push]` shorthand — every listed event unfiltered

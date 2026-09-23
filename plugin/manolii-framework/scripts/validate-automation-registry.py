@@ -232,7 +232,15 @@ def _workflow_trigger_ok(spec: dict, trigger: dict) -> str | None:
     """Verify a parsed workflow's `on:` actually fires for the registered
     trigger — a schedule entry missing/renamed or a drifted cron otherwise
     looks fine to a file-exists check."""
-    on = spec.get("on") or spec.get(True) or {}
+    # select `on:` by KEY PRESENCE — `on: false` / `on: []` must not be
+    # erased into an empty map by truthiness, since a falsy declaration is
+    # just as unloadable to GitHub as a missing one
+    if "on" in spec:
+        on = spec["on"]
+    elif True in spec:           # YAML 1.1 parses bare `on:` as the key True
+        on = spec[True]
+    else:
+        return "workflow declares no on: trigger block"
     if isinstance(on, str):      # `on: push` scalar shorthand
         on = {on: None}
     if isinstance(on, list):     # `on: [push]` shorthand
@@ -243,6 +251,8 @@ def _workflow_trigger_ok(spec: dict, trigger: dict) -> str | None:
         on = {e: None for e in on}
     if not isinstance(on, dict):
         return "on: is not a recognised trigger block"
+    if not on:
+        return "workflow declares no triggers"
     # EVERY declared event must itself be loadable — a malformed sibling
     # (`on: {push: null, schedule: false}`) or an invented event name makes
     # the whole workflow file unloadable, so the registered trigger can

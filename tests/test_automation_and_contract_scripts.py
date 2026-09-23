@@ -987,3 +987,38 @@ def test_contract_workflow_run_types_and_job_ids() -> None:
         "  deploy: {runs-on: ubuntu-latest, steps: [{run: 'true'}]}\n"
         "  rollback job: {runs-on: ubuntu-latest, steps: [{run: 'true'}]}\n")
     assert mod.jobs_map(spec) == {}
+
+
+# ── review round 36 ─────────────────────────────────────────────────────────
+
+def test_registry_falsy_on_block_rejected(tmp_path: Path) -> None:
+    """`on: false` / `on: []` / missing `on:` can't be erased — a webhook/
+    other automation must not verify a workflow GitHub can't load."""
+    import argparse
+    mod = _load(REGISTRY_SCRIPT, "var36")
+    repo_dir = tmp_path / "repo36"
+    wf = repo_dir / ".github/workflows/x.yml"
+    wf.parent.mkdir(parents=True)
+    auto = {"name": "n", "repo": "Org/repo36",
+            "workflow": ".github/workflows/x.yml",
+            "trigger": {"type": "webhook"}, "risk_tier": "green", "owner": "o"}
+    args = argparse.Namespace(mode="local", repos_dir=str(tmp_path))
+    for body in ("on: false\njobs:\n  x: {runs-on: u, steps: [{run: 't'}]}\n",
+                 "on: []\njobs:\n  x: {runs-on: u, steps: [{run: 't'}]}\n",
+                 "jobs:\n  x: {runs-on: u, steps: [{run: 't'}]}\n"):
+        wf.write_text(body)
+        errs: list[str] = []
+        mod.check_workflow_files({"automations": [auto]}, args, errs)
+        assert errs, body
+    wf.write_text("on: push\njobs:\n  x: {runs-on: u, steps: [{run: 't'}]}\n")
+    errs = []
+    mod.check_workflow_files({"automations": [auto]}, args, errs)
+    assert errs == []
+
+
+def test_contract_falsy_on_block_not_unfiltered() -> None:
+    """Contract parity: falsy `on:` is non-matching, not erased."""
+    mod = _load(CONTRACT_SCRIPT, "cdc36")
+    assert mod.workflow_triggers_branch(yaml.safe_load("on: false"), "develop") is False
+    spec = yaml.safe_load("on: []\njobs: {}\n")
+    assert mod.workflow_triggers_branch(spec, "develop") is False

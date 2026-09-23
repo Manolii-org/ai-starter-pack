@@ -120,6 +120,9 @@ jobs:
       # like `1; malicious-command` must never reach the run: program
       DOWNGRADE_STEPS: ${{ inputs.downgrade_steps }}
       PROBE_URL_VAR: ${{ inputs.url_env_var }}
+      # an env-var value is never re-parsed for shell metacharacters — a
+      # `;`-carrying prefix stays literal argv words instead of a command
+      RUN_PREFIX: ${{ inputs.run_prefix }}
     # covers service-container startup too — a stalled registry pull/health
     # init happens before any step-level or shell `timeout` can apply
     timeout-minutes: 45
@@ -172,7 +175,7 @@ jobs:
           for i in $(seq 1 30); do
             # `timeout` bounds each probe — a stalled driver handshake must not
             # hang the whole job (a single unbounded connect can outlive the runner).
-            if timeout 15 ${{ inputs.run_prefix }} python -c "$PROBE" 2>/dev/null; then
+            if timeout 15 $RUN_PREFIX python -c "$PROBE" 2>/dev/null; then
               echo "database ready after ${i} probe(s)"
               exit 0
             fi
@@ -185,7 +188,7 @@ jobs:
         working-directory: ${{ inputs.workdir }}
         env: ${{ fromJSON(inputs.migrations_env_json) }}
         # bounded: a lock-waiting upgrade must not eat the runner's job limit
-        run: timeout 300 ${{ inputs.run_prefix }} alembic upgrade head
+        run: timeout 300 $RUN_PREFIX alembic upgrade head
 
       - name: Downgrade N steps
         if: ${{ inputs.downgrade_steps != '0' }}
@@ -199,22 +202,22 @@ jobs:
               echo "::error::downgrade_steps must be a non-negative integer (got '$DOWNGRADE_STEPS')"
               exit 1 ;;
           esac
-          timeout 300 ${{ inputs.run_prefix }} alembic downgrade "-$DOWNGRADE_STEPS"
+          timeout 300 $RUN_PREFIX alembic downgrade "-$DOWNGRADE_STEPS"
 
       - name: Re-apply (upgrade head)
         if: ${{ inputs.downgrade_steps != '0' }}
         working-directory: ${{ inputs.workdir }}
         env: ${{ fromJSON(inputs.migrations_env_json) }}
-        run: timeout 300 ${{ inputs.run_prefix }} alembic upgrade head
+        run: timeout 300 $RUN_PREFIX alembic upgrade head
 
       - name: Single head assertion
         working-directory: ${{ inputs.workdir }}
         env: ${{ fromJSON(inputs.migrations_env_json) }}
         run: |
-          heads=$(timeout 60 ${{ inputs.run_prefix }} alembic heads | grep -c ' (head)' || true)
+          heads=$(timeout 60 $RUN_PREFIX alembic heads | grep -c ' (head)' || true)
           if [ "$heads" -ne 1 ]; then
             echo "::error::Expected exactly 1 alembic head, found $heads — merge migration branches."
-            timeout 60 ${{ inputs.run_prefix }} alembic heads
+            timeout 60 $RUN_PREFIX alembic heads
             exit 1
           fi
 
@@ -223,6 +226,6 @@ jobs:
         working-directory: ${{ inputs.workdir }}
         env: ${{ fromJSON(inputs.migrations_env_json) }}
         run: |
-          if ! timeout 120 ${{ inputs.run_prefix }} alembic check; then
+          if ! timeout 120 $RUN_PREFIX alembic check; then
             echo "::warning::alembic check reports model/migration drift — generate a migration."
           fi
