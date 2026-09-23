@@ -683,6 +683,17 @@ def _ssh_host_unchanged(url: str) -> str | None:
             and eff.get("localcommand", "").strip()):
         return ("ssh client config executes a local command after "
                 "connecting (PermitLocalCommand/LocalCommand)")
+    # Provider libraries dlopen during authentication — a configured
+    # path executes attacker code mid-push with the staged files
+    # readable, every host check still green. Defaults only:
+    # pkcs11provider none; securitykeyprovider internal (the builtin).
+    if eff.get("pkcs11provider", "none").lower() not in ("", "none"):
+        return ("ssh client config loads a PKCS#11 provider library "
+                "(PKCS11Provider)")
+    if eff.get("securitykeyprovider", "internal").lower() not in \
+            ("", "none", "internal"):
+        return ("ssh client config loads a security-key provider "
+                "library (SecurityKeyProvider)")
     # 'none' disables the file entirely (documented for both knobs) —
     # filtering it like /dev/null keeps the remaining file validated
     # instead of resolving a sentinel as a filesystem path.
@@ -1090,25 +1101,27 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
         return (f"push destination '{_redact(remote)}' resolves to "
                 f"'{_redact(url)}'")
     # A credential.helper runs during the push on HTTPS destinations —
-    # including a '!shell command' form. A helper configured from INSIDE
-    # the clone (local config or a file it includes) is part of the
-    # untrusted input and can exfiltrate the staged content while every
-    # transport check stays green. Operator-side origins (system, global,
-    # command line, env) are the trust channel — same basis as
+    # including a '!shell command' form — and core.askPass answers the
+    # authentication prompt the same way. A program configured from
+    # INSIDE the clone (local config or a file it includes) is part of
+    # the untrusted input and can exfiltrate the staged content while
+    # every transport check stays green. Operator-side origins (system,
+    # global, command line, env) are the trust channel — same basis as
     # MIRROR_TRUST_DIRS.
     if saw_https:
         root_p = os.path.normcase(os.path.realpath(str(root))) + os.sep
         for ln in _cfg_lines("--show-origin", "--get-regexp",
                              r"^credential\..*\.helper$"
-                             r"|^credential\.helper$"):
+                             r"|^credential\.helper$|^core\.askpass$"):
             origin = ln.split(None, 1)[0]
             if not origin.startswith("file:"):
                 continue
             op = os.path.normcase(os.path.realpath(
                 os.path.join(str(root), origin[5:])))
             if op.startswith(root_p):
-                return ("a repository-local credential.helper can "
-                        "exfiltrate the staged universe content")
+                return ("a repository-local credential.helper or "
+                        "core.askPass program can exfiltrate the "
+                        "staged universe content")
     return None
 
 

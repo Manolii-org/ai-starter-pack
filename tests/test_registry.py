@@ -2709,6 +2709,21 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
                       GIT_CONFIG_GLOBAL=str(gcfg)))
     assert r.returncode == 0, r.stderr
 
+    # core.askPass answers the push's authentication prompt — a
+    # clone-local value is the same untrusted-input class.
+    ap = tmp_path / "askpass"
+    ap.mkdir()
+    sp.run(["git", "init", "-q"], cwd=ap, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=ap, capture_output=True)
+    sp.run(["git", "config", "core.askPass", "/tmp/upload-creds"],
+           cwd=ap, capture_output=True)
+    r = run(ap, _bootstrap_env(tmp_path))
+    assert r.returncode == 2, r.stderr
+    assert "askPass" in r.stderr
+    assert not (ap / "registry").exists()
+
     # Attributes binding against a path the bootstrap CREATES
     # (README.md / schemas/**) must refuse even though the path does
     # not exist yet — the seeded file enters the filter during
@@ -3200,6 +3215,18 @@ def test_bootstrap_ssh_effective_config(monkeypatch, tmp_path):
     kh_file.write_text(f"github.com ssh-rsa {good}\n")
     patch([(k, str(kh_file) if k == "userknownhostsfile" else v)
            for k, v in CLEAN] + [("globalknownhostsfile", "none")])
+    assert mod._ssh_host_unchanged(URL) is None
+
+    # Provider libraries dlopen during authentication — non-default
+    # PKCS11Provider/SecurityKeyProvider refuse, defaults pass.
+    patch([(k, str(kh_file) if k == "userknownhostsfile" else v)
+           for k, v in CLEAN] + [("pkcs11provider", "/tmp/libp11.so")])
+    assert "PKCS" in mod._ssh_host_unchanged(URL)
+    patch([(k, str(kh_file) if k == "userknownhostsfile" else v)
+           for k, v in CLEAN] + [("securitykeyprovider", "/tmp/sk.so")])
+    assert "security-key" in mod._ssh_host_unchanged(URL)
+    patch([(k, str(kh_file) if k == "userknownhostsfile" else v)
+           for k, v in CLEAN] + [("securitykeyprovider", "internal")])
     assert mod._ssh_host_unchanged(URL) is None
     # Reaching the source cap must fail closed — a partial scan can
     # leave a 'Match exec' in an unscanned Include'd file.
