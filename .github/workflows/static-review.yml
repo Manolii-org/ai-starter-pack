@@ -20,7 +20,11 @@ permissions:
 jobs:
   changed-files:
     name: Detect Changed Files
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+          && fromJSON(vars.LIGHT_RUNNER || '["ubuntu-slim"]')
+          || 'ubuntu-latest' }}
+    timeout-minutes: 14
     outputs:
       has_py: ${{ steps.detect.outputs.has_py }}
       has_sh: ${{ steps.detect.outputs.has_sh }}
@@ -57,7 +61,11 @@ jobs:
 
   bandit:
     name: Bandit (Python)
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+          && fromJSON(vars.LIGHT_RUNNER || '["ubuntu-slim"]')
+          || 'ubuntu-latest' }}
+    timeout-minutes: 14
     needs: changed-files
     if: needs.changed-files.outputs.has_py == 'true'
     steps:
@@ -78,13 +86,25 @@ jobs:
 
   shellcheck:
     name: Shellcheck
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+          && fromJSON(vars.LIGHT_RUNNER || '["ubuntu-slim"]')
+          || 'ubuntu-latest' }}
+    timeout-minutes: 14
     needs: changed-files
     if: needs.changed-files.outputs.has_sh == 'true'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
+      - name: Install ShellCheck
+        run: |
+          # shellcheck is absent from the slim image; guard-install it.
+          if ! command -v shellcheck >/dev/null; then
+            if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo"; fi
+            timeout 120 $SUDO apt-get update -qq
+            timeout 120 $SUDO apt-get install -y -qq shellcheck
+          fi
       - name: Run Shellcheck on changed shell files
         run: |
           # Deleted shell files must not be passed to shellcheck: the path no
@@ -97,7 +117,13 @@ jobs:
 
   eslint:
     name: ESLint (JS/TS)
-    runs-on: ubuntu-latest
+    # Runs npm ci on the consumer dependency graph — hosted by default,
+    # slim via explicit LIGHT_RUNNER opt-in (consumer-scale, unverifiable).
+    runs-on: >-
+      ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+          && fromJSON(vars.LIGHT_RUNNER || '["ubuntu-latest"]')
+          || 'ubuntu-latest' }}
+    timeout-minutes: 30
     needs: changed-files
     if: needs.changed-files.outputs.has_ts == 'true'
     steps:
@@ -126,7 +152,11 @@ jobs:
 
   agent-routing-lint:
     name: Agent Routing Lint
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+          && fromJSON(vars.LIGHT_RUNNER || '["ubuntu-slim"]')
+          || 'ubuntu-latest' }}
+    timeout-minutes: 14
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - name: Detect agent/skill docs

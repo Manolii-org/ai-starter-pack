@@ -29,7 +29,11 @@ env:
 jobs:
   outcome-contract:
     name: Workflow Outcome Contract
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+          && fromJSON(vars.LIGHT_RUNNER || '["ubuntu-slim"]')
+          || 'ubuntu-latest' }}
+    timeout-minutes: 14
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - name: Validate explicit workflow outcomes
@@ -45,7 +49,11 @@ jobs:
   # package.json presence goes through this job's output instead.
   detect:
     name: Detect Project
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+          && fromJSON(vars.LIGHT_RUNNER || '["ubuntu-slim"]')
+          || 'ubuntu-latest' }}
+    timeout-minutes: 14
     outputs:
       has_pkg: ${{ steps.detect.outputs.has_pkg }}
     steps:
@@ -59,7 +67,13 @@ jobs:
   install:
     name: Install Dependencies
     if: needs.detect.outputs.has_pkg == 'true'
-    runs-on: ubuntu-latest
+    # npm ci scales with the consumer dependency graph — unverifiable from the
+    # template, so hosted by default; slim via explicit LIGHT_RUNNER opt-in.
+    runs-on: >-
+      ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+          && fromJSON(vars.LIGHT_RUNNER || '["ubuntu-latest"]')
+          || 'ubuntu-latest' }}
+    timeout-minutes: 30
     needs: [detect]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -81,7 +95,12 @@ jobs:
   security-audit:
     name: Security Audit
     needs: [install]
-    runs-on: ubuntu-latest
+    # Cache-miss arm runs npm ci — consumer-scale, so hosted by default.
+    runs-on: >-
+      ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+          && fromJSON(vars.LIGHT_RUNNER || '["ubuntu-latest"]')
+          || 'ubuntu-latest' }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
@@ -99,7 +118,14 @@ jobs:
   lint:
     name: Lint
     needs: [install]
-    runs-on: ubuntu-latest
+    # Template file — consumer suite size is unverifiable, so the default stays
+    # hosted; slim is an explicit opt-in via LIGHT_RUNNER (REUSABLE-WORKFLOWS.md:
+    # slim only for verified sub-10-min jobs). Fork guard as elsewhere.
+    runs-on: >-
+      ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+          && fromJSON(vars.LIGHT_RUNNER || '["ubuntu-latest"]')
+          || 'ubuntu-latest' }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
@@ -116,7 +142,14 @@ jobs:
   typecheck:
     name: Type Check
     needs: [install]
-    runs-on: ubuntu-latest
+    # Template file — consumer suite size is unverifiable, so the default stays
+    # hosted; slim is an explicit opt-in via LIGHT_RUNNER (REUSABLE-WORKFLOWS.md:
+    # slim only for verified sub-10-min jobs). Fork guard as elsewhere.
+    runs-on: >-
+      ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+          && fromJSON(vars.LIGHT_RUNNER || '["ubuntu-latest"]')
+          || 'ubuntu-latest' }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
@@ -133,7 +166,14 @@ jobs:
   test:
     name: Test
     needs: [install]
-    runs-on: ubuntu-latest
+    # Template file — consumer suite size is unverifiable, so the default stays
+    # hosted; slim is an explicit opt-in via LIGHT_RUNNER (REUSABLE-WORKFLOWS.md:
+    # slim only for verified sub-10-min jobs). Fork guard as elsewhere.
+    runs-on: >-
+      ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+          && fromJSON(vars.LIGHT_RUNNER || '["ubuntu-latest"]')
+          || 'ubuntu-latest' }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
@@ -155,7 +195,15 @@ jobs:
   build:
     name: Build
     needs: [security-audit, lint, typecheck, test]
-    runs-on: ubuntu-latest
+    # This file is a starter-pack template: non-fleet consumers have no Fly
+    # pool, so the default must stay hosted — fleet tenants opt in by setting
+    # CI_RUNNER_OVERRIDE (fly-runner-setup.md). Fork PRs always fall back to
+    # hosted even when the var is set.
+    runs-on: >-
+      ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+          && fromJSON(vars.CI_RUNNER_OVERRIDE || '["ubuntu-latest"]')
+          || 'ubuntu-latest' }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6

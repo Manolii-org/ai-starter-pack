@@ -18,7 +18,11 @@ permissions:
 
 jobs:
   eval-gate:
+    # Hosted: the eval suite runs 550+ tests including sub-100ms HTTP-budget
+    # assertions — timing-sensitive enough that slim's 1-core flakes it
+    # (2/4 runs failed on TimeoutError during this PR). Not a light leg.
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:

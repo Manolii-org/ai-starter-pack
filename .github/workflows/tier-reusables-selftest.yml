@@ -100,7 +100,10 @@ jobs:
   assert-positive:
     name: assert positive verdicts
     needs: [fast-positive, preprod-positive, summary-skip, summary-pass]
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+          && fromJSON(vars.LIGHT_RUNNER || '["ubuntu-slim"]')
+          || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - name: Assert verdicts and breakdowns
@@ -153,7 +156,10 @@ jobs:
   # ── NEGATIVE path — see the SCOPE note in this file's header ────────────
   fail-closed-tests:
     name: fail-closed tests
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+          && fromJSON(vars.LIGHT_RUNNER || '["ubuntu-slim"]')
+          || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6

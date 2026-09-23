@@ -24,7 +24,7 @@ jobs:
     concurrency:
       group: release-tag-${{ inputs.tag }}
       cancel-in-progress: false
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.LIGHT_RUNNER || '["ubuntu-slim"]') }}
     timeout-minutes: 5
     outputs:
       tagged_sha: ${{ steps.create.outputs.sha }}
@@ -139,7 +139,7 @@ jobs:
     name: release tag — explicit outcome
     needs: tag
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.LIGHT_RUNNER || '["ubuntu-slim"]') }}
     timeout-minutes: 5
     permissions:
       checks: write
