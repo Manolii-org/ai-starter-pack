@@ -34,6 +34,7 @@ import hashlib
 import json
 import re
 import shutil
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -110,18 +111,31 @@ def load_plugins_index(registry_root: Path) -> dict[tuple[str, str], dict]:
 
 
 def version_satisfies(version: str, ref: str) -> bool:
-    """Exact semver, caret range (^x.y -> same major, >=), tag:, or sha: pin."""
+    """Exact semver or caret range (^x.y -> same major, >=).
+
+    tag:/sha: pins never reach here — they are verified against the actual
+    checkout revision in plan_requirement, so a checkout at the wrong commit
+    cannot silently satisfy a pin."""
     def parse(v: str) -> tuple[int, ...]:
         parts = v.lstrip("v").split(".")
         return tuple(int(p) for p in parts if p.isdigit())
-    if ref.startswith("sha:") or ref.startswith("tag:"):
-        # Resolved at the fetch layer; the local checkout is the pinned ref.
-        return True
     if ref.startswith("^"):
         want = parse(ref[1:])
         have = parse(version)
         return have[:1] == want[:1] and have >= want
     return parse(version) == parse(ref)
+
+
+def git_rev(repo: Path, rev: str) -> str | None:
+    """Resolve `rev` to a commit sha inside `repo`, or None when the path is
+    not a git checkout (or the rev does not exist)."""
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--verify", f"{rev}^{{commit}}"],
+            capture_output=True, text=True, timeout=10)
+        return r.stdout.strip() if r.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError):
+        return None
 
 
 def collect_component_files(plugin_dir: Path) -> dict[str, list[Path]]:
@@ -176,7 +190,25 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
             version = json.loads(manifest_file.read_text(encoding="utf-8"))["version"]
         except (json.JSONDecodeError, KeyError):
             pass
-    if not version_satisfies(version, ref):
+    if ref.startswith(("sha:", "tag:")):
+        want = ref.split(":", 1)[1]
+        head = git_rev(registry_root, "HEAD")
+        pinned = head and git_rev(registry_root, want)
+        if head is None:
+            plan.conflicts.append((
+                repo_root / req,
+                f"pinned ref '{ref}' needs a verifiable git checkout — "
+                "the registry source is not a git repository",
+            ))
+            return
+        if pinned is None or pinned != head:
+            plan.conflicts.append((
+                repo_root / req,
+                f"registry checkout is not at the pinned ref '{want}' "
+                f"(HEAD {head[:12]}) — check out the pin or use a version range",
+            ))
+            return
+    elif not version_satisfies(version, ref):
         plan.conflicts.append((
             repo_root / req,
             f"ref '{ref}' not satisfied by registry version {version}",
