@@ -439,21 +439,15 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
     def _ssl_off(url: str) -> bool:
         # An accepted https destination with TLS verification disabled
         # can be MITM'd by any proxy on the path — refuse rather than
-        # trusting the slug. GIT_SSL_NO_VERIFY and the effective
-        # http.sslVerify (the longest-matching http.<base>.sslVerify
-        # entry wins, per http-config scoping) decide together.
-        if (os.environ.get("GIT_SSL_NO_VERIFY", "").lower()
-                in ("true", "1", "yes", "on")):
+        # trusting the slug. GIT_SSL_NO_VERIFY is defined by presence
+        # (git disables verification even for '=0'), and
+        # `git config --get-urlmatch` applies git's own precedence for
+        # http.<base>.sslVerify: the longest match wins and, at equal
+        # specificity, the later scope wins.
+        if "GIT_SSL_NO_VERIFY" in os.environ:
             return True
-        vals = _cfg_lines("--get-all", "http.sslVerify")
+        vals = _cfg_lines("--get-urlmatch", "http.sslVerify", url)
         eff = vals[-1].strip().lower() if vals else ""
-        best = -1
-        for line in _cfg_lines("--get-regexp",
-                               r"^http\..*\.sslverify$"):
-            key, _, v = line.partition(" ")
-            base = key[len("http."):-len(".sslverify")]
-            if url.startswith(base) and len(base) > best:
-                best, eff = len(base), v.strip().lower()
         return eff in ("false", "0", "no", "off")
 
     def _proxy_ok(url: str) -> bool:

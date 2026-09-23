@@ -2450,10 +2450,30 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     sp.run(["git", "remote", "add", "origin",
             "https://github.com/Buro-Built/buro-registry.git"],
            cwd=sv, capture_output=True)
-    r = run(sv, dict(_bootstrap_env(tmp_path), GIT_SSL_NO_VERIFY="true"))
+    # GIT_SSL_NO_VERIFY is defined by presence — '=0' still disables.
+    r = run(sv, dict(_bootstrap_env(tmp_path), GIT_SSL_NO_VERIFY="0"))
     assert r.returncode == 2, r.stderr
     assert "tls verification" in r.stderr
     assert not (sv / "registry").exists()
+
+    # The same URL-scoped key repeated in a later scope: git resolves
+    # equal-specificity entries by order — the later value wins.
+    genv = _bootstrap_env(tmp_path)
+    eq = tmp_path / "ssleq"
+    eq.mkdir()
+    sp.run(["git", "init", "-q"], cwd=eq, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=eq, capture_output=True)
+    sp.run(["git", "config", "--global",
+            "http.https://github.com/.sslVerify", "true"],
+           cwd=eq, capture_output=True, env=genv)
+    sp.run(["git", "config", "http.https://github.com/.sslVerify",
+            "false"], cwd=eq, capture_output=True)
+    r = run(eq, genv)
+    assert r.returncode == 2, r.stderr
+    assert "tls verification" in r.stderr
+    assert not (eq / "registry").exists()
 
     # Credentials in the URL query or fragment must not reach stderr.
     cq = tmp_path / "credquery"
