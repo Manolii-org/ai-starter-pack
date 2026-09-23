@@ -2362,56 +2362,34 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     assert "ssh client config" in r.stderr
     assert not (pc / "registry").exists()
 
-    # A git:// URL parses to the verified slug, but core.gitProxy
-    # replaces the direct connection — the push can land anywhere the
-    # proxy command chooses → refuse.
-    gp = tmp_path / "gitproxy"
+    # git:// is plaintext transport (no encryption, no server
+    # authentication) — refused outright regardless of gitProxy config.
+    gp = tmp_path / "gitproto"
     gp.mkdir()
     sp.run(["git", "init", "-q"], cwd=gp, capture_output=True)
     sp.run(["git", "remote", "add", "origin",
             "git://github.com/Buro-Built/buro-registry.git"],
            cwd=gp, capture_output=True)
-    sp.run(["git", "config", "core.gitProxy", "evil-proxy"], cwd=gp,
-           capture_output=True)
     r = run(gp, _bootstrap_env(tmp_path))
     assert r.returncode == 2, r.stderr
-    assert "gitProxy" in r.stderr
+    assert "plaintext git" in r.stderr
     assert not (gp / "registry").exists()
 
-    # A `for github.com`-qualified proxy applies to the destination →
-    # refuse.
-    gq = tmp_path / "gitproxyq"
-    gq.mkdir()
-    sp.run(["git", "init", "-q"], cwd=gq, capture_output=True)
+    # An opaque helper destination can carry credentials in its
+    # arguments — they must not reach stderr.
+    ex = tmp_path / "extcreds"
+    ex.mkdir()
+    sp.run(["git", "init", "-q"], cwd=ex, capture_output=True)
     sp.run(["git", "remote", "add", "origin",
-            "git://github.com/Buro-Built/buro-registry.git"],
-           cwd=gq, capture_output=True)
-    sp.run(["git", "config", "core.gitProxy",
-            "evil-proxy for github.com"], cwd=gq,
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=ex, capture_output=True)
+    sp.run(["git", "config", "remote.origin.pushurl",
+            "ext::helper --token=SUPERSECRET %S"], cwd=ex,
            capture_output=True)
-    r = run(gq, _bootstrap_env(tmp_path))
+    r = run(ex, _bootstrap_env(tmp_path))
     assert r.returncode == 2, r.stderr
-    assert "gitProxy" in r.stderr
-    assert not (gq / "registry").exists()
-
-    # git matches entries in order and the FIRST match wins — a
-    # following `none` entry does not rescue an earlier proxy.
-    gf = tmp_path / "gitproxy-first"
-    gf.mkdir()
-    sp.run(["git", "init", "-q"], cwd=gf, capture_output=True)
-    sp.run(["git", "remote", "add", "origin",
-            "git://github.com/Buro-Built/buro-registry.git"],
-           cwd=gf, capture_output=True)
-    sp.run(["git", "config", "core.gitProxy",
-            "evil-proxy for github.com"], cwd=gf,
-           capture_output=True)
-    sp.run(["git", "config", "--add", "core.gitProxy",
-            "none for github.com"], cwd=gf,
-           capture_output=True)
-    r = run(gf, _bootstrap_env(tmp_path))
-    assert r.returncode == 2, r.stderr
-    assert "gitProxy" in r.stderr
-    assert not (gf / "registry").exists()
+    assert "SUPERSECRET" not in r.stderr
+    assert not (ex / "registry").exists()
 
     # Plain-HTTP is refused outright — it is plaintext transport and
     # its effective proxy chain cannot be trusted for a private push.
@@ -2644,21 +2622,15 @@ def test_bootstrap_mirror_push_target_pass(tmp_path):
     r = run(sh, dict(env, PATH=f"{stub}:{env['PATH']}"))
     assert r.returncode == 0, r.stderr
 
-    # core.gitProxy entries scoped away from github.com or disabled
-    # with `none` do not apply to a git:// destination.
-    gx = tmp_path / "gitproxy-scoped-ok"
-    gx.mkdir()
-    sp.run(["git", "init", "-q"], cwd=gx, capture_output=True)
+    # Userless scp-style 'github.com:slug' is valid git ssh syntax —
+    # it must be accepted like the user@ form, verified via 'ssh -G'.
+    us = tmp_path / "userlessscp"
+    us.mkdir()
+    sp.run(["git", "init", "-q"], cwd=us, capture_output=True)
     sp.run(["git", "remote", "add", "origin",
-            "git://github.com/Buro-Built/buro-registry.git"],
-           cwd=gx, capture_output=True)
-    sp.run(["git", "config", "core.gitProxy",
-            "evil-proxy for example.com"], cwd=gx,
-           capture_output=True)
-    sp.run(["git", "config", "--add", "core.gitProxy",
-            "none for github.com"], cwd=gx,
-           capture_output=True)
-    r = run(gx)
+            "github.com:Buro-Built/buro-registry.git"],
+           cwd=us, capture_output=True)
+    r = run(us, dict(env, PATH=f"{stub}:{env['PATH']}"))
     assert r.returncode == 0, r.stderr
 
     # A URL-valued branch.<name>.pushRemote at the verified slug — git

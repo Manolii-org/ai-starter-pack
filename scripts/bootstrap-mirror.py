@@ -235,7 +235,9 @@ _GH_HTTPS = re.compile(
     r"^(?:https?|git|ssh)://(?:[^@/\s]+@)?github\.com(?::\d+)?/"
     r"([^/\s]+/[^/\s]+?)(?:\.git)?/?$")
 _GH_SCP = re.compile(
-    r"^[^@\s]+@github\.com:([^/\s]+/[^/\s]+?)(?:\.git)?/?$")
+    # scp-style 'github.com:slug' — the leading user@ is optional in
+    # valid git syntax
+    r"^(?:[^@\s]+@)?github\.com:([^/\s]+/[^/\s]+?)(?:\.git)?/?$")
 
 
 def _origin_slug(root: Path) -> str | None:
@@ -269,7 +271,10 @@ def _redact(url: str) -> str:
     mask a leading user@ as well (the username may be a token)."""
     url = re.sub(r"://[^/@\s]*@", "://***@", url, count=1)
     url = re.sub(r"^[^@\s:]+@", "***@", url, count=1)
-    return url.split("?", 1)[0].split("#", 1)[0]
+    url = url.split("?", 1)[0].split("#", 1)[0]
+    # An opaque helper destination ('ext::cmd --token=… %S') is not a
+    # URL — its arguments can carry credentials, so do not echo them.
+    return url.split(" ", 1)[0]
 
 
 def _ssh_host_unchanged(url: str) -> bool:
@@ -291,8 +296,9 @@ def _ssh_host_unchanged(url: str) -> bool:
         user = unquote(user) if user else ""
         args = (["-p", port] if port else []) + \
             [f"{user}@github.com" if user else "github.com"]
-    else:  # scp-style user@github.com:slug
-        args = [f"{url.split('@', 1)[0]}@github.com"]
+    else:  # scp-style [user@]github.com:slug — user may be omitted
+        user = url.split("@", 1)[0] if "@" in url else ""
+        args = [f"{user}@github.com" if user else "github.com"]
     try:
         r = subprocess.run(["ssh", "-G", *args],
                            capture_output=True, text=True, timeout=10)
@@ -428,31 +434,10 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
     # core.sshCommand (or the GIT_SSH_COMMAND/GIT_SSH environment
     # variables) replaces the ssh transport entirely — an ssh/scp URL
     # that parses to the verified slug can still land anywhere the
-    # command chooses. core.gitProxy / GIT_PROXY_COMMAND is the same
-    # class for git:// URLs.
+    # command chooses.
     ssh_src = ("core.sshCommand" if _cfg("core.sshCommand") else
                "GIT_SSH_COMMAND" if os.environ.get("GIT_SSH_COMMAND") else
                "GIT_SSH" if os.environ.get("GIT_SSH") else "")
-
-    def _gitproxy_applies() -> bool:
-        # core.gitProxy entries may carry a `for <domain>` qualifier and
-        # a `none` command disables the proxy — git matches entries in
-        # the given order and the FIRST match for the destination domain
-        # wins.
-        for ln in _cfg_lines("--get-all", "core.gitProxy"):
-            cmd, sep, domain = ln.rpartition(" for ")
-            if not sep:
-                cmd, domain = ln, ""
-            if domain and not re.search(
-                    rf"(^|\.){re.escape(domain.strip().lower())}$",
-                    "github.com"):
-                continue
-            return cmd.strip().lower() != "none"
-        return False
-
-    proxy_src = ("GIT_PROXY_COMMAND"
-                 if os.environ.get("GIT_PROXY_COMMAND")
-                 else "core.gitProxy" if _gitproxy_applies() else "")
 
     def _ssl_off(url: str) -> bool:
         # An accepted https destination with TLS verification disabled
@@ -485,9 +470,13 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
                                  + url[len(proxy):]) == slug)
 
     for url in urls:
-        if url.startswith("http://"):
+        # Plaintext transports (http, git) carry the private pack
+        # unencrypted and unauthenticated — refuse them outright like
+        # any misdirected destination.
+        m = re.match(r"(http|git)://", url)
+        if m:
             return (f"push destination '{_redact(remote)}' resolves to "
-                    f"plaintext http url '{_redact(url)}'")
+                    f"plaintext {m.group(1)} url '{_redact(url)}'")
         if _slug_of(url) == slug or _proxy_ok(url):
             if url.startswith("https://") and _ssl_off(url):
                 return ("tls verification disabled for push url "
@@ -501,9 +490,6 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
                             "elsewhere (or 'ssh -G' could not verify "
                             "the effective host) for push url "
                             f"'{_redact(url)}'")
-            if proxy_src and url.startswith("git://"):
-                return (f"{proxy_src} overrides the git transport "
-                        f"for push url '{_redact(url)}'")
             continue
         return (f"push destination '{_redact(remote)}' resolves to "
                 f"'{_redact(url)}'")
