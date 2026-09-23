@@ -2489,7 +2489,11 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     # GIT_SSL_NO_VERIFY environment variable all count).
     for i, cfg in enumerate((["http.sslVerify", "false"],
                              ["http.https://github.com/.sslVerify",
-                              "false"])):
+                              "false"],
+                             # An explicitly-EMPTY value canonicalises
+                             # to false — its blank --get-urlmatch
+                             # record must not read as 'enabled'.
+                             ["http.sslVerify", ""])):
         sv = tmp_path / f"ssloff{i}"
         sv.mkdir()
         sp.run(["git", "init", "-q"], cwd=sv, capture_output=True)
@@ -2943,6 +2947,16 @@ def test_bootstrap_ssh_effective_config(monkeypatch, tmp_path):
     patch([(k, str(kh_file) if k == "userknownhostsfile" else v)
            for k, v in CLEAN])
     assert "size" in mod._ssh_host_unchanged(URL)
+
+    # A quoted path containing spaces is emitted WITHOUT its quoting —
+    # 'one two' parses as two absent fragments while ssh loads the
+    # real spaced file. A spaced join naming an existing file is
+    # ambiguous → refuse.
+    (home / ".ssh").mkdir(exist_ok=True)
+    (home / ".ssh" / "one two").write_text(f"github.com ssh-rsa {bad}\n")
+    patch([(k, f"{home}/.ssh/one two"
+           if k == "userknownhostsfile" else v) for k, v in CLEAN])
+    assert "ambiguous" in mod._ssh_host_unchanged(URL)
 
     # A PATH-resolved ssh outside the system dirs is never even asked.
     patch(CLEAN, which="/tmp/evil/ssh")

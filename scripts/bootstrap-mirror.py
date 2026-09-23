@@ -520,6 +520,20 @@ def _ssh_host_unchanged(url: str) -> str | None:
         if os.name == "nt" else "/etc/ssh")
     allowed = tuple(os.path.normcase(d + os.sep) for d in
                     (os.path.join(home, ".ssh"), global_kh))
+    # 'ssh -G' emits a quoted path containing spaces WITHOUT its
+    # quoting — 'a b' may be one file or two. When a spaced join of
+    # consecutive fragments names a real file the parse is ambiguous
+    # (the real path was never inspected) — fail closed.
+    for frags in (eff.get("userknownhostsfile", "").split(),
+                  eff.get("globalknownhostsfile", "").split()):
+        for i in range(len(frags)):
+            for j in range(i + 2, len(frags) + 1):
+                joined = os.path.expanduser(
+                    " ".join(frags[i:j])
+                    .replace("%d", home).replace("%u", user))
+                if os.path.exists(joined):
+                    return ("a known-hosts file list is ambiguous "
+                            "(a pathname may contain spaces)")
     trusted: list[str] = []
     for p in kh:
         rp = os.path.normcase(os.path.realpath(os.path.expanduser(
@@ -671,10 +685,22 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
         specificity, the later scope wins."""
         if "GIT_SSL_NO_VERIFY" in os.environ:
             return "tls verification disabled"
-        vals = _cfg_lines("--get-urlmatch", "http.sslVerify", url)
-        eff = vals[-1].strip().lower() if vals else ""
-        if eff in ("false", "0", "no", "off"):
-            return "tls verification disabled"
+        # An explicitly-EMPTY http.sslVerify canonicalises to false in
+        # git, but --get-urlmatch reports it as a BLANK record — which
+        # must not read as 'enabled'. The exit status separates
+        # 'set to empty' (rc 0) from 'unset' (rc 1).
+        try:
+            r = subprocess.run(
+                ["git", "-C", str(root), "config", "--get-urlmatch",
+                 "http.sslVerify", url],
+                capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            return "tls verification state could not be verified"
+        if r.returncode == 0:
+            lines = r.stdout.splitlines()
+            eff = lines[-1].strip().lower() if lines else ""
+            if eff in ("", "false", "0", "no", "off"):
+                return "tls verification disabled"
         for var in ("GIT_SSL_CAINFO", "GIT_SSL_CAPATH"):
             if var in os.environ:
                 return f"custom CA trust store via {var}"
