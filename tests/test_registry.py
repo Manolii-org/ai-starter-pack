@@ -1971,11 +1971,10 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     import subprocess as sp
     pack = Path(__file__).resolve().parent.parent
 
-    def run(root, env):
+    def run(root, env, slug="buro-built/buro-registry", universe="buro"):
         return sp.run(
             [sys.executable, "scripts/bootstrap-mirror.py", "--root",
-             str(root), "--universe", "buro",
-             "--slug", "buro-built/buro-registry"],
+             str(root), "--universe", universe, "--slug", slug],
             cwd=pack, capture_output=True, text=True, env=env)
 
     # gh absent from PATH (git still resolvable) → visibility
@@ -2006,6 +2005,15 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     assert r.returncode == 2, r.stderr
     assert not (mism / "registry").exists()
 
+    # --universe not matching the origin's owning org → refuse (the lint
+    # exempts patterns by owner; a buro scope under impaktful-platform
+    # would seed the wrong universe AND exempt the wrong org).
+    r = run(mism, _bootstrap_env(tmp_path),
+            slug="impaktful-platform/impaktful-registry")
+    assert r.returncode == 2, r.stderr
+    assert "requires the mirror to live under" in r.stderr
+    assert not (mism / "registry").exists()
+
     # gh reports public → refuse.
     pub_bin = tmp_path / "pubbin"
     pub_bin.mkdir()
@@ -2022,6 +2030,37 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     plain.mkdir()
     r = run(plain, _bootstrap_env(tmp_path))
     assert r.returncode == 2, r.stderr
+
+
+def test_bootstrap_mirror_dirty_clone_no_ratchet(tmp_path):
+    """A first seed into a clone that ALREADY has tracked files gets merge
+    semantics too — hits in pre-existing files are the org's own content
+    and must surface as lint FAILs, never be silently grandfathered into
+    the ratchet."""
+    import subprocess as sp
+    pack = Path(__file__).resolve().parent.parent
+    root = tmp_path / "buro-registry"
+    root.mkdir()
+    sp.run(["git", "init", "-q"], cwd=root, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=root, capture_output=True)
+    # A tracked pre-existing file carrying another org's slug.
+    (root / "notes.md").write_text("see Impaktful-Platform/impaktful_3.0\n")
+    sp.run(["git", "add", "notes.md"], cwd=root, capture_output=True)
+    env = _bootstrap_env(tmp_path)
+    r = sp.run(
+        [sys.executable, "scripts/bootstrap-mirror.py", "--root", str(root),
+         "--universe", "buro", "--slug", "buro-built/buro-registry"],
+        cwd=pack, capture_output=True, text=True, env=env)
+    assert r.returncode == 0, r.stderr
+    al = (root / "registry/pack-surface-allowlist.txt").read_text()
+    entries = {ln.split("#", 1)[0] for ln in al.splitlines()
+               if ln.strip() and not ln.startswith("#")}
+    assert "notes.md" not in entries, \
+        "pre-existing own-content hit was ratcheted on a dirty first seed"
+    assert any(e.startswith("registry/platform/") for e in entries), \
+        "vendored platform hits must still be seeded"
 
 
 def test_bootstrap_mirror_refresh_aborts_on_bad_index(tmp_path):

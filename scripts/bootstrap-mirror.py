@@ -78,6 +78,16 @@ from pathlib import Path
 PACK = Path(__file__).resolve().parent.parent
 
 UNIVERSES = ("manolii", "buro", "impaktful", "cpdcheck")
+# The GitHub org that OWNS each universe's mirror — binding matters: the
+# vendored lint exempts the origin owner's slug patterns, so a mirror
+# hosted under a different org would exempt the wrong org AND seed the
+# wrong universe scope.
+UNIVERSE_OWNERS = {
+    "manolii": "manolii-org",
+    "buro": "buro-built",
+    "impaktful": "impaktful-platform",
+    "cpdcheck": "cpdcheck",
+}
 IP_OWNERS = {
     "manolii": "Manolii Pty Ltd",
     "buro": "Buro Built",
@@ -120,8 +130,9 @@ name: registry-lint
 on:
   pull_request:
     paths: ['**']
+  # No branch filter — the mirror's default branch is org-configured
+  # (main vs master vs other); the gate must cover every direct push.
   push:
-    branches: [main]
     paths: ['**']
 
 permissions:
@@ -416,7 +427,8 @@ def main() -> int:
 
     # The seeded digest must bind to THIS checkout's repo — a --slug that
     # names any other accessible private repo would pass visibility yet
-    # fail the first CI run, which hashes the real origin remote.
+    # fail the first CI run, which hashes the real origin remote. The
+    # same check catches a non-git root before anything is written.
     origin = _origin_slug(root)
     if origin is None:
         sys.stderr.write("FAIL: --root must be a git checkout with an "
@@ -430,6 +442,16 @@ def main() -> int:
             "accessible private repo\n")
         return 2
 
+    # The mirror's universe is bound to the repo's owning org — the
+    # vendored lint exempts patterns by origin owner, so a mismatch both
+    # seeds the wrong scope AND exempts the wrong org's slugs.
+    expected_owner = UNIVERSE_OWNERS[args.universe]
+    if origin.split("/", 1)[0] != expected_owner:
+        sys.stderr.write(
+            f"FAIL: --universe {args.universe} requires the mirror to live "
+            f"under {expected_owner}, but origin is '{origin}'\n")
+        return 2
+
     vis = check_visibility(slug)
     if vis is None:
         return 2
@@ -438,7 +460,22 @@ def main() -> int:
     # An existing registry/ means this is a rerun/refresh — allowlist regen
     # must merge (preserve live mirror-owned entries, never ratchet new
     # violations in the org's own tree) rather than freeze the whole tree.
-    established = reg.is_dir()
+    # A first seed into a NON-EMPTY clone gets the same filtering: tracked
+    # files predating the scaffold are the org's own content, and their
+    # hits must surface as lint FAILs, not be silently grandfathered.
+    tracked = subprocess.run(["git", "-C", str(root), "ls-files"],
+                            capture_output=True, text=True, timeout=10)
+    established = reg.is_dir() or bool(
+        tracked.returncode == 0 and tracked.stdout.strip())
+    # A mirror is scoped once — a rerun naming a different universe than
+    # an existing scope is a misconfiguration, not a re-seed.
+    for u in UNIVERSES:
+        if u != args.universe and (reg / u / "scope.yaml").is_file():
+            sys.stderr.write(
+                f"FAIL: this mirror is already scoped to universe '{u}' "
+                f"(registry/{u}/scope.yaml exists) — --universe "
+                f"{args.universe} does not match; refusing\n")
+            return 2
     reg.mkdir(parents=True, exist_ok=True)
     (reg / ".private-mirror").write_text("")
     seed_scope(root, args.universe)
