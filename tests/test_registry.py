@@ -2437,6 +2437,23 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     assert "file:***" in r.stderr
     assert not (lf / "registry").exists()
 
+    # Even on github.com a path exceeding owner/repo(.git) may carry a
+    # credential — it is withheld wholesale, not exempted by the host.
+    gp = tmp_path / "ghpath"
+    gp.mkdir()
+    sp.run(["git", "init", "-q"], cwd=gp, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=gp, capture_output=True)
+    sp.run(["git", "config", "remote.origin.pushurl",
+            "https://github.com/Other-Org/public-repo/SECRETX"], cwd=gp,
+           capture_output=True)
+    r = run(gp, _bootstrap_env(tmp_path))
+    assert r.returncode == 2, r.stderr
+    assert "SECRETX" not in r.stderr
+    assert "github.com/***" in r.stderr
+    assert not (gp / "registry").exists()
+
     # Plain-HTTP is refused outright — it is plaintext transport and
     # its effective proxy chain cannot be trusted for a private push.
     ht = tmp_path / "httppush"
@@ -2644,6 +2661,18 @@ def test_bootstrap_mirror_push_target_pass(tmp_path):
             "https://github.com/"], cwd=a, capture_output=True)
     r = run(a)
     assert r.returncode == 0, r.stderr
+
+    # Hostname case is immaterial to DNS/git — 'GITHUB.COM' binds the
+    # same verified slug.
+    uc = tmp_path / "uppercase-host"
+    uc.mkdir()
+    sp.run(["git", "init", "-q"], cwd=uc, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://GITHUB.COM/Buro-Built/buro-registry.git"],
+           cwd=uc, capture_output=True)
+    r = run(uc)
+    assert r.returncode == 0, r.stderr
+    assert (uc / "registry/.private-mirror").is_file()
 
     b = tmp_path / "proxy-ok"
     b.mkdir()

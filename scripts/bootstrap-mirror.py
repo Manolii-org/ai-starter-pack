@@ -265,8 +265,10 @@ def _origin_slug(root: Path) -> str | None:
 
 
 def _slug_of(url: str) -> str | None:
-    """owner/repo of a github.com URL, lowercased; None otherwise."""
-    m = _GH_HTTPS.match(url) or _GH_SCP.match(url)
+    """owner/repo of a github.com URL, lowercased; None otherwise.
+    The host is matched case-insensitively ('GITHUB.COM' is the same
+    DNS name git would connect to)."""
+    m = _GH_HTTPS.match(url.lower()) or _GH_SCP.match(url.lower())
     return m.group(1).lower() if m else None
 
 
@@ -292,13 +294,16 @@ def _redact(url: str) -> str:
     if url.startswith("file:"):
         return "file:***"
     if "://" in url:
-        url = re.sub(
-            r"(://(?!(?:[^@/\s]+@)?github\.com(?::\d+)?/)[^/\s]+)/\S*$",
-            r"\1/***", url)
+        # Keep the path only for an exact owner/repo(.git) github.com
+        # URL — extra components ('/org/repo/SECRET') may carry a
+        # credential, and a malformed slug aids nothing.
+        if not _GH_HTTPS.match(url):
+            url = re.sub(r"(://[^/\s]+)/\S*$", r"\1/***", url)
     elif re.match(r"^(?:[^@\s]+@)?[^:\s@/]+:", url):
-        url = re.sub(
-            r"^((?:[^@\s]+@)?(?!github\.com(?::|$))[^:\s@]+):\S*$",
-            r"\1:***", url)
+        # scp-style 'user@host:path' — same rule.
+        if not _GH_SCP.match(url):
+            url = re.sub(
+                r"^((?:[^@\s]+@)?[^:\s@]+):\S*$", r"\1:***", url)
     else:
         # Not a recognised URL form — '/tmp/SECRET/repo.git', '~/x',
         # './x' are all valid push destinations whose components may
@@ -313,7 +318,11 @@ def _redact(url: str) -> str:
 # prefixes are user-writable — a wrapper placed there would attest to
 # its own config, so only the root-owned system dirs qualify, and the
 # resolved file itself must be root-owned.
-_SSH_TRUST_DIRS = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
+_SSH_TRUST_DIRS = (
+    (os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
+                  "System32", "OpenSSH"),)
+    if os.name == "nt" else
+    ("/usr/bin", "/bin", "/usr/sbin", "/sbin"))
 
 
 def _ssh_host_unchanged(url: str) -> str | None:
@@ -330,7 +339,7 @@ def _ssh_host_unchanged(url: str) -> str | None:
     any doubt."""
     if url.startswith("ssh://"):
         m = re.match(r"^ssh://(?:([^@/\s]+)@)?github\.com(?::(\d+))?/",
-                     url)
+                     url, re.IGNORECASE)
         user, port = m.groups()
         # git percent-decodes URL userinfo before invoking ssh — the
         # -G target must carry the same decoded user or Match user
@@ -342,8 +351,9 @@ def _ssh_host_unchanged(url: str) -> str | None:
         user = url.split("@", 1)[0] if "@" in url else ""
         args = [f"{user}@github.com" if user else "github.com"]
     ssh = shutil.which("ssh")
-    if not ssh or not os.path.realpath(ssh).startswith(
-            tuple(f"{d}/" for d in _SSH_TRUST_DIRS)):
+    ssh_rp = os.path.normcase(os.path.realpath(ssh)) if ssh else ""
+    if not ssh or not any(ssh_rp.startswith(
+            os.path.normcase(d) + os.sep) for d in _SSH_TRUST_DIRS):
         return ("ssh transport cannot be verified: 'ssh' resolves to "
                 f"{_redact(ssh or '<missing>')} outside the system "
                 "directories")
