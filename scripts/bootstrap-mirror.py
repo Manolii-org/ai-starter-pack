@@ -370,10 +370,13 @@ def _ssh_host_unchanged(url: str) -> str | None:
                 "ProxyCommand/ProxyJump")
     # OpenSSH 9.6+ canonicalises 'no'/'off' to 'false' in -G output —
     # check every spelling of disabled server authentication.
+    # 'accept-new' authenticates automatically on first use (TOFU):
+    # on a host without a github.com entry an interceptor supplies the
+    # first key and the push still lands — refuse it too.
     if eff.get("stricthostkeychecking", "").lower() in (
-            "no", "off", "false", "0"):
+            "no", "off", "false", "0", "accept-new"):
         return ("ssh host key verification is disabled "
-                "(StrictHostKeyChecking no/off)")
+                "(StrictHostKeyChecking no/off/accept-new)")
     # HostKeyAlias replaces the hostname used for host-key lookup — an
     # alias pointing at an attacker-owned entry verifies the
     # interceptor's key while hostname still reports github.com.
@@ -381,6 +384,12 @@ def _ssh_host_unchanged(url: str) -> str | None:
     if alias and alias != "github.com":
         return ("ssh client config overrides the host key lookup "
                 "(HostKeyAlias)")
+    # KnownHostsCommand supplies host keys beyond the known-hosts
+    # files — a configured command can emit an attacker-controlled
+    # github.com key that 'yes'-level checking then accepts.
+    if eff.get("knownhostscommand", "").strip().lower() not in ("", "none"):
+        return ("ssh client config installs a dynamic host-key source "
+                "(KnownHostsCommand)")
     if not [p for p in (eff.get("userknownhostsfile", "").split()
                         + eff.get("globalknownhostsfile", "").split())
             if p != "/dev/null"]:

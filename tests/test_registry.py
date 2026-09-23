@@ -2751,7 +2751,7 @@ def test_bootstrap_ssh_effective_config(monkeypatch):
     patch(CLEAN + [("proxyjump", "bastion")])
     assert "ProxyCommand" in mod._ssh_host_unchanged(URL)
 
-    for shkc in ("no", "off", "false", "0"):
+    for shkc in ("no", "off", "false", "0", "accept-new"):
         patch(CLEAN + [("stricthostkeychecking", shkc)])
         assert "host key" in mod._ssh_host_unchanged(URL), shkc
     # HostKeyAlias swaps the name used for host-key lookup while
@@ -2760,6 +2760,12 @@ def test_bootstrap_ssh_effective_config(monkeypatch):
     patch(CLEAN + [("hostkeyalias", "attacker.example")])
     assert "HostKeyAlias" in mod._ssh_host_unchanged(URL)
     patch(CLEAN + [("hostkeyalias", "github.com")])
+    assert mod._ssh_host_unchanged(URL) is None
+    # A KnownHostsCommand supplies host keys beyond the files —
+    # refused unless unset/'none'.
+    patch(CLEAN + [("knownhostscommand", "emit-attacker-key")])
+    assert "KnownHostsCommand" in mod._ssh_host_unchanged(URL)
+    patch(CLEAN + [("knownhostscommand", "none")])
     assert mod._ssh_host_unchanged(URL) is None
 
     patch(CLEAN + [("userknownhostsfile", "/dev/null"),
