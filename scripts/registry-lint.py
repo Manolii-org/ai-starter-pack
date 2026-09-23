@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import subprocess
 import sys
 import unicodedata
 from dataclasses import dataclass
@@ -104,8 +105,9 @@ SECRETS_ALLOWLIST_PATH = REGISTRY / "secrets-allowlist.txt"
 # the other universe names are already public scope contracts. Per-line
 # ratchet (same path#sha8 format) grandfathers today's references.
 PACK_SURFACE_ALLOWLIST = REGISTRY / "pack-surface-allowlist.txt"
-# VCS/vendor/cache dirs skipped; `releases/` deliberately NOT skipped —
-# frozen snapshots published into the public repo are exposure too.
+# VCS/vendor/cache dirs — only consulted by the NON-GIT fallback. In a
+# real checkout the scan enumerates `git ls-files` instead: anything
+# committed is published, whatever its directory is called.
 PACK_SKIP_DIRS = {".git", "registry", "node_modules", "__pycache__",
                   "venv", ".venv", "dist", "build", ".next",
                   ".ruff_cache", ".pytest_cache", ".brand"}
@@ -120,6 +122,13 @@ PACK_SURFACE_PATTERNS = [
     r"ep-[a-z0-9-]+\.[a-z0-9.-]*neon\.tech",
     r"\b[a-z0-9-]+\.internal\b",
 ]
+# Owner/repo slugs and hostnames are matched case-insensitively — DNS and
+# git URLs don't care about casing, so `manolii-org/private-repo` must
+# trip the gate just as `Manolii-org/private-repo` does.
+PACK_SURFACE_RES = [re.compile(p, re.IGNORECASE)
+                    for p in PACK_SURFACE_PATTERNS]
+
+CANONICAL_PACK_SLUG = "manolii-org/ai-starter-pack"
 
 SCOPE_SCHEMA_PATH = REPO / "schemas" / "registry-scope.schema.json"
 try:
@@ -696,16 +705,47 @@ def org_leak_lines() -> list[str]:
     return sorted(out)
 
 
+def _tracked_files() -> list[Path] | None:
+    """Every git-tracked file in the repo, or None outside a git checkout.
+    Tracked enumeration replaces directory-name skips entirely: a slug
+    committed under .brand/ (or any other directory name) is published
+    content and must be scanned — only untracked caches/vendor trees may
+    be skipped, and untracked files are absent from ls-files anyway."""
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(REPO), "ls-files", "-z"],
+            capture_output=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
+        return None
+    out = []
+    for rel in r.stdout.decode("utf-8", errors="ignore").split("\x00"):
+        if rel:
+            out.append(REPO / rel)
+    return out
+
+
+def pack_surface_files() -> list[Path]:
+    """Files covered by the PACK-SURFACE scan. In a git checkout this is
+    every tracked file (including registry/ and .brand/ — no other check
+    covers the PACK-SURFACE pattern set there); without git, an rglob
+    fallback keeps the VCS/vendor/cache skips."""
+    tracked = _tracked_files()
+    if tracked is not None:
+        return [p for p in tracked if p.is_file()]
+    return [
+        p for p in sorted(REPO.rglob("*"))
+        if p.is_file()
+        and not any(part in PACK_SKIP_DIRS
+                    for part in p.relative_to(REPO).parts)
+    ]
+
+
 def pack_surface_hits() -> list[str]:
     """Every current PACK-SURFACE line-key (for --write-pack-allowlist)."""
     out = []
-    pats = [re.compile(p) for p in PACK_SURFACE_PATTERNS]
-    for path in sorted(REPO.rglob("*")):
-        if not path.is_file():
-            continue
-        parts = path.relative_to(REPO).parts
-        if any(p in PACK_SKIP_DIRS for p in parts):
-            continue
+    for path in pack_surface_files():
         rel_s = path.relative_to(REPO).as_posix()
         if rel_s in PACK_SURFACE_EXEMPT:
             continue
@@ -714,24 +754,19 @@ def pack_surface_hits() -> list[str]:
         except OSError:
             continue
         for i, line in enumerate(lines, 1):
-            if any(p.search(line) for p in pats):
+            if any(p.search(line) for p in PACK_SURFACE_RES):
                 out.append(line_key(rel_s, line))
     return sorted(set(out))
 
 
 def check_pack_surface() -> None:
-    """No private-repo slugs or infra identifiers outside registry/.
-    registry/ itself is covered by ORG-LEAK; credentials by SECRETS and
-    Detect Secrets — this is the remaining public-repo gap."""
+    """No private-repo slugs or infra identifiers anywhere in the tracked
+    tree. registry/ is included — ORG-LEAK covers org NAMES there, but
+    not the infra-id shapes (project refs, endpoints, .internal) this
+    check owns; credentials stay with SECRETS + Detect Secrets."""
     fails = 0
     allow = load_line_allowlist(PACK_SURFACE_ALLOWLIST)
-    pats = [re.compile(p) for p in PACK_SURFACE_PATTERNS]
-    for path in sorted(REPO.rglob("*")):
-        if not path.is_file():
-            continue
-        parts = path.relative_to(REPO).parts
-        if any(p in PACK_SKIP_DIRS for p in parts):
-            continue
+    for path in pack_surface_files():
         rel_s = path.relative_to(REPO).as_posix()
         if rel_s in PACK_SURFACE_EXEMPT:
             continue
@@ -740,7 +775,7 @@ def check_pack_surface() -> None:
         except OSError:
             continue
         for i, line in enumerate(lines, 1):
-            if (any(p.search(line) for p in pats)
+            if (any(p.search(line) for p in PACK_SURFACE_RES)
                     and line_key(rel_s, line) not in allow):
                 report("FAIL", "PACK-SURFACE",
                        f"{rel_s}:{i} — private slug/infra id in public repo")
@@ -752,7 +787,26 @@ def check_pack_surface() -> None:
                f"stale allowlist entry — remove it: {stale}")
     if not fails:
         report("PASS", "PACK-SURFACE",
-               "no private slugs/infra ids outside registry/")
+               "no private slugs/infra ids in tracked files")
+
+
+def _origin_slug() -> str | None:
+    """owner/repo of the origin remote, lowercased — or None when the
+    remote is absent/unparseable. The marker waiver must be tied to a
+    VERIFIED private context: a committed `.private-mirror` file alone
+    cannot disable the public boundary, or one PR could plant both the
+    marker and universe content and still pass."""
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(REPO), "remote", "get-url", "origin"],
+            capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
+        return None
+    m = re.search(r"[:/]([^/\s]+/[^/\s]+?)\.git$", r.stdout.strip()) \
+        or re.search(r"[:/]([^/\s]+/[^/\s]+?)/?$", r.stdout.strip())
+    return m.group(1).lower() if m else None
 
 
 def check_public_boundary() -> None:
@@ -762,7 +816,21 @@ def check_public_boundary() -> None:
     repos and never sync upstream either. The scope.yaml CONTRACTS scaffold
     here is public-safe metadata; anything beyond it is content."""
     if (REGISTRY / ".private-mirror").is_file():
-        report("PASS", "PUBLIC", "private mirror marker present — boundary waived")
+        slug = _origin_slug()
+        if slug == CANONICAL_PACK_SLUG:
+            report("FAIL", "PUBLIC",
+                   "registry/.private-mirror committed in the canonical "
+                   f"public repo ({slug}) — the marker only has meaning "
+                   "in a private mirror; remove it")
+            return
+        if slug is None:
+            report("FAIL", "PUBLIC",
+                   "registry/.private-mirror present but the origin remote "
+                   "cannot be verified as a private mirror — refusing to "
+                   "waive the public boundary on an unverifiable marker")
+            return
+        report("PASS", "PUBLIC",
+               f"private mirror ({slug}) — boundary waived")
         return
     fails = 0
     for scope in UNIVERSES + LOCAL_SCOPES:

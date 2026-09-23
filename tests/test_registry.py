@@ -1691,18 +1691,112 @@ def test_public_boundary_scope_yaml_only_passes(tmp_path):
 
 def test_public_boundary_private_mirror_marker_waives(tmp_path):
     """registry/.private-mirror marks a private mirror — the boundary is
-    waived there (universe content is legal in its own org's mirror)."""
+    waived there, but ONLY when the origin remote verifies this isn't
+    the canonical public repo (a bare committable marker cannot waive
+    the guard)."""
+    import subprocess as sp
     reg_root = make_registry(tmp_path / "src", {
         "platform/framework": [("skills/demo/x.md", "x")],
         "manolii/secret-thing": [("skills/x/SKILL.md",
                                   "---\nname: x\ndescription: y\n---\n")],
     })
     (reg_root / "registry/.private-mirror").write_text("")
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    sp.run(["git", "init", "-q"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=reg_root, env=env, check=True)
     mod = load_lint_module()
     mod.REGISTRY = reg_root / "registry"
+    mod.REPO = reg_root
     mod.results = []
     mod.check_public_boundary()
     assert not [f for f in mod.results if f.status == "FAIL"]
+
+
+def test_public_boundary_marker_in_canonical_repo_fails(tmp_path):
+    """A committed .private-mirror in the canonical public repo is a
+    self-granted waiver — it must FAIL, not silently pass."""
+    import subprocess as sp
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "x")],
+    })
+    (reg_root / "registry/.private-mirror").write_text("")
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    sp.run(["git", "init", "-q"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Manolii-org/ai-starter-pack.git"],
+           cwd=reg_root, env=env, check=True)
+    mod = load_lint_module()
+    mod.REGISTRY = reg_root / "registry"
+    mod.REPO = reg_root
+    mod.results = []
+    mod.check_public_boundary()
+    fails = [f for f in mod.results if f.status == "FAIL"]
+    assert any("canonical" in f.detail or "private-mirror" in f.detail
+               for f in fails)
+
+
+def test_public_boundary_marker_without_remote_fails(tmp_path):
+    """A marker in a checkout whose origin cannot be verified is
+    unverifiable — fail closed rather than waive."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "x")],
+    })
+    (reg_root / "registry/.private-mirror").write_text("")
+    mod = load_lint_module()
+    mod.REGISTRY = reg_root / "registry"
+    mod.REPO = reg_root
+    mod.results = []
+    mod.check_public_boundary()
+    fails = [f for f in mod.results if f.status == "FAIL"]
+    assert any("cannot be verified" in f.detail or "unverifiable"
+               in f.detail for f in fails)
+
+
+def test_pack_surface_lowercase_slug_fails(tmp_path):
+    """Owner/repo casing doesn't matter to git or DNS — a lowercase
+    manolii-org/<repo> slug must trip the gate."""
+    repo = tmp_path / "pack"
+    repo.mkdir()
+    (repo / "registry").mkdir()
+    (repo / "x.md").write_text("clone github.com/manolii-org/secret-repo")
+    mod = load_lint_module()
+    mod.REPO = repo
+    mod.REGISTRY = repo / "registry"
+    mod.PACK_SURFACE_ALLOWLIST = repo / "registry" / "pack-surface-allowlist.txt"
+    mod.results = []
+    mod.check_pack_surface()
+    fails = [f for f in mod.results
+             if f.check == "PACK-SURFACE" and f.status == "FAIL"]
+    assert any("x.md" in f.detail for f in fails)
+
+
+def test_pack_surface_scans_tracked_skip_dir(tmp_path):
+    """A slug committed under a skip-listed dir is still published —
+    the scan enumerates tracked files, not directory names."""
+    import subprocess as sp
+    repo = tmp_path / "pack"
+    repo.mkdir()
+    (repo / "registry").mkdir()
+    brand = repo / ".brand"
+    brand.mkdir()
+    (brand / "branded.yml").write_text("upstream: Buro-Built/bcp-core")
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    sp.run(["git", "init", "-q"], cwd=repo, env=env, check=True)
+    sp.run(["git", "add", "-A"], cwd=repo, env=env, check=True)
+    mod = load_lint_module()
+    mod.REPO = repo
+    mod.REGISTRY = repo / "registry"
+    mod.PACK_SURFACE_ALLOWLIST = repo / "registry" / "pack-surface-allowlist.txt"
+    mod.results = []
+    mod.check_pack_surface()
+    fails = [f for f in mod.results
+             if f.check == "PACK-SURFACE" and f.status == "FAIL"]
+    assert any(".brand" in f.detail for f in fails)
 
 
 def test_pack_surface_private_slug_fails(tmp_path):
