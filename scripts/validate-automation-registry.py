@@ -46,6 +46,14 @@ TRIGGER_TYPES = {"schedule", "push", "pull_request", "workflow_dispatch", "webho
 SECRET_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,}$")
 # GitHub job ids: start with a letter or `_`, then alphanumerics, `-`, `_`.
 JOB_ID_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*\Z")
+# GitHub's real per-event config keys — anything else can't load.
+EVENT_KEYS = {
+    "push": {"branches", "branches-ignore", "tags", "tags-ignore",
+             "paths", "paths-ignore"},
+    "pull_request": {"branches", "branches-ignore", "paths", "paths-ignore",
+                     "types"},
+    "workflow_dispatch": {"inputs"},
+}
 MONTH_NAMES = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
                "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}
 WEEKDAY_NAMES = {"SUN": 0, "MON": 1, "TUE": 2, "WED": 3, "THU": 4,
@@ -210,10 +218,30 @@ def _workflow_trigger_ok(spec: dict, trigger: dict) -> str | None:
         if ttype not in on:
             return f"workflow missing on.{ttype} trigger"
         # a parseable but invalid event config (`on: {push: true}`) can
-        # never run — key presence alone is not conformance
+        # never run — key presence alone is not conformance. The block must
+        # also stay inside GitHub's real per-event key set (a typo'd key like
+        # `brnches` or an underscore alias is unloadable) and each declared
+        # filter must be a string or a list of strings (`paths: false`,
+        # `types: [5]` can't load either). Mutual exclusion:
+        # `branches`+`branches-ignore`, `tags`+`tags-ignore`.
         ev = on[ttype]
-        if ev is not None and not isinstance(ev, dict):
-            return f"on.{ttype} is not a valid event configuration"
+        if ev is not None:
+            if not isinstance(ev, dict):
+                return f"on.{ttype} is not a valid event configuration"
+            allowed = EVENT_KEYS.get(ttype, set())
+            if not set(ev) <= allowed:
+                return f"on.{ttype} uses keys GitHub doesn't support"
+            for k, v in ev.items():
+                if k == "inputs":
+                    continue
+                if not (isinstance(v, str)
+                        or (isinstance(v, list)
+                            and all(isinstance(x, str) for x in v))):
+                    return f"on.{ttype}.{k} is not a valid filter value"
+            if "branches" in ev and "branches-ignore" in ev:
+                return f"on.{ttype} can't combine branches and branches-ignore"
+            if "tags" in ev and "tags-ignore" in ev:
+                return f"on.{ttype} can't combine tags and tags-ignore"
     jobs = spec.get("jobs")
     if not isinstance(jobs, dict) or not any(
             _runnable_job(j) for k, j in jobs.items()

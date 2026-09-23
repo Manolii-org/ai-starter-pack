@@ -45,11 +45,16 @@ SCHEMA_FILE = Path(__file__).resolve().parent.parent / "schemas" / "deployment-c
 ROLLBACK_RE = re.compile(r"rollback", re.IGNORECASE)
 # GitHub job ids: start with a letter or `_`, then alphanumerics, `-`, `_`.
 JOB_ID_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*\Z")
-# Closed set of GitHub's real push/pull_request event-config keys — a typo'd
-# or invented key (`branches_ignore`, `brnches`) makes the workflow
+# Closed per-event sets of GitHub's real event-config keys — a typo'd or
+# invented key (`branches_ignore`, `brnches`) or a key legal only on the
+# other event (`types` on push, `tags` on pull_request) makes the workflow
 # unloadable, so the event is non-matching rather than "unfiltered".
-EVENT_KEYS = {"branches", "branches-ignore", "tags", "tags-ignore",
-              "paths", "paths-ignore", "types"}
+EVENT_KEYS = {
+    "push": {"branches", "branches-ignore", "tags", "tags-ignore",
+             "paths", "paths-ignore"},
+    "pull_request": {"branches", "branches-ignore", "paths", "paths-ignore",
+                     "types"},
+}
 
 LANE_REQUIRED = ("branch", "environment", "workflow")
 REPO_REQUIRED = ("repo", "lanes")
@@ -329,18 +334,20 @@ def workflow_triggers_branch(spec: dict, branch: str) -> bool:
             ev = {}
         elif not isinstance(ev, dict):
             continue
-        # only GitHub's real event-config keys — underscore aliases
-        # (`branches_ignore`) and typo'd keys alike are unloadable
-        if not set(ev) <= EVENT_KEYS:
+        # only GitHub's real event-config keys for THIS event — underscore
+        # aliases (`branches_ignore`), typo'd keys, and cross-event keys
+        # (`types` on push) alike are unloadable
+        if not set(ev) <= EVENT_KEYS[event]:
             continue
+        # every declared filter value must be a pattern/activity list — a
+        # recognized key with `paths: false` or `types: 5` can't load either
+        if any(_as_patterns(ev[k]) is None for k in EVENT_KEYS[event] if k in ev):
+            continue  # malformed filter value — workflow can't load
         # tag-only triggers never fire for branch pushes: a `push` event
         # whose config filters on `tags`/`tags-ignore` but declares no
         # `branches`/`branches-ignore` runs only on tag pushes. Detection is
-        # by KEY PRESENCE (a falsy `tags: []` is still a declared filter) and
-        # each declared value must parse as a pattern list.
+        # by KEY PRESENCE (a falsy `tags: []` is still a declared filter).
         tag_keys = ("tags", "tags-ignore")
-        if any(_as_patterns(ev[k]) is None for k in tag_keys if k in ev):
-            continue  # malformed tag filter — workflow can't load
         has_tag_filter = any(k in ev for k in tag_keys)
         has_branch_filter = any(k in ev for k in ("branches", "branches-ignore"))
         if event == "push" and has_tag_filter and not has_branch_filter:
