@@ -43,6 +43,13 @@ except ImportError:
 
 SCHEMA_FILE = Path(__file__).resolve().parent.parent / "schemas" / "deployment-contract.schema.json"
 ROLLBACK_RE = re.compile(r"rollback", re.IGNORECASE)
+# GitHub job ids: start with a letter or `_`, then alphanumerics, `-`, `_`.
+JOB_ID_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*\Z")
+# Closed set of GitHub's real push/pull_request event-config keys — a typo'd
+# or invented key (`branches_ignore`, `brnches`) makes the workflow
+# unloadable, so the event is non-matching rather than "unfiltered".
+EVENT_KEYS = {"branches", "branches-ignore", "tags", "tags-ignore",
+              "paths", "paths-ignore", "types"}
 
 LANE_REQUIRED = ("branch", "environment", "workflow")
 REPO_REQUIRED = ("repo", "lanes")
@@ -322,34 +329,31 @@ def workflow_triggers_branch(spec: dict, branch: str) -> bool:
             ev = {}
         elif not isinstance(ev, dict):
             continue
+        # only GitHub's real event-config keys — underscore aliases
+        # (`branches_ignore`) and typo'd keys alike are unloadable
+        if not set(ev) <= EVENT_KEYS:
+            continue
         # tag-only triggers never fire for branch pushes: a `push` event
         # whose config filters on `tags`/`tags-ignore` but declares no
         # `branches`/`branches-ignore` runs only on tag pushes. Detection is
-        # by KEY PRESENCE (a falsy `tags: []`/`false` is still a declared
-        # filter) and each declared value must parse as a pattern list.
-        tag_keys = ("tags", "tags-ignore", "tags_ignore")
+        # by KEY PRESENCE (a falsy `tags: []` is still a declared filter) and
+        # each declared value must parse as a pattern list.
+        tag_keys = ("tags", "tags-ignore")
         if any(_as_patterns(ev[k]) is None for k in tag_keys if k in ev):
             continue  # malformed tag filter — workflow can't load
         has_tag_filter = any(k in ev for k in tag_keys)
-        has_branch_filter = any(k in ev for k in
-                                ("branches", "branches-ignore", "branches_ignore"))
+        has_branch_filter = any(k in ev for k in ("branches", "branches-ignore"))
         if event == "push" and has_tag_filter and not has_branch_filter:
             continue
         # GitHub forbids `branches` together with `branches-ignore` (and
         # likewise `tags` with `tags-ignore`) on the same event — a workflow
         # declaring both can never run, so the lane reports drift.
-        if ("branches" in ev and has_branch_filter
-                and any(k in ev for k in ("branches-ignore", "branches_ignore"))):
+        if "branches" in ev and "branches-ignore" in ev:
             continue
-        if has_tag_filter and "tags" in ev and any(
-                k in ev for k in ("tags-ignore", "tags_ignore")):
+        if "tags" in ev and "tags-ignore" in ev:
             continue
         branches = _as_patterns(ev.get("branches"))
-        # key-presence, not truthiness — `branches-ignore: false` must reach
-        # _as_patterns and be rejected, not `or`-swallowed into "unfiltered"
-        ignore_val = (ev["branches-ignore"] if "branches-ignore" in ev
-                      else ev.get("branches_ignore"))
-        ignore = _as_patterns(ignore_val)
+        ignore = _as_patterns(ev.get("branches-ignore"))
         # A non-string/non-list filter (`branches-ignore: true`) is an invalid
         # event config — it can never run, so report drift rather than crash
         # on iteration or mistake it for "unfiltered".
@@ -450,7 +454,8 @@ def jobs_map(spec: dict) -> dict:
     # keys must be strings — a `jobs: {1: {...}}` entry would feed an int
     # to the rollback regex (TypeError) and isn't a valid GitHub job id
     return {k: v for k, v in jobs.items()
-            if isinstance(k, str) and isinstance(v, dict) and _executable(v)}
+            if isinstance(k, str) and JOB_ID_RE.fullmatch(k)
+            and isinstance(v, dict) and _executable(v)}
 
 
 def job_ids(spec: dict) -> set[str]:

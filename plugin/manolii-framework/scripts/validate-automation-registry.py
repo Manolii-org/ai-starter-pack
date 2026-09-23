@@ -44,6 +44,8 @@ ALLOWED_TRIGGER_KEYS = {"type", "cron", "description"}
 RISK_TIERS = {"green", "amber", "red"}
 TRIGGER_TYPES = {"schedule", "push", "pull_request", "workflow_dispatch", "webhook", "other"}
 SECRET_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,}$")
+# GitHub job ids: start with a letter or `_`, then alphanumerics, `-`, `_`.
+JOB_ID_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*\Z")
 MONTH_NAMES = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
                "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}
 WEEKDAY_NAMES = {"SUN": 0, "MON": 1, "TUE": 2, "WED": 3, "THU": 4,
@@ -214,7 +216,8 @@ def _workflow_trigger_ok(spec: dict, trigger: dict) -> str | None:
             return f"on.{ttype} is not a valid event configuration"
     jobs = spec.get("jobs")
     if not isinstance(jobs, dict) or not any(
-            _runnable_job(j) for j in jobs.values()):
+            _runnable_job(j) for k, j in jobs.items()
+            if isinstance(k, str) and JOB_ID_RE.fullmatch(k)):
         # a conformant `on:` on a workflow that executes nothing still
         # verifies — the registry drift check would stay green with the
         # automation's work silently removed
