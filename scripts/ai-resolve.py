@@ -117,11 +117,16 @@ def declared_consumer_scripts(src_bytes: bytes) -> set[str]:
     return out
 
 
-def script_dep_block(plugin_dir: Path, src_bytes: bytes) -> bool:
+def script_dep_block(plugin_dir: Path, src_bytes: bytes,
+                     pinned_scripts: set[str] | None = None) -> bool:
     """True when the file's script usage cannot run under a resolver install:
     a bundled plugin script (scripts/ isn't materialised), an explicit
     requires_scripts dep, or an unbundled invocation that isn't listed in
-    consumer_scripts."""
+    consumer_scripts.
+
+    Under a tag:/sha: pin, `pinned_scripts` carries the basenames the PINNED
+    git tree holds in scripts/ — the worktree's is_file() would honour
+    ignored/untracked plants and index-hidden deletions the pin never saw."""
     sdir = plugin_dir / "scripts"
     declared = declared_consumer_scripts(src_bytes)
     for m in SCRIPT_REF.finditer(src_bytes):
@@ -131,7 +136,9 @@ def script_dep_block(plugin_dir: Path, src_bytes: bytes) -> bool:
         if not n:
             continue
         name = n.group(1).decode("utf-8", errors="ignore")
-        if (sdir / name).is_file():
+        bundled = (name in pinned_scripts if pinned_scripts is not None
+                   else (sdir / name).is_file())
+        if bundled:
             return True  # bundled dep — resolver cannot satisfy it
         if (f"scripts/{name}" not in declared
                 and name not in declared):
@@ -444,6 +451,7 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
     materialised: dict[str, str] = {}
     component_files = (collect_component_files(plugin_dir)
                        if write_components else {})
+    pinned_scripts: set[str] | None = None
     if pinned:
         # Worktree enumeration alone is not authoritative under a pin: a
         # tracked component DELETED while marked skip-worktree leaves status
@@ -485,6 +493,29 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                     "— refusing an incomplete pin",
                 ))
                 return
+        # The bundled-script check inside script_dep_block is a dep decision
+        # the pin must also own: read scripts/ from the pinned git tree so an
+        # ignored worktree plant or index-hidden deletion cannot flip it
+        # while the lock records the same pin.
+        rel_sdir = (plugin_dir / "scripts").relative_to(registry_root).as_posix()
+        try:
+            stree = subprocess.run(
+                ["git", "-C", str(registry_root), "ls-tree", "-r",
+                 "--name-only", "HEAD", "--", rel_sdir],
+                capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            stree = None
+        if stree is None or stree.returncode != 0:
+            plan.conflicts.append((
+                repo_root / req,
+                f"pinned ref '{ref}' cannot enumerate the pinned scripts tree "
+                "— refusing to make dep decisions on unverifiable state",
+            ))
+            return
+        pinned_scripts = {
+            ln.rsplit("/", 1)[-1] for ln in stree.stdout.splitlines()
+            if ln and ln.rsplit("/", 1)[0] == rel_sdir
+        }
     for comp, files in component_files.items():
         target_root = repo_root / COMPONENT_TARGETS[comp]
         for src in files:
@@ -540,7 +571,8 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                     continue
             if (b"CLAUDE_PLUGIN_ROOT" in src_bytes
                     or declares_script_deps(src_bytes)
-                    or script_dep_block(plugin_dir, src_bytes)):
+                    or script_dep_block(plugin_dir, src_bytes,
+                                        pinned_scripts)):
                 # Files depending on the plugin install root or on sibling
                 # scripts/ cannot run in a resolver install — the resolver
                 # does not materialise scripts (surface wiring is a later

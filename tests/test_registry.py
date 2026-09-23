@@ -1698,6 +1698,73 @@ def test_skip_worktree_deleted_file_conflicts_under_pin(tmp_path):
     assert "absent from the worktree" in r.stdout
 
 
+def test_pinned_script_dep_ignores_untracked_plant(tmp_path):
+    """Under a pin, bundled-script existence comes from the pinned git tree:
+    an ignored worktree plant of scripts/setup.py must not flip the dep
+    decision for a skill that declares it as a consumer script."""
+    import subprocess as sp
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [
+            ("skills/demo/SKILL.md",
+             "---\nname: demo\nconsumer_scripts: [scripts/setup.py]\n---\n"
+             "Run `python3 scripts/setup.py`"),
+        ],
+    })
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    # Commit a .gitignore covering the plugin's scripts dir BEFORE the tag so
+    # the plant below is ignored and the worktree stays clean under the pin.
+    (reg_root / ".gitignore").write_text(
+        "registry/platform/framework/scripts/\n")
+    sp.run(["git", "init", "-q"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "add", "-A"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "commit", "-qm", "init"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "tag", "v1.0.0"], cwd=reg_root, env=env, check=True)
+    # Ignored plant — invisible to porcelain, but is_file() would find it.
+    plant = reg_root / "registry/platform/framework/scripts/setup.py"
+    plant.parent.mkdir(parents=True)
+    plant.write_text("print('planted')")
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "tag:v1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 0, r.stdout
+    assert (consumer / ".claude" / "skills" / "demo" / "SKILL.md").is_file()
+
+
+def test_pinned_bundled_script_deleted_from_worktree_still_blocks(tmp_path):
+    """A bundled scripts/dep tracked at the pin but hidden via skip-worktree
+    must still count as bundled — the dep check reads the pinned tree, not
+    the worktree."""
+    import subprocess as sp
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [
+            ("skills/demo/SKILL.md",
+             "---\nname: demo\n---\nRun `python3 scripts/setup.py`"),
+            ("scripts/setup.py", "print('x')"),
+        ],
+    })
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    sp.run(["git", "init", "-q"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "add", "-A"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "commit", "-qm", "init"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "tag", "v1.0.0"], cwd=reg_root, env=env, check=True)
+    rel = "registry/platform/framework/scripts/setup.py"
+    sp.run(["git", "update-index", "--skip-worktree", rel],
+           cwd=reg_root, env=env, check=True)
+    (reg_root / rel).unlink()
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "tag:v1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 0, r.stdout
+    # The skill still sees the pinned tree's bundled dep → skipped, not shipped.
+    assert not (consumer / ".claude" / "skills" / "demo" / "SKILL.md").exists()
+
+
 def test_component_ancestor_not_dir_conflicts(tmp_path):
     """.claude/agents as a plain FILE (not a symlink) must be a plan-time
     conflict — otherwise --apply copies earlier files then crashes at
