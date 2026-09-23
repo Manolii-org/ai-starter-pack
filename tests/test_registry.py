@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -482,6 +483,40 @@ def test_orphan_behind_symlinked_dir_conflicts(tmp_path):
     assert r.returncode == 1
     assert "symlinked directory" in r.stdout
     assert real.read_text() == "real"
+
+
+def test_tag_pin_verified_against_checkout(tmp_path):
+    """tag:/sha: refs must match the registry checkout's actual HEAD — a
+    checkout at the wrong commit cannot silently satisfy a pin."""
+    import subprocess as sp
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "x")],
+    })
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    sp.run(["git", "init", "-q"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "add", "-A"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "commit", "-qm", "init"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "tag", "v1.0.0"], cwd=reg_root, env=env, check=True)
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "tag:v1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 0, r.stdout
+    # pin a tag that does not name HEAD → conflict
+    sp.run(["git", "commit", "-qm", "second", "--allow-empty"],
+           cwd=reg_root, env=env, check=True)
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 1
+    assert "not at the pinned ref" in r.stdout
+    # a non-git registry source cannot satisfy a pin at all
+    bare = make_registry(tmp_path / "bare", {
+        "platform/framework": [("skills/demo/x.md", "x")],
+    })
+    r = run_resolver(m, bare, consumer, "--apply")
+    assert r.returncode == 1
+    assert "needs a verifiable git checkout" in r.stdout
 
 
 def seed_catalog(reg: Path, patterns: list[str] | None = None) -> None:

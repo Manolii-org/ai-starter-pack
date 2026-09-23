@@ -117,12 +117,8 @@ platform/om/evals/operational-memory/case-system-of-record-write-refused.json#7f
 platform/om/evals/operational-memory/case-unknown-is-an-answer.json#7f86d652
 platform/om/evals/operational-memory/case-vendor-history-incomplete.json#7f86d652
 platform/om/skills/om-fact-capture/SKILL.md#75824fd1
-platform/om/skills/om-fact-capture/SKILL.md#ab0622d3
 platform/om/skills/om-handover/SKILL.md#19c64b10
 platform/om/skills/om-handover/SKILL.md#75824fd1
-platform/om/skills/om-handover/SKILL.md#ab0622d3
 platform/om/skills/om-handover/SKILL.md#e4b0243c
 platform/om/skills/om-readiness/SKILL.md#75824fd1
-platform/om/skills/om-readiness/SKILL.md#ab0622d3
 platform/om/skills/om-staff-answer/SKILL.md#75824fd1
-platform/om/skills/om-staff-answer/SKILL.md#ab0622d3
