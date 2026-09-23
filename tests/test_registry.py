@@ -1849,6 +1849,68 @@ def test_secrets_stale_allowlist_entry_fails(tmp_path):
                for f in fails), "stale secrets allowlist entry did not FAIL"
 
 
+def test_pack_surface_mirror_mode_exempts_own_org_only(tmp_path):
+    """In a verified private mirror the OWNING org's slug is legitimate
+    (a buro mirror names Buro-Built/* on purpose), while other orgs'
+    slugs and infra ids still FAIL — the cross-org boundary holds."""
+    import subprocess as sp
+    repo = tmp_path / "mirror"
+    (repo / "registry").mkdir(parents=True)
+    (repo / "x.md").write_text(
+        "see Buro-Built/buro-core\n"
+        "and Impaktful-Platform/impaktful_3.0\n"
+        "and db.abc123.supabase.co\n")
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    sp.run(["git", "init", "-q"], cwd=repo, env=env, check=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=repo, env=env, check=True)
+    # ls-files enumerates the INDEX — stage the file so the tracked-file
+    # scan sees it (no commit needed).
+    sp.run(["git", "add", "x.md"], cwd=repo, env=env, check=True)
+    (repo / "registry/.private-mirror").write_text("")
+    (repo / "registry/private-mirrors.txt").write_text(
+        hashlib.sha256(b"buro-built/buro-registry").hexdigest() + "\n")
+    mod = load_lint_module()
+    mod.REPO = repo
+    mod.REGISTRY = repo / "registry"
+    mod.PRIVATE_MIRRORS_PATH = repo / "registry/private-mirrors.txt"
+    mod.PACK_SURFACE_ALLOWLIST = repo / "registry" / "pack-surface-allowlist.txt"
+    mod.results = []
+    mod.check_pack_surface()
+    flagged = {f.detail.split(" — ", 1)[0]
+               for f in mod.results
+               if f.check == "PACK-SURFACE" and f.status == "FAIL"}
+    assert "x.md:2" in flagged, "cross-org slug not flagged"
+    assert "x.md:3" in flagged, "infra id not flagged"
+    assert "x.md:1" not in flagged, "own-org slug wrongly flagged"
+
+
+def test_bootstrap_mirror_seed(tmp_path):
+    """bootstrap-mirror.py seeds a complete lint-clean mirror scaffold."""
+    import subprocess as sp
+    import yaml
+    pack = Path(__file__).resolve().parent.parent
+    root = tmp_path / "buro-registry"
+    root.mkdir()
+    r = sp.run(
+        [sys.executable, "scripts/bootstrap-mirror.py", "--root", str(root),
+         "--universe", "buro", "--slug", "buro-built/buro-registry"],
+        cwd=pack, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert (root / "registry/.private-mirror").is_file()
+    assert (root / "registry/buro/scope.yaml").is_file()
+    assert (root / "registry/platform").is_dir()
+    assert (root / "registry/plugins.json").is_file()
+    assert (root / "scripts/registry-lint.py").is_file()
+    assert hashlib.sha256(b"buro-built/buro-registry").hexdigest() \
+        in (root / "registry/private-mirrors.txt").read_text()
+    doc = yaml.safe_load((root / "registry/buro/scope.yaml").read_text())
+    assert doc["scope"] == "buro" and doc["visibility"] == "buro"
+    assert doc["parent_scope"] == "platform"
+
+
 def test_pack_surface_scans_tracked_skip_dir(tmp_path):
     """A slug committed under a skip-listed dir is still published —
     the scan enumerates tracked files, not directory names."""

@@ -133,6 +133,16 @@ PACK_SURFACE_PATTERNS = [
 PACK_SURFACE_RES = [re.compile(p, re.IGNORECASE)
                     for p in PACK_SURFACE_PATTERNS]
 
+# The first four patterns are private-repo slugs keyed by org OWNER
+# (the slug prefix before '/'; CPDcheck uses its repo-name prefix).
+# In a verified private mirror the OWNING org's slug is legitimate — a
+# buro mirror names its sibling buro repos on purpose — while every
+# OTHER org's slugs stay violations (that is the cross-org privacy
+# boundary). Infra patterns (index 4+) are sensitive anywhere and never
+# relax.
+PACK_SURFACE_ORG_OWNERS = ("manolii-org", "buro-built",
+                           "impaktful-platform", "cpdcheck")
+
 CANONICAL_PACK_SLUG = "manolii-org/ai-starter-pack"
 
 # Trusted private mirrors — registry/private-mirrors.txt holds the
@@ -768,8 +778,11 @@ def pack_surface_files() -> list[Path]:
 
 
 def pack_surface_hits() -> list[str]:
-    """Every current PACK-SURFACE line-key (for --write-pack-allowlist)."""
+    """Every current PACK-SURFACE line-key (for --write-pack-allowlist).
+    Uses the active pattern set — in a verified mirror, own-org hits are
+    legitimate and never enter the ratchet."""
     out = []
+    res = _pack_surface_res()
     for path in pack_surface_files():
         rel_s = path.relative_to(REPO).as_posix()
         if rel_s in PACK_SURFACE_EXEMPT:
@@ -779,9 +792,26 @@ def pack_surface_hits() -> list[str]:
         except OSError:
             continue
         for i, line in enumerate(lines, 1):
-            if any(p.search(line) for p in PACK_SURFACE_RES):
+            if any(p.search(line) for p in res):
                 out.append(line_key(rel_s, line))
     return sorted(set(out))
+
+
+def _pack_surface_res() -> list[re.Pattern]:
+    """Active PACK-SURFACE patterns for this checkout.
+
+    In a VERIFIED private mirror the origin owner's slug pattern is
+    removed: a buro mirror names Buro-Built/* repos legitimately — the
+    check's job there is the cross-org boundary (other orgs' slugs) plus
+    infra ids, which stay active. In the canonical public repo (or an
+    unverified checkout) every pattern applies."""
+    slug = _verified_mirror_slug()
+    if slug is None:
+        return PACK_SURFACE_RES
+    owner = slug.split("/", 1)[0]
+    return [p for i, p in enumerate(PACK_SURFACE_RES)
+            if i >= len(PACK_SURFACE_ORG_OWNERS)
+            or PACK_SURFACE_ORG_OWNERS[i] != owner]
 
 
 def check_pack_surface() -> None:
@@ -790,6 +820,7 @@ def check_pack_surface() -> None:
     not the infra-id shapes (project refs, endpoints, .internal) this
     check owns; credentials stay with SECRETS + Detect Secrets."""
     fails = 0
+    res = _pack_surface_res()
     allow = load_line_allowlist(PACK_SURFACE_ALLOWLIST)
     for path in pack_surface_files():
         rel_s = path.relative_to(REPO).as_posix()
@@ -800,7 +831,7 @@ def check_pack_surface() -> None:
         except OSError:
             continue
         for i, line in enumerate(lines, 1):
-            if (any(p.search(line) for p in PACK_SURFACE_RES)
+            if (any(p.search(line) for p in res)
                     and line_key(rel_s, line) not in allow):
                 report("FAIL", "PACK-SURFACE",
                        f"{rel_s}:{i} — private slug/infra id in public repo")
@@ -832,6 +863,21 @@ def _origin_slug() -> str | None:
     m = re.search(r"[:/]([^/\s]+/[^/\s]+?)\.git$", r.stdout.strip()) \
         or re.search(r"[:/]([^/\s]+/[^/\s]+?)/?$", r.stdout.strip())
     return m.group(1).lower() if m else None
+
+
+def _verified_mirror_slug() -> str | None:
+    """The origin slug when this checkout is a VERIFIED private mirror
+    (marker present, origin resolvable, slug not canonical, slug digest
+    in registry/private-mirrors.txt) — else None. Shared by the PUBLIC
+    boundary check and the mirror-mode PACK-SURFACE pattern selection."""
+    if not (REGISTRY / ".private-mirror").is_file():
+        return None
+    slug = _origin_slug()
+    if slug is None or slug == CANONICAL_PACK_SLUG:
+        return None
+    if hashlib.sha256(slug.encode()).hexdigest() not in _trusted_mirrors():
+        return None
+    return slug
 
 
 def _trusted_mirrors() -> set[str]:
