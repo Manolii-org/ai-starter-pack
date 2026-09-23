@@ -2,6 +2,7 @@
 from rendered consumers (resolver/lint semantics, scope fail-closed rule)."""
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -316,21 +317,29 @@ def test_lockfile_path_escape_conflicts(tmp_path):
     consumer.mkdir()
     victim = tmp_path / "victim.txt"
     victim.write_text("do not delete")
+    settings = consumer / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text('{"keep": "me"}')
     m = write_manifest(consumer, "manolii",
                        [{"plugin": "platform/framework", "ref": "1.0.0"}])
     assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
-    # poison the lockfile: entries escaping repo_root and .claude/
+    # poison the lockfile: entries escaping repo_root and resolver-owned roots
     lock_file = consumer / ".ai" / "capability-lock.json"
     lock = json.loads(lock_file.read_text())
     lock["files"]["../victim.txt"] = "0" * 64
     lock["files"][str(victim)] = "0" * 64
     lock["files"]["etc/passwd"] = "0" * 64
+    lock["files"][".claude/settings.json"] = hashlib.sha256(
+        settings.read_bytes()).hexdigest()
     lock_file.write_text(json.dumps(lock))
     write_manifest(consumer, "manolii", [])
     r = run_resolver(m, reg_root, consumer, "--apply", "--prune")
     assert r.returncode == 1
-    assert "materialisation roots" in r.stdout
+    assert "resolver-owned" in r.stdout
     assert victim.read_text() == "do not delete"
+    # .claude/settings.json is not resolver-owned — matching digest or not,
+    # prune must never unlink it
+    assert settings.read_text() == '{"keep": "me"}'
 
 
 def test_secrets_scans_binary_like_files(tmp_path):
@@ -367,6 +376,23 @@ def test_org_leak_scans_nested_readme(tmp_path):
                 if f.check == "ORG-LEAK" and f.status == "FAIL"
                 and "README.md" in f.detail]
     assert per_line, [f.detail for f in mod.results]
+
+
+def test_unindexed_dir_fails_index(tmp_path):
+    """A scope child dir that is neither indexed nor carries a manifest must
+    still fail INDEX — treating it as a non-plugin left a hole where INDEX
+    and MANIFEST both passed for an unresolvable plugin."""
+    mod = load_lint_module()
+    reg = tmp_path / "registry"
+    (reg / "platform" / "ghost").mkdir(parents=True)  # no manifest, not indexed
+    (reg / "plugins.json").write_text(json.dumps({"plugins": []}))
+    mod.REGISTRY = reg
+    mod.ALLOWLIST_PATH = reg / "leak-allowlist.txt"
+    mod.results = []
+    mod.check_index()
+    fails = [f for f in mod.results
+             if f.check == "INDEX" and f.status == "FAIL"]
+    assert fails and "ghost" in fails[0].detail
 
 
 def test_indexed_plugin_missing_manifest_fails(tmp_path):

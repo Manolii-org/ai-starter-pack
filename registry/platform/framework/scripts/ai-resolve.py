@@ -51,6 +51,10 @@ COMPONENT_TARGETS = {
     "agents": ".claude/agents",
     "commands": ".claude/commands",
 }
+# Resolver-owned subtrees — prune/removal may only ever touch paths rooted at
+# one of these (e.g. .claude/settings.json is NOT resolver-owned and must
+# never be unlinked by a lockfile entry).
+OWNED_ROOTS = frozenset(COMPONENT_TARGETS.values())
 LOCK_PATH = ".ai/capability-lock.json"
 REQUIRES_RE = re.compile(
     r"^(platform|manolii|buro|impaktful|cpdcheck|repo|personal)/([a-z0-9][a-z0-9-]*)$"
@@ -297,18 +301,21 @@ def main() -> int:
             continue
         # Containment: the lockfile is data, not authority — a poisoned or
         # legacy-v1 entry (absolute path, .. escape, or anything outside the
-        # .claude/ materialisation roots) must never steer an unlink outside
-        # the repo. Resolve it and fail closed rather than trusting it.
+        # resolver-owned subtrees — .claude/{skills,agents,commands}) must
+        # never steer an unlink outside them. .claude/settings.json and
+        # friends are not resolver-owned. Resolve it and fail closed.
         candidate = (repo_root / f).resolve()
         try:
             rel_c = candidate.relative_to(repo_root)
         except ValueError:
             rel_c = None
-        if Path(f).is_absolute() or rel_c is None or rel_c.parts[0] != ".claude":
+        if (Path(f).is_absolute() or rel_c is None
+                or "/".join(rel_c.parts[:2]) not in OWNED_ROOTS):
             plan.conflicts.append((
                 repo_root / f,
-                "lockfile path outside .claude/ materialisation roots — refusing to "
-                "act on it (repair .ai/capability-lock.json manually)",
+                "lockfile path outside resolver-owned roots "
+                "(.claude/{skills,agents,commands}) — refusing to act on it "
+                "(repair .ai/capability-lock.json manually)",
             ))
             continue
         digest = locked_dig[f]

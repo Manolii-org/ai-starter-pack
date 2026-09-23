@@ -140,9 +140,11 @@ def check_index() -> None:
         if not sdir.is_dir():
             continue
         for child in sdir.iterdir():
-            if child.is_dir() and (child / ".claude-plugin" / "plugin.json").exists():
-                if (scope, child.name) not in seen:
-                    report("FAIL", "INDEX", f"plugin dir not indexed: {scope}/{child.name}")
+            # Every dir under a scope is a plugin candidate — requiring
+            # .claude-plugin/plugin.json here would let an unindexed dir that
+            # also lacks its manifest pass INDEX and escape MANIFEST too.
+            if child.is_dir() and (scope, child.name) not in seen:
+                report("FAIL", "INDEX", f"plugin dir not indexed: {scope}/{child.name}")
     if not any(f.status == "FAIL" and f.check == "INDEX" for f in results):
         report("PASS", "INDEX", f"{len(seen)} plugins indexed, filesystem consistent")
 
