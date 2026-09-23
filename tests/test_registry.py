@@ -2958,6 +2958,17 @@ def test_bootstrap_ssh_effective_config(monkeypatch, tmp_path):
            if k == "userknownhostsfile" else v) for k, v in CLEAN])
     assert "ambiguous" in mod._ssh_host_unchanged(URL)
 
+    # Windows: the trust root is OS-derived (_windows_dir → kernel32),
+    # never the caller-controlled SystemRoot env. When the OS cannot
+    # answer there is NO trusted directory — a system-looking ssh
+    # still refuses, and on POSIX _windows_dir reports nothing.
+    assert mod._windows_dir() == ""
+    monkeypatch.setattr(mod, "_windows_dir", lambda: "")
+    monkeypatch.setattr(mod.os, "name", "nt")
+    patch(CLEAN)
+    assert "cannot be verified" in mod._ssh_host_unchanged(URL)
+    monkeypatch.setattr(mod.os, "name", "posix")
+
     # A PATH-resolved ssh outside the system dirs is never even asked.
     patch(CLEAN, which="/tmp/evil/ssh")
     assert "cannot be verified" in mod._ssh_host_unchanged(URL)

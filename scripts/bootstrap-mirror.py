@@ -287,7 +287,9 @@ def _redact(url: str) -> str:
     # without space-separated arguments, so never echo the address.
     m = re.match(r"^([a-zA-Z][a-zA-Z0-9+.-]*)::(?!/)", url)
     if m:
-        return f"{m.group(1)}::***"
+        # The transport NAME is also arbitrary — 'SUPERSECRETTOKEN::x'
+        # puts a credential there, so withhold it too.
+        return "<transport>::***"
     # The path can carry a credential ('https://h/d/SECRET/x.git',
     # 'user@h:SECRET/x.git') — withhold it for non-github hosts. A
     # github.com path is just owner/repo and identifying the
@@ -319,13 +321,28 @@ def _redact(url: str) -> str:
 # Directories a trusted system ssh lives under (resolved with realpath
 # so /bin -> /usr/bin merges still count). /usr/local and Homebrew
 # prefixes are user-writable — a wrapper placed there would attest to
-# its own config, so only the root-owned system dirs qualify, and the
-# resolved file itself must be root-owned.
-_SSH_TRUST_DIRS = (
-    (os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
-                  "System32", "OpenSSH"),)
-    if os.name == "nt" else
-    ("/usr/bin", "/bin", "/usr/sbin", "/sbin"))
+# its own config, so only the system dirs qualify, and the resolved
+# file itself must be root-owned (POSIX) or signed (Windows, checked
+# at call time — POSIX st_uid is meaningless there).
+_SSH_TRUST_DIRS = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
+
+
+def _windows_dir() -> str:
+    """The real Windows directory reported by the OS — kernel32
+    GetWindowsDirectoryW, never the SystemRoot environment variable
+    (a caller can point that at a user-writable tree holding a wrapper
+    ssh and still pass an env-derived allowlist). Empty string when
+    the OS cannot answer or the platform is not Windows."""
+    if os.name != "nt":
+        return ""
+    try:
+        import ctypes
+        buf = ctypes.create_unicode_buffer(260)  # MAX_PATH
+        if ctypes.windll.kernel32.GetWindowsDirectoryW(buf, 260):
+            return buf.value
+    except (AttributeError, ImportError, OSError, ValueError):
+        pass
+    return ""
 
 
 # GitHub's published SSH host-key fingerprints — public values GitHub
@@ -442,18 +459,53 @@ def _ssh_host_unchanged(url: str) -> str | None:
         args = [f"{user}@github.com" if user else "github.com"]
     ssh = shutil.which("ssh")
     ssh_rp = os.path.normcase(os.path.realpath(ssh)) if ssh else ""
-    if not ssh or not any(ssh_rp.startswith(
-            os.path.normcase(d) + os.sep) for d in _SSH_TRUST_DIRS):
+    # The trust root is OS-derived, never env-derived: on Windows it
+    # is %WINDIR%\System32\OpenSSH via kernel32 — a SystemRoot env var
+    # pointing at a user-writable tree earns no trust.
+    if os.name == "nt":
+        windir = _windows_dir()
+        trust_dirs = (os.path.normcase(
+            os.path.join(windir, "System32", "OpenSSH")) + os.sep,) \
+            if windir else ()
+    else:
+        windir = ""
+        trust_dirs = tuple(os.path.normcase(d) + os.sep
+                           for d in _SSH_TRUST_DIRS)
+    if not ssh or not any(ssh_rp.startswith(d) for d in trust_dirs):
         return ("ssh transport cannot be verified: 'ssh' resolves to "
                 f"{_redact(ssh or '<missing>')} outside the system "
                 "directories")
-    try:
-        root_owned = os.stat(ssh).st_uid == 0
-    except OSError:
-        root_owned = False
-    if not root_owned:
-        return ("ssh transport cannot be verified: 'ssh' resolves to "
-                f"{_redact(ssh)} which is not owned by the superuser")
+    if os.name == "nt":
+        # st_uid is meaningless on Windows — the executable must carry
+        # a Valid Authenticode signature instead (Microsoft signs its
+        # OpenSSH port). PowerShell comes from the same OS-derived
+        # directory, never PATH — the wrapper would shadow it too.
+        ps = os.path.join(windir, "System32", "WindowsPowerShell",
+                          "v1.0", "powershell.exe")
+        if not os.path.isfile(ps):
+            return ("ssh transport cannot be verified: system "
+                    "PowerShell is unavailable for the signature "
+                    "check")
+        try:
+            s = subprocess.run(
+                [ps, "-NoProfile", "-Command",
+                 "(Get-AuthenticodeSignature -LiteralPath '"
+                 + ssh_rp.replace("'", "''") + "').Status"],
+                capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            return "'ssh' signature could not be verified"
+        if s.returncode != 0 or s.stdout.strip() != "Valid":
+            return ("ssh transport cannot be verified: 'ssh' lacks "
+                    "a valid signature")
+    else:
+        try:
+            root_owned = os.stat(ssh).st_uid == 0
+        except OSError:
+            root_owned = False
+        if not root_owned:
+            return ("ssh transport cannot be verified: 'ssh' resolves "
+                    f"to {_redact(ssh)} which is not owned by the "
+                    "superuser")
     try:
         r = subprocess.run([ssh, "-G", *args],
                            capture_output=True, text=True, timeout=10)
