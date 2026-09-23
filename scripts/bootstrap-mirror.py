@@ -281,25 +281,34 @@ def _redact(url: str) -> str:
     # The path can carry a credential ('https://h/d/SECRET/x.git',
     # 'user@h:SECRET/x.git') — withhold it for non-github hosts. A
     # github.com path is just owner/repo and identifying the
-    # misdirected destination aids the fix.
+    # misdirected destination aids the fix. A local 'file://' or
+    # bare-filesystem destination is opaque entirely — git accepts it
+    # as a push URL and any component may be sensitive.
+    if url.startswith("file:"):
+        return "file:***"
     if "://" in url:
         url = re.sub(
             r"(://(?!(?:[^@/\s]+@)?github\.com(?::\d+)?/)[^/\s]+)/\S*$",
             r"\1/***", url)
-    else:
+    elif re.match(r"^(?:[^@\s]+@)?[^:\s@/]+:", url):
         url = re.sub(
             r"^((?:[^@\s]+@)?(?!github\.com(?::|$))[^:\s@]+):\S*$",
             r"\1:***", url)
+    else:
+        # Not a recognised URL form — '/tmp/SECRET/repo.git', '~/x',
+        # './x' are all valid push destinations whose components may
+        # be sensitive; never echo them.
+        return "<opaque destination>"
     # A space-bearing non-URL string is opaque too — drop its arguments.
     return url.split(" ", 1)[0]
 
 
 # Directories a trusted system ssh lives under (resolved with realpath
-# so /bin -> /usr/bin merges and Homebrew Cellar links still count). A
-# 'ssh' resolving anywhere else is a PATH shadow — refuse to ask it to
-# attest to its own config.
-_SSH_TRUST_DIRS = ("/usr/bin", "/bin", "/usr/sbin", "/sbin",
-                   "/usr/local", "/opt/homebrew")
+# so /bin -> /usr/bin merges still count). /usr/local and Homebrew
+# prefixes are user-writable — a wrapper placed there would attest to
+# its own config, so only the root-owned system dirs qualify, and the
+# resolved file itself must be root-owned.
+_SSH_TRUST_DIRS = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
 
 
 def _ssh_host_unchanged(url: str) -> str | None:
@@ -334,6 +343,13 @@ def _ssh_host_unchanged(url: str) -> str | None:
                 f"{_redact(ssh or '<missing>')} outside the system "
                 "directories")
     try:
+        root_owned = os.stat(ssh).st_uid == 0
+    except OSError:
+        root_owned = False
+    if not root_owned:
+        return ("ssh transport cannot be verified: 'ssh' resolves to "
+                f"{_redact(ssh)} which is not owned by the superuser")
+    try:
         r = subprocess.run([ssh, "-G", *args],
                            capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.TimeoutExpired):
@@ -352,7 +368,10 @@ def _ssh_host_unchanged(url: str) -> str | None:
             or eff.get("proxyjump", "none").lower() != "none"):
         return ("ssh client config tunnels github.com through "
                 "ProxyCommand/ProxyJump")
-    if eff.get("stricthostkeychecking", "").lower() in ("no", "off"):
+    # OpenSSH 9.6+ canonicalises 'no'/'off' to 'false' in -G output —
+    # check every spelling of disabled server authentication.
+    if eff.get("stricthostkeychecking", "").lower() in (
+            "no", "off", "false", "0"):
         return ("ssh host key verification is disabled "
                 "(StrictHostKeyChecking no/off)")
     if not [p for p in (eff.get("userknownhostsfile", "").split()

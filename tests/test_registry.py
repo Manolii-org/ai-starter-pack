@@ -2366,6 +2366,39 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     assert "SECRETPATH" not in r.stderr
     assert not (cp / "registry").exists()
 
+    # A local filesystem path is a valid git push destination — any of
+    # its components may be sensitive, so none reach stderr.
+    lp = tmp_path / "localpath"
+    lp.mkdir()
+    sp.run(["git", "init", "-q"], cwd=lp, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=lp, capture_output=True)
+    sp.run(["git", "config", "remote.pushDefault",
+            "/tmp/SECRETDIR/repo.git"], cwd=lp,
+           capture_output=True)
+    r = run(lp, _bootstrap_env(tmp_path))
+    assert r.returncode == 2, r.stderr
+    assert "SECRETDIR" not in r.stderr
+    assert "<opaque destination>" in r.stderr
+    assert not (lp / "registry").exists()
+
+    # 'file://' is the URL form of a local path — opaque too.
+    lf = tmp_path / "localfile"
+    lf.mkdir()
+    sp.run(["git", "init", "-q"], cwd=lf, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=lf, capture_output=True)
+    sp.run(["git", "config", "remote.pushDefault",
+            "file:///tmp/SECRETFILE/repo.git"], cwd=lf,
+           capture_output=True)
+    r = run(lf, _bootstrap_env(tmp_path))
+    assert r.returncode == 2, r.stderr
+    assert "SECRETFILE" not in r.stderr
+    assert "file:***" in r.stderr
+    assert not (lf / "registry").exists()
+
     # Plain-HTTP is refused outright — it is plaintext transport and
     # its effective proxy chain cannot be trusted for a private push.
     ht = tmp_path / "httppush"
@@ -2714,8 +2747,9 @@ def test_bootstrap_ssh_effective_config(monkeypatch):
     patch(CLEAN + [("proxyjump", "bastion")])
     assert "ProxyCommand" in mod._ssh_host_unchanged(URL)
 
-    patch(CLEAN + [("stricthostkeychecking", "no")])
-    assert "host key" in mod._ssh_host_unchanged(URL)
+    for shkc in ("no", "off", "false", "0"):
+        patch(CLEAN + [("stricthostkeychecking", shkc)])
+        assert "host key" in mod._ssh_host_unchanged(URL), shkc
 
     patch(CLEAN + [("userknownhostsfile", "/dev/null"),
                    ("globalknownhostsfile", "/dev/null")])
