@@ -1580,6 +1580,42 @@ def test_secrets_python_octal_escape_fails(tmp_path):
         "octal-escaped credential not flagged"
 
 
+def test_secrets_python_named_escape_fails(tmp_path):
+    """"ghp_\\N{LATIN CAPITAL LETTER A}..." in a Python file decodes to a
+    credential at runtime — named Unicode escapes must trip SECRETS."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [(
+            "scripts/helper.py",
+            'token = "ghp_\\N{LATIN CAPITAL LETTER A}AAAAAAAAAAAAAAAAAAA"')],
+    })
+    mod = load_lint_module()
+    mod.REGISTRY = reg_root / "registry"
+    mod.results = []
+    mod.check_secrets()
+    fails = [f for f in mod.results
+             if f.check == "SECRETS" and f.status == "FAIL"]
+    assert any("helper.py" in f.detail for f in fails), \
+        "named-escaped credential not flagged"
+
+
+def test_xscope_dot_segment_path_fails(tmp_path):
+    """.././manolii/ and registry/x/../buro/ resolve into another scope —
+    XSCOPE must match normalized paths, not only literal spellings."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [(
+            "skills/demo/x.md",
+            "load .././manolii/private.md\n"
+            "also registry/x/../buro/secret.md\n")],
+    })
+    mod = load_lint_module()
+    mod.REGISTRY = reg_root / "registry"
+    mod.results = []
+    mod.check_xscope()
+    fails = [f for f in mod.results
+             if f.check == "XSCOPE" and f.status == "FAIL"]
+    assert len(fails) >= 2
+
+
 def test_missing_plugin_manifest_conflicts(tmp_path):
     """A plugin dir without .claude-plugin/plugin.json must conflict — a
     silent 0.0.0 default would let `ref: "0"` satisfy it."""

@@ -27,6 +27,7 @@ import hashlib
 import json
 import re
 import sys
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -349,13 +350,14 @@ def _decoded_json_strings(doc) -> list[str]:
 
 _SOURCE_ESC = re.compile(
     r"\\(?:x([0-9a-fA-F]{2})|u\{([0-9a-fA-F]{1,6})\}|u([0-9a-fA-F]{4})"
-    r"|U([0-9a-fA-F]{8})|([0-7]{1,3}))")
+    r"|U([0-9a-fA-F]{8})|([0-7]{1,3})|N\{([A-Za-z0-9 \-]+)\})")
 
 
 def _decode_source_escapes(line: str) -> str:
-    """Decode \\xNN / \\uXXXX / \\UXXXXXXXX / \\u{X..XXXXXX} / \\ooo escapes
-    as a Python/JS/TS consumer would — source files can embed a credential
-    behind runtime-decoded escapes ("ghp_\\x41", "ghp_\\101") that raw text
+    """Decode \\xNN / \\uXXXX / \\UXXXXXXXX / \\u{X..XXXXXX} / \\ooo /
+    \\N{name} escapes as a Python/JS/TS consumer would — source files can
+    embed a credential behind runtime-decoded escapes ("ghp_\\x41",
+    "ghp_\\101", "ghp_\\N{LATIN CAPITAL LETTER A}...") that raw text
     cannot match. `\\\\` is protected first so a literal backslash doesn't
     double-decode."""
     if "\\" not in line:
@@ -364,6 +366,11 @@ def _decode_source_escapes(line: str) -> str:
     def rep(m: re.Match) -> str:
         if m.group(5) is not None:
             return chr(int(m.group(5), 8))
+        if m.group(6) is not None:
+            try:
+                return unicodedata.lookup(m.group(6))
+            except KeyError:
+                return m.group(0)
         for g in m.groups()[:4]:
             if g:
                 try:
@@ -567,6 +574,20 @@ def check_skills() -> None:
         report("PASS", "SKILL", "SKILL.md frontmatter valid")
 
 
+def _norm_scope_path(line: str) -> str:
+    """Collapse JSON-slash escapes, duplicate separators and `.`/`..`
+    segments so equivalent spellings of a scope path cannot evade the
+    XSCOPE substring match. Iterated to a fixpoint — each pass can
+    expose a new collapsible pair (a/b/../c/../x -> a/../x -> x)."""
+    t = line.replace("\\/", "/")
+    prev = None
+    while prev != t:
+        prev = t
+        t = t.replace("//", "/").replace("/./", "/")
+        t = re.sub(r"/[^/\s\"']+/\.\./", "/", t)
+    return t
+
+
 def check_xscope() -> None:
     fails = 0
     for path in sorted(REGISTRY.rglob("*")):
@@ -591,7 +612,10 @@ def check_xscope() -> None:
             # JSON string values escape '/' as '\/': a manifest carrying
             # "registry\/manolii\/private" parses to the forbidden path but
             # slips the raw-text match — normalize escapes before matching.
-            norm = line.replace("\\/", "/")
+            # Dot segments get the same treatment: .././manolii/ and
+            # registry/x/../manolii/ resolve into another scope's tree
+            # without containing the literal substrings checked below.
+            norm = _norm_scope_path(line)
             for other in ALL_SCOPES:
                 if other == scope:
                     continue
