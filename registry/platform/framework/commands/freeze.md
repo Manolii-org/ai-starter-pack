@@ -4,6 +4,7 @@ version: 1.0.0
 description: Add a path-level edit guard (alias for /guard add)
 type: command
 requires_mcp: []
+requires_scripts: ['scripts/guard_check.py']
 required_entities: []
 safety_tier: green
 tags: ['safety', 'guards', 'alias']

@@ -1365,6 +1365,24 @@ def test_wrongly_typed_lock_conflicts(tmp_path):
     assert "Traceback" not in r.stderr
 
 
+def test_nested_resolved_files_null_conflicts(tmp_path):
+    """{"resolved":[{"files":null}]} — the entry is a dict but its nested
+    files value is None; locked_digests must not TypeError."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "x")],
+    })
+    consumer = tmp_path / "consumer"
+    (consumer / ".ai").mkdir(parents=True)
+    (consumer / ".ai" / "capability-lock.json").write_text(
+        '{"resolved": [{"plugin": "platform/framework", "files": null}]}')
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--check")
+    assert r.returncode == 1
+    assert "malformed" in r.stdout
+    assert "Traceback" not in r.stderr
+
+
 def test_skip_worktree_file_conflicts_under_pin(tmp_path):
     """git update-index --skip-worktree hides modified worktree bytes from
     status AND ls-files — only a comparison against the pinned git object

@@ -4,6 +4,7 @@ version: 1.0.0
 description: Temporarily permit edits to a guarded path (auto-clears at next SessionStart)
 type: command
 requires_mcp: []
+requires_scripts: ['scripts/guard_check.py']
 required_entities: []
 safety_tier: amber
 tags: ['safety', 'guards', 'session']

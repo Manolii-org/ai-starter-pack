@@ -96,8 +96,15 @@ def main() -> None:
         failed = False
         for _source, (scope, name) in PLUGIN_MAP.items():
             a, b = REGISTRY / scope / name, target_root / scope / name
-            proc = subprocess.run(["diff", "-r", "--exclude=.git", str(a), str(b)],
-                                  capture_output=True, text=True)
+            try:
+                proc = subprocess.run(
+                    ["diff", "-r", "--exclude=.git", str(a), str(b)],
+                    capture_output=True, text=True, timeout=120)
+            except subprocess.TimeoutExpired:
+                shutil.rmtree(target_root, ignore_errors=True)
+                sys.stderr.write(
+                    f"FAIL: freshness diff timed out after 120s for {scope}/{name}\n")
+                sys.exit(2)
             if proc.returncode != 0:
                 failed = True
                 sys.stderr.write(f"STALE {scope}/{name}:\n{proc.stdout[:4000]}\n")

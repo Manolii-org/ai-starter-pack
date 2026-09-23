@@ -572,6 +572,24 @@ def load_lock(repo_root: Path) -> tuple[dict, str | None]:
             not isinstance(resolved, list)
             or not all(isinstance(r, dict) for r in resolved)):
         return {}, "'resolved' must be a list of plugin objects"
+    if isinstance(resolved, list):
+        # Nested 'files' maps inside resolved entries feed locked_digests —
+        # {"resolved":[{"files":null}]} is valid JSON that TypeErrors there.
+        for r in resolved:
+            if "files" not in r:
+                continue
+            rf = r["files"]
+            if isinstance(rf, dict):
+                ok = all(isinstance(k, str)
+                         and (v is None or isinstance(v, str))
+                         for k, v in rf.items())
+            elif isinstance(rf, list):
+                ok = all(isinstance(f, str) for f in rf)
+            else:
+                ok = False
+            if not ok:
+                return {}, ("resolved entry 'files' must map paths to "
+                            "digests or list path strings")
     return doc, None
 
 
