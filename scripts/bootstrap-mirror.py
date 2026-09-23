@@ -485,19 +485,30 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
                "GIT_SSH_COMMAND" if os.environ.get("GIT_SSH_COMMAND") else
                "GIT_SSH" if os.environ.get("GIT_SSH") else "")
 
-    def _ssl_off(url: str) -> bool:
-        # An accepted https destination with TLS verification disabled
-        # can be MITM'd by any proxy on the path — refuse rather than
-        # trusting the slug. GIT_SSL_NO_VERIFY is defined by presence
-        # (git disables verification even for '=0'), and
-        # `git config --get-urlmatch` applies git's own precedence for
-        # http.<base>.sslVerify: the longest match wins and, at equal
-        # specificity, the later scope wins.
+    def _tls_problem(url: str) -> str:
+        """A refusal reason when the accepted https destination's trust
+        evaluation is unsafe; '' otherwise. Verification disabled is the
+        obvious MITM — but a custom CA bundle or CA path is just as
+        dangerous: verification stays on while trusting a trust root the
+        attacker controls, so a forged github.com certificate verifies.
+        GIT_SSL_NO_VERIFY is defined by presence (even '=0'), and
+        `git config --get-urlmatch` applies git's own precedence for
+        http.<base>.* — the longest match wins and, at equal
+        specificity, the later scope wins."""
         if "GIT_SSL_NO_VERIFY" in os.environ:
-            return True
+            return "tls verification disabled"
         vals = _cfg_lines("--get-urlmatch", "http.sslVerify", url)
         eff = vals[-1].strip().lower() if vals else ""
-        return eff in ("false", "0", "no", "off")
+        if eff in ("false", "0", "no", "off"):
+            return "tls verification disabled"
+        for var in ("GIT_SSL_CAINFO", "GIT_SSL_CAPATH"):
+            if var in os.environ:
+                return f"custom CA trust store via {var}"
+        for key in ("http.sslCAInfo", "http.sslCAPath"):
+            vals = _cfg_lines("--get-urlmatch", key, url)
+            if vals and vals[-1].strip():
+                return f"custom CA trust store via {key}"
+        return ""
 
     def _proxy_ok(url: str) -> bool:
         # Auth-proxy exception: an environment may rewrite github.com
@@ -524,9 +535,10 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
             return (f"push destination '{_redact(remote)}' resolves to "
                     f"plaintext {m.group(1)} url '{_redact(url)}'")
         if _slug_of(url) == slug or _proxy_ok(url):
-            if url.startswith("https://") and _ssl_off(url):
-                return ("tls verification disabled for push url "
-                        f"'{_redact(url)}'")
+            if url.startswith("https://"):
+                tls = _tls_problem(url)
+                if tls:
+                    return f"{tls} for push url '{_redact(url)}'"
             if url.startswith("ssh://") or _GH_SCP.match(url):
                 if ssh_src:
                     return (f"{ssh_src} overrides the ssh transport "

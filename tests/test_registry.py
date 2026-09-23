@@ -2409,6 +2409,33 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     assert "tls verification" in r.stderr
     assert not (sv / "registry").exists()
 
+    # A custom CA trust store keeps verification ON while trusting a
+    # root the attacker may control — refuse env and config forms.
+    ca = tmp_path / "sslcaenv"
+    ca.mkdir()
+    sp.run(["git", "init", "-q"], cwd=ca, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=ca, capture_output=True)
+    r = run(ca, dict(_bootstrap_env(tmp_path),
+                     GIT_SSL_CAINFO="/tmp/evil-ca.pem"))
+    assert r.returncode == 2, r.stderr
+    assert "custom CA" in r.stderr
+    assert not (ca / "registry").exists()
+
+    cb = tmp_path / "sslcacfg"
+    cb.mkdir()
+    sp.run(["git", "init", "-q"], cwd=cb, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=cb, capture_output=True)
+    sp.run(["git", "config", "http.sslCAInfo", "/tmp/evil-ca.pem"],
+           cwd=cb, capture_output=True)
+    r = run(cb, _bootstrap_env(tmp_path))
+    assert r.returncode == 2, r.stderr
+    assert "custom CA" in r.stderr
+    assert not (cb / "registry").exists()
+
     # The same URL-scoped key repeated in a later scope: git resolves
     # equal-specificity entries by order — the later value wins.
     genv = _bootstrap_env(tmp_path)
