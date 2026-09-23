@@ -488,14 +488,18 @@ def check_xscope() -> None:
         except OSError:
             continue
         for i, line in enumerate(lines, 1):
+            # JSON string values escape '/' as '\/': a manifest carrying
+            # "registry\/manolii\/private" parses to the forbidden path but
+            # slips the raw-text match — normalize escapes before matching.
+            norm = line.replace("\\/", "/")
             for other in ALL_SCOPES:
                 if other == scope:
                     continue
                 # ../<other>/ is the relative form; registry/<other>/ is the
                 # repository-root form a manifest 'path' field uses — both
                 # wire one scope's tree into another's consumers.
-                if (f"../{other}/" in line
-                        or f"registry/{other}/" in line):
+                if (f"../{other}/" in norm
+                        or f"registry/{other}/" in norm):
                     report("FAIL", "XSCOPE", f"{rel}:{i} references {other}/")
                     fails += 1
                     break

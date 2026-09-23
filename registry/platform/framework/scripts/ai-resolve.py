@@ -169,7 +169,9 @@ def version_satisfies(version: str, ref: str) -> bool:
             upper = tuple(1 if j == len(want) - 1 else 0 for j in range(3))
         have = pad(parse(version))
         return pad(want) <= have < upper
-    return parse(version) == parse(ref)
+    # Exact refs are padded like caret bounds — the grammar accepts x[.y[.z]],
+    # so '1.14' must satisfy a plugin reporting '1.14.0'.
+    return pad(parse(version)) == pad(parse(ref))
 
 
 def git_rev(repo: Path, rev: str) -> str | None:

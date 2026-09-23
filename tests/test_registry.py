@@ -1347,6 +1347,38 @@ def test_xscope_registry_root_form_fails(tmp_path):
     assert any("manolii" in f.detail for f in fails)
 
 
+def test_xscope_json_escaped_path_fails(tmp_path):
+    """{"path": "registry\\/manolii\\/private"} — JSON '/' escapes parse to the
+    forbidden cross-scope path; the raw-text match must normalize them."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [(
+            "skills/demo/x.md",
+            '{"ref": "registry\\/manolii\\/private"}')],
+    })
+    mod = load_lint_module()
+    mod.REGISTRY = reg_root / "registry"
+    mod.results = []
+    mod.check_xscope()
+    fails = [f for f in mod.results
+             if f.check == "XSCOPE" and f.status == "FAIL"]
+    assert any("manolii" in f.detail for f in fails)
+
+
+def test_exact_ref_abbreviated_matches_zero_padded_version(tmp_path):
+    """ref '1.0' must satisfy registry version '1.0.0' — the grammar accepts
+    x[.y[.z]] so exact compares normalize to three components."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "x")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 0, r.stdout
+    assert (consumer / ".claude" / "skills" / "demo" / "x.md").is_file()
+
+
 def test_wrongly_typed_lock_conflicts(tmp_path):
     """{"files": null} is valid JSON but not a lock — it must report a
     repairable conflict, not crash locked_digests with TypeError."""
