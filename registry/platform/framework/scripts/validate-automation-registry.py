@@ -204,9 +204,11 @@ def _workflow_trigger_ok(spec: dict, trigger: dict) -> str | None:
         if not isinstance(sched, list) or not sched:
             return "workflow has no on.schedule entries"
         # reject the WHOLE list on a malformed member — `[{cron: '0 2 * * *'},
-        # false]` is a schedule GitHub cannot load, not "just the cron entry"
-        if any(not isinstance(s, dict) or not isinstance(s.get("cron"), str)
-               for s in sched):
+        # false]` is a schedule GitHub cannot load, not "just the cron entry".
+        # `cron` is the only key a schedule item accepts — `{cron: x, bogus: 1}`
+        # can't load either.
+        if any(not isinstance(s, dict) or set(s) != {"cron"}
+               or not isinstance(s["cron"], str) for s in sched):
             return "on.schedule contains a malformed entry"
         crons = [s["cron"] for s in sched]
         want = str(trigger.get("cron", ""))
@@ -233,11 +235,22 @@ def _workflow_trigger_ok(spec: dict, trigger: dict) -> str | None:
                 return f"on.{ttype} uses keys GitHub doesn't support"
             for k, v in ev.items():
                 if k == "inputs":
+                    # workflow_dispatch input definitions must be a mapping
+                    # of mappings — `inputs: false` can't load
+                    if not isinstance(v, dict) or any(
+                            not isinstance(m, dict) for m in v.values()):
+                        return f"on.{ttype}.inputs must map inputs to definitions"
                     continue
                 if not (isinstance(v, str)
                         or (isinstance(v, list)
                             and all(isinstance(x, str) for x in v))):
                     return f"on.{ttype}.{k} is not a valid filter value"
+            # an empty positive filter fires nothing — `paths: []` matches no
+            # changed file, `types: []` no activity
+            if "paths" in ev and not ev["paths"]:
+                return f"on.{ttype} declares an empty paths filter"
+            if "types" in ev and not ev["types"]:
+                return f"on.{ttype} declares an empty types filter"
             if "branches" in ev and "branches-ignore" in ev:
                 return f"on.{ttype} can't combine branches and branches-ignore"
             if "tags" in ev and "tags-ignore" in ev:
@@ -263,8 +276,12 @@ def _runnable_job(job) -> bool:
     if cond is False or (isinstance(cond, str) and cond.strip().lower() == "false"):
         return False  # `if: false` — permanently skipped, satisfies nothing
     uses = job.get("uses")
-    if isinstance(uses, str):
-        return bool(uses.strip())
+    if "uses" in job:
+        # reusable-call form — GitHub rejects it when it also carries the
+        # normal job-execution fields
+        if not (isinstance(uses, str) and uses.strip()):
+            return False
+        return "runs-on" not in job and "steps" not in job
     return _runner_ok(job.get("runs-on")) and (
         isinstance(job.get("steps"), list) and job["steps"]
         and all(_step_ok(s) for s in job["steps"]))

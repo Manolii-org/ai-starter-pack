@@ -359,6 +359,11 @@ def workflow_triggers_branch(spec: dict, branch: str) -> bool:
             continue
         if "tags" in ev and "tags-ignore" in ev:
             continue
+        # an explicitly EMPTY positive filter can never fire — `paths: []`
+        # matches no changed file, `types: []` no activity
+        if ("paths" in ev and not _as_patterns(ev["paths"])
+                or "types" in ev and not _as_patterns(ev["types"])):
+            continue
         branches = _as_patterns(ev.get("branches"))
         ignore = _as_patterns(ev.get("branches-ignore"))
         # A non-string/non-list filter (`branches-ignore: true`) is an invalid
@@ -405,8 +410,12 @@ def _executable(job: dict) -> bool:
     if cond is False or (isinstance(cond, str) and cond.strip().lower() == "false"):
         return False  # `if: false` — permanently skipped, satisfies nothing
     uses = job.get("uses")
-    if isinstance(uses, str):
-        return bool(uses.strip())
+    if "uses" in job:
+        # reusable-call form — GitHub rejects it when it also carries the
+        # normal job-execution fields
+        if not (isinstance(uses, str) and uses.strip()):
+            return False
+        return "runs-on" not in job and "steps" not in job
     return _runner_ok(job.get("runs-on")) and (
         isinstance(job.get("steps"), list) and job["steps"]
         and all(_step_ok(s) for s in job["steps"]))
