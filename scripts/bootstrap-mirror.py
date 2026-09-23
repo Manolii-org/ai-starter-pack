@@ -253,10 +253,14 @@ def _origin_slug(root: Path) -> str | None:
     None when git, the remote, or a parseable GitHub slug is absent."""
     # `git config --get` returns the CONFIGURED url; `remote get-url`
     # expands url.insteadOf rewrites (e.g. auth proxies) and would hide
-    # the real host the operator bound this checkout to.
+    # the real host the operator bound this checkout to. A PATH
+    # wrapper could attest any origin — use a trusted system git.
+    git = _trusted_prog("git")
+    if not git:
+        return None
     try:
         r = subprocess.run(
-            ["git", "-C", str(root), "config", "--get",
+            [git, "-C", str(root), "config", "--get",
              "remote.origin.url"],
             capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.TimeoutExpired):
@@ -324,7 +328,7 @@ def _redact(url: str) -> str:
 # its own config, so only the system dirs qualify, and the resolved
 # file itself must be root-owned (POSIX) or signed (Windows, checked
 # at call time — POSIX st_uid is meaningless there).
-_SSH_TRUST_DIRS = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
+_SYS_BIN_DIRS = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
 
 
 def _windows_dir() -> str:
@@ -343,6 +347,142 @@ def _windows_dir() -> str:
     except (AttributeError, ImportError, OSError, ValueError):
         pass
     return ""
+
+
+_FOLDERID_PROGRAM_FILES = "{905E63B6-C1BF-494E-B29C-65B732D3D21A}"
+_FOLDERID_PROGRAM_FILES_X86 = "{7C5A40EF-A0FB-4BFC-874A-C0F2E0B9FA8E}"
+
+
+def _known_folder(guid_text: str) -> str:
+    """A Windows KnownFolder path reported by the OS (shell32
+    SHGetKnownFolderPath), never an environment variable — ProgramFiles
+    env vars are caller-controlled and cannot root a trust decision.
+    Empty string off-Windows or when the OS cannot answer."""
+    if os.name != "nt":
+        return ""
+    try:
+        import ctypes
+        import uuid
+        from ctypes import wintypes
+
+        class GUID(ctypes.Structure):
+            _fields_ = [("b", ctypes.c_byte * 16)]
+        g = GUID()
+        g.b[:] = uuid.UUID(guid_text).bytes_le
+        out = wintypes.LPWSTR()
+        if ctypes.windll.shell32.SHGetKnownFolderPath(
+                ctypes.byref(g), 0, None, ctypes.byref(out)) == 0 \
+                and out.value:
+            val = str(out.value)
+            ctypes.windll.ole32.CoTaskMemFree(
+                ctypes.cast(out, ctypes.c_void_p))
+            return val
+    except (AttributeError, ImportError, OSError, TypeError,
+            ValueError):
+        pass
+    return ""
+
+
+def _nt_prog_dirs(name: str) -> tuple[str, ...]:
+    """Windows trust roots for `name`, every component OS-derived
+    (kernel32 / shell32 — no environment variables)."""
+    if name == "ssh":
+        w = _windows_dir()
+        return (os.path.normcase(os.path.join(
+            w, "System32", "OpenSSH")) + os.sep,) if w else ()
+    pf = (_known_folder(_FOLDERID_PROGRAM_FILES),
+          _known_folder(_FOLDERID_PROGRAM_FILES_X86))
+    sub = {"git": "Git", "gh": "GitHub CLI"}.get(name, name)
+    return tuple(os.path.normcase(os.path.join(d, sub)) + os.sep
+                 for d in pf if d)
+
+
+def _exe_verified(path: str) -> bool:
+    """True when the resolved executable is system-authentic:
+    POSIX — owned by the superuser; Windows — a Valid Authenticode
+    signature reported by the system PowerShell (resolved under the
+    OS-derived Windows directory, never PATH — the wrapper would
+    shadow it too)."""
+    if os.name != "nt":
+        try:
+            return os.stat(path).st_uid == 0
+        except OSError:
+            return False
+    windir = _windows_dir()
+    if not windir:
+        return False
+    ps = os.path.join(windir, "System32", "WindowsPowerShell",
+                      "v1.0", "powershell.exe")
+    if not os.path.isfile(ps):
+        return False
+    try:
+        s = subprocess.run(
+            [ps, "-NoProfile", "-Command",
+             "(Get-AuthenticodeSignature -LiteralPath '"
+             + path.replace("'", "''") + "').Status"],
+            capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return s.returncode == 0 and s.stdout.strip() == "Valid"
+
+
+def _trusted_prog(name: str) -> str:
+    """Absolute path of a TRUSTED system executable, or '' when the
+    PATH-resolved binary cannot be authenticated. A PATH-shadowing
+    wrapper can answer every attestation below correctly and still
+    intercept the real operation, so the binary itself must be trusted:
+    POSIX — resolved under a system bin dir and root-owned; Windows —
+    resolved under an OS-derived install dir and Authenticode-signed.
+    MIRROR_TRUST_DIRS (os.pathsep-separated) may declare extra roots
+    for binaries a platform installs outside the system dirs — the
+    operator's declaration is itself the attestation (env is the
+    trust channel, like MIRROR_GITHUB_PROXY_PREFIX), so those paths
+    skip the per-file verification."""
+    p = shutil.which(name)
+    rp = os.path.normcase(os.path.realpath(p)) if p else ""
+    if not rp:
+        return ""
+    if os.name == "nt":
+        dirs = _nt_prog_dirs(name)
+    else:
+        dirs = tuple(os.path.normcase(d) + os.sep
+                     for d in _SYS_BIN_DIRS)
+    extra = tuple(os.path.normcase(os.path.realpath(d)) + os.sep
+                  for d in os.environ.get(
+                      "MIRROR_TRUST_DIRS", "").split(os.pathsep) if d)
+    if any(rp.startswith(d) for d in extra):
+        return rp
+    if any(rp.startswith(d) for d in dirs) and _exe_verified(rp):
+        return rp
+    return ""
+
+
+def _match_exec_in(paths: list[str]) -> bool:
+    """True when any ssh_config source declares a 'Match exec'
+    criterion — arbitrary, state-dependent local execution during
+    config parsing that the -G snapshot cannot attest (a condition
+    false at check time can be true at push time). 'exec' must be a
+    criterion TOKEN: 'Match host exec.example.com' is a hostname
+    pattern, not execution."""
+    seen = 0
+    for p in paths:
+        if seen >= 64:
+            break
+        seen += 1
+        try:
+            if os.path.getsize(p) > 1 << 20:
+                return True  # unverifiable → treat as presence
+            data = Path(p).read_text(errors="replace")
+        except OSError:
+            continue
+        for ln in data.splitlines():
+            ln = ln.strip()
+            if not ln or ln.startswith("#"):
+                continue
+            f = ln.lower().split()
+            if f[0] == "match" and "exec" in f[1:]:
+                return True
+    return False
 
 
 # GitHub's published SSH host-key fingerprints — public values GitHub
@@ -457,57 +597,14 @@ def _ssh_host_unchanged(url: str) -> str | None:
         user = url.split("@", 1)[0] if "@" in url else ""
         port = None
         args = [f"{user}@github.com" if user else "github.com"]
-    ssh = shutil.which("ssh")
-    ssh_rp = os.path.normcase(os.path.realpath(ssh)) if ssh else ""
-    # The trust root is OS-derived, never env-derived: on Windows it
-    # is %WINDIR%\System32\OpenSSH via kernel32 — a SystemRoot env var
-    # pointing at a user-writable tree earns no trust.
-    if os.name == "nt":
-        windir = _windows_dir()
-        trust_dirs = (os.path.normcase(
-            os.path.join(windir, "System32", "OpenSSH")) + os.sep,) \
-            if windir else ()
-    else:
-        windir = ""
-        trust_dirs = tuple(os.path.normcase(d) + os.sep
-                           for d in _SSH_TRUST_DIRS)
-    if not ssh or not any(ssh_rp.startswith(d) for d in trust_dirs):
-        return ("ssh transport cannot be verified: 'ssh' resolves to "
-                f"{_redact(ssh or '<missing>')} outside the system "
-                "directories")
-    if os.name == "nt":
-        # st_uid is meaningless on Windows — the executable must carry
-        # a Valid Authenticode signature instead (Microsoft signs its
-        # OpenSSH port). PowerShell comes from the same OS-derived
-        # directory, never PATH — the wrapper would shadow it too.
-        ps = os.path.join(windir, "System32", "WindowsPowerShell",
-                          "v1.0", "powershell.exe")
-        if not os.path.isfile(ps):
-            return ("ssh transport cannot be verified: system "
-                    "PowerShell is unavailable for the signature "
-                    "check")
-        try:
-            s = subprocess.run(
-                [ps, "-NoProfile", "-Command",
-                 "(Get-AuthenticodeSignature -LiteralPath '"
-                 + ssh_rp.replace("'", "''") + "').Status"],
-                capture_output=True, text=True, timeout=30)
-        except (OSError, subprocess.TimeoutExpired):
-            return "'ssh' signature could not be verified"
-        if s.returncode != 0 or s.stdout.strip() != "Valid":
-            return ("ssh transport cannot be verified: 'ssh' lacks "
-                    "a valid signature")
-    else:
-        try:
-            root_owned = os.stat(ssh).st_uid == 0
-        except OSError:
-            root_owned = False
-        if not root_owned:
-            return ("ssh transport cannot be verified: 'ssh' resolves "
-                    f"to {_redact(ssh)} which is not owned by the "
-                    "superuser")
+    ssh = _trusted_prog("ssh")
+    if not ssh:
+        return ("ssh transport cannot be verified: 'ssh' does not "
+                "resolve to a trusted system executable")
     try:
-        r = subprocess.run([ssh, "-G", *args],
+        # '-v' adds the debug trace naming every config source ssh
+        # actually read — needed for the Match exec scan below.
+        r = subprocess.run([ssh, "-G", "-v", *args],
                            capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.TimeoutExpired):
         return "'ssh -G' could not verify the effective host"
@@ -517,6 +614,21 @@ def _ssh_host_unchanged(url: str) -> str | None:
     for ln in r.stdout.splitlines():
         key, _, value = ln.partition(" ")
         eff[key] = value.strip()
+    # 'Match exec' runs arbitrary code while ssh PARSES the config,
+    # and its result is state-dependent — a condition testing for the
+    # file this bootstrap creates is false at check time and true at
+    # the real push, so the -G snapshot cannot attest it. Scan every
+    # source ssh actually read (the -v 'Reading configuration data'
+    # trace covers Include'd files too) for the criterion.
+    srcs = []
+    for ln in r.stderr.splitlines():
+        m = re.match(r"debug\d+:\s*Reading configuration data\s+(.+)$",
+                     ln.strip())
+        if m:
+            srcs.append(m.group(1).strip())
+    if _match_exec_in(srcs):
+        return ("ssh client config declares a 'Match exec' condition "
+                "(state-dependent local execution)")
     # hostname alone is insufficient: a ProxyCommand/ProxyJump still
     # reports the target host while connecting elsewhere.
     if eff.get("hostname", "").lower() != "github.com":
@@ -626,7 +738,16 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
     branch.<name>.remote > origin. The selected value may be a
     remote name OR a literal URL (git-push's <repository> accepts
     both) — `remote get-url` only accepts names, so a URL destination
-    gets the push rewrite chain applied directly."""
+    gets the push rewrite chain applied directly.
+    Every attestation below asks git about git — a PATH-shadowing
+    wrapper could answer all of them truthfully and still intercept
+    the real `git add`/`git push`. All calls go through one
+    authenticated system binary."""
+    git = _trusted_prog("git")
+    if not git:
+        return ("git does not resolve to a trusted system executable "
+                "— a PATH wrapper could attest to itself")
+
     def _cfg(key: str) -> str:
         lines = _cfg_lines(key)
         return lines[0] if lines else ""
@@ -634,7 +755,7 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
     def _cfg_lines(*args: str) -> list[str]:
         try:
             r = subprocess.run(
-                ["git", "-C", str(root), "config", *args],
+                [git, "-C", str(root), "config", *args],
                 capture_output=True, text=True, timeout=10)
         except (OSError, subprocess.TimeoutExpired):
             return []
@@ -653,7 +774,7 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
         out: list[tuple[str, str]] = []
         try:
             r = subprocess.run(
-                ["git", "-C", str(root), "config", "--get-regexp", "-z",
+                [git, "-C", str(root), "config", "--get-regexp", "-z",
                  rf"^url\..*\.{suffix}$"],
                 capture_output=True, text=True, timeout=10)
         except (OSError, subprocess.TimeoutExpired):
@@ -679,7 +800,7 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
     # benign role in this bootstrap.
     try:
         hp = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "--git-path",
+            [git, "-C", str(root), "rev-parse", "--git-path",
              "hooks"],
             capture_output=True, text=True, timeout=10)
         hooks_dir = Path(root) / hp.stdout.strip() \
@@ -702,7 +823,7 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
 
     try:
         b = subprocess.run(
-            ["git", "-C", str(root), "symbolic-ref", "--short", "-q",
+            [git, "-C", str(root), "symbolic-ref", "--short", "-q",
              "HEAD"],
             capture_output=True, text=True, timeout=10)
         branch = b.stdout.strip() if b.returncode == 0 else ""
@@ -715,7 +836,7 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
 
     names = set()
     try:
-        nr = subprocess.run(["git", "-C", str(root), "remote"],
+        nr = subprocess.run([git, "-C", str(root), "remote"],
                             capture_output=True, text=True, timeout=10)
         if nr.returncode == 0:
             names = set(nr.stdout.split())
@@ -732,7 +853,7 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
                     "transport to a remote helper")
         try:
             r = subprocess.run(
-                ["git", "-C", str(root), "remote", "get-url", "--push",
+                [git, "-C", str(root), "remote", "get-url", "--push",
                  "--all", remote],
                 capture_output=True, text=True, timeout=10)
         except (OSError, subprocess.TimeoutExpired):
@@ -776,7 +897,7 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
         # 'set to empty' (rc 0) from 'unset' (rc 1).
         try:
             r = subprocess.run(
-                ["git", "-C", str(root), "config", "--get-urlmatch",
+                [git, "-C", str(root), "config", "--get-urlmatch",
                  "http.sslVerify", url],
                 capture_output=True, text=True, timeout=10)
         except (OSError, subprocess.TimeoutExpired):
@@ -860,9 +981,17 @@ def check_visibility(slug: str) -> str | None:
     installed, not authed, repo unreachable) the check fails closed — a
     warn-and-continue would let an operator seed into a public
     destination without ever noticing."""
+    # A PATH-shadowing 'gh' wrapper could report any visibility —
+    # require a trusted binary before asking it.
+    gh = _trusted_prog("gh")
+    if not gh:
+        sys.stderr.write(
+            "FAIL: 'gh' does not resolve to a trusted system "
+            "executable — visibility cannot be verified.\n")
+        return None
     try:
         r = subprocess.run(
-            ["gh", "api", f"repos/{slug}", "--jq", ".visibility"],
+            [gh, "api", f"repos/{slug}", "--jq", ".visibility"],
             capture_output=True, text=True, timeout=15)
     except (OSError, subprocess.TimeoutExpired):
         r = None
@@ -976,7 +1105,13 @@ def regen_allowlists(root: Path, established: bool, vis: str) -> bool:
     Fatal: without PyYAML/jsonschema the vendored lint dies on import and
     no allowlists get written — a mirror pushed in that state flags every
     grandfathered platform hit in its first CI run."""
-    r = subprocess.run(["git", "-C", str(root), "add", "-A"],
+    git = _trusted_prog("git")
+    if not git:
+        sys.stderr.write(
+            "FAIL: 'git' does not resolve to a trusted system "
+            "executable — staging cannot be verified.\n")
+        return False
+    r = subprocess.run([git, "-C", str(root), "add", "-A"],
                        capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
         # Without staged files the vendored lint falls back to rglob —
@@ -1095,10 +1230,19 @@ def main() -> int:
     # A first seed into a NON-EMPTY clone gets the same filtering: tracked
     # files predating the scaffold are the org's own content, and their
     # hits must surface as lint FAILs, not be silently grandfathered.
-    tracked = subprocess.run(["git", "-C", str(root), "ls-files"],
-                            capture_output=True, text=True, timeout=10)
-    established = reg.is_dir() or bool(
-        tracked.returncode == 0 and tracked.stdout.strip())
+    # An untrusted git makes the tracked-file answer unverifiable —
+    # an empty read would treat pre-existing content as disposable,
+    # so fail closed to the merge (preserve) path.
+    git = _trusted_prog("git")
+    if git:
+        tracked = subprocess.run(
+            [git, "-C", str(root), "ls-files"],
+            capture_output=True, text=True, timeout=10)
+        has_tracked = bool(tracked.returncode == 0
+                           and tracked.stdout.strip())
+    else:
+        has_tracked = True
+    established = reg.is_dir() or has_tracked
     # A mirror is scoped once — a rerun naming a different universe than
     # an existing scope is a misconfiguration, not a re-seed.
     for u in UNIVERSES:

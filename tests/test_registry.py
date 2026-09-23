@@ -1931,8 +1931,10 @@ def test_pack_surface_mirror_mode_exempts_own_org_only(tmp_path,
 
 def _bootstrap_env(tmp_path):
     """env for bootstrap subprocess calls: a `gh` stub reporting 'private'
-    (the visibility check fails closed when gh can't answer), and PATH
-    including it."""
+    (the visibility check fails closed when gh can't answer), PATH
+    including it, and MIRROR_TRUST_DIRS declaring the stub — a binary
+    outside the system dirs is untrusted unless the operator declares
+    the root."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     gh = bin_dir / "gh"
@@ -1944,7 +1946,8 @@ def _bootstrap_env(tmp_path):
     empty_cfg = tmp_path / "gitconfig.empty"
     empty_cfg.write_text("")
     return dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}",
-                GIT_CONFIG_GLOBAL=str(empty_cfg))
+                GIT_CONFIG_GLOBAL=str(empty_cfg),
+                MIRROR_TRUST_DIRS=str(bin_dir))
 
 
 def test_bootstrap_mirror_seed(tmp_path):
@@ -2028,6 +2031,26 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     r = run(root, dict(os.environ, PATH=str(empty_bin)))
     assert r.returncode == 2, r.stderr
     assert not (root / "registry").exists()
+
+    # A PATH-shadowing git (a real file, not a symlink into the
+    # system dirs) cannot attest to itself — refuse before writes
+    # even though the wrapper delegates honestly.
+    eb = tmp_path / "evilbin"
+    eb.mkdir()
+    (eb / "git").write_text("#!/bin/sh\nexec /usr/bin/git \"$@\"\n")
+    os.chmod(eb / "git", 0o755)
+    ebroot = tmp_path / "ebroot"
+    ebroot.mkdir()
+    sp.run(["git", "init", "-q"], cwd=ebroot, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=ebroot, capture_output=True)
+    r = run(ebroot,
+            dict(os.environ,
+                 PATH=f"{eb}{os.pathsep}{os.environ['PATH']}"))
+    assert r.returncode == 2, r.stderr
+    assert "trusted" in r.stderr or "origin" in r.stderr
+    assert not (ebroot / "registry").exists()
 
     # --slug naming ANOTHER accessible repo → the digest would not bind
     # to this checkout's origin → refuse.
@@ -2835,8 +2858,8 @@ def test_bootstrap_ssh_effective_config(monkeypatch, tmp_path):
     calls = []
 
     class R:
-        def __init__(self, out, rc=0):
-            self.stdout, self.returncode, self.stderr = out, rc, ""
+        def __init__(self, out, rc=0, err=""):
+            self.stdout, self.returncode, self.stderr = out, rc, err
 
     def patch(lines, which="/usr/bin/ssh"):
         calls.clear()
@@ -2859,13 +2882,14 @@ def test_bootstrap_ssh_effective_config(monkeypatch, tmp_path):
 
     patch(CLEAN)
     assert mod._ssh_host_unchanged(URL) is None
-    # git invokes 'ssh -G <user>@<host>' for an scp-style URL.
-    assert calls == [["/usr/bin/ssh", "-G", "git@github.com"]]
+    # git invokes 'ssh -G <user>@<host>' for an scp-style URL; '-v'
+    # traces the config sources ssh actually read.
+    assert calls == [["/usr/bin/ssh", "-G", "-v", "git@github.com"]]
 
     patch(CLEAN)
     assert mod._ssh_host_unchanged(
         "github.com:Buro-Built/buro-registry.git") is None
-    assert calls[-1] == ["/usr/bin/ssh", "-G", "github.com"]
+    assert calls[-1] == ["/usr/bin/ssh", "-G", "-v", "github.com"]
 
     # The -G target carries the URL's port and percent-DECODED user so
     # `Match user`/`Match port` evaluate like the real push.
@@ -2873,7 +2897,7 @@ def test_bootstrap_ssh_effective_config(monkeypatch, tmp_path):
     assert mod._ssh_host_unchanged(
         "ssh://redir%65ct@github.com:2222/Buro-Built/buro-registry.git"
     ) is None
-    assert calls[-1] == ["/usr/bin/ssh", "-G", "-p", "2222",
+    assert calls[-1] == ["/usr/bin/ssh", "-G", "-v", "-p", "2222",
                          "redirect@github.com"]
 
     patch([(k, "evil.example.test" if k == "hostname" else v)
@@ -3015,6 +3039,45 @@ def test_bootstrap_ssh_effective_config(monkeypatch, tmp_path):
            for k, v in CLEAN] + [("permitlocalcommand", "yes"),
                                  ("localcommand", "/bin/evil %h")])
     assert "local command" in mod._ssh_host_unchanged(URL)
+
+    # 'Match exec' in ANY config source ssh read is state-dependent
+    # local execution — a condition false now can be true at push
+    # time, so -G's snapshot cannot attest it. The -v debug trace
+    # names the sources; 'Match host exec.example.com' is a hostname
+    # pattern and must NOT trip the scan.
+    cfg = tmp_path / "ssh_match_exec"
+    cfg.write_text('Match exec "test -f /tmp/marker"\n'
+                   '  HostName attacker.example\n'
+                   'Match host exec.example.com\n')
+
+    def run_v(argv, **_kw):
+        return R("hostname github.com\nstricthostkeychecking ask\n"
+                 "userknownhostsfile ~/.ssh/known_hosts\n",
+                 err=(f"debug1: Reading configuration data {cfg}\n"))
+    monkeypatch.setattr(
+        mod, "subprocess",
+        types.SimpleNamespace(run=run_v,
+                              TimeoutExpired=_sp.TimeoutExpired))
+    monkeypatch.setattr(
+        mod, "shutil",
+        types.SimpleNamespace(which=lambda _n: "/usr/bin/ssh"))
+    assert "Match exec" in mod._ssh_host_unchanged(URL)
+    hostpat = tmp_path / "ssh_host_pattern"
+    hostpat.write_text('Match host exec.example.com\n'
+                       '  HostName attacker.example\n')
+    assert mod._match_exec_in([str(hostpat)]) is False
+
+    # A PATH-resolved binary outside the system dirs earns no trust —
+    # a wrapper can attest to itself.
+    monkeypatch.setattr(
+        mod, "shutil",
+        types.SimpleNamespace(
+            which=lambda _n: str(tmp_path / "nogit")))
+    assert mod._trusted_prog("git") == ""
+    monkeypatch.setattr(
+        mod, "shutil",
+        types.SimpleNamespace(which=lambda _n: "/usr/bin/ssh"))
+    assert mod._trusted_prog("ssh").startswith("/usr/")
 
     # Windows: the trust root is OS-derived (_windows_dir → kernel32),
     # never the caller-controlled SystemRoot env. When the OS cannot
