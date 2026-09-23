@@ -1708,7 +1708,7 @@ def test_public_boundary_private_mirror_marker_waives(tmp_path):
             "https://github.com/Buro-Built/buro-registry.git"],
            cwd=reg_root, env=env, check=True)
     (reg_root / "registry/private-mirrors.txt").write_text(
-        "buro-built/buro-registry\n")
+        hashlib.sha256(b"buro-built/buro-registry").hexdigest() + "\n")
     mod = load_lint_module()
     mod.REGISTRY = reg_root / "registry"
     mod.REPO = reg_root

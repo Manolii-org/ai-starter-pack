@@ -87,13 +87,19 @@ DETECTOR_FILES = {
 
 # Publisher-identity files: this pack is public and carries its publisher's
 # name on purpose — its LICENSE, CODEOWNERS, starter README template and
-# telemetry schema legitimately name it. Exempt by BASENAME so the
-# generated copies under plugin/ are covered too (a new generated tree must
-# not need a new exempt entry). Org-LEAK only — secrets are never exempt.
-PUBLISHER_FILES = {
-    'CODEOWNERS', 'LICENSE', 'LICENSE.md', 'LICENSE.txt', '.gitignore',
-    'README-STARTER-PACK.md.jinja', 'heartbeat.ts', 'heartbeat.test.ts',
+# telemetry schema legitimately name it. Exemptions are EXACT paths (root
+# files) plus tight generated-copy SUFFIXES (the heartbeat telemetry module
+# only ever lives under <tree>/telemetry/, canonical or generated) — a
+# basename-wide rule would exempt a planted customer/heartbeat.ts or
+# private/LICENSE as well. Org-LEAK only — secrets are never exempt.
+PUBLISHER_PATHS = {
+    '.github/CODEOWNERS', 'LICENSE', 'LICENSE.md', 'LICENSE.txt',
+    '.gitignore', 'README-STARTER-PACK.md.jinja',
 }
+PUBLISHER_SUFFIXES = (
+    'telemetry/heartbeat.ts',
+    'telemetry/tests/heartbeat.test.ts',
+)
 
 
 def template_source_variants(pack_root: Path, path_glob: str, feature: str) -> list[Path]:
@@ -135,7 +141,8 @@ def scan_org_leak(pack_root: Path) -> list[CheckResult]:
         if not should_scan_file(path, pack_root):
             continue
         rel = path.relative_to(pack_root).as_posix()
-        if rel in DETECTOR_FILES or path.name in PUBLISHER_FILES:
+        if (rel in DETECTOR_FILES or rel in PUBLISHER_PATHS
+                or rel.endswith(PUBLISHER_SUFFIXES)):
             continue
         try:
             with open(path, 'r', encoding='utf-8', errors='ignore') as f:

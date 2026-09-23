@@ -135,12 +135,14 @@ PACK_SURFACE_RES = [re.compile(p, re.IGNORECASE)
 
 CANONICAL_PACK_SLUG = "manolii-org/ai-starter-pack"
 
-# Trusted private mirrors — committed list (registry/private-mirrors.txt)
-# of the org-owned repos that may carry universe content. The marker
-# waiver requires the origin slug to appear here: `slug != canonical`
-# alone is not proof of privacy (a public fork is also non-canonical),
-# and a committed list is auditable + CODEOWNERS-gated like every other
-# registry contract.
+# Trusted private mirrors — registry/private-mirrors.txt holds the
+# sha256(lowercase owner/repo slug) of each org-owned repo that may carry
+# universe content. Digests, not plaintext slugs: this repo is public, so
+# a committed slug list would itself disclose the private repo names the
+# PACK-SURFACE scan exists to keep out (and would fail that scan the
+# moment a real mirror was declared). The marker waiver requires the
+# origin slug's digest to appear here: `slug != canonical` alone is not
+# proof of privacy (a public fork is also non-canonical).
 PRIVATE_MIRRORS_PATH = REGISTRY / "private-mirrors.txt"
 
 SCOPE_SCHEMA_PATH = REPO / "schemas" / "registry-scope.schema.json"
@@ -833,14 +835,14 @@ def _origin_slug() -> str | None:
 
 
 def _trusted_mirrors() -> set[str]:
-    """Declared private-mirror slugs (lowercase owner/repo) from
-    registry/private-mirrors.txt — the committed, auditable allowlist
-    the marker waiver checks against."""
+    """Declared private-mirror digests (sha256 of the lowercase
+    owner/repo slug) from registry/private-mirrors.txt — the committed,
+    non-disclosing trust record the marker waiver checks against."""
     if not PRIVATE_MIRRORS_PATH.is_file():
         return set()
     return {line.strip().lower()
             for line in PRIVATE_MIRRORS_PATH.read_text().splitlines()
-            if line.strip() and not line.startswith("#")}
+            if re.fullmatch(r"[0-9a-f]{64}", line.strip())}
 
 
 def check_public_boundary() -> None:
@@ -863,11 +865,12 @@ def check_public_boundary() -> None:
                    "cannot be verified as a private mirror — refusing to "
                    "waive the public boundary on an unverifiable marker")
             return
-        if slug not in _trusted_mirrors():
+        digest = hashlib.sha256(slug.encode()).hexdigest()
+        if digest not in _trusted_mirrors():
             report("FAIL", "PUBLIC",
                    f"origin '{slug}' is not a declared private mirror — "
                    "a public fork can carry .private-mirror, so the waiver "
-                   "applies only to slugs listed in "
+                   "applies only to slug digests listed in "
                    "registry/private-mirrors.txt")
             return
         report("PASS", "PUBLIC",

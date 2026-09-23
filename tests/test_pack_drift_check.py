@@ -400,3 +400,24 @@ class TestPackDriftPublicBoundary(unittest.TestCase):
             fails = [r for r in results
                      if r.status == "FAIL" and "LICENSE" in r.detail]
             self.assertEqual(len(fails), 0)
+
+    def test_nested_publisher_basename_not_exempt(self):
+        """Exemptions are exact paths / telemetry-scoped suffixes — a
+        customer/heartbeat.ts or private/LICENSE sharing only a basename
+        must still scan."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pack_root = Path(tmpdir)
+            org_name = "man" + "olii"
+            (pack_root / "customer").mkdir()
+            (pack_root / "private").mkdir()
+            (pack_root / "customer/heartbeat.ts").write_text(org_name)
+            (pack_root / "private/LICENSE").write_text(org_name)
+            # But the canonical generated copies DO stay exempt:
+            (pack_root / "telemetry").mkdir()
+            (pack_root / "telemetry/heartbeat.ts").write_text(org_name)
+            results = pack_drift_check.scan_org_leak(pack_root)
+            fails = [r for r in results if r.status == "FAIL"]
+            flagged = " ".join(r.detail for r in fails)
+            self.assertIn("customer/heartbeat.ts", flagged)
+            self.assertIn("private/LICENSE", flagged)
+            self.assertNotIn("telemetry/heartbeat.ts", flagged)
