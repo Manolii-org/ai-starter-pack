@@ -875,7 +875,8 @@ def _origin_slug() -> str | None:
         r"^(?:https?|git|ssh)://(?:[^@/\s]+@)?github\.com(?::\d+)?/"
         r"([^/\s]+/[^/\s]+?)(?:\.git)?/?$", url) \
         or re.match(
-            r"^[^@\s]+@github\.com:([^/\s]+/[^/\s]+?)(?:\.git)?/?$", url)
+            # scp-style 'github.com:slug' — the leading user@ is optional
+            r"^(?:[^@\s]+@)?github\.com:([^/\s]+/[^/\s]+?)(?:\.git)?/?$", url)
     return m.group(1).lower() if m else None
 
 
