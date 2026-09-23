@@ -342,6 +342,88 @@ def test_lockfile_path_escape_conflicts(tmp_path):
     assert settings.read_text() == '{"keep": "me"}'
 
 
+def test_symlinked_destination_conflicts(tmp_path):
+    """A .claude/skills symlink pointing outside the repo must refuse
+    materialisation — mkdir/copy2 would otherwise write outside repo_root."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/SKILL.md",
+                                "---\nname: demo\ndescription: d\n---\nv1")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (consumer / ".claude").mkdir()
+    (consumer / ".claude" / "skills").symlink_to(outside)
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 1
+    assert "resolves outside" in r.stdout
+    assert not any(outside.iterdir())
+
+
+def test_prune_removes_symlink_entry_not_target(tmp_path):
+    """An orphan lock entry that is a symlink to a required file: prune must
+    unlink the LINK, never its target."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/real.md", "required content")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    target = consumer / ".claude" / "skills" / "demo" / "real.md"
+    link = consumer / ".claude" / "skills" / "demo" / "stale-link.md"
+    link.symlink_to(target.name)  # relative link -> same dir
+    # poison the lock: orphan entry for the symlink, digest = target's bytes
+    lock_file = consumer / ".ai" / "capability-lock.json"
+    lock = json.loads(lock_file.read_text())
+    lock["files"][".claude/skills/demo/stale-link.md"] = hashlib.sha256(
+        target.read_bytes()).hexdigest()
+    lock_file.write_text(json.dumps(lock))
+    r = run_resolver(m, reg_root, consumer, "--apply", "--prune")
+    assert r.returncode == 0, r.stdout
+    assert target.read_text() == "required content"  # target survived
+    assert not link.exists() and not link.is_symlink()  # link removed
+
+
+def test_secrets_covers_catalog_patterns(tmp_path):
+    """The SECRETS scan derives patterns from the shipped token-shapes.json —
+    types absent from the hardcoded base (sk-ant-*) must still fail."""
+    mod = load_lint_module()
+    reg = tmp_path / "registry"
+    mod.REGISTRY = reg
+    mod.SECRETS_ALLOWLIST_PATH = reg / "secrets-allowlist.txt"
+    mod.results = []
+    (reg / "platform").mkdir(parents=True)
+    (reg / "platform" / "cfg").write_text(
+        "key = sk-ant-api03-" + "a" * 90 + "\n")
+    mod.check_secrets()
+    fails = [f for f in mod.results
+             if f.check == "SECRETS" and f.status == "FAIL"]
+    assert fails and "cfg" in fails[0].detail
+
+
+def test_secrets_scans_detector_corpus(tmp_path):
+    """token-shapes.json itself is scanned — a real credential planted inside
+    the detector corpus cannot hide behind the file-level exemption."""
+    mod = load_lint_module()
+    reg = tmp_path / "registry"
+    p = reg / "platform" / "framework" / "data"
+    p.mkdir(parents=True)
+    (p / "token-shapes.json").write_text(
+        '{"patterns": [], "comment": "ghp_' + "b" * 40 + '"}\n')
+    mod.REGISTRY = reg
+    mod.SECRETS_ALLOWLIST_PATH = reg / "secrets-allowlist.txt"
+    mod.results = []
+    mod.check_secrets()
+    fails = [f for f in mod.results
+             if f.check == "SECRETS" and f.status == "FAIL"]
+    assert fails and "token-shapes.json" in fails[0].detail
+
+
 def test_secrets_scans_binary_like_files(tmp_path):
     """A NUL byte must not exempt a file from the secrets scan — the gate
     scans every file under registry/ regardless of content shape."""

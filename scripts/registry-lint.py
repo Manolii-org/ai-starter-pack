@@ -66,6 +66,17 @@ SECRET_PATTERNS = [
     r"xox[bpoas]-[A-Za-z0-9-]{10,}", r"dp\.(?:st|ct|sa)\.[A-Za-z0-9_-]{20,}",
     r"vercel_[a-z]+_[A-Za-z0-9]{20,}",
 ]
+# The shipped detector corpus is the canonical credential-shape catalog —
+# derive the scanner from it so new provider patterns cover this gate
+# automatically (sk-ant-*, sk-or-*, ghr_*, ASIA*, JWT, stripe, ...).
+TOKEN_SHAPES_PATH = REGISTRY / "platform/framework/data/token-shapes.json"
+try:
+    _CATALOG = [p["regex"] for p in
+                json.loads(TOKEN_SHAPES_PATH.read_text()).get("patterns", [])
+                if p.get("regex")]
+except (OSError, json.JSONDecodeError, AttributeError):
+    _CATALOG = []
+SECRET_PATTERNS += [p for p in _CATALOG if p not in SECRET_PATTERNS]
 MANIFEST_FILES = {".claude-plugin/plugin.json", ".devin-plugin/plugin.json",
                   "scope.yaml", "plugins.json", "CODEOWNERS", "README.md"}
 
@@ -75,8 +86,12 @@ MANIFEST_FILES = {".claude-plugin/plugin.json", ".devin-plugin/plugin.json",
 # examples) — the allowlist freezes that set: new leaks FAIL, stale entries
 # FAIL, and P3 cleanup burns the list down. Regenerate with --write-allowlist.
 ALLOWLIST_PATH = REGISTRY / "leak-allowlist.txt"
-# Always-exempt detector data (the secret-shapes corpus would self-triage).
+# Detector data corpus — exempt from ORG-LEAK only (it is by-design org
+# identifier samples); NOT exempt from SECRETS — a real credential planted
+# there must still fail. Self-matching lines are ratcheted per-line via
+# secrets-allowlist.txt.
 DETECTOR_DATA = {"platform/framework/data/token-shapes.json"}
+SECRETS_ALLOWLIST_PATH = REGISTRY / "secrets-allowlist.txt"
 
 SCOPE_SCHEMA_PATH = REPO / "schemas" / "registry-scope.schema.json"
 try:
@@ -250,14 +265,14 @@ def check_scopes() -> None:
         report("PASS", "SCOPE", "scope contracts valid")
 
 
-def load_allowlist() -> set[str]:
+def load_line_allowlist(path: Path) -> set[str]:
     """Per-line ratchet entries: `registry-rel/path#sha8` where sha8 is the
     first 8 hex of sha256(stripped-lowercase line). A line grandfathered here
-    suppresses ORG-LEAK for exactly that line — new identifiers on OTHER lines
+    suppresses the scan for exactly that line — new hits on OTHER lines
     of the same file still fail."""
-    if not ALLOWLIST_PATH.is_file():
+    if not path.is_file():
         return set()
-    return {line.strip() for line in ALLOWLIST_PATH.read_text().splitlines()
+    return {line.strip() for line in path.read_text().splitlines()
             if line.strip() and not line.startswith("#")}
 
 
@@ -278,9 +293,8 @@ def content_scan_files(org_leak: bool = True) -> list[Path]:
         if not path.is_file():
             continue
         rel = path.relative_to(REGISTRY)
-        if rel.as_posix() in DETECTOR_DATA:
-            continue
-        if org_leak and (scope_of(path) is None or exempt(rel)):
+        if org_leak and (rel.as_posix() in DETECTOR_DATA
+                       or scope_of(path) is None or exempt(rel)):
             continue
         out.append(path)
     return out
@@ -288,7 +302,7 @@ def content_scan_files(org_leak: bool = True) -> list[Path]:
 
 def check_org_leak() -> None:
     fails = warns = 0
-    allow = load_allowlist()
+    allow = load_line_allowlist(ALLOWLIST_PATH)
     used: set[str] = set()
     extra_re = re.compile(EXTRA_ORG, re.IGNORECASE)
     for path in content_scan_files():
@@ -330,17 +344,24 @@ def check_org_leak() -> None:
 
 def check_secrets() -> None:
     # The ORG-LEAK ratchet allowlist does NOT apply here — an org-name
-    # grandfather must never suppress credential detection.
+    # grandfather must never suppress credential detection. The corpus file
+    # is scanned too; only lines matching a secrets-ratchet entry
+    # (secrets-allowlist.txt, same path#sha8 format) are suppressed — a real
+    # credential planted inside token-shapes.json cannot hide there.
     pats = [re.compile(p) for p in SECRET_PATTERNS]
+    allow = load_line_allowlist(SECRETS_ALLOWLIST_PATH)
     fails = 0
     for path in content_scan_files(org_leak=False):
         rel = path.relative_to(REGISTRY)
+        rel_s = rel.as_posix()
         try:
             text = path.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
         for i, line in enumerate(text.splitlines(), 1):
             if any(p.search(line) for p in pats):
+                if line_key(rel_s, line) in allow:
+                    continue
                 report("FAIL", "SECRETS", f"{rel}:{i} — credential-shaped string")
                 fails += 1
     if not fails:

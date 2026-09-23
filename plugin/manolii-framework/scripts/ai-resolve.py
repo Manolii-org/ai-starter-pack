@@ -190,6 +190,21 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
             rel = src.relative_to(plugin_dir / comp)
             dst = target_root / rel
             rel_dst = dst.relative_to(repo_root).as_posix()
+            # A symlinked .claude/{skills,agents,commands} (or descendant) would
+            # make mkdir/copy2 write OUTSIDE repo_root through the lexical dst.
+            # Resolve it and require the real location stays resolver-owned.
+            resolved_dst = dst.resolve()
+            try:
+                rel_r = resolved_dst.relative_to(repo_root)
+            except ValueError:
+                rel_r = None
+            if rel_r is None or "/".join(rel_r.parts[:2]) not in OWNED_ROOTS:
+                plan.conflicts.append((
+                    dst,
+                    "destination resolves outside resolver-owned roots "
+                    "(symlinked path) — refusing to materialise through it",
+                ))
+                continue
             src_sha = sha256(src)
             prior = plan.planned.get(rel_dst)
             if prior is not None:
@@ -304,7 +319,8 @@ def main() -> int:
         # resolver-owned subtrees — .claude/{skills,agents,commands}) must
         # never steer an unlink outside them. .claude/settings.json and
         # friends are not resolver-owned. Resolve it and fail closed.
-        candidate = (repo_root / f).resolve()
+        lexical = repo_root / f
+        candidate = lexical.resolve()
         try:
             rel_c = candidate.relative_to(repo_root)
         except ValueError:
@@ -312,22 +328,25 @@ def main() -> int:
         if (Path(f).is_absolute() or rel_c is None
                 or "/".join(rel_c.parts[:2]) not in OWNED_ROOTS):
             plan.conflicts.append((
-                repo_root / f,
+                lexical,
                 "lockfile path outside resolver-owned roots "
                 "(.claude/{skills,agents,commands}) — refusing to act on it "
                 "(repair .ai/capability-lock.json manually)",
             ))
             continue
         digest = locked_dig[f]
-        if (args.prune and candidate.is_file()
-                and (digest is None or sha256(candidate) != digest)):
+        # Digest checks read THROUGH a symlink (that's what the lock recorded),
+        # but removals act on the lexical path — unlinking a symlink entry must
+        # remove the link, never its target.
+        if (args.prune and lexical.is_file()
+                and (digest is None or sha256(lexical) != digest)):
             plan.conflicts.append((
-                candidate,
+                lexical,
                 "prune candidate modified since install — refusing to remove a "
                 "possibly hand-edited file (delete or restore it manually, then re-resolve)",
             ))
         else:
-            plan.removals.append(candidate)
+            plan.removals.append(lexical)
 
     # ---- report ----
     print(f"universe={universe}  registry={registry_root}")
@@ -364,7 +383,7 @@ def main() -> int:
             shutil.copy2(src, dst)
         if args.prune:
             for f in plan.removals:
-                if f.is_file():
+                if f.is_file() or f.is_symlink():
                     f.unlink()
             for f in plan.removals:
                 d = f.parent
