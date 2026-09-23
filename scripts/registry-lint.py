@@ -23,6 +23,7 @@ registry store.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sys
@@ -207,21 +208,37 @@ def check_scopes() -> None:
 
 
 def load_allowlist() -> set[str]:
+    """Per-line ratchet entries: `registry-rel/path#sha8` where sha8 is the
+    first 8 hex of sha256(stripped-lowercase line). A line grandfathered here
+    suppresses ORG-LEAK for exactly that line — new identifiers on OTHER lines
+    of the same file still fail."""
     if not ALLOWLIST_PATH.is_file():
         return set()
     return {line.strip() for line in ALLOWLIST_PATH.read_text().splitlines()
             if line.strip() and not line.startswith("#")}
 
 
-def content_scan_files() -> list[Path]:
+def line_key(rel_s: str, line: str) -> str:
+    h = hashlib.sha256(line.strip().lower().encode()).hexdigest()[:8]
+    return f"{rel_s}#{h}"
+
+
+SCAN_SUFFIXES = {".md", ".py", ".sh", ".json", ".yml", ".yaml", ".ts", ".txt"}
+
+
+def content_scan_files(org_leak: bool = True) -> list[Path]:
+    """Files scanned for org identifiers (org_leak=True) or secrets (False).
+    Org-leak exempts scope metadata (allowlist entries, scope.yaml, DETECTOR_DATA);
+    secrets exempts only DETECTOR_DATA — a credential committed in a manifest or
+    a scope.yaml must still fail."""
     out = []
     for path in sorted(REGISTRY.rglob("*")):
-        if not path.is_file() or path.suffix.lower() not in {".md", ".py", ".sh", ".json", ".yml", ".yaml", ".ts"}:
+        if not path.is_file() or path.suffix.lower() not in SCAN_SUFFIXES:
             continue
         rel = path.relative_to(REGISTRY)
-        if scope_of(path) is None or exempt(rel):
-            continue
         if rel.as_posix() in DETECTOR_DATA:
+            continue
+        if org_leak and (scope_of(path) is None or exempt(rel)):
             continue
         out.append(path)
     return out
@@ -236,38 +253,37 @@ def check_org_leak() -> None:
         scope = scope_of(path)
         rel = path.relative_to(REGISTRY)
         rel_s = rel.as_posix()
-        allowed = rel_s in allow
-        if allowed:
-            used.add(rel_s)
         try:
             text = path.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
         for i, line in enumerate(text.splitlines(), 1):
+            key = line_key(rel_s, line)
+            grandfathered = key in allow
+            if grandfathered:
+                used.add(key)
             for org, pat in ORG_TERMS.items():
                 if scope in UNIVERSES and org == scope:
                     continue  # a universe may name itself
-                if re.search(pat, line, re.IGNORECASE):
-                    if allowed:
-                        continue
+                if re.search(pat, line, re.IGNORECASE) and not grandfathered:
                     report("FAIL", "ORG-LEAK", f"{rel}:{i} — '{org}' in {scope} scope")
                     fails += 1
-            if not allowed and extra_re.search(line):
+            if not grandfathered and extra_re.search(line):
                 report("FAIL", "ORG-LEAK", f"{rel}:{i} — internal identifier")
                 fails += 1
             if re.search(r"\bkl_", line):
                 warns += 1
     for stale in sorted(allow - used):
-        if (REGISTRY / stale).exists():
-            report("WARN", "ORG-LEAK", f"allowlist entry clean now — remove it: {stale}")
+        if (REGISTRY / stale.rsplit("#", 1)[0]).exists():
+            report("WARN", "ORG-LEAK", f"allowlist line clean now — remove it: {stale}")
         else:
             report("WARN", "ORG-LEAK", f"stale allowlist entry — remove it: {stale}")
     if warns:
         report("WARN", "ORG-LEAK", f"kl_* (opt-in remote memory) referenced in {warns} lines — allowed when gated")
     if fails:
-        report("FAIL", "ORG-LEAK", f"{fails} new leak(s) outside the {len(allow)}-file ratchet allowlist")
+        report("FAIL", "ORG-LEAK", f"{fails} new leak(s) outside the {len(allow)}-line ratchet allowlist")
     else:
-        report("PASS", "ORG-LEAK", f"no new leaks ({len(used)} files ratchet-allowlisted)")
+        report("PASS", "ORG-LEAK", f"no new leaks ({len(used)} lines ratchet-allowlisted)")
 
 
 def check_secrets() -> None:
@@ -275,7 +291,7 @@ def check_secrets() -> None:
     # grandfather must never suppress credential detection.
     pats = [re.compile(p) for p in SECRET_PATTERNS]
     fails = 0
-    for path in content_scan_files():
+    for path in content_scan_files(org_leak=False):
         rel = path.relative_to(REGISTRY)
         try:
             text = path.read_text(encoding="utf-8", errors="ignore")
@@ -336,36 +352,42 @@ def check_xscope() -> None:
         report("PASS", "XSCOPE", "no cross-scope path references")
 
 
-def org_leak_files() -> list[str]:
-    """Files under registry/ containing org identifiers (for --write-allowlist)."""
-    out = []
+def org_leak_lines() -> list[str]:
+    """Per-line ratchet entries for every org-identifier line under registry/
+    (for --write-allowlist regeneration)."""
+    out = set()
     extra_re = re.compile(EXTRA_ORG, re.IGNORECASE)
     for path in content_scan_files():
         scope = scope_of(path)
-        rel = path.relative_to(REGISTRY).as_posix()
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        hit = extra_re.search(text) is not None
-        if not hit:
-            for org, pat in ORG_TERMS.items():
-                if scope in UNIVERSES and org == scope:
-                    continue
-                if re.search(pat, text, re.IGNORECASE):
-                    hit = True
-                    break
-        if hit:
-            out.append(rel)
-    return out
+        rel_s = path.relative_to(REGISTRY).as_posix()
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            hit = extra_re.search(line) is not None
+            if not hit:
+                for org, pat in ORG_TERMS.items():
+                    if scope in UNIVERSES and org == scope:
+                        continue
+                    if re.search(pat, line, re.IGNORECASE):
+                        hit = True
+                        break
+            if hit:
+                out.add(line_key(rel_s, line))
+    return sorted(out)
 
 
 def main() -> int:
     if "--write-allowlist" in sys.argv:
-        files = org_leak_files()
+        lines = org_leak_lines()
         ALLOWLIST_PATH.write_text(
-            "# Ratchet allowlist — registry files grandfathered for the ORG-LEAK\n"
-            "# scan only (SECRETS still scans them). New leaks FAIL; stale warn.\n"
+            "# Per-line ratchet allowlist — `path#sha8(stripped-line)` entries\n"
+            "# grandfathered for the ORG-LEAK scan only (SECRETS scans all files).\n"
+            "# New identifier lines FAIL; consumed entries that stop matching warn.\n"
             "# Regenerate: python3 scripts/registry-lint.py --write-allowlist\n"
-            + "\n".join(files) + "\n")
-        print(f"wrote {len(files)} entries -> {ALLOWLIST_PATH.relative_to(REPO)}")
+            + "\n".join(lines) + "\n")
+        print(f"wrote {len(lines)} entries -> {ALLOWLIST_PATH.relative_to(REPO)}")
         return 0
     if not REGISTRY.is_dir():
         sys.stderr.write(f"FAIL: {REGISTRY} missing\n")

@@ -196,6 +196,144 @@ def test_apply_prune_removes_orphans(tmp_path):
     assert run_resolver(m, reg_root, consumer, "--prune").returncode == 2
 
 
+def test_output_path_collision_conflicts(tmp_path):
+    """Two plugins shipping different content to the same .claude/ path must
+    fail closed — never let resolution order pick a winner."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/a": [("skills/demo/SKILL.md",
+                        "---\nname: demo\ndescription: from-a\n---\n")],
+        "platform/b": [("skills/demo/SKILL.md",
+                        "---\nname: demo\ndescription: from-b\n---\n")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii", [
+        {"plugin": "platform/a", "ref": "1.0.0"},
+        {"plugin": "platform/b", "ref": "1.0.0"},
+    ])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 1
+    assert "output-path collision" in r.stdout
+    assert not (consumer / ".claude").exists()
+
+
+def test_identical_collision_dedupes(tmp_path):
+    """Identical content from two plugins is a dedup skip, not a conflict."""
+    body = "---\nname: demo\ndescription: d\n---\nsame bytes\n"
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/a": [("skills/demo/SKILL.md", body)],
+        "platform/b": [("skills/demo/SKILL.md", body)],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii", [
+        {"plugin": "platform/a", "ref": "1.0.0"},
+        {"plugin": "platform/b", "ref": "1.0.0"},
+    ])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 0, r.stdout
+    assert "already provided by" in r.stdout
+    assert (consumer / ".claude" / "skills" / "demo" / "SKILL.md").read_text() == body
+
+
+def test_prune_refuses_hand_edited_orphan(tmp_path):
+    """--prune must not unlink a file that was hand-edited after install."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/SKILL.md",
+                                "---\nname: demo\ndescription: d\n---\nv1")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    skill = consumer / ".claude" / "skills" / "demo" / "SKILL.md"
+    skill.write_text("hand edit after install")
+    write_manifest(consumer, "manolii", [])
+    r = run_resolver(m, reg_root, consumer, "--apply", "--prune")
+    assert r.returncode == 1
+    assert "modified since install" in r.stdout
+    assert skill.read_text() == "hand edit after install"
+
+
+def test_orphan_stays_tracked_without_prune(tmp_path):
+    """--apply without --prune keeps the orphan AND its lockfile entry, so a
+    later --prune still verifies it against the install digest."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/SKILL.md",
+                                "---\nname: demo\ndescription: d\n---\nv1")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    skill = consumer / ".claude" / "skills" / "demo" / "SKILL.md"
+    write_manifest(consumer, "manolii", [])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 0
+    assert skill.is_file()
+    lock = json.loads((consumer / ".ai" / "capability-lock.json").read_text())
+    assert ".claude/skills/demo/SKILL.md" in lock["files"]
+    # a later --prune still removes it (digest verified against lock)
+    r = run_resolver(m, reg_root, consumer, "--apply", "--prune")
+    assert r.returncode == 0
+    assert not skill.exists()
+    lock = json.loads((consumer / ".ai" / "capability-lock.json").read_text())
+    assert ".claude/skills/demo/SKILL.md" not in lock["files"]
+
+
+def load_lint_module():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("registry_lint", LINT)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod  # dataclass field resolution needs the module registered
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_secrets_scans_metadata_files(tmp_path):
+    """SECRETS must cover files exempt from ORG-LEAK (scope.yaml, manifests):
+    a credential in registry metadata is still a leak."""
+    mod = load_lint_module()
+    reg = tmp_path / "registry"
+    mod.REGISTRY = reg
+    mod.ALLOWLIST_PATH = reg / "leak-allowlist.txt"
+    mod.results = []
+    (reg / "platform").mkdir(parents=True)
+    (reg / "platform" / "scope.yaml").write_text(
+        "scope: platform\napi_key: ghp_abcdefghij0123456789\n")
+    mod.check_secrets()
+    fails = [f for f in mod.results
+             if f.check == "SECRETS" and f.status == "FAIL"]
+    assert fails and "scope.yaml" in fails[0].detail
+
+
+def test_org_leak_ratchet_is_per_line(tmp_path):
+    """A grandfathered line suppresses only itself — a new identifier on
+    another line of the same file still fails."""
+    mod = load_lint_module()
+    src = tmp_path / "src"
+    reg_root = make_registry(src, {
+        "platform/framework": [("skills/demo/SKILL.md",
+                                "line one mentions manolii here\n"
+                                "line two now mentions impaktful\n")],
+    })
+    reg = reg_root / "registry"
+    mod.REGISTRY = reg
+    mod.ALLOWLIST_PATH = reg / "leak-allowlist.txt"
+    mod.results = []
+    rel = "platform/framework/skills/demo/SKILL.md"
+    mod.ALLOWLIST_PATH.write_text(
+        mod.line_key(rel, "line one mentions manolii here") + "\n")
+    mod.check_org_leak()
+    per_line = [f for f in mod.results
+                if f.check == "ORG-LEAK" and f.status == "FAIL"
+                and f"{rel}:" in f.detail]
+    assert len(per_line) == 1, [f.detail for f in mod.results]
+    assert ":2" in per_line[0].detail and "impaktful" in per_line[0].detail
+
+
 def test_repo_manifest_schema_valid():
     """The shipped ai-manifest.yaml validates against the schema."""
     import yaml

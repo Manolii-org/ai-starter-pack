@@ -65,6 +65,9 @@ class Plan:
     removals: list[Path] = field(default_factory=list)
     advisories: list[str] = field(default_factory=list)
     resolved: list[dict] = field(default_factory=list)
+    # rel_dst -> (src_sha256, plugin_req) for every planned write — cross-plugin
+    # output-path collision detection (the last writer must never win silently)
+    planned: dict[str, tuple[str, str]] = field(default_factory=dict)
 
 
 def load_manifest(path: Path) -> dict:
@@ -131,7 +134,7 @@ def sha256(path: Path) -> str:
 
 
 def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
-                     index: dict, repo_root: Path, lock: dict, plan: Plan) -> None:
+                     index: dict, repo_root: Path, locked: dict, plan: Plan) -> None:
     m = REQUIRES_RE.match(req)
     if not m:
         plan.conflicts.append((repo_root / req, "malformed plugin reference"))
@@ -176,9 +179,6 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
         ))
         return
 
-    locked = lock.get("files", {}) if lock else {}
-    if isinstance(locked, list):  # v1 lockfile: paths without digests
-        locked = {k: None for k in locked}
     materialised: dict[str, str] = {}
     for comp, files in collect_component_files(plugin_dir).items():
         target_root = repo_root / COMPONENT_TARGETS[comp]
@@ -186,9 +186,24 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
             rel = src.relative_to(plugin_dir / comp)
             dst = target_root / rel
             rel_dst = dst.relative_to(repo_root).as_posix()
+            src_sha = sha256(src)
+            prior = plan.planned.get(rel_dst)
+            if prior is not None:
+                prior_sha, prior_req = prior
+                if prior_sha != src_sha:
+                    plan.conflicts.append((
+                        dst,
+                        f"output-path collision: {req} provides different content for this "
+                        f"path than {prior_req} — refusing to pick a winner",
+                    ))
+                else:
+                    plan.skips.append((dst, f"identical — already provided by {prior_req}"))
+                    materialised[rel_dst] = src_sha
+                continue
             if dst.exists():
                 if dst.read_bytes() == src.read_bytes():
                     plan.skips.append((dst, "identical"))
+                    plan.planned[rel_dst] = (src_sha, req)
                 elif rel_dst not in locked:
                     plan.conflicts.append((
                         dst,
@@ -204,10 +219,12 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                     continue
                 else:
                     plan.writes.append((src, dst))  # registry drift — update
-                materialised[rel_dst] = sha256(src)
+                    plan.planned[rel_dst] = (src_sha, req)
+                materialised[rel_dst] = src_sha
             else:
                 plan.writes.append((src, dst))
-                materialised[rel_dst] = sha256(src)
+                plan.planned[rel_dst] = (src_sha, req)
+                materialised[rel_dst] = src_sha
 
     for comp in ("hooks", "scripts", "data", "telemetry"):
         if (plugin_dir / comp).is_dir():
@@ -261,18 +278,32 @@ def main() -> int:
     index = load_plugins_index(registry_root)
     lock = load_lock(repo_root)
 
+    locked_dig = locked_digests(lock)
     plan = Plan()
     for req in manifest["requires"]:
         plan_requirement(req["plugin"], str(req["ref"]), universe,
-                         registry_root, index, repo_root, lock, plan)
+                         registry_root, index, repo_root, locked_dig, plan)
 
-    # Orphan detection: lockfile files no longer required.
+    # Orphan detection: lockfile files no longer required. A file whose
+    # on-disk digest differs from the installed digest (or whose install
+    # digest is unknown — v1 locks) may be a hand edit: never unlink it
+    # silently, surface it as a conflict like every other clobber.
     current = set()
     for r in plan.resolved:
         current.update(r["files"])
-    for f in locked_files_all(lock):
-        if f not in current:
-            plan.removals.append(repo_root / f)
+    for f in sorted(locked_dig):
+        if f in current:
+            continue
+        candidate = repo_root / f
+        digest = locked_dig[f]
+        if candidate.is_file() and (digest is None or sha256(candidate) != digest):
+            plan.conflicts.append((
+                candidate,
+                "prune candidate modified since install — refusing to remove a "
+                "possibly hand-edited file (delete or restore it manually, then re-resolve)",
+            ))
+        else:
+            plan.removals.append(candidate)
 
     # ---- report ----
     print(f"universe={universe}  registry={registry_root}")
@@ -316,11 +347,19 @@ def main() -> int:
                 while d != repo_root and d.is_dir() and not any(d.iterdir()):
                     d.rmdir()
                     d = d.parent
+        new_files = {rel: digest for r in plan.resolved
+                     for rel, digest in r["files"].items()}
+        if not args.prune:
+            # Kept orphans stay lockfile-tracked so a later --apply --prune
+            # (or --check) still knows they were installed by the resolver.
+            for f in plan.removals:
+                rel = f.relative_to(repo_root).as_posix()
+                new_files[rel] = locked_dig[rel]
         lock_doc = {
             "version": 1,
             "universe": universe,
             "resolved": [{k: v for k, v in r.items() if k != "files"} for r in plan.resolved],
-            "files": {rel: digest for r in plan.resolved for rel, digest in r["files"].items()},
+            "files": new_files,
         }
         lock_file = repo_root / LOCK_PATH
         lock_file.parent.mkdir(parents=True, exist_ok=True)
@@ -333,15 +372,26 @@ def main() -> int:
     return 0
 
 
-def locked_files_all(lock: dict) -> list[str]:
+def locked_digests(lock: dict) -> dict[str, str | None]:
+    """All lockfile-tracked repo-relative paths -> installed sha256 (or None
+    for v1 locks that recorded paths without digests)."""
+    out: dict[str, str | None] = {}
     if not lock:
-        return []
+        return out
     files = lock.get("files", {})
-    out = set(files) if isinstance(files, dict) else set(files)
+    if isinstance(files, dict):
+        out.update(files)
+    else:
+        out.update((f, None) for f in files)
     for r in lock.get("resolved", []):
         rf = r.get("files", {})
-        out.update(rf.keys() if isinstance(rf, dict) else rf)
-    return sorted(out)
+        if isinstance(rf, dict):
+            for k in rf:
+                out.setdefault(k, rf[k])
+        else:
+            for k in rf:
+                out.setdefault(k, None)
+    return out
 
 
 if __name__ == "__main__":
