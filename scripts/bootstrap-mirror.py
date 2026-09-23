@@ -264,8 +264,10 @@ def _slug_of(url: str) -> str | None:
 
 
 def _redact(url: str) -> str:
-    """Strip URL userinfo (credentials) before it reaches a diagnostic."""
-    return re.sub(r"://[^/@\s]*@", "://***@", url, count=1)
+    """Strip credentials (userinfo, query, fragment) before a diagnostic
+    prints the URL."""
+    url = re.sub(r"://[^/@\s]*@", "://***@", url, count=1)
+    return url.split("?", 1)[0].split("#", 1)[0]
 
 
 def _ssh_host_unchanged(url: str) -> bool:
@@ -433,11 +435,46 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
     proxy_src = ("GIT_PROXY_COMMAND"
                  if os.environ.get("GIT_PROXY_COMMAND")
                  else "core.gitProxy" if _gitproxy_applies() else "")
+
+    def _ssl_off(url: str) -> bool:
+        # An accepted https destination with TLS verification disabled
+        # can be MITM'd by any proxy on the path — refuse rather than
+        # trusting the slug. GIT_SSL_NO_VERIFY and the effective
+        # http.sslVerify (the longest-matching http.<base>.sslVerify
+        # entry wins, per http-config scoping) decide together.
+        if (os.environ.get("GIT_SSL_NO_VERIFY", "").lower()
+                in ("true", "1", "yes", "on")):
+            return True
+        vals = _cfg_lines("--get-all", "http.sslVerify")
+        eff = vals[-1].strip().lower() if vals else ""
+        best = -1
+        for line in _cfg_lines("--get-regexp",
+                               r"^http\..*\.sslverify$"):
+            key, _, v = line.partition(" ")
+            base = key[len("http."):-len(".sslverify")]
+            if url.startswith(base) and len(base) > best:
+                best, eff = len(base), v.strip().lower()
+        return eff in ("false", "0", "no", "off")
+
+    def _proxy_ok(url: str) -> bool:
+        # Auth-proxy exception: an environment may rewrite github.com
+        # URLs through an auth proxy whose path still embeds the real
+        # slug. The prefix is supplied by the operator via the
+        # MIRROR_GITHUB_PROXY_PREFIX env var — environment-specific
+        # infrastructure hostnames do not belong in this public repo.
+        proxy = os.environ.get("MIRROR_GITHUB_PROXY_PREFIX", "")
+        return bool(proxy and url.startswith(proxy)
+                    and _slug_of("https://github.com/"
+                                 + url[len(proxy):]) == slug)
+
     for url in urls:
         if url.startswith("http://"):
             return (f"push destination '{_redact(remote)}' resolves to "
                     f"plaintext http url '{_redact(url)}'")
-        if _slug_of(url) == slug:
+        if _slug_of(url) == slug or _proxy_ok(url):
+            if url.startswith("https://") and _ssl_off(url):
+                return ("tls verification disabled for push url "
+                        f"'{_redact(url)}'")
             if url.startswith("ssh://") or _GH_SCP.match(url):
                 if ssh_src:
                     return (f"{ssh_src} overrides the ssh transport "
@@ -451,17 +488,8 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
                 return (f"{proxy_src} overrides the git transport "
                         f"for push url '{_redact(url)}'")
             continue
-        # Auth-proxy exception: an environment may rewrite github.com
-        # URLs through an auth proxy whose path still embeds the real
-        # slug. The prefix is supplied by the operator via the
-        # MIRROR_GITHUB_PROXY_PREFIX env var — environment-specific
-        # infrastructure hostnames do not belong in this public repo.
-        proxy = os.environ.get("MIRROR_GITHUB_PROXY_PREFIX", "")
-        if not (proxy and url.startswith(proxy)
-                and _slug_of("https://github.com/" + url[len(proxy):])
-                == slug):
-            return (f"push destination '{_redact(remote)}' resolves to "
-                    f"'{_redact(url)}'")
+        return (f"push destination '{_redact(remote)}' resolves to "
+                f"'{_redact(url)}'")
     return None
 
 

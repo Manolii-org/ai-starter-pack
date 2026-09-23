@@ -2426,6 +2426,51 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     assert "plaintext http" in r.stderr
     assert not (ht / "registry").exists()
 
+    # https with TLS verification disabled is MITM-able — refuse
+    # (global http.sslVerify=false, a URL-scoped override, and the
+    # GIT_SSL_NO_VERIFY environment variable all count).
+    for i, cfg in enumerate((["http.sslVerify", "false"],
+                             ["http.https://github.com/.sslVerify",
+                              "false"])):
+        sv = tmp_path / f"ssloff{i}"
+        sv.mkdir()
+        sp.run(["git", "init", "-q"], cwd=sv, capture_output=True)
+        sp.run(["git", "remote", "add", "origin",
+                "https://github.com/Buro-Built/buro-registry.git"],
+               cwd=sv, capture_output=True)
+        sp.run(["git", "config", *cfg], cwd=sv, capture_output=True)
+        r = run(sv, _bootstrap_env(tmp_path))
+        assert r.returncode == 2, r.stderr
+        assert "tls verification" in r.stderr
+        assert not (sv / "registry").exists()
+
+    sv = tmp_path / "sslenv"
+    sv.mkdir()
+    sp.run(["git", "init", "-q"], cwd=sv, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=sv, capture_output=True)
+    r = run(sv, dict(_bootstrap_env(tmp_path), GIT_SSL_NO_VERIFY="true"))
+    assert r.returncode == 2, r.stderr
+    assert "tls verification" in r.stderr
+    assert not (sv / "registry").exists()
+
+    # Credentials in the URL query or fragment must not reach stderr.
+    cq = tmp_path / "credquery"
+    cq.mkdir()
+    sp.run(["git", "init", "-q"], cwd=cq, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=cq, capture_output=True)
+    sp.run(["git", "config", "remote.origin.pushurl",
+            "https://github.com/Other/public.git?access_token="
+            "SECRETQUERY#frag=SECRETQUERY"], cwd=cq,
+           capture_output=True)
+    r = run(cq, _bootstrap_env(tmp_path))
+    assert r.returncode == 2, r.stderr
+    assert "SECRETQUERY" not in r.stderr
+    assert not (cq / "registry").exists()
+
     # A non-GitHub origin that parses to a valid-looking slug — gh would
     # verify an UNRELATED github.com repo of the same name → refuse.
     gl = tmp_path / "gitlab"
