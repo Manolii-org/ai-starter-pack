@@ -1707,12 +1707,39 @@ def test_public_boundary_private_mirror_marker_waives(tmp_path):
     sp.run(["git", "remote", "add", "origin",
             "https://github.com/Buro-Built/buro-registry.git"],
            cwd=reg_root, env=env, check=True)
+    (reg_root / "registry/private-mirrors.txt").write_text(
+        "buro-built/buro-registry\n")
     mod = load_lint_module()
     mod.REGISTRY = reg_root / "registry"
     mod.REPO = reg_root
+    mod.PRIVATE_MIRRORS_PATH = reg_root / "registry/private-mirrors.txt"
     mod.results = []
     mod.check_public_boundary()
     assert not [f for f in mod.results if f.status == "FAIL"]
+
+
+def test_public_boundary_marker_undeclared_remote_fails(tmp_path):
+    """A parseable but undeclared origin (e.g. a public fork) cannot
+    waive the boundary — the slug must appear in private-mirrors.txt."""
+    import subprocess as sp
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "x")],
+    })
+    (reg_root / "registry/.private-mirror").write_text("")
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    sp.run(["git", "init", "-q"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/someuser/ai-starter-pack.git"],
+           cwd=reg_root, env=env, check=True)
+    mod = load_lint_module()
+    mod.REGISTRY = reg_root / "registry"
+    mod.REPO = reg_root
+    mod.PRIVATE_MIRRORS_PATH = reg_root / "registry/private-mirrors.txt"
+    mod.results = []
+    mod.check_public_boundary()
+    fails = [f for f in mod.results if f.status == "FAIL"]
+    assert any("not a declared private mirror" in f.detail for f in fails)
 
 
 def test_public_boundary_marker_in_canonical_repo_fails(tmp_path):
@@ -1772,6 +1799,54 @@ def test_pack_surface_lowercase_slug_fails(tmp_path):
     fails = [f for f in mod.results
              if f.check == "PACK-SURFACE" and f.status == "FAIL"]
     assert any("x.md" in f.detail for f in fails)
+
+
+def test_pack_surface_prefixed_canonical_slug_fails(tmp_path):
+    """`Manolii-org/ai-starter-pack-private` is a DIFFERENT repo — the
+    canonical-name exception must end at a true slug delimiter, not at
+    `\\b` (which fires before '-' and '.')."""
+    repo = tmp_path / "pack"
+    repo.mkdir()
+    (repo / "registry").mkdir()
+    (repo / "x.md").write_text(
+        "see Manolii-org/ai-starter-pack-private and "
+        "Manolii-org/ai-starter-pack.private")
+    (repo / "ok.md").write_text(
+        "clone github.com/Manolii-org/ai-starter-pack.git and "
+        "gh:Manolii-org/ai-starter-pack")
+    mod = load_lint_module()
+    mod.REPO = repo
+    mod.REGISTRY = repo / "registry"
+    mod.PACK_SURFACE_ALLOWLIST = repo / "registry" / "pack-surface-allowlist.txt"
+    mod.results = []
+    mod.check_pack_surface()
+    fails = [f for f in mod.results
+             if f.check == "PACK-SURFACE" and f.status == "FAIL"]
+    assert any("x.md" in f.detail for f in fails), \
+        "prefixed private slug not flagged"
+    assert not any("ok.md" in f.detail for f in fails), \
+        "canonical slug (incl .git suffix) wrongly flagged"
+
+
+def test_secrets_stale_allowlist_entry_fails(tmp_path):
+    """An unused secrets-ratchet entry is a reusable credential
+    exemption — reintroducing the identical line would silently pass.
+    Stale entries must FAIL, matching the ORG-LEAK/PACK-SURFACE
+    contract."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "clean")],
+    })
+    reg = reg_root / "registry"
+    (reg / "secrets-allowlist.txt").write_text(
+        "platform/framework/skills/demo/x.md#deadbeef\n")
+    mod = load_lint_module()
+    mod.REGISTRY = reg
+    mod.results = []
+    mod.check_secrets()
+    fails = [f for f in mod.results
+             if f.check == "SECRETS" and f.status == "FAIL"]
+    assert any("deadbeef" in f.detail or "stale" in f.detail
+               for f in fails), "stale secrets allowlist entry did not FAIL"
 
 
 def test_pack_surface_scans_tracked_skip_dir(tmp_path):

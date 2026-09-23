@@ -1,0 +1,16 @@
+# Trusted private mirrors — one owner/repo slug per line (lowercase).
+#
+# A registry/.private-mirror marker waives the PUBLIC boundary check ONLY
+# when `git remote get-url origin` resolves to a slug listed here. This is
+# the committed, auditable record of which repos may legitimately carry
+# universe-scope content: `slug != canonical` alone cannot prove privacy
+# (a public fork is also non-canonical).
+#
+# Adding a slug is a governance act — mirror owners request it via a
+# reviewed PR against this file when their private mirror is created.
+#
+# Planned mirrors (added here when created):
+# buro-built/<universe-registry>     — Buro universe content
+# impaktful-platform/<universe-registry> — Impaktful universe content
+# cpdcheck/<universe-registry>       — CPDcheck universe content
+# manolii-org/<universe-registry>    — Manolii universe content

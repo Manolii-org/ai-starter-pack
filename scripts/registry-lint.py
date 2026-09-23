@@ -113,7 +113,12 @@ PACK_SKIP_DIRS = {".git", "registry", "node_modules", "__pycache__",
                   ".ruff_cache", ".pytest_cache", ".brand"}
 PACK_SURFACE_EXEMPT = {"scripts/registry-lint.py", "tests/test_registry.py"}
 PACK_SURFACE_PATTERNS = [
-    r"Manolii-org/(?!ai-starter-pack\b)[A-Za-z0-9_.-]+",
+    # The canonical-repo exception must end at a true slug delimiter —
+    # `\b` also fires before '-' and '.', which would exempt prefixed
+    # PRIVATE repos like ai-starter-pack-private / ai-starter-pack.x.
+    # `.git` stays exempt: it's the public repo's own clone suffix.
+    r"Manolii-org/(?!ai-starter-pack(?:\.git)?(?![A-Za-z0-9_.-]))"
+    r"[A-Za-z0-9_.-]+",
     r"Buro-Built/[A-Za-z0-9_.-]+",
     r"Impaktful-Platform/[A-Za-z0-9_.-]+",
     r"CPDcheck-[A-Za-z0-9_.-]+",
@@ -129,6 +134,14 @@ PACK_SURFACE_RES = [re.compile(p, re.IGNORECASE)
                     for p in PACK_SURFACE_PATTERNS]
 
 CANONICAL_PACK_SLUG = "manolii-org/ai-starter-pack"
+
+# Trusted private mirrors — committed list (registry/private-mirrors.txt)
+# of the org-owned repos that may carry universe content. The marker
+# waiver requires the origin slug to appear here: `slug != canonical`
+# alone is not proof of privacy (a public fork is also non-canonical),
+# and a committed list is auditable + CODEOWNERS-gated like every other
+# registry contract.
+PRIVATE_MIRRORS_PATH = REGISTRY / "private-mirrors.txt"
 
 SCOPE_SCHEMA_PATH = REPO / "schemas" / "registry-scope.schema.json"
 try:
@@ -576,6 +589,7 @@ def check_secrets() -> None:
                "derived; scanning with the base pattern list only")
         fails += 1
     allow = load_line_allowlist(SECRETS_ALLOWLIST_PATH)
+    used: set[str] = set()
     for path in content_scan_files(org_leak=False):
         rel = path.relative_to(REGISTRY)
         rel_s = rel.as_posix()
@@ -585,10 +599,19 @@ def check_secrets() -> None:
             continue
         for i, line in enumerate(lines, 1):
             if any(p.search(line) for p in pats):
-                if line_key(rel_s, line) in allow:
+                key = line_key(rel_s, line)
+                if key in allow:
+                    used.add(key)
                     continue
                 report("FAIL", "SECRETS", f"{rel}:{i} — credential-shaped string")
                 fails += 1
+    # Stale entries FAIL — an unused credential exemption is reusable:
+    # reintroducing the identical line at the same path would silently
+    # pass. Same ratchet contract as ORG-LEAK and PACK-SURFACE.
+    for stale in sorted(allow - used):
+        report("FAIL", "SECRETS",
+               f"stale allowlist entry — remove it: {stale}")
+        fails += 1
     if not fails:
         report("PASS", "SECRETS", "no credential shapes")
 
@@ -809,6 +832,17 @@ def _origin_slug() -> str | None:
     return m.group(1).lower() if m else None
 
 
+def _trusted_mirrors() -> set[str]:
+    """Declared private-mirror slugs (lowercase owner/repo) from
+    registry/private-mirrors.txt — the committed, auditable allowlist
+    the marker waiver checks against."""
+    if not PRIVATE_MIRRORS_PATH.is_file():
+        return set()
+    return {line.strip().lower()
+            for line in PRIVATE_MIRRORS_PATH.read_text().splitlines()
+            if line.strip() and not line.startswith("#")}
+
+
 def check_public_boundary() -> None:
     """This registry is PUBLIC — universe scopes never land here; they live
     in per-org private mirrors (a mirror carries registry/.private-mirror to
@@ -829,8 +863,15 @@ def check_public_boundary() -> None:
                    "cannot be verified as a private mirror — refusing to "
                    "waive the public boundary on an unverifiable marker")
             return
+        if slug not in _trusted_mirrors():
+            report("FAIL", "PUBLIC",
+                   f"origin '{slug}' is not a declared private mirror — "
+                   "a public fork can carry .private-mirror, so the waiver "
+                   "applies only to slugs listed in "
+                   "registry/private-mirrors.txt")
+            return
         report("PASS", "PUBLIC",
-               f"private mirror ({slug}) — boundary waived")
+               f"declared private mirror ({slug}) — boundary waived")
         return
     fails = 0
     for scope in UNIVERSES + LOCAL_SCOPES:
