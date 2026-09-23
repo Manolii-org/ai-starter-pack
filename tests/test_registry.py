@@ -2494,6 +2494,39 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     assert r.returncode == 2, r.stderr
     assert not (es / "registry").exists()
 
+    # scp-style 'user@host:path' userinfo is credential-bearing too —
+    # it has no '://' for the userinfo rule to catch.
+    cs = tmp_path / "credscp"
+    cs.mkdir()
+    sp.run(["git", "init", "-q"], cwd=cs, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=cs, capture_output=True)
+    sp.run(["git", "config", "remote.origin.pushurl",
+            "SECRETSCP@github.com:Other/public.git"], cwd=cs,
+           capture_output=True)
+    r = run(cs, _bootstrap_env(tmp_path))
+    assert r.returncode == 2, r.stderr
+    assert "SECRETSCP" not in r.stderr
+    assert not (cs / "registry").exists()
+
+    # The auth-proxy exemption is for https proxies only — a non-https
+    # prefix (e.g. an 'ext::… ' helper transport) must not exempt the
+    # rewritten destination.
+    ep = tmp_path / "extproxy"
+    ep.mkdir()
+    sp.run(["git", "init", "-q"], cwd=ep, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=ep, capture_output=True)
+    sp.run(["git", "config",
+            'url."ext::helper ".insteadOf', "https://github.com/"],
+           cwd=ep, capture_output=True)
+    r = run(ep, dict(_bootstrap_env(tmp_path),
+                     MIRROR_GITHUB_PROXY_PREFIX="ext::helper "))
+    assert r.returncode == 2, r.stderr
+    assert not (ep / "registry").exists()
+
     # Credentials in the URL query or fragment must not reach stderr.
     cq = tmp_path / "credquery"
     cq.mkdir()

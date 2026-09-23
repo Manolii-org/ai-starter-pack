@@ -265,8 +265,10 @@ def _slug_of(url: str) -> str | None:
 
 def _redact(url: str) -> str:
     """Strip credentials (userinfo, query, fragment) before a diagnostic
-    prints the URL."""
+    prints the URL. The scp-style 'user@host:path' form has no '://' —
+    mask a leading user@ as well (the username may be a token)."""
     url = re.sub(r"://[^/@\s]*@", "://***@", url, count=1)
+    url = re.sub(r"^[^@\s:]+@", "***@", url, count=1)
     return url.split("?", 1)[0].split("#", 1)[0]
 
 
@@ -473,7 +475,12 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
         # MIRROR_GITHUB_PROXY_PREFIX env var — environment-specific
         # infrastructure hostnames do not belong in this public repo.
         proxy = os.environ.get("MIRROR_GITHUB_PROXY_PREFIX", "")
-        return bool(proxy and url.startswith(proxy)
+        # Require an https prefix: anything else (an 'ext::… ' helper
+        # URL, 'git://', 'ssh://') would still hand the push to a
+        # transport we cannot verify — the exemption exists for an
+        # https auth proxy only.
+        return bool(proxy.startswith("https://")
+                    and url.startswith(proxy)
                     and _slug_of("https://github.com/"
                                  + url[len(proxy):]) == slug)
 
