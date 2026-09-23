@@ -2328,6 +2328,26 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     assert "ssh client config" in r.stderr
     assert not (mu / "registry").exists()
 
+    # A ProxyCommand reports hostname github.com but connects
+    # elsewhere — hostname alone is insufficient.
+    pc = tmp_path / "sshproxy"
+    pc.mkdir()
+    stub3 = tmp_path / "sshstub3"
+    stub3.mkdir()
+    s3 = stub3 / "ssh"
+    s3.write_text(
+        "#!/bin/sh\necho 'hostname github.com'\n"
+        "echo 'proxycommand ssh -W %h:%p bastion.example.test'\n")
+    s3.chmod(0o755)
+    sp.run(["git", "init", "-q"], cwd=pc, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "git@github.com:Buro-Built/buro-registry.git"],
+           cwd=pc, capture_output=True)
+    r = run(pc, dict(env, PATH=f"{stub3}:{env['PATH']}"))
+    assert r.returncode == 2, r.stderr
+    assert "ssh client config" in r.stderr
+    assert not (pc / "registry").exists()
+
     # A git:// URL parses to the verified slug, but core.gitProxy
     # replaces the direct connection — the push can land anywhere the
     # proxy command chooses → refuse.

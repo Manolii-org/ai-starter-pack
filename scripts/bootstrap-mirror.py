@@ -271,9 +271,11 @@ def _ssh_host_unchanged(url: str) -> bool:
     """`ssh -G` resolves OpenSSH's effective config — a HostName rewrite
     in ~/.ssh/config or /etc/ssh/ssh_config would redirect an ssh push
     away from github.com even though the URL parses to the verified
-    slug. Query with the same user/host/port arguments git would pass
-    so `Match user`/`Match port` blocks evaluate identically. Fail
-    closed when ssh cannot confirm the effective host."""
+    slug, and a ProxyCommand/ProxyJump would tunnel it to another
+    server while hostname still reports github.com. Query with the
+    same user/host/port arguments git would pass so `Match user`/
+    `Match port` blocks evaluate identically. Fail closed when ssh
+    cannot confirm a direct connection to github.com."""
     if url.startswith("ssh://"):
         m = re.match(r"^ssh://(?:([^@/\s]+)@)?github\.com(?::(\d+))?/",
                      url)
@@ -289,11 +291,15 @@ def _ssh_host_unchanged(url: str) -> bool:
         return False
     if r.returncode != 0:
         return False
+    eff = {}
     for ln in r.stdout.splitlines():
         key, _, value = ln.partition(" ")
-        if key == "hostname":
-            return value.strip().lower() == "github.com"
-    return False
+        eff[key] = value.strip()
+    # hostname alone is insufficient: a ProxyCommand/ProxyJump still
+    # reports the target host while connecting elsewhere.
+    return (eff.get("hostname", "").lower() == "github.com"
+            and eff.get("proxycommand", "none").lower() == "none"
+            and eff.get("proxyjump", "none").lower() == "none")
 
 
 def _push_targets_ok(root: Path, slug: str) -> str | None:
