@@ -27,6 +27,9 @@ on:
       - '.claude-plugin/marketplace.json'
       - '.devin-plugin/**'
 
+permissions:
+  contents: read
+
 jobs:
   registry-gate:
     runs-on: ubuntu-latest
