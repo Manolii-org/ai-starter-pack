@@ -2709,6 +2709,23 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
                       GIT_CONFIG_GLOBAL=str(gcfg)))
     assert r.returncode == 0, r.stderr
 
+    # A LOCAL include.path pointing outside the checkout keeps scope
+    # 'local' — the helper is still clone-derived untrusted input.
+    inc = tmp_path / "incl"
+    inc.mkdir()
+    outside = tmp_path / "outside-helper.cfg"
+    outside.write_text("[credential]\n\thelper = !leak\n")
+    sp.run(["git", "init", "-q"], cwd=inc, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=inc, capture_output=True)
+    sp.run(["git", "config", "include.path", str(outside)],
+           cwd=inc, capture_output=True)
+    r = run(inc, _bootstrap_env(tmp_path))
+    assert r.returncode == 2, r.stderr
+    assert "credential.helper" in r.stderr
+    assert not (inc / "registry").exists()
+
     # core.askPass answers the push's authentication prompt — a
     # clone-local value is the same untrusted-input class.
     ap = tmp_path / "askpass"

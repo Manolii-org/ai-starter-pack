@@ -1110,15 +1110,23 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
     # MIRROR_TRUST_DIRS.
     if saw_https:
         root_p = os.path.normcase(os.path.realpath(str(root))) + os.sep
-        for ln in _cfg_lines("--show-origin", "--get-regexp",
+        # Both predicates are needed. Scope alone misses a GLOBAL config
+        # whose include.path pulls a file from inside the clone (scope
+        # stays 'global'); origin alone misses a LOCAL config whose
+        # include.path points outside the checkout (scope stays 'local').
+        for ln in _cfg_lines("--show-scope", "--show-origin",
+                             "--get-regexp",
                              r"^credential\..*\.helper$"
                              r"|^credential\.helper$|^core\.askpass$"):
-            origin = ln.split(None, 1)[0]
-            if not origin.startswith("file:"):
+            parts = ln.split("\t")
+            if len(parts) < 3:
                 continue
+            scope, origin = parts[0], parts[1]
             op = os.path.normcase(os.path.realpath(
-                os.path.join(str(root), origin[5:])))
-            if op.startswith(root_p):
+                os.path.join(str(root), origin[5:]))) \
+                if origin.startswith("file:") else ""
+            if (scope in ("local", "worktree")
+                    or (op and op.startswith(root_p))):
                 return ("a repository-local credential.helper or "
                         "core.askPass program can exfiltrate the "
                         "staged universe content")
