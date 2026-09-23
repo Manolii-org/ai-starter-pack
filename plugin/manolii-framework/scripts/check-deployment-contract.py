@@ -274,7 +274,11 @@ def workflow_triggers_branch(spec: dict, branch: str) -> bool:
     if isinstance(on, str):  # `on: push` scalar shorthand — unfiltered
         on = {on: None}
     if isinstance(on, list):  # `on: [push]` shorthand — every listed event unfiltered
-        on = {e: None for e in on if isinstance(e, str)}
+        # reject the WHOLE list on a non-string member — `on: [push, true]`
+        # is a workflow GitHub cannot load, not "push only"
+        if any(not isinstance(e, str) for e in on):
+            return False
+        on = {e: None for e in on}
     # Anything left that isn't a mapping (`on: true`, `on: 123`, a list of
     # non-scalars) is malformed — GitHub would reject it, so it can never
     # fire: report as non-matching rather than raising on `event in on`.
@@ -283,12 +287,14 @@ def workflow_triggers_branch(spec: dict, branch: str) -> bool:
     for event in ("push", "pull_request"):
         if event not in on:
             continue
-        # `on: push` (bare) parses as None — event present, unfiltered
-        ev = on.get(event) or {}
-        # A structurally invalid event config (on: {push: [main]}, push: true)
-        # cannot run at all — treat as non-matching so the lane reports drift
-        # rather than crashing on .get.
-        if not isinstance(ev, dict):
+        # `on: push` (bare) parses as None — event present, unfiltered.
+        # Falsy-but-invalid configs (`push: false`, `push: []`, `push: ""`)
+        # are NOT the None shorthand — GitHub rejects the workflow, so the
+        # lane reports drift rather than treating the event as unfiltered.
+        ev = on.get(event)
+        if ev is None:
+            ev = {}
+        elif not isinstance(ev, dict):
             continue
         # tag-only triggers never fire for branch pushes: a `push` event
         # whose config filters on `tags`/`tags-ignore` but declares no
@@ -341,12 +347,40 @@ def _executable(job: dict) -> bool:
     uses = job.get("uses")
     if isinstance(uses, str):
         return bool(uses.strip())
-    runner = job.get("runs-on")
-    runner_ok = (isinstance(runner, str) and bool(runner.strip())
-                 or isinstance(runner, (list, dict)) and bool(runner))
-    steps = job.get("steps")
-    return runner_ok and (isinstance(steps, list) and steps
-                          and all(isinstance(s, dict) for s in steps))
+    return _runner_ok(job.get("runs-on")) and (
+        isinstance(job.get("steps"), list) and job["steps"]
+        and all(_step_ok(s) for s in job["steps"]))
+
+
+def _runner_ok(runner) -> bool:
+    """`runs-on` may be a label string, a non-empty list of label strings,
+    or a `group`/`labels` map — only those keys, only string values."""
+    if isinstance(runner, str):
+        return bool(runner.strip())
+    if isinstance(runner, list):
+        return bool(runner) and all(
+            isinstance(x, str) and x.strip() for x in runner)
+    if isinstance(runner, dict):
+        if not runner or not set(runner) <= {"group", "labels"}:
+            return False  # `runs-on: {bogus: true}` parses but never runs
+        group, labels = runner.get("group"), runner.get("labels")
+        group_ok = group is None or (isinstance(group, str) and group.strip())
+        labels_ok = (labels is None
+                     or isinstance(labels, str) and labels.strip()
+                     or isinstance(labels, list) and labels
+                     and all(isinstance(x, str) and x.strip() for x in labels))
+        return bool(group_ok and labels_ok)
+    return False
+
+
+def _step_ok(step) -> bool:
+    """A runnable step carries a non-empty `run` command or `uses` action —
+    `{}` / `with`-only / `run: ""` steps are rejected by GitHub."""
+    if not isinstance(step, dict):
+        return False
+    run, uses = step.get("run"), step.get("uses")
+    return (isinstance(run, str) and bool(run.strip())
+            or isinstance(uses, str) and bool(uses.strip()))
 
 
 def jobs_map(spec: dict) -> dict:

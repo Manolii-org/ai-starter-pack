@@ -181,7 +181,11 @@ def _workflow_trigger_ok(spec: dict, trigger: dict) -> str | None:
     if isinstance(on, str):      # `on: push` scalar shorthand
         on = {on: None}
     if isinstance(on, list):     # `on: [push]` shorthand
-        on = {e: None for e in on if isinstance(e, str)}
+        # reject the WHOLE list on a non-string member — `on: [push, true]`
+        # is a workflow GitHub cannot load, not "push only"
+        if any(not isinstance(e, str) for e in on):
+            return "on: list contains a non-string event name"
+        on = {e: None for e in on}
     if not isinstance(on, dict):
         return "on: is not a recognised trigger block"
     ttype = trigger.get("type")
@@ -215,18 +219,47 @@ def _workflow_trigger_ok(spec: dict, trigger: dict) -> str | None:
 
 def _runnable_job(job) -> bool:
     """Same bar as the deployment-contract checker: a `uses:` call naming a
-    callee, or `runs-on` (str / label list / group map) + step mappings."""
+    callee, or a valid `runs-on` (str / label list / group map) + steps that
+    each carry a non-empty `run` or `uses`."""
     if not isinstance(job, dict):
         return False
     uses = job.get("uses")
     if isinstance(uses, str):
         return bool(uses.strip())
-    runner = job.get("runs-on")
-    runner_ok = (isinstance(runner, str) and bool(runner.strip())
-                 or isinstance(runner, (list, dict)) and bool(runner))
-    steps = job.get("steps")
-    return runner_ok and (isinstance(steps, list) and steps
-                          and all(isinstance(s, dict) for s in steps))
+    return _runner_ok(job.get("runs-on")) and (
+        isinstance(job.get("steps"), list) and job["steps"]
+        and all(_step_ok(s) for s in job["steps"]))
+
+
+def _runner_ok(runner) -> bool:
+    """`runs-on` may be a label string, a non-empty list of label strings,
+    or a `group`/`labels` map — only those keys, only string values."""
+    if isinstance(runner, str):
+        return bool(runner.strip())
+    if isinstance(runner, list):
+        return bool(runner) and all(
+            isinstance(x, str) and x.strip() for x in runner)
+    if isinstance(runner, dict):
+        if not runner or not set(runner) <= {"group", "labels"}:
+            return False  # `runs-on: {bogus: true}` parses but never runs
+        group, labels = runner.get("group"), runner.get("labels")
+        group_ok = group is None or (isinstance(group, str) and group.strip())
+        labels_ok = (labels is None
+                     or isinstance(labels, str) and labels.strip()
+                     or isinstance(labels, list) and labels
+                     and all(isinstance(x, str) and x.strip() for x in labels))
+        return bool(group_ok and labels_ok)
+    return False
+
+
+def _step_ok(step) -> bool:
+    """A runnable step carries a non-empty `run` command or `uses` action —
+    `{}` / `with`-only / `run: ""` steps are rejected by GitHub."""
+    if not isinstance(step, dict):
+        return False
+    run, uses = step.get("run"), step.get("uses")
+    return (isinstance(run, str) and bool(run.strip())
+            or isinstance(uses, str) and bool(uses.strip()))
 
 
 def check_workflow_files(doc: dict, args: argparse.Namespace, errors: list[str]) -> None:
