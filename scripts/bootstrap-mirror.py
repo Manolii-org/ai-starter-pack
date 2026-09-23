@@ -270,11 +270,37 @@ def _push_targets_ok(root: Path, slug: str) -> bool:
     possibly public, repo even though the fetch URL bound to the
     private one. `remote get-url --push` applies git's own resolution
     (pushurl list, pushInsteadOf precedence, insteadOf fallback), so
-    it returns exactly the URLs `git push` would use."""
+    it returns exactly the URLs `git push` would use.
+
+    The remote is resolved the same way a plain `git push` resolves
+    it: branch.<name>.pushRemote > remote.pushDefault >
+    branch.<name>.remote > origin — a checkout that pushes to a
+    non-origin remote gets validated against THAT remote's urls."""
+    def _cfg(key: str) -> str:
+        try:
+            r = subprocess.run(
+                ["git", "-C", str(root), "config", "--get", key],
+                capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
+        return r.stdout.strip() if r.returncode == 0 else ""
+
+    try:
+        b = subprocess.run(
+            ["git", "-C", str(root), "symbolic-ref", "--short", "-q",
+             "HEAD"],
+            capture_output=True, text=True, timeout=10)
+        branch = b.stdout.strip() if b.returncode == 0 else ""
+    except (OSError, subprocess.TimeoutExpired):
+        branch = ""
+    remote = ((branch and _cfg(f"branch.{branch}.pushRemote"))
+              or _cfg("remote.pushDefault")
+              or (branch and _cfg(f"branch.{branch}.remote"))
+              or "origin")
     try:
         r = subprocess.run(
             ["git", "-C", str(root), "remote", "get-url", "--push",
-             "--all", "origin"],
+             "--all", remote],
             capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.TimeoutExpired):
         return False

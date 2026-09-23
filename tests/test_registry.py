@@ -2126,6 +2126,44 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     assert "redirect" in r.stderr
     assert not (pio / "registry").exists()
 
+    # remote.pushDefault pointing at a second remote whose slug differs —
+    # a plain `git push` would select that remote over origin → refuse.
+    pd = tmp_path / "pushdefault"
+    pd.mkdir()
+    sp.run(["git", "init", "-q"], cwd=pd, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=pd, capture_output=True)
+    sp.run(["git", "remote", "add", "evil",
+            "https://github.com/Other-Org/public-repo.git"],
+           cwd=pd, capture_output=True)
+    sp.run(["git", "config", "remote.pushDefault", "evil"], cwd=pd,
+           capture_output=True)
+    r = run(pd, _bootstrap_env(tmp_path))
+    assert r.returncode == 2, r.stderr
+    assert "redirect" in r.stderr
+    assert not (pd / "registry").exists()
+
+    # branch.<name>.pushRemote has the highest precedence — same
+    # redirect via the current branch's pushRemote → refuse.
+    pr = tmp_path / "pushremote"
+    pr.mkdir()
+    sp.run(["git", "init", "-q"], cwd=pr, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=pr, capture_output=True)
+    sp.run(["git", "remote", "add", "evil",
+            "https://github.com/Other-Org/public-repo.git"],
+           cwd=pr, capture_output=True)
+    cur = sp.run(["git", "symbolic-ref", "--short", "HEAD"], cwd=pr,
+                 capture_output=True, text=True).stdout.strip()
+    sp.run(["git", "config", f"branch.{cur}.pushRemote", "evil"], cwd=pr,
+           capture_output=True)
+    r = run(pr, _bootstrap_env(tmp_path))
+    assert r.returncode == 2, r.stderr
+    assert "redirect" in r.stderr
+    assert not (pr / "registry").exists()
+
     # A non-GitHub origin that parses to a valid-looking slug — gh would
     # verify an UNRELATED github.com repo of the same name → refuse.
     gl = tmp_path / "gitlab"
@@ -2187,6 +2225,23 @@ def test_bootstrap_mirror_push_target_pass(tmp_path):
             "url.https://git-manager.devin.ai/proxy/github.com/.insteadOf",
             "https://github.com/"], cwd=b, capture_output=True)
     r = run(b)
+    assert r.returncode == 0, r.stderr
+
+    # remote.pushDefault selecting a DIFFERENT remote is fine when that
+    # remote resolves to the same verified slug — the push still lands
+    # on the private repo.
+    c = tmp_path / "pushdefault-same-slug"
+    c.mkdir()
+    sp.run(["git", "init", "-q"], cwd=c, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=c, capture_output=True)
+    sp.run(["git", "remote", "add", "mirror",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=c, capture_output=True)
+    sp.run(["git", "config", "remote.pushDefault", "mirror"], cwd=c,
+           capture_output=True)
+    r = run(c)
     assert r.returncode == 0, r.stderr
 
 
