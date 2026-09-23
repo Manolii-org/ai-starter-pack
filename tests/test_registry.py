@@ -747,6 +747,26 @@ def test_undeclared_script_reference_skips(tmp_path):
     assert (skills / "plain" / "SKILL.md").is_file()
 
 
+def test_script_prose_mention_does_not_gate(tmp_path):
+    """A bare `scripts/x.py` mention in prose is NOT a dependency — only
+    executable-invocation shapes gate materialise."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [
+            ("skills/prose/SKILL.md",
+             "---\nname: prose\nconsumer_scripts: [scripts/setup.py]\n---\n"
+             "Run `python3 scripts/setup.py` first.\n"
+             "The scripts/reference.py file documents the format."),
+        ],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 0, r.stdout
+    assert (consumer / ".claude" / "skills" / "prose" / "SKILL.md").is_file()
+
+
 def test_consumer_scripts_mismatch_skips(tmp_path):
     """A consumer_scripts declaration must cover EVERY unbundled invocation —
     declaring scripts/setup.py cannot exempt invoking scripts/missing.py."""
@@ -1520,6 +1540,25 @@ def test_secrets_source_hex_escape_fails(tmp_path):
              if f.check == "SECRETS" and f.status == "FAIL"]
     assert any("helper.py" in f.detail for f in fails), \
         "source-language escaped credential not flagged"
+
+
+def test_secrets_ecmascript_codepoint_escape_fails(tmp_path):
+    """"ghp_\\u{41}..." in a JS/TS source file is an ECMAScript code-point
+    escape that decodes to a credential — must trip SECRETS."""
+    esc = "\\u{41}" * 20
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [(
+            "scripts/helper.ts",
+            'const token = "ghp_' + esc + '";')],
+    })
+    mod = load_lint_module()
+    mod.REGISTRY = reg_root / "registry"
+    mod.results = []
+    mod.check_secrets()
+    fails = [f for f in mod.results
+             if f.check == "SECRETS" and f.status == "FAIL"]
+    assert any("helper.ts" in f.detail for f in fails), \
+        "ECMAScript code-point escaped credential not flagged"
 
 
 def test_exact_ref_abbreviated_matches_zero_padded_version(tmp_path):

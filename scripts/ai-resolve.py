@@ -122,12 +122,15 @@ def script_dep_block(plugin_dir: Path, src_bytes: bytes) -> bool:
     a bundled plugin script (scripts/ isn't materialised), an explicit
     requires_scripts dep, or an unbundled invocation that isn't listed in
     consumer_scripts."""
-    if not SCRIPT_REF.search(src_bytes):
-        return False
     sdir = plugin_dir / "scripts"
     declared = declared_consumer_scripts(src_bytes)
-    for m in SCRIPT_NAME.finditer(src_bytes):
-        name = m.group(1).decode("utf-8", errors="ignore")
+    for m in SCRIPT_REF.finditer(src_bytes):
+        # Only names inside actual invocations count — a bare `scripts/x.py`
+        # mention in prose is not a dependency and must not gate materialise.
+        n = SCRIPT_NAME.search(m.group(0))
+        if not n:
+            continue
+        name = n.group(1).decode("utf-8", errors="ignore")
         if (sdir / name).is_file():
             return True  # bundled dep — resolver cannot satisfy it
         if (f"scripts/{name}" not in declared
