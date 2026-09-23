@@ -416,9 +416,9 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
 
     def _gitproxy_applies() -> bool:
         # core.gitProxy entries may carry a `for <domain>` qualifier and
-        # a `none` command disables the proxy — evaluate every entry in
-        # order; the last one applicable to github.com decides.
-        applies = False
+        # a `none` command disables the proxy — git matches entries in
+        # the given order and the FIRST match for the destination domain
+        # wins.
         for ln in _cfg_lines("--get-all", "core.gitProxy"):
             cmd, sep, domain = ln.rpartition(" for ")
             if not sep:
@@ -427,8 +427,8 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
                     rf"(^|\.){re.escape(domain.strip().lower())}$",
                     "github.com"):
                 continue
-            applies = cmd.strip().lower() != "none"
-        return applies
+            return cmd.strip().lower() != "none"
+        return False
 
     proxy_src = ("GIT_PROXY_COMMAND"
                  if os.environ.get("GIT_PROXY_COMMAND")

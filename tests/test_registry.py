@@ -2394,6 +2394,25 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     assert "gitProxy" in r.stderr
     assert not (gq / "registry").exists()
 
+    # git matches entries in order and the FIRST match wins — a
+    # following `none` entry does not rescue an earlier proxy.
+    gf = tmp_path / "gitproxy-first"
+    gf.mkdir()
+    sp.run(["git", "init", "-q"], cwd=gf, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "git://github.com/Buro-Built/buro-registry.git"],
+           cwd=gf, capture_output=True)
+    sp.run(["git", "config", "core.gitProxy",
+            "evil-proxy for github.com"], cwd=gf,
+           capture_output=True)
+    sp.run(["git", "config", "--add", "core.gitProxy",
+            "none for github.com"], cwd=gf,
+           capture_output=True)
+    r = run(gf, _bootstrap_env(tmp_path))
+    assert r.returncode == 2, r.stderr
+    assert "gitProxy" in r.stderr
+    assert not (gf / "registry").exists()
+
     # Plain-HTTP is refused outright — it is plaintext transport and
     # its effective proxy chain cannot be trusted for a private push.
     ht = tmp_path / "httppush"
