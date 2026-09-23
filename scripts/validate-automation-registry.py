@@ -59,6 +59,15 @@ EVENT_KEYS = {
 INPUT_DEF_KEYS = {"description", "required", "type", "default", "options",
                   "deprecationMessage"}
 INPUT_TYPES = {"boolean", "choice", "number", "environment", "string"}
+# GitHub's documented pull_request activity types — a made-up name can never
+# fire, and GitHub rejects the workflow that declares one.
+PR_TYPES = {"assigned", "unassigned", "labeled", "unlabeled", "opened",
+            "edited", "closed", "reopened", "synchronize", "converted_to_draft",
+            "ready_for_review", "locked", "unlocked", "review_requested",
+            "review_request_removed", "auto_merge_enabled",
+            "auto_merge_disabled", "milestoned", "demilestoned", "enqueued",
+            "dequeued", "head_ref_restored", "head_ref_deleted",
+            "marked_as_duplicate", "transferred"}
 MONTH_NAMES = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
                "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}
 WEEKDAY_NAMES = {"SUN": 0, "MON": 1, "TUE": 2, "WED": 3, "THU": 4,
@@ -215,6 +224,10 @@ def _workflow_trigger_ok(spec: dict, trigger: dict) -> str | None:
         if any(not isinstance(s, dict) or set(s) != {"cron"}
                or not isinstance(s["cron"], str) for s in sched):
             return "on.schedule contains a malformed entry"
+        # every entry's cron must parse — one bad expression makes the whole
+        # workflow unloadable even when the registered cron is also present
+        if any(not valid_cron(s["cron"]) for s in sched):
+            return "on.schedule contains an invalid cron expression"
         crons = [s["cron"] for s in sched]
         want = str(trigger.get("cron", ""))
         if want and want not in crons:
@@ -272,6 +285,12 @@ def _workflow_trigger_ok(spec: dict, trigger: dict) -> str | None:
                 return f"on.{ttype} declares an empty paths filter"
             if "types" in ev and not ev["types"]:
                 return f"on.{ttype} declares an empty types filter"
+            if ttype == "pull_request" and "types" in ev:
+                types = ev["types"]
+                if isinstance(types, str):
+                    types = [types]
+                if any(t not in PR_TYPES for t in types):
+                    return "on.pull_request.types contains an invalid activity"
             if "branches" in ev and "branches-ignore" in ev:
                 return f"on.{ttype} can't combine branches and branches-ignore"
             if "tags" in ev and "tags-ignore" in ev:

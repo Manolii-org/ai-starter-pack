@@ -55,6 +55,15 @@ EVENT_KEYS = {
     "pull_request": {"branches", "branches-ignore", "paths", "paths-ignore",
                      "types"},
 }
+# GitHub's documented pull_request activity types — a made-up name can never
+# fire, and GitHub rejects the workflow that declares one.
+PR_TYPES = {"assigned", "unassigned", "labeled", "unlabeled", "opened",
+            "edited", "closed", "reopened", "synchronize", "converted_to_draft",
+            "ready_for_review", "locked", "unlocked", "review_requested",
+            "review_request_removed", "auto_merge_enabled",
+            "auto_merge_disabled", "milestoned", "demilestoned", "enqueued",
+            "dequeued", "head_ref_restored", "head_ref_deleted",
+            "marked_as_duplicate", "transferred"}
 
 LANE_REQUIRED = ("branch", "environment", "workflow")
 REPO_REQUIRED = ("repo", "lanes")
@@ -363,6 +372,11 @@ def workflow_triggers_branch(spec: dict, branch: str) -> bool:
         # matches no changed file, `types: []` no activity
         if ("paths" in ev and not _as_patterns(ev["paths"])
                 or "types" in ev and not _as_patterns(ev["types"])):
+            continue
+        # pull_request `types` entries must be real activity names — an
+        # invented activity never fires and GitHub rejects the workflow
+        if (event == "pull_request" and "types" in ev
+                and any(t not in PR_TYPES for t in _as_patterns(ev["types"]))):
             continue
         branches = _as_patterns(ev.get("branches"))
         ignore = _as_patterns(ev.get("branches-ignore"))
