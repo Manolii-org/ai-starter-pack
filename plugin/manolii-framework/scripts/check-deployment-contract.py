@@ -327,11 +327,19 @@ def _as_patterns(value) -> list[str] | None:
 
 def _executable(job: dict) -> bool:
     """A job id only counts when GitHub could actually run it — a reusable
-    `uses:` call, or a normal job with `runs-on` and a non-empty `steps`.
-    An empty mapping `{}` parses but executes nothing."""
-    if isinstance(job.get("uses"), str):
-        return True
-    return "runs-on" in job and bool(job.get("steps"))
+    `uses:` call naming a callee, or a normal job with a non-empty `runs-on`
+    (string, label list, or group map) and a non-empty list of step maps.
+    `{uses: ""}`, `{runs-on: null, steps: "x"}`, and `{}` parse but execute
+    nothing — counting them would satisfy `required_jobs` with a dead job."""
+    uses = job.get("uses")
+    if isinstance(uses, str):
+        return bool(uses.strip())
+    runner = job.get("runs-on")
+    runner_ok = (isinstance(runner, str) and bool(runner.strip())
+                 or isinstance(runner, (list, dict)) and bool(runner))
+    steps = job.get("steps")
+    return runner_ok and (isinstance(steps, list) and steps
+                          and all(isinstance(s, dict) for s in steps))
 
 
 def jobs_map(spec: dict) -> dict:
