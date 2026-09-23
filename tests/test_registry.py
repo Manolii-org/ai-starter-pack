@@ -2770,7 +2770,7 @@ def _load_bootstrap():
     return mod
 
 
-def test_bootstrap_ssh_effective_config(monkeypatch):
+def test_bootstrap_ssh_effective_config(monkeypatch, tmp_path):
     """_ssh_host_unchanged must refuse any effective-config evidence of
     redirection or disabled server authentication, and must not trust a
     PATH-shadowing ssh executable to attest to itself."""
@@ -2857,6 +2857,71 @@ def test_bootstrap_ssh_effective_config(monkeypatch):
     patch(CLEAN + [("userknownhostsfile", "/tmp/attacker_hosts")])
     assert "untrusted" in mod._ssh_host_unchanged(URL)
     patch(CLEAN + [("userknownhostsfile", "/etc/ssh/ssh_known_hosts")])
+    assert mod._ssh_host_unchanged(URL) is None
+
+    # An approved LOCATION is not proof of KEY identity: ssh accepts
+    # any matching entry, so every github.com entry under ~/.ssh must
+    # fingerprint to GitHub's published host keys — content is checked,
+    # not just the directory the file lives in.
+    import base64
+    import hmac
+    home = tmp_path / "h"
+    kh_file = home / ".ssh" / "attacker_hosts"
+    kh_file.parent.mkdir(parents=True)
+    monkeypatch.setattr(mod, "pwd", types.SimpleNamespace(
+        getpwuid=lambda _uid: types.SimpleNamespace(
+            pw_dir=str(home), pw_name="u")))
+    bad = base64.b64encode(b"forged-attacker-key-blob").decode()
+    kh_file.write_text(f"github.com ssh-rsa {bad}\n")
+    patch([(k, str(kh_file) if k == "userknownhostsfile" else v)
+           for k, v in CLEAN])
+    assert "published" in mod._ssh_host_unchanged(URL)
+
+    # The pinned set holds GitHub's real published fingerprints.
+    assert "SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU" \
+        in mod._GITHUB_HOST_KEY_SHA256
+    assert "SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s" \
+        in mod._GITHUB_HOST_KEY_SHA256
+    assert "SHA256:p2QAMXNIC1TJYWeIOttrVc98/R1BUFWu3/LiyKgUfQM" \
+        in mod._GITHUB_HOST_KEY_SHA256
+
+    # A github.com entry whose blob fingerprints to the pinned set
+    # anchors the host — patch the pinned set to a test blob's digest.
+    blob = b"fake-github-key-blob"
+    fp = "SHA256:" + base64.b64encode(
+        hashlib.sha256(blob).digest()).decode().rstrip("=")
+    monkeypatch.setattr(mod, "_GITHUB_HOST_KEY_SHA256", {fp})
+    good = base64.b64encode(blob).decode()
+    kh_file.write_text(f"github.com ssh-rsa {good}\n")
+    patch([(k, str(kh_file) if k == "userknownhostsfile" else v)
+           for k, v in CLEAN])
+    assert mod._ssh_host_unchanged(URL) is None
+
+    # A certificate-authority entry covering github.com lets a CA sign
+    # any host key — refused even beside a pinned key.
+    kh_file.write_text(f"github.com ssh-rsa {good}\n"
+                       f"@cert-authority github.com ssh-rsa {bad}\n")
+    patch([(k, str(kh_file) if k == "userknownhostsfile" else v)
+           for k, v in CLEAN])
+    assert "certificate-authority" in mod._ssh_host_unchanged(URL)
+
+    # Hashed known-hosts entries (HashKnownHosts) resolve via HMAC-SHA1
+    # — a forged hashed github.com entry refuses the same way.
+    salt = b"somesalt"
+    tok = "|1|" + base64.b64encode(salt).decode() + "|" + \
+        base64.b64encode(hmac.new(
+            salt, b"github.com", hashlib.sha1).digest()).decode()
+    kh_file.write_text(
+        f"{tok} ssh-rsa {base64.b64encode(b'attacker-hashed').decode()}\n")
+    patch([(k, str(kh_file) if k == "userknownhostsfile" else v)
+           for k, v in CLEAN])
+    assert "published" in mod._ssh_host_unchanged(URL)
+
+    # No github.com entry anywhere → interactive TOFU stands (shkc=ask
+    # already passed) — not refused.
+    kh_file.write_text(f"other.example ssh-rsa {bad}\n")
+    patch([(k, str(kh_file) if k == "userknownhostsfile" else v)
+           for k, v in CLEAN])
     assert mod._ssh_host_unchanged(URL) is None
 
     # A PATH-resolved ssh outside the system dirs is never even asked.

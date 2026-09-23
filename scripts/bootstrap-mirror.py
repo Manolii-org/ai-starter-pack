@@ -68,7 +68,10 @@ private-mirrors.txt holds digests only.
 from __future__ import annotations
 
 import argparse
+import base64
+import fnmatch
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -325,6 +328,89 @@ _SSH_TRUST_DIRS = (
     ("/usr/bin", "/bin", "/usr/sbin", "/sbin"))
 
 
+# GitHub's published SSH host-key fingerprints — public values GitHub
+# ships for authenticating its servers (docs.github.com 'GitHub's SSH
+# key fingerprints'), verified against a live ssh-keyscan. Pinning is
+# what makes an approved known-hosts DIRECTORY trustworthy: location
+# says where the file lives, not whose keys it holds, and ssh accepts
+# ANY matching entry — a seeded '~/.ssh/attacker_hosts' would otherwise
+# pass the path check while authenticating an interceptor's key.
+_GITHUB_HOST_KEY_SHA256 = frozenset({
+    "SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s",  # ssh-rsa
+    "SHA256:p2QAMXNIC1TJYWeIOttrVc98/R1BUFWu3/LiyKgUfQM",  # ecdsa-p256
+    "SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU",  # ssh-ed25519
+})
+
+
+def _kh_covers(field: str, port: str) -> bool:
+    """A known-hosts host field that can answer a lookup for github.com:
+    comma-separated globs ('github.com', '*.github.com', '*'), bracketed
+    '[host]:port' forms, or a '|1|salt|hash' HMAC-SHA1 token."""
+    if field.startswith("|1|"):
+        try:
+            s64, h64 = field[3:].split("|", 1)
+            salt = base64.b64decode(s64)
+            dig = base64.b64decode(h64)
+        except ValueError:
+            return False
+        cands = {"github.com", "[github.com]:22"}
+        if port:
+            cands.add(f"[github.com]:{port}")
+        return any(hmac.compare_digest(
+            hmac.new(salt, c.encode(), hashlib.sha1).digest(), dig)
+            for c in cands)
+    for pat in field.split(","):
+        p = pat
+        if p.startswith("["):
+            p = p[1:p.find("]")] if "]" in p else p[1:]
+        elif ":" in p:
+            p = p.split(":", 1)[0]
+        if fnmatch.fnmatchcase("github.com", p.lower()):
+            return True
+    return False
+
+
+def _kh_pin_problem(files: list[str], port: str) -> str | None:
+    """None when no github.com entry contradicts GitHub's published host
+    keys; a refusal reason otherwise. ssh accepts ANY matching known-
+    hosts entry, so EVERY github.com entry must fingerprint to a
+    published key — a single unpinned one is a seeded MITM anchor. A
+    certificate-authority entry covering github.com defeats pinning
+    outright (a CA signs arbitrary host keys). No github.com entry at
+    all is fine: first contact then falls to the interactive
+    StrictHostKeyChecking decision already checked."""
+    for rp in files:
+        try:
+            if os.path.getsize(rp) > 8 << 20:  # absurd for known_hosts
+                continue
+            data = Path(rp).read_text(errors="replace")
+        except OSError:
+            continue
+        for ln in data.splitlines():
+            ln = ln.strip()
+            if not ln or ln.startswith("#"):
+                continue
+            f = ln.split()
+            if f[0].startswith("@"):
+                if (f[0] == "@cert-authority" and len(f) > 2
+                        and _kh_covers(f[1], port)):
+                    return ("a certificate-authority known-hosts entry "
+                            "can sign arbitrary github.com host keys")
+                continue
+            if len(f) < 3 or not _kh_covers(f[0], port):
+                continue
+            try:
+                blob = base64.b64decode(f[2])
+            except ValueError:
+                continue
+            fp = "SHA256:" + base64.b64encode(
+                hashlib.sha256(blob).digest()).decode().rstrip("=")
+            if fp not in _GITHUB_HOST_KEY_SHA256:
+                return ("known-hosts file holds a github.com host key "
+                        "outside GitHub's published fingerprints")
+    return None
+
+
 def _ssh_host_unchanged(url: str) -> str | None:
     """None when ssh's effective config for this URL's user/host/port
     verifies a direct, authenticated connection to github.com; a short
@@ -349,6 +435,7 @@ def _ssh_host_unchanged(url: str) -> str | None:
             [f"{user}@github.com" if user else "github.com"]
     else:  # scp-style [user@]github.com:slug — user may be omitted
         user = url.split("@", 1)[0] if "@" in url else ""
+        port = None
         args = [f"{user}@github.com" if user else "github.com"]
     ssh = shutil.which("ssh")
     ssh_rp = os.path.normcase(os.path.realpath(ssh)) if ssh else ""
@@ -421,13 +508,24 @@ def _ssh_host_unchanged(url: str) -> str | None:
         user = pw.pw_name if pw else ""
     except (KeyError, AttributeError):
         home, user = os.path.expanduser("~"), ""
+    # Trusted locations: ~/.ssh plus the system file (/etc/ssh on POSIX,
+    # %ProgramData%\ssh on Windows, where the OpenSSH port keeps it).
+    # Compare normcase'd realpaths so 'C:\Users\…' matches its own
+    # prefix — hard-coded forward slashes never match a Windows path.
+    global_kh = (os.path.join(os.environ.get(
+        "ProgramData", r"C:\ProgramData"), "ssh")
+        if os.name == "nt" else "/etc/ssh")
+    allowed = tuple(os.path.normcase(d + os.sep) for d in
+                    (os.path.join(home, ".ssh"), global_kh))
+    trusted: list[str] = []
     for p in kh:
-        rp = os.path.realpath(os.path.expanduser(
-            p.replace("%d", home).replace("%u", user)))
-        if not rp.startswith((f"{home}/.ssh/", "/etc/ssh/")):
+        rp = os.path.normcase(os.path.realpath(os.path.expanduser(
+            p.replace("%d", home).replace("%u", user))))
+        if not rp.startswith(allowed):
             return ("ssh host key verification uses an untrusted "
                     "known-hosts file path")
-    return None
+        trusted.append(rp)
+    return _kh_pin_problem(trusted, port)
 
 
 def _push_targets_ok(root: Path, slug: str) -> str | None:
