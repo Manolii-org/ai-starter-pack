@@ -1272,6 +1272,81 @@ def test_check_detects_stale_lock_metadata(tmp_path):
     assert "lock is stale" in r.stdout
 
 
+def test_tag_revision_operator_rejected(tmp_path):
+    """tag:v2~1 resolves to the tagged commit's PARENT via gitrev syntax —
+    tag: must accept only valid tag names (check-ref-format), not
+    arbitrary revision expressions."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "x")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "tag:v1.0.0~1"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 1
+    assert "valid git tag name" in r.stdout
+
+
+def test_ignored_component_under_pin_conflicts(tmp_path):
+    """An IGNORED untracked component (e.g. *.pyc) is invisible to
+    git status --untracked-files=all — but must never materialise under a
+    pin, since the lock would claim bytes the pinned revision lacks."""
+    import subprocess as sp
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "x")],
+    })
+    (reg_root / ".gitignore").write_text("*.pyc\n")
+    (reg_root / "registry" / "platform" / "framework" / "skills" / "demo"
+     / "debug.pyc").write_bytes(b"\x00pyc-bytes")
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    sp.run(["git", "init", "-q"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "add", "-A"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "commit", "-qm", "init"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "tag", "v1.0.0"], cwd=reg_root, env=env, check=True)
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "tag:v1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 1
+    assert "not tracked at the pinned revision" in r.stdout
+
+
+def test_org_leak_snake_case_identifier_fails(tmp_path):
+    """`\\b` treats `_` as a word char — manolii_infrastructure_dependencies
+    would pass a \\b-boundary scan. ORG-LEAK must match org names inside
+    snake_case identifiers."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md",
+                                "uses manolii_infrastructure_dependencies\n")],
+    })
+    mod = load_lint_module()
+    mod.REGISTRY = reg_root / "registry"
+    mod.results = []
+    mod.check_org_leak()
+    fails = [f for f in mod.results
+             if f.check == "ORG-LEAK" and f.status == "FAIL"]
+    assert fails, "snake_case org identifier not flagged"
+
+
+def test_xscope_registry_root_form_fails(tmp_path):
+    """A manifest 'path' uses the repo-root form registry/<scope>/ — the
+    XSCOPE scan must flag it, not only ../<scope>/."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md",
+                                "see registry/manolii/private\n")],
+    })
+    mod = load_lint_module()
+    mod.REGISTRY = reg_root / "registry"
+    mod.results = []
+    mod.check_xscope()
+    fails = [f for f in mod.results
+             if f.check == "XSCOPE" and f.status == "FAIL"]
+    assert any("manolii" in f.detail for f in fails)
+
+
 def test_component_ancestor_not_dir_conflicts(tmp_path):
     """.claude/agents as a plain FILE (not a symlink) must be a plan-time
     conflict — otherwise --apply copies earlier files then crashes at

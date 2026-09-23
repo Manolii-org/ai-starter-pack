@@ -98,6 +98,7 @@ platform/framework/telemetry/heartbeat.ts#667d47a5
 platform/framework/telemetry/heartbeat.ts#91358d38
 platform/framework/telemetry/tests/heartbeat.test.ts#359b0fb8
 platform/framework/telemetry/tests/heartbeat.test.ts#82aebde5
+platform/framework/telemetry/tests/test_heartbeat.py#2af87695
 platform/framework/telemetry/tests/test_heartbeat.py#e555ff3e
 platform/om/README.md#38bcb27f
 platform/om/README.md#3cc155bc
@@ -119,6 +120,7 @@ platform/om/evals/operational-memory/case-vendor-history-incomplete.json#7f86d65
 platform/om/skills/om-fact-capture/SKILL.md#75824fd1
 platform/om/skills/om-handover/SKILL.md#19c64b10
 platform/om/skills/om-handover/SKILL.md#75824fd1
+platform/om/skills/om-handover/SKILL.md#a8013ab5
 platform/om/skills/om-handover/SKILL.md#e4b0243c
 platform/om/skills/om-readiness/SKILL.md#75824fd1
 platform/om/skills/om-staff-answer/SKILL.md#75824fd1

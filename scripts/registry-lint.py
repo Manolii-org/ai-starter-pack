@@ -51,13 +51,18 @@ ALL_SCOPES = ("platform",) + UNIVERSES + LOCAL_SCOPES
 # Org identifiers. `manolii` is the registry's own publisher — platform content
 # must not carry ANY universe id including manolii (that's the whole point of
 # platform scope). Universe scopes may name themselves only.
+# Boundaries are identifier-aware: `\b` treats `_` as a word character, so
+# manolii_infrastructure_dependencies and CPDCHECK_INTERNAL would slip through.
+# Only [A-Za-z0-9] counts as a word char here — underscores are separators.
+_B = r"(?<![A-Za-z0-9])"
+_E = r"(?![A-Za-z0-9])"
 ORG_TERMS = {
-    "manolii": r"\bmanolii\b",
-    "impaktful": r"\bimpaktful\b",
-    "buro": r"\bburo\b|\bburo-built\b",
-    "cpdcheck": r"\bcpdcheck\b|\bensombl\b",
+    "manolii": _B + "manolii" + _E,
+    "impaktful": _B + "impaktful" + _E,
+    "buro": _B + "(?:buro|buro-built)" + _E,
+    "cpdcheck": _B + "(?:cpdcheck|ensombl)" + _E,
 }
-EXTRA_ORG = r"\bknowledge-layer\b|\bpicklebugs\b|\blead-converter\b|\bhiha\b"
+EXTRA_ORG = _B + "(?:knowledge-layer|picklebugs|lead-converter|hiha)" + _E
 
 SECRET_PATTERNS = [
     r"ghp_[A-Za-z0-9]{20,}", r"gho_[A-Za-z0-9]{20,}", r"ghs_[A-Za-z0-9]{20,}",
@@ -484,8 +489,14 @@ def check_xscope() -> None:
             continue
         for i, line in enumerate(lines, 1):
             for other in ALL_SCOPES:
-                if other != scope and f"../{other}/" in line:
-                    report("FAIL", "XSCOPE", f"{rel}:{i} references ../{other}/")
+                if other == scope:
+                    continue
+                # ../<other>/ is the relative form; registry/<other>/ is the
+                # repository-root form a manifest 'path' field uses — both
+                # wire one scope's tree into another's consumers.
+                if (f"../{other}/" in line
+                        or f"registry/{other}/" in line):
+                    report("FAIL", "XSCOPE", f"{rel}:{i} references {other}/")
                     fails += 1
                     break
     if not fails:

@@ -256,6 +256,19 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                 return
             pin_rev = want
         else:
+            # git rev-parse accepts revision operators — tag:v2~1 would
+            # resolve to refs/tags/v2's PARENT, not a tag named v2~1.
+            # check-ref-format rejects ~ ^ : ? * [ \ spaces and "..".
+            bad_name = subprocess.run(
+                ["git", "check-ref-format", f"tags/{want}"],
+                capture_output=True, timeout=10)
+            if bad_name.returncode != 0:
+                plan.conflicts.append((
+                    repo_root / req,
+                    f"pinned ref '{ref}' — tag: requires a valid git tag "
+                    "name (no revision operators, '..', or spaces)",
+                ))
+                return
             # tag: resolves strictly under refs/tags/ — tag:main must not
             # satisfy against a branch.
             pin_rev = f"refs/tags/{want}"
@@ -379,6 +392,26 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                     f"{req}: {rel} is or resolves through a symlink — "
                     "refusing to materialise the link target"))
                 continue
+            if pinned:
+                # git status --untracked-files=all does not show IGNORED
+                # files — a clean worktree can still hold an untracked
+                # component (e.g. *.pyc). The lock would claim bytes the
+                # pinned revision does not contain, so every source must
+                # be tracked at the index (index == pin after the
+                # cleanliness check).
+                tracked = subprocess.run(
+                    ["git", "-C", str(registry_root), "ls-files",
+                     "--error-unmatch", "--",
+                     src.relative_to(registry_root).as_posix()],
+                    capture_output=True, timeout=10)
+                if tracked.returncode != 0:
+                    plan.conflicts.append((
+                        dst,
+                        f"{req}: {rel} is not tracked at the pinned revision "
+                        "(ignored or untracked) — refusing to materialise "
+                        "bytes outside the pin",
+                    ))
+                    continue
             src_bytes = src.read_bytes()
             if (b"CLAUDE_PLUGIN_ROOT" in src_bytes
                     or SCRIPT_REF.search(src_bytes)
