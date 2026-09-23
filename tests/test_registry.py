@@ -2391,6 +2391,23 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     assert "SUPERSECRET" not in r.stderr
     assert not (ex / "registry").exists()
 
+    # The opaque helper address can also carry a credential with no
+    # space at all — the whole '<transport>::<address>' is withheld.
+    e2 = tmp_path / "extcreds-nospace"
+    e2.mkdir()
+    sp.run(["git", "init", "-q"], cwd=e2, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=e2, capture_output=True)
+    sp.run(["git", "config", "remote.origin.pushurl",
+            "ext::helper--token=SUPERSECRET"], cwd=e2,
+           capture_output=True)
+    r = run(e2, _bootstrap_env(tmp_path))
+    assert r.returncode == 2, r.stderr
+    assert "SUPERSECRET" not in r.stderr
+    assert "helper" not in r.stderr
+    assert not (e2 / "registry").exists()
+
     # Plain-HTTP is refused outright — it is plaintext transport and
     # its effective proxy chain cannot be trusted for a private push.
     ht = tmp_path / "httppush"

@@ -272,8 +272,13 @@ def _redact(url: str) -> str:
     url = re.sub(r"://[^/@\s]*@", "://***@", url, count=1)
     url = re.sub(r"^[^@\s:]+@", "***@", url, count=1)
     url = url.split("?", 1)[0].split("#", 1)[0]
-    # An opaque helper destination ('ext::cmd --token=… %S') is not a
-    # URL — its arguments can carry credentials, so do not echo them.
+    # A '<transport>::<address>' remote-helper destination embeds an
+    # opaque helper address — credentials may be inside it with or
+    # without space-separated arguments, so never echo the address.
+    m = re.match(r"^([a-zA-Z][a-zA-Z0-9+.-]*)::(?!/)", url)
+    if m:
+        return f"{m.group(1)}::***"
+    # A space-bearing non-URL string is opaque too — drop its arguments.
     return url.split(" ", 1)[0]
 
 
