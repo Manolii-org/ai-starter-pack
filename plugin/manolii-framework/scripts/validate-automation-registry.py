@@ -193,7 +193,12 @@ def _workflow_trigger_ok(spec: dict, trigger: dict) -> str | None:
         sched = on.get("schedule")
         if not isinstance(sched, list) or not sched:
             return "workflow has no on.schedule entries"
-        crons = [str(s.get("cron")) for s in sched if isinstance(s, dict)]
+        # reject the WHOLE list on a malformed member — `[{cron: '0 2 * * *'},
+        # false]` is a schedule GitHub cannot load, not "just the cron entry"
+        if any(not isinstance(s, dict) or not isinstance(s.get("cron"), str)
+               for s in sched):
+            return "on.schedule contains a malformed entry"
+        crons = [s["cron"] for s in sched]
         want = str(trigger.get("cron", ""))
         if want and want not in crons:
             return f"registered cron {want!r} not in on.schedule {crons!r}"
@@ -265,12 +270,20 @@ def _step_ok(step) -> bool:
             or isinstance(uses, str) and bool(uses.strip()))
 
 
-def _repo_dir(args: argparse.Namespace, repo: str) -> Path:
+def _repo_dir(args: argparse.Namespace, repo: str) -> Path | None:
     """`OrgA/api` and `OrgB/api` must not share one flat checkout — when the
     registry repeats a basename, require the owner-qualified
     `<repos-dir>/<owner>/<name>` layout. Otherwise prefer it when present,
-    falling back to the flat `<repos-dir>/<name>` convention."""
-    name = repo.split("/")[-1]
+    falling back to the flat `<repos-dir>/<name>` convention.
+
+    Returns None when `repo` isn't exactly `owner/name` — an absolute or
+    `..`-bearing identifier would escape repos_dir and turn an unrelated
+    checkout into the trusted containment base."""
+    parts = repo.split("/")
+    if (len(parts) != 2 or not all(parts)
+            or any(p in (".", "..") for p in parts)):
+        return None
+    name = parts[1]
     if name in getattr(args, "_dup_basenames", ()):
         return Path(args.repos_dir) / repo
     owner_dir = Path(args.repos_dir) / repo
@@ -284,12 +297,14 @@ def check_workflow_files(doc: dict, args: argparse.Namespace, errors: list[str])
     if not isinstance(automations, list):
         return  # structural errors already recorded by validate()
     # basename collisions (OrgA/api + OrgB/api) force owner-qualified
-    # checkout paths — a shared flat dir would verify the wrong repo
+    # checkout paths — a shared flat dir would verify the wrong repo.
+    # Count DISTINCT repo slugs: two automations on the same repository
+    # must not mark its basename as a collision.
     base_count: dict[str, int] = {}
-    for a in automations:
-        if isinstance(a, dict) and isinstance(a.get("repo"), str):
-            b = a["repo"].split("/")[-1]
-            base_count[b] = base_count.get(b, 0) + 1
+    for slug in {a["repo"] for a in automations
+                 if isinstance(a, dict) and isinstance(a.get("repo"), str)}:
+        b = slug.split("/")[-1]
+        base_count[b] = base_count.get(b, 0) + 1
     args._dup_basenames = {b for b, n in base_count.items() if n > 1}
     for auto in automations:
         if not isinstance(auto, dict):
@@ -305,6 +320,9 @@ def check_workflow_files(doc: dict, args: argparse.Namespace, errors: list[str])
         text = None
         if args.mode == "local":
             repo_dir = _repo_dir(args, repo)
+            if repo_dir is None:
+                fail(f"{name}: repo '{repo}' is not a valid owner/name slug", errors)
+                continue
             # keep the path inside THIS checkout — an absolute workflow or
             # one with `..`/`/` traversal would verify a sibling repo's file
             base = repo_dir.resolve()

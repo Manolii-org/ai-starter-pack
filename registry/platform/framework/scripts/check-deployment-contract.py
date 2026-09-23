@@ -156,6 +156,8 @@ def fetch_workflow(repo: str, wf_path: str, branch: str,
     """Return (yaml_text, error) for the workflow file ON THE LANE'S BRANCH."""
     if args.mode == "local":
         repo_dir = _repo_dir(args, repo)
+        if repo_dir is None:
+            return None, f"'{repo}' is not a valid owner/name repository slug"
         # origin/<branch> is authoritative: once it resolves, the lane is judged
         # by that ref ALONE — a divergent local branch can't paper over a remote
         # lane that lacks the workflow.
@@ -201,12 +203,20 @@ def fetch_workflow(repo: str, wf_path: str, branch: str,
         return None, f"undecodable workflow content: {exc}"
 
 
-def _repo_dir(args: argparse.Namespace, repo: str) -> Path:
+def _repo_dir(args: argparse.Namespace, repo: str) -> Path | None:
     """`OrgA/api` and `OrgB/api` must not share one flat checkout — when the
     contract repeats a basename, require the owner-qualified
     `<repos-dir>/<owner>/<name>` layout. Otherwise prefer it when present,
-    falling back to the flat `<repos-dir>/<name>` convention."""
-    name = repo.split("/")[-1]
+    falling back to the flat `<repos-dir>/<name>` convention.
+
+    Returns None when `repo` isn't exactly `owner/name` — an absolute or
+    `..`-bearing identifier would escape repos_dir and turn an unrelated
+    checkout into the trusted containment base."""
+    parts = repo.split("/")
+    if (len(parts) != 2 or not all(parts)
+            or any(p in (".", "..") for p in parts)):
+        return None
+    name = parts[1]
     if name in getattr(args, "_dup_basenames", ()):
         return Path(args.repos_dir) / repo
     owner_dir = Path(args.repos_dir) / repo
@@ -320,8 +330,11 @@ def workflow_triggers_branch(spec: dict, branch: str) -> bool:
         if event == "push" and has_tag_filter and not has_branch_filter:
             continue
         branches = _as_patterns(ev.get("branches"))
-        ignore = _as_patterns(ev.get("branches-ignore")
-                              or ev.get("branches_ignore"))
+        # key-presence, not truthiness — `branches-ignore: false` must reach
+        # _as_patterns and be rejected, not `or`-swallowed into "unfiltered"
+        ignore_val = (ev["branches-ignore"] if "branches-ignore" in ev
+                      else ev.get("branches_ignore"))
+        ignore = _as_patterns(ignore_val)
         # A non-string/non-list filter (`branches-ignore: true`) is an invalid
         # event config — it can never run, so report drift rather than crash
         # on iteration or mistake it for "unfiltered".
@@ -535,11 +548,13 @@ def main() -> int:
 
     # basename collisions (OrgA/api + OrgB/api) force owner-qualified
     # checkout paths — a shared flat dir would verify the wrong repo
+    # count DISTINCT repo slugs — the same repo listed twice must not mark
+    # its basename as a collision
     base_count: dict[str, int] = {}
-    for r in doc["repos"]:
-        if isinstance(r.get("repo"), str):
-            b = r["repo"].split("/")[-1]
-            base_count[b] = base_count.get(b, 0) + 1
+    for slug in {r["repo"] for r in doc["repos"]
+                 if isinstance(r.get("repo"), str)}:
+        b = slug.split("/")[-1]
+        base_count[b] = base_count.get(b, 0) + 1
     args._dup_basenames = {b for b, n in base_count.items() if n > 1}
 
     for r in doc["repos"]:
