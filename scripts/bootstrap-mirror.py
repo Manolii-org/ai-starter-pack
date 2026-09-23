@@ -262,8 +262,10 @@ def _slug_of(url: str) -> str | None:
     return m.group(1).lower() if m else None
 
 
-def _push_targets_ok(root: Path, slug: str) -> bool:
-    """Every effective PUSH destination must resolve to the verified slug.
+def _push_targets_ok(root: Path, slug: str) -> str | None:
+    """None when every effective PUSH destination resolves to the verified
+    slug; otherwise a short description of the config that would redirect
+    the push, for the refusal diagnostic.
     `git push` honours remote.origin.pushurl and the
     url.<base>.insteadOf / url.<base>.pushInsteadOf rewrites — any of
     them can redirect the seeded universe content to a different,
@@ -336,14 +338,15 @@ def _push_targets_ok(root: Path, slug: str) -> bool:
         # which can forward the pack anywhere — the configured URL is no
         # longer evidence of the real destination.
         if _cfg(f"remote.{remote}.vcs"):
-            return False
+            return (f"remote.{remote}.vcs delegates the push transport "
+                    f"to git-remote-{_cfg(f'remote.{remote}.vcs')}")
         try:
             r = subprocess.run(
                 ["git", "-C", str(root), "remote", "get-url", "--push",
                  "--all", remote],
                 capture_output=True, text=True, timeout=10)
         except (OSError, subprocess.TimeoutExpired):
-            return False
+            return f"could not resolve push URLs for remote '{remote}'"
         urls = [ln.strip() for ln in r.stdout.splitlines() if ln.strip()] \
             if r.returncode == 0 else []
     else:
@@ -355,7 +358,7 @@ def _push_targets_ok(root: Path, slug: str) -> bool:
             eff = _rewrite(remote, _rules("insteadof"))
         urls = [eff]
     if not urls:
-        return False
+        return f"could not resolve push URLs for '{remote}'"
     for url in urls:
         if _slug_of(url) == slug:
             continue
@@ -366,8 +369,8 @@ def _push_targets_ok(root: Path, slug: str) -> bool:
         if not (url.startswith(proxy)
                 and _slug_of("https://github.com/" + url[len(proxy):])
                 == slug):
-            return False
-    return True
+            return (f"push destination '{remote}' resolves to '{url}'")
+    return None
 
 
 def check_visibility(slug: str) -> str | None:
@@ -594,14 +597,15 @@ def main() -> int:
             f"under {expected_owner}, but origin is '{origin}'\n")
         return 2
 
-    # Pushes must land on the verified repo too — a pushurl or
-    # pushInsteadOf rewrite can redirect `git push` to a different
-    # (possibly public) repo than the fetch url we just bound.
-    if not _push_targets_ok(root, slug):
+    # Pushes must land on the verified repo too — pushurl, push
+    # remote/default overrides, URL rewrites, or a vcs transport helper
+    # can redirect `git push` to a different (possibly public) repo
+    # than the fetch url we just bound.
+    why = _push_targets_ok(root, slug)
+    if why is not None:
         sys.stderr.write(
-            "FAIL: a remote.origin.pushurl or url.*.pushInsteadOf rule "
-            f"redirects `git push` away from '{slug}' — the seeded "
-            "universe content could land in a different repo; refusing\n")
+            f"FAIL: {why} — the seeded universe content could land in "
+            f"a repo other than '{slug}'; refusing\n")
         return 2
 
     vis = check_visibility(slug)

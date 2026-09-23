@@ -2074,7 +2074,7 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
            capture_output=True)
     r = run(pu, _bootstrap_env(tmp_path))
     assert r.returncode == 2, r.stderr
-    assert "redirect" in r.stderr
+    assert "public-repo" in r.stderr
     assert not (pu / "registry").exists()
 
     # A pushInsteadOf rewrite doing the same redirect → refuse.
@@ -2088,7 +2088,7 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
             "https://github.com/"], cwd=pi, capture_output=True)
     r = run(pi, _bootstrap_env(tmp_path))
     assert r.returncode == 2, r.stderr
-    assert "redirect" in r.stderr
+    assert "gitlab.com" in r.stderr
     assert not (pi / "registry").exists()
 
     # insteadOf rewrites pushes too when no pushInsteadOf rule exists —
@@ -2104,7 +2104,7 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
             "https://github.com/"], cwd=io, capture_output=True)
     r = run(io, _bootstrap_env(tmp_path))
     assert r.returncode == 2, r.stderr
-    assert "redirect" in r.stderr
+    assert "gitlab.com" in r.stderr
     assert not (io / "registry").exists()
 
     # insteadOf still applies to an EXPLICIT pushurl (only pushInsteadOf
@@ -2123,7 +2123,7 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
             "https://github.com/"], cwd=pio, capture_output=True)
     r = run(pio, _bootstrap_env(tmp_path))
     assert r.returncode == 2, r.stderr
-    assert "redirect" in r.stderr
+    assert "gitlab.com" in r.stderr
     assert not (pio / "registry").exists()
 
     # remote.pushDefault pointing at a second remote whose slug differs —
@@ -2141,7 +2141,7 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
            capture_output=True)
     r = run(pd, _bootstrap_env(tmp_path))
     assert r.returncode == 2, r.stderr
-    assert "redirect" in r.stderr
+    assert "public-repo" in r.stderr
     assert not (pd / "registry").exists()
 
     # branch.<name>.pushRemote has the highest precedence — same
@@ -2161,7 +2161,7 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
            capture_output=True)
     r = run(pr, _bootstrap_env(tmp_path))
     assert r.returncode == 2, r.stderr
-    assert "redirect" in r.stderr
+    assert "public-repo" in r.stderr
     assert not (pr / "registry").exists()
 
     # A push destination may be a literal URL, not a remote name —
@@ -2177,7 +2177,7 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
            capture_output=True)
     r = run(pv, _bootstrap_env(tmp_path))
     assert r.returncode == 2, r.stderr
-    assert "redirect" in r.stderr
+    assert "public-repo" in r.stderr
     assert not (pv / "registry").exists()
 
     # When NO pushInsteadOf rule matches the URL destination, git falls
@@ -2200,7 +2200,7 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
             "https://github.com/"], cwd=pf, capture_output=True)
     r = run(pf, _bootstrap_env(tmp_path))
     assert r.returncode == 2, r.stderr
-    assert "redirect" in r.stderr
+    assert "gitlab.com" in r.stderr
     assert not (pf / "registry").exists()
 
     # remote.<name>.vcs delegates pushes to a git-remote-<vcs> helper
@@ -2216,7 +2216,7 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
            capture_output=True)
     r = run(vc, _bootstrap_env(tmp_path))
     assert r.returncode == 2, r.stderr
-    assert "redirect" in r.stderr
+    assert "vcs" in r.stderr
     assert not (vc / "registry").exists()
 
     # A non-GitHub origin that parses to a valid-looking slug — gh would
