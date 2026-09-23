@@ -98,6 +98,29 @@ ALLOWLIST_PATH = REGISTRY / "leak-allowlist.txt"
 DETECTOR_DATA = {TOKEN_SHAPES_REL}
 SECRETS_ALLOWLIST_PATH = REGISTRY / "secrets-allowlist.txt"
 
+# PACK-SURFACE: this whole repo is PUBLIC — private-repo slugs and
+# infrastructure identifiers anywhere in it are recon surface even when
+# harmless. Org names are NOT flagged here: Manolii is the publisher and
+# the other universe names are already public scope contracts. Per-line
+# ratchet (same path#sha8 format) grandfathers today's references.
+PACK_SURFACE_ALLOWLIST = REGISTRY / "pack-surface-allowlist.txt"
+# VCS/vendor/cache dirs skipped; `releases/` deliberately NOT skipped —
+# frozen snapshots published into the public repo are exposure too.
+PACK_SKIP_DIRS = {".git", "registry", "node_modules", "__pycache__",
+                  "venv", ".venv", "dist", "build", ".next",
+                  ".ruff_cache", ".pytest_cache", ".brand"}
+PACK_SURFACE_EXEMPT = {"scripts/registry-lint.py", "tests/test_registry.py"}
+PACK_SURFACE_PATTERNS = [
+    r"Manolii-org/(?!ai-starter-pack\b)[A-Za-z0-9_.-]+",
+    r"Buro-Built/[A-Za-z0-9_.-]+",
+    r"Impaktful-Platform/[A-Za-z0-9_.-]+",
+    r"CPDcheck-[A-Za-z0-9_.-]+",
+    r"prj_[A-Za-z0-9]{15,}",
+    r"db\.[a-z0-9]+\.supabase\.co",
+    r"ep-[a-z0-9-]+\.[a-z0-9.-]*neon\.tech",
+    r"\b[a-z0-9-]+\.internal\b",
+]
+
 SCOPE_SCHEMA_PATH = REPO / "schemas" / "registry-scope.schema.json"
 try:
     SCOPE_SCHEMA = json.loads(SCOPE_SCHEMA_PATH.read_text()) if jsonschema else None
@@ -392,9 +415,22 @@ def scan_text_lines(path: Path) -> list[str]:
     become the real value when a consumer parses the document, so the raw
     text must not be the only form the scans see."""
     raw = path.read_bytes()
-    text = raw.decode("utf-8", errors="ignore")
-    if b"\x00" in raw:
-        text += "\n" + raw.replace(b"\x00", b"").decode("utf-8", errors="ignore")
+    # Decode the file's ACTUAL encoding for structured parsing — a UTF-16/32
+    # JSON document must parse as JSON (an escaped credential inside it is
+    # reconstructed by the consumer's parser). BOM is definitive; BOM-less
+    # UTF-16/32 keeps the NUL-stripped appendix for line coverage AND as the
+    # structured-parse candidate.
+    enc = "utf-8"
+    if raw[:4] in (b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff"):
+        enc = "utf-32"
+    elif raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        enc = "utf-16"
+    text = raw.decode(enc, errors="ignore")
+    parsable = text
+    if enc == "utf-8" and b"\x00" in raw:
+        stripped = raw.replace(b"\x00", b"").decode("utf-8", errors="ignore")
+        text += "\n" + stripped
+        parsable = stripped
     lines = text.splitlines()
     # Source-language escape pass: \\xNN / \\uXXXX in .py/.js/.ts/.sh/... is
     # decoded by the consumer's runtime, so scan the decoded form too.
@@ -410,7 +446,7 @@ def scan_text_lines(path: Path) -> list[str]:
     docs = []
     if path.suffix == ".json":
         try:
-            doc = json.loads(text)
+            doc = json.loads(parsable)
         except json.JSONDecodeError:
             doc = None
         if doc is not None:
@@ -420,14 +456,14 @@ def scan_text_lines(path: Path) -> list[str]:
         # token: "ghp_\u0041..." value is a credential once PyYAML reads it
         # while invisible to the raw text scan.
         try:
-            docs = [d for d in yaml.safe_load_all(text)]
+            docs = [d for d in yaml.safe_load_all(parsable)]
         except yaml.YAMLError:
             docs = []
     elif path.suffix == ".toml" and tomllib is not None:
         # TOML basic strings decode \uXXXX the same way — token = "ghp_\u0041"
         # is a credential once a TOML consumer parses it.
         try:
-            docs = [tomllib.loads(text)]
+            docs = [tomllib.loads(parsable)]
         except tomllib.TOMLDecodeError:
             docs = []
     for doc in docs:
@@ -492,11 +528,14 @@ def check_org_leak() -> None:
                 fails += 1
             if re.search(r"\bkl_", line):
                 warns += 1
+    # Stale entries FAIL, not warn — a grandfathered line hash is reusable:
+    # reintroducing the identical leaked line at the same path is silently
+    # allowlisted while the stale entry sits. Burn-down must be enforced.
     for stale in sorted(allow - used):
         if (REGISTRY / stale.rsplit("#", 1)[0]).exists():
-            report("WARN", "ORG-LEAK", f"allowlist line clean now — remove it: {stale}")
+            report("FAIL", "ORG-LEAK", f"allowlist line clean now — remove it: {stale}")
         else:
-            report("WARN", "ORG-LEAK", f"stale allowlist entry — remove it: {stale}")
+            report("FAIL", "ORG-LEAK", f"stale allowlist entry — remove it: {stale}")
     if warns:
         report("WARN", "ORG-LEAK", f"kl_* (opt-in remote memory) referenced in {warns} lines — allowed when gated")
     if fails:
@@ -657,7 +696,102 @@ def org_leak_lines() -> list[str]:
     return sorted(out)
 
 
+def pack_surface_hits() -> list[str]:
+    """Every current PACK-SURFACE line-key (for --write-pack-allowlist)."""
+    out = []
+    pats = [re.compile(p) for p in PACK_SURFACE_PATTERNS]
+    for path in sorted(REPO.rglob("*")):
+        if not path.is_file():
+            continue
+        parts = path.relative_to(REPO).parts
+        if any(p in PACK_SKIP_DIRS for p in parts):
+            continue
+        rel_s = path.relative_to(REPO).as_posix()
+        if rel_s in PACK_SURFACE_EXEMPT:
+            continue
+        try:
+            lines = scan_text_lines(path)
+        except OSError:
+            continue
+        for i, line in enumerate(lines, 1):
+            if any(p.search(line) for p in pats):
+                out.append(line_key(rel_s, line))
+    return sorted(set(out))
+
+
+def check_pack_surface() -> None:
+    """No private-repo slugs or infra identifiers outside registry/.
+    registry/ itself is covered by ORG-LEAK; credentials by SECRETS and
+    Detect Secrets — this is the remaining public-repo gap."""
+    fails = 0
+    allow = load_line_allowlist(PACK_SURFACE_ALLOWLIST)
+    pats = [re.compile(p) for p in PACK_SURFACE_PATTERNS]
+    for path in sorted(REPO.rglob("*")):
+        if not path.is_file():
+            continue
+        parts = path.relative_to(REPO).parts
+        if any(p in PACK_SKIP_DIRS for p in parts):
+            continue
+        rel_s = path.relative_to(REPO).as_posix()
+        if rel_s in PACK_SURFACE_EXEMPT:
+            continue
+        try:
+            lines = scan_text_lines(path)
+        except OSError:
+            continue
+        for i, line in enumerate(lines, 1):
+            if (any(p.search(line) for p in pats)
+                    and line_key(rel_s, line) not in allow):
+                report("FAIL", "PACK-SURFACE",
+                       f"{rel_s}:{i} — private slug/infra id in public repo")
+                fails += 1
+    # Stale entries are reusable exemptions — FAIL them (same contract
+    # as ORG-LEAK's ratchet).
+    for stale in sorted(set(allow) - set(pack_surface_hits())):
+        report("FAIL", "PACK-SURFACE",
+               f"stale allowlist entry — remove it: {stale}")
+    if not fails:
+        report("PASS", "PACK-SURFACE",
+               "no private slugs/infra ids outside registry/")
+
+
+def check_public_boundary() -> None:
+    """This registry is PUBLIC — universe scopes never land here; they live
+    in per-org private mirrors (a mirror carries registry/.private-mirror to
+    opt out of this guard). repo/personal scopes live inside consumer
+    repos and never sync upstream either. The scope.yaml CONTRACTS scaffold
+    here is public-safe metadata; anything beyond it is content."""
+    if (REGISTRY / ".private-mirror").is_file():
+        report("PASS", "PUBLIC", "private mirror marker present — boundary waived")
+        return
+    fails = 0
+    for scope in UNIVERSES + LOCAL_SCOPES:
+        sdir = REGISTRY / scope
+        if not sdir.is_dir():
+            continue
+        for child in sorted(sdir.iterdir()):
+            if child.name == "scope.yaml" and child.is_file():
+                continue
+            report("FAIL", "PUBLIC",
+                   f"{scope}/{child.name} in the public registry — {scope} "
+                   "content lives in its private mirror or in consumer "
+                   "repos; only scope.yaml may scaffold here")
+            fails += 1
+    if not fails:
+        report("PASS", "PUBLIC",
+               "universe/local scopes hold contracts only (scope.yaml)")
+
+
 def main() -> int:
+    if "--write-pack-allowlist" in sys.argv:
+        PACK_SURFACE_ALLOWLIST.write_text(
+            "# Per-line ratchet allowlist — `path#sha8(stripped-line)` entries\n"
+            "# grandfathered for the PACK-SURFACE scan (private slugs/infra ids).\n"
+            "# New hits FAIL. Regenerate:\n"
+            "#   python3 scripts/registry-lint.py --write-pack-allowlist\n"
+            + "\n".join(pack_surface_hits()) + "\n")
+        print(f"wrote {PACK_SURFACE_ALLOWLIST.relative_to(REPO)}")
+        return 0
     if "--write-allowlist" in sys.argv:
         lines = org_leak_lines()
         ALLOWLIST_PATH.write_text(
@@ -672,7 +806,8 @@ def main() -> int:
         sys.stderr.write(f"FAIL: {REGISTRY} missing\n")
         return 1
     for fn in (check_index, check_manifests, check_scopes, check_org_leak,
-               check_secrets, check_skills, check_xscope):
+               check_secrets, check_skills, check_xscope,
+               check_pack_surface, check_public_boundary):
         fn()
     fails = sum(1 for f in results if f.status == "FAIL")
     warns = sum(1 for f in results if f.status == "WARN")

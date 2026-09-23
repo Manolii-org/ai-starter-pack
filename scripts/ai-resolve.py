@@ -375,6 +375,37 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                 "pin inputs)",
             ))
             return
+        # porcelain is blind to skip-worktree / assume-unchanged edits —
+        # the catalog is a resolution input, so verify the worktree copy
+        # byte-for-byte against the pinned object before trusting `index`.
+        cat = subprocess.run(
+            ["git", "-C", str(registry_root), "show", "HEAD:./plugins.json"],
+            capture_output=True, timeout=10)
+        if cat.returncode != 0:
+            plan.conflicts.append((
+                repo_root / req,
+                f"pinned ref '{ref}' cannot verify the plugin catalog — "
+                "git show HEAD:./plugins.json failed; refusing to resolve "
+                "an index the pin cannot vouch for",
+            ))
+            return
+        try:
+            live_catalog = (registry_root / "plugins.json").read_bytes()
+        except OSError:
+            plan.conflicts.append((
+                repo_root / req,
+                f"pinned ref '{ref}': registry/plugins.json unreadable",
+            ))
+            return
+        if cat.stdout != live_catalog:
+            plan.conflicts.append((
+                repo_root / req,
+                f"pinned ref '{ref}': registry/plugins.json differs from "
+                "the pinned object (skip-worktree/assume-unchanged hides "
+                "worktree edits from git status) — refusing to install a "
+                "catalog the pin never published",
+            ))
+            return
     else:
         body = ref[1:] if ref.startswith("^") else ref
         if not SEMVER_REF.fullmatch(body):

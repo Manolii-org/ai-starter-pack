@@ -1,41 +1,13 @@
 name: registry-lint
 
 on:
+  # Every path — this repo is PUBLIC and PACK-SURFACE scans the whole tree
+  # for private slugs/infra ids; a leak in any file must trigger the gate.
   pull_request:
-    paths:
-      - 'registry/**'
-      - 'scripts/**'
-      - '.claude/**'
-      - 'plugin-sources/**'
-      - 'plugin/**'
-      - 'telemetry/**'
-      - '.ai/**'
-      - 'pack.manifest.yml'
-      - 'schemas/ai-manifest.schema.json'
-      - 'schemas/registry-scope.schema.json'
-      - '.claude-plugin/marketplace.json'
-      - '.devin-plugin/**'
-      - 'ai-manifest.yaml'
-      - 'copier.yml'
-      - 'docs/registry.md'
-      - 'tests/test_registry.py'
-      - '.github/workflows/registry-lint.yml'
+    paths: ['**']
   push:
     branches: [main]
-    paths:
-      - 'registry/**'
-      - 'scripts/**'
-      - '.claude/**'
-      - 'plugin-sources/**'
-      - 'plugin/**'
-      - 'telemetry/**'
-      - '.ai/**'
-      - 'pack.manifest.yml'
-      - 'copier.yml'
-      - 'schemas/ai-manifest.schema.json'
-      - 'schemas/registry-scope.schema.json'
-      - '.claude-plugin/marketplace.json'
-      - '.devin-plugin/**'
+    paths: ['**']
 
 permissions:
   contents: read

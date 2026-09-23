@@ -63,6 +63,16 @@ Codex and Cursor do not emit that host event; do not invent one.
 - Skipping git hooks (`--no-verify`)
 - Modifying CI/CD workflows (`.github/workflows/`, `.gitlab-ci.yml`) without explicit human review
 
+**This repository is PUBLIC** — enforced by `registry-lint.py` (CI):
+- Content under `registry/<universe>/`, `registry/repo/`, or
+  `registry/personal/` beyond `scope.yaml` (universe content lives in
+  per-org private mirrors; see docs/registry.md § Public-repo boundary)
+- Private-repo slugs or infrastructure identifiers anywhere in the repo
+  (PACK-SURFACE check; ratchet allowlist `registry/pack-surface-allowlist.txt`)
+- Customer data, internal URLs/hostnames, or credentials anywhere — ever.
+  Committing to this repo publishes to the world permanently, history
+  included.
+
 ### Database Rules
 - No direct production database access without explicit approval
 - All queries must be parameterized (no string interpolation)

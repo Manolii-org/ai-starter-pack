@@ -31,6 +31,33 @@ Privacy is structural, not procedural — three enforcement layers:
    On Devin, org-scope `forbiddenPlugins` globs (deny-wins across scopes)
    provide the same isolation natively.
 
+## Public-repo boundary (hard rule)
+
+**ai-starter-pack is public.** Its `registry/` tree therefore holds
+**platform scope only, plus every scope's `scope.yaml` contract** — the
+contracts are public-safe metadata (visibility, ip_owner, promotion
+policy). Nothing else may land under a non-platform scope here:
+
+- `registry/<universe>/` content lives in a **per-org private mirror**
+  (e.g. the Buro universe's own capability-registry repo under its GitHub
+  org). A mirror carries an empty `registry/.private-mirror` marker file;
+  `registry-lint`'s PUBLIC check waives the boundary there. Mirror
+  consumers point `ai-resolve.py` at the mirror checkout — the resolver
+  needs no flag; scope semantics are identical.
+- `registry/repo/` and `registry/personal/` content lives inside each
+  consumer repo (or the user's home checkout) and never syncs upstream.
+- The PUBLIC check fails the lint on any non-`scope.yaml` file under a
+  universe/local scope in this repo — the boundary is enforced, not
+  documented.
+
+Separately, `PACK-SURFACE` fails on private-repo slugs (other repos in
+this org, and any other org's repos) and infra identifiers (Vercel
+project ids, `*.supabase.co`, `*.neon.tech`, `*.internal`) anywhere in
+the repo outside `registry/`. Today's references are ratchet-frozen in
+`registry/pack-surface-allowlist.txt` — new hits FAIL; regenerate with
+`python3 scripts/registry-lint.py --write-pack-allowlist` when scrubbing
+one down.
+
 ## Authoring a plugin
 
 ```

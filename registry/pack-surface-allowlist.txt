@@ -1,0 +1,21 @@
+# Per-line ratchet allowlist — `path#sha8(stripped-line)` entries
+# grandfathered for the PACK-SURFACE scan (private slugs/infra ids).
+# New hits FAIL. Regenerate:
+#   python3 scripts/registry-lint.py --write-pack-allowlist
+docs/feature-train.md#a74f052b
+litellm-product/README.md#bfee1649
+litellm-product/releases/0.4.2/release.json#faaa4f00
+litellm-product/releases/0.4.2/source/config/litellm-product-contract.json#66393959
+litellm-product/releases/0.4.3/release.json#faaa4f00
+litellm-product/releases/0.4.3/source/config/litellm-product-contract.json#66393959
+plugin/manolii-framework/scripts/build-litellm-product-asset.py#1ee9c293
+prompts/05-promotion-reusables.md#0d9a76ca
+prompts/05-promotion-reusables.md#0fddf364
+prompts/05-promotion-reusables.md#764b9894
+prompts/05-promotion-reusables.md#8327aad6
+prompts/05-promotion-reusables.md#bad8f0e3
+prompts/05-promotion-reusables.md#d6979e0b
+scripts/build-litellm-product-asset.py#1ee9c293
+scripts/build-plugin.py#38d63ec8
+tests/test_autofix_reusable_yaml.py#ab0e4575
+tests/test_run_judge_review_lookup.py#b3e54a7c

@@ -1616,6 +1616,131 @@ def test_xscope_dot_segment_path_fails(tmp_path):
     assert len(fails) >= 2
 
 
+def test_secrets_utf16_json_escaped_credential_fails(tmp_path):
+    """A UTF-16 JSON file carrying 'ghp_\\u0041...' must trip SECRETS —
+    the structured decode must run on the detected encoding, not on the
+    garbled utf-8 read (which fails json.loads and skips decoded values)."""
+    doc = '{"k": "ghp_\\u0041AAAAAAAAAAAAAAAAAAA"}'
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [(
+            "data/encoded.json", doc)],
+    })
+    f = reg_root / "registry/platform/framework/data/encoded.json"
+    f.write_bytes(b"\xff\xfe" + doc.encode("utf-16-le"))
+    mod = load_lint_module()
+    mod.REGISTRY = reg_root / "registry"
+    mod.results = []
+    mod.check_secrets()
+    fails = [f for f in mod.results
+             if f.check == "SECRETS" and f.status == "FAIL"]
+    assert any("encoded.json" in f.detail for f in fails), \
+        "UTF-16 JSON escaped credential not flagged"
+
+
+def test_stale_org_allowlist_entry_fails(tmp_path):
+    """A grandfathered line that no longer matches is a REUSABLE exemption —
+    reintroducing the identical leaked line would silently pass. Stale
+    entries must FAIL, not warn."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "clean")],
+    })
+    reg = reg_root / "registry"
+    (reg / "leak-allowlist.txt").write_text(
+        "platform/framework/skills/demo/x.md#deadbeef\n")
+    mod = load_lint_module()
+    mod.REGISTRY = reg
+    mod.results = []
+    mod.check_org_leak()
+    fails = [f for f in mod.results
+             if f.check == "ORG-LEAK" and f.status == "FAIL"]
+    assert any("deadbeef" in f.detail or "stale" in f.detail
+               for f in fails), "stale allowlist entry did not FAIL"
+
+
+def test_public_boundary_universe_content_fails(tmp_path):
+    """registry/<universe>/ content beyond scope.yaml is banned in the
+    public repo — universe plugins live in private mirrors."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "x")],
+        "manolii/secret-thing": [("skills/x/SKILL.md",
+                                  "---\nname: x\ndescription: y\n---\n")],
+    })
+    (reg_root / "registry/manolii/scope.yaml").write_text("scope: manolii\n")
+    mod = load_lint_module()
+    mod.REGISTRY = reg_root / "registry"
+    mod.results = []
+    mod.check_public_boundary()
+    fails = [f for f in mod.results if f.status == "FAIL"]
+    assert any("manolii/" in f.detail for f in fails)
+
+
+def test_public_boundary_scope_yaml_only_passes(tmp_path):
+    """The universe scope.yaml CONTRACT is public-safe scaffold — it must
+    not trip the boundary."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "x")],
+    })
+    (reg_root / "registry/manolii").mkdir(exist_ok=True)
+    (reg_root / "registry/manolii/scope.yaml").write_text("scope: manolii\n")
+    mod = load_lint_module()
+    mod.REGISTRY = reg_root / "registry"
+    mod.results = []
+    mod.check_public_boundary()
+    assert not [f for f in mod.results if f.status == "FAIL"]
+
+
+def test_public_boundary_private_mirror_marker_waives(tmp_path):
+    """registry/.private-mirror marks a private mirror — the boundary is
+    waived there (universe content is legal in its own org's mirror)."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "x")],
+        "manolii/secret-thing": [("skills/x/SKILL.md",
+                                  "---\nname: x\ndescription: y\n---\n")],
+    })
+    (reg_root / "registry/.private-mirror").write_text("")
+    mod = load_lint_module()
+    mod.REGISTRY = reg_root / "registry"
+    mod.results = []
+    mod.check_public_boundary()
+    assert not [f for f in mod.results if f.status == "FAIL"]
+
+
+def test_pack_surface_private_slug_fails(tmp_path):
+    """A private-repo slug outside registry/ is recon surface in a public
+    repo — PACK-SURFACE fails on it."""
+    repo = tmp_path / "pack"
+    repo.mkdir()
+    (repo / "registry").mkdir()
+    (repo / "docs").mkdir()
+    (repo / "docs/x.md").write_text("see Buro-Built/internal-repo here")
+    mod = load_lint_module()
+    mod.REPO = repo
+    mod.REGISTRY = repo / "registry"
+    mod.PACK_SURFACE_ALLOWLIST = repo / "registry" / "pack-surface-allowlist.txt"
+    mod.results = []
+    mod.check_pack_surface()
+    fails = [f for f in mod.results
+             if f.check == "PACK-SURFACE" and f.status == "FAIL"]
+    assert any("docs/x.md" in f.detail for f in fails)
+
+
+def test_pack_surface_self_repo_slug_ok(tmp_path):
+    """References to ai-starter-pack itself are legitimate — the repo may
+    name its own slug."""
+    repo = tmp_path / "pack"
+    repo.mkdir()
+    (repo / "registry").mkdir()
+    (repo / "README.md").write_text(
+        "install: copier copy gh:Manolii-org/ai-starter-pack .")
+    mod = load_lint_module()
+    mod.REPO = repo
+    mod.REGISTRY = repo / "registry"
+    mod.PACK_SURFACE_ALLOWLIST = repo / "registry" / "pack-surface-allowlist.txt"
+    mod.results = []
+    mod.check_pack_surface()
+    assert not [f for f in mod.results if f.status == "FAIL"]
+
+
 def test_missing_plugin_manifest_conflicts(tmp_path):
     """A plugin dir without .claude-plugin/plugin.json must conflict — a
     silent 0.0.0 default would let `ref: "0"` satisfy it."""
@@ -1947,3 +2072,34 @@ def test_xscope_scans_all_extensions(tmp_path):
     fails = [f for f in mod.results if f.check == "XSCOPE" and f.status == "FAIL"]
     assert any("manolii" in f.detail for f in fails)
     assert len(fails) >= 2
+
+
+def test_skip_worktree_modified_plugins_json_conflicts_under_pin(tmp_path):
+    """plugins.json edited under skip-worktree leaves git status clean —
+    but the catalog is a resolution input: a modified index could add a
+    plugin the pin never published. The resolver must byte-compare the
+    worktree catalog against `git show HEAD:./plugins.json`."""
+    import subprocess as sp
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "v1")],
+    })
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    sp.run(["git", "init", "-q"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "add", "-A"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "commit", "-qm", "init"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "tag", "v1.0.0"], cwd=reg_root, env=env, check=True)
+    rel = "registry/plugins.json"
+    sp.run(["git", "update-index", "--skip-worktree", rel],
+           cwd=reg_root, env=env, check=True)
+    idx = json.loads((reg_root / rel).read_text())
+    idx["plugins"].append({"scope": "platform", "name": "planted",
+                           "path": "registry/platform/planted"})
+    (reg_root / rel).write_text(json.dumps(idx))
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "tag:v1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 1
+    assert "plugins.json differs" in r.stdout
