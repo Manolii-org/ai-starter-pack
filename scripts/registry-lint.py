@@ -145,6 +145,15 @@ def check_index() -> None:
             report("FAIL", "INDEX",
                    f"{key}: path '{p.get('path')}' != '{expected}' — "
                    "the resolver would materialise a different plugin than named")
+    # Every registry-root dir is a scope — an undeclared dir (e.g.
+    # registry/acme/private/) is invisible to the scope loop and has
+    # scope_of() == None, so ORG-LEAK and XSCOPE skip it entirely. Fail
+    # closed on every directory not declared in ALL_SCOPES.
+    for child in REGISTRY.iterdir():
+        if child.is_dir() and child.name not in ALL_SCOPES:
+            report("FAIL", "INDEX",
+                   f"undeclared scope dir: {child.name}/ — every registry "
+                   "scope must be one of " + "/".join(ALL_SCOPES))
     # every plugin dir under a scope must be indexed
     for scope in ALL_SCOPES:
         sdir = REGISTRY / scope
@@ -446,8 +455,11 @@ def check_skills() -> None:
 
 def check_xscope() -> None:
     fails = 0
-    for path in REGISTRY.rglob("*"):
-        if not path.is_file() or path.suffix.lower() not in {".md", ".py", ".sh", ".json"}:
+    for path in sorted(REGISTRY.rglob("*")):
+        # Every regular file — no extension allowlist: hooks, scripts and
+        # other plugin assets are valid content and a .ts/.yaml/.toml or
+        # extensionless file can wire ../<scope>/ just as well as .md.
+        if not path.is_file():
             continue
         scope = scope_of(path)
         rel = path.relative_to(REGISTRY)
@@ -457,11 +469,16 @@ def check_xscope() -> None:
         is_manifest = rel.name == "plugin.json"
         if scope is None or (exempt(rel) and not is_manifest):
             continue
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        for other in ALL_SCOPES:
-            if other != scope and f"../{other}/" in text:
-                report("FAIL", "XSCOPE", f"{rel}: references ../{other}/")
-                fails += 1
+        try:
+            lines = scan_text_lines(path)
+        except OSError:
+            continue
+        for i, line in enumerate(lines, 1):
+            for other in ALL_SCOPES:
+                if other != scope and f"../{other}/" in line:
+                    report("FAIL", "XSCOPE", f"{rel}:{i} references ../{other}/")
+                    fails += 1
+                    break
     if not fails:
         report("PASS", "XSCOPE", "no cross-scope path references")
 

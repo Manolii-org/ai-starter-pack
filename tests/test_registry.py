@@ -1146,3 +1146,97 @@ def test_registry_lint_passes_on_repo():
     """The real registry in this repo passes its own gate."""
     r = subprocess.run([sys.executable, str(LINT)], capture_output=True, text=True)
     assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_component_ancestor_not_dir_conflicts(tmp_path):
+    """.claude/agents as a plain FILE (not a symlink) must be a plan-time
+    conflict — otherwise --apply copies earlier files then crashes at
+    mkdir, leaving them materialised without a lock."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [
+            ("skills/demo/SKILL.md", "---\nname: demo\ndescription: d\n---\nv1"),
+            ("agents/x.md", "agent"),
+        ],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    (consumer / ".claude").mkdir()
+    (consumer / ".claude" / "agents").write_text("a file, not a dir")
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 1
+    assert "is not a directory" in r.stdout
+    assert not (consumer / ".claude" / "skills" / "demo" / "SKILL.md").exists()
+
+
+def test_check_detects_missing_lock(tmp_path):
+    """Files matching the registry but no capability-lock.json → DRIFT,
+    not OK — ownership was never established."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "x")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    run_resolver(m, reg_root, consumer, "--apply")
+    (consumer / ".ai" / "capability-lock.json").unlink()
+    r = run_resolver(m, reg_root, consumer, "--check")
+    assert r.returncode == 1
+    assert "lock missing" in r.stdout
+
+
+def test_check_detects_stale_lock(tmp_path):
+    """A lock whose files map differs from what resolution produces →
+    DRIFT even though every file on disk matches."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "x")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    run_resolver(m, reg_root, consumer, "--apply")
+    lock_p = consumer / ".ai" / "capability-lock.json"
+    doc = json.loads(lock_p.read_text())
+    doc["files"][".claude/skills/demo/x.md"] = "0" * 64
+    lock_p.write_text(json.dumps(doc))
+    r = run_resolver(m, reg_root, consumer, "--check")
+    assert r.returncode == 1
+    assert "lock is stale" in r.stdout
+
+
+def test_undeclared_scope_dir_fails(tmp_path):
+    """A registry-root dir outside ALL_SCOPES is invisible to the scope
+    loop — its files escape ORG-LEAK and XSCOPE entirely. INDEX must fail."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "x")],
+    })
+    acme = reg_root / "registry" / "acme" / "private"
+    acme.mkdir(parents=True)
+    (acme / "s.md").write_text("manolii internal")
+    mod = load_lint_module()
+    mod.REGISTRY = reg_root / "registry"
+    mod.results = []
+    mod.check_index()
+    fails = [f for f in mod.results if f.check == "INDEX" and f.status == "FAIL"]
+    assert any("undeclared scope" in f.detail for f in fails)
+
+
+def test_xscope_scans_all_extensions(tmp_path):
+    """Cross-scope ../<scope>/ refs in non-md/py/sh/json files (hooks,
+    scripts, extensionless assets) must fail — no extension allowlist."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [
+            ("hooks/run", "#!/bin/sh\nexec ../manolii/private/hook.sh"),
+            ("data/config.yaml", "ref: ../manolii/x"),
+        ],
+    })
+    mod = load_lint_module()
+    mod.REGISTRY = reg_root / "registry"
+    mod.results = []
+    mod.check_xscope()
+    fails = [f for f in mod.results if f.check == "XSCOPE" and f.status == "FAIL"]
+    assert any("manolii" in f.detail for f in fails)
+    assert len(fails) >= 2

@@ -382,6 +382,25 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                     "through it (replace the link with a real directory)",
                 ))
                 continue
+            # Type-check ancestors too — .claude/agents as a plain FILE is
+            # not a symlink, passes the checks above, and dst.exists() is
+            # False for its children: --apply would copy every earlier file
+            # then crash at mkdir(), leaving them materialised without a
+            # lock. Reject non-directory ancestors at plan time.
+            file_ancestor = None
+            for anc in dst.parents:
+                if anc == repo_root:
+                    break
+                if anc.exists() and not anc.is_dir():
+                    file_ancestor = anc
+                    break
+            if file_ancestor is not None:
+                plan.conflicts.append((
+                    dst,
+                    f"destination ancestor {file_ancestor.relative_to(repo_root)} "
+                    "is not a directory — refusing to materialise through it",
+                ))
+                continue
             src_sha = hashlib.sha256(src_bytes).hexdigest()
             prior = plan.planned.get(rel_dst)
             if prior is not None:
@@ -605,7 +624,29 @@ def main() -> int:
 
     if args.check:
         drift = [d for _, d in plan.writes]
-        if drift or plan.removals:
+        # Verify the lock itself, not just file bytes — a consumer whose
+        # files match the registry but whose lock is missing or stale has
+        # no ownership record: CI would pass, then a later registry update
+        # reads the files as untracked hand edits and refuses to update.
+        # Expected doc mirrors exactly what --apply would write.
+        expected_files = {rel: digest for r in plan.resolved
+                          for rel, digest in r["files"].items()}
+        for f in plan.removals:
+            rel = f.relative_to(repo_root).as_posix()
+            expected_files[rel] = locked_dig[rel]
+        expected_resolved = [{k: v for k, v in r.items() if k != "files"}
+                             for r in plan.resolved]
+        lock_missing = not lock_file.is_file()
+        lock_stale = (
+            lock.get("files") != expected_files
+            or lock.get("resolved") != expected_resolved)
+        if drift or plan.removals or lock_missing or lock_stale:
+            if lock_missing:
+                print("\nDRIFT: capability lock missing — run --apply to "
+                      "establish ownership")
+            elif lock_stale:
+                print("\nDRIFT: capability lock is stale — run --apply to "
+                      "refresh ownership")
             print("\nDRIFT: materialised state differs from registry source")
             return 1
         print("\nOK: materialised state matches registry source")
