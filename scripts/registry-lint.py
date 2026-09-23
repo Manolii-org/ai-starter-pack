@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -865,17 +866,31 @@ def _origin_slug() -> str | None:
     return m.group(1).lower() if m else None
 
 
+def _mirror_visibility_asserted() -> bool:
+    """Mirror mode needs an externally-supplied visibility assertion —
+    MIRROR_VISIBILITY=private|internal set by the caller from an
+    out-of-repo check (CI runs `gh api repos/<repo> --jq .visibility`;
+    bootstrap-mirror.py sets it from its own verified result). A
+    checkout's own committed files can never prove its repo is private:
+    a public fork can carry both the marker and its own slug digest."""
+    return os.environ.get("MIRROR_VISIBILITY", "").strip().lower() in (
+        "private", "internal")
+
+
 def _verified_mirror_slug() -> str | None:
     """The origin slug when this checkout is a VERIFIED private mirror
     (marker present, origin resolvable, slug not canonical, slug digest
-    in registry/private-mirrors.txt) — else None. Shared by the PUBLIC
-    boundary check and the mirror-mode PACK-SURFACE pattern selection."""
+    in registry/private-mirrors.txt, AND MIRROR_VISIBILITY asserted) —
+    else None. Shared by the PUBLIC boundary check and the mirror-mode
+    PACK-SURFACE pattern selection."""
     if not (REGISTRY / ".private-mirror").is_file():
         return None
     slug = _origin_slug()
     if slug is None or slug == CANONICAL_PACK_SLUG:
         return None
     if hashlib.sha256(slug.encode()).hexdigest() not in _trusted_mirrors():
+        return None
+    if not _mirror_visibility_asserted():
         return None
     return slug
 
@@ -918,6 +933,13 @@ def check_public_boundary() -> None:
                    "a public fork can carry .private-mirror, so the waiver "
                    "applies only to slug digests listed in "
                    "registry/private-mirrors.txt")
+            return
+        if not _mirror_visibility_asserted():
+            report("FAIL", "PUBLIC",
+                   "mirror declared but MIRROR_VISIBILITY is not asserted "
+                   "to private/internal — CI must set it from an API check "
+                   "(the generated registry-lint workflow does); committed "
+                   "files alone cannot prove this repo is private")
             return
         report("PASS", "PUBLIC",
                f"declared private mirror ({slug}) — boundary waived")

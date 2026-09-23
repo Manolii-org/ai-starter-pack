@@ -48,11 +48,16 @@ Re-run with --refresh-platform to overwrite the platform tree + lint/schema
 vendoring from a newer canonical checkout; the mirror's own universe scope,
 non-platform index entries, and marker are preserved.
 
-Visibility: the seeder asks `gh` whether --slug resolves to a private (or
-internal) repo and REFUSES on anything else — a self-declared slug+digest
-is no evidence of privacy, and an unverifiable lookup must fail closed:
-seeding universe content into a repo of unknown visibility is exactly the
-failure mode the mirror boundary exists to prevent.
+Visibility + binding: the seeder requires (a) --slug to equal the
+checkout's own origin remote — the digest it writes must bind to THIS
+repo, not just any private repo the token can see — and (b) `gh` to
+confirm that slug is private/internal. Either check failing is fatal:
+seeding universe content into a repo of unknown visibility is exactly
+the failure mode the mirror boundary exists to prevent. Mirror-mode
+lint also requires an externally-supplied MIRROR_VISIBILITY=private|
+internal assertion — committed files alone can never prove privacy,
+so the generated workflow verifies visibility via `gh api` on every
+run and the bootstrap injects its own verified result during regen.
 
 Privacy: this script writes no other-org identifiers into the mirror —
 the vendored tree is already org-leak-clean in the canonical repo, and
@@ -63,6 +68,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import re
 import shutil
 import subprocess
 import sys
@@ -130,6 +137,21 @@ jobs:
           python-version: '3.12'
       - name: Install deps
         run: timeout 120 pip install pyyaml jsonschema
+      # Mirror mode in the lint requires a visibility assertion that is
+      # NOT derivable from committed files — a public fork can carry the
+      # marker and its own digest. Verify against the API on every run:
+      # a mirror flipped to public after seeding drops back to the full
+      # pattern set and the boundary gate re-engages.
+      - name: Assert mirror privacy
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          vis=$(gh api "repos/${{ github.repository }}" --jq .visibility)
+          if [ "$vis" != "private" ] && [ "$vis" != "internal" ]; then
+            echo "::error::mirror repo must be private (got: $vis)"
+            exit 1
+          fi
+          echo "MIRROR_VISIBILITY=$vis" >> "$GITHUB_ENV"
       - name: Lint the registry
         run: python3 scripts/registry-lint.py
 """
@@ -158,10 +180,13 @@ private boundary.
   the index: this mirror's own (non-platform) plugin entries are kept.
 - `scripts/registry-lint.py` + `.github/workflows/registry-lint.yml` —
   the same lint gate the canonical repo runs, driven by a minimal
-  mirror-only workflow. In a verified mirror it waives the public
-  boundary, exempts this org's own repo slugs, and still FAILs on other
-  orgs' slugs, infra identifiers, credential shapes, and cross-scope
-  references.
+  mirror-only workflow that first asserts repo visibility via `gh api`
+  (`MIRROR_VISIBILITY=private` reaches the lint env). In a verified
+  mirror the lint waives the public boundary, exempts this org's own
+  repo slugs, and still FAILs on other orgs' slugs, infra identifiers,
+  credential shapes, and cross-scope references. For a LOCAL lint run,
+  export it yourself after confirming the repo is private:
+  `MIRROR_VISIBILITY=private python3 scripts/registry-lint.py`
 
 ## Consumers
 
@@ -186,7 +211,23 @@ def seed_scope(root: Path, universe: str) -> None:
             SCOPE_YAML.format(universe=universe, ip_owner=IP_OWNERS[universe]))
 
 
-def check_visibility(slug: str) -> int:
+def _origin_slug(root: Path) -> str | None:
+    """owner/repo of the checkout's origin remote, lowercased — None when
+    git, the remote, or a parseable slug is absent."""
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(root), "remote", "get-url", "origin"],
+            capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
+        return None
+    m = re.search(r"[:/]([^/\s]+/[^/\s]+?)\.git$", r.stdout.strip()) \
+        or re.search(r"[:/]([^/\s]+/[^/\s]+?)/?$", r.stdout.strip())
+    return m.group(1).lower() if m else None
+
+
+def check_visibility(slug: str) -> str | None:
     """Require a CONFIRMED private (or internal) repo before seeding — a
     self-declared slug + digest pair is not evidence of privacy, and
     universe content in a public repo is the failure mode this whole
@@ -205,34 +246,41 @@ def check_visibility(slug: str) -> int:
             f"FAIL: could not verify {slug} visibility via gh — seeding "
             "refused. The mirror MUST be a private repo: create it first, "
             "then authenticate gh (GH_TOKEN) with access to it and retry.\n")
-        return 2
+        return None
     vis = r.stdout.strip().lower()
     if vis in ("private", "internal"):
         print(f"OK: {slug} visibility={vis}")
-        return 0
+        return vis
     sys.stderr.write(
         f"FAIL: {slug} visibility={vis or 'unknown'} — a mirror must be a "
         "private repo; universe content never belongs in a public tree\n")
-    return 2
+    return None
 
 
-def merge_index(src_reg: Path, reg: Path) -> None:
+def merge_index(src_reg: Path, reg: Path) -> bool:
     """registry/plugins.json — fresh canonical platform entries merged with
     the mirror's own non-platform entries (so --refresh-platform never drops
-    plugins the org added to its universe scope)."""
+    plugins the org added to its universe scope). A malformed existing index
+    aborts the run: falling back to {} would silently discard every
+    mirror-owned entry."""
     canonical = json.loads((src_reg / "plugins.json").read_text())
     dst = reg / "plugins.json"
     if dst.is_file():
         try:
             existing = json.loads(dst.read_text())
-        except json.JSONDecodeError:
-            existing = {}
+        except json.JSONDecodeError as exc:
+            sys.stderr.write(
+                f"FAIL: {dst} is malformed JSON ({exc}) — aborting; fix or "
+                "restore the file and retry, or the refresh would discard "
+                "the mirror's own plugin entries\n")
+            return False
         mine = [p for p in existing.get("plugins", [])
                 if isinstance(p, dict) and p.get("scope") != "platform"]
         canonical["plugins"] = (
             [p for p in canonical.get("plugins", [])
              if p.get("scope") == "platform"] + mine)
     dst.write_text(json.dumps(canonical, indent=2) + "\n")
+    return True
 
 
 # Ratchet files the vendored lint maintains.
@@ -247,7 +295,14 @@ ALLOWLIST_FILES = (
 # lint FAILs, never be ratcheted by a routine refresh.
 VENDORED_PATHS = (
     "registry/platform/",
-    "registry/plugins.json",
+    # plugins.json is deliberately NOT vendored despite being rewritten by
+    # refresh: merge_index preserves the mirror's own non-platform entries,
+    # so the file is mixed-ownership. Per-line ratchets cannot split file
+    # ownership — classifying it as vendored would ratchet NEW hits inside
+    # the mirror's own entries (e.g. another org's slug in a universe
+    # plugin path) instead of letting them FAIL. Old entries still live
+    # are preserved by the merge rule; only NEW hits are refused.
+    "registry/secrets-allowlist.txt",
     "registry/secrets-allowlist.txt",
     "registry/private-mirrors.txt",
     "registry/.private-mirror",
@@ -271,7 +326,7 @@ def _vendored(path: str) -> bool:
                for p in VENDORED_PATHS)
 
 
-def regen_allowlists(root: Path, established: bool) -> bool:
+def regen_allowlists(root: Path, established: bool, vis: str) -> bool:
     """Regenerate the ratchet allowlists via the vendored lint (its REPO
     resolves from its own location). Mirror mode is already active — marker
     + mirrors.txt are written first — so exempt own-org hits never enter
@@ -309,9 +364,14 @@ def regen_allowlists(root: Path, established: bool) -> bool:
             if p.is_file():
                 old[rel] = p.read_text(encoding="utf-8").splitlines()
     lint = root / "scripts" / "registry-lint.py"
+    # Mirror-mode lint requires an externally-supplied visibility
+    # assertion — bootstrap already verified it via gh above, so inject
+    # the confirmed value into the vendored lint subprocesses.
+    lint_env = {**os.environ, "MIRROR_VISIBILITY": vis}
     for flag in ("--write-allowlist", "--write-pack-allowlist"):
         r = subprocess.run([sys.executable, str(lint), flag],
-                           cwd=root, capture_output=True, text=True)
+                           cwd=root, capture_output=True, text=True,
+                           env=lint_env)
         if r.returncode != 0:
             sys.stderr.write(f"FAIL: lint {flag} regen failed: "
                              f"{r.stderr.strip() or r.stdout.strip()}\n")
@@ -354,7 +414,24 @@ def main() -> int:
                          "--slug must be owner/repo\n")
         return 2
 
-    if check_visibility(slug):
+    # The seeded digest must bind to THIS checkout's repo — a --slug that
+    # names any other accessible private repo would pass visibility yet
+    # fail the first CI run, which hashes the real origin remote.
+    origin = _origin_slug(root)
+    if origin is None:
+        sys.stderr.write("FAIL: --root must be a git checkout with an "
+                         "'origin' remote — run inside the mirror clone "
+                         "(or `git init` + `git remote add origin` first)\n")
+        return 2
+    if origin != slug:
+        sys.stderr.write(
+            f"FAIL: --slug '{slug}' does not match the checkout's origin "
+            f"'{origin}' — the digest must bind to this repo, not any "
+            "accessible private repo\n")
+        return 2
+
+    vis = check_visibility(slug)
+    if vis is None:
         return 2
 
     reg = root / "registry"
@@ -373,7 +450,8 @@ def main() -> int:
         if dst_plat.exists():
             shutil.rmtree(dst_plat)
         shutil.copytree(src_reg / "platform", dst_plat)
-    merge_index(src_reg, reg)
+    if not merge_index(src_reg, reg):
+        return 2
 
     (reg / "private-mirrors.txt").write_text(
         MIRRORS_TXT.format(
@@ -394,7 +472,7 @@ def main() -> int:
     wf.write_text(MIRROR_WORKFLOW)
 
     (root / "README.md").write_text(README)
-    if not regen_allowlists(root, established):
+    if not regen_allowlists(root, established, vis):
         return 2
     print(f"seeded mirror for {args.universe} at {root} (slug {slug})")
     print("next: git add -A && git commit && git push, then add the slug "

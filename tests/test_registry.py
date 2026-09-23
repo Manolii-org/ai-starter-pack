@@ -1689,11 +1689,12 @@ def test_public_boundary_scope_yaml_only_passes(tmp_path):
     assert not [f for f in mod.results if f.status == "FAIL"]
 
 
-def test_public_boundary_private_mirror_marker_waives(tmp_path):
+def test_public_boundary_private_mirror_marker_waives(tmp_path, monkeypatch):
     """registry/.private-mirror marks a private mirror — the boundary is
-    waived there, but ONLY when the origin remote verifies this isn't
-    the canonical public repo (a bare committable marker cannot waive
-    the guard)."""
+    waived there, but ONLY when (a) the origin remote verifies this isn't
+    the canonical public repo, (b) the slug is declared, and (c)
+    MIRROR_VISIBILITY is asserted from outside the checkout (a public
+    fork can carry both marker and digest)."""
     import subprocess as sp
     reg_root = make_registry(tmp_path / "src", {
         "platform/framework": [("skills/demo/x.md", "x")],
@@ -1713,7 +1714,14 @@ def test_public_boundary_private_mirror_marker_waives(tmp_path):
     mod.REGISTRY = reg_root / "registry"
     mod.REPO = reg_root
     mod.PRIVATE_MIRRORS_PATH = reg_root / "registry/private-mirrors.txt"
+    # Without the external assertion the waiver must still refuse.
     mod.results = []
+    monkeypatch.delenv("MIRROR_VISIBILITY", raising=False)
+    mod.check_public_boundary()
+    assert any("MIRROR_VISIBILITY" in f.detail
+               for f in mod.results if f.status == "FAIL")
+    mod.results = []
+    monkeypatch.setenv("MIRROR_VISIBILITY", "private")
     mod.check_public_boundary()
     assert not [f for f in mod.results if f.status == "FAIL"]
 
@@ -1849,11 +1857,15 @@ def test_secrets_stale_allowlist_entry_fails(tmp_path):
                for f in fails), "stale secrets allowlist entry did not FAIL"
 
 
-def test_pack_surface_mirror_mode_exempts_own_org_only(tmp_path):
+def test_pack_surface_mirror_mode_exempts_own_org_only(tmp_path,
+                                                      monkeypatch):
     """In a verified private mirror the OWNING org's slug is legitimate
     (a buro mirror names Buro-Built/* on purpose), while other orgs'
-    slugs and infra ids still FAIL — the cross-org boundary holds."""
+    slugs and infra ids still FAIL — the cross-org boundary holds.
+    Mirror mode also requires the external MIRROR_VISIBILITY assertion
+    (committed files alone cannot prove the repo is private)."""
     import subprocess as sp
+    monkeypatch.setenv("MIRROR_VISIBILITY", "private")
     repo = tmp_path / "mirror"
     (repo / "registry").mkdir(parents=True)
     (repo / "x.md").write_text(
@@ -1910,8 +1922,12 @@ def test_bootstrap_mirror_seed(tmp_path):
     root = tmp_path / "buro-registry"
     root.mkdir()
     # Mirrors are clones — a non-git root must fail (staging the scaffold
-    # is required for the lint to enumerate registry/** hits).
+    # is required for the lint to enumerate registry/** hits), and --slug
+    # must equal the checkout's origin.
     sp.run(["git", "init", "-q"], cwd=root, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=root, capture_output=True)
     env = _bootstrap_env(tmp_path)
     r = sp.run(
         [sys.executable, "scripts/bootstrap-mirror.py", "--root", str(root),
@@ -1936,9 +1952,13 @@ def test_bootstrap_mirror_seed(tmp_path):
     # Secrets ratchet is vendored — its token-shape catalogue ships
     # unchanged inside registry/platform/**.
     assert (root / "registry/secrets-allowlist.txt").is_file()
-    # Generated workflow must not invoke files the scaffold never seeds.
+    # Generated workflow must not invoke files the scaffold never seeds,
+    # and must carry the API-side privacy assertion that feeds
+    # MIRROR_VISIBILITY into the lint env.
     wf = (root / ".github/workflows/registry-lint.yml").read_text()
     assert "registry-lint.py" in wf
+    assert "Assert mirror privacy" in wf
+    assert "MIRROR_VISIBILITY" in wf
     assert "build-registry.py" not in wf
     assert "pytest" not in wf
 
@@ -1958,15 +1978,33 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
              "--slug", "buro-built/buro-registry"],
             cwd=pack, capture_output=True, text=True, env=env)
 
-    # gh absent from PATH → visibility unverifiable → refuse before writes.
+    # gh absent from PATH (git still resolvable) → visibility
+    # unverifiable → refuse before writes.
+    import shutil as _shutil
     root = tmp_path / "nogh"
     root.mkdir()
     sp.run(["git", "init", "-q"], cwd=root, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=root, capture_output=True)
     empty_bin = tmp_path / "emptybin"
     empty_bin.mkdir()
+    os.symlink(_shutil.which("git"), empty_bin / "git")
     r = run(root, dict(os.environ, PATH=str(empty_bin)))
     assert r.returncode == 2, r.stderr
     assert not (root / "registry").exists()
+
+    # --slug naming ANOTHER accessible repo → the digest would not bind
+    # to this checkout's origin → refuse.
+    mism = tmp_path / "mism"
+    mism.mkdir()
+    sp.run(["git", "init", "-q"], cwd=mism, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Impaktful-Platform/impaktful-registry.git"],
+           cwd=mism, capture_output=True)
+    r = run(mism, _bootstrap_env(tmp_path))
+    assert r.returncode == 2, r.stderr
+    assert not (mism / "registry").exists()
 
     # gh reports public → refuse.
     pub_bin = tmp_path / "pubbin"
@@ -1979,11 +2017,40 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     assert r.returncode == 2, r.stderr
     assert not (root / "registry").exists()
 
-    # gh stub OK but --root is not a git checkout → fatal at staging.
+    # gh stub OK but --root is not a git checkout → refused (no origin).
     plain = tmp_path / "plainroot"
     plain.mkdir()
     r = run(plain, _bootstrap_env(tmp_path))
     assert r.returncode == 2, r.stderr
+
+
+def test_bootstrap_mirror_refresh_aborts_on_bad_index(tmp_path):
+    """An established mirror whose plugins.json is momentarily malformed
+    (e.g. mid conflict-resolution) must NOT be overwritten with the
+    canonical platform-only index — abort and keep the file."""
+    import subprocess as sp
+    pack = Path(__file__).resolve().parent.parent
+    root = tmp_path / "buro-registry"
+    root.mkdir()
+    sp.run(["git", "init", "-q"], cwd=root, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=root, capture_output=True)
+    env = _bootstrap_env(tmp_path)
+    r = sp.run(
+        [sys.executable, "scripts/bootstrap-mirror.py", "--root", str(root),
+         "--universe", "buro", "--slug", "buro-built/buro-registry"],
+        cwd=pack, capture_output=True, text=True, env=env)
+    assert r.returncode == 0, r.stderr
+    idx = root / "registry/plugins.json"
+    idx.write_text("{malformed\n")
+    r = sp.run(
+        [sys.executable, "scripts/bootstrap-mirror.py", "--root", str(root),
+         "--universe", "buro", "--slug", "buro-built/buro-registry",
+         "--refresh-platform"],
+        cwd=pack, capture_output=True, text=True, env=env)
+    assert r.returncode == 2, r.stderr
+    assert idx.read_text() == "{malformed\n", "index clobbered on abort"
 
 
 def test_bootstrap_mirror_refresh_preserves_index(tmp_path):
@@ -1994,6 +2061,9 @@ def test_bootstrap_mirror_refresh_preserves_index(tmp_path):
     root = tmp_path / "impaktful-registry"
     root.mkdir()
     sp.run(["git", "init", "-q"], cwd=root, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Impaktful-Platform/impaktful-registry.git"],
+           cwd=root, capture_output=True)
     env = _bootstrap_env(tmp_path)
     r = sp.run(
         [sys.executable, "scripts/bootstrap-mirror.py", "--root", str(root),
@@ -2034,6 +2104,9 @@ def test_bootstrap_mirror_refresh_preserves_owned_state(tmp_path):
     # its non-git rglob fallback skip-lists the dir. Mirrors are clones, so
     # init the root before seeding (regen also stages via git add).
     sp.run(["git", "init", "-q"], cwd=root, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/CPDcheck/cpdcheck-registry.git"],
+           cwd=root, capture_output=True)
     env = _bootstrap_env(tmp_path)
     r = sp.run(
         [sys.executable, "scripts/bootstrap-mirror.py", "--root", str(root),
