@@ -87,7 +87,7 @@ on:
           execution, and under `pull_request_target` it would run with secrets.
       runs_on:
         type: string
-        default: ubuntu-latest
+        default: ubuntu-slim
         description: Runner label.
       working_directory:
         type: string
