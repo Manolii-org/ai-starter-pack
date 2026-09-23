@@ -1888,7 +1888,10 @@ def test_pack_surface_mirror_mode_exempts_own_org_only(tmp_path):
 
 
 def test_bootstrap_mirror_seed(tmp_path):
-    """bootstrap-mirror.py seeds a complete lint-clean mirror scaffold."""
+    """bootstrap-mirror.py seeds a complete lint-clean mirror scaffold:
+    marker, universe scope, vendored platform, merged index, digests-only
+    trust file, minimal generated workflow, and freshly-regenerated
+    ratchet allowlists (mirror mode never freezes own-org hits)."""
     import subprocess as sp
     import yaml
     pack = Path(__file__).resolve().parent.parent
@@ -1909,6 +1912,52 @@ def test_bootstrap_mirror_seed(tmp_path):
     doc = yaml.safe_load((root / "registry/buro/scope.yaml").read_text())
     assert doc["scope"] == "buro" and doc["visibility"] == "buro"
     assert doc["parent_scope"] == "platform"
+    # Ratchets seeded for THIS mirror's content — a vendored platform tree
+    # carries canonical's grandfathered hits; an empty allowlist would
+    # fail the first lint.
+    assert (root / "registry/leak-allowlist.txt").is_file()
+    assert (root / "registry/pack-surface-allowlist.txt").is_file()
+    # Secrets ratchet is vendored — its token-shape catalogue ships
+    # unchanged inside registry/platform/**.
+    assert (root / "registry/secrets-allowlist.txt").is_file()
+    # Generated workflow must not invoke files the scaffold never seeds.
+    wf = (root / ".github/workflows/registry-lint.yml").read_text()
+    assert "registry-lint.py" in wf
+    assert "build-registry.py" not in wf
+    assert "pytest" not in wf
+
+
+def test_bootstrap_mirror_refresh_preserves_index(tmp_path):
+    """--refresh-platform overwrites the vendored platform tree but MERGES
+    plugins.json — the mirror's own universe plugin entries survive."""
+    import subprocess as sp
+    pack = Path(__file__).resolve().parent.parent
+    root = tmp_path / "impaktful-registry"
+    root.mkdir()
+    r = sp.run(
+        [sys.executable, "scripts/bootstrap-mirror.py", "--root", str(root),
+         "--universe", "impaktful", "--slug",
+         "impaktful-platform/impaktful-registry", "--refresh-platform"],
+        cwd=pack, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    idx = json.loads((root / "registry/plugins.json").read_text())
+    idx["plugins"].append({
+        "scope": "impaktful", "name": "dqms",
+        "path": "registry/impaktful/dqms",
+        "version_source": ".claude-plugin/plugin.json",
+        "description": "org-private plugin"})
+    (root / "registry/plugins.json").write_text(json.dumps(idx))
+    r = sp.run(
+        [sys.executable, "scripts/bootstrap-mirror.py", "--root", str(root),
+         "--universe", "impaktful", "--slug",
+         "impaktful-platform/impaktful-registry", "--refresh-platform"],
+        cwd=pack, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    names = {(p["scope"], p["name"])
+             for p in json.loads(
+                 (root / "registry/plugins.json").read_text())["plugins"]}
+    assert ("impaktful", "dqms") in names, "mirror plugin dropped on refresh"
+    assert ("platform", "framework") in names
 
 
 def test_pack_surface_scans_tracked_skip_dir(tmp_path):
