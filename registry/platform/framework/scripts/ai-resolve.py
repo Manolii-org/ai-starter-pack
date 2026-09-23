@@ -190,22 +190,29 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
             rel = src.relative_to(plugin_dir / comp)
             dst = target_root / rel
             rel_dst = dst.relative_to(repo_root).as_posix()
-            # A symlinked .claude/{skills,agents,commands} (or descendant) would
-            # make mkdir/copy2 write OUTSIDE repo_root through the lexical dst.
-            # Resolve it and require the real location stays resolver-owned.
-            resolved_dst = dst.resolve()
-            try:
-                rel_r = resolved_dst.relative_to(repo_root)
-            except ValueError:
-                rel_r = None
-            if rel_r is None or "/".join(rel_r.parts[:2]) not in OWNED_ROOTS:
+            src_bytes = src.read_bytes()
+            if b"CLAUDE_PLUGIN_ROOT" in src_bytes:
+                # Commands referencing the plugin install root cannot run in a
+                # resolver install — there is no plugin root. Materialising
+                # them would ship a documented command that fails on invoke;
+                # script wiring is a later-phase concern (docs/registry.md).
+                plan.advisories.append(
+                    f"{req}: {rel} references CLAUDE_PLUGIN_ROOT — not runnable in "
+                    f"resolver mode (needs marketplace install or script wiring); "
+                    f"not materialised")
+                continue
+            # Any symlink in the destination chain — dst itself or an ancestor
+            # — makes mkdir/copy2 write through it: outside the repo or across
+            # to another locked capability. resolve() != dst proves a link
+            # exists regardless of where it points; refuse to write through it.
+            if dst.resolve() != dst:
                 plan.conflicts.append((
                     dst,
-                    "destination resolves outside resolver-owned roots "
-                    "(symlinked path) — refusing to materialise through it",
+                    "destination path contains a symlink — refusing to materialise "
+                    "through it (replace the link with a real directory)",
                 ))
                 continue
-            src_sha = sha256(src)
+            src_sha = hashlib.sha256(src_bytes).hexdigest()
             prior = plan.planned.get(rel_dst)
             if prior is not None:
                 prior_sha, prior_req = prior
@@ -220,7 +227,7 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                     materialised[rel_dst] = src_sha
                 continue
             if dst.exists():
-                if dst.read_bytes() == src.read_bytes():
+                if dst.read_bytes() == src_bytes:
                     plan.skips.append((dst, "identical"))
                     plan.planned[rel_dst] = (src_sha, req)
                 elif rel_dst not in locked:

@@ -359,8 +359,58 @@ def test_symlinked_destination_conflicts(tmp_path):
                        [{"plugin": "platform/framework", "ref": "1.0.0"}])
     r = run_resolver(m, reg_root, consumer, "--apply")
     assert r.returncode == 1
-    assert "resolves outside" in r.stdout
+    assert "contains a symlink" in r.stdout
     assert not any(outside.iterdir())
+
+
+def test_symlink_within_owned_roots_conflicts(tmp_path):
+    """A destination symlink must be refused even when its target is inside
+    another resolver-owned subtree — copy2 would silently overwrite the
+    target capability."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "x"),
+                               ("agents/real.md", "real")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    real = consumer / ".claude" / "agents" / "real.md"
+    x = consumer / ".claude" / "skills" / "demo" / "x.md"
+    x.unlink()
+    x.symlink_to("../../agents/real.md")
+    # craft a second plugin revision so x.md has new content (drift update)
+    (reg_root / "registry" / "platform" / "framework" / "skills" / "demo"
+     / "x.md").write_text("x v2")
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 1
+    assert "contains a symlink" in r.stdout
+    assert real.read_text() == "real"
+
+
+def test_plugin_root_commands_not_materialised(tmp_path):
+    """Files referencing ${CLAUDE_PLUGIN_ROOT} cannot run in resolver mode
+    (there is no plugin root) — they are advisory, never written."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [
+            ("commands/doctor.md",
+             "run ${CLAUDE_PLUGIN_ROOT}/scripts/doctor.py"),
+            ("commands/standalone.md", "a self-contained command"),
+        ],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 0, r.stdout
+    assert "CLAUDE_PLUGIN_ROOT" in r.stdout
+    cmds = consumer / ".claude" / "commands"
+    assert not (cmds / "doctor.md").exists()
+    assert (cmds / "standalone.md").is_file()
+    lock = json.loads((consumer / ".ai" / "capability-lock.json").read_text())
+    assert ".claude/commands/doctor.md" not in lock["files"]
 
 
 def test_prune_removes_symlink_entry_not_target(tmp_path):
@@ -389,6 +439,13 @@ def test_prune_removes_symlink_entry_not_target(tmp_path):
     assert not link.exists() and not link.is_symlink()  # link removed
 
 
+def seed_catalog(reg: Path, patterns: list[str] | None = None) -> None:
+    p = reg / "platform" / "framework" / "data"
+    p.mkdir(parents=True, exist_ok=True)
+    (p / "token-shapes.json").write_text(json.dumps({
+        "patterns": [{"name": "t", "regex": rx} for rx in (patterns or [])]}))
+
+
 def test_secrets_covers_catalog_patterns(tmp_path):
     """The SECRETS scan derives patterns from the shipped token-shapes.json —
     types absent from the hardcoded base (sk-ant-*) must still fail."""
@@ -397,13 +454,14 @@ def test_secrets_covers_catalog_patterns(tmp_path):
     mod.REGISTRY = reg
     mod.SECRETS_ALLOWLIST_PATH = reg / "secrets-allowlist.txt"
     mod.results = []
-    (reg / "platform").mkdir(parents=True)
+    seed_catalog(reg, [r"sk-ant-(?:api|admin)\d{2}-[A-Za-z0-9_-]{80,}"])
+    (reg / "platform").mkdir(parents=True, exist_ok=True)
     (reg / "platform" / "cfg").write_text(
         "key = sk-ant-api03-" + "a" * 90 + "\n")
     mod.check_secrets()
     fails = [f for f in mod.results
              if f.check == "SECRETS" and f.status == "FAIL"]
-    assert fails and "cfg" in fails[0].detail
+    assert any("cfg" in f.detail for f in fails)
 
 
 def test_secrets_scans_detector_corpus(tmp_path):
@@ -421,7 +479,39 @@ def test_secrets_scans_detector_corpus(tmp_path):
     mod.check_secrets()
     fails = [f for f in mod.results
              if f.check == "SECRETS" and f.status == "FAIL"]
-    assert fails and "token-shapes.json" in fails[0].detail
+    assert any("token-shapes.json" in f.detail for f in fails)
+
+
+def test_secrets_scans_utf16_credentials(tmp_path):
+    """A credential stored as UTF-16LE interleaves NULs between characters —
+    the normalized scan must still see it."""
+    mod = load_lint_module()
+    reg = tmp_path / "registry"
+    mod.REGISTRY = reg
+    mod.SECRETS_ALLOWLIST_PATH = reg / "secrets-allowlist.txt"
+    mod.results = []
+    seed_catalog(reg)
+    (reg / "platform" / "key.txt").write_bytes(
+        ("ghp_" + "c" * 40).encode("utf-16-le"))
+    mod.check_secrets()
+    fails = [f for f in mod.results
+             if f.check == "SECRETS" and f.status == "FAIL"]
+    assert any("key.txt" in f.detail for f in fails)
+
+
+def test_secrets_fails_when_catalog_missing(tmp_path):
+    """An unreadable credential catalog must fail closed — silently degrading
+    to the base list would leave catalog-only shapes uncovered."""
+    mod = load_lint_module()
+    reg = tmp_path / "registry"
+    reg.mkdir(parents=True)
+    mod.REGISTRY = reg
+    mod.SECRETS_ALLOWLIST_PATH = reg / "secrets-allowlist.txt"
+    mod.results = []
+    mod.check_secrets()
+    fails = [f for f in mod.results
+             if f.check == "SECRETS" and f.status == "FAIL"]
+    assert any("catalog" in f.detail for f in fails)
 
 
 def test_secrets_scans_binary_like_files(tmp_path):
@@ -430,15 +520,15 @@ def test_secrets_scans_binary_like_files(tmp_path):
     mod = load_lint_module()
     reg = tmp_path / "registry"
     mod.REGISTRY = reg
-    mod.ALLOWLIST_PATH = reg / "leak-allowlist.txt"
+    mod.SECRETS_ALLOWLIST_PATH = reg / "secrets-allowlist.txt"
     mod.results = []
-    (reg / "platform").mkdir(parents=True)
+    seed_catalog(reg)
     (reg / "platform" / "weird").write_bytes(
         b"\x00binary-ish prefix\nkey = ghp_abcdefghij0123456789\n")
     mod.check_secrets()
     fails = [f for f in mod.results
              if f.check == "SECRETS" and f.status == "FAIL"]
-    assert fails and "weird" in fails[0].detail
+    assert any("weird" in f.detail for f in fails)
 
 
 def test_org_leak_scans_nested_readme(tmp_path):
@@ -511,15 +601,15 @@ def test_secrets_scans_metadata_files(tmp_path):
     mod = load_lint_module()
     reg = tmp_path / "registry"
     mod.REGISTRY = reg
-    mod.ALLOWLIST_PATH = reg / "leak-allowlist.txt"
+    mod.SECRETS_ALLOWLIST_PATH = reg / "secrets-allowlist.txt"
     mod.results = []
-    (reg / "platform").mkdir(parents=True)
+    seed_catalog(reg)
     (reg / "platform" / "scope.yaml").write_text(
         "scope: platform\napi_key: ghp_abcdefghij0123456789\n")
     mod.check_secrets()
     fails = [f for f in mod.results
              if f.check == "SECRETS" and f.status == "FAIL"]
-    assert fails and "scope.yaml" in fails[0].detail
+    assert any("scope.yaml" in f.detail for f in fails)
 
 
 def test_org_leak_ratchet_is_per_line(tmp_path):

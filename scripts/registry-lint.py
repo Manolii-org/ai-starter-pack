@@ -67,16 +67,10 @@ SECRET_PATTERNS = [
     r"vercel_[a-z]+_[A-Za-z0-9]{20,}",
 ]
 # The shipped detector corpus is the canonical credential-shape catalog —
-# derive the scanner from it so new provider patterns cover this gate
-# automatically (sk-ant-*, sk-or-*, ghr_*, ASIA*, JWT, stripe, ...).
-TOKEN_SHAPES_PATH = REGISTRY / "platform/framework/data/token-shapes.json"
-try:
-    _CATALOG = [p["regex"] for p in
-                json.loads(TOKEN_SHAPES_PATH.read_text()).get("patterns", [])
-                if p.get("regex")]
-except (OSError, json.JSONDecodeError, AttributeError):
-    _CATALOG = []
-SECRET_PATTERNS += [p for p in _CATALOG if p not in SECRET_PATTERNS]
+# the scanner derives from it so new provider patterns cover this gate
+# automatically (sk-ant-*, sk-or-*, ghr_*, ASIA*, JWT, stripe, ...). Loaded
+# per check_secrets() call so REGISTRY reassignment in tests is honoured.
+TOKEN_SHAPES_REL = "platform/framework/data/token-shapes.json"
 MANIFEST_FILES = {".claude-plugin/plugin.json", ".devin-plugin/plugin.json",
                   "scope.yaml", "plugins.json", "CODEOWNERS", "README.md"}
 
@@ -90,7 +84,7 @@ ALLOWLIST_PATH = REGISTRY / "leak-allowlist.txt"
 # identifier samples); NOT exempt from SECRETS — a real credential planted
 # there must still fail. Self-matching lines are ratcheted per-line via
 # secrets-allowlist.txt.
-DETECTOR_DATA = {"platform/framework/data/token-shapes.json"}
+DETECTOR_DATA = {TOKEN_SHAPES_REL}
 SECRETS_ALLOWLIST_PATH = REGISTRY / "secrets-allowlist.txt"
 
 SCOPE_SCHEMA_PATH = REPO / "schemas" / "registry-scope.schema.json"
@@ -281,6 +275,17 @@ def line_key(rel_s: str, line: str) -> str:
     return f"{rel_s}#{h}"
 
 
+def scan_text_lines(path: Path) -> list[str]:
+    """Encoding-normalized text lines for content scans. UTF-16/32 encode
+    ASCII-shaped credentials with NUL separators — stripping NULs recovers
+    the ASCII bytes so encoding alone cannot exempt a credential."""
+    raw = path.read_bytes()
+    text = raw.decode("utf-8", errors="ignore")
+    if b"\x00" in raw:
+        text += "\n" + raw.replace(b"\x00", b"").decode("utf-8", errors="ignore")
+    return text.splitlines()
+
+
 def content_scan_files(org_leak: bool = True) -> list[Path]:
     """Files scanned for org identifiers (org_leak=True) or secrets (False).
     Every file under registry/ is scanned — no extension allowlist and no
@@ -310,10 +315,10 @@ def check_org_leak() -> None:
         rel = path.relative_to(REGISTRY)
         rel_s = rel.as_posix()
         try:
-            text = path.read_text(encoding="utf-8", errors="ignore")
+            lines = scan_text_lines(path)
         except OSError:
             continue
-        for i, line in enumerate(text.splitlines(), 1):
+        for i, line in enumerate(lines, 1):
             key = line_key(rel_s, line)
             grandfathered = key in allow
             if grandfathered:
@@ -349,16 +354,30 @@ def check_secrets() -> None:
     # (secrets-allowlist.txt, same path#sha8 format) are suppressed — a real
     # credential planted inside token-shapes.json cannot hide there.
     pats = [re.compile(p) for p in SECRET_PATTERNS]
-    allow = load_line_allowlist(SECRETS_ALLOWLIST_PATH)
     fails = 0
+    # Derive the scanner from the shipped catalog — and fail closed when the
+    # catalog can't be read, rather than silently degrading to the short
+    # hardcoded list (that would leave Anthropic/OpenRouter/JWT/… uncovered).
+    try:
+        _shapes = json.loads(
+            (REGISTRY / TOKEN_SHAPES_REL).read_text(encoding="utf-8"))
+        _cat = [p["regex"] for p in _shapes.get("patterns", [])
+                if p.get("regex")]
+        pats += [re.compile(p) for p in _cat if p not in SECRET_PATTERNS]
+    except (OSError, json.JSONDecodeError, AttributeError):
+        report("FAIL", "SECRETS",
+               f"{TOKEN_SHAPES_REL} unreadable — credential catalog cannot be "
+               "derived; scanning with the base pattern list only")
+        fails += 1
+    allow = load_line_allowlist(SECRETS_ALLOWLIST_PATH)
     for path in content_scan_files(org_leak=False):
         rel = path.relative_to(REGISTRY)
         rel_s = rel.as_posix()
         try:
-            text = path.read_text(encoding="utf-8", errors="ignore")
+            lines = scan_text_lines(path)
         except OSError:
             continue
-        for i, line in enumerate(text.splitlines(), 1):
+        for i, line in enumerate(lines, 1):
             if any(p.search(line) for p in pats):
                 if line_key(rel_s, line) in allow:
                     continue
