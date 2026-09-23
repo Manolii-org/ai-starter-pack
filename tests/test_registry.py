@@ -818,13 +818,13 @@ def test_xscope_scans_manifests(tmp_path):
     assert any("manolii" in f.detail for f in fails)
 
 
-def test_backticked_script_ref_skipped(tmp_path):
-    """`scripts/x.py` in backticks is an invocation-shaped dependency —
-    the file is advisory-skipped, not materialised."""
+def test_backticked_script_mention_materialises(tmp_path):
+    """A backticked `scripts/x.py` mention is prose, not an invocation —
+    the file still materialises."""
     reg_root = make_registry(tmp_path / "src", {
         "platform/framework": [
-            ("commands/run-status.md",
-             "Step: run `scripts/sprint_status.py` to regenerate status.md"),
+            ("agents/executor.md",
+             "Tier classification runs via `scripts/suggester.py`."),
         ],
     })
     consumer = tmp_path / "consumer"
@@ -833,8 +833,86 @@ def test_backticked_script_ref_skipped(tmp_path):
                        [{"plugin": "platform/framework", "ref": "1.0.0"}])
     r = run_resolver(m, reg_root, consumer, "--apply")
     assert r.returncode == 0, r.stdout
-    assert not (consumer / ".claude" / "commands" / "run-status.md").exists()
+    assert (consumer / ".claude" / "agents" / "executor.md").is_file()
+
+
+def test_requires_scripts_frontmatter_skips(tmp_path):
+    """requires_scripts: [...] in frontmatter is an explicit dependency —
+    the file is advisory-skipped in resolver mode."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [
+            ("commands/fan-out.md",
+             "---\nname: fan-out\nrequires_scripts: [sprint_status.py]\n---\n"
+             "Decomposes into parallel tasks."),
+        ],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 0, r.stdout
+    assert not (consumer / ".claude" / "commands" / "fan-out.md").exists()
     assert "scripts/" in r.stdout
+
+
+def test_lock_parent_not_dir_conflicts(tmp_path):
+    """.ai as a plain file must be a plan-time conflict — otherwise --apply
+    copies files then fails the lock write, leaving them unowned."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "x")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    (consumer / ".ai").write_text("not a dir")
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 1
+    assert "not a directory" in r.stdout
+    assert not (consumer / ".claude" / "skills" / "demo" / "x.md").exists()
+
+
+def test_git_status_failure_conflicts(tmp_path):
+    """A nonzero git status (corrupt/unreadable index) must not read as a
+    clean worktree — fail closed."""
+    import subprocess as sp
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "x")],
+    })
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    sp.run(["git", "init", "-q"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "add", "-A"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "commit", "-qm", "init"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "tag", "v1.0.0"], cwd=reg_root, env=env, check=True)
+    (reg_root / ".git" / "index").write_text("garbage")
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "tag:v1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 1
+    assert "cannot verify worktree cleanliness" in r.stdout
+
+
+def test_caret_zero_major_bounds(tmp_path):
+    """^0.1 accepts 0.1.x but not 0.2.0 — pre-1.0 caret ranges bound at the
+    first nonzero component."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "x")],
+    })
+    # plugin manifests at version 0.2.0
+    (reg_root / "registry" / "platform" / "framework" / ".claude-plugin"
+     / "plugin.json").write_text(
+         '{"name": "framework", "version": "0.2.0", "description": "x"}')
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "^0.1"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 1
+    assert "not satisfied" in r.stdout
 
 
 def seed_catalog(reg: Path, patterns: list[str] | None = None) -> None:

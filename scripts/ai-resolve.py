@@ -68,8 +68,27 @@ SEMVER_REF = re.compile(r"v?\d+(?:\.\d+){0,2}")
 SCRIPT_REF = re.compile(
     rb"(?:python3?|bash|sh|zsh|node|npx|tsx|deno|ruby|perl|uv\s+run|pipenv\s+run)"
     rb"\s+[^\n|&;`]*?scripts/[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs)\b"
-    rb"|\./scripts/[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs)\b"
-    rb"|`scripts/[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs)\b")
+    rb"|\./scripts/[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs)\b")
+# Backticked `scripts/x.py` is NOT an invocation context — prose uses it for
+# mentions. A real dependency that no interpreter/./ prefix expresses must be
+# declared explicitly: `requires_scripts: [...]` in the file's frontmatter.
+SCRIPT_DEP_KEYS = ("requires_scripts",)
+
+
+def declares_script_deps(src_bytes: bytes) -> bool:
+    """True when the file's YAML frontmatter declares script dependencies —
+    explicit metadata, since prose heuristics can't distinguish
+    "run `scripts/x.py`" from "routing uses `scripts/x.py`"."""
+    m = re.match(rb"\A---\s*\n(.*?)\n---\s*\n", src_bytes, re.S)
+    if not m:
+        return False
+    try:
+        fm = yaml.safe_load(m.group(1).decode("utf-8", errors="ignore")) or {}
+    except yaml.YAMLError:
+        return False
+    if not isinstance(fm, dict):
+        return False
+    return any(fm.get(k) for k in SCRIPT_DEP_KEYS)
 
 
 @dataclass
@@ -129,10 +148,25 @@ def version_satisfies(version: str, ref: str) -> bool:
     def parse(v: str) -> tuple[int, ...]:
         parts = v.lstrip("v").split(".")
         return tuple(int(p) for p in parts if p.isdigit())
+
+    def pad(t: tuple[int, ...]) -> tuple[int, int, int]:
+        return (t + (0, 0, 0))[:3]
+
     if ref.startswith("^"):
         want = parse(ref[1:])
-        have = parse(version)
-        return have[:1] == want[:1] and have >= want
+        # SemVer caret: the upper bound is the first NONZERO component +1 —
+        # ^1.4 → <2.0.0, ^0.1 → <0.2.0, ^0.0.3 → <0.0.4. All-zero constraints
+        # bound at their declared width: ^0 → <1.0.0, ^0.0 → <0.1.0.
+        padded = pad(want)
+        upper = None
+        for i, c in enumerate(padded):
+            if c:
+                upper = padded[:i] + (c + 1,)
+                break
+        if upper is None:
+            upper = tuple(1 if j == len(want) - 1 else 0 for j in range(3))
+        have = pad(parse(version))
+        return pad(want) <= have < upper
     return parse(version) == parse(ref)
 
 
@@ -235,7 +269,15 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
             ["git", "-C", str(registry_root), "status", "--porcelain",
              "--untracked-files=all", "--", "."],
             capture_output=True, text=True, timeout=10)
-        if dirty.returncode == 0 and dirty.stdout.strip():
+        if dirty.returncode != 0:
+            plan.conflicts.append((
+                repo_root / req,
+                f"pinned ref '{ref}' cannot verify worktree cleanliness — "
+                "git status failed; refusing to record a pin over "
+                "unverifiable bytes",
+            ))
+            return
+        if dirty.stdout.strip():
             plan.conflicts.append((
                 repo_root / req,
                 f"pinned ref '{ref}' requires a clean worktree — uncommitted "
@@ -317,7 +359,8 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                 continue
             src_bytes = src.read_bytes()
             if (b"CLAUDE_PLUGIN_ROOT" in src_bytes
-                    or SCRIPT_REF.search(src_bytes)):
+                    or SCRIPT_REF.search(src_bytes)
+                    or declares_script_deps(src_bytes)):
                 # Files depending on the plugin install root or on sibling
                 # scripts/ cannot run in a resolver install — the resolver
                 # does not materialise scripts (surface wiring is a later
@@ -515,6 +558,22 @@ def main() -> int:
         plan.conflicts.append((
             lock_file,
             "lockfile destination contains a symlink — refusing to write through it",
+        ))
+    # Type-check the destination too — --apply copies every planned file
+    # BEFORE the lock write; if .ai is a plain file or the lock path is a
+    # directory the copy succeeds and the lock fails, leaving materialised
+    # files with no ownership record. Reject it at plan time.
+    if lock_file.parent.exists() and not lock_file.parent.is_dir():
+        plan.conflicts.append((
+            lock_file,
+            "lockfile parent .ai is not a directory — refusing to materialise "
+            "without an ownership path",
+        ))
+    elif lock_file.exists() and not lock_file.is_file():
+        plan.conflicts.append((
+            lock_file,
+            "lockfile destination is not a regular file — refusing to "
+            "materialise without an ownership path",
         ))
     if lock_err:
         plan.conflicts.append((

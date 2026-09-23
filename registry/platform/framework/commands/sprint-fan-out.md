@@ -4,6 +4,7 @@ version: 1.0.0
 description: Decompose a goal into a DAG of parallel tasks; dispatch worktree-isolated orchestrator sub-agents
 type: command
 requires_mcp: []
+requires_scripts: ["sprint_status.py"]
 required_entities: []
 safety_tier: amber
 tags: ['orchestration', 'parallel', 'worktree']
