@@ -351,7 +351,8 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
                  "--all", remote],
                 capture_output=True, text=True, timeout=10)
         except (OSError, subprocess.TimeoutExpired):
-            return f"could not resolve push URLs for remote '{remote}'"
+            return ("could not resolve push URLs for remote "
+                    f"'{_redact(remote)}'")
         urls = [ln.strip() for ln in r.stdout.splitlines() if ln.strip()] \
             if r.returncode == 0 else []
     else:
@@ -363,7 +364,7 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
             eff = _rewrite(remote, _rules("insteadof"))
         urls = [eff]
     if not urls:
-        return f"could not resolve push URLs for '{remote}'"
+        return f"could not resolve push URLs for '{_redact(remote)}'"
     # core.sshCommand (or the GIT_SSH_COMMAND/GIT_SSH environment
     # variables) replaces the ssh transport entirely — an ssh/scp URL
     # that parses to the verified slug can still land anywhere the
@@ -392,7 +393,7 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
         if not (url.startswith(proxy)
                 and _slug_of("https://github.com/" + url[len(proxy):])
                 == slug):
-            return (f"push destination '{remote}' resolves to "
+            return (f"push destination '{_redact(remote)}' resolves to "
                     f"'{_redact(url)}'")
     return None
 

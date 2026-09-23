@@ -2267,6 +2267,23 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     assert "SECRETTOKEN" not in r.stderr
     assert not (cr / "registry").exists()
 
+    # Same for a credential-bearing literal URL in remote.pushDefault —
+    # the configured destination itself must be redacted.
+    cl = tmp_path / "credlit"
+    cl.mkdir()
+    sp.run(["git", "init", "-q"], cwd=cl, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=cl, capture_output=True)
+    sp.run(["git", "config", "remote.pushDefault",
+            "https://x-access-token:SECRETTOKEN@github.com/"
+            "Other-Org/public-repo.git"],
+           cwd=cl, capture_output=True)
+    r = run(cl, _bootstrap_env(tmp_path))
+    assert r.returncode == 2, r.stderr
+    assert "SECRETTOKEN" not in r.stderr
+    assert not (cl / "registry").exists()
+
     # A git:// URL parses to the verified slug, but core.gitProxy
     # replaces the direct connection — the push can land anywhere the
     # proxy command chooses → refuse.
