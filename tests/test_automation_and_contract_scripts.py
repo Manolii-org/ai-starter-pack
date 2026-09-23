@@ -1022,3 +1022,59 @@ def test_contract_falsy_on_block_not_unfiltered() -> None:
     assert mod.workflow_triggers_branch(yaml.safe_load("on: false"), "develop") is False
     spec = yaml.safe_load("on: []\njobs: {}\n")
     assert mod.workflow_triggers_branch(spec, "develop") is False
+
+
+# ── review round 37 ─────────────────────────────────────────────────────────
+
+def test_registry_null_schedule_rejected() -> None:
+    """`on: {push: null, schedule: null}` — bare schedule must carry cron
+    entries; the generic `cfg is None` shorthand can't apply."""
+    mod = _load(REGISTRY_SCRIPT, "var37a")
+    assert mod._event_cfg_ok("schedule", None) is not None
+    assert mod._event_cfg_ok("push", None) is None
+    assert mod._event_cfg_ok("schedule", [{"cron": "0 6 * * *"}]) is None
+
+
+def test_contract_null_schedule_sibling_rejected() -> None:
+    mod = _load(CONTRACT_SCRIPT, "cdc37a")
+    assert mod._event_loadable("schedule", None) is False
+    spec = yaml.safe_load("on: {push: null, schedule: null}\n")
+    assert mod.workflow_triggers_branch(spec, "develop") is False
+
+
+def test_both_negated_char_class_branch_glob() -> None:
+    """`release/[!a]*` is a NEGATED class — `release/b` fires, `release/a`
+    does not."""
+    mod = _load(CONTRACT_SCRIPT, "cdc37b")
+    spec = yaml.safe_load("on: {push: {branches: ['release/[!a]*']}}")
+    assert mod.workflow_triggers_branch(spec, "release/a1") is False
+    assert mod.workflow_triggers_branch(spec, "release/b1") is True
+
+
+def test_both_constant_falsy_job_conditions() -> None:
+    """`${{ 0 }}`/`${{ null }}`/`${{ ~ }}` are permanently off like `false`."""
+    for name, path in (("var37c", REGISTRY_SCRIPT), ("cdc37c", CONTRACT_SCRIPT)):
+        mod = _load(path, name)
+        for cond in ("${{ 0 }}", "${{ null }}", "${{ ~ }}",
+                     "${{ false }}", 0, False):
+            assert mod._permanently_off(cond) is True, (name, cond)
+        for live in ("${{ 1 }}", "${{ github.ref }}", "always()"):
+            assert mod._permanently_off(live) is False, (name, live)
+
+
+def test_both_catchall_paths_ignore_disables() -> None:
+    """`paths-ignore: ['**']` covers every path — the event can never fire;
+    a `!` re-inclusion keeps it alive."""
+    reg = _load(REGISTRY_SCRIPT, "var37d")
+    con = _load(CONTRACT_SCRIPT, "cdc37d")
+    def on_block(doc: str) -> dict:
+        spec = yaml.safe_load(doc)
+        return spec["on"] if "on" in spec else spec[True]   # YAML 1.1 `on:` → True
+    for dead in ("on: {push: {paths-ignore: ['**']}}",
+                 "on: {push: {paths-ignore: '*'}}"):
+        cfg = on_block(dead)["push"]
+        assert reg._event_cfg_ok("push", cfg) is not None, dead
+        assert con.workflow_triggers_branch(yaml.safe_load(dead), "prod") is False
+    live = "on: {push: {paths-ignore: ['**', '!docs/**']}}"
+    assert reg._event_cfg_ok("push", on_block(live)["push"]) is None
+    assert con.workflow_triggers_branch(yaml.safe_load(live), "prod") is True

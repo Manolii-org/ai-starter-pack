@@ -152,14 +152,15 @@ def _permanently_off(cond) -> bool:
     """An `if:` that can never run — `false` literal or the equivalent
     expression wrapper `${{ false }}` — counts as a skipped job, not a
     runnable one (it can satisfy nothing)."""
-    if cond is False:
+    if cond is False or cond == 0:
         return True
     if not isinstance(cond, str):
         return False
     s = cond.strip()
     if s.startswith("${{") and s.endswith("}}"):
         s = s[3:-2].strip()
-    return s.lower() == "false"
+    # GitHub's falsy expression literals: false, 0, null (and YAML's `~`)
+    return s.lower() in ("false", "0", "null", "~")
 
 
 def _input_def_ok(v, call: bool = False) -> bool:
@@ -195,13 +196,15 @@ def _event_loadable(name, cfg) -> bool:
     unloads the whole workflow, so the lane's push/PR can never fire either."""
     if not isinstance(name, str) or name not in GH_EVENTS:
         return False
-    if cfg is None:
-        return True
     if name == "schedule":
+        # checked BEFORE the generic `cfg is None` shorthand — a bare
+        # `schedule:` is NOT unfiltered; it must carry cron entries
         return (isinstance(cfg, list) and cfg and all(
             isinstance(s, dict) and set(s) == {"cron"}
             and isinstance(s["cron"], str) and valid_cron(s["cron"])
             for s in cfg))
+    if cfg is None:
+        return True
     if not isinstance(cfg, dict):
         return False
     allowed = EVENT_KEYS.get(name, {"types"})
@@ -488,7 +491,13 @@ def workflow_triggers_branch(spec: dict, branch: str) -> bool:
                     i += 1
                 else:
                     cls = pattern[i + 1:j]
-                    out.append("[" + ("\\" if cls.startswith("^") else "") + cls + "]")
+                    if cls.startswith("!"):
+                        # GitHub `[!a]` negates the class → Python `[^a]`
+                        cls = "^" + cls[1:]
+                    elif cls.startswith("^"):
+                        # `^` is NOT GitHub negation — keep it a literal
+                        cls = "\\" + cls
+                    out.append("[" + cls + "]")
                     i = j + 1
             elif c in ("+", "?"):
                 if out:  # quantifier on the preceding atom
@@ -593,6 +602,14 @@ def workflow_triggers_branch(spec: dict, branch: str) -> bool:
         # invented activity never fires and GitHub rejects the workflow
         if (event == "pull_request" and "types" in ev
                 and any(t not in PR_TYPES for t in _as_patterns(ev["types"]))):
+            continue
+        # a `paths-ignore` covering every path disables the event — but `!`
+        # re-includes paths, so `['**', '!docs/**']` still fires on docs
+        pi = _as_patterns(ev.get("paths-ignore"))
+        if (pi is not None
+                and any(p in ("*", "**", "**/*") for p in pi
+                        if not p.startswith("!"))
+                and not any(p.startswith("!") for p in pi)):
             continue
         branches = _as_patterns(ev.get("branches"))
         ignore = _as_patterns(ev.get("branches-ignore"))

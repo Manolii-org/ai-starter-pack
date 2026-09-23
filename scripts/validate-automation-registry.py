@@ -298,11 +298,10 @@ def _event_cfg_ok(name, cfg) -> str | None:
     filter keys, and well-formed filter values."""
     if not isinstance(name, str) or name not in GH_EVENTS:
         return f"on declares an unknown event {name!r}"
-    if cfg is None:
-        return None                          # `on: {push:}` — unfiltered
     if name == "schedule":
-        # entries: a non-empty list of {cron: <str>} — only key `cron`, and
-        # every expression must parse (one bad entry unloads the workflow)
+        # checked BEFORE the `cfg is None` shorthand — a bare `schedule:`
+        # is NOT unfiltered; it must carry cron entries. Entries: a
+        # non-empty list of {cron: <str>}, every expression must parse.
         if not isinstance(cfg, list) or not cfg:
             return "on.schedule contains a malformed entry"
         if any(not isinstance(s, dict) or set(s) != {"cron"}
@@ -311,6 +310,8 @@ def _event_cfg_ok(name, cfg) -> str | None:
         if any(not valid_cron(s["cron"]) for s in cfg):
             return "on.schedule contains an invalid cron expression"
         return None
+    if cfg is None:
+        return None                          # `on: {push:}` — unfiltered
     if not isinstance(cfg, dict):
         return f"on.{name} is not a valid event configuration"
     # events with no documented branch/path grammar only accept `types`;
@@ -373,6 +374,16 @@ def _event_cfg_ok(name, cfg) -> str | None:
         return f"on.{name} can't combine branches and branches-ignore"
     if "tags" in cfg and "tags-ignore" in cfg:
         return f"on.{name} can't combine tags and tags-ignore"
+    # a `paths-ignore` covering every path disables the event — but `!`
+    # re-includes paths, so `['**', '!docs/**']` still fires on docs
+    pi = cfg.get("paths-ignore")
+    if isinstance(pi, str):
+        pi = [pi]
+    if isinstance(pi, list) and pi:
+        if (any(p in ("*", "**", "**/*") for p in pi
+                if not p.startswith("!"))
+                and not any(p.startswith("!") for p in pi)):
+            return f"on.{name} ignores every path — the trigger can never fire"
     return None
 
 
@@ -424,14 +435,15 @@ def _permanently_off(cond) -> bool:
     """An `if:` that can never run — `false` literal or the equivalent
     expression wrapper `${{ false }}` — counts as a skipped job, not a
     runnable one (it can satisfy nothing)."""
-    if cond is False:
+    if cond is False or cond == 0:
         return True
     if not isinstance(cond, str):
         return False
     s = cond.strip()
     if s.startswith("${{") and s.endswith("}}"):
         s = s[3:-2].strip()
-    return s.lower() == "false"
+    # GitHub's falsy expression literals: false, 0, null (and YAML's `~`)
+    return s.lower() in ("false", "0", "null", "~")
 
 
 def _runnable_job(job) -> bool:
