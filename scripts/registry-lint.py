@@ -108,7 +108,10 @@ def exempt(rel_to_registry: Path) -> bool:
     if len(parts) <= 2:  # registry root files + scope.yaml
         return True
     tail = "/".join(parts[-2:])
-    return tail in MANIFEST_FILES or parts[-1] == "README.md"
+    # README.md is deliberately NOT exempt: nested plugin READMEs are
+    # distributed content, and exempting them by basename would bypass the
+    # per-line ratchet entirely.
+    return tail in MANIFEST_FILES
 
 
 def check_index() -> None:
@@ -146,6 +149,18 @@ def check_index() -> None:
 
 def check_manifests() -> None:
     bad = 0
+    # Every indexed plugin must carry BOTH manifests — a directory that lacks
+    # .claude-plugin/plugin.json is never visited by the file loop below, so
+    # require it explicitly (the resolver would silently treat it as v0.0.0).
+    index_path = REGISTRY / "plugins.json"
+    if index_path.is_file():
+        for p in json.loads(index_path.read_text()).get("plugins", []):
+            pdir = REGISTRY / p.get("scope", "") / p.get("name", "")
+            for man in (".claude-plugin/plugin.json", ".devin-plugin/plugin.json"):
+                if not (pdir / man).is_file():
+                    report("FAIL", "MANIFEST",
+                           f"{pdir.relative_to(REGISTRY)}: indexed plugin missing {man}")
+                    bad += 1
     for pj in REGISTRY.rglob(".claude-plugin/plugin.json"):
         rel = pj.relative_to(REGISTRY)
         plugin_dir = pj.parent.parent
@@ -182,6 +197,11 @@ def check_manifests() -> None:
 
 def check_scopes() -> None:
     bad = 0
+    if SCOPE_SCHEMA is None:
+        report("FAIL", "SCOPE",
+               "schemas/registry-scope.schema.json unreadable or jsonschema "
+               "missing — scope contracts cannot be validated")
+        bad += 1
     for scope in ALL_SCOPES:
         sdir = REGISTRY / scope
         if not sdir.is_dir():
@@ -244,25 +264,16 @@ def line_key(rel_s: str, line: str) -> str:
     return f"{rel_s}#{h}"
 
 
-def is_text_file(path: Path) -> bool:
-    """Sniff for binary content — the content scans cover every text file in
-    the registry regardless of extension (.env, Dockerfile, extensionless
-    executables): a credential or org name must not evade the gate by living
-    in a file type nobody enumerated."""
-    try:
-        return b"\x00" not in path.read_bytes()[:8192]
-    except OSError:
-        return False
-
-
 def content_scan_files(org_leak: bool = True) -> list[Path]:
     """Files scanned for org identifiers (org_leak=True) or secrets (False).
-    Org-leak exempts scope metadata (allowlist entries, scope.yaml, DETECTOR_DATA);
-    secrets exempts only DETECTOR_DATA — a credential committed in a manifest or
-    a scope.yaml must still fail."""
+    Every file under registry/ is scanned — no extension allowlist and no
+    content-sniffed binary exclusion either: a NUL byte or unusual name must
+    not be able to exempt a committed credential. Org-leak additionally
+    exempts scope metadata (allowlist entries, scope.yaml, manifests);
+    secrets exempts only DETECTOR_DATA."""
     out = []
     for path in sorted(REGISTRY.rglob("*")):
-        if not path.is_file() or not is_text_file(path):
+        if not path.is_file():
             continue
         rel = path.relative_to(REGISTRY)
         if rel.as_posix() in DETECTOR_DATA:

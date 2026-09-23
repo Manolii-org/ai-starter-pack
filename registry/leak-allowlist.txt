@@ -75,6 +75,8 @@ platform/framework/skills/migration-drift/SKILL.md#00752d08
 platform/framework/skills/migration-drift/SKILL.md#6152a7ca
 platform/framework/skills/migration-drift/SKILL.md#d37321df
 platform/framework/skills/migration-drift/SKILL.md#ec4f6a43
+platform/framework/telemetry/README.md#658b2280
+platform/framework/telemetry/README.md#7bc54766
 platform/framework/telemetry/heartbeat.py#0c1b7a55
 platform/framework/telemetry/heartbeat.py#695518e5
 platform/framework/telemetry/heartbeat.py#6aa6c7b3
@@ -97,6 +99,10 @@ platform/framework/telemetry/heartbeat.ts#91358d38
 platform/framework/telemetry/tests/heartbeat.test.ts#359b0fb8
 platform/framework/telemetry/tests/heartbeat.test.ts#82aebde5
 platform/framework/telemetry/tests/test_heartbeat.py#e555ff3e
+platform/om/README.md#38bcb27f
+platform/om/README.md#3cc155bc
+platform/om/README.md#6b5fe255
+platform/om/README.md#7754bcd5
 platform/om/evals/operational-memory/case-amenity-simple-citation.json#7f86d652
 platform/om/evals/operational-memory/case-conflicting-evidence-surfaced.json#7f86d652
 platform/om/evals/operational-memory/case-guest-reply-draft-only.json#7f86d652

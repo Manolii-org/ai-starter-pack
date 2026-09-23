@@ -305,6 +305,89 @@ def test_modified_orphan_kept_without_prune(tmp_path):
     assert ".claude/skills/demo/SKILL.md" in lock["files"]
 
 
+def test_lockfile_path_escape_conflicts(tmp_path):
+    """A lockfile entry that escapes the repo/.claude roots (absolute path or
+    .. traversal) must never steer a prune unlink — fail closed."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/SKILL.md",
+                                "---\nname: demo\ndescription: d\n---\nv1")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    victim = tmp_path / "victim.txt"
+    victim.write_text("do not delete")
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    # poison the lockfile: entries escaping repo_root and .claude/
+    lock_file = consumer / ".ai" / "capability-lock.json"
+    lock = json.loads(lock_file.read_text())
+    lock["files"]["../victim.txt"] = "0" * 64
+    lock["files"][str(victim)] = "0" * 64
+    lock["files"]["etc/passwd"] = "0" * 64
+    lock_file.write_text(json.dumps(lock))
+    write_manifest(consumer, "manolii", [])
+    r = run_resolver(m, reg_root, consumer, "--apply", "--prune")
+    assert r.returncode == 1
+    assert "materialisation roots" in r.stdout
+    assert victim.read_text() == "do not delete"
+
+
+def test_secrets_scans_binary_like_files(tmp_path):
+    """A NUL byte must not exempt a file from the secrets scan — the gate
+    scans every file under registry/ regardless of content shape."""
+    mod = load_lint_module()
+    reg = tmp_path / "registry"
+    mod.REGISTRY = reg
+    mod.ALLOWLIST_PATH = reg / "leak-allowlist.txt"
+    mod.results = []
+    (reg / "platform").mkdir(parents=True)
+    (reg / "platform" / "weird").write_bytes(
+        b"\x00binary-ish prefix\nkey = ghp_abcdefghij0123456789\n")
+    mod.check_secrets()
+    fails = [f for f in mod.results
+             if f.check == "SECRETS" and f.status == "FAIL"]
+    assert fails and "weird" in fails[0].detail
+
+
+def test_org_leak_scans_nested_readme(tmp_path):
+    """Nested plugin READMEs are distributed content — org identifiers in
+    them hit the scan (basename exemption would bypass the ratchet)."""
+    mod = load_lint_module()
+    src = tmp_path / "src"
+    reg_root = make_registry(src, {
+        "platform/framework": [("README.md", "this plugin mentions impaktful\n")],
+    })
+    reg = reg_root / "registry"
+    mod.REGISTRY = reg
+    mod.ALLOWLIST_PATH = reg / "leak-allowlist.txt"
+    mod.results = []
+    mod.check_org_leak()
+    per_line = [f for f in mod.results
+                if f.check == "ORG-LEAK" and f.status == "FAIL"
+                and "README.md" in f.detail]
+    assert per_line, [f.detail for f in mod.results]
+
+
+def test_indexed_plugin_missing_manifest_fails(tmp_path):
+    """An indexed plugin dir without .claude-plugin/plugin.json must FAIL —
+    the resolver would silently treat it as version 0.0.0."""
+    mod = load_lint_module()
+    reg = tmp_path / "registry"
+    pdir = reg / "platform" / "ghost"
+    pdir.mkdir(parents=True)  # no .claude-plugin/plugin.json
+    (reg / "plugins.json").write_text(json.dumps({
+        "plugins": [{"scope": "platform", "name": "ghost",
+                     "path": "registry/platform/ghost"}]}))
+    mod.REGISTRY = reg
+    mod.ALLOWLIST_PATH = reg / "leak-allowlist.txt"
+    mod.results = []
+    mod.check_manifests()
+    fails = [f for f in mod.results
+             if f.check == "MANIFEST" and f.status == "FAIL"]
+    assert fails and "ghost" in fails[0].detail
+
+
 def load_lint_module():
     import importlib.util
     spec = importlib.util.spec_from_file_location("registry_lint", LINT)

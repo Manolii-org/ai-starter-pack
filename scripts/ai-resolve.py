@@ -295,7 +295,22 @@ def main() -> int:
     for f in sorted(locked_dig):
         if f in current:
             continue
-        candidate = repo_root / f
+        # Containment: the lockfile is data, not authority — a poisoned or
+        # legacy-v1 entry (absolute path, .. escape, or anything outside the
+        # .claude/ materialisation roots) must never steer an unlink outside
+        # the repo. Resolve it and fail closed rather than trusting it.
+        candidate = (repo_root / f).resolve()
+        try:
+            rel_c = candidate.relative_to(repo_root)
+        except ValueError:
+            rel_c = None
+        if Path(f).is_absolute() or rel_c is None or rel_c.parts[0] != ".claude":
+            plan.conflicts.append((
+                repo_root / f,
+                "lockfile path outside .claude/ materialisation roots — refusing to "
+                "act on it (repair .ai/capability-lock.json manually)",
+            ))
+            continue
         digest = locked_dig[f]
         if (args.prune and candidate.is_file()
                 and (digest is None or sha256(candidate) != digest)):
