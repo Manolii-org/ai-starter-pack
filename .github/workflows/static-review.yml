@@ -20,7 +20,10 @@ permissions:
 jobs:
   changed-files:
     name: Detect Changed Files
-    runs-on: ${{ fromJSON(vars.LIGHT_RUNNER || '["ubuntu-slim"]') }}
+    runs-on: >-
+      ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+          && fromJSON(vars.LIGHT_RUNNER || '["ubuntu-slim"]')
+          || 'ubuntu-latest' }}
     timeout-minutes: 14
     outputs:
       has_py: ${{ steps.detect.outputs.has_py }}
@@ -58,7 +61,10 @@ jobs:
 
   bandit:
     name: Bandit (Python)
-    runs-on: ${{ fromJSON(vars.LIGHT_RUNNER || '["ubuntu-slim"]') }}
+    runs-on: >-
+      ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+          && fromJSON(vars.LIGHT_RUNNER || '["ubuntu-slim"]')
+          || 'ubuntu-latest' }}
     timeout-minutes: 14
     needs: changed-files
     if: needs.changed-files.outputs.has_py == 'true'
@@ -80,7 +86,10 @@ jobs:
 
   shellcheck:
     name: Shellcheck
-    runs-on: ${{ fromJSON(vars.LIGHT_RUNNER || '["ubuntu-slim"]') }}
+    runs-on: >-
+      ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+          && fromJSON(vars.LIGHT_RUNNER || '["ubuntu-slim"]')
+          || 'ubuntu-latest' }}
     timeout-minutes: 14
     needs: changed-files
     if: needs.changed-files.outputs.has_sh == 'true'
@@ -93,8 +102,8 @@ jobs:
           # shellcheck is absent from the slim image; guard-install it.
           if ! command -v shellcheck >/dev/null; then
             if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo"; fi
-            $SUDO apt-get update -qq
-            $SUDO apt-get install -y -qq shellcheck
+            timeout 120 $SUDO apt-get update -qq
+            timeout 120 $SUDO apt-get install -y -qq shellcheck
           fi
       - name: Run Shellcheck on changed shell files
         run: |
@@ -108,7 +117,10 @@ jobs:
 
   eslint:
     name: ESLint (JS/TS)
-    runs-on: ${{ fromJSON(vars.LIGHT_RUNNER || '["ubuntu-slim"]') }}
+    runs-on: >-
+      ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+          && fromJSON(vars.LIGHT_RUNNER || '["ubuntu-slim"]')
+          || 'ubuntu-latest' }}
     timeout-minutes: 14
     needs: changed-files
     if: needs.changed-files.outputs.has_ts == 'true'
@@ -138,7 +150,10 @@ jobs:
 
   agent-routing-lint:
     name: Agent Routing Lint
-    runs-on: ${{ fromJSON(vars.LIGHT_RUNNER || '["ubuntu-slim"]') }}
+    runs-on: >-
+      ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+          && fromJSON(vars.LIGHT_RUNNER || '["ubuntu-slim"]')
+          || 'ubuntu-latest' }}
     timeout-minutes: 14
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
