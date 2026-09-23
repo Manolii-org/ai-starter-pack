@@ -661,6 +661,28 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
                 out.append((prefix, repl))
         return out
 
+    # githooks(5): a pre-push hook runs arbitrary code during the push
+    # — it can read the freshly staged universe files and upload them
+    # anywhere even when every transport check below passes.
+    # `rev-parse --git-path` resolves the effective hooks dir
+    # (core.hooksPath included); any present pre-push file fails
+    # closed — executability is platform-dependent, and a file named
+    # pre-push in the hooks dir has no benign role here.
+    try:
+        hp = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--git-path",
+             "hooks/pre-push"],
+            capture_output=True, text=True, timeout=10)
+        hook = Path(root) / hp.stdout.strip() \
+            if hp.returncode == 0 and hp.stdout.strip() else None
+    except (OSError, subprocess.TimeoutExpired):
+        hook = None
+    if hook is None:
+        return "the pre-push hook path could not be resolved"
+    if hook.exists():
+        return ("a pre-push hook can exfiltrate the staged universe "
+                "content during the push")
+
     def _rewrite(url: str, rules: list[tuple[str, str]]) -> str:
         for prefix, repl in sorted(rules, key=lambda r: -len(r[0])):
             if url.startswith(prefix):

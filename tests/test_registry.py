@@ -2764,6 +2764,41 @@ def test_bootstrap_mirror_push_target_pass(tmp_path):
     r = run(d)
     assert r.returncode == 0, r.stderr
 
+    # A pre-push hook runs arbitrary code during the push — it can read
+    # the staged universe files and exfiltrate them even when every
+    # transport check passes. An executable hook in .git/hooks fails
+    # closed, and core.hooksPath's directory is checked too.
+    hk = tmp_path / "prepushhook"
+    hk.mkdir()
+    sp.run(["git", "init", "-q"], cwd=hk, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=hk, capture_output=True)
+    hook = hk / ".git" / "hooks" / "pre-push"
+    hook.write_text("#!/bin/sh\nexit 0\n")
+    os.chmod(hook, 0o755)
+    r = run(hk)
+    assert r.returncode == 2, r.stderr
+    assert "pre-push" in r.stderr
+    assert not (hk / "registry").exists()
+
+    hd = tmp_path / "hooksdir"
+    hd.mkdir()
+    hp2 = tmp_path / "prepushpath"
+    hp2.mkdir()
+    sp.run(["git", "init", "-q"], cwd=hp2, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=hp2, capture_output=True)
+    (hd / "pre-push").write_text("#!/bin/sh\nexit 0\n")
+    os.chmod(hd / "pre-push", 0o755)
+    sp.run(["git", "config", "core.hooksPath", str(hd)],
+           cwd=hp2, capture_output=True)
+    r = run(hp2)
+    assert r.returncode == 2, r.stderr
+    assert "pre-push" in r.stderr
+    assert not (hp2 / "registry").exists()
+
 
 def _load_bootstrap():
     import importlib.util
