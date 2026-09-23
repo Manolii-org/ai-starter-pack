@@ -267,13 +267,23 @@ def _redact(url: str) -> str:
     return re.sub(r"://[^/@\s]*@", "://***@", url, count=1)
 
 
-def _ssh_host_unchanged() -> bool:
+def _ssh_host_unchanged(url: str) -> bool:
     """`ssh -G` resolves OpenSSH's effective config — a HostName rewrite
     in ~/.ssh/config or /etc/ssh/ssh_config would redirect an ssh push
     away from github.com even though the URL parses to the verified
-    slug. Fail closed when ssh cannot confirm the effective host."""
+    slug. Query with the same user/host/port arguments git would pass
+    so `Match user`/`Match port` blocks evaluate identically. Fail
+    closed when ssh cannot confirm the effective host."""
+    if url.startswith("ssh://"):
+        m = re.match(r"^ssh://(?:([^@/\s]+)@)?github\.com(?::(\d+))?/",
+                     url)
+        user, port = m.groups()
+        args = (["-p", port] if port else []) + \
+            [f"{user}@github.com" if user else "github.com"]
+    else:  # scp-style user@github.com:slug
+        args = [f"{url.split('@', 1)[0]}@github.com"]
     try:
-        r = subprocess.run(["ssh", "-G", "github.com"],
+        r = subprocess.run(["ssh", "-G", *args],
                            capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.TimeoutExpired):
         return False
@@ -401,7 +411,7 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
                 if ssh_src:
                     return (f"{ssh_src} overrides the ssh transport "
                             f"for push url '{_redact(url)}'")
-                if not _ssh_host_unchanged():
+                if not _ssh_host_unchanged(url):
                     return ("ssh client config redirects github.com "
                             "elsewhere (or 'ssh -G' could not verify "
                             "the effective host) for push url "

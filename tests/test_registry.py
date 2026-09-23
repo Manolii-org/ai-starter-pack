@@ -2305,6 +2305,29 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     assert "ssh client config" in r.stderr
     assert not (sh / "registry").exists()
 
+    # A `Match user` rewrite is invisible to 'ssh -G github.com' — the
+    # query must carry the URL's user so it evaluates the same blocks
+    # git's push would. Stub: only a 'redirect@' target rewrites.
+    mu = tmp_path / "sshmatchuser"
+    mu.mkdir()
+    stub2 = tmp_path / "sshstub2"
+    stub2.mkdir()
+    s2 = stub2 / "ssh"
+    s2.write_text(
+        '#!/bin/sh\ncase " $* " in\n'
+        '  *redirect@github.com*) echo "hostname evil.example.test";;\n'
+        '  *) echo "hostname github.com";;\n'
+        "esac\n")
+    s2.chmod(0o755)
+    sp.run(["git", "init", "-q"], cwd=mu, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "redirect@github.com:Buro-Built/buro-registry.git"],
+           cwd=mu, capture_output=True)
+    r = run(mu, dict(env, PATH=f"{stub2}:{env['PATH']}"))
+    assert r.returncode == 2, r.stderr
+    assert "ssh client config" in r.stderr
+    assert not (mu / "registry").exists()
+
     # A git:// URL parses to the verified slug, but core.gitProxy
     # replaces the direct connection — the push can land anywhere the
     # proxy command chooses → refuse.
