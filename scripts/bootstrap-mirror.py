@@ -359,8 +359,16 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
         urls = [eff]
     if not urls:
         return f"could not resolve push URLs for '{remote}'"
+    ssh_override = _cfg("core.sshCommand")
     for url in urls:
         if _slug_of(url) == slug:
+            # core.sshCommand replaces the ssh transport entirely — an
+            # ssh/scp URL that parses to the verified slug can still
+            # land anywhere the command chooses.
+            if ssh_override and (url.startswith("ssh://")
+                                 or _GH_SCP.match(url)):
+                return ("core.sshCommand overrides the ssh transport "
+                        f"for push url '{url}'")
             continue
         # Devin-box auth proxy: forwards pushes to the github.com slug
         # embedded in its path (the box's global insteadOf rewrites every

@@ -2219,6 +2219,22 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     assert "vcs" in r.stderr
     assert not (vc / "registry").exists()
 
+    # An ssh/scp URL parses to the verified slug, but core.sshCommand
+    # replaces the transport entirely — the push can land anywhere →
+    # refuse.
+    sc = tmp_path / "sshcommand"
+    sc.mkdir()
+    sp.run(["git", "init", "-q"], cwd=sc, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "git@github.com:Buro-Built/buro-registry.git"],
+           cwd=sc, capture_output=True)
+    sp.run(["git", "config", "core.sshCommand", "evil-ssh"], cwd=sc,
+           capture_output=True)
+    r = run(sc, _bootstrap_env(tmp_path))
+    assert r.returncode == 2, r.stderr
+    assert "sshCommand" in r.stderr
+    assert not (sc / "registry").exists()
+
     # A non-GitHub origin that parses to a valid-looking slug — gh would
     # verify an UNRELATED github.com repo of the same name → refuse.
     gl = tmp_path / "gitlab"
