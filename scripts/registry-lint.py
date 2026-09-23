@@ -349,19 +349,22 @@ def _decoded_json_strings(doc) -> list[str]:
 
 _SOURCE_ESC = re.compile(
     r"\\(?:x([0-9a-fA-F]{2})|u\{([0-9a-fA-F]{1,6})\}|u([0-9a-fA-F]{4})"
-    r"|U([0-9a-fA-F]{8}))")
+    r"|U([0-9a-fA-F]{8})|([0-7]{1,3}))")
 
 
 def _decode_source_escapes(line: str) -> str:
-    """Decode \\xNN / \\uXXXX / \\UXXXXXXXX / \\u{X..XXXXXX} escapes as a
-    Python/JS/TS consumer would — source files can embed a credential behind
-    runtime-decoded escapes ("ghp_\\x41") that raw text cannot match.
-    `\\\\` is protected first so a literal backslash doesn't double-decode."""
+    """Decode \\xNN / \\uXXXX / \\UXXXXXXXX / \\u{X..XXXXXX} / \\ooo escapes
+    as a Python/JS/TS consumer would — source files can embed a credential
+    behind runtime-decoded escapes ("ghp_\\x41", "ghp_\\101") that raw text
+    cannot match. `\\\\` is protected first so a literal backslash doesn't
+    double-decode."""
     if "\\" not in line:
         return line
 
     def rep(m: re.Match) -> str:
-        for g in m.groups():
+        if m.group(5) is not None:
+            return chr(int(m.group(5), 8))
+        for g in m.groups()[:4]:
             if g:
                 try:
                     return chr(int(g, 16))

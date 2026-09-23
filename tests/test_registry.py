@@ -1561,6 +1561,60 @@ def test_secrets_ecmascript_codepoint_escape_fails(tmp_path):
         "ECMAScript code-point escaped credential not flagged"
 
 
+def test_secrets_python_octal_escape_fails(tmp_path):
+    """"ghp_\\101..." in a Python source file decodes to a credential at
+    runtime — octal escapes must trip SECRETS like hex/unicode forms."""
+    esc = "\\101" + "A" * 19
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [(
+            "scripts/helper.py",
+            'token = "ghp_' + esc + '"')],
+    })
+    mod = load_lint_module()
+    mod.REGISTRY = reg_root / "registry"
+    mod.results = []
+    mod.check_secrets()
+    fails = [f for f in mod.results
+             if f.check == "SECRETS" and f.status == "FAIL"]
+    assert any("helper.py" in f.detail for f in fails), \
+        "octal-escaped credential not flagged"
+
+
+def test_missing_plugin_manifest_conflicts(tmp_path):
+    """A plugin dir without .claude-plugin/plugin.json must conflict — a
+    silent 0.0.0 default would let `ref: "0"` satisfy it."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "x")],
+    })
+    (reg_root / "registry/platform/framework/.claude-plugin/plugin.json"
+     ).unlink()
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 1
+    assert "non-semver" in r.stdout or "missing" in r.stdout
+
+
+def test_non_semver_manifest_version_conflicts(tmp_path):
+    """'1.bad.2' must not satisfy ref '1.2' — version is a resolution input,
+    non-semver values conflict instead of permissive parsing."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "x")],
+    })
+    (reg_root / "registry/platform/framework/.claude-plugin/plugin.json"
+     ).write_text(json.dumps(
+         {"name": "framework", "version": "1.bad.2", "description": "t"}))
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.2"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 1
+    assert "non-semver" in r.stdout
+
+
 def test_exact_ref_abbreviated_matches_zero_padded_version(tmp_path):
     """ref '1.0' must satisfy registry version '1.0.0' — the grammar accepts
     x[.y[.z]] so exact compares normalize to three components."""

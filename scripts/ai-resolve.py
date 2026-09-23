@@ -433,14 +433,25 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                 "revision — refusing to record pin metadata from unverifiable bytes",
             ))
             return
-    version = "0.0.0"
+    version = None
     if manifest_file.is_file():
         try:
             version = json.loads(manifest_file.read_text(encoding="utf-8"))["version"]
-            if not isinstance(version, str):
-                version = "0.0.0"
         except (json.JSONDecodeError, KeyError):
-            pass
+            version = None
+    # The manifest version is a resolution input: absent/malformed/non-semver
+    # values must conflict — silently defaulting to 0.0.0 lets `ref: "0"`
+    # satisfy a manifest-less plugin, and parse()'s permissive digit filter
+    # would let "1.bad.2" satisfy "1.2".
+    if (not isinstance(version, str)
+            or not SEMVER_REF.fullmatch(version)):
+        plan.conflicts.append((
+            repo_root / req,
+            f"{req}: .claude-plugin/plugin.json missing, unreadable, or "
+            f"carries non-semver version {version!r} — refusing unverifiable "
+            "resolution",
+        ))
+        return
     if not pinned and not version_satisfies(version, ref):
         plan.conflicts.append((
             repo_root / req,
