@@ -42,3 +42,19 @@ def test_autofix_uses_github_token_fallback() -> None:
         "is empty in called workflows and breaks private-repo git fetch"
     )
     assert "github_token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}" not in text
+
+
+def test_workflow_run_staleness_is_checked_before_checkout_and_agent() -> None:
+    """A delayed failure must not check out or invoke an agent for an old SHA."""
+
+    for workflow in WORKFLOWS:
+        text = workflow.read_text(encoding="utf-8")
+        stale_check = '"$WR_HEAD_SHA" != "$CURRENT_HEAD_SHA"'
+        checkout = "uses: actions/checkout@"
+        agent = "uses: anthropics/claude-code-action@"
+        assert "WR_HEAD_SHA: ${{ github.event.workflow_run.head_sha || '' }}" in text
+        assert "gh api \"repos/${REPOSITORY}/pulls/${PR_NUM}\" --jq '.head.sha'" in text
+        assert text.index(stale_check) < text.index(checkout) < text.index(agent)
+        # Missing API/SHA evidence is deliberately fail-open so a current failure
+        # still reaches repair; only a proven inequality suppresses dispatch.
+        assert '-n "$WR_HEAD_SHA" && -n "$CURRENT_HEAD_SHA"' in text
