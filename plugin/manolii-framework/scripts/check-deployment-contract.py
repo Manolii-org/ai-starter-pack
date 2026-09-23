@@ -452,12 +452,15 @@ def _runner_ok(runner) -> bool:
 
 def _step_ok(step) -> bool:
     """A runnable step carries a non-empty `run` command or `uses` action —
-    `{}` / `with`-only / `run: ""` steps are rejected by GitHub."""
+    exactly one of them. `{}` / `with`-only / `run: ""` steps are rejected by
+    GitHub, and so is a step declaring both (`run` + `uses` is invalid syntax)."""
     if not isinstance(step, dict):
         return False
-    run, uses = step.get("run"), step.get("uses")
-    return (isinstance(run, str) and bool(run.strip())
-            or isinstance(uses, str) and bool(uses.strip()))
+    has_run, has_uses = "run" in step, "uses" in step
+    if has_run == has_uses:
+        return False  # need exactly one execution form
+    v = step.get("run") if has_run else step.get("uses")
+    return isinstance(v, str) and bool(v.strip())
 
 
 def jobs_map(spec: dict) -> dict:

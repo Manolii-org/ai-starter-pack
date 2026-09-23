@@ -54,6 +54,11 @@ EVENT_KEYS = {
                      "types"},
     "workflow_dispatch": {"inputs"},
 }
+# workflow_dispatch input-definition grammar: only these keys, and `type`
+# restricted to GitHub's real input types.
+INPUT_DEF_KEYS = {"description", "required", "type", "default", "options",
+                  "deprecationMessage"}
+INPUT_TYPES = {"boolean", "choice", "number", "environment", "string"}
 MONTH_NAMES = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
                "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}
 WEEKDAY_NAMES = {"SUN": 0, "MON": 1, "TUE": 2, "WED": 3, "THU": 4,
@@ -236,10 +241,26 @@ def _workflow_trigger_ok(spec: dict, trigger: dict) -> str | None:
             for k, v in ev.items():
                 if k == "inputs":
                     # workflow_dispatch input definitions must be a mapping
-                    # of mappings — `inputs: false` can't load
-                    if not isinstance(v, dict) or any(
-                            not isinstance(m, dict) for m in v.values()):
+                    # of mappings — `inputs: false` can't load. Each
+                    # definition must itself stay inside GitHub's input
+                    # grammar: only the documented keys, a real `type`,
+                    # a boolean `required`, and a string-list `options`.
+                    if not isinstance(v, dict):
                         return f"on.{ttype}.inputs must map inputs to definitions"
+                    for iname, idef in v.items():
+                        if not isinstance(idef, dict):
+                            return f"on.{ttype}.inputs must map inputs to definitions"
+                        if not set(idef) <= INPUT_DEF_KEYS:
+                            return f"on.{ttype}.inputs.{iname} uses keys GitHub doesn't support"
+                        it = idef.get("type")
+                        if it is not None and it not in INPUT_TYPES:
+                            return f"on.{ttype}.inputs.{iname}.type '{it}' is not a valid input type"
+                        if "required" in idef and not isinstance(idef["required"], bool):
+                            return f"on.{ttype}.inputs.{iname}.required must be a boolean"
+                        if "options" in idef and not (
+                                isinstance(idef["options"], list) and idef["options"]
+                                and all(isinstance(o, str) for o in idef["options"])):
+                            return f"on.{ttype}.inputs.{iname}.options must be a non-empty list of strings"
                     continue
                 if not (isinstance(v, str)
                         or (isinstance(v, list)
@@ -318,12 +339,15 @@ def _runner_ok(runner) -> bool:
 
 def _step_ok(step) -> bool:
     """A runnable step carries a non-empty `run` command or `uses` action —
-    `{}` / `with`-only / `run: ""` steps are rejected by GitHub."""
+    exactly one of them. `{}` / `with`-only / `run: ""` steps are rejected by
+    GitHub, and so is a step declaring both (`run` + `uses` is invalid syntax)."""
     if not isinstance(step, dict):
         return False
-    run, uses = step.get("run"), step.get("uses")
-    return (isinstance(run, str) and bool(run.strip())
-            or isinstance(uses, str) and bool(uses.strip()))
+    has_run, has_uses = "run" in step, "uses" in step
+    if has_run == has_uses:
+        return False  # need exactly one execution form
+    v = step.get("run") if has_run else step.get("uses")
+    return isinstance(v, str) and bool(v.strip())
 
 
 def _repo_dir(args: argparse.Namespace, repo: str) -> Path | None:
