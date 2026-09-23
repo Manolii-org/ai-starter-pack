@@ -29,9 +29,11 @@ permissions:
 jobs:
   mutation-diff:
     name: Mutation Testing on Diff
+    # Installs the consumer dependency graph — hosted by default, slim via
+    # explicit LIGHT_RUNNER opt-in (consumer-scale, unverifiable).
     runs-on: >-
       ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-          && fromJSON(vars.LIGHT_RUNNER || '["ubuntu-slim"]')
+          && fromJSON(vars.LIGHT_RUNNER || '["ubuntu-latest"]')
           || 'ubuntu-latest' }}
     timeout-minutes: 14
     steps:
