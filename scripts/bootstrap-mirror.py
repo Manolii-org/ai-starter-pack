@@ -547,6 +547,14 @@ def _ssh_host_unchanged(url: str) -> str | None:
     if eff.get("knownhostscommand", "").strip().lower() not in ("", "none"):
         return ("ssh client config installs a dynamic host-key source "
                 "(KnownHostsCommand)")
+    # PermitLocalCommand + LocalCommand runs the command locally after
+    # connecting — it can read the staged universe files and upload
+    # them anywhere while hostname/host-key checks stay green.
+    if (eff.get("permitlocalcommand", "").lower() in
+            ("yes", "true", "on", "1")
+            and eff.get("localcommand", "").strip()):
+        return ("ssh client config executes a local command after "
+                "connecting (PermitLocalCommand/LocalCommand)")
     kh = [p for p in (eff.get("userknownhostsfile", "").split()
                       + eff.get("globalknownhostsfile", "").split())
           if p != "/dev/null"]
@@ -661,27 +669,30 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
                 out.append((prefix, repl))
         return out
 
-    # githooks(5): a pre-push hook runs arbitrary code during the push
-    # — it can read the freshly staged universe files and upload them
-    # anywhere even when every transport check below passes.
-    # `rev-parse --git-path` resolves the effective hooks dir
-    # (core.hooksPath included); any present pre-push file fails
-    # closed — executability is platform-dependent, and a file named
-    # pre-push in the hooks dir has no benign role here.
+    # githooks(5): the recommended `git add -A && git commit &&
+    # git push` invokes every hook below — each runs arbitrary code
+    # with the freshly staged universe files readable, so any of them
+    # can exfiltrate the content even when every transport check
+    # passes. `rev-parse --git-path` resolves the effective hooks dir
+    # (core.hooksPath included); any present hook file fails closed —
+    # executability is platform-dependent, and such a file has no
+    # benign role in this bootstrap.
     try:
         hp = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "--git-path",
-             "hooks/pre-push"],
+             "hooks"],
             capture_output=True, text=True, timeout=10)
-        hook = Path(root) / hp.stdout.strip() \
+        hooks_dir = Path(root) / hp.stdout.strip() \
             if hp.returncode == 0 and hp.stdout.strip() else None
     except (OSError, subprocess.TimeoutExpired):
-        hook = None
-    if hook is None:
-        return "the pre-push hook path could not be resolved"
-    if hook.exists():
-        return ("a pre-push hook can exfiltrate the staged universe "
-                "content during the push")
+        hooks_dir = None
+    if hooks_dir is None:
+        return "the hooks directory could not be resolved"
+    for name in ("pre-commit", "prepare-commit-msg", "commit-msg",
+                 "post-commit", "pre-push"):
+        if (hooks_dir / name).exists():
+            return (f"a '{name}' hook can exfiltrate the staged "
+                    "universe content during the commit/push")
 
     def _rewrite(url: str, rules: list[tuple[str, str]]) -> str:
         for prefix, repl in sorted(rules, key=lambda r: -len(r[0])):

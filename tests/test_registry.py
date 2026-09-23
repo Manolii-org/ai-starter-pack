@@ -2799,6 +2799,22 @@ def test_bootstrap_mirror_push_target_pass(tmp_path):
     assert "pre-push" in r.stderr
     assert not (hp2 / "registry").exists()
 
+    # Commit-side hooks run during the recommended `git commit` too —
+    # every hook the add/commit/push sequence invokes is checked.
+    hk2 = tmp_path / "precommithook"
+    hk2.mkdir()
+    sp.run(["git", "init", "-q"], cwd=hk2, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=hk2, capture_output=True)
+    hook = hk2 / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\nexit 0\n")
+    os.chmod(hook, 0o755)
+    r = run(hk2)
+    assert r.returncode == 2, r.stderr
+    assert "pre-commit" in r.stderr
+    assert not (hk2 / "registry").exists()
+
 
 def _load_bootstrap():
     import importlib.util
@@ -2992,6 +3008,13 @@ def test_bootstrap_ssh_effective_config(monkeypatch, tmp_path):
     patch([(k, f"{home}/.ssh/one two"
            if k == "userknownhostsfile" else v) for k, v in CLEAN])
     assert "ambiguous" in mod._ssh_host_unchanged(URL)
+
+    # PermitLocalCommand + LocalCommand executes a command locally
+    # after connecting — an exfil path invisible to the host checks.
+    patch([(k, str(kh_file) if k == "userknownhostsfile" else v)
+           for k, v in CLEAN] + [("permitlocalcommand", "yes"),
+                                 ("localcommand", "/bin/evil %h")])
+    assert "local command" in mod._ssh_host_unchanged(URL)
 
     # Windows: the trust root is OS-derived (_windows_dir → kernel32),
     # never the caller-controlled SystemRoot env. When the OS cannot
