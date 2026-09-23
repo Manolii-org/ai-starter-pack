@@ -35,7 +35,8 @@ permissions:
 jobs:
   autofix:
     name: Autofix PR
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.LIGHT_RUNNER || '["ubuntu-slim"]') }}
+    timeout-minutes: 14
     # Human collaborator reviews/comments, OR relayed bot review (**[@), OR CI workflow_run failure.
     # Do NOT blanket-exclude github-actions[bot] — that is the relay author.
     if: |

@@ -51,7 +51,7 @@ permissions:
 jobs:
   plan:
     name: Integration Admission · plan
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.LIGHT_RUNNER || '["ubuntu-slim"]') }}
     timeout-minutes: 5
     outputs:
       plan: ${{ steps.plan.outputs.plan }}
@@ -187,7 +187,7 @@ jobs:
     name: Integration Admission
     needs: [plan, execute]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.LIGHT_RUNNER || '["ubuntu-slim"]') }}
     timeout-minutes: 5
     outputs:
       verdict: ${{ steps.verdict.outputs.verdict }}
