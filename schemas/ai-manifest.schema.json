@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/manolii-org/ai-starter-pack/main/schemas/ai-manifest.schema.json",
+  "title": "Capability Manifest (ai-manifest.yaml)",
+  "description": "Consumer-side dependency declaration: which capability-registry plugins this repo consumes, its universe, and per-surface hints. Resolved by scripts/ai-resolve.py.",
+  "type": "object",
+  "required": ["version", "universe", "requires"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "type": "integer", "const": 1 },
+    "universe": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Universe id this repo belongs to (manolii | buro | impaktful | cpdcheck, or any value — unregistered repos may still require platform/* and local scopes). Fail-closed: a repo can never require another universe's scope."
+    },
+    "requires": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["plugin", "ref"],
+        "additionalProperties": false,
+        "properties": {
+          "plugin": {
+            "type": "string",
+            "pattern": "^(platform|manolii|buro|impaktful|cpdcheck|repo|personal)/[a-z0-9][a-z0-9-]*$",
+            "description": "scope/name — e.g. platform/framework, buro/core"
+          },
+          "ref": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Version constraint: exact semver ('1.14.0'), caret range ('^1.14'), tag ('tag:v1.15.0'), or commit pin ('sha:<hex>'). sha: pins resolve at the fetch layer."
+          }
+        }
+      }
+    },
+    "feature_flags": {
+      "type": "object",
+      "description": "Optional per-repo toggles a plugin may consult (e.g. kl_integration). Keys are plugin-defined.",
+      "additionalProperties": { "type": ["boolean", "string", "number"] }
+    },
+    "surfaces": {
+      "type": "array",
+      "items": { "enum": ["claude-code", "devin", "cursor", "codex", "openhands"] },
+      "uniqueItems": true,
+      "description": "Agent surfaces to materialise for. claude-code is implemented today; others are advisory until their renderers land."
+    }
+  }
+}

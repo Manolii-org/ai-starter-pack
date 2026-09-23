@@ -1,0 +1,147 @@
+---
+name: watch-pr
+version: 2.1.0
+description: "Persistent PR resolution loop — subscribes to activity, monitors CI, review comments (Human/CodeRabbit/Gemini/bots), and merge conflicts. Loops until PR is clear or max rounds reached."
+type: command
+requires_mcp: [github]
+safety_tier: green
+required_entities: []
+tags:
+  - workflow
+  - automation
+  - system
+---
+# /watch-pr — Persistent PR Resolution Loop
+
+
+
+Invoke as `/watch-pr [PR_NUMBER]` or `/watch-pr` (auto-detects from current branch).
+
+## Protocol
+
+### Step 0: Write Active-Task Checkpoint
+
+```bash
+python3 - <<'EOF'
+import json, os, datetime
+os.makedirs('.ai/sessions', exist_ok=True)
+try:
+    data = json.load(open('.ai/sessions/active-task.json'))
+except Exception:
+    data = {}
+data.update({
+    'type': 'watch-pr',
+    'status': 'watching',
+    'round': 0,
+    'started_at': datetime.datetime.utcnow().isoformat() + 'Z',
+})
+json.dump(data, open('.ai/sessions/active-task.json', 'w'), indent=2)
+EOF
+```
+
+After Step 1 resolves the PR number and branch, patch those fields in. Update `round` at the top of each loop iteration.
+
+### Step 1: Resolve PR Number
+
+```bash
+git rev-parse --abbrev-ref HEAD
+```
+
+Call `mcp__github__list_pull_requests(owner, repo, state:"open")` and match by branch name, or use the supplied PR_NUMBER.
+
+### Step 2: Subscribe (split — do not always subscribe PR activity)
+
+If GitHub reports auto-merge **actually armed** (`autoMergeRequest` /
+`auto_merge`, not intended-later) **and** every changed path is inside
+`reports/**`, `docs/**`, `reports/INDEX.md`, `.github/pull_request_template.md`,
+`.github/PULL_REQUEST_TEMPLATE.md`: **must not** call
+`mcp__github__subscribe_pr_activity` / `subscribe_github_pr`. Optional CI
+subscribe or none. Arm a ≥20-minute heartbeat only if CI subscribe is on.
+
+Armed check: REST `GET /repos/{owner}/{repo}/pulls/{n}` — `.auto_merge` object
+vs `null` for classic auto-merge. GraphQL `autoMergeRequest { enabledAt }` **or**
+non-null `mergeQueueEntry { id }` (merge-queue PRs keep REST `auto_merge: null`).
+`mergeable_state: CLEAN` is not arming. `gh pr view <n> --json autoMergeRequest`
+covers classic arming only.
+
+Product-red (any other path): subscribe PR **and** CI when the surface has
+it, plus a bounded ≥20-minute heartbeat. Cursor Cloud:
+`subscribe_github_pr` / `subscribe_github_ci`. Claude Code:
+`mcp__github__subscribe_pr_activity` only (no CI-only MCP equivalent —
+do **not** invent a GitHub MCP CI-subscribe tool).
+
+```
+mcp__github__subscribe_pr_activity(owner, repo, pr_number)
+subscribe_github_ci(owner, repo, pr_number)   # Cursor Cloud only
+```
+
+Docs/CI with **none** (no CI subscribe): do **not** enter the 60s poll /
+5-minute wait. GitHub auto-merge + Judge is the waiter. End the turn.
+
+### Step 3: Outer Loop (max 5 rounds)
+
+Track state as: **"Round N/5: [found issues] -> [dispatched fix] -> [waiting]"**
+
+Update checkpoint at top of every round. Skip this loop for docs/CI `none`.
+
+**3a. Product-red / CI-subscribe only — event-led, not a 60s sleep loop:**
+- `mcp__github__pull_request_read` → check `head.sha` vs current `HEAD`
+- Check CI status per SHA
+- Check `mergeable` flag: `null` = still computing (re-poll), `false` = conflict, `true` = clean
+- List all review threads; mark unresolved ones
+
+**3b. Exit condition (ALL must be true):**
+- All CI checks pass on current HEAD SHA
+- Zero unresolved review threads
+- At least 5 minutes elapsed since last push
+- No merge conflict
+
+**3c. Collect issues (priority order):**
+1. Merge conflicts (highest priority)
+2. Failing / errored CI checks
+3. Unresolved review comments — classified by reviewer type:
+
+| Reviewer | Detection |
+|----------|-----------|
+| Human | `user.type == "User"` and no bot pattern |
+| CodeRabbit | `user.login` matches `coderabbitai` prefix |
+| Gemini Code Assist | `user.login` starts with `gemini` OR body starts with `<!-- Gemini Code Assist` |
+| Other bots | `user.type == "Bot"` or `user.login` ends with `[bot]` |
+
+**3d. Dispatch `/pr-resolve` with the collected issue list.**
+
+**3e. Re-arm the ≥20-minute heartbeat** (not a foreground 5-minute wait). If exit condition met → done. Otherwise increment round.
+
+**3f. Before round N+1:** carry the existing subscription forward — `subscribe_pr_activity` is idempotent and the stream does not need resetting. Do NOT unsubscribe+resubscribe: both calls are connector-approval-gated (native claude.ai dialog, unsilenceable by repo config) and the reset buys nothing.
+
+### Step 4: Escalate at Round 5
+
+If still unresolved after round 5:
+1. Do NOT unsubscribe — `unsubscribe_pr_activity` is connector-approval-gated (native claude.ai dialog, unsilenceable by repo config) and buys nothing here: simply stop acting on the stream; the subscription lapses with the session, and merged/closed PRs are auto-unsubscribed by the platform. Call it only if the operator explicitly asks to stop watching.
+2. Post summary comment classifying each remaining issue as:
+   - (a) caused by this PR's changes
+   - (b) pre-existing / unrelated
+   - (c) environmental / flaky
+3. Notify the user
+4. Set checkpoint `status: "escalated"`
+
+### On Successful Merge
+
+Set checkpoint `status: "merged"`, notify user with merge URL.
+
+## Merge Conflict Protocol
+
+```bash
+git log --oneline HEAD..origin/{base_branch}
+git show origin/{base_branch}:<conflicted-file>
+git show HEAD:<conflicted-file>
+```
+
+Understand intent of **both sides** before editing. If ambiguous, surface to user.
+
+## Hard Limits
+
+- Never force-push
+- Never merge or rebase onto main/master directly
+- Never push to main/master
+- Never skip CI or bypass hooks (--no-verify)

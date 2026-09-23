@@ -1,0 +1,56 @@
+name: registry-lint
+
+on:
+  pull_request:
+    paths:
+      - 'registry/**'
+      - 'scripts/build-registry.py'
+      - 'scripts/registry-lint.py'
+      - 'scripts/ai-resolve.py'
+      - 'schemas/ai-manifest.schema.json'
+      - 'schemas/registry-scope.schema.json'
+      - '.claude-plugin/marketplace.json'
+      - '.devin-plugin/**'
+      - 'ai-manifest.yaml'
+      - 'docs/registry.md'
+      - 'tests/test_registry.py'
+      - '.github/workflows/registry-lint.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'registry/**'
+      - 'scripts/build-registry.py'
+      - 'scripts/registry-lint.py'
+      - 'scripts/ai-resolve.py'
+      - 'schemas/ai-manifest.schema.json'
+      - 'schemas/registry-scope.schema.json'
+      - '.claude-plugin/marketplace.json'
+      - '.devin-plugin/**'
+
+jobs:
+  registry-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install deps
+        run: pip install pyyaml copier pytest jsonschema
+      - name: Lint the registry
+        run: python3 scripts/registry-lint.py
+      - name: Freshness — platform plugins are regenerated output
+        run: python3 scripts/build-registry.py --check
+      - name: Manifest validates + resolver dry-run
+        run: |
+          python3 - <<'PY'
+          import json, yaml, jsonschema, sys
+          schema = json.load(open('schemas/ai-manifest.schema.json'))
+          doc = yaml.safe_load(open('ai-manifest.yaml'))
+          jsonschema.validate(doc, schema)
+          print('ai-manifest.yaml valid')
+          PY
+          mkdir -p /tmp/resolve-check
+          python3 scripts/ai-resolve.py --registry . --manifest "$PWD/ai-manifest.yaml" --repo-root /tmp/resolve-check
+      - name: Registry unit tests
+        run: python3 -m pytest tests/test_registry.py -q

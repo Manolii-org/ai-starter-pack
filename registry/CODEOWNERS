@@ -1,0 +1,14 @@
+# Capability registry — per-scope ownership.
+# Scope owners approve changes to their universe's plugins and promotions into platform/.
+
+registry/platform/    @manolii-org/maintainers
+registry/manolii/     @manolii-org/maintainers
+registry/buro/        @manolii-org/buro-owners
+registry/impaktful/   @manolii-org/impaktful-owners
+registry/cpdcheck/    @manolii-org/cpdcheck-owners
+registry/repo/        @manolii-org/maintainers
+registry/personal/    @manolii-org/maintainers
+
+# Registry machinery (schemas, lint, resolver inputs)
+registry/plugins.json @manolii-org/maintainers
+registry/README.md    @manolii-org/maintainers

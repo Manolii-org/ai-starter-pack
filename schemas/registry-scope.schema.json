@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/manolii-org/ai-starter-pack/main/schemas/registry-scope.schema.json",
+  "title": "Capability Registry Scope Contract",
+  "description": "Declares a registry scope's identity, IP owner, visibility, and promotion policy. Registry-native — deliberately NOT a mesh-contract (that schema's ip_owner enum cannot express non-mesh owners).",
+  "type": "object",
+  "required": ["schema_version", "scope", "ip_owner", "visibility"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "scope": {
+      "type": "string",
+      "enum": ["platform", "manolii", "buro", "impaktful", "cpdcheck", "repo", "personal"],
+      "description": "Scope directory this contract governs — must equal the directory name."
+    },
+    "parent_scope": {
+      "type": ["string", "null"],
+      "description": "Scope this scope promotes into (universe scopes promote into platform only, after sanitisation).",
+      "enum": ["platform", null]
+    },
+    "ip_owner": { "type": "string", "minLength": 1, "description": "Legal IP owner of this scope's content (free string — mesh-contract enum does not apply here)." },
+    "visibility": {
+      "type": "string",
+      "enum": ["all-universes", "manolii", "buro", "impaktful", "cpdcheck", "local-only"],
+      "description": "all-universes = consumable by any repo; <universe> = only repos declaring that universe; local-only = never published."
+    },
+    "description": { "type": "string" },
+    "surfaces": {
+      "type": "array",
+      "items": { "enum": ["claude-code", "devin", "cursor", "codex", "openhands"] },
+      "uniqueItems": true
+    },
+    "promotion_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "auto_promote": { "type": "boolean" },
+        "cost_threshold_usd": { "type": ["number", "null"] }
+      },
+      "description": "Mesh-contract-compatible promotion stub — governs universe->platform promotion automation."
+    }
+  }
+}

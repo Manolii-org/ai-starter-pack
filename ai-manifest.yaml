@@ -1,0 +1,26 @@
+# Capability manifest — declares which capability-registry plugins this repo
+# consumes. Materialise the resolved set into .claude/ with:
+#
+#   python3 scripts/ai-resolve.py --registry <path-to-ai-starter-pack-checkout> --apply
+#
+# Model, scopes, and privacy rules: docs/registry.md
+# Schema: schemas/ai-manifest.schema.json (pack-internal; not shipped)
+
+version: 1
+
+# Universe this repo belongs to — registered ids: manolii | buro | impaktful |
+# cpdcheck. Any other value (e.g. unregistered) is valid and may still require
+# platform/* assets; universe-scoped plugins resolve only when universe matches.
+# The resolver FAILS CLOSED on out-of-scope requires — it never partially applies.
+universe: unregistered
+
+requires:
+  - plugin: platform/framework
+    ref: "^1.14"
+  # platform/om is opt-in — it needs a Knowledge Layer MCP backend:
+  # - plugin: platform/om
+  #   ref: "^1.0"
+
+feature_flags: {}
+
+surfaces: [claude-code]

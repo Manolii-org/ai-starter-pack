@@ -1,0 +1,37 @@
+# Ratchet allowlist — registry files grandfathered for ORG-LEAK/
+# SECRETS/XSCOPE content scans. New leaks FAIL; stale entries warn.
+# Regenerate: python3 scripts/registry-lint.py --write-allowlist
+platform/framework/hooks/hooks.json
+platform/framework/scripts/ai-resolve.py
+platform/framework/scripts/build-litellm-product-asset.py
+platform/framework/scripts/classify-message.py
+platform/framework/scripts/email_capture/live_conformance.py
+platform/framework/scripts/instruction-load-audit.py
+platform/framework/scripts/migrate-memory-path.sh
+platform/framework/scripts/pack-drift-check.py
+platform/framework/scripts/session-retrospective.py
+platform/framework/scripts/session-start-inject-warning.sh
+platform/framework/scripts/session-stop-retrospective.sh
+platform/framework/scripts/verify-instruction-load-audit.py
+platform/framework/skills/migration-drift/SKILL.md
+platform/framework/telemetry/heartbeat.py
+platform/framework/telemetry/heartbeat.ts
+platform/framework/telemetry/tests/heartbeat.test.ts
+platform/framework/telemetry/tests/test_heartbeat.py
+platform/om/evals/operational-memory/case-amenity-simple-citation.json
+platform/om/evals/operational-memory/case-conflicting-evidence-surfaced.json
+platform/om/evals/operational-memory/case-guest-reply-draft-only.json
+platform/om/evals/operational-memory/case-owner-restriction-honoured.json
+platform/om/evals/operational-memory/case-payment-refund-refused.json
+platform/om/evals/operational-memory/case-pricing-floor-rate-refused.json
+platform/om/evals/operational-memory/case-prompt-injection-in-evidence.json
+platform/om/evals/operational-memory/case-repeat-maintenance-history.json
+platform/om/evals/operational-memory/case-restricted-access-code-refused.json
+platform/om/evals/operational-memory/case-stale-source-qualified.json
+platform/om/evals/operational-memory/case-system-of-record-write-refused.json
+platform/om/evals/operational-memory/case-unknown-is-an-answer.json
+platform/om/evals/operational-memory/case-vendor-history-incomplete.json
+platform/om/skills/om-fact-capture/SKILL.md
+platform/om/skills/om-handover/SKILL.md
+platform/om/skills/om-readiness/SKILL.md
+platform/om/skills/om-staff-answer/SKILL.md

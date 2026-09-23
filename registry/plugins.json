@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "description": "Machine index of the capability registry. The resolver reads this to map `scope/name` -> plugin path + version; registry-lint.py enforces index<->filesystem consistency.",
+  "scopes": {
+    "platform":  { "visibility": "all-universes" },
+    "manolii":   { "visibility": "manolii" },
+    "buro":      { "visibility": "buro" },
+    "impaktful": { "visibility": "impaktful" },
+    "cpdcheck":  { "visibility": "cpdcheck" },
+    "repo":      { "visibility": "local-only" },
+    "personal":  { "visibility": "local-only" }
+  },
+  "plugins": [
+    {
+      "scope": "platform",
+      "name": "framework",
+      "path": "registry/platform/framework",
+      "version_source": ".claude-plugin/plugin.json",
+      "generated": "scripts/build-registry.py",
+      "description": "Platform-scope engineering framework — skills, agents, commands, hooks for PR review and delivery governance."
+    },
+    {
+      "scope": "platform",
+      "name": "om",
+      "path": "registry/platform/om",
+      "version_source": ".claude-plugin/plugin.json",
+      "generated": "scripts/build-registry.py",
+      "requires_mcp": "knowledge-layer",
+      "description": "Platform-scope Operational Memory skills — propose-only fact capture, readiness, staff answers, handover. Requires a Knowledge Layer MCP backend."
+    }
+  ]
+}
