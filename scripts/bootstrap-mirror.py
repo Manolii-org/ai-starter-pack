@@ -683,6 +683,15 @@ def _ssh_host_unchanged(url: str) -> str | None:
             and eff.get("localcommand", "").strip()):
         return ("ssh client config executes a local command after "
                 "connecting (PermitLocalCommand/LocalCommand)")
+    # ControlMaster multiplexing attaches the push to an EXISTING
+    # connection at ControlPath — the session's real peer may differ
+    # from github.com entirely while -G still reports a clean direct
+    # config. Any enabled form (yes/auto/ask variants) fails closed;
+    # ControlPath alone is inert without ControlMaster.
+    if eff.get("controlmaster", "no").lower() not in (
+            "", "no", "false", "off", "0"):
+        return ("ssh client config multiplexes through a shared "
+                "connection (ControlMaster/ControlPath)")
     # Provider libraries dlopen during authentication — a configured
     # path executes attacker code mid-push with the staged files
     # readable, every host check still green. Defaults only:

@@ -3245,6 +3245,17 @@ def test_bootstrap_ssh_effective_config(monkeypatch, tmp_path):
     patch([(k, str(kh_file) if k == "userknownhostsfile" else v)
            for k, v in CLEAN] + [("securitykeyprovider", "internal")])
     assert mod._ssh_host_unchanged(URL) is None
+
+    # ControlMaster attaches the push to an existing session — the
+    # peer may not be github.com though -G reads clean. Refuse any
+    # enabled form; 'no' (the default) passes.
+    patch([(k, str(kh_file) if k == "userknownhostsfile" else v)
+           for k, v in CLEAN]
+          + [("controlmaster", "auto"), ("controlpath", "/tmp/cm-%r@%h:%p")])
+    assert "multiplex" in mod._ssh_host_unchanged(URL)
+    patch([(k, str(kh_file) if k == "userknownhostsfile" else v)
+           for k, v in CLEAN] + [("controlmaster", "no")])
+    assert mod._ssh_host_unchanged(URL) is None
     # Reaching the source cap must fail closed — a partial scan can
     # leave a 'Match exec' in an unscanned Include'd file.
     benign = tmp_path / "ssh_benign"
