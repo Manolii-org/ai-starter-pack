@@ -262,6 +262,11 @@ def _slug_of(url: str) -> str | None:
     return m.group(1).lower() if m else None
 
 
+def _redact(url: str) -> str:
+    """Strip URL userinfo (credentials) before it reaches a diagnostic."""
+    return re.sub(r"://[^/@\s]*@", "://***@", url, count=1)
+
+
 def _push_targets_ok(root: Path, slug: str) -> str | None:
     """None when every effective PUSH destination resolves to the verified
     slug; otherwise a short description of the config that would redirect
@@ -359,22 +364,26 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
         urls = [eff]
     if not urls:
         return f"could not resolve push URLs for '{remote}'"
-    ssh_override = _cfg("core.sshCommand")
-    git_proxy = _cfg("core.gitProxy")
+    # core.sshCommand (or the GIT_SSH_COMMAND/GIT_SSH environment
+    # variables) replaces the ssh transport entirely — an ssh/scp URL
+    # that parses to the verified slug can still land anywhere the
+    # command chooses. core.gitProxy / GIT_PROXY_COMMAND is the same
+    # class for git:// URLs.
+    ssh_src = ("core.sshCommand" if _cfg("core.sshCommand") else
+               "GIT_SSH_COMMAND" if os.environ.get("GIT_SSH_COMMAND") else
+               "GIT_SSH" if os.environ.get("GIT_SSH") else "")
+    proxy_src = ("core.gitProxy" if _cfg("core.gitProxy") else
+                 "GIT_PROXY_COMMAND"
+                 if os.environ.get("GIT_PROXY_COMMAND") else "")
     for url in urls:
         if _slug_of(url) == slug:
-            # core.sshCommand replaces the ssh transport entirely — an
-            # ssh/scp URL that parses to the verified slug can still
-            # land anywhere the command chooses.
-            if ssh_override and (url.startswith("ssh://")
-                                 or _GH_SCP.match(url)):
-                return ("core.sshCommand overrides the ssh transport "
-                        f"for push url '{url}'")
-            # core.gitProxy replaces the direct connection for git:// —
-            # same class of transport override.
-            if git_proxy and url.startswith("git://"):
-                return ("core.gitProxy overrides the git transport "
-                        f"for push url '{url}'")
+            if ssh_src and (url.startswith("ssh://")
+                            or _GH_SCP.match(url)):
+                return (f"{ssh_src} overrides the ssh transport "
+                        f"for push url '{_redact(url)}'")
+            if proxy_src and url.startswith("git://"):
+                return (f"{proxy_src} overrides the git transport "
+                        f"for push url '{_redact(url)}'")
             continue
         # Devin-box auth proxy: forwards pushes to the github.com slug
         # embedded in its path (the box's global insteadOf rewrites every
@@ -383,7 +392,8 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
         if not (url.startswith(proxy)
                 and _slug_of("https://github.com/" + url[len(proxy):])
                 == slug):
-            return (f"push destination '{remote}' resolves to '{url}'")
+            return (f"push destination '{remote}' resolves to "
+                    f"'{_redact(url)}'")
     return None
 
 

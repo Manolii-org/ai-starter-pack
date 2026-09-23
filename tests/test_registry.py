@@ -2235,6 +2235,38 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     assert "sshCommand" in r.stderr
     assert not (sc / "registry").exists()
 
+    # GIT_SSH_COMMAND is the environment-level equivalent of
+    # core.sshCommand → refuse.
+    se = tmp_path / "sshenv"
+    se.mkdir()
+    sp.run(["git", "init", "-q"], cwd=se, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "git@github.com:Buro-Built/buro-registry.git"],
+           cwd=se, capture_output=True)
+    env = _bootstrap_env(tmp_path)
+    env["GIT_SSH_COMMAND"] = "evil-ssh"
+    r = run(se, env)
+    assert r.returncode == 2, r.stderr
+    assert "GIT_SSH_COMMAND" in r.stderr
+    assert not (se / "registry").exists()
+
+    # A rejected credential-bearing push URL must not print the
+    # credential to stderr (it lands in transcripts/CI logs).
+    cr = tmp_path / "creds"
+    cr.mkdir()
+    sp.run(["git", "init", "-q"], cwd=cr, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=cr, capture_output=True)
+    sp.run(["git", "remote", "set-url", "--push", "origin",
+            "https://x-access-token:SECRETTOKEN@github.com/"
+            "Other-Org/public-repo.git"],
+           cwd=cr, capture_output=True)
+    r = run(cr, _bootstrap_env(tmp_path))
+    assert r.returncode == 2, r.stderr
+    assert "SECRETTOKEN" not in r.stderr
+    assert not (cr / "registry").exists()
+
     # A git:// URL parses to the verified slug, but core.gitProxy
     # replaces the direct connection — the push can land anywhere the
     # proxy command chooses → refuse.
