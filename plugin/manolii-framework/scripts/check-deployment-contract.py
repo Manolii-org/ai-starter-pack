@@ -321,7 +321,11 @@ def _as_patterns(value) -> list[str] | None:
     if isinstance(value, str):
         return [value]
     if isinstance(value, list):
-        return [p for p in value if isinstance(p, str)]
+        # reject the WHOLE list on any non-string member — dropping bad
+        # entries could leave [], which eval_ordered reads as "unfiltered"
+        if any(not isinstance(p, str) for p in value):
+            return None
+        return list(value)
     return None
 
 
@@ -349,8 +353,10 @@ def jobs_map(spec: dict) -> dict:
     jobs = spec.get("jobs")
     if not isinstance(jobs, dict):
         return {}
+    # keys must be strings — a `jobs: {1: {...}}` entry would feed an int
+    # to the rollback regex (TypeError) and isn't a valid GitHub job id
     return {k: v for k, v in jobs.items()
-            if isinstance(v, dict) and _executable(v)}
+            if isinstance(k, str) and isinstance(v, dict) and _executable(v)}
 
 
 def job_ids(spec: dict) -> set[str]:

@@ -203,7 +203,30 @@ def _workflow_trigger_ok(spec: dict, trigger: dict) -> str | None:
         ev = on[ttype]
         if ev is not None and not isinstance(ev, dict):
             return f"on.{ttype} is not a valid event configuration"
+    jobs = spec.get("jobs")
+    if not isinstance(jobs, dict) or not any(
+            _runnable_job(j) for j in jobs.values()):
+        # a conformant `on:` on a workflow that executes nothing still
+        # verifies — the registry drift check would stay green with the
+        # automation's work silently removed
+        return "workflow declares no runnable jobs"
     return None
+
+
+def _runnable_job(job) -> bool:
+    """Same bar as the deployment-contract checker: a `uses:` call naming a
+    callee, or `runs-on` (str / label list / group map) + step mappings."""
+    if not isinstance(job, dict):
+        return False
+    uses = job.get("uses")
+    if isinstance(uses, str):
+        return bool(uses.strip())
+    runner = job.get("runs-on")
+    runner_ok = (isinstance(runner, str) and bool(runner.strip())
+                 or isinstance(runner, (list, dict)) and bool(runner))
+    steps = job.get("steps")
+    return runner_ok and (isinstance(steps, list) and steps
+                          and all(isinstance(s, dict) for s in steps))
 
 
 def check_workflow_files(doc: dict, args: argparse.Namespace, errors: list[str]) -> None:
@@ -218,8 +241,11 @@ def check_workflow_files(doc: dict, args: argparse.Namespace, errors: list[str])
         text = None
         if args.mode == "local":
             repo_dir = Path(args.repos_dir) / repo.split("/")[-1]
-            path = repo_dir / workflow
-            if not path.exists():
+            # keep the path inside THIS checkout — an absolute workflow or
+            # one with `..`/`/` traversal would verify a sibling repo's file
+            base = repo_dir.resolve()
+            path = (repo_dir / workflow).resolve()
+            if not path.is_relative_to(base) or not path.is_file():
                 fail(f"{name}: {workflow} not found in local checkout {repo_dir}", errors)
                 continue
             text = path.read_text(encoding="utf-8", errors="replace")
