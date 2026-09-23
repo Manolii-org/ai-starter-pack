@@ -141,6 +141,61 @@ def test_check_detects_drift(tmp_path):
     assert r.returncode == 0 and "matches" in r.stdout
 
 
+def test_tracked_hand_edit_refuses(tmp_path):
+    """A hand edit to a lockfile-tracked file is a conflict, not an update."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/SKILL.md",
+                                "---\nname: demo\ndescription: d\n---\nv1")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    skill = consumer / ".claude" / "skills" / "demo" / "SKILL.md"
+    skill.write_text("hand edit after install")
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 1
+    assert "modified since install" in r.stdout
+    assert skill.read_text() == "hand edit after install"
+
+
+def test_lockfile_paths_are_repo_relative(tmp_path):
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/SKILL.md",
+                                "---\nname: demo\ndescription: d\n---\nv1")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    lock = json.loads((consumer / ".ai" / "capability-lock.json").read_text())
+    assert all(not Path(p).is_absolute() for p in lock["files"])
+    assert ".claude/skills/demo/SKILL.md" in lock["files"]
+
+
+def test_apply_prune_removes_orphans(tmp_path):
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/SKILL.md",
+                                "---\nname: demo\ndescription: d\n---\nv1"),
+                               ("skills/extra/SKILL.md",
+                                "---\nname: extra\ndescription: d\n---\nv1")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    # requirement shrinks: drop the plugin, keep nothing
+    write_manifest(consumer, "manolii", [])
+    r = run_resolver(m, reg_root, consumer, "--apply", "--prune")
+    assert r.returncode == 0
+    assert not (consumer / ".claude" / "skills" / "demo").exists()
+    # --prune without --apply is an argparse error
+    assert run_resolver(m, reg_root, consumer, "--prune").returncode == 2
+
+
 def test_repo_manifest_schema_valid():
     """The shipped ai-manifest.yaml validates against the schema."""
     import yaml

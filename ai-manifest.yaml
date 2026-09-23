@@ -19,7 +19,7 @@ requires:
     ref: "^1.14"
   # platform/om is opt-in — it needs a Knowledge Layer MCP backend:
   # - plugin: platform/om
-  #   ref: "^1.0"
+  #   ref: "^0.1"
 
 feature_flags: {}
 

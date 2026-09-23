@@ -1,5 +1,5 @@
-# Ratchet allowlist — registry files grandfathered for ORG-LEAK/
-# SECRETS/XSCOPE content scans. New leaks FAIL; stale entries warn.
+# Ratchet allowlist — registry files grandfathered for the ORG-LEAK
+# scan only (SECRETS still scans them). New leaks FAIL; stale warn.
 # Regenerate: python3 scripts/registry-lint.py --write-allowlist
 platform/framework/hooks/hooks.json
 platform/framework/scripts/ai-resolve.py

@@ -70,8 +70,10 @@ python3 scripts/ai-resolve.py --registry <checkout> --apply --prune             
 ```
 
 Resolver guarantees: fail-closed scope check before any write; never clobbers a
-hand-edited file (untracked diffs are reported as conflicts, not overwritten);
-writes `.ai/capability-lock.json` (commit it) so `--check` detects drift.
+hand-edited file — the lockfile records the installed sha256 of every
+materialised file, so a file changed since install (by you or by drift) is a
+conflict, not an overwrite; writes `.ai/capability-lock.json` (commit it —
+paths are repo-relative) so `--check` detects drift.
 
 Materialised components today: `skills/` → `.claude/skills/`, `agents/` →
 `.claude/agents/`, `commands/` → `.claude/commands/`. `hooks/`+`scripts/`

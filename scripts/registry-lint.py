@@ -63,8 +63,8 @@ SECRET_PATTERNS = [
 MANIFEST_FILES = {".claude-plugin/plugin.json", ".devin-plugin/plugin.json",
                   "scope.yaml", "plugins.json", "CODEOWNERS", "README.md"}
 
-# Ratchet allowlist: files (relative to registry/) grandfathered for content
-# scans (ORG-LEAK / SECRETS / XSCOPE). Today's platform seeds legitimately
+# Ratchet allowlist: files (relative to registry/) grandfathered for the
+# ORG-LEAK scan only. Today's platform seeds legitimately
 # reference org identifiers (doc links, redaction detector data, entity
 # examples) — the allowlist freezes that set: new leaks FAIL, stale entries
 # FAIL, and P3 cleanup burns the list down. Regenerate with --write-allowlist.
@@ -271,13 +271,12 @@ def check_org_leak() -> None:
 
 
 def check_secrets() -> None:
+    # The ORG-LEAK ratchet allowlist does NOT apply here — an org-name
+    # grandfather must never suppress credential detection.
     pats = [re.compile(p) for p in SECRET_PATTERNS]
-    allow = load_allowlist()
     fails = 0
     for path in content_scan_files():
         rel = path.relative_to(REGISTRY)
-        if rel.as_posix() in allow:
-            continue
         try:
             text = path.read_text(encoding="utf-8", errors="ignore")
         except OSError:
@@ -362,8 +361,8 @@ def main() -> int:
     if "--write-allowlist" in sys.argv:
         files = org_leak_files()
         ALLOWLIST_PATH.write_text(
-            "# Ratchet allowlist — registry files grandfathered for ORG-LEAK/\n"
-            "# SECRETS/XSCOPE content scans. New leaks FAIL; stale entries warn.\n"
+            "# Ratchet allowlist — registry files grandfathered for the ORG-LEAK\n"
+            "# scan only (SECRETS still scans them). New leaks FAIL; stale warn.\n"
             "# Regenerate: python3 scripts/registry-lint.py --write-allowlist\n"
             + "\n".join(files) + "\n")
         print(f"wrote {len(files)} entries -> {ALLOWLIST_PATH.relative_to(REPO)}")
