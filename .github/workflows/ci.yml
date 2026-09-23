@@ -67,11 +67,13 @@ jobs:
   install:
     name: Install Dependencies
     if: needs.detect.outputs.has_pkg == 'true'
+    # npm ci scales with the consumer dependency graph — unverifiable from the
+    # template, so hosted by default; slim via explicit LIGHT_RUNNER opt-in.
     runs-on: >-
       ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-          && fromJSON(vars.LIGHT_RUNNER || '["ubuntu-slim"]')
+          && fromJSON(vars.LIGHT_RUNNER || '["ubuntu-latest"]')
           || 'ubuntu-latest' }}
-    timeout-minutes: 14
+    timeout-minutes: 30
     needs: [detect]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -93,11 +95,12 @@ jobs:
   security-audit:
     name: Security Audit
     needs: [install]
+    # Cache-miss arm runs npm ci — consumer-scale, so hosted by default.
     runs-on: >-
       ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-          && fromJSON(vars.LIGHT_RUNNER || '["ubuntu-slim"]')
+          && fromJSON(vars.LIGHT_RUNNER || '["ubuntu-latest"]')
           || 'ubuntu-latest' }}
-    timeout-minutes: 14
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6

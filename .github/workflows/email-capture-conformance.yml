@@ -8,7 +8,7 @@ permissions:
   contents: read
 jobs:
   conformance:
-    runs-on: ${{ fromJSON(vars.LIGHT_RUNNER || '["ubuntu-slim"]') }}
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
       EMAIL_CAPTURE_MODE: hermetic
