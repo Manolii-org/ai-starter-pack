@@ -2164,6 +2164,22 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     assert "redirect" in r.stderr
     assert not (pr / "registry").exists()
 
+    # A push destination may be a literal URL, not a remote name —
+    # a URL-valued remote.pushDefault pointing elsewhere → refuse.
+    pv = tmp_path / "pushdefault-url"
+    pv.mkdir()
+    sp.run(["git", "init", "-q"], cwd=pv, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=pv, capture_output=True)
+    sp.run(["git", "config", "remote.pushDefault",
+            "https://github.com/Other-Org/public-repo.git"], cwd=pv,
+           capture_output=True)
+    r = run(pv, _bootstrap_env(tmp_path))
+    assert r.returncode == 2, r.stderr
+    assert "redirect" in r.stderr
+    assert not (pv / "registry").exists()
+
     # A non-GitHub origin that parses to a valid-looking slug — gh would
     # verify an UNRELATED github.com repo of the same name → refuse.
     gl = tmp_path / "gitlab"
@@ -2242,6 +2258,22 @@ def test_bootstrap_mirror_push_target_pass(tmp_path):
     sp.run(["git", "config", "remote.pushDefault", "mirror"], cwd=c,
            capture_output=True)
     r = run(c)
+    assert r.returncode == 0, r.stderr
+
+    # A URL-valued branch.<name>.pushRemote at the verified slug — git
+    # accepts a URL there just as it accepts a remote name.
+    d = tmp_path / "pushremote-url-ok"
+    d.mkdir()
+    sp.run(["git", "init", "-q"], cwd=d, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=d, capture_output=True)
+    cur = sp.run(["git", "symbolic-ref", "--short", "HEAD"], cwd=d,
+                 capture_output=True, text=True).stdout.strip()
+    sp.run(["git", "config", f"branch.{cur}.pushRemote",
+            "https://github.com/Buro-Built/buro-registry.git"], cwd=d,
+           capture_output=True)
+    r = run(d)
     assert r.returncode == 0, r.stderr
 
 

@@ -274,16 +274,41 @@ def _push_targets_ok(root: Path, slug: str) -> bool:
 
     The remote is resolved the same way a plain `git push` resolves
     it: branch.<name>.pushRemote > remote.pushDefault >
-    branch.<name>.remote > origin — a checkout that pushes to a
-    non-origin remote gets validated against THAT remote's urls."""
+    branch.<name>.remote > origin. The selected value may be a
+    remote name OR a literal URL (git-push's <repository> accepts
+    both) — `remote get-url` only accepts names, so a URL destination
+    gets the push rewrite chain applied directly."""
     def _cfg(key: str) -> str:
+        lines = _cfg_lines(key)
+        return lines[0] if lines else ""
+
+    def _cfg_lines(*args: str) -> list[str]:
         try:
             r = subprocess.run(
-                ["git", "-C", str(root), "config", "--get", key],
+                ["git", "-C", str(root), "config", *args],
                 capture_output=True, text=True, timeout=10)
         except (OSError, subprocess.TimeoutExpired):
-            return ""
-        return r.stdout.strip() if r.returncode == 0 else ""
+            return []
+        return [ln for ln in r.stdout.splitlines() if ln] \
+            if r.returncode == 0 else []
+
+    def _rules(suffix: str) -> list[tuple[str, str]]:
+        # url.<base>.<suffix> = <prefix>: URLs starting with <prefix>
+        # (the value) are rewritten to start with <base> (the key's
+        # middle part). Longest matching prefix wins.
+        out: list[tuple[str, str]] = []
+        for line in _cfg_lines("--get-regexp", rf"^url\..*\.{suffix}$"):
+            key, _, prefix = line.partition(" ")
+            repl = key[len("url."):-len(f".{suffix}")]
+            if prefix:
+                out.append((prefix, repl))
+        return out
+
+    def _rewrite(url: str, rules: list[tuple[str, str]]) -> str:
+        for prefix, repl in sorted(rules, key=lambda r: -len(r[0])):
+            if url.startswith(prefix):
+                return repl + url[len(prefix):]
+        return url
 
     try:
         b = subprocess.run(
@@ -297,15 +322,31 @@ def _push_targets_ok(root: Path, slug: str) -> bool:
               or _cfg("remote.pushDefault")
               or (branch and _cfg(f"branch.{branch}.remote"))
               or "origin")
+
+    names = set()
     try:
-        r = subprocess.run(
-            ["git", "-C", str(root), "remote", "get-url", "--push",
-             "--all", remote],
-            capture_output=True, text=True, timeout=10)
+        nr = subprocess.run(["git", "-C", str(root), "remote"],
+                            capture_output=True, text=True, timeout=10)
+        if nr.returncode == 0:
+            names = set(nr.stdout.split())
     except (OSError, subprocess.TimeoutExpired):
-        return False
-    urls = [ln.strip() for ln in r.stdout.splitlines() if ln.strip()] \
-        if r.returncode == 0 else []
+        pass
+    if remote in names:
+        try:
+            r = subprocess.run(
+                ["git", "-C", str(root), "remote", "get-url", "--push",
+                 "--all", remote],
+                capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        urls = [ln.strip() for ln in r.stdout.splitlines() if ln.strip()] \
+            if r.returncode == 0 else []
+    else:
+        # Literal URL: pushes apply pushInsteadOf when any such rule
+        # exists, otherwise insteadOf — the same chain `get-url --push`
+        # applies to remote names.
+        urls = [_rewrite(remote, _rules("pushinsteadof")
+                         or _rules("insteadof"))]
     if not urls:
         return False
     for url in urls:
