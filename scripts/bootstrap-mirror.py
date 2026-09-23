@@ -5,7 +5,7 @@ Run inside an EMPTY clone of the org's private mirror repo:
 
     python3 scripts/bootstrap-mirror.py \
         --root /path/to/<org>-registry --universe buro \
-        --slug buro-built/buro-registry
+        --slug <org>/<org>-registry   # lowercase owner/repo of the mirror
 
 Creates the full mirror scaffold:
 
