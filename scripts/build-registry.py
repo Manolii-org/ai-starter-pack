@@ -50,7 +50,13 @@ def build_one(source_plugin: str, scope: str, name: str, install_mode: str,
         "--out", str(out),
         "--install-mode", install_mode,
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=300)
+    except subprocess.TimeoutExpired:
+        sys.stderr.write(f"FAIL: build-plugin --plugin {source_plugin} "
+                         "timed out after 300s\n")
+        sys.exit(2)
     if proc.returncode != 0:
         sys.stderr.write(proc.stdout + proc.stderr)
         sys.exit(proc.returncode)

@@ -1347,6 +1347,51 @@ def test_xscope_registry_root_form_fails(tmp_path):
     assert any("manolii" in f.detail for f in fails)
 
 
+def test_wrongly_typed_lock_conflicts(tmp_path):
+    """{"files": null} is valid JSON but not a lock — it must report a
+    repairable conflict, not crash locked_digests with TypeError."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "x")],
+    })
+    consumer = tmp_path / "consumer"
+    (consumer / ".ai").mkdir(parents=True)
+    (consumer / ".ai" / "capability-lock.json").write_text(
+        '{"files": null}')
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--check")
+    assert r.returncode == 1
+    assert "malformed" in r.stdout
+    assert "Traceback" not in r.stderr
+
+
+def test_skip_worktree_file_conflicts_under_pin(tmp_path):
+    """git update-index --skip-worktree hides modified worktree bytes from
+    status AND ls-files — only a comparison against the pinned git object
+    catches the divergence."""
+    import subprocess as sp
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "v1")],
+    })
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    sp.run(["git", "init", "-q"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "add", "-A"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "commit", "-qm", "init"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "tag", "v1.0.0"], cwd=reg_root, env=env, check=True)
+    rel = "registry/platform/framework/skills/demo/x.md"
+    sp.run(["git", "update-index", "--skip-worktree", rel],
+           cwd=reg_root, env=env, check=True)
+    (reg_root / rel).write_text("tampered")
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "tag:v1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 1
+    assert "differs from the pinned git object" in r.stdout
+
+
 def test_component_ancestor_not_dir_conflicts(tmp_path):
     """.claude/agents as a plain FILE (not a symlink) must be a plan-time
     conflict — otherwise --apply copies earlier files then crashes at

@@ -392,19 +392,27 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                     f"{req}: {rel} is or resolves through a symlink — "
                     "refusing to materialise the link target"))
                 continue
+            src_bytes = src.read_bytes()
             if pinned:
-                # git status --untracked-files=all does not show IGNORED
-                # files — a clean worktree can still hold an untracked
-                # component (e.g. *.pyc). The lock would claim bytes the
-                # pinned revision does not contain, so every source must
-                # be tracked at the index (index == pin after the
-                # cleanliness check).
-                tracked = subprocess.run(
-                    ["git", "-C", str(registry_root), "ls-files",
-                     "--error-unmatch", "--",
-                     src.relative_to(registry_root).as_posix()],
-                    capture_output=True, timeout=10)
-                if tracked.returncode != 0:
+                # Compare against the pinned git OBJECT, not the index or
+                # status output: --untracked-files=all is blind to ignored
+                # files, and skip-worktree / assume-unchanged index flags
+                # let a tracked file's modified worktree bytes pass both
+                # checks while not being what the pinned revision holds.
+                rel_src = src.relative_to(registry_root).as_posix()
+                try:
+                    blob = subprocess.run(
+                        ["git", "-C", str(registry_root), "show",
+                         f"HEAD:./{rel_src}"],
+                        capture_output=True, timeout=10)
+                except (OSError, subprocess.SubprocessError):
+                    plan.conflicts.append((
+                        dst,
+                        f"{req}: {rel} cannot be verified against the "
+                        "pinned revision — git show failed",
+                    ))
+                    continue
+                if blob.returncode != 0:
                     plan.conflicts.append((
                         dst,
                         f"{req}: {rel} is not tracked at the pinned revision "
@@ -412,7 +420,14 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                         "bytes outside the pin",
                     ))
                     continue
-            src_bytes = src.read_bytes()
+                if blob.stdout != src_bytes:
+                    plan.conflicts.append((
+                        dst,
+                        f"{req}: {rel} differs from the pinned git object "
+                        "(index flags like skip-worktree can hide the "
+                        "divergence) — refusing to materialise",
+                    ))
+                    continue
             if (b"CLAUDE_PLUGIN_ROOT" in src_bytes
                     or SCRIPT_REF.search(src_bytes)
                     or declares_script_deps(src_bytes)):
@@ -537,6 +552,26 @@ def load_lock(repo_root: Path) -> tuple[dict, str | None]:
         return {}, f"unparseable JSON: {e}"
     if not isinstance(doc, dict):
         return {}, "not a JSON object"
+    # Structure validation — a syntactically valid but wrongly-typed lock
+    # ({"files": null}, resolved:[1,2]) must fail closed with a repairable
+    # conflict, not a TypeError traceback deep in locked_digests.
+    files = doc.get("files")
+    if "files" in doc:
+        if isinstance(files, dict):
+            if not all(isinstance(k, str)
+                       and (v is None or isinstance(v, str))
+                       for k, v in files.items()):
+                return {}, "'files' entries must map paths to digests"
+        elif isinstance(files, list):
+            if not all(isinstance(f, str) for f in files):
+                return {}, "'files' list entries must be path strings"
+        else:
+            return {}, "'files' must be an object or a list"
+    resolved = doc.get("resolved")
+    if "resolved" in doc and (
+            not isinstance(resolved, list)
+            or not all(isinstance(r, dict) for r in resolved)):
+        return {}, "'resolved' must be a list of plugin objects"
     return doc, None
 
 
