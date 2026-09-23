@@ -2284,16 +2284,15 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     assert "SECRETTOKEN" not in r.stderr
     assert not (cl / "registry").exists()
 
-    # An ssh/scp URL parses to the verified slug, but the operator's
-    # ssh config can map Host github.com to another HostName — 'ssh -G'
-    # must confirm the effective host (stubbed here to answer a
-    # rewritten hostname).
-    sh = tmp_path / "sshhostname"
+    # An 'ssh' resolved from PATH to a non-system location is a
+    # wrapper — it would attest to its own '-G' output while forwarding
+    # the push anywhere, so refuse without asking it.
+    sh = tmp_path / "sshuntrusted"
     sh.mkdir()
     stub = tmp_path / "sshstub"
     stub.mkdir()
     s = stub / "ssh"
-    s.write_text("#!/bin/sh\necho 'hostname evil.example.test'\n")
+    s.write_text("#!/bin/sh\necho 'hostname github.com'\n")
     s.chmod(0o755)
     sp.run(["git", "init", "-q"], cwd=sh, capture_output=True)
     sp.run(["git", "remote", "add", "origin",
@@ -2302,65 +2301,8 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     env = _bootstrap_env(tmp_path)
     r = run(sh, dict(env, PATH=f"{stub}:{env['PATH']}"))
     assert r.returncode == 2, r.stderr
-    assert "ssh client config" in r.stderr
+    assert "ssh transport cannot be verified" in r.stderr
     assert not (sh / "registry").exists()
-
-    # A `Match user` rewrite is invisible to 'ssh -G github.com' — the
-    # query must carry the URL's user so it evaluates the same blocks
-    # git's push would. Stub: only a 'redirect@' target rewrites.
-    mu = tmp_path / "sshmatchuser"
-    mu.mkdir()
-    stub2 = tmp_path / "sshstub2"
-    stub2.mkdir()
-    s2 = stub2 / "ssh"
-    s2.write_text(
-        '#!/bin/sh\ncase " $* " in\n'
-        '  *redirect@github.com*) echo "hostname evil.example.test";;\n'
-        '  *) echo "hostname github.com";;\n'
-        "esac\n")
-    s2.chmod(0o755)
-    sp.run(["git", "init", "-q"], cwd=mu, capture_output=True)
-    sp.run(["git", "remote", "add", "origin",
-            "redirect@github.com:Buro-Built/buro-registry.git"],
-           cwd=mu, capture_output=True)
-    r = run(mu, dict(env, PATH=f"{stub2}:{env['PATH']}"))
-    assert r.returncode == 2, r.stderr
-    assert "ssh client config" in r.stderr
-    assert not (mu / "registry").exists()
-
-    # git percent-decodes URL userinfo before invoking ssh — the -G
-    # target must carry the decoded user or a `Match user` block that
-    # applies to the real push is missed during validation.
-    ue = tmp_path / "sshurlenc"
-    ue.mkdir()
-    sp.run(["git", "init", "-q"], cwd=ue, capture_output=True)
-    sp.run(["git", "remote", "add", "origin",
-            "ssh://redir%65ct@github.com/Buro-Built/buro-registry.git"],
-           cwd=ue, capture_output=True)
-    r = run(ue, dict(env, PATH=f"{stub2}:{env['PATH']}"))
-    assert r.returncode == 2, r.stderr
-    assert "ssh client config" in r.stderr
-    assert not (ue / "registry").exists()
-
-    # A ProxyCommand reports hostname github.com but connects
-    # elsewhere — hostname alone is insufficient.
-    pc = tmp_path / "sshproxy"
-    pc.mkdir()
-    stub3 = tmp_path / "sshstub3"
-    stub3.mkdir()
-    s3 = stub3 / "ssh"
-    s3.write_text(
-        "#!/bin/sh\necho 'hostname github.com'\n"
-        "echo 'proxycommand ssh -W %h:%p bastion.example.test'\n")
-    s3.chmod(0o755)
-    sp.run(["git", "init", "-q"], cwd=pc, capture_output=True)
-    sp.run(["git", "remote", "add", "origin",
-            "git@github.com:Buro-Built/buro-registry.git"],
-           cwd=pc, capture_output=True)
-    r = run(pc, dict(env, PATH=f"{stub3}:{env['PATH']}"))
-    assert r.returncode == 2, r.stderr
-    assert "ssh client config" in r.stderr
-    assert not (pc / "registry").exists()
 
     # git:// is plaintext transport (no encryption, no server
     # authentication) — refused outright regardless of gitProxy config.
@@ -2407,6 +2349,22 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     assert "SUPERSECRET" not in r.stderr
     assert "helper" not in r.stderr
     assert not (e2 / "registry").exists()
+
+    # An ordinary URL path can carry a credential too — the diagnostic
+    # must withhold the path, keeping only scheme+host.
+    cp = tmp_path / "credpath"
+    cp.mkdir()
+    sp.run(["git", "init", "-q"], cwd=cp, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=cp, capture_output=True)
+    sp.run(["git", "config", "remote.origin.pushurl",
+            "https://example.test/git/SECRETPATH/repo.git"], cwd=cp,
+           capture_output=True)
+    r = run(cp, _bootstrap_env(tmp_path))
+    assert r.returncode == 2, r.stderr
+    assert "SECRETPATH" not in r.stderr
+    assert not (cp / "registry").exists()
 
     # Plain-HTTP is refused outright — it is plaintext transport and
     # its effective proxy chain cannot be trusted for a private push.
@@ -2619,24 +2577,16 @@ def test_bootstrap_mirror_push_target_pass(tmp_path):
     r = run(c)
     assert r.returncode == 0, r.stderr
 
-    # An ssh/scp destination with a clean ssh config passes — 'ssh -G'
-    # confirms github.com is not redirected. HOME points at an empty
-    # home so the machine's real ~/.ssh/config cannot interfere.
+    # An ssh/scp destination passes when the system ssh's effective
+    # config verifies a direct, authenticated connection to github.com
+    # (the real 'ssh -G' on a default-configured host does).
     sh = tmp_path / "ssh-ok"
     sh.mkdir()
     sp.run(["git", "init", "-q"], cwd=sh, capture_output=True)
     sp.run(["git", "remote", "add", "origin",
             "git@github.com:Buro-Built/buro-registry.git"],
            cwd=sh, capture_output=True)
-    # ssh resolves ~ via getpwuid, not $HOME, so $HOME does not isolate
-    # ~/.ssh/config — stub 'ssh -G' to confirm github.com instead of
-    # depending on the machine's real ssh config.
-    stub = tmp_path / "sshokstub"
-    stub.mkdir()
-    s = stub / "ssh"
-    s.write_text("#!/bin/sh\necho 'hostname github.com'\n")
-    s.chmod(0o755)
-    r = run(sh, dict(env, PATH=f"{stub}:{env['PATH']}"))
+    r = run(sh)
     assert r.returncode == 0, r.stderr
 
     # Userless scp-style 'github.com:slug' is valid git ssh syntax —
@@ -2647,7 +2597,7 @@ def test_bootstrap_mirror_push_target_pass(tmp_path):
     sp.run(["git", "remote", "add", "origin",
             "github.com:Buro-Built/buro-registry.git"],
            cwd=us, capture_output=True)
-    r = run(us, dict(env, PATH=f"{stub}:{env['PATH']}"))
+    r = run(us)
     assert r.returncode == 0, r.stderr
 
     # A URL-valued branch.<name>.pushRemote at the verified slug — git
@@ -2665,6 +2615,89 @@ def test_bootstrap_mirror_push_target_pass(tmp_path):
            capture_output=True)
     r = run(d)
     assert r.returncode == 0, r.stderr
+
+
+def _load_bootstrap():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "bootstrap_mirror", "scripts/bootstrap-mirror.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_bootstrap_ssh_effective_config(monkeypatch):
+    """_ssh_host_unchanged must refuse any effective-config evidence of
+    redirection or disabled server authentication, and must not trust a
+    PATH-shadowing ssh executable to attest to itself."""
+    import subprocess as _sp
+    import types
+    mod = _load_bootstrap()
+    calls = []
+
+    class R:
+        def __init__(self, out, rc=0):
+            self.stdout, self.returncode, self.stderr = out, rc, ""
+
+    def patch(lines, which="/usr/bin/ssh"):
+        calls.clear()
+
+        def run(argv, **_kw):
+            calls.append(argv)
+            return R("".join(f"{k} {v}\n" for k, v in lines))
+
+        monkeypatch.setattr(
+            mod, "subprocess",
+            types.SimpleNamespace(
+                run=run, TimeoutExpired=_sp.TimeoutExpired))
+        monkeypatch.setattr(
+            mod, "shutil", types.SimpleNamespace(which=lambda _n: which))
+
+    CLEAN = [("hostname", "github.com"),
+             ("stricthostkeychecking", "ask"),
+             ("userknownhostsfile", "/u/.ssh/known_hosts")]
+    URL = "git@github.com:Buro-Built/buro-registry.git"
+
+    patch(CLEAN)
+    assert mod._ssh_host_unchanged(URL) is None
+    # git invokes 'ssh -G <user>@<host>' for an scp-style URL.
+    assert calls == [["/usr/bin/ssh", "-G", "git@github.com"]]
+
+    patch(CLEAN)
+    assert mod._ssh_host_unchanged(
+        "github.com:Buro-Built/buro-registry.git") is None
+    assert calls[-1] == ["/usr/bin/ssh", "-G", "github.com"]
+
+    # The -G target carries the URL's port and percent-DECODED user so
+    # `Match user`/`Match port` evaluate like the real push.
+    patch(CLEAN)
+    assert mod._ssh_host_unchanged(
+        "ssh://redir%65ct@github.com:2222/Buro-Built/buro-registry.git"
+    ) is None
+    assert calls[-1] == ["/usr/bin/ssh", "-G", "-p", "2222",
+                         "redirect@github.com"]
+
+    patch([(k, "evil.example.test" if k == "hostname" else v)
+           for k, v in CLEAN])
+    assert "redirects" in mod._ssh_host_unchanged(URL)
+
+    patch(CLEAN + [("proxycommand", "ssh -W %h:%p bastion")])
+    assert "ProxyCommand" in mod._ssh_host_unchanged(URL)
+
+    patch(CLEAN + [("proxyjump", "bastion")])
+    assert "ProxyCommand" in mod._ssh_host_unchanged(URL)
+
+    patch(CLEAN + [("stricthostkeychecking", "no")])
+    assert "host key" in mod._ssh_host_unchanged(URL)
+
+    patch(CLEAN + [("userknownhostsfile", "/dev/null"),
+                   ("globalknownhostsfile", "/dev/null")])
+    assert "known-hosts" in mod._ssh_host_unchanged(URL)
+
+    # A PATH-resolved ssh outside the system dirs is never even asked.
+    patch(CLEAN, which="/tmp/evil/ssh")
+    assert "cannot be verified" in mod._ssh_host_unchanged(URL)
+    assert calls == []
 
 
 def test_bootstrap_mirror_dirty_clone_no_ratchet(tmp_path):

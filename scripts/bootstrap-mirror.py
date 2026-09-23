@@ -278,19 +278,42 @@ def _redact(url: str) -> str:
     m = re.match(r"^([a-zA-Z][a-zA-Z0-9+.-]*)::(?!/)", url)
     if m:
         return f"{m.group(1)}::***"
+    # The path can carry a credential ('https://h/d/SECRET/x.git',
+    # 'user@h:SECRET/x.git') — withhold it for non-github hosts. A
+    # github.com path is just owner/repo and identifying the
+    # misdirected destination aids the fix.
+    if "://" in url:
+        url = re.sub(
+            r"(://(?!(?:[^@/\s]+@)?github\.com(?::\d+)?/)[^/\s]+)/\S*$",
+            r"\1/***", url)
+    else:
+        url = re.sub(
+            r"^((?:[^@\s]+@)?(?!github\.com(?::|$))[^:\s@]+):\S*$",
+            r"\1:***", url)
     # A space-bearing non-URL string is opaque too — drop its arguments.
     return url.split(" ", 1)[0]
 
 
-def _ssh_host_unchanged(url: str) -> bool:
-    """`ssh -G` resolves OpenSSH's effective config — a HostName rewrite
-    in ~/.ssh/config or /etc/ssh/ssh_config would redirect an ssh push
-    away from github.com even though the URL parses to the verified
-    slug, and a ProxyCommand/ProxyJump would tunnel it to another
-    server while hostname still reports github.com. Query with the
+# Directories a trusted system ssh lives under (resolved with realpath
+# so /bin -> /usr/bin merges and Homebrew Cellar links still count). A
+# 'ssh' resolving anywhere else is a PATH shadow — refuse to ask it to
+# attest to its own config.
+_SSH_TRUST_DIRS = ("/usr/bin", "/bin", "/usr/sbin", "/sbin",
+                   "/usr/local", "/opt/homebrew")
+
+
+def _ssh_host_unchanged(url: str) -> str | None:
+    """None when ssh's effective config for this URL's user/host/port
+    verifies a direct, authenticated connection to github.com; a short
+    refusal reason otherwise. `ssh -G` resolves OpenSSH's effective
+    config: HostName rewrites, ProxyCommand/ProxyJump tunnels, and
+    disabled host-key verification would each let a push to the
+    verified slug land elsewhere or be intercepted. Query with the
     same user/host/port arguments git would pass so `Match user`/
-    `Match port` blocks evaluate identically. Fail closed when ssh
-    cannot confirm a direct connection to github.com."""
+    `Match port` blocks evaluate identically. The ssh executable is
+    resolved through the same PATH git uses and must be a system ssh —
+    a PATH-shadowing wrapper cannot attest to itself. Fail closed on
+    any doubt."""
     if url.startswith("ssh://"):
         m = re.match(r"^ssh://(?:([^@/\s]+)@)?github\.com(?::(\d+))?/",
                      url)
@@ -304,22 +327,40 @@ def _ssh_host_unchanged(url: str) -> bool:
     else:  # scp-style [user@]github.com:slug — user may be omitted
         user = url.split("@", 1)[0] if "@" in url else ""
         args = [f"{user}@github.com" if user else "github.com"]
+    ssh = shutil.which("ssh")
+    if not ssh or not os.path.realpath(ssh).startswith(
+            tuple(f"{d}/" for d in _SSH_TRUST_DIRS)):
+        return ("ssh transport cannot be verified: 'ssh' resolves to "
+                f"{_redact(ssh or '<missing>')} outside the system "
+                "directories")
     try:
-        r = subprocess.run(["ssh", "-G", *args],
+        r = subprocess.run([ssh, "-G", *args],
                            capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.TimeoutExpired):
-        return False
+        return "'ssh -G' could not verify the effective host"
     if r.returncode != 0:
-        return False
+        return "'ssh -G' could not verify the effective host"
     eff = {}
     for ln in r.stdout.splitlines():
         key, _, value = ln.partition(" ")
         eff[key] = value.strip()
     # hostname alone is insufficient: a ProxyCommand/ProxyJump still
     # reports the target host while connecting elsewhere.
-    return (eff.get("hostname", "").lower() == "github.com"
-            and eff.get("proxycommand", "none").lower() == "none"
-            and eff.get("proxyjump", "none").lower() == "none")
+    if eff.get("hostname", "").lower() != "github.com":
+        return "ssh client config redirects github.com elsewhere"
+    if (eff.get("proxycommand", "none").lower() != "none"
+            or eff.get("proxyjump", "none").lower() != "none"):
+        return ("ssh client config tunnels github.com through "
+                "ProxyCommand/ProxyJump")
+    if eff.get("stricthostkeychecking", "").lower() in ("no", "off"):
+        return ("ssh host key verification is disabled "
+                "(StrictHostKeyChecking no/off)")
+    if not [p for p in (eff.get("userknownhostsfile", "").split()
+                        + eff.get("globalknownhostsfile", "").split())
+            if p != "/dev/null"]:
+        return ("ssh host key verification has no known-hosts file "
+                "(UserKnownHostsFile /dev/null)")
+    return None
 
 
 def _push_targets_ok(root: Path, slug: str) -> str | None:
@@ -490,11 +531,9 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
                 if ssh_src:
                     return (f"{ssh_src} overrides the ssh transport "
                             f"for push url '{_redact(url)}'")
-                if not _ssh_host_unchanged(url):
-                    return ("ssh client config redirects github.com "
-                            "elsewhere (or 'ssh -G' could not verify "
-                            "the effective host) for push url "
-                            f"'{_redact(url)}'")
+                prob = _ssh_host_unchanged(url)
+                if prob:
+                    return f"{prob} for push url '{_redact(url)}'"
             continue
         return (f"push destination '{_redact(remote)}' resolves to "
                 f"'{_redact(url)}'")
