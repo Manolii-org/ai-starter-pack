@@ -1,0 +1,39 @@
+name: check-guarded-paths
+description: >-
+  CI-side enforcement of .ai/guards.json: fails the job when the PR/push diff
+  touches a guard's paths without an explicit bypass (PR label `guard-ok:<id>`
+  or commit trailer `Guarded-Path: <id>`). Session hooks (guard_check.py)
+  guard local agent edits; this action guards the merge decision itself.
+inputs:
+  base_ref:
+    description: Base ref to diff against (e.g. origin/develop). Resolved to a merge-base.
+    required: true
+  head_ref:
+    description: Head ref/SHA to diff.
+    required: false
+    default: HEAD
+  guards_file:
+    description: Path to the guards policy file.
+    required: false
+    default: .ai/guards.json
+  bypass_guards:
+    description: >-
+      Comma-separated guard ids to treat as unfreezed for this run
+      (caller computes from PR labels/commit trailers).
+    required: false
+    default: ''
+runs:
+  using: composite
+  steps:
+    - name: Check guarded paths
+      shell: bash
+      env:
+        BASE_REF: ${{ inputs.base_ref }}
+        HEAD_REF: ${{ inputs.head_ref }}
+        GUARDS_FILE: ${{ inputs.guards_file }}
+        BYPASS_GUARDS: ${{ inputs.bypass_guards }}
+      run: |
+        python3 "${{ github.action_path }}/check.py" \
+          --base "$BASE_REF" --head "$HEAD_REF" \
+          --guards-file "$GUARDS_FILE" \
+          --bypass "$BYPASS_GUARDS"

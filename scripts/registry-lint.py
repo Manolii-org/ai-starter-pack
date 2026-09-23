@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import subprocess
 import sys
@@ -133,16 +132,6 @@ PACK_SURFACE_PATTERNS = [
 # trip the gate just as `Manolii-org/private-repo` does.
 PACK_SURFACE_RES = [re.compile(p, re.IGNORECASE)
                     for p in PACK_SURFACE_PATTERNS]
-
-# The first four patterns are private-repo slugs keyed by org OWNER
-# (the slug prefix before '/'; CPDcheck uses its repo-name prefix).
-# In a verified private mirror the OWNING org's slug is legitimate — a
-# buro mirror names its sibling buro repos on purpose — while every
-# OTHER org's slugs stay violations (that is the cross-org privacy
-# boundary). Infra patterns (index 4+) are sensitive anywhere and never
-# relax.
-PACK_SURFACE_ORG_OWNERS = ("manolii-org", "buro-built",
-                           "impaktful-platform", "cpdcheck")
 
 CANONICAL_PACK_SLUG = "manolii-org/ai-starter-pack"
 
@@ -778,12 +767,39 @@ def pack_surface_files() -> list[Path]:
     ]
 
 
+def _mirror_owner() -> str | None:
+    """In a verified private mirror: the mirror's owning org (lowercased),
+    or None. Sibling slugs under that org are legitimate mirror content."""
+    if not (REGISTRY / ".private-mirror").is_file():
+        return None
+    slug = _verified_mirror_slug()
+    return slug.split("/", 1)[0].lower() if slug else None
+
+
+def _surface_hits(line: str, mirror_owner: str | None) -> list[str]:
+    hits = [(m, i) for i, p in enumerate(PACK_SURFACE_RES)
+            for m in p.findall(line)]
+
+    def own_org(hit: str, idx: int) -> bool:
+        # The owner exemption covers repository-slug patterns ONLY — an
+        # infra identifier that happens to share the org prefix
+        # (`buro-built-prod.internal`) must still trip the boundary.
+        h = hit.lower()
+        if idx < 3:                        # `Org/repo` slug patterns
+            return h.startswith(mirror_owner + "/")
+        if idx == 3:                       # `CPDcheck-<repo>` has no '/'
+            return mirror_owner == "cpdcheck" and h.startswith("cpdcheck-")
+        return False
+
+    if mirror_owner and hits and all(own_org(m, i) for m, i in hits):
+        return []
+    return [m for m, _ in hits]
+
+
 def pack_surface_hits() -> list[str]:
-    """Every current PACK-SURFACE line-key (for --write-pack-allowlist).
-    Uses the active pattern set — in a verified mirror, own-org hits are
-    legitimate and never enter the ratchet."""
+    """Every current PACK-SURFACE line-key (for --write-pack-allowlist)."""
+    owner = _mirror_owner()
     out = []
-    res = _pack_surface_res()
     for path in pack_surface_files():
         rel_s = path.relative_to(REPO).as_posix()
         if rel_s in PACK_SURFACE_EXEMPT:
@@ -793,26 +809,9 @@ def pack_surface_hits() -> list[str]:
         except OSError:
             continue
         for i, line in enumerate(lines, 1):
-            if any(p.search(line) for p in res):
+            if _surface_hits(line, owner):
                 out.append(line_key(rel_s, line))
     return sorted(set(out))
-
-
-def _pack_surface_res() -> list[re.Pattern]:
-    """Active PACK-SURFACE patterns for this checkout.
-
-    In a VERIFIED private mirror the origin owner's slug pattern is
-    removed: a buro mirror names Buro-Built/* repos legitimately — the
-    check's job there is the cross-org boundary (other orgs' slugs) plus
-    infra ids, which stay active. In the canonical public repo (or an
-    unverified checkout) every pattern applies."""
-    slug = _verified_mirror_slug()
-    if slug is None:
-        return PACK_SURFACE_RES
-    owner = slug.split("/", 1)[0]
-    return [p for i, p in enumerate(PACK_SURFACE_RES)
-            if i >= len(PACK_SURFACE_ORG_OWNERS)
-            or PACK_SURFACE_ORG_OWNERS[i] != owner]
 
 
 def check_pack_surface() -> None:
@@ -821,7 +820,7 @@ def check_pack_surface() -> None:
     not the infra-id shapes (project refs, endpoints, .internal) this
     check owns; credentials stay with SECRETS + Detect Secrets."""
     fails = 0
-    res = _pack_surface_res()
+    owner = _mirror_owner()
     allow = load_line_allowlist(PACK_SURFACE_ALLOWLIST)
     for path in pack_surface_files():
         rel_s = path.relative_to(REPO).as_posix()
@@ -832,7 +831,7 @@ def check_pack_surface() -> None:
         except OSError:
             continue
         for i, line in enumerate(lines, 1):
-            if (any(p.search(line) for p in res)
+            if (_surface_hits(line, owner)
                     and line_key(rel_s, line) not in allow):
                 report("FAIL", "PACK-SURFACE",
                        f"{rel_s}:{i} — private slug/infra id in public repo")
@@ -865,9 +864,12 @@ def _origin_slug() -> str | None:
         return None
     if r.returncode != 0:
         return None
-    # A non-GitHub origin that happens to parse (gitlab.com/<org>/<repo>)
-    # is not a mirror — the visibility oracle is `gh api` against GitHub
-    # and the generated gate is a GitHub Actions workflow.
+    # Require the literal host to be github.com — the visibility oracle is
+    # `gh api` against GitHub, so a URL whose PATH merely contains a
+    # github.com segment (`https://public.example/git/github.com/x/y`)
+    # or whose host embeds it (`notgithub.com`, `evil.github.com`) must
+    # never resolve to a slug that could borrow an unrelated private
+    # repo's privacy to forge the waiver.
     url = r.stdout.strip()
     m = re.match(
         r"^(?:https?|git|ssh)://(?:[^@/\s]+@)?github\.com(?::\d+)?/"
@@ -875,36 +877,6 @@ def _origin_slug() -> str | None:
         or re.match(
             r"^[^@\s]+@github\.com:([^/\s]+/[^/\s]+?)(?:\.git)?/?$", url)
     return m.group(1).lower() if m else None
-
-
-def _mirror_visibility_asserted() -> bool:
-    """Mirror mode needs an externally-supplied visibility assertion —
-    MIRROR_VISIBILITY=private set by the caller from an out-of-repo
-    check (CI runs `gh api repos/<repo> --jq .visibility`;
-    bootstrap-mirror.py sets it from its own verified result). Only
-    `private` counts: on GitHub Enterprise `internal` grants every
-    enterprise member (incl. other orgs) read access. A checkout's own
-    committed files can never prove its repo is private: a public fork
-    can carry both the marker and its own slug digest."""
-    return os.environ.get("MIRROR_VISIBILITY", "").strip().lower() == "private"
-
-
-def _verified_mirror_slug() -> str | None:
-    """The origin slug when this checkout is a VERIFIED private mirror
-    (marker present, origin resolvable, slug not canonical, slug digest
-    in registry/private-mirrors.txt, AND MIRROR_VISIBILITY asserted) —
-    else None. Shared by the PUBLIC boundary check and the mirror-mode
-    PACK-SURFACE pattern selection."""
-    if not (REGISTRY / ".private-mirror").is_file():
-        return None
-    slug = _origin_slug()
-    if slug is None or slug == CANONICAL_PACK_SLUG:
-        return None
-    if hashlib.sha256(slug.encode()).hexdigest() not in _trusted_mirrors():
-        return None
-    if not _mirror_visibility_asserted():
-        return None
-    return slug
 
 
 def _trusted_mirrors() -> set[str]:
@@ -916,6 +888,35 @@ def _trusted_mirrors() -> set[str]:
     return {line.strip().lower()
             for line in PRIVATE_MIRRORS_PATH.read_text().splitlines()
             if re.fullmatch(r"[0-9a-f]{64}", line.strip())}
+
+
+def _repo_visibility(slug: str) -> str | None:
+    """Live GitHub visibility via `gh api` — the external assertion the
+    marker waiver needs. Committed markers and digests are both
+    attacker-editable, so neither proves privacy on its own."""
+    try:
+        out = subprocess.run(
+            ["gh", "api", f"repos/{slug}", "--jq", ".visibility",
+             "--hostname", "github.com"],
+            capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if out.returncode != 0:
+        return None
+    return out.stdout.strip() or None
+
+
+def _verified_mirror_slug() -> str | None:
+    """The origin slug iff it is a VERIFIED private mirror (non-canonical,
+    digest-declared, live private-visibility assertion). None otherwise."""
+    slug = _origin_slug()
+    if slug is None or slug == CANONICAL_PACK_SLUG:
+        return None
+    if hashlib.sha256(slug.encode()).hexdigest() not in _trusted_mirrors():
+        return None
+    if _repo_visibility(slug) != "private":
+        return None
+    return slug
 
 
 def check_public_boundary() -> None:
@@ -946,15 +947,16 @@ def check_public_boundary() -> None:
                    "applies only to slug digests listed in "
                    "registry/private-mirrors.txt")
             return
-        if not _mirror_visibility_asserted():
+        vis = _repo_visibility(slug)
+        if vis != "private":
             report("FAIL", "PUBLIC",
-                   "mirror declared but MIRROR_VISIBILITY is not asserted "
-                   "to private — CI must set it from an API check (the "
-                   "generated registry-lint workflow does); committed files "
-                   "alone cannot prove this repo is private")
+                   f"origin '{slug}' failed the live private-visibility "
+                   f"assertion (visibility={vis or 'unverifiable via gh api'}) "
+                   "— the waiver requires a verified private repo, not just "
+                   "a committed marker + digest")
             return
         report("PASS", "PUBLIC",
-               f"declared private mirror ({slug}) — boundary waived")
+               f"declared + verified private mirror ({slug}) — boundary waived")
         return
     fails = 0
     for scope in UNIVERSES + LOCAL_SCOPES:

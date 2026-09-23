@@ -23,6 +23,11 @@ jobs:
       - name: Install deps
         run: timeout 120 pip install pyyaml copier pytest jsonschema
       - name: Lint the registry
+        env:
+          # `.private-mirror` waivers verify repo visibility live via
+          # `gh api` — on a clean runner gh needs a token or the lookup
+          # fails closed and every mirror CI refuses the waiver.
+          GH_TOKEN: ${{ github.token }}
         run: python3 scripts/registry-lint.py
       - name: Freshness — platform plugins are regenerated output
         run: python3 scripts/build-registry.py --check

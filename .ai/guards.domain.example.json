@@ -1,0 +1,55 @@
+{
+  "_comment": "Domain guard catalogue — copy entries your repo actually has into .ai/guards.json. Delete paths that don't exist; a guard over nothing is noise.",
+  "guards": [
+    {
+      "id": "db-migrations",
+      "description": "Schema migrations (alembic/drizzle/flyway/…)",
+      "paths": ["alembic/**", "migrations/**", "supabase/migrations/**", "prisma/migrations/**", "db/migrate/**"],
+      "mode": "block",
+      "reason": "irreversible DDL can strand prod between app revisions",
+      "default": true
+    },
+    {
+      "id": "auth-session",
+      "description": "Authentication, session, and token handling",
+      "paths": ["app/core/security.py", "app/core/secrets.py", "app/services/auth_service.py", "lib/auth/**", "middleware.ts", "src/auth/**"],
+      "mode": "block",
+      "reason": "auth regressions bypass every downstream control",
+      "default": true
+    },
+    {
+      "id": "billing-payments",
+      "description": "Billing, subscriptions, payment provider calls",
+      "paths": ["app/services/xero/**", "app/services/afsl_subscription*", "app/services/afsl_plan*", "lib/billing/**", "src/billing/**", "app/api/routes/billing*"],
+      "mode": "block",
+      "reason": "money-path changes need human accountability",
+      "default": true
+    },
+    {
+      "id": "deploy-workflows",
+      "description": "CI/CD and deployment workflow definitions",
+      "paths": [".github/workflows/**", "Dockerfile", "docker-compose*.yml", "fly.toml"],
+      "mode": "block",
+      "reason": "workflow edits can silently disable the gates that guard everything else",
+      "default": true
+    },
+    {
+      "id": "guards-config",
+      "description": "Guard policy itself",
+      "paths": [".ai/guards.json", ".ai/guards*.json"],
+      "mode": "block",
+      "reason": "guard policy changes require explicit sign-off (self-protection)",
+      "default": true
+    },
+    {
+      "id": "data-retention",
+      "description": "Tables/columns holding PII or regulated data",
+      "paths": ["app/models/**", "src/db/schema*"],
+      "mode": "warn",
+      "reason": "model churn near PII warrants a second look, not a hard block",
+      "default": true
+    }
+  ],
+  "session_unfreezes": [],
+  "bypass_log": ".ai/bypass-log.jsonl"
+}

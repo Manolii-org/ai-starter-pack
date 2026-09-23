@@ -55,11 +55,12 @@ bind to THIS repo, not just any private repo the token can see — and
 grants every enterprise member, incl. other orgs, read access). Either check failing
 is fatal: seeding universe content into a repo of unknown visibility is
 exactly the failure mode the mirror boundary exists to prevent.
-Mirror-mode lint also requires an externally-supplied
-MIRROR_VISIBILITY=private assertion — committed files alone can never
-prove privacy, so the generated workflow verifies visibility via
-`gh api` on every run and the bootstrap injects its own verified
-result during regen.
+Mirror-mode lint verifies repo visibility itself — on every run it
+calls `gh api repos/<origin-slug>` and requires `private` (committed
+files alone can never prove privacy). The generated workflow therefore
+exports `GH_TOKEN: ${{ github.token }}` on the lint step so the lookup
+is authenticated; on a clean runner an unauthenticated `gh` fails
+closed and the waiver never applies.
 
 Privacy: this script writes no other-org identifiers into the mirror —
 the vendored tree is already org-leak-clean in the canonical repo, and
@@ -79,7 +80,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from urllib.parse import unquote
+
 
 try:
     import pwd
@@ -159,24 +160,14 @@ jobs:
           python-version: '3.12'
       - name: Install deps
         run: timeout 120 pip install pyyaml jsonschema
-      # Mirror mode in the lint requires a visibility assertion that is
-      # NOT derivable from committed files — a public fork can carry the
-      # marker and its own digest. Verify against the API on every run:
-      # a mirror flipped to public after seeding drops back to the full
-      # pattern set and the boundary gate re-engages.
-      - name: Assert mirror privacy
+      # Mirror mode in the lint verifies visibility itself via `gh api`
+      # on every run — a mirror flipped public after seeding drops back
+      # to the full pattern set and the boundary re-engages. The lookup
+      # must be authenticated: without GH_TOKEN it fails closed and the
+      # waiver never applies.
+      - name: Lint the registry
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          vis=$(timeout 30 gh api "repos/${{ github.repository }}" --jq .visibility)
-          # 'internal' is not private enough: on GitHub Enterprise it
-          # grants every enterprise member (incl. other orgs) read access.
-          if [ "$vis" != "private" ]; then
-            echo "::error::mirror repo must be private (got: $vis)"
-            exit 1
-          fi
-          echo "MIRROR_VISIBILITY=$vis" >> "$GITHUB_ENV"
-      - name: Lint the registry
         run: python3 scripts/registry-lint.py
 """
 
@@ -204,13 +195,13 @@ private boundary.
   the index: this mirror's own (non-platform) plugin entries are kept.
 - `scripts/registry-lint.py` + `.github/workflows/registry-lint.yml` —
   the same lint gate the canonical repo runs, driven by a minimal
-  mirror-only workflow that first asserts repo visibility via `gh api`
-  (`MIRROR_VISIBILITY=private` reaches the lint env). In a verified
-  mirror the lint waives the public boundary, exempts this org's own
-  repo slugs, and still FAILs on other orgs' slugs, infra identifiers,
-  credential shapes, and cross-scope references. For a LOCAL lint run,
-  export it yourself after confirming the repo is private:
-  `MIRROR_VISIBILITY=private python3 scripts/registry-lint.py`
+  mirror-only workflow that authenticates the lint's own `gh api`
+  visibility check via `GH_TOKEN`. In a verified private mirror the
+  lint waives the public boundary, exempts this org's own repo slugs,
+  and still FAILs on other orgs' slugs, infra identifiers, credential
+  shapes, and cross-scope references. For a LOCAL lint run, any
+  authenticated `gh` works (gh auth login or GH_TOKEN) — an
+  unauthenticated lookup fails closed and refuses the waiver.
 
 ## Consumers
 
@@ -343,6 +334,26 @@ def _windows_dir() -> str:
         import ctypes
         buf = ctypes.create_unicode_buffer(260)  # MAX_PATH
         if ctypes.windll.kernel32.GetWindowsDirectoryW(buf, 260):
+            return buf.value
+    except (AttributeError, ImportError, OSError, ValueError):
+        pass
+    return ""
+
+
+def _program_data_dir() -> str:
+    """%ProgramData% reported by the OS — shell32 SHGetFolderPathW with
+    CSIDL_COMMON_APPDATA — never the environment variable (a caller can
+    point ProgramData at a user-writable tree holding a forged known-
+    hosts file and still pass an env-derived allowlist). Empty string
+    off-Windows or when the OS cannot answer."""
+    if os.name != "nt":
+        return ""
+    try:
+        import ctypes
+        buf = ctypes.create_unicode_buffer(260)  # MAX_PATH
+        CSIDL_COMMON_APPDATA = 0x0023
+        if ctypes.windll.shell32.SHGetFolderPathW(
+                None, CSIDL_COMMON_APPDATA, None, 0, buf) == 0:
             return buf.value
     except (AttributeError, ImportError, OSError, ValueError):
         pass
@@ -603,16 +614,21 @@ def _ssh_host_unchanged(url: str) -> str | None:
         m = re.match(r"^ssh://(?:([^@/\s]+)@)?github\.com(?::(\d+))?/",
                      url, re.IGNORECASE)
         user, port = m.groups()
-        # git percent-decodes URL userinfo before invoking ssh — the
-        # -G target must carry the same decoded user or Match user
-        # blocks evaluate differently than the real push.
-        user = unquote(user) if user else ""
         args = (["-p", port] if port else []) + \
             [f"{user}@github.com" if user else "github.com"]
     else:  # scp-style [user@]github.com:slug — user may be omitted
         user = url.split("@", 1)[0] if "@" in url else ""
         port = None
         args = [f"{user}@github.com" if user else "github.com"]
+    # Git hands ssh the URL username byte-for-byte — it does NOT
+    # percent-decode userinfo — so the -G target must carry the same raw
+    # user or 'Match user' blocks evaluate differently than the real
+    # push ('ssh://git%40evil@…' is a different user than 'git@evil').
+    # Anything outside a plain token charset — '%' escapes, control
+    # characters, leading '-' — cannot be attested → refuse.
+    if user and not re.fullmatch(r"[A-Za-z0-9._~]+", user):
+        return ("push url carries an ssh user that cannot be attested "
+                "(encoding or control characters)")
     ssh = _trusted_prog("ssh")
     if not ssh:
         return ("ssh transport cannot be verified: 'ssh' does not "
@@ -724,13 +740,19 @@ def _ssh_host_unchanged(url: str) -> str | None:
         home, user = os.path.expanduser("~"), ""
     # Trusted locations: ~/.ssh plus the system file (/etc/ssh on POSIX,
     # %ProgramData%\ssh on Windows, where the OpenSSH port keeps it).
-    # Compare normcase'd realpaths so 'C:\Users\…' matches its own
-    # prefix — hard-coded forward slashes never match a Windows path.
-    global_kh = (os.path.join(os.environ.get(
-        "ProgramData", r"C:\ProgramData"), "ssh")
-        if os.name == "nt" else "/etc/ssh")
-    allowed = tuple(os.path.normcase(d + os.sep) for d in
-                    (os.path.join(home, ".ssh"), global_kh))
+    # The Windows root comes from the OS — CSIDL_COMMON_APPDATA via
+    # shell32 — never the ProgramData env var (a caller can point it at
+    # a forged known-hosts tree). Compare normcase'd realpaths so
+    # 'C:\Users\…' matches its own prefix — hard-coded forward slashes
+    # never match a Windows path.
+    roots = [os.path.join(home, ".ssh")]
+    if os.name == "nt":
+        pd = _program_data_dir()
+        if pd:
+            roots.append(os.path.join(pd, "ssh"))
+    else:
+        roots.append("/etc/ssh")
+    allowed = tuple(os.path.normcase(d + os.sep) for d in roots)
     # 'ssh -G' emits a quoted path containing spaces WITHOUT its
     # quoting — 'a b' may be one file or two. When a spaced join of
     # consecutive fragments names a real file the parse is ambiguous
@@ -1280,7 +1302,7 @@ def _vendored(path: str) -> bool:
                for p in VENDORED_PATHS)
 
 
-def regen_allowlists(root: Path, established: bool, vis: str) -> bool:
+def regen_allowlists(root: Path, established: bool) -> bool:
     """Regenerate the ratchet allowlists via the vendored lint (its REPO
     resolves from its own location). Mirror mode is already active — marker
     + mirrors.txt are written first — so exempt own-org hits never enter
@@ -1324,14 +1346,12 @@ def regen_allowlists(root: Path, established: bool, vis: str) -> bool:
             if p.is_file():
                 old[rel] = p.read_text(encoding="utf-8").splitlines()
     lint = root / "scripts" / "registry-lint.py"
-    # Mirror-mode lint requires an externally-supplied visibility
-    # assertion — bootstrap already verified it via gh above, so inject
-    # the confirmed value into the vendored lint subprocesses.
-    lint_env = {**os.environ, "MIRROR_VISIBILITY": vis}
+    # The vendored lint verifies repo visibility itself via `gh api` —
+    # the subprocess inherits this environment, and bootstrap already
+    # proved `gh` is authenticated above, so no extra plumbing is needed.
     for flag in ("--write-allowlist", "--write-pack-allowlist"):
         r = subprocess.run([sys.executable, str(lint), flag],
-                           cwd=root, capture_output=True, text=True,
-                           env=lint_env)
+                           cwd=root, capture_output=True, text=True)
         if r.returncode != 0:
             sys.stderr.write(f"FAIL: lint {flag} regen failed: "
                              f"{r.stderr.strip() or r.stdout.strip()}\n")
@@ -1413,8 +1433,7 @@ def main() -> int:
             f"a repo other than '{slug}'; refusing\n")
         return 2
 
-    vis = check_visibility(slug)
-    if vis is None:
+    if check_visibility(slug) is None:
         return 2
 
     reg = root / "registry"
@@ -1480,7 +1499,7 @@ def main() -> int:
     wf.write_text(MIRROR_WORKFLOW)
 
     (root / "README.md").write_text(README)
-    if not regen_allowlists(root, established, vis):
+    if not regen_allowlists(root, established):
         return 2
     print(f"seeded mirror for {args.universe} at {root} (slug {slug})")
     # 'git commit -m --no-gpg-sign': never the bare command — a
