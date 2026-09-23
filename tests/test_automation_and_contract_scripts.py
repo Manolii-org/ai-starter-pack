@@ -918,3 +918,72 @@ def test_contract_expr_false_and_choice_parity() -> None:
         "on:\n  push: {branches: [develop]}\n"
         "  workflow_dispatch: {inputs: {env: {type: choice}}}\n")
     assert mod.workflow_triggers_branch(spec, "develop") is False
+
+
+# ── review round 35 ─────────────────────────────────────────────────────────
+
+def test_registry_workflow_run_types_enum(tmp_path: Path) -> None:
+    """Invented workflow_run activity types unload the whole file."""
+    import argparse
+    mod = _load(REGISTRY_SCRIPT, "var35a")
+    repo_dir = tmp_path / "repo35a"
+    wf = repo_dir / ".github/workflows/x.yml"
+    wf.parent.mkdir(parents=True)
+    wf.write_text(
+        "on:\n  push: null\n"
+        "  workflow_run: {workflows: [CI], types: [never_happens]}\n"
+        "jobs:\n  x: {runs-on: ubuntu-latest, steps: [{run: 'true'}]}\n")
+    auto = {"name": "n", "repo": "Org/repo35a",
+            "workflow": ".github/workflows/x.yml",
+            "trigger": {"type": "push"}, "risk_tier": "green", "owner": "o"}
+    args = argparse.Namespace(mode="local", repos_dir=str(tmp_path))
+    errs: list[str] = []
+    mod.check_workflow_files({"automations": [auto]}, args, errs)
+    assert errs and "invalid activity" in errs[0]
+    wf.write_text(
+        "on:\n  push: null\n"
+        "  workflow_run: {workflows: [CI], types: [completed]}\n"
+        "jobs:\n  x: {runs-on: ubuntu-latest, steps: [{run: 'true'}]}\n")
+    errs = []
+    mod.check_workflow_files({"automations": [auto]}, args, errs)
+    assert errs == []
+
+
+def test_registry_invalid_sibling_job_id(tmp_path: Path) -> None:
+    """One invalid job key rejects the workflow even with good jobs beside it."""
+    import argparse
+    mod = _load(REGISTRY_SCRIPT, "var35b")
+    repo_dir = tmp_path / "repo35b"
+    wf = repo_dir / ".github/workflows/x.yml"
+    wf.parent.mkdir(parents=True)
+    wf.write_text(
+        "on: push\n"
+        "jobs:\n"
+        "  deploy: {runs-on: ubuntu-latest, steps: [{run: 'true'}]}\n"
+        "  rollback job: {runs-on: ubuntu-latest, steps: [{run: 'true'}]}\n")
+    auto = {"name": "n", "repo": "Org/repo35b",
+            "workflow": ".github/workflows/x.yml",
+            "trigger": {"type": "push"}, "risk_tier": "green", "owner": "o"}
+    args = argparse.Namespace(mode="local", repos_dir=str(tmp_path))
+    errs: list[str] = []
+    mod.check_workflow_files({"automations": [auto]}, args, errs)
+    assert errs and "invalid job" in errs[0]
+
+
+def test_contract_workflow_run_types_and_job_ids() -> None:
+    """Contract parity: bad workflow_run.types and a bad sibling job id."""
+    mod = _load(CONTRACT_SCRIPT, "cdc35")
+    spec = yaml.safe_load(
+        "on:\n  push: {branches: [develop]}\n"
+        "  workflow_run: {workflows: [CI], types: [never_happens]}\n")
+    assert mod.workflow_triggers_branch(spec, "develop") is False
+    spec = yaml.safe_load(
+        "on:\n  push: {branches: [develop]}\n"
+        "  workflow_run: {workflows: [CI], types: [completed]}\n")
+    assert mod.workflow_triggers_branch(spec, "develop") is True
+    spec = yaml.safe_load(
+        "on: push\n"
+        "jobs:\n"
+        "  deploy: {runs-on: ubuntu-latest, steps: [{run: 'true'}]}\n"
+        "  rollback job: {runs-on: ubuntu-latest, steps: [{run: 'true'}]}\n")
+    assert mod.jobs_map(spec) == {}

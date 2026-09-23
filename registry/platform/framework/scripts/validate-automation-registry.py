@@ -95,6 +95,10 @@ PR_TYPES = {"assigned", "unassigned", "labeled", "unlabeled", "opened",
             "auto_merge_disabled", "milestoned", "demilestoned", "enqueued",
             "dequeued", "head_ref_restored", "head_ref_deleted",
             "marked_as_duplicate", "transferred"}
+# workflow_run's documented activity types — same "invented name never fires"
+# rule as pull_request.types.
+WORKFLOW_RUN_TYPES = {"requested", "in_progress", "completed"}
+
 MONTH_NAMES = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
                "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}
 WEEKDAY_NAMES = {"SUN": 0, "MON": 1, "TUE": 2, "WED": 3, "THU": 4,
@@ -262,9 +266,15 @@ def _workflow_trigger_ok(spec: dict, trigger: dict) -> str | None:
         if ttype not in on:
             return f"workflow missing on.{ttype} trigger"
     jobs = spec.get("jobs")
-    if not isinstance(jobs, dict) or not any(
-            _runnable_job(j) for k, j in jobs.items()
-            if isinstance(k, str) and JOB_ID_RE.fullmatch(k)):
+    if not isinstance(jobs, dict):
+        return "workflow declares no runnable jobs"
+    # ONE invalid job id or non-mapping job body rejects the whole workflow
+    # for GitHub — it can't be skipped so the remaining jobs satisfy the
+    # runnable check on a file that never loads.
+    if any(not isinstance(k, str) or not JOB_ID_RE.fullmatch(k)
+           or not isinstance(j, dict) for k, j in jobs.items()):
+        return "workflow contains an invalid job definition"
+    if not any(_runnable_job(j) for j in jobs.values()):
         # a conformant `on:` on a workflow that executes nothing still
         # verifies — the registry drift check would stay green with the
         # automation's work silently removed
@@ -338,11 +348,16 @@ def _event_cfg_ok(name, cfg) -> str | None:
     for pos in ("branches", "tags", "paths", "types"):
         if pos in cfg and not cfg[pos]:
             return f"on.{name} declares an empty {pos} filter"
-    if name in ("pull_request", "pull_request_target") and "types" in cfg:
+    # activity-type enums: an invented activity name unloads the workflow
+    if "types" in cfg:
         types = cfg["types"]
         if isinstance(types, str):
             types = [types]
-        if any(t not in PR_TYPES for t in types):
+        if name in ("pull_request", "pull_request_target") and any(
+                t not in PR_TYPES for t in types):
+            return f"on.{name}.types contains an invalid activity"
+        if name == "workflow_run" and any(
+                t not in WORKFLOW_RUN_TYPES for t in types):
             return f"on.{name}.types contains an invalid activity"
     if "branches" in cfg and "branches-ignore" in cfg:
         return f"on.{name} can't combine branches and branches-ignore"

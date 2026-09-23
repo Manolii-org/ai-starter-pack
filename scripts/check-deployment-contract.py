@@ -96,6 +96,9 @@ PR_TYPES = {"assigned", "unassigned", "labeled", "unlabeled", "opened",
             "auto_merge_disabled", "milestoned", "demilestoned", "enqueued",
             "dequeued", "head_ref_restored", "head_ref_deleted",
             "marked_as_duplicate", "transferred"}
+# workflow_run's documented activity types — same "invented name never fires"
+# rule as pull_request.types.
+WORKFLOW_RUN_TYPES = {"requested", "in_progress", "completed"}
 
 MONTH_NAMES = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
                "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}
@@ -243,6 +246,17 @@ def _event_loadable(name, cfg) -> bool:
         return False
     if "tags" in cfg and "tags-ignore" in cfg:
         return False
+    # activity-type enums: an invented activity name unloads the workflow
+    types = cfg.get("types")
+    if isinstance(types, str):
+        types = [types]
+    if isinstance(types, list):
+        if name in ("pull_request", "pull_request_target") and any(
+                t not in PR_TYPES for t in types):
+            return False
+        if name == "workflow_run" and any(
+                t not in WORKFLOW_RUN_TYPES for t in types):
+            return False
     return True
 
 
@@ -678,11 +692,13 @@ def jobs_map(spec: dict) -> dict:
     jobs = spec.get("jobs")
     if not isinstance(jobs, dict):
         return {}
-    # keys must be strings — a `jobs: {1: {...}}` entry would feed an int
-    # to the rollback regex (TypeError) and isn't a valid GitHub job id
-    return {k: v for k, v in jobs.items()
-            if isinstance(k, str) and JOB_ID_RE.fullmatch(k)
-            and isinstance(v, dict) and _executable(v)}
+    # ONE invalid job id or non-mapping job body rejects the whole workflow
+    # for GitHub — filtering it out would let a never-loadable file satisfy
+    # lane assertions with its remaining jobs.
+    if any(not isinstance(k, str) or not JOB_ID_RE.fullmatch(k)
+           or not isinstance(v, dict) for k, v in jobs.items()):
+        return {}
+    return {k: v for k, v in jobs.items() if _executable(v)}
 
 
 def job_ids(spec: dict) -> set[str]:
