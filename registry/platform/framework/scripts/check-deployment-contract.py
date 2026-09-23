@@ -287,11 +287,13 @@ def workflow_triggers_branch(spec: dict, branch: str) -> bool:
         for p in patterns:
             if not isinstance(p, str):
                 continue
-            if p.startswith("!"):
-                if gh_match(p[1:]):
-                    matched = False
-            elif gh_match(p):
-                matched = True
+            neg = p.startswith("!")
+            try:
+                hit = gh_match(p[1:] if neg else p)
+            except re.error:
+                return False  # unparseable glob — workflow can't load
+            if hit:
+                matched = not neg
         return matched
 
     on = spec.get("on") or spec.get(True) or {}
@@ -322,12 +324,25 @@ def workflow_triggers_branch(spec: dict, branch: str) -> bool:
             continue
         # tag-only triggers never fire for branch pushes: a `push` event
         # whose config filters on `tags`/`tags-ignore` but declares no
-        # `branches`/`branches-ignore` runs only on tag pushes.
-        has_tag_filter = bool(ev.get("tags") or ev.get("tags-ignore")
-                              or ev.get("tags_ignore"))
+        # `branches`/`branches-ignore` runs only on tag pushes. Detection is
+        # by KEY PRESENCE (a falsy `tags: []`/`false` is still a declared
+        # filter) and each declared value must parse as a pattern list.
+        tag_keys = ("tags", "tags-ignore", "tags_ignore")
+        if any(_as_patterns(ev[k]) is None for k in tag_keys if k in ev):
+            continue  # malformed tag filter — workflow can't load
+        has_tag_filter = any(k in ev for k in tag_keys)
         has_branch_filter = any(k in ev for k in
                                 ("branches", "branches-ignore", "branches_ignore"))
         if event == "push" and has_tag_filter and not has_branch_filter:
+            continue
+        # GitHub forbids `branches` together with `branches-ignore` (and
+        # likewise `tags` with `tags-ignore`) on the same event — a workflow
+        # declaring both can never run, so the lane reports drift.
+        if ("branches" in ev and has_branch_filter
+                and any(k in ev for k in ("branches-ignore", "branches_ignore"))):
+            continue
+        if has_tag_filter and "tags" in ev and any(
+                k in ev for k in ("tags-ignore", "tags_ignore")):
             continue
         branches = _as_patterns(ev.get("branches"))
         # key-presence, not truthiness — `branches-ignore: false` must reach
@@ -397,13 +412,21 @@ def _runner_ok(runner) -> bool:
     if isinstance(runner, dict):
         if not runner or not set(runner) <= {"group", "labels"}:
             return False  # `runs-on: {bogus: true}` parses but never runs
-        group, labels = runner.get("group"), runner.get("labels")
-        group_ok = group is None or (isinstance(group, str) and group.strip())
-        labels_ok = (labels is None
-                     or isinstance(labels, str) and labels.strip()
-                     or isinstance(labels, list) and labels
-                     and all(isinstance(x, str) and x.strip() for x in labels))
-        return bool(group_ok and labels_ok)
+        # every PRESENT key must hold a usable value — `{group: null}` or
+        # `{labels: null}` selects no runner even though .get() reads it as
+        # "absent"
+        if "group" in runner and not (
+                isinstance(runner["group"], str) and runner["group"].strip()):
+            return False
+        if "labels" in runner:
+            labels = runner["labels"]
+            if isinstance(labels, str):
+                if not labels.strip():
+                    return False
+            elif not (isinstance(labels, list) and labels and all(
+                    isinstance(x, str) and x.strip() for x in labels)):
+                return False
+        return True
     return False
 
 

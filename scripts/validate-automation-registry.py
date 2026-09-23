@@ -250,13 +250,21 @@ def _runner_ok(runner) -> bool:
     if isinstance(runner, dict):
         if not runner or not set(runner) <= {"group", "labels"}:
             return False  # `runs-on: {bogus: true}` parses but never runs
-        group, labels = runner.get("group"), runner.get("labels")
-        group_ok = group is None or (isinstance(group, str) and group.strip())
-        labels_ok = (labels is None
-                     or isinstance(labels, str) and labels.strip()
-                     or isinstance(labels, list) and labels
-                     and all(isinstance(x, str) and x.strip() for x in labels))
-        return bool(group_ok and labels_ok)
+        # every PRESENT key must hold a usable value — `{group: null}` or
+        # `{labels: null}` selects no runner even though .get() reads it as
+        # "absent"
+        if "group" in runner and not (
+                isinstance(runner["group"], str) and runner["group"].strip()):
+            return False
+        if "labels" in runner:
+            labels = runner["labels"]
+            if isinstance(labels, str):
+                if not labels.strip():
+                    return False
+            elif not (isinstance(labels, list) and labels and all(
+                    isinstance(x, str) and x.strip() for x in labels)):
+                return False
+        return True
     return False
 
 
