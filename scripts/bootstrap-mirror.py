@@ -413,10 +413,30 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
     ssh_src = ("core.sshCommand" if _cfg("core.sshCommand") else
                "GIT_SSH_COMMAND" if os.environ.get("GIT_SSH_COMMAND") else
                "GIT_SSH" if os.environ.get("GIT_SSH") else "")
-    proxy_src = ("core.gitProxy" if _cfg("core.gitProxy") else
-                 "GIT_PROXY_COMMAND"
-                 if os.environ.get("GIT_PROXY_COMMAND") else "")
+
+    def _gitproxy_applies() -> bool:
+        # core.gitProxy entries may carry a `for <domain>` qualifier and
+        # a `none` command disables the proxy — evaluate every entry in
+        # order; the last one applicable to github.com decides.
+        applies = False
+        for ln in _cfg_lines("--get-all", "core.gitProxy"):
+            cmd, sep, domain = ln.rpartition(" for ")
+            if not sep:
+                cmd, domain = ln, ""
+            if domain and not re.search(
+                    rf"(^|\.){re.escape(domain.strip().lower())}$",
+                    "github.com"):
+                continue
+            applies = cmd.strip().lower() != "none"
+        return applies
+
+    proxy_src = ("GIT_PROXY_COMMAND"
+                 if os.environ.get("GIT_PROXY_COMMAND")
+                 else "core.gitProxy" if _gitproxy_applies() else "")
     for url in urls:
+        if url.startswith("http://"):
+            return (f"push destination '{_redact(remote)}' resolves to "
+                    f"plaintext http url '{_redact(url)}'")
         if _slug_of(url) == slug:
             if url.startswith("ssh://") or _GH_SCP.match(url):
                 if ssh_src:
