@@ -314,7 +314,6 @@ VENDORED_PATHS = (
     # plugin path) instead of letting them FAIL. Old entries still live
     # are preserved by the merge rule; only NEW hits are refused.
     "registry/secrets-allowlist.txt",
-    "registry/secrets-allowlist.txt",
     "registry/private-mirrors.txt",
     "registry/.private-mirror",
     "scripts/registry-lint.py",
