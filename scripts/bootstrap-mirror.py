@@ -273,9 +273,13 @@ def _slug_of(url: str) -> str | None:
 def _redact(url: str) -> str:
     """Strip credentials (userinfo, query, fragment) before a diagnostic
     prints the URL. The scp-style 'user@host:path' form has no '://' —
-    mask a leading user@ as well (the username may be a token)."""
-    url = re.sub(r"://[^/@\s]*@", "://***@", url, count=1)
-    url = re.sub(r"^[^@\s:]+@", "***@", url, count=1)
+    mask a leading user@ as well (the username may be a token; a
+    second '@' inside userinfo is masked with it)."""
+    # Userinfo may contain MORE than one '@' — git preserves the whole
+    # remote value, so mask greedily through the LAST '@' before the
+    # authority/path boundary, or a credential lands in the residue.
+    url = re.sub(r"://[^/\s]*@", "://***@", url, count=1)
+    url = re.sub(r"^[^:\s]*@", "***@", url, count=1)
     url = url.split("?", 1)[0].split("#", 1)[0]
     # A '<transport>::<address>' remote-helper destination embeds an
     # opaque helper address — credentials may be inside it with or

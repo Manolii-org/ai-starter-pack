@@ -2431,6 +2431,23 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     assert "SECRETPATH" not in r.stderr
     assert not (cp / "registry").exists()
 
+    # Userinfo may contain MORE than one '@' — git preserves the whole
+    # value, so masking through only the first delimiter would leak the
+    # remainder to stderr.
+    mu = tmp_path / "multiat"
+    mu.mkdir()
+    sp.run(["git", "init", "-q"], cwd=mu, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=mu, capture_output=True)
+    sp.run(["git", "config", "remote.origin.pushurl",
+            "https://foo@SUPERSECRETTOKEN@github.com/Other/repo.git"],
+           cwd=mu, capture_output=True)
+    r = run(mu, _bootstrap_env(tmp_path))
+    assert r.returncode == 2, r.stderr
+    assert "SUPERSECRETTOKEN" not in r.stderr
+    assert not (mu / "registry").exists()
+
     # A local filesystem path is a valid git push destination — any of
     # its components may be sensitive, so none reach stderr.
     lp = tmp_path / "localpath"
