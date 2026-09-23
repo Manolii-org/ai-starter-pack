@@ -955,6 +955,24 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
                 return ("an attributes-bound clean/process filter can "
                         "exfiltrate the staged universe content")
 
+    # Commit signing execs the configured program during 'git commit' —
+    # gpg.program / gpg.ssh.program / gpg.openpgp.program /
+    # gpg.x509.program. A LOCAL-scope program is untrusted input and
+    # runs after the scaffold is staged; it only fires when signing is
+    # effectively on (commit.gpgSign / tag.gpgSign at any scope — a
+    # global program is the operator's own tool, the trusted channel).
+    # The printed next step also carries --no-gpg-sign.
+    if (_cfg("commit.gpgsign").strip().lower()
+            in ("true", "yes", "on", "1")
+            or _cfg("tag.gpgsign").strip().lower()
+            in ("true", "yes", "on", "1")):
+        for ln in _cfg_lines("--show-scope", "--get-regexp",
+                             r"^gpg\.(program|ssh\.program"
+                             r"|openpgp\.program|x509\.program)$"):
+            if ln.split("\t", 1)[0] in ("local", "worktree"):
+                return ("a repository-local commit-signing program can "
+                        "exfiltrate the staged universe content")
+
     def _rewrite(url: str, rules: list[tuple[str, str]]) -> str:
         for prefix, repl in sorted(rules, key=lambda r: -len(r[0])):
             if url.startswith(prefix):
@@ -1465,11 +1483,12 @@ def main() -> int:
     if not regen_allowlists(root, established, vis):
         return 2
     print(f"seeded mirror for {args.universe} at {root} (slug {slug})")
-    # 'git commit -m': never the bare command — a configured editor
-    # (core.editor/GIT_EDITOR) launches on it and can read the freshly
-    # staged private scaffold.
-    print("next: git add -A && git commit -m 'seed private mirror' && "
-          "git push, then add the slug "
+    # 'git commit -m --no-gpg-sign': never the bare command — a
+    # configured editor (core.editor/GIT_EDITOR) launches on it and a
+    # commit.gpgSign signing program (gpg.program/gpg.ssh.program)
+    # execs on it; either can read the freshly staged private scaffold.
+    print("next: git add -A && git commit -m 'seed private mirror' "
+          "--no-gpg-sign && git push, then add the slug "
           "digest to the canonical registry/private-mirrors.txt")
     return 0
 

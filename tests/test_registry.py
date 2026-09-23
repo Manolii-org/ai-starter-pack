@@ -2741,6 +2741,23 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     assert "askPass" in r.stderr
     assert not (ap / "registry").exists()
 
+    # commit.gpgSign + a LOCAL gpg.program execs the program during
+    # 'git commit' — clone-local signing config is untrusted input.
+    sg = tmp_path / "signer"
+    sg.mkdir()
+    sp.run(["git", "init", "-q"], cwd=sg, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=sg, capture_output=True)
+    sp.run(["git", "config", "commit.gpgsign", "true"],
+           cwd=sg, capture_output=True)
+    sp.run(["git", "config", "gpg.program", "/tmp/sign"],
+           cwd=sg, capture_output=True)
+    r = run(sg, _bootstrap_env(tmp_path))
+    assert r.returncode == 2, r.stderr
+    assert "signing" in r.stderr
+    assert not (sg / "registry").exists()
+
     # Attributes binding against a path the bootstrap CREATES
     # (README.md / schemas/**) must refuse even though the path does
     # not exist yet — the seeded file enters the filter during
