@@ -1148,6 +1148,67 @@ def test_registry_lint_passes_on_repo():
     assert r.returncode == 0, r.stdout + r.stderr
 
 
+def test_symlinked_scope_root_fails(tmp_path):
+    """A scope root that is a symlink passes is_dir() but rglob() won't
+    descend into it — MANIFEST/ORG-LEAK/SECRETS/XSCOPE all skip its bytes.
+    INDEX must refuse."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "x")],
+    })
+    reg = reg_root / "registry"
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    (target / "hidden.md").write_text("manolii secrets")
+    (reg / "manolii").symlink_to(target)
+    mod = load_lint_module()
+    mod.REGISTRY = reg
+    mod.results = []
+    mod.check_index()
+    fails = [f for f in mod.results if f.check == "INDEX" and f.status == "FAIL"]
+    assert any("scope root is a symlink" in f.detail for f in fails)
+
+
+def test_hardlinked_destination_update_isolated(tmp_path):
+    """A destination hard-linked to an external file shares an inode —
+    --apply must replace, not overwrite-in-place, or the external peer
+    gets modified by a registry update."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "v1")],
+    })
+    consumer = tmp_path / "consumer"
+    (consumer / ".claude" / "skills" / "demo").mkdir(parents=True)
+    skill_dst = consumer / ".claude" / "skills" / "demo" / "x.md"
+    skill_dst.write_text("v1")                       # identical to registry
+    external = consumer / "external.md"
+    os.link(skill_dst, external)                      # shared inode
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 0, r.stdout                 # adopted into lock
+    (reg_root / "registry" / "platform" / "framework"
+     / "skills" / "demo" / "x.md").write_text("v2")     # registry drifts
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 0, r.stdout
+    assert skill_dst.read_text() == "v2"
+    assert external.read_text() == "v1"                # peer untouched
+
+
+def test_directory_destination_conflicts(tmp_path):
+    """A directory at a component destination must be a plan-time
+    conflict — not an IsADirectoryError crash."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "x")],
+    })
+    consumer = tmp_path / "consumer"
+    (consumer / ".claude" / "skills" / "demo" / "x.md").mkdir(parents=True)
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 1
+    assert "non-regular file" in r.stdout
+    assert "IsADirectoryError" not in r.stderr
+
+
 def test_component_ancestor_not_dir_conflicts(tmp_path):
     """.claude/agents as a plain FILE (not a symlink) must be a plan-time
     conflict — otherwise --apply copies earlier files then crashes at

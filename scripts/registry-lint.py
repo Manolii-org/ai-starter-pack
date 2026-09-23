@@ -157,6 +157,15 @@ def check_index() -> None:
     # every plugin dir under a scope must be indexed
     for scope in ALL_SCOPES:
         sdir = REGISTRY / scope
+        # A symlinked scope root passes is_dir() — but rglob() does not
+        # descend through directory symlinks, so MANIFEST/ORG-LEAK/SECRETS/
+        # XSCOPE would skip the plugin bytes behind it while INDEX passes.
+        # A scope root must be a real directory.
+        if sdir.is_symlink():
+            report("FAIL", "INDEX",
+                   f"scope root is a symlink: {scope}/ — refusing to approve "
+                   "content the scans cannot descend into")
+            continue
         if not sdir.is_dir():
             continue
         scope_root = sdir.resolve()

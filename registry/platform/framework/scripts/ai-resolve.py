@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -415,6 +416,16 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                     plan.skips.append((dst, f"identical — already provided by {prior_req}"))
                     materialised[rel_dst] = src_sha
                 continue
+            if dst.exists() and not dst.is_file():
+                # A directory (or FIFO/socket) at the destination —
+                # read_bytes() would crash IsADirectoryError instead of
+                # reporting a fail-closed conflict.
+                plan.conflicts.append((
+                    dst,
+                    "destination exists as a non-regular file — refusing to "
+                    "overwrite it (remove the directory and re-resolve)",
+                ))
+                continue
             if dst.exists():
                 if dst.read_bytes() == src_bytes:
                     plan.skips.append((dst, "identical"))
@@ -655,7 +666,14 @@ def main() -> int:
     if args.apply:
         for src, dst in plan.writes:
             dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dst)
+            # Copy to a temp file then atomically rename — a destination
+            # hard-linked to a file outside the owned tree shares an inode;
+            # copy2 would open and overwrite that shared inode (and the
+            # external peer). os.replace unlinks the dst entry, so registry
+            # updates can never modify bytes reachable via another link.
+            tmp = dst.with_name(f".{dst.name}.ai-resolve-tmp")
+            shutil.copy2(src, tmp)
+            os.replace(tmp, dst)
         if args.prune:
             for f in plan.removals:
                 if f.is_file() or f.is_symlink():
