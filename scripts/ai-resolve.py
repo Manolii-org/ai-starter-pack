@@ -37,6 +37,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -194,6 +195,26 @@ def collect_component_files(plugin_dir: Path) -> dict[str, list[Path]]:
 
 def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def atomic_replace(dst: Path, fill) -> None:
+    """Install `dst` through an exclusively-created sibling temp + rename.
+
+    tempfile.mkstemp picks a random name with O_EXCL — a consumer cannot
+    pre-plant a symlink or hard link there, so writes can never follow a
+    link out of the tree. os.replace then unlinks any existing dst entry,
+    so a destination hard-linked to a file outside the owned tree keeps
+    its shared inode (and the external peer) untouched."""
+    fd, tmp_name = tempfile.mkstemp(dir=dst.parent,
+                                    prefix=f".{dst.name}.", suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            fill(f)
+        os.replace(tmp, dst)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
 
 
 def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
@@ -648,9 +669,13 @@ def main() -> int:
         expected_resolved = [{k: v for k, v in r.items() if k != "files"}
                              for r in plan.resolved]
         lock_missing = not lock_file.is_file()
-        lock_stale = (
-            lock.get("files") != expected_files
-            or lock.get("resolved") != expected_resolved)
+        expected_lock = {
+            "version": 1,
+            "universe": universe,
+            "resolved": expected_resolved,
+            "files": expected_files,
+        }
+        lock_stale = lock != expected_lock
         if drift or plan.removals or lock_missing or lock_stale:
             if lock_missing:
                 print("\nDRIFT: capability lock missing — run --apply to "
@@ -666,14 +691,12 @@ def main() -> int:
     if args.apply:
         for src, dst in plan.writes:
             dst.parent.mkdir(parents=True, exist_ok=True)
-            # Copy to a temp file then atomically rename — a destination
-            # hard-linked to a file outside the owned tree shares an inode;
-            # copy2 would open and overwrite that shared inode (and the
-            # external peer). os.replace unlinks the dst entry, so registry
-            # updates can never modify bytes reachable via another link.
-            tmp = dst.with_name(f".{dst.name}.ai-resolve-tmp")
-            shutil.copy2(src, tmp)
-            os.replace(tmp, dst)
+            atomic_replace(dst, lambda f, s=src: shutil.copyfileobj(
+                s.open("rb"), f))
+            try:
+                shutil.copystat(src, dst)   # keep copy2's mode/mtime semantics
+            except OSError:
+                pass
         if args.prune:
             for f in plan.removals:
                 if f.is_file() or f.is_symlink():
@@ -699,7 +722,13 @@ def main() -> int:
         }
         lock_file = repo_root / LOCK_PATH
         lock_file.parent.mkdir(parents=True, exist_ok=True)
-        lock_file.write_text(json.dumps(lock_doc, indent=2) + "\n", encoding="utf-8")
+        # Atomic like the component writes — write_text truncates a
+        # hard-linked lock's shared inode (external peer), and a crash
+        # mid-write would leave a partial ownership record.
+        atomic_replace(
+            lock_file,
+            lambda f: f.write(json.dumps(lock_doc, indent=2).encode("utf-8")
+                              + b"\n"))
         print(f"\napplied: {len(plan.writes)} write(s), lock -> {LOCK_PATH}")
         return 0
 

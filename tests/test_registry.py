@@ -1209,6 +1209,69 @@ def test_directory_destination_conflicts(tmp_path):
     assert "IsADirectoryError" not in r.stderr
 
 
+def test_apply_ignores_preplanted_temp_link(tmp_path):
+    """A consumer could pre-create a predictable sibling temp path as a
+    link — the resolver's exclusively-created temp must never follow it."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "v1")],
+    })
+    consumer = tmp_path / "consumer"
+    skills_dir = consumer / ".claude" / "skills" / "demo"
+    skills_dir.mkdir(parents=True)
+    external = consumer / "external.md"
+    external.write_text("external")
+    (skills_dir / ".x.md.ai-resolve-tmp").symlink_to(external)
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 0, r.stdout
+    assert external.read_text() == "external"
+    assert (skills_dir / "x.md").read_text() == "v1"
+
+
+def test_hardlinked_lock_isolated(tmp_path):
+    """The capability lock, hard-linked to an external file, must not let
+    an --apply write reach the peer through the shared inode."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "v1")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 0, r.stdout
+    lock = consumer / ".ai" / "capability-lock.json"
+    external = consumer / "external-lock.json"
+    os.link(lock, external)
+    external_bytes = external.read_bytes()
+    (reg_root / "registry" / "platform" / "framework"
+     / "skills" / "demo" / "x.md").write_text("v2")
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 0, r.stdout
+    assert external.read_bytes() == external_bytes
+
+
+def test_check_detects_stale_lock_metadata(tmp_path):
+    """--check compares the full expected lock doc — a lock whose universe
+    or version field drifts (same files) is stale, not OK."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "x")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    lock_path = consumer / ".ai" / "capability-lock.json"
+    doc = json.loads(lock_path.read_text())
+    doc["universe"] = "buro"
+    lock_path.write_text(json.dumps(doc, indent=2) + "\n")
+    r = run_resolver(m, reg_root, consumer, "--check")
+    assert r.returncode == 1
+    assert "lock is stale" in r.stdout
+
+
 def test_component_ancestor_not_dir_conflicts(tmp_path):
     """.claude/agents as a plain FILE (not a symlink) must be a plan-time
     conflict — otherwise --apply copies earlier files then crashes at
