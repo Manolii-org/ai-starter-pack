@@ -39,11 +39,26 @@ contracts are public-safe metadata (visibility, ip_owner, promotion
 policy). Nothing else may land under a non-platform scope here:
 
 - `registry/<universe>/` content lives in a **per-org private mirror**
-  (e.g. the Buro universe's own capability-registry repo under its GitHub
-  org). A mirror carries an empty `registry/.private-mirror` marker file;
-  `registry-lint`'s PUBLIC check waives the boundary there. Mirror
-  consumers point `ai-resolve.py` at the mirror checkout — the resolver
-  needs no flag; scope semantics are identical.
+  (one private repo per universe org, named e.g. `<org>-registry`).
+  Seed one from an empty clone with
+  `python3 scripts/bootstrap-mirror.py --root <mirror-checkout>
+  --universe <u> --slug <org>/<repo>` — it writes the marker, the
+  universe's `scope.yaml`, a vendored copy of `registry/platform/**` +
+  `plugins.json` (one `--registry` root serves both scopes), the same
+  lint script + workflow, and `private-mirrors.txt` holding the sha256
+  of the mirror's own slug.
+- The `.private-mirror` marker only waives the boundary when the origin
+  remote's slug is non-canonical AND its sha256 digest is listed in the
+  repo's `private-mirrors.txt` — a committed marker alone cannot waive
+  it, and the digest list never names the private repos in plaintext.
+- In a verified mirror, `registry-lint` runs in mirror mode: the PUBLIC
+  boundary is waived and the owning org's slug pattern drops out of
+  PACK-SURFACE (a buro mirror names `Buro-Built/*` on purpose) while
+  every other org's slugs and all infra ids still FAIL — the check's
+  job there is the *cross-org* boundary. `--refresh-platform` re-vendors
+  the platform tree from a newer canonical checkout.
+- Mirror consumers point `ai-resolve.py --registry <mirror-checkout>`
+  at it — the resolver needs no flag; scope semantics are identical.
 - `registry/repo/` and `registry/personal/` content lives inside each
   consumer repo (or the user's home checkout) and never syncs upstream.
 - The PUBLIC check fails the lint on any non-`scope.yaml` file under a

@@ -1689,11 +1689,12 @@ def test_public_boundary_scope_yaml_only_passes(tmp_path):
     assert not [f for f in mod.results if f.status == "FAIL"]
 
 
-def test_public_boundary_private_mirror_marker_waives(tmp_path):
+def test_public_boundary_private_mirror_marker_waives(tmp_path, monkeypatch):
     """registry/.private-mirror marks a private mirror — the boundary is
-    waived there, but ONLY when the origin remote verifies this isn't
-    the canonical public repo (a bare committable marker cannot waive
-    the guard)."""
+    waived there, but ONLY when (a) the origin remote verifies this isn't
+    the canonical public repo, (b) the slug is declared, and (c)
+    MIRROR_VISIBILITY is asserted from outside the checkout (a public
+    fork can carry both marker and digest)."""
     import subprocess as sp
     reg_root = make_registry(tmp_path / "src", {
         "platform/framework": [("skills/demo/x.md", "x")],
@@ -1713,9 +1714,23 @@ def test_public_boundary_private_mirror_marker_waives(tmp_path):
     mod.REGISTRY = reg_root / "registry"
     mod.REPO = reg_root
     mod.PRIVATE_MIRRORS_PATH = reg_root / "registry/private-mirrors.txt"
+    # Without the external assertion the waiver must still refuse.
     mod.results = []
+    monkeypatch.delenv("MIRROR_VISIBILITY", raising=False)
+    mod.check_public_boundary()
+    assert any("MIRROR_VISIBILITY" in f.detail
+               for f in mod.results if f.status == "FAIL")
+    mod.results = []
+    monkeypatch.setenv("MIRROR_VISIBILITY", "private")
     mod.check_public_boundary()
     assert not [f for f in mod.results if f.status == "FAIL"]
+    # `internal` is NOT an acceptable assertion — on GitHub Enterprise it
+    # grants every enterprise member (incl. other orgs) read access.
+    mod.results = []
+    monkeypatch.setenv("MIRROR_VISIBILITY", "internal")
+    mod.check_public_boundary()
+    assert any("MIRROR_VISIBILITY" in f.detail
+               for f in mod.results if f.status == "FAIL")
 
 
 def test_public_boundary_marker_undeclared_remote_fails(tmp_path):
@@ -1847,6 +1862,389 @@ def test_secrets_stale_allowlist_entry_fails(tmp_path):
              if f.check == "SECRETS" and f.status == "FAIL"]
     assert any("deadbeef" in f.detail or "stale" in f.detail
                for f in fails), "stale secrets allowlist entry did not FAIL"
+
+
+def test_pack_surface_mirror_mode_exempts_own_org_only(tmp_path,
+                                                      monkeypatch):
+    """In a verified private mirror the OWNING org's slug is legitimate
+    (a buro mirror names Buro-Built/* on purpose), while other orgs'
+    slugs and infra ids still FAIL — the cross-org boundary holds.
+    Mirror mode also requires the external MIRROR_VISIBILITY assertion
+    (committed files alone cannot prove the repo is private)."""
+    import subprocess as sp
+    monkeypatch.setenv("MIRROR_VISIBILITY", "private")
+    repo = tmp_path / "mirror"
+    (repo / "registry").mkdir(parents=True)
+    (repo / "x.md").write_text(
+        "see Buro-Built/buro-core\n"
+        "and Impaktful-Platform/impaktful_3.0\n"
+        "and db.abc123.supabase.co\n")
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    sp.run(["git", "init", "-q"], cwd=repo, env=env, check=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=repo, env=env, check=True)
+    # ls-files enumerates the INDEX — stage the file so the tracked-file
+    # scan sees it (no commit needed).
+    sp.run(["git", "add", "x.md"], cwd=repo, env=env, check=True)
+    (repo / "registry/.private-mirror").write_text("")
+    (repo / "registry/private-mirrors.txt").write_text(
+        hashlib.sha256(b"buro-built/buro-registry").hexdigest() + "\n")
+    mod = load_lint_module()
+    mod.REPO = repo
+    mod.REGISTRY = repo / "registry"
+    mod.PRIVATE_MIRRORS_PATH = repo / "registry/private-mirrors.txt"
+    mod.PACK_SURFACE_ALLOWLIST = repo / "registry" / "pack-surface-allowlist.txt"
+    mod.results = []
+    mod.check_pack_surface()
+    flagged = {f.detail.split(" — ", 1)[0]
+               for f in mod.results
+               if f.check == "PACK-SURFACE" and f.status == "FAIL"}
+    assert "x.md:2" in flagged, "cross-org slug not flagged"
+    assert "x.md:3" in flagged, "infra id not flagged"
+    assert "x.md:1" not in flagged, "own-org slug wrongly flagged"
+
+
+def _bootstrap_env(tmp_path):
+    """env for bootstrap subprocess calls: a `gh` stub reporting 'private'
+    (the visibility check fails closed when gh can't answer), and PATH
+    including it."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    gh = bin_dir / "gh"
+    gh.write_text("#!/bin/sh\necho private\n")
+    gh.chmod(0o755)
+    return dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}")
+
+
+def test_bootstrap_mirror_seed(tmp_path):
+    """bootstrap-mirror.py seeds a complete lint-clean mirror scaffold:
+    marker, universe scope, vendored platform, merged index, digests-only
+    trust file, minimal generated workflow, and freshly-regenerated
+    ratchet allowlists (mirror mode never freezes own-org hits)."""
+    import subprocess as sp
+    import yaml
+    pack = Path(__file__).resolve().parent.parent
+    root = tmp_path / "buro-registry"
+    root.mkdir()
+    # Mirrors are clones — a non-git root must fail (staging the scaffold
+    # is required for the lint to enumerate registry/** hits), and --slug
+    # must equal the checkout's origin.
+    sp.run(["git", "init", "-q"], cwd=root, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=root, capture_output=True)
+    env = _bootstrap_env(tmp_path)
+    r = sp.run(
+        [sys.executable, "scripts/bootstrap-mirror.py", "--root", str(root),
+         "--universe", "buro", "--slug", "buro-built/buro-registry"],
+        cwd=pack, capture_output=True, text=True, env=env)
+    assert r.returncode == 0, r.stderr
+    assert (root / "registry/.private-mirror").is_file()
+    assert (root / "registry/buro/scope.yaml").is_file()
+    assert (root / "registry/platform").is_dir()
+    assert (root / "registry/plugins.json").is_file()
+    assert (root / "scripts/registry-lint.py").is_file()
+    assert hashlib.sha256(b"buro-built/buro-registry").hexdigest() \
+        in (root / "registry/private-mirrors.txt").read_text()
+    doc = yaml.safe_load((root / "registry/buro/scope.yaml").read_text())
+    assert doc["scope"] == "buro" and doc["visibility"] == "buro"
+    assert doc["parent_scope"] == "platform"
+    # Ratchets seeded for THIS mirror's content — a vendored platform tree
+    # carries canonical's grandfathered hits; an empty allowlist would
+    # fail the first lint.
+    assert (root / "registry/leak-allowlist.txt").is_file()
+    assert (root / "registry/pack-surface-allowlist.txt").is_file()
+    # Secrets ratchet is vendored — its token-shape catalogue ships
+    # unchanged inside registry/platform/**.
+    assert (root / "registry/secrets-allowlist.txt").is_file()
+    # Generated workflow must not invoke files the scaffold never seeds,
+    # and must carry the API-side privacy assertion that feeds
+    # MIRROR_VISIBILITY into the lint env.
+    wf = (root / ".github/workflows/registry-lint.yml").read_text()
+    assert "registry-lint.py" in wf
+    assert "Assert mirror privacy" in wf
+    assert "MIRROR_VISIBILITY" in wf
+    assert "build-registry.py" not in wf
+    assert "pytest" not in wf
+
+
+def test_bootstrap_mirror_fails_closed(tmp_path):
+    """Seeding refuses (rc 2, nothing written) when repo visibility cannot
+    be verified or is public — and refuses at the staging step when --root
+    is not a git checkout (an empty rglob-fallback allowlist would leave
+    the first pushed CI run red)."""
+    import subprocess as sp
+    pack = Path(__file__).resolve().parent.parent
+
+    def run(root, env, slug="buro-built/buro-registry", universe="buro"):
+        return sp.run(
+            [sys.executable, "scripts/bootstrap-mirror.py", "--root",
+             str(root), "--universe", universe, "--slug", slug],
+            cwd=pack, capture_output=True, text=True, env=env)
+
+    # gh absent from PATH (git still resolvable) → visibility
+    # unverifiable → refuse before writes.
+    import shutil as _shutil
+    root = tmp_path / "nogh"
+    root.mkdir()
+    sp.run(["git", "init", "-q"], cwd=root, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=root, capture_output=True)
+    empty_bin = tmp_path / "emptybin"
+    empty_bin.mkdir()
+    os.symlink(_shutil.which("git"), empty_bin / "git")
+    r = run(root, dict(os.environ, PATH=str(empty_bin)))
+    assert r.returncode == 2, r.stderr
+    assert not (root / "registry").exists()
+
+    # --slug naming ANOTHER accessible repo → the digest would not bind
+    # to this checkout's origin → refuse.
+    mism = tmp_path / "mism"
+    mism.mkdir()
+    sp.run(["git", "init", "-q"], cwd=mism, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Impaktful-Platform/impaktful-registry.git"],
+           cwd=mism, capture_output=True)
+    r = run(mism, _bootstrap_env(tmp_path))
+    assert r.returncode == 2, r.stderr
+    assert not (mism / "registry").exists()
+
+    # --universe not matching the origin's owning org → refuse (the lint
+    # exempts patterns by owner; a buro scope under impaktful-platform
+    # would seed the wrong universe AND exempt the wrong org).
+    r = run(mism, _bootstrap_env(tmp_path),
+            slug="impaktful-platform/impaktful-registry")
+    assert r.returncode == 2, r.stderr
+    assert "requires the mirror to live under" in r.stderr
+    assert not (mism / "registry").exists()
+
+    # gh reports public → refuse.
+    pub_bin = tmp_path / "pubbin"
+    pub_bin.mkdir()
+    gh = pub_bin / "gh"
+    gh.write_text("#!/bin/sh\necho public\n")
+    gh.chmod(0o755)
+    r = run(root, dict(os.environ,
+                       PATH=f"{pub_bin}:{os.environ['PATH']}"))
+    assert r.returncode == 2, r.stderr
+    assert not (root / "registry").exists()
+
+    # A non-GitHub origin that parses to a valid-looking slug — gh would
+    # verify an UNRELATED github.com repo of the same name → refuse.
+    gl = tmp_path / "gitlab"
+    gl.mkdir()
+    sp.run(["git", "init", "-q"], cwd=gl, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://gitlab.com/Buro-Built/buro-registry.git"],
+           cwd=gl, capture_output=True)
+    r = run(gl, _bootstrap_env(tmp_path))
+    assert r.returncode == 2, r.stderr
+    assert not (gl / "registry").exists()
+
+    # gh stub OK but --root is not a git checkout → refused (no origin).
+    plain = tmp_path / "plainroot"
+    plain.mkdir()
+    r = run(plain, _bootstrap_env(tmp_path))
+    assert r.returncode == 2, r.stderr
+
+
+def test_bootstrap_mirror_dirty_clone_no_ratchet(tmp_path):
+    """A first seed into a clone that ALREADY has tracked files gets merge
+    semantics too — hits in pre-existing files are the org's own content
+    and must surface as lint FAILs, never be silently grandfathered into
+    the ratchet."""
+    import subprocess as sp
+    pack = Path(__file__).resolve().parent.parent
+    root = tmp_path / "buro-registry"
+    root.mkdir()
+    sp.run(["git", "init", "-q"], cwd=root, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=root, capture_output=True)
+    # A tracked pre-existing file carrying another org's slug.
+    (root / "notes.md").write_text("see Impaktful-Platform/impaktful_3.0\n")
+    sp.run(["git", "add", "notes.md"], cwd=root, capture_output=True)
+    env = _bootstrap_env(tmp_path)
+    r = sp.run(
+        [sys.executable, "scripts/bootstrap-mirror.py", "--root", str(root),
+         "--universe", "buro", "--slug", "buro-built/buro-registry"],
+        cwd=pack, capture_output=True, text=True, env=env)
+    assert r.returncode == 0, r.stderr
+    al = (root / "registry/pack-surface-allowlist.txt").read_text()
+    entries = {ln.split("#", 1)[0] for ln in al.splitlines()
+               if ln.strip() and not ln.startswith("#")}
+    assert "notes.md" not in entries, \
+        "pre-existing own-content hit was ratcheted on a dirty first seed"
+    assert any(e.startswith("registry/platform/") for e in entries), \
+        "vendored platform hits must still be seeded"
+
+
+def test_bootstrap_mirror_refresh_aborts_on_bad_index(tmp_path):
+    """An established mirror whose plugins.json is momentarily malformed
+    (e.g. mid conflict-resolution) must NOT be overwritten with the
+    canonical platform-only index — abort and keep the file."""
+    import subprocess as sp
+    pack = Path(__file__).resolve().parent.parent
+    root = tmp_path / "buro-registry"
+    root.mkdir()
+    sp.run(["git", "init", "-q"], cwd=root, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=root, capture_output=True)
+    env = _bootstrap_env(tmp_path)
+    r = sp.run(
+        [sys.executable, "scripts/bootstrap-mirror.py", "--root", str(root),
+         "--universe", "buro", "--slug", "buro-built/buro-registry"],
+        cwd=pack, capture_output=True, text=True, env=env)
+    assert r.returncode == 0, r.stderr
+    idx = root / "registry/plugins.json"
+    idx.write_text("{malformed\n")
+    r = sp.run(
+        [sys.executable, "scripts/bootstrap-mirror.py", "--root", str(root),
+         "--universe", "buro", "--slug", "buro-built/buro-registry",
+         "--refresh-platform"],
+        cwd=pack, capture_output=True, text=True, env=env)
+    assert r.returncode == 2, r.stderr
+    assert idx.read_text() == "{malformed\n", "index clobbered on abort"
+
+
+def test_bootstrap_mirror_refresh_preserves_index(tmp_path):
+    """--refresh-platform overwrites the vendored platform tree but MERGES
+    plugins.json — the mirror's own universe plugin entries survive."""
+    import subprocess as sp
+    pack = Path(__file__).resolve().parent.parent
+    root = tmp_path / "impaktful-registry"
+    root.mkdir()
+    sp.run(["git", "init", "-q"], cwd=root, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Impaktful-Platform/impaktful-registry.git"],
+           cwd=root, capture_output=True)
+    env = _bootstrap_env(tmp_path)
+    r = sp.run(
+        [sys.executable, "scripts/bootstrap-mirror.py", "--root", str(root),
+         "--universe", "impaktful", "--slug",
+         "impaktful-platform/impaktful-registry", "--refresh-platform"],
+        cwd=pack, capture_output=True, text=True, env=env)
+    assert r.returncode == 0, r.stderr
+    idx = json.loads((root / "registry/plugins.json").read_text())
+    idx["plugins"].append({
+        "scope": "impaktful", "name": "dqms",
+        "path": "registry/impaktful/dqms",
+        "version_source": ".claude-plugin/plugin.json",
+        "description": "org-private plugin"})
+    (root / "registry/plugins.json").write_text(json.dumps(idx))
+    r = sp.run(
+        [sys.executable, "scripts/bootstrap-mirror.py", "--root", str(root),
+         "--universe", "impaktful", "--slug",
+         "impaktful-platform/impaktful-registry", "--refresh-platform"],
+        cwd=pack, capture_output=True, text=True, env=env)
+    assert r.returncode == 0, r.stderr
+    names = {(p["scope"], p["name"])
+             for p in json.loads(
+                 (root / "registry/plugins.json").read_text())["plugins"]}
+    assert ("impaktful", "dqms") in names, "mirror plugin dropped on refresh"
+    assert ("platform", "framework") in names
+
+
+def test_bootstrap_mirror_no_refresh_keeps_platform_index(tmp_path):
+    """An established-mirror rerun WITHOUT --refresh-platform keeps the
+    EXISTING platform index entries — importing a newer canonical's
+    platform list while the old vendored tree stays put would desync
+    index↔tree (indexed-but-missing dirs trip the INDEX lint check)."""
+    import subprocess as sp
+    pack = Path(__file__).resolve().parent.parent
+    root = tmp_path / "buro-registry"
+    root.mkdir()
+    sp.run(["git", "init", "-q"], cwd=root, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=root, capture_output=True)
+    env = _bootstrap_env(tmp_path)
+    r = sp.run(
+        [sys.executable, "scripts/bootstrap-mirror.py", "--root", str(root),
+         "--universe", "buro", "--slug", "buro-built/buro-registry"],
+        cwd=pack, capture_output=True, text=True, env=env)
+    assert r.returncode == 0, r.stderr
+
+    # The mirror's platform tree predates a canonical platform addition:
+    # locally drop one platform entry (tree+index stay consistent).
+    idx_path = root / "registry/plugins.json"
+    idx = json.loads(idx_path.read_text())
+    plat = [p for p in idx["plugins"] if p.get("scope") == "platform"]
+    assert len(plat) >= 1
+    dropped = (plat[0]["scope"], plat[0]["name"])
+    idx["plugins"].remove(plat[0])
+    idx_path.write_text(json.dumps(idx))
+
+    r = sp.run(
+        [sys.executable, "scripts/bootstrap-mirror.py", "--root", str(root),
+         "--universe", "buro", "--slug", "buro-built/buro-registry"],
+        cwd=pack, capture_output=True, text=True, env=env)
+    assert r.returncode == 0, r.stderr
+    names = {(p["scope"], p["name"])
+             for p in json.loads(idx_path.read_text())["plugins"]}
+    assert dropped not in names, \
+        "no-refresh rerun re-imported a platform entry the tree lacks"
+
+
+def test_bootstrap_mirror_refresh_preserves_owned_state(tmp_path):
+    """On an established mirror, refresh must not (a) clobber the org's own
+    scope.yaml edits, or (b) ratchet NEW violations in mirror-owned paths —
+    only vendored-path hits may enter the regenerated allowlists, while
+    pre-existing mirror-owned entries that are still live are preserved."""
+    import subprocess as sp
+    pack = Path(__file__).resolve().parent.parent
+    root = tmp_path / "cpdcheck-registry"
+    root.mkdir()
+    # The PACK-SURFACE scan only sees registry/** in a real git checkout —
+    # its non-git rglob fallback skip-lists the dir. Mirrors are clones, so
+    # init the root before seeding (regen also stages via git add).
+    sp.run(["git", "init", "-q"], cwd=root, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/CPDcheck/cpdcheck-registry.git"],
+           cwd=root, capture_output=True)
+    env = _bootstrap_env(tmp_path)
+    r = sp.run(
+        [sys.executable, "scripts/bootstrap-mirror.py", "--root", str(root),
+         "--universe", "cpdcheck", "--slug",
+         "cpdcheck/cpdcheck-registry"],
+        cwd=pack, capture_output=True, text=True, env=env)
+    assert r.returncode == 0, r.stderr
+
+    scope_file = root / "registry/cpdcheck/scope.yaml"
+    scope_file.write_text(scope_file.read_text()
+                          + "\n# org-specific note\n")
+
+    # A pre-existing live ratchet entry for mirror-owned content.
+    keep_line = "see Manolii-org/master for context"
+    keep_key = "registry/cpdcheck/keep.md#" + \
+        hashlib.sha256(keep_line.lower().encode()).hexdigest()[:8]
+    (root / "registry/cpdcheck/keep.md").write_text(keep_line + "\n")
+    al = root / "registry/pack-surface-allowlist.txt"
+    al.write_text(al.read_text() + keep_key + "\n")
+
+    # A NEW mirror-owned violation that was never ratcheted.
+    (root / "registry/cpdcheck/new.md").write_text(
+        "also see Manolii-org/master\n")
+
+    r = sp.run(
+        [sys.executable, "scripts/bootstrap-mirror.py", "--root", str(root),
+         "--universe", "cpdcheck", "--slug",
+         "cpdcheck/cpdcheck-registry", "--refresh-platform"],
+        cwd=pack, capture_output=True, text=True, env=env)
+    assert r.returncode == 0, r.stderr
+
+    assert "org-specific note" in scope_file.read_text()
+
+    entries = {ln.split("#", 1)[0] for ln in al.read_text().splitlines()
+               if ln.strip() and not ln.startswith("#")}
+    assert "registry/cpdcheck/keep.md" in entries, \
+        "live mirror-owned ratchet entry dropped on refresh"
+    assert "registry/cpdcheck/new.md" not in entries, \
+        "refresh ratcheted a new mirror-owned violation"
 
 
 def test_pack_surface_scans_tracked_skip_dir(tmp_path):

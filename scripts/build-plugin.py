@@ -299,10 +299,14 @@ def assemble_hooks_and_scripts(rendered: Path, out: Path) -> dict:
     if rsrc.is_dir():
         # Pack-dev tests live under scripts/tests/ but must not ship in the
         # consumer plugin artifact (eval-gate drift + install footprint).
+        # bootstrap-mirror.py is pack-repo tooling too: its PACK derivation
+        # resolves scripts/../<repo-root>, which points inside the plugin
+        # dir for a bundled copy — exclude it rather than ship a broken one.
         shutil.copytree(
             rsrc,
             out / "scripts",
-            ignore=shutil.ignore_patterns("tests", "__pycache__", "*.pyc"),
+            ignore=shutil.ignore_patterns(
+                "tests", "__pycache__", "*.pyc", "bootstrap-mirror.py"),
         )
         counts["scripts"] = sum(1 for p in (out / "scripts").rglob("*") if p.is_file())
 
