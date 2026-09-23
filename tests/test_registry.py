@@ -705,11 +705,13 @@ def test_script_dependent_skills_not_materialised(tmp_path):
 
 def test_consumer_repo_script_reference_materialises(tmp_path):
     """A skill whose `python3 scripts/x.py` refers to a script the plugin
-    does NOT ship is a consumer-repository command (setup docs have the
-    consumer fetch it) — it must materialise, not be skipped."""
+    does NOT ship AND that declares consumer_scripts: [...] is a
+    consumer-repository command — it must materialise, not be skipped."""
     reg_root = make_registry(tmp_path / "src", {
         "platform/framework": [
             ("skills/migration-drift/SKILL.md",
+             "---\nname: migration-drift\n"
+             "consumer_scripts: [scripts/check-migration-drift-mgmt.py]\n---\n"
              "Fetch it first, then `python3 scripts/check-migration-drift-mgmt.py`"),
         ],
     })
@@ -721,6 +723,28 @@ def test_consumer_repo_script_reference_materialises(tmp_path):
     assert r.returncode == 0, r.stdout
     assert (consumer / ".claude" / "skills" / "migration-drift"
             / "SKILL.md").is_file()
+
+
+def test_undeclared_script_reference_skips(tmp_path):
+    """A `python3 scripts/x.py` invocation for a script the plugin does not
+    bundle and with NO consumer_scripts declaration is an unverifiable dep —
+    the file is skipped, not shipped broken."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [
+            ("skills/analytics/SKILL.md",
+             "Run `python3 scripts/session-analytics.py --days 7`"),
+            ("skills/plain/SKILL.md", "self-contained"),
+        ],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 0, r.stdout
+    skills = consumer / ".claude" / "skills"
+    assert not (skills / "analytics" / "SKILL.md").exists()
+    assert (skills / "plain" / "SKILL.md").is_file()
 
 
 def test_index_fails_on_symlinked_plugin_dir(tmp_path):
@@ -1440,6 +1464,25 @@ def test_secrets_yaml_unicode_escape_fails(tmp_path):
         "yaml unicode-escaped credential not flagged"
 
 
+def test_secrets_toml_unicode_escape_fails(tmp_path):
+    """TOML basic strings decode \\uXXXX too — token = "ghp_\u0041..." must
+    trip the SECRETS scan."""
+    esc = "\\u0041" * 20
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [(
+            "data/cfg.toml",
+            'token = "ghp_' + esc + '"')],
+    })
+    mod = load_lint_module()
+    mod.REGISTRY = reg_root / "registry"
+    mod.results = []
+    mod.check_secrets()
+    fails = [f for f in mod.results
+             if f.check == "SECRETS" and f.status == "FAIL"]
+    assert any("cfg.toml" in f.detail for f in fails), \
+        "toml unicode-escaped credential not flagged"
+
+
 def test_exact_ref_abbreviated_matches_zero_padded_version(tmp_path):
     """ref '1.0' must satisfy registry version '1.0.0' — the grammar accepts
     x[.y[.z]] so exact compares normalize to three components."""
@@ -1544,6 +1587,37 @@ def test_skip_worktree_manifest_conflicts_under_pin(tmp_path):
     r = run_resolver(m, reg_root, consumer, "--apply")
     assert r.returncode == 1
     assert "differs from or is absent at the pinned" in r.stdout
+
+
+def test_skip_worktree_deleted_file_conflicts_under_pin(tmp_path):
+    """A tracked component DELETED under skip-worktree leaves git status
+    clean and vanishes from worktree enumeration — the per-file git show
+    would never run, materialising an incomplete plugin under the pin.
+    The resolver must compare the pinned TREE's file list instead."""
+    import subprocess as sp
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [
+            ("skills/demo/x.md", "v1"),
+            ("skills/demo/y.md", "v1"),
+        ],
+    })
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    sp.run(["git", "init", "-q"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "add", "-A"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "commit", "-qm", "init"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "tag", "v1.0.0"], cwd=reg_root, env=env, check=True)
+    rel = "registry/platform/framework/skills/demo/y.md"
+    sp.run(["git", "update-index", "--skip-worktree", rel],
+           cwd=reg_root, env=env, check=True)
+    (reg_root / rel).unlink()
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "tag:v1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 1
+    assert "absent from the worktree" in r.stdout
 
 
 def test_component_ancestor_not_dir_conflicts(tmp_path):

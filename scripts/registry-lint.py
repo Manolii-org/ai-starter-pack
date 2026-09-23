@@ -41,6 +41,11 @@ try:
 except ImportError:
     jsonschema = None
 
+try:
+    import tomllib
+except ImportError:
+    tomllib = None  # Python < 3.11 — TOML decode scan unavailable
+
 REPO = Path(__file__).resolve().parent.parent
 REGISTRY = REPO / "registry"
 
@@ -369,6 +374,13 @@ def scan_text_lines(path: Path) -> list[str]:
         try:
             docs = [d for d in yaml.safe_load_all(text)]
         except yaml.YAMLError:
+            docs = []
+    elif path.suffix == ".toml" and tomllib is not None:
+        # TOML basic strings decode \uXXXX the same way — token = "ghp_\u0041"
+        # is a credential once a TOML consumer parses it.
+        try:
+            docs = [tomllib.loads(text)]
+        except tomllib.TOMLDecodeError:
             docs = []
     for doc in docs:
         for s in _decoded_json_strings(doc):

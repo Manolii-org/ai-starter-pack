@@ -75,6 +75,11 @@ SCRIPT_REF = re.compile(
 # mentions. A real dependency that no interpreter/./ prefix expresses must be
 # declared explicitly: `requires_scripts: [...]` in the file's frontmatter.
 SCRIPT_DEP_KEYS = ("requires_scripts",)
+# Frontmatter declaring the file's `scripts/x.py` references are CONSUMER-side
+# (the consumer repo already owns them, or the file's own setup section has the
+# consumer fetch them) — the only exemption that lets an unbundled script
+# reference materialise instead of being skipped as an unsatisfiable dep.
+CONSUMER_SCRIPT_KEYS = ("consumer_scripts",)
 # Basename extraction for SCRIPT_REF matches — used to distinguish bundled
 # plugin scripts (a real dependency) from consumer-repository commands.
 SCRIPT_NAME = re.compile(rb"scripts/([A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs))\b")
@@ -95,20 +100,31 @@ def bundled_script_dep(plugin_dir: Path, src_bytes: bytes) -> bool:
     return False
 
 
+def _frontmatter(src_bytes: bytes) -> dict:
+    m = re.match(rb"\A---\s*\n(.*?)\n---\s*\n", src_bytes, re.S)
+    if not m:
+        return {}
+    try:
+        fm = yaml.safe_load(m.group(1).decode("utf-8", errors="ignore")) or {}
+    except yaml.YAMLError:
+        return {}
+    return fm if isinstance(fm, dict) else {}
+
+
 def declares_script_deps(src_bytes: bytes) -> bool:
     """True when the file's YAML frontmatter declares script dependencies —
     explicit metadata, since prose heuristics can't distinguish
     "run `scripts/x.py`" from "routing uses `scripts/x.py`"."""
-    m = re.match(rb"\A---\s*\n(.*?)\n---\s*\n", src_bytes, re.S)
-    if not m:
-        return False
-    try:
-        fm = yaml.safe_load(m.group(1).decode("utf-8", errors="ignore")) or {}
-    except yaml.YAMLError:
-        return False
-    if not isinstance(fm, dict):
-        return False
+    fm = _frontmatter(src_bytes)
     return any(fm.get(k) for k in SCRIPT_DEP_KEYS)
+
+
+def declares_consumer_scripts(src_bytes: bytes) -> bool:
+    """True when the file declares its scripts/ references are provided by
+    the consumer repository (consumer_scripts: [...]) — evidence the
+    commands are runnable after materialisation."""
+    fm = _frontmatter(src_bytes)
+    return any(fm.get(k) for k in CONSUMER_SCRIPT_KEYS)
 
 
 @dataclass
@@ -416,6 +432,44 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
     materialised: dict[str, str] = {}
     component_files = (collect_component_files(plugin_dir)
                        if write_components else {})
+    if pinned:
+        # Worktree enumeration alone is not authoritative under a pin: a
+        # tracked component DELETED while marked skip-worktree leaves status
+        # clean and simply never appears in the rglob — the per-file git show
+        # would never run on it, materialising an incomplete plugin under the
+        # pin's name. Compare the git TREE's file list for each component dir
+        # against what the worktree actually holds. Extra worktree files are
+        # already refused per-file below (untracked → no pinned object).
+        for comp in COMPONENT_TARGETS:
+            rel_dir = (plugin_dir / comp).relative_to(registry_root).as_posix()
+            try:
+                tree = subprocess.run(
+                    ["git", "-C", str(registry_root), "ls-tree", "-r",
+                     "--name-only", "HEAD", "--", rel_dir],
+                    capture_output=True, text=True, timeout=10)
+            except (OSError, subprocess.SubprocessError):
+                tree = None
+            if tree is None or tree.returncode != 0:
+                plan.conflicts.append((
+                    repo_root / req,
+                    f"pinned ref '{ref}' cannot enumerate the tracked plugin "
+                    "tree — refusing to record a pin over unverifiable state",
+                ))
+                return
+            tracked = {ln for ln in tree.stdout.splitlines() if ln}
+            present = {
+                src.relative_to(registry_root).as_posix()
+                for src in component_files.get(comp, [])
+            }
+            missing = sorted(tracked - present)
+            if missing:
+                plan.conflicts.append((
+                    repo_root / req,
+                    f"{req}: {missing[0]} is tracked at the pinned revision "
+                    "but absent from the worktree (skip-worktree deletion?) "
+                    "— refusing an incomplete pin",
+                ))
+                return
     for comp, files in component_files.items():
         target_root = repo_root / COMPONENT_TARGETS[comp]
         for src in files:
@@ -471,7 +525,9 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                     continue
             if (b"CLAUDE_PLUGIN_ROOT" in src_bytes
                     or bundled_script_dep(plugin_dir, src_bytes)
-                    or declares_script_deps(src_bytes)):
+                    or declares_script_deps(src_bytes)
+                    or (SCRIPT_REF.search(src_bytes)
+                        and not declares_consumer_scripts(src_bytes))):
                 # Files depending on the plugin install root or on sibling
                 # scripts/ cannot run in a resolver install — the resolver
                 # does not materialise scripts (surface wiring is a later
