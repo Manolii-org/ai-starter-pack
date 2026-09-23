@@ -85,21 +85,6 @@ CONSUMER_SCRIPT_KEYS = ("consumer_scripts",)
 SCRIPT_NAME = re.compile(rb"scripts/([A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs))\b")
 
 
-def bundled_script_dep(plugin_dir: Path, src_bytes: bytes) -> bool:
-    """True when src invokes scripts/<name> AND the plugin ships that exact
-    script — a sibling dependency resolver mode cannot satisfy. References
-    to scripts the plugin does not bundle are consumer-repository commands
-    (setup docs have the consumer fetch/create them) and materialise fine."""
-    if not SCRIPT_REF.search(src_bytes):
-        return False
-    sdir = plugin_dir / "scripts"
-    for m in SCRIPT_NAME.finditer(src_bytes):
-        name = m.group(1).decode("utf-8", errors="ignore")
-        if (sdir / name).is_file():
-            return True
-    return False
-
-
 def _frontmatter(src_bytes: bytes) -> dict:
     m = re.match(rb"\A---\s*\n(.*?)\n---\s*\n", src_bytes, re.S)
     if not m:
@@ -119,12 +104,36 @@ def declares_script_deps(src_bytes: bytes) -> bool:
     return any(fm.get(k) for k in SCRIPT_DEP_KEYS)
 
 
-def declares_consumer_scripts(src_bytes: bytes) -> bool:
-    """True when the file declares its scripts/ references are provided by
-    the consumer repository (consumer_scripts: [...]) — evidence the
-    commands are runnable after materialisation."""
+def declared_consumer_scripts(src_bytes: bytes) -> set[str]:
+    """The set of script paths the file declares are consumer-repository
+    provided (consumer_scripts: [...]) — every unbundled scripts/x.py
+    invocation must be explicitly listed here to be exempt."""
     fm = _frontmatter(src_bytes)
-    return any(fm.get(k) for k in CONSUMER_SCRIPT_KEYS)
+    out: set[str] = set()
+    for k in CONSUMER_SCRIPT_KEYS:
+        v = fm.get(k)
+        if isinstance(v, (list, tuple)):
+            out |= {str(x) for x in v}
+    return out
+
+
+def script_dep_block(plugin_dir: Path, src_bytes: bytes) -> bool:
+    """True when the file's script usage cannot run under a resolver install:
+    a bundled plugin script (scripts/ isn't materialised), an explicit
+    requires_scripts dep, or an unbundled invocation that isn't listed in
+    consumer_scripts."""
+    if not SCRIPT_REF.search(src_bytes):
+        return False
+    sdir = plugin_dir / "scripts"
+    declared = declared_consumer_scripts(src_bytes)
+    for m in SCRIPT_NAME.finditer(src_bytes):
+        name = m.group(1).decode("utf-8", errors="ignore")
+        if (sdir / name).is_file():
+            return True  # bundled dep — resolver cannot satisfy it
+        if (f"scripts/{name}" not in declared
+                and name not in declared):
+            return True  # unbundled + undeclared — would ship broken
+    return False
 
 
 @dataclass
@@ -438,8 +447,11 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
         # clean and simply never appears in the rglob — the per-file git show
         # would never run on it, materialising an incomplete plugin under the
         # pin's name. Compare the git TREE's file list for each component dir
-        # against what the worktree actually holds. Extra worktree files are
-        # already refused per-file below (untracked → no pinned object).
+        # against what the worktree actually holds — enumerated independently
+        # of component_files since surface selection may leave that empty.
+        # Extra worktree files are already refused per-file below (untracked
+        # → no pinned object).
+        verify_files = collect_component_files(plugin_dir)
         for comp in COMPONENT_TARGETS:
             rel_dir = (plugin_dir / comp).relative_to(registry_root).as_posix()
             try:
@@ -459,7 +471,7 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
             tracked = {ln for ln in tree.stdout.splitlines() if ln}
             present = {
                 src.relative_to(registry_root).as_posix()
-                for src in component_files.get(comp, [])
+                for src in verify_files.get(comp, [])
             }
             missing = sorted(tracked - present)
             if missing:
@@ -524,10 +536,8 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                     ))
                     continue
             if (b"CLAUDE_PLUGIN_ROOT" in src_bytes
-                    or bundled_script_dep(plugin_dir, src_bytes)
                     or declares_script_deps(src_bytes)
-                    or (SCRIPT_REF.search(src_bytes)
-                        and not declares_consumer_scripts(src_bytes))):
+                    or script_dep_block(plugin_dir, src_bytes)):
                 # Files depending on the plugin install root or on sibling
                 # scripts/ cannot run in a resolver install — the resolver
                 # does not materialise scripts (surface wiring is a later

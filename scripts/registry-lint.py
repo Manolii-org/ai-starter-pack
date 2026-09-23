@@ -347,6 +347,31 @@ def _decoded_json_strings(doc) -> list[str]:
     return out
 
 
+_SOURCE_ESC = re.compile(r"\\(?:x([0-9a-fA-F]{2})|u([0-9a-fA-F]{4})|U([0-9a-fA-F]{8}))")
+
+
+def _decode_source_escapes(line: str) -> str:
+    """Decode \\xNN / \\uXXXX / \\UXXXXXXXX escapes as a Python/JS/TS consumer
+    would — source files can embed a credential behind runtime-decoded
+    escapes ("ghp_\\x41") that raw text cannot match. `\\\\` is protected
+    first so a literal backslash doesn't double-decode."""
+    if "\\" not in line:
+        return line
+
+    def rep(m: re.Match) -> str:
+        for g in m.groups():
+            if g:
+                try:
+                    return chr(int(g, 16))
+                except ValueError:
+                    return m.group(0)
+        return m.group(0)
+
+    t = line.replace("\\\\", "\x00")
+    t = _SOURCE_ESC.sub(rep, t)
+    return t.replace("\x00", "\\")
+
+
 def scan_text_lines(path: Path) -> list[str]:
     """Encoding-normalized text lines for content scans. UTF-16/32 encode
     ASCII-shaped credentials with NUL separators — stripping NULs recovers
@@ -359,6 +384,17 @@ def scan_text_lines(path: Path) -> list[str]:
     if b"\x00" in raw:
         text += "\n" + raw.replace(b"\x00", b"").decode("utf-8", errors="ignore")
     lines = text.splitlines()
+    # Source-language escape pass: \\xNN / \\uXXXX in .py/.js/.ts/.sh/... is
+    # decoded by the consumer's runtime, so scan the decoded form too.
+    # Structured formats are excluded — their own decoders (below) already
+    # handle their escape sets, and re-decoding raw JSON/YAML/TOML text would
+    # double-report legitimately escaped values. Same escaped-form dedupe:
+    # a decoded line is only added when its own escaped form is absent.
+    if path.suffix not in (".json", ".yaml", ".yml", ".toml"):
+        for line in list(lines):
+            d = _decode_source_escapes(line)
+            if d != line and json.dumps(d)[1:-1] not in text:
+                lines.append(d)
     docs = []
     if path.suffix == ".json":
         try:

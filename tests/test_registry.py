@@ -747,6 +747,26 @@ def test_undeclared_script_reference_skips(tmp_path):
     assert (skills / "plain" / "SKILL.md").is_file()
 
 
+def test_consumer_scripts_mismatch_skips(tmp_path):
+    """A consumer_scripts declaration must cover EVERY unbundled invocation —
+    declaring scripts/setup.py cannot exempt invoking scripts/missing.py."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [
+            ("skills/mismatch/SKILL.md",
+             "---\nname: mismatch\nconsumer_scripts: [scripts/setup.py]\n---\n"
+             "Then run `python3 scripts/missing.py`"),
+        ],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 0, r.stdout
+    assert not (consumer / ".claude" / "skills" / "mismatch"
+                / "SKILL.md").exists()
+
+
 def test_index_fails_on_symlinked_plugin_dir(tmp_path):
     """A symlinked plugin dir aliases another scope's tree — INDEX must
     refuse to follow it."""
@@ -1481,6 +1501,25 @@ def test_secrets_toml_unicode_escape_fails(tmp_path):
              if f.check == "SECRETS" and f.status == "FAIL"]
     assert any("cfg.toml" in f.detail for f in fails), \
         "toml unicode-escaped credential not flagged"
+
+
+def test_secrets_source_hex_escape_fails(tmp_path):
+    """"ghp_\\x41..." in a Python source file decodes to a credential at
+    runtime — the scan must see source-language escape forms too."""
+    esc = "\\x41" * 20
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [(
+            "scripts/helper.py",
+            'token = "ghp_' + esc + '"')],
+    })
+    mod = load_lint_module()
+    mod.REGISTRY = reg_root / "registry"
+    mod.results = []
+    mod.check_secrets()
+    fails = [f for f in mod.results
+             if f.check == "SECRETS" and f.status == "FAIL"]
+    assert any("helper.py" in f.detail for f in fails), \
+        "source-language escaped credential not flagged"
 
 
 def test_exact_ref_abbreviated_matches_zero_padded_version(tmp_path):
