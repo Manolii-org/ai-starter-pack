@@ -2,11 +2,15 @@
 #
 # A registry/.private-mirror marker waives the PUBLIC boundary check ONLY
 # when the digest of `git remote get-url origin`'s slug appears here.
-# Digests, not plaintext slugs: this repo is public, so committing mirror
-# names would both disclose the private repos AND trip the PACK-SURFACE
-# scan this gate complements. The digest is still a committed, auditable,
-# CODEOWNERS-gated trust record — a mirror owner proves their entry by
-# publishing the slug alongside the PR that adds it, out of band.
+# Digests are NOT a confidentiality boundary: mirror slugs are enumerable
+# by construction, so hashing hides nothing. Their purpose is narrower —
+# keep a committed, auditable, CODEOWNERS-gated trust record without
+# writing cross-org identifiers into this public repo (a plaintext
+# owner/repo list would trip the PACK-SURFACE scan this gate
+# complements). The security boundary is the committed marker plus the
+# live gh-api visibility check; this file is only the allowlist. A
+# mirror owner proves their entry by publishing the slug alongside the
+# PR that adds it, out of band.
 #
 # To add a mirror:  printf '%s' 'owner/repo' | sha256sum   (lowercase slug)
 #
