@@ -905,10 +905,11 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
                                 timeout=10)
         except (OSError, subprocess.TimeoutExpired):
             vr = None
-        vm = (re.search(r"(\d+)\.(\d+)", vr.stdout)
+        vm = (re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", vr.stdout)
               if vr is not None else None)
         modern = (vm is not None
-                  and (int(vm.group(1)), int(vm.group(2))) >= (2, 35))
+                  and (int(vm.group(1)), int(vm.group(2)),
+                       int(vm.group(3) or 0)) >= (2, 35, 1))
         if not modern or fsm.lower() not in (
                 "true", "false", "yes", "no", "on", "off", "0", "1"):
             return ("a configured core.fsmonitor command can "

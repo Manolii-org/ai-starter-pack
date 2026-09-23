@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -2970,6 +2971,32 @@ def test_bootstrap_mirror_push_target_pass(tmp_path):
     assert r.returncode == 2, r.stderr
     assert "fsmonitor" in r.stderr
     assert not (fm / "registry").exists()
+
+    # A BOOLEAN core.fsmonitor is only safe on git >=2.35.1 — on 2.35.0
+    # git still treats the value as a hook pathname, so 'true' execs a
+    # PATH 'true' wrapper during 'git add'. The stub answers
+    # '--version' with 2.35.0 and delegates everything else to the real
+    # git; MIRROR_TRUST_DIRS makes the stub a trusted binary.
+    fm0 = tmp_path / "fsm0"
+    fm0.mkdir()
+    sp.run(["git", "init", "-q"], cwd=fm0, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=fm0, capture_output=True)
+    sp.run(["git", "config", "core.fsmonitor", "true"],
+           cwd=fm0, capture_output=True)
+    real_git = os.path.realpath(shutil.which("git") or "/usr/bin/git")
+    gitstub = Path(env["MIRROR_TRUST_DIRS"]) / "git"
+    gitstub.write_text(
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n"
+        "  echo \"git version 2.35.0\"\n  exit 0\nfi\n"
+        f"exec {real_git} \"$@\"\n")
+    gitstub.chmod(0o755)
+    r = run(fm0)
+    assert r.returncode == 2, r.stderr
+    assert "fsmonitor" in r.stderr
+    assert not (fm0 / "registry").exists()
+    gitstub.unlink()
 
     # filter.<name>.clean/.process runs the configured program on
     # staged file contents during 'git add' — refuse when configured.
