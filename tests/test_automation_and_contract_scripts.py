@@ -850,3 +850,71 @@ def test_contract_sibling_grammar_parity() -> None:
         "on:\n  push: {branches: [develop]}\n"
         "  workflow_call: {inputs: {t: {type: choice, options: [a]}}}\n")
     assert mod.workflow_triggers_branch(spec, "develop") is False
+
+
+# ── review round 34 ─────────────────────────────────────────────────────────
+
+def test_registry_choice_input_requires_options(tmp_path: Path) -> None:
+    """`type: choice` without options can't load — reject it."""
+    import argparse
+    mod = _load(REGISTRY_SCRIPT, "var34a")
+    repo_dir = tmp_path / "repo34a"
+    wf = repo_dir / ".github/workflows/x.yml"
+    wf.parent.mkdir(parents=True)
+    wf.write_text(
+        "on:\n  push: null\n"
+        "  workflow_dispatch:\n    inputs:\n      env:\n        type: choice\n"
+        "jobs:\n  x: {runs-on: ubuntu-latest, steps: [{run: 'true'}]}\n")
+    auto = {"name": "n", "repo": "Org/repo34a",
+            "workflow": ".github/workflows/x.yml",
+            "trigger": {"type": "push"}, "risk_tier": "green", "owner": "o"}
+    args = argparse.Namespace(mode="local", repos_dir=str(tmp_path))
+    errs: list[str] = []
+    mod.check_workflow_files({"automations": [auto]}, args, errs)
+    assert errs and "choice" in errs[0]
+    wf.write_text(
+        "on:\n  push: null\n"
+        "  workflow_dispatch:\n    inputs:\n      env:\n"
+        "        type: choice\n        options: [staging, prod]\n"
+        "jobs:\n  x: {runs-on: ubuntu-latest, steps: [{run: 'true'}]}\n")
+    errs = []
+    mod.check_workflow_files({"automations": [auto]}, args, errs)
+    assert errs == []
+
+
+def test_registry_expr_false_job_not_runnable(tmp_path: Path) -> None:
+    """`if: ${{ false }}` is permanently skipped — counts as no jobs."""
+    import argparse
+    mod = _load(REGISTRY_SCRIPT, "var34b")
+    repo_dir = tmp_path / "repo34b"
+    wf = repo_dir / ".github/workflows/x.yml"
+    wf.parent.mkdir(parents=True)
+    wf.write_text(
+        "on: push\n"
+        "jobs:\n  x:\n    if: ${{ false }}\n"
+        "    runs-on: ubuntu-latest\n    steps: [{run: 'true'}]\n")
+    auto = {"name": "n", "repo": "Org/repo34b",
+            "workflow": ".github/workflows/x.yml",
+            "trigger": {"type": "push"}, "risk_tier": "green", "owner": "o"}
+    args = argparse.Namespace(mode="local", repos_dir=str(tmp_path))
+    errs: list[str] = []
+    mod.check_workflow_files({"automations": [auto]}, args, errs)
+    assert errs and "no runnable jobs" in errs[0]
+
+
+def test_contract_expr_false_and_choice_parity() -> None:
+    """Contract checker mirrors: expression-false job skipped; choice w/o
+    options rejected as a sibling workflow_dispatch declaration."""
+    mod = _load(CONTRACT_SCRIPT, "cdc34")
+    assert mod._executable({"runs-on": "ubuntu-latest",
+                            "if": "${{ false }}",
+                            "steps": [{"run": "true"}]}) is False
+    assert mod._executable({"runs-on": "ubuntu-latest",
+                            "if": "${{false}}",
+                            "steps": [{"run": "true"}]}) is False
+    assert mod._executable({"runs-on": "ubuntu-latest",
+                            "steps": [{"run": "true"}]}) is True
+    spec = yaml.safe_load(
+        "on:\n  push: {branches: [develop]}\n"
+        "  workflow_dispatch: {inputs: {env: {type: choice}}}\n")
+    assert mod.workflow_triggers_branch(spec, "develop") is False

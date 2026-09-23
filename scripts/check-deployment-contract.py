@@ -145,6 +145,20 @@ def valid_cron(expr: str) -> bool:
     )
 
 
+def _permanently_off(cond) -> bool:
+    """An `if:` that can never run — `false` literal or the equivalent
+    expression wrapper `${{ false }}` — counts as a skipped job, not a
+    runnable one (it can satisfy nothing)."""
+    if cond is False:
+        return True
+    if not isinstance(cond, str):
+        return False
+    s = cond.strip()
+    if s.startswith("${{") and s.endswith("}}"):
+        s = s[3:-2].strip()
+    return s.lower() == "false"
+
+
 def _input_def_ok(v, call: bool = False) -> bool:
     """`inputs:` must map names to definitions inside GitHub's grammar —
     dispatch or reusable-call shape."""
@@ -163,10 +177,12 @@ def _input_def_ok(v, call: bool = False) -> bool:
             return False
         if "required" in m and not isinstance(m["required"], bool):
             return False
-        if "options" in m and not (
-                isinstance(m["options"], list) and m["options"]
-                and all(isinstance(o, str) for o in m["options"])):
+        opts_ok = (isinstance(m.get("options"), list) and m["options"]
+                   and all(isinstance(o, str) for o in m["options"]))
+        if "options" in m and not opts_ok:
             return False
+        if not call and it == "choice" and not opts_ok:
+            return False          # a choice input REQUIRES non-empty options
     return True
 
 
@@ -599,9 +615,8 @@ def _executable(job: dict) -> bool:
     (string, label list, or group map) and a non-empty list of step maps.
     `{uses: ""}`, `{runs-on: null, steps: "x"}`, and `{}` parse but execute
     nothing — counting them would satisfy `required_jobs` with a dead job."""
-    cond = job.get("if")
-    if cond is False or (isinstance(cond, str) and cond.strip().lower() == "false"):
-        return False  # `if: false` — permanently skipped, satisfies nothing
+    if _permanently_off(job.get("if")):
+        return False  # `if: false` / `if: ${{ false }}` — permanently skipped
     uses = job.get("uses")
     if "uses" in job:
         # reusable-call form — GitHub rejects it when it also carries the

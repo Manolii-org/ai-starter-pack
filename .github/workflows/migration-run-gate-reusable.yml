@@ -119,6 +119,7 @@ jobs:
       # pass caller-controlled values through env, not shell source — a value
       # like `1; malicious-command` must never reach the run: program
       DOWNGRADE_STEPS: ${{ inputs.downgrade_steps }}
+      PROBE_URL_VAR: ${{ inputs.url_env_var }}
     # covers service-container startup too — a stalled registry pull/health
     # init happens before any step-level or shell `timeout` can apply
     timeout-minutes: 45
@@ -160,7 +161,14 @@ jobs:
         run: |
           set -e
           PROBE='import os,sys; import sqlalchemy; url=os.environ.get(os.environ.get("PROBE_URL_VAR","ALEMBIC_DATABASE_URL")) or os.environ.get("DATABASE_URL",""); sqlalchemy.create_engine(url).connect().close()'
-          export PROBE_URL_VAR='${{ inputs.url_env_var }}'
+          # url_env_var names an env var — enforce identifier shape so a
+          # caller-supplied value can't carry shell syntax into the probe
+          case "$PROBE_URL_VAR" in
+            ''|[0-9]*|*[!A-Za-z0-9_]*)
+              echo "::error::url_env_var must be an env-var identifier (got '$PROBE_URL_VAR')"
+              exit 1 ;;
+          esac
+          export PROBE_URL_VAR
           for i in $(seq 1 30); do
             # `timeout` bounds each probe — a stalled driver handshake must not
             # hang the whole job (a single unbounded connect can outlive the runner).

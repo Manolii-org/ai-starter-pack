@@ -368,10 +368,12 @@ def _dispatch_inputs_ok(name, v) -> str | None:
             return f"on.{name}.inputs.{iname}.type '{it}' is not a valid input type"
         if "required" in idef and not isinstance(idef["required"], bool):
             return f"on.{name}.inputs.{iname}.required must be a boolean"
-        if "options" in idef and not (
-                isinstance(idef["options"], list) and idef["options"]
-                and all(isinstance(o, str) for o in idef["options"])):
+        opts_ok = (isinstance(idef.get("options"), list) and idef["options"]
+                   and all(isinstance(o, str) for o in idef["options"]))
+        if "options" in idef and not opts_ok:
             return f"on.{name}.inputs.{iname}.options must be a non-empty list of strings"
+        if it == "choice" and not opts_ok:
+            return f"on.{name}.inputs.{iname} is type 'choice' but declares no options"
     return None
 
 
@@ -393,15 +395,28 @@ def _call_inputs_ok(name, v) -> str | None:
     return None
 
 
+def _permanently_off(cond) -> bool:
+    """An `if:` that can never run — `false` literal or the equivalent
+    expression wrapper `${{ false }}` — counts as a skipped job, not a
+    runnable one (it can satisfy nothing)."""
+    if cond is False:
+        return True
+    if not isinstance(cond, str):
+        return False
+    s = cond.strip()
+    if s.startswith("${{") and s.endswith("}}"):
+        s = s[3:-2].strip()
+    return s.lower() == "false"
+
+
 def _runnable_job(job) -> bool:
     """Same bar as the deployment-contract checker: a `uses:` call naming a
     callee, or a valid `runs-on` (str / label list / group map) + steps that
     each carry a non-empty `run` or `uses`."""
     if not isinstance(job, dict):
         return False
-    cond = job.get("if")
-    if cond is False or (isinstance(cond, str) and cond.strip().lower() == "false"):
-        return False  # `if: false` — permanently skipped, satisfies nothing
+    if _permanently_off(job.get("if")):
+        return False  # `if: false` / `if: ${{ false }}` — permanently skipped
     uses = job.get("uses")
     if "uses" in job:
         # reusable-call form — GitHub rejects it when it also carries the
