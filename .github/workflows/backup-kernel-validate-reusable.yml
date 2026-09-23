@@ -26,7 +26,7 @@ permissions:
 
 jobs:
   validate:
-    runs-on: ${{ fromJSON(vars.LIGHT_RUNNER || '["ubuntu-slim"]') }}
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout caller repo (manifest)

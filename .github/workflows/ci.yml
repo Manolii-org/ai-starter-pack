@@ -183,9 +183,13 @@ jobs:
   build:
     name: Build
     needs: [security-audit, lint, typecheck, test]
+    # This file is a starter-pack template: non-fleet consumers have no Fly
+    # pool, so the default must stay hosted — fleet tenants opt in by setting
+    # CI_RUNNER_OVERRIDE (fly-runner-setup.md). Fork PRs always fall back to
+    # hosted even when the var is set.
     runs-on: >-
       ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-          && fromJSON(vars.CI_RUNNER_OVERRIDE || '["self-hosted","fly"]')
+          && fromJSON(vars.CI_RUNNER_OVERRIDE || '["ubuntu-latest"]')
           || 'ubuntu-latest' }}
     timeout-minutes: 20
     steps:

@@ -28,7 +28,7 @@ permissions:
 jobs:
   publish:
     name: ${{ inputs.operation }} — ${{ inputs.outcome }}
-    runs-on: ${{ fromJSON(vars.LIGHT_RUNNER || '["ubuntu-slim"]') }}
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Validate and publish named conclusion
