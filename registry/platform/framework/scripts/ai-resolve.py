@@ -75,6 +75,24 @@ SCRIPT_REF = re.compile(
 # mentions. A real dependency that no interpreter/./ prefix expresses must be
 # declared explicitly: `requires_scripts: [...]` in the file's frontmatter.
 SCRIPT_DEP_KEYS = ("requires_scripts",)
+# Basename extraction for SCRIPT_REF matches — used to distinguish bundled
+# plugin scripts (a real dependency) from consumer-repository commands.
+SCRIPT_NAME = re.compile(rb"scripts/([A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs))\b")
+
+
+def bundled_script_dep(plugin_dir: Path, src_bytes: bytes) -> bool:
+    """True when src invokes scripts/<name> AND the plugin ships that exact
+    script — a sibling dependency resolver mode cannot satisfy. References
+    to scripts the plugin does not bundle are consumer-repository commands
+    (setup docs have the consumer fetch/create them) and materialise fine."""
+    if not SCRIPT_REF.search(src_bytes):
+        return False
+    sdir = plugin_dir / "scripts"
+    for m in SCRIPT_NAME.finditer(src_bytes):
+        name = m.group(1).decode("utf-8", errors="ignore")
+        if (sdir / name).is_file():
+            return True
+    return False
 
 
 def declares_script_deps(src_bytes: bytes) -> bool:
@@ -452,7 +470,7 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                     ))
                     continue
             if (b"CLAUDE_PLUGIN_ROOT" in src_bytes
-                    or SCRIPT_REF.search(src_bytes)
+                    or bundled_script_dep(plugin_dir, src_bytes)
                     or declares_script_deps(src_bytes)):
                 # Files depending on the plugin install root or on sibling
                 # scripts/ cannot run in a resolver install — the resolver

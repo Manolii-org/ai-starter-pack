@@ -354,22 +354,33 @@ def scan_text_lines(path: Path) -> list[str]:
     if b"\x00" in raw:
         text += "\n" + raw.replace(b"\x00", b"").decode("utf-8", errors="ignore")
     lines = text.splitlines()
+    docs = []
     if path.suffix == ".json":
         try:
             doc = json.loads(text)
         except json.JSONDecodeError:
             doc = None
         if doc is not None:
-            # A decoded line only adds coverage when the value is hidden
-            # behind escapes — i.e. the file does NOT contain the line's own
-            # JSON-escaped form. Legitimately escaped values (\u2014, \\d,
-            # \") reproduce exactly what the file shows and are skipped;
-            # escape-hidden values (ghp_\u0041, registry\/x) surface.
-            for s in _decoded_json_strings(doc):
-                for piece in s.splitlines():
-                    esc = json.dumps(piece)[1:-1]
-                    if piece and esc not in text:
-                        lines.append(piece)
+            docs = [doc]
+    elif path.suffix in (".yaml", ".yml"):
+        # YAML decodes the same \uXXXX escapes inside quoted scalars — a
+        # token: "ghp_\u0041..." value is a credential once PyYAML reads it
+        # while invisible to the raw text scan.
+        try:
+            docs = [d for d in yaml.safe_load_all(text)]
+        except yaml.YAMLError:
+            docs = []
+    for doc in docs:
+        for s in _decoded_json_strings(doc):
+            for piece in s.splitlines():
+                # A decoded line only adds coverage when the value is hidden
+                # behind escapes — i.e. the file does NOT contain the line's
+                # own JSON-escaped form. Legitimately escaped values (\u2014,
+                # \\d, \") reproduce exactly what the file shows and are
+                # skipped; escape-hidden values surface.
+                esc = json.dumps(piece)[1:-1]
+                if piece and esc not in text:
+                    lines.append(piece)
     return lines
 
 

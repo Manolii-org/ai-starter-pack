@@ -682,12 +682,13 @@ def test_index_fails_on_symlinked_component_file(tmp_path):
 
 
 def test_script_dependent_skills_not_materialised(tmp_path):
-    """A skill that calls a sibling script it doesn't ship cannot run in
+    """A skill that invokes a script the plugin BUNDLES cannot run in
     resolver mode — advisory-skip it, never write it."""
     reg_root = make_registry(tmp_path / "src", {
         "platform/framework": [
             ("skills/analytics/SKILL.md",
              "Run `python3 scripts/session-analytics.py --days 7`"),
+            ("scripts/session-analytics.py", "# bundled helper"),
             ("skills/plain/SKILL.md", "self-contained"),
         ],
     })
@@ -700,6 +701,26 @@ def test_script_dependent_skills_not_materialised(tmp_path):
     skills = consumer / ".claude" / "skills"
     assert not (skills / "analytics" / "SKILL.md").exists()
     assert (skills / "plain" / "SKILL.md").is_file()
+
+
+def test_consumer_repo_script_reference_materialises(tmp_path):
+    """A skill whose `python3 scripts/x.py` refers to a script the plugin
+    does NOT ship is a consumer-repository command (setup docs have the
+    consumer fetch it) — it must materialise, not be skipped."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [
+            ("skills/migration-drift/SKILL.md",
+             "Fetch it first, then `python3 scripts/check-migration-drift-mgmt.py`"),
+        ],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 0, r.stdout
+    assert (consumer / ".claude" / "skills" / "migration-drift"
+            / "SKILL.md").is_file()
 
 
 def test_index_fails_on_symlinked_plugin_dir(tmp_path):
@@ -1398,6 +1419,25 @@ def test_secrets_unicode_escaped_token_fails(tmp_path):
              if f.check == "SECRETS" and f.status == "FAIL"]
     assert any("cfg.json" in f.detail for f in fails), \
         "unicode-escaped credential not flagged"
+
+
+def test_secrets_yaml_unicode_escape_fails(tmp_path):
+    """PyYAML decodes \\uXXXX inside quoted scalars — a YAML credential must
+    trip the SECRETS scan just like a JSON one."""
+    esc = "\\u0041" * 20
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [(
+            "data/cfg.yaml",
+            'token: "ghp_' + esc + '"')],
+    })
+    mod = load_lint_module()
+    mod.REGISTRY = reg_root / "registry"
+    mod.results = []
+    mod.check_secrets()
+    fails = [f for f in mod.results
+             if f.check == "SECRETS" and f.status == "FAIL"]
+    assert any("cfg.yaml" in f.detail for f in fails), \
+        "yaml unicode-escaped credential not flagged"
 
 
 def test_exact_ref_abbreviated_matches_zero_padded_version(tmp_path):
