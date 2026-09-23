@@ -167,6 +167,15 @@ def check_index() -> None:
             # also lacks its manifest pass INDEX and escape MANIFEST too.
             if child.is_dir() and (scope, child.name) not in seen:
                 report("FAIL", "INDEX", f"plugin dir not indexed: {scope}/{child.name}")
+            if child.is_dir():
+                # Symlinked FILES inside a real plugin dir — the resolver's
+                # file loop follows links, so agents/leak.md -> /etc/passwd
+                # would ship the target's bytes to consumers.
+                for p in child.rglob("*"):
+                    if p.is_symlink():
+                        report("FAIL", "INDEX",
+                               f"symlinked file inside plugin: "
+                               f"{p.relative_to(REGISTRY)} -> {p.readlink()}")
     if not any(f.status == "FAIL" and f.check == "INDEX" for f in results):
         report("PASS", "INDEX", f"{len(seen)} plugins indexed, filesystem consistent")
 

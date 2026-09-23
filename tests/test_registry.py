@@ -576,6 +576,111 @@ def test_malformed_ref_conflicts(tmp_path):
     assert "malformed ref" in r.stdout
 
 
+def test_dirty_index_rejects_pin(tmp_path):
+    """An uncommitted plugins.json edit is itself a resolution input — a pin
+    must not copy content the pinned index didn't describe."""
+    import subprocess as sp
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "x")],
+    })
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    sp.run(["git", "init", "-q"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "add", "-A"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "commit", "-qm", "init"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "tag", "v1.0.0"], cwd=reg_root, env=env, check=True)
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "tag:v1.0.0"}])
+    (reg_root / "registry" / "plugins.json").write_text(
+        '{"plugins": []}')  # uncommitted index change
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 1
+    assert "clean worktree" in r.stdout
+
+
+def test_index_path_scope_mismatch_conflicts(tmp_path):
+    """An index entry whose path doesn't match its scope/name aliases
+    another plugin — refuse it."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "x")],
+    })
+    # point platform/framework at a different path that exists
+    idx = reg_root / "registry" / "plugins.json"
+    idx.write_text(json.dumps({"plugins": [
+        {"scope": "platform", "name": "framework",
+         "path": "registry/platform/other"}]}))
+    (reg_root / "registry" / "platform" / "other").mkdir()
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 1
+    assert "does not match" in r.stdout
+
+
+def test_symlinked_component_file_conflicts(tmp_path):
+    """skills/leak/SKILL.md -> /etc/passwd must not copy the link target
+    into the consumer."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/ok/SKILL.md", "x")],
+    })
+    leak = reg_root / "registry" / "platform" / "framework" / "skills" / "leak"
+    leak.mkdir()
+    (leak / "SKILL.md").symlink_to("/etc/passwd")
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 1
+    assert "symlink" in r.stdout
+
+
+def test_illustrative_script_mentions_materialise(tmp_path):
+    """Prose that merely mentions scripts/x.sh (sample findings, example
+    output) is not a dependency — the file must still materialise."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [
+            ("skills/demo/SKILL.md",
+             'Report example: {"file": "scripts/sync.py", "issue": "leak"}'),
+        ],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 0, r.stdout
+    assert (consumer / ".claude" / "skills" / "demo" / "SKILL.md").is_file()
+
+
+def test_index_fails_on_symlinked_component_file(tmp_path):
+    """INDEX flags a symlinked file inside a real plugin dir."""
+    mod = load_lint_module()
+    reg = tmp_path / "registry"
+    pdir = reg / "platform" / "framework"
+    pdir.mkdir(parents=True)
+    for sub in (".claude-plugin", ".devin-plugin"):
+        (pdir / sub).mkdir()
+        (pdir / sub / "plugin.json").write_text(
+            '{"name": "framework", "version": "1.0.0", "description": "x"}')
+    (reg / "plugins.json").write_text(json.dumps({"plugins": [
+        {"scope": "platform", "name": "framework",
+         "path": "registry/platform/framework"}]}))
+    sdir = pdir / "skills" / "leak"
+    sdir.mkdir(parents=True)
+    (sdir / "SKILL.md").symlink_to("/etc/passwd")
+    mod.REGISTRY = reg
+    mod.results = []
+    mod.check_index()
+    fails = [f for f in mod.results
+             if f.check == "INDEX" and f.status == "FAIL"]
+    assert any("symlinked file" in f.detail for f in fails)
+
+
 def test_script_dependent_skills_not_materialised(tmp_path):
     """A skill that calls a sibling script it doesn't ship cannot run in
     resolver mode — advisory-skip it, never write it."""

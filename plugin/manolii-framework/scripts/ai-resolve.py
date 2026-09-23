@@ -61,9 +61,14 @@ REQUIRES_RE = re.compile(
     r"^(platform|manolii|buro|impaktful|cpdcheck|repo|personal)/([a-z0-9][a-z0-9-]*)$"
 )
 SEMVER_REF = re.compile(r"v?\d+(?:\.\d+){0,2}")
-# A materialised file that needs a sibling script — the resolver does not
-# materialise scripts/, so these references can never run in resolver mode.
-SCRIPT_REF = re.compile(rb"scripts/[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs)\b")
+# A materialised file that INVOKES a sibling script — the resolver does not
+# materialise scripts/, so real invocations can never run in resolver mode.
+# Only executable-invocation shapes match (interpreter call or ./exec); a
+# bare `scripts/x.py` mention in prose or sample output is not a dependency.
+SCRIPT_REF = re.compile(
+    rb"(?:python3?|bash|sh|zsh|node|npx|tsx|deno|ruby|perl|uv\s+run|pipenv\s+run)"
+    rb"\s+[^\n|&;`]*?scripts/[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs)\b"
+    rb"|\./scripts/[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs)\b")
 
 
 @dataclass
@@ -178,6 +183,50 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
             f"{req}: repo/personal assets are materialised in place — nothing to fetch")
         return
 
+    pinned = ref.startswith(("sha:", "tag:"))
+    if pinned:
+        # Verify the pin BEFORE trusting the index — plugins.json is itself a
+        # resolution input, and a dirty index could retarget a scope/name.
+        want = ref.split(":", 1)[1]
+        head = git_rev(registry_root, "HEAD")
+        pinned_sha = head and git_rev(registry_root, want)
+        if head is None:
+            plan.conflicts.append((
+                repo_root / req,
+                f"pinned ref '{ref}' needs a verifiable git checkout — "
+                "the registry source is not a git repository",
+            ))
+            return
+        if pinned_sha is None or pinned_sha != head:
+            plan.conflicts.append((
+                repo_root / req,
+                f"registry checkout is not at the pinned ref '{want}' "
+                f"(HEAD {head[:12]}) — check out the pin or use a version range",
+            ))
+            return
+        # HEAD may equal the pin while the worktree is dirty — materialising
+        # would copy uncommitted bytes while recording the pinned ref. The
+        # check covers the whole registry: plugins.json and every plugin
+        # tree are pin inputs.
+        dirty = subprocess.run(
+            ["git", "-C", str(registry_root), "status", "--porcelain",
+             "--untracked-files=all", "--", "."],
+            capture_output=True, text=True, timeout=10)
+        if dirty.returncode == 0 and dirty.stdout.strip():
+            plan.conflicts.append((
+                repo_root / req,
+                f"pinned ref '{ref}' requires a clean worktree — uncommitted "
+                "changes under the registry (index and plugin content are "
+                "pin inputs)",
+            ))
+            return
+    else:
+        body = ref[1:] if ref.startswith("^") else ref
+        if not SEMVER_REF.fullmatch(body):
+            plan.conflicts.append((repo_root / req, f"malformed ref '{ref}' — "
+                "supported: ^x[.y[.z]], x[.y[.z]], tag:<tag>, sha:<sha>"))
+            return
+
     entry = index.get((scope, name))
     if entry is None:
         plan.conflicts.append((repo_root / req, "not in registry/plugins.json"))
@@ -185,6 +234,17 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
     plugin_dir = registry_root.parent / entry["path"] if not Path(entry["path"]).is_absolute() else Path(entry["path"])
     if not plugin_dir.is_dir():
         plan.conflicts.append((repo_root / req, f"missing plugin dir: {entry['path']}"))
+        return
+    try:
+        indexed_rel = plugin_dir.relative_to(registry_root)
+    except ValueError:
+        plan.conflicts.append((repo_root / req,
+            f"indexed path '{entry['path']}' is outside the registry"))
+        return
+    if indexed_rel.parts != (scope, name):
+        plan.conflicts.append((repo_root / req,
+            f"indexed path '{entry['path']}' does not match the requested "
+            f"scope/name '{scope}/{name}' — refusing to alias"))
         return
     if plugin_dir.resolve() != plugin_dir:
         # A symlinked plugin dir (or ancestor) aliases another scope's tree —
@@ -205,49 +265,12 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                 version = "0.0.0"
         except (json.JSONDecodeError, KeyError):
             pass
-    if ref.startswith(("sha:", "tag:")):
-        want = ref.split(":", 1)[1]
-        head = git_rev(registry_root, "HEAD")
-        pinned = head and git_rev(registry_root, want)
-        if head is None:
-            plan.conflicts.append((
-                repo_root / req,
-                f"pinned ref '{ref}' needs a verifiable git checkout — "
-                "the registry source is not a git repository",
-            ))
-            return
-        if pinned is None or pinned != head:
-            plan.conflicts.append((
-                repo_root / req,
-                f"registry checkout is not at the pinned ref '{want}' "
-                f"(HEAD {head[:12]}) — check out the pin or use a version range",
-            ))
-            return
-        # HEAD may equal the pin while the worktree is dirty — materialising
-        # would copy uncommitted bytes while recording the pinned ref.
-        dirty = subprocess.run(
-            ["git", "-C", str(plugin_dir), "status", "--porcelain",
-             "--untracked-files=all", "--", "."],
-            capture_output=True, text=True, timeout=10)
-        if dirty.returncode == 0 and dirty.stdout.strip():
-            plan.conflicts.append((
-                repo_root / req,
-                f"pinned ref '{ref}' requires a clean worktree — uncommitted "
-                f"changes under {entry['path']}/",
-            ))
-            return
-    else:
-        body = ref[1:] if ref.startswith("^") else ref
-        if not SEMVER_REF.fullmatch(body):
-            plan.conflicts.append((repo_root / req, f"malformed ref '{ref}' — "
-                "supported: ^x[.y[.z]], x[.y[.z]], tag:<tag>, sha:<sha>"))
-            return
-        if not version_satisfies(version, ref):
-            plan.conflicts.append((
-                repo_root / req,
-                f"ref '{ref}' not satisfied by registry version {version}",
-            ))
-            return
+    if not pinned and not version_satisfies(version, ref):
+        plan.conflicts.append((
+            repo_root / req,
+            f"ref '{ref}' not satisfied by registry version {version}",
+        ))
+        return
 
     materialised: dict[str, str] = {}
     for comp, files in collect_component_files(plugin_dir).items():
@@ -256,6 +279,17 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
             rel = src.relative_to(plugin_dir / comp)
             dst = target_root / rel
             rel_dst = dst.relative_to(repo_root).as_posix()
+            resolved_src = src.resolve()
+            if (resolved_src != src
+                    or not resolved_src.is_relative_to(plugin_dir)):
+                # A symlinked component file (or one behind a linked dir)
+                # copies the link target's bytes into the consumer — e.g.
+                # agents/leak.md -> /etc/passwd ships /etc/passwd.
+                plan.conflicts.append((
+                    dst,
+                    f"{req}: {rel} is or resolves through a symlink — "
+                    "refusing to materialise the link target"))
+                continue
             src_bytes = src.read_bytes()
             if (b"CLAUDE_PLUGIN_ROOT" in src_bytes
                     or SCRIPT_REF.search(src_bytes)):
