@@ -283,6 +283,28 @@ def test_orphan_stays_tracked_without_prune(tmp_path):
     assert ".claude/skills/demo/SKILL.md" not in lock["files"]
 
 
+def test_modified_orphan_kept_without_prune(tmp_path):
+    """--apply without --prune promises to keep orphans — a hand-edited orphan
+    must not abort unrelated updates or lose its lockfile tracking."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/SKILL.md",
+                                "---\nname: demo\ndescription: d\n---\nv1")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    skill = consumer / ".claude" / "skills" / "demo" / "SKILL.md"
+    skill.write_text("hand edit after install")
+    write_manifest(consumer, "manolii", [])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 0, r.stdout
+    assert skill.read_text() == "hand edit after install"
+    lock = json.loads((consumer / ".ai" / "capability-lock.json").read_text())
+    assert ".claude/skills/demo/SKILL.md" in lock["files"]
+
+
 def load_lint_module():
     import importlib.util
     spec = importlib.util.spec_from_file_location("registry_lint", LINT)

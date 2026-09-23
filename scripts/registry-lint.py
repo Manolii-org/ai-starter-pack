@@ -36,6 +36,11 @@ except ImportError:
     sys.stderr.write("FAIL: PyYAML required (pip install pyyaml)\n")
     sys.exit(2)
 
+try:
+    import jsonschema
+except ImportError:
+    jsonschema = None
+
 REPO = Path(__file__).resolve().parent.parent
 REGISTRY = REPO / "registry"
 
@@ -72,6 +77,12 @@ MANIFEST_FILES = {".claude-plugin/plugin.json", ".devin-plugin/plugin.json",
 ALLOWLIST_PATH = REGISTRY / "leak-allowlist.txt"
 # Always-exempt detector data (the secret-shapes corpus would self-triage).
 DETECTOR_DATA = {"platform/framework/data/token-shapes.json"}
+
+SCOPE_SCHEMA_PATH = REPO / "schemas" / "registry-scope.schema.json"
+try:
+    SCOPE_SCHEMA = json.loads(SCOPE_SCHEMA_PATH.read_text()) if jsonschema else None
+except (OSError, json.JSONDecodeError):
+    SCOPE_SCHEMA = None
 
 @dataclass
 class Finding:
@@ -115,8 +126,11 @@ def check_index() -> None:
             report("FAIL", "INDEX", f"{key}: path missing: {p.get('path')}")
         if key[0] not in ALL_SCOPES:
             report("FAIL", "INDEX", f"{key}: unknown scope '{key[0]}'")
-        if Path(p.get("path", "")).parent.name != key[0]:
-            report("FAIL", "INDEX", f"{key}: path {p.get('path')} not inside its scope dir")
+        expected = f"registry/{key[0]}/{key[1]}"
+        if p.get("path") != expected:
+            report("FAIL", "INDEX",
+                   f"{key}: path '{p.get('path')}' != '{expected}' — "
+                   "the resolver would materialise a different plugin than named")
     # every plugin dir under a scope must be indexed
     for scope in ALL_SCOPES:
         sdir = REGISTRY / scope
@@ -184,6 +198,13 @@ def check_scopes() -> None:
             report("FAIL", "SCOPE", f"{scope}: scope.yaml invalid YAML")
             bad += 1
             continue
+        if SCOPE_SCHEMA is not None:
+            validator_cls = jsonschema.validators.validator_for(SCOPE_SCHEMA)
+            for err in sorted(validator_cls(SCOPE_SCHEMA).iter_errors(doc),
+                              key=lambda e: list(e.absolute_path)):
+                where = "/".join(str(p) for p in err.absolute_path) or "<root>"
+                report("FAIL", "SCOPE", f"{scope}: schema violation at {where}: {err.message}")
+                bad += 1
         if doc.get("scope") != scope:
             report("FAIL", "SCOPE", f"{scope}: scope field '{doc.get('scope')}' != dir")
             bad += 1
@@ -223,7 +244,15 @@ def line_key(rel_s: str, line: str) -> str:
     return f"{rel_s}#{h}"
 
 
-SCAN_SUFFIXES = {".md", ".py", ".sh", ".json", ".yml", ".yaml", ".ts", ".txt"}
+def is_text_file(path: Path) -> bool:
+    """Sniff for binary content — the content scans cover every text file in
+    the registry regardless of extension (.env, Dockerfile, extensionless
+    executables): a credential or org name must not evade the gate by living
+    in a file type nobody enumerated."""
+    try:
+        return b"\x00" not in path.read_bytes()[:8192]
+    except OSError:
+        return False
 
 
 def content_scan_files(org_leak: bool = True) -> list[Path]:
@@ -233,7 +262,7 @@ def content_scan_files(org_leak: bool = True) -> list[Path]:
     a scope.yaml must still fail."""
     out = []
     for path in sorted(REGISTRY.rglob("*")):
-        if not path.is_file() or path.suffix.lower() not in SCAN_SUFFIXES:
+        if not path.is_file() or not is_text_file(path):
             continue
         rel = path.relative_to(REGISTRY)
         if rel.as_posix() in DETECTOR_DATA:

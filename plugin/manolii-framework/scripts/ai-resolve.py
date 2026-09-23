@@ -284,10 +284,11 @@ def main() -> int:
         plan_requirement(req["plugin"], str(req["ref"]), universe,
                          registry_root, index, repo_root, locked_dig, plan)
 
-    # Orphan detection: lockfile files no longer required. A file whose
-    # on-disk digest differs from the installed digest (or whose install
-    # digest is unknown — v1 locks) may be a hand edit: never unlink it
-    # silently, surface it as a conflict like every other clobber.
+    # Orphan detection: lockfile files no longer required. Without --prune an
+    # orphan is simply kept (and stays lockfile-tracked) — modified or not.
+    # Under --prune a file whose on-disk digest differs from the installed
+    # digest (or whose install digest is unknown — v1 locks) may be a hand
+    # edit: never unlink it silently, surface it as a conflict.
     current = set()
     for r in plan.resolved:
         current.update(r["files"])
@@ -296,7 +297,8 @@ def main() -> int:
             continue
         candidate = repo_root / f
         digest = locked_dig[f]
-        if candidate.is_file() and (digest is None or sha256(candidate) != digest):
+        if (args.prune and candidate.is_file()
+                and (digest is None or sha256(candidate) != digest)):
             plan.conflicts.append((
                 candidate,
                 "prune candidate modified since install — refusing to remove a "
