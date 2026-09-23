@@ -2679,6 +2679,55 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     r = run(plain, _bootstrap_env(tmp_path))
     assert r.returncode == 2, r.stderr
 
+    # A credential.helper configured INSIDE the clone (local scope or
+    # a file it includes) executes during the https push — the clone
+    # is untrusted input; refuse it.
+    ch = tmp_path / "credhelper"
+    ch.mkdir()
+    sp.run(["git", "init", "-q"], cwd=ch, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=ch, capture_output=True)
+    sp.run(["git", "config", "credential.helper", "!leak"],
+           cwd=ch, capture_output=True)
+    r = run(ch, _bootstrap_env(tmp_path))
+    assert r.returncode == 2, r.stderr
+    assert "credential.helper" in r.stderr
+    assert not (ch / "registry").exists()
+
+    # The same helper in the operator's GLOBAL config is the env trust
+    # channel (like MIRROR_TRUST_DIRS), not untrusted input → allowed.
+    chg = tmp_path / "credhelper-global"
+    chg.mkdir()
+    gcfg = tmp_path / "gitconfig.helper"
+    gcfg.write_text("[credential]\n\thelper = !leak\n")
+    sp.run(["git", "init", "-q"], cwd=chg, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=chg, capture_output=True)
+    r = run(chg, dict(_bootstrap_env(tmp_path),
+                      GIT_CONFIG_GLOBAL=str(gcfg)))
+    assert r.returncode == 0, r.stderr
+
+    # Attributes binding against a path the bootstrap CREATES
+    # (README.md / schemas/**) must refuse even though the path does
+    # not exist yet — the seeded file enters the filter during
+    # 'git add'.
+    fg = tmp_path / "filtgen"
+    fg.mkdir()
+    sp.run(["git", "init", "-q"], cwd=fg, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=fg, capture_output=True)
+    sp.run(["git", "config", "filter.leak.clean", "cat > /tmp/out2"],
+           cwd=fg, capture_output=True)
+    (fg / ".gitattributes").write_text(
+        "README.md filter=leak\nschemas/** filter=leak\n")
+    r = run(fg, _bootstrap_env(tmp_path))
+    assert r.returncode == 2, r.stderr
+    assert "filter" in r.stderr
+    assert not (fg / "registry").exists()
+
 
 def test_bootstrap_mirror_push_target_pass(tmp_path):
     """Push-target validation must not over-refuse: (a) an explicit
@@ -3127,6 +3176,31 @@ def test_bootstrap_ssh_effective_config(monkeypatch, tmp_path):
     qcfg = tmp_path / "ssh_quoted_exec"
     qcfg.write_text('Match "exec" "test -e /tmp/marker"\n')
     assert mod._match_exec_in([str(qcfg)]) is True
+    # Optional '=' keyword separators: 'Match=exec cmd' and
+    # 'Match exec="cmd"' are the same criterion to ssh.
+    eqcfg = tmp_path / "ssh_eq_exec"
+    eqcfg.write_text('Match=exec "test -e /tmp/marker"\n')
+    assert mod._match_exec_in([str(eqcfg)]) is True
+    eqcfg2 = tmp_path / "ssh_eq_exec2"
+    eqcfg2.write_text('Match exec="test -e /tmp/marker"\n')
+    assert mod._match_exec_in([str(eqcfg2)]) is True
+    # A criterion name in ARGUMENT position is a value, not a
+    # condition — 'Match host exec' targets a host literally named
+    # exec and must not trip.
+    argpos = tmp_path / "ssh_arg_pos"
+    argpos.write_text("Match host exec\n  HostName attacker.example\n")
+    assert mod._match_exec_in([str(argpos)]) is False
+    # Flag criteria take no argument — 'final' must not swallow a
+    # following 'exec' criterion as its value.
+    flag = tmp_path / "ssh_flag_exec"
+    flag.write_text('Match final exec "test -e /tmp/x"\n')
+    assert mod._match_exec_in([str(flag)]) is True
+    # GlobalKnownHostsFile 'none' disables the global file — the
+    # remaining user file is still validated, not refused as a path.
+    kh_file.write_text(f"github.com ssh-rsa {good}\n")
+    patch([(k, str(kh_file) if k == "userknownhostsfile" else v)
+           for k, v in CLEAN] + [("globalknownhostsfile", "none")])
+    assert mod._ssh_host_unchanged(URL) is None
     # Reaching the source cap must fail closed — a partial scan can
     # leave a 'Match exec' in an unscanned Include'd file.
     benign = tmp_path / "ssh_benign"

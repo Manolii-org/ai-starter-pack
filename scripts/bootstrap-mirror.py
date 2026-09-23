@@ -481,12 +481,23 @@ def _match_exec_in(paths: list[str]) -> bool:
             ln = ln.strip()
             if not ln or ln.startswith("#"):
                 continue
-            # OpenSSH accepts quoted arguments — Match "exec" "cmd"
-            # leaves the criterion quoted in a raw split, so normalise
-            # quote characters off every token before comparing.
-            f = [t.strip("\"'") for t in ln.lower().split()]
-            if f and f[0] == "match" and "exec" in f[1:]:
-                return True
+            # OpenSSH accepts quoted arguments AND optional '=' keyword
+            # separators (Match=exec "cmd", Match exec="cmd") — split on
+            # both, then walk criterion/argument PAIRS: a criterion name
+            # in argument position ('Match host exec') is a value, not a
+            # condition, while criteria like 'final'/'canonical'/'all'
+            # take no argument.
+            f = [t.strip("\"'") for t in re.split(r"[=\s]+", ln.lower())
+                 if t]
+            if f and f[0] == "match":
+                arg_criteria = {"exec", "host", "originalhost",
+                                "localnetwork", "tagged", "command",
+                                "user", "localuser"}
+                i = 1
+                while i < len(f):
+                    if f[i] == "exec":
+                        return True
+                    i += 2 if f[i] in arg_criteria else 1
     return False
 
 
@@ -672,9 +683,12 @@ def _ssh_host_unchanged(url: str) -> str | None:
             and eff.get("localcommand", "").strip()):
         return ("ssh client config executes a local command after "
                 "connecting (PermitLocalCommand/LocalCommand)")
+    # 'none' disables the file entirely (documented for both knobs) —
+    # filtering it like /dev/null keeps the remaining file validated
+    # instead of resolving a sentinel as a filesystem path.
     kh = [p for p in (eff.get("userknownhostsfile", "").split()
                       + eff.get("globalknownhostsfile", "").split())
-          if p != "/dev/null"]
+          if p.lower() not in ("/dev/null", "none")]
     if not kh:
         return ("ssh host key verification has no known-hosts file "
                 "(UserKnownHostsFile /dev/null)")
@@ -879,18 +893,22 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
         names = [n for n in cand.split(b"\0") if n]
         # 'git add -A' also stages what this bootstrap WILL write — a
         # binding like 'registry/** filter=leak' has no current
-        # candidate yet still receives every seeded file. Probe the
-        # scaffold paths plus every file the vendored registry tree
-        # contributes (a path need not exist for check-attr to report
-        # its binding).
-        scaffold = [b"registry/.private-mirror",
-                    b"registry/plugins.json",
-                    b"registry/private-mirrors.txt",
-                    b"registry/leak-allowlist.txt",
-                    b"registry/secrets-allowlist.txt",
-                    b"registry/pack-surface-allowlist.txt",
-                    b"scripts/registry-lint.py",
-                    b".github/workflows/registry-lint.yml"]
+        # candidate yet still receives every seeded file. Probe every
+        # path the script writes — VENDORED_PATHS (incl. README.md and
+        # the vendored schema) plus the generated allowlists,
+        # plugins.json, and each universe scope — plus every file the
+        # vendored registry tree contributes (a path need not exist
+        # for check-attr to report its binding).
+        scaffold: list[bytes] = []
+        for p in (*VENDORED_PATHS,
+                  "registry/plugins.json",
+                  "registry/leak-allowlist.txt",
+                  "registry/pack-surface-allowlist.txt"):
+            scaffold.append(p.encode())
+            if p.endswith("/"):
+                # A directory prefix binds nothing as a probe path —
+                # probe a representative file under it instead.
+                scaffold.append((p + "scope.yaml").encode())
         scaffold += [f"registry/{u}/scope.yaml".encode()
                      for u in UNIVERSE_OWNERS]
         names += scaffold
@@ -1034,6 +1052,7 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
                     and _slug_of("https://github.com/"
                                  + url[len(proxy):]) == slug)
 
+    saw_https = False
     for url in urls:
         # Transport dispatch is case-insensitive — 'HTTPS://', 'SSH://'
         # and 'GitHub.com:' are the same schemes/host to git, so the
@@ -1050,6 +1069,7 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
                     f"plaintext {m.group(1)} url '{_redact(url)}'")
         if _slug_of(url) == slug or _proxy_ok(url):
             if low.startswith("https://"):
+                saw_https = True
                 # GIT_EXEC_PATH swaps which git-remote-https helper the
                 # push execs — a verified URL is no longer evidence of
                 # the transport that carries the pack.
@@ -1069,6 +1089,26 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
             continue
         return (f"push destination '{_redact(remote)}' resolves to "
                 f"'{_redact(url)}'")
+    # A credential.helper runs during the push on HTTPS destinations —
+    # including a '!shell command' form. A helper configured from INSIDE
+    # the clone (local config or a file it includes) is part of the
+    # untrusted input and can exfiltrate the staged content while every
+    # transport check stays green. Operator-side origins (system, global,
+    # command line, env) are the trust channel — same basis as
+    # MIRROR_TRUST_DIRS.
+    if saw_https:
+        root_p = os.path.normcase(os.path.realpath(str(root))) + os.sep
+        for ln in _cfg_lines("--show-origin", "--get-regexp",
+                             r"^credential\..*\.helper$"
+                             r"|^credential\.helper$"):
+            origin = ln.split(None, 1)[0]
+            if not origin.startswith("file:"):
+                continue
+            op = os.path.normcase(os.path.realpath(
+                os.path.join(str(root), origin[5:])))
+            if op.startswith(root_p):
+                return ("a repository-local credential.helper can "
+                        "exfiltrate the staged universe content")
     return None
 
 
@@ -1395,7 +1435,11 @@ def main() -> int:
     if not regen_allowlists(root, established, vis):
         return 2
     print(f"seeded mirror for {args.universe} at {root} (slug {slug})")
-    print("next: git add -A && git commit && git push, then add the slug "
+    # 'git commit -m': never the bare command — a configured editor
+    # (core.editor/GIT_EDITOR) launches on it and can read the freshly
+    # staged private scaffold.
+    print("next: git add -A && git commit -m 'seed private mirror' && "
+          "git push, then add the slug "
           "digest to the canonical registry/private-mirrors.txt")
     return 0
 
