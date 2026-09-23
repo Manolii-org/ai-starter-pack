@@ -8,6 +8,19 @@ uses: manolii-org/ai-starter-pack/.github/workflows/<name>-reusable.yml@v1.14.0
 
 Frozen at v1 (additive=non-breaking; rename/remove/default-change=v2).
 
+## Runner selection — opt into `ubuntu-slim` for light jobs
+
+Every `runs_on` input defaults to `ubuntu-latest` and changing that default is a
+v2 (breaking) change, so callers opt in explicitly. For jobs that are short
+(<10 min), run no Docker daemon workload (`container:`, `services:`, `docker
+build/run`), and need no `sudo` or heavyweight toolchains, pass
+`runs_on: ubuntu-slim` — it bills at ~1/3 of ubuntu-latest per minute. The slim
+image (>= 20260120) ships `gh`, `jq`, `yq`, Node 24 and cloud CLIs; it runs as
+root with no `sudo` binary and enforces a 15-minute execution cap. Keep
+`ubuntu-latest` (or a `CI_RUNNER_OVERRIDE`-aware expression) for docker,
+sudo, or >10-minute jobs, and for anything that must keep full-toolchain
+compatibility without re-verification.
+
 ## Deployment control-flow actions
 
 Two step-level composite actions keep product-owned provider commands local while

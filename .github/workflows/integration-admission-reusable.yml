@@ -32,7 +32,7 @@ on:
         description: Provenance-validated evidence candidates supplied by a trusted caller/broker.
       runs_on:
         type: string
-        default: ubuntu-slim
+        default: ubuntu-latest
       shadow:
         type: boolean
         default: true

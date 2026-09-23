@@ -14,7 +14,7 @@ on:
     inputs:
       runs_on:
         type: string
-        default: ubuntu-slim
+        default: ubuntu-latest
         description: Runner label.
       python_version:
         type: string
