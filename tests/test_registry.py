@@ -3234,6 +3234,16 @@ def test_bootstrap_ssh_effective_config(monkeypatch, tmp_path):
     flag = tmp_path / "ssh_flag_exec"
     flag.write_text('Match final exec "test -e /tmp/x"\n')
     assert mod._match_exec_in([str(flag)]) is True
+    # Negated criteria: 'Match !exec "cmd"' is still state-dependent
+    # execution — the command's result can differ between check and
+    # push, so it refuses; a negated VALUE ('Match host
+    # !exec.example.com') is a pattern and stays allowed.
+    neg = tmp_path / "ssh_neg_exec"
+    neg.write_text('Match !exec "test ! -e /tmp/marker"\n')
+    assert mod._match_exec_in([str(neg)]) is True
+    negval = tmp_path / "ssh_neg_val"
+    negval.write_text('Match host !exec.example.com\n')
+    assert mod._match_exec_in([str(negval)]) is False
     # GlobalKnownHostsFile 'none' disables the global file — the
     # remaining user file is still validated, not refused as a path.
     kh_file.write_text(f"github.com ssh-rsa {good}\n")

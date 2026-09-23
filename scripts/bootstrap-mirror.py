@@ -497,7 +497,12 @@ def _match_exec_in(paths: list[str]) -> bool:
             # both, then walk criterion/argument PAIRS: a criterion name
             # in argument position ('Match host exec') is a value, not a
             # condition, while criteria like 'final'/'canonical'/'all'
-            # take no argument.
+            # take no argument. Criteria may be negated — 'Match !exec
+            # "cmd"' is state-dependent execution too (the command's
+            # result can differ between check and push), so a leading
+            # '!' is normalised away before the comparison; a negated
+            # VALUE ('Match host !exec.example.com') sits in argument
+            # position and is skipped with it.
             f = [t.strip("\"'") for t in re.split(r"[=\s]+", ln.lower())
                  if t]
             if f and f[0] == "match":
@@ -506,9 +511,10 @@ def _match_exec_in(paths: list[str]) -> bool:
                                 "user", "localuser"}
                 i = 1
                 while i < len(f):
-                    if f[i] == "exec":
+                    crit = f[i].lstrip("!")
+                    if crit == "exec":
                         return True
-                    i += 2 if f[i] in arg_criteria else 1
+                    i += 2 if crit in arg_criteria else 1
     return False
 
 
