@@ -54,7 +54,32 @@ EVENT_KEYS = {
              "paths", "paths-ignore"},
     "pull_request": {"branches", "branches-ignore", "paths", "paths-ignore",
                      "types"},
+    "pull_request_target": {"branches", "branches-ignore", "paths",
+                            "paths-ignore", "types"},
+    "workflow_dispatch": {"inputs"},
+    "workflow_call": {"inputs", "secrets", "outputs"},
+    "workflow_run": {"workflows", "types"},
 }
+# GitHub's real `on:` event names — an invented event makes the whole
+# workflow file unloadable.
+GH_EVENTS = {
+    "branch_protection_rule", "check_run", "check_suite", "create",
+    "delete", "deployment", "deployment_status", "discussion",
+    "discussion_comment", "fork", "gollum", "issue_comment", "issues",
+    "label", "merge_group", "milestone", "page_build", "project",
+    "project_card", "project_column", "public", "pull_request",
+    "pull_request_review", "pull_request_review_comment",
+    "pull_request_target", "push", "registry_package", "release",
+    "repository_dispatch", "schedule", "status", "watch",
+    "workflow_call", "workflow_dispatch", "workflow_run",
+}
+# workflow_dispatch input-definition grammar: only these keys, and `type`
+# restricted to GitHub's real input types.
+INPUT_DEF_KEYS = {"description", "required", "type", "default", "options",
+                  "deprecationMessage"}
+INPUT_TYPES = {"boolean", "choice", "number", "environment", "string"}
+# GitHub only runs workflows directly under .github/workflows/.
+WORKFLOW_PATH_RE = re.compile(r"\.github/workflows/[^/\\]+\.(?:yml|yaml)\Z")
 # GitHub's documented pull_request activity types — a made-up name can never
 # fire, and GitHub rejects the workflow that declares one.
 PR_TYPES = {"assigned", "unassigned", "labeled", "unlabeled", "opened",
@@ -64,6 +89,111 @@ PR_TYPES = {"assigned", "unassigned", "labeled", "unlabeled", "opened",
             "auto_merge_disabled", "milestoned", "demilestoned", "enqueued",
             "dequeued", "head_ref_restored", "head_ref_deleted",
             "marked_as_duplicate", "transferred"}
+
+MONTH_NAMES = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+               "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}
+WEEKDAY_NAMES = {"SUN": 0, "MON": 1, "TUE": 2, "WED": 3, "THU": 4,
+                 "FRI": 5, "SAT": 6}
+# minute/hour/dom/month/dow — names are only valid in their own field
+CRON_FIELDS = ((0, 59, {}), (0, 23, {}), (1, 31, {}),
+               (1, 12, MONTH_NAMES), (0, 7, WEEKDAY_NAMES))
+
+
+def _cron_atom_ok(atom: str, lo: int, hi: int, names: dict[str, int]) -> bool:
+    """One cron atom: `*`, `*/n`, `a`, `a-b`, `a-b/n` — ints or field names."""
+    if atom == "*":
+        return True
+    if atom.startswith("*/"):
+        return atom[2:].isdigit() and int(atom[2:]) > 0
+    step = None
+    if "/" in atom:
+        atom, step = atom.split("/", 1)
+        if not step.isdigit() or int(step) <= 0:
+            return False
+    if "-" in atom:
+        a, b = atom.split("-", 1)
+        try:
+            lo_v = names.get(a.upper(), int(a) if a.lstrip("-").isdigit() else None)
+            hi_v = names.get(b.upper(), int(b) if b.lstrip("-").isdigit() else None)
+        except (TypeError, ValueError):
+            return False
+        if lo_v is None or hi_v is None:
+            return False
+        return lo <= lo_v <= hi_v <= hi
+    v = names.get(atom.upper())
+    if v is None:
+        if not atom.lstrip("-").isdigit():
+            return False
+        v = int(atom)
+    return lo <= v <= hi
+
+
+def valid_cron(expr: str) -> bool:
+    fields = expr.split()
+    if len(fields) != 5:
+        return False
+    return all(
+        all(_cron_atom_ok(atom, lo, hi, names) for atom in field.split(","))
+        for field, (lo, hi, names) in zip(fields, CRON_FIELDS)
+    )
+
+
+def _input_def_ok(v) -> bool:
+    """`inputs:` must map names to definitions inside GitHub's grammar."""
+    if not isinstance(v, dict):
+        return False
+    for m in v.values():
+        if not isinstance(m, dict) or not set(m) <= INPUT_DEF_KEYS:
+            return False
+        it = m.get("type")
+        if it is not None and it not in INPUT_TYPES:
+            return False
+        if "required" in m and not isinstance(m["required"], bool):
+            return False
+        if "options" in m and not (
+                isinstance(m["options"], list) and m["options"]
+                and all(isinstance(o, str) for o in m["options"])):
+            return False
+    return True
+
+
+def _event_loadable(name, cfg) -> bool:
+    """A sibling `on.<event>` declaration must itself be loadable — one bad
+    entry (`schedule: false`, an unknown event name, a bad filter value)
+    unloads the whole workflow, so the lane's push/PR can never fire either."""
+    if not isinstance(name, str) or name not in GH_EVENTS:
+        return False
+    if cfg is None:
+        return True
+    if name == "schedule":
+        return (isinstance(cfg, list) and cfg and all(
+            isinstance(s, dict) and set(s) == {"cron"}
+            and isinstance(s["cron"], str) and valid_cron(s["cron"])
+            for s in cfg))
+    if not isinstance(cfg, dict):
+        return False
+    allowed = EVENT_KEYS.get(name, {"types"})
+    if not set(cfg) <= allowed:
+        return False
+    if name == "workflow_run" and not (
+            isinstance(cfg.get("workflows"), list) and cfg["workflows"]
+            and all(isinstance(w, str) and w.strip() for w in cfg["workflows"])):
+        return False
+    for k, v in cfg.items():
+        if k == "inputs":
+            if not _input_def_ok(v):
+                return False
+            continue
+        if k in ("secrets", "outputs"):
+            if not isinstance(v, dict):
+                return False
+            continue
+        if not (isinstance(v, str)
+                or (isinstance(v, list)
+                    and all(isinstance(x, str) for x in v))):
+            return False
+    return True
+
 
 LANE_REQUIRED = ("branch", "environment", "workflow")
 REPO_REQUIRED = ("repo", "lanes")
@@ -154,7 +284,12 @@ def load_contract(path: Path) -> dict:
                 problems.append(f"{where} ({r.get('repo','?')}): 'lanes' must be a list")
     if jsonschema is not None and SCHEMA_FILE.exists():
         schema = json.loads(SCHEMA_FILE.read_text(encoding="utf-8"))
-        for err in jsonschema.Draft202012Validator(schema).iter_errors(doc):
+        validator_cls = getattr(jsonschema, "Draft202012Validator", None)
+        if validator_cls is None:
+            # older jsonschema (e.g. 3.x) — pick the validator matching the
+            # schema's $schema keyword instead of a hardcoded draft
+            validator_cls = jsonschema.validators.validator_for(schema)
+        for err in validator_cls(schema).iter_errors(doc):
             loc = ".".join(str(p) for p in err.absolute_path) or "<root>"
             problems.append(f"{loc}: {err.message}")
     elif jsonschema is None:
@@ -175,6 +310,10 @@ def load_contract(path: Path) -> dict:
 def fetch_workflow(repo: str, wf_path: str, branch: str,
                    args: argparse.Namespace) -> tuple[str | None, str | None]:
     """Return (yaml_text, error) for the workflow file ON THE LANE'S BRANCH."""
+    if not WORKFLOW_PATH_RE.fullmatch(wf_path):
+        # GitHub only discovers workflows under .github/workflows/ — a file
+        # stored anywhere else can never run for the lane
+        return None, f"{wf_path} is not a .github/workflows/*.yml|*.yaml path"
     if args.mode == "local":
         repo_dir = _repo_dir(args, repo)
         if repo_dir is None:
@@ -331,6 +470,11 @@ def workflow_triggers_branch(spec: dict, branch: str) -> bool:
     # fire: report as non-matching rather than raising on `event in on`.
     if not isinstance(on, dict):
         return False
+    # every declared event must be loadable — a malformed sibling
+    # (`on: {push: null, schedule: false}`) unloads the whole file
+    for ev_name, ev_cfg in on.items():
+        if not _event_loadable(ev_name, ev_cfg):
+            return False
     for event in ("push", "pull_request"):
         if event not in on:
             continue

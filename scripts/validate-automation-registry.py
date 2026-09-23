@@ -44,6 +44,8 @@ ALLOWED_TRIGGER_KEYS = {"type", "cron", "description"}
 RISK_TIERS = {"green", "amber", "red"}
 TRIGGER_TYPES = {"schedule", "push", "pull_request", "workflow_dispatch", "webhook", "other"}
 SECRET_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,}$")
+# GitHub only runs workflows directly under .github/workflows/.
+WORKFLOW_PATH_RE = re.compile(r"\.github/workflows/[^/\\]+\.(?:yml|yaml)\Z")
 # GitHub job ids: start with a letter or `_`, then alphanumerics, `-`, `_`.
 JOB_ID_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*\Z")
 # GitHub's real per-event config keys — anything else can't load.
@@ -52,7 +54,24 @@ EVENT_KEYS = {
              "paths", "paths-ignore"},
     "pull_request": {"branches", "branches-ignore", "paths", "paths-ignore",
                      "types"},
+    "pull_request_target": {"branches", "branches-ignore", "paths",
+                            "paths-ignore", "types"},
     "workflow_dispatch": {"inputs"},
+    "workflow_call": {"inputs", "secrets", "outputs"},
+    "workflow_run": {"workflows", "types"},
+}
+# GitHub's real `on:` event names — an invented event makes the whole
+# workflow file unloadable.
+GH_EVENTS = {
+    "branch_protection_rule", "check_run", "check_suite", "create",
+    "delete", "deployment", "deployment_status", "discussion",
+    "discussion_comment", "fork", "gollum", "issue_comment", "issues",
+    "label", "merge_group", "milestone", "page_build", "project",
+    "project_card", "project_column", "public", "pull_request",
+    "pull_request_review", "pull_request_review_comment",
+    "pull_request_target", "push", "registry_package", "release",
+    "repository_dispatch", "schedule", "status", "watch",
+    "workflow_call", "workflow_dispatch", "workflow_run",
 }
 # workflow_dispatch input-definition grammar: only these keys, and `type`
 # restricted to GitHub's real input types.
@@ -212,23 +231,20 @@ def _workflow_trigger_ok(spec: dict, trigger: dict) -> str | None:
         on = {e: None for e in on}
     if not isinstance(on, dict):
         return "on: is not a recognised trigger block"
+    # EVERY declared event must itself be loadable — a malformed sibling
+    # (`on: {push: null, schedule: false}`) or an invented event name makes
+    # the whole workflow file unloadable, so the registered trigger can
+    # never fire either.
+    for ev_name, ev_cfg in on.items():
+        err = _event_cfg_ok(ev_name, ev_cfg)
+        if err:
+            return err
     ttype = trigger.get("type")
     if ttype == "schedule":
         sched = on.get("schedule")
-        if not isinstance(sched, list) or not sched:
+        if sched is None:
             return "workflow has no on.schedule entries"
-        # reject the WHOLE list on a malformed member — `[{cron: '0 2 * * *'},
-        # false]` is a schedule GitHub cannot load, not "just the cron entry".
-        # `cron` is the only key a schedule item accepts — `{cron: x, bogus: 1}`
-        # can't load either.
-        if any(not isinstance(s, dict) or set(s) != {"cron"}
-               or not isinstance(s["cron"], str) for s in sched):
-            return "on.schedule contains a malformed entry"
-        # every entry's cron must parse — one bad expression makes the whole
-        # workflow unloadable even when the registered cron is also present
-        if any(not valid_cron(s["cron"]) for s in sched):
-            return "on.schedule contains an invalid cron expression"
-        crons = [s["cron"] for s in sched]
+        crons = [s["cron"] for s in sched]  # entries already cron-validated
         want = str(trigger.get("cron", ""))
         if want and want not in crons:
             return f"registered cron {want!r} not in on.schedule {crons!r}"
@@ -237,64 +253,6 @@ def _workflow_trigger_ok(spec: dict, trigger: dict) -> str | None:
     if ttype in ("push", "pull_request", "workflow_dispatch"):
         if ttype not in on:
             return f"workflow missing on.{ttype} trigger"
-        # a parseable but invalid event config (`on: {push: true}`) can
-        # never run — key presence alone is not conformance. The block must
-        # also stay inside GitHub's real per-event key set (a typo'd key like
-        # `brnches` or an underscore alias is unloadable) and each declared
-        # filter must be a string or a list of strings (`paths: false`,
-        # `types: [5]` can't load either). Mutual exclusion:
-        # `branches`+`branches-ignore`, `tags`+`tags-ignore`.
-        ev = on[ttype]
-        if ev is not None:
-            if not isinstance(ev, dict):
-                return f"on.{ttype} is not a valid event configuration"
-            allowed = EVENT_KEYS.get(ttype, set())
-            if not set(ev) <= allowed:
-                return f"on.{ttype} uses keys GitHub doesn't support"
-            for k, v in ev.items():
-                if k == "inputs":
-                    # workflow_dispatch input definitions must be a mapping
-                    # of mappings — `inputs: false` can't load. Each
-                    # definition must itself stay inside GitHub's input
-                    # grammar: only the documented keys, a real `type`,
-                    # a boolean `required`, and a string-list `options`.
-                    if not isinstance(v, dict):
-                        return f"on.{ttype}.inputs must map inputs to definitions"
-                    for iname, idef in v.items():
-                        if not isinstance(idef, dict):
-                            return f"on.{ttype}.inputs must map inputs to definitions"
-                        if not set(idef) <= INPUT_DEF_KEYS:
-                            return f"on.{ttype}.inputs.{iname} uses keys GitHub doesn't support"
-                        it = idef.get("type")
-                        if it is not None and it not in INPUT_TYPES:
-                            return f"on.{ttype}.inputs.{iname}.type '{it}' is not a valid input type"
-                        if "required" in idef and not isinstance(idef["required"], bool):
-                            return f"on.{ttype}.inputs.{iname}.required must be a boolean"
-                        if "options" in idef and not (
-                                isinstance(idef["options"], list) and idef["options"]
-                                and all(isinstance(o, str) for o in idef["options"])):
-                            return f"on.{ttype}.inputs.{iname}.options must be a non-empty list of strings"
-                    continue
-                if not (isinstance(v, str)
-                        or (isinstance(v, list)
-                            and all(isinstance(x, str) for x in v))):
-                    return f"on.{ttype}.{k} is not a valid filter value"
-            # an empty positive filter fires nothing — `paths: []` matches no
-            # changed file, `types: []` no activity
-            if "paths" in ev and not ev["paths"]:
-                return f"on.{ttype} declares an empty paths filter"
-            if "types" in ev and not ev["types"]:
-                return f"on.{ttype} declares an empty types filter"
-            if ttype == "pull_request" and "types" in ev:
-                types = ev["types"]
-                if isinstance(types, str):
-                    types = [types]
-                if any(t not in PR_TYPES for t in types):
-                    return "on.pull_request.types contains an invalid activity"
-            if "branches" in ev and "branches-ignore" in ev:
-                return f"on.{ttype} can't combine branches and branches-ignore"
-            if "tags" in ev and "tags-ignore" in ev:
-                return f"on.{ttype} can't combine tags and tags-ignore"
     jobs = spec.get("jobs")
     if not isinstance(jobs, dict) or not any(
             _runnable_job(j) for k, j in jobs.items()
@@ -303,6 +261,86 @@ def _workflow_trigger_ok(spec: dict, trigger: dict) -> str | None:
         # verifies — the registry drift check would stay green with the
         # automation's work silently removed
         return "workflow declares no runnable jobs"
+    return None
+
+
+def _event_cfg_ok(name, cfg) -> str | None:
+    """One `on.<event>` declaration must be a config GitHub can load: a real
+    event name, the right shape for that event, only that event's documented
+    filter keys, and well-formed filter values."""
+    if not isinstance(name, str) or name not in GH_EVENTS:
+        return f"on declares an unknown event {name!r}"
+    if cfg is None:
+        return None                          # `on: {push:}` — unfiltered
+    if name == "schedule":
+        # entries: a non-empty list of {cron: <str>} — only key `cron`, and
+        # every expression must parse (one bad entry unloads the workflow)
+        if not isinstance(cfg, list) or not cfg:
+            return "on.schedule contains a malformed entry"
+        if any(not isinstance(s, dict) or set(s) != {"cron"}
+               or not isinstance(s["cron"], str) for s in cfg):
+            return "on.schedule contains a malformed entry"
+        if any(not valid_cron(s["cron"]) for s in cfg):
+            return "on.schedule contains an invalid cron expression"
+        return None
+    if not isinstance(cfg, dict):
+        return f"on.{name} is not a valid event configuration"
+    # events with no documented branch/path grammar only accept `types`;
+    # workflow_call/dispatch/run have their own key sets in EVENT_KEYS
+    allowed = EVENT_KEYS.get(name, {"types"})
+    if not set(cfg) <= allowed:
+        return f"on.{name} uses keys GitHub doesn't support"
+    if name == "workflow_run" and not (
+            isinstance(cfg.get("workflows"), list) and cfg["workflows"]
+            and all(isinstance(w, str) and w.strip() for w in cfg["workflows"])):
+        return "on.workflow_run requires a non-empty workflows list"
+    for k, v in cfg.items():
+        if k == "inputs":
+            # input definitions must be a mapping of mappings. Each
+            # definition must itself stay inside GitHub's input grammar:
+            # only the documented keys, a real `type`, a boolean
+            # `required`, and a string-list `options`.
+            if not isinstance(v, dict):
+                return f"on.{name}.inputs must map inputs to definitions"
+            for iname, idef in v.items():
+                if not isinstance(idef, dict):
+                    return f"on.{name}.inputs must map inputs to definitions"
+                if not set(idef) <= INPUT_DEF_KEYS:
+                    return f"on.{name}.inputs.{iname} uses keys GitHub doesn't support"
+                it = idef.get("type")
+                if it is not None and it not in INPUT_TYPES:
+                    return f"on.{name}.inputs.{iname}.type '{it}' is not a valid input type"
+                if "required" in idef and not isinstance(idef["required"], bool):
+                    return f"on.{name}.inputs.{iname}.required must be a boolean"
+                if "options" in idef and not (
+                        isinstance(idef["options"], list) and idef["options"]
+                        and all(isinstance(o, str) for o in idef["options"])):
+                    return f"on.{name}.inputs.{iname}.options must be a non-empty list of strings"
+            continue
+        if k in ("secrets", "outputs"):
+            if not isinstance(v, dict):
+                return f"on.{name}.{k} must be a mapping"
+            continue
+        if not (isinstance(v, str)
+                or (isinstance(v, list)
+                    and all(isinstance(x, str) for x in v))):
+            return f"on.{name}.{k} is not a valid filter value"
+    # an empty positive filter fires nothing — `paths: []` matches no
+    # changed file, `types: []` no activity
+    if "paths" in cfg and not cfg["paths"]:
+        return f"on.{name} declares an empty paths filter"
+    if "types" in cfg and not cfg["types"]:
+        return f"on.{name} declares an empty types filter"
+    if name in ("pull_request", "pull_request_target") and "types" in cfg:
+        types = cfg["types"]
+        if isinstance(types, str):
+            types = [types]
+        if any(t not in PR_TYPES for t in types):
+            return f"on.{name}.types contains an invalid activity"
+    if "branches" in cfg and "branches-ignore" in cfg:
+        return f"on.{name} can't combine branches and branches-ignore"
+    if "tags" in cfg and "tags-ignore" in cfg:
+        return f"on.{name} can't combine tags and tags-ignore"
     return None
 
 
@@ -416,6 +454,13 @@ def check_workflow_files(doc: dict, args: argparse.Namespace, errors: list[str])
             continue  # missing/non-string fields already reported by validate()
         if "*" in repo:
             continue  # wildcard declaration — applies fleet-wide, no single file to fetch
+        # GitHub only discovers workflows under .github/workflows/ — a file
+        # stored anywhere else (archive/nightly.yml) never runs, so don't
+        # verify it
+        if not WORKFLOW_PATH_RE.fullmatch(workflow):
+            fail(f"{name}: workflow '{workflow}' must live at "
+                 ".github/workflows/*.yml|*.yaml", errors)
+            continue
         text = None
         if args.mode == "local":
             repo_dir = _repo_dir(args, repo)

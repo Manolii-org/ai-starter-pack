@@ -687,3 +687,79 @@ def test_changed_files_unquoted_unicode(tmp_path: Path) -> None:
     finally:
         os.chdir(cwd)
     assert "alembic/é.py" in files
+
+
+# ── review round 32 ─────────────────────────────────────────────────────────
+
+def test_registry_malformed_sibling_event(tmp_path: Path) -> None:
+    """`on: {push: null, schedule: false}` — the checked event is fine but the
+    bad sibling makes the whole file unloadable."""
+    import argparse
+    mod = _load(REGISTRY_SCRIPT, "var32a")
+    repo_dir = tmp_path / "repo32"
+    wf = repo_dir / ".github/workflows/x.yml"
+    wf.parent.mkdir(parents=True)
+    wf.write_text("on:\n  push: null\n  schedule: false\n"
+                  "jobs:\n  x: {runs-on: ubuntu-latest, steps: [{run: 'true'}]}\n")
+    auto = {"name": "n", "repo": "Org/repo32",
+            "workflow": ".github/workflows/x.yml",
+            "trigger": {"type": "push"}, "risk_tier": "green", "owner": "o"}
+    args = argparse.Namespace(mode="local", repos_dir=str(tmp_path))
+    errs: list[str] = []
+    mod.check_workflow_files({"automations": [auto]}, args, errs)
+    assert errs and "schedule" in errs[0]
+
+
+def test_registry_unknown_sibling_event(tmp_path: Path) -> None:
+    """An invented event name is itself a load failure."""
+    import argparse
+    mod = _load(REGISTRY_SCRIPT, "var32b")
+    repo_dir = tmp_path / "repo32b"
+    wf = repo_dir / ".github/workflows/x.yml"
+    wf.parent.mkdir(parents=True)
+    wf.write_text("on:\n  push: null\n  fake_event: {types: [x]}\n"
+                  "jobs:\n  x: {runs-on: ubuntu-latest, steps: [{run: 'true'}]}\n")
+    auto = {"name": "n", "repo": "Org/repo32b",
+            "workflow": ".github/workflows/x.yml",
+            "trigger": {"type": "push"}, "risk_tier": "green", "owner": "o"}
+    args = argparse.Namespace(mode="local", repos_dir=str(tmp_path))
+    errs: list[str] = []
+    mod.check_workflow_files({"automations": [auto]}, args, errs)
+    assert errs and "unknown event" in errs[0]
+
+
+def test_registry_workflow_path_not_in_workflows_dir(tmp_path: Path) -> None:
+    """A `workflow:` outside .github/workflows/ can never run — fail it."""
+    import argparse
+    mod = _load(REGISTRY_SCRIPT, "var32c")
+    repo_dir = tmp_path / "repo32c"
+    (repo_dir / "archive").mkdir(parents=True)
+    (repo_dir / "archive/nightly.yml").write_text(
+        "on: push\njobs:\n  x: {runs-on: ubuntu-latest, steps: [{run: 't'}]}\n")
+    auto = {"name": "n", "repo": "Org/repo32c", "workflow": "archive/nightly.yml",
+            "trigger": {"type": "push"}, "risk_tier": "green", "owner": "o"}
+    args = argparse.Namespace(mode="local", repos_dir=str(tmp_path))
+    errs: list[str] = []
+    mod.check_workflow_files({"automations": [auto]}, args, errs)
+    assert errs and ".github/workflows" in errs[0]
+
+
+def test_contract_malformed_sibling_event() -> None:
+    """Deployment checker: a bad sibling unloads the file → push can't fire."""
+    mod = _load(CONTRACT_SCRIPT, "cdc32")
+    spec = yaml.safe_load("on:\n  push: {branches: [develop]}\n  schedule: false\n")
+    assert mod.workflow_triggers_branch(spec, "develop") is False
+    spec = yaml.safe_load("on:\n  push: {branches: [develop]}\n  nope: {}\n")
+    assert mod.workflow_triggers_branch(spec, "develop") is False
+    spec = yaml.safe_load("on:\n  push: {branches: [develop]}\n"
+                          "  schedule: [{cron: '0 2 * * *'}]\n")
+    assert mod.workflow_triggers_branch(spec, "develop") is True
+
+
+def test_contract_workflow_path_restriction(tmp_path: Path) -> None:
+    """fetch_workflow rejects paths outside .github/workflows/ in both modes."""
+    import argparse
+    mod = _load(CONTRACT_SCRIPT, "cdc32b")
+    args = argparse.Namespace(mode="local", repos_dir=str(tmp_path), token="x")
+    _, err = mod.fetch_workflow("Org/repo", "archive/nightly.yml", "main", args)
+    assert err and ".github/workflows" in err

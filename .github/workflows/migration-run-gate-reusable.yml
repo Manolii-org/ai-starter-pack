@@ -64,11 +64,8 @@ on:
         required: false
         default: '.'
         description: Directory holding alembic.ini / the migration tool config.
-      alembic_dir:
-        type: string
-        required: false
-        default: 'alembic'
-        description: Subdirectory under workdir that holds the versions/ tree (alembic -c aware).
+        # a non-standard versions/ tree is still reached via the ini's
+        # script_location — set workdir to the directory holding it.
       adapter:
         type: string
         required: false
