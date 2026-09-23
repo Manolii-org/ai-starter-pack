@@ -763,3 +763,90 @@ def test_contract_workflow_path_restriction(tmp_path: Path) -> None:
     args = argparse.Namespace(mode="local", repos_dir=str(tmp_path), token="x")
     _, err = mod.fetch_workflow("Org/repo", "archive/nightly.yml", "main", args)
     assert err and ".github/workflows" in err
+
+
+# ── review round 33 ─────────────────────────────────────────────────────────
+
+def test_registry_workflow_call_input_grammar(tmp_path: Path) -> None:
+    """workflow_call inputs: `type` is required and only bool/number/string —
+    dispatch grammar (`choice`+options) must NOT be applied to call inputs."""
+    import argparse
+    mod = _load(REGISTRY_SCRIPT, "var33a")
+    repo_dir = tmp_path / "repo33a"
+    wf = repo_dir / ".github/workflows/x.yml"
+    wf.parent.mkdir(parents=True)
+    wf.write_text(
+        "on:\n  push: null\n"
+        "  workflow_call:\n    inputs:\n      target:\n"
+        "        type: choice\n        options: [prod]\n"
+        "jobs:\n  x: {runs-on: ubuntu-latest, steps: [{run: 'true'}]}\n")
+    auto = {"name": "n", "repo": "Org/repo33a",
+            "workflow": ".github/workflows/x.yml",
+            "trigger": {"type": "push"}, "risk_tier": "green", "owner": "o"}
+    args = argparse.Namespace(mode="local", repos_dir=str(tmp_path))
+    errs: list[str] = []
+    mod.check_workflow_files({"automations": [auto]}, args, errs)
+    assert errs and "workflow_call.inputs.target" in errs[0]
+    wf.write_text(
+        "on:\n  push: null\n"
+        "  workflow_call:\n    inputs:\n      target: {description: x}\n"
+        "jobs:\n  x: {runs-on: ubuntu-latest, steps: [{run: 'true'}]}\n")
+    errs = []
+    mod.check_workflow_files({"automations": [auto]}, args, errs)
+    assert errs and "not a valid input type" in errs[0]   # type missing
+
+
+def test_registry_workflow_run_branch_filters_ok(tmp_path: Path) -> None:
+    """workflow_run DOES support branches/branches-ignore — don't reject."""
+    import argparse
+    mod = _load(REGISTRY_SCRIPT, "var33b")
+    repo_dir = tmp_path / "repo33b"
+    wf = repo_dir / ".github/workflows/x.yml"
+    wf.parent.mkdir(parents=True)
+    wf.write_text(
+        "on:\n  push: null\n"
+        "  workflow_run:\n    workflows: [CI]\n    branches: [main]\n"
+        "jobs:\n  x: {runs-on: ubuntu-latest, steps: [{run: 'true'}]}\n")
+    auto = {"name": "n", "repo": "Org/repo33b",
+            "workflow": ".github/workflows/x.yml",
+            "trigger": {"type": "push"}, "risk_tier": "green", "owner": "o"}
+    args = argparse.Namespace(mode="local", repos_dir=str(tmp_path))
+    errs: list[str] = []
+    mod.check_workflow_files({"automations": [auto]}, args, errs)
+    assert errs == []
+
+
+def test_registry_empty_ref_filters_fail(tmp_path: Path) -> None:
+    """`branches: []`/`tags: []` are positive filters that fire nothing."""
+    import argparse
+    mod = _load(REGISTRY_SCRIPT, "var33c")
+    repo_dir = tmp_path / "repo33c"
+    wf = repo_dir / ".github/workflows/x.yml"
+    wf.parent.mkdir(parents=True)
+    wf.write_text("on:\n  push:\n    branches: []\n"
+                  "jobs:\n  x: {runs-on: ubuntu-latest, steps: [{run: 't'}]}\n")
+    auto = {"name": "n", "repo": "Org/repo33c",
+            "workflow": ".github/workflows/x.yml",
+            "trigger": {"type": "push"}, "risk_tier": "green", "owner": "o"}
+    args = argparse.Namespace(mode="local", repos_dir=str(tmp_path))
+    errs: list[str] = []
+    mod.check_workflow_files({"automations": [auto]}, args, errs)
+    assert errs and "empty branches filter" in errs[0]
+
+
+def test_contract_sibling_grammar_parity() -> None:
+    """Contract checker mirrors: workflow_run branches ok; empty branches bad;
+    workflow_call input with dispatch-only grammar rejected."""
+    mod = _load(CONTRACT_SCRIPT, "cdc33")
+    spec = yaml.safe_load(
+        "on:\n  push: {branches: [develop]}\n"
+        "  workflow_run: {workflows: [CI], branches: [main]}\n")
+    assert mod.workflow_triggers_branch(spec, "develop") is True
+    spec = yaml.safe_load(
+        "on:\n  push: {branches: [develop]}\n"
+        "  pull_request_target: {branches: [], branches-ignore: [x]}\n")
+    assert mod.workflow_triggers_branch(spec, "develop") is False
+    spec = yaml.safe_load(
+        "on:\n  push: {branches: [develop]}\n"
+        "  workflow_call: {inputs: {t: {type: choice, options: [a]}}}\n")
+    assert mod.workflow_triggers_branch(spec, "develop") is False

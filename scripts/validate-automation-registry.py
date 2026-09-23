@@ -58,7 +58,7 @@ EVENT_KEYS = {
                             "paths-ignore", "types"},
     "workflow_dispatch": {"inputs"},
     "workflow_call": {"inputs", "secrets", "outputs"},
-    "workflow_run": {"workflows", "types"},
+    "workflow_run": {"workflows", "types", "branches", "branches-ignore"},
 }
 # GitHub's real `on:` event names — an invented event makes the whole
 # workflow file unloadable.
@@ -78,6 +78,14 @@ GH_EVENTS = {
 INPUT_DEF_KEYS = {"description", "required", "type", "default", "options",
                   "deprecationMessage"}
 INPUT_TYPES = {"boolean", "choice", "number", "environment", "string"}
+# workflow_call (reusable-workflow) definitions have a DIFFERENT grammar:
+# `type` is mandatory and restricted to boolean/number/string — no `choice`,
+# `environment`, `options`, or `deprecationMessage`.
+CALL_INPUT_DEF_KEYS = {"description", "required", "type", "default"}
+CALL_INPUT_TYPES = {"boolean", "number", "string"}
+# workflow_call secrets/outputs: fixed keys; every output needs a `value`.
+CALL_SECRET_KEYS = {"description", "required"}
+CALL_OUTPUT_KEYS = {"description", "value"}
 # GitHub's documented pull_request activity types — a made-up name can never
 # fire, and GitHub rejects the workflow that declares one.
 PR_TYPES = {"assigned", "unassigned", "labeled", "unlabeled", "opened",
@@ -296,26 +304,26 @@ def _event_cfg_ok(name, cfg) -> str | None:
         return "on.workflow_run requires a non-empty workflows list"
     for k, v in cfg.items():
         if k == "inputs":
-            # input definitions must be a mapping of mappings. Each
-            # definition must itself stay inside GitHub's input grammar:
-            # only the documented keys, a real `type`, a boolean
-            # `required`, and a string-list `options`.
-            if not isinstance(v, dict):
-                return f"on.{name}.inputs must map inputs to definitions"
-            for iname, idef in v.items():
-                if not isinstance(idef, dict):
-                    return f"on.{name}.inputs must map inputs to definitions"
-                if not set(idef) <= INPUT_DEF_KEYS:
-                    return f"on.{name}.inputs.{iname} uses keys GitHub doesn't support"
-                it = idef.get("type")
-                if it is not None and it not in INPUT_TYPES:
-                    return f"on.{name}.inputs.{iname}.type '{it}' is not a valid input type"
-                if "required" in idef and not isinstance(idef["required"], bool):
-                    return f"on.{name}.inputs.{iname}.required must be a boolean"
-                if "options" in idef and not (
-                        isinstance(idef["options"], list) and idef["options"]
-                        and all(isinstance(o, str) for o in idef["options"])):
-                    return f"on.{name}.inputs.{iname}.options must be a non-empty list of strings"
+            if name == "workflow_call":
+                err = _call_inputs_ok(name, v)
+            else:
+                err = _dispatch_inputs_ok(name, v)
+            if err:
+                return err
+            continue
+        if k == "secrets" and name == "workflow_call":
+            if not isinstance(v, dict) or any(
+                    not isinstance(s, dict) or not set(s) <= CALL_SECRET_KEYS
+                    or ("required" in s and not isinstance(s["required"], bool))
+                    for s in v.values()):
+                return "on.workflow_call.secrets must map secrets to definitions"
+            continue
+        if k == "outputs" and name == "workflow_call":
+            if not isinstance(v, dict) or any(
+                    not isinstance(o, dict) or not set(o) <= CALL_OUTPUT_KEYS
+                    or not isinstance(o.get("value"), str) or not o["value"].strip()
+                    for o in v.values()):
+                return "on.workflow_call.outputs must map outputs to {value: ...}"
             continue
         if k in ("secrets", "outputs"):
             if not isinstance(v, dict):
@@ -326,11 +334,10 @@ def _event_cfg_ok(name, cfg) -> str | None:
                     and all(isinstance(x, str) for x in v))):
             return f"on.{name}.{k} is not a valid filter value"
     # an empty positive filter fires nothing — `paths: []` matches no
-    # changed file, `types: []` no activity
-    if "paths" in cfg and not cfg["paths"]:
-        return f"on.{name} declares an empty paths filter"
-    if "types" in cfg and not cfg["types"]:
-        return f"on.{name} declares an empty types filter"
+    # changed file, `types: []` no activity, `branches: []`/`tags: []` no ref
+    for pos in ("branches", "tags", "paths", "types"):
+        if pos in cfg and not cfg[pos]:
+            return f"on.{name} declares an empty {pos} filter"
     if name in ("pull_request", "pull_request_target") and "types" in cfg:
         types = cfg["types"]
         if isinstance(types, str):
@@ -341,6 +348,48 @@ def _event_cfg_ok(name, cfg) -> str | None:
         return f"on.{name} can't combine branches and branches-ignore"
     if "tags" in cfg and "tags-ignore" in cfg:
         return f"on.{name} can't combine tags and tags-ignore"
+    return None
+
+
+def _dispatch_inputs_ok(name, v) -> str | None:
+    """workflow_dispatch input definitions must be a mapping of mappings.
+    Each definition must itself stay inside GitHub's input grammar: only
+    the documented keys, a real `type`, a boolean `required`, and a
+    string-list `options`."""
+    if not isinstance(v, dict):
+        return f"on.{name}.inputs must map inputs to definitions"
+    for iname, idef in v.items():
+        if not isinstance(idef, dict):
+            return f"on.{name}.inputs must map inputs to definitions"
+        if not set(idef) <= INPUT_DEF_KEYS:
+            return f"on.{name}.inputs.{iname} uses keys GitHub doesn't support"
+        it = idef.get("type")
+        if it is not None and it not in INPUT_TYPES:
+            return f"on.{name}.inputs.{iname}.type '{it}' is not a valid input type"
+        if "required" in idef and not isinstance(idef["required"], bool):
+            return f"on.{name}.inputs.{iname}.required must be a boolean"
+        if "options" in idef and not (
+                isinstance(idef["options"], list) and idef["options"]
+                and all(isinstance(o, str) for o in idef["options"])):
+            return f"on.{name}.inputs.{iname}.options must be a non-empty list of strings"
+    return None
+
+
+def _call_inputs_ok(name, v) -> str | None:
+    """workflow_call input definitions: `type` is REQUIRED and restricted to
+    boolean/number/string — reusable workflows have no choice/environment."""
+    if not isinstance(v, dict):
+        return f"on.{name}.inputs must map inputs to definitions"
+    for iname, idef in v.items():
+        if not isinstance(idef, dict):
+            return f"on.{name}.inputs must map inputs to definitions"
+        if not set(idef) <= CALL_INPUT_DEF_KEYS:
+            return f"on.{name}.inputs.{iname} uses keys GitHub doesn't support"
+        it = idef.get("type")
+        if it not in CALL_INPUT_TYPES:
+            return f"on.{name}.inputs.{iname}.type '{it}' is not a valid input type"
+        if "required" in idef and not isinstance(idef["required"], bool):
+            return f"on.{name}.inputs.{iname}.required must be a boolean"
     return None
 
 

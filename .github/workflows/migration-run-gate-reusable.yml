@@ -115,6 +115,10 @@ env:
 jobs:
   migration-run:
     runs-on: ${{ inputs.runs_on }}
+    env:
+      # pass caller-controlled values through env, not shell source — a value
+      # like `1; malicious-command` must never reach the run: program
+      DOWNGRADE_STEPS: ${{ inputs.downgrade_steps }}
     # covers service-container startup too — a stalled registry pull/health
     # init happens before any step-level or shell `timeout` can apply
     timeout-minutes: 45
@@ -179,7 +183,15 @@ jobs:
         if: ${{ inputs.downgrade_steps != '0' }}
         working-directory: ${{ inputs.workdir }}
         env: ${{ fromJSON(inputs.migrations_env_json) }}
-        run: timeout 300 ${{ inputs.run_prefix }} alembic downgrade -${{ inputs.downgrade_steps }}
+        run: |
+          # digits-only — the input documents an integer count, not a
+          # command fragment; reject anything else before the shell sees it
+          case "$DOWNGRADE_STEPS" in
+            ''|*[!0-9]*)
+              echo "::error::downgrade_steps must be a non-negative integer (got '$DOWNGRADE_STEPS')"
+              exit 1 ;;
+          esac
+          timeout 300 ${{ inputs.run_prefix }} alembic downgrade "-$DOWNGRADE_STEPS"
 
       - name: Re-apply (upgrade head)
         if: ${{ inputs.downgrade_steps != '0' }}

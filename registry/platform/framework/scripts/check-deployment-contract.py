@@ -58,7 +58,7 @@ EVENT_KEYS = {
                             "paths-ignore", "types"},
     "workflow_dispatch": {"inputs"},
     "workflow_call": {"inputs", "secrets", "outputs"},
-    "workflow_run": {"workflows", "types"},
+    "workflow_run": {"workflows", "types", "branches", "branches-ignore"},
 }
 # GitHub's real `on:` event names — an invented event makes the whole
 # workflow file unloadable.
@@ -78,6 +78,13 @@ GH_EVENTS = {
 INPUT_DEF_KEYS = {"description", "required", "type", "default", "options",
                   "deprecationMessage"}
 INPUT_TYPES = {"boolean", "choice", "number", "environment", "string"}
+# workflow_call (reusable-workflow) definitions have a DIFFERENT grammar:
+# `type` is mandatory and restricted to boolean/number/string — no `choice`,
+# `environment`, `options`, or `deprecationMessage`.
+CALL_INPUT_DEF_KEYS = {"description", "required", "type", "default"}
+CALL_INPUT_TYPES = {"boolean", "number", "string"}
+CALL_SECRET_KEYS = {"description", "required"}
+CALL_OUTPUT_KEYS = {"description", "value"}
 # GitHub only runs workflows directly under .github/workflows/.
 WORKFLOW_PATH_RE = re.compile(r"\.github/workflows/[^/\\]+\.(?:yml|yaml)\Z")
 # GitHub's documented pull_request activity types — a made-up name can never
@@ -138,15 +145,21 @@ def valid_cron(expr: str) -> bool:
     )
 
 
-def _input_def_ok(v) -> bool:
-    """`inputs:` must map names to definitions inside GitHub's grammar."""
+def _input_def_ok(v, call: bool = False) -> bool:
+    """`inputs:` must map names to definitions inside GitHub's grammar —
+    dispatch or reusable-call shape."""
     if not isinstance(v, dict):
         return False
+    keys = CALL_INPUT_DEF_KEYS if call else INPUT_DEF_KEYS
+    types = CALL_INPUT_TYPES if call else INPUT_TYPES
     for m in v.values():
-        if not isinstance(m, dict) or not set(m) <= INPUT_DEF_KEYS:
+        if not isinstance(m, dict) or not set(m) <= keys:
             return False
         it = m.get("type")
-        if it is not None and it not in INPUT_TYPES:
+        if call:
+            if it not in types:              # type is REQUIRED for workflow_call
+                return False
+        elif it is not None and it not in types:
             return False
         if "required" in m and not isinstance(m["required"], bool):
             return False
@@ -181,7 +194,21 @@ def _event_loadable(name, cfg) -> bool:
         return False
     for k, v in cfg.items():
         if k == "inputs":
-            if not _input_def_ok(v):
+            if not _input_def_ok(v, call=(name == "workflow_call")):
+                return False
+            continue
+        if k == "secrets" and name == "workflow_call":
+            if not isinstance(v, dict) or any(
+                    not isinstance(s, dict) or not set(s) <= CALL_SECRET_KEYS
+                    or ("required" in s and not isinstance(s["required"], bool))
+                    for s in v.values()):
+                return False
+            continue
+        if k == "outputs" and name == "workflow_call":
+            if not isinstance(v, dict) or any(
+                    not isinstance(o, dict) or not set(o) <= CALL_OUTPUT_KEYS
+                    or not isinstance(o.get("value"), str) or not o["value"].strip()
+                    for o in v.values()):
                 return False
             continue
         if k in ("secrets", "outputs"):
@@ -192,6 +219,14 @@ def _event_loadable(name, cfg) -> bool:
                 or (isinstance(v, list)
                     and all(isinstance(x, str) for x in v))):
             return False
+    # empty positive filters and mutually-exclusive pairs can't load — same
+    # failures as on the checked push/PR event
+    if any(k in cfg and not cfg[k] for k in ("branches", "tags", "paths", "types")):
+        return False
+    if "branches" in cfg and "branches-ignore" in cfg:
+        return False
+    if "tags" in cfg and "tags-ignore" in cfg:
+        return False
     return True
 
 
