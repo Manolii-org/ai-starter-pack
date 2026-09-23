@@ -267,6 +267,25 @@ def _redact(url: str) -> str:
     return re.sub(r"://[^/@\s]*@", "://***@", url, count=1)
 
 
+def _ssh_host_unchanged() -> bool:
+    """`ssh -G` resolves OpenSSH's effective config — a HostName rewrite
+    in ~/.ssh/config or /etc/ssh/ssh_config would redirect an ssh push
+    away from github.com even though the URL parses to the verified
+    slug. Fail closed when ssh cannot confirm the effective host."""
+    try:
+        r = subprocess.run(["ssh", "-G", "github.com"],
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if r.returncode != 0:
+        return False
+    for ln in r.stdout.splitlines():
+        key, _, value = ln.partition(" ")
+        if key == "hostname":
+            return value.strip().lower() == "github.com"
+    return False
+
+
 def _push_targets_ok(root: Path, slug: str) -> str | None:
     """None when every effective PUSH destination resolves to the verified
     slug; otherwise a short description of the config that would redirect
@@ -378,19 +397,26 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
                  if os.environ.get("GIT_PROXY_COMMAND") else "")
     for url in urls:
         if _slug_of(url) == slug:
-            if ssh_src and (url.startswith("ssh://")
-                            or _GH_SCP.match(url)):
-                return (f"{ssh_src} overrides the ssh transport "
-                        f"for push url '{_redact(url)}'")
+            if url.startswith("ssh://") or _GH_SCP.match(url):
+                if ssh_src:
+                    return (f"{ssh_src} overrides the ssh transport "
+                            f"for push url '{_redact(url)}'")
+                if not _ssh_host_unchanged():
+                    return ("ssh client config redirects github.com "
+                            "elsewhere (or 'ssh -G' could not verify "
+                            "the effective host) for push url "
+                            f"'{_redact(url)}'")
             if proxy_src and url.startswith("git://"):
                 return (f"{proxy_src} overrides the git transport "
                         f"for push url '{_redact(url)}'")
             continue
-        # Devin-box auth proxy: forwards pushes to the github.com slug
-        # embedded in its path (the box's global insteadOf rewrites every
-        # github.com URL through it — pushes still land on that repo).
-        proxy = "https://git-manager.devin.ai/proxy/github.com/"
-        if not (url.startswith(proxy)
+        # Auth-proxy exception: an environment may rewrite github.com
+        # URLs through an auth proxy whose path still embeds the real
+        # slug. The prefix is supplied by the operator via the
+        # MIRROR_GITHUB_PROXY_PREFIX env var — environment-specific
+        # infrastructure hostnames do not belong in this public repo.
+        proxy = os.environ.get("MIRROR_GITHUB_PROXY_PREFIX", "")
+        if not (proxy and url.startswith(proxy)
                 and _slug_of("https://github.com/" + url[len(proxy):])
                 == slug):
             return (f"push destination '{_redact(remote)}' resolves to "

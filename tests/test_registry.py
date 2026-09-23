@@ -2284,6 +2284,27 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     assert "SECRETTOKEN" not in r.stderr
     assert not (cl / "registry").exists()
 
+    # An ssh/scp URL parses to the verified slug, but the operator's
+    # ssh config can map Host github.com to another HostName — 'ssh -G'
+    # must confirm the effective host (stubbed here to answer a
+    # rewritten hostname).
+    sh = tmp_path / "sshhostname"
+    sh.mkdir()
+    stub = tmp_path / "sshstub"
+    stub.mkdir()
+    s = stub / "ssh"
+    s.write_text("#!/bin/sh\necho 'hostname evil.example.test'\n")
+    s.chmod(0o755)
+    sp.run(["git", "init", "-q"], cwd=sh, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "git@github.com:Buro-Built/buro-registry.git"],
+           cwd=sh, capture_output=True)
+    env = _bootstrap_env(tmp_path)
+    r = run(sh, dict(env, PATH=f"{stub}:{env['PATH']}"))
+    assert r.returncode == 2, r.stderr
+    assert "ssh client config" in r.stderr
+    assert not (sh / "registry").exists()
+
     # A git:// URL parses to the verified slug, but core.gitProxy
     # replaces the direct connection — the push can land anywhere the
     # proxy command chooses → refuse.
@@ -2323,19 +2344,19 @@ def test_bootstrap_mirror_push_target_pass(tmp_path):
     """Push-target validation must not over-refuse: (a) an explicit
     pushurl pinned to the verified slug stays valid even when a
     pushInsteadOf rule exists — git ignores pushInsteadOf for remotes
-    with an explicit pushurl; (b) the Devin-box auth-proxy insteadOf
-    rewrites the effective push URL to git-manager.devin.ai, which
-    still lands on the verified github.com slug."""
+    with an explicit pushurl; (b) an env-supplied auth-proxy prefix
+    whose insteadOf rewrites the effective push URL still lands on
+    the verified github.com slug."""
     import subprocess as sp
     pack = Path(__file__).resolve().parent.parent
     env = _bootstrap_env(tmp_path)
 
-    def run(root):
+    def run(root, e=None):
         return sp.run(
             [sys.executable, "scripts/bootstrap-mirror.py", "--root",
              str(root), "--universe", "buro",
              "--slug", "buro-built/buro-registry"],
-            cwd=pack, capture_output=True, text=True, env=env)
+            cwd=pack, capture_output=True, text=True, env=e or env)
 
     a = tmp_path / "pushurl-ok"
     a.mkdir()
@@ -2357,10 +2378,11 @@ def test_bootstrap_mirror_push_target_pass(tmp_path):
     sp.run(["git", "remote", "add", "origin",
             "https://github.com/Buro-Built/buro-registry.git"],
            cwd=b, capture_output=True)
+    prefix = "https://auth-proxy.example.test/github.com/"
     sp.run(["git", "config",
-            "url.https://git-manager.devin.ai/proxy/github.com/.insteadOf",
+            f"url.{prefix}.insteadOf",
             "https://github.com/"], cwd=b, capture_output=True)
-    r = run(b)
+    r = run(b, dict(env, MIRROR_GITHUB_PROXY_PREFIX=prefix))
     assert r.returncode == 0, r.stderr
 
     # remote.pushDefault selecting a DIFFERENT remote is fine when that
@@ -2378,6 +2400,28 @@ def test_bootstrap_mirror_push_target_pass(tmp_path):
     sp.run(["git", "config", "remote.pushDefault", "mirror"], cwd=c,
            capture_output=True)
     r = run(c)
+    assert r.returncode == 0, r.stderr
+
+    # An ssh/scp destination with a clean ssh config passes — 'ssh -G'
+    # confirms github.com is not redirected. HOME points at an empty
+    # home so the machine's real ~/.ssh/config cannot interfere.
+    sh = tmp_path / "ssh-ok"
+    sh.mkdir()
+    sp.run(["git", "init", "-q"], cwd=sh, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "git@github.com:Buro-Built/buro-registry.git"],
+           cwd=sh, capture_output=True)
+    empty_home = tmp_path / "emptyhome"
+    empty_home.mkdir()
+    # ssh resolves ~ via getpwuid, not $HOME, so an empty HOME does not
+    # isolate ~/.ssh/config — stub 'ssh -G' to confirm github.com
+    # instead of depending on the machine's real ssh config.
+    stub = tmp_path / "sshokstub"
+    stub.mkdir()
+    s = stub / "ssh"
+    s.write_text("#!/bin/sh\necho 'hostname github.com'\n")
+    s.chmod(0o755)
+    r = run(sh, dict(env, PATH=f"{stub}:{env['PATH']}"))
     assert r.returncode == 0, r.stderr
 
     # A URL-valued branch.<name>.pushRemote at the verified slug — git
