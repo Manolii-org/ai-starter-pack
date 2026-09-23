@@ -382,7 +382,10 @@ def _kh_pin_problem(files: list[str], port: str) -> str | None:
     for rp in files:
         try:
             if os.path.getsize(rp) > 8 << 20:  # absurd for known_hosts
-                continue
+                # ssh still reads the file — skipping it would let a
+                # padded forged entry past verification. Fail closed.
+                return ("a known-hosts file exceeds the size that can "
+                        "be verified safely")
             data = Path(rp).read_text(errors="replace")
         except OSError:
             continue
@@ -525,7 +528,11 @@ def _ssh_host_unchanged(url: str) -> str | None:
             return ("ssh host key verification uses an untrusted "
                     "known-hosts file path")
         trusted.append(rp)
-    return _kh_pin_problem(trusted, port)
+    # ssh looks up '[github.com]:<port>' for non-default ports — the
+    # EFFECTIVE port from -G (a 'Host github.com / Port 443' block),
+    # not the URL's, names the token the real lookup uses.
+    eff_port = eff.get("port", "") or (port or "")
+    return _kh_pin_problem(trusted, eff_port)
 
 
 def _push_targets_ok(root: Path, slug: str) -> str | None:

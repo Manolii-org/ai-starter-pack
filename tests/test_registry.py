@@ -2924,6 +2924,26 @@ def test_bootstrap_ssh_effective_config(monkeypatch, tmp_path):
            for k, v in CLEAN])
     assert mod._ssh_host_unchanged(URL) is None
 
+    # Non-default effective port: 'Host github.com / Port 443' makes
+    # ssh look up '[github.com]:443' — a forged key under that hashed
+    # token must fail too (the EFFECTIVE port, not the URL's).
+    salt = b"portsalt"
+    tok443 = "|1|" + base64.b64encode(salt).decode() + "|" + \
+        base64.b64encode(hmac.new(
+            salt, b"[github.com]:443", hashlib.sha1).digest()).decode()
+    kh_file.write_text(
+        f"{tok443} ssh-rsa {base64.b64encode(b'forged-443').decode()}\n")
+    patch([(k, str(kh_file) if k == "userknownhostsfile" else v)
+           for k, v in CLEAN] + [("port", "443")])
+    assert "published" in mod._ssh_host_unchanged(URL)
+
+    # A padded known-hosts file beyond the verification cap is refused
+    # outright — skipping it would still let ssh read a forged entry.
+    kh_file.write_text(f"github.com ssh-rsa {bad}\n" + "#" * (8 << 20))
+    patch([(k, str(kh_file) if k == "userknownhostsfile" else v)
+           for k, v in CLEAN])
+    assert "size" in mod._ssh_host_unchanged(URL)
+
     # A PATH-resolved ssh outside the system dirs is never even asked.
     patch(CLEAN, which="/tmp/evil/ssh")
     assert "cannot be verified" in mod._ssh_host_unchanged(URL)
