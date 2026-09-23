@@ -78,6 +78,11 @@ import sys
 from pathlib import Path
 from urllib.parse import unquote
 
+try:
+    import pwd
+except ImportError:  # Windows — no getpwuid; expanduser fallback
+    pwd = None
+
 PACK = Path(__file__).resolve().parent.parent
 
 UNIVERSES = ("manolii", "buro", "impaktful", "cpdcheck")
@@ -390,11 +395,28 @@ def _ssh_host_unchanged(url: str) -> str | None:
     if eff.get("knownhostscommand", "").strip().lower() not in ("", "none"):
         return ("ssh client config installs a dynamic host-key source "
                 "(KnownHostsCommand)")
-    if not [p for p in (eff.get("userknownhostsfile", "").split()
-                        + eff.get("globalknownhostsfile", "").split())
-            if p != "/dev/null"]:
+    kh = [p for p in (eff.get("userknownhostsfile", "").split()
+                      + eff.get("globalknownhostsfile", "").split())
+          if p != "/dev/null"]
+    if not kh:
         return ("ssh host key verification has no known-hosts file "
                 "(UserKnownHostsFile /dev/null)")
+    # A custom known-hosts path can name an attacker-seeded file that
+    # 'yes'-level checking then trusts as the host-key database — each
+    # file must live where host keys are actually kept (~/.ssh or
+    # /etc/ssh). ssh resolves '~' via getpwuid, not $HOME.
+    try:
+        pw = pwd.getpwuid(os.getuid()) if pwd else None
+        home = pw.pw_dir if pw else os.path.expanduser("~")
+        user = pw.pw_name if pw else ""
+    except (KeyError, AttributeError):
+        home, user = os.path.expanduser("~"), ""
+    for p in kh:
+        rp = os.path.realpath(os.path.expanduser(
+            p.replace("%d", home).replace("%u", user)))
+        if not rp.startswith((f"{home}/.ssh/", "/etc/ssh/")):
+            return ("ssh host key verification uses an untrusted "
+                    "known-hosts file path")
     return None
 
 
@@ -488,12 +510,12 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
     if remote in names:
         # remote.<name>.vcs delegates the transport to git-remote-<vcs>,
         # which can forward the pack anywhere — the configured URL is no
-        # longer evidence of the real destination.
-        # The value is not echoed: 'remote.<name>.vcs' may itself be a
-        # credential-bearing helper name.
+        # longer evidence of the real destination. Neither the config
+        # value nor the remote name is echoed: both may carry a
+        # credential.
         if _cfg(f"remote.{remote}.vcs"):
-            return (f"remote.{remote}.vcs delegates the push transport "
-                    "to a remote helper")
+            return ("a configured remote's vcs delegates the push "
+                    "transport to a remote helper")
         try:
             r = subprocess.run(
                 ["git", "-C", str(root), "remote", "get-url", "--push",
@@ -573,6 +595,12 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
                     f"plaintext {m.group(1)} url '{_redact(url)}'")
         if _slug_of(url) == slug or _proxy_ok(url):
             if url.startswith("https://"):
+                # GIT_EXEC_PATH swaps which git-remote-https helper the
+                # push execs — a verified URL is no longer evidence of
+                # the transport that carries the pack.
+                if "GIT_EXEC_PATH" in os.environ:
+                    return ("push url handled by an overridden git "
+                            "exec path (GIT_EXEC_PATH)")
                 tls = _tls_problem(url)
                 if tls:
                     return f"{tls} for push url '{_redact(url)}'"

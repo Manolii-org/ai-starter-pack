@@ -2223,6 +2223,40 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     assert "helper--token" not in r.stderr
     assert not (vc / "registry").exists()
 
+    # And a credential-bearing remote NAME is not echoed either.
+    vn = tmp_path / "vcs-name"
+    vn.mkdir()
+    sp.run(["git", "init", "-q"], cwd=vn, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=vn, capture_output=True)
+    sp.run(["git", "remote", "add", "SUPERSECRETTOKEN",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=vn, capture_output=True)
+    sp.run(["git", "config", "remote.pushDefault", "SUPERSECRETTOKEN"],
+           cwd=vn, capture_output=True)
+    sp.run(["git", "config", "remote.SUPERSECRETTOKEN.vcs", "evil"],
+           cwd=vn, capture_output=True)
+    r = run(vn, _bootstrap_env(tmp_path))
+    assert r.returncode == 2, r.stderr
+    assert "vcs" in r.stderr
+    assert "SUPERSECRETTOKEN" not in r.stderr
+    assert not (vn / "registry").exists()
+
+    # GIT_EXEC_PATH swaps which git-remote-<scheme> helper the push
+    # execs — a verified https URL is no evidence of the transport.
+    gx = tmp_path / "execpath"
+    gx.mkdir()
+    sp.run(["git", "init", "-q"], cwd=gx, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=gx, capture_output=True)
+    r = run(gx, dict(_bootstrap_env(tmp_path),
+                     GIT_EXEC_PATH="/tmp/evil-exec"))
+    assert r.returncode == 2, r.stderr
+    assert "GIT_EXEC_PATH" in r.stderr
+    assert not (gx / "registry").exists()
+
     # An ssh/scp URL parses to the verified slug, but core.sshCommand
     # replaces the transport entirely — the push can land anywhere →
     # refuse.
@@ -2719,7 +2753,7 @@ def test_bootstrap_ssh_effective_config(monkeypatch):
 
     CLEAN = [("hostname", "github.com"),
              ("stricthostkeychecking", "ask"),
-             ("userknownhostsfile", "/u/.ssh/known_hosts")]
+             ("userknownhostsfile", "~/.ssh/known_hosts")]
     URL = "git@github.com:Buro-Built/buro-registry.git"
 
     patch(CLEAN)
@@ -2771,6 +2805,13 @@ def test_bootstrap_ssh_effective_config(monkeypatch):
     patch(CLEAN + [("userknownhostsfile", "/dev/null"),
                    ("globalknownhostsfile", "/dev/null")])
     assert "known-hosts" in mod._ssh_host_unchanged(URL)
+
+    # A custom known-hosts path can point at an attacker-seeded file —
+    # only ~/.ssh and /etc/ssh locations are trusted.
+    patch(CLEAN + [("userknownhostsfile", "/tmp/attacker_hosts")])
+    assert "untrusted" in mod._ssh_host_unchanged(URL)
+    patch(CLEAN + [("userknownhostsfile", "/etc/ssh/ssh_known_hosts")])
+    assert mod._ssh_host_unchanged(URL) is None
 
     # A PATH-resolved ssh outside the system dirs is never even asked.
     patch(CLEAN, which="/tmp/evil/ssh")
