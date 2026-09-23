@@ -49,15 +49,17 @@ vendoring from a newer canonical checkout; the mirror's own universe scope,
 non-platform index entries, and marker are preserved.
 
 Visibility + binding: the seeder requires (a) --slug to equal the
-checkout's own origin remote — the digest it writes must bind to THIS
-repo, not just any private repo the token can see — and (b) `gh` to
-confirm that slug is private/internal. Either check failing is fatal:
-seeding universe content into a repo of unknown visibility is exactly
-the failure mode the mirror boundary exists to prevent. Mirror-mode
-lint also requires an externally-supplied MIRROR_VISIBILITY=private|
-internal assertion — committed files alone can never prove privacy,
-so the generated workflow verifies visibility via `gh api` on every
-run and the bootstrap injects its own verified result during regen.
+checkout's own github.com origin remote — the digest it writes must
+bind to THIS repo, not just any private repo the token can see — and
+(b) `gh` to confirm that slug is private (NOT internal — internal
+grants every enterprise member, incl. other orgs, read access). Either check failing
+is fatal: seeding universe content into a repo of unknown visibility is
+exactly the failure mode the mirror boundary exists to prevent.
+Mirror-mode lint also requires an externally-supplied
+MIRROR_VISIBILITY=private assertion — committed files alone can never
+prove privacy, so the generated workflow verifies visibility via
+`gh api` on every run and the bootstrap injects its own verified
+result during regen.
 
 Privacy: this script writes no other-org identifiers into the mirror —
 the vendored tree is already org-leak-clean in the canonical repo, and
@@ -158,7 +160,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           vis=$(gh api "repos/${{ github.repository }}" --jq .visibility)
-          if [ "$vis" != "private" ] && [ "$vis" != "internal" ]; then
+          # 'internal' is not private enough: on GitHub Enterprise it
+          # grants every enterprise member (incl. other orgs) read access.
+          if [ "$vis" != "private" ]; then
             echo "::error::mirror repo must be private (got: $vis)"
             exit 1
           fi
@@ -222,30 +226,48 @@ def seed_scope(root: Path, universe: str) -> None:
             SCOPE_YAML.format(universe=universe, ip_owner=IP_OWNERS[universe]))
 
 
+# The mirror MUST live on GitHub — the visibility oracle is `gh api` and
+# the generated gate is a GitHub Actions workflow. A non-GitHub origin that
+# happens to parse (e.g. gitlab.com/<org>/<repo>) would have its visibility
+# checked against an UNRELATED github.com repo of the same slug.
+_GH_HTTPS = re.compile(
+    r"^(?:https?|git|ssh)://(?:[^@/\s]+@)?github\.com(?::\d+)?/"
+    r"([^/\s]+/[^/\s]+?)(?:\.git)?/?$")
+_GH_SCP = re.compile(
+    r"^[^@\s]+@github\.com:([^/\s]+/[^/\s]+?)(?:\.git)?/?$")
+
+
 def _origin_slug(root: Path) -> str | None:
-    """owner/repo of the checkout's origin remote, lowercased — None when
-    git, the remote, or a parseable slug is absent."""
+    """owner/repo of the checkout's github.com origin remote, lowercased —
+    None when git, the remote, or a parseable GitHub slug is absent."""
+    # `git config --get` returns the CONFIGURED url; `remote get-url`
+    # expands url.insteadOf rewrites (e.g. auth proxies) and would hide
+    # the real host the operator bound this checkout to.
     try:
         r = subprocess.run(
-            ["git", "-C", str(root), "remote", "get-url", "origin"],
+            ["git", "-C", str(root), "config", "--get",
+             "remote.origin.url"],
             capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.TimeoutExpired):
         return None
     if r.returncode != 0:
         return None
-    m = re.search(r"[:/]([^/\s]+/[^/\s]+?)\.git$", r.stdout.strip()) \
-        or re.search(r"[:/]([^/\s]+/[^/\s]+?)/?$", r.stdout.strip())
+    url = r.stdout.strip()
+    m = _GH_HTTPS.match(url) or _GH_SCP.match(url)
     return m.group(1).lower() if m else None
 
 
 def check_visibility(slug: str) -> str | None:
-    """Require a CONFIRMED private (or internal) repo before seeding — a
-    self-declared slug + digest pair is not evidence of privacy, and
-    universe content in a public repo is the failure mode this whole
-    design exists to prevent. `gh` is the only cheap visibility oracle;
-    when it cannot answer (not installed, not authed, repo unreachable)
-    the check fails closed — a warn-and-continue would let an operator
-    seed into a public destination without ever noticing."""
+    """Require a CONFIRMED private repo before seeding — a self-declared
+    slug + digest pair is not evidence of privacy, and universe content
+    in a public repo is the failure mode this whole design exists to
+    prevent. `internal` does NOT count: on GitHub Enterprise it grants
+    every enterprise member (including other orgs) read access — the
+    cross-org boundary is org-private, not enterprise-internal. `gh` is
+    the only cheap visibility oracle; when it cannot answer (not
+    installed, not authed, repo unreachable) the check fails closed — a
+    warn-and-continue would let an operator seed into a public
+    destination without ever noticing."""
     try:
         r = subprocess.run(
             ["gh", "api", f"repos/{slug}", "--jq", ".visibility"],
@@ -259,7 +281,7 @@ def check_visibility(slug: str) -> str | None:
             "then authenticate gh (GH_TOKEN) with access to it and retry.\n")
         return None
     vis = r.stdout.strip().lower()
-    if vis in ("private", "internal"):
+    if vis == "private":
         print(f"OK: {slug} visibility={vis}")
         return vis
     sys.stderr.write(
@@ -268,12 +290,16 @@ def check_visibility(slug: str) -> str | None:
     return None
 
 
-def merge_index(src_reg: Path, reg: Path) -> bool:
-    """registry/plugins.json — fresh canonical platform entries merged with
-    the mirror's own non-platform entries (so --refresh-platform never drops
-    plugins the org added to its universe scope). A malformed existing index
-    aborts the run: falling back to {} would silently discard every
-    mirror-owned entry."""
+def merge_index(src_reg: Path, reg: Path, refresh_platform: bool) -> bool:
+    """registry/plugins.json — canonical platform entries merged with the
+    mirror's own non-platform entries (so --refresh-platform never drops
+    plugins the org added to its universe scope). A malformed existing
+    index aborts the run: falling back to {} would silently discard every
+    mirror-owned entry.
+
+    refresh_platform=False keeps the EXISTING platform entries: the
+    platform tree on disk is unchanged, so importing a newer canonical's
+    platform index would desync index↔tree (indexed-but-missing dirs)."""
     canonical = json.loads((src_reg / "plugins.json").read_text())
     dst = reg / "plugins.json"
     if dst.is_file():
@@ -285,11 +311,14 @@ def merge_index(src_reg: Path, reg: Path) -> bool:
                 "restore the file and retry, or the refresh would discard "
                 "the mirror's own plugin entries\n")
             return False
-        mine = [p for p in existing.get("plugins", [])
-                if isinstance(p, dict) and p.get("scope") != "platform"]
-        canonical["plugins"] = (
-            [p for p in canonical.get("plugins", [])
-             if p.get("scope") == "platform"] + mine)
+        if refresh_platform:
+            mine = [p for p in existing.get("plugins", [])
+                    if isinstance(p, dict) and p.get("scope") != "platform"]
+            canonical["plugins"] = (
+                [p for p in canonical.get("plugins", [])
+                 if p.get("scope") == "platform"] + mine)
+        else:
+            canonical["plugins"] = existing.get("plugins", [])
     dst.write_text(json.dumps(canonical, indent=2) + "\n")
     return True
 
@@ -431,8 +460,9 @@ def main() -> int:
     origin = _origin_slug(root)
     if origin is None:
         sys.stderr.write("FAIL: --root must be a git checkout with an "
-                         "'origin' remote — run inside the mirror clone "
-                         "(or `git init` + `git remote add origin` first)\n")
+                         "'origin' remote pointing at github.com — run "
+                         "inside the mirror clone (the visibility check "
+                         "and generated CI gate both assume GitHub)\n")
         return 2
     if origin != slug:
         sys.stderr.write(
@@ -482,11 +512,12 @@ def main() -> int:
     # Vendored canonical content: the whole platform tree + merged index.
     src_reg = PACK / "registry"
     dst_plat = reg / "platform"
-    if args.refresh_platform or not dst_plat.exists():
+    refreshing = args.refresh_platform or not dst_plat.exists()
+    if refreshing:
         if dst_plat.exists():
             shutil.rmtree(dst_plat)
         shutil.copytree(src_reg / "platform", dst_plat)
-    if not merge_index(src_reg, reg):
+    if not merge_index(src_reg, reg, refreshing):
         return 2
 
     (reg / "private-mirrors.txt").write_text(

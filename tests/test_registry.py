@@ -1724,6 +1724,13 @@ def test_public_boundary_private_mirror_marker_waives(tmp_path, monkeypatch):
     monkeypatch.setenv("MIRROR_VISIBILITY", "private")
     mod.check_public_boundary()
     assert not [f for f in mod.results if f.status == "FAIL"]
+    # `internal` is NOT an acceptable assertion — on GitHub Enterprise it
+    # grants every enterprise member (incl. other orgs) read access.
+    mod.results = []
+    monkeypatch.setenv("MIRROR_VISIBILITY", "internal")
+    mod.check_public_boundary()
+    assert any("MIRROR_VISIBILITY" in f.detail
+               for f in mod.results if f.status == "FAIL")
 
 
 def test_public_boundary_marker_undeclared_remote_fails(tmp_path):
@@ -2025,6 +2032,18 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     assert r.returncode == 2, r.stderr
     assert not (root / "registry").exists()
 
+    # A non-GitHub origin that parses to a valid-looking slug — gh would
+    # verify an UNRELATED github.com repo of the same name → refuse.
+    gl = tmp_path / "gitlab"
+    gl.mkdir()
+    sp.run(["git", "init", "-q"], cwd=gl, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://gitlab.com/Buro-Built/buro-registry.git"],
+           cwd=gl, capture_output=True)
+    r = run(gl, _bootstrap_env(tmp_path))
+    assert r.returncode == 2, r.stderr
+    assert not (gl / "registry").exists()
+
     # gh stub OK but --root is not a git checkout → refused (no origin).
     plain = tmp_path / "plainroot"
     plain.mkdir()
@@ -2128,6 +2147,47 @@ def test_bootstrap_mirror_refresh_preserves_index(tmp_path):
                  (root / "registry/plugins.json").read_text())["plugins"]}
     assert ("impaktful", "dqms") in names, "mirror plugin dropped on refresh"
     assert ("platform", "framework") in names
+
+
+def test_bootstrap_mirror_no_refresh_keeps_platform_index(tmp_path):
+    """An established-mirror rerun WITHOUT --refresh-platform keeps the
+    EXISTING platform index entries — importing a newer canonical's
+    platform list while the old vendored tree stays put would desync
+    index↔tree (indexed-but-missing dirs trip the INDEX lint check)."""
+    import subprocess as sp
+    pack = Path(__file__).resolve().parent.parent
+    root = tmp_path / "buro-registry"
+    root.mkdir()
+    sp.run(["git", "init", "-q"], cwd=root, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=root, capture_output=True)
+    env = _bootstrap_env(tmp_path)
+    r = sp.run(
+        [sys.executable, "scripts/bootstrap-mirror.py", "--root", str(root),
+         "--universe", "buro", "--slug", "buro-built/buro-registry"],
+        cwd=pack, capture_output=True, text=True, env=env)
+    assert r.returncode == 0, r.stderr
+
+    # The mirror's platform tree predates a canonical platform addition:
+    # locally drop one platform entry (tree+index stay consistent).
+    idx_path = root / "registry/plugins.json"
+    idx = json.loads(idx_path.read_text())
+    plat = [p for p in idx["plugins"] if p.get("scope") == "platform"]
+    assert len(plat) >= 1
+    dropped = (plat[0]["scope"], plat[0]["name"])
+    idx["plugins"].remove(plat[0])
+    idx_path.write_text(json.dumps(idx))
+
+    r = sp.run(
+        [sys.executable, "scripts/bootstrap-mirror.py", "--root", str(root),
+         "--universe", "buro", "--slug", "buro-built/buro-registry"],
+        cwd=pack, capture_output=True, text=True, env=env)
+    assert r.returncode == 0, r.stderr
+    names = {(p["scope"], p["name"])
+             for p in json.loads(idx_path.read_text())["plugins"]}
+    assert dropped not in names, \
+        "no-refresh rerun re-imported a platform entry the tree lacks"
 
 
 def test_bootstrap_mirror_refresh_preserves_owned_state(tmp_path):

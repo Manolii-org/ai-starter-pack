@@ -853,28 +853,40 @@ def _origin_slug() -> str | None:
     VERIFIED private context: a committed `.private-mirror` file alone
     cannot disable the public boundary, or one PR could plant both the
     marker and universe content and still pass."""
+    # `git config --get` returns the CONFIGURED url; `remote get-url`
+    # expands url.insteadOf rewrites (e.g. auth proxies) and would hide
+    # the real host.
     try:
         r = subprocess.run(
-            ["git", "-C", str(REPO), "remote", "get-url", "origin"],
+            ["git", "-C", str(REPO), "config", "--get",
+             "remote.origin.url"],
             capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.TimeoutExpired):
         return None
     if r.returncode != 0:
         return None
-    m = re.search(r"[:/]([^/\s]+/[^/\s]+?)\.git$", r.stdout.strip()) \
-        or re.search(r"[:/]([^/\s]+/[^/\s]+?)/?$", r.stdout.strip())
+    # A non-GitHub origin that happens to parse (gitlab.com/<org>/<repo>)
+    # is not a mirror — the visibility oracle is `gh api` against GitHub
+    # and the generated gate is a GitHub Actions workflow.
+    url = r.stdout.strip()
+    m = re.match(
+        r"^(?:https?|git|ssh)://(?:[^@/\s]+@)?github\.com(?::\d+)?/"
+        r"([^/\s]+/[^/\s]+?)(?:\.git)?/?$", url) \
+        or re.match(
+            r"^[^@\s]+@github\.com:([^/\s]+/[^/\s]+?)(?:\.git)?/?$", url)
     return m.group(1).lower() if m else None
 
 
 def _mirror_visibility_asserted() -> bool:
     """Mirror mode needs an externally-supplied visibility assertion —
-    MIRROR_VISIBILITY=private|internal set by the caller from an
-    out-of-repo check (CI runs `gh api repos/<repo> --jq .visibility`;
-    bootstrap-mirror.py sets it from its own verified result). A
-    checkout's own committed files can never prove its repo is private:
-    a public fork can carry both the marker and its own slug digest."""
-    return os.environ.get("MIRROR_VISIBILITY", "").strip().lower() in (
-        "private", "internal")
+    MIRROR_VISIBILITY=private set by the caller from an out-of-repo
+    check (CI runs `gh api repos/<repo> --jq .visibility`;
+    bootstrap-mirror.py sets it from its own verified result). Only
+    `private` counts: on GitHub Enterprise `internal` grants every
+    enterprise member (incl. other orgs) read access. A checkout's own
+    committed files can never prove its repo is private: a public fork
+    can carry both the marker and its own slug digest."""
+    return os.environ.get("MIRROR_VISIBILITY", "").strip().lower() == "private"
 
 
 def _verified_mirror_slug() -> str | None:
@@ -937,9 +949,9 @@ def check_public_boundary() -> None:
         if not _mirror_visibility_asserted():
             report("FAIL", "PUBLIC",
                    "mirror declared but MIRROR_VISIBILITY is not asserted "
-                   "to private/internal — CI must set it from an API check "
-                   "(the generated registry-lint workflow does); committed "
-                   "files alone cannot prove this repo is private")
+                   "to private — CI must set it from an API check (the "
+                   "generated registry-lint workflow does); committed files "
+                   "alone cannot prove this repo is private")
             return
         report("PASS", "PUBLIC",
                f"declared private mirror ({slug}) — boundary waived")
