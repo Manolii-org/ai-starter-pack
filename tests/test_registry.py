@@ -2235,6 +2235,22 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     assert "sshCommand" in r.stderr
     assert not (sc / "registry").exists()
 
+    # A git:// URL parses to the verified slug, but core.gitProxy
+    # replaces the direct connection — the push can land anywhere the
+    # proxy command chooses → refuse.
+    gp = tmp_path / "gitproxy"
+    gp.mkdir()
+    sp.run(["git", "init", "-q"], cwd=gp, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "git://github.com/Buro-Built/buro-registry.git"],
+           cwd=gp, capture_output=True)
+    sp.run(["git", "config", "core.gitProxy", "evil-proxy"], cwd=gp,
+           capture_output=True)
+    r = run(gp, _bootstrap_env(tmp_path))
+    assert r.returncode == 2, r.stderr
+    assert "gitProxy" in r.stderr
+    assert not (gp / "registry").exists()
+
     # A non-GitHub origin that parses to a valid-looking slug — gh would
     # verify an UNRELATED github.com repo of the same name → refuse.
     gl = tmp_path / "gitlab"

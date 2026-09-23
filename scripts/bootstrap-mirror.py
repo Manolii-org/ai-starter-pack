@@ -360,6 +360,7 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
     if not urls:
         return f"could not resolve push URLs for '{remote}'"
     ssh_override = _cfg("core.sshCommand")
+    git_proxy = _cfg("core.gitProxy")
     for url in urls:
         if _slug_of(url) == slug:
             # core.sshCommand replaces the ssh transport entirely — an
@@ -368,6 +369,11 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
             if ssh_override and (url.startswith("ssh://")
                                  or _GH_SCP.match(url)):
                 return ("core.sshCommand overrides the ssh transport "
+                        f"for push url '{url}'")
+            # core.gitProxy replaces the direct connection for git:// —
+            # same class of transport override.
+            if git_proxy and url.startswith("git://"):
+                return ("core.gitProxy overrides the git transport "
                         f"for push url '{url}'")
             continue
         # Devin-box auth proxy: forwards pushes to the github.com slug
