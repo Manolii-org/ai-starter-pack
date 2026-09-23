@@ -479,8 +479,11 @@ def _match_exec_in(paths: list[str]) -> bool:
             ln = ln.strip()
             if not ln or ln.startswith("#"):
                 continue
-            f = ln.lower().split()
-            if f[0] == "match" and "exec" in f[1:]:
+            # OpenSSH accepts quoted arguments — Match "exec" "cmd"
+            # leaves the criterion quoted in a raw split, so normalise
+            # quote characters off every token before comparing.
+            f = [t.strip("\"'") for t in ln.lower().split()]
+            if f and f[0] == "match" and "exec" in f[1:]:
                 return True
     return False
 
@@ -791,13 +794,16 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
         return out
 
     # githooks(5): the recommended `git add -A && git commit &&
-    # git push` invokes every hook below — each runs arbitrary code
-    # with the freshly staged universe files readable, so any of them
-    # can exfiltrate the content even when every transport check
-    # passes. `rev-parse --git-path` resolves the effective hooks dir
-    # (core.hooksPath included); any present hook file fails closed —
-    # executability is platform-dependent, and such a file has no
-    # benign role in this bootstrap.
+    # git push` invokes every hook below — index updates
+    # (post-index-change, fsmonitor-watchman), auto-gc (pre-auto-gc),
+    # commit flow (pre-commit .. post-commit), ref transactions
+    # (reference-transaction), and the push itself (pre-push). Each
+    # runs arbitrary code with the freshly staged universe files
+    # readable, so any of them can exfiltrate the content even when
+    # every transport check passes. `rev-parse --git-path` resolves
+    # the effective hooks dir (core.hooksPath included); any present
+    # hook file fails closed — executability is platform-dependent,
+    # and such a file has no benign role in this bootstrap.
     try:
         hp = subprocess.run(
             [git, "-C", str(root), "rev-parse", "--git-path",
@@ -809,11 +815,13 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
         hooks_dir = None
     if hooks_dir is None:
         return "the hooks directory could not be resolved"
-    for name in ("pre-commit", "prepare-commit-msg", "commit-msg",
-                 "post-commit", "pre-push"):
+    for name in ("post-index-change", "fsmonitor-watchman",
+                 "pre-auto-gc", "pre-commit", "prepare-commit-msg",
+                 "commit-msg", "post-commit", "reference-transaction",
+                 "pre-push"):
         if (hooks_dir / name).exists():
             return (f"a '{name}' hook can exfiltrate the staged "
-                    "universe content during the commit/push")
+                    "universe content during the add/commit/push")
 
     def _rewrite(url: str, rules: list[tuple[str, str]]) -> str:
         for prefix, repl in sorted(rules, key=lambda r: -len(r[0])):

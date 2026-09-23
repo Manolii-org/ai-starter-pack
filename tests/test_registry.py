@@ -2838,6 +2838,22 @@ def test_bootstrap_mirror_push_target_pass(tmp_path):
     assert "pre-commit" in r.stderr
     assert not (hk2 / "registry").exists()
 
+    # Index/reference hooks run during `git add`/`git commit` too —
+    # post-index-change fires inside the bootstrap's own staging.
+    rt = tmp_path / "reftranhook"
+    rt.mkdir()
+    sp.run(["git", "init", "-q"], cwd=rt, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=rt, capture_output=True)
+    hook = rt / ".git" / "hooks" / "post-index-change"
+    hook.write_text("#!/bin/sh\nexit 0\n")
+    os.chmod(hook, 0o755)
+    r = run(rt)
+    assert r.returncode == 2, r.stderr
+    assert "post-index-change" in r.stderr
+    assert not (rt / "registry").exists()
+
 
 def _load_bootstrap():
     import importlib.util
@@ -3066,6 +3082,10 @@ def test_bootstrap_ssh_effective_config(monkeypatch, tmp_path):
     hostpat.write_text('Match host exec.example.com\n'
                        '  HostName attacker.example\n')
     assert mod._match_exec_in([str(hostpat)]) is False
+    # OpenSSH accepts quoted criteria — Match "exec" must refuse too.
+    qcfg = tmp_path / "ssh_quoted_exec"
+    qcfg.write_text('Match "exec" "test -e /tmp/marker"\n')
+    assert mod._match_exec_in([str(qcfg)]) is True
 
     # A PATH-resolved binary outside the system dirs earns no trust —
     # a wrapper can attest to itself.
