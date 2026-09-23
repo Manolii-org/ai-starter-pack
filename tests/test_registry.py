@@ -439,6 +439,51 @@ def test_prune_removes_symlink_entry_not_target(tmp_path):
     assert not link.exists() and not link.is_symlink()  # link removed
 
 
+def test_symlinked_lockfile_destination_conflicts(tmp_path):
+    """A symlinked .ai dir makes the lock write follow the link out of the
+    repo — --apply must refuse before touching it."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "x")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    (consumer / ".ai").symlink_to(outside)
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 1
+    assert "lockfile destination" in r.stdout
+    assert not any(outside.iterdir())
+
+
+def test_orphan_behind_symlinked_dir_conflicts(tmp_path):
+    """A lockfile orphan whose PARENT chain contains a symlink: unlink()
+    would traverse the link and delete another capability's file."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("agents/real.md", "real")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    real = consumer / ".claude" / "agents" / "real.md"
+    (consumer / ".claude" / "skills").mkdir()
+    (consumer / ".claude" / "skills" / "alias").symlink_to(
+        "../../agents", target_is_directory=True)
+    lock_file = consumer / ".ai" / "capability-lock.json"
+    lock = json.loads(lock_file.read_text())
+    lock["files"][".claude/skills/alias/real.md"] = hashlib.sha256(
+        real.read_bytes()).hexdigest()
+    lock_file.write_text(json.dumps(lock))
+    r = run_resolver(m, reg_root, consumer, "--apply", "--prune")
+    assert r.returncode == 1
+    assert "symlinked directory" in r.stdout
+    assert real.read_text() == "real"
+
+
 def seed_catalog(reg: Path, patterns: list[str] | None = None) -> None:
     p = reg / "platform" / "framework" / "data"
     p.mkdir(parents=True, exist_ok=True)
@@ -529,6 +574,23 @@ def test_secrets_scans_binary_like_files(tmp_path):
     fails = [f for f in mod.results
              if f.check == "SECRETS" and f.status == "FAIL"]
     assert any("weird" in f.detail for f in fails)
+
+
+def test_org_leak_scans_scope_root_files(tmp_path):
+    """Only scope.yaml is exempt at a scope root — a stray
+    registry/platform/leak.txt cannot bypass the privacy gate."""
+    mod = load_lint_module()
+    reg = tmp_path / "registry"
+    mod.REGISTRY = reg
+    mod.ALLOWLIST_PATH = reg / "leak-allowlist.txt"
+    mod.results = []
+    (reg / "platform").mkdir(parents=True)
+    (reg / "platform" / "scope.yaml").write_text("scope: platform\n")
+    (reg / "platform" / "leak.txt").write_text("belongs to buro entity\n")
+    mod.check_org_leak()
+    fails = [f for f in mod.results
+             if f.check == "ORG-LEAK" and f.status == "FAIL"]
+    assert any("leak.txt" in f.detail for f in fails)
 
 
 def test_org_leak_scans_nested_readme(tmp_path):

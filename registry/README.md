@@ -29,7 +29,9 @@ assets. Cross-universe promotion goes through `platform/` only, after sanitisati
 ```
 registry/
   plugins.json              # machine index: scope → plugin → version
-  CODEOWNERS                # per-scope review ownership
+  secrets-allowlist.txt     # secrets-scan ratchet (per-line)
+                            # per-scope ownership lives in .github/CODEOWNERS —
+                            #  GitHub ignores nested CODEOWNERS files
   <scope>/
     scope.yaml              # scope contract (ip_owner, promotion_policy, surfaces)
     <plugin>/

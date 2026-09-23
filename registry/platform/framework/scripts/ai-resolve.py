@@ -328,16 +328,23 @@ def main() -> int:
         # friends are not resolver-owned. Resolve it and fail closed.
         lexical = repo_root / f
         candidate = lexical.resolve()
+        # The entry itself may still be a symlink — unlink removes the link,
+        # never its target. But a symlink ANCESTOR (.claude/skills/alias ->
+        # ../agents) makes unlink traverse the link and delete another
+        # capability's file; the parent chain must resolve to itself.
+        parent_resolved = lexical.parent.resolve()
         try:
             rel_c = candidate.relative_to(repo_root)
         except ValueError:
             rel_c = None
-        if (Path(f).is_absolute() or rel_c is None
+        if (Path(f).is_absolute() or parent_resolved != lexical.parent
+                or rel_c is None
                 or "/".join(rel_c.parts[:2]) not in OWNED_ROOTS):
             plan.conflicts.append((
                 lexical,
-                "lockfile path outside resolver-owned roots "
-                "(.claude/{skills,agents,commands}) — refusing to act on it "
+                "lockfile path outside resolver-owned roots or behind a "
+                "symlinked directory (.claude/{skills,agents,commands}) — "
+                "refusing to act on it "
                 "(repair .ai/capability-lock.json manually)",
             ))
             continue
@@ -354,6 +361,15 @@ def main() -> int:
             ))
         else:
             plan.removals.append(lexical)
+
+    # A symlinked .ai dir or lock file makes write_text follow the link out of
+    # the repo — refuse before any materialisation applies.
+    lock_file = repo_root / LOCK_PATH
+    if lock_file.resolve() != lock_file:
+        plan.conflicts.append((
+            lock_file,
+            "lockfile destination contains a symlink — refusing to write through it",
+        ))
 
     # ---- report ----
     print(f"universe={universe}  registry={registry_root}")

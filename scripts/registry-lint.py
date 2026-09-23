@@ -114,8 +114,10 @@ def scope_of(path: Path) -> str | None:
 def exempt(rel_to_registry: Path) -> bool:
     """Manifest/root metadata files exempt from content scans."""
     parts = rel_to_registry.parts
-    if len(parts) <= 2:  # registry root files + scope.yaml
+    if len(parts) == 1:  # registry root files (plugins.json, README, allowlists)
         return True
+    if len(parts) == 2 and parts[-1] == "scope.yaml":
+        return True  # scope metadata — anything else at a scope root is scanned
     tail = "/".join(parts[-2:])
     # README.md is deliberately NOT exempt: nested plugin READMEs are
     # distributed content, and exempting them by basename would bypass the
