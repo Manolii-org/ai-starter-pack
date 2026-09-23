@@ -337,7 +337,7 @@ def _ssh_host_unchanged(url: str) -> str | None:
     resolved through the same PATH git uses and must be a system ssh —
     a PATH-shadowing wrapper cannot attest to itself. Fail closed on
     any doubt."""
-    if url.startswith("ssh://"):
+    if url.lower().startswith("ssh://"):
         m = re.match(r"^ssh://(?:([^@/\s]+)@)?github\.com(?::(\d+))?/",
                      url, re.IGNORECASE)
         user, port = m.groups()
@@ -596,15 +596,21 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
                                  + url[len(proxy):]) == slug)
 
     for url in urls:
+        # Transport dispatch is case-insensitive — 'HTTPS://', 'SSH://'
+        # and 'GitHub.com:' are the same schemes/host to git, so the
+        # checks below must see the same normalised form _slug_of did.
+        # The ORIGINAL url is kept for user/port extraction (scp users
+        # are case-sensitive) and for diagnostics.
+        low = url.lower()
         # Plaintext transports (http, git) carry the private pack
         # unencrypted and unauthenticated — refuse them outright like
         # any misdirected destination.
-        m = re.match(r"(http|git)://", url)
+        m = re.match(r"(http|git)://", low)
         if m:
             return (f"push destination '{_redact(remote)}' resolves to "
                     f"plaintext {m.group(1)} url '{_redact(url)}'")
         if _slug_of(url) == slug or _proxy_ok(url):
-            if url.startswith("https://"):
+            if low.startswith("https://"):
                 # GIT_EXEC_PATH swaps which git-remote-https helper the
                 # push execs — a verified URL is no longer evidence of
                 # the transport that carries the pack.
@@ -614,7 +620,7 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
                 tls = _tls_problem(url)
                 if tls:
                     return f"{tls} for push url '{_redact(url)}'"
-            if url.startswith("ssh://") or _GH_SCP.match(url):
+            if low.startswith("ssh://") or _GH_SCP.match(low):
                 if ssh_src:
                     return (f"{ssh_src} overrides the ssh transport "
                             f"for push url '{_redact(url)}'")

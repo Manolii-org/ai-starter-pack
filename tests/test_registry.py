@@ -2288,6 +2288,23 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     assert "GIT_SSH_COMMAND" in r.stderr
     assert not (se / "registry").exists()
 
+    # A mixed-case scp host ('GitHub.com') still binds the verified slug
+    # via the case-insensitive _slug_of — the ssh transport checks must
+    # run on that same normalised view or GIT_SSH_COMMAND slips past.
+    mc = tmp_path / "mixedcase-scp"
+    mc.mkdir()
+    sp.run(["git", "init", "-q"], cwd=mc, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=mc, capture_output=True)
+    sp.run(["git", "config", "remote.origin.pushurl",
+            "git@GitHub.com:Buro-Built/buro-registry.git"], cwd=mc,
+           capture_output=True)
+    r = run(mc, env)
+    assert r.returncode == 2, r.stderr
+    assert "GIT_SSH_COMMAND" in r.stderr
+    assert not (mc / "registry").exists()
+
     # A rejected credential-bearing push URL must not print the
     # credential to stderr (it lands in transcripts/CI logs).
     cr = tmp_path / "creds"
