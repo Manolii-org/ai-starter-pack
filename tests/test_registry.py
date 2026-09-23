@@ -1960,6 +1960,59 @@ def test_bootstrap_mirror_refresh_preserves_index(tmp_path):
     assert ("platform", "framework") in names
 
 
+def test_bootstrap_mirror_refresh_preserves_owned_state(tmp_path):
+    """On an established mirror, refresh must not (a) clobber the org's own
+    scope.yaml edits, or (b) ratchet NEW violations in mirror-owned paths —
+    only vendored-path hits may enter the regenerated allowlists, while
+    pre-existing mirror-owned entries that are still live are preserved."""
+    import subprocess as sp
+    pack = Path(__file__).resolve().parent.parent
+    root = tmp_path / "cpdcheck-registry"
+    root.mkdir()
+    # The PACK-SURFACE scan only sees registry/** in a real git checkout —
+    # its non-git rglob fallback skip-lists the dir. Mirrors are clones, so
+    # init the root before seeding (regen also stages via git add).
+    sp.run(["git", "init", "-q"], cwd=root, capture_output=True)
+    r = sp.run(
+        [sys.executable, "scripts/bootstrap-mirror.py", "--root", str(root),
+         "--universe", "cpdcheck", "--slug",
+         "cpdcheck/cpdcheck-registry"],
+        cwd=pack, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+
+    scope_file = root / "registry/cpdcheck/scope.yaml"
+    scope_file.write_text(scope_file.read_text()
+                          + "\n# org-specific note\n")
+
+    # A pre-existing live ratchet entry for mirror-owned content.
+    keep_line = "see Manolii-org/master for context"
+    keep_key = "registry/cpdcheck/keep.md#" + \
+        hashlib.sha256(keep_line.lower().encode()).hexdigest()[:8]
+    (root / "registry/cpdcheck/keep.md").write_text(keep_line + "\n")
+    al = root / "registry/pack-surface-allowlist.txt"
+    al.write_text(al.read_text() + keep_key + "\n")
+
+    # A NEW mirror-owned violation that was never ratcheted.
+    (root / "registry/cpdcheck/new.md").write_text(
+        "also see Manolii-org/master\n")
+
+    r = sp.run(
+        [sys.executable, "scripts/bootstrap-mirror.py", "--root", str(root),
+         "--universe", "cpdcheck", "--slug",
+         "cpdcheck/cpdcheck-registry", "--refresh-platform"],
+        cwd=pack, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+
+    assert "org-specific note" in scope_file.read_text()
+
+    entries = {ln.split("#", 1)[0] for ln in al.read_text().splitlines()
+               if ln.strip() and not ln.startswith("#")}
+    assert "registry/cpdcheck/keep.md" in entries, \
+        "live mirror-owned ratchet entry dropped on refresh"
+    assert "registry/cpdcheck/new.md" not in entries, \
+        "refresh ratcheted a new mirror-owned violation"
+
+
 def test_pack_surface_scans_tracked_skip_dir(tmp_path):
     """A slug committed under a skip-listed dir is still published —
     the scan enumerates tracked files, not directory names."""

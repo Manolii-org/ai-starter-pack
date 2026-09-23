@@ -23,10 +23,15 @@ Creates the full mirror scaffold:
                                     REGENERATED against the seeded tree
                                     (copying canonical's would go stale:
                                     exempt own-org patterns still have
-                                    frozen entries → FAIL); the secrets
-                                    allowlist is vendored verbatim — its
-                                    token-shape catalogue ships in the
-                                    platform tree unchanged
+                                    frozen entries → FAIL); on an
+                                    established mirror regen keeps only
+                                    VENDORED-path entries + preserved
+                                    mirror-owned entries still live — a
+                                    new violation in the org's own tree
+                                    is never written into the ratchet.
+                                    The secrets allowlist is vendored
+                                    verbatim — its token-shape catalogue
+                                    ships in the platform tree unchanged
     scripts/registry-lint.py        vendored lint gate
     schemas/registry-scope.schema.json
     .github/workflows/registry-lint.yml  generated (minimal — the canonical
@@ -173,8 +178,12 @@ def seed_scope(root: Path, universe: str) -> None:
     sdir = root / "registry" / universe
     sdir.mkdir(parents=True, exist_ok=True)
     scope_file = sdir / "scope.yaml"
-    scope_file.write_text(
-        SCOPE_YAML.format(universe=universe, ip_owner=IP_OWNERS[universe]))
+    # The universe contract is mirror-owned: write it on first seed only.
+    # A refresh rerun must not clobber the org's surfaces/description/
+    # promotion-policy edits.
+    if not scope_file.is_file():
+        scope_file.write_text(
+            SCOPE_YAML.format(universe=universe, ip_owner=IP_OWNERS[universe]))
 
 
 def check_visibility(slug: str) -> int:
@@ -224,23 +233,95 @@ def merge_index(src_reg: Path, reg: Path) -> None:
     dst.write_text(json.dumps(canonical, indent=2) + "\n")
 
 
-def regen_allowlists(root: Path) -> None:
-    """Regenerate the ratchet allowlists against the seeded tree via the
-    vendored lint (its REPO resolves from its own location). Mirror mode is
-    already active — marker + mirrors.txt are written first — so exempt
-    own-org hits never enter the list and no canonical entries go stale.
-    The PACK-SURFACE/ORG-LEAK scans enumerate `git ls-files` — stage the
-    scaffold first or the allowlists come out empty and the first pushed
-    CI run flags every vendored hit as new."""
+# Ratchet files the vendored lint maintains.
+ALLOWLIST_FILES = (
+    "registry/leak-allowlist.txt",
+    "registry/pack-surface-allowlist.txt",
+)
+
+# Paths this bootstrap OWNS (vendored or generated). On an established
+# mirror, allowlist regen may only refresh entries under these paths —
+# hits anywhere else belong to the org's own tree and must surface as
+# lint FAILs, never be ratcheted by a routine refresh.
+VENDORED_PATHS = (
+    "registry/platform/",
+    "registry/plugins.json",
+    "registry/secrets-allowlist.txt",
+    "registry/private-mirrors.txt",
+    "registry/.private-mirror",
+    "scripts/registry-lint.py",
+    "schemas/registry-scope.schema.json",
+    ".github/workflows/registry-lint.yml",
+    "README.md",
+)
+
+
+def _entry_path(line: str) -> str | None:
+    """Path part of a `path#sha8` ratchet entry; None for comments/headers."""
+    s = line.strip()
+    if not s or s.startswith("#") or "#" not in s:
+        return None
+    return s.split("#", 1)[0]
+
+
+def _vendored(path: str) -> bool:
+    return any(path == p or (p.endswith("/") and path.startswith(p))
+               for p in VENDORED_PATHS)
+
+
+def regen_allowlists(root: Path, established: bool) -> bool:
+    """Regenerate the ratchet allowlists via the vendored lint (its REPO
+    resolves from its own location). Mirror mode is already active — marker
+    + mirrors.txt are written first — so exempt own-org hits never enter
+    the list and no canonical entries go stale. The scans enumerate
+    `git ls-files` — stage the scaffold first or the lists come out empty.
+
+    On an ESTABLISHED mirror the raw regen would freeze every live hit —
+    including brand-new violations in the org's own universe tree — into
+    the ratchet where no review would ever see them. Merge instead: keep
+    fresh hits under vendored paths only, and preserve pre-existing
+    mirror-owned entries that are still live (a stale one drops out, the
+    org's ratchet burns down on its own). A violation that arrives fresh
+    in a mirror-owned path is simply not written — the next lint run
+    FAILs on it, which is the whole point of the gate.
+
+    Fatal: without PyYAML/jsonschema the vendored lint dies on import and
+    no allowlists get written — a mirror pushed in that state flags every
+    grandfathered platform hit in its first CI run."""
     subprocess.run(["git", "-C", str(root), "add", "-A"],
                    capture_output=True, timeout=30)
+    old: dict[str, list[str]] = {}
+    if established:
+        for rel in ALLOWLIST_FILES:
+            p = root / rel
+            if p.is_file():
+                old[rel] = p.read_text(encoding="utf-8").splitlines()
     lint = root / "scripts" / "registry-lint.py"
     for flag in ("--write-allowlist", "--write-pack-allowlist"):
         r = subprocess.run([sys.executable, str(lint), flag],
                            cwd=root, capture_output=True, text=True)
         if r.returncode != 0:
-            sys.stderr.write(f"WARN: lint {flag} regen failed: "
+            sys.stderr.write(f"FAIL: lint {flag} regen failed: "
                              f"{r.stderr.strip() or r.stdout.strip()}\n")
+            return False
+    if established:
+        for rel in ALLOWLIST_FILES:
+            p = root / rel
+            if not p.is_file():
+                continue
+            fresh = p.read_text(encoding="utf-8").splitlines()
+            fresh_entries = {ln for ln in fresh if _entry_path(ln) is not None}
+            headers = [ln for ln in fresh if _entry_path(ln) is None]
+            keep = [ln for ln in fresh
+                    if _entry_path(ln) is not None
+                    and _vendored(_entry_path(ln))]
+            preserved = [ln for ln in old.get(rel, [])
+                         if _entry_path(ln) is not None
+                         and not _vendored(_entry_path(ln))
+                         and ln in fresh_entries]
+            p.write_text("\n".join(headers + keep + preserved) + "\n",
+                         encoding="utf-8")
+    return True
 
 
 def main() -> int:
@@ -265,6 +346,10 @@ def main() -> int:
         return 2
 
     reg = root / "registry"
+    # An existing registry/ means this is a rerun/refresh — allowlist regen
+    # must merge (preserve live mirror-owned entries, never ratchet new
+    # violations in the org's own tree) rather than freeze the whole tree.
+    established = reg.is_dir()
     reg.mkdir(parents=True, exist_ok=True)
     (reg / ".private-mirror").write_text("")
     seed_scope(root, args.universe)
@@ -297,7 +382,8 @@ def main() -> int:
     wf.write_text(MIRROR_WORKFLOW)
 
     (root / "README.md").write_text(README)
-    regen_allowlists(root)
+    if not regen_allowlists(root, established):
+        return 2
     print(f"seeded mirror for {args.universe} at {root} (slug {slug})")
     print("next: git add -A && git commit && git push, then add the slug "
           "digest to the canonical registry/private-mirrors.txt")
