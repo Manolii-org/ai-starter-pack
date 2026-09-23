@@ -2203,6 +2203,22 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     assert "redirect" in r.stderr
     assert not (pf / "registry").exists()
 
+    # remote.<name>.vcs delegates pushes to a git-remote-<vcs> helper
+    # that can forward the pack anywhere — the configured URL is not
+    # evidence of the real destination → refuse.
+    vc = tmp_path / "vcs-helper"
+    vc.mkdir()
+    sp.run(["git", "init", "-q"], cwd=vc, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=vc, capture_output=True)
+    sp.run(["git", "config", "remote.origin.vcs", "evil"], cwd=vc,
+           capture_output=True)
+    r = run(vc, _bootstrap_env(tmp_path))
+    assert r.returncode == 2, r.stderr
+    assert "redirect" in r.stderr
+    assert not (vc / "registry").exists()
+
     # A non-GitHub origin that parses to a valid-looking slug — gh would
     # verify an UNRELATED github.com repo of the same name → refuse.
     gl = tmp_path / "gitlab"

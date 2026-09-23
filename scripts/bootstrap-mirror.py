@@ -332,6 +332,11 @@ def _push_targets_ok(root: Path, slug: str) -> bool:
     except (OSError, subprocess.TimeoutExpired):
         pass
     if remote in names:
+        # remote.<name>.vcs delegates the transport to git-remote-<vcs>,
+        # which can forward the pack anywhere — the configured URL is no
+        # longer evidence of the real destination.
+        if _cfg(f"remote.{remote}.vcs"):
+            return False
         try:
             r = subprocess.run(
                 ["git", "-C", str(root), "remote", "get-url", "--push",
