@@ -2212,11 +2212,15 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     sp.run(["git", "remote", "add", "origin",
             "https://github.com/Buro-Built/buro-registry.git"],
            cwd=vc, capture_output=True)
-    sp.run(["git", "config", "remote.origin.vcs", "evil"], cwd=vc,
+    sp.run(["git", "config", "remote.origin.vcs",
+            "helper--token=SUPERSECRET"], cwd=vc,
            capture_output=True)
     r = run(vc, _bootstrap_env(tmp_path))
     assert r.returncode == 2, r.stderr
     assert "vcs" in r.stderr
+    # The helper name itself may carry a credential — never echoed.
+    assert "SUPERSECRET" not in r.stderr
+    assert "helper--token" not in r.stderr
     assert not (vc / "registry").exists()
 
     # An ssh/scp URL parses to the verified slug, but core.sshCommand
@@ -2750,6 +2754,13 @@ def test_bootstrap_ssh_effective_config(monkeypatch):
     for shkc in ("no", "off", "false", "0"):
         patch(CLEAN + [("stricthostkeychecking", shkc)])
         assert "host key" in mod._ssh_host_unchanged(URL), shkc
+    # HostKeyAlias swaps the name used for host-key lookup while
+    # hostname still reports github.com — refused unless unset or the
+    # identity alias.
+    patch(CLEAN + [("hostkeyalias", "attacker.example")])
+    assert "HostKeyAlias" in mod._ssh_host_unchanged(URL)
+    patch(CLEAN + [("hostkeyalias", "github.com")])
+    assert mod._ssh_host_unchanged(URL) is None
 
     patch(CLEAN + [("userknownhostsfile", "/dev/null"),
                    ("globalknownhostsfile", "/dev/null")])

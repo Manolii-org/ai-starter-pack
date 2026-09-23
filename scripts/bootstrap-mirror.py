@@ -374,6 +374,13 @@ def _ssh_host_unchanged(url: str) -> str | None:
             "no", "off", "false", "0"):
         return ("ssh host key verification is disabled "
                 "(StrictHostKeyChecking no/off)")
+    # HostKeyAlias replaces the hostname used for host-key lookup — an
+    # alias pointing at an attacker-owned entry verifies the
+    # interceptor's key while hostname still reports github.com.
+    alias = eff.get("hostkeyalias", "").lower()
+    if alias and alias != "github.com":
+        return ("ssh client config overrides the host key lookup "
+                "(HostKeyAlias)")
     if not [p for p in (eff.get("userknownhostsfile", "").split()
                         + eff.get("globalknownhostsfile", "").split())
             if p != "/dev/null"]:
@@ -473,9 +480,11 @@ def _push_targets_ok(root: Path, slug: str) -> str | None:
         # remote.<name>.vcs delegates the transport to git-remote-<vcs>,
         # which can forward the pack anywhere — the configured URL is no
         # longer evidence of the real destination.
+        # The value is not echoed: 'remote.<name>.vcs' may itself be a
+        # credential-bearing helper name.
         if _cfg(f"remote.{remote}.vcs"):
             return (f"remote.{remote}.vcs delegates the push transport "
-                    f"to git-remote-{_cfg(f'remote.{remote}.vcs')}")
+                    "to a remote helper")
         try:
             r = subprocess.run(
                 ["git", "-C", str(root), "remote", "get-url", "--push",
