@@ -115,11 +115,14 @@ jobs:
   lint:
     name: Lint
     needs: [install]
+    # Template file — consumer suite size is unverifiable, so the default stays
+    # hosted; slim is an explicit opt-in via LIGHT_RUNNER (REUSABLE-WORKFLOWS.md:
+    # slim only for verified sub-10-min jobs). Fork guard as elsewhere.
     runs-on: >-
       ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-          && fromJSON(vars.LIGHT_RUNNER || '["ubuntu-slim"]')
+          && fromJSON(vars.LIGHT_RUNNER || '["ubuntu-latest"]')
           || 'ubuntu-latest' }}
-    timeout-minutes: 14
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
@@ -136,11 +139,14 @@ jobs:
   typecheck:
     name: Type Check
     needs: [install]
+    # Template file — consumer suite size is unverifiable, so the default stays
+    # hosted; slim is an explicit opt-in via LIGHT_RUNNER (REUSABLE-WORKFLOWS.md:
+    # slim only for verified sub-10-min jobs). Fork guard as elsewhere.
     runs-on: >-
       ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-          && fromJSON(vars.LIGHT_RUNNER || '["ubuntu-slim"]')
+          && fromJSON(vars.LIGHT_RUNNER || '["ubuntu-latest"]')
           || 'ubuntu-latest' }}
-    timeout-minutes: 14
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
@@ -157,11 +163,14 @@ jobs:
   test:
     name: Test
     needs: [install]
+    # Template file — consumer suite size is unverifiable, so the default stays
+    # hosted; slim is an explicit opt-in via LIGHT_RUNNER (REUSABLE-WORKFLOWS.md:
+    # slim only for verified sub-10-min jobs). Fork guard as elsewhere.
     runs-on: >-
       ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-          && fromJSON(vars.LIGHT_RUNNER || '["ubuntu-slim"]')
+          && fromJSON(vars.LIGHT_RUNNER || '["ubuntu-latest"]')
           || 'ubuntu-latest' }}
-    timeout-minutes: 14
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
