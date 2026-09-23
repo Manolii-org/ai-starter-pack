@@ -1887,6 +1887,18 @@ def test_pack_surface_mirror_mode_exempts_own_org_only(tmp_path):
     assert "x.md:1" not in flagged, "own-org slug wrongly flagged"
 
 
+def _bootstrap_env(tmp_path):
+    """env for bootstrap subprocess calls: a `gh` stub reporting 'private'
+    (the visibility check fails closed when gh can't answer), and PATH
+    including it."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    gh = bin_dir / "gh"
+    gh.write_text("#!/bin/sh\necho private\n")
+    gh.chmod(0o755)
+    return dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}")
+
+
 def test_bootstrap_mirror_seed(tmp_path):
     """bootstrap-mirror.py seeds a complete lint-clean mirror scaffold:
     marker, universe scope, vendored platform, merged index, digests-only
@@ -1897,10 +1909,14 @@ def test_bootstrap_mirror_seed(tmp_path):
     pack = Path(__file__).resolve().parent.parent
     root = tmp_path / "buro-registry"
     root.mkdir()
+    # Mirrors are clones — a non-git root must fail (staging the scaffold
+    # is required for the lint to enumerate registry/** hits).
+    sp.run(["git", "init", "-q"], cwd=root, capture_output=True)
+    env = _bootstrap_env(tmp_path)
     r = sp.run(
         [sys.executable, "scripts/bootstrap-mirror.py", "--root", str(root),
          "--universe", "buro", "--slug", "buro-built/buro-registry"],
-        cwd=pack, capture_output=True, text=True)
+        cwd=pack, capture_output=True, text=True, env=env)
     assert r.returncode == 0, r.stderr
     assert (root / "registry/.private-mirror").is_file()
     assert (root / "registry/buro/scope.yaml").is_file()
@@ -1927,6 +1943,49 @@ def test_bootstrap_mirror_seed(tmp_path):
     assert "pytest" not in wf
 
 
+def test_bootstrap_mirror_fails_closed(tmp_path):
+    """Seeding refuses (rc 2, nothing written) when repo visibility cannot
+    be verified or is public — and refuses at the staging step when --root
+    is not a git checkout (an empty rglob-fallback allowlist would leave
+    the first pushed CI run red)."""
+    import subprocess as sp
+    pack = Path(__file__).resolve().parent.parent
+
+    def run(root, env):
+        return sp.run(
+            [sys.executable, "scripts/bootstrap-mirror.py", "--root",
+             str(root), "--universe", "buro",
+             "--slug", "buro-built/buro-registry"],
+            cwd=pack, capture_output=True, text=True, env=env)
+
+    # gh absent from PATH → visibility unverifiable → refuse before writes.
+    root = tmp_path / "nogh"
+    root.mkdir()
+    sp.run(["git", "init", "-q"], cwd=root, capture_output=True)
+    empty_bin = tmp_path / "emptybin"
+    empty_bin.mkdir()
+    r = run(root, dict(os.environ, PATH=str(empty_bin)))
+    assert r.returncode == 2, r.stderr
+    assert not (root / "registry").exists()
+
+    # gh reports public → refuse.
+    pub_bin = tmp_path / "pubbin"
+    pub_bin.mkdir()
+    gh = pub_bin / "gh"
+    gh.write_text("#!/bin/sh\necho public\n")
+    gh.chmod(0o755)
+    r = run(root, dict(os.environ,
+                       PATH=f"{pub_bin}:{os.environ['PATH']}"))
+    assert r.returncode == 2, r.stderr
+    assert not (root / "registry").exists()
+
+    # gh stub OK but --root is not a git checkout → fatal at staging.
+    plain = tmp_path / "plainroot"
+    plain.mkdir()
+    r = run(plain, _bootstrap_env(tmp_path))
+    assert r.returncode == 2, r.stderr
+
+
 def test_bootstrap_mirror_refresh_preserves_index(tmp_path):
     """--refresh-platform overwrites the vendored platform tree but MERGES
     plugins.json — the mirror's own universe plugin entries survive."""
@@ -1934,11 +1993,13 @@ def test_bootstrap_mirror_refresh_preserves_index(tmp_path):
     pack = Path(__file__).resolve().parent.parent
     root = tmp_path / "impaktful-registry"
     root.mkdir()
+    sp.run(["git", "init", "-q"], cwd=root, capture_output=True)
+    env = _bootstrap_env(tmp_path)
     r = sp.run(
         [sys.executable, "scripts/bootstrap-mirror.py", "--root", str(root),
          "--universe", "impaktful", "--slug",
          "impaktful-platform/impaktful-registry", "--refresh-platform"],
-        cwd=pack, capture_output=True, text=True)
+        cwd=pack, capture_output=True, text=True, env=env)
     assert r.returncode == 0, r.stderr
     idx = json.loads((root / "registry/plugins.json").read_text())
     idx["plugins"].append({
@@ -1951,7 +2012,7 @@ def test_bootstrap_mirror_refresh_preserves_index(tmp_path):
         [sys.executable, "scripts/bootstrap-mirror.py", "--root", str(root),
          "--universe", "impaktful", "--slug",
          "impaktful-platform/impaktful-registry", "--refresh-platform"],
-        cwd=pack, capture_output=True, text=True)
+        cwd=pack, capture_output=True, text=True, env=env)
     assert r.returncode == 0, r.stderr
     names = {(p["scope"], p["name"])
              for p in json.loads(
@@ -1973,11 +2034,12 @@ def test_bootstrap_mirror_refresh_preserves_owned_state(tmp_path):
     # its non-git rglob fallback skip-lists the dir. Mirrors are clones, so
     # init the root before seeding (regen also stages via git add).
     sp.run(["git", "init", "-q"], cwd=root, capture_output=True)
+    env = _bootstrap_env(tmp_path)
     r = sp.run(
         [sys.executable, "scripts/bootstrap-mirror.py", "--root", str(root),
          "--universe", "cpdcheck", "--slug",
          "cpdcheck/cpdcheck-registry"],
-        cwd=pack, capture_output=True, text=True)
+        cwd=pack, capture_output=True, text=True, env=env)
     assert r.returncode == 0, r.stderr
 
     scope_file = root / "registry/cpdcheck/scope.yaml"
@@ -2000,7 +2062,7 @@ def test_bootstrap_mirror_refresh_preserves_owned_state(tmp_path):
         [sys.executable, "scripts/bootstrap-mirror.py", "--root", str(root),
          "--universe", "cpdcheck", "--slug",
          "cpdcheck/cpdcheck-registry", "--refresh-platform"],
-        cwd=pack, capture_output=True, text=True)
+        cwd=pack, capture_output=True, text=True, env=env)
     assert r.returncode == 0, r.stderr
 
     assert "org-specific note" in scope_file.read_text()

@@ -49,10 +49,10 @@ vendoring from a newer canonical checkout; the mirror's own universe scope,
 non-platform index entries, and marker are preserved.
 
 Visibility: the seeder asks `gh` whether --slug resolves to a private (or
-internal) repo and REFUSES on 'public' — a self-declared slug+digest is no
-evidence of privacy; when gh is unavailable the check degrades to a WARN
-(the marker waiver itself is lint-side advisory — the canonical repo can
-never be waived, so the load-bearing boundary stays upstream).
+internal) repo and REFUSES on anything else — a self-declared slug+digest
+is no evidence of privacy, and an unverifiable lookup must fail closed:
+seeding universe content into a repo of unknown visibility is exactly the
+failure mode the mirror boundary exists to prevent.
 
 Privacy: this script writes no other-org identifiers into the mirror —
 the vendored tree is already org-leak-clean in the canonical repo, and
@@ -187,12 +187,13 @@ def seed_scope(root: Path, universe: str) -> None:
 
 
 def check_visibility(slug: str) -> int:
-    """Refuse to seed a PUBLIC repo — a self-declared slug + digest pair
-    is not evidence of privacy, and universe content in a public repo is
-    the failure mode this whole design exists to prevent. `gh` is the
-    only cheap visibility oracle; when it cannot answer (not installed,
-    not authed, no network) warn and continue — the canonical repo's own
-    gate is still fail-closed upstream."""
+    """Require a CONFIRMED private (or internal) repo before seeding — a
+    self-declared slug + digest pair is not evidence of privacy, and
+    universe content in a public repo is the failure mode this whole
+    design exists to prevent. `gh` is the only cheap visibility oracle;
+    when it cannot answer (not installed, not authed, repo unreachable)
+    the check fails closed — a warn-and-continue would let an operator
+    seed into a public destination without ever noticing."""
     try:
         r = subprocess.run(
             ["gh", "api", f"repos/{slug}", "--jq", ".visibility"],
@@ -200,18 +201,19 @@ def check_visibility(slug: str) -> int:
     except (OSError, subprocess.TimeoutExpired):
         r = None
     if r is None or r.returncode != 0:
-        print(f"WARN: could not verify {slug} visibility via gh "
-              "(missing/unreachable) — seeding anyway; the mirror MUST be "
-              "private")
-        return 0
-    vis = r.stdout.strip().lower()
-    if vis == "public":
         sys.stderr.write(
-            f"FAIL: {slug} is PUBLIC — a mirror must be a private repo; "
-            "universe content never belongs in a public tree\n")
+            f"FAIL: could not verify {slug} visibility via gh — seeding "
+            "refused. The mirror MUST be a private repo: create it first, "
+            "then authenticate gh (GH_TOKEN) with access to it and retry.\n")
         return 2
-    print(f"OK: {slug} visibility={vis}")
-    return 0
+    vis = r.stdout.strip().lower()
+    if vis in ("private", "internal"):
+        print(f"OK: {slug} visibility={vis}")
+        return 0
+    sys.stderr.write(
+        f"FAIL: {slug} visibility={vis or 'unknown'} — a mirror must be a "
+        "private repo; universe content never belongs in a public tree\n")
+    return 2
 
 
 def merge_index(src_reg: Path, reg: Path) -> None:
@@ -288,8 +290,18 @@ def regen_allowlists(root: Path, established: bool) -> bool:
     Fatal: without PyYAML/jsonschema the vendored lint dies on import and
     no allowlists get written — a mirror pushed in that state flags every
     grandfathered platform hit in its first CI run."""
-    subprocess.run(["git", "-C", str(root), "add", "-A"],
-                   capture_output=True, timeout=30)
+    r = subprocess.run(["git", "-C", str(root), "add", "-A"],
+                       capture_output=True, text=True, timeout=30)
+    if r.returncode != 0:
+        # Without staged files the vendored lint falls back to rglob —
+        # which SKIPS registry/ — and writes a pack-surface allowlist that
+        # omits every vendored hit. Once the dir is later initialised and
+        # pushed, CI scans those tracked files and fails. --root must be a
+        # git checkout: this is fatal, not a warning.
+        sys.stderr.write("FAIL: could not stage the scaffold — --root must "
+                         "be a git checkout (run inside the mirror clone, "
+                         "or `git init` it first)\n")
+        return False
     old: dict[str, list[str]] = {}
     if established:
         for rel in ALLOWLIST_FILES:
