@@ -88,6 +88,14 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
+      - name: Install ShellCheck
+        run: |
+          # shellcheck is absent from the slim image; guard-install it.
+          if ! command -v shellcheck >/dev/null; then
+            if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo"; fi
+            $SUDO apt-get update -qq
+            $SUDO apt-get install -y -qq shellcheck
+          fi
       - name: Run Shellcheck on changed shell files
         run: |
           # Deleted shell files must not be passed to shellcheck: the path no
