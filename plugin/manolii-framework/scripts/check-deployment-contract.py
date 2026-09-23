@@ -155,7 +155,7 @@ def fetch_workflow(repo: str, wf_path: str, branch: str,
                    args: argparse.Namespace) -> tuple[str | None, str | None]:
     """Return (yaml_text, error) for the workflow file ON THE LANE'S BRANCH."""
     if args.mode == "local":
-        repo_dir = Path(args.repos_dir) / repo.split("/")[-1]
+        repo_dir = _repo_dir(args, repo)
         # origin/<branch> is authoritative: once it resolves, the lane is judged
         # by that ref ALONE — a divergent local branch can't paper over a remote
         # lane that lacks the workflow.
@@ -199,6 +199,20 @@ def fetch_workflow(repo: str, wf_path: str, branch: str,
         return base64.b64decode(out.stdout).decode("utf-8", "replace"), None
     except ValueError as exc:
         return None, f"undecodable workflow content: {exc}"
+
+
+def _repo_dir(args: argparse.Namespace, repo: str) -> Path:
+    """`OrgA/api` and `OrgB/api` must not share one flat checkout — when the
+    contract repeats a basename, require the owner-qualified
+    `<repos-dir>/<owner>/<name>` layout. Otherwise prefer it when present,
+    falling back to the flat `<repos-dir>/<name>` convention."""
+    name = repo.split("/")[-1]
+    if name in getattr(args, "_dup_basenames", ()):
+        return Path(args.repos_dir) / repo
+    owner_dir = Path(args.repos_dir) / repo
+    if owner_dir.is_dir():
+        return owner_dir
+    return Path(args.repos_dir) / name
 
 
 def workflow_triggers_branch(spec: dict, branch: str) -> bool:
@@ -316,6 +330,10 @@ def workflow_triggers_branch(spec: dict, branch: str) -> bool:
         # branches-ignore disqualifies a matched branch (ordered semantics too)
         if eval_ordered(ignore) if ignore else False:
             continue
+        # an explicitly EMPTY positive filter (`branches: []`) matches
+        # nothing — only a MISSING `branches` key means "every branch"
+        if "branches" in ev and not branches:
+            continue
         if eval_ordered(branches):
             return True
     return False
@@ -344,6 +362,9 @@ def _executable(job: dict) -> bool:
     (string, label list, or group map) and a non-empty list of step maps.
     `{uses: ""}`, `{runs-on: null, steps: "x"}`, and `{}` parse but execute
     nothing — counting them would satisfy `required_jobs` with a dead job."""
+    cond = job.get("if")
+    if cond is False or (isinstance(cond, str) and cond.strip().lower() == "false"):
+        return False  # `if: false` — permanently skipped, satisfies nothing
     uses = job.get("uses")
     if isinstance(uses, str):
         return bool(uses.strip())
@@ -511,6 +532,15 @@ def main() -> int:
     doc = load_contract(args.contract)
     errors: list[str] = []
     warnings: list[str] = []
+
+    # basename collisions (OrgA/api + OrgB/api) force owner-qualified
+    # checkout paths — a shared flat dir would verify the wrong repo
+    base_count: dict[str, int] = {}
+    for r in doc["repos"]:
+        if isinstance(r.get("repo"), str):
+            b = r["repo"].split("/")[-1]
+            base_count[b] = base_count.get(b, 0) + 1
+    args._dup_basenames = {b for b, n in base_count.items() if n > 1}
 
     for r in doc["repos"]:
         repo = r.get("repo")

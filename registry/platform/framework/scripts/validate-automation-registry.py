@@ -223,6 +223,9 @@ def _runnable_job(job) -> bool:
     each carry a non-empty `run` or `uses`."""
     if not isinstance(job, dict):
         return False
+    cond = job.get("if")
+    if cond is False or (isinstance(cond, str) and cond.strip().lower() == "false"):
+        return False  # `if: false` — permanently skipped, satisfies nothing
     uses = job.get("uses")
     if isinstance(uses, str):
         return bool(uses.strip())
@@ -262,10 +265,32 @@ def _step_ok(step) -> bool:
             or isinstance(uses, str) and bool(uses.strip()))
 
 
+def _repo_dir(args: argparse.Namespace, repo: str) -> Path:
+    """`OrgA/api` and `OrgB/api` must not share one flat checkout — when the
+    registry repeats a basename, require the owner-qualified
+    `<repos-dir>/<owner>/<name>` layout. Otherwise prefer it when present,
+    falling back to the flat `<repos-dir>/<name>` convention."""
+    name = repo.split("/")[-1]
+    if name in getattr(args, "_dup_basenames", ()):
+        return Path(args.repos_dir) / repo
+    owner_dir = Path(args.repos_dir) / repo
+    if owner_dir.is_dir():
+        return owner_dir
+    return Path(args.repos_dir) / name
+
+
 def check_workflow_files(doc: dict, args: argparse.Namespace, errors: list[str]) -> None:
     automations = doc.get("automations")
     if not isinstance(automations, list):
         return  # structural errors already recorded by validate()
+    # basename collisions (OrgA/api + OrgB/api) force owner-qualified
+    # checkout paths — a shared flat dir would verify the wrong repo
+    base_count: dict[str, int] = {}
+    for a in automations:
+        if isinstance(a, dict) and isinstance(a.get("repo"), str):
+            b = a["repo"].split("/")[-1]
+            base_count[b] = base_count.get(b, 0) + 1
+    args._dup_basenames = {b for b, n in base_count.items() if n > 1}
     for auto in automations:
         if not isinstance(auto, dict):
             continue  # non-mapping entries already reported by validate()
@@ -279,7 +304,7 @@ def check_workflow_files(doc: dict, args: argparse.Namespace, errors: list[str])
             continue  # wildcard declaration — applies fleet-wide, no single file to fetch
         text = None
         if args.mode == "local":
-            repo_dir = Path(args.repos_dir) / repo.split("/")[-1]
+            repo_dir = _repo_dir(args, repo)
             # keep the path inside THIS checkout — an absolute workflow or
             # one with `..`/`/` traversal would verify a sibling repo's file
             base = repo_dir.resolve()
