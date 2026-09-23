@@ -17,12 +17,12 @@ settings.json merge step that is a later-phase concern.
 
 Usage:
     ai-resolve.py [--manifest ai-manifest.yaml] [--registry <path>]
-                  [--repo-root .] [--apply | --check | --prune]
+                  [--repo-root .] [--apply [--prune] | --check]
 
   Default mode is a dry run — prints the plan, writes nothing.
   --apply   materialise the resolved set
+  --prune   with --apply, also remove lockfile-tracked files no longer required
   --check   exit 1 if materialised files differ from the registry source
-  --prune   also remove lockfile-tracked files no longer required
 
 Registry source: a local checkout containing a top-level registry/ dir (the
 ai-starter-pack repo works). Remote fetch (github:org/repo@ref) lands in P1.
@@ -176,27 +176,38 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
         ))
         return
 
-    locked_files = set(lock.get("files", [])) if lock else set()
-    materialised: list[str] = []
+    locked = lock.get("files", {}) if lock else {}
+    if isinstance(locked, list):  # v1 lockfile: paths without digests
+        locked = {k: None for k in locked}
+    materialised: dict[str, str] = {}
     for comp, files in collect_component_files(plugin_dir).items():
         target_root = repo_root / COMPONENT_TARGETS[comp]
         for src in files:
             rel = src.relative_to(plugin_dir / comp)
             dst = target_root / rel
+            rel_dst = dst.relative_to(repo_root).as_posix()
             if dst.exists():
                 if dst.read_bytes() == src.read_bytes():
                     plan.skips.append((dst, "identical"))
-                elif dst.as_posix() in locked_files:
-                    plan.writes.append((src, dst))  # tracked drift — update
-                else:
+                elif rel_dst not in locked:
                     plan.conflicts.append((
                         dst,
                         "exists and differs — not lockfile-tracked, refusing to clobber a hand edit",
                     ))
-                materialised.append(dst.as_posix())
+                    continue
+                elif locked[rel_dst] is None or sha256(dst) != locked[rel_dst]:
+                    plan.conflicts.append((
+                        dst,
+                        "materialised file modified since install — refusing to clobber a hand "
+                        "edit (restore it or delete it and re-resolve)",
+                    ))
+                    continue
+                else:
+                    plan.writes.append((src, dst))  # registry drift — update
+                materialised[rel_dst] = sha256(src)
             else:
                 plan.writes.append((src, dst))
-                materialised.append(dst.as_posix())
+                materialised[rel_dst] = sha256(src)
 
     for comp in ("hooks", "scripts", "data", "telemetry"):
         if (plugin_dir / comp).is_dir():
@@ -210,7 +221,7 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
         "ref": ref,
         "resolved_version": version,
         "source": entry["path"],
-        "files": sorted(materialised),
+        "files": materialised,
         "sha256": sha256(manifest_file) if manifest_file.is_file() else None,
     })
 
@@ -234,8 +245,11 @@ def main() -> int:
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--apply", action="store_true")
     mode.add_argument("--check", action="store_true")
-    mode.add_argument("--prune", action="store_true")
+    ap.add_argument("--prune", action="store_true",
+                    help="with --apply, also remove lockfile-tracked files no longer required")
     args = ap.parse_args()
+    if args.prune and not args.apply:
+        ap.error("--prune requires --apply")
 
     repo_root = Path(args.repo_root).resolve()
     manifest_path = Path(args.manifest)
@@ -258,7 +272,7 @@ def main() -> int:
         current.update(r["files"])
     for f in locked_files_all(lock):
         if f not in current:
-            plan.removals.append(Path(f))
+            plan.removals.append(repo_root / f)
 
     # ---- report ----
     print(f"universe={universe}  registry={registry_root}")
@@ -289,7 +303,7 @@ def main() -> int:
         print("\nOK: materialised state matches registry source")
         return 0
 
-    if args.apply or args.prune:
+    if args.apply:
         for src, dst in plan.writes:
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
@@ -297,11 +311,16 @@ def main() -> int:
             for f in plan.removals:
                 if f.is_file():
                     f.unlink()
+            for f in plan.removals:
+                d = f.parent
+                while d != repo_root and d.is_dir() and not any(d.iterdir()):
+                    d.rmdir()
+                    d = d.parent
         lock_doc = {
             "version": 1,
             "universe": universe,
             "resolved": [{k: v for k, v in r.items() if k != "files"} for r in plan.resolved],
-            "files": sorted(current),
+            "files": {rel: digest for r in plan.resolved for rel, digest in r["files"].items()},
         }
         lock_file = repo_root / LOCK_PATH
         lock_file.parent.mkdir(parents=True, exist_ok=True)
@@ -317,10 +336,12 @@ def main() -> int:
 def locked_files_all(lock: dict) -> list[str]:
     if not lock:
         return []
-    files = set(lock.get("files", []))
+    files = lock.get("files", {})
+    out = set(files) if isinstance(files, dict) else set(files)
     for r in lock.get("resolved", []):
-        files.update(r.get("files", []))
-    return sorted(files)
+        rf = r.get("files", {})
+        out.update(rf.keys() if isinstance(rf, dict) else rf)
+    return sorted(out)
 
 
 if __name__ == "__main__":
