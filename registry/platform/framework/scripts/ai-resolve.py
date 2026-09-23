@@ -359,6 +359,27 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
         return
 
     manifest_file = plugin_dir / ".claude-plugin" / "plugin.json"
+    if pinned:
+        # The manifest feeds resolved_version + the lock's sha256 — it is a
+        # pin input like any component file, so verify it against the pinned
+        # git object too (skip-worktree on THIS file passes every other check
+        # while recording modified metadata under the pin's name).
+        rel_man = manifest_file.relative_to(registry_root).as_posix()
+        try:
+            man_blob = subprocess.run(
+                ["git", "-C", str(registry_root), "show", f"HEAD:./{rel_man}"],
+                capture_output=True, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            man_blob = None
+        if (man_blob is None or man_blob.returncode != 0
+                or not manifest_file.is_file()
+                or man_blob.stdout != manifest_file.read_bytes()):
+            plan.conflicts.append((
+                repo_root / req,
+                f"{req}: {rel_man} differs from or is absent at the pinned "
+                "revision — refusing to record pin metadata from unverifiable bytes",
+            ))
+            return
     version = "0.0.0"
     if manifest_file.is_file():
         try:

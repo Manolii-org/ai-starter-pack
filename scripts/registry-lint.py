@@ -326,15 +326,51 @@ def line_key(rel_s: str, line: str) -> str:
     return f"{rel_s}#{h}"
 
 
+def _decoded_json_strings(doc) -> list[str]:
+    """Every string key and value in a parsed JSON document."""
+    out = []
+    if isinstance(doc, str):
+        out.append(doc)
+    elif isinstance(doc, dict):
+        for k, v in doc.items():
+            if isinstance(k, str):
+                out.append(k)
+            out += _decoded_json_strings(v)
+    elif isinstance(doc, list):
+        for v in doc:
+            out += _decoded_json_strings(v)
+    return out
+
+
 def scan_text_lines(path: Path) -> list[str]:
     """Encoding-normalized text lines for content scans. UTF-16/32 encode
     ASCII-shaped credentials with NUL separators — stripping NULs recovers
-    the ASCII bytes so encoding alone cannot exempt a credential."""
+    the ASCII bytes so encoding alone cannot exempt a credential. JSON files
+    additionally yield their DECODED string values — \\uXXXX and \\/ escapes
+    become the real value when a consumer parses the document, so the raw
+    text must not be the only form the scans see."""
     raw = path.read_bytes()
     text = raw.decode("utf-8", errors="ignore")
     if b"\x00" in raw:
         text += "\n" + raw.replace(b"\x00", b"").decode("utf-8", errors="ignore")
-    return text.splitlines()
+    lines = text.splitlines()
+    if path.suffix == ".json":
+        try:
+            doc = json.loads(text)
+        except json.JSONDecodeError:
+            doc = None
+        if doc is not None:
+            # A decoded line only adds coverage when the value is hidden
+            # behind escapes — i.e. the file does NOT contain the line's own
+            # JSON-escaped form. Legitimately escaped values (\u2014, \\d,
+            # \") reproduce exactly what the file shows and are skipped;
+            # escape-hidden values (ghp_\u0041, registry\/x) surface.
+            for s in _decoded_json_strings(doc):
+                for piece in s.splitlines():
+                    esc = json.dumps(piece)[1:-1]
+                    if piece and esc not in text:
+                        lines.append(piece)
+    return lines
 
 
 def content_scan_files(org_leak: bool = True) -> list[Path]:
