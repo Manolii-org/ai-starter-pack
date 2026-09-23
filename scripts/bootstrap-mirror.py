@@ -253,68 +253,47 @@ def _origin_slug(root: Path) -> str | None:
     if r.returncode != 0:
         return None
     url = r.stdout.strip()
+    return _slug_of(url)
+
+
+def _slug_of(url: str) -> str | None:
+    """owner/repo of a github.com URL, lowercased; None otherwise."""
     m = _GH_HTTPS.match(url) or _GH_SCP.match(url)
     return m.group(1).lower() if m else None
 
 
 def _push_targets_ok(root: Path, slug: str) -> bool:
     """Every effective PUSH destination must resolve to the verified slug.
-    `git push` honours remote.origin.pushurl (any number) and
-    url.<base>.pushInsteadOf rewrites — either can redirect the seeded
-    universe content to a different, possibly public, repo even though
-    the fetch URL bound to the private one. pushInsteadOf applies over
-    BOTH the fetch url and explicit pushurls, so evaluate the effective
-    URL in each case.
-
-    Config semantics: for `url.<base>.pushInsteadOf = <prefix>`, any URL
-    starting with <prefix> is rewritten to start with <base> — the
-    config VALUE is the match prefix, the key's middle part is the
-    replacement."""
-    def _cfg(*args: str) -> list[str]:
-        try:
-            r = subprocess.run(["git", "-C", str(root), "config", *args],
-                               capture_output=True, text=True, timeout=10)
-        except (OSError, subprocess.TimeoutExpired):
-            return []
-        return [ln for ln in r.stdout.splitlines() if ln] \
-            if r.returncode == 0 else []
-
-    def _gh(url: str) -> str | None:
-        m = _GH_HTTPS.match(url) or _GH_SCP.match(url)
-        return m.group(1).lower() if m else None
-
-    pushurls = _cfg("--get-all", "remote.origin.pushurl")
-    rules: list[tuple[str, str]] = []
-    for line in _cfg("--get-regexp", r"^url\..*\.pushinsteadof$"):
-        key, _, prefix = line.partition(" ")
-        repl = key[len("url."):-len(".pushinsteadof")]
-        if prefix:
-            rules.append((prefix, repl))
-
-    # No explicit pushurl → pushes go to the (already-verified) fetch url.
-    targets = pushurls or [_gh_origin_url(root)]
-    for t in targets:
-        eff = t
-        # git applies the single longest matching pushInsteadOf prefix.
-        for prefix, repl in sorted(rules, key=lambda r: -len(r[0])):
-            if eff.startswith(prefix):
-                eff = repl + eff[len(prefix):]
-                break
-        if _gh(eff) != slug:
-            return False
-    return True
-
-
-def _gh_origin_url(root: Path) -> str:
-    """Raw configured fetch url for origin ('' when absent)."""
+    `git push` honours remote.origin.pushurl and the
+    url.<base>.insteadOf / url.<base>.pushInsteadOf rewrites — any of
+    them can redirect the seeded universe content to a different,
+    possibly public, repo even though the fetch URL bound to the
+    private one. `remote get-url --push` applies git's own resolution
+    (pushurl list, pushInsteadOf precedence, insteadOf fallback), so
+    it returns exactly the URLs `git push` would use."""
     try:
         r = subprocess.run(
-            ["git", "-C", str(root), "config", "--get",
-             "remote.origin.url"],
+            ["git", "-C", str(root), "remote", "get-url", "--push",
+             "--all", "origin"],
             capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.TimeoutExpired):
-        return ""
-    return r.stdout.strip() if r.returncode == 0 else ""
+        return False
+    urls = [ln.strip() for ln in r.stdout.splitlines() if ln.strip()] \
+        if r.returncode == 0 else []
+    if not urls:
+        return False
+    for url in urls:
+        if _slug_of(url) == slug:
+            continue
+        # Devin-box auth proxy: forwards pushes to the github.com slug
+        # embedded in its path (the box's global insteadOf rewrites every
+        # github.com URL through it — pushes still land on that repo).
+        proxy = "https://git-manager.devin.ai/proxy/github.com/"
+        if not (url.startswith(proxy)
+                and _slug_of("https://github.com/" + url[len(proxy):])
+                == slug):
+            return False
+    return True
 
 
 def check_visibility(slug: str) -> str | None:

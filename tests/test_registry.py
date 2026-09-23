@@ -1938,7 +1938,13 @@ def _bootstrap_env(tmp_path):
     gh = bin_dir / "gh"
     gh.write_text("#!/bin/sh\necho private\n")
     gh.chmod(0o755)
-    return dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}")
+    # Isolate the harness machine's GLOBAL git config — e.g. a Devin box
+    # rewrites every github.com url through its auth proxy via
+    # url.insteadOf, which would silently steer push-target checks.
+    empty_cfg = tmp_path / "gitconfig.empty"
+    empty_cfg.write_text("")
+    return dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}",
+                GIT_CONFIG_GLOBAL=str(empty_cfg))
 
 
 def test_bootstrap_mirror_seed(tmp_path):
@@ -2085,6 +2091,41 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     assert "redirect" in r.stderr
     assert not (pi / "registry").exists()
 
+    # insteadOf rewrites pushes too when no pushInsteadOf rule exists —
+    # a github→gitlab insteadOf must refuse even though the raw origin
+    # url is GitHub.
+    io = tmp_path / "insteadof"
+    io.mkdir()
+    sp.run(["git", "init", "-q"], cwd=io, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=io, capture_output=True)
+    sp.run(["git", "config", "url.https://gitlab.com/.insteadOf",
+            "https://github.com/"], cwd=io, capture_output=True)
+    r = run(io, _bootstrap_env(tmp_path))
+    assert r.returncode == 2, r.stderr
+    assert "redirect" in r.stderr
+    assert not (io / "registry").exists()
+
+    # insteadOf still applies to an EXPLICIT pushurl (only pushInsteadOf
+    # is ignored for those) — pushurl pinned to the verified slug but an
+    # insteadOf redirecting github.com elsewhere must refuse.
+    pio = tmp_path / "pushurl-insteadof"
+    pio.mkdir()
+    sp.run(["git", "init", "-q"], cwd=pio, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=pio, capture_output=True)
+    sp.run(["git", "config", "remote.origin.pushurl",
+            "https://github.com/Buro-Built/buro-registry.git"], cwd=pio,
+           capture_output=True)
+    sp.run(["git", "config", "url.https://gitlab.com/.insteadOf",
+            "https://github.com/"], cwd=pio, capture_output=True)
+    r = run(pio, _bootstrap_env(tmp_path))
+    assert r.returncode == 2, r.stderr
+    assert "redirect" in r.stderr
+    assert not (pio / "registry").exists()
+
     # A non-GitHub origin that parses to a valid-looking slug — gh would
     # verify an UNRELATED github.com repo of the same name → refuse.
     gl = tmp_path / "gitlab"
@@ -2102,6 +2143,51 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     plain.mkdir()
     r = run(plain, _bootstrap_env(tmp_path))
     assert r.returncode == 2, r.stderr
+
+
+def test_bootstrap_mirror_push_target_pass(tmp_path):
+    """Push-target validation must not over-refuse: (a) an explicit
+    pushurl pinned to the verified slug stays valid even when a
+    pushInsteadOf rule exists — git ignores pushInsteadOf for remotes
+    with an explicit pushurl; (b) the Devin-box auth-proxy insteadOf
+    rewrites the effective push URL to git-manager.devin.ai, which
+    still lands on the verified github.com slug."""
+    import subprocess as sp
+    pack = Path(__file__).resolve().parent.parent
+    env = _bootstrap_env(tmp_path)
+
+    def run(root):
+        return sp.run(
+            [sys.executable, "scripts/bootstrap-mirror.py", "--root",
+             str(root), "--universe", "buro",
+             "--slug", "buro-built/buro-registry"],
+            cwd=pack, capture_output=True, text=True, env=env)
+
+    a = tmp_path / "pushurl-ok"
+    a.mkdir()
+    sp.run(["git", "init", "-q"], cwd=a, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=a, capture_output=True)
+    sp.run(["git", "config", "remote.origin.pushurl",
+            "https://github.com/Buro-Built/buro-registry.git"], cwd=a,
+           capture_output=True)
+    sp.run(["git", "config", "url.https://gitlab.com/.pushInsteadOf",
+            "https://github.com/"], cwd=a, capture_output=True)
+    r = run(a)
+    assert r.returncode == 0, r.stderr
+
+    b = tmp_path / "proxy-ok"
+    b.mkdir()
+    sp.run(["git", "init", "-q"], cwd=b, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "https://github.com/Buro-Built/buro-registry.git"],
+           cwd=b, capture_output=True)
+    sp.run(["git", "config",
+            "url.https://git-manager.devin.ai/proxy/github.com/.insteadOf",
+            "https://github.com/"], cwd=b, capture_output=True)
+    r = run(b)
+    assert r.returncode == 0, r.stderr
 
 
 def test_bootstrap_mirror_dirty_clone_no_ratchet(tmp_path):
