@@ -68,7 +68,8 @@ SEMVER_REF = re.compile(r"v?\d+(?:\.\d+){0,2}")
 SCRIPT_REF = re.compile(
     rb"(?:python3?|bash|sh|zsh|node|npx|tsx|deno|ruby|perl|uv\s+run|pipenv\s+run)"
     rb"\s+[^\n|&;`]*?scripts/[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs)\b"
-    rb"|\./scripts/[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs)\b")
+    rb"|\./scripts/[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs)\b"
+    rb"|`scripts/[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs)\b")
 
 
 @dataclass
@@ -161,7 +162,8 @@ def sha256(path: Path) -> str:
 
 
 def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
-                     index: dict, repo_root: Path, locked: dict, plan: Plan) -> None:
+                     index: dict, repo_root: Path, locked: dict, plan: Plan,
+                     write_components: bool = True) -> None:
     m = REQUIRES_RE.match(req)
     if not m:
         plan.conflicts.append((repo_root / req, "malformed plugin reference"))
@@ -188,8 +190,20 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
         # Verify the pin BEFORE trusting the index — plugins.json is itself a
         # resolution input, and a dirty index could retarget a scope/name.
         want = ref.split(":", 1)[1]
+        if ref.startswith("sha:"):
+            # sha: must be a literal commit id — rev-parse accepts arbitrary
+            # expressions, so sha:HEAD would otherwise always pass.
+            if not re.fullmatch(r"[0-9a-fA-F]{7,40}", want):
+                plan.conflicts.append((repo_root / req,
+                    f"pinned ref '{ref}' — sha: requires a hexadecimal "
+                    "commit id"))
+                return
+            pin_rev = want
+        else:
+            # tag: resolves strictly under refs/tags/ — tag:main must not
+            # satisfy against a branch.
+            pin_rev = f"refs/tags/{want}"
         head = git_rev(registry_root, "HEAD")
-        pinned_sha = head and git_rev(registry_root, want)
         if head is None:
             plan.conflicts.append((
                 repo_root / req,
@@ -197,7 +211,16 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                 "the registry source is not a git repository",
             ))
             return
-        if pinned_sha is None or pinned_sha != head:
+        pinned_sha = git_rev(registry_root, pin_rev)
+        if pinned_sha is None:
+            kind = "tag" if ref.startswith("tag:") else "commit"
+            plan.conflicts.append((
+                repo_root / req,
+                f"pinned {kind} '{want}' does not resolve in the registry "
+                "checkout",
+            ))
+            return
+        if pinned_sha != head:
             plan.conflicts.append((
                 repo_root / req,
                 f"registry checkout is not at the pinned ref '{want}' "
@@ -273,7 +296,9 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
         return
 
     materialised: dict[str, str] = {}
-    for comp, files in collect_component_files(plugin_dir).items():
+    component_files = (collect_component_files(plugin_dir)
+                       if write_components else {})
+    for comp, files in component_files.items():
         target_root = repo_root / COMPONENT_TARGETS[comp]
         for src in files:
             rel = src.relative_to(plugin_dir / comp)
@@ -415,9 +440,21 @@ def main() -> int:
 
     locked_dig = locked_digests(lock)
     plan = Plan()
+    # claude-code is the only implemented surface — anything else the
+    # manifest selects is advisory until its renderer lands, and a manifest
+    # that selects no claude-code must materialise no .claude/ output at all.
+    surfaces = manifest.get("surfaces")
+    claude_selected = not isinstance(surfaces, list) or "claude-code" in surfaces
+    if isinstance(surfaces, list):
+        for s in surfaces:
+            if s != "claude-code":
+                plan.advisories.append(
+                    f"surface '{s}' is advisory-only — no renderer yet "
+                    "(claude-code is the only implemented surface)")
     for req in manifest["requires"]:
         plan_requirement(req["plugin"], str(req["ref"]), universe,
-                         registry_root, index, repo_root, locked_dig, plan)
+                         registry_root, index, repo_root, locked_dig, plan,
+                         write_components=claude_selected)
 
     # Orphan detection: lockfile files no longer required. Without --prune an
     # orphan is simply kept (and stays lockfile-tracked) — modified or not.

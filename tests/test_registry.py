@@ -744,6 +744,99 @@ def test_manifest_version_must_be_semver(tmp_path):
     assert any("version" in f.detail for f in fails)
 
 
+def test_sha_pin_requires_hex(tmp_path):
+    """sha:HEAD must not pass — rev-parse accepts arbitrary expressions but
+    a pin must be a literal commit id."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "x")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "sha:HEAD"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 1
+    assert "hexadecimal" in r.stdout
+
+
+def test_tag_resolves_under_refs_tags(tmp_path):
+    """tag:main must not satisfy against a branch — tags resolve strictly
+    under refs/tags/."""
+    import subprocess as sp
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "x")],
+    })
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    sp.run(["git", "init", "-qb", "main"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "add", "-A"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "commit", "-qm", "init"], cwd=reg_root, env=env, check=True)
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "tag:main"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 1
+    assert "does not resolve" in r.stdout
+
+
+def test_surfaces_devin_only_writes_nothing(tmp_path):
+    """A manifest selecting surfaces:[devin] materialises no .claude/
+    output and reports the unsupported surface as advisory."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "x")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = consumer / "ai-manifest.yaml"
+    m.write_text(
+        "version: 1\nuniverse: manolii\n"
+        "surfaces: [devin]\n"
+        "requires:\n  - plugin: platform/framework\n    ref: 1.0.0\n")
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 0, r.stdout
+    assert not (consumer / ".claude" / "skills" / "demo" / "x.md").exists()
+    assert "devin" in r.stdout
+
+
+def test_xscope_scans_manifests(tmp_path):
+    """A plugin.json referencing ../manolii/ fails XSCOPE — the metadata
+    exemption covers the org-name scan only."""
+    mod = load_lint_module()
+    reg = tmp_path / "registry"
+    pdir = reg / "platform" / "framework"
+    pdir.mkdir(parents=True)
+    (pdir / ".claude-plugin").mkdir()
+    (pdir / ".claude-plugin" / "plugin.json").write_text(
+        '{"name": "framework", "version": "1.0.0", "description": "x",\n'
+        ' "wiring": "../manolii/secret"}')
+    mod.REGISTRY = reg
+    mod.results = []
+    mod.check_xscope()
+    fails = [f for f in mod.results
+             if f.check == "XSCOPE" and f.status == "FAIL"]
+    assert any("manolii" in f.detail for f in fails)
+
+
+def test_backticked_script_ref_skipped(tmp_path):
+    """`scripts/x.py` in backticks is an invocation-shaped dependency —
+    the file is advisory-skipped, not materialised."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [
+            ("commands/run-status.md",
+             "Step: run `scripts/sprint_status.py` to regenerate status.md"),
+        ],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 0, r.stdout
+    assert not (consumer / ".claude" / "commands" / "run-status.md").exists()
+    assert "scripts/" in r.stdout
+
+
 def seed_catalog(reg: Path, patterns: list[str] | None = None) -> None:
     p = reg / "platform" / "framework" / "data"
     p.mkdir(parents=True, exist_ok=True)

@@ -451,7 +451,11 @@ def check_xscope() -> None:
             continue
         scope = scope_of(path)
         rel = path.relative_to(REGISTRY)
-        if scope is None or exempt(rel):
+        # Manifest metadata is exempt from the org-NAME scan (publisher info)
+        # but NOT from this path check — a plugin.json can wire components
+        # into another scope via ../<scope>/ references.
+        is_manifest = rel.name == "plugin.json"
+        if scope is None or (exempt(rel) and not is_manifest):
             continue
         text = path.read_text(encoding="utf-8", errors="ignore")
         for other in ALL_SCOPES:
