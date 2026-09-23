@@ -2328,6 +2328,20 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     assert "ssh client config" in r.stderr
     assert not (mu / "registry").exists()
 
+    # git percent-decodes URL userinfo before invoking ssh — the -G
+    # target must carry the decoded user or a `Match user` block that
+    # applies to the real push is missed during validation.
+    ue = tmp_path / "sshurlenc"
+    ue.mkdir()
+    sp.run(["git", "init", "-q"], cwd=ue, capture_output=True)
+    sp.run(["git", "remote", "add", "origin",
+            "ssh://redir%65ct@github.com/Buro-Built/buro-registry.git"],
+           cwd=ue, capture_output=True)
+    r = run(ue, dict(env, PATH=f"{stub2}:{env['PATH']}"))
+    assert r.returncode == 2, r.stderr
+    assert "ssh client config" in r.stderr
+    assert not (ue / "registry").exists()
+
     # A ProxyCommand reports hostname github.com but connects
     # elsewhere — hostname alone is insufficient.
     pc = tmp_path / "sshproxy"

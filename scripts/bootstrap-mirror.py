@@ -76,6 +76,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import unquote
 
 PACK = Path(__file__).resolve().parent.parent
 
@@ -280,6 +281,10 @@ def _ssh_host_unchanged(url: str) -> bool:
         m = re.match(r"^ssh://(?:([^@/\s]+)@)?github\.com(?::(\d+))?/",
                      url)
         user, port = m.groups()
+        # git percent-decodes URL userinfo before invoking ssh — the
+        # -G target must carry the same decoded user or Match user
+        # blocks evaluate differently than the real push.
+        user = unquote(user) if user else ""
         args = (["-p", port] if port else []) + \
             [f"{user}@github.com" if user else "github.com"]
     else:  # scp-style user@github.com:slug
