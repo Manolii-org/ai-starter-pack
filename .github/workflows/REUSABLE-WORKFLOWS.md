@@ -636,7 +636,8 @@ Reusable job that runs a repo's Playwright suite in PR CI and uploads the
 HTML report, test-results (traces/failure screenshots), and the conventional
 `e2e-artifacts/` journey screenshots — always, pass or fail. The suite's own
 `playwright.config.ts` `webServer` block starts the app (or point
-`PLAYWRIGHT_BASE_URL` at a remote env via `test_env_json`).
+`PLAYWRIGHT_BASE_URL` at a remote env via `test_env` — dotenv-style
+`KEY=VALUE` lines, e.g. `test_env: PLAYWRIGHT_BASE_URL=https://staging.example.com`).
 
 ```yaml
 jobs:
