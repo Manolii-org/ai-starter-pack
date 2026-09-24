@@ -6301,3 +6301,68 @@ def test_prune_type_change_fails_closed(tmp_path):
     # lock must not have been rewritten (drop would leave it untracked)
     assert json.loads((lockdir / "capability-lock.json"
                        ).read_text())["files"]
+
+
+def test_mini_yaml_next_line_scalar_typed(tmp_path):
+    """`key:` + next-line scalar node — the value is typed (`1` -> int,
+    `on` -> bool, `{k: v}` -> map), matching PyYAML (Devin on #123)."""
+    mod = load_resolve_module()
+    doc = mod._mini_yaml("version:\n  1\nuniverse:\n  manolii\n"
+                         "requires: []\nfeature_flags:\n  {a: 1}\n")
+    assert doc == {"version": 1, "universe": "manolii",
+                   "requires": [], "feature_flags": {"a": 1}}
+    # A bare `-` + deeper flow map is a mapping item, not folded text.
+    doc2 = mod._mini_yaml(
+        "requires:\n  -\n    {plugin: platform/framework, ref: '1.0.0'}\n")
+    assert doc2 == {"requires": [{"plugin": "platform/framework",
+                                  "ref": "1.0.0"}]}
+    # And a bare `-` + deeper plain/quoted scalar stays typed too.
+    doc3 = mod._mini_yaml("items:\n  -\n    5\n  -\n    'six'\n")
+    assert doc3 == {"items": [5, "six"]}
+
+
+def test_line_continuation_script_dep(tmp_path):
+    """`python3 \\` + `scripts/x.py` on the next line is ONE command — the
+    dependency must be detected (Codex on #1953)."""
+    reg = make_registry(tmp_path / "reg", {
+        "platform/plugin": [(
+            "commands/do.md",
+            "run:\n```sh\npython3 \\\n    scripts/setup.py\n```\n")],
+    })
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    manifest = write_manifest(repo, "manolii",
+                              [{"plugin": "platform/plugin", "ref": "1.0"}])
+    out = run_resolver(manifest, reg, repo, "--apply")
+    assert out.returncode == 0, out.stderr
+    assert "not materialised" in out.stdout
+    assert not (repo / ".claude" / "commands" / "do.md").exists()
+
+
+def test_prune_missing_parent_dir_noop(tmp_path):
+    """An orphan whose parent dir was deleted — under a read-only ancestor —
+    is a no-op lock clear, never a mkdir failure (Devin on #123)."""
+    import os, json
+    repo = tmp_path / "repo"
+    skills = repo / ".claude" / "skills"
+    skills.mkdir(parents=True)
+    reg = tmp_path / "reg"
+    (reg / "registry").mkdir(parents=True)
+    (reg / "registry" / "plugins.json").write_text(json.dumps(
+        {"schema_version": 1, "scopes": {}, "plugins": []}))
+    lockdir = repo / ".ai"
+    lockdir.mkdir()
+    (lockdir / "capability-lock.json").write_text(json.dumps({
+        "files": {".claude/skills/old/SKILL.md": "0" * 64},
+        "resolved": [{"plugin": "platform/old", "version": "0.0.0"}]}))
+    manifest = repo / "ai-manifest.yaml"
+    manifest.write_text("version: 1\nuniverse: platform\nrequires: []\n")
+    os.chmod(skills, 0o555)  # recreation of old/ would fail here
+    try:
+        out = run_resolver(manifest, reg, repo, "--apply", "--prune")
+    finally:
+        os.chmod(skills, 0o755)
+    assert out.returncode == 0, out.stderr
+    assert not (skills / "old").exists()  # never resurrected
+    assert json.loads((lockdir / "capability-lock.json"
+                       ).read_text())["files"] == {}

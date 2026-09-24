@@ -30,6 +30,7 @@ ai-starter-pack repo works). Remote fetch (github:org/repo@ref) lands in P1.
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -123,31 +124,46 @@ def _cmd_window(src: bytes, start: int) -> bytes:
     shell metacharacter (newline, |, &, ;, backtick) or comment. A '#'
     ends the region only at a word start (unquoted and preceded by
     whitespace) — `a#b` and `\"a#b\"` are literal text, and metachars
-    inside quotes are literal too."""
+    inside quotes are literal too. A POSIX backslash-newline continuation
+    is part of the same command, so it is REMOVED from the window —
+    without the join the newline would end the window (or break the
+    invocation regex) before a scripts/ argument on the next line could
+    ever be seen."""
     in_s = in_d = esc = False
+    out = bytearray()
     i = start
     while i < len(src):
         c = src[i]
         if esc:
             esc = False
+            if c == 0x0A:
+                i += 1
+                continue
+            out += b"\\" + bytes([c])
         elif in_d and c == 0x5C:
             esc = True
         elif in_d and c == 0x22:
             in_d = False
+            out.append(c)
         elif in_s and c == 0x27:
             in_s = False
+            out.append(c)
         elif c == 0x22:
             in_d = True
+            out.append(c)
         elif c == 0x27:
             in_s = True
+            out.append(c)
         elif c == 0x5C:
             esc = True
         elif c in b"\n|&;`":
             break
-        elif c == 0x23 and (i == start or src[i - 1] in b" \t"):
+        elif c == 0x23 and (not out or out[-1] in b" \t"):
             break
+        else:
+            out.append(c)
         i += 1
-    return src[start:i]
+    return bytes(out)
 
 # A `|`/`>` block-scalar indicator with optional chomping (+/-) and
 # explicit-indentation (1-9) modifiers in either order: `|`, `>+`, `|-`,
@@ -905,11 +921,15 @@ def _mini_yaml(text: str):
                                 or nxt.startswith("- ")):
                             seq.append(parse(lines[pos[0]][0]))
                         else:
-                            # `-` bare item + deeper plain text — a scalar
-                            # folding anything deeper than the dash.
+                            # `-` bare item + deeper text — the node may be
+                            # a flow collection (`-\n  {k: v}`), a quoted
+                            # scalar, or folded plain text. scalar() handles
+                            # all three: flow/quoted decode, plain text
+                            # returns as-is, `5`/`yes` keep their type.
                             acc = lines[pos[0]][1]
                             pos[0] += 1
-                            seq.append(fold_scalar(acc, indent))
+                            seq.append(
+                                scalar(fold_scalar(acc, indent)))
                             skip_markers()
                             if (pos[0] < len(lines)
                                     and lines[pos[0]][0] > indent):
@@ -976,7 +996,10 @@ def _mini_yaml(text: str):
                                     # orphan the sibling loop rejects).
                                     acc = nxt
                                     pos[0] += 1
-                                    d[ikey] = fold_scalar(acc, indent + 2)
+                                    # Still a typed node — `- key:\n    1`
+                                    # is int 1, not '1'.
+                                    d[ikey] = scalar(
+                                        fold_scalar(acc, indent + 2))
                             else:
                                 # Key at the item's key column — a
                                 # sibling, not the value.
@@ -1081,8 +1104,12 @@ def _mini_yaml(text: str):
                     else:
                         # The scalar's first line sets the content column
                         # but continuations fold at any depth past the
-                        # KEY's own indent (`x:\n  a\n a` -> 'a a').
-                        out[k] = fold_scalar(acc, indent)
+                        # KEY's own indent (`x:\n  a\n a` -> 'a a'). A
+                        # next-line scalar is still a typed node —
+                        # `version:\n  1` is int 1, `...\n  on` is True —
+                        # so the folded text goes through scalar() like
+                        # an inline value.
+                        out[k] = scalar(fold_scalar(acc, indent))
                     skip_markers()
                     if (pos[0] < len(lines)
                             and lines[pos[0]][0] > indent):
@@ -1164,14 +1191,19 @@ def script_dep_block(plugin_dir: Path, src_bytes: bytes,
     ignored/untracked plants and index-hidden deletions the pin never saw."""
     sdir = plugin_dir / "scripts"
     declared = declared_consumer_scripts(src_bytes)
-    for m in SCRIPT_REF.finditer(src_bytes):
+    # A POSIX backslash-newline continuation is part of one logical
+    # command — remove it up front or `python3 \` + `scripts/x.py` on the
+    # next line never matches the invocation regex. Over-joining is the
+    # safe direction: it can only surface MORE scripts/ references.
+    scan = src_bytes.replace(b"\\\r\n", b"").replace(b"\\\n", b"")
+    for m in SCRIPT_REF.finditer(scan):
         # A single invocation may carry SEVERAL scripts/ arguments —
         # `bash scripts/first.sh scripts/second.sh` ends its regex match
         # at first.sh, but second.sh is just as much a dependency. Scan
         # the whole command region (bounded by UNQUOTED shell metachars
         # and word-start comments — quote-aware, so "a#b" hides nothing)
         # so every argument reaches the bundled/declared checks.
-        window = _cmd_window(src_bytes, m.start())
+        window = _cmd_window(scan, m.start())
         # Each ref carries (declared alternatives, bundled probes): any
         # bundled probe hit means the dep is bundled (the resolver cannot
         # materialise scripts/); otherwise at least one declared
@@ -2643,16 +2675,23 @@ def main() -> int:
         try:
             def snapshot(d: Path):
                 # (bytes, mode) of d's current content WITHOUT following
-                # links, or None when d is absent / not a regular file.
-                # `exists && !is_symlink && read_bytes` would let a swap to
-                # a symlink between the check and the read smuggle the link
-                # target's bytes into the rollback journal.
+                # links, or None only when d is confirmed absent / a link /
+                # a non-regular file. Any OTHER open error (EACCES, EMFILE,
+                # ...) propagates — journaling a failed read as 'absent'
+                # would make rollback unlink an existing file. O_NONBLOCK:
+                # a destination swapped to a FIFO must not hang the apply
+                # waiting on a writer.
                 if _HAS_DIRFD:
                     try:
-                        fd = os.open(d.name, os.O_RDONLY | os.O_NOFOLLOW,
-                                     dir_fd=parent_fd(d.parent))
-                    except OSError:
-                        return None
+                        fd = os.open(
+                            d.name,
+                            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                            dir_fd=parent_fd(d.parent))
+                    except OSError as e:
+                        if e.errno in (errno.ENOENT, errno.ENOTDIR,
+                                       errno.ELOOP):
+                            return None
+                        raise
                     with os.fdopen(fd, "rb") as fh:
                         st = os.fstat(fh.fileno())
                         if not stat.S_ISREG(st.st_mode):
@@ -2663,7 +2702,7 @@ def main() -> int:
                 try:
                     if d.is_file():
                         return d.read_bytes(), d.stat().st_mode & 0o777
-                except OSError:
+                except FileNotFoundError:
                     pass
                 return None
 
@@ -2690,6 +2729,15 @@ def main() -> int:
                     dfd=parent_fd(dst.parent))
             if args.prune:
                 for f in plan.removals:
+                    rel_f = f.relative_to(repo_root).as_posix()
+                    if not os.path.lexists(f):
+                        # Already gone — removal is a lock-entry clear only.
+                        # Checking BEFORE snapshot matters twice: snapshot's
+                        # parent_fd creates missing directories, so a pruned
+                        # file under a deleted dir would resurrect the whole
+                        # tree — and fail under a read-only ancestor, which
+                        # a no-op removal never needed.
+                        continue
                     # Regular files only — a symlink reached removals only
                     # through the kept-path branch, and unlink on it is
                     # never a resolver-approved deletion. Re-stat WITHOUT
@@ -2702,8 +2750,22 @@ def main() -> int:
                         if f.is_symlink() or f.exists():
                             raise OSError(
                                 "prune target is not a regular file: "
-                                f"{f.relative_to(repo_root).as_posix()}")
-                        continue  # already gone — removal is a no-op
+                                f"{rel_f}")
+                        continue  # raced deletion — still a no-op
+                    # Re-verify against the lock BEFORE unlinking — the
+                    # digest/mode check at plan time is a stale read by
+                    # now: a hand edit between plan and apply must abort
+                    # (and roll back), not delete the edited file.
+                    want_dig = locked_dig.get(rel_f)
+                    if (want_dig is None
+                            or hashlib.sha256(snap[0]).hexdigest()
+                            != want_dig
+                            or not _exec_provable(
+                                locked_exec.get(rel_f), snap[1])):
+                        raise OSError(
+                            "prune target changed since planning "
+                            "(digest or mode drift) — refusing to remove "
+                            f"a possibly hand-edited file: {rel_f}")
                     undo.append((f, snap[0], snap[1]))
                     if _HAS_DIRFD:
                         os.unlink(f.name, dir_fd=parent_fd(f.parent))
