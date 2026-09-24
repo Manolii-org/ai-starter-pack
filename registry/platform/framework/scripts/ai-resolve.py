@@ -1423,8 +1423,8 @@ def _seg_drains(body: bytes) -> bool:
         # their operands are outputs or program text, not inputs.
         return True
     if key == b"cat":
-        ops = [a for a in args
-               if not a.startswith(b"-") and a != b"--"]
+        ops = [a for a in args if _operand_feeds_stream(a) or (
+            not a.startswith(b"-") and a != b"--")]
     else:
         ops = _reader_operands(key, args)
     if ops and not any(_operand_feeds_stream(o) for o in ops):
@@ -1658,6 +1658,17 @@ def _seg_prov(body: bytes, prov: str):
                         _operand_feeds_stream(o) for o in ops):
                     prov = "own"
             # Otherwise the reader forwards its input — prov flows.
+        elif key == b"eval":
+            # `eval` joins its operands into a command and runs it on
+            # the SAME stdin/stdout — `eval cat` forwards the pipe just
+            # like `cat` (Codex on #1380, round-18 review). Analyze the
+            # joined program text: an inner exec consumes dep bytes, a
+            # reader forwards them, anything else emits its own.
+            inner = _sub_flow(b" ".join(args))
+            if inner == "exec":
+                return None if prov in ("up", "script", "thru") else "own"
+            if inner == "none":
+                prov = "own"
         elif key in _SEG_RESERVED:
             # Compound/conjunction keywords are transparent to the
             # stream: `if :; then cat; fi` runs cat on the `if`

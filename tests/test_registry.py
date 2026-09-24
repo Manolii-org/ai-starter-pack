@@ -9425,3 +9425,28 @@ def test_pipe_to_exec_round17(tmp_path):
             b"cat scripts/x.sh | sh < <(printf hi)",
             b"cat scripts/x.sh | cat <(printf hi) | sh"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_pipe_to_exec_round18(tmp_path):
+    """Round-18 review batch — `eval` operand = executed command
+    string; `cat f -` reads BOTH a file and the shared stdin
+    (Devin on #127, Codex on #1380)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (
+            # eval's argv is program text run on the same stdin/stdout
+            b"cat scripts/x.sh | eval cat | sh",
+            b"cat scripts/x.sh | eval sh | sh",
+            b"cat scripts/x.sh | echo \"$(eval cat)\" | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # a `-`/fd-path operand makes `cat` read the shared stdin
+            # to EOF alongside its files — later `;` siblings see EOF
+            b"cat scripts/x.sh | sh -c 'cat /etc/hosts -; sh'",
+            b"cat scripts/x.sh | sh -c 'cat - /etc/hosts; sh'",
+            b"cat scripts/x.sh | sh -c 'cat /dev/stdin /etc/hosts; sh'",
+            # eval running a sink still replaces the stream
+            b"cat scripts/x.sh | eval wc -l | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
