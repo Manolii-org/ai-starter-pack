@@ -37,7 +37,7 @@
                 "rollback_required": {"type": "boolean", "description": "per-lane override; when omitted the repo-level flag applies (default true)"},
                 "health_check": {"type": "string", "description": "free-form liveness contract (URL, az command, containerapp revision-health)"},
                 "concurrency_group": {"type": "string", "description": "expected workflow concurrency group substring — serializes deploys"},
-                "required_checks": {"type": "array", "items": {"type": "string"}, "uniqueItems": true, "description": "extra check-run names required on THIS lane's branch only — merged over the repo-level required_checks"},
+                "required_checks": {"type": "array", "items": {"type": "string"}, "uniqueItems": true, "description": "check-run names required on THIS lane's branch — REPLACES the repo-level required_checks (an empty list means audited-but-nothing-required; omit the key to inherit repo-level)"},
                 "notes": {"type": "string"}
               }
             }

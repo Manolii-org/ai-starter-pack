@@ -127,20 +127,26 @@ jobs:
         env:
           AUTO_COMMIT: ${{ inputs.auto_commit_baseline }}
           HAS_GH_PAT: ${{ secrets.GH_PAT != '' }}
+          MODE: ${{ inputs.mode }}
+          JOB_TIMEOUT: ${{ inputs.job_timeout_minutes }}
+          STEP_TIMEOUT: ${{ inputs.timeout_minutes }}
+          BASELINE_FILE: ${{ inputs.baseline_file }}
+          CACHE_PATH: ${{ inputs.cache_path }}
+          CACHE_KEY: ${{ inputs.cache_key }}
         run: |
-          if ! echo "${{ inputs.mode }}" | grep -qxE 'enforce|report'; then
+          if ! printf '%s' "$MODE" | grep -qxE 'enforce|report'; then
             echo "::error::mode must be 'enforce' or 'report'"; exit 1
           fi
           if [ "$AUTO_COMMIT" = "true" ] && [ "$HAS_GH_PAT" != "true" ]; then
             echo "::error::auto_commit_baseline requires a write-capable GH_PAT secret — the reusable's contents:read permission caps github.token"; exit 1
           fi
-          if [ "${{ inputs.job_timeout_minutes }}" -lt $(( ${{ inputs.timeout_minutes }} + 10 )) ]; then
+          if [ "$JOB_TIMEOUT" -lt $(( STEP_TIMEOUT + 10 )) ]; then
             echo "::error::job_timeout_minutes must be >= timeout_minutes + 10"; exit 1
           fi
-          case "${{ inputs.baseline_file }}" in
+          case "$BASELINE_FILE" in
             /*|*..*|*~) echo "::error::baseline_file must stay inside the workspace"; exit 1;;
           esac
-          if [ -n "${{ inputs.cache_path }}" ] && [ -z "${{ inputs.cache_key }}" ]; then
+          if [ -n "$CACHE_PATH" ] && [ -z "$CACHE_KEY" ]; then
             echo "::error::cache_key required when cache_path is set"; exit 1
           fi
 

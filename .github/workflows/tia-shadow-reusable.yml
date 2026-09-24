@@ -70,13 +70,16 @@ jobs:
         id: ran
         with:
           name: tia-ran-tests
+          path: ${{ runner.temp }}/tia-ran-tests
 
       - name: Build TIA journal
+        continue-on-error: true
         shell: bash
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           TEST_ROOTS: ${{ inputs.test_roots }}
+          RAN_DIR: ${{ runner.temp }}/tia-ran-tests
         run: |
           python3 - <<'PY'
           import fnmatch, json, os, subprocess, sys
@@ -117,21 +120,21 @@ jobs:
                   if is_test(c) or c.startswith(("docs/", ".github/")):
                       continue
                   stem = Path(c).stem
-                  candidates = (f"test_{stem}", f"{stem}.test", f"{stem}.spec", f"{stem}_test")
+                  patterns = (f"test_{stem}.*", f"{stem}.test.*", f"{stem}.spec.*", f"{stem}_test.*")
                   expected.update(t for t in all_files
-                                  if t.split("/", 1)[0] in roots
-                                  and Path(t).stem.split(".")[0] in
-                                      {cand.split(".")[0] for cand in candidates})
+                                  if t != c
+                                  and t.split("/", 1)[0] in roots
+                                  and is_test(t)
+                                  and any(fnmatch.fnmatch(Path(t).name, pat) for pat in patterns))
 
           ran = None
-          # Contract: callers write `ran-tests.txt` into the `tia-ran-tests`
-          # artifact (extracts at workspace root; also accept a same-named
-          # subdir). Filenames are contract, not discovery.
-          ran_file = next((p for p in (Path("ran-tests.txt"),
-                                      Path("tia-ran-tests/ran-tests.txt"))
-                           if p.is_file()), None)
-          if ran_file:
-              ran = sorted(l.strip() for l in ran_file.read_text().splitlines() if l.strip())
+          # The artifact extracts under RAN_DIR — read whatever manifest
+          # file(s) the caller put there; never search the repo.
+          ran_dir = Path(os.environ["RAN_DIR"])
+          ran_files = sorted(p for p in ran_dir.rglob("*") if p.is_file()) if ran_dir.is_dir() else []
+          if ran_files:
+              ran = sorted({l.strip() for f in ran_files
+                            for l in f.read_text().splitlines() if l.strip()})
           journal = {
               "head_sha": head, "base_sha": base,
               "changed_files": changed,

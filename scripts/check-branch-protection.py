@@ -73,14 +73,43 @@ def current_contexts(protection: dict) -> list[str]:
     return []
 
 
+def _gh_json(endpoint: str, timeout: int = 30) -> tuple[list | dict | None, str | None]:
+    """gh api helper: (json_body, None) on success; (None, '404') on not-found;
+    (None, <err>) otherwise."""
+    try:
+        out = subprocess.run(["gh", "api", endpoint],
+                             capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None, f"gh api timed out ({timeout}s)"
+    except OSError as exc:
+        return None, f"gh not runnable: {exc}"
+    if out.returncode != 0:
+        err = out.stderr.strip()[:160]
+        if "404" in err or "Not Found" in err:
+            return None, "404"
+        return None, err or f"exit {out.returncode}"
+    try:
+        return json.loads(out.stdout), None
+    except ValueError as exc:
+        return None, f"undecodable JSON: {exc}"
+
+
+def fixture_name(repo: str, branch: str) -> str:
+    """Filesystem-safe stem for fixture/fix-payload files — '/' and other
+    non-[A-Za-z0-9_.-] chars in lane branches would otherwise descend into
+    nonexistent subdirs."""
+    return f"{repo.replace('/', '__')}__{re.sub(r'[^A-Za-z0-9_.-]', '_', branch)}"
+
+
 def fetch_protection(repo: str, branch: str,
                      args: argparse.Namespace) -> tuple[dict | None, str | None]:
     """Return (protection_json, error). protection_json=None means the branch
-    is unprotected (404); error is set only for real fetch failures."""
+    is unprotected (no legacy protection AND no rulesets); error is set only
+    for real fetch failures — including a branch that does not exist."""
     if getattr(args, "fixtures", None):
-        base = Path(args.fixtures) / f"{repo.replace('/', '__')}__{branch}"
-        body_path = base.with_suffix(".json")
-        if base.with_suffix(".404").exists():
+        stem = Path(args.fixtures) / fixture_name(repo, branch)
+        body_path = Path(f"{stem}.json")
+        if Path(f"{stem}.404").exists():
             return None, None
         if not body_path.is_file():
             return None, f"no fixture for {repo}@{branch} ({body_path})"
@@ -91,30 +120,53 @@ def fetch_protection(repo: str, branch: str,
     if not SLUG_RE.fullmatch(repo):
         return None, f"'{repo}' is not a valid owner/name slug"
     ref = urllib.parse.quote(branch, safe="")
-    try:
-        out = subprocess.run(
-            ["gh", "api", f"repos/{repo}/branches/{ref}/protection"],
-            capture_output=True, text=True, timeout=30,
-        )
-    except subprocess.TimeoutExpired:
-        return None, f"gh api timed out (30s) on {repo}@{branch}"
-    except OSError as exc:
-        return None, f"gh not runnable: {exc}"
-    if out.returncode != 0:
-        err = out.stderr.strip()[:160]
-        if "404" in err or "Not Found" in err:
-            return None, None  # unprotected branch — a finding, not an error
+    body, err = _gh_json(f"repos/{repo}/branches/{ref}/protection")
+    if err and err != "404":
         return None, f"gh api protection read failed for {repo}@{branch}: {err}"
-    try:
-        return json.loads(out.stdout), None
-    except ValueError as exc:
-        return None, f"undecodable protection JSON for {repo}@{branch}: {exc}"
+    if err is None and isinstance(body, dict):
+        return body, None
+    # 404: the legacy endpoint misses repository RULESETS — check those before
+    # calling the branch unprotected. Also distinguishes nonexistent branches.
+    rules, rerr = _gh_json(f"repos/{repo}/rules/branches/{ref}")
+    if rerr and rerr != "404":
+        return None, f"gh api rulesets read failed for {repo}@{branch}: {rerr}"
+    if isinstance(rules, list) and rules:
+        checks = []
+        for rule in rules:
+            params = rule.get("parameters") or {}
+            if rule.get("type") == "required_status_checks":
+                checks += [c["context"] for c in params.get("required_status_checks") or []
+                           if isinstance(c, dict) and c.get("context")]
+        # Synthetic protection view: fix payloads are emitted but carry a
+        # ruleset caveat (a legacy PUT cannot edit rulesets).
+        return {"required_status_checks": {"strict": False,
+                "checks": [{"context": c} for c in checks]},
+                "_ruleset_managed": True}, None
+    exists, eerr = _gh_json(f"repos/{repo}/branches/{ref}")
+    if eerr == "404" or exists is None:
+        return None, f"branch {repo}@{branch} does not exist"
+    return None, None  # exists but unprotected — a finding, not an error
 
 
 def _enabled(node) -> bool:
     """A GET protection sub-object carries {enabled: bool, url} — the PUT body
     wants the bare boolean."""
     return bool(isinstance(node, dict) and node.get("enabled"))
+
+
+def _name_list(node) -> dict | None:
+    """Normalize GET-shaped users/teams/apps sub-objects to the PUT shape
+    {users: [login], teams: [slug], apps: [slug]}."""
+    if not isinstance(node, dict):
+        return None
+    return {
+        "users": [u.get("login") for u in node.get("users") or []
+                  if isinstance(u, dict) and u.get("login")],
+        "teams": [t.get("slug") for t in node.get("teams") or []
+                  if isinstance(t, dict) and t.get("slug")],
+        "apps": [a.get("slug") for a in node.get("apps") or []
+                 if isinstance(a, dict) and a.get("slug")],
+    }
 
 
 def fix_body(protection: dict | None, required: list[str]) -> dict:
@@ -138,21 +190,17 @@ def fix_body(protection: dict | None, required: list[str]) -> dict:
             "strict": bool(rsc.get("strict")), "checks": checks}
         body["enforce_admins"] = _enabled(protection.get("enforce_admins"))
         rpr = protection.get("required_pull_request_reviews")
-        body["required_pull_request_reviews"] = (
-            {k: v for k, v in rpr.items() if k != "url"}
-            if isinstance(rpr, dict) else None)
-        rst = protection.get("restrictions")
-        if isinstance(rst, dict):
-            body["restrictions"] = {
-                "users": [u.get("login") for u in rst.get("users") or []
-                          if isinstance(u, dict) and u.get("login")],
-                "teams": [t.get("slug") for t in rst.get("teams") or []
-                          if isinstance(t, dict) and t.get("slug")],
-                "apps": [a.get("slug") for a in rst.get("apps") or []
-                         if isinstance(a, dict) and a.get("slug")],
-            }
+        if isinstance(rpr, dict):
+            clean = {k: v for k, v in rpr.items() if k != "url"}
+            # Nested users/teams/apps must be reduced to login/slug arrays or
+            # the PUT is rejected 422.
+            for k in ("dismissal_restrictions", "bypass_pull_request_allowances"):
+                if isinstance(clean.get(k), dict):
+                    clean[k] = _name_list(clean[k])
+            body["required_pull_request_reviews"] = clean
         else:
-            body["restrictions"] = None
+            body["required_pull_request_reviews"] = None
+        body["restrictions"] = _name_list(protection.get("restrictions"))
         for k in PUT_BOOL_KEYS:
             body[k] = _enabled(protection.get(k))
     else:
@@ -235,14 +283,16 @@ def main() -> int:
             findings.append(f"{where}: {why}: {', '.join(missing)}")
             report.append(f"| {repo} | {branch} | ❌ {why}: `{', '.join(missing)}` |")
             if args.emit_fixes:
-                # '/' in a lane branch (release/1.2) would make the fix path
-                # descend into a nonexistent dir — flatten separators.
-                slug = f"{repo.replace('/', '__')}__{branch.replace('/', '__')}"
+                slug = fixture_name(repo, branch)
                 body = fix_body(protection, required)
                 warns = [] if protection else [
                     "branch had no protection — payload sets ONLY "
                     "required_status_checks + enforce_admins; review "
                     "reviews/signatures/restrictions before applying"]
+                if protection and protection.get("_ruleset_managed"):
+                    warns.append("branch is ruleset-managed — a PUT sets legacy "
+                                 "protection alongside the ruleset; prefer "
+                                 "editing the ruleset itself")
                 fixes.append({"repo": repo, "branch": branch, "file": f"{slug}.json",
                               "body": body, "warnings": warns})
 
@@ -277,14 +327,17 @@ def main() -> int:
             fh.write("\n### Branch-protection required-checks audit\n\n")
             fh.write("\n".join(report) + "\n")
 
+    # OK count = branches that actually verified; skipped/unverifiable are
+    # excluded so a fleet of 403s cannot masquerade as a conforming fleet.
+    ok_count = sum(1 for line in report if "| OK (" in line)
     if findings:
         level = "warning" if args.warn_only else "error"
         print(f"branch-protection: {len(findings)} finding(s) [{level}]:")
         for f in findings:
             print(f"  - {f}")
         return 0 if args.warn_only else 1
-    print(f"branch-protection: OK — "
-          f"{sum(len(audited(r)) for r in doc['repos'])} branch(es) conform")
+    print(f"branch-protection: OK — {ok_count} branch(es) conform, "
+          f"{len(warnings)} unverifiable")
     return 0
 
 

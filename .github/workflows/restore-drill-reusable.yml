@@ -90,14 +90,17 @@ jobs:
 
       - name: Validate inputs
         shell: bash
+        env:
+          DB_AUTH: ${{ inputs.db_auth }}
+          QUERIES: ${{ inputs.sanity_queries }}
         run: |
-          if ! echo "${{ inputs.db_auth }}" | grep -qxE 'sql-auth|entra'; then
+          if ! printf '%s' "$DB_AUTH" | grep -qxE 'sql-auth|entra'; then
             echo "::error::db_auth must be sql-auth or entra"; exit 1
           fi
           while IFS= read -r q; do
             [ -z "$q" ] && continue
             echo "$q" | grep -qiE '^\s*select\b' || { echo "::error::sanity query is not SELECT-only: $q"; exit 1; }
-          done <<< '${{ inputs.sanity_queries }}'
+          done <<< "$QUERIES"
 
       - name: Azure login (OIDC)
         uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2.3.1
@@ -108,9 +111,11 @@ jobs:
 
       - name: Install go-sqlcmd
         shell: bash
+        env:
+          SQLCMD_VERSION: ${{ inputs.sqlcmd_version }}
         run: |
           curl -fsSL --connect-timeout 15 --max-time 120 \
-            "https://github.com/microsoft/go-sqlcmd/releases/download/v${{ inputs.sqlcmd_version }}/sqlcmd-linux-amd64.tar.bz2" \
+            "https://github.com/microsoft/go-sqlcmd/releases/download/v${SQLCMD_VERSION}/sqlcmd-linux-amd64.tar.bz2" \
             | sudo tar -xj -C /usr/local/bin
           sqlcmd --version
 
@@ -127,9 +132,12 @@ jobs:
           # now-15m (latest restorable point lags wall-clock by a few minutes).
           RESTORE_TIME=$(date -u -d '15 minutes ago' +%Y-%m-%dT%H:%M:%SZ)
           echo "restoring $SRC at point $RESTORE_TIME -> $DRILL_DB"
-          timeout 600 az sql db restore -g "$RG" -s "$SERVER" -n "$SRC" \
-            --dest-name "$DRILL_DB" --time "$RESTORE_TIME" -o none
+          # --no-wait: az returns once the restore is accepted; the poll loop
+          # below owns the wait (a synchronous restore can exceed 10 min).
+          timeout 120 az sql db restore -g "$RG" -s "$SERVER" -n "$SRC" \
+            --dest-name "$DRILL_DB" --time "$RESTORE_TIME" --no-wait -o none
           echo "restore_time=$RESTORE_TIME" >> "$GITHUB_OUTPUT"
+          echo "created=true" >> "$GITHUB_OUTPUT"
           # poll until Online (bounded by job timeout)
           for i in $(seq 1 40); do
             STATE=$(timeout 60 az sql db show -g "$RG" -s "$SERVER" -n "$DRILL_DB" --query status -o tsv 2>/dev/null || echo Provisioning)
@@ -155,12 +163,13 @@ jobs:
             [ -z "$q" ] && continue
             echo "--- query: $q"
             # -b: exit nonzero on a SQL batch error so a failed sanity query
-            # fails the drill instead of being recorded as a result.
+            # fails the drill instead of being recorded as a result. The
+            # password rides the SQLCMDPASSWORD env var — never -P (process args).
             if [ "$DB_AUTH" = "entra" ]; then
               OUT=$(timeout 60 sqlcmd -b -S "$FQDN" -d "$DRILL_DB" --authentication-method=ActiveDirectoryDefault \
                     -Q "$q" -h -1 -W -l 30 2>&1)
             else
-              OUT=$(timeout 60 sqlcmd -b -S "$FQDN" -d "$DRILL_DB" -U "$SQLCMDUSER" -P "$SQLCMDPASSWORD" \
+              OUT=$(timeout 60 sqlcmd -b -S "$FQDN" -d "$DRILL_DB" -U "$SQLCMDUSER" \
                     -Q "$q" -h -1 -W -l 30 2>&1)
             fi
             echo "$OUT"
@@ -188,7 +197,9 @@ jobs:
           if-no-files-found: warn
 
       - name: Drop throwaway database
-        if: always()
+        # Only when THIS run created it — a failed restore must not delete a
+        # same-named DB owned by another invocation.
+        if: always() && steps.restore.outputs.created == 'true'
         shell: bash
         env:
           RG: ${{ inputs.resource_group }}
