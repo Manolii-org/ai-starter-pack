@@ -132,6 +132,10 @@ jobs:
           if ! printf '%s' "$DB_AUTH" | grep -qxE 'sql-auth|entra'; then
             echo "::error::db_auth must be sql-auth or entra"; exit 1
           fi
+          mkdir -p drill-report && : > drill-report/results.jsonl
+          # Write the report skeleton now — a failed query step exits before
+          # the finalize step, and the upload always()s need SOMETHING there.
+          python3 -c 'import json,os; from pathlib import Path; Path("drill-report/report.json").write_text(json.dumps({"drill_db": os.environ["DRILL_DB"], "status": "incomplete", "queries": []}, indent=2))'
           while IFS= read -r q; do
             [ -z "$q" ] && continue
             echo "$q" | grep -qiE '^\s*select\b' || { echo "::error::sanity query is not SELECT-only: $q"; exit 1; }
@@ -213,8 +217,9 @@ jobs:
           set -euo pipefail
           FQDN="$SERVER.database.windows.net"
           mkdir -p drill-report && : > drill-report/results.jsonl
-          # Stop ~8m before the job timeout so upload + delete get scheduled.
-          DEADLINE=$(( JOB_START + (JOB_TIMEOUT - 8) * 60 ))
+          # Stop ~10m before the job timeout so upload + delete get scheduled.
+          DEADLINE=$(( JOB_START + (JOB_TIMEOUT - 10) * 60 ))
+          FAILED=0
           INCOMPLETE=0
           while IFS= read -r q; do
             [ -z "$q" ] && continue
@@ -229,10 +234,10 @@ jobs:
             # password rides the SQLCMDPASSWORD env var — never -P (process args).
             if [ "$DB_AUTH" = "entra" ]; then
               OUT=$(timeout 60 sqlcmd -b -S "$FQDN" -d "$DRILL_DB" --authentication-method=ActiveDirectoryDefault \
-                    -Q "$q" -h -1 -W -l 30 2>&1)
+                    -Q "$q" -h -1 -W -l 30 2>&1) || { FAILED=1; OUT="$OUT"; }
             else
               OUT=$(timeout 60 sqlcmd -b -S "$FQDN" -d "$DRILL_DB" -U "$SQLCMDUSER" \
-                    -Q "$q" -h -1 -W -l 30 2>&1)
+                    -Q "$q" -h -1 -W -l 30 2>&1) || { FAILED=1; OUT="$OUT"; }
             fi
             # Cap logged/stored output — queries are meant to return aggregate
             # scalars; truncation bounds exposure if one returns rows anyway.
@@ -242,11 +247,21 @@ jobs:
             python3 -c 'import json,sys; print(json.dumps({"query": sys.argv[1], "output": sys.argv[2].strip()[:500]}))' \
               "$q" "$OUT" >> drill-report/results.jsonl
           done <<< "$QUERIES"
-          [ "$INCOMPLETE" = 1 ] && exit 1
+          [ "$INCOMPLETE" = 1 ] || [ "$FAILED" = 1 ] && { echo "::error::sanity queries incomplete or failed"; exit 1; }
+          :
+
+      - name: Finalize drill report
+        # always() — a failed query step exits before report.json exists;
+        # the artifact must still carry a structured summary for diagnosis.
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p drill-report
           python3 - <<'PY'
           import json, os
           from pathlib import Path
-          rows = [json.loads(l) for l in Path("drill-report/results.jsonl").read_text().splitlines()]
+          results = Path("drill-report/results.jsonl")
+          rows = [json.loads(l) for l in results.read_text().splitlines()] if results.exists() else []
           report = {"drill_db": os.environ["DRILL_DB"],
                     "run": os.environ["GITHUB_SERVER_URL"] + "/" + os.environ["GITHUB_REPOSITORY"]
                            + "/actions/runs/" + os.environ["GITHUB_RUN_ID"],
@@ -277,8 +292,12 @@ jobs:
           # can materialize seconds later, and a single `db show` 404 is how
           # orphan drill DBs happen. A failed lookup is NOT proof of absence:
           # only an explicit NotFound counts as absent; timeouts/5xx retry.
+          # Bound retries to a 9-minute window — the query step reserves ~10m
+          # for upload + this loop; iterating 20 unbounded attempts would let
+          # the job timeout cancel mid-teardown and orphan the DB.
           ABSENT_CONFIRMED=0
-          for i in $(seq 1 20); do
+          TEARDOWN_DEADLINE=$(( $(date +%s) + 9 * 60 ))
+          while [ "$(date +%s)" -lt "$TEARDOWN_DEADLINE" ]; do
             ERR=$(mktemp)
             if timeout 60 az sql db show -g "$RG" -s "$SERVER" -n "$DRILL_DB" -o none 2>"$ERR"; then
               timeout 240 az sql db delete -g "$RG" -s "$SERVER" -n "$DRILL_DB" -y -o none || true

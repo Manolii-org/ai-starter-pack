@@ -321,16 +321,41 @@ def main() -> int:
                 # branch' — an unprotected or missing prod branch is still a
                 # finding; only a verified protected branch reports OK.
                 protection, err = fetch_protection(repo, branch, args)
-                if err:
+                if err and "does not exist" in err:
+                    # Definitive contract mismatch, not a scope failure — a
+                    # deleted/misspelled lane must not pass as 'unverifiable'.
+                    findings.append(f"{where}: {err}")
+                    report.append(f"| {repo} | {branch} | ❌ {err} |")
+                elif err:
                     warnings.append(f"{where}: {err}")
                     report.append(f"| {repo} | {branch} | ⚠️ unverifiable — {err} |")
                 elif protection is None:
                     findings.append(f"{where}: branch unprotected (no checks declared)")
                     report.append(f"| {repo} | {branch} | ❌ unprotected (no checks declared) |")
+                    if args.emit_fixes:
+                        slug = fixture_name(repo, branch)
+                        fixes.append({"repo": repo, "branch": branch,
+                                      "file": f"{slug}.json",
+                                      "body": fix_body(None, []),
+                                      "warnings": ["contract declares NO required checks — "
+                                                   "payload enables basic protection only"]})
                 else:
-                    report.append(f"| {repo} | {branch} | OK (protected, no checks required) |")
+                    # Surplus check applies here too — a stale required context
+                    # on a 'no checks declared' lane blocks merges silently.
+                    extra = current_contexts(protection)
+                    if extra:
+                        warnings.append(f"{where}: surplus required checks not declared: "
+                                        f"{', '.join(extra)}")
+                        report.append(f"| {repo} | {branch} | OK (protected, no checks required) "
+                                      f"(+{len(extra)} undeclared: `{'`, `'.join(extra)}`) |")
+                    else:
+                        report.append(f"| {repo} | {branch} | OK (protected, no checks required) |")
                 continue
             protection, err = fetch_protection(repo, branch, args)
+            if err and "does not exist" in err:
+                findings.append(f"{where}: {err}")
+                report.append(f"| {repo} | {branch} | ❌ {err} |")
+                continue
             if err:
                 warnings.append(f"{where}: {err}")
                 report.append(f"| {repo} | {branch} | ⚠️ unverifiable — {err} |")
