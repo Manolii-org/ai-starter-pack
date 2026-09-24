@@ -177,23 +177,22 @@ jobs:
         if: ${{ always() }}
         id: artifacts
         run: |
+          python3 -c '
+          import os, sys
+          workspace = os.path.realpath(os.environ["GITHUB_WORKSPACE"])
+          for raw in os.environ["ARTIFACT_PATHS_IN"].splitlines():
+              if not raw:
+                  continue
+              candidate = raw if os.path.isabs(raw) else os.path.join(os.environ["WORKDIR"], raw)
+              resolved = os.path.realpath(candidate)
+              if os.path.commonpath((workspace, resolved)) == workspace:
+                  print(resolved)
+              else:
+                  print(f"::warning::skipping artifact path outside workspace: {raw}", file=sys.stderr)
+          ' > /tmp/artifact-paths.txt
           {
             echo 'paths<<EOF'
-            python3 - <<'PY'
-            import os
-            import sys
-
-            workspace = os.path.realpath(os.environ["GITHUB_WORKSPACE"])
-            for raw in os.environ["ARTIFACT_PATHS_IN"].splitlines():
-                if not raw:
-                    continue
-                candidate = raw if os.path.isabs(raw) else os.path.join(os.environ["WORKDIR"], raw)
-                resolved = os.path.realpath(candidate)
-                if os.path.commonpath((workspace, resolved)) == workspace:
-                    print(resolved)
-                else:
-                    print(f"::warning::skipping artifact path outside workspace: {raw}", file=sys.stderr)
-            PY
+            cat /tmp/artifact-paths.txt
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 
@@ -205,7 +204,7 @@ jobs:
           TEST_USER_EMAIL: ${{ secrets.E2E_TEST_USER_EMAIL }}
           TEST_USER_PASSWORD: ${{ secrets.E2E_TEST_USER_PASSWORD }}
         run: |
-          python3 <<'PY'
+          python3 -c '
           import json, os, re, subprocess, sys
           try:
               args = json.loads(os.environ.get("PLAYWRIGHT_ARGS_JSON") or "[]")
@@ -220,7 +219,7 @@ jobs:
               if m:
                   env[m.group(1)] = m.group(2)
           subprocess.run(["npx", "playwright", "test", *args], env=env, check=True)
-          PY
+          '
 
       - name: Upload e2e artifacts
         if: ${{ always() }}
