@@ -1424,6 +1424,23 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                     # install mode — record that, not this provider's.
                     exec_modes[rel_dst] = prior_install
                 continue
+            # planned keys are file paths only: one plugin shipping
+            # .claude/x while another ships .claude/x/y escapes the
+            # exact-key check above — --apply would write the file then
+            # fail mkdir() on the descendant mid-run, unlocked.
+            overlap = next(
+                (p for p in plan.planned
+                 if p.startswith(rel_dst + "/")
+                 or rel_dst.startswith(p + "/")),
+                None)
+            if overlap is not None:
+                plan.conflicts.append((
+                    dst,
+                    f"output-path collision: {req} plans {rel_dst} which "
+                    f"overlaps {overlap} (file vs directory prefix) — "
+                    "refusing to materialise",
+                ))
+                continue
             if dst.exists() and not dst.is_file():
                 # A directory (or FIFO/socket) at the destination —
                 # read_bytes() would crash IsADirectoryError instead of

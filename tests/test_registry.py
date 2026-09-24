@@ -242,6 +242,29 @@ def test_output_path_collision_conflicts(tmp_path):
     assert not (consumer / ".claude").exists()
 
 
+def test_prefix_collision_file_vs_descendant_conflicts(tmp_path):
+    """One plugin shipping .claude/x while another ships .claude/x/y must
+    fail closed — the exact-key check misses it and --apply would write
+    the file then crash on mkdir() for the descendant, unlocked."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/a": [("skills/demo", "file body\n")],
+        "platform/b": [("skills/demo/deep.md", "nested\n")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    for order in (
+        [{"plugin": "platform/a", "ref": "1.0.0"},
+         {"plugin": "platform/b", "ref": "1.0.0"}],
+        [{"plugin": "platform/b", "ref": "1.0.0"},
+         {"plugin": "platform/a", "ref": "1.0.0"}],
+    ):
+        m = write_manifest(consumer, "manolii", order)
+        r = run_resolver(m, reg_root, consumer, "--apply")
+        assert r.returncode == 1
+        assert "output-path collision" in r.stdout
+        assert not (consumer / ".claude").exists()
+
+
 def test_identical_collision_dedupes(tmp_path):
     """Identical content from two plugins is a dedup skip, not a conflict."""
     body = "---\nname: demo\ndescription: d\n---\nsame bytes\n"
