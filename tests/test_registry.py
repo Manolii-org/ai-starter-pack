@@ -9226,3 +9226,112 @@ def test_command_start_skips_substitution_separators(tmp_path):
     # An invoked script file is still detected after the substitution.
     src = b'bash scripts/x.sh $(printf a; printf b)\n'
     assert mod.script_dep_block(pdir, src)
+
+
+def test_command_start_span_end_is_exclusive(tmp_path):
+    """`$(a)` after a separator must not hide the NEXT command — the
+    span end is already exclusive, so `;`/`|`/`&&` after `)` still move
+    the command start (Devin + CodeRabbit on #1380/#1957, round-15)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for sep in (b"; ", b"|", b"&& ", b"\n"):
+        assert mod.script_dep_block(
+            pdir, b"echo $(true)" + sep + b"bash scripts/x.sh\n")
+        assert mod.script_dep_block(
+            pdir, b'echo "$(true)"' + sep + b"bash scripts/x.sh\n")
+    # A bare `(` group inside the sub stays balanced (Devin on #1957).
+    assert mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | echo "$( (true); cat)" | sh\n')
+    # A `)` inside the sub's own quotes is literal — the `;` after the
+    # REAL close still separates (Devin on #1957).
+    assert mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | echo "$(printf ")"; cat)" | sh\n')
+    assert mod.script_dep_block(
+        pdir, b'echo $(printf ";"); cat scripts/x.sh\n') is False
+
+
+def test_script_dep_sh_c_classifies_whole_list(tmp_path):
+    """`sh -c '…'` runs a command LIST sharing the shell's stdin — a
+    later command or inner pipeline still executes the pipe (Devin +
+    CodeRabbit on #1380/#1957, round-15)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | sh -c "true; sh"\n')
+    assert mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | sh -c "cat | sh"\n')
+    assert mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | sh -c "echo start; sh"\n')
+    # A forwarder inside `-c` still hands the stream downstream.
+    assert mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | sh -c "cat" | sh\n')
+    assert not mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | sh -c "cat"\n')
+    assert not mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | sh -c "wc -l"\n')
+
+
+def test_script_dep_shell_head_operands_not_demoted(tmp_path):
+    """`-c`/program positionals on shell and bc/dc heads are program
+    text, not input files — `$(bash -c cat)` forwards the pipe (Codex
+    on #1380, round-15)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | echo "$(bash -c cat)" | sh\n')
+    assert not mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | echo "$(bash -c wc)" | sh\n')
+
+
+def test_effective_head_leading_redirects(tmp_path):
+    """Redirect words before the head are not the head — `0<&0 cat`
+    runs cat on the pipe and `0<&3 sh` keeps fd0 live (Codex on #1957,
+    round-15)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | echo "$(0<&0 cat)" | sh\n')
+    assert mod.script_dep_block(pdir, b"cat scripts/x.sh | 0<&0 sh\n")
+    assert not mod.script_dep_block(pdir, b"cat scripts/x.sh | <&- sh\n")
+    # Output-diverted leading redirect emits nothing to the capture.
+    assert not mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | echo "$(>/dev/null cat)" | sh\n')
+
+
+def test_reader_operands_long_program_flag(tmp_path):
+    """`--regexp=P`/`--file=F` set prog_seen just like `-eP` — the next
+    positional is a real input file (CodeRabbit on #1957, round-15)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert not mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | echo "$(grep --regexp=f /etc/hosts)"'
+        b" | sh\n")
+    assert not mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | echo "$(grep --regexp f /etc/hosts)"'
+        b" | sh\n")
+
+
+def test_seg_prov_structural_only_segments(tmp_path):
+    """A bare `fi`/`done`/`then` emits no captured data — structural
+    keywords strip to the real head instead of preserving provenance
+    (CodeRabbit on #1957, round-15)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert not mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | echo "$(if true; then echo hi; fi)"'
+        b" | sh\n")
+    assert mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | echo "$(if true; then cat; fi)"'
+        b" | sh\n")
