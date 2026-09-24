@@ -1,0 +1,146 @@
+name: E2E Playwright Gate (Reusable)
+# Reusable workflow_call form. Caller owns `on:`.
+# Cite: .github/workflows/REUSABLE-WORKFLOWS.md
+#
+# Runs a repo's Playwright suite against the app the suite's own
+# `webServer` block starts (or a remote PLAYWRIGHT_BASE_URL), then uploads
+# the report, test-results (traces, failure screenshots/videos), and the
+# conventional `e2e-artifacts/` journey screenshots — always, pass or fail.
+#
+# Convention: specs write verification screenshots into `e2e-artifacts/`
+# (e.g. `page.screenshot({ path: 'e2e-artifacts/01-login.png' })`) so every
+# PR carries visual evidence of the exercised journeys, not just failures.
+#
+# Caller example:
+#
+#   e2e:
+#     uses: Manolii-org/ai-starter-pack/.github/workflows/e2e-playwright-reusable.yml@<tag-or-sha>
+#     with:
+#       playwright_args: "--grep @smoke"
+#       test_env_json: >-
+#         {"TEST_USER_EMAIL":"${{ secrets.E2E_TEST_USER_EMAIL }}",
+#         "TEST_USER_PASSWORD":"${{ secrets.E2E_TEST_USER_PASSWORD }}"}
+#
+# `test_env_json` lands ONLY on the playwright step, so a missing
+# E2E_TEST_USER_* secret degrades to whatever the suite runs unauthenticated
+# (the smoke-tier convention: auth.setup skips when creds are absent).
+#
+# Security: caller-controlled strings reach the shell as argv words via
+# $VAR expansion (never re-parsed as shell source); secrets belong in
+# test_env_json, which is a job-env injection — never in playwright_args.
+
+on:
+  workflow_call:
+    inputs:
+      runs_on:
+        type: string
+        required: false
+        default: 'ubuntu-latest'
+        description: Runner label.
+      node_version:
+        type: string
+        required: false
+        default: '22'
+        description: Node version for setup-node.
+      workdir:
+        type: string
+        required: false
+        default: '.'
+        description: Working directory containing package.json + playwright.config.
+      install_command:
+        type: string
+        required: false
+        default: 'npm ci'
+        description: Dependency install shell command (arbitrary shell — keep secrets out).
+      build_command:
+        type: string
+        required: false
+        default: ''
+        description: Optional pre-test build step (e.g. `npm run build`) run after install.
+      browsers:
+        type: string
+        required: false
+        default: 'chromium'
+        description: Space-separated playwright browser set for `playwright install`.
+      playwright_args:
+        type: string
+        required: false
+        default: ''
+        description: Extra argv for `playwright test`, e.g. `--grep @smoke` or `--project=chromium`.
+      test_env_json:
+        type: string
+        required: false
+        default: '{}'
+        description: JSON object injected as env on the playwright step (test creds, base URL overrides).
+      artifact_name:
+        type: string
+        required: false
+        default: ''
+        description: Artifact name override; defaults to e2e-<caller repo name>.
+      artifact_paths:
+        type: string
+        required: false
+        default: "playwright-report/\ntest-results/\ne2e-artifacts/"
+        description: Newline-separated paths uploaded with the e2e report artifact.
+      retention_days:
+        type: number
+        required: false
+        default: 14
+        description: Artifact retention.
+      timeout_minutes:
+        type: number
+        required: false
+        default: 30
+        description: Hard bound on the playwright test step.
+
+jobs:
+  e2e:
+    runs-on: ${{ inputs.runs_on }}
+    env:
+      # pass caller-controlled values through env, not shell source — a value
+      # like `--grep @smoke; curl evil` must never reach the run: program; an
+      # env-var value is never re-parsed for shell metacharacters, so it
+      # stays literal argv words
+      BROWSERS: ${{ inputs.browsers }}
+      PLAYWRIGHT_ARGS: ${{ inputs.playwright_args }}
+      TEST_TIMEOUT_MIN: ${{ inputs.timeout_minutes }}
+    # job bound covers install (~35m) + the step-level test timeout; keep
+    # timeout_minutes under ~50 or raise this ceiling too
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Install dependencies
+        working-directory: ${{ inputs.workdir }}
+        timeout-minutes: 20
+        run: ${{ inputs.install_command }}
+
+      - name: Build
+        if: ${{ inputs.build_command != '' }}
+        working-directory: ${{ inputs.workdir }}
+        timeout-minutes: 20
+        run: ${{ inputs.build_command }}
+
+      - name: Install Playwright browsers
+        working-directory: ${{ inputs.workdir }}
+        timeout-minutes: 15
+        run: npx playwright install --with-deps $BROWSERS
+
+      - name: Run Playwright suite
+        working-directory: ${{ inputs.workdir }}
+        env: ${{ fromJSON(inputs.test_env_json) }}
+        run: timeout ${TEST_TIMEOUT_MIN}m npx playwright test $PLAYWRIGHT_ARGS
+
+      - name: Upload e2e artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name != '' && inputs.artifact_name || format('e2e-{0}', github.event.repository.name) }}
+          retention-days: ${{ inputs.retention_days }}
+          path: ${{ inputs.artifact_paths }}
