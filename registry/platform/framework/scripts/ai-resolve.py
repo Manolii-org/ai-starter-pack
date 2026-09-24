@@ -116,19 +116,20 @@ SCRIPT_NAME = re.compile(
     rb"scripts/((?:[A-Za-z0-9_.-]+/)"
     rb"*(?:[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs|cjs|rb|pl)|[A-Za-z0-9_-]+))"
     rb"(?![\w.])")
-# `-m scripts.a.b` extraction — the dotted module resolves to either
-# scripts/a/b.py or the package scripts/a/b/__init__.py; both are checked.
+# `-m scripts.a.b` extraction — the dotted module resolves to
+# scripts/a/b.py or the runnable scripts/a/b/__main__.py (`python -m`
+# never executes a bare __init__.py — that file alone is no entry point).
 MODULE_NAME = re.compile(rb"-m[ \t]+scripts\.([A-Za-z0-9_.]+)")
 def _cmd_window(src: bytes, start: int) -> bytes:
     """The command region starting at `start` — up to the first UNQUOTED
-    shell metacharacter (newline, |, &, ;, backtick) or comment. A '#'
-    ends the region only at a word start (unquoted and preceded by
-    whitespace) — `a#b` and `\"a#b\"` are literal text, and metachars
-    inside quotes are literal too. A POSIX backslash-newline continuation
-    is part of the same command, so it is REMOVED from the window —
-    without the join the newline would end the window (or break the
-    invocation regex) before a scripts/ argument on the next line could
-    ever be seen."""
+    shell metacharacter (newline, |, &, ;) or comment. A '#' ends the
+    region only at a word start (unquoted and preceded by whitespace) —
+    `a#b` and `\"a#b\"` are literal text. Metacharacters inside quotes
+    are literal too (a literal newline is legal inside either quote form
+    and does NOT end the command); a backtick stays a command-context
+    boundary even inside double quotes. POSIX continuations are joined
+    by _join_continuations up front — inside single quotes a backslash
+    is literal and never joins."""
     in_s = in_d = esc = False
     out = bytearray()
     i = start
@@ -140,14 +141,19 @@ def _cmd_window(src: bytes, start: int) -> bytes:
                 i += 1
                 continue
             out += b"\\" + bytes([c])
-        elif in_d and c == 0x5C:
-            esc = True
-        elif in_d and c == 0x22:
-            in_d = False
+        elif in_s:
+            if c == 0x27:
+                in_s = False
             out.append(c)
-        elif in_s and c == 0x27:
-            in_s = False
-            out.append(c)
+        elif in_d:
+            if c == 0x5C:
+                esc = True
+            elif c == 0x60:
+                break
+            else:
+                if c == 0x22:
+                    in_d = False
+                out.append(c)
         elif c == 0x22:
             in_d = True
             out.append(c)
@@ -162,6 +168,70 @@ def _cmd_window(src: bytes, start: int) -> bytes:
             break
         else:
             out.append(c)
+        i += 1
+    return bytes(out)
+
+
+def _join_continuations(src: bytes) -> bytes:
+    """POSIX line-continuation join for the whole source: drop
+    `\\<newline>` where the shell keeps the command's tokens contiguous —
+    after an ODD-length backslash run outside quotes or inside double
+    quotes. An even run's final backslash is itself escaped, so the
+    newline there still terminates the command — the unconditional
+    byte-replace this supersedes fused such separate commands into one
+    window. Inside single quotes no escaping exists and every backslash
+    is literal, but a `\\<newline>` pair still sits inside the one
+    argument — joining it too keeps the window contiguous so arguments
+    after the closing quote stay visible to the invocation regex."""
+    out = bytearray()
+    in_s = in_d = False
+    i = 0
+    n = len(src)
+    while i < n:
+        c = src[i]
+        if in_s:
+            if c == 0x5C:
+                # No escaping inside sq, but a backslash run ending at a
+                # newline still separates the same arg's text — join its
+                # trailing `\<newline>` so the window stays contiguous.
+                j = i
+                while j < n and src[j] == 0x5C:
+                    j += 1
+                run = j - i
+                nl = src[j:j + 2]
+                if nl[:1] == b"\n" or nl == b"\r\n":
+                    out += b"\\" * (run - 1)
+                    i = j + (2 if nl == b"\r\n" else 1)
+                    continue
+                out += src[i:j]
+                i = j
+                continue
+            out.append(c)
+            if c == 0x27:
+                in_s = False
+            i += 1
+            continue
+        if c == 0x5C:
+            j = i
+            while j < n and src[j] == 0x5C:
+                j += 1
+            run = j - i
+            nl = src[j:j + 2]
+            if run % 2 == 1 and (nl[:1] == b"\n" or nl == b"\r\n"):
+                out += b"\\" * (run - 1)
+                i = j + (2 if nl == b"\r\n" else 1)
+                continue
+            out += src[i:j]
+            i = j
+            continue
+        if in_d:
+            if c == 0x22:
+                in_d = False
+        elif c == 0x22:
+            in_d = True
+        elif c == 0x27:
+            in_s = True
+        out.append(c)
         i += 1
     return bytes(out)
 
@@ -324,7 +394,11 @@ def _mini_yaml(text: str):
                 in_d = True
             elif ch == "'" and not v[sep:i].strip():
                 in_s = True
-            elif ch == ":":
+            elif (ch == ":"
+                    and v[i + 1:i + 2] in (" ", "\t", "")):
+                # The ':' separates key from value only when followed by
+                # whitespace or EOL — `rollout:phase` is a legal plain
+                # key (its ':' precedes 'p', not a separator).
                 return i
             else:
                 if (ch in ",[{"
@@ -378,11 +452,11 @@ def _mini_yaml(text: str):
         # YAML allows in a plain scalar key — `rollout/phase`, `a+b`, `x=y`
         # are all legal keys — excluding only the indicator characters that
         # can never open one (- ? : , [ ] { } # & * ! | > ' " % @ `) and
-        # whitespace. The ':' separator can't appear in the key itself
-        # (`key:v` is one scalar in flow style anyway), and '#' can't
-        # either (always comment territory).
+        # whitespace. A ':' may appear INSIDE the key when not followed by
+        # whitespace — `rollout:phase: true` keys on `rollout:phase`
+        # (PyYAML agrees). '#' can't appear at all (comment territory).
         r"^(\"(?:[^\"\\]|\\.)*\"|'(?:[^']|'')*'"
-        r"|[^\s?:,\[\]{}#&*!|>'\"%@`-][^\s\[\]{},:#]*)"
+        r"|[^\s?:,\[\]{}#&*!|>'\"%@`-](?:[^\s\[\]{},:#]|:(?=\S))*)"
         # The ':' separates a key only when followed by spaces or EOL — a
         # tab is not a separator (`key:\tv` is a ScannerError in PyYAML).
         # re.S: a folded multiline quoted value can carry a literal '\n'.
@@ -1193,9 +1267,12 @@ def script_dep_block(plugin_dir: Path, src_bytes: bytes,
     declared = declared_consumer_scripts(src_bytes)
     # A POSIX backslash-newline continuation is part of one logical
     # command — remove it up front or `python3 \` + `scripts/x.py` on the
-    # next line never matches the invocation regex. Over-joining is the
-    # safe direction: it can only surface MORE scripts/ references.
-    scan = src_bytes.replace(b"\\\r\n", b"").replace(b"\\\n", b"")
+    # next line never matches the invocation regex. The join must be
+    # quote- and parity-aware: inside single quotes a backslash is
+    # literal, and an even run's last backslash is itself escaped — in
+    # both cases the newline still ends the command, and joining anyway
+    # would fuse two separate commands' arguments into one window.
+    scan = _join_continuations(src_bytes)
     for m in SCRIPT_REF.finditer(scan):
         # A single invocation may carry SEVERAL scripts/ arguments —
         # `bash scripts/first.sh scripts/second.sh` ends its regex match
@@ -1210,18 +1287,28 @@ def script_dep_block(plugin_dir: Path, src_bytes: bytes,
         # alternative must appear in consumer_scripts.
         refs: list[tuple[list[str], list[str]]] = []
         for n in SCRIPT_NAME.finditer(window):
+            # An output-redirect target (`cmd > scripts/x`,
+            # `cmd 2> scripts/x`, `cmd >> scripts/x`) is created or
+            # overwritten by the command — it is not something the
+            # command reads, so it is not a dependency. Look back past
+            # whitespace for the '>' operator; an input redirect (<)
+            # still counts — that file must exist.
+            j = n.start() - 1
+            while j >= 0 and window[j] in b" \t":
+                j -= 1
+            if j >= 0 and window[j] == 0x3E:
+                continue
             p = n.group(1).decode("utf-8", errors="ignore")
             refs.append(([p], [p]))
         for mod in MODULE_NAME.finditer(window):
             # `python -m scripts.a.b` runs a/b.py or the package entry
-            # a/b/__main__.py — either satisfies the invocation. The
-            # bundled probe also covers __init__.py: a plugin-shipped
-            # package init is still a dep the resolver cannot run.
+            # a/b/__main__.py — either satisfies the invocation. A bare
+            # __init__.py is no entry point: `python -m pkg` needs
+            # __main__.py, so only those two paths gate the dep.
             base = mod.group(1).decode("utf-8", errors="ignore")
             base = base.replace(".", "/")
             refs.append(([base + ".py", base + "/__main__.py"],
-                         [base + ".py", base + "/__main__.py",
-                          base + "/__init__.py"]))
+                         [base + ".py", base + "/__main__.py"]))
         if not refs:
             continue
         for declared_alts, bundled_probes in refs:
@@ -1996,6 +2083,9 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                 # the installed-mode record — a consumer chmod that
                 # coincides with a registry chmod is still a local edit.
                 rec_exec = locked_exec.get(rel_dst)
+                rec_tagged = (isinstance(rec_exec, int)
+                              and not isinstance(rec_exec, bool)
+                              and rec_exec >= EXEC_TAG)
                 exec_consistent = (rel_dst not in locked or rec_exec is None
                                    or _exec_matches(rec_exec,
                                                     dst.stat().st_mode))
@@ -2008,10 +2098,18 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                 # record encodes the source's mode. An adopted file's record
                 # encodes the consumer's own mode — comparing it against src
                 # would schedule a permanent clobber of a file the consumer
-                # owns. For a legacy record the comparison is any-exec only.
-                mode_consistent = (rel_dst not in locked or rec_exec is None
-                                   or rel_dst not in locked_prov
-                                   or _exec_matches(rec_exec, src_mode))
+                # owns. A TAGGED record carries the full mask; a legacy
+                # untagged one only proves any-exec — under it, r/w-bit
+                # drift can't be attributed, so identical requires the full
+                # dst mask to equal the source's: ratify neither a possible
+                # consumer chmod nor a silent rewrite that would revert it.
+                mode_consistent = (
+                    rel_dst not in locked or rec_exec is None
+                    or rel_dst not in locked_prov
+                    or (rec_tagged and _exec_matches(rec_exec, src_mode))
+                    or (not rec_tagged
+                        and (dst.stat().st_mode & 0o777)
+                            == (src_mode & 0o777)))
                 if (bytes_match and same_exec and exec_consistent
                         and mode_consistent
                         and rel_dst in locked
@@ -2088,6 +2186,22 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                             "— refusing to clobber a possible local chmod "
                             "(restore the mode or delete the file and "
                             "re-resolve)",
+                        ))
+                        continue
+                    if (not rec_tagged and same_exec
+                            and (dst.stat().st_mode & 0o777)
+                                != (src_mode & 0o777)):
+                        # A legacy any-exec record can't attribute
+                        # read/write-bit drift — it only proves the exec
+                        # class matched at install. Rewriting to the
+                        # registry mask could revert a consumer chmod,
+                        # recording 'identical' would ratify it: refuse.
+                        plan.conflicts.append((
+                            dst,
+                            "mode drift beyond the legacy exec record's "
+                            "any-executable tracking — the difference "
+                            "cannot be attributed (restore the mode or "
+                            "delete the file and re-resolve)",
                         ))
                         continue
                     else:
@@ -2745,9 +2859,56 @@ def main() -> int:
                     # candidate swapped for a symlink or directory after
                     # planning must fail the whole apply (rollback), not
                     # be silently skipped while its lock entry drops.
-                    snap = snapshot(f)
+                    # Bind verification to the directory entry actually
+                    # deleted: the digest/mode check would otherwise run on
+                    # one inode while os.unlink acts on whatever the name
+                    # resolves to when it fires — a concurrent
+                    # rename-replace could swap in an unverified file
+                    # between the two. POSIX has no compare-and-unlink, so
+                    # move the entry to a private name inside the same
+                    # directory first: the moved inode is provably the
+                    # verified one, and a failed check can put it back.
+                    tmp = f.parent / (".ai-prune-" + f.name)
+                    if os.path.lexists(tmp):
+                        raise OSError(
+                            "prune staging name already exists: "
+                            f"{tmp.relative_to(repo_root).as_posix()}")
+                    if _HAS_DIRFD:
+                        dfd = parent_fd(f.parent)
+                        try:
+                            os.rename(f.name, tmp.name,
+                                      src_dir_fd=dfd, dst_dir_fd=dfd)
+                        except OSError as e:
+                            if e.errno == errno.ENOENT:
+                                continue  # raced deletion — still a no-op
+                            raise
+                    else:
+                        try:
+                            f.rename(tmp)
+                        except FileNotFoundError:
+                            continue  # raced deletion — still a no-op
+
+                    def _restore() -> None:
+                        try:
+                            # A newcomer that took the original name is
+                            # not ours to clobber — leave the moved entry
+                            # under its private name; the raise below
+                            # aborts the apply either way.
+                            if os.path.lexists(f):
+                                return
+                            if _HAS_DIRFD:
+                                os.rename(tmp.name, f.name,
+                                          src_dir_fd=dfd,
+                                          dst_dir_fd=dfd)
+                            else:
+                                tmp.rename(f)
+                        except OSError:
+                            pass
+
+                    snap = snapshot(tmp)
                     if snap is None:
-                        if f.is_symlink() or f.exists():
+                        if tmp.is_symlink() or tmp.exists():
+                            _restore()
                             raise OSError(
                                 "prune target is not a regular file: "
                                 f"{rel_f}")
@@ -2762,15 +2923,16 @@ def main() -> int:
                             != want_dig
                             or not _exec_provable(
                                 locked_exec.get(rel_f), snap[1])):
+                        _restore()
                         raise OSError(
                             "prune target changed since planning "
                             "(digest or mode drift) — refusing to remove "
                             f"a possibly hand-edited file: {rel_f}")
                     undo.append((f, snap[0], snap[1]))
                     if _HAS_DIRFD:
-                        os.unlink(f.name, dir_fd=parent_fd(f.parent))
+                        os.unlink(tmp.name, dir_fd=dfd)
                     else:
-                        f.unlink()
+                        tmp.unlink()
                     print(f"  removed "
                           f"{f.relative_to(repo_root).as_posix()}")
         except OSError as e:

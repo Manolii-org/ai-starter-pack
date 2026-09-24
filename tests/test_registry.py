@@ -5979,9 +5979,13 @@ def test_script_dep_block_module_main_py(tmp_path):
     body_mod = (b"---\nconsumer_scripts: [scripts/pkg.py]\n---\n"
                 b"python -m scripts.pkg\n")
     assert not mod.script_dep_block(pdir, body_mod)
-    # a bundled __init__.py is still a dep the resolver cannot run
+    # a bundled __init__.py is NOT an entry point — a consumer-declared
+    # __main__.py still satisfies `python -m pkg` (Codex on #1344)
     (pdir / "scripts" / "pkg").mkdir()
     (pdir / "scripts" / "pkg" / "__init__.py").write_bytes(b"")
+    assert not mod.script_dep_block(pdir, body_main)
+    # but a bundled __main__.py is a real bundled dep — still blocks
+    (pdir / "scripts" / "pkg" / "__main__.py").write_bytes(b"")
     assert mod.script_dep_block(pdir, body_main)
 
 
@@ -6366,3 +6370,158 @@ def test_prune_missing_parent_dir_noop(tmp_path):
     assert not (skills / "old").exists()  # never resurrected
     assert json.loads((lockdir / "capability-lock.json"
                        ).read_text())["files"] == {}
+
+
+def test_join_continuations_parity_and_quotes():
+    """`\\<newline>` joins only where the shell keeps tokens contiguous —
+    odd runs outside quotes or in dq join; even runs and everything else
+    keep the newline as the command boundary (Codex on #1344/#6)."""
+    mod = load_resolve_module()
+    j, BS, NL = mod._join_continuations, b"\\", b"\n"
+    assert j(b"python3 " + BS + NL + b"echo") == b"python3 echo"
+    # even run: the last backslash is itself escaped — separate commands
+    assert j(b"python3 " + BS * 2 + NL + b"echo") == (
+        b"python3 " + BS * 2 + NL + b"echo")
+    assert j(b"x " + BS * 3 + NL + b"y") == b"x " + BS * 2 + b"y"
+    assert j(b'x "a' + BS + NL + b'b" y') == b'x "ab" y'
+    assert j(b"x 'a" + BS + NL + b"b' y") == b"x 'ab' y"
+    assert j(b"x " + BS + b"\r\n" + b"y") == b"x y"
+    assert j(b"x " + BS + b"y") == b"x " + BS + b"y"
+
+
+def test_mini_yaml_embedded_colon_plain_key():
+    """`rollout:phase: true` keys on `rollout:phase` — a `:` inside a plain
+    key is legal when not followed by whitespace (PyYAML-verified; Codex
+    on #123)."""
+    mod = load_resolve_module()
+    try:
+        import yaml
+    except ImportError:
+        yaml = None
+    for doc, want in [
+        ('feature_flags:\n  rollout:phase: true\n',
+         {'feature_flags': {'rollout:phase': True}}),
+        ('f:\n  a:b: [1, 2]\n', {'f': {'a:b': [1, 2]}}),
+        ('k:v: |\n  txt\n', {'k:v': 'txt\n'}),
+        ('k:v: 1\n', {'k:v': 1}),
+        ('x: a:b\n', {'x': 'a:b'}),
+    ]:
+        assert mod._mini_yaml(doc) == want, doc
+        if yaml is not None:
+            assert mod._mini_yaml(doc) == yaml.safe_load(doc), doc
+
+
+def test_script_dep_even_run_keeps_commands_separate(tmp_path):
+    """`python3 \\\\` + `echo scripts/x.sh` are TWO commands — fusing them
+    made x.sh look like a python3 dep (Codex on #1953 / Devin on #6)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    body = (b"---\nconsumer_scripts: [scripts/first.sh]\n---\n"
+            b"python3 " + b"\\" * 2 + b"\necho scripts/x.sh\n")
+    # x.sh is an echo arg, not a python dep — no block either way
+    assert not mod.script_dep_block(pdir, body)
+    # Sanity: a genuinely undeclared python dep still blocks
+    body2 = (b"---\nconsumer_scripts: [scripts/first.sh]\n---\n"
+             b"python3 " + b"\\" + b"\nscripts/x.sh\n")
+    assert mod.script_dep_block(pdir, body2)
+
+
+def test_script_dep_redirect_target_not_a_dep(tmp_path):
+    """`cmd > scripts/out` creates the file — an output-redirect target is
+    not a dependency the command reads (Devin on #1344). `<` still is."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    declared = b"---\nconsumer_scripts: [scripts/first.sh]\n---\n"
+    for op in (b">", b">>", b"2>"):
+        body = (declared + b"bash scripts/first.sh "
+                + op + b" scripts/generated.sh\n")
+        assert not mod.script_dep_block(pdir, body), op
+    # input redirect still counts — that file must exist
+    body = declared + b"bash scripts/first.sh < scripts/input.sh\n"
+    assert mod.script_dep_block(pdir, body)
+
+
+def test_script_dep_module_init_only_package(tmp_path):
+    """`python -m scripts.pkg` runs pkg.py or pkg/__main__.py — a bundled
+    __init__.py alone is no entry point, so a consumer-declared
+    __main__.py satisfies the dep (Codex on #1344)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts" / "pkg").mkdir(parents=True)
+    (pdir / "scripts" / "pkg" / "__init__.py").write_bytes(b"x = 1\n")
+    body = (b"---\nconsumer_scripts: [scripts/pkg/__main__.py]\n---\n"
+            b"python3 -m scripts.pkg\n")
+    assert not mod.script_dep_block(pdir, body)
+    # undeclared __main__.py still blocks
+    body2 = (b"---\nconsumer_scripts: [scripts/other.py]\n---\n"
+             b"python3 -m scripts.pkg\n")
+    assert mod.script_dep_block(pdir, body2)
+
+
+def test_legacy_exec_record_mode_drift_conflicts(tmp_path):
+    """An untagged (legacy any-exec) exec record can't attribute r/w-bit
+    drift — dst mode differing from src mode in non-exec bits must
+    conflict, not pass as 'identical' or silently rewrite (Devin on
+    #1953)."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/SKILL.md",
+                                "---\nname: demo\ndescription: d\n---\nv1")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    rel = ".claude/skills/demo/SKILL.md"
+    lock_file = consumer / ".ai" / "capability-lock.json"
+    lock = json.loads(lock_file.read_text())
+    lock["exec"][rel] = False  # legacy any-exec record — no full mask
+    lock_file.write_text(json.dumps(lock))
+    (consumer / rel).chmod(0o600)  # r/w-bit drift a legacy record can't name
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 1
+    assert "legacy exec record" in r.stdout
+    # Same drift provable under a tagged record (exec class unchanged):
+    # still refuses to clobber a local chmod — different message.
+    lock["exec"][rel] = 0o10000 | 0o644
+    lock_file.write_text(json.dumps(lock))
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 1
+    assert "installed-mode record" in r.stdout
+
+
+def test_prune_staging_name_collision_aborts(tmp_path):
+    """A leftover `.ai-prune-<name>` sibling means the compare-and-unlink
+    staging slot is taken — apply must abort, not clobber it (Codex on
+    #1953)."""
+    repo = tmp_path / "repo"
+    skills = repo / ".claude" / "skills"
+    (skills / "old").mkdir(parents=True)
+    stale = skills / "old" / "SKILL.md"
+    stale.write_text("stale")
+    (skills / "old" / ".ai-prune-SKILL.md").write_text("leftover")
+    reg = tmp_path / "reg"
+    (reg / "registry").mkdir(parents=True)
+    (reg / "registry" / "plugins.json").write_text(json.dumps(
+        {"schema_version": 1, "scopes": {}, "plugins": []}))
+    lockdir = repo / ".ai"
+    lockdir.mkdir()
+    lockdir.joinpath("capability-lock.json").write_text(json.dumps({
+        "files": {".claude/skills/old/SKILL.md":
+                  {"scope": "platform", "plugin": "old",
+                   "sha256": "0" * 64, "exec": 0}},
+        "resolved": [{"plugin": "platform/old", "version": "0.0.0"}]}))
+    manifest = repo / "ai-manifest.yaml"
+    manifest.write_text("version: 1\nuniverse: platform\nrequires: []\n")
+    # digest mismatch alone would already abort — make it match first
+    import hashlib
+    dig = hashlib.sha256(b"stale").hexdigest()
+    lock = json.loads(lockdir.joinpath("capability-lock.json").read_text())
+    lock["files"][".claude/skills/old/SKILL.md"]["sha256"] = dig
+    lockdir.joinpath("capability-lock.json").write_text(json.dumps(lock))
+    out = run_resolver(manifest, reg, repo, "--apply", "--prune")
+    assert out.returncode != 0
+    assert stale.read_text() == "stale"  # restored, never unlinked
+    assert (skills / "old" / ".ai-prune-SKILL.md").read_text() == "leftover"
