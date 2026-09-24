@@ -183,6 +183,12 @@ def fetch_protection(repo: str, branch: str,
                 "_ruleset_contexts": rctx}, None
     exists, eerr = _gh_json(f"repos/{repo}/branches/{ref}")
     if eerr == "404" or (eerr is None and exists is None):
+        # GitHub also 404s branches on repos the token cannot see — confirm
+        # repo visibility before declaring the branch missing.
+        _, gerr = _gh_json(f"repos/{repo}")
+        if gerr:
+            return None, (f"repo {repo} unreadable ({gerr}) — cannot verify "
+                          f"branch {branch}")
         return None, f"branch {repo}@{branch} does not exist"
     if eerr:  # a read failure is unverifiable state, not "unprotected"
         return None, f"gh api branch read failed for {repo}@{branch}: {eerr}"
