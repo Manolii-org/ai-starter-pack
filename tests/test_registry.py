@@ -4224,7 +4224,7 @@ def test_apply_conflicts_on_local_exec_bit_drift(tmp_path):
              else dst.stat().st_mode | 0o111)
     r = run_resolver(m, reg_root, consumer, "--apply")
     assert r.returncode == 1
-    assert "exec bit differs" in r.stdout
+    assert "exec mode differs" in r.stdout
 
 
 def test_pinned_exec_mode_conflicts(tmp_path):
@@ -4252,6 +4252,179 @@ def test_pinned_exec_mode_conflicts(tmp_path):
     r = run_resolver(m, reg_root, consumer, "--apply")
     assert r.returncode == 1
     assert "exec bit differs from the pinned git tree" in r.stdout
+
+
+def test_partial_exec_mask_chmod_conflicts(tmp_path):
+    """0755 -> 0744 changes the mode but not the 'has exec bit' bool — the
+    lock must record the exact mask so a partial-mask local chmod is caught
+    instead of misread as a registry mode change."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/run.sh", "echo hi\n")],
+    })
+    src = (reg_root / "registry" / "platform" / "framework" / "skills"
+           / "demo" / "run.sh")
+    src.chmod(0o755)
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    dst = consumer / ".claude" / "skills" / "demo" / "run.sh"
+    dst.chmod(0o744)
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 1
+    assert "exec mode differs" in r.stdout
+
+
+def test_lock_records_exact_exec_mask(tmp_path):
+    """The lock's exec map stores the installed st_mode & 0o111 mask as an
+    int — not a bool — so partial-mask changes stay detectable."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/run.sh", "echo hi\n")],
+    })
+    (reg_root / "registry" / "platform" / "framework" / "skills"
+     / "demo" / "run.sh").chmod(0o755)
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    lock = json.loads(
+        (consumer / ".ai" / "capability-lock.json").read_text())
+    assert lock["exec"][".claude/skills/demo/run.sh"] == 0o111
+
+
+def test_legacy_bool_exec_record_conflicts_on_drift(tmp_path):
+    """A bool exec record can't distinguish a partial-mask chmod — any exec
+    drift against it conflicts rather than guessing (fail-closed
+    migration); --apply then upgrades it to an int record."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/run.sh", "echo hi\n")],
+    })
+    (reg_root / "registry" / "platform" / "framework" / "skills"
+     / "demo" / "run.sh").chmod(0o755)
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    dst = consumer / ".claude" / "skills" / "demo" / "run.sh"
+    dst.parent.mkdir(parents=True)
+    dst.write_text("echo hi\n")
+    dst.chmod(0o744)
+    ai = consumer / ".ai"
+    ai.mkdir()
+    rel = ".claude/skills/demo/run.sh"
+    (ai / "capability-lock.json").write_text(json.dumps({
+        "version": 1, "universe": "manolii",
+        "resolved": [{"plugin": "platform/framework", "scope": "platform",
+                      "ref": "1.0.0", "resolved_version": "1.0.0",
+                      "source": "platform/framework", "sha256": None}],
+        "files": {rel: hashlib.sha256(b"echo hi\n").hexdigest()},
+        "provenance": {rel: "platform/framework"},
+        "exec": {rel: True},
+    }))
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 1
+    assert "exec mode differs" in r.stdout
+    dst.chmod(0o755)
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    lock = json.loads((ai / "capability-lock.json").read_text())
+    assert lock["exec"][rel] == 0o111
+
+
+def test_mode_divergent_collision_conflicts(tmp_path):
+    """Identical bytes + different exec masks is a collision, not a dedup —
+    otherwise the lock records one plugin's mode while the file carries the
+    other's, and --check passes an inconsistent state."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/shared/tool.sh", "echo x\n")],
+        "platform/other": [("skills/shared/tool.sh", "echo x\n")],
+    })
+    (reg_root / "registry" / "platform" / "other" / "skills"
+     / "shared" / "tool.sh").chmod(0o755)
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"},
+                        {"plugin": "platform/other", "ref": "1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 1
+    assert "output-path collision" in r.stdout
+
+
+def test_prune_refuses_chmodded_orphan(tmp_path):
+    """An orphan whose exec mode drifted is a possible local chmod — --prune
+    must refuse to unlink it, same as a byte-edited orphan."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/SKILL.md",
+                                "---\nname: demo\ndescription: d\n---\nbody")],
+        "platform/other": [("skills/extra/run.sh", "echo hi\n")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"},
+                        {"plugin": "platform/other", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    write_manifest(consumer, "manolii",
+                   [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    orphan = consumer / ".claude" / "skills" / "extra" / "run.sh"
+    orphan.chmod(orphan.stat().st_mode | 0o111)
+    r = run_resolver(m, reg_root, consumer, "--apply", "--prune")
+    assert r.returncode == 1
+    assert "exec mode differs" in r.stdout
+    assert orphan.is_file()
+
+
+def test_check_flags_orphan_exec_drift(tmp_path):
+    """A chmodded kept orphan is drift: --check compares the on-disk exec
+    mask against the recorded one, not just bytes."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/SKILL.md",
+                                "---\nname: demo\ndescription: d\n---\nbody")],
+        "platform/other": [("skills/extra/run.sh", "echo hi\n")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"},
+                        {"plugin": "platform/other", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    write_manifest(consumer, "manolii",
+                   [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    orphan = consumer / ".claude" / "skills" / "extra" / "run.sh"
+    assert run_resolver(m, reg_root, consumer, "--check").returncode == 0
+    orphan.chmod(orphan.stat().st_mode | 0o111)
+    r = run_resolver(m, reg_root, consumer, "--check")
+    assert r.returncode == 1
+    assert "exec mode changed" in r.stdout
+
+
+def test_legacy_lock_provenance_backfill(tmp_path):
+    """Locks written by the shipped pre-provenance resolver keep ownership
+    only in the top-level 'files' map (resolved[] was serialised without
+    'files'). Those entries must stay prune-eligible after upgrade."""
+    reg_root = make_registry(tmp_path / "src", {})
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    victim = consumer / ".claude" / "skills" / "demo" / "gone.md"
+    victim.parent.mkdir(parents=True)
+    victim.write_text("installed by old resolver")
+    ai = consumer / ".ai"
+    ai.mkdir()
+    (ai / "capability-lock.json").write_text(json.dumps({
+        "version": 1, "universe": "manolii",
+        "resolved": [{"plugin": "platform/framework", "scope": "platform",
+                      "ref": "1.0.0", "resolved_version": "1.0.0",
+                      "source": "platform/framework", "sha256": None}],
+        "files": {".claude/skills/demo/gone.md":
+                  hashlib.sha256(b"installed by old resolver").hexdigest()},
+    }))
+    m = write_manifest(consumer, "manolii", [])
+    r = run_resolver(m, reg_root, consumer, "--apply", "--prune")
+    assert r.returncode == 0, r.stdout
+    assert not victim.exists()
 
 
 def test_unparseable_frontmatter_treated_as_deps():

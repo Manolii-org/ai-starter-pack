@@ -341,9 +341,11 @@ class Plan:
     removals: list[Path] = field(default_factory=list)
     advisories: list[str] = field(default_factory=list)
     resolved: list[dict] = field(default_factory=list)
-    # rel_dst -> (src_sha256, plugin_req) for every planned write — cross-plugin
-    # output-path collision detection (the last writer must never win silently)
-    planned: dict[str, tuple[str, str]] = field(default_factory=dict)
+    # rel_dst -> (src_sha256, plugin_req, src exec mask) for every planned
+    # write — cross-plugin output-path collision detection: the last writer
+    # must never win silently, and identical bytes with different modes are
+    # not the same file.
+    planned: dict[str, tuple[str, str, int]] = field(default_factory=dict)
     # rel_dst -> verified source bytes, captured at plan time so --apply
     # writes what was checksummed instead of re-reading a mutable registry.
     payload: dict[str, bytes] = field(default_factory=dict)
@@ -709,7 +711,7 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
         return
 
     materialised: dict[str, str] = {}
-    exec_modes: dict[str, bool] = {}
+    exec_modes: dict[str, int] = {}
     component_files = (collect_component_files(plugin_dir)
                        if write_components else {})
     pinned_scripts: set[str] | None = None
@@ -894,19 +896,20 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                 ))
                 continue
             src_sha = hashlib.sha256(src_bytes).hexdigest()
+            src_exec = src.stat().st_mode & 0o111
             prior = plan.planned.get(rel_dst)
             if prior is not None:
-                prior_sha, prior_req = prior
-                if prior_sha != src_sha:
+                prior_sha, prior_req, prior_exec = prior
+                if prior_sha != src_sha or prior_exec != src_exec:
                     plan.conflicts.append((
                         dst,
-                        f"output-path collision: {req} provides different content for this "
-                        f"path than {prior_req} — refusing to pick a winner",
+                        f"output-path collision: {req} provides different content or "
+                        f"mode for this path than {prior_req} — refusing to pick a winner",
                     ))
                 else:
                     plan.skips.append((dst, f"identical — already provided by {prior_req}"))
                     materialised[rel_dst] = src_sha
-                    exec_modes[rel_dst] = bool(src.stat().st_mode & 0o111)
+                    exec_modes[rel_dst] = src_exec
                 continue
             if dst.exists() and not dst.is_file():
                 # A directory (or FIFO/socket) at the destination —
@@ -919,14 +922,13 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                 ))
                 continue
             if dst.exists():
-                # 'identical' means bytes AND the exec bit match — a registry
+                # 'identical' means bytes AND the exec mask match — a registry
                 # file that gained/lost +x must fall through to the locked
                 # drift-repair path, not skip with stale permissions.
-                same_exec = ((dst.stat().st_mode ^ src.stat().st_mode)
-                             & 0o111) == 0
+                same_exec = ((dst.stat().st_mode ^ src_exec) & 0o111) == 0
                 if dst.read_bytes() == src_bytes and same_exec:
                     plan.skips.append((dst, "identical"))
-                    plan.planned[rel_dst] = (src_sha, req)
+                    plan.planned[rel_dst] = (src_sha, req, src_exec)
                 elif rel_dst not in locked:
                     plan.conflicts.append((
                         dst,
@@ -941,16 +943,19 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                     ))
                     continue
                 elif not same_exec:
-                    # Bytes still match the install record but the exec bit
+                    # Bytes still match the install record but the exec mask
                     # differs — the lock's installed-mode record distinguishes
                     # a local chmod (refuse) from a registry mode change
-                    # (repair by rewriting).
-                    dst_exec = bool(dst.stat().st_mode & 0o111)
+                    # (repair by rewriting). A legacy bool record can't tell
+                    # a partial-mask chmod from a registry change, so any
+                    # exec drift against it conflicts instead of guessing.
+                    dst_exec = dst.stat().st_mode & 0o111
                     rec_exec = locked_exec.get(rel_dst)
-                    if rec_exec is None or dst_exec != rec_exec:
+                    if (rec_exec is None or isinstance(rec_exec, bool)
+                            or dst_exec != rec_exec):
                         plan.conflicts.append((
                             dst,
-                            "exec bit differs from the installed-mode record "
+                            "exec mode differs from the installed-mode record "
                             "— refusing to clobber a possible local chmod "
                             "(restore the mode or delete the file and "
                             "re-resolve)",
@@ -960,20 +965,20 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                         # dst mode still matches the install record — the
                         # registry changed mode; repair by rewriting.
                         plan.writes.append((src, dst))
-                        plan.planned[rel_dst] = (src_sha, req)
+                        plan.planned[rel_dst] = (src_sha, req, src_exec)
                         plan.payload[rel_dst] = src_bytes
                 else:
                     plan.writes.append((src, dst))  # registry drift — update
-                    plan.planned[rel_dst] = (src_sha, req)
+                    plan.planned[rel_dst] = (src_sha, req, src_exec)
                     plan.payload[rel_dst] = src_bytes
                 materialised[rel_dst] = src_sha
-                exec_modes[rel_dst] = bool(src.stat().st_mode & 0o111)
+                exec_modes[rel_dst] = src_exec
             else:
                 plan.writes.append((src, dst))
-                plan.planned[rel_dst] = (src_sha, req)
+                plan.planned[rel_dst] = (src_sha, req, src_exec)
                 plan.payload[rel_dst] = src_bytes
                 materialised[rel_dst] = src_sha
-                exec_modes[rel_dst] = bool(src.stat().st_mode & 0o111)
+                exec_modes[rel_dst] = src_exec
 
     for comp in ("hooks", "scripts", "data", "telemetry"):
         if (plugin_dir / comp).is_dir():
@@ -1054,9 +1059,9 @@ def load_lock(repo_root: Path) -> tuple[dict, str | None]:
     execmap = doc.get("exec")
     if "exec" in doc and (
             not isinstance(execmap, dict)
-            or not all(isinstance(k, str) and isinstance(v, bool)
+            or not all(isinstance(k, str) and isinstance(v, int)
                        for k, v in execmap.items())):
-        return {}, "'exec' must map repo-relative paths to booleans"
+        return {}, "'exec' must map repo-relative paths to exec masks (int)"
     return doc, None
 
 
@@ -1081,16 +1086,40 @@ def lock_provenance(lock: dict) -> dict[str, str]:
         for k in keys:
             if isinstance(k, str):
                 out.setdefault(k, who)
+    # Locks written by the shipped resolver before 'provenance' existed hold
+    # all ownership in the top-level 'files' map — their resolved[] entries
+    # were already serialised without 'files'. Attribute those entries
+    # (bounded to resolver-owned roots) so their files stay prune-eligible.
+    # The shape is gated on a non-empty resolved[] so a minimal files-only
+    # lock (v0/v1 or forged claim) keeps the fail-closed release treatment.
+    files_map = lock.get("files")
+    resolved_entries = lock.get("resolved")
+    if (isinstance(files_map, dict) and isinstance(resolved_entries, list)
+            and resolved_entries):
+        for k in files_map:
+            if (isinstance(k, str)
+                    and "/".join(k.split("/")[:2]) in OWNED_ROOTS):
+                out.setdefault(k, "unknown")
     return out
 
 
-def lock_exec_modes(lock: dict) -> dict[str, bool]:
-    """rel path -> exec bit as installed, for chmod-drift attribution: the
-    lock records the mode the resolver materialised, so a local chmod (dst
-    mode != record) is distinguishable from a registry mode change (dst
-    mode == record != src mode)."""
+def lock_exec_modes(lock: dict) -> dict[str, int]:
+    """rel path -> installed exec mask (st_mode & 0o111), for chmod-drift
+    attribution: the lock records the mode the resolver materialised, so a
+    local chmod (dst mode != record) is distinguishable from a registry
+    mode change (dst mode == record != src mode). Legacy bool values are
+    kept as-is — they cannot distinguish a partial-mask chmod, so exec
+    drift against them conflicts rather than guesses."""
     execmap = lock.get("exec")
     return dict(execmap) if isinstance(execmap, dict) else {}
+
+
+def _exec_matches(rec, mode: int) -> bool:
+    """An int record compares the exact exec mask; a legacy bool record
+    compares 'has any exec bit' — the only granularity it can express."""
+    if isinstance(rec, bool):
+        return bool(mode & 0o111) == rec
+    return (mode & 0o111) == rec
 
 
 def main() -> int:
@@ -1209,6 +1238,16 @@ def main() -> int:
                     "prune candidate modified since install — refusing to remove a "
                     "possibly hand-edited file (delete or restore it manually, then re-resolve)",
                 ))
+            elif (lexical.is_file() and not lexical.is_symlink()
+                    and f in locked_exec
+                    and not _exec_matches(locked_exec[f],
+                                          lexical.stat().st_mode)):
+                plan.conflicts.append((
+                    lexical,
+                    "prune candidate's exec mode differs from the installed-mode "
+                    "record — refusing to remove a possibly hand-chmodded file "
+                    "(delete or restore it manually, then re-resolve)",
+                ))
             else:
                 plan.removals.append(lexical)
         else:
@@ -1325,6 +1364,10 @@ def main() -> int:
                     on_disk = None
                 if on_disk != digest:
                     orphan_drift.append(f"{rel} (modified)")
+            rec = locked_exec.get(rel)
+            if (rec is not None and f.is_file() and not f.is_symlink()
+                    and not _exec_matches(rec, f.stat().st_mode)):
+                orphan_drift.append(f"{rel} (exec mode changed)")
         if drift or orphan_drift or lock_missing or lock_stale:
             for od in orphan_drift:
                 print(f"  drift   {od}")
@@ -1340,6 +1383,8 @@ def main() -> int:
         return 0
 
     if args.apply:
+        planned_modes = {rel: mode for r in plan.resolved
+                         for rel, mode in r["exec"].items()}
         for src, dst in plan.writes:
             rel_dst = dst.relative_to(repo_root).as_posix()
             dst.parent.mkdir(parents=True, exist_ok=True)
@@ -1349,6 +1394,12 @@ def main() -> int:
             atomic_replace(dst,
                            lambda f, b=plan.payload[rel_dst]: f.write(b),
                            src=src)
+            # And the exec mask the plan recorded — copystat would copy the
+            # source's CURRENT mode, which may have drifted since planning;
+            # the lock must describe the file that was actually installed.
+            mask = planned_modes.get(rel_dst)
+            if mask is not None:
+                os.chmod(dst, (dst.stat().st_mode & ~0o111) | mask)
         if args.prune:
             for f in plan.removals:
                 if f.is_file() or f.is_symlink():
