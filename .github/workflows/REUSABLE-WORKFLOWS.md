@@ -630,6 +630,33 @@ and a `postgresql://` URL. The `ALEMBIC_DATABASE_URL` convention is the
 recommended env override in each instance's `alembic/env.py` — it makes the
 same var usable for local dev without secrets-manager access.
 
+## e2e-playwright (v1.18.0+)
+
+Reusable job that runs a repo's Playwright suite in PR CI and uploads the
+HTML report, test-results (traces/failure screenshots), and the conventional
+`e2e-artifacts/` journey screenshots — always, pass or fail. The suite's own
+`playwright.config.ts` `webServer` block starts the app (or point
+`PLAYWRIGHT_BASE_URL` at a remote env via `test_env` — dotenv-style
+`KEY=VALUE` lines, e.g. `test_env: PLAYWRIGHT_BASE_URL=https://staging.example.com`).
+
+```yaml
+jobs:
+  e2e:
+    uses: Manolii-org/ai-starter-pack/.github/workflows/e2e-playwright-reusable.yml@v1.18.0
+    with:
+      playwright_args_json: '["--grep", "@smoke"]'
+    secrets:
+      E2E_TEST_USER_EMAIL: ${{ secrets.E2E_TEST_USER_EMAIL }}
+      E2E_TEST_USER_PASSWORD: ${{ secrets.E2E_TEST_USER_PASSWORD }}
+```
+
+Convention: specs write verification screenshots to `e2e-artifacts/*.png`
+with `page.screenshot(...)` so every PR carries visual evidence, not just
+failures. Credentials travel via `secrets:` (GitHub forbids the secrets
+context inside `with:`); `test_env` carries NON-secret env only.
+`artifact_paths` are relative to `workdir`. Full input list in the file
+header.
+
 ## check-guarded-paths (v1.17.0+)
 
 Step-level composite action enforcing `.ai/guards.json` at merge time —

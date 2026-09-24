@@ -1,0 +1,235 @@
+name: E2E Playwright Gate (Reusable)
+# Reusable workflow_call form. Caller owns `on:`.
+# Cite: .github/workflows/REUSABLE-WORKFLOWS.md
+#
+# Runs a repo's Playwright suite against the app the suite's own
+# `webServer` block starts (or a remote PLAYWRIGHT_BASE_URL), then uploads
+# the report, test-results (traces, failure screenshots/videos), and the
+# conventional `e2e-artifacts/` journey screenshots — always, pass or fail.
+#
+# Convention: specs write verification screenshots into `e2e-artifacts/`
+# (e.g. `page.screenshot({ path: 'e2e-artifacts/01-login.png' })`) so every
+# PR carries visual evidence of the exercised journeys, not just failures.
+#
+# Caller example:
+#
+#   e2e:
+#     uses: Manolii-org/ai-starter-pack/.github/workflows/e2e-playwright-reusable.yml@<tag-or-sha>
+#     with:
+#       playwright_args_json: '["--grep", "@smoke"]'
+#     secrets:
+#       E2E_TEST_USER_EMAIL: ${{ secrets.E2E_TEST_USER_EMAIL }}
+#       E2E_TEST_USER_PASSWORD: ${{ secrets.E2E_TEST_USER_PASSWORD }}
+#
+# Credentials travel via `secrets:` (GitHub forbids the secrets context in
+# `with:`); the declared secrets land on the playwright step as TEST_USER_*.
+# A missing E2E_TEST_USER_* secret degrades to whatever the suite runs
+# unauthenticated (the smoke-tier convention: auth.setup skips when creds
+# are absent). `test_env` is for NON-secret env only (PLAYWRIGHT_BASE_URL,
+# feature flags) — dotenv-style KEY=VALUE lines merged into the job env.
+#
+# Security: caller-controlled strings reach the shell as argv words via
+# arrays/expansion (never re-parsed as shell source); secrets belong in
+# `secrets:` — never in playwright_args_json or test_env.
+
+on:
+  workflow_call:
+    inputs:
+      runs_on:
+        type: string
+        required: false
+        default: 'ubuntu-latest'
+        description: Runner label.
+      node_version:
+        type: string
+        required: false
+        default: '22'
+        description: Node version for setup-node.
+      workdir:
+        type: string
+        required: false
+        default: '.'
+        description: Working directory containing package.json + playwright.config.
+      install_command:
+        type: string
+        required: false
+        default: 'npm ci'
+        description: Dependency install shell command (arbitrary shell — keep secrets out).
+      build_command:
+        type: string
+        required: false
+        default: ''
+        description: Optional pre-test build step (e.g. `npm run build`) run after install.
+      browsers:
+        type: string
+        required: false
+        default: 'chromium'
+        description: Space-separated playwright browser set for `playwright install`.
+      playwright_args_json:
+        type: string
+        required: false
+        default: '[]'
+        description: >-
+          JSON array of extra argv strings for `playwright test`, e.g.
+          '["--grep", "@smoke"]'. An array (not a string) so args containing
+          whitespace survive intact.
+      test_env:
+        type: string
+        required: false
+        default: ''
+        description: >-
+          Dotenv-style KEY=VALUE lines merged into the playwright process
+          env only (NON-secret values: PLAYWRIGHT_BASE_URL, feature flags).
+          Only lines matching an identifier KEY= prefix are applied; the
+          value is everything after the first `=` — it is never re-parsed
+          or job-wide. Credentials go through `secrets:` — the secrets
+          context is not allowed inside `with:`.
+      artifact_name:
+        type: string
+        required: false
+        default: ''
+        description: Artifact name override; defaults to e2e-<caller repo name>.
+      artifact_paths:
+        type: string
+        required: false
+        default: "playwright-report/\ntest-results/\ne2e-artifacts/"
+        description: >-
+          Newline-separated artifact paths, relative to `workdir`. Absolute
+          paths are accepted only inside the workspace.
+      retention_days:
+        type: number
+        required: false
+        default: 14
+        description: Artifact retention.
+      timeout_minutes:
+        type: number
+        required: false
+        default: 30
+        description: Step-level timeout on the playwright test run.
+      job_timeout_minutes:
+        type: number
+        required: false
+        default: 90
+        description: >-
+          Job-level timeout ceiling; must exceed timeout_minutes by >=60m of
+          headroom for checkout/install/browser-install/artifact upload
+          (GitHub expressions cannot compute sums, so callers raise both).
+    secrets:
+      E2E_TEST_USER_EMAIL:
+        required: false
+        description: Synthetic test-account email — lands as TEST_USER_EMAIL.
+      E2E_TEST_USER_PASSWORD:
+        required: false
+        description: Synthetic test-account password — lands as TEST_USER_PASSWORD.
+
+jobs:
+  e2e:
+    runs-on: ${{ inputs.runs_on }}
+    env:
+      # pass caller-controlled values through env, not shell source — values
+      # are never re-parsed for shell metacharacters
+      BROWSERS: ${{ inputs.browsers }}
+      PLAYWRIGHT_ARGS_JSON: ${{ inputs.playwright_args_json }}
+      TEST_ENV_LINES: ${{ inputs.test_env }}
+      ARTIFACT_PATHS_IN: ${{ inputs.artifact_paths }}
+      WORKDIR: ${{ inputs.workdir }}
+    # caller-set ceiling: job_timeout_minutes must leave >=60m over
+    # timeout_minutes for install + browser + upload (GH expressions can't add)
+    timeout-minutes: ${{ inputs.job_timeout_minutes }}
+    steps:
+      - name: Validate timeout contract
+        shell: bash
+        run: |
+          if [ "${{ inputs.job_timeout_minutes }}" -lt $(( ${{ inputs.timeout_minutes }} + 60 )) ]; then
+            echo "::error::job_timeout_minutes must be >= timeout_minutes + 60 (install, browsers, build, upload headroom)"
+            exit 1
+          fi
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Install dependencies
+        shell: bash
+        working-directory: ${{ inputs.workdir }}
+        timeout-minutes: 20
+        run: ${{ inputs.install_command }}
+
+      - name: Build
+        shell: bash
+        if: ${{ inputs.build_command != '' }}
+        working-directory: ${{ inputs.workdir }}
+        timeout-minutes: 20
+        run: ${{ inputs.build_command }}
+
+      - name: Install Playwright browsers
+        shell: bash
+        working-directory: ${{ inputs.workdir }}
+        timeout-minutes: 15
+        run: npx playwright install --with-deps $BROWSERS
+
+      - name: Resolve artifact paths
+        shell: bash
+        if: ${{ always() }}
+        id: artifacts
+        run: |
+          paths_file=$(mktemp)
+          trap 'rm -f "$paths_file"' EXIT
+          python3 -c '
+          import os, sys
+          workspace = os.path.realpath(os.environ["GITHUB_WORKSPACE"])
+          for raw in os.environ["ARTIFACT_PATHS_IN"].splitlines():
+              if not raw:
+                  continue
+              candidate = raw if os.path.isabs(raw) else os.path.join(os.environ["WORKDIR"], raw)
+              resolved = os.path.realpath(candidate)
+              if os.path.commonpath((workspace, resolved)) == workspace:
+                  print(resolved)
+              else:
+                  print(f"::warning::skipping artifact path outside workspace: {raw}", file=sys.stderr)
+          ' > "$paths_file"
+          {
+            echo 'paths<<EOF'
+            cat "$paths_file"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run Playwright suite
+        shell: bash
+        working-directory: ${{ inputs.workdir }}
+        timeout-minutes: ${{ inputs.timeout_minutes }}
+        env:
+          TEST_USER_EMAIL: ${{ secrets.E2E_TEST_USER_EMAIL }}
+          TEST_USER_PASSWORD: ${{ secrets.E2E_TEST_USER_PASSWORD }}
+        run: |
+          python3 -c '
+          import json, os, re, subprocess, sys
+          try:
+              args = json.loads(os.environ.get("PLAYWRIGHT_ARGS_JSON") or "[]")
+              if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+                  raise ValueError("expected a JSON array of strings")
+          except Exception as e:
+              print(f"::error::playwright_args_json invalid: {e}", file=sys.stderr)
+              sys.exit(1)
+          env = dict(os.environ)
+          for line in (os.environ.get("TEST_ENV_LINES") or "").splitlines():
+              m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", line)
+              if m:
+                  env[m.group(1)] = m.group(2)
+          subprocess.run(["npx", "playwright", "test", *args], env=env, check=True)
+          '
+
+      - name: Upload e2e artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ inputs.artifact_name != '' && inputs.artifact_name || format('e2e-{0}', github.event.repository.name) }}
+          # re-runs reuse the same name — overwrite so a retried suite can
+          # replace stale artifacts instead of failing the upload step
+          overwrite: true
+          retention-days: ${{ inputs.retention_days }}
+          path: ${{ steps.artifacts.outputs.paths }}
