@@ -111,7 +111,7 @@ on:
         required: false
         default: 90
         description: >-
-          Job-level timeout ceiling; must exceed timeout_minutes by enough
+          Job-level timeout ceiling; must exceed timeout_minutes by >=60m of
           headroom for checkout/install/browser-install/artifact upload
           (GitHub expressions cannot compute sums, so callers raise both).
     secrets:
@@ -133,15 +133,15 @@ jobs:
       TEST_ENV_LINES: ${{ inputs.test_env }}
       ARTIFACT_PATHS_IN: ${{ inputs.artifact_paths }}
       WORKDIR: ${{ inputs.workdir }}
-    # caller-set ceiling: keep job_timeout_minutes > timeout_minutes with room
-    # for install + browser + upload (GH expressions can't add, so no auto-sum)
+    # caller-set ceiling: job_timeout_minutes must leave >=60m over
+    # timeout_minutes for install + browser + upload (GH expressions can't add)
     timeout-minutes: ${{ inputs.job_timeout_minutes }}
     steps:
       - name: Validate timeout contract
         shell: bash
         run: |
-          if [ "${{ inputs.job_timeout_minutes }}" -le $(( ${{ inputs.timeout_minutes }} + 15 )) ]; then
-            echo "::error::job_timeout_minutes must exceed timeout_minutes by >15m (setup + upload headroom)"
+          if [ "${{ inputs.job_timeout_minutes }}" -lt $(( ${{ inputs.timeout_minutes }} + 60 )) ]; then
+            echo "::error::job_timeout_minutes must be >= timeout_minutes + 60 (install, browsers, build, upload headroom)"
             exit 1
           fi
 
@@ -228,5 +228,8 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ inputs.artifact_name != '' && inputs.artifact_name || format('e2e-{0}', github.event.repository.name) }}
+          # re-runs reuse the same name — overwrite so a retried suite can
+          # replace stale artifacts instead of failing the upload step
+          overwrite: true
           retention-days: ${{ inputs.retention_days }}
           path: ${{ steps.artifacts.outputs.paths }}
