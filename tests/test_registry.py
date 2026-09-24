@@ -7651,14 +7651,25 @@ def test_read_source_refuses_links_and_nonregular(tmp_path):
     mod = load_resolve_module()
     target = tmp_path / "target"
     target.write_bytes(b"real")
-    assert mod._read_source(target) == b"real"
+    got = mod._read_source(tmp_path, "target")
+    assert got is not None and got[0] == b"real"
     link = tmp_path / "link"
     link.symlink_to(target)
-    assert mod._read_source(link) is None
+    assert mod._read_source(tmp_path, "link") is None
     fifo = tmp_path / "fifo"
     os.mkfifo(fifo)
-    assert mod._read_source(fifo) is None
-    assert mod._read_source(tmp_path / "missing") is None
+    assert mod._read_source(tmp_path, "fifo") is None
+    assert mod._read_source(tmp_path, "missing") is None
+    # An ANCESTOR swapped for a symlink is refused too — the leaf's
+    # O_NOFOLLOW alone still follows a linked parent dir (Codex P1 on
+    # cpdcheck #8).
+    if mod._HAS_DIRFD:
+        real_dir = tmp_path / "realdir"
+        real_dir.mkdir()
+        (real_dir / "leaf").write_bytes(b"x")
+        linked = tmp_path / "linked"
+        linked.symlink_to(real_dir, target_is_directory=True)
+        assert mod._read_source(tmp_path, "linked/leaf") is None
 
 
 def test_apply_writes_mutex_lockfile(tmp_path):
@@ -7674,4 +7685,153 @@ def test_apply_writes_mutex_lockfile(tmp_path):
     m = write_manifest(consumer, "manolii",
                        [{"plugin": "platform/framework", "ref": "1.0.0"}])
     assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    # Non-git consumer → .ai fallback; a git repo locks under its
+    # metadata dir instead so the worktree stays clean (Codex P2 on
+    # #1374 / cpdcheck #8).
     assert (consumer / ".ai" / "capability-apply.lock").exists()
+    import subprocess
+    git_consumer = tmp_path / "git-consumer"
+    git_consumer.mkdir()
+    subprocess.run(["git", "-C", str(git_consumer), "init", "-q"],
+                   check=True)
+    m2 = write_manifest(git_consumer, "manolii",
+                        [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m2, reg_root, git_consumer, "--apply").returncode == 0
+    assert (git_consumer / ".git" / "capability-apply.lock").exists()
+    assert not (git_consumer / ".ai" / "capability-apply.lock").exists()
+
+
+def test_script_dep_stdin_executors_bc_dc(tmp_path):
+    """`bc`/`dc` interpret stdin as program text — `cat x | bc` runs the
+    file's contents, and bc's own output can carry code to a later `sh`
+    (Codex on #125 / #1374). They are NOT stream-replacing sinks."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "calc.bc").write_bytes(b"x")
+    for pipe in (b"cat scripts/calc.bc | bc",
+                 b"cat scripts/calc.bc | dc",
+                 b"cat scripts/calc.bc | bc | sh"):
+        assert mod.script_dep_block(pdir, pipe + b"\n"), pipe
+    # true sinks still end the chain
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/calc.bc | expr 1 + 1 | sh\n")
+
+
+def test_script_dep_suffix_punctuation(tmp_path):
+    """A dotted script name's extension may carry `-`/`_` —
+    `bash scripts/setup.foo-bar` is an invocation (Codex on #125)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "setup.foo-bar").write_bytes(b"x")
+    (pdir / "scripts" / "setup.foo_bar").write_bytes(b"x")
+    for line in (b"bash scripts/setup.foo-bar",
+                 b"bash scripts/setup.foo_bar",
+                 b"./scripts/setup.foo-bar"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_env_split_string_trailing_argv(tmp_path):
+    """`env -S 'sh' -c true` appends argv AFTER the operand — the `-c`
+    means stdin is never read (Devin BUG_0001 on #125); `-S 'bash'
+    /dev/null` runs the positional file (BUG_0002 on #1374)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    # operand plus trailing argv classifies as sink — chain ends
+    for pipe in (b"cat scripts/x.sh | env -S 'sh' -c true | sh",
+                 b"cat scripts/x.sh | env -S 'bash' /dev/null | sh"):
+        assert not mod.script_dep_block(pdir, pipe + b"\n"), pipe
+    # bare operand still executes the pipe
+    assert mod.script_dep_block(pdir, b"cat scripts/x.sh | env -S 'sh'\n")
+
+
+def test_script_dep_bare_env_is_a_sink(tmp_path):
+    """`env` with no command word prints the environ — it never forwards
+    stdin, so `cat x | env | sh` pipes env vars, not the script (Devin
+    BUG_0005 on #125)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for pipe in (b"cat scripts/x.sh | env | sh",
+                 b"cat scripts/x.sh | env -i | sh",
+                 b"cat scripts/x.sh | A=1 env | bash"):
+        assert not mod.script_dep_block(pdir, pipe + b"\n"), pipe
+    # env WITH a command word still wraps it
+    assert mod.script_dep_block(pdir, b"cat scripts/x.sh | env sh\n")
+
+
+def test_script_dep_stdout_redirect_before_pipe(tmp_path):
+    """`echo "$(cat x)" > f | sh` redirects stdout — the pipe carries
+    nothing, so the reader is inert (Devin BUG_0004 on #125). fd>1 and
+    input redirects do NOT redirect the pipe's payload."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (b'echo "$(cat scripts/x.sh)" > /dev/null | sh',
+                 b'echo "$(cat scripts/x.sh)" >> log | bash',
+                 b'echo "$(cat scripts/x.sh)" &> out | sh'):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    # fd2 redirect does not starve the pipe — still executes
+    for line in (b'echo "$(cat scripts/x.sh)" 2>&1 | sh',
+                 b'echo "$(cat scripts/x.sh)" 2>/dev/null | sh'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_later_substitution_is_an_arg(tmp_path):
+    """A `$(...)` between the substitution and the pipe is an ARGUMENT,
+    not a boundary — `echo "$(cat x)" $(true) | sh` still executes
+    (Devin BUG_0002 on #125/#1374, cpdcheck #8)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (b'echo "$(cat scripts/x.sh)" $(true) | sh',
+                 b'echo "$(cat scripts/x.sh)" `true` | sh',
+                 b'echo "$(cat scripts/x.sh)" "$(whoami)" | bash'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_inner_quotes_dont_hide_pipe(tmp_path):
+    """Quotes inside a LATER substitution must not flip the outer quote
+    state — `"$(cat x;" "y)" | sh` still pipes (Devin BUG_0003 on #125,
+    Codex on cpdcheck #8)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh; echo " ")" | sh\n')
+    # a comment before the pipe ends the command — nothing executes
+    assert not mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh)" # runs | sh\n')
+
+
+def test_script_dep_heredoc_literal_quotes_backticks(tmp_path):
+    """An unquoted heredoc body treats `'it\\'s'` as literal text yet
+    backticks still expand — the apostrophe must not hide a real
+    `sh scripts/x.sh` pair (CodeRabbit on #125)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    body = (b"cat <<'E'\n"
+            b"it's `sh scripts/x.sh` literal\n"
+            b"E\n")
+    # quoted delimiter → literal body, no exec
+    assert not mod.script_dep_block(pdir, body)
+    body = (b"sh <<'E'\n"
+            b"it's fine\n"
+            b"E\n")
+    # quoted delimiter on sh → literal body, nothing runs
+    assert not mod.script_dep_block(pdir, body)
+    # unquoted delimiter — the body is expanded by sh: a backtick
+    # command following a literal apostrophe still counts
+    body = (b"cat <<E\n"
+            b"it's `sh scripts/x.sh` literal\n"
+            b"E\n")
+    assert mod.script_dep_block(pdir, body)
