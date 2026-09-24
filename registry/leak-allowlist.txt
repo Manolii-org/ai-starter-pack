@@ -24,7 +24,7 @@ platform/framework/schemas/email-capture/profile.schema.json#543fd5c2
 platform/framework/schemas/email-capture/typed-error.schema.json#6510ed0b
 platform/framework/schemas/integration-admission.schema.json#5bc815b8
 platform/framework/scripts/ai-resolve.py#9e24a13c
-platform/framework/scripts/ai-resolve.py#bd083a9c
+platform/framework/scripts/ai-resolve.py#66f72fef
 platform/framework/scripts/build-litellm-product-asset.py#1ee9c293
 platform/framework/scripts/classify-message.py#6b57f930
 platform/framework/scripts/email_capture/live_conformance.py#bedcb3a2

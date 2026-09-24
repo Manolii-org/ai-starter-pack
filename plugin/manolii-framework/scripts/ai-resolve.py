@@ -70,9 +70,10 @@ SEMVER_REF = re.compile(r"v?\d+(?:\.\d+){0,2}")
 # Only executable-invocation shapes match (interpreter call or ./exec); a
 # bare `scripts/x.py` mention in prose or sample output is not a dependency.
 SCRIPT_REF = re.compile(
-    # \b before the alternation — `source`/`exec` must be a command word,
-    # not a suffix of `resource`/`outsource`/`oncexec`.
-    rb"\b(?:python(?:\d+(?:\.\d+)*)?|bash|sh|zsh|node|npx|tsx|ts-node|deno"
+    # (?<![\w-]) before the alternation — `source`/`exec` must be a command
+    # word, not a suffix of `resource`/`outsource`/`oncexec`, and not the
+    # tail of hyphenated prose like `open-source` or `re-exec`.
+    rb"(?<![\w-])(?:python(?:\d+(?:\.\d+)*)?|bash|sh|zsh|node|npx|tsx|ts-node|deno"
     rb"|ruby|perl|source|exec|bun|bunx|uv\s+run|pipenv\s+run)"
     rb"\s+[^\n|&;`]*?scripts/(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs)\b"
     rb"|\./scripts/(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs)\b"
@@ -95,6 +96,11 @@ CONSUMER_SCRIPT_KEYS = ("consumer_scripts",)
 # consumer-repository commands.
 SCRIPT_NAME = re.compile(
     rb"scripts/((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs))\b")
+# A `|`/`>` block-scalar indicator with optional chomping (+/-) and
+# explicit-indentation (1-9) modifiers in either order: `|`, `>+`, `|-`,
+# `|2`, `|2-`, `|-2`, `|+2`, `|2+`. `|0` is not legal YAML (digit is 1-9)
+# and fails closed through the plain-scalar path.
+BLOCK_IND_RE = re.compile(r"[>|](?:[1-9]?[+-]?|[+-][1-9])")
 
 
 _DQ_ESCAPES = {
@@ -260,19 +266,24 @@ def _mini_yaml(text: str):
 
     lines = []
     raw_lines = text.splitlines()
+    # Whether the document's last line carries a line break — a `|+`/`>+`
+    # block whose final content line ends at an unterminated EOF must not
+    # gain a phantom terminator that splitlines() can no longer see.
+    last_term = not text or text[-1] in "\n\r"
     li = 0
     block_indent = None    # set: deeper lines are literal block content
     content_indent = None  # the block's dedent level (first content line)
     seen_doc_start = False
     while li < len(raw_lines):
         raw = raw_lines[li]
+        term = li < len(raw_lines) - 1 or last_term
         li += 1
         if block_indent is not None:
             # Inside a `|`/`>` block scalar — content is literal: '#' lines
             # are NOT comments and blank lines are content too. The block
             # ends at the first non-blank line no deeper than the key.
             if not raw.strip():
-                lines.append((block_indent + 1, ""))
+                lines.append((block_indent + 1, "", term))
                 continue
             ind = len(raw) - len(raw.lstrip(" \t"))
             if ind > block_indent:
@@ -286,7 +297,7 @@ def _mini_yaml(text: str):
                 # YAML dedents block content by the first line's indent —
                 # deeper lines keep their extra (relative) indentation,
                 # and trailing spaces are literal content too.
-                lines.append((ind, raw[content_indent:]))
+                lines.append((ind, raw[content_indent:], term))
                 continue
             block_indent = None
             content_indent = None
@@ -335,7 +346,7 @@ def _mini_yaml(text: str):
         indent = len(body) - len(body.lstrip())
         if "\t" in body[:indent]:
             raise ValueError("tab indentation is not supported")
-        lines.append((indent, body.lstrip()))
+        lines.append((indent, body.lstrip(), True))
         # A `|`/`>` value opens a literal block on the deeper lines that
         # follow — `- |`/`- key: |` seq items too (the value after the dash
         # is the indicator itself). The block's scope differs: `key: |`
@@ -343,15 +354,18 @@ def _mini_yaml(text: str):
         # mapping, or the item's logical indent+2 for `- key: |` — a `tag:`
         # sibling at that level is a key, not content); a bare `- |`
         # scalar item is scoped by the dash's own indent — any deeper
-        # line is content, matching PyYAML.
+        # line is content, matching PyYAML. An explicit digit (`|2-`)
+        # fixes the dedent level at block_indent + d instead of the first
+        # content line's indent.
         bci = map_colon(value)
-        if (bci != -1
-                and re.fullmatch(r"[>|][+-]?", value[bci + 1:].strip())):
-            block_indent = indent + 2 if seq_item else indent
-            content_indent = None
-        elif re.fullmatch(r"[>|][+-]?", value):
-            block_indent = indent
-            content_indent = None
+        bind = (BLOCK_IND_RE.fullmatch(value[bci + 1:].strip())
+                if bci != -1 else BLOCK_IND_RE.fullmatch(value))
+        if bind:
+            block_indent = (indent + 2
+                            if seq_item and bci != -1 else indent)
+            d = re.search(r"[1-9]", bind.group(0))
+            content_indent = (block_indent + int(d.group(0))
+                              if d else None)
 
     pos = [0]
     # Quoted keys are legal YAML in block mappings just as in flow maps —
@@ -437,19 +451,31 @@ def _mini_yaml(text: str):
             if map_items and not map_items[-1].strip():
                 map_items = map_items[:-1]  # legal trailing comma
             for item in map_items:
+                item = item.strip()
+                # Quoted keys take JSON form (`"k":v` — no space needed);
+                # a PLAIN key's ':' only separates when followed by
+                # whitespace or the item's end — `{key:v}` is the single
+                # scalar key 'key:v' in YAML, not a mapping.
                 m = re.match(
-                    r"^(\"(?:[^\"\\]|\\.)*\"|'(?:[^']|'')*'"
-                    r"|[A-Za-z0-9_.-]+)\s*:\s*(.*)$",
-                    item.strip(), re.S)
-                if not m:
-                    raise ValueError(
-                        f"unsupported flow-map item {item!r}")
-                key_tok = m.group(1)
-                key = scalar(key_tok) if key_tok[0] in "\"'" else key_tok
+                    r"^(\"(?:[^\"\\]|\\.)*\"|'(?:[^']|'')*')\s*:(.*)$",
+                    item, re.S)
+                if m:
+                    key = scalar(m.group(1))
+                    val_tok = m.group(2)
+                else:
+                    m = re.match(
+                        r"^([A-Za-z0-9_.-]+)\s*:(?:\s+(.*)|)$",
+                        item, re.S)
+                    if not m:
+                        raise ValueError(
+                            f"unsupported flow-map item {item!r}")
+                    key, val_tok = m.group(1), m.group(2)
                 if key in out_map:
                     raise ValueError(
                         f"duplicate key {key!r} in flow map")
-                out_map[key] = scalar(m.group(2))
+                out_map[key] = (None if val_tok is None
+                                or not val_tok.strip()
+                                else scalar(val_tok))
             return out_map
         if tok[0] == '"':
             if not (len(tok) > 1 and tok.endswith('"')):
@@ -463,44 +489,78 @@ def _mini_yaml(text: str):
             return int(tok)
         if re.fullmatch(r"-?\d+\.\d+", tok):
             return float(tok)
-        if tok in ("true", "false", "True", "False"):
-            return tok.lower() == "true"
-        if tok in ("null", "~"):
+        # YAML 1.1 booleans/nulls, matching PyYAML safe_load: yes/no/
+        # on/off are bools in ANY letter case; single-letter y/n stay
+        # strings. A `requires_scripts: off` must read False, not the
+        # truthy string 'off'.
+        lower = tok.lower()
+        if lower in ("true", "yes", "on"):
+            return True
+        if lower in ("false", "no", "off"):
+            return False
+        if lower in ("null", "~"):
             return None
         if tok[0] in "[{|>&!%@`":
             raise ValueError(f"unsupported scalar {tok!r}")
         return tok
 
-    def block_scalar(indicator: str, vals: list[str]) -> str:
-        # Literal `|` joins lines verbatim — every content line carries
-        # its own terminator. Folded `>`: a break between two ordinary
-        # non-blank lines becomes a space; a break adjacent to a blank or
-        # more-indented line (still leading-space after dedent) stays a
-        # newline, except the break AFTER a blank line, which is absorbed.
-        # Chomping: `x-` strips trailing newlines, `x+` keeps them all,
-        # plain `x` clips to exactly one.
+    def block_scalar(indicator: str, vals: list) -> str:
+        # `vals` is (content, terminated) per line — `terminated` is False
+        # only for a last line that reached an unterminated EOF, so `|+`/
+        # `>+` don't invent a break the source did not carry.
+        #
+        # Literal `|` joins lines verbatim. Folded `>`: a break between
+        # two ordinary non-blank lines becomes a space; every blank line
+        # contributes one '\n', but an interior blank followed by an
+        # ordinary line shares the break already emitted before it
+        # (a\n\nb -> 'a\nb') — it keeps its own only when it is leading,
+        # follows a blank or more-indented line, or precedes a blank or
+        # more-indented line or the block's end. Breaks adjacent to
+        # more-indented lines (still leading-space after dedent) stay
+        # newlines. Chomping: `x-` strips trailing newlines, `x+` keeps
+        # them all, plain `x` clips to exactly one — and an all-blank
+        # block clips to "" (trailing blanks are chomped first).
         if indicator.startswith(">"):
             parts: list[str] = []
-            for i, v in enumerate(vals):
-                parts.append(v)
-                if i == len(vals) - 1:
-                    parts.append("\n")
-                elif not v:
-                    if not vals[i + 1]:
-                        parts.append("\n")
-                elif not vals[i + 1] or v[:1] in " \t" \
-                        or vals[i + 1][:1] in " \t":
-                    parts.append("\n")
+            last = len(vals) - 1
+            # Whether the nearest non-blank line before the current blank
+            # run is an ORDINARY line (not more-indented). The last blank
+            # of an interior run shares the break the run-start's line
+            # break already supplied; blanks after a more-indented line
+            # or at the start of the block keep their own.
+            prev_nb_ordinary = False
+            for i, (v, term) in enumerate(vals):
+                brk = "\n" if term else ""
+                if not v:
+                    nxt = vals[i + 1][0] if i < last else None
+                    nxt_ordinary = bool(nxt) and nxt[:1] not in " \t"
+                    if not (nxt_ordinary and prev_nb_ordinary):
+                        parts.append(brk)
                 else:
-                    parts.append(" ")
+                    parts.append(v)
+                    if i == last:
+                        parts.append(brk)
+                    elif not vals[i + 1][0] or v[:1] in " \t" \
+                            or vals[i + 1][0][:1] in " \t":
+                        parts.append("\n")
+                    else:
+                        parts.append(" ")
+                    prev_nb_ordinary = v[:1] not in " \t"
             text = "".join(parts)
         else:
-            text = "".join(v + "\n" for v in vals)
-        if indicator.endswith("-"):
+            text = "".join(v + ("\n" if t else "") for v, t in vals)
+        if "-" in indicator[1:]:
             return text.rstrip("\n")
-        if indicator.endswith("+"):
+        if "+" in indicator[1:]:
             return text
-        return text.rstrip("\n") + ("\n" if text else "")
+        # Clip: one trailing break iff the last non-blank content line was
+        # actually terminated — `x: |\n  a` (unterminated EOF) yields 'a',
+        # while `x: |\n  a\n  ` still yields 'a\n' (a's own break).
+        stripped = text.rstrip("\n")
+        if not stripped:
+            return ""
+        last_nl = next((t for v, t in reversed(vals) if v), False)
+        return stripped + ("\n" if last_nl else "")
 
     def parse(indent: int):
         if lines[pos[0]][0] != indent:
@@ -519,14 +579,14 @@ def _mini_yaml(text: str):
                                if pos[0] < len(lines)
                                and lines[pos[0]][0] > indent else None)
                     continue
-                if re.fullmatch(r"[>|][+-]?", item):
+                if BLOCK_IND_RE.fullmatch(item):
                     # `- |` — the scalar item's block is every line deeper
                     # than the dash itself (how the preprocessor scoped
                     # it, and how PyYAML reads it).
                     vals = []
                     while (pos[0] < len(lines)
                            and lines[pos[0]][0] > indent):
-                        vals.append(lines[pos[0]][1])
+                        vals.append((lines[pos[0]][1], lines[pos[0]][2]))
                         pos[0] += 1
                     seq.append(block_scalar(item, vals))
                     continue
@@ -537,13 +597,13 @@ def _mini_yaml(text: str):
                     iv = km.group(2)
                     if iv is not None and not iv.strip():
                         iv = None  # `- key: # comment` — no scalar value
-                    if iv is not None and re.fullmatch(
-                            r"[>|][+-]?", iv.strip()):
+                    if iv is not None and BLOCK_IND_RE.fullmatch(
+                            iv.strip()):
                         # `- key: |` — same indent+2 block scoping as `- |`.
                         vals = []
                         while (pos[0] < len(lines)
                                and lines[pos[0]][0] > indent + 2):
-                            vals.append(lines[pos[0]][1])
+                            vals.append((lines[pos[0]][1], lines[pos[0]][2]))
                             pos[0] += 1
                         d[ikey] = block_scalar(iv.strip(), vals)
                     elif iv is not None:
@@ -584,13 +644,13 @@ def _mini_yaml(text: str):
                 raise ValueError(f"duplicate key {k!r}")
             pos[0] += 1
             if v is not None:
-                if re.fullmatch(r"[>|][+-]?", v.strip()):
+                if BLOCK_IND_RE.fullmatch(v.strip()):
                     # Block scalar: every deeper-indented line is literal
                     # content (even lines shaped like keys or seq items).
                     vals = []
                     while (pos[0] < len(lines)
                            and lines[pos[0]][0] > indent):
-                        vals.append(lines[pos[0]][1])
+                        vals.append((lines[pos[0]][1], lines[pos[0]][2]))
                         pos[0] += 1
                     out[k] = block_scalar(v.strip(), vals)
                 else:

@@ -5406,6 +5406,33 @@ def test_mini_yaml_block_scalar_keep_and_fold_parity():
         "x: |+\n  a\n\n  b\n\n",
         "x: |+\n  a\n\n",
         "v: >-\n  a\n  b\n",
+        # All-blank blocks: clip yields '' (trailing blanks are chomped),
+        # keep yields exactly the blank lines' breaks.
+        "x: |\n  \n", "x: |+\n  \n", "x: |\n  \n  \n", "x: >\n  \n",
+        "x: >+\n  \n",
+        # Blanks are content even when the block ends at an unindented
+        # line — `x: |+\n\ny: 1` keeps '\n' for x.
+        "x: |\n\ny: 1\n", "x: |+\n\ny: 1\n", "x: |+\n\n  a\n",
+        "x: |+\n  \n  a\n", "x: |+\n  a\n\ny: 1\n", "x: |\n  a\n\ny: 1\n",
+        # Unterminated EOF: `|+`/`>+` must not invent a final break, and
+        # clip keeps a break only when the last non-blank line carried one.
+        "x: |+\n  a", "x: >+\n  a", "x: |\n  a", "x: |\n  a\n",
+        "x: |+\n  a\n  ", "x: |\n  a\n  ", "x: >-\n  a\n\n  ",
+        "x: |\n", "x: >-\n",
+        # Leading blanks + interior blank runs under `>`.
+        "x: >-\n  \n  p\n", "x: >\n  \n  a\n\n  b\n",
+        "x: >\n  a\n\n    m\n\n  b\n", "x: >+\n  a\n\n\n", "x: >+\n  a\n\n\n\n",
+        "x: >-\n  a\n\n",
+        # Explicit indentation indicators, both modifier orders, and on
+        # sequence items — `|0` is invalid YAML (digit range is 1-9).
+        "x: |2-\n      1.0.0\ny: 2\n", "x: |2\n  ab\n", "x: |-2\n  ab\n",
+        "x: |4\n    ab\n", "x: |9+\n          ab\n",
+        "- |2\n    a\n- b\n", "- key: |2\n      a\n- b\n", "- |2\n   a\n- b\n",
+        # YAML 1.1 booleans/nulls in any case; y/n stay strings.
+        "v: yes", "v: no", "v: On", "v: OFF", "v: y", "v: n",
+        "v: Null", "v: NULL", "v: ~", "v: None",
+        # Flow maps: quoted keys may abut their ':'; `{key:}` is null.
+        'x: {"key":v}', "x: {k: v}", "x: {key:}", "x: {key: }",
     ]
     try:
         import yaml as pyyaml
@@ -5420,6 +5447,50 @@ def test_mini_yaml_block_scalar_keep_and_fold_parity():
     assert mod._mini_yaml("v: |\n      a  \n") == {"v": "a  \n"}
     assert mod._mini_yaml("x: >\n  a\n    b\n  c\n") == {"x": "a\n  b\nc\n"}
     assert mod._mini_yaml("plugin: |+\n      a\n") == {"plugin": "a\n"}
+    assert mod._mini_yaml("x: |\n  \n") == {"x": ""}
+    assert mod._mini_yaml("x: |+\n  \n") == {"x": "\n"}
+    assert mod._mini_yaml("x: |+\n  a") == {"x": "a"}
+    assert mod._mini_yaml("x: |\n  a") == {"x": "a"}
+    assert mod._mini_yaml("x: |\n  a\n  ") == {"x": "a\n"}
+    assert mod._mini_yaml("x: |+\n\ny: 1\n") == {"x": "\n", "y": 1}
+    assert mod._mini_yaml("x: |2-\n      1.0.0\ny: 2\n") == {
+        "x": "    1.0.0", "y": 2}
+    assert mod._mini_yaml("v: off") == {"v": False}
+    assert mod._mini_yaml('x: {"key":v}') == {"x": {"key": "v"}}
+    assert mod._mini_yaml("x: {key:}") == {"x": {"key": None}}
+    # `|0` is not a legal indicator (digits are 1-9) — the value is not a
+    # block scalar at all, so it must raise rather than silently parse.
+    try:
+        mod._mini_yaml("x: |0\n  ab\n")
+        raise AssertionError("|0 must fail closed")
+    except ValueError:
+        pass
+
+
+def test_mini_yaml_flow_map_plain_key_requires_space():
+    """In a flow map a PLAIN key's ':' separates only when followed by
+    whitespace or the item's end — `{key:v}` is the scalar key 'key:v' in
+    real YAML. A malformed requirement must not resolve: raising is the
+    fail-closed behaviour here."""
+    mod = load_resolve_module()
+    for bad in ("x: {key:v}", "x: {a:b,c: d}", "x: {key :v}",
+                'requires: [{plugin:platform/framework, ref:"1.0.0"}]'):
+        try:
+            mod._mini_yaml(bad)
+            raise AssertionError(f"{bad!r} must not parse as a mapping")
+        except ValueError:
+            pass
+
+
+def test_script_ref_ignores_hyphenated_prose():
+    """`open-source scripts/x.sh` is prose, not a source invocation — the
+    word boundary must exclude a hyphen prefix."""
+    mod = load_resolve_module()
+    assert not mod.SCRIPT_REF.search(b"an open-source scripts/setup.sh")
+    assert not mod.SCRIPT_REF.search(b"re-exec scripts/setup.sh")
+    assert mod.SCRIPT_REF.search(b"source scripts/setup.sh")
+    assert mod.SCRIPT_REF.search(b". scripts/setup.sh")
+    assert mod.SCRIPT_REF.search(b"bash scripts/setup.sh")
 
 
 def test_keep_chomped_plugin_name_fails_validation():
