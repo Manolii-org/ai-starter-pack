@@ -98,8 +98,8 @@ SCRIPT_REF = re.compile(
     # `scripts/check.sh` with no invocation word stays a prose mention
     # (can't be told apart from "edit scripts/check.sh" without
     # over-blocking capabilities that merely document the path).
-    rb"|(?<![\w-])python(?:\d+(?:\.\d+)*)?[ \t]+-m[ \t]+scripts\."
-    rb"(?:[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*)(?![\w.])")
+    rb"|(?<![\w-])python(?:\d+(?:\.\d+)*)?[ \t]+-m[ \t]+scripts"
+    rb"(?:\.(?:[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*))?(?![\w.])")
 # Backticked `scripts/x.py` is NOT an invocation context — prose uses it for
 # mentions. A real dependency that no interpreter/./ prefix expresses must be
 # declared explicitly: `requires_scripts: [...]` in the file's frontmatter.
@@ -119,7 +119,9 @@ SCRIPT_NAME = re.compile(
 # `-m scripts.a.b` extraction — the dotted module resolves to
 # scripts/a/b.py or the runnable scripts/a/b/__main__.py (`python -m`
 # never executes a bare __init__.py — that file alone is no entry point).
-MODULE_NAME = re.compile(rb"-m[ \t]+scripts\.([A-Za-z0-9_.]+)")
+# A bare `python -m scripts` (group 1 None) runs scripts/__main__.py.
+MODULE_NAME = re.compile(
+    rb"-m[ \t]+scripts(?:\.([A-Za-z0-9_.]+))?(?![\w.])")
 def _cmd_window(src: bytes, start: int) -> bytes:
     """The command region starting at `start` — up to the first UNQUOTED
     shell metacharacter (newline, |, &, ;) or comment. A '#' ends the
@@ -162,7 +164,24 @@ def _cmd_window(src: bytes, start: int) -> bytes:
             out.append(c)
         elif c == 0x5C:
             esc = True
-        elif c in b"\n|&;`":
+        elif c == 0x26:  # &
+            nxt = src[i + 1] if i + 1 < len(src) else 0
+            prev = out[-1] if out else 0
+            # `&&` and a bare `&` end the command. `&>`, `>&`, and `<&`
+            # are redirections — keep them so the target can be ignored
+            # without dropping a later real argument.
+            if nxt != 0x26 and (nxt == 0x3E or prev in (0x3E, 0x3C)):
+                out.append(c)
+                i += 1
+                continue
+            break
+        elif c == 0x7C:  # |
+            if out and out[-1] == 0x3E:
+                out.append(c)  # `>|` clobber, not a pipe
+                i += 1
+                continue
+            break
+        elif c in b"\n;`":
             break
         elif c == 0x23 and (not out or out[-1] in b" \t"):
             break
@@ -179,10 +198,11 @@ def _join_continuations(src: bytes) -> bytes:
     quotes. An even run's final backslash is itself escaped, so the
     newline there still terminates the command — the unconditional
     byte-replace this supersedes fused such separate commands into one
-    window. Inside single quotes no escaping exists and every backslash
-    is literal, but a `\\<newline>` pair still sits inside the one
-    argument — joining it too keeps the window contiguous so arguments
-    after the closing quote stay visible to the invocation regex."""
+    window. Inside single quotes every backslash is literal, so a
+    backslash-newline is NOT a join (`printf 'bash \\'` + newline +
+    `scripts/missing.sh'` must not become an invocation). A newline
+    inside quotes does not end `_cmd_window`, so an argument after the
+    closing quote stays visible without joining the quoted text."""
     out = bytearray()
     in_s = in_d = False
     i = 0
@@ -190,22 +210,9 @@ def _join_continuations(src: bytes) -> bytes:
     while i < n:
         c = src[i]
         if in_s:
-            if c == 0x5C:
-                # No escaping inside sq, but a backslash run ending at a
-                # newline still separates the same arg's text — join its
-                # trailing `\<newline>` so the window stays contiguous.
-                j = i
-                while j < n and src[j] == 0x5C:
-                    j += 1
-                run = j - i
-                nl = src[j:j + 2]
-                if nl[:1] == b"\n" or nl == b"\r\n":
-                    out += b"\\" * (run - 1)
-                    i = j + (2 if nl == b"\r\n" else 1)
-                    continue
-                out += src[i:j]
-                i = j
-                continue
+            # No escapes and no line continuation. Joining here turned
+            # `printf 'bash \` + newline + `scripts/missing.sh'` into an
+            # invocation the shell never runs.
             out.append(c)
             if c == 0x27:
                 in_s = False
@@ -234,6 +241,100 @@ def _join_continuations(src: bytes) -> bytes:
         out.append(c)
         i += 1
     return bytes(out)
+
+
+# Longest match first so `>>`/`&>`/`<<-` etc. win over the single chars.
+_REDIR_OPS = (
+    b"&>>", b"<<<", b"<<-", b">>", b"<<", b"<>", b">&", b"<&",
+    b">|", b"&>", b">", b"<",
+)
+# Ops whose target is written, an fd word, or a heredoc/here-string
+# delimiter — never a file the command READS. `<` and `<>` open the
+# target for input, so those targets stay dependencies.
+_REDIR_NO_DEP = frozenset(
+    (b"&>>", b"<<<", b"<<-", b">>", b"<<", b">&", b"<&", b">|", b"&>",
+     b">"))
+
+
+def _redirection_target_spans(window: bytes) -> list[tuple[int, int]]:
+    """Byte spans of words that are shell redirection targets.
+
+    `python scripts/foo.py > scripts/generated.py` invokes foo.py; the
+    generated path is not a dependency. An fd prefix (`2>`) is part of
+    the operator. A quoted operator (`">"`) is an argument, not a
+    redirect."""
+    spans: list[tuple[int, int]] = []
+    i = 0
+    n = len(window)
+    in_s = in_d = False
+    word_start: int | None = None
+    expect_target = False
+
+    def end_word(end: int) -> None:
+        nonlocal word_start, expect_target
+        if word_start is not None and expect_target and word_start < end:
+            spans.append((word_start, end))
+        if word_start is not None and expect_target:
+            expect_target = False
+        word_start = None
+
+    while i < n:
+        c = window[i]
+        if in_s:
+            if word_start is None:
+                word_start = i
+            if c == 0x27:
+                in_s = False
+            i += 1
+            continue
+        if in_d:
+            if word_start is None:
+                word_start = i
+            if c == 0x5C and i + 1 < n:
+                i += 2
+                continue
+            if c == 0x22:
+                in_d = False
+            i += 1
+            continue
+        if c == 0x5C and i + 1 < n:
+            if word_start is None:
+                word_start = i
+            i += 2
+            continue
+        if c in b" \t":
+            end_word(i)
+            i += 1
+            continue
+        if c == 0x27:
+            if word_start is None:
+                word_start = i
+            in_s = True
+            i += 1
+            continue
+        if c == 0x22:
+            if word_start is None:
+                word_start = i
+            in_d = True
+            i += 1
+            continue
+        matched = next(
+            (op for op in _REDIR_OPS if window.startswith(op, i)), None)
+        if matched is not None:
+            if (word_start is not None and word_start < i
+                    and window[word_start:i].isdigit()):
+                word_start = None  # `2>` — fd prefix, not a filename
+            else:
+                end_word(i)
+            i += len(matched)
+            expect_target = matched in _REDIR_NO_DEP
+            continue
+        if word_start is None:
+            word_start = i
+        i += 1
+    end_word(n)
+    return spans
+
 
 # A `|`/`>` block-scalar indicator with optional chomping (+/-) and
 # explicit-indentation (1-9) modifiers in either order: `|`, `>+`, `|-`,
@@ -500,6 +601,15 @@ def _mini_yaml(text: str):
                 raise ValueError("tab cannot start a block-scalar line")
             ind = len(raw) - len(raw.lstrip(" "))
             if raw[ind:]:
+                if (raw[ind:ind + 1] == "\t"
+                        and content_indent is not None
+                        and ind < content_indent):
+                    # A tab in the indentation region can never start a
+                    # token — PyYAML ScannerError. Once the content
+                    # indent is established a tab AT/AFTER it is content
+                    # (`  \tb` -> `\tb`), and a tab-led first content
+                    # line (`  \ta`) makes the tab content itself.
+                    raise ValueError("tab in block-scalar indentation")
                 # A comment line deeper than the key ends the block when it
                 # sits shallower than the established content indent (or,
                 # before any content, shallower than a deeper whitespace
@@ -887,9 +997,12 @@ def _mini_yaml(text: str):
             if not (len(tok) > 1 and tok.endswith("'")):
                 raise ValueError(f"unterminated quoted scalar {tok!r}")
             return tok[1:-1].replace("''", "'")
-        if re.fullmatch(r"-?\d+", tok):
+        # PyYAML numeric grammar: a leading '+' is legal on ints and
+        # floats (`+1` -> 1, `+1.5` -> 1.5), `.5` and `1.` are floats —
+        # but bare exponents (`-1e3`) are NOT (they stay strings).
+        if re.fullmatch(r"[-+]?\d+", tok):
             return int(tok)
-        if re.fullmatch(r"-?\d+\.\d+", tok):
+        if re.fullmatch(r"[-+]?(?:\d+\.\d*|\.\d+)", tok):
             return float(tok)
         # YAML 1.1 booleans/nulls, matching PyYAML safe_load: yes/no/
         # on/off are bools in ANY letter case; single-letter y/n stay
@@ -1286,29 +1399,49 @@ def script_dep_block(plugin_dir: Path, src_bytes: bytes,
         # materialise scripts/); otherwise at least one declared
         # alternative must appear in consumer_scripts.
         refs: list[tuple[list[str], list[str]]] = []
+        # Redirection targets are not dependencies — output/fd/heredoc
+        # operators create the target or take a word (`>`, `>>`, `>|`,
+        # `>&`, `&>`, `&>>`, `2>`, `<<`, `<<-`, `<<<`, `<&`). An input
+        # redirect (`<`, `<>`) still counts — the command reads it.
+        redir_spans = _redirection_target_spans(window)
         for n in SCRIPT_NAME.finditer(window):
-            # An output-redirect target (`cmd > scripts/x`,
-            # `cmd 2> scripts/x`, `cmd >> scripts/x`) is created or
-            # overwritten by the command — it is not something the
-            # command reads, so it is not a dependency. Look back past
-            # whitespace for the '>' operator; an input redirect (<)
-            # still counts — that file must exist.
-            j = n.start() - 1
-            while j >= 0 and window[j] in b" \t":
-                j -= 1
-            if j >= 0 and window[j] == 0x3E:
+            if any(a <= n.start() and n.end() <= b
+                   for a, b in redir_spans):
                 continue
             p = n.group(1).decode("utf-8", errors="ignore")
+            if not re.search(
+                    r"\.(?:py|sh|ts|js|mjs|cjs|rb|pl)$", p):
+                # An extensionless scripts/ path is ambiguous — it can
+                # name a directory or file passed to an option
+                # (`--directory scripts/site`, `--opt=scripts/site`) or
+                # a VAR= assignment, not an invocation. Skip it when the
+                # previous word is a long option or carries `=`; keep it
+                # after a bare `--` terminator or a short flag so a real
+                # `bash -x scripts/run` still gates (fail-closed).
+                j = n.start() - 1
+                while j >= 0 and window[j] in b" \t":
+                    j -= 1
+                end = j + 1
+                while j >= 0 and window[j] not in b" \t":
+                    j -= 1
+                prev = window[j + 1:end]
+                if (len(prev) > 2 and prev.startswith(b"--")) \
+                        or b"=" in prev:
+                    continue
             refs.append(([p], [p]))
         for mod in MODULE_NAME.finditer(window):
             # `python -m scripts.a.b` runs a/b.py or the package entry
             # a/b/__main__.py — either satisfies the invocation. A bare
             # __init__.py is no entry point: `python -m pkg` needs
-            # __main__.py, so only those two paths gate the dep.
-            base = mod.group(1).decode("utf-8", errors="ignore")
-            base = base.replace(".", "/")
-            refs.append(([base + ".py", base + "/__main__.py"],
-                         [base + ".py", base + "/__main__.py"]))
+            # __main__.py, so only those two paths gate the dep. A bare
+            # `python -m scripts` runs scripts/__main__.py directly.
+            if mod.group(1) is None:
+                refs.append((["__main__.py"], ["__main__.py"]))
+            else:
+                base = mod.group(1).decode("utf-8", errors="ignore")
+                base = base.replace(".", "/")
+                refs.append(([base + ".py", base + "/__main__.py"],
+                             [base + ".py", base + "/__main__.py"]))
         if not refs:
             continue
         for declared_alts, bundled_probes in refs:
@@ -2753,20 +2886,46 @@ def main() -> int:
                 dfds[rel] = secure_dir_fd(repo_root, rel)
             return dfds[rel]
 
-        # Rollback journal — each entry is (dst, prior_bytes, prior_mode);
-        # prior_bytes None marks a destination that did not exist before
-        # this apply. A failure AFTER the first materialised output (a mid
-        # write, or the lock write itself) would otherwise leave files the
-        # lock never recorded — the next run would adopt them without
-        # provenance and a later registry update would conflict on files
-        # this resolver actually put there. Restore every touched
-        # destination instead: apply is all-or-nothing.
-        undo: list[tuple[Path, bytes | None, int | None]] = []
+        # Rollback journal — each entry is (dst, prior_bytes, prior_mode,
+        # created_inode); prior_bytes None marks a destination that did
+        # not exist before this apply, and created_inode pins its
+        # deletion to the inode this resolver created — a name that now
+        # resolves to a different file is not ours to unlink. A failure
+        # AFTER the first materialised output (a mid write, or the lock
+        # write itself) would otherwise leave files the lock never
+        # recorded — the next run would adopt them without provenance
+        # and a later registry update would conflict on files this
+        # resolver actually put there. Restore every touched destination
+        # instead: apply is all-or-nothing.
+        undo: list[tuple[Path, bytes | None, int | None,
+                         tuple[int, int] | None]] = []
 
         def rollback() -> None:
-            for dst, prior, mode in reversed(undo):
+            for dst, prior, mode, ino in reversed(undo):
                 try:
                     if prior is None:
+                        if ino is not None:
+                            try:
+                                if _HAS_DIRFD:
+                                    cur = os.stat(
+                                        dst.name,
+                                        dir_fd=parent_fd(dst.parent),
+                                        follow_symlinks=False)
+                                else:
+                                    cur = os.stat(
+                                        dst, follow_symlinks=False)
+                            except OSError:
+                                continue  # already gone — nothing to undo
+                            if (cur.st_dev, cur.st_ino) != ino:
+                                # The name was renamed/replaced since the
+                                # write — unlinking it would delete a file
+                                # this run did not create.
+                                sys.stderr.write(
+                                    "note: rollback left "
+                                    f"{dst.relative_to(repo_root).as_posix()}"
+                                    " in place — the path no longer resolves"
+                                    " to the file this run created\n")
+                                continue
                         if _HAS_DIRFD:
                             os.unlink(dst.name,
                                       dir_fd=parent_fd(dst.parent))
@@ -2789,11 +2948,14 @@ def main() -> int:
         try:
             def snapshot(d: Path):
                 # (bytes, mode) of d's current content WITHOUT following
-                # links, or None only when d is confirmed absent / a link /
-                # a non-regular file. Any OTHER open error (EACCES, EMFILE,
-                # ...) propagates — journaling a failed read as 'absent'
-                # would make rollback unlink an existing file. O_NONBLOCK:
-                # a destination swapped to a FIFO must not hang the apply
+                # links — None only when d is confirmed ABSENT. A link or
+                # non-regular file raises: recording one as 'absent' would
+                # journal a bogus prior state, and --apply must abort on a
+                # destination swapped in after planning rather than write
+                # over it. Any OTHER open error (EACCES, EMFILE, ...)
+                # propagates — journaling a failed read as 'absent' would
+                # make rollback unlink an existing file. O_NONBLOCK: a
+                # destination swapped to a FIFO must not hang the apply
                 # waiting on a writer.
                 if _HAS_DIRFD:
                     try:
@@ -2802,22 +2964,33 @@ def main() -> int:
                             os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
                             dir_fd=parent_fd(d.parent))
                     except OSError as e:
-                        if e.errno in (errno.ENOENT, errno.ENOTDIR,
-                                       errno.ELOOP):
+                        if e.errno == errno.ENOENT:
                             return None
+                        if e.errno == errno.ELOOP:
+                            raise OSError(
+                                "destination is a symlink: "
+                                f"{d.relative_to(repo_root).as_posix()}")
                         raise
                     with os.fdopen(fd, "rb") as fh:
                         st = os.fstat(fh.fileno())
                         if not stat.S_ISREG(st.st_mode):
-                            return None
+                            raise OSError(
+                                "destination is not a regular file: "
+                                f"{d.relative_to(repo_root).as_posix()}")
                         return fh.read(), st.st_mode & 0o777
                 if d.is_symlink():
-                    return None
+                    raise OSError(
+                        "destination is a symlink: "
+                        f"{d.relative_to(repo_root).as_posix()}")
                 try:
                     if d.is_file():
                         return d.read_bytes(), d.stat().st_mode & 0o777
                 except FileNotFoundError:
-                    pass
+                    return None
+                if os.path.lexists(d):
+                    raise OSError(
+                        "destination is not a regular file: "
+                        f"{d.relative_to(repo_root).as_posix()}")
                 return None
 
             for src, dst in plan.writes:
@@ -2825,9 +2998,28 @@ def main() -> int:
                 if not _HAS_DIRFD:
                     dst.parent.mkdir(parents=True, exist_ok=True)
                 snap = snapshot(dst)
+                # The snapshot must equal the state the plan accepted:
+                # tracked paths were verified byte-for-byte against the
+                # lock (digest + installed-mode record), untracked ones
+                # were verified absent. Anything else is a concurrent
+                # edit — abort rather than silently clobber it.
+                want = locked_dig.get(rel_dst)
+                rec_mode = locked_exec.get(rel_dst)
+                if snap is None:
+                    if rel_dst in locked_dig:
+                        raise OSError(
+                            "tracked destination vanished since planning: "
+                            f"{rel_dst}")
+                elif (rel_dst not in locked_dig or want is None
+                        or hashlib.sha256(snap[0]).hexdigest() != want
+                        or not (rec_mode is None
+                                or _exec_matches(rec_mode, snap[1]))):
+                    raise OSError(
+                        "destination changed since planning — refusing to "
+                        "clobber a possible concurrent edit: " f"{rel_dst}")
                 undo.append((dst,
                              snap[0] if snap else None,
-                             snap[1] if snap else None))
+                             snap[1] if snap else None, None))
                 # Write the bytes the plan checksummed, not a fresh read of
                 # src — a registry file swapped between plan and apply
                 # would otherwise ship content the lock never digested.
@@ -2841,6 +3033,17 @@ def main() -> int:
                     times=plan.times.get(rel_dst),
                     mode=(planned[3] if planned is not None else None),
                     dfd=parent_fd(dst.parent))
+                if snap is None:
+                    # Bind the rollback deletion to the inode this write
+                    # created — a name swapped to a different file before
+                    # a rollback must not be unlinked.
+                    if _HAS_DIRFD:
+                        st = os.stat(dst.name,
+                                     dir_fd=parent_fd(dst.parent),
+                                     follow_symlinks=False)
+                    else:
+                        st = os.stat(dst, follow_symlinks=False)
+                    undo[-1] = (dst, None, None, (st.st_dev, st.st_ino))
             if args.prune:
                 for f in plan.removals:
                     rel_f = f.relative_to(repo_root).as_posix()
@@ -2905,30 +3108,34 @@ def main() -> int:
                         except OSError:
                             pass
 
-                    snap = snapshot(tmp)
-                    if snap is None:
-                        if tmp.is_symlink() or tmp.exists():
-                            _restore()
-                            raise OSError(
-                                "prune target is not a regular file: "
-                                f"{rel_f}")
-                        continue  # raced deletion — still a no-op
-                    # Re-verify against the lock BEFORE unlinking — the
-                    # digest/mode check at plan time is a stale read by
-                    # now: a hand edit between plan and apply must abort
-                    # (and roll back), not delete the edited file.
-                    want_dig = locked_dig.get(rel_f)
-                    if (want_dig is None
-                            or hashlib.sha256(snap[0]).hexdigest()
-                            != want_dig
-                            or not _exec_provable(
-                                locked_exec.get(rel_f), snap[1])):
+                    try:
+                        snap = snapshot(tmp)
+                        if snap is not None:
+                            # Re-verify against the lock BEFORE unlinking
+                            # — the digest/mode check at plan time is a
+                            # stale read by now: a hand edit between plan
+                            # and apply must abort (and roll back), not
+                            # delete the edited file.
+                            want_dig = locked_dig.get(rel_f)
+                            if (want_dig is None
+                                    or hashlib.sha256(snap[0]).hexdigest()
+                                    != want_dig
+                                    or not _exec_provable(
+                                        locked_exec.get(rel_f), snap[1])):
+                                raise OSError(
+                                    "prune target changed since planning "
+                                    "(digest or mode drift) — refusing to "
+                                    "remove a possibly hand-edited file: "
+                                    f"{rel_f}")
+                    except OSError:
+                        # A read failure must not strand the file under
+                        # its staging name — put it back before the abort
+                        # unwinds the rest of the apply.
                         _restore()
-                        raise OSError(
-                            "prune target changed since planning "
-                            "(digest or mode drift) — refusing to remove "
-                            f"a possibly hand-edited file: {rel_f}")
-                    undo.append((f, snap[0], snap[1]))
+                        raise
+                    if snap is None:
+                        continue  # raced deletion — still a no-op
+                    undo.append((f, snap[0], snap[1], None))
                     if _HAS_DIRFD:
                         os.unlink(tmp.name, dir_fd=dfd)
                     else:

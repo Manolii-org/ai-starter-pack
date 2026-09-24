@@ -6374,8 +6374,10 @@ def test_prune_missing_parent_dir_noop(tmp_path):
 
 def test_join_continuations_parity_and_quotes():
     """`\\<newline>` joins only where the shell keeps tokens contiguous —
-    odd runs outside quotes or in dq join; even runs and everything else
-    keep the newline as the command boundary (Codex on #1344/#6)."""
+    odd runs outside quotes or in dq join; even runs and everything in
+    single quotes keep the backslash+newline literal (a literal backslash-newline
+    inside sq is NOT a join — joining it forged invocations like
+    `printf 'bash \\` + nl + `scripts/x.sh'`)."""
     mod = load_resolve_module()
     j, BS, NL = mod._join_continuations, b"\\", b"\n"
     assert j(b"python3 " + BS + NL + b"echo") == b"python3 echo"
@@ -6384,7 +6386,8 @@ def test_join_continuations_parity_and_quotes():
         b"python3 " + BS * 2 + NL + b"echo")
     assert j(b"x " + BS * 3 + NL + b"y") == b"x " + BS * 2 + b"y"
     assert j(b'x "a' + BS + NL + b'b" y') == b'x "ab" y'
-    assert j(b"x 'a" + BS + NL + b"b' y") == b"x 'ab' y"
+    # single quotes: every backslash is literal — no join
+    assert j(b"x 'a" + BS + NL + b"b' y") == b"x 'a" + BS + NL + b"b' y"
     assert j(b"x " + BS + b"\r\n" + b"y") == b"x y"
     assert j(b"x " + BS + b"y") == b"x " + BS + b"y"
 
@@ -6525,3 +6528,208 @@ def test_prune_staging_name_collision_aborts(tmp_path):
     assert out.returncode != 0
     assert stale.read_text() == "stale"  # restored, never unlinked
     assert (skills / "old" / ".ai-prune-SKILL.md").read_text() == "leftover"
+
+
+def test_mini_yaml_signed_and_dot_scalars():
+    """PyYAML numeric grammar: `+1` -> 1, `+1.5` -> 1.5, `.5`/`1.` are
+    floats — but bare exponents (`-1e3`) stay strings (Codex on #123)."""
+    mod = load_resolve_module()
+    try:
+        import yaml
+    except ImportError:
+        yaml = None
+    for doc, want in [
+        ('x: +1\n', {'x': 1}),
+        ('x: +1.5\n', {'x': 1.5}),
+        ('x: .5\n', {'x': 0.5}),
+        ('x: 1.\n', {'x': 1.0}),
+        ('x: -1e3\n', {'x': '-1e3'}),
+        ('x: +1e3\n', {'x': '+1e3'}),
+    ]:
+        assert mod._mini_yaml(doc) == want, doc
+        if yaml is not None:
+            assert mod._mini_yaml(doc) == yaml.safe_load(doc), doc
+
+
+def test_mini_yaml_block_scalar_tab_indentation():
+    """A tab in block-scalar INDENTATION is a PyYAML ScannerError; a tab
+    at/past the content column is literal content — including a tab-led
+    FIRST content line (cursor[bot] on #1344, corrected against PyYAML)."""
+    mod = load_resolve_module()
+    try:
+        import yaml
+    except ImportError:
+        yaml = None
+    for doc, want in [
+        ('x: |-\n  \ta\n', {'x': '\ta'}),
+        ('x: |-\n  a\n  \tb\n', {'x': 'a\n\tb'}),
+    ]:
+        assert mod._mini_yaml(doc) == want, doc
+        if yaml is not None:
+            assert mod._mini_yaml(doc) == yaml.safe_load(doc), doc
+    for doc in ('x: |-\n  a\n \tb\n', 'x: |-\n  a\n\tb\n'):
+        with pytest.raises(ValueError):
+            mod._mini_yaml(doc)
+        if yaml is not None:
+            with pytest.raises(Exception):
+                yaml.safe_load(doc)
+
+
+def test_script_dep_redirect_targets_and_bare_module(tmp_path):
+    """Redirect targets that create/fill a file or take a word are not
+    dependencies; input redirects (`<`, `<>`) still are — and a bare
+    `python -m scripts` probes scripts/__main__.py."""
+    mod = load_resolve_module()
+    dep = lambda b: mod.script_dep_block(tmp_path, b.encode())
+    # output / fd / heredoc / here-string targets — created, not read
+    for body in [
+        "python run.py > scripts/out.py",
+        "python run.py >> scripts/out.py",
+        "python run.py 2> scripts/err.txt",
+        "python run.py &> scripts/log.txt",
+        "python run.py >| scripts/x.py",
+        "python run.py >& scripts/x.py",
+        "python run.py << scripts/delim.py",
+        "python run.py <<- scripts/delim.py",
+        "python run.py <<< scripts/word.py",
+        "python run.py <& scripts/fd.py",
+    ]:
+        assert not dep(body), body
+    # input redirects READ the file — real deps
+    for body in [
+        "python run.py < scripts/in.py",
+        "python run.py <> scripts/rw.py",
+    ]:
+        assert dep(body), body
+    # a redirect target then a real dep in the next pipeline stage
+    assert dep("cmd > scripts/x.py | bash scripts/y.sh")
+    # bare package invocation needs __main__.py: unbundled + undeclared
+    # blocks, bundled blocks (scripts/ is never materialised), declared
+    # consumer-side materialises
+    assert dep("python -m scripts")
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "__main__.py").write_text("x=1")
+    assert dep("python -m scripts")
+    shutil.rmtree(tmp_path / "scripts")
+    body = (b"---\nconsumer_scripts: [scripts/__main__.py]\n---\n"
+            b"python -m scripts\n")
+    assert not mod.script_dep_block(tmp_path, body)
+
+
+def test_script_dep_extensionless_option_values(tmp_path):
+    """An extensionless scripts/ path after a long option or `=` is an
+    argument value (`--directory scripts/site`), not an invocation;
+    after a bare `--` or a short flag it still gates (Codex on #1344)."""
+    mod = load_resolve_module()
+    dep = lambda b: mod.script_dep_block(tmp_path, b.encode())
+    assert not dep("python -m http.server --directory scripts/site")
+    assert not dep("python run.py --input=scripts/fixtures")
+    assert not dep("DATA=scripts/fixtures bash run.sh")
+    # still gated: positional after `--`, short flag, plain arg
+    assert dep("bash -- scripts/run")
+    assert dep("bash -x scripts/run")
+    assert dep("bash opts scripts/run")
+    # extended names count even after a long option — fail-closed
+    assert dep("python run.py --out scripts/out.py")
+
+
+def test_script_dep_sq_continuation_is_not_a_join(tmp_path):
+    """`printf 'bash \\<nl>scripts/x.sh'` prints text — a literal
+    backslash-newline inside single quotes is NOT a line continuation,
+    so it must not register a dependency (cursor[bot] on #1344)."""
+    mod = load_resolve_module()
+    assert not mod.script_dep_block(
+        tmp_path, b"printf 'bash \\\nscripts/missing.sh'\n")
+
+
+def test_apply_aborts_on_symlink_destination(tmp_path):
+    """A dst that is a link/non-regular at apply time must abort, not be
+    journaled 'absent' and written over (Codex on #1953)."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/p": [("skills/a/SKILL.md",
+                        "---\nname: a\ndescription: d\n---\nx")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "buro",
+                       [{"plugin": "platform/p", "ref": "1.0.0"}])
+    dst = consumer / ".claude" / "skills" / "a" / "SKILL.md"
+    dst.parent.mkdir(parents=True)
+    dst.symlink_to("/nonexistent-target")
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode != 0  # plan conflict or apply abort — fail-closed
+    assert dst.is_symlink()  # untouched — no clobber, no unlink
+
+
+def test_apply_rollback_only_unlinks_its_own_inode(tmp_path, monkeypatch):
+    """Rollback must delete the inode the write created — a path swapped
+    to a different file before rollback is left alone (Codex on #1953)."""
+    import errno
+    mod = load_resolve_module()
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/p": [("skills/a/SKILL.md",
+                        "---\nname: a\ndescription: d\n---\nx"),
+                       ("skills/b/SKILL.md",
+                        "---\nname: b\ndescription: d\n---\ny")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "buro",
+                       [{"plugin": "platform/p", "ref": "1.0.0"}])
+    monkeypatch.setattr(sys, "argv", [
+        str(RESOLVE), "--manifest", str(m), "--registry", str(reg_root),
+        "--repo-root", str(consumer), "--apply"])
+    real = mod.atomic_replace
+    swap_src = tmp_path / "swapped"
+    swap_src.write_text("SWAPPED")
+    state = {"first": None}
+
+    def fake(dst, fill, times=None, mode=None, dfd=None):
+        if state["first"] is None:
+            state["first"] = dst
+            return real(dst, fill, times=times, mode=mode, dfd=dfd)
+        # Concurrent edit simulation: the first written path is now a
+        # DIFFERENT inode, then this write fails and unwinds.
+        os.replace(swap_src, state["first"])
+        raise OSError(errno.ENOMEM, "simulated write failure")
+
+    monkeypatch.setattr(mod, "atomic_replace", fake)
+    assert mod.main() == 2
+    assert state["first"] is not None
+    # Rollback left the swapped file alone — it is not ours to delete.
+    assert state["first"].read_text() == "SWAPPED"
+
+
+def test_prune_restores_after_staged_read_failure(tmp_path, monkeypatch):
+    """A failed read of the staged `.ai-prune-*` name must put the file
+    back, not strand it under the staging name (Devin on #6/#1344)."""
+    import errno
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/p": [("skills/a/SKILL.md",
+                        "---\nname: a\ndescription: d\n---\nx")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "buro",
+                       [{"plugin": "platform/p", "ref": "1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 0, r.stderr
+    f = consumer / ".claude" / "skills" / "a" / "SKILL.md"
+    assert f.is_file()
+    # Drop the requirement → f becomes a prune candidate.
+    m.write_text("version: 1\nuniverse: buro\nrequires: []\n")
+    mod = load_resolve_module()
+    monkeypatch.setattr(sys, "argv", [
+        str(RESOLVE), "--manifest", str(m), "--registry", str(reg_root),
+        "--repo-root", str(consumer), "--apply", "--prune"])
+    real_open = os.open
+
+    def fake_open(path, flags, *a, **kw):
+        if str(path).startswith(".ai-prune-"):
+            raise OSError(errno.EACCES, "denied")
+        return real_open(path, flags, *a, **kw)
+
+    monkeypatch.setattr(mod.os, "open", fake_open)
+    assert mod.main() == 2
+    assert f.read_text() == "---\nname: a\ndescription: d\n---\nx"
+    assert not list(f.parent.glob(".ai-prune-*"))
