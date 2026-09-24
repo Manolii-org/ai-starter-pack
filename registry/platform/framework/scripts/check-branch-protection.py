@@ -340,13 +340,22 @@ def main() -> int:
                 warnings.append(f"{where}: ruleset read failed: {rerr}")
             present = current_contexts(protection) if protection else []
             missing = [c for c in required if c not in present]
+            # Surplus live contexts (required by protection but undeclared in
+            # the contract) escape a one-sided diff — a stale check CI never
+            # emits can block merges forever. Flagged as a warning, not a
+            # finding: the contract is a floor, not a ceiling.
+            surplus = [c for c in present if c not in required]
+            if surplus:
+                warnings.append(f"{where}: surplus required checks not declared: "
+                                f"{', '.join(surplus)}")
             if missing and rerr:
                 # Union may be incomplete — a finding would be a guess, and the
                 # emitted PUT could duplicate ruleset-managed checks.
                 report.append(f"| {repo} | {branch} | ⚠️ unverifiable — ruleset read failed: {rerr} |")
                 continue
             if not missing:
-                report.append(f"| {repo} | {branch} | OK ({len(required)} required) |")
+                tail = f" (+{len(surplus)} undeclared: `{'`, `'.join(surplus)}`)" if surplus else ""
+                report.append(f"| {repo} | {branch} | OK ({len(required)} required){tail} |")
                 continue
             why = "branch unprotected" if protection is None else "missing from required checks"
             findings.append(f"{where}: {why}: {', '.join(missing)}")
@@ -376,6 +385,9 @@ def main() -> int:
                  "Review each body before applying — the PUT replaces the WHOLE",
                  "protection config, so a stale snapshot could drop settings a",
                  "human added since the audit ran.",
+                 "",
+                 "Run each command from THIS directory (the extracted artifact",
+                 "root) — `--input` paths are relative to it, not the runner.",
                  ""]
         for f in fixes:
             (d / f["file"]).write_text(json.dumps(f["body"], indent=2) + "\n",
@@ -386,7 +398,7 @@ def main() -> int:
                       # is single-quoted so metachars in branch names stay inert.
                       f"gh api -X PUT 'repos/{f['repo']}/branches/"
                       f"{urllib.parse.quote(f['branch'], safe='')}/protection' "
-                      f"--input '{(d / f['file']).resolve()}'",
+                      f"--input '{f['file']}'",
                       "```", ""]
             for w in f["warnings"]:
                 lines.append(f"> ⚠️ {w}\n")
