@@ -131,7 +131,10 @@ jobs:
             # out a cross-repo head would hand PR-controlled files those
             # privileges. Compare repo IDs, not .fork — a caller that is itself
             # a fork still has head.repo.fork=true on its own PRs.
-            SAME=$(gh api "repos/${REPOSITORY}/pulls/${PR_NUM}" \
+            # Bounded: a stalled gh api would otherwise eat the 30m job
+            # ceiling before reaching the safe skip path; a timeout lands in
+            # the same 'unknown' (skip) bucket as an API error.
+            SAME=$(timeout -k 5 30 gh api "repos/${REPOSITORY}/pulls/${PR_NUM}" \
               --jq 'if .head.repo == null then "missing" elif (.head.repo.id == .base.repo.id) then "true" else "false" end' \
               2>/dev/null || echo 'unknown')
             if [[ "$SAME" != "true" ]]; then
@@ -141,7 +144,7 @@ jobs:
             fi
           fi
           if [[ "$EVENT_NAME" == "workflow_run" ]]; then
-            CURRENT_HEAD_SHA=$(gh api "repos/${REPOSITORY}/pulls/${PR_NUM}" --jq '.head.sha' 2>/dev/null || echo '')
+            CURRENT_HEAD_SHA=$(timeout -k 5 30 gh api "repos/${REPOSITORY}/pulls/${PR_NUM}" --jq '.head.sha' 2>/dev/null || echo '')
             if [[ -n "$WR_HEAD_SHA" && -n "$CURRENT_HEAD_SHA" && "$WR_HEAD_SHA" != "$CURRENT_HEAD_SHA" ]]; then
               echo "skip=true" >> "$GITHUB_OUTPUT"
               echo "Stale workflow_run: ${WR_HEAD_SHA} is not current PR head ${CURRENT_HEAD_SHA}; skipping before checkout and agent dispatch"
@@ -149,7 +152,7 @@ jobs:
             fi
           fi
           if [[ -z "$HEAD_REF" ]]; then
-            HEAD_REF=$(gh pr view "$PR_NUM" --json headRefName --jq '.headRefName' 2>/dev/null || echo '')
+            HEAD_REF=$(timeout -k 5 30 gh pr view "$PR_NUM" --json headRefName --jq '.headRefName' 2>/dev/null || echo '')
           fi
           echo "skip=false" >> "$GITHUB_OUTPUT"
           echo "pr_number=$PR_NUM" >> "$GITHUB_OUTPUT"
@@ -211,7 +214,7 @@ jobs:
             fi
           fi
 
-          LABELS=$(gh pr view "$PR_NUM" --json labels --jq '[.labels[].name]' 2>/dev/null || echo '[]')
+          LABELS=$(timeout -k 5 30 gh pr view "$PR_NUM" --json labels --jq '[.labels[].name]' 2>/dev/null || echo '[]')
           if echo "$LABELS" | grep -q "skip-ai-review"; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
@@ -230,13 +233,13 @@ jobs:
           set -euo pipefail
           MAX_FIXES="${MAX_FIXES:-1}"
           # Count commits on this PR whose subject starts with [autofix]
-          COUNT=$(gh api "repos/${{ github.repository }}/pulls/${PR_NUM}/commits" --paginate \
+          COUNT=$(timeout -k 5 30 gh api "repos/${{ github.repository }}/pulls/${PR_NUM}/commits" --paginate \
             --jq '[.[].commit.message | split("\n")[0] | select(startswith("[autofix]"))] | length' 2>/dev/null || echo 0)
           echo "successful_fix_commits=$COUNT" >> "$GITHUB_OUTPUT"
           if [[ "$COUNT" -ge "$MAX_FIXES" ]]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "::notice::Per-PR autofix budget reached ($COUNT >= $MAX_FIXES successful [autofix] commits); skipping"
-            gh pr comment "$PR_NUM" --body "<!-- pack-autofix:budget-exhausted --> [autofix-budget] Skipping further Autofix — this PR already has ${COUNT} successful [autofix] commit(s) (cap ${MAX_FIXES}). Remove an autofix commit or raise max_successful_fixes if a further pass is intentional." || true
+            timeout -k 5 30 gh pr comment "$PR_NUM" --body "<!-- pack-autofix:budget-exhausted --> [autofix-budget] Skipping further Autofix — this PR already has ${COUNT} successful [autofix] commit(s) (cap ${MAX_FIXES}). Remove an autofix commit or raise max_successful_fixes if a further pass is intentional." || true
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
