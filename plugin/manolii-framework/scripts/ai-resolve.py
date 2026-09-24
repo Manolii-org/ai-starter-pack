@@ -406,9 +406,12 @@ def _redirection_target_spans(window: bytes) -> list[tuple[int, int]]:
 # (`python -m http.server -d scripts/site`).
 _BOOL_SHORT: dict[bytes, frozenset[int]] = {
     b"python": frozenset(b"bBEhiIOPqsSuvVx"),
-    b"bash": frozenset(b"eEfhimpnuxv"),
-    b"sh": frozenset(b"eEfhimpnuxv"),
-    b"zsh": frozenset(b"eEfhimpnuxv"),
+    b"bash": frozenset(b"eEfhimpnuxvs"),
+    b"sh": frozenset(b"eEfhimpnuxvs"),
+    b"zsh": frozenset(b"eEfhimpnuxvs"),
+    b"dash": frozenset(b"eEfhimpnuxvs"),
+    b"ksh": frozenset(b"eEfhimpnuxvs"),
+    b"ash": frozenset(b"eEfhimpnuxvs"),
 }
 # Long options that do not take an operand. Anything else in `--opt` or
 # `--opt=value` form binds the following word / the text after `=` — that
@@ -637,11 +640,18 @@ def _command_start(src: bytes, pos: int) -> int:
     counts as a separator even inside double quotes (its substitution
     executes) but `$(` does NOT split — the enclosing command's head
     still governs, and `$(...)` regions are handled separately by
-    _substitution_spans."""
+    _substitution_spans — their INNER separators (`$(a; b)`) likewise
+    must not move the start (Devin on #1380, round-14 review)."""
     start = 0
     in_s = in_d = False
+    # `$(`/`<(`/`>(` open index -> closing index: separators inside the
+    # region are literal to the enclosing command.
+    subs = {a: b + 1 for a, b in _substitution_spans(src)}
     i = 0
     while i < pos:
+        if i in subs:
+            i = subs[i]
+            continue
         c = src[i]
         if in_s:
             if c == 0x27:
@@ -1020,10 +1030,12 @@ def _py_module_verdict(mod: bytes, rest_words: list, sub: bytes) -> str:
         # A positional operand — a FILE the module reads, or `-` for
         # the pipe. getopt stops option parsing at the first operand
         # (`base64 -d - -e` decodes stdin; Codex on #9, round-12).
+        # An fd-path operand names the pipe too — `python -m base64 -d
+        # /dev/stdin` decodes it (Codex on #1957, round-14 review).
         positional += 1
         if getopt:
             opts_done = True
-        if t == b"-":
+        if _stdin_path_operand(t):
             stdin_live = True
             continue
         if top in _PY_MODULE_ITER_OPS:
@@ -1100,10 +1112,106 @@ _EMIT_PIPE_READERS = frozenset(
 # counts (`$(printf cat)` emits the text `cat`, it never reads the
 # pipe — Devin + CodeRabbit on #1380/#1957, round-12 review). Newlines
 # separate commands too (`$(printf safe\ncat)` runs cat — round-13
-# consumer reviews). A bare `&` is NOT a separator here:
-# `<&0`/`>&2`/`&>f` are redirect operators that must stay with their
-# command.
-_SUB_CMD_SPLIT = re.compile(rb"\$\(|&&|\|\||[;|`\n]")
+# consumer reviews). A bare `&` IS a background separator, but the
+# `<&0`/`>&2`/`&>f`/`|&`/`&&` forms are redirect or pipeline operators
+# that must stay glued (Codex on #127/#1380/#1957, round-14 review).
+# Separators inside quotes are literal text — `$(printf 'a;cat')`
+# prints one string, it does not run `cat` (Devin on #127/#1380,
+# round-14 review) — so the split is a scanner, not a regex.
+def _sub_cmd_seps(a: bytes):
+    """Yield (start, end, kind) separators inside substitution body `a`.
+
+    kind `b"|"` marks a pipe continuation (`|` or `|&` — the next
+    region reads THIS region's output); any other kind is a command
+    boundary (`;`, `&&`, `||`, bare `&`, backtick, newline, `$(`) whose
+    next region is a fresh command on the upstream pipe. A `|` glued to
+    `>` (`>|` noclobber) is a redirect, not a pipe."""
+    in_s = in_d = esc = False
+    i = 0
+    n = len(a)
+    while i < n:
+        c = a[i]
+        if esc:
+            esc = False
+            i += 1
+            continue
+        if c == 0x5C and not in_s:
+            esc = True
+            i += 1
+            continue
+        if in_s:
+            if c == 0x27:
+                in_s = False
+            i += 1
+            continue
+        if c == 0x27:
+            in_s = True
+            i += 1
+            continue
+        if c == 0x22:
+            in_d = not in_d
+            i += 1
+            continue
+        if in_d:
+            # Inside "..." only a substitution still executes —
+            # separators stay literal.
+            if a[i:i + 2] == b"$(":
+                yield i, i + 2, b"$("
+                i += 2
+                continue
+            if c == 0x60:
+                yield i, i + 1, b"`"
+            i += 1
+            continue
+        if a[i:i + 2] == b"$(":
+            yield i, i + 2, b"$("
+            i += 2
+            continue
+        if a[i:i + 2] in (b"&&", b"||"):
+            yield i, i + 2, a[i:i + 2]
+            i += 2
+            continue
+        if c == 0x7C:  # `|` — `|&` counts as one pipe operator
+            if a[i - 1:i] == b">":
+                i += 1
+                continue  # `>|` — redirect, not a pipe
+            j = i + 1
+            if a[j:j + 1] == b"&":
+                j += 1
+            yield i, j, b"|"
+            i = j
+            continue
+        if c == 0x26:  # `&` — background separator, unless glued to a
+            # redirect (`>&`, `<&`, `&>`, `&>>`) or pipeline (`|&`)
+            p = i - 1
+            while p >= 0 and a[p] in b" \t":
+                p -= 1
+            pv = a[p:p + 1] if p >= 0 else b""
+            if pv not in (b"<", b">") and a[i + 1:i + 2] not in (
+                    b">", b"&"):
+                yield i, i + 1, b"&"
+            i += 1
+            continue
+        if c == 0x60:
+            yield i, i + 1, b"`"
+            i += 1
+            continue
+        if c in (0x3B, 0x0A):
+            yield i, i + 1, a[i:i + 1]
+            i += 1
+            continue
+        i += 1
+
+
+# Control-flow keywords are never a command head — `$(if :; then cat;
+# fi)` runs `cat`, not `then` (Codex on #1380, round-14 review).
+# Negation (`!`), `select`/`coproc`/`function` prefixes and the
+# `in`/`do`/`else` chains scan through to the real command; a keyword
+# with nothing behind it returns (None, [], None) — fail closed.
+_SEG_RESERVED = frozenset({
+    b"if", b"then", b"elif", b"else", b"fi", b"while", b"until",
+    b"do", b"done", b"for", b"in", b"case", b"esac", b"select",
+    b"coproc", b"function", b"!"})
 
 
 def _seg_head_args(body: bytes) -> tuple:
@@ -1119,7 +1227,9 @@ def _seg_head_args(body: bytes) -> tuple:
     command head can be identified (fail closed upstream: the segment
     keeps the flowing provenance). The returned fd map reflects the
     segment's own redirects — a `< file` rebind means the head's input
-    is the file, not whatever the pipeline carried."""
+    is the file, not whatever the pipeline carried; the redirect's
+    target may sit in the NEXT word (`cat < /dev/null` — Devin on
+    #9/#1957, round-14 review)."""
     words = _shell_words(_mask_parens(body))
     words = [w for w in words
              if _word_text(body[w[0]:w[1]]) not in (b"{", b"}")]
@@ -1135,12 +1245,136 @@ def _seg_head_args(body: bytes) -> tuple:
     for w in words[hi + 1:]:
         raw = body[w[0]:w[1]]
         if pend is not None:
+            # A bare `<`/`>` operator's target lives in THIS word —
+            # `cat < /dev/null` rebinds stdin to the file.
+            fd, mode = pend
             pend = None
+            _word_pending_target(scratch, fd, mode, raw)
             continue
         at, pend = _word_redirects(raw, scratch)
         if at:
             args.append(at)
     return key, args, scratch
+
+
+def _stdin_path_operand(t: bytes) -> bool:
+    """True when operand `t` names the pipe itself — `-`, `/dev/stdin`,
+    `/dev/fd/0`, `/proc/self/fd/0` (Codex on #1957, round-14 review)."""
+    return t == b"-" or _fd_alias_target(t) == 0
+
+
+# Heads whose operands NEVER replace the stdin read — `tee F` still
+# echoes the pipe, `xargs CMD` uses it as command argv, `read`/
+# `mapfile`/`readarray` take variable names, `tr SET SET` takes char
+# sets (round-14 review).
+_READER_STDIN_OPS = frozenset(
+    {b"tee", b"tr", b"xargs", b"read", b"mapfile", b"readarray"})
+# Reader heads whose FIRST positional operand is program text — the
+# pattern/script/filter, not an input file (`grep PAT F`, `sed SCRIPT
+# F`, `awk PROG F`, `jq FILTER F`, `openssl SUBCOMMAND …`).
+_READER_PROGRAM_FIRST = frozenset(
+    {b"grep", b"egrep", b"fgrep", b"zgrep", b"rg", b"sed", b"awk",
+     b"jq", b"yq", b"openssl"})
+# Flags of reader heads that bind the FOLLOWING word as an option
+# value or program text — never the stream input (a flag whose operand
+# IS the input — `patch -i`, `xargs -a` — is deliberately absent so it
+# still counts as a file operand).
+_READER_FLAG_OPS = {
+    b"head": frozenset({b"-n", b"-c", b"--lines", b"--bytes"}),
+    b"tail": frozenset({b"-n", b"-c", b"--lines", b"--bytes",
+                        b"--sleep-interval"}),
+    b"grep": frozenset({b"-e", b"-f", b"-m", b"-A", b"-B", b"-C", b"-D",
+                        b"--regexp", b"--file", b"--max-count",
+                        b"--after-context", b"--before-context",
+                        b"--context", b"--include", b"--exclude",
+                        b"--exclude-dir", b"--exclude-from", b"--label",
+                        b"--binary-files", b"--directories",
+                        b"--devices", b"--group-separator"}),
+    b"sed": frozenset({b"-e", b"-f", b"--expression", b"--file",
+                       b"-l", b"--line-length"}),
+    b"awk": frozenset({b"-f", b"-v", b"-F", b"--file", b"--assign",
+                       b"--field-separator"}),
+    b"sort": frozenset({b"-k", b"-t", b"-o", b"-T", b"-S", b"--key",
+                        b"--field-separator", b"--output",
+                        b"--temporary-directory", b"--buffer-size"}),
+    b"cut": frozenset({b"-f", b"-c", b"-b", b"-d", b"--fields",
+                       b"--characters", b"--bytes", b"--delimiter"}),
+    b"paste": frozenset({b"-d", b"--delimiters"}),
+    b"join": frozenset({b"-1", b"-2", b"-e", b"-j", b"-t", b"-o",
+                        b"-a", b"-v"}),
+    b"jq": frozenset({b"-f", b"--from-file", b"-L", b"--indent"}),
+    b"yq": frozenset({b"-f", b"--from-file"}),
+    b"tar": frozenset({b"-f", b"--file", b"-C", b"--directory"}),
+    b"iconv": frozenset({b"-f", b"-t", b"--from-code", b"--to-code",
+                         b"-o", b"--output"}),
+    b"fold": frozenset({b"-w", b"--width"}),
+    b"nl": frozenset({b"-b", b"-f", b"-h", b"-i", b"-l", b"-n", b"-p",
+                      b"-s", b"-v", b"-w"}),
+    b"od": frozenset({b"-A", b"-j", b"-N", b"-S", b"-t", b"-w"}),
+    b"xxd": frozenset({b"-g", b"-c", b"-l", b"-o", b"-s"}),
+    b"hexdump": frozenset({b"-e", b"-f", b"-n", b"-s"}),
+    b"strings": frozenset({b"-n", b"-t", b"-e", b"--bytes",
+                          b"--radix", b"--encoding"}),
+    b"split": frozenset({b"-l", b"-b", b"-C", b"-n", b"-a",
+                         b"--lines", b"--bytes", b"--line-bytes",
+                         b"--number", b"--suffix-length"}),
+    b"rg": frozenset({b"-e", b"-f", b"-m", b"-A", b"-B", b"-C", b"-g",
+                      b"-t", b"-T", b"--regexp", b"--file",
+                      b"--max-count", b"--after-context",
+                      b"--before-context", b"--context", b"--glob",
+                      b"--type", b"--type-not"}),
+    b"pr": frozenset({b"-e", b"-h", b"-i", b"-l", b"-n", b"-o", b"-r",
+                      b"-s", b"-w", b"-J", b"-S", b"-T", b"-W", b"-d"}),
+}
+_READER_FLAG_OPS[b"egrep"] = _READER_FLAG_OPS[b"grep"]
+_READER_FLAG_OPS[b"fgrep"] = _READER_FLAG_OPS[b"grep"]
+_READER_FLAG_OPS[b"zgrep"] = _READER_FLAG_OPS[b"grep"]
+_READER_FLAG_OPS[b"hd"] = _READER_FLAG_OPS[b"hexdump"]
+# Program-supplying flag operands — `grep -e PAT`/`sed -e SCRIPT`
+# (glued `-ePAT` included) mean the first positional is already a
+# FILE.
+_READER_PROG_FLAGS = {
+    b"grep": frozenset({b"-e", b"-f", b"--regexp", b"--file"}),
+    b"sed": frozenset({b"-e", b"-f", b"--expression", b"--file"}),
+    b"awk": frozenset({b"-f", b"--file"}),
+    b"jq": frozenset({b"-f", b"--from-file"}),
+    b"yq": frozenset({b"-f", b"--from-file"}),
+}
+_READER_PROG_FLAGS[b"egrep"] = _READER_PROG_FLAGS[b"grep"]
+_READER_PROG_FLAGS[b"fgrep"] = _READER_PROG_FLAGS[b"grep"]
+_READER_PROG_FLAGS[b"zgrep"] = _READER_PROG_FLAGS[b"grep"]
+_READER_PROG_FLAGS[b"rg"] = frozenset({b"-e", b"-f", b"--regexp",
+                                      b"--file"})
+
+
+def _reader_operands(key: bytes, args: list) -> list:
+    """Positional file operands of reader head `key` — flags and their
+    operand values folded away; `--` ends option parsing; the first
+    positional is dropped for program-first heads unless a program flag
+    already supplied it (`grep -e p f` — `f` is a file)."""
+    flagops = _READER_FLAG_OPS.get(key, frozenset())
+    progflags = _READER_PROG_FLAGS.get(key, frozenset())
+    ops: list[bytes] = []
+    prog_seen = ended = False
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if not ended and a != b"-" and a.startswith(b"-"):
+            if a == b"--":
+                ended = True
+            elif a in flagops:
+                prog_seen |= a in progflags
+                i += 2
+                continue
+            elif len(a) > 2 and a[:2] in progflags:
+                prog_seen = True  # glued `-ePAT`/`--file=F` program
+            i += 1
+            continue
+        ops.append(a)
+        i += 1
+    if key in _READER_PROGRAM_FIRST and not prog_seen and ops:
+        ops = ops[1:]
+    return ops
 
 
 def _seg_prov(body: bytes, prov: str):
@@ -1156,7 +1390,11 @@ def _seg_prov(body: bytes, prov: str):
         return prov
     v = _stdin_exec_head(body)
     if v == "exec":
-        return None
+        # Executing UPSTREAM/SCRIPT bytes is a dep — but an interpreter
+        # handed replaced content (`cat scripts/x.sh | wc -l | sh` —
+        # sh runs a line count, Devin on #127, round-14 review) is not.
+        # Its output is its own either way, so the walk continues.
+        return None if prov in ("up", "script") else "own"
     if v == "sink":
         return "own"       # the stage emits a replacement, not content
     # "other" — a pass-through or unknown head.
@@ -1175,17 +1413,33 @@ def _seg_prov(body: bytes, prov: str):
             elif not fd_in:
                 prov = "own"
             else:
-                ops = [a2 for a2 in args if a2 == b"-" or (
+                ops = [a2 for a2 in args if _stdin_path_operand(a2) or (
                     not a2.startswith(b"-") and a2 != b"--")]
-                if ops and not any(
-                        o in (b"-", b"/dev/stdin") for o in ops):
+                if ops and not any(_stdin_path_operand(o) for o in ops):
                     prov = "own"
         elif key in _EMIT_PIPE_READERS:
             if any(b"scripts/" in arg for arg in args):
                 prov = "script"
             elif not fd_in:
                 prov = "own"   # `head <f` reads the file, not stdin
+            elif key not in _READER_STDIN_OPS:
+                # File operands replace the input — `head -n 1
+                # /etc/hosts` emits /etc/hosts, not the pipe (Devin on
+                # #1380, round-14 review). A `-`/fd-path operand keeps
+                # the pipe in the input list (`head f -` reads both).
+                ops = _reader_operands(key, args)
+                if ops and not any(
+                        _stdin_path_operand(o) for o in ops):
+                    prov = "own"
             # Otherwise the reader forwards its input — prov flows.
+        elif key in _SEG_RESERVED:
+            # Compound/conjunction keywords are transparent to the
+            # stream: `if :; then cat; fi` runs cat on the `if`
+            # statement's stdin — the pipeline's provenance flows
+            # through (Codex on #1380, round-14 review). A `for i in
+            # scripts/x.sh` list still names dep bytes.
+            if any(b"scripts/" in arg for arg in args):
+                prov = "script"
         else:
             # Not a known reader (e.g. `$(git status)`) — it emits its
             # own text; a scripts/ operand still loads dep bytes it
@@ -1217,17 +1471,16 @@ def _sub_reads_stdin(a: bytes) -> bool:
 
     `a` is a substitution BODY — the caller supplies each span."""
     # Split the body into command regions: each separator starts a
-    # fresh command whose FIRST word is the head. A lone `|` instead
+    # fresh command whose FIRST word is the head. A `|`/`|&` instead
     # continues the pipeline — the next segment reads THIS segment's
     # output, not the upstream pipe.
-    seps = list(_SUB_CMD_SPLIT.finditer(a))
-    spans = [(0, seps[0].start() if seps else len(a))]
+    seps = list(_sub_cmd_seps(a))
+    spans = [(0, seps[0][0] if seps else len(a))]
     sepk = [None]
-    for i, m in enumerate(seps):
-        start = m.end()
-        end = seps[i + 1].start() if i + 1 < len(seps) else len(a)
-        spans.append((start, end))
-        sepk.append(m.group(0))
+    for i, (s0, e0, kind) in enumerate(seps):
+        end = seps[i + 1][0] if i + 1 < len(seps) else len(a)
+        spans.append((e0, end))
+        sepk.append(kind)
     # Provenance of the current pipeline's output: "up" = upstream pipe
     # bytes flow through, "script" = a scripts/ operand's bytes joined
     # the stream, "own" = the last stage emits its own content.
@@ -1534,6 +1787,7 @@ def _stdin_exec_head(win: bytes) -> str:
     saw_program = False  # `-c`/`-e`-style operand flag or program file
     stdin_mode = False   # `-`/shell `-s` — read stdin; later words are args
     py_verdict = None
+    sh_c = None          # a shell `-c`'s operand — the command string
     pending = None
     for n, w in enumerate(sub_words[1:], start=1):
         raw = sub[w[0]:w[1]]
@@ -1589,6 +1843,13 @@ def _stdin_exec_head(win: bytes) -> str:
             continue
         if t in flags:
             saw_program = True
+            if (key in _SH_STDIN_HEADS and t == b"-c"
+                    and n + 1 < len(sub_words)):
+                # The operand word is the command STRING — classify it
+                # as a command list instead of treating `-c` as a
+                # blind "program from argv" (round-14 review).
+                sh_c = _word_text(
+                    sub[sub_words[n + 1][0]:sub_words[n + 1][1]])
             continue
         if not t.startswith(b"-"):
             if key in (b"bc", b"dc"):
@@ -1603,6 +1864,17 @@ def _stdin_exec_head(win: bytes) -> str:
         return "sink"  # stdin ends bound elsewhere — the pipe is unread
     if py_verdict is not None:
         return py_verdict
+    if sh_c is not None:
+        # `-c` runs its STRING, never the pipe — `-s` does not change
+        # that (`cat x | sh -s -c 'exit'` runs exit, Devin on #127,
+        # round-14 review). The string is itself a command list: an
+        # exec head inside it consumes the pipe (`sh -c 'sh'` execs
+        # it), a reader forwards it (`sh -c 'cat'` re-emits it
+        # downstream), anything else leaves it unread.
+        inner = _stdin_exec_head(sh_c)
+        if inner == "other":
+            return "other" if _sub_reads_stdin(sh_c) else "sink"
+        return inner
     if saw_program:
         return "sink"
     return "exec"
@@ -1926,10 +2198,20 @@ def _redirect_apply_in(fds: dict, src: bytes, i: int) -> int:
         # stderr; `0<&3` picks up a saved pipe).
         fds[fd] = fds.get(_fd_key(src[d:m], -1), _FD_UNKNOWN)
         return m
-    # `n<&word` — a non-numeric dup target is invalid bash; UNKNOWN
-    # counts as rebound (fail closed — same rule as `dup_in` in
-    # _word_pending_target).
-    t, end, _ = _fd_target_word(src, i)
+    # `n<&word` — mirror `_redirect_apply` for the forms bash accepts:
+    # a QUOTED digit is still an fd dup (`0<&"0"`), and an expansion
+    # may resolve to fd0 at runtime so the fd binds its DEFAULT
+    # (`0<&$FD` keeps the pipe — CodeRabbit on #1957, round-14 review).
+    # A literal non-numeric word is an AMBIGUOUS redirect — bash
+    # aborts before the command runs and nothing consumes the pipe,
+    # so UNKNOWN is correct (round-9 review).
+    t, end, has_exp = _fd_target_word(src, i)
+    if t.isdigit():
+        fds[fd] = fds.get(_fd_key(t, -1), _FD_UNKNOWN)
+        return end
+    if has_exp:
+        fds[fd] = _fresh_fds().get(fd, _FD_UNKNOWN)
+        return max(end, i)
     fds[fd] = _FD_UNKNOWN
     return max(end, i)
 
@@ -2126,6 +2408,9 @@ def _word_pending_target(fds: dict, fd, mode: str, raw: bytes) -> None:
         if fd == 1:
             fds[2] = _FD_FILE
     else:
+        # `n<& word` with a literal non-numeric target is an ambiguous
+        # redirect — bash aborts the command; UNKNOWN counts as
+        # rebound, which is the fail-closed answer either way.
         fds[fd] = _FD_UNKNOWN
 
 
@@ -2440,6 +2725,11 @@ def _pipe_pos(src: bytes, pos: int) -> int:
         elif c == 0x3E and src[j + 1:j + 2] != b"(":
             j = _redirect_apply(fds, src, j)
             continue
+        elif c == 0x3C and src[j + 1:j + 2] != b"(":
+            # `1<&2`-style INPUT-side dups also move fd1 off the pipe
+            # (Devin on #127/#9, round-14 review).
+            j = _redirect_apply_in(fds, src, j)
+            continue
         elif c == 0x26 and src[j + 1:j + 2] == b">":
             j = _redirect_apply(fds, src, j)  # `&>`/`&>>` -> fds 1&2
             continue
@@ -2504,6 +2794,9 @@ def _pipe_pos(src: bytes, pos: int) -> int:
         elif c == 0x3E:  # `>`/`>>`/`>&`/`n<>`/`>|` — the fd map decides
             j = _redirect_apply(fds, src, j)
             continue
+        elif c == 0x3C and src[j + 1:j + 2] != b"(":
+            j = _redirect_apply_in(fds, src, j)  # `1<&2` dup moves fd1
+            continue                           # off the pipe too (r-14)
         elif c == 0x26:
             prev = src[j - 1:j]
             nxt = src[j + 1:j + 2]

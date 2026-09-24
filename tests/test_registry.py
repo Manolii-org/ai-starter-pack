@@ -9031,3 +9031,198 @@ def test_script_dep_date_unquoted_sub(tmp_path):
     # And on the output_exec side: an unquoted +$(cat f) is no exec.
     assert not mod.script_dep_block(
         pdir, b'date +$(cat scripts/x.sh) | sh\n')
+
+
+def test_script_dep_quoted_separator_literals(tmp_path):
+    """Separators inside quotes are literal text, not command
+    boundaries — `$(printf 'safe; cat')` prints one string and never
+    runs `cat` (Devin on #127/#1380, round-14 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert not mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | echo "$(printf \'safe; cat\')" | sh\n')
+    assert not mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | echo "$(printf \'safe|cat\')" | sh\n')
+    # Real separators still split — the second region runs on stdin.
+    assert mod.script_dep_block(
+        pdir, b'echo "$(printf a; cat scripts/x.sh)" | sh\n')
+    assert mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | echo "$(printf a; cat)" | sh\n')
+
+
+def test_script_dep_bare_ampersand_and_pipe_amp(tmp_path):
+    """A bare `&` is a background separator and `|&` a single pipe
+    operator — earlier they were either glued or split wrongly
+    (Codex on #127/#1380/#1957, round-14 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    # `cat x | cat & cat | sh`: background job + `cat | sh` reading the
+    # script's own stdin — not the script bytes.
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | cat & cat | sh\n")
+    # `|&` joins stderr into the pipe — script bytes still flow.
+    assert mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh |& cat)" | sh\n')
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | sh -c 'cat' |& sh\n")
+    # `cat &` inside a substitution emits script bytes to the capture.
+    assert mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh & wait)" | sh\n')
+
+
+def test_script_dep_compound_keyword_transparency(tmp_path):
+    """Compound keywords share the compound statement's stdin —
+    `if :; then cat; fi` and `while cat; do :; done` forward the
+    stream (Codex on #1380, round-14 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir,
+        b'echo "$(cat scripts/x.sh | if :; then cat; fi)" | sh\n')
+    assert mod.script_dep_block(
+        pdir,
+        b'echo "$(cat scripts/x.sh | while cat; do :; done)" | sh\n')
+    # Inside the substitution walk a `for`/`in` list naming a plugin
+    # script carries its bytes (the outer dep-detection of for-list
+    # operands is a separate gap — the segment walk still detects it).
+    assert mod._sub_reads_stdin(
+        b'for i in scripts/x.sh; do cat "$i"; done')
+
+
+def test_script_dep_shell_c_operand(tmp_path):
+    """`sh -c` runs its STRING, never the pipe: `-s` does not change
+    that, and a reader/exec head inside the string classifies the
+    stage by the string (Devin on #127, round-14 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | sh -s -c 'exit'\n")
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | sh -c 'echo safe' | sh\n")
+    # `-s` must not swallow `-c` as its operand.
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | bash -s -c 'exit'\n")
+    # A reader inside -c re-emits the pipe; an inner exec consumes it.
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | sh -c 'cat' | sh\n")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | sh -c 'sh'\n")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | sh -c 'if :; then cat; fi' | sh\n")
+
+
+def test_script_dep_reader_file_operands(tmp_path):
+    """Reader heads with real FILE operands emit the file, not the
+    pipe — `head -n 1 /etc/hosts` forwards nothing (Devin on #1380,
+    round-14 review). Program-first heads skip the pattern/script
+    operand; a `-`/fd-path operand keeps the pipe."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert not mod.script_dep_block(
+        pdir,
+        b'echo "$(cat scripts/x.sh | head -n 1 /etc/hosts)" | sh\n')
+    assert not mod.script_dep_block(
+        pdir,
+        b'echo "$(cat scripts/x.sh | grep p /etc/hosts)" | sh\n')
+    assert not mod.script_dep_block(
+        pdir,
+        b'echo "$(cat scripts/x.sh | sed s/a/b/ /etc/hosts)" | sh\n')
+    assert not mod.script_dep_block(
+        pdir,
+        b'echo "$(cat scripts/x.sh | awk \'{print}\' /etc/hosts)" | sh\n')
+    assert not mod.script_dep_block(
+        pdir,
+        b'echo "$(cat scripts/x.sh | jq . /etc/hosts)" | sh\n')
+    # Program supplied via flag: first positional is already a file.
+    assert not mod.script_dep_block(
+        pdir,
+        b'echo "$(cat scripts/x.sh | grep -e p /etc/hosts)" | sh\n')
+    assert not mod.script_dep_block(
+        pdir,
+        b'echo "$(cat scripts/x.sh | openssl base64 -in /etc/hosts)" | sh\n')
+    # No file operand — the pipe still flows.
+    assert mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh | head -n 1)" | sh\n')
+    assert mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh | tee /tmp/f)" | sh\n')
+    # `cat < file` via a spaced target also rebinds.
+    assert not mod.script_dep_block(
+        pdir,
+        b'echo "$(cat scripts/x.sh | cat < /dev/null)" | sh\n')
+
+
+def test_script_dep_exec_only_on_stream_content(tmp_path):
+    """An exec stage consumes a dep only when the STREAM carries it —
+    `cat x | wc -l | sh` hands sh a line count, not the script
+    (Devin on #127, round-14 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert not mod.script_dep_block(
+        pdir,
+        b'echo "$(cat scripts/x.sh | cat x | wc -l | cat)" | sh\n')
+    # Upstream content still executes.
+    assert mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh | sh)" | sh\n')
+
+
+def test_script_dep_fd_path_operands(tmp_path):
+    """`python -m` codec operands named by fd paths read the pipe —
+    `/dev/stdin`, `/dev/fd/0`, `/proc/self/fd/0` are all stdin
+    (Codex on #1957, round-14 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | python -m base64 -d /dev/stdin | sh\n")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | python -m gzip -d /dev/fd/0 | sh\n")
+    assert mod.script_dep_block(
+        pdir,
+        b"cat scripts/x.sh | python -m uu -d /proc/self/fd/0 | sh\n")
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | python -m base64 -d /etc/passwd | sh\n")
+
+
+def test_script_dep_expanded_input_dup_binds_default(tmp_path):
+    """`0<&$FD` can restore fd0 to the pipe at runtime — bind the fd's
+    default rather than a proven-away state (CodeRabbit on #1957,
+    round-14 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | sh 0<&$FD\n")
+    # Input-side fd dups still divert output off the pipe.
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | cat 1<&2 | sh\n")
+
+
+def test_command_start_skips_substitution_separators(tmp_path):
+    """`$(a; b)` inside a command line must not move the command start
+    — the argument after the substitution belongs to the OUTER
+    command, not the inner `;` (Devin on #1380, round-14 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    src = b'bash other.sh $(printf a; printf b) scripts/x.sh\n'
+    pos = src.index(b'scripts/x.sh')
+    cs = mod._command_start(src, pos)
+    assert src[cs:].startswith(b'bash other.sh')
+    # An invoked script file is still detected after the substitution.
+    src = b'bash scripts/x.sh $(printf a; printf b)\n'
+    assert mod.script_dep_block(pdir, src)
