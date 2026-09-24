@@ -182,8 +182,10 @@ def fetch_protection(repo: str, branch: str,
                 "_ruleset_managed": True,
                 "_ruleset_contexts": rctx}, None
     exists, eerr = _gh_json(f"repos/{repo}/branches/{ref}")
-    if eerr == "404" or exists is None:
+    if eerr == "404" or (eerr is None and exists is None):
         return None, f"branch {repo}@{branch} does not exist"
+    if eerr:  # a read failure is unverifiable state, not "unprotected"
+        return None, f"gh api branch read failed for {repo}@{branch}: {eerr}"
     return None, None  # exists but unprotected — a finding, not an error
 
 
@@ -225,8 +227,13 @@ def fix_body(protection: dict | None, required: list[str]) -> dict:
         # protection (they belong to the ruleset). `required` here is the
         # contract list; append only what's absent from the union.
         union = set(current_contexts(protection))
-        checks = [{"context": c, "app_id": app_ids.get(c)}
-                  for c in legacy_contexts(protection)]
+        checks = []
+        for c in legacy_contexts(protection):
+            entry: dict = {"context": c}
+            aid = app_ids.get(c)
+            if isinstance(aid, int):  # GET may omit app_id — a null one 422s
+                entry["app_id"] = aid
+            checks.append(entry)
         checks += [{"context": c} for c in required if c not in union]
         rsc = protection.get("required_status_checks") or {}
         body["required_status_checks"] = {
@@ -310,7 +317,18 @@ def main() -> int:
         for branch, required in sorted(branches.items()):
             where = f"{repo}@{branch}"
             if not required:
-                report.append(f"| {repo} | {branch} | none declared — skipped |")
+                # 'required_checks: []' means 'nothing required', not 'skip the
+                # branch' — an unprotected or missing prod branch is still a
+                # finding; only a verified protected branch reports OK.
+                protection, err = fetch_protection(repo, branch, args)
+                if err:
+                    warnings.append(f"{where}: {err}")
+                    report.append(f"| {repo} | {branch} | ⚠️ unverifiable — {err} |")
+                elif protection is None:
+                    findings.append(f"{where}: branch unprotected (no checks declared)")
+                    report.append(f"| {repo} | {branch} | ❌ unprotected (no checks declared) |")
+                else:
+                    report.append(f"| {repo} | {branch} | OK (protected, no checks required) |")
                 continue
             protection, err = fetch_protection(repo, branch, args)
             if err:

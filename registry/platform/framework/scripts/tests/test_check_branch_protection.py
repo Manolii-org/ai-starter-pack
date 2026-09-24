@@ -147,3 +147,30 @@ def test_e2e_no_checks_declared_is_clean(tmp_path: Path) -> None:
     fixtures = tmp_path / "fx"
     fixtures.mkdir()
     assert _run(c, fixtures).returncode == 0
+
+
+def test_e2e_empty_declared_checks_unprotected_is_finding(tmp_path: Path) -> None:
+    """required_checks: [] means 'nothing required' — an unprotected branch is
+    still a finding (verified-empty vs skipped are different outcomes)."""
+    c = tmp_path / "c.yaml"
+    c.write_text("schema_version: 1\nrepos:\n  - repo: Org/app\n"
+                 "    lanes:\n      - branch: main\n        environment: production\n"
+                 "        workflow: .github/workflows/deploy.yml\n"
+                 "        required_checks: []\n")
+    fixtures = tmp_path / "fx"
+    fixtures.mkdir()
+    _fixture(fixtures, "Org/app", "main", None)  # 404
+    out = _run(c, fixtures)
+    assert out.returncode == 1
+    assert "unprotected" in out.stdout
+
+
+def test_fix_body_omits_null_app_id() -> None:
+    """GET shapes without a checks[] array (or with app_id: null) must emit
+    context-only entries — a null app_id fails the PUT with 422."""
+    prot = {"required_status_checks": {"strict": False,
+                                       "contexts": ["guards"]}}
+    body = cbp.fix_body(prot, ["guards", "scan"])
+    checks = body["required_status_checks"]["checks"]
+    assert all("app_id" not in c or isinstance(c["app_id"], int) for c in checks)
+    assert {c["context"] for c in checks} == {"guards", "scan"}
