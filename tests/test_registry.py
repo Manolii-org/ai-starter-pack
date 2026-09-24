@@ -5956,6 +5956,80 @@ def test_script_dep_block_mixed_invocation(tmp_path):
     # bundle the MODULE -> blocked even though extra.py is declared
     (pdir / "scripts" / "check.py").write_bytes(b"x")
     assert mod.script_dep_block(pdir, body2)
+
+
+def test_script_dep_block_dash_m_hyphenated_module(tmp_path):
+    """`python -m scripts-tools` is a DIFFERENT module argument, not bare
+    `-m scripts` — it must not pin a dep on scripts/__main__.py
+    (Codex/Devin on bcp-core#1370)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    pdir.mkdir()
+    assert not mod.script_dep_block(pdir, b"python -m scripts-tools\n")
+    # bare `python -m scripts` still gates on scripts/__main__.py
+    assert mod.script_dep_block(pdir, b"python -m scripts\n")
+    (pdir / "scripts").mkdir()
+    (pdir / "scripts" / "__main__.py").write_bytes(b"x")
+    # bundled dep -> blocks; hyphenated still free
+    assert not mod.script_dep_block(pdir, b"python -m scripts-tools\n")
+
+
+def test_script_dep_block_literal_text_not_invocation(tmp_path):
+    """An interpreter+path inside text that only PRINTS (echo/printf/cat,
+    quoted or not) or inside a `#` comment is documentation, not an
+    invocation — it must not suppress the capability (Devin on
+    impaktful_3.0#1953)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    pdir.mkdir()
+    assert not mod.script_dep_block(
+        pdir, b'echo "bash scripts/demo.sh"\n')
+    assert not mod.script_dep_block(
+        pdir, b"echo bash scripts/demo.sh\n")
+    assert not mod.script_dep_block(
+        pdir, b'printf "%s\\n" "python scripts/x.py"\n')
+    assert not mod.script_dep_block(
+        pdir, b'# run bash scripts/demo.sh first\n')
+    assert not mod.script_dep_block(
+        pdir, b'grep -l bash scripts/x.sh\n')
+    # Executing contexts still gate: -c strings and eval DO run.
+    assert mod.script_dep_block(
+        pdir, b"sh -c 'bash scripts/demo.sh'\n")
+    assert mod.script_dep_block(
+        pdir, b'eval "bash scripts/demo.sh"\n')
+    assert mod.script_dep_block(
+        pdir, b'bash scripts/demo.sh  # note\n')
+
+
+def test_stale_skip_recheck(tmp_path):
+    """A skipped (identical) destination whose bytes/mode drifted between
+    planning and the lock write must be flagged — its digest would
+    otherwise enter the lock stale (Devin on impaktful_3.0#1953)."""
+    import hashlib as _hl
+    mod = load_resolve_module()
+    root = tmp_path
+    dst = root / ".claude" / "agents" / "a.md"
+    dst.parent.mkdir(parents=True)
+    dst.write_bytes(b"same")
+    plan = mod.Plan(
+        skips=[(dst, "identical")],
+        resolved=[{"files": {".claude/agents/a.md":
+                             _hl.sha256(b"same").hexdigest()},
+                   "exec": {".claude/agents/a.md": 0o644}}])
+    ok_snap = lambda p: (b"same", 0o644, (1, 2))
+    assert mod._stale_skip(root, plan, ok_snap) is None
+    # changed bytes -> stale
+    bad_snap = lambda p: (b"changed", 0o644, (1, 2))
+    assert mod._stale_skip(
+        root, plan, bad_snap) == ".claude/agents/a.md"
+    # vanished -> stale
+    gone_snap = lambda p: None
+    assert mod._stale_skip(
+        root, plan, gone_snap) == ".claude/agents/a.md"
+    # mode drift -> stale
+    mode_snap = lambda p: (b"same", 0o755, (1, 2))
+    assert mod._stale_skip(
+        root, plan, mode_snap) == ".claude/agents/a.md"
     # and the reverse: bundled path + declared module still blocks
     pdir2 = tmp_path / "plug2"
     (pdir2 / "scripts").mkdir(parents=True)
@@ -6111,6 +6185,26 @@ def test_apply_rollback_restores_file_timestamps(tmp_path):
     # reads the file during planning, which refreshes it before the
     # snapshot is taken, so the recorded atime is legitimately ~now.
     assert skill.stat().st_mtime_ns == times[1]
+
+
+def test_apply_restores_deleted_installed_file(tmp_path):
+    """An installed file the consumer deleted is a planned RESTORE, not
+    a 'vanished destination' — apply must put it back, not refuse
+    forever (Devin on #123)."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/SKILL.md",
+                                "---\nname: demo\ndescription: d\n---\nv1")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    skill = consumer / ".claude" / "skills" / "demo" / "SKILL.md"
+    skill.unlink()
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert skill.read_bytes() == b"---\nname: demo\ndescription: d\n---\nv1"
 
 
 def test_mode_drift_does_not_hide_local_edit(tmp_path):
@@ -6618,6 +6712,49 @@ def test_mini_yaml_signed_and_dot_scalars():
     assert math.isnan(mod._mini_yaml('x: .NaN\n')['x'])
     if yaml is not None:
         assert math.isnan(yaml.safe_load('x: .NaN\n')['x'])
+
+
+def test_mini_yaml_bool_case_is_pyyaml_exact():
+    """PyYAML's bool/null regexes take only lower/Title/UPPER spellings —
+    `tRuE`, `yEs`, `oFf`, `nUll` are STRINGS (Devin on #123)."""
+    mod = load_resolve_module()
+    for doc, want in [
+        ('x: tRuE\n', {'x': 'tRuE'}),
+        ('x: yEs\n', {'x': 'yEs'}),
+        ('x: oFf\n', {'x': 'oFf'}),
+        ('x: nUll\n', {'x': 'nUll'}),
+        ('x: YeS\n', {'x': 'YeS'}),
+        ('x: true\n', {'x': True}),
+        ('x: True\n', {'x': True}),
+        ('x: TRUE\n', {'x': True}),
+        ('x: off\n', {'x': False}),
+        ('x: Off\n', {'x': False}),
+        ('x: OFF\n', {'x': False}),
+        ('x: Null\n', {'x': None}),
+        ('x: NULL\n', {'x': None}),
+        ('x: ~\n', {'x': None}),
+    ]:
+        got = mod._mini_yaml(doc)
+        assert got == want and type(got['x']) is type(want['x']), doc
+
+
+def test_mini_yaml_sexagesimal_float_scale():
+    """Sexagesimal floats scale every field but the LAST by 60^k:
+    `1:20.5` = 80.5, `1:02:03.5` = 3723.5 (PyYAML; Codex on #1370)."""
+    mod = load_resolve_module()
+    for doc, want in [
+        ('x: 1:20.5\n', 80.5),
+        ('x: 1:02:03.5\n', 3723.5),
+        ('x: -1:20.5\n', -80.5),
+    ]:
+        got = mod._mini_yaml(doc)['x']
+        assert got == pytest.approx(want), doc
+        try:
+            import yaml as pyyaml
+        except ImportError:
+            pyyaml = None
+        if pyyaml is not None:
+            assert got == pyyaml.safe_load(doc)['x'], doc
 
 
 def test_mini_yaml_rejects_embedded_mapping_value():

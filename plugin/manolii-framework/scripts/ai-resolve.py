@@ -99,8 +99,10 @@ SCRIPT_REF = re.compile(
     # `scripts/check.sh` with no invocation word stays a prose mention
     # (can't be told apart from "edit scripts/check.sh" without
     # over-blocking capabilities that merely document the path).
+    # Boundary includes `-`: `python -m scripts-tools` is a DIFFERENT
+    # module argument, not bare `-m scripts` (consumer review of the vendored resolver).
     rb"|(?<![\w-])python(?:\d+(?:\.\d+)*)?[ \t]+-m[ \t]+scripts"
-    rb"(?:\.(?:[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*))?(?![\w.])")
+    rb"(?:\.(?:[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*))?(?![\w.-])")
 # Backticked `scripts/x.py` is NOT an invocation context — prose uses it for
 # mentions. A real dependency that no interpreter/./ prefix expresses must be
 # declared explicitly: `requires_scripts: [...]` in the file's frontmatter.
@@ -122,7 +124,7 @@ SCRIPT_NAME = re.compile(
 # never executes a bare __init__.py — that file alone is no entry point).
 # A bare `python -m scripts` (group 1 None) runs scripts/__main__.py.
 MODULE_NAME = re.compile(
-    rb"-m[ \t]+scripts(?:\.([A-Za-z0-9_.]+))?(?![\w.])")
+    rb"-m[ \t]+scripts(?:\.([A-Za-z0-9_.]+))?(?![\w.-])")
 def _cmd_window(src: bytes, start: int) -> bytes:
     """The command region starting at `start` — up to the first UNQUOTED
     shell metacharacter (newline, |, &, ;) or comment. A '#' ends the
@@ -480,6 +482,32 @@ def _long_option_takes_value(text: bytes) -> bool:
 _SCRIPT_SUFFIXES = (
     b".py", b".sh", b".ts", b".js", b".mjs", b".cjs", b".rb", b".pl",
 )
+
+# Command heads whose arguments can never be executed — an interpreter +
+# scripts/ path inside `echo "bash scripts/x.sh"` (or unquoted) only
+# prints; it is documentation, not an invocation (Devin on
+# vendored-resolver review). Kept to words that print or inspect: `eval`,
+# `xargs`, `env`, `sudo`, `command`, `sh -c` DO run their arguments and
+# are deliberately absent.
+_NONEXEC_HEADS = frozenset({
+    b"echo", b"printf", b"cat", b"head", b"tail", b"grep", b"egrep",
+    b"fgrep", b"sed", b"awk", b"less", b"more", b"man", b"wc", b"diff",
+    b"file", b"stat", b"ls", b"which", b"type", b"head", b"help",
+})
+
+
+def _command_start(src: bytes, pos: int) -> int:
+    """Start of the command containing `pos` — the byte after the last
+    separator before it. Quote state is ignored on the backward scan: a
+    ';' inside a quoted string may split early, which only shortens the
+    enclosing command and errs toward treating the match as a real
+    invocation (fail-closed)."""
+    i = pos
+    while i > 0 and src[i - 1] not in b"\n|&;`":
+        i -= 1
+    while i < pos and src[i] in b" \t":
+        i += 1
+    return i
 
 
 def _glued_short_hides_path(text: bytes) -> bool:
@@ -1244,25 +1272,28 @@ def _mini_yaml(text: str):
             return sign * float(tok.lstrip("+-").replace("_", ""))
         if re.fullmatch(r"[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])+\.[0-9_]*",
                         tok):
-            head, _, frac = tok.lstrip("+-").rpartition(":")
-            v = 0
-            for part in head.split(":"):
-                v = v * 60 + int(part.replace("_", ""))
-            return sign * (v + float(frac.replace("_", "")) / 60)
+            # Every field but the LAST is scaled 60^k — the final field
+            # stays at unit scale: `1:20.5` = 80.5, `1:02:03.5` = 3723.5
+            # (PyYAML's constructor; consumer review of the vendored resolver).
+            v = 0.0
+            for part in tok.lstrip("+-").split(":"):
+                v = v * 60 + float(part.replace("_", ""))
+            return sign * v
         if tok.lstrip("+-") in (".inf", ".Inf", ".INF"):
             return math.inf * sign
         if tok in (".nan", ".NaN", ".NAN"):
             return math.nan
-        # YAML 1.1 booleans/nulls, matching PyYAML safe_load: yes/no/
-        # on/off are bools in ANY letter case; single-letter y/n stay
-        # strings. A `requires_scripts: off` must read False, not the
-        # truthy string 'off'.
-        lower = tok.lower()
-        if lower in ("true", "yes", "on"):
+        # YAML 1.1 booleans/nulls — PyYAML's resolver regexes accept only
+        # lower/Title/UPPER spellings (yes|Yes|YES|…), NOT arbitrary case:
+        # `tRuE` and `nUll` stay strings (Devin on #123). Single-letter
+        # y/n stay strings too. `requires_scripts: off` still reads False.
+        if tok in ("true", "True", "TRUE",
+                   "yes", "Yes", "YES", "on", "On", "ON"):
             return True
-        if lower in ("false", "no", "off"):
+        if tok in ("false", "False", "FALSE",
+                   "no", "No", "NO", "off", "Off", "OFF"):
             return False
-        if lower in ("null", "~"):
+        if tok in ("null", "Null", "NULL", "~"):
             return None
         if tok[0] in "[{|>&!%@`":
             raise ValueError(f"unsupported scalar {tok!r}")
@@ -1664,7 +1695,28 @@ def script_dep_block(plugin_dir: Path, src_bytes: bytes,
         # operand with a script extension could still be an input file
         # (`--input scripts/data.py`), so it stays gated (fail-closed).
         opt_spans = _option_value_spans(window)
+        # Literal text is not an invocation. The match's window starts at
+        # the interpreter keyword, so `echo "bash scripts/x.sh"` and
+        # `# bash scripts/x.sh` would otherwise pin deps on arguments that
+        # only print. `enclosing` is the full command containing the match;
+        # a position past its end sits in the trailing comment _cmd_window
+        # stopped at, and a head that cannot execute (`echo`, `printf`,
+        # `cat`, `grep`, …) makes every argument literal (Devin on
+        # vendored-resolver review).
+        cs = _command_start(scan, m.start())
+        enclosing = _cmd_window(scan, cs)
+        first = _shell_words(enclosing)[:1]
+        literal_all = bool(
+            first and _command_key(enclosing[first[0][0]:first[0][1]])
+            in _NONEXEC_HEADS)
+        comment_from = cs + len(enclosing)
+
+        def literal(pos: int) -> bool:
+            return literal_all or pos >= comment_from
+
         for n in SCRIPT_NAME.finditer(window):
+            if literal(m.start() + n.start()):
+                continue
             if any(a <= n.start() and n.end() <= b
                    for a, b in redir_spans):
                 continue
@@ -1675,6 +1727,8 @@ def script_dep_block(plugin_dir: Path, src_bytes: bytes,
                 continue
             refs.append(([p], [p]))
         for mod in MODULE_NAME.finditer(window):
+            if literal(m.start() + mod.start()):
+                continue
             # `python -m scripts.a.b` runs a/b.py or the package entry
             # a/b/__main__.py — either satisfies the invocation. A bare
             # __init__.py is no entry point: `python -m pkg` needs
@@ -1705,6 +1759,26 @@ def script_dep_block(plugin_dir: Path, src_bytes: bytes,
     return False
 
 
+def _stale_skip(repo_root: Path, plan: "Plan", snapshot) -> str | None:
+    """rel_dst of a skipped destination that changed since planning, else
+    None. An identical-skip's digest enters the lock verbatim — a file
+    edited in between must abort the apply rather than record a stale
+    ownership entry (consumer review of the vendored resolver)."""
+    want_dig = {rel: d for r in plan.resolved
+                for rel, d in r["files"].items()}
+    want_mode = {rel: m for r in plan.resolved
+                 for rel, m in r["exec"].items()}
+    for dst, _why in plan.skips:
+        rel_dst = dst.relative_to(repo_root).as_posix()
+        want = want_dig.get(rel_dst)
+        snap = snapshot(dst)
+        if (snap is None or want is None
+                or hashlib.sha256(snap[0]).hexdigest() != want
+                or snap[1] != want_mode.get(rel_dst)):
+            return rel_dst
+    return None
+
+
 @dataclass
 class Plan:
     writes: list[tuple[Path, Path]] = field(default_factory=list)   # (src, dst)
@@ -1726,6 +1800,11 @@ class Plan:
     # rel_dst -> (atime_ns, mtime_ns) captured with the payload — apply
     # must never re-stat a registry source that could vanish mid-apply.
     times: dict[str, tuple[int, int]] = field(default_factory=dict)
+    # rel_dsts whose destination was ABSENT at plan time. Apply refuses a
+    # tracked destination missing since planning only when planning saw
+    # it present — an installed file the consumer deleted is a planned
+    # restore, not a concurrent edit (Devin on #123).
+    absent: set[str] = field(default_factory=set)
 
 
 def load_manifest(path: Path) -> dict:
@@ -2438,6 +2517,8 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                     "refusing to materialise",
                 ))
                 continue
+            if not dst.exists():
+                plan.absent.add(rel_dst)
             if dst.exists() and not dst.is_file():
                 # A directory (or FIFO/socket) at the destination —
                 # read_bytes() would crash IsADirectoryError instead of
@@ -3177,6 +3258,30 @@ def main() -> int:
                         else:
                             dst.unlink(missing_ok=True)
                     else:
+                        if ino is not None:
+                            # Compare-and-restore: the inode this run
+                            # installed must still own the name — a
+                            # concurrent replacement after our write is
+                            # not ours to overwrite (Codex on
+                            # vendored-resolver review).
+                            try:
+                                if _HAS_DIRFD:
+                                    cur = os.stat(
+                                        dst.name,
+                                        dir_fd=parent_fd(dst.parent),
+                                        follow_symlinks=False)
+                                else:
+                                    cur = os.stat(
+                                        dst, follow_symlinks=False)
+                            except OSError:
+                                continue
+                            if (cur.st_dev, cur.st_ino) != ino:
+                                sys.stderr.write(
+                                    "note: rollback left "
+                                    f"{dst.relative_to(repo_root).as_posix()}"
+                                    " in place — the path no longer resolves"
+                                    " to the file this run wrote\n")
+                                continue
                         # Restore bytes, mode AND the original timestamps —
                         # a fresh inode without `times` would read as a
                         # change to timestamp-based builds and watchers
@@ -3260,7 +3365,8 @@ def main() -> int:
                 want = locked_dig.get(rel_dst)
                 rec_mode = locked_exec.get(rel_dst)
                 if snap is None:
-                    if rel_dst in locked_dig:
+                    if (rel_dst in locked_dig
+                            and rel_dst not in plan.absent):
                         raise OSError(
                             "tracked destination vanished since planning: "
                             f"{rel_dst}")
@@ -3288,18 +3394,22 @@ def main() -> int:
                     times=plan.times.get(rel_dst),
                     mode=(planned[3] if planned is not None else None),
                     dfd=parent_fd(dst.parent))
-                if snap is None:
-                    # Bind the rollback deletion to the inode this write
-                    # created — a name swapped to a different file before
-                    # a rollback must not be unlinked.
-                    if _HAS_DIRFD:
-                        st = os.stat(dst.name,
-                                     dir_fd=parent_fd(dst.parent),
-                                     follow_symlinks=False)
-                    else:
-                        st = os.stat(dst, follow_symlinks=False)
-                    undo[-1] = (dst, None, None,
-                                (st.st_dev, st.st_ino), None)
+                # Bind rollback to the inode this write installed —
+                # a name swapped to a different file before a rollback
+                # must be neither unlinked nor overwritten (new files get
+                # compare-and-unlink; updates get compare-and-restore —
+                # consumer review of the vendored resolver).
+                if _HAS_DIRFD:
+                    st = os.stat(dst.name,
+                                 dir_fd=parent_fd(dst.parent),
+                                 follow_symlinks=False)
+                else:
+                    st = os.stat(dst, follow_symlinks=False)
+                undo[-1] = (dst,
+                            snap[0] if snap else None,
+                            snap[1] if snap else None,
+                            (st.st_dev, st.st_ino),
+                            snap[2] if snap else None)
             if args.prune:
                 for f in plan.removals:
                     rel_f = f.relative_to(repo_root).as_posix()
@@ -3404,6 +3514,23 @@ def main() -> int:
                 os.close(dfd)
             sys.stderr.write(f"FAIL: cannot apply: {e}\n")
             return 2
+        # Skipped (identical) destinations get their digest copied into the
+        # lock without a write — re-verify each one still matches what
+        # planning saw, or the lock records a stale ownership entry for a
+        # file edited in between (consumer review of the vendored resolver).
+        try:
+            stale = _stale_skip(repo_root, plan, snapshot)
+            if stale is not None:
+                raise OSError(
+                    "identical destination changed since planning — "
+                    "refusing to record a stale lock entry: "
+                    f"{stale}")
+        except OSError as e:
+            rollback()
+            for dfd in dfds.values():
+                os.close(dfd)
+            sys.stderr.write(f"FAIL: cannot apply: {e}\n")
+            return 2
         new_files = {rel: digest for r in plan.resolved
                      for rel, digest in r["files"].items()}
         if not args.prune:
@@ -3477,7 +3604,13 @@ def main() -> int:
             for f in plan.removals:
                 d = f.parent
                 try:
-                    while (d != repo_root and d.is_dir()
+                    # Revalidate each ancestor WITHOUT following links —
+                    # the verified dir FDs are closed by now, and an
+                    # ancestor swapped to a symlink would make is_dir/
+                    # iterdir/rmdir act outside repo_root (Codex on
+                    # vendored-resolver review).
+                    while (d != repo_root
+                           and not os.path.islink(d) and d.is_dir()
                            and not any(d.iterdir())):
                         d.rmdir()
                         d = d.parent
