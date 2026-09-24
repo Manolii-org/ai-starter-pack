@@ -4652,6 +4652,86 @@ def test_versioned_python_invocation_is_script_dep(tmp_path):
     assert (skills / "plain" / "SKILL.md").is_file()
 
 
+def test_adopted_shared_file_no_false_collision(tmp_path):
+    """Two plugins providing identical bytes+mode must BOTH adopt an
+    existing consumer file even when the consumer's own mask differs —
+    the collision check compares provider source modes, never the
+    adopted file's recorded mode."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/shared/tool.sh", "echo x\n")],
+        "platform/other": [("skills/shared/tool.sh", "echo x\n")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    adopted = consumer / ".claude" / "skills" / "shared" / "tool.sh"
+    adopted.parent.mkdir(parents=True)
+    adopted.write_text("echo x\n")
+    adopted.chmod(0o600)
+    for scope in ("framework", "other"):
+        (reg_root / "registry" / "platform" / scope / "skills"
+         / "shared" / "tool.sh").chmod(0o644)
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"},
+                        {"plugin": "platform/other", "ref": "1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 0, r.stdout
+    assert "collision" not in r.stdout
+    assert (adopted.stat().st_mode & 0o777) == 0o600
+
+
+def test_inline_comment_after_parent_key(tmp_path):
+    """`requires: # comment` is a parent key with no scalar value — the
+    strip must not feed an empty token to scalar and kill the parse."""
+    mod = load_resolve_module()
+    got = mod._mini_yaml(
+        "version: 1\nuniverse: manolii\nrequires: # plugins\n"
+        "  - plugin: platform/framework\n    ref: \"1.0.0\"\n")
+    assert got["requires"] == [
+        {"plugin": "platform/framework", "ref": "1.0.0"}]
+    got2 = mod._mini_yaml(
+        "requires:\n  - plugin: x # note\n    ref: \"1\"\n")
+    assert got2["requires"] == [{"plugin": "x", "ref": "1"}]
+
+
+def test_block_map_quoted_keys(tmp_path):
+    """Quoted keys in block mappings decode like bare keys — PyYAML
+    accepted `"version": 1` and `- "plugin": x`, so the stdlib parser
+    must too."""
+    mod = load_resolve_module()
+    got = mod._mini_yaml(
+        "\"version\": 1\n'universe': manolii\nrequires:\n"
+        "  - \"plugin\": platform/framework\n    'ref': \"1.0.0\"\n")
+    assert got == {
+        "version": 1, "universe": "manolii",
+        "requires": [{"plugin": "platform/framework", "ref": "1.0.0"}]}
+
+
+def test_root_flow_map_frontmatter(tmp_path):
+    """A whole-document flow map is valid frontmatter — `{description: x}`
+    must parse through scalar rather than die in the block parser."""
+    mod = load_resolve_module()
+    got = mod._mini_yaml("{description: sample, consumer_scripts: [s.sh]}")
+    assert got == {"description": "sample", "consumer_scripts": ["s.sh"]}
+    got2 = mod._mini_yaml("[a, b]")
+    assert got2 == ["a", "b"]
+
+
+def test_sourced_and_bun_script_invocations_are_deps(tmp_path):
+    """`source scripts/x.sh`, `bun scripts/x.ts`, `exec scripts/x.sh` are
+    bundled-script invocations — script_dep_block must gate them like
+    interpreter calls."""
+    mod = load_resolve_module()
+    plug = tmp_path / "reg" / "registry" / "platform" / "p"
+    (plug / "scripts").mkdir(parents=True)
+    (plug / "scripts" / "setup.sh").write_text("x")
+    for invocation in (b"source scripts/setup.sh", b". scripts/setup.sh",
+                       b"bun scripts/setup.sh", b"exec scripts/setup.sh",
+                       b"bash -c scripts/setup.sh"):
+        # `. ` sourcing is prose-prone — only `source` gates it.
+        expect = invocation != b". scripts/setup.sh"
+        assert mod.script_dep_block(plug, invocation) is expect, invocation
+
+
 def test_lock_dest_unwritable_fails_before_writes(tmp_path):
     """An unwritable .ai/ must refuse --apply BEFORE any component write —
     otherwise files land with no ownership record."""

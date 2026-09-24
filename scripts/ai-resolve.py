@@ -68,8 +68,8 @@ SEMVER_REF = re.compile(r"v?\d+(?:\.\d+){0,2}")
 # Only executable-invocation shapes match (interpreter call or ./exec); a
 # bare `scripts/x.py` mention in prose or sample output is not a dependency.
 SCRIPT_REF = re.compile(
-    rb"(?:python(?:\d+(?:\.\d+)*)?|bash|sh|zsh|node|npx|tsx|deno|ruby|perl"
-    rb"|uv\s+run|pipenv\s+run)"
+    rb"(?:python(?:\d+(?:\.\d+)*)?|bash|sh|zsh|node|npx|tsx|ts-node|deno"
+    rb"|ruby|perl|source|exec|bun|bunx|uv\s+run|pipenv\s+run)"
     rb"\s+[^\n|&;`]*?scripts/(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs)\b"
     rb"|\./scripts/(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs)\b")
 # Backticked `scripts/x.py` is NOT an invocation context — prose uses it for
@@ -247,7 +247,14 @@ def _mini_yaml(text: str):
         lines.append((indent, body.lstrip()))
 
     pos = [0]
-    key_re = re.compile(r"^([A-Za-z0-9_.-]+)\s*:(?:\s+(.*))?$")
+    # Quoted keys are legal YAML in block mappings just as in flow maps —
+    # `"version": 1` decodes to the same key as `version: 1`.
+    key_re = re.compile(
+        r"^(\"(?:[^\"\\]|\\.)*\"|'(?:[^']|'')*'|[A-Za-z0-9_.-]+)"
+        r"\s*:(?:\s+(.*))?$")
+
+    def key_of(tok: str):
+        return scalar(tok) if tok[:1] in "\"'" else tok
 
     def flow_items(inner: str) -> list[str]:
         # Split a flow list's item text on top-level commas only — a comma
@@ -374,13 +381,17 @@ def _mini_yaml(text: str):
                 km = key_re.match(item)
                 if km:
                     d = {}
-                    if km.group(2) is not None:
-                        d[km.group(1)] = scalar(km.group(2))
+                    ikey = key_of(km.group(1))
+                    iv = km.group(2)
+                    if iv is not None and not iv.strip():
+                        iv = None  # `- key: # comment` — no scalar value
+                    if iv is not None:
+                        d[ikey] = scalar(iv)
                     elif (pos[0] < len(lines)
                           and lines[pos[0]][0] > indent):
-                        d[km.group(1)] = parse(lines[pos[0]][0])
+                        d[ikey] = parse(lines[pos[0]][0])
                     else:
-                        d[km.group(1)] = None
+                        d[ikey] = None
                     while pos[0] < len(lines) and lines[pos[0]][0] > indent:
                         more = parse(lines[pos[0]][0])
                         if not isinstance(more, dict):
@@ -399,7 +410,12 @@ def _mini_yaml(text: str):
             km = key_re.match(lines[pos[0]][1])
             if not km:
                 raise ValueError(f"unsupported line {lines[pos[0]][1]!r}")
-            k, v = km.group(1), km.group(2)
+            k, v = key_of(km.group(1)), km.group(2)
+            # `key: # comment` strips to `key: ` — a whitespace-only value
+            # is NO value (a nested block or null follows), not an empty
+            # scalar.
+            if v is not None and not v.strip():
+                v = None
             if k in out:
                 # Duplicate keys silently keep the last value in YAML — a
                 # manifest that states a ref twice must be a parse error,
@@ -464,6 +480,12 @@ def _mini_yaml(text: str):
 
     if not lines:
         return {}
+    if lines[0][1][:1] in "[{":
+        # A whole-document flow collection — e.g. frontmatter written as a
+        # single `{k: v}` line — parses through scalar directly.
+        if len(lines) != 1:
+            raise ValueError("trailing unparseable structure")
+        return scalar(lines[0][1])
     root = parse(lines[0][0])
     if pos[0] != len(lines):
         raise ValueError("trailing unparseable structure")
@@ -550,10 +572,11 @@ class Plan:
     removals: list[Path] = field(default_factory=list)
     advisories: list[str] = field(default_factory=list)
     resolved: list[dict] = field(default_factory=list)
-    # rel_dst -> (src_sha256, plugin_req, src exec mask, installed mode)
-    # for every planned write — cross-plugin output-path collision
-    # detection: the last writer must never win silently, and identical
-    # bytes with different modes are not the same file.
+    # rel_dst -> (src_sha256, plugin_req, src mode, installed mode) for
+    # every planned output — cross-plugin output-path collision detection
+    # compares SOURCE modes (the last writer must never win silently);
+    # the installed mode is what the lock records, which differs from
+    # the source's on the adopt-on-match path.
     planned: dict[str, tuple[str, str, int, int]] = field(
         default_factory=dict)
     # rel_dst -> verified source bytes, captured at plan time so --apply
@@ -1148,11 +1171,14 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
             src_mode = (src.stat().st_mode & 0o666) | src_exec
             prior = plan.planned.get(rel_dst)
             if prior is not None:
-                prior_sha, prior_req, prior_exec, prior_mode = prior
-                # Collide on the FULL mode — apply installs the source mask
-                # verbatim, so an rw-bit difference is order-dependent
-                # output, not a umask artifact.
-                if prior_sha != src_sha or prior_mode != src_mode:
+                prior_sha, prior_req, prior_src_mode, prior_install = prior
+                # Collide on the providers' SOURCE modes — identical bytes
+                # with different masks are order-dependent output. The
+                # installed mask is NOT the comparator: an adopted file's
+                # entry holds the consumer's own mode, and comparing it
+                # against a second provider's source would collide two
+                # plugins that agree with each other.
+                if prior_sha != src_sha or prior_src_mode != src_mode:
                     plan.conflicts.append((
                         dst,
                         f"output-path collision: {req} provides different content or "
@@ -1161,9 +1187,9 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                 else:
                     plan.skips.append((dst, f"identical — already provided by {prior_req}"))
                     materialised[rel_dst] = src_sha
-                    # The installed file carries the FIRST provider's mode —
-                    # record that, not this provider's.
-                    exec_modes[rel_dst] = prior_mode
+                    # The installed file carries the FIRST provider's
+                    # install mode — record that, not this provider's.
+                    exec_modes[rel_dst] = prior_install
                 continue
             if dst.exists() and not dst.is_file():
                 # A directory (or FIFO/socket) at the destination —
@@ -1232,7 +1258,7 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                     # For an adopted untracked file dst is the only truth;
                     # for a tracked identical file dst == record == src.
                     dst_mode = dst.stat().st_mode & 0o777
-                    plan.planned[rel_dst] = (src_sha, req, src_exec,
+                    plan.planned[rel_dst] = (src_sha, req, src_mode,
                                              dst_mode)
                     materialised[rel_dst] = src_sha
                     exec_modes[rel_dst] = dst_mode
@@ -1272,12 +1298,12 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                         # dst mode still matches the install record — the
                         # registry changed mode; repair by rewriting.
                         plan.writes.append((src, dst))
-                        plan.planned[rel_dst] = (src_sha, req, src_exec,
+                        plan.planned[rel_dst] = (src_sha, req, src_mode,
                                                  src_mode)
                         plan.payload[rel_dst] = src_bytes
                 else:
                     plan.writes.append((src, dst))  # registry drift — update
-                    plan.planned[rel_dst] = (src_sha, req, src_exec,
+                    plan.planned[rel_dst] = (src_sha, req, src_mode,
                                              src_mode)
                     plan.payload[rel_dst] = src_bytes
                 materialised[rel_dst] = src_sha
@@ -1286,7 +1312,7 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                 exec_modes.setdefault(rel_dst, src_mode)
             else:
                 plan.writes.append((src, dst))
-                plan.planned[rel_dst] = (src_sha, req, src_exec, src_mode)
+                plan.planned[rel_dst] = (src_sha, req, src_mode, src_mode)
                 plan.payload[rel_dst] = src_bytes
                 materialised[rel_dst] = src_sha
                 exec_modes[rel_dst] = src_mode
