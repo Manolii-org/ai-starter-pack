@@ -681,6 +681,190 @@ def _substitution_spans(window: bytes) -> list[tuple[int, int]]:
     return spans
 
 
+# Command heads that execute what they read on stdin — a non-executing
+# head piped into one of these is NOT literal text (`printf 'bash x' | sh`
+# runs it). xargs without a command runs echo — deliberately absent.
+_STDIN_EXEC_HEADS = frozenset({
+    b"sh", b"bash", b"dash", b"zsh", b"ksh", b"ash",
+    b"python", b"perl", b"ruby", b"node", b"php", b"lua", b"tclsh",
+})
+
+
+def _pipe_to_exec(src: bytes, pos: int) -> bool:
+    """True when an unquoted `|` (or `|&`) at `pos` pipes into a command
+    whose head executes stdin — `printf 'bash x' | sh` runs the text the
+    printf only seemed to print."""
+    j = pos
+    if src[j:j + 1] != b"|" or src[j + 1:j + 2] == b"|":
+        return False
+    j += 1
+    if src[j:j + 1] == b"&":
+        j += 1
+    while j < len(src) and src[j] in b" \t":
+        j += 1
+    win = _cmd_window(src, j)
+    w = _shell_words(_mask_parens(win))
+    return (bool(w)
+            and _command_key(win[w[0][0]:w[0][1]]) in _STDIN_EXEC_HEADS)
+
+
+_HEREDOC_DELIM = re.compile(rb"['\"]?([A-Za-z0-9_.-]+)['\"]?")
+
+
+def _heredoc_ops(line: bytes) -> list[tuple[bytes, bool, bool, int]]:
+    """`<<` openers in one line — (delim, strip_tabs, quoted_delim, pos).
+    Quote-aware: `<<` inside quotes or comments is text, not an operator.
+    `<<<` (here-string) carries its input on the same line — skipped."""
+    ops: list[tuple[bytes, bool, bool, int]] = []
+    in_s = in_d = False
+    i = 0
+    n = len(line)
+    while i < n:
+        c = line[i]
+        if in_s:
+            if c == 0x27:
+                in_s = False
+        elif in_d:
+            if c == 0x5C:
+                i += 1
+            elif c == 0x22:
+                in_d = False
+        elif c == 0x5C:
+            i += 1
+        elif c == 0x27:
+            in_s = True
+        elif c == 0x22:
+            in_d = True
+        elif c == 0x23 and (i == 0 or line[i - 1] in b" \t"):
+            break
+        elif c == 0x3C and line[i + 1:i + 2] == b"<" \
+                and line[i + 2:i + 3] != b"<":
+            j = i + 2
+            strip = False
+            if line[j:j + 1] in (b"-", b"~"):
+                strip = True
+                j += 1
+            while line[j:j + 1] in (b" ", b"\t"):
+                j += 1
+            m = _HEREDOC_DELIM.match(line, j)
+            if m:
+                ops.append((m.group(1), strip,
+                            line[j:j + 1] in (b"'", b'"'), i))
+                i = m.end()
+                continue
+        i += 1
+    return ops
+
+
+_HD_LITERAL = 0  # body is inert data end to end
+_HD_EXEC = 1     # head (or a pipe consumer) executes the body
+_HD_EXPAND = 2   # inert head, but unquoted body — $( ) / ` ` still expand
+
+
+def _heredoc_spans(src: bytes) -> list[tuple[int, int, int]]:
+    """(start, end, mode) spans of heredoc bodies in `src`.
+
+    A `<<[-~]DELIM` opener queues body lines — stdin to its command — until
+    a line equal to DELIM (`<<-`/`<<~` allow leading tabs). The body is
+    inert data (_HD_LITERAL) only when the owning command's head cannot
+    execute (`cat`, `echo`, …), its output is not piped into an
+    interpreter, AND the body cannot expand a substitution — a QUOTED
+    delimiter disables expansion entirely; an unquoted body with no
+    `$(` or backtick is inert too, otherwise it is _HD_EXPAND (only the
+    substitution regions inside it execute). `sh <<E` and `cat <<E | sh`
+    both run the body (_HD_EXEC). An unterminated heredoc opens no span —
+    its tail keeps normal (fail-closed) treatment."""
+    spans: list[tuple[int, int, int]] = []
+    lines = src.split(b"\n")
+    offs: list[int] = []
+    o = 0
+    for ln in lines:
+        offs.append(o)
+        o += len(ln) + 1
+    pending: list[list] = []  # [delim, strip_tabs, quoted, lit, start_off]
+    i = 0
+    while i < len(lines):
+        ln = lines[i]
+        if pending:
+            delim, strip, quoted, lit, start_off = pending[0]
+            chk = ln.lstrip(b"\t") if strip else ln
+            if chk == delim:
+                body = src[start_off:offs[i]]
+                mode = (_HD_EXEC if not lit
+                        else _HD_LITERAL if quoted or (
+                            b"$(" not in body and b"`" not in body)
+                        else _HD_EXPAND)
+                spans.append((start_off, offs[i], mode))
+                pending.pop(0)
+            i += 1
+            continue
+        for delim, strip, quoted, op_pos in _heredoc_ops(ln):
+            cs = _command_start(src, offs[i] + op_pos)
+            win = _cmd_window(src, cs)
+            w = _shell_words(_mask_parens(win))
+            head = _command_key(win[w[0][0]:w[0][1]]) if w else b""
+            lit = (head in _NONEXEC_HEADS
+                   and not _pipe_to_exec(src, cs + len(win)))
+            pending.append(
+                [delim, strip, quoted, lit, offs[i] + len(ln) + 1])
+        i += 1
+    return spans
+
+
+def _descend_sub(src: bytes, pos: int,
+                 region: tuple[int, int] | None = None) -> bool | None:
+    """If `pos` is inside the innermost `$(...)` (or a backtick pair) of
+    `src` (restricted to `region` when given), classify it inside that
+    substitution's body. Returns None when pos is in no substitution."""
+    a0, b0 = region if region is not None else (0, len(src))
+    # The span must OPEN inside the region; it may run past the end —
+    # `$(` inside an unquoted heredoc body still parses to its closing
+    # paren even when that lies beyond the delimiter line.
+    inner = [s for s in _substitution_spans(src)
+             if s[0] <= pos < s[1] and a0 <= s[0]]
+    if inner:
+        a, b = min(inner, key=lambda s: s[1] - s[0])
+        body_end = b - 1 if src[b - 1:b] == b")" else b
+        return _command_literal(src[a + 2:body_end], pos - a - 2)
+    ticks = [t for t in range(a0, b0) if src[t] == 0x60]
+    for t1, t2 in zip(ticks[::2], ticks[1::2]):
+        if t1 < pos < t2:
+            return _command_literal(src[t1 + 1:t2], pos - t1 - 1)
+    return None
+
+
+def _command_literal(src: bytes, pos: int) -> bool:
+    """True when `pos` sits in text the shell does NOT execute.
+
+    Literal zones: arguments of a head that cannot run its arguments
+    (`echo`, `printf`, `cat`, …) — unless that output pipes into an
+    interpreter; inert heredoc bodies; and the trailing comment
+    `_cmd_window` stopped at. `$(...)` bodies and backticks recurse —
+    each substitution's OWN head decides (`$(echo bash x)` prints,
+    `$(bash x)` runs), nesting descending to the innermost command."""
+    for a, b, mode in _heredoc_spans(src):
+        if a <= pos < b:
+            if mode == _HD_LITERAL:
+                return True
+            if mode == _HD_EXPAND:
+                r = _descend_sub(src, pos, (a, b))
+                return True if r is None else r
+            break  # _HD_EXEC — the body is a script; classify it directly
+    r = _descend_sub(src, pos)
+    if r is not None:
+        return r
+    cs = _command_start(src, pos)
+    win = _cmd_window(src, cs)
+    if pos >= cs + len(win):
+        return True  # trailing comment — documentation, not code
+    words = _shell_words(_mask_parens(win))
+    if not words:
+        return False
+    if _command_key(win[words[0][0]:words[0][1]]) not in _NONEXEC_HEADS:
+        return False
+    return not _pipe_to_exec(src, cs + len(win))
+
+
 def _glued_short_hides_path(text: bytes) -> bool:
     """A short option with the operand glued on (`-dscripts/site`).
 
@@ -1089,9 +1273,16 @@ def _mini_yaml(text: str):
             lines.append(
                 (len(raw) - len(raw.lstrip(" ")), kind, term))
             continue
-        body = strip_comment(raw.rstrip())
+        rstripped = raw.rstrip()
+        body = strip_comment(rstripped)
         if not body.strip():
             continue
+        # An inline comment still ENDS the scalar it trails — `k: v # c`
+        # followed by a deeper `more` line is a PyYAML error, not the
+        # value 'v more'. Mark the boundary the same way a standalone
+        # comment does, so a later continuation can't fold across it
+        # (Devin on vendored-resolver review).
+        inline_comment = len(body) != len(rstripped)
         # Single-document markers: exactly one leading `---` is boilerplate;
         # an EMPTY first document still counts, so a second `---` is a new
         # document and raises. `...` ends the document — anything after it
@@ -1221,6 +1412,8 @@ def _mini_yaml(text: str):
                                   if d else None)
                 continue
         lines.append((indent, body.lstrip(), True))
+        if inline_comment:
+            lines.append((indent, "\x00", True))
         # A `|`/`>` value opens a literal block on the deeper lines that
         # follow — `- |`/`- key: |` seq items too (the value after the dash
         # is the indicator itself). The block's scope differs: `key: |`
@@ -1881,22 +2074,14 @@ def script_dep_block(plugin_dir: Path, src_bytes: bytes,
         # vendored-resolver review).
         cs = _command_start(scan, m.start())
         enclosing = _cmd_window(scan, cs)
-        first = _shell_words(enclosing)[:1]
-        literal_all = bool(
-            first and _command_key(enclosing[first[0][0]:first[0][1]])
-            in _NONEXEC_HEADS)
-        comment_from = cs + len(enclosing)
-        # `$(...)` regions of the enclosing command execute BEFORE its
-        # head — `echo "$(bash scripts/x.sh)"` runs the script even
-        # though echo only prints, so positions inside a substitution
-        # stay executable (never literal).
-        sub_spans = _substitution_spans(enclosing)
-
+        # Literal text is not an invocation. `echo "bash scripts/x.sh"`,
+        # `# bash scripts/x.sh`, `cat <<E … bash x.sh … E` (inert heredoc
+        # bodies) and `$(echo bash x)` all only print or feed text; while
+        # `$(bash x)`, `printf 'x' | sh`, `sh <<E` and `python <x.py`
+        # DO run — _command_literal descends into each substitution's own
+        # head and checks heredoc/pipe context to tell them apart.
         def literal(pos: int) -> bool:
-            rel = pos - cs
-            if any(a <= rel < b for a, b in sub_spans):
-                return False
-            return literal_all or pos >= comment_from
+            return _command_literal(scan, pos)
 
         # A scripts/ path only invokes when it IS the whole shell word —
         # `python -m scripts'-tools'` concatenates to `scripts-tools`, a
@@ -1914,7 +2099,27 @@ def script_dep_block(plugin_dir: Path, src_bytes: bytes,
             if w is None:
                 return False
             raw = enclosing[w[0]:w[1]]
-            if _word_text(raw) in (text, b"./" + text):
+            tw = _word_text(raw)
+            # Input-redirect glue stays inside the word (`<scripts/x.py`,
+            # `<>…`, `0<…`) — `python <scripts/x.py` reads the script —
+            # and so does a TRAILING redirect (`scripts/x.py<in`). Strip
+            # both before comparing (Devin on vendored-resolver review).
+            m_in = re.match(rb"\d*<>?", tw)
+            cand = tw[m_in.end():] if m_in else tw
+            cand = cand.split(b"<", 1)[0].split(b">", 1)[0]
+            # `$PWD/scripts/x.py`/`${P}/…` and any deeper path tail still
+            # names the script — only a bare-prefix concat like
+            # `xscripts/` is rejected.
+            if cand in (text, b"./" + text) or cand.endswith(b"/" + text):
+                return True
+            # A glued non-`-d` short-option operand whose tail is a script
+            # IS the invocation (`node -rscripts/preload.js`) — the same
+            # predicate the option-operand suppressor uses, inverted
+            # (Codex on vendored-resolver review).
+            if (tw.startswith(b"-") and not tw.startswith(b"--")
+                    and len(tw) > 2 and tw[1:2].isalpha()
+                    and b"scripts/" in tw
+                    and not _glued_short_hides_path(tw)):
                 return True
             if raw[:1] in (b"'", b'"'):
                 return True
@@ -2425,7 +2630,11 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
         plan.conflicts.append((repo_root / req, f"missing plugin dir: {entry['path']}"))
         return
     try:
-        indexed_rel = plugin_dir.relative_to(registry_root)
+        # Canonical paths both sides — with a symlinked registry ancestor
+        # the lexical relative_to and the resolved tree disagree, so a
+        # crafted path could read as inside while resolving outside.
+        indexed_rel = plugin_dir.resolve().relative_to(
+            registry_root.resolve())
     except ValueError:
         plan.conflicts.append((repo_root / req,
             f"indexed path '{entry['path']}' is outside the registry"))
@@ -3857,18 +4066,25 @@ def main() -> int:
             # would let the next run adopt them without provenance.
             restore_staged()
             rollback()
-            sys.stderr.write(f"FAIL: cannot write {LOCK_PATH}: {e}\n")
-            return 2
-        finally:
             for dfd in dfds.values():
                 os.close(dfd)
-        # The lock is committed — staged prunes are now durable.
+            sys.stderr.write(f"FAIL: cannot write {LOCK_PATH}: {e}\n")
+            return 2
+        # The lock is committed — staged prunes are now durable. Unlink
+        # through the still-open verified dir FD: a parent renamed and
+        # replaced by a symlink since staging can't redirect the delete
+        # outside the repository (Codex on vendored-resolver review).
         for _f, tmp, _dfd in staged:
             try:
-                tmp.unlink()
+                if _HAS_DIRFD and _dfd is not None:
+                    os.unlink(tmp.name, dir_fd=_dfd)
+                else:
+                    tmp.unlink()
             except OSError as e:
                 print("  note: staged prune entry left at "
                       f"{tmp.relative_to(repo_root).as_posix()} ({e})")
+        for dfd in dfds.values():
+            os.close(dfd)
         if args.prune:
             # Only once the lock is durably written — pruning an emptied
             # parent dir BEFORE this point would leave rollback() unable

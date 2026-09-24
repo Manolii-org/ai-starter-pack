@@ -7114,3 +7114,164 @@ def test_prune_restores_after_staged_read_failure(tmp_path, monkeypatch):
     assert mod.main() == 2
     assert f.read_text() == "---\nname: a\ndescription: d\n---\nx"
     assert not list(f.parent.glob(".ai-prune-*"))
+
+
+def test_script_dep_inner_substitution_head(tmp_path):
+    """The head INSIDE `$(...)` decides, not the outer command —
+    `$(echo bash x)` only prints, `$(bash x)` runs (Devin on
+    #123/#6/#1953)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    pdir.mkdir()
+    # inner non-executing heads -> literal, not a dep
+    assert not mod.script_dep_block(
+        pdir, b'x="$(echo bash scripts/x.sh)"\n')
+    assert not mod.script_dep_block(
+        pdir, b"x=$(printf 'bash scripts/x.sh')\n")
+    # inner EXECUTING head still gates
+    assert mod.script_dep_block(
+        pdir, b'x="$(bash scripts/x.sh)"\n')
+    # nesting descends to the innermost command
+    assert mod.script_dep_block(
+        pdir, b'x="$(echo $(bash scripts/x.sh))"\n')
+    assert not mod.script_dep_block(
+        pdir, b'x="$(bash $(echo scripts/x.sh))"\n'
+        .replace(b"scripts/x.sh", b'"$(echo ok)"'))
+
+
+def test_script_dep_pipe_to_executor(tmp_path):
+    """A non-executing head piped into an interpreter is not inert —
+    `printf 'bash x' | sh` runs the text (Devin on #1370)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    pdir.mkdir()
+    assert mod.script_dep_block(
+        pdir, b"printf 'bash scripts/x.sh' | sh\n")
+    assert mod.script_dep_block(
+        pdir, b"printf 'bash scripts/x.sh' |& sh\n")
+    # harmless downstreams stay literal
+    assert not mod.script_dep_block(
+        pdir, b"printf 'bash scripts/x.sh' | wc -l\n")
+    # `||` is a fallback, not a pipe to exec
+    assert not mod.script_dep_block(
+        pdir, b"printf 'bash scripts/x.sh' || true\n")
+
+
+def test_script_dep_heredoc_body(tmp_path):
+    """Heredoc bodies are stdin data unless the head (or a pipe
+    consumer) executes them (Devin on #1953)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    pdir.mkdir()
+    inert = b"cat <<EOF\nbash scripts/x.sh\nEOF\n"
+    assert not mod.script_dep_block(pdir, inert)
+    assert not mod.script_dep_block(
+        pdir, b"cat <<- EOF\n\tbash scripts/x.sh\n\tEOF\n")
+    # exec head / pipe-to-exec still gates
+    assert mod.script_dep_block(
+        pdir, b"sh <<EOF\nbash scripts/x.sh\nEOF\n")
+    assert mod.script_dep_block(
+        pdir, b"cat <<EOF | sh\nbash scripts/x.sh\nEOF\n")
+    # quoted delimiter disables expansion -> stays literal
+    assert not mod.script_dep_block(
+        pdir, b"cat <<'EOF'\n$(bash scripts/x.sh)\nEOF\n")
+    # unquoted body still expands $( ) — the substitution's own head runs
+    assert mod.script_dep_block(
+        pdir, b"cat <<EOF\n$(bash scripts/x.sh)\nEOF\n")
+    # ...but non-expanding text in that same body stays inert
+    assert not mod.script_dep_block(
+        pdir, b"cat <<EOF\n$(date)\nbash scripts/x.sh\nEOF\n")
+
+
+def test_script_dep_word_member_forms(tmp_path):
+    """Glued short-option operands, $PWD-prefixed paths and input
+    redirects still invoke the script (Codex + Devin on #1370)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    pdir.mkdir()
+    assert mod.script_dep_block(pdir, b"node -rscripts/preload.js\n")
+    assert mod.script_dep_block(pdir, b"python $PWD/scripts/tool.py\n")
+    assert mod.script_dep_block(pdir, b"python ${PWD}/scripts/tool.py\n")
+    assert mod.script_dep_block(pdir, b"python <scripts/tool.py\n")
+    # the -d directory-operand suppression still holds
+    assert not mod.script_dep_block(pdir, b"node -dscripts/site\n")
+    # bare-prefix concatenation still rejected
+    assert not mod.script_dep_block(pdir, b"bash xscripts/tool.py\n")
+
+
+def test_mini_yaml_inline_comment_ends_scalar(tmp_path):
+    """`k: v # c` followed by a deeper line is a PyYAML error — the
+    comment ends the scalar; folding a continuation across it must
+    fail closed (Devin on #123)."""
+    mod = load_resolve_module()
+    try:
+        mod._mini_yaml("key: safe # note\n  continuation\n")
+        raise AssertionError("must raise")
+    except ValueError:
+        pass
+    # normal inline comments still parse fine
+    assert mod._mini_yaml("k: v # note\n") == {"k": "v"}
+    assert mod._mini_yaml("k: v # note\nother: x\n") == {
+        "k": "v", "other": "x"}
+    # a deeper line after a NON-commented scalar still folds
+    assert mod._mini_yaml("k: v\n  more\n") == {"k": "v more"}
+
+
+def test_prune_staged_unlink_uses_dir_fd(tmp_path, monkeypatch):
+    """Staged prune files are deleted through the verified dir FD while
+    it is still open — a parent swapped to a symlink after staging
+    cannot redirect the delete (Codex on #1953)."""
+    mod = load_resolve_module()
+    if not getattr(mod, "_HAS_DIRFD", False):
+        pytest.skip("dirfd platform only")
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/p": [("skills/a/SKILL.md",
+                        "---\nname: a\ndescription: d\n---\nx")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "buro",
+                       [{"plugin": "platform/p", "ref": "1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 0, r.stderr
+    m.write_text("version: 1\nuniverse: buro\nrequires: []\n")
+    monkeypatch.setattr(sys, "argv", [
+        str(RESOLVE), "--manifest", str(m), "--registry", str(reg_root),
+        "--repo-root", str(consumer), "--apply", "--prune"])
+    real_unlink = os.unlink
+    seen = []
+
+    def rec(path, *a, **kw):
+        seen.append(kw.get("dir_fd"))
+        return real_unlink(path, *a, **kw)
+
+    monkeypatch.setattr(mod.os, "unlink", rec)
+    assert mod.main() == 0
+    assert any(fd is not None for fd in seen)
+
+
+def test_registry_dotdot_index_path_fails_closed(tmp_path):
+    """An index `path` escaping via `..` — even to a REAL sibling dir —
+    is outside the canonical registry tree and conflicts (Devin SEC on
+    #1953): resolved containment, not lexical string shape, is the
+    boundary."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/p": [("skills/a/SKILL.md",
+                        "---\nname: a\ndescription: d\n---\nx")],
+    })
+    # redirect the index entry through `..` into a real sibling tree
+    evil = reg_root / "evil" / "p"
+    (evil / "skills" / "a").mkdir(parents=True)
+    (evil / "skills" / "a" / "SKILL.md").write_text(
+        "---\nname: a\ndescription: d\n---\nx")
+    idx = reg_root / "registry" / "plugins.json"
+    doc = json.loads(idx.read_text())
+    doc["plugins"][0]["path"] = "registry/../evil/p"
+    idx.write_text(json.dumps(doc))
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "buro",
+                       [{"plugin": "platform/p", "ref": "1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode != 0
+    assert "outside the registry" in r.stdout
