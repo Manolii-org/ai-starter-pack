@@ -6304,6 +6304,12 @@ def test_apply_rollback_removes_new_outputs(tmp_path):
     })
     consumer = tmp_path / "consumer"
     consumer.mkdir()
+    # A git checkout routes the apply mutex under .git — without it the
+    # mutex lands in the read-only .ai and the resolver refuses at rc=1
+    # before materialising anything, never exercising the rollback path
+    # this test exists to verify (CodeRabbit on #9, round-9 review).
+    subprocess.run(["git", "-C", str(consumer), "init", "-q"],
+                   check=True)
     ai_dir = consumer / ".ai"
     ai_dir.mkdir()
     os.chmod(ai_dir, 0o555)
@@ -6313,9 +6319,7 @@ def test_apply_rollback_removes_new_outputs(tmp_path):
         r = run_resolver(m, reg_root, consumer, "--apply")
     finally:
         os.chmod(ai_dir, 0o755)
-    # rc=1: refused at the apply mutex (fails closed on an unroutable
-    # lock path — round-7 review); rc=2: the lock-write plan conflict.
-    assert r.returncode in (1, 2), r.stdout + r.stderr
+    assert r.returncode == 2, r.stdout + r.stderr
     assert not (consumer / ".claude" / "skills" / "demo"
                 / "SKILL.md").exists()
     assert not (consumer / ".claude" / "commands" / "run.md").exists()
@@ -8173,3 +8177,201 @@ def test_script_dep_backslash_inside_singles(tmp_path):
     (pdir / "scripts" / "x.sh").write_bytes(b"x")
     assert mod.script_dep_block(
         pdir, b"cat scripts/x.sh | tee 'a\\' '>x' | sh\n")
+
+
+def test_script_dep_stdout_save_restore(tmp_path):
+    """A `>` mid-segment is not final — `3>&1 >/dev/null 1>&3` restores
+    stdout onto the pipe (Devin + CodeRabbit on #127/#1374/#9, round-9
+    review). The fd map is judged at the `|`, never mid-segment."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh)" 3>&1 >/dev/null 1>&3 | sh\n')
+    # restore through an fd-backed device path — same alias semantics
+    assert mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh)" 3>&1 >/dev/null'
+              b' 1>/dev/fd/3 | sh\n')
+    assert mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh)" >/dev/stdout | sh\n')
+    assert mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh)" >/proc/self/fd/1 | sh\n')
+    # still diverted when nothing restores it
+    assert not mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh)" >/dev/null | sh\n')
+    assert not mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh)" 3>/tmp/o 1>&3 | sh\n')
+
+
+def test_script_dep_clobber_op(tmp_path):
+    """`>|` is noclobber file redirection — its `|` is operator text,
+    not a pipe (`echo "$(x)" 2>|sh` writes fd2 to a file named `sh` —
+    CodeRabbit on #1955/#9, round-9 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert not mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh)" 2>|sh\n')
+    # a real pipe AFTER the clobber target still counts
+    assert mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh)" 2>|log | sh\n')
+
+
+def test_script_dep_stdin_save_restore(tmp_path):
+    """fd dups can save and restore STDIN — `3<&0 </dev/null 0<&3`
+    leaves fd0 on the pipe (Codex on #1955, round-9 review); `<&00`
+    and `<& 0` are self-dup forms (Codex on #127)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | sh 3<&0 </dev/null 0<&3\n")
+    assert mod.script_dep_block(pdir, b"cat scripts/x.sh | sh <&00\n")
+    assert mod.script_dep_block(pdir, b"cat scripts/x.sh | sh <& 0\n")
+    # `<& /dev/stdin` is an ambiguous redirect — bash errors out and
+    # nothing executes.
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | sh 0<& /dev/stdin\n")
+    # rebound after the restore still sinks
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | sh 3<&0 0<&3 </dev/null\n")
+
+
+def test_script_dep_late_stdin_redirect(tmp_path):
+    """Redirects apply AFTER `-s`/`-`/`-m` verdicts too —
+    `sh -s </dev/null` and `python -m base64 -d </dev/null` read the
+    file, not the pipe (Codex on #1374, CodeRabbit on #9, round-9)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    (pdir / "scripts" / "x.b64").write_bytes(b"x")
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | sh -s </dev/null | cat\n")
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | sh - </dev/null | cat\n")
+    assert not mod.script_dep_block(
+        pdir,
+        b"cat scripts/x.b64 | python -m base64 -d </dev/null | sh\n")
+    # glued mid-word operator — `-s</dev/null` is `-s` + a redirect
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | sh -s</dev/null | cat\n")
+    # and `-s` alone still reads the pipe
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | sh -s | cat\n")
+
+
+def test_script_dep_grep_operand_hides_quiet(tmp_path):
+    """An operand-taking option consumes the NEXT word — `grep -e -q`
+    uses `-q` as the PATTERN and still forwards matches (Devin +
+    CodeRabbit on #1374/#9, round-9 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | grep -e -q | sh\n")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | grep --regexp -q | sh\n")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | grep -f -q | sh\n")
+    # `-qe` — quiet is set before the operand flag; still a sink
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | grep -qe -q | sh\n")
+    # `-q` as a separate flag after a non-operand option still sinks
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | grep -v -q x | sh\n")
+
+
+def test_script_dep_head_last_limit_wins(tmp_path):
+    """The LAST `-n`/`-c` limit decides — `head -n 0 -n 10` forwards 10
+    lines (CodeRabbit + Codex on #127/#1374, round-9 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | head -n 0 -n 10 | sh\n")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | head -c 0 -n 5 | sh\n")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | head -5 | sh\n")
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | head -n 5 -n 0 | sh\n")
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | head -n 10 -c 0 | sh\n")
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | head -0 | sh\n")
+
+
+def test_script_dep_emit_head_substitution(tmp_path):
+    """`echo`/`printf` emit their argv — a substitution inside re-reads
+    the pipe and forwards it downstream: `cat x | echo "$(cat)" | sh`
+    runs x (Devin on #1374, round-9 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | echo "$(cat)" | sh\n')
+    assert mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | printf "%s" "$(cat)" | sh\n')
+    # non-emitting sinks take the substitution as an operand — the
+    # content never reaches stdout
+    assert not mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | wc -c "$(cat)" | sh\n')
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | echo plain | sh\n")
+
+
+def test_script_dep_python_base64_cluster(tmp_path):
+    """Codec modules accept clustered shorts — `python -m base64 -du`
+    decodes (urlsafe), re-emitting program text for a downstream `sh`
+    (Codex on #1374, round-9 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.b64").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.b64 | python -m base64 -du | sh\n")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.b64 | python -m base64 -ud | sh\n")
+    # `-ed` contains a decode letter — it decodes too (verified:
+    # getopt splits the cluster). `-u` is decode-family (urlsafe), so
+    # `-e` alone is the encode-only negative.
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.b64 | python -m base64 -ed | sh\n")
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.b64 | python -m base64 -e | sh\n")
+
+
+def test_script_dep_enclosing_sub_span(tmp_path):
+    """A substitution nested in the ENCLOSING substitution's body is
+    descended, not skipped — `echo "$(echo "$(cat x)" | sh)"` runs x
+    (Devin on #127, round-9 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir, b'echo "$(echo "$(cat scripts/x.sh)" | sh)"\n')
+    # and the outer-pipe form still counts
+    assert mod.script_dep_block(
+        pdir, b'echo "$(echo "$(cat scripts/x.sh)")" | sh\n')
+
+
+def test_script_dep_amp_gt_binds_both_fds(tmp_path):
+    """`&> f` redirects fds 1+2 to the file — the pipe after it gets
+    nothing (round-9 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert not mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh)" &> f | sh\n')
+    # target in the next word binds both fds too
+    assert not mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh)" &> f f2 | sh\n')
