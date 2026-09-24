@@ -5847,3 +5847,90 @@ def test_dirfd_apply_writes_through_planted_parent_symlink(tmp_path):
     assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
     dst = consumer / ".claude" / "skills" / "demo" / "SKILL.md"
     assert dst.is_file() and not dst.is_symlink()
+
+
+def test_mini_yaml_dquote_backslash_escape_fold():
+    """In a double-quoted scalar, an ODD trailing '\\' run escapes the line
+    break itself — join with NO separator. An even run is an escaped
+    backslash + an ordinary space fold. Single-quoted '\\' is literal."""
+    mod = load_resolve_module()
+    assert mod._mini_yaml('x: "a\\\n  b"\n') == {"x": "ab"}
+    assert mod._mini_yaml('x: "platform/\\\n  framework"\n') == \
+        {"x": "platform/framework"}
+    assert mod._mini_yaml('x: "a\\\n\n  b"\n') == {"x": "a\nb"}
+    assert mod._mini_yaml('x: "a \\\n  b"\n') == {"x": "a b"}
+    assert mod._mini_yaml('x: "a\\\\\n  b"\n') == {"x": "a\\ b"}
+    assert mod._mini_yaml("x: 'a\\\n  b'\n") == {"x": "a\\ b"}
+
+
+def test_mini_yaml_commented_key_lone_block_indicator():
+    """`key: # note` strips to `key: ` — a lone `|`/`>` on the next line
+    still opens a block scalar."""
+    mod = load_resolve_module()
+    assert mod._mini_yaml("ref: # pin\n  |\n    1.2\n") == {"ref": "1.2\n"}
+    assert mod._mini_yaml("- key: # c\n   |\n    a\n") == [{"key": "a\n"}]
+    assert mod._mini_yaml("- # c\n  |\n   a\n") == ["a\n"]
+
+
+def test_mini_yaml_quoted_seq_item_with_colon():
+    """A quoted scalar containing ': ' inside a seq item is a string, not
+    a key — the plain-key alternative must not start with a quote char."""
+    mod = load_resolve_module()
+    assert mod._mini_yaml("- 'setup: done'\n- other\n") == \
+        ["setup: done", "other"]
+    assert mod._mini_yaml("examples:\n  - 'setup: done'\n") == \
+        {"examples": ["setup: done"]}
+    # a genuinely quoted KEY still parses
+    assert mod._mini_yaml("- 'key': v\n") == [{"key": "v"}]
+
+
+def test_mini_yaml_inline_doc_start_node():
+    """`--- <node>` — the root node may share the marker line."""
+    mod = load_resolve_module()
+    assert mod._mini_yaml("--- {a: 1}\n") == {"a": 1}
+    assert mod._mini_yaml("--- # c\n{a: 1}\n") == {"a": 1}
+    mod._mini_yaml("--- \n")  # bare marker with empty doc tolerated
+    with pytest.raises(ValueError):
+        mod._mini_yaml("--- - 1\n")
+    with pytest.raises(ValueError):
+        mod._mini_yaml("--- {a: 1}\n--- {b: 2}\n")
+
+
+def test_script_dep_block_python_dash_m(tmp_path):
+    """`python -m scripts.check` invokes the same file — a bundled module
+    is an unsatisfiable dep; a consumer-declared one materialises."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/plugm": [
+            ("commands/run.md",
+             "run `python3 -m scripts.check` to verify"),
+            ("scripts/check.py", "print(1)"),
+        ],
+        "platform/plugm2": [
+            ("commands/run2.md",
+             "run `python3 -m scripts.check` to verify"),
+        ],
+        "platform/plugm3": [
+            ("commands/run3.md",
+             "---\nconsumer_scripts: [scripts/check.py]\n---\n"
+             "run `python3 -m scripts.check` to verify"),
+        ],
+        "platform/plugm4": [
+            ("commands/run4.md",
+             "run `python3 -m scripts.pkg.check` to verify"),
+            ("scripts/pkg/check/__init__.py", ""),
+        ],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(
+        consumer, "manolii",
+        [{"plugin": "platform/plugm", "ref": "1.0.0"},
+         {"plugin": "platform/plugm2", "ref": "1.0.0"},
+         {"plugin": "platform/plugm3", "ref": "1.0.0"},
+         {"plugin": "platform/plugm4", "ref": "1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 0, r.stdout
+    cmds = consumer / ".claude" / "commands"
+    installed = {p.name for p in cmds.glob("*.md")}
+    assert "run3.md" in installed
+    assert not (installed & {"run.md", "run2.md", "run4.md"})

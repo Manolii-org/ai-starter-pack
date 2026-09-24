@@ -89,7 +89,15 @@ SCRIPT_REF = re.compile(
     # after the dot, so `./scripts/x.sh` still binds only to the exec alt.
     rb"|(?<![\w./\\-])\.[ \t]+[^\n|&;`]*?scripts/(?:[A-Za-z0-9_.-]+/)"
     rb"*(?:[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs|cjs|rb|pl)|[A-Za-z0-9_-]+)"
-    rb"(?![\w.])")
+    rb"(?![\w.])"
+    # `python -m scripts.check` — the module form invokes the same file
+    # (scripts/check.py, or a package's __init__.py). Extraction maps the
+    # dotted module name back to candidate scripts/ paths; a bare
+    # `scripts/check.sh` with no invocation word stays a prose mention
+    # (can't be told apart from "edit scripts/check.sh" without
+    # over-blocking capabilities that merely document the path).
+    rb"|(?<![\w-])python(?:\d+(?:\.\d+)*)?[ \t]+-m[ \t]+scripts\."
+    rb"(?:[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*)(?![\w.])")
 # Backticked `scripts/x.py` is NOT an invocation context — prose uses it for
 # mentions. A real dependency that no interpreter/./ prefix expresses must be
 # declared explicitly: `requires_scripts: [...]` in the file's frontmatter.
@@ -106,6 +114,9 @@ SCRIPT_NAME = re.compile(
     rb"scripts/((?:[A-Za-z0-9_.-]+/)"
     rb"*(?:[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs|cjs|rb|pl)|[A-Za-z0-9_-]+))"
     rb"(?![\w.])")
+# `-m scripts.a.b` extraction — the dotted module resolves to either
+# scripts/a/b.py or the package scripts/a/b/__init__.py; both are checked.
+MODULE_NAME = re.compile(rb"-m[ \t]+scripts\.([A-Za-z0-9_.]+)")
 # A `|`/`>` block-scalar indicator with optional chomping (+/-) and
 # explicit-indentation (1-9) modifiers in either order: `|`, `>+`, `|-`,
 # `|2`, `|2-`, `|-2`, `|+2`, `|2+`. `|0` is not legal YAML (digit is 1-9)
@@ -418,6 +429,24 @@ def _mini_yaml(text: str):
                     "multiple YAML documents are not supported")
             seen_doc_start = True
             continue
+        if (body == body.lstrip() and body.strip().startswith("---")
+                and body.strip()[3] in " \t"):
+            # `--- <node>` — the root node may share the marker line
+            # (`--- {version: 1, ...}`). The marker still counts as the
+            # document start; the remainder parses as the line's content.
+            if (seen_doc_start
+                    or any(l[1] not in ("", "\x00") for l in lines)):
+                raise ValueError(
+                    "multiple YAML documents are not supported")
+            seen_doc_start = True
+            body = body.strip()[3:].strip()
+            if not body:
+                continue
+            if body.startswith("- "):
+                # `--- - 1` — a seq entry directly on the marker line is a
+                # ScannerError in PyYAML, not a document.
+                raise ValueError(
+                    "sequence entries are not allowed on a '---' line")
         if body == body.lstrip() and body.strip() == "...":
             for rest in raw_lines[li:]:
                 if rest.strip() and not rest.lstrip().startswith("#"):
@@ -431,7 +460,20 @@ def _mini_yaml(text: str):
         while open_quote(body) and li < len(raw_lines):
             nxt = raw_lines[li]
             li += 1
-            if nxt.strip():
+            # In a double-quoted scalar an ODD-length run of trailing
+            # backslashes escapes the line break itself: the last '\' is
+            # consumed and the continuation joins with NO separator. An
+            # even run is an escaped backslash then an ordinary folded
+            # break ('a\\\n  b' -> 'a\\ b'). Single-quoted scalars have
+            # no escapes — '\' is literal there.
+            if (open_quote(body) == '"'
+                    and (len(body) - len(body.rstrip("\\"))) % 2 == 1):
+                body = body[:-1]
+                if nxt.strip():
+                    body += nxt.strip()
+                else:
+                    body += "\n"
+            elif nxt.strip():
                 body += ("" if body.endswith("\n") else " ") + nxt.strip()
             else:
                 body += "\n"
@@ -474,9 +516,12 @@ def _mini_yaml(text: str):
             # not detach it.
             prev = next((l for l in reversed(lines)
                          if l[1] not in ("", "\x00")), None)
+            # `key: # note` strips to `key: ` — the emptiness test must
+            # ignore the whitespace strip_comment left after the colon.
             if (prev is None
                     or (prev[0] <= indent
-                        and (prev[1] == "-" or prev[1].endswith(":")))):
+                        and (prev[1].rstrip() == "-"
+                             or prev[1].rstrip().endswith(":")))):
                 block_indent = (prev[0] + 2
                                 if prev is not None
                                 and prev[1].startswith("- ")
@@ -523,9 +568,12 @@ def _mini_yaml(text: str):
     # `"version": 1` decodes to the same key as `version: 1`.
     key_re = re.compile(
         # Plain-scalar keys may contain a mid-word apostrophe (`author's`) —
-        # quoted alternatives are tried first, so a leading ' still parses
-        # as a quoted key.
-        r"^(\"(?:[^\"\\]|\\.)*\"|'(?:[^']|'')*'|[A-Za-z0-9_.'-]+)"
+        # but may NOT start with one: a leading quote opens a quoted scalar,
+        # so `- 'setup: done'` is the string 'setup: done', not key 'setup.
+        # The quoted alternatives are tried first, so a quoted key still
+        # parses ('key': v).
+        r"^(\"(?:[^\"\\]|\\.)*\"|'(?:[^']|'')*'"
+        r"|[A-Za-z0-9_.-][A-Za-z0-9_.'-]*)"
         # The ':' separates a key only when followed by spaces or EOL — a
         # tab is not a separator (`key:\tv` is a ScannerError in PyYAML).
         # re.S: a folded multiline quoted value can carry a literal '\n'.
@@ -1053,16 +1101,28 @@ def script_dep_block(plugin_dir: Path, src_bytes: bytes,
         # Only names inside actual invocations count — a bare `scripts/x.py`
         # mention in prose is not a dependency and must not gate materialise.
         n = SCRIPT_NAME.search(m.group(0))
-        if not n:
-            continue
-        name = n.group(1).decode("utf-8", errors="ignore")
-        bundled = (name in pinned_scripts if pinned_scripts is not None
-                   else (sdir / name).is_file())
+        if n:
+            names = [n.group(1).decode("utf-8", errors="ignore")]
+        else:
+            mod = MODULE_NAME.search(m.group(0))
+            if not mod:
+                continue
+            # `python -m scripts.a.b` -> scripts/a/b.py or the package
+            # scripts/a/b/__init__.py — either satisfies/blocks equally.
+            stem = mod.group(1).decode("utf-8", errors="ignore")
+            names = [stem.replace(".", "/") + ".py",
+                     stem.replace(".", "/") + "/__init__.py"]
+        bundled = any(
+            (name in pinned_scripts if pinned_scripts is not None
+             else (sdir / name).is_file())
+            for name in names)
         if bundled:
             return True  # bundled dep — resolver cannot satisfy it
-        if (f"scripts/{name}" not in declared
-                and f"./scripts/{name}" not in declared
-                and name not in declared):
+        if not any(
+                f"scripts/{name}" in declared
+                or f"./scripts/{name}" in declared
+                or name in declared
+                for name in names):
             return True  # unbundled + undeclared — would ship broken
     return False
 
