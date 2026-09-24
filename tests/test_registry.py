@@ -4818,7 +4818,7 @@ def test_prune_refuses_chmodded_orphan(tmp_path):
     orphan.chmod(orphan.stat().st_mode | 0o111)
     r = run_resolver(m, reg_root, consumer, "--apply", "--prune")
     assert r.returncode == 1
-    assert "exec mode differs" in r.stdout
+    assert "installed-mode record" in r.stdout
     assert orphan.is_file()
 
 
@@ -5218,3 +5218,173 @@ def test_apply_preflights_every_destination(tmp_path):
     assert r.returncode != 0
     assert not (consumer / ".claude" / "skills" / "demo" / "SKILL.md"
                 ).exists()
+
+
+def test_mini_yaml_seq_block_scalars():
+    """`- |` and `- key: |` block scalars in sequences parse like PyYAML —
+    content dedents by its first line's indent, `>` folds, `x-`/`x+` chomp.
+    The seq item's logical indent is indent+2, so a sibling key inside the
+    item map is never swallowed as block content."""
+    mod = load_resolve_module()
+    doc = mod._mini_yaml(
+        "items:\n  - |\n    line one\n    line two\n  - plain\n")
+    assert doc == {"items": ["line one\nline two\n", "plain"]}
+    doc = mod._mini_yaml(
+        "entries:\n  - description: |\n      literal\n      # not a comment\n"
+        "    tag: x\n  - description: >-\n      folded\n      lines\n")
+    assert doc == {"entries": [
+        {"description": "literal\n# not a comment\n", "tag": "x"},
+        {"description": "folded lines"},
+    ]}
+    doc = mod._mini_yaml("ref: |-\n  ^1.14\n")
+    assert doc == {"ref": "^1.14"}
+    doc = mod._mini_yaml("ref: |\n  ^1.14\n")
+    assert doc == {"ref": "^1.14\n"}
+    doc = mod._mini_yaml("ref: >\n  ^1.14\n")
+    assert doc == {"ref": "^1.14\n"}
+    doc = mod._mini_yaml("v: |\n\n  a\n\n  b\n")
+    assert doc == {"v": "\na\n\nb\n"}
+    try:
+        import yaml as pyyaml
+    except ImportError:
+        pyyaml = None
+    if pyyaml is not None:
+        for y in ("items:\n  - |\n    one\n    two\n  - plain\n",
+                  "ref: |\n  ^1.14\n",
+                  "ref: >-\n  a\n  b\n",
+                  "v: |\n\n  a\n\n  b\n",
+                  "entries:\n  - description: |\n      lit\n    tag: x\n"):
+            assert pyyaml.safe_load(y) == mod._mini_yaml(y), y
+
+
+def test_mini_yaml_double_doc_marker_rejected():
+    """`---\\n---` is two documents — an empty first document still counts,
+    so a second marker must fail closed."""
+    mod = load_resolve_module()
+    with pytest.raises(ValueError):
+        mod._mini_yaml("---\n---\nversion: 1\n")
+    with pytest.raises(ValueError):
+        mod._mini_yaml("---\n# comment\n---\nversion: 1\n")
+
+
+def test_dot_source_never_crosses_lines(tmp_path):
+    """The POSIX `.` builtin needs same-line whitespace — a full stop at
+    the end of a prose line must not 'source' the NEXT line's scripts/
+    path and gate a runnable file."""
+    fm = ("---\nname: demo\ndescription: d\n---\n"
+          "Sentence ends here.\nscripts/setup.sh is prose, not a dep.\n")
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/SKILL.md", fm)],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 0, r.stdout
+    assert (consumer / ".claude" / "skills" / "demo" / "SKILL.md").is_file()
+    # A real `. scripts/x.sh` invocation still gates materialisation.
+    fm2 = ("---\nname: gated\ndescription: d\n---\n"
+           ". scripts/setup.sh\n")
+    reg_root = make_registry(tmp_path / "src2", {
+        "platform/framework": [("skills/gated/SKILL.md", fm2)],
+    })
+    consumer2 = tmp_path / "consumer2"
+    consumer2.mkdir()
+    m = write_manifest(consumer2, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    r = run_resolver(m, reg_root, consumer2, "--apply")
+    assert r.returncode == 0, r.stdout
+    assert not (consumer2 / ".claude" / "skills" / "gated" / "SKILL.md"
+                ).exists()
+
+
+def test_manifest_block_scalar_ref_resolves(tmp_path):
+    """`ref: |-` is valid YAML — its value dedents and clips to the bare
+    version constraint instead of reaching plan_requirement with the
+    content indent or a trailing newline."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/SKILL.md",
+                                "---\nname: demo\ndescription: d\n---\nv1")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = consumer / "ai-manifest.yaml"
+    m.write_text(
+        "version: 1\nuniverse: manolii\nrequires:\n"
+        "  - plugin: platform/framework\n    ref: |-\n      ^1.0\n")
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (consumer / ".claude" / "skills" / "demo" / "SKILL.md").is_file()
+
+
+def test_atomic_replace_never_restasts_source(tmp_path):
+    """--apply uses the plan-time (atime, mtime) snapshot — a registry
+    source deleted between plan and apply must not strand the write."""
+    mod = load_resolve_module()
+    src = tmp_path / "src.md"
+    src.write_text("payload")
+    st = src.stat()
+    src.unlink()
+    dst = tmp_path / "out.md"
+    mod.atomic_replace(dst, lambda f: f.write(b"payload"),
+                       times=(st.st_atime_ns, st.st_mtime_ns), mode=0o644)
+    assert dst.read_bytes() == b"payload"
+    assert dst.stat().st_mode & 0o777 == 0o644
+    assert dst.stat().st_mtime_ns == st.st_mtime_ns
+
+
+def test_prune_probe_skips_missing_orphan_parent(tmp_path):
+    """An already-deleted orphan's parent needs no write probe — a
+    read-only parent must not block pruning the other entries."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/SKILL.md",
+                                "---\nname: demo\ndescription: d\n---\nv1"),
+                               ("skills/extra/SKILL.md",
+                                "---\nname: extra\ndescription: d\n---\nv1")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    orphan = consumer / ".claude" / "skills" / "extra" / "SKILL.md"
+    orphan.unlink()
+    (consumer / ".claude" / "skills" / "extra").chmod(0o555)
+    write_manifest(consumer, "manolii", [])
+    r = run_resolver(m, reg_root, consumer, "--apply", "--prune")
+    assert r.returncode == 0, r.stdout + r.stderr
+    lock = json.loads(
+        (consumer / ".ai" / "capability-lock.json").read_text())
+    assert ".claude/skills/extra/SKILL.md" not in lock["files"]
+
+
+def test_prune_requires_full_mode_record(tmp_path):
+    """A legacy or missing exec record cannot distinguish a consumer chmod
+    of the non-exec bits — --prune conflicts instead of unlinking."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/SKILL.md",
+                                "---\nname: demo\ndescription: d\n---\nv1")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    rel = ".claude/skills/demo/SKILL.md"
+    orphan = consumer / rel
+    lock_file = consumer / ".ai" / "capability-lock.json"
+    lock = json.loads(lock_file.read_text())
+    lock["exec"][rel] = False  # legacy any-exec record — no full mask
+    lock_file.write_text(json.dumps(lock))
+    orphan.chmod(0o600)  # consumer chmod the digest cannot see
+    write_manifest(consumer, "manolii", [])
+    r = run_resolver(m, reg_root, consumer, "--apply", "--prune")
+    assert r.returncode == 1
+    assert "installed-mode record" in r.stdout
+    assert orphan.is_file()
+    # An untouched file is equally unverifiable under a legacy record.
+    orphan.chmod(0o644)
+    r = run_resolver(m, reg_root, consumer, "--apply", "--prune")
+    assert r.returncode == 1
+    assert orphan.is_file()

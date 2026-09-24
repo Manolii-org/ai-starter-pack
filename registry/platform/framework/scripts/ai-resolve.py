@@ -77,7 +77,7 @@ SCRIPT_REF = re.compile(
     # POSIX `.` — the dot builtin sources a file just like `source`. The
     # lookbehind keeps `..`, `foo.` and `./` out; `. ` requires whitespace
     # after the dot, so `./scripts/x.sh` still binds only to the exec alt.
-    rb"|(?<![\w./\\-])\.\s+[^\n|&;`]*?scripts/(?:[A-Za-z0-9_.-]+/)*"
+    rb"|(?<![\w./\\-])\.[ \t]+[^\n|&;`]*?scripts/(?:[A-Za-z0-9_.-]+/)*"
     rb"[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs)\b")
 # Backticked `scripts/x.py` is NOT an invocation context — prose uses it for
 # mentions. A real dependency that no interpreter/./ prefix expresses must be
@@ -259,7 +259,9 @@ def _mini_yaml(text: str):
     lines = []
     raw_lines = text.splitlines()
     li = 0
-    block_indent = None  # set: deeper-indented lines are literal content
+    block_indent = None    # set: deeper lines are literal block content
+    content_indent = None  # the block's dedent level (first content line)
+    seen_doc_start = False
     while li < len(raw_lines):
         raw = raw_lines[li]
         li += 1
@@ -272,19 +274,33 @@ def _mini_yaml(text: str):
                 continue
             ind = len(raw) - len(raw.lstrip(" \t"))
             if ind > block_indent:
-                lines.append((ind, raw[block_indent:].rstrip()))
+                if content_indent is None:
+                    content_indent = ind
+                if ind < content_indent:
+                    # Less indented than the first content line but deeper
+                    # than the key — invalid YAML, not quieter content.
+                    raise ValueError(
+                        "inconsistent block scalar indentation")
+                # YAML dedents block content by the first line's indent —
+                # deeper lines keep their extra (relative) indentation.
+                lines.append((ind, raw[content_indent:].rstrip()))
                 continue
             block_indent = None
+            content_indent = None
         if not raw.strip() or raw.lstrip().startswith("#"):
             continue
         body = strip_comment(raw.rstrip())
         if not body.strip():
             continue
-        # Single-document markers: a leading `---` is boilerplate, `...`
-        # ends the document — anything after it is trailing garbage. A `---`
-        # anywhere else lands in `lines` and fails at parse time, so
-        # multi-document input still raises.
-        if body.strip() == "---" and not lines:
+        # Single-document markers: exactly one leading `---` is boilerplate;
+        # an EMPTY first document still counts, so a second `---` is a new
+        # document and raises. `...` ends the document — anything after it
+        # is trailing garbage.
+        if body.strip() == "---":
+            if seen_doc_start or lines:
+                raise ValueError(
+                    "multiple YAML documents are not supported")
+            seen_doc_start = True
             continue
         if body.strip() == "...":
             for rest in raw_lines[li:]:
@@ -297,7 +313,8 @@ def _mini_yaml(text: str):
         # collection: a '[' or '{' inside a plain scalar ('description:
         # Use [ to open') is ordinary text, not a bracket to balance.
         value = body.lstrip()
-        if value[:1] == "-":
+        seq_item = value[:1] == "-"
+        if seq_item:
             value = value[1:].lstrip()
         fold = value[:1] in "[{"
         if not fold:
@@ -317,14 +334,21 @@ def _mini_yaml(text: str):
             raise ValueError("tab indentation is not supported")
         lines.append((indent, body.lstrip()))
         # A `|`/`>` value opens a literal block on the deeper lines that
-        # follow — `- |` seq items too (the value after the dash is the
-        # indicator itself).
+        # follow — `- |`/`- key: |` seq items too (the value after the dash
+        # is the indicator itself). The block's scope differs: `key: |`
+        # content must sit deeper than the KEY (the key's column in a
+        # mapping, or the item's logical indent+2 for `- key: |` — a `tag:`
+        # sibling at that level is a key, not content); a bare `- |`
+        # scalar item is scoped by the dash's own indent — any deeper
+        # line is content, matching PyYAML.
         bci = map_colon(value)
         if (bci != -1
                 and re.fullmatch(r"[>|][+-]?", value[bci + 1:].strip())):
-            block_indent = indent
+            block_indent = indent + 2 if seq_item else indent
+            content_indent = None
         elif re.fullmatch(r"[>|][+-]?", value):
             block_indent = indent
+            content_indent = None
 
     pos = [0]
     # Quoted keys are legal YAML in block mappings just as in flow maps —
@@ -444,6 +468,33 @@ def _mini_yaml(text: str):
             raise ValueError(f"unsupported scalar {tok!r}")
         return tok
 
+    def block_scalar(indicator: str, vals: list[str]) -> str:
+        # Literal `|` joins lines verbatim, folded `>` joins runs of
+        # non-blank lines with a space and turns each blank line into a
+        # line break. Chomping: `x-` strips the trailing newline, `x+`
+        # keeps it, plain `x` clips to exactly one.
+        if indicator.startswith(">"):
+            parts: list[str] = []
+            run: list[str] = []
+            for v in vals:
+                if v:
+                    run.append(v)
+                else:
+                    if run:
+                        parts.append(" ".join(run))
+                        run = []
+                    parts.append("\n")
+            if run:
+                parts.append(" ".join(run))
+            text = "".join(parts)
+        else:
+            text = "\n".join(vals)
+        if indicator.endswith("-"):
+            return text.rstrip("\n")
+        if indicator.endswith("+"):
+            return text
+        return text.rstrip("\n") + ("\n" if text else "")
+
     def parse(indent: int):
         if lines[pos[0]][0] != indent:
             raise ValueError("inconsistent indentation")
@@ -461,6 +512,17 @@ def _mini_yaml(text: str):
                                if pos[0] < len(lines)
                                and lines[pos[0]][0] > indent else None)
                     continue
+                if re.fullmatch(r"[>|][+-]?", item):
+                    # `- |` — the scalar item's block is every line deeper
+                    # than the dash itself (how the preprocessor scoped
+                    # it, and how PyYAML reads it).
+                    vals = []
+                    while (pos[0] < len(lines)
+                           and lines[pos[0]][0] > indent):
+                        vals.append(lines[pos[0]][1])
+                        pos[0] += 1
+                    seq.append(block_scalar(item, vals))
+                    continue
                 km = key_re.match(item)
                 if km:
                     d = {}
@@ -468,7 +530,16 @@ def _mini_yaml(text: str):
                     iv = km.group(2)
                     if iv is not None and not iv.strip():
                         iv = None  # `- key: # comment` — no scalar value
-                    if iv is not None:
+                    if iv is not None and re.fullmatch(
+                            r"[>|][+-]?", iv.strip()):
+                        # `- key: |` — same indent+2 block scoping as `- |`.
+                        vals = []
+                        while (pos[0] < len(lines)
+                               and lines[pos[0]][0] > indent + 2):
+                            vals.append(lines[pos[0]][1])
+                            pos[0] += 1
+                        d[ikey] = block_scalar(iv.strip(), vals)
+                    elif iv is not None:
                         d[ikey] = scalar(iv)
                     elif (pos[0] < len(lines)
                           and lines[pos[0]][0] > indent):
@@ -514,8 +585,7 @@ def _mini_yaml(text: str):
                            and lines[pos[0]][0] > indent):
                         vals.append(lines[pos[0]][1])
                         pos[0] += 1
-                    out[k] = (" ".join(vals)
-                              if v.strip().startswith(">") else "\n".join(vals))
+                    out[k] = block_scalar(v.strip(), vals)
                 else:
                     out[k] = scalar(v)
                     # Plain scalars may continue on deeper-indented lines that
@@ -665,6 +735,9 @@ class Plan:
     # rel_dst -> verified source bytes, captured at plan time so --apply
     # writes what was checksummed instead of re-reading a mutable registry.
     payload: dict[str, bytes] = field(default_factory=dict)
+    # rel_dst -> (atime_ns, mtime_ns) captured with the payload — apply
+    # must never re-stat a registry source that could vanish mid-apply.
+    times: dict[str, tuple[int, int]] = field(default_factory=dict)
 
 
 def load_manifest(path: Path) -> dict:
@@ -702,6 +775,10 @@ def load_manifest(path: Path) -> dict:
                 f"FAIL: requires[{i}] must map string 'plugin' and 'ref' "
                 "(quote numeric-looking refs, e.g. ref: \"1.10\")\n")
             sys.exit(2)
+        # A block-scalar ref (`ref: |-`/`ref: >`) may carry the clip
+        # newline; the version grammar is whitespace-free, so normalise
+        # at the boundary instead of rejecting the valid manifest.
+        entry["ref"] = entry["ref"].strip()
     surfaces = data.get("surfaces")
     if surfaces is not None and (
             not isinstance(surfaces, list)
@@ -783,7 +860,8 @@ def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def atomic_replace(dst: Path, fill, src: Path | None = None,
+def atomic_replace(dst: Path, fill,
+                   times: tuple[int, int] | None = None,
                    mode: int | None = None) -> None:
     """Install `dst` through an exclusively-created sibling temp + rename.
 
@@ -794,20 +872,23 @@ def atomic_replace(dst: Path, fill, src: Path | None = None,
     its shared inode (and the external peer) untouched. Mode/times land on
     the temp BEFORE the swap — a metadata failure leaves the old
     destination intact rather than publishing a 0600 temp, and no
-    post-rename chmod ever follows a swapped-in symlink."""
+    post-rename chmod ever follows a swapped-in symlink.
+
+    `times` is the (atime_ns, mtime_ns) snapshot captured at PLAN time —
+    apply must never re-stat the registry source: a source that
+    disappears mid-apply would otherwise strand already-written files
+    with no lock record."""
     fd, tmp_name = tempfile.mkstemp(dir=dst.parent,
                                     prefix=f".{dst.name}.", suffix=".tmp")
     tmp = Path(tmp_name)
     try:
         with os.fdopen(fd, "wb") as f:
             fill(f)
-        if src is not None:
-            s = src.stat()
-            # Mtime only — copystat would also copy xattrs, including
-            # security.capability under a root --apply, so times and mode
-            # are handled explicitly and privileged bits never propagate.
-            os.utime(tmp, ns=(s.st_atime_ns, s.st_mtime_ns))
-            os.chmod(tmp, s.st_mode & 0o777)
+        if times is not None:
+            # Plan-time snapshot — copystat-style xattrs (including
+            # security.capability) never propagate since times and mode
+            # are set explicitly.
+            os.utime(tmp, ns=times)
         if mode is not None:
             # The PLANNED mask — the source's mode may have drifted between
             # plan and apply; the installed file must match the lock record.
@@ -1250,8 +1331,10 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                 ))
                 continue
             src_sha = hashlib.sha256(src_bytes).hexdigest()
-            src_exec = src.stat().st_mode & 0o111
-            src_mode = (src.stat().st_mode & 0o666) | src_exec
+            src_st = src.stat()
+            src_exec = src_st.st_mode & 0o111
+            src_mode = (src_st.st_mode & 0o666) | src_exec
+            src_times = (src_st.st_atime_ns, src_st.st_mtime_ns)
             prior = plan.planned.get(rel_dst)
             if prior is not None:
                 prior_sha, prior_req, prior_src_mode, prior_install = prior
@@ -1399,11 +1482,13 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                         plan.planned[rel_dst] = (src_sha, req, src_mode,
                                                  src_mode)
                         plan.payload[rel_dst] = src_bytes
+                        plan.times[rel_dst] = src_times
                 else:
                     plan.writes.append((src, dst))  # registry drift — update
                     plan.planned[rel_dst] = (src_sha, req, src_mode,
                                              src_mode)
                     plan.payload[rel_dst] = src_bytes
+                    plan.times[rel_dst] = src_times
                 materialised[rel_dst] = src_sha
                 # The identical-skip branch records dst's real mask; every
                 # other path installs the source's.
@@ -1412,6 +1497,7 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                 plan.writes.append((src, dst))
                 plan.planned[rel_dst] = (src_sha, req, src_mode, src_mode)
                 plan.payload[rel_dst] = src_bytes
+                plan.times[rel_dst] = src_times
                 materialised[rel_dst] = src_sha
                 exec_modes[rel_dst] = src_mode
 
@@ -1568,6 +1654,15 @@ def _exec_matches(rec, mode: int) -> bool:
     return bool(mode & 0o111) == bool(rec)
 
 
+def _exec_provable(rec, mode: int) -> bool:
+    """A prune decision needs the FULL installed mask — a tagged record —
+    not the legacy any-exec approximation, and not 'no record at all':
+    only a tagged record that still matches the on-disk mode proves the
+    file's permissions were never touched since install."""
+    return (isinstance(rec, int) and not isinstance(rec, bool)
+            and rec >= EXEC_TAG and (rec & 0o777) == (mode & 0o777))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--manifest", default="ai-manifest.yaml")
@@ -1710,14 +1805,20 @@ def main() -> int:
                     "prune candidate modified since install — refusing to remove a "
                     "possibly hand-edited file (delete or restore it manually, then re-resolve)",
                 ))
-            elif (lexical.is_file() and not lexical.is_symlink()
-                    and f in locked_exec
-                    and not _exec_matches(locked_exec[f],
-                                          lexical.stat().st_mode)):
+            elif (lexical.is_file()
+                    and not _exec_provable(locked_exec.get(f),
+                                           lexical.stat().st_mode)):
+                # Pruning is irreversible — it needs the FULL installed
+                # mask, not the legacy any-exec approximation: a consumer
+                # chmod of the non-exec bits (0644 -> 0600) leaves the
+                # digest AND the any-exec state unchanged, so a missing
+                # or untagged record can't prove the file is the one the
+                # resolver installed.
                 plan.conflicts.append((
                     lexical,
-                    "prune candidate's exec mode differs from the installed-mode "
-                    "record — refusing to remove a possibly hand-chmodded file "
+                    "prune candidate has no full installed-mode record to "
+                    "verify against — a consumer chmod of the non-exec "
+                    "bits is indistinguishable; refusing to remove it "
                     "(delete or restore it manually, then re-resolve)",
                 ))
             else:
@@ -1883,7 +1984,11 @@ def main() -> int:
         probe_dirs = {lock_file.parent} | {dst.parent
                                          for _, dst in plan.writes}
         if args.prune:
-            probe_dirs |= {f.parent for f in plan.removals}
+            # A missing orphan needs no parent probe — unlinking it is a
+            # no-op; only its lock entry is cleared. Probing a read-only
+            # parent anyway would block pruning of unrelated files.
+            probe_dirs |= {f.parent for f in plan.removals
+                           if os.path.lexists(f)}
         pd = lock_file.parent
         try:
             for pd in sorted(probe_dirs):
@@ -1906,7 +2011,7 @@ def main() -> int:
             # a post-rename chmod could follow a swapped-in symlink.
             atomic_replace(dst,
                            lambda f, b=plan.payload[rel_dst]: f.write(b),
-                           src=src,
+                           times=plan.times.get(rel_dst),
                            mode=(planned[3] if planned is not None else None))
         if args.prune:
             for f in plan.removals:
