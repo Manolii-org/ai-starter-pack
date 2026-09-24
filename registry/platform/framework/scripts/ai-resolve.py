@@ -55,6 +55,11 @@ COMPONENT_TARGETS = {
 # never be unlinked by a lockfile entry).
 OWNED_ROOTS = frozenset(COMPONENT_TARGETS.values())
 LOCK_PATH = ".ai/capability-lock.json"
+# Lock 'exec' records written by this resolver are tagged full masks
+# (EXEC_TAG | mode&0o777). The tag keeps a genuine installed mode of 0 or
+# 0o111 distinguishable from a legacy record, which only ever encoded
+# any-exec on/off (see _exec_matches).
+EXEC_TAG = 0o10000
 REQUIRES_RE = re.compile(
     r"^(platform|manolii|buro|impaktful|cpdcheck|repo|personal)/([a-z0-9][a-z0-9-]*)$"
 )
@@ -215,14 +220,23 @@ def _mini_yaml(text: str):
             continue
         # A flow collection may continue on deeper lines — fold each
         # (comment-stripped) line in with one space until the brackets
-        # balance.
-        while flow_depth(body) > 0 and li < len(raw_lines):
-            part = strip_comment(raw_lines[li].strip())
-            li += 1
-            if part.strip():
-                body += " " + part
-        if flow_depth(body) != 0:
-            raise ValueError("unterminated flow collection")
+        # balance. Folding is gated on the VALUE actually opening a
+        # collection: a '[' or '{' inside a plain scalar ('description:
+        # Use [ to open') is ordinary text, not a bracket to balance.
+        value = body.lstrip()
+        if value[:1] == "-":
+            value = value[1:].lstrip()
+        fold = value[:1] in "[{"
+        if not fold and ":" in value:
+            fold = value.split(":", 1)[1].lstrip()[:1] in "[{"
+        if fold:
+            while flow_depth(body) > 0 and li < len(raw_lines):
+                part = strip_comment(raw_lines[li].strip())
+                li += 1
+                if part.strip():
+                    body += " " + part
+            if flow_depth(body) != 0:
+                raise ValueError("unterminated flow collection")
         indent = len(body) - len(body.lstrip())
         if "\t" in body[:indent]:
             raise ValueError("tab indentation is not supported")
@@ -282,8 +296,14 @@ def _mini_yaml(text: str):
             raise ValueError("empty scalar")
         if tok.startswith("[") and tok.endswith("]"):
             inner = tok[1:-1].strip()
-            return ([] if not inner
-                    else [scalar(p) for p in flow_items(inner)])
+            if not inner:
+                return []
+            items = flow_items(inner)
+            # A trailing comma is legal YAML — the text after it is empty,
+            # not an item. A bare empty item mid-list still fails closed.
+            if not items[-1].strip():
+                items = items[:-1]
+            return [scalar(p) for p in items]
         if tok == "{}":
             return {}
         if tok == "[]":
@@ -292,7 +312,10 @@ def _mini_yaml(text: str):
             # Flow map — `{k: v, ...}`; keys are bare scalars in the
             # supported subset (quoted keys stay fail-closed).
             out_map: dict = {}
-            for item in flow_items(tok[1:-1].strip()):
+            map_items = flow_items(tok[1:-1].strip())
+            if map_items and not map_items[-1].strip():
+                map_items = map_items[:-1]  # legal trailing comma
+            for item in map_items:
                 m = re.match(r"^([A-Za-z0-9_.-]+)\s*:\s*(.*)$",
                              item.strip(), re.S)
                 if not m:
@@ -519,11 +542,12 @@ class Plan:
     removals: list[Path] = field(default_factory=list)
     advisories: list[str] = field(default_factory=list)
     resolved: list[dict] = field(default_factory=list)
-    # rel_dst -> (src_sha256, plugin_req, src exec mask) for every planned
-    # write — cross-plugin output-path collision detection: the last writer
-    # must never win silently, and identical bytes with different modes are
-    # not the same file.
-    planned: dict[str, tuple[str, str, int]] = field(default_factory=dict)
+    # rel_dst -> (src_sha256, plugin_req, src exec mask, installed mode)
+    # for every planned write — cross-plugin output-path collision
+    # detection: the last writer must never win silently, and identical
+    # bytes with different modes are not the same file.
+    planned: dict[str, tuple[str, str, int, int]] = field(
+        default_factory=dict)
     # rel_dst -> verified source bytes, captured at plan time so --apply
     # writes what was checksummed instead of re-reading a mutable registry.
     payload: dict[str, bytes] = field(default_factory=dict)
@@ -545,7 +569,9 @@ def load_manifest(path: Path) -> dict:
         if key not in data:
             sys.stderr.write(f"FAIL: ai-manifest.yaml missing required key: {key}\n")
             sys.exit(2)
-    if data["version"] != 1:
+    # bool True and float 1.0 both == 1 in Python — the schema version is
+    # a literal int or the manifest is malformed, not merely unsupported.
+    if type(data["version"]) is not int or data["version"] != 1:
         sys.stderr.write(f"FAIL: unsupported manifest version: {data['version']}\n")
         sys.exit(2)
     if not isinstance(data["requires"], list):
@@ -728,6 +754,30 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
             # tag: resolves strictly under refs/tags/ — tag:main must not
             # satisfy against a branch.
             pin_rev = f"refs/tags/{want}"
+        # The registry must BE the checkout (or its registry/ dir) —
+        # rev-parse under a registry copied beneath an unrelated repo
+        # resolves against the PARENT's refs, verifying the pin against
+        # a tree it does not describe.
+        top_r = subprocess.run(
+            ["git", "-C", str(registry_root), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=10)
+        if top_r.returncode != 0:
+            plan.conflicts.append((
+                repo_root / req,
+                f"pinned ref '{ref}' needs a verifiable git checkout — "
+                "the registry source is not a git repository",
+            ))
+            return
+        rr = registry_root.resolve()
+        top = Path(top_r.stdout.strip()).resolve()
+        if rr != top and rr != top / "registry":
+            plan.conflicts.append((
+                repo_root / req,
+                f"pinned ref '{ref}' needs the registry at a checkout root "
+                "or its registry/ dir — a registry nested inside another "
+                "repository would verify the pin against the wrong tree",
+            ))
+            return
         head = git_rev(registry_root, "HEAD")
         if head is None:
             plan.conflicts.append((
@@ -1125,7 +1175,17 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                 exec_consistent = (rel_dst not in locked or rec_exec is None
                                    or _exec_matches(rec_exec,
                                                     dst.stat().st_mode))
+                # 'identical' also requires the SOURCE's current mode to be
+                # the installed-mode record: a permission-only registry
+                # change (0644 -> 0444, same bytes) is registry mode drift,
+                # not identity — falling through to the rewrite path keeps
+                # the installed copy and the lock record in step. For a
+                # legacy record the comparison is any-exec only.
+                mode_consistent = (rel_dst not in locked or rec_exec is None
+                                   or _exec_matches(rec_exec,
+                                                    src.stat().st_mode))
                 if (bytes_match and same_exec and exec_consistent
+                        and mode_consistent
                         and rel_dst in locked
                         and locked[rel_dst] is not None
                         and locked[rel_dst] != src_sha):
@@ -1143,10 +1203,18 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                         "re-resolve, or restore the installed bytes)",
                     ))
                     continue
-                if bytes_match and same_exec and exec_consistent:
+                if (bytes_match and same_exec and exec_consistent
+                        and mode_consistent):
                     plan.skips.append((dst, "identical"))
+                    # The lock records the mode of the file actually on
+                    # disk — dst's real mask, not the registry source's.
+                    # For an adopted untracked file dst is the only truth;
+                    # for a tracked identical file dst == record == src.
+                    dst_mode = dst.stat().st_mode & 0o777
                     plan.planned[rel_dst] = (src_sha, req, src_exec,
-                                             src_mode)
+                                             dst_mode)
+                    materialised[rel_dst] = src_sha
+                    exec_modes[rel_dst] = dst_mode
                 elif rel_dst not in locked:
                     plan.conflicts.append((
                         dst,
@@ -1160,8 +1228,9 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                         "edit (restore it or delete it and re-resolve)",
                     ))
                     continue
-                elif not same_exec or not exec_consistent:
-                    # Bytes match the install record but the exec state
+                elif (not same_exec or not exec_consistent
+                      or not mode_consistent):
+                    # Bytes match the install record but the mode state
                     # differs from the source and/or the record — the lock's
                     # installed-mode record distinguishes a local chmod
                     # (refuse) from a registry mode change (repair by
@@ -1191,7 +1260,9 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                                              src_mode)
                     plan.payload[rel_dst] = src_bytes
                 materialised[rel_dst] = src_sha
-                exec_modes[rel_dst] = src_mode
+                # The identical-skip branch records dst's real mask; every
+                # other path installs the source's.
+                exec_modes.setdefault(rel_dst, src_mode)
             else:
                 plan.writes.append((src, dst))
                 plan.planned[rel_dst] = (src_sha, req, src_exec, src_mode)
@@ -1326,13 +1397,13 @@ def lock_provenance(lock: dict) -> dict[str, str]:
 
 
 def lock_exec_modes(lock: dict) -> dict[str, int]:
-    """rel path -> installed mode (st_mode & 0o777), for chmod-drift
-    attribution: the lock records the mode the resolver materialised, so a
-    local chmod (dst mode != record) is distinguishable from a registry
-    mode change (dst mode == record != src mode). Records written by
-    this resolver hold the full installed mask; legacy bool values are
-    kept as-is — they cannot distinguish a partial-mask chmod, so exec
-    drift against them conflicts rather than guesses."""
+    """rel path -> installed mode record, for chmod-drift attribution: the
+    lock records the mode the resolver materialised, so a local chmod
+    (dst mode != record) is distinguishable from a registry mode change
+    (dst mode == record != src mode). Records written by this resolver
+    are tagged (EXEC_TAG | full mask); legacy bool/int values are kept
+    as-is — they express only an on/off exec state, so drift against
+    them compares any-exec or conflicts rather than guesses."""
     execmap = lock.get("exec")
     return dict(execmap) if isinstance(execmap, dict) else {}
 
@@ -1340,14 +1411,15 @@ def lock_exec_modes(lock: dict) -> dict[str, int]:
 def _exec_matches(rec, mode: int) -> bool:
     """Match an installed-mode record against a live st_mode.
 
-    Records this resolver writes hold the full installed mask (mode &
-    0o777), so a chmod inside the exec bits (0755 -> 0744) differs from
-    the record. Legacy records — bools and the old any-exec masks
-    0o111/0 — express only an on/off state (git reproduces 100644/100755
-    and the umask picks the actual bits), so they compare by any-exec."""
+    Records this resolver writes are EXEC_TAG-tagged full masks — the
+    tag exists so a genuine installed mode of 0 or 0o111 is not mistaken
+    for a legacy record. Legacy records — bools and the old any-exec
+    masks 0o111/0 — express only an on/off state (git reproduces
+    100644/100755 and the umask picks the actual bits), so they compare
+    by any-exec."""
     if (isinstance(rec, int) and not isinstance(rec, bool)
-            and rec not in (0, 0o111)):
-        return (mode & 0o777) == rec
+            and rec >= EXEC_TAG):
+        return (mode & 0o777) == (rec & 0o777)
     return bool(mode & 0o111) == bool(rec)
 
 
@@ -1589,7 +1661,7 @@ def main() -> int:
             rel = f.relative_to(repo_root).as_posix()
             if rel in install_prov:
                 expected_prov[rel] = install_prov[rel]
-        expected_exec = {rel: mode for r in plan.resolved
+        expected_exec = {rel: (mode | EXEC_TAG) for r in plan.resolved
                          for rel, mode in r["exec"].items()}
         for f in plan.removals:
             rel = f.relative_to(repo_root).as_posix()
@@ -1664,7 +1736,11 @@ def main() -> int:
             # the lock must describe the file that was actually installed.
             planned = plan.planned.get(rel_dst)
             if planned is not None:
-                os.chmod(dst, (dst.stat().st_mode & ~0o111) | planned[2])
+                # The FULL planned mask, not just exec bits — copystat
+                # copied the source's CURRENT mode, which may have drifted
+                # since planning; the installed file must match the mode
+                # the lock is about to record.
+                os.chmod(dst, planned[3] & 0o777)
         if args.prune:
             for f in plan.removals:
                 if f.is_file() or f.is_symlink():
@@ -1704,7 +1780,7 @@ def main() -> int:
                 rel = f.relative_to(repo_root).as_posix()
                 if rel in install_prov:
                     new_prov[rel] = install_prov[rel]
-        new_exec = {rel: mode for r in plan.resolved
+        new_exec = {rel: (mode | EXEC_TAG) for r in plan.resolved
                     for rel, mode in r["exec"].items()}
         if not args.prune:
             for f in plan.removals:

@@ -4296,8 +4296,10 @@ def test_lock_records_full_installed_mode(tmp_path):
     assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
     lock = json.loads(
         (consumer / ".ai" / "capability-lock.json").read_text())
-    assert lock["exec"][".claude/skills/demo/run.sh"] == 0o750
-    assert lock["exec"][".claude/skills/demo/SKILL.md"] == 0o644
+    # New records are EXEC_TAG-tagged full masks — the tag keeps a real
+    # installed mode of 0 or 0o111 distinct from a legacy any-exec record.
+    assert lock["exec"][".claude/skills/demo/run.sh"] == 0o10000 | 0o750
+    assert lock["exec"][".claude/skills/demo/SKILL.md"] == 0o10000 | 0o644
 
 
 def test_legacy_bool_exec_record_conflicts_on_drift(tmp_path):
@@ -4334,7 +4336,7 @@ def test_legacy_bool_exec_record_conflicts_on_drift(tmp_path):
     dst.chmod(0o755)
     assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
     lock = json.loads((ai / "capability-lock.json").read_text())
-    assert lock["exec"][rel] == 0o755
+    assert lock["exec"][rel] == 0o10000 | 0o755
 
 
 def test_legacy_bool_record_allows_registry_mode_repair(tmp_path):
@@ -4370,7 +4372,7 @@ def test_legacy_bool_record_allows_registry_mode_repair(tmp_path):
     assert r.returncode == 0, r.stdout
     assert dst.stat().st_mode & 0o111
     lock = json.loads((ai / "capability-lock.json").read_text())
-    assert lock["exec"][rel] == 0o755
+    assert lock["exec"][rel] == 0o10000 | 0o755
 
 
 def test_coincident_local_and_registry_chmod_conflicts(tmp_path):
@@ -4392,6 +4394,151 @@ def test_coincident_local_and_registry_chmod_conflicts(tmp_path):
     r = run_resolver(m, reg_root, consumer, "--apply")
     assert r.returncode == 1
     assert "exec mode differs" in r.stdout
+
+
+def test_permission_only_registry_change_repairs(tmp_path):
+    """A registry chmod with identical bytes (0644 -> 0444) is mode drift,
+    not 'identical' — rewriting keeps the installed file in step with the
+    tagged full-mask record instead of stranding the consumer's copy."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/SKILL.md", "---\nname: demo\n"
+                                "description: d\n---\nbody")],
+    })
+    src = (reg_root / "registry" / "platform" / "framework" / "skills"
+           / "demo" / "SKILL.md")
+    src.chmod(0o644)
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    dst = consumer / ".claude" / "skills" / "demo" / "SKILL.md"
+    src.chmod(0o444)
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    assert dst.stat().st_mode & 0o777 == 0o444
+    lock = json.loads(
+        (consumer / ".ai" / "capability-lock.json").read_text())
+    rel = ".claude/skills/demo/SKILL.md"
+    assert lock["exec"][rel] == 0o10000 | 0o444
+    # Steady state — the repaired mode satisfies the record on re-resolve.
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    assert run_resolver(m, reg_root, consumer, "--check").returncode == 0
+
+
+def test_adopted_identical_records_dst_mode(tmp_path):
+    """An untracked file byte-identical to the registry source is adopted
+    for drift-watching — the lock must record the mode the file actually
+    carries, not the source's, or the next resolve sees phantom drift."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/SKILL.md", "---\nname: demo\n"
+                                "description: d\n---\nbody")],
+    })
+    (reg_root / "registry" / "platform" / "framework" / "skills"
+     / "demo" / "SKILL.md").chmod(0o600)
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    dst = consumer / ".claude" / "skills" / "demo" / "SKILL.md"
+    dst.parent.mkdir(parents=True)
+    dst.write_text("---\nname: demo\ndescription: d\n---\nbody")
+    dst.chmod(0o644)
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    lock = json.loads(
+        (consumer / ".ai" / "capability-lock.json").read_text())
+    rel = ".claude/skills/demo/SKILL.md"
+    assert lock["exec"][rel] == 0o10000 | 0o644
+    # Re-resolve is a clean identical-skip — no phantom mode conflict.
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    assert run_resolver(m, reg_root, consumer, "--check").returncode == 0
+
+
+def test_exec_matches_tagged_vs_legacy_records():
+    """Tagged records compare the full mask — a genuine installed mode of
+    0 or 0o111 must not be mistaken for a legacy any-exec record."""
+    m = load_resolve_module()._exec_matches
+    assert m(0o10000 | 0o111, 0o111) is True
+    assert m(0o10000 | 0o111, 0o755) is False
+    assert m(0o10000 | 0, 0o400) is False
+    assert m(0o10000 | 0o644, 0o644) is True
+    # Legacy encodings keep any-exec semantics.
+    assert m(0o111, 0o755) is True
+    assert m(0o111, 0o644) is False
+    assert m(True, 0o755) is True
+    assert m(False, 0o600) is True
+
+
+def test_manifest_version_must_be_int(tmp_path):
+    """`version: true` and `version: 1.0` satisfy `!= 1` in Python — the
+    schema version is a literal int or the manifest is malformed."""
+    for bad in ("true", "1.0"):
+        consumer = tmp_path / f"consumer-{bad}"
+        consumer.mkdir()
+        m = consumer / "ai-manifest.yaml"
+        m.write_text(f"version: {bad}\nuniverse: manolii\nrequires: []\n")
+        r = run_resolver(m, tmp_path / "src", consumer)
+        assert r.returncode == 2
+        assert "unsupported manifest version" in r.stderr
+
+
+def test_mini_yaml_flow_trailing_comma():
+    """A trailing comma inside a flow list/map is legal YAML — the empty
+    text after it is not an item."""
+    mod = load_resolve_module()
+    data = mod._mini_yaml(
+        "requires: [{plugin: platform/framework, ref: \"1.0.0\",}, "
+        "]\nsurfaces: [claude-code,]\n")
+    assert data["surfaces"] == ["claude-code"]
+    assert data["requires"] == [
+        {"plugin": "platform/framework", "ref": "1.0.0"}]
+
+
+def test_mini_yaml_plain_scalar_containing_bracket():
+    """'description: Use [ to open' is a plain scalar with '[' text — not
+    a flow collection; folding/depth must not fire."""
+    mod = load_resolve_module()
+    data = mod._mini_yaml("a:\n  description: Use [ to open\n")
+    assert data["a"]["description"] == "Use [ to open"
+
+
+def test_pinned_ref_nested_checkout_conflicts(tmp_path):
+    """rev-parse inside a registry nested beneath an unrelated repository
+    resolves against the PARENT's refs — a pin would verify a tree it does
+    not describe, so refuse unless the registry IS the checkout root or
+    its registry/ dir."""
+    import subprocess as sp
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    sp.run(["git", "init", "-q"], cwd=outer, env=env, check=True)
+    (outer / "README").write_text("x")
+    sp.run(["git", "add", "-A"], cwd=outer, env=env, check=True)
+    sp.run(["git", "commit", "-qm", "init"], cwd=outer, env=env, check=True)
+    sp.run(["git", "tag", "v1.0.0"], cwd=outer, env=env, check=True)
+    # Registry nested at outer/sub/registry — not the checkout root.
+    reg_root = make_registry(outer / "sub", {
+        "platform/framework": [("skills/demo/x.md", "v1")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework",
+                         "ref": "tag:v1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 1
+    assert "checkout root" in r.stdout
+    # A registry at the checkout's registry/ dir still verifies.
+    good_root = make_registry(outer / "ok", {
+        "platform/framework": [("skills/demo/x.md", "v1")],
+    })
+    sp.run(["git", "init", "-q"], cwd=good_root, env=env, check=True)
+    sp.run(["git", "add", "-A"], cwd=good_root, env=env, check=True)
+    sp.run(["git", "commit", "-qm", "init"], cwd=good_root, env=env,
+           check=True)
+    sp.run(["git", "tag", "v1.0.0"], cwd=good_root, env=env, check=True)
+    r2 = run_resolver(m, good_root, consumer, "--apply")
+    assert r2.returncode == 0, r2.stdout
 
 
 def test_mode_divergent_collision_conflicts(tmp_path):
