@@ -5547,3 +5547,303 @@ def test_prune_cleanup_survives_readonly_parent(tmp_path):
     lock = json.loads(
         (consumer / ".ai" / "capability-lock.json").read_text())
     assert ".claude/skills/old/SKILL.md" not in lock["files"]
+
+
+def test_mini_yaml_tab_rejected():
+    """Tabs can never start a token — inside or outside a block scalar —
+    matching PyYAML's ScannerError."""
+    mod = load_resolve_module()
+    with pytest.raises(ValueError):
+        mod._mini_yaml("x: |\n  a\n\tb\n")
+    with pytest.raises(ValueError):
+        mod._mini_yaml("x:\n\ta\n")
+    with pytest.raises(ValueError):
+        mod._mini_yaml("a:\tb\n")
+    # a tab DEEPER than the content indent is literal content, not a token
+    assert mod._mini_yaml("x: |\n  a\n  \tb\n") == {"x": "a\n\tb\n"}
+
+
+def test_mini_yaml_block_whitespace_lines():
+    """Whitespace-only lines inside a block scalar dedent relative to the
+    content indent — a blank when shallower, literal spaces when deeper
+    (kept even trailing). A leading ws-line deeper than the first content
+    line is a PyYAML error, not auto-detected indentation."""
+    mod = load_resolve_module()
+    assert mod._mini_yaml("x: |\n  a\n   \n  b\n") == {"x": "a\n \nb\n"}
+    # trailing ws deeper than the dedent is literal content — kept
+    assert mod._mini_yaml("x: |\n  a\n   \n") == {"x": "a\n \n"}
+    # a leading ws line deeper than the first content line → error
+    with pytest.raises(ValueError):
+        mod._mini_yaml("x: |\n    \n  a\n")
+    # all-pending whitespace lines (never reaching content) → ''
+    assert mod._mini_yaml("x: |\n    \n") == {"x": ""}
+    assert mod._mini_yaml("x: |\n \n") == {"x": ""}
+    assert mod._mini_yaml("x: |\n  \n   \n") == {"x": ""}
+    # explicit indent: a ws line deeper than it keeps the excess spaces
+    assert mod._mini_yaml("x: |2\n    \n") == {"x": "  \n"}
+    assert mod._mini_yaml("x: |-\n  \n   \n") == {"x": ""}
+
+
+def test_mini_yaml_doc_markers_col0_only():
+    """`---`/`...` are document markers at column 0 only — an indented
+    `---` inside a scalar continuation is plain text."""
+    mod = load_resolve_module()
+    assert mod._mini_yaml("---\nx: a\n...") == {"x": "a"}
+    assert mod._mini_yaml("x:\n  ---\n  a\n") == {"x": "--- a"}
+    with pytest.raises(ValueError):
+        mod._mini_yaml("x: a\n---\ny: 2\n")
+    with pytest.raises(ValueError):
+        mod._mini_yaml("x: |\n  a\n---\n")
+    with pytest.raises(ValueError):
+        mod._mini_yaml("x: a\n...\n---\ny: 2\n")
+    with pytest.raises(ValueError):
+        mod._mini_yaml("---\n# c\n\n---\nx: 1\n")
+
+
+def test_mini_yaml_quoted_multiline_folds():
+    """An open quoted scalar folds continuation lines — content joins on
+    spaces, blank lines become literal newlines, structure inside the
+    quote is text."""
+    mod = load_resolve_module()
+    assert mod._mini_yaml('x: "a\n  b"\n') == {"x": "a b"}
+    assert mod._mini_yaml("x: 'a\n  b'\n") == {"x": "a b"}
+    assert mod._mini_yaml('x: "a\n\n  b"\n') == {"x": "a\nb"}
+    assert mod._mini_yaml("x: 'a\n\n  b'\n") == {"x": "a\nb"}
+    # blank line before the continuation → the fold keeps its newline
+    assert mod._mini_yaml('x: "a"\n') == {"x": "a"}
+    doc = mod._mini_yaml('x: "a\n   \n  b"\n')
+    assert doc == {"x": "a\nb"}
+    # a continuation line's leading whitespace (spaces or tabs) folds
+    # into the single joining space — never content
+    assert mod._mini_yaml('x: "a\n   b"\n') == {"x": "a b"}
+    assert mod._mini_yaml('x: "a\n  \tb"\n') == {"x": "a b"}
+    # key-shaped and dash lines inside the quote are text
+    assert mod._mini_yaml('x: "a\n  y: 1"\n') == {"x": "a y: 1"}
+    assert mod._mini_yaml("x: 'a\n  - s'\n") == {"x": "a - s"}
+    # an unterminated quote is a ScannerError in PyYAML — we raise too
+    with pytest.raises(ValueError):
+        mod._mini_yaml('x: "a\ny: 2\n')
+    with pytest.raises(ValueError):
+        mod._mini_yaml('x: "a\n  y: 1\n')
+
+
+def test_mini_yaml_plain_scalar_continuations():
+    """Plain scalars fold deeper-indented continuations: content on
+    spaces, blank lines to newlines, even lines shaped like seq items
+    or document markers. A key-shaped line is 'mapping values are not
+    allowed here'; a comment ends the scalar entirely."""
+    mod = load_resolve_module()
+    assert mod._mini_yaml("x: a\n  b\n") == {"x": "a b"}
+    assert mod._mini_yaml("x: a\n\n  b\n") == {"x": "a\nb"}
+    assert mod._mini_yaml("x: a\n  - s\n") == {"x": "a - s"}
+    assert mod._mini_yaml("x: a\n  ---\n") == {"x": "a ---"}
+    assert mod._mini_yaml("x: a\n  |\n") == {"x": "a |"}
+    assert mod._mini_yaml("x: a\n   \n  b\n") == {"x": "a\nb"}
+    with pytest.raises(ValueError):
+        mod._mini_yaml("x: a\n  \tb\n")
+    with pytest.raises(ValueError):
+        mod._mini_yaml("x:\n  a\n  y: 1\n")
+    with pytest.raises(ValueError):
+        mod._mini_yaml("x:\n  a\n y: 1\n")
+    with pytest.raises(ValueError):
+        mod._mini_yaml("x: a\n y: 1\n")
+    # an outdented key ends the continuation — new sibling, not an error
+    assert mod._mini_yaml("x: a\n  b\ny: 1\n") == {"x": "a b", "y": 1}
+    # a comment terminates the scalar — a following indented line is an
+    # error at any depth
+    with pytest.raises(ValueError):
+        mod._mini_yaml("x: a\n # c\n  b\n")
+    with pytest.raises(ValueError):
+        mod._mini_yaml("x: a\n  # c\n  b\n")
+
+
+def test_mini_yaml_empty_value_dispatch():
+    """`key:` with nothing after it dispatches on the next real line:
+    deeper scalar → scalar, same-indent dash → nested sequence, deeper
+    key → nested map, a lone `|`/`>` → block scalar, else None."""
+    mod = load_resolve_module()
+    assert mod._mini_yaml("x:\n  a\n") == {"x": "a"}
+    assert mod._mini_yaml("x:\n b: 2\n") == {"x": {"b": 2}}
+    assert mod._mini_yaml("x:\n- s\n") == {"x": ["s"]}
+    assert mod._mini_yaml("x:\n - s\n") == {"x": ["s"]}
+    assert mod._mini_yaml("x:\nb: 2\n") == {"x": None, "b": 2}
+    assert mod._mini_yaml("x:\n") == {"x": None}
+    # lone indicator lines discovered AFTER the key
+    assert mod._mini_yaml("x:\n  |\n    a\n") == {"x": "a\n"}
+    assert mod._mini_yaml("x:\n  >\n    a\n") == {"x": "a\n"}
+    assert mod._mini_yaml("x:\n\n  |\n    a\n") == {"x": "a\n"}
+    assert mod._mini_yaml("x:\n  # c\n  |\n    a\n") == {"x": "a\n"}
+    assert mod._mini_yaml("x:\n  |\n") == {"x": ""}
+    # doc-root lone indicator is a scalar document
+    assert mod._mini_yaml("|\n  a\n") == "a\n"
+    # blank/comment lines between `x:` and a deeper scalar don't detach
+    # it — the scalar still attaches as the value
+    assert mod._mini_yaml("x:\n\n  a\n") == {"x": "a"}
+    assert mod._mini_yaml("x:\n # c\n  a\n") == {"x": "a"}
+
+
+def test_mini_yaml_comment_ends_block():
+    """A `#` line deeper than the key ends the block when shallower than
+    established content indent (or, pre-content, shallower than a deeper
+    whitespace line). At/above content indent it is literal."""
+    mod = load_resolve_module()
+    assert mod._mini_yaml("x: |\n   a\n  # c\n") == {"x": "a\n"}
+    assert mod._mini_yaml("x: |\n   \n  # c\n") == {"x": ""}
+    assert mod._mini_yaml("x: |\n    w\n  # c\n") == {"x": "w\n"}
+    assert mod._mini_yaml("- |\n   a\n  # c\n") == ["a\n"]
+    # comment at/above content indent is literal
+    assert mod._mini_yaml("x: |\n  a\n  # c\n  b\n") == {"x": "a\n# c\nb\n"}
+    assert mod._mini_yaml("x: |\n # c\n") == {"x": "# c\n"}
+    assert mod._mini_yaml("x: |\n # c\n  a\n") == {"x": "# c\n a\n"}
+    # an orphan line after the ended block still errors
+    with pytest.raises(ValueError):
+        mod._mini_yaml("x: |\n   \n  # c\n  a\n")
+
+
+def test_mini_yaml_dash_key_colon_dispatch():
+    """`- k:` (empty value inside a seq item) resolves like PyYAML:
+    a key AT the key column is a SIBLING of the item map, a deeper key
+    or deeper scalar is the VALUE, a dash attaches at >= key column,
+    and a marker in between detaches the next line."""
+    mod = load_resolve_module()
+    assert mod._mini_yaml("- k:\n  b: 2\n") == [{"k": None, "b": 2}]
+    assert mod._mini_yaml("- k:\n    b: 2\n") == [{"k": {"b": 2}}]
+    assert mod._mini_yaml("- k:\n   b: 2\n") == [{"k": {"b": 2}}]
+    with pytest.raises(ValueError):
+        mod._mini_yaml("- k:\n - s\n")
+    assert mod._mini_yaml("- k:\n   \n  b: 2\n") == [{"k": None, "b": 2}]
+    assert mod._mini_yaml("- k:\n\n  - x\n") == [{"k": ["x"]}]
+    assert mod._mini_yaml("- k:\n  - x\n") == [{"k": ["x"]}]
+    assert mod._mini_yaml("- k:\n  |\n    v\n") == [{"k": "v\n"}]
+    assert mod._mini_yaml("- k:\n\n   a\n") == [{"k": "a"}]
+    with pytest.raises(ValueError):
+        mod._mini_yaml("- k:\n\n  a\n")
+    with pytest.raises(ValueError):
+        mod._mini_yaml("- k:\n - s\n")
+
+
+def test_mini_yaml_dash_scalar_and_seq_folds():
+    """`- scalar` and deeper plain items fold continuations at their own
+    thresholds; a sibling dash inside a deeper seq's fold region is text."""
+    mod = load_resolve_module()
+    assert mod._mini_yaml("- foo\n  b\n") == ["foo b"]
+    # a dash line inside the scalar's fold region is text, not an item
+    assert mod._mini_yaml("- foo\n - s\n") == ["foo - s"]
+    assert mod._mini_yaml("- foo\n- s\n") == ["foo", "s"]
+    assert mod._mini_yaml("- k: v\n   c\n") == [{"k": "v c"}]
+    assert mod._mini_yaml("-\n  v\n c\n") == ["v c"]
+    # a shallower dash after a nested seq is a PyYAML error — orphan
+    with pytest.raises(ValueError):
+        mod._mini_yaml("-\n  - a\n - s\n")
+    assert mod._mini_yaml("x:\n  - foo\n    - bar\n") == {"x": ["foo - bar"]}
+    # a blank line inside the fold keeps a real newline
+    assert mod._mini_yaml("- foo\n   \n  b\n") == ["foo\nb"]
+    with pytest.raises(ValueError):
+        mod._mini_yaml("- desc: x\n    y: 1\n")
+    with pytest.raises(ValueError):
+        mod._mini_yaml("- a: 1\n      b: 2\n")
+    with pytest.raises(ValueError):
+        mod._mini_yaml("-\n  a\n    y: 1\n")
+
+
+def test_mini_yaml_lone_indicator_after_dash():
+    """`- |` values are every line deeper than the dash; the first
+    content line's indent may be deeper than the indicator's own."""
+    mod = load_resolve_module()
+    # deeper content than the first line's indent → PyYAML error
+    with pytest.raises(ValueError):
+        mod._mini_yaml("-\n  |\n   a\n  b\n")
+    # a leading ws line deeper than the first content line → error
+    with pytest.raises(ValueError):
+        mod._mini_yaml("- |\n   \n  a\n")
+    assert mod._mini_yaml("- |\n  a\n   b\n") == ["a\n b\n"]
+    # - | indented still ends cleanly at outdent
+    assert mod._mini_yaml("- |\n  a\n- s\n") == ["a\n", "s"]
+    # content below a bare dash's `|` dedents to its own first line
+    assert mod._mini_yaml("-\n  |\n a\n") == ["a\n"]
+
+
+def test_script_ref_separator_and_extensionless():
+    """Invocation prefixes allow ANY amount of whitespace before
+    scripts/ (`uv  run`, `sh\\t`), and extension-less names count too —
+    but prose `top/scripts/x` still doesn't invoke."""
+    mod = load_resolve_module()
+    assert mod.SCRIPT_REF.search(b"uv  run scripts/setup.py")
+    assert mod.SCRIPT_REF.search(b"sh\tscripts/setup.sh")
+    assert mod.SCRIPT_REF.search(b"env bash scripts/setup.sh")
+    assert mod.SCRIPT_REF.search(b"pipenv run scripts/setup.py")
+    assert mod.SCRIPT_REF.search(b"./scripts/setup.sh")
+    assert mod.SCRIPT_REF.search(b"source ./scripts/setup.sh")
+    assert not mod.SCRIPT_REF.search(b"top/scripts/setup.sh")
+    # extension-less scripts/ names are invocable too
+    body = (b"---\nconsumer_scripts: [helper]\n---\n"
+            b"source scripts/helper\n")
+    assert mod.SCRIPT_REF.search(body)
+    n = mod.SCRIPT_NAME.search(mod.SCRIPT_REF.search(body).group(0))
+    assert n.group(1) == b"helper"
+
+
+def test_script_dep_block_dot_slash_declared(tmp_path):
+    """`consumer_scripts: [./scripts/x]` declares `x` — a bundled script
+    stays a dep, an undeclared unbundled name still gates."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    # unbundled + declared via ./scripts/ → not a dep
+    body = (b"---\nconsumer_scripts: [./scripts/helper.sh]\n---\n"
+            b"bash scripts/helper.sh\n")
+    assert not mod.script_dep_block(pdir, body)
+    # same name declared WITHOUT the ./ prefix also counts
+    body2 = (b"---\nconsumer_scripts: [helper.sh]\n---\n"
+             b"bash scripts/helper.sh\n")
+    assert not mod.script_dep_block(pdir, body2)
+    # unbundled + NOT declared → dep
+    assert mod.script_dep_block(pdir, b"bash scripts/other.sh\n")
+    # bundled → dep regardless of declaration
+    (pdir / "scripts" / "helper.sh").write_bytes(b"x")
+    assert mod.script_dep_block(pdir, body)
+
+
+def test_secure_dir_fd_refuses_symlink_ancestors(tmp_path):
+    """secure_dir_fd must raise when ANY path component is a symlink —
+    a swapped-in link cannot redirect the write outside the tree."""
+    mod = load_resolve_module()
+    root = tmp_path / "root"
+    (root / "a" / "b").mkdir(parents=True)
+    fd = mod.secure_dir_fd(root, "a/b")
+    os.close(fd)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (root / "a" / "b").rmdir()
+    (root / "a" / "b").symlink_to(outside)
+    with pytest.raises(OSError):
+        mod.secure_dir_fd(root, "a/b")
+    (root / "a" / "b").unlink()
+    (root / "a" / "b").mkdir()
+    fd = mod.secure_dir_fd(root, "a/b")
+    # writes through the fd land in the real dir even if a later level
+    # is swapped — verified via atomic_replace's dfd path
+    mod.atomic_replace(
+        root / "a" / "b" / "out.md", lambda f: f.write(b"payload"),
+        mode=0o600, dfd=fd)
+    os.close(fd)
+    assert (root / "a" / "b" / "out.md").read_bytes() == b"payload"
+    assert not (root / "a" / "b" / "out.md").is_symlink()
+
+
+def test_dirfd_apply_writes_through_planted_parent_symlink(tmp_path):
+    """An --apply that prefetched a dir_fd must write beneath the real
+    directory even if the parent path is swapped for a symlink between
+    planning and apply."""
+    mod = load_resolve_module()
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/SKILL.md",
+                                "---\nname: demo\ndescription: d\n---\nv1")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    dst = consumer / ".claude" / "skills" / "demo" / "SKILL.md"
+    assert dst.is_file() and not dst.is_symlink()

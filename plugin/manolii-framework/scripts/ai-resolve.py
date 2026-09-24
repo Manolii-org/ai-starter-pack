@@ -74,14 +74,22 @@ SCRIPT_REF = re.compile(
     # word, not a suffix of `resource`/`outsource`/`oncexec`, and not the
     # tail of hyphenated prose like `open-source` or `re-exec`.
     rb"(?<![\w-])(?:python(?:\d+(?:\.\d+)*)?|bash|sh|zsh|node|npx|tsx|ts-node|deno"
-    rb"|ruby|perl|source|exec|bun|bunx|uv\s+run|pipenv\s+run)"
-    rb"\s+[^\n|&;`]*?scripts/(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs)\b"
-    rb"|\./scripts/(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs)\b"
+    # Separators are HORIZONTAL whitespace only — `\s` would let a command
+    # word at end of one line join a `scripts/` path at the start of the
+    # next (`source\nscripts/x.sh` is not an invocation).
+    rb"|ruby|perl|source|exec|bun|bunx|uv[ \t]+run|pipenv[ \t]+run)"
+    rb"[ \t]+[^\n|&;`]*?scripts/(?:[A-Za-z0-9_.-]+/)"
+    rb"*(?:[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs|cjs|rb|pl)|[A-Za-z0-9_-]+)"
+    rb"(?![\w.])"
+    rb"|\./scripts/(?:[A-Za-z0-9_.-]+/)"
+    rb"*(?:[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs|cjs|rb|pl)|[A-Za-z0-9_-]+)"
+    rb"(?![\w.])"
     # POSIX `.` — the dot builtin sources a file just like `source`. The
     # lookbehind keeps `..`, `foo.` and `./` out; `. ` requires whitespace
     # after the dot, so `./scripts/x.sh` still binds only to the exec alt.
-    rb"|(?<![\w./\\-])\.[ \t]+[^\n|&;`]*?scripts/(?:[A-Za-z0-9_.-]+/)*"
-    rb"[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs)\b")
+    rb"|(?<![\w./\\-])\.[ \t]+[^\n|&;`]*?scripts/(?:[A-Za-z0-9_.-]+/)"
+    rb"*(?:[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs|cjs|rb|pl)|[A-Za-z0-9_-]+)"
+    rb"(?![\w.])")
 # Backticked `scripts/x.py` is NOT an invocation context — prose uses it for
 # mentions. A real dependency that no interpreter/./ prefix expresses must be
 # declared explicitly: `requires_scripts: [...]` in the file's frontmatter.
@@ -95,7 +103,9 @@ CONSUMER_SCRIPT_KEYS = ("consumer_scripts",)
 # distinguish bundled plugin scripts (a real dependency) from
 # consumer-repository commands.
 SCRIPT_NAME = re.compile(
-    rb"scripts/((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs))\b")
+    rb"scripts/((?:[A-Za-z0-9_.-]+/)"
+    rb"*(?:[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs|cjs|rb|pl)|[A-Za-z0-9_-]+))"
+    rb"(?![\w.])")
 # A `|`/`>` block-scalar indicator with optional chomping (+/-) and
 # explicit-indentation (1-9) modifiers in either order: `|`, `>+`, `|-`,
 # `|2`, `|2-`, `|-2`, `|+2`, `|2+`. `|0` is not legal YAML (digit is 1-9)
@@ -264,6 +274,39 @@ def _mini_yaml(text: str):
             i += 1
         return -1
 
+    def open_quote(s: str) -> str:
+        # The quote char left open at the end of `s` ("'" or '"'), else ''.
+        # Same token-boundary gating as strip_comment: a quote mid-scalar
+        # ("don't", `x"y`) is plain text, not a quote opener.
+        in_s = in_d = False
+        sep = 0
+        i = 0
+        while i < len(s):
+            ch = s[i]
+            if in_d:
+                if ch == "\\":
+                    i += 2
+                    continue
+                if ch == '"':
+                    in_d = False
+            elif in_s:
+                if ch == "'":
+                    if s[i + 1:i + 2] == "'":
+                        i += 2
+                        continue
+                    in_s = False
+            elif ch == '"' and not s[sep:i].strip():
+                in_d = True
+            elif ch == "'" and not s[sep:i].strip():
+                in_s = True
+            else:
+                if (ch in ":,[{"
+                        or (ch == "-" and not s[sep:i].strip()
+                            and s[i + 1:i + 2] in (" ", "\t", ""))):
+                    sep = i + 1
+            i += 1
+        return '"' if in_d else ("'" if in_s else "")
+
     lines = []
     raw_lines = text.splitlines()
     # Whether the document's last line carries a line break — a `|+`/`>+`
@@ -273,7 +316,20 @@ def _mini_yaml(text: str):
     li = 0
     block_indent = None    # set: deeper lines are literal block content
     content_indent = None  # the block's dedent level (first content line)
+    pending_ws = []        # leading all-spaces lines awaiting content_indent
     seen_doc_start = False
+
+    def flush_pending_ws():
+        # Leading all-spaces lines are blank — unless one sits deeper than
+        # the first real content line, which is an error in YAML ("a leading
+        # empty line may not be more indented than the first non-empty line").
+        for pi, pt in pending_ws:
+            if content_indent is not None and pi > content_indent:
+                raise ValueError(
+                    "leading empty line deeper than block content")
+            lines.append((block_indent + 1, "", pt))
+        pending_ws.clear()
+
     while li < len(raw_lines):
         raw = raw_lines[li]
         term = li < len(raw_lines) - 1 or last_term
@@ -282,26 +338,70 @@ def _mini_yaml(text: str):
             # Inside a `|`/`>` block scalar — content is literal: '#' lines
             # are NOT comments and blank lines are content too. The block
             # ends at the first non-blank line no deeper than the key.
-            if not raw.strip():
-                lines.append((block_indent + 1, "", term))
-                continue
-            ind = len(raw) - len(raw.lstrip(" \t"))
-            if ind > block_indent:
+            if raw[:1] == "\t":
+                # A tab can never start a token — PyYAML ScannerError, even
+                # inside a block scalar's leading whitespace.
+                raise ValueError("tab cannot start a block-scalar line")
+            ind = len(raw) - len(raw.lstrip(" "))
+            if raw[ind:]:
+                # A comment line deeper than the key ends the block when it
+                # sits shallower than the established content indent (or,
+                # before any content, shallower than a deeper whitespace
+                # line already seen) — the line itself stays a comment,
+                # not content. At/above the content indent it is literal.
+                comment_ends = (
+                    ind > block_indent
+                    and raw[ind:].startswith("#")
+                    and ind < (content_indent
+                               if content_indent is not None
+                               else max((pi for pi, _ in pending_ws),
+                                        default=block_indent + 1)))
+                # Non-blank — indentation is the leading SPACES only; a tab
+                # after the spaces is content, not a token start.
+                if ind > block_indent and not comment_ends:
+                    if content_indent is None:
+                        content_indent = ind
+                        flush_pending_ws()
+                    if ind < content_indent:
+                        # Less indented than the first content line but
+                        # deeper than the key — invalid YAML, not quieter
+                        # content.
+                        raise ValueError(
+                            "inconsistent block scalar indentation")
+                    # YAML dedents block content by the first line's
+                    # indent — deeper lines keep their extra (relative)
+                    # indentation, and trailing spaces are literal
+                    # content too.
+                    lines.append((ind, raw[content_indent:], term))
+                    continue
+            else:
+                # Whitespace-only line (all spaces — a tab already raised).
+                # A blank line NEVER ends a block, whatever its indent.
                 if content_indent is None:
-                    content_indent = ind
-                if ind < content_indent:
-                    # Less indented than the first content line but deeper
-                    # than the key — invalid YAML, not quieter content.
-                    raise ValueError(
-                        "inconsistent block scalar indentation")
-                # YAML dedents block content by the first line's indent —
-                # deeper lines keep their extra (relative) indentation,
-                # and trailing spaces are literal content too.
-                lines.append((ind, raw[content_indent:], term))
+                    # BEFORE the first content line its validity depends on
+                    # the dedent level the first content line will set —
+                    # defer the decision.
+                    pending_ws.append((ind, term))
+                elif ind > content_indent:
+                    # Interior whitespace-only line deeper than the dedent
+                    # level — its excess spaces are significant content.
+                    lines.append((ind, raw[content_indent:], term))
+                else:
+                    lines.append((block_indent + 1, "", term))
                 continue
+            flush_pending_ws()
             block_indent = None
             content_indent = None
         if not raw.strip() or raw.lstrip().startswith("#"):
+            # Blank lines and comments are invisible to structure, but NOT
+            # to a plain-scalar continuation: a blank line folds to '\n'
+            # ('x:\n  a\n\n  b' -> 'a\nb') while a comment line ENDS the
+            # scalar ('x: a\n# c\n  b' is a PyYAML error). Blanks emit ""
+            # and comments emit "\x00" so parse can tell them apart; both
+            # carry their own indent so a stray ind can't reshape the doc.
+            kind = "" if not raw.strip() else "\x00"
+            lines.append(
+                (len(raw) - len(raw.lstrip(" ")), kind, term))
             continue
         body = strip_comment(raw.rstrip())
         if not body.strip():
@@ -309,18 +409,32 @@ def _mini_yaml(text: str):
         # Single-document markers: exactly one leading `---` is boilerplate;
         # an EMPTY first document still counts, so a second `---` is a new
         # document and raises. `...` ends the document — anything after it
-        # is trailing garbage.
-        if body.strip() == "---":
-            if seen_doc_start or lines:
+        # is trailing garbage. Markers count ONLY at column zero — an
+        # indented `---` is scalar content, not a document boundary.
+        if body == body.lstrip() and body.strip() == "---":
+            if (seen_doc_start
+                    or any(l[1] not in ("", "\x00") for l in lines)):
                 raise ValueError(
                     "multiple YAML documents are not supported")
             seen_doc_start = True
             continue
-        if body.strip() == "...":
+        if body == body.lstrip() and body.strip() == "...":
             for rest in raw_lines[li:]:
                 if rest.strip() and not rest.lstrip().startswith("#"):
                     raise ValueError("content after document end '...'")
             break
+        # A quoted scalar may continue on deeper lines — YAML folds the
+        # break to one space and strips the continuation's indent; a blank
+        # continuation line folds to a real '\n' (the space join resumes
+        # only after a non-blank line). Consumed lines are literal inside
+        # the quote — '#'/indents carry no syntax there.
+        while open_quote(body) and li < len(raw_lines):
+            nxt = raw_lines[li]
+            li += 1
+            if nxt.strip():
+                body += ("" if body.endswith("\n") else " ") + nxt.strip()
+            else:
+                body += "\n"
         # A flow collection may continue on deeper lines — fold each
         # (comment-stripped) line in with one space until the brackets
         # balance. Folding is gated on the VALUE actually opening a
@@ -343,9 +457,37 @@ def _mini_yaml(text: str):
                     body += " " + part
             if flow_depth(body) != 0:
                 raise ValueError("unterminated flow collection")
-        indent = len(body) - len(body.lstrip())
-        if "\t" in body[:indent]:
+        indent = len(body) - len(body.lstrip(" "))
+        if body[indent:indent + 1] == "\t":
+            # Only spaces may indent — a tab can never start a token.
             raise ValueError("tab indentation is not supported")
+        # A lone `|`/`>` on the line AFTER an empty value (`key:`, `-`,
+        # `- key:`) still opens a block scalar — scoped by the KEY's
+        # indent (or the item's key column for `- key:`), not by the
+        # indicator line's own column. Emit a \x01-tagged header at the
+        # effective block indent so parse treats it as block content; a
+        # bare `|` at document root works the same way.
+        lone_ind = BLOCK_IND_RE.fullmatch(body.lstrip())
+        if lone_ind:
+            # The preceding line for block discovery is the last REAL
+            # line — blank/comment markers between `x:` and the `|` do
+            # not detach it.
+            prev = next((l for l in reversed(lines)
+                         if l[1] not in ("", "\x00")), None)
+            if (prev is None
+                    or (prev[0] <= indent
+                        and (prev[1] == "-" or prev[1].endswith(":")))):
+                block_indent = (prev[0] + 2
+                                if prev is not None
+                                and prev[1].startswith("- ")
+                                else (prev[0] if prev is not None
+                                      else indent))
+                lines.append(
+                    (block_indent, "\x01" + body.lstrip(), True))
+                d = re.search(r"[1-9]", lone_ind.group(0))
+                content_indent = (block_indent + int(d.group(0))
+                                  if d else None)
+                continue
         lines.append((indent, body.lstrip(), True))
         # A `|`/`>` value opens a literal block on the deeper lines that
         # follow — `- |`/`- key: |` seq items too (the value after the dash
@@ -358,14 +500,23 @@ def _mini_yaml(text: str):
         # fixes the dedent level at block_indent + d instead of the first
         # content line's indent.
         bci = map_colon(value)
-        bind = (BLOCK_IND_RE.fullmatch(value[bci + 1:].strip())
-                if bci != -1 else BLOCK_IND_RE.fullmatch(value))
+        # The ':' separator only counts when followed by a space or EOL —
+        # `key:|`/`key:\t|` are not `key: <indicator>` pairs at all.
+        bind = (
+            BLOCK_IND_RE.fullmatch(value[bci + 1:].strip())
+            if bci != -1 and value[bci + 1:bci + 2] in (" ", "")
+            else (None if bci != -1 else BLOCK_IND_RE.fullmatch(value)))
         if bind:
             block_indent = (indent + 2
                             if seq_item and bci != -1 else indent)
             d = re.search(r"[1-9]", bind.group(0))
             content_indent = (block_indent + int(d.group(0))
                               if d else None)
+
+    if block_indent is not None:
+        # A block scalar running to EOF — deferred whitespace-only lines
+        # still belong to it (all blank when no content line ever came).
+        flush_pending_ws()
 
     pos = [0]
     # Quoted keys are legal YAML in block mappings just as in flow maps —
@@ -375,10 +526,62 @@ def _mini_yaml(text: str):
         # quoted alternatives are tried first, so a leading ' still parses
         # as a quoted key.
         r"^(\"(?:[^\"\\]|\\.)*\"|'(?:[^']|'')*'|[A-Za-z0-9_.'-]+)"
-        r"\s*:(?:\s+(.*))?$")
+        # The ':' separates a key only when followed by spaces or EOL — a
+        # tab is not a separator (`key:\tv` is a ScannerError in PyYAML).
+        # re.S: a folded multiline quoted value can carry a literal '\n'.
+        r" *:(?: +(.*)|)$",
+        re.S)
 
     def key_of(tok: str):
         return scalar(tok) if tok[:1] in "\"'" else tok
+
+    # "" = blank-line marker, "\x00" = comment marker — both invisible to
+    # structure but load-bearing inside a plain-scalar continuation.
+    def skip_markers():
+        while pos[0] < len(lines) and lines[pos[0]][1] in ("", "\x00"):
+            pos[0] += 1
+
+    def block_marker():
+        """Consume a \x01-tagged lone-indicator header + its content lines.
+
+        The header carries the effective block indent as its tuple indent —
+        content is every line deeper than that."""
+        bi, ind = lines[pos[0]][0], lines[pos[0]][1][1:]
+        pos[0] += 1
+        vals = []
+        while (pos[0] < len(lines) and lines[pos[0]][0] > bi
+               and lines[pos[0]][1] != "\x00"):
+            vals.append((lines[pos[0]][1], lines[pos[0]][2]))
+            pos[0] += 1
+        return block_scalar(ind, vals)
+
+    def fold_scalar(acc, threshold):
+        """Fold plain-scalar continuation lines into acc.
+
+        Non-key content deeper than `threshold` joins with one space.
+        A blank ("") line folds to a real '\n' — but only when content
+        follows it (trailing blanks before the scalar ends are dropped).
+        A "\x00" comment line ENDS the scalar (PyYAML: the comment breaks
+        the continuation, so a following indented line is an error).
+        A key-shaped line in the continuation region is 'mapping values
+        are not allowed here'."""
+        pending_nl = 0
+        while pos[0] < len(lines):
+            txt = lines[pos[0]][1]
+            if txt == "":
+                pending_nl += 1
+                pos[0] += 1
+                continue
+            if txt == "\x00" or lines[pos[0]][0] <= threshold:
+                break
+            if key_re.match(txt):
+                raise ValueError("mapping values are not allowed here")
+            acc = (str(acc) + "\n" * pending_nl
+                   + ("" if pending_nl or str(acc).endswith("\n")
+                      else " ") + txt)
+            pending_nl = 0
+            pos[0] += 1
+        return acc
 
     def flow_items(inner: str) -> list[str]:
         # Split a flow list's item text on top-level commas only — a comma
@@ -566,26 +769,55 @@ def _mini_yaml(text: str):
         if lines[pos[0]][0] != indent:
             raise ValueError("inconsistent indentation")
         first = lines[pos[0]][1]
+        if first.startswith("\x01"):
+            # Document rooted at a lone `|`/`>` block scalar.
+            return block_marker()
         if first == "-" or first.startswith("- "):
             seq = []
-            while (pos[0] < len(lines)
-                   and lines[pos[0]][0] == indent
-                   and (lines[pos[0]][1] == "-"
-                        or lines[pos[0]][1].startswith("- "))):
+            while pos[0] < len(lines):
+                if lines[pos[0]][1] in ("", "\x00"):
+                    pos[0] += 1
+                    continue
+                if (lines[pos[0]][0] != indent
+                        or not (lines[pos[0]][1] == "-"
+                                or lines[pos[0]][1].startswith("- "))):
+                    break
                 item = lines[pos[0]][1][1:].lstrip()
                 pos[0] += 1
                 if not item:
-                    seq.append(parse(lines[pos[0]][0])
-                               if pos[0] < len(lines)
-                               and lines[pos[0]][0] > indent else None)
+                    skip_markers()
+                    if (pos[0] < len(lines)
+                            and lines[pos[0]][1].startswith("\x01")):
+                        seq.append(block_marker())
+                    elif (pos[0] < len(lines)
+                          and lines[pos[0]][0] > indent):
+                        nxt = lines[pos[0]][1]
+                        if (key_re.match(nxt) or nxt == "-"
+                                or nxt.startswith("- ")):
+                            seq.append(parse(lines[pos[0]][0]))
+                        else:
+                            # `-` bare item + deeper plain text — a scalar
+                            # folding anything deeper than the dash.
+                            acc = lines[pos[0]][1]
+                            pos[0] += 1
+                            seq.append(fold_scalar(acc, indent))
+                            skip_markers()
+                            if (pos[0] < len(lines)
+                                    and lines[pos[0]][0] > indent):
+                                raise ValueError(
+                                    "nested structure after scalar")
+                    else:
+                        seq.append(None)
                     continue
                 if BLOCK_IND_RE.fullmatch(item):
                     # `- |` — the scalar item's block is every line deeper
                     # than the dash itself (how the preprocessor scoped
-                    # it, and how PyYAML reads it).
+                    # it, and how PyYAML reads it). A comment marker ends
+                    # the block — comments are not content.
                     vals = []
                     while (pos[0] < len(lines)
-                           and lines[pos[0]][0] > indent):
+                           and lines[pos[0]][0] > indent
+                           and lines[pos[0]][1] != "\x00"):
                         vals.append((lines[pos[0]][1], lines[pos[0]][2]))
                         pos[0] += 1
                     seq.append(block_scalar(item, vals))
@@ -602,18 +834,52 @@ def _mini_yaml(text: str):
                         # `- key: |` — same indent+2 block scoping as `- |`.
                         vals = []
                         while (pos[0] < len(lines)
-                               and lines[pos[0]][0] > indent + 2):
+                               and lines[pos[0]][0] > indent + 2
+                               and lines[pos[0]][1] != "\x00"):
                             vals.append((lines[pos[0]][1], lines[pos[0]][2]))
                             pos[0] += 1
                         d[ikey] = block_scalar(iv.strip(), vals)
                     elif iv is not None:
-                        d[ikey] = scalar(iv)
-                    elif (pos[0] < len(lines)
-                          and lines[pos[0]][0] > indent):
-                        d[ikey] = parse(lines[pos[0]][0])
+                        # A multiline plain scalar folds each continuation
+                        # line DEEPER THAN THE KEY'S COLUMN (indent+2) into
+                        # the value — a sibling key sits AT indent+2.
+                        d[ikey] = fold_scalar(scalar(iv), indent + 2)
                     else:
-                        d[ikey] = None
-                    while pos[0] < len(lines) and lines[pos[0]][0] > indent:
+                        skip_markers()
+                        if (pos[0] < len(lines)
+                                and lines[pos[0]][1].startswith("\x01")):
+                            d[ikey] = block_marker()
+                        elif (pos[0] < len(lines)
+                              and lines[pos[0]][0] > indent):
+                            ni, nxt = lines[pos[0]][0], lines[pos[0]][1]
+                            if ((nxt == "-" or nxt.startswith("- "))
+                                    and ni >= indent + 2):
+                                # `- key:` + `- x` at the key column or
+                                # deeper — a nested seq value.
+                                d[ikey] = parse(ni)
+                            elif ni > indent + 2:
+                                if key_re.match(nxt):
+                                    d[ikey] = parse(ni)
+                                else:
+                                    # `- key:` + deeper plain text — a
+                                    # folded scalar; a leftover at or below
+                                    # the key column is a sibling (or an
+                                    # orphan the sibling loop rejects).
+                                    acc = nxt
+                                    pos[0] += 1
+                                    d[ikey] = fold_scalar(acc, indent + 2)
+                            else:
+                                # Key at the item's key column — a
+                                # sibling, not the value.
+                                d[ikey] = None
+                        else:
+                            d[ikey] = None
+                    while pos[0] < len(lines):
+                        if lines[pos[0]][1] in ("", "\x00"):
+                            pos[0] += 1
+                            continue
+                        if lines[pos[0]][0] <= indent:
+                            break
                         more = parse(lines[pos[0]][0])
                         if not isinstance(more, dict):
                             raise ValueError("nested sequence inside item map")
@@ -624,10 +890,17 @@ def _mini_yaml(text: str):
                         d.update(more)
                     seq.append(d)
                 else:
-                    seq.append(scalar(item))
+                    # `- foo` plain item folds any deeper continuation
+                    # line into the scalar (deeper than the DASH's indent).
+                    seq.append(fold_scalar(scalar(item), indent))
             return seq
         out = {}
-        while pos[0] < len(lines) and lines[pos[0]][0] == indent:
+        while pos[0] < len(lines):
+            if lines[pos[0]][1] in ("", "\x00"):
+                pos[0] += 1
+                continue
+            if lines[pos[0]][0] != indent:
+                break
             km = key_re.match(lines[pos[0]][1])
             if not km:
                 raise ValueError(f"unsupported line {lines[pos[0]][1]!r}")
@@ -647,66 +920,75 @@ def _mini_yaml(text: str):
                 if BLOCK_IND_RE.fullmatch(v.strip()):
                     # Block scalar: every deeper-indented line is literal
                     # content (even lines shaped like keys or seq items).
+                    # A comment marker ends the block.
                     vals = []
                     while (pos[0] < len(lines)
-                           and lines[pos[0]][0] > indent):
+                           and lines[pos[0]][0] > indent
+                           and lines[pos[0]][1] != "\x00"):
                         vals.append((lines[pos[0]][1], lines[pos[0]][2]))
                         pos[0] += 1
                     out[k] = block_scalar(v.strip(), vals)
                 else:
-                    out[k] = scalar(v)
-                    # Plain scalars may continue on deeper-indented lines that
-                    # are not a new key or seq item — YAML folds them with one
-                    # space. A deeper key after a scalar is mixed content:
-                    # reject.
-                    while (pos[0] < len(lines)
-                           and lines[pos[0]][0] > indent
-                           and not key_re.match(lines[pos[0]][1])
-                           and not lines[pos[0]][1].startswith("-")):
-                        out[k] = str(out[k]) + " " + lines[pos[0]][1]
-                        pos[0] += 1
+                    # A plain scalar continues on deeper lines — YAML
+                    # folds them with one space (a blank line folds to
+                    # '\n'). A leftover deeper line afterwards is mixed
+                    # content: reject.
+                    out[k] = fold_scalar(scalar(v), indent)
+                    skip_markers()
                     if (pos[0] < len(lines) and lines[pos[0]][0] > indent):
                         raise ValueError("nested structure after scalar value")
-            elif (pos[0] < len(lines)
-                  and lines[pos[0]][0] == indent
-                  and (lines[pos[0]][1] == "-"
-                       or lines[pos[0]][1].startswith("- "))):
+            else:
+                skip_markers()
+            if v is None and (pos[0] < len(lines)
+                              and lines[pos[0]][1].startswith("\x01")):
+                out[k] = block_marker()
+            elif v is None and (pos[0] < len(lines)
+                                and lines[pos[0]][0] == indent
+                                and (lines[pos[0]][1] == "-"
+                                     or lines[pos[0]][1]
+                                     .startswith("- "))):
                 # Indentationless block sequence: `key:` followed by `-`
                 # items at the SAME indent is valid YAML (yaml.dump emits
                 # it). The seq parser stops at the next non-dash line, so
                 # sibling mapping keys are not consumed.
                 out[k] = parse(indent)
-            elif pos[0] < len(lines) and lines[pos[0]][0] > indent:
+            elif v is None and pos[0] < len(lines) and lines[pos[0]][0] > indent:
                 # `key:` empty followed by deeper plain text is a folded
                 # scalar in YAML; a deeper key/seq is a nested structure.
-                if (not key_re.match(lines[pos[0]][1])
-                        and not lines[pos[0]][1].startswith("-")):
-                    vals = []
-                    while (pos[0] < len(lines)
-                           and lines[pos[0]][0] > indent
-                           and not key_re.match(lines[pos[0]][1])
-                           and not lines[pos[0]][1].startswith("-")):
-                        vals.append(lines[pos[0]][1])
-                        pos[0] += 1
-                    out[k] = " ".join(vals)
+                # `- `-shaped lines only open a sequence in FIRST position
+                # — inside a scalar continuation they are literal text.
+                if (key_re.match(lines[pos[0]][1])
+                        or lines[pos[0]][1] == "-"
+                        or lines[pos[0]][1].startswith("- ")):
+                    out[k] = parse(lines[pos[0]][0])
+                else:
+                    acc = lines[pos[0]][1]
+                    pos[0] += 1
+                    # The scalar's first line sets the content column but
+                    # continuations fold at any depth past the KEY's own
+                    # indent (`x:\n  a\n a` -> 'a a' in PyYAML).
+                    out[k] = fold_scalar(acc, indent)
+                    skip_markers()
                     if (pos[0] < len(lines)
                             and lines[pos[0]][0] > indent):
                         raise ValueError("nested structure after scalar")
-                else:
-                    out[k] = parse(lines[pos[0]][0])
-            else:
+            elif v is None:
                 out[k] = None
         return out
 
     if not lines:
         return {}
-    if lines[0][1][:1] in "[{":
+    skip_markers()
+    if pos[0] == len(lines):
+        return {}
+    if lines[pos[0]][1][:1] in "[{":
         # A whole-document flow collection — e.g. frontmatter written as a
         # single `{k: v}` line — parses through scalar directly.
-        if len(lines) != 1:
+        if any(l[1] not in ("", "\x00") for l in lines[pos[0] + 1:]):
             raise ValueError("trailing unparseable structure")
-        return scalar(lines[0][1])
-    root = parse(lines[0][0])
+        return scalar(lines[pos[0]][1])
+    root = parse(lines[pos[0]][0])
+    skip_markers()
     if pos[0] != len(lines):
         raise ValueError("trailing unparseable structure")
     return root
@@ -779,6 +1061,7 @@ def script_dep_block(plugin_dir: Path, src_bytes: bytes,
         if bundled:
             return True  # bundled dep — resolver cannot satisfy it
         if (f"scripts/{name}" not in declared
+                and f"./scripts/{name}" not in declared
                 and name not in declared):
             return True  # unbundled + undeclared — would ship broken
     return False
@@ -927,9 +1210,42 @@ def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+# Descriptor-relative file ops (O_DIRECTORY/O_NOFOLLOW + dir_fd) — POSIX
+# only; Windows takes the path-based fallback.
+_HAS_DIRFD = (os.name == "posix" and hasattr(os, "O_DIRECTORY")
+              and hasattr(os, "O_NOFOLLOW") and os.supports_dir_fd
+              >= {os.open, os.mkdir, os.rename, os.utime, os.chmod,
+                  os.unlink, os.stat})
+
+
+def secure_dir_fd(root: Path, rel: str) -> int:
+    """A dir_fd for `rel` beneath `root`, creating missing components.
+
+    Every component is opened O_DIRECTORY|O_NOFOLLOW relative to the fd of
+    the component above it — a symlink planted (or swapped in) at ANY level
+    raises instead of letting a later write escape the tree. Callers own
+    the returned fd. POSIX-only; callers must gate on _HAS_DIRFD."""
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for part in rel.split("/") if rel and rel != "." else []:
+            try:
+                os.mkdir(part, 0o777, dir_fd=fd)
+            except FileExistsError:
+                pass
+            nfd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                          dir_fd=fd)
+            os.close(fd)
+            fd = nfd
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 def atomic_replace(dst: Path, fill,
                    times: tuple[int, int] | None = None,
-                   mode: int | None = None) -> None:
+                   mode: int | None = None,
+                   dfd: int | None = None) -> None:
     """Install `dst` through an exclusively-created sibling temp + rename.
 
     tempfile.mkstemp picks a random name with O_EXCL — a consumer cannot
@@ -941,10 +1257,41 @@ def atomic_replace(dst: Path, fill,
     destination intact rather than publishing a 0600 temp, and no
     post-rename chmod ever follows a swapped-in symlink.
 
+    When `dfd` is given (from secure_dir_fd), every syscall is relative to
+    the held-open verified directory — even a parent dir swapped for a
+    symlink between planning and apply cannot redirect the write.
+
     `times` is the (atime_ns, mtime_ns) snapshot captured at PLAN time —
     apply must never re-stat the registry source: a source that
     disappears mid-apply would otherwise strand already-written files
     with no lock record."""
+    if dfd is not None:
+        # Descriptor-relative temp — same O_EXCL guarantee as mkstemp but
+        # bound to the held-open parent instead of a rewalked path.
+        while True:
+            tmp_name = f".{dst.name}.{os.urandom(8).hex()}.tmp"
+            try:
+                tfd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                              0o600, dir_fd=dfd)
+                break
+            except FileExistsError:
+                continue
+        try:
+            with os.fdopen(tfd, "wb") as f:
+                fill(f)
+            if times is not None:
+                os.utime(tmp_name, ns=times, dir_fd=dfd,
+                         follow_symlinks=False)
+            if mode is not None:
+                os.chmod(tmp_name, mode & 0o777, dir_fd=dfd,
+                         follow_symlinks=False)
+            os.rename(tmp_name, dst.name, src_dir_fd=dfd, dst_dir_fd=dfd)
+        finally:
+            try:
+                os.unlink(tmp_name, dir_fd=dfd)
+            except OSError:
+                pass
+        return
     fd, tmp_name = tempfile.mkstemp(dir=dst.parent,
                                     prefix=f".{dst.name}.", suffix=".tmp")
     tmp = Path(tmp_name)
@@ -2074,37 +2421,77 @@ def main() -> int:
             probe_dirs |= {f.parent for f in plan.removals
                            if os.path.lexists(f)}
         pd = lock_file.parent
+        dfds: dict[str, int] = {}
         try:
             for pd in sorted(probe_dirs):
-                pd.mkdir(parents=True, exist_ok=True)
-                probe_fd, probe_name = tempfile.mkstemp(
-                    dir=pd, prefix=".write-probe.", suffix=".tmp")
-                os.close(probe_fd)
-                Path(probe_name).unlink()
+                if _HAS_DIRFD:
+                    rel_par = pd.relative_to(repo_root).as_posix()
+                    # secure_dir_fd creates missing components AND holds the
+                    # verified dir open — the write probe lands inside it
+                    # without re-walking a path a symlink could redirect.
+                    dfds[rel_par] = secure_dir_fd(repo_root, rel_par)
+                    pn = f".write-probe.{os.urandom(4).hex()}"
+                    pfd = os.open(pn, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                                  0o600, dir_fd=dfds[rel_par])
+                    os.close(pfd)
+                    os.unlink(pn, dir_fd=dfds[rel_par])
+                else:
+                    pd.mkdir(parents=True, exist_ok=True)
+                    probe_fd, probe_name = tempfile.mkstemp(
+                        dir=pd, prefix=".write-probe.", suffix=".tmp")
+                    os.close(probe_fd)
+                    Path(probe_name).unlink()
         except OSError as e:
+            for dfd in dfds.values():
+                os.close(dfd)
             sys.stderr.write(f"FAIL: cannot write to {pd}: {e}\n")
             return 2
-        for src, dst in plan.writes:
-            rel_dst = dst.relative_to(repo_root).as_posix()
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            # Write the bytes the plan checksummed, not a fresh read of src —
-            # a registry file swapped between plan and apply would otherwise
-            # ship content the lock never digested.
-            planned = plan.planned.get(rel_dst)
-            # The FULL planned mask lands on the temp before the rename —
-            # a post-rename chmod could follow a swapped-in symlink.
-            atomic_replace(dst,
-                           lambda f, b=plan.payload[rel_dst]: f.write(b),
-                           times=plan.times.get(rel_dst),
-                           mode=(planned[3] if planned is not None else None))
+
+        def parent_fd(p: Path) -> int | None:
+            if not _HAS_DIRFD:
+                return None
+            rel = p.relative_to(repo_root).as_posix()
+            if rel not in dfds:
+                dfds[rel] = secure_dir_fd(repo_root, rel)
+            return dfds[rel]
+
+        try:
+            for src, dst in plan.writes:
+                rel_dst = dst.relative_to(repo_root).as_posix()
+                if not _HAS_DIRFD:
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                # Write the bytes the plan checksummed, not a fresh read of
+                # src — a registry file swapped between plan and apply
+                # would otherwise ship content the lock never digested.
+                planned = plan.planned.get(rel_dst)
+                # The FULL planned mask lands on the temp before the
+                # rename — a post-rename chmod could follow a swapped-in
+                # symlink.
+                atomic_replace(
+                    dst,
+                    lambda f, b=plan.payload[rel_dst]: f.write(b),
+                    times=plan.times.get(rel_dst),
+                    mode=(planned[3] if planned is not None else None),
+                    dfd=parent_fd(dst.parent))
+            if args.prune:
+                for f in plan.removals:
+                    # Regular files only — a symlink reached removals only
+                    # through the kept-path branch, and unlink on it is
+                    # never a resolver-approved deletion.
+                    if f.is_file() and not f.is_symlink():
+                        if _HAS_DIRFD:
+                            os.unlink(f.name,
+                                      dir_fd=parent_fd(f.parent))
+                        else:
+                            f.unlink()
+                        print(f"  removed "
+                              f"{f.relative_to(repo_root).as_posix()}")
+        except OSError as e:
+            for dfd in dfds.values():
+                os.close(dfd)
+            sys.stderr.write(f"FAIL: cannot apply: {e}\n")
+            return 2
         if args.prune:
-            for f in plan.removals:
-                # Regular files only — a symlink reached removals only
-                # through the kept-path branch, and unlink on it is never
-                # a resolver-approved deletion.
-                if f.is_file() and not f.is_symlink():
-                    f.unlink()
-                    print(f"  removed {f.relative_to(repo_root).as_posix()}")
             for f in plan.removals:
                 d = f.parent
                 try:
@@ -2165,14 +2552,23 @@ def main() -> int:
             "exec": new_exec,
         }
         lock_file = repo_root / LOCK_PATH
-        lock_file.parent.mkdir(parents=True, exist_ok=True)
         # Atomic like the component writes — write_text truncates a
         # hard-linked lock's shared inode (external peer), and a crash
         # mid-write would leave a partial ownership record.
-        atomic_replace(
-            lock_file,
-            lambda f: f.write(json.dumps(lock_doc, indent=2).encode("utf-8")
-                              + b"\n"))
+        try:
+            if not _HAS_DIRFD:
+                lock_file.parent.mkdir(parents=True, exist_ok=True)
+            atomic_replace(
+                lock_file,
+                lambda f: f.write(json.dumps(lock_doc, indent=2)
+                                  .encode("utf-8") + b"\n"),
+                dfd=parent_fd(lock_file.parent))
+        except OSError as e:
+            sys.stderr.write(f"FAIL: cannot write {LOCK_PATH}: {e}\n")
+            return 2
+        finally:
+            for dfd in dfds.values():
+                os.close(dfd)
         print(f"\napplied: {len(plan.writes)} write(s), lock -> {LOCK_PATH}")
         return 0
 
