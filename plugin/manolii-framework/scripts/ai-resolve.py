@@ -424,7 +424,7 @@ def _mini_yaml(text: str):
         # indented `---` is scalar content, not a document boundary.
         if body == body.lstrip() and body.strip() == "---":
             if (seen_doc_start
-                    or any(l[1] not in ("", "\x00") for l in lines)):
+                    or any(ln[1] not in ("", "\x00") for ln in lines)):
                 raise ValueError(
                     "multiple YAML documents are not supported")
             seen_doc_start = True
@@ -435,7 +435,7 @@ def _mini_yaml(text: str):
             # (`--- {version: 1, ...}`). The marker still counts as the
             # document start; the remainder parses as the line's content.
             if (seen_doc_start
-                    or any(l[1] not in ("", "\x00") for l in lines)):
+                    or any(ln[1] not in ("", "\x00") for ln in lines)):
                 raise ValueError(
                     "multiple YAML documents are not supported")
             seen_doc_start = True
@@ -514,8 +514,8 @@ def _mini_yaml(text: str):
             # The preceding line for block discovery is the last REAL
             # line — blank/comment markers between `x:` and the `|` do
             # not detach it.
-            prev = next((l for l in reversed(lines)
-                         if l[1] not in ("", "\x00")), None)
+            prev = next((ln for ln in reversed(lines)
+                         if ln[1] not in ("", "\x00")), None)
             # `key: # note` strips to `key: ` — the emptiness test must
             # ignore the whitespace strip_comment left after the colon.
             if (prev is None
@@ -1032,7 +1032,7 @@ def _mini_yaml(text: str):
     if lines[pos[0]][1][:1] in "[{":
         # A whole-document flow collection — e.g. frontmatter written as a
         # single `{k: v}` line — parses through scalar directly.
-        if any(l[1] not in ("", "\x00") for l in lines[pos[0] + 1:]):
+        if any(ln[1] not in ("", "\x00") for ln in lines[pos[0] + 1:]):
             raise ValueError("trailing unparseable structure")
         return scalar(lines[pos[0]][1])
     root = parse(lines[pos[0]][0])
