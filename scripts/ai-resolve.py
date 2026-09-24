@@ -86,19 +86,24 @@ SCRIPT_REF = re.compile(
     # Separators are HORIZONTAL whitespace only — `\s` would let a command
     # word at end of one line join a `scripts/` path at the start of the
     # next (`source\nscripts/x.sh` is not an invocation).
-    rb"|ruby|perl|source|exec|bun|bunx|uv[ \t]+run|pipenv[ \t]+run)"
+    rb"|ruby|perl|source|exec|bun|bunx|uv[ \t]+run|pipenv[ \t]+run"
+    rb"|poetry[ \t]+run|pdm[ \t]+run|hatch[ \t]+run)"
     rb"[ \t]+[^\n|&;`]*?scripts/(?:[A-Za-z0-9_.-]+/)"
     rb"*(?:[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs|cjs|rb|pl)|[A-Za-z0-9_-]+)"
     rb"(?![\w.])"
     # An interpreter held in a variable — `$PYTHON scripts/setup.py`,
-    # `${NODE} scripts/x.js` — runs the script just as a literal
-    # interpreter word does, and the resolver cannot know the variable's
-    # value, so it counts as a dependency (Codex on vendored-resolver
-    # review). Only options may sit between the head and the path; a
-    # loose `[^\n]*?` would turn prose like `$VAR and scripts/x.sh` into
-    # an invocation.
-    rb"|\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)"
-    rb"[ \t]+(?:-[^\s|&;`]*[ \t]+)*scripts/(?:[A-Za-z0-9_.-]+/)"
+    # `${NODE} scripts/x.js`, `"$PYTHON" scripts/x.py` (the double quotes
+    # still expand) — runs the script just as a literal interpreter word
+    # does, and the resolver cannot know the variable's value, so it
+    # counts as a dependency (Codex on vendored-resolver review). Options
+    # — each optionally binding one operand word, since the variable's
+    # grammar is unknown (`$PYTHON -X dev scripts/x.py`) — may sit
+    # between the head and the path; a loose `[^\n]*?` would turn prose
+    # like `$VAR and scripts/x.sh` into an invocation.
+    rb"|\"?\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)\"?"
+    rb"[ \t]+(?:-[^\s|&;`]*[ \t]+"
+    rb"(?:(?:\"[^\n\"]*\"|'[^\n']*'|[^\s|&;`'-][^\s|&;`]*)[ \t]+)?)*"
+    rb"scripts/(?:[A-Za-z0-9_.-]+/)"
     rb"*(?:[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs|cjs|rb|pl)|[A-Za-z0-9_-]+)"
     rb"(?![\w.])"
     rb"|\./scripts/(?:[A-Za-z0-9_.-]+/)"
@@ -664,9 +669,9 @@ def _substitution_spans(window: bytes) -> list[tuple[int, int]]:
         if in_d:
             if c == 0x22:
                 in_d = False
-            elif (c == 0x24 and window[i + 1:i + 2] == b"(") or (
-                    c in (0x3C, 0x3E) and window[i + 1:i + 2] == b"("
-                    and window[i - 1:i] not in (b"<", b">", b"&", b"|")):
+            elif c == 0x24 and window[i + 1:i + 2] == b"(":
+                # `$(` expands inside double quotes; `<(`/`>(` do NOT —
+                # `cat "<(bash x)"` passes literal text (Devin Review).
                 stack.append([i, 0, True])
                 in_d = False
                 i += 2
@@ -725,47 +730,147 @@ _STDIN_EXEC_HEADS = frozenset({
 _EXEC_WRAPPERS = frozenset({
     b"env", b"command", b"sudo", b"nohup", b"stdbuf", b"exec", b"time",
 })
+# Wrapper options that bind the FOLLOWING word — `sudo -u root bash`
+# skips `root` before identifying `bash`; `env -C /tmp bash` and
+# `stdbuf -o L bash` are the same shape (Devin Review on #1370).
+_WRAPPER_OPT_OPERAND = {
+    b"env": frozenset({b"-C", b"-S", b"-u",
+                       b"--chdir", b"--unset", b"--split-string",
+                       b"--argv0"}),
+    b"sudo": frozenset({b"-u", b"-g", b"-h", b"-r", b"-t", b"-D", b"-R",
+                        b"-p", b"-U", b"-T",
+                        b"--user", b"--group", b"--host", b"--role",
+                        b"--type", b"--chdir", b"--chroot", b"--prompt",
+                        b"--other-user", b"--command-timeout"}),
+    b"stdbuf": frozenset({b"-i", b"-o", b"-e",
+                          b"--input", b"--output", b"--error"}),
+    b"exec": frozenset({b"-a"}),
+    b"time": frozenset({b"-o", b"-f", b"--output", b"--format"}),
+    b"nohup": frozenset(),
+    b"command": frozenset(),
+}
+# `command -v`/`-V` only describe a command — they never run it (Devin
+# Review on #1370).
+_WRAPPER_DESCRIBE = frozenset({b"-v", b"-V"})
+_ASSIGN_WORD = re.compile(rb"[A-Za-z_][A-Za-z0-9_]*=")
+# Interpreter options whose OPERAND is the program — `sh -c 'x'` and
+# `python -c 'x'` never read stdin, so piping a script into them is inert
+# (Devin Review on #1953). `-e` means errexit for shells but the eval
+# operand for perl/ruby/node/lua, so the table is per-head.
+_EXEC_OPERAND_FLAGS = {
+    b"sh": frozenset({b"-c"}), b"bash": frozenset({b"-c"}),
+    b"dash": frozenset({b"-c"}), b"zsh": frozenset({b"-c"}),
+    b"ksh": frozenset({b"-c"}), b"ash": frozenset({b"-c"}),
+    b"python": frozenset({b"-c"}),
+    b"perl": frozenset({b"-e", b"-E"}),
+    b"ruby": frozenset({b"-e"}),
+    b"node": frozenset({b"-e", b"--eval"}),
+    b"php": frozenset({b"-r", b"-f"}),
+    b"lua": frozenset({b"-e"}),
+    b"tclsh": frozenset(),
+}
 
 
-def _stdin_exec_head(win: bytes) -> bool:
-    """True when `win`'s effective command executes its stdin.
-
-    Wrapper heads are skipped along with their options and `VAR=value`
-    assignments, so `env -i FOO=1 bash` resolves to `bash`."""
-    words = _shell_words(_mask_parens(win))
+def _effective_head(words: list, win: bytes) -> int | None:
+    """Index of the effective command word — past `VAR=value` assignments
+    and wrapper heads (env/sudo/command/…) with their operands. -1 for a
+    describe-only `command -v`/`-V`; None when nothing is a head."""
     i = 0
     while i < len(words):
         text = _word_text(win[words[i][0]:words[i][1]])
+        if _ASSIGN_WORD.match(text):
+            i += 1
+            continue
         key = _command_key(win[words[i][0]:words[i][1]])
         if key in _EXEC_WRAPPERS:
             i += 1
-            # Skip the wrapper's own operands: options and, for `env`,
-            # NAME=value assignments. Anything else is the real head.
+            takes_operand = _WRAPPER_OPT_OPERAND.get(key, frozenset())
             while i < len(words):
                 t = _word_text(win[words[i][0]:words[i][1]])
-                if t.startswith(b"-") or re.match(rb"[A-Za-z_][A-Za-z0-9_]*=",
-                                                  t):
+                if _ASSIGN_WORD.match(t):
                     i += 1
+                    continue
+                if key == b"command" and t in _WRAPPER_DESCRIBE:
+                    return -1
+                if t.startswith(b"-"):
+                    if (b"=" not in t and t in takes_operand
+                            and i + 1 < len(words)):
+                        i += 2
+                    else:
+                        i += 1
                     continue
                 break
             continue
-        return key in _STDIN_EXEC_HEADS and not text.startswith(b"-")
-    return False
+        return i
+    return None
+
+
+def _stdin_exec_head(win: bytes) -> str:
+    """Classify `win`'s effective command as a pipe consumer.
+
+    "exec"  — the head executes what it reads on stdin (`sh`, `python`).
+    "sink"  — the head ends the stream without executing it: a
+              describe-mode wrapper (`command -v`), or an interpreter
+              whose program comes from argv (`sh -c 'true'`,
+              `python f.py` — the pipe's contents are ignored).
+    "other" — anything else; a `|` walk continues past it (a filter or
+              an unknown head may still forward the script downstream)."""
+    words = _shell_words(_mask_parens(win))
+    hi = _effective_head(words, win)
+    if hi == -1:
+        return "sink"
+    if hi is None:
+        return "other"
+    key = _command_key(win[words[hi][0]:words[hi][1]])
+    if key not in _STDIN_EXEC_HEADS:
+        return "other"
+    # The interpreter's own program operand ends the chain: `-c 'x'` runs
+    # the operand, a positional runs that FILE — neither reads stdin.
+    # `-`/`-s` explicitly mean "read stdin". Option operands are skipped
+    # via _option_value_spans (`python -X dev` still reads stdin).
+    sub = win[words[hi][0]:]
+    operands = set(_option_value_spans(sub))
+    # Unmasked words — _option_value_spans computed spans without paren
+    # masking, so `$(...)` words keep their coordinates.
+    sub_words = _shell_words(sub)
+    flags = _EXEC_OPERAND_FLAGS.get(key, frozenset())
+    for w in sub_words[1:]:
+        if w in operands:
+            continue
+        t = _word_text(sub[w[0]:w[1]])
+        if t in (b"-", b"-s"):
+            break
+        if t in flags or not t.startswith(b"-"):
+            return "sink"
+    return "exec"
 
 
 def _pipe_to_exec(src: bytes, pos: int) -> bool:
-    """True when an unquoted `|` (or `|&`) at `pos` pipes into a command
-    whose head executes stdin — `printf 'bash x' | sh` runs the text the
-    printf only seemed to print, and so does `| env bash`."""
+    """True when an unquoted `|` (or `|&`) at `pos` starts a pipeline
+    whose contents reach a command that executes stdin.
+
+    The walk continues past forwarding/filter heads — `cat x | tee
+    /dev/stderr | sh` runs the script through two hops (Devin Review on
+    #123). A "sink" segment (a describe-mode wrapper or an interpreter
+    taking its program from argv, like `sh -c 'true'`) breaks the chain:
+    the pipe's contents are never executed downstream of it."""
     j = pos
-    if src[j:j + 1] != b"|" or src[j + 1:j + 2] == b"|":
-        return False
-    j += 1
-    if src[j:j + 1] == b"&":
+    while j < len(src):
+        if src[j:j + 1] != b"|" or src[j + 1:j + 2] == b"|":
+            return False
         j += 1
-    while j < len(src) and src[j] in b" \t":
-        j += 1
-    return _stdin_exec_head(_cmd_window(src, j))
+        if src[j:j + 1] == b"&":
+            j += 1
+        while j < len(src) and src[j] in b" \t":
+            j += 1
+        win = _cmd_window(src, j)
+        verdict = _stdin_exec_head(win)
+        if verdict == "exec":
+            return True
+        if verdict == "sink":
+            return False
+        j += len(win)
+    return False
 
 
 _HEREDOC_DELIM = re.compile(rb"['\"]?([A-Za-z0-9_.-]+)['\"]?")
@@ -871,8 +976,44 @@ def _heredoc_spans(src: bytes) -> list[tuple[int, int, int]]:
     return spans
 
 
+def _span_output_exec(src: bytes, a: int) -> bool:
+    """True when the substitution starting at `a` produces output the
+    enclosing command EXECUTES — so a reader inside it (`cat scripts/x`)
+    supplies code, not data (Codex on #123).
+
+    - `<(`/`>(` operands are fd-paths the head opens and runs:
+      `bash <(cat x)` and `source <(cat x)` execute x's contents.
+    - `$(` output becomes code as `eval`'s argument
+      (`eval "$(cat x)"`) or the operand of a `-c`/`-e`-style program
+      flag (`bash -c "$(cat x)"`, `node -e "$(cat x)"`)."""
+    procsub = src[a] in (0x3C, 0x3E)
+    cs = _command_start(src, a)
+    win = _cmd_window(src, cs)
+    words = _shell_words(_mask_parens(win))
+    hi = _effective_head(words, win)
+    if hi is None or hi < 0:
+        return False
+    key = _command_key(win[words[hi][0]:words[hi][1]])
+    if procsub:
+        return key in _STDIN_EXEC_HEADS or key in (b"source", b".")
+    if key == b"eval":
+        return True
+    flags = _EXEC_OPERAND_FLAGS.get(key, frozenset())
+    if not flags:
+        return False
+    # `$(` is code when it sits in the operand word of a program flag.
+    rel = a - cs
+    for k in range(len(words)):
+        if words[k][0] <= rel < words[k][1]:
+            return any(
+                _word_text(win[words[j][0]:words[j][1]]) in flags
+                for j in range(hi + 1, k))
+    return False
+
+
 def _descend_sub(src: bytes, pos: int,
-                 region: tuple[int, int] | None = None) -> bool | None:
+                 region: tuple[int, int] | None = None,
+                 output_exec: bool = False) -> bool | None:
     """If `pos` is inside the innermost `$(...)` (or a backtick pair) of
     `src` (restricted to `region` when given), classify it inside that
     substitution's body. Returns None when pos is in no substitution."""
@@ -885,15 +1026,22 @@ def _descend_sub(src: bytes, pos: int,
     if inner:
         a, b = min(inner, key=lambda s: s[1] - s[0])
         body_end = b - 1 if src[b - 1:b] == b")" else b
-        return _command_literal(src[a + 2:body_end], pos - a - 2)
+        return _command_literal(
+            src[a + 2:body_end], pos - a - 2,
+            output_exec or _span_output_exec(src, a))
     ticks = [t for t in range(a0, b0) if src[t] == 0x60]
     for t1, t2 in zip(ticks[::2], ticks[1::2]):
         if t1 < pos < t2:
-            return _command_literal(src[t1 + 1:t2], pos - t1 - 1)
+            # `eval \`cmd\`` / `bash -c \`cmd\`` execute the output the
+            # same way the `$(` forms do (backtick is not procsub).
+            return _command_literal(
+                src[t1 + 1:t2], pos - t1 - 1,
+                output_exec or _span_output_exec(src, t1))
     return None
 
 
-def _command_literal(src: bytes, pos: int) -> bool:
+def _command_literal(src: bytes, pos: int,
+                     output_exec: bool = False) -> bool:
     """True when `pos` sits in text the shell does NOT execute.
 
     Literal zones: arguments of a head that cannot run its arguments
@@ -901,16 +1049,19 @@ def _command_literal(src: bytes, pos: int) -> bool:
     interpreter; inert heredoc bodies; and the trailing comment
     `_cmd_window` stopped at. `$(...)` bodies and backticks recurse —
     each substitution's OWN head decides (`$(echo bash x)` prints,
-    `$(bash x)` runs), nesting descending to the innermost command."""
+    `$(bash x)` runs), nesting descending to the innermost command.
+
+    `output_exec` marks bodies whose OUTPUT becomes code (`bash -c
+    "$(cat x)"`): a print/read head's operands are code-bound too."""
     for a, b, mode in _heredoc_spans(src):
         if a <= pos < b:
             if mode == _HD_LITERAL:
                 return True
             if mode == _HD_EXPAND:
-                r = _descend_sub(src, pos, (a, b))
+                r = _descend_sub(src, pos, (a, b), output_exec)
                 return True if r is None else r
             break  # _HD_EXEC — the body is a script; classify it directly
-    r = _descend_sub(src, pos)
+    r = _descend_sub(src, pos, output_exec=output_exec)
     if r is not None:
         return r
     cs = _command_start(src, pos)
@@ -922,6 +1073,8 @@ def _command_literal(src: bytes, pos: int) -> bool:
         return False
     if _command_key(win[words[0][0]:words[0][1]]) not in _NONEXEC_HEADS:
         return False
+    if output_exec:
+        return False  # the command's output is code — nothing is inert
     return not _pipe_to_exec(src, cs + len(win))
 
 
@@ -1478,8 +1631,6 @@ def _mini_yaml(text: str):
                                   if d else None)
                 continue
         lines.append((indent, body.lstrip(), True))
-        if inline_comment:
-            lines.append((indent, "\x00", True))
         # A `|`/`>` value opens a literal block on the deeper lines that
         # follow — `- |`/`- key: |` seq items too (the value after the dash
         # is the indicator itself). The block's scope differs: `key: |`
@@ -1497,6 +1648,11 @@ def _mini_yaml(text: str):
             BLOCK_IND_RE.fullmatch(value[bci + 1:].strip())
             if bci != -1 and value[bci + 1:bci + 2] in (" ", "")
             else (None if bci != -1 else BLOCK_IND_RE.fullmatch(value)))
+        if inline_comment and not bind:
+            # `ref: |- # pin` is legal — the comment trails the indicator
+            # and deeper lines are still block content, so the marker
+            # must not terminate them (Codex on vendored-resolver review).
+            lines.append((indent, "\x00", True))
         if bind:
             block_indent = (indent + 2
                             if seq_item and bci != -1 else indent)

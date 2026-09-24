@@ -7294,6 +7294,76 @@ def test_script_dep_pipe_through_wrapper(tmp_path):
         pdir, b"printf 'bash scripts/x.sh' | env cat\n")
     assert not mod.script_dep_block(
         pdir, b"printf 'bash scripts/x.sh' | env\n")
+    # wrapper options that take an operand: the operand must be skipped,
+    # not mistaken for the pipe's effective head (Devin Review on #1370)
+    for wrapped in (b"sudo -u root bash", b"stdbuf -o L bash",
+                    b"env -C /tmp bash", b"env -u FOO bash",
+                    b"env --unset=FOO bash", b"exec -a sh bash",
+                    b"time -o t.txt bash", b"sudo -uroot bash",
+                    b"FOO=1 bash"):
+        assert mod.script_dep_block(
+            pdir, b"printf 'bash scripts/x.sh' | " + wrapped + b"\n"), wrapped
+    # `command -v`/`-V` describe a command — nothing executes (same review)
+    assert not mod.script_dep_block(
+        pdir, b"printf 'bash scripts/x.sh' | command -v bash\n")
+    assert not mod.script_dep_block(
+        pdir, b"printf 'bash scripts/x.sh' | command -V sh\n")
+
+
+def test_script_dep_pipe_multi_hop_and_sink(tmp_path):
+    """The pipeline walk continues past forwarding heads —
+    `| tee /dev/stderr | sh` executes (Devin on #123) — and stops at a
+    sink: an interpreter taking its program from argv (`sh -c`,
+    `python f.py`) ignores the pipe's contents (Devin on #1953)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    (pdir / "scripts" / "x.py").write_bytes(b"x")
+    for pipe in (b"cat scripts/x.sh | tee /dev/stderr | sh",
+                 b"cat scripts/x.sh | grep -v '^#' | bash",
+                 b"cat scripts/x.sh | sort | uniq | python",
+                 b"cat scripts/x.sh | tee f | command bash"):
+        assert mod.script_dep_block(pdir, pipe + b"\n"), pipe
+    for pipe in (b"cat scripts/x.sh | sh -c 'true'",
+                 b"cat scripts/x.sh | bash -c 'echo hi'",
+                 b"cat scripts/x.py | python -c 'print(1)'",
+                 b"cat scripts/x.sh | perl -e '1'",
+                 b"cat scripts/x.py | python other.py",
+                 b"cat scripts/x.sh | tee f | command -v sh",
+                 b"cat scripts/x.sh | wc -l"):
+        assert not mod.script_dep_block(pdir, pipe + b"\n"), pipe
+    # stdin-reading forms still execute the pipe's contents
+    assert mod.script_dep_block(pdir, b"cat scripts/x.py | python -u\n")
+    assert mod.script_dep_block(pdir, b"cat scripts/x.py | python -X dev\n")
+    assert mod.script_dep_block(pdir, b"cat scripts/x.sh | sh -s\n")
+    assert mod.script_dep_block(pdir, b"cat scripts/x.sh | bash -O extglob\n")
+
+
+def test_script_dep_output_exec_substitution(tmp_path):
+    """`bash -c "$(cat scripts/x.sh)"` and `bash <(cat scripts/x.sh)`
+    execute the FILE's contents — the substitution's output is code, so
+    the reader head inside supplies a dependency (Codex on #123)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    (pdir / "scripts" / "x.py").write_bytes(b"x")
+    for line in (b'bash -c "$(cat scripts/x.sh)"',
+                 b"bash <(cat scripts/x.sh)",
+                 b"source <(cat scripts/x.sh)",
+                 b'. <(cat scripts/x.sh)',
+                 b'eval "$(cat scripts/x.sh)"',
+                 b'python -c "$(cat scripts/x.py)"',
+                 b'node -e "$(cat scripts/x.sh)"',
+                 b'eval `cat scripts/x.sh`'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    # the substitution's output is NOT code under a reader/echo head
+    for line in (b'echo "$(cat scripts/x.sh)"',
+                 b'cat "$(cat scripts/x.sh)"',
+                 b'cat <(cat scripts/x.sh)',
+                 b'bash "$(cat scripts/x.sh)"'):  # operand is a path, not code
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
 
 
 def test_script_dep_process_substitution(tmp_path):
@@ -7312,9 +7382,16 @@ def test_script_dep_process_substitution(tmp_path):
     # output process substitution runs the consumer too
     assert mod.script_dep_block(
         pdir, b"bash scripts/x.sh | tee >(cat)\n")
-    # quoted/escaped openers stay literal text
+    # quoted/escaped openers stay literal text — `cat "<(x)"` passes the
+    # literal string to cat (Devin Review: process substitution does NOT
+    # expand inside double quotes; `$(` does)
     assert not mod.script_dep_block(
         pdir, b"echo '<(bash scripts/x.sh)'\n")
+    assert not mod.script_dep_block(
+        pdir, b'cat "<(bash scripts/x.sh)"\n')
+    # `$(` inside double quotes DOES expand — still a dep
+    assert mod.script_dep_block(
+        pdir, b'x="$(bash scripts/x.sh)"\n')
     # a plain input redirect is still a read, not execution
     assert not mod.script_dep_block(
         pdir, b"cat < other-file\n")
@@ -7353,9 +7430,49 @@ def test_script_dep_dash_ksh_and_variable_interpreters(tmp_path):
     assert mod.script_dep_block(pdir, b"$PYTHON scripts/x.py\n")
     assert mod.script_dep_block(pdir, b"${PYTHON} scripts/x.py\n")
     assert mod.script_dep_block(pdir, b"${NODE} scripts/x.js\n")
+    # double-quoted var head still expands and runs (Devin on #1953)
+    assert mod.script_dep_block(pdir, b'"$PYTHON" scripts/x.py\n')
+    # options bind operands — `$PYTHON -X dev scripts/x.py` runs x.py
+    # (Devin on cpdcheck #6); a bare non-dash operand is the script
+    assert mod.script_dep_block(
+        pdir, b"$PYTHON -X dev scripts/x.py\n")
+    assert mod.script_dep_block(
+        pdir, b"$PYTHON -u -X dev scripts/x.py\n")
     # loose prose must not become an invocation
     assert not mod.script_dep_block(
         pdir, b"set $FOO to the scripts/x.py path\n")
+    assert not mod.script_dep_block(
+        pdir, b"$FOO and scripts/x.py are mentioned\n")
+
+
+def test_script_dep_runner_forms(tmp_path):
+    """Runner heads (`poetry run`, `pdm run`, `hatch run`) execute the
+    script argument exactly like `uv run`/`pipenv run` (Codex on #1953).
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.py").write_bytes(b"x")
+    for head in (b"uv run", b"pipenv run", b"poetry run", b"pdm run",
+                 b"hatch run"):
+        assert mod.script_dep_block(
+            pdir, head + b" scripts/x.py\n"), head
+
+
+def test_mini_yaml_block_scalar_inline_comment():
+    """`ref: |- # comment` is legal YAML — the comment trails the block
+    indicator, and deeper lines are still the scalar's content (Codex on
+    vendored-resolver review)."""
+    mod = load_resolve_module()
+    y = ("entry:\n"
+         "  ref: |-  # pinned\n"
+         "    scripts/x.sh\n")
+    assert mod._mini_yaml(y) == {"entry": {"ref": "scripts/x.sh"}}
+    # folding variant + a `#`-carrying content line
+    y = ("entry:\n"
+         "  ref: >-  # pinned\n"
+         "    scripts/x.sh\n")
+    assert mod._mini_yaml(y) == {"entry": {"ref": "scripts/x.sh"}}
 
 
 def test_mini_yaml_plain_key_edge_chars():
