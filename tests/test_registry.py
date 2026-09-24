@@ -6106,3 +6106,112 @@ def test_mode_drift_does_not_hide_local_edit(tmp_path):
                       .read_text())
     assert lock["files"][".claude/skills/demo/SKILL.md"] != \
         hashlib.sha256(skill.read_bytes()).hexdigest()
+
+
+def test_mini_yaml_next_line_collections():
+    """`key:` empty followed by a deeper flow collection or quoted
+    scalar — the node IS the value (Devin Review): `requires:` and
+    `surfaces:` written this way must resolve, not come back as a
+    string."""
+    mod = load_resolve_module()
+    doc = ('version: 1\nuniverse: manolii\nrequires:\n'
+           '  [{plugin: platform/framework, ref: "1.0.0"}]\n')
+    assert mod._mini_yaml(doc) == {
+        "version": 1, "universe": "manolii",
+        "requires": [{"plugin": "platform/framework", "ref": "1.0.0"}]}
+    assert mod._mini_yaml('surfaces:\n  [claude-code]\n') == {
+        "surfaces": ["claude-code"]}
+    assert mod._mini_yaml('ref:\n  "1.0.0"\n') == {"ref": "1.0.0"}
+    assert mod._mini_yaml('ref:\n  \'v\'\n') == {"ref": "v"}
+    assert mod._mini_yaml('x:\n  {a: 1}\n') == {"x": {"a": 1}}
+    # a deeper stray line after the collection still rejects
+    try:
+        mod._mini_yaml('x:\n  [a]\n  junk\n')
+        raise AssertionError("nested structure must raise")
+    except ValueError:
+        pass
+    # plain folded scalars still fold
+    assert mod._mini_yaml('x:\n  a\n  b\n') == {"x": "a b"}
+    assert mod._mini_yaml('x:\n  a\n  b\n') == {"x": "a b"}
+
+
+def test_script_dep_block_second_arg(tmp_path):
+    """`bash scripts/first.sh scripts/second.sh` — the regex match ends at
+    first.sh but second.sh is just as much a dependency: bundled it must
+    block, undeclared it must block (Devin Review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    body = (b"---\nconsumer_scripts: [scripts/first.sh]\n---\n"
+            b"bash scripts/first.sh scripts/second.sh\n")
+    # second.sh bundled -> block even though first.sh is declared
+    (pdir / "scripts" / "second.sh").write_bytes(b"x")
+    assert mod.script_dep_block(pdir, body)
+    # second.sh unbundled + undeclared -> block
+    (pdir / "scripts" / "second.sh").unlink()
+    assert mod.script_dep_block(pdir, body)
+    # both declared -> allowed
+    body2 = (b"---\nconsumer_scripts: [scripts/first.sh,"
+             b" scripts/second.sh]\n---\n"
+             b"bash scripts/first.sh scripts/second.sh\n")
+    assert not mod.script_dep_block(pdir, body2)
+    # a scripts/ path inside a trailing shell comment is NOT a dep
+    body3 = (b"---\nconsumer_scripts: [scripts/first.sh]\n---\n"
+             b"bash scripts/first.sh # see scripts/notes.sh\n")
+    assert not mod.script_dep_block(pdir, body3)
+
+
+def test_prune_dir_cleanup_after_lock_write(tmp_path):
+    """--prune removes a dir's last file; if the lock write then fails,
+    rollback must restore the file — so empty-dir cleanup may only run
+    AFTER the lock commit (Devin Review + Codex on #1953)."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/SKILL.md",
+                                "---\nname: demo\ndescription: d\n---\nv1")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    skill = consumer / ".claude" / "skills" / "demo" / "SKILL.md"
+    # drop the requirement so --prune removes the file AND its now-empty
+    # dir; then break the lock write
+    m.write_text("version: 1\nuniverse: manolii\nrequires: []\n")
+    ai_dir = consumer / ".ai"
+    os.chmod(ai_dir, 0o555)
+    try:
+        r = run_resolver(m, reg_root, consumer, "--apply", "--prune")
+    finally:
+        os.chmod(ai_dir, 0o755)
+    assert r.returncode == 2, r.stdout + r.stderr
+    # rollback restored the file — its parent dir survived cleanup
+    assert skill.read_text().endswith("v1")
+
+
+def test_pinned_mode_normalised_to_tree(tmp_path):
+    """Under a tag:/sha: pin a worktree chmod on the r/w bits (0644 ->
+    0600) hides from status AND the blob compare — the install + lock
+    record must carry the pinned TREE mode, not the worktree's."""
+    import subprocess as sp
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "v1")],
+    })
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    sp.run(["git", "init", "-q"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "add", "-A"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "commit", "-qm", "init"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "tag", "v1.0.0"], cwd=reg_root, env=env, check=True)
+    os.chmod(reg_root / "registry" / "platform" / "framework" / "skills"
+             / "demo" / "x.md", 0o600)
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "tag:v1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    dst = consumer / ".claude" / "skills" / "demo" / "x.md"
+    assert dst.stat().st_mode & 0o777 == 0o644
+    lock = json.loads((consumer / ".ai" / "capability-lock.json")
+                      .read_text())
+    assert lock["exec"][".claude/skills/demo/x.md"] & 0o777 == 0o644

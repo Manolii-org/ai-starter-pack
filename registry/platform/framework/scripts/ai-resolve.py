@@ -117,6 +117,10 @@ SCRIPT_NAME = re.compile(
 # `-m scripts.a.b` extraction — the dotted module resolves to either
 # scripts/a/b.py or the package scripts/a/b/__init__.py; both are checked.
 MODULE_NAME = re.compile(rb"-m[ \t]+scripts\.([A-Za-z0-9_.]+)")
+# Command-region boundary for dep scanning — matches SCRIPT_REF's own
+# exclusion set plus '#': a shell comment after the invocation is not
+# part of the command's argument list.
+_CMD_BOUND = re.compile(rb"[\n|&;`#]")
 # A `|`/`>` block-scalar indicator with optional chomping (+/-) and
 # explicit-indentation (1-9) modifiers in either order: `|`, `>+`, `|-`,
 # `|2`, `|2-`, `|-2`, `|+2`, `|2+`. `|0` is not legal YAML (digit is 1-9)
@@ -1035,10 +1039,16 @@ def _mini_yaml(text: str):
                 else:
                     acc = lines[pos[0]][1]
                     pos[0] += 1
-                    # The scalar's first line sets the content column but
-                    # continuations fold at any depth past the KEY's own
-                    # indent (`x:\n  a\n a` -> 'a a' in PyYAML).
-                    out[k] = fold_scalar(acc, indent)
+                    if acc[:1] in "[{\"'":
+                        # A deeper flow collection or quoted scalar IS the
+                        # value — `requires:\n  [{plugin: ...}]` parses the
+                        # list, it is not folded plain text.
+                        out[k] = scalar(acc)
+                    else:
+                        # The scalar's first line sets the content column
+                        # but continuations fold at any depth past the
+                        # KEY's own indent (`x:\n  a\n a` -> 'a a').
+                        out[k] = fold_scalar(acc, indent)
                     skip_markers()
                     if (pos[0] < len(lines)
                             and lines[pos[0]][0] > indent):
@@ -1121,18 +1131,24 @@ def script_dep_block(plugin_dir: Path, src_bytes: bytes,
     sdir = plugin_dir / "scripts"
     declared = declared_consumer_scripts(src_bytes)
     for m in SCRIPT_REF.finditer(src_bytes):
-        # Every scripts/ reference inside ONE invocation is a separate
-        # dependency — `python -m scripts.foo scripts/x.py` needs BOTH
-        # checked, not just the first slash-form path the match contains.
+        # A single invocation may carry SEVERAL scripts/ arguments —
+        # `bash scripts/first.sh scripts/second.sh` ends its regex match
+        # at first.sh, but second.sh is just as much a dependency. Scan
+        # the whole command region (bounded by the same shell metachars
+        # the matcher uses, plus '#' which opens a shell comment) so
+        # every argument reaches the bundled/declared checks.
+        bound = _CMD_BOUND.search(src_bytes, m.end())
+        window = src_bytes[m.start():bound.start()
+                           if bound else len(src_bytes)]
         # Each ref carries (declared alternatives, bundled probes): any
         # bundled probe hit means the dep is bundled (the resolver cannot
         # materialise scripts/); otherwise at least one declared
         # alternative must appear in consumer_scripts.
         refs: list[tuple[list[str], list[str]]] = []
-        for n in SCRIPT_NAME.finditer(m.group(0)):
+        for n in SCRIPT_NAME.finditer(window):
             p = n.group(1).decode("utf-8", errors="ignore")
             refs.append(([p], [p]))
-        for mod in MODULE_NAME.finditer(m.group(0)):
+        for mod in MODULE_NAME.finditer(window):
             # `python -m scripts.a.b` runs a/b.py or the package entry
             # a/b/__main__.py — either satisfies the invocation. The
             # bundled probe also covers __init__.py: a plugin-shipped
@@ -1839,8 +1855,18 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                 continue
             src_sha = hashlib.sha256(src_bytes).hexdigest()
             src_st = src.stat()
-            src_exec = src_st.st_mode & 0o111
-            src_mode = (src_st.st_mode & 0o666) | src_exec
+            if pinned:
+                # Under a pin the recorded mode is the pinned TREE's — a
+                # worktree chmod on the r/w bits (0644 -> 0600) hides from
+                # status AND the blob compare but is not what the pin
+                # holds; normalising keeps the install + lock record
+                # pin-derived instead of unverified-worktree-derived.
+                src_mode = (0o755 if pinned_modes.get(rel_src) == "100755"
+                            else 0o644)
+                src_exec = src_mode & 0o111
+            else:
+                src_exec = src_st.st_mode & 0o111
+                src_mode = (src_st.st_mode & 0o666) | src_exec
             src_times = (src_st.st_atime_ns, src_st.st_mtime_ns)
             prior = plan.planned.get(rel_dst)
             if prior is not None:
@@ -1919,8 +1945,7 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                 # owns. For a legacy record the comparison is any-exec only.
                 mode_consistent = (rel_dst not in locked or rec_exec is None
                                    or rel_dst not in locked_prov
-                                   or _exec_matches(rec_exec,
-                                                    src.stat().st_mode))
+                                   or _exec_matches(rec_exec, src_mode))
                 if (bytes_match and same_exec and exec_consistent
                         and mode_consistent
                         and rel_dst in locked
@@ -2625,21 +2650,6 @@ def main() -> int:
                 os.close(dfd)
             sys.stderr.write(f"FAIL: cannot apply: {e}\n")
             return 2
-        if args.prune:
-            for f in plan.removals:
-                d = f.parent
-                try:
-                    while (d != repo_root and d.is_dir()
-                           and not any(d.iterdir())):
-                        d.rmdir()
-                        d = d.parent
-                except OSError:
-                    # Best-effort cleanup — a read-only parent (or a
-                    # missing orphan's dir) must not abort before the lock
-                    # update: a left-behind empty dir is cosmetic.
-                    print("  note: empty-directory cleanup skipped for "
-                          f"{d.relative_to(repo_root).as_posix()} "
-                          "(permission denied)")
         new_files = {rel: digest for r in plan.resolved
                      for rel, digest in r["files"].items()}
         if not args.prune:
@@ -2706,6 +2716,24 @@ def main() -> int:
         finally:
             for dfd in dfds.values():
                 os.close(dfd)
+        if args.prune:
+            # Only once the lock is durably written — pruning an emptied
+            # parent dir BEFORE this point would leave rollback() unable
+            # to recreate the file it is restoring.
+            for f in plan.removals:
+                d = f.parent
+                try:
+                    while (d != repo_root and d.is_dir()
+                           and not any(d.iterdir())):
+                        d.rmdir()
+                        d = d.parent
+                except OSError:
+                    # Best-effort cleanup — a read-only parent (or a
+                    # missing orphan's dir) is cosmetic; the lock is
+                    # already correct.
+                    print("  note: empty-directory cleanup skipped for "
+                          f"{d.relative_to(repo_root).as_posix()} "
+                          "(permission denied)")
         print(f"\napplied: {len(plan.writes)} write(s), lock -> {LOCK_PATH}")
         return 0
 
