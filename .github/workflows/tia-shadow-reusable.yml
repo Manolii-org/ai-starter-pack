@@ -10,10 +10,11 @@ name: TIA Shadow (Reusable)
 #
 # Contract with the caller:
 #   - The test job uploads a plain-text, one-path-per-line manifest of tests
-#     executed as artifact named `tia-ran-tests` (e.g. pytest:
+#     executed as artifact named `tia-ran-tests` containing a file named
+#     `ran-tests.txt` (e.g. pytest:
 #     `pytest --collect-only -q | sed 's/::.*//' | sort -u`, vitest:
-#     `vitest run --reporter=json --outputFile .tia/ran.json` post-processed
-#     to paths, or simply `git ls-files 'tests/**'` when the suite always
+#     `vitest run --reporter=json --outputFile tia-results.json` post-processed
+#     to paths, or simply `git ls-files '*_test.go'` when the suite always
 #     runs whole). If no such artifact exists the run records
 #     `ran_tests: null` and still exits 0.
 #   - Optional `.ai/tia-map.json` in the caller repo:
@@ -123,10 +124,12 @@ jobs:
                                       {cand.split(".")[0] for cand in candidates})
 
           ran = None
-          ran_file = next(Path(".").rglob("ran.txt"), None) or \
-                     next((p for p in Path(".").rglob("*") if p.is_file()
-                           and p.parts[0] != ".git" and "tia" not in str(p)
-                           and p.name in ("ran-tests.txt", "ran.txt")), None)
+          # Contract: callers write `ran-tests.txt` into the `tia-ran-tests`
+          # artifact (extracts at workspace root; also accept a same-named
+          # subdir). Filenames are contract, not discovery.
+          ran_file = next((p for p in (Path("ran-tests.txt"),
+                                      Path("tia-ran-tests/ran-tests.txt"))
+                           if p.is_file()), None)
           if ran_file:
               ran = sorted(l.strip() for l in ran_file.read_text().splitlines() if l.strip())
           journal = {

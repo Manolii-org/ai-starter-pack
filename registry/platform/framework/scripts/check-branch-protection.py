@@ -235,7 +235,9 @@ def main() -> int:
             findings.append(f"{where}: {why}: {', '.join(missing)}")
             report.append(f"| {repo} | {branch} | ❌ {why}: `{', '.join(missing)}` |")
             if args.emit_fixes:
-                slug = f"{repo.replace('/', '__')}__{branch}"
+                # '/' in a lane branch (release/1.2) would make the fix path
+                # descend into a nonexistent dir — flatten separators.
+                slug = f"{repo.replace('/', '__')}__{branch.replace('/', '__')}"
                 body = fix_body(protection, required)
                 warns = [] if protection else [
                     "branch had no protection — payload sets ONLY "

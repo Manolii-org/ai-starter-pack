@@ -84,7 +84,10 @@ on:
           On push events to the repo's default branch, commit a raised
           baseline via the signed gh-api commit technique (git/blobs →
           git/trees → git/commits → PATCH refs) — no force-push. Caller must
-          grant permissions: contents: write. Ignored on pull_request events.
+          grant permissions: contents: write AND supply a write-capable
+          GH_PAT secret — the reusable's own `permissions: contents: read`
+          caps the default github.token, so auto-commit without GH_PAT is
+          rejected at validation. Ignored on pull_request events.
       cache_path:
         type: string
         required: false
@@ -121,9 +124,15 @@ jobs:
     steps:
       - name: Validate inputs
         shell: bash
+        env:
+          AUTO_COMMIT: ${{ inputs.auto_commit_baseline }}
+          HAS_GH_PAT: ${{ secrets.GH_PAT != '' }}
         run: |
           if ! echo "${{ inputs.mode }}" | grep -qxE 'enforce|report'; then
             echo "::error::mode must be 'enforce' or 'report'"; exit 1
+          fi
+          if [ "$AUTO_COMMIT" = "true" ] && [ "$HAS_GH_PAT" != "true" ]; then
+            echo "::error::auto_commit_baseline requires a write-capable GH_PAT secret — the reusable's contents:read permission caps github.token"; exit 1
           fi
           if [ "${{ inputs.job_timeout_minutes }}" -lt $(( ${{ inputs.timeout_minutes }} + 10 )) ]; then
             echo "::error::job_timeout_minutes must be >= timeout_minutes + 10"; exit 1
@@ -180,8 +189,8 @@ jobs:
         run: |
           set -euo pipefail
           RAW=$(eval "$METRIC_COMMAND" | tail -1 | tr -d '[:space:]%')
-          if ! python3 -c "import sys; float(sys.argv[1])" "$RAW" 2>/dev/null; then
-            echo "::error::metric_command did not print a float — got '$RAW'"; exit 1
+          if ! python3 -c "import math,sys; v=float(sys.argv[1]); sys.exit(0 if math.isfinite(v) and 0 <= v <= 100 else 1)" "$RAW" 2>/dev/null; then
+            echo "::error::metric_command did not print a finite 0-100 percentage — got '$RAW'"; exit 1
           fi
           echo "value=$RAW" >> "$GITHUB_OUTPUT"
 
@@ -193,21 +202,26 @@ jobs:
           MODE: ${{ inputs.mode }}
         run: |
           python3 - <<'PY'
-          import os, sys
+          import math, os, sys
           from pathlib import Path
-          current = round(float(os.environ["CURRENT"]), 1)
+          # Compare unrounded — rounding to 0.1 first lets small regressions pass.
+          current = float(os.environ["CURRENT"])
+          cur_d = round(current, 1)
           base_path = Path(os.environ["BASELINE_FILE"])
           if not base_path.exists():
               print(f"coverage-ratchet: no baseline at {base_path} — "
-                    f"this run measures {current}%. Seed the baseline file to activate.")
+                    f"this run measures {cur_d}%. Seed the baseline file to activate.")
               sys.exit(0)
-          baseline = round(float(base_path.read_text().strip()), 1)
+          baseline = float(base_path.read_text().strip())
+          if not math.isfinite(baseline) or not 0 <= baseline <= 100:
+              print(f"::error::baseline file {base_path} is not a finite 0-100 percentage: '{baseline}'")
+              sys.exit(1)
           if current < baseline:
-              msg = (f"coverage {current}% < baseline {baseline}% — "
+              msg = (f"coverage {cur_d}% < baseline {round(baseline, 1)}% — "
                      "add tests or justify the drop; do not lower the baseline to pass")
               print(f"::error::{msg}" if os.environ["MODE"] == "enforce" else f"::warning::{msg}")
               sys.exit(1 if os.environ["MODE"] == "enforce" else 0)
-          print(f"coverage-ratchet: {current}% >= baseline {baseline}% "
+          print(f"coverage-ratchet: {cur_d}% >= baseline {round(baseline, 1)}% "
                 f"(+{round(current - baseline, 1)} — raise the baseline file to ratchet up)")
           PY
 
@@ -238,7 +252,7 @@ jobs:
                   cmd += ["--input", "-"]
               proc = subprocess.run(cmd,
                   input=json.dumps(body) if body is not None else None,
-                  capture_output=True, text=True)
+                  capture_output=True, text=True, timeout=60)
               if proc.returncode != 0:
                   sys.exit(f"::error::gh api {args[0]} failed: {proc.stderr.strip()}")
               return json.loads(proc.stdout)

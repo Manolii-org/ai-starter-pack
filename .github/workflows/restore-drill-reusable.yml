@@ -109,7 +109,8 @@ jobs:
       - name: Install go-sqlcmd
         shell: bash
         run: |
-          curl -fsSL "https://github.com/microsoft/go-sqlcmd/releases/download/v${{ inputs.sqlcmd_version }}/sqlcmd-linux-amd64.tar.bz2" \
+          curl -fsSL --connect-timeout 15 --max-time 120 \
+            "https://github.com/microsoft/go-sqlcmd/releases/download/v${{ inputs.sqlcmd_version }}/sqlcmd-linux-amd64.tar.bz2" \
             | sudo tar -xj -C /usr/local/bin
           sqlcmd --version
 
@@ -122,11 +123,16 @@ jobs:
           SRC: ${{ inputs.source_database }}
         run: |
           set -euo pipefail
-          az sql db restore -g "$RG" -s "$SERVER" -n "$SRC" \
-            --dest-name "$DRILL_DB" -o none
+          # PITR requires --time within the source's retention window; use
+          # now-15m (latest restorable point lags wall-clock by a few minutes).
+          RESTORE_TIME=$(date -u -d '15 minutes ago' +%Y-%m-%dT%H:%M:%SZ)
+          echo "restoring $SRC at point $RESTORE_TIME -> $DRILL_DB"
+          timeout 600 az sql db restore -g "$RG" -s "$SERVER" -n "$SRC" \
+            --dest-name "$DRILL_DB" --time "$RESTORE_TIME" -o none
+          echo "restore_time=$RESTORE_TIME" >> "$GITHUB_OUTPUT"
           # poll until Online (bounded by job timeout)
           for i in $(seq 1 40); do
-            STATE=$(az sql db show -g "$RG" -s "$SERVER" -n "$DRILL_DB" --query status -o tsv 2>/dev/null || echo Provisioning)
+            STATE=$(timeout 60 az sql db show -g "$RG" -s "$SERVER" -n "$DRILL_DB" --query status -o tsv 2>/dev/null || echo Provisioning)
             echo "[$i] $DRILL_DB: $STATE"
             [ "$STATE" = "Online" ] && exit 0
             sleep 30
@@ -148,11 +154,13 @@ jobs:
           while IFS= read -r q; do
             [ -z "$q" ] && continue
             echo "--- query: $q"
+            # -b: exit nonzero on a SQL batch error so a failed sanity query
+            # fails the drill instead of being recorded as a result.
             if [ "$DB_AUTH" = "entra" ]; then
-              OUT=$(sqlcmd -S "$FQDN" -d "$DRILL_DB" --authentication-method=ActiveDirectoryDefault \
-                    -Q "$q" -h -1 -W 2>&1)
+              OUT=$(timeout 60 sqlcmd -b -S "$FQDN" -d "$DRILL_DB" --authentication-method=ActiveDirectoryDefault \
+                    -Q "$q" -h -1 -W -l 30 2>&1)
             else
-              OUT=$(sqlcmd -S "$FQDN" -d "$DRILL_DB" -U "$SQLCMDUSER" -P "$SQLCMDPASSWORD" \
+              OUT=$(timeout 60 sqlcmd -b -S "$FQDN" -d "$DRILL_DB" -U "$SQLCMDUSER" -P "$SQLCMDPASSWORD" \
                     -Q "$q" -h -1 -W -l 30 2>&1)
             fi
             echo "$OUT"
@@ -186,5 +194,5 @@ jobs:
           RG: ${{ inputs.resource_group }}
           SERVER: ${{ inputs.sql_server }}
         run: |
-          az sql db delete -g "$RG" -s "$SERVER" -n "$DRILL_DB" -y -o none \
+          timeout 300 az sql db delete -g "$RG" -s "$SERVER" -n "$DRILL_DB" -y -o none \
             || echo "::warning::cleanup of $DRILL_DB failed — check for orphan DB"
