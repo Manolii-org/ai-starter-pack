@@ -91,7 +91,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout_minutes }}
     env:
-      DRILL_DB: ${{ format('{0}-drill-{1}', inputs.source_database, github.run_number) }}
+      DRILL_DB: ${{ format('{0}-drill-{1}-{2}', inputs.source_database, github.run_number, github.run_attempt) }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -103,12 +103,18 @@ jobs:
           DB_AUTH: ${{ inputs.db_auth }}
           QUERIES: ${{ inputs.sanity_queries }}
         run: |
+          # Start clock for the per-step deadlines below — a job-level timeout
+          # kills pending steps, so restore+queries must finish with ~8m spare
+          # for upload + delete.
+          echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
           if ! printf '%s' "$DB_AUTH" | grep -qxE 'sql-auth|entra'; then
             echo "::error::db_auth must be sql-auth or entra"; exit 1
           fi
           while IFS= read -r q; do
             [ -z "$q" ] && continue
             echo "$q" | grep -qiE '^\s*select\b' || { echo "::error::sanity query is not SELECT-only: $q"; exit 1; }
+            # SELECT ... INTO writes rows — the drill is read-only.
+            echo "$q" | grep -qiE '\binto\b' && { echo "::error::sanity query must not use SELECT ... INTO: $q"; exit 1; }
             # Reject a second statement smuggled after ';' — a trailing
             # semicolon is fine, anything after it is not.
             body="${q%%;*}"
@@ -143,12 +149,12 @@ jobs:
           sqlcmd --version
 
       - name: Restore to throwaway database
-        id: restore
         shell: bash
         env:
           RG: ${{ inputs.resource_group }}
           SERVER: ${{ inputs.sql_server }}
           SRC: ${{ inputs.source_database }}
+          JOB_TIMEOUT: ${{ inputs.timeout_minutes }}
         run: |
           set -euo pipefail
           # PITR requires --time within the source's retention window; use
@@ -160,11 +166,13 @@ jobs:
           timeout 120 az sql db restore -g "$RG" -s "$SERVER" -n "$SRC" \
             --dest-name "$DRILL_DB" --time "$RESTORE_TIME" --no-wait -o none
           echo "restore_time=$RESTORE_TIME" >> "$GITHUB_OUTPUT"
-          echo "created=true" >> "$GITHUB_OUTPUT"
-          # poll until Online (bounded by job timeout)
-          for i in $(seq 1 40); do
+          # Poll until Online, but stop ~12m before the job timeout so sanity
+          # queries + teardown still get scheduled (a job timeout cancels
+          # pending steps entirely).
+          DEADLINE=$(( JOB_START + (JOB_TIMEOUT - 12) * 60 ))
+          while [ "$(date +%s)" -lt "$DEADLINE" ]; do
             STATE=$(timeout 60 az sql db show -g "$RG" -s "$SERVER" -n "$DRILL_DB" --query status -o tsv 2>/dev/null || echo Provisioning)
-            echo "[$i] $DRILL_DB: $STATE"
+            echo "$DRILL_DB: $STATE"
             [ "$STATE" = "Online" ] && exit 0
             sleep 30
           done
@@ -178,12 +186,16 @@ jobs:
           DB_AUTH: ${{ inputs.db_auth }}
           SQLCMDUSER: ${{ secrets.DRILL_SQL_USER }}
           SQLCMDPASSWORD: ${{ secrets.DRILL_SQL_PASSWORD }}
+          JOB_TIMEOUT: ${{ inputs.timeout_minutes }}
         run: |
           set -euo pipefail
           FQDN="$SERVER.database.windows.net"
           mkdir -p drill-report && : > drill-report/results.jsonl
+          # Stop ~8m before the job timeout so upload + delete get scheduled.
+          DEADLINE=$(( JOB_START + (JOB_TIMEOUT - 8) * 60 ))
           while IFS= read -r q; do
             [ -z "$q" ] && continue
+            [ "$(date +%s)" -ge "$DEADLINE" ] && { echo "::warning::query budget exhausted — skipping remaining sanity queries"; break; }
             echo "--- query: $q"
             # -b: exit nonzero on a SQL batch error so a failed sanity query
             # fails the drill instead of being recorded as a result. The
@@ -195,8 +207,10 @@ jobs:
               OUT=$(timeout 60 sqlcmd -b -S "$FQDN" -d "$DRILL_DB" -U "$SQLCMDUSER" \
                     -Q "$q" -h -1 -W -l 30 2>&1)
             fi
-            echo "$OUT"
-            python3 -c 'import json,sys; print(json.dumps({"query": sys.argv[1], "output": sys.argv[2].strip()}))' \
+            # Cap logged/stored output — queries are meant to return aggregate
+            # scalars; truncation bounds exposure if one returns rows anyway.
+            echo "$OUT" | head -20
+            python3 -c 'import json,sys; print(json.dumps({"query": sys.argv[1], "output": sys.argv[2].strip()[:500]}))' \
               "$q" "$OUT" >> drill-report/results.jsonl
           done <<< "$QUERIES"
           python3 - <<'PY'
@@ -220,13 +234,18 @@ jobs:
           if-no-files-found: warn
 
       - name: Drop throwaway database
-        # Only when THIS run created it — a failed restore must not delete a
-        # same-named DB owned by another invocation.
-        if: always() && steps.restore.outputs.created == 'true'
+        # always() — a restore Azure accepted before the CLI failed still
+        # provisions $DRILL_DB later, so verify existence and delete. The name
+        # embeds run_number+run_attempt, so only THIS invocation could own it.
+        if: always()
         shell: bash
         env:
           RG: ${{ inputs.resource_group }}
           SERVER: ${{ inputs.sql_server }}
         run: |
-          timeout 300 az sql db delete -g "$RG" -s "$SERVER" -n "$DRILL_DB" -y -o none \
-            || echo "::warning::cleanup of $DRILL_DB failed — check for orphan DB"
+          if timeout 60 az sql db show -g "$RG" -s "$SERVER" -n "$DRILL_DB" -o none 2>/dev/null; then
+            timeout 300 az sql db delete -g "$RG" -s "$SERVER" -n "$DRILL_DB" -y -o none \
+              || echo "::warning::cleanup of $DRILL_DB failed — check for orphan DB"
+          else
+            echo "$DRILL_DB not found — nothing to clean up"
+          fi

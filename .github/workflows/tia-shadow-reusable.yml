@@ -82,7 +82,7 @@ jobs:
           RAN_DIR: ${{ runner.temp }}/tia-ran-tests
         run: |
           python3 - <<'PY'
-          import fnmatch, json, os, subprocess, sys
+          import fnmatch, glob, json, os, subprocess, sys
           from pathlib import Path
 
           base, head = os.environ["BASE_SHA"], os.environ["HEAD_SHA"]
@@ -103,9 +103,11 @@ jobs:
               mappings = m.get("mappings", [])
               map_source = ".ai/tia-map.json"
 
-          expected = set(p for p in changed if is_test(p))
           all_files = subprocess.run(["git", "ls-files"], capture_output=True,
                                      text=True, check=True).stdout.split()
+          # Intersect with ls-files: a deleted test can't run, so counting it
+          # as expected would fabricate a 'missing' entry in the journal.
+          expected = set(p for p in changed if is_test(p) and p in set(all_files))
           if mappings or always:
               expected.update(t for t in all_files
                               if any(fnmatch.fnmatch(t, g) for g in always))
@@ -120,6 +122,9 @@ jobs:
                   if is_test(c) or c.startswith(("docs/", ".github/")):
                       continue
                   stem = Path(c).stem
+                  # Escape metachars — a stem like '[id]' is a char class to
+                  # fnmatch; match it literally.
+                  stem = glob.escape(stem)
                   patterns = (f"test_{stem}.*", f"{stem}.test.*", f"{stem}.spec.*", f"{stem}_test.*")
                   expected.update(t for t in all_files
                                   if t != c

@@ -311,8 +311,16 @@ def main() -> int:
                 warnings.append(f"{where}: {err}")
                 report.append(f"| {repo} | {branch} | ⚠️ unverifiable — {err} |")
                 continue
+            rerr = (protection or {}).get("_ruleset_fetch_error")
+            if rerr:
+                warnings.append(f"{where}: ruleset read failed: {rerr}")
             present = current_contexts(protection) if protection else []
             missing = [c for c in required if c not in present]
+            if missing and rerr:
+                # Union may be incomplete — a finding would be a guess, and the
+                # emitted PUT could duplicate ruleset-managed checks.
+                report.append(f"| {repo} | {branch} | ⚠️ unverifiable — ruleset read failed: {rerr} |")
+                continue
             if not missing:
                 report.append(f"| {repo} | {branch} | OK ({len(required)} required) |")
                 continue
@@ -350,7 +358,10 @@ def main() -> int:
                                        encoding="utf-8")
             lines += [f"## {f['repo']}@{f['branch']}", "",
                       "```sh",
-                      f"gh api -X PUT repos/{f['repo']}/branches/{f['branch']}/protection "
+                      # URI-encode the branch (reads already do); the endpoint
+                      # is single-quoted so metachars in branch names stay inert.
+                      f"gh api -X PUT 'repos/{f['repo']}/branches/"
+                      f"{urllib.parse.quote(f['branch'], safe='')}/protection' "
                       f"--input '{(d / f['file']).resolve()}'",
                       "```", ""]
             for w in f["warnings"]:

@@ -269,9 +269,11 @@ REPO_REQUIRED = ("repo", "lanes")
 # the structural fallback (no jsonschema) can't silently accept a typo like
 # `required_job` / `concurrency_grop` that disables a drift assertion.
 LANE_KEYS = LANE_REQUIRED + ("required_jobs", "rollback_required",
-                             "concurrency_group", "health_check", "notes")
+                             "concurrency_group", "health_check", "notes",
+                             "required_checks")
 REPO_KEYS = REPO_REQUIRED + ("rollback_required", "default_branch",
-                             "secrets_required")
+                             "secrets_required", "protected_branches",
+                             "required_checks")
 
 
 def load_contract(path: Path) -> dict:
@@ -315,6 +317,12 @@ def load_contract(path: Path) -> dict:
                                      for s in r["secrets_required"]))):
                 problems.append(f"{where} ({r.get('repo','?')}): "
                                 "'secrets_required' must be a list of strings")
+            for opt in ("protected_branches", "required_checks"):
+                if (opt in r
+                        and not (isinstance(r[opt], list)
+                                 and all(isinstance(s, str) for s in r[opt]))):
+                    problems.append(f"{where} ({r.get('repo','?')}): "
+                                    f"'{opt}' must be a list of strings")
             lanes = r.get("lanes")
             if isinstance(lanes, list):
                 for j, lane in enumerate(lanes):
@@ -338,6 +346,12 @@ def load_contract(path: Path) -> dict:
                     elif "required_jobs" in lane and not all(
                             isinstance(j, str) for j in lane["required_jobs"]):
                         problems.append(f"{where}.lanes[{j}]: required_jobs entries must be strings")
+                    if ("required_checks" in lane
+                            and not (isinstance(lane["required_checks"], list)
+                                     and all(isinstance(s, str)
+                                             for s in lane["required_checks"]))):
+                        problems.append(f"{where}.lanes[{j}]: "
+                                        "'required_checks' must be a list of strings")
                     if ("rollback_required" in lane
                             and not isinstance(lane["rollback_required"], bool)):
                         problems.append(f"{where}.lanes[{j}]: "

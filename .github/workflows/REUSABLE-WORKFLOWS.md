@@ -682,8 +682,9 @@ jobs:
 
 `setup_command` is the escape hatch for toolchains node/python don't cover
 (e.g. Go from the hosted toolcache). `auto_commit_baseline` raises the
-baseline on default-branch pushes via a signed gh-api commit (needs
-`contents: write` or `GH_PAT`).
+baseline on default-branch pushes via a signed gh-api commit — requires a
+write-capable `GH_PAT` secret (the reusable's `permissions: contents: read`
+caps the caller token, so the option is rejected without GH_PAT).
 
 ## tia-shadow (v1.19.0+)
 

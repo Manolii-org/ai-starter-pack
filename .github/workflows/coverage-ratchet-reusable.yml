@@ -134,11 +134,18 @@ jobs:
           CACHE_PATH: ${{ inputs.cache_path }}
           CACHE_KEY: ${{ inputs.cache_key }}
           SETUP_COMMAND: ${{ inputs.setup_command }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           if ! printf '%s' "$MODE" | grep -qxE 'enforce|report'; then
             echo "::error::mode must be 'enforce' or 'report'"; exit 1
           fi
-          if [ "$AUTO_COMMIT" = "true" ] && [ "$HAS_GH_PAT" != "true" ]; then
+          # GH_PAT only matters where the auto-commit step can actually run —
+          # fork/dependabot PRs get no secrets, so requiring it unconditionally
+          # would fail every PR leg that sets auto_commit_baseline.
+          if [ "$AUTO_COMMIT" = "true" ] && [ "$HAS_GH_PAT" != "true" ] \
+             && [ "$EVENT_NAME" = "push" ] && [ "$REF" = "refs/heads/$DEFAULT_BRANCH" ]; then
             echo "::error::auto_commit_baseline requires a write-capable GH_PAT secret — the reusable's contents:read permission caps github.token"; exit 1
           fi
           # Overhead = install cap (20) + setup cap (10 when setup_command set)
@@ -267,7 +274,9 @@ jobs:
               if proc.returncode != 0:
                   sys.exit(f"::error::gh api {args[0]} failed: {proc.stderr.strip()}")
               return json.loads(proc.stdout)
-          current = round(float(os.environ["CURRENT"]), 1)
+          # Full precision — rounding before compare/write drops fractional
+          # gains and lets small regressions through later.
+          current = float(os.environ["CURRENT"])
           repo, branch = os.environ["REPO"], os.environ["BRANCH"]
           base_path = Path(os.environ["BASELINE_FILE"])
           head = gh(f"repos/{repo}/git/ref/heads/{branch}")["object"]["sha"]
@@ -286,7 +295,7 @@ jobs:
               live_blob = json.loads(probe.stdout)
               live = gh(f"repos/{repo}/git/blobs/{live_blob['sha']}")
               live_text = base64.b64decode(live["content"]).decode().strip()
-          if live_text is not None and round(float(live_text), 1) >= current:
+          if live_text is not None and float(live_text) >= current:
               print(f"coverage {current} not above live baseline {live_text} — nothing to commit")
               sys.exit(0)
           old = live_text if live_text is not None else "none"
