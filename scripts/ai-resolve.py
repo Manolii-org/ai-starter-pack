@@ -68,7 +68,9 @@ SEMVER_REF = re.compile(r"v?\d+(?:\.\d+){0,2}")
 # Only executable-invocation shapes match (interpreter call or ./exec); a
 # bare `scripts/x.py` mention in prose or sample output is not a dependency.
 SCRIPT_REF = re.compile(
-    rb"(?:python(?:\d+(?:\.\d+)*)?|bash|sh|zsh|node|npx|tsx|ts-node|deno"
+    # \b before the alternation — `source`/`exec` must be a command word,
+    # not a suffix of `resource`/`outsource`/`oncexec`.
+    rb"\b(?:python(?:\d+(?:\.\d+)*)?|bash|sh|zsh|node|npx|tsx|ts-node|deno"
     rb"|ruby|perl|source|exec|bun|bunx|uv\s+run|pipenv\s+run)"
     rb"\s+[^\n|&;`]*?scripts/(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs)\b"
     rb"|\./scripts/(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs)\b")
@@ -211,6 +213,32 @@ def _mini_yaml(text: str):
             i += 1
         return depth
 
+    def map_colon(v: str) -> int:
+        # Index of the `:` that separates a mapping key from its value,
+        # or -1. The key may be quoted — a `:` inside quotes is key
+        # content, not the separator.
+        in_s = in_d = esc = False
+        for i, ch in enumerate(v):
+            if esc:
+                esc = False
+            elif in_d and ch == "\\":
+                esc = True
+            elif in_d and ch == '"':
+                in_d = False
+            elif in_s and ch == "'":
+                if v[i + 1:i + 2] == "'":
+                    esc = True
+                else:
+                    in_s = False
+            elif not in_s and not in_d:
+                if ch == '"':
+                    in_d = True
+                elif ch == "'":
+                    in_s = True
+                elif ch == ":":
+                    return i
+        return -1
+
     lines = []
     raw_lines = text.splitlines()
     li = 0
@@ -231,8 +259,10 @@ def _mini_yaml(text: str):
         if value[:1] == "-":
             value = value[1:].lstrip()
         fold = value[:1] in "[{"
-        if not fold and ":" in value:
-            fold = value.split(":", 1)[1].lstrip()[:1] in "[{"
+        if not fold:
+            ci = map_colon(value)
+            if ci != -1:
+                fold = value[ci + 1:].lstrip()[:1] in "[{"
         if fold:
             while flow_depth(body) > 0 and li < len(raw_lines):
                 part = strip_comment(raw_lines[li].strip())

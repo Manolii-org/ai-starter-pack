@@ -4716,6 +4716,15 @@ def test_root_flow_map_frontmatter(tmp_path):
     assert got2 == ["a", "b"]
 
 
+def test_quoted_key_with_colon_folds_flow_value(tmp_path):
+    """A `:` inside a quoted key is not the map separator — a folded flow
+    value beneath such a key must still collect its continuation lines."""
+    mod = load_resolve_module()
+    got = mod._mini_yaml(
+        "\"description: usage\": [one,\n  two]\nnext: 1\n")
+    assert got == {"description: usage": ["one", "two"], "next": 1}
+
+
 def test_sourced_and_bun_script_invocations_are_deps(tmp_path):
     """`source scripts/x.sh`, `bun scripts/x.ts`, `exec scripts/x.sh` are
     bundled-script invocations — script_dep_block must gate them like
@@ -4724,11 +4733,13 @@ def test_sourced_and_bun_script_invocations_are_deps(tmp_path):
     plug = tmp_path / "reg" / "registry" / "platform" / "p"
     (plug / "scripts").mkdir(parents=True)
     (plug / "scripts" / "setup.sh").write_text("x")
-    for invocation in (b"source scripts/setup.sh", b". scripts/setup.sh",
-                       b"bun scripts/setup.sh", b"exec scripts/setup.sh",
-                       b"bash -c scripts/setup.sh"):
-        # `. ` sourcing is prose-prone — only `source` gates it.
-        expect = invocation != b". scripts/setup.sh"
+    for invocation, expect in (
+            (b"source scripts/setup.sh", True),
+            (b". scripts/setup.sh", False),   # `. ` sourcing is prose-prone
+            (b"resource scripts/setup.sh", False),  # `source` inside a word
+            (b"bun scripts/setup.sh", True),
+            (b"exec scripts/setup.sh", True),
+            (b"bash -c scripts/setup.sh", True)):
         assert mod.script_dep_block(plug, invocation) is expect, invocation
 
 
