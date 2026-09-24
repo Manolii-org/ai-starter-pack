@@ -510,6 +510,11 @@ def _mini_yaml(text: str):
                 body += ("" if body.endswith("\n") else " ") + nxt.strip()
             else:
                 body += "\n"
+        if not open_quote(body):
+            # Once the quote closes, the rest of that line regains YAML
+            # syntax — a trailing comment must come off (it is text, not
+            # scalar content), while a '#' inside the folded quote stays.
+            body = strip_comment(body)
         # A flow collection may continue on deeper lines — fold each
         # (comment-stripped) line in with one space until the brackets
         # balance. Folding is gated on the VALUE actually opening a

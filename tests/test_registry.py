@@ -6215,3 +6215,21 @@ def test_pinned_mode_normalised_to_tree(tmp_path):
     lock = json.loads((consumer / ".ai" / "capability-lock.json")
                       .read_text())
     assert lock["exec"][".claude/skills/demo/x.md"] & 0o777 == 0o644
+
+
+def test_mini_yaml_quoted_fold_trailing_comment():
+    """A comment on the line that CLOSES a folded quoted scalar is a
+    comment, not scalar text — `plugin: "platform/\n framework" # c` is
+    the value 'platform/ framework' (Devin Review on #1344)."""
+    mod = load_resolve_module()
+    doc = 'plugin: "platform/\n    framework" # plugin name\n'
+    assert mod._mini_yaml(doc) == {"plugin": "platform/ framework"}
+    # a '#' inside the folded quote is literal
+    doc2 = 'plugin: "a\n    b#c" x\n'
+    try:
+        mod._mini_yaml(doc2)
+        raise AssertionError("trailing token must raise")
+    except ValueError:
+        pass
+    assert mod._mini_yaml('plugin: "a\n    b#c" # tail\n') == {
+        "plugin": "a b#c"}
