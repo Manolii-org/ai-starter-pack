@@ -1319,6 +1319,20 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                         "edit (restore it or delete it and re-resolve)",
                     ))
                     continue
+                elif rel_dst not in locked_prov:
+                    # Locked but never resolver-written: the file was
+                    # ADOPTED — the consumer already owned it when it first
+                    # matched the registry. The registry changing later must
+                    # not rewrite a consumer-owned file nor claim provenance
+                    # over it (a later --prune would then delete it).
+                    plan.conflicts.append((
+                        dst,
+                        "adopted file, never resolver-installed — the "
+                        "registry version changed since adoption; delete "
+                        "the file and re-resolve to take the registry "
+                        "version, or drop the requirement to keep yours",
+                    ))
+                    continue
                 elif (not same_exec or not exec_consistent
                       or not mode_consistent):
                     # Bytes match the install record but the mode state

@@ -1287,15 +1287,14 @@ def test_hardlinked_destination_update_isolated(tmp_path):
         "platform/framework": [("skills/demo/x.md", "v1")],
     })
     consumer = tmp_path / "consumer"
-    (consumer / ".claude" / "skills" / "demo").mkdir(parents=True)
+    consumer.mkdir()
     skill_dst = consumer / ".claude" / "skills" / "demo" / "x.md"
-    skill_dst.write_text("v1")                       # identical to registry
-    external = consumer / "external.md"
-    os.link(skill_dst, external)                      # shared inode
     m = write_manifest(consumer, "manolii",
                        [{"plugin": "platform/framework", "ref": "1.0.0"}])
     r = run_resolver(m, reg_root, consumer, "--apply")
-    assert r.returncode == 0, r.stdout                 # adopted into lock
+    assert r.returncode == 0, r.stdout                 # resolver-installed
+    external = consumer / "external.md"
+    os.link(skill_dst, external)                      # shared inode
     (reg_root / "registry" / "platform" / "framework"
      / "skills" / "demo" / "x.md").write_text("v2")     # registry drifts
     r = run_resolver(m, reg_root, consumer, "--apply")
@@ -4677,6 +4676,31 @@ def test_adopted_shared_file_no_false_collision(tmp_path):
     assert r.returncode == 0, r.stdout
     assert "collision" not in r.stdout
     assert (adopted.stat().st_mode & 0o777) == 0o600
+
+
+def test_adopted_file_survives_registry_drift(tmp_path):
+    """An adopted file is consumer-owned: the registry changing its
+    content later must CONFLICT, never rewrite the file nor claim
+    provenance over it."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/shared/tool.sh", "echo x\n")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    adopted = consumer / ".claude" / "skills" / "shared" / "tool.sh"
+    adopted.parent.mkdir(parents=True)
+    adopted.write_text("echo x\n")
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 0, r.stdout
+    # Registry content drifts — the consumer file must not be clobbered.
+    src = (reg_root / "registry" / "platform" / "framework" / "skills"
+           / "shared" / "tool.sh")
+    src.write_text("echo REGISTRY-V2\n")
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode != 0 or "adopted" in r.stdout
+    assert adopted.read_text() == "echo x\n"
 
 
 def test_inline_comment_after_parent_key(tmp_path):
