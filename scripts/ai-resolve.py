@@ -318,6 +318,28 @@ def _mini_yaml(text: str):
             i += 1
         return '"' if in_d else ("'" if in_s else "")
 
+    # Quoted keys are legal YAML in block mappings just as in flow maps —
+    # `"version": 1` decodes to the same key as `version: 1`.
+    key_re = re.compile(
+        # Plain-scalar keys may contain a mid-word apostrophe (`author's`) —
+        # but may NOT start with one: a leading quote opens a quoted scalar,
+        # so `- 'setup: done'` is the string 'setup: done', not key 'setup.
+        # The quoted alternatives are tried first, so a quoted key still
+        # parses ('key': v). The plain alternative accepts every character
+        # YAML allows in a plain scalar key — `rollout/phase`, `a+b`, `x=y`
+        # are all legal keys — excluding only the indicator characters that
+        # can never open one (- ? : , [ ] { } # & * ! | > ' " % @ `) and
+        # whitespace. The ':' separator can't appear in the key itself
+        # (`key:v` is one scalar in flow style anyway), and '#' can't
+        # either (always comment territory).
+        r"^(\"(?:[^\"\\]|\\.)*\"|'(?:[^']|'')*'"
+        r"|[^\s?:,\[\]{}#&*!|>'\"%@`-][^\s\[\]{},:#]*)"
+        # The ':' separates a key only when followed by spaces or EOL — a
+        # tab is not a separator (`key:\tv` is a ScannerError in PyYAML).
+        # re.S: a folded multiline quoted value can carry a literal '\n'.
+        r" *:(?: +(.*)|)$",
+        re.S)
+
     lines = []
     raw_lines = text.splitlines()
     # Whether the document's last line carries a line break — a `|+`/`>+`
@@ -442,11 +464,18 @@ def _mini_yaml(text: str):
             body = body.strip()[3:].strip()
             if not body:
                 continue
-            if body.startswith("- "):
+            if body.startswith("- ") or body == "-":
                 # `--- - 1` — a seq entry directly on the marker line is a
                 # ScannerError in PyYAML, not a document.
                 raise ValueError(
                     "sequence entries are not allowed on a '---' line")
+            if key_re.match(body):
+                # `--- key: v` — the marker line's node must be COMPLETE:
+                # a flow collection, scalar, or block-scalar indicator. A
+                # block mapping entry cannot share the `---` line — PyYAML
+                # raises "mapping values are not allowed here".
+                raise ValueError(
+                    "mapping entries are not allowed on a '---' line")
         if body == body.lstrip() and body.strip() == "...":
             for rest in raw_lines[li:]:
                 if rest.strip() and not rest.lstrip().startswith("#"):
@@ -564,21 +593,6 @@ def _mini_yaml(text: str):
         flush_pending_ws()
 
     pos = [0]
-    # Quoted keys are legal YAML in block mappings just as in flow maps —
-    # `"version": 1` decodes to the same key as `version: 1`.
-    key_re = re.compile(
-        # Plain-scalar keys may contain a mid-word apostrophe (`author's`) —
-        # but may NOT start with one: a leading quote opens a quoted scalar,
-        # so `- 'setup: done'` is the string 'setup: done', not key 'setup.
-        # The quoted alternatives are tried first, so a quoted key still
-        # parses ('key': v).
-        r"^(\"(?:[^\"\\]|\\.)*\"|'(?:[^']|'')*'"
-        r"|[A-Za-z0-9_.-][A-Za-z0-9_.'-]*)"
-        # The ':' separates a key only when followed by spaces or EOL — a
-        # tab is not a separator (`key:\tv` is a ScannerError in PyYAML).
-        # re.S: a folded multiline quoted value can carry a literal '\n'.
-        r" *:(?: +(.*)|)$",
-        re.S)
 
     def key_of(tok: str):
         return scalar(tok) if tok[:1] in "\"'" else tok
@@ -714,13 +728,22 @@ def _mini_yaml(text: str):
                     key = scalar(m.group(1))
                     val_tok = m.group(2)
                 else:
+                    # A plain key is everything up to the ':' separator —
+                    # any character except the flow indicators ([ ] { } ,
+                    # and the separator itself). `rollout/phase: true` and
+                    # `a:b: v` (key 'a:b') are legal YAML; `{key:v}` still
+                    # fails to match here because its ':' is followed by
+                    # 'v', not whitespace/EOL.
                     m = re.match(
-                        r"^([A-Za-z0-9_.-]+)\s*:(?:\s+(.*)|)$",
+                        r"^([^\[\]{},]+?)\s*:(?:\s+(.*)|)$",
                         item, re.S)
                     if not m:
                         raise ValueError(
                             f"unsupported flow-map item {item!r}")
-                    key, val_tok = m.group(1), m.group(2)
+                    key, val_tok = m.group(1).strip(), m.group(2)
+                    if not key:
+                        raise ValueError(
+                            f"unsupported flow-map item {item!r}")
                 if key in out_map:
                     raise ValueError(
                         f"duplicate key {key!r} in flow map")
@@ -1098,32 +1121,42 @@ def script_dep_block(plugin_dir: Path, src_bytes: bytes,
     sdir = plugin_dir / "scripts"
     declared = declared_consumer_scripts(src_bytes)
     for m in SCRIPT_REF.finditer(src_bytes):
-        # Only names inside actual invocations count — a bare `scripts/x.py`
-        # mention in prose is not a dependency and must not gate materialise.
-        n = SCRIPT_NAME.search(m.group(0))
-        if n:
-            names = [n.group(1).decode("utf-8", errors="ignore")]
-        else:
-            mod = MODULE_NAME.search(m.group(0))
-            if not mod:
-                continue
-            # `python -m scripts.a.b` -> scripts/a/b.py or the package
-            # scripts/a/b/__init__.py — either satisfies/blocks equally.
-            stem = mod.group(1).decode("utf-8", errors="ignore")
-            names = [stem.replace(".", "/") + ".py",
-                     stem.replace(".", "/") + "/__init__.py"]
-        bundled = any(
-            (name in pinned_scripts if pinned_scripts is not None
-             else (sdir / name).is_file())
-            for name in names)
-        if bundled:
-            return True  # bundled dep — resolver cannot satisfy it
-        if not any(
-                f"scripts/{name}" in declared
-                or f"./scripts/{name}" in declared
-                or name in declared
-                for name in names):
-            return True  # unbundled + undeclared — would ship broken
+        # Every scripts/ reference inside ONE invocation is a separate
+        # dependency — `python -m scripts.foo scripts/x.py` needs BOTH
+        # checked, not just the first slash-form path the match contains.
+        # Each ref carries (declared alternatives, bundled probes): any
+        # bundled probe hit means the dep is bundled (the resolver cannot
+        # materialise scripts/); otherwise at least one declared
+        # alternative must appear in consumer_scripts.
+        refs: list[tuple[list[str], list[str]]] = []
+        for n in SCRIPT_NAME.finditer(m.group(0)):
+            p = n.group(1).decode("utf-8", errors="ignore")
+            refs.append(([p], [p]))
+        for mod in MODULE_NAME.finditer(m.group(0)):
+            # `python -m scripts.a.b` runs a/b.py or the package entry
+            # a/b/__main__.py — either satisfies the invocation. The
+            # bundled probe also covers __init__.py: a plugin-shipped
+            # package init is still a dep the resolver cannot run.
+            base = mod.group(1).decode("utf-8", errors="ignore")
+            base = base.replace(".", "/")
+            refs.append(([base + ".py", base + "/__main__.py"],
+                         [base + ".py", base + "/__main__.py",
+                          base + "/__init__.py"]))
+        if not refs:
+            continue
+        for declared_alts, bundled_probes in refs:
+            if any(
+                    (name in pinned_scripts
+                     if pinned_scripts is not None
+                     else (sdir / name).is_file())
+                    for name in bundled_probes):
+                return True  # bundled dep — resolver cannot satisfy it
+            if not any(
+                    f"scripts/{name}" in declared
+                    or f"./scripts/{name}" in declared
+                    or name in declared
+                    for name in declared_alts):
+                return True  # unbundled + undeclared — would ship broken
     return False
 
 
@@ -2515,11 +2548,49 @@ def main() -> int:
                 dfds[rel] = secure_dir_fd(repo_root, rel)
             return dfds[rel]
 
+        # Rollback journal — each entry is (dst, prior_bytes, prior_mode);
+        # prior_bytes None marks a destination that did not exist before
+        # this apply. A failure AFTER the first materialised output (a mid
+        # write, or the lock write itself) would otherwise leave files the
+        # lock never recorded — the next run would adopt them without
+        # provenance and a later registry update would conflict on files
+        # this resolver actually put there. Restore every touched
+        # destination instead: apply is all-or-nothing.
+        undo: list[tuple[Path, bytes | None, int | None]] = []
+
+        def rollback() -> None:
+            for dst, prior, mode in reversed(undo):
+                try:
+                    if prior is None:
+                        if _HAS_DIRFD:
+                            os.unlink(dst.name,
+                                      dir_fd=parent_fd(dst.parent))
+                        else:
+                            dst.unlink(missing_ok=True)
+                    else:
+                        atomic_replace(
+                            dst,
+                            lambda f, b=prior: f.write(b),
+                            mode=mode,
+                            dfd=parent_fd(dst.parent))
+                except OSError as re:
+                    # Best-effort restore — a write that already failed
+                    # (e.g. ENOSPC) will likely fail here too; surface it
+                    # but keep unwinding the rest of the journal.
+                    sys.stderr.write(
+                        f"note: rollback could not restore "
+                        f"{dst.relative_to(repo_root).as_posix()}: {re}\n")
+
         try:
             for src, dst in plan.writes:
                 rel_dst = dst.relative_to(repo_root).as_posix()
                 if not _HAS_DIRFD:
                     dst.parent.mkdir(parents=True, exist_ok=True)
+                existed = dst.is_file() and not dst.is_symlink()
+                undo.append((
+                    dst,
+                    dst.read_bytes() if existed else None,
+                    dst.stat().st_mode & 0o777 if existed else None))
                 # Write the bytes the plan checksummed, not a fresh read of
                 # src — a registry file swapped between plan and apply
                 # would otherwise ship content the lock never digested.
@@ -2539,6 +2610,8 @@ def main() -> int:
                     # through the kept-path branch, and unlink on it is
                     # never a resolver-approved deletion.
                     if f.is_file() and not f.is_symlink():
+                        undo.append((f, f.read_bytes(),
+                                     f.stat().st_mode & 0o777))
                         if _HAS_DIRFD:
                             os.unlink(f.name,
                                       dir_fd=parent_fd(f.parent))
@@ -2547,6 +2620,7 @@ def main() -> int:
                         print(f"  removed "
                               f"{f.relative_to(repo_root).as_posix()}")
         except OSError as e:
+            rollback()
             for dfd in dfds.values():
                 os.close(dfd)
             sys.stderr.write(f"FAIL: cannot apply: {e}\n")
@@ -2624,6 +2698,9 @@ def main() -> int:
                                   .encode("utf-8") + b"\n"),
                 dfd=parent_fd(lock_file.parent))
         except OSError as e:
+            # Roll the outputs back too — leaving them on disk untracked
+            # would let the next run adopt them without provenance.
+            rollback()
             sys.stderr.write(f"FAIL: cannot write {LOCK_PATH}: {e}\n")
             return 2
         finally:

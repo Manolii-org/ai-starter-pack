@@ -5934,3 +5934,175 @@ def test_script_dep_block_python_dash_m(tmp_path):
     installed = {p.name for p in cmds.glob("*.md")}
     assert "run3.md" in installed
     assert not (installed & {"run.md", "run2.md", "run4.md"})
+
+
+def test_script_dep_block_mixed_invocation(tmp_path):
+    """`python -m scripts.check scripts/extra.py` has TWO deps — the
+    bundled module still blocks even when the later slash-path is
+    declared."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    # the module dep is unbundled but undeclared -> blocks
+    body = (b"---\nconsumer_scripts: [scripts/extra.py]\n---\n"
+            b"python -m scripts.check scripts/extra.py\n")
+    assert mod.script_dep_block(pdir, body)
+    # declaring the module too -> allowed
+    body2 = (b"---\nconsumer_scripts: [scripts/check.py,"
+             b" scripts/extra.py]\n---\n"
+             b"python -m scripts.check scripts/extra.py\n")
+    assert not mod.script_dep_block(pdir, body2)
+    # bundle the MODULE -> blocked even though extra.py is declared
+    (pdir / "scripts" / "check.py").write_bytes(b"x")
+    assert mod.script_dep_block(pdir, body2)
+    # and the reverse: bundled path + declared module still blocks
+    pdir2 = tmp_path / "plug2"
+    (pdir2 / "scripts").mkdir(parents=True)
+    (pdir2 / "scripts" / "extra.py").write_bytes(b"x")
+    body3 = (b"---\nconsumer_scripts: [scripts/check.py]\n---\n"
+             b"python -m scripts.check scripts/extra.py\n")
+    assert mod.script_dep_block(pdir2, body3)
+
+
+def test_script_dep_block_module_main_py(tmp_path):
+    """`python -m scripts.pkg` runs pkg/__main__.py (or pkg.py) — an
+    __init__.py declaration alone does NOT satisfy the invocation."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    body_init = (b"---\nconsumer_scripts: [scripts/pkg/__init__.py]\n---\n"
+                 b"python -m scripts.pkg\n")
+    assert mod.script_dep_block(pdir, body_init)
+    body_main = (b"---\nconsumer_scripts: [scripts/pkg/__main__.py]\n---\n"
+                 b"python -m scripts.pkg\n")
+    assert not mod.script_dep_block(pdir, body_main)
+    body_mod = (b"---\nconsumer_scripts: [scripts/pkg.py]\n---\n"
+                b"python -m scripts.pkg\n")
+    assert not mod.script_dep_block(pdir, body_mod)
+    # a bundled __init__.py is still a dep the resolver cannot run
+    (pdir / "scripts" / "pkg").mkdir()
+    (pdir / "scripts" / "pkg" / "__init__.py").write_bytes(b"")
+    assert mod.script_dep_block(pdir, body_main)
+
+
+def test_mini_yaml_doc_start_mapping_rejected():
+    """`--- key: v` — a block mapping entry may not share the marker
+    line; PyYAML raises 'mapping values are not allowed here'."""
+    mod = load_resolve_module()
+    for bad in ("--- version: 1\nuniverse: manolii\n",
+                "--- x:\n", "--- 'k': v\n", "--- -\n",
+                "--- 'k: v'\n", "--- a\n"):
+        try:
+            mod._mini_yaml(bad)
+            raise AssertionError(f"{bad!r} must raise")
+        except ValueError:
+            pass
+    # legal remainders keep working: a flow collection or block-scalar
+    # indicator is a COMPLETE node; bare scalars stay unsupported
+    # (fail-closed — the supported subset never had a scalar root)
+    assert mod._mini_yaml("--- {a: 1}\n") == {"a": 1}
+    assert mod._mini_yaml("--- [a]\n") == ["a"]
+    assert mod._mini_yaml("--- |\n  x\n") == "x\n"
+
+
+def test_mini_yaml_plain_key_charset():
+    """Plain keys may contain '/', '+', '=' etc. — in flow maps and in
+    block mappings alike (PyYAML accepts them)."""
+    mod = load_resolve_module()
+    assert mod._mini_yaml(
+        "feature_flags: {rollout/phase: true, a+b: 2}") == {
+            "feature_flags": {"rollout/phase": True, "a+b": 2}}
+    assert mod._mini_yaml("rollout/phase: true\n") == {
+        "rollout/phase": True}
+    assert mod._mini_yaml("x: {a:b: v}") == {"x": {"a:b": "v"}}
+
+
+def test_apply_rollback_on_lock_failure(tmp_path):
+    """If the lock write fails after outputs were materialised, the
+    resolver must restore the prior state — files written this run are
+    removed and pre-existing tracked files get their old bytes back.
+    An unrolled-back output would be adopted WITHOUT provenance next
+    run and conflict later on files the resolver itself wrote."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/SKILL.md",
+                                "---\nname: demo\ndescription: d\n---\nv1")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    skill = consumer / ".claude" / "skills" / "demo" / "SKILL.md"
+    assert skill.read_text().endswith("v1")
+    # registry drifts to v2; break the lock path so apply fails at the
+    # lock write after rewriting SKILL.md
+    (reg_root / "registry" / "platform" / "framework" / "skills" / "demo"
+     / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: d\n---\nv2")
+    ai_dir = consumer / ".ai"
+    os.chmod(ai_dir, 0o555)
+    try:
+        r = run_resolver(m, reg_root, consumer, "--apply")
+    finally:
+        os.chmod(ai_dir, 0o755)
+    assert r.returncode == 2, r.stdout + r.stderr
+    # rolled back: v1 content restored, not half-applied v2
+    assert skill.read_text().endswith("v1"), skill.read_text()
+
+
+def test_apply_rollback_removes_new_outputs(tmp_path):
+    """A FIRST apply that fails at the lock write must leave no
+    materialised outputs behind."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/SKILL.md",
+                                "---\nname: demo\ndescription: d\n---\nv1"),
+                               ("commands/run.md", "run")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    ai_dir = consumer / ".ai"
+    ai_dir.mkdir()
+    os.chmod(ai_dir, 0o555)
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    try:
+        r = run_resolver(m, reg_root, consumer, "--apply")
+    finally:
+        os.chmod(ai_dir, 0o755)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert not (consumer / ".claude" / "skills" / "demo"
+                / "SKILL.md").exists()
+    assert not (consumer / ".claude" / "commands" / "run.md").exists()
+
+
+def test_mode_drift_does_not_hide_local_edit(tmp_path):
+    """Install A@0644, hand-edit the consumer copy to B@0644, then move the
+    registry to B@0600 — the local edit must still CONFLICT, not be
+    rewritten + re-provenanced as resolver-owned. Mode drift
+    (mode_consistent False) must not bypass the modified-since-install
+    guard."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/SKILL.md",
+                                "---\nname: demo\ndescription: d\n---\nv1")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    skill = consumer / ".claude" / "skills" / "demo" / "SKILL.md"
+    os.chmod(skill, 0o644)
+    skill.write_text("---\nname: demo\ndescription: d\n---\nv2")
+    # registry carries the SAME new bytes but at a different mode
+    reg_file = (reg_root / "registry" / "platform" / "framework"
+                / "skills" / "demo" / "SKILL.md")
+    reg_file.write_text("---\nname: demo\ndescription: d\n---\nv2")
+    os.chmod(reg_file, 0o600)
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "modified since install" in r.stdout
+    # the lock must NOT claim ownership of the local edit
+    lock = json.loads((consumer / ".ai" / "capability-lock.json")
+                      .read_text())
+    assert lock["files"][".claude/skills/demo/SKILL.md"] != \
+        hashlib.sha256(skill.read_bytes()).hexdigest()
