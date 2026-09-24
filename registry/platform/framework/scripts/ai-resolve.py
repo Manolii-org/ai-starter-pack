@@ -34,7 +34,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -69,7 +68,8 @@ SEMVER_REF = re.compile(r"v?\d+(?:\.\d+){0,2}")
 # Only executable-invocation shapes match (interpreter call or ./exec); a
 # bare `scripts/x.py` mention in prose or sample output is not a dependency.
 SCRIPT_REF = re.compile(
-    rb"(?:python3?|bash|sh|zsh|node|npx|tsx|deno|ruby|perl|uv\s+run|pipenv\s+run)"
+    rb"(?:python(?:\d+(?:\.\d+)*)?|bash|sh|zsh|node|npx|tsx|deno|ruby|perl"
+    rb"|uv\s+run|pipenv\s+run)"
     rb"\s+[^\n|&;`]*?scripts/(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs)\b"
     rb"|\./scripts/(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs)\b")
 # Backticked `scripts/x.py` is NOT an invocation context — prose uses it for
@@ -165,8 +165,12 @@ def _mini_yaml(text: str):
             else:
                 # Quotes open a region only at a token boundary — a quote
                 # inside an already-started scalar (an apostrophe like
-                # "don't") is plain text, not a quote opener.
-                if ch in ":,-[{":
+                # "don't") is plain text, not a quote opener. A '-' counts
+                # only as the block-sequence indicator — at a token start
+                # AND followed by whitespace; 'editor-'s' is one scalar.
+                if (ch in ":,[{"
+                        or (ch == "-" and not s[sep:i].strip()
+                            and s[i + 1:i + 2] in (" ", "\t", ""))):
                     sep = i + 1
             i += 1
         return s
@@ -202,7 +206,7 @@ def _mini_yaml(text: str):
                     sep = i + 1
                 elif ch in "]}":
                     depth -= 1
-                elif ch in ":,-":
+                elif ch in ":,":
                     sep = i + 1
             i += 1
         return depth
@@ -280,7 +284,7 @@ def _mini_yaml(text: str):
                     sep = i + 1
                 elif ch in "]}":
                     depth -= 1
-                elif ch in ":-":
+                elif ch == ":":
                     sep = i + 1
                 elif ch == ",":
                     sep = i + 1
@@ -316,15 +320,19 @@ def _mini_yaml(text: str):
             if map_items and not map_items[-1].strip():
                 map_items = map_items[:-1]  # legal trailing comma
             for item in map_items:
-                m = re.match(r"^([A-Za-z0-9_.-]+)\s*:\s*(.*)$",
-                             item.strip(), re.S)
+                m = re.match(
+                    r"^(\"(?:[^\"\\]|\\.)*\"|'(?:[^']|'')*'"
+                    r"|[A-Za-z0-9_.-]+)\s*:\s*(.*)$",
+                    item.strip(), re.S)
                 if not m:
                     raise ValueError(
                         f"unsupported flow-map item {item!r}")
-                if m.group(1) in out_map:
+                key_tok = m.group(1)
+                key = scalar(key_tok) if key_tok[0] in "\"'" else key_tok
+                if key in out_map:
                     raise ValueError(
-                        f"duplicate key {m.group(1)!r} in flow map")
-                out_map[m.group(1)] = scalar(m.group(2))
+                        f"duplicate key {key!r} in flow map")
+                out_map[key] = scalar(m.group(2))
             return out_map
         if tok[0] == '"':
             if not (len(tok) > 1 and tok.endswith('"')):
@@ -669,17 +677,18 @@ def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def atomic_replace(dst: Path, fill, src: Path | None = None) -> None:
+def atomic_replace(dst: Path, fill, src: Path | None = None,
+                   mode: int | None = None) -> None:
     """Install `dst` through an exclusively-created sibling temp + rename.
 
     tempfile.mkstemp picks a random name with O_EXCL — a consumer cannot
     pre-plant a symlink or hard link there, so writes can never follow a
     link out of the tree. os.replace then unlinks any existing dst entry,
     so a destination hard-linked to a file outside the owned tree keeps
-    its shared inode (and the external peer) untouched. With `src`, the
-    source's mode/mtime land on the temp BEFORE the swap — a metadata
-    failure then leaves the old destination intact rather than
-    publishing a 0600 temp."""
+    its shared inode (and the external peer) untouched. Mode/times land on
+    the temp BEFORE the swap — a metadata failure leaves the old
+    destination intact rather than publishing a 0600 temp, and no
+    post-rename chmod ever follows a swapped-in symlink."""
     fd, tmp_name = tempfile.mkstemp(dir=dst.parent,
                                     prefix=f".{dst.name}.", suffix=".tmp")
     tmp = Path(tmp_name)
@@ -687,10 +696,16 @@ def atomic_replace(dst: Path, fill, src: Path | None = None) -> None:
         with os.fdopen(fd, "wb") as f:
             fill(f)
         if src is not None:
-            shutil.copystat(src, tmp)   # keep copy2's mode/mtime semantics
-            # Never propagate privileged mode bits — a 4755/2755 source under
-            # a root-run --apply would publish setuid/setgid on the output.
-            os.chmod(tmp, tmp.stat().st_mode & 0o777)
+            s = src.stat()
+            # Mtime only — copystat would also copy xattrs, including
+            # security.capability under a root --apply, so times and mode
+            # are handled explicitly and privileged bits never propagate.
+            os.utime(tmp, ns=(s.st_atime_ns, s.st_mtime_ns))
+            os.chmod(tmp, s.st_mode & 0o777)
+        if mode is not None:
+            # The PLANNED mask — the source's mode may have drifted between
+            # plan and apply; the installed file must match the lock record.
+            os.chmod(tmp, mode & 0o777)
         os.replace(tmp, dst)
     finally:
         if tmp.exists():
@@ -700,8 +715,10 @@ def atomic_replace(dst: Path, fill, src: Path | None = None) -> None:
 def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                      index: dict, repo_root: Path, locked: dict, plan: Plan,
                      write_components: bool = True,
-                     locked_exec: dict | None = None) -> None:
+                     locked_exec: dict | None = None,
+                     locked_prov: dict | None = None) -> None:
     locked_exec = locked_exec or {}
+    locked_prov = locked_prov or {}
     m = REQUIRES_RE.match(req)
     if not m:
         plan.conflicts.append((repo_root / req, "malformed plugin reference"))
@@ -1132,10 +1149,10 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
             prior = plan.planned.get(rel_dst)
             if prior is not None:
                 prior_sha, prior_req, prior_exec, prior_mode = prior
-                # Exec compares on the any-exec state: git reproduces only
-                # 100644/100755 and the umask picks the actual bits, so a
-                # partial-mask difference is a checkout artifact, not content.
-                if prior_sha != src_sha or bool(prior_exec) != bool(src_exec):
+                # Collide on the FULL mode — apply installs the source mask
+                # verbatim, so an rw-bit difference is order-dependent
+                # output, not a umask artifact.
+                if prior_sha != src_sha or prior_mode != src_mode:
                     plan.conflicts.append((
                         dst,
                         f"output-path collision: {req} provides different content or "
@@ -1162,9 +1179,8 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                 # 'identical' means bytes AND the any-exec state match — a
                 # registry file that gained/lost +x must fall through to the
                 # locked drift-repair path, not skip with stale permissions.
-                # The comparison is any-exec only: git stores 100644/100755
-                # and the umask selects the bits, so the mask itself is not a
-                # portable signal.
+                # Exec class is the identity signal here; the full mask is
+                # checked separately against the lock record below.
                 dst_exec = dst.stat().st_mode & 0o111
                 same_exec = bool(dst_exec) == bool(src_exec)
                 bytes_match = dst.read_bytes() == src_bytes
@@ -1179,9 +1195,14 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                 # the installed-mode record: a permission-only registry
                 # change (0644 -> 0444, same bytes) is registry mode drift,
                 # not identity — falling through to the rewrite path keeps
-                # the installed copy and the lock record in step. For a
-                # legacy record the comparison is any-exec only.
+                # the installed copy and the lock record in step. This only
+                # gates files the resolver WROTE (in install_prov): their
+                # record encodes the source's mode. An adopted file's record
+                # encodes the consumer's own mode — comparing it against src
+                # would schedule a permanent clobber of a file the consumer
+                # owns. For a legacy record the comparison is any-exec only.
                 mode_consistent = (rel_dst not in locked or rec_exec is None
+                                   or rel_dst not in locked_prov
                                    or _exec_matches(rec_exec,
                                                     src.stat().st_mode))
                 if (bytes_match and same_exec and exec_consistent
@@ -1471,7 +1492,8 @@ def main() -> int:
         plan_requirement(req["plugin"], req["ref"], universe,
                          registry_root, index, repo_root, locked_dig, plan,
                          write_components=claude_selected,
-                         locked_exec=locked_exec)
+                         locked_exec=locked_exec,
+                         locked_prov=install_prov)
 
     # Orphan detection: lockfile files no longer required. Without --prune an
     # orphan is simply kept (and stays lockfile-tracked) — modified or not.
@@ -1722,28 +1744,33 @@ def main() -> int:
         return 0
 
     if args.apply:
+        # Probe the lock destination BEFORE materialising anything — if .ai
+        # cannot take the lock, components would land with no ownership
+        # record and every later run treats them as untracked local files.
+        lock_file.parent.mkdir(parents=True, exist_ok=True)
+        probe_fd, probe_name = tempfile.mkstemp(
+            dir=lock_file.parent, prefix=".lock-probe.", suffix=".tmp")
+        os.close(probe_fd)
+        Path(probe_name).unlink()
         for src, dst in plan.writes:
             rel_dst = dst.relative_to(repo_root).as_posix()
             dst.parent.mkdir(parents=True, exist_ok=True)
             # Write the bytes the plan checksummed, not a fresh read of src —
             # a registry file swapped between plan and apply would otherwise
             # ship content the lock never digested.
+            planned = plan.planned.get(rel_dst)
+            # The FULL planned mask lands on the temp before the rename —
+            # a post-rename chmod could follow a swapped-in symlink.
             atomic_replace(dst,
                            lambda f, b=plan.payload[rel_dst]: f.write(b),
-                           src=src)
-            # And the exec mask the plan recorded — copystat would copy the
-            # source's CURRENT mode, which may have drifted since planning;
-            # the lock must describe the file that was actually installed.
-            planned = plan.planned.get(rel_dst)
-            if planned is not None:
-                # The FULL planned mask, not just exec bits — copystat
-                # copied the source's CURRENT mode, which may have drifted
-                # since planning; the installed file must match the mode
-                # the lock is about to record.
-                os.chmod(dst, planned[3] & 0o777)
+                           src=src,
+                           mode=(planned[3] if planned is not None else None))
         if args.prune:
             for f in plan.removals:
-                if f.is_file() or f.is_symlink():
+                # Regular files only — a symlink reached removals only
+                # through the kept-path branch, and unlink on it is never
+                # a resolver-approved deletion.
+                if f.is_file() and not f.is_symlink():
                     f.unlink()
                     print(f"  removed {f.relative_to(repo_root).as_posix()}")
             for f in plan.removals:

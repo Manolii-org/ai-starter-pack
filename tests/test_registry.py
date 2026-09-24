@@ -4561,9 +4561,10 @@ def test_mode_divergent_collision_conflicts(tmp_path):
     assert "output-path collision" in r.stdout
 
 
-def test_partial_mask_collision_dedupes(tmp_path):
-    """0755 vs 0750 is the same any-exec state — identical bytes dedupe
-    instead of colliding (the raw mask varies by umask across machines)."""
+def test_partial_mask_collision_conflicts(tmp_path):
+    """0755 vs 0750 is an rw-bit divergence — identical bytes still collide.
+    Apply installs the source mask verbatim, so deduping would make the
+    installed file depend on provider order."""
     reg_root = make_registry(tmp_path / "src", {
         "platform/framework": [("skills/shared/tool.sh", "echo x\n")],
         "platform/other": [("skills/shared/tool.sh", "echo x\n")],
@@ -4577,7 +4578,98 @@ def test_partial_mask_collision_dedupes(tmp_path):
     m = write_manifest(consumer, "manolii",
                        [{"plugin": "platform/framework", "ref": "1.0.0"},
                         {"plugin": "platform/other", "ref": "1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 1
+    assert "output-path collision" in r.stdout
+
+
+def test_adopted_mode_difference_stays_adopted(tmp_path):
+    """An adopted file keeps its own mode forever: identical bytes but
+    different rw bits than the source must NOT schedule a rewrite on the
+    next run — the consumer owns that file's permissions."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/shared/tool.sh", "echo x\n")],
+    })
+    (reg_root / "registry" / "platform" / "framework" / "skills"
+     / "shared" / "tool.sh").chmod(0o600)
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    adopted = consumer / ".claude" / "skills" / "shared" / "tool.sh"
+    adopted.parent.mkdir(parents=True)
+    adopted.write_text("echo x\n")
+    adopted.chmod(0o644)
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
     assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    assert (adopted.stat().st_mode & 0o777) == 0o644
+    # Second run: --check must see 'identical', not a planned rewrite.
+    assert run_resolver(m, reg_root, consumer, "--check").returncode == 0
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 0
+    assert (adopted.stat().st_mode & 0o777) == 0o644
+    lock = json.loads((consumer / ".ai" / "capability-lock.json").read_text())
+    prov = lock.get("provenance", {})
+    assert ".claude/skills/shared/tool.sh" not in prov
+
+
+def test_flow_scalar_hyphen_apostrophe(tmp_path):
+    """'editor-'s' inside a flow list is ONE plain scalar — '-' mid-token
+    must not open a quote region and break the flow item parse."""
+    mod = load_resolve_module()
+    got = mod._mini_yaml("tags: [editor-'s, other]\n")
+    assert got["tags"] == ["editor-'s", "other"]
+
+
+def test_flow_map_quoted_keys(tmp_path):
+    """Quoted keys in a flow map decode like any other scalar — PyYAML
+    accepts {\"plugin\": x} and the fallback must too."""
+    mod = load_resolve_module()
+    got = mod._mini_yaml(
+        'requires: [{"plugin": platform/framework, "ref": "1.0.0"}]\n')
+    assert got["requires"] == [
+        {"plugin": "platform/framework", "ref": "1.0.0"}]
+
+
+def test_versioned_python_invocation_is_script_dep(tmp_path):
+    """python3.11 scripts/x.py is the same bundled-script dependency as
+    python3 — the interpreter version suffix must not hide it."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [
+            ("skills/analytics/SKILL.md",
+             "Run `python3.11 scripts/session-analytics.py --days 7`"),
+            ("scripts/session-analytics.py", "# bundled helper"),
+            ("skills/plain/SKILL.md", "self-contained"),
+        ],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 0, r.stdout
+    skills = consumer / ".claude" / "skills"
+    assert not (skills / "analytics" / "SKILL.md").exists()
+    assert (skills / "plain" / "SKILL.md").is_file()
+
+
+def test_lock_dest_unwritable_fails_before_writes(tmp_path):
+    """An unwritable .ai/ must refuse --apply BEFORE any component write —
+    otherwise files land with no ownership record."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/SKILL.md",
+                                "---\nname: demo\ndescription: d\n---\nbody")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    ai_dir = consumer / ".ai"
+    ai_dir.mkdir()
+    ai_dir.chmod(0o555)
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode != 0
+    assert not (consumer / ".claude" / "skills" / "demo" / "SKILL.md"
+                ).exists()
 
 
 def test_prune_refuses_chmodded_orphan(tmp_path):
