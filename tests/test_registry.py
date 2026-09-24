@@ -7835,3 +7835,86 @@ def test_script_dep_heredoc_literal_quotes_backticks(tmp_path):
             b"it's `sh scripts/x.sh` literal\n"
             b"E\n")
     assert mod.script_dep_block(pdir, body)
+
+
+def test_script_dep_quoted_backtick_keeps_quote_state(tmp_path):
+    """The byte right after a closing backtick must still be read — a
+    skipped `"` flipped the outer quote state and hid the pipe (round-6
+    review on #125/#8)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (b'echo "`cat scripts/x.sh`" | sh',
+                 b'echo `true` "$(cat scripts/x.sh)" | sh',
+                 b'echo "`true`$(cat scripts/x.sh)" | bash'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_wrapped_env_split_string(tmp_path):
+    """A wrapper in front of `env` must not end the split-string pre-pass
+    (round-6 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (b'echo "$(cat scripts/x.sh)" | command env -S sh',
+                 b'echo "$(cat scripts/x.sh)" | nohup env -S bash',
+                 b'echo "$(cat scripts/x.sh)" | stdbuf -o0 env -S sh'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_env_split_string_forwarding_operand(tmp_path):
+    """`env -S 'cat'` is a COMMAND that forwards stdin — it must not fall
+    through to the bare-`env` sink (round-6 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (b"echo \"$(cat scripts/x.sh)\" | env -S 'cat' | sh",
+                 b"echo \"$(cat scripts/x.sh)\" | env -S 'tee /dev/null' | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_stdout_self_duplication(tmp_path):
+    """`>&1`/`1>&1` point stdout at itself — a no-op that leaves the pipe
+    intact (round-6 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (b'echo "$(cat scripts/x.sh)" >&1 | sh',
+                 b'echo "$(cat scripts/x.sh)" 1>&1 | bash'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_earlier_stdout_redirect(tmp_path):
+    """A fd1 redirect BEFORE the substitution empties the pipe too; a
+    redirect in an earlier command segment does not (round-6 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert not mod.script_dep_block(
+        pdir, b'echo >/dev/null "$(cat scripts/x.sh)" | sh\n')
+    assert mod.script_dep_block(
+        pdir, b'true >/dev/null; echo "$(cat scripts/x.sh)" | sh\n')
+    assert mod.script_dep_block(
+        pdir, b'true >/dev/null && echo "$(cat scripts/x.sh)" | sh\n')
+
+
+def test_script_dep_python_module_stdin(tmp_path):
+    """`python -m` is a sink only for modules that parse stdin as DATA —
+    `code` runs it, `base64 -d` decodes it into program text (round-6
+    review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.py").write_bytes(b"x")
+    for line in (b'echo "$(cat scripts/x.py)" | python -m code',
+                 b'echo "$(cat scripts/x.py)" | python -m base64 -d | sh',
+                 b'echo "$(cat scripts/x.py)" | python3 -mcode'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (b'echo "$(cat scripts/x.py)" | python -m json.tool',
+                 b'echo "$(cat scripts/x.py)" | python -m http.server'):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line

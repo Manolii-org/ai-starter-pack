@@ -784,7 +784,9 @@ _ASSIGN_WORD = re.compile(rb"[A-Za-z_][A-Za-z0-9_]*=")
 # (Devin Review on #1953). `-e` means errexit for shells but the eval
 # operand for perl/ruby/node/lua, so the table is per-head. `python -m`
 # takes its program from the named module (`python -m json.tool` parses
-# the pipe as DATA), so it ends the chain the same way.
+# the pipe as DATA), so it ends the chain the same way — EXCEPT for
+# modules that evaluate stdin as program text, listed in
+# _PYTHON_STDIN_MODULES below.
 _EXEC_OPERAND_FLAGS = {
     b"sh": frozenset({b"-c"}), b"bash": frozenset({b"-c"}),
     b"dash": frozenset({b"-c"}), b"zsh": frozenset({b"-c"}),
@@ -797,6 +799,14 @@ _EXEC_OPERAND_FLAGS = {
     b"lua": frozenset({b"-e"}),
     b"tclsh": frozenset(),
 }
+# `-m` modules that run stdin as program text rather than parsing it as
+# data — `cat scripts/x.py | python -m code` executes the file, and
+# `base64 -d` emits program text a downstream `sh` runs. The `-m` sink
+# rule does not apply to them (Codex + Devin on the round-6 review).
+_PYTHON_STDIN_MODULES = frozenset({
+    b"code", b"base64", b"quopri", b"uu", b"gzip", b"bz2", b"lzma",
+    b"zlib", b"binascii", b"pdb", b"idlelib", b"asyncio",
+})
 
 
 def _effective_head(words: list, win: bytes) -> int | None:
@@ -851,12 +861,31 @@ def _stdin_exec_head(win: bytes) -> str:
     # operand or not (Codex on #1370). Classify the operand text as the
     # command; an operand that doesn't classify falls through to the
     # normal wrapper walk.
-    for w in words:
+    wi = 0
+    while wi < len(words):
+        w = words[wi]
         t = _word_text(win[w[0]:w[1]])
         if _ASSIGN_WORD.match(t):
+            wi += 1
             continue
-        if _command_key(win[w[0]:w[1]]) == b"env":
-            j = words.index(w) + 1
+        wkey = _command_key(win[w[0]:w[1]])
+        if wkey in _EXEC_WRAPPERS and wkey != b"env":
+            # `command env -S sh` — a wrapper in front of env must not end
+            # the pre-pass, or the split-string operand goes unclassified
+            # (Codex + Devin on the round-6 review). Skip the wrapper and
+            # any operand-taking option of its own, as _effective_head
+            # does, then keep looking for `env`.
+            wi += 1
+            opts = _WRAPPER_OPT_OPERAND.get(wkey, frozenset())
+            while wi < len(words):
+                tw = _word_text(win[words[wi][0]:words[wi][1]])
+                if not tw.startswith(b"-") or tw == b"-":
+                    break
+                wi += 2 if (b"=" not in tw and tw in opts
+                            and wi + 1 < len(words)) else 1
+            continue
+        if wkey == b"env":
+            j = wi + 1
             found_cmd = False
             while j < len(words):
                 tj = _word_text(win[words[j][0]:words[j][1]])
@@ -888,6 +917,12 @@ def _stdin_exec_head(win: bytes) -> str:
                         operand + (b" " + rest if rest else b""))
                     if v != "other":
                         return v
+                    # An operand that doesn't classify is still a COMMAND:
+                    # `env -S 'cat'` forwards stdin. Falling through to
+                    # the "env printed the environ" sink would end the
+                    # walk and miss `env -S 'cat' | sh` (Codex + Devin on
+                    # the round-6 review).
+                    found_cmd = True
                     break
                 if tj.startswith(b"-"):
                     j += 2 if (b"=" not in tj
@@ -923,12 +958,23 @@ def _stdin_exec_head(win: bytes) -> str:
     # masking, so `$(...)` words keep their coordinates.
     sub_words = _shell_words(sub)
     flags = _EXEC_OPERAND_FLAGS.get(key, frozenset())
-    for w in sub_words[1:]:
+    for n, w in enumerate(sub_words[1:], start=1):
         if w in operands:
             continue
         t = _word_text(sub[w[0]:w[1]])
         if t in (b"-", b"-s"):
             break
+        if key == b"python" and t in (b"-m", b"--module"):
+            # The module decides: most parse stdin as DATA, but a few run
+            # it as program text (`python -m code`) or decode it into
+            # program text for a downstream interpreter (`-m base64 -d`).
+            mod = (_word_text(sub[sub_words[n + 1][0]:sub_words[n + 1][1]])
+                   if n + 1 < len(sub_words) else b"")
+            return ("exec" if mod.split(b".")[0] in _PYTHON_STDIN_MODULES
+                    else "sink")
+        if t.startswith(b"-m") and key == b"python" and len(t) > 2:
+            return ("exec" if t[2:].split(b".")[0] in _PYTHON_STDIN_MODULES
+                    else "sink")
         if t in flags or not t.startswith(b"-"):
             return "sink"
     return "exec"
@@ -1071,6 +1117,14 @@ def _heredoc_spans(src: bytes) -> list[tuple[int, int, int]]:
     return spans
 
 
+def _self_dup_stdout(src: bytes, j: int) -> bool:
+    """True when the `>` at `j` is a stdout self-duplication (`>&1`,
+    `1>&1`). Pointing fd1 at itself is a no-op — the pipe still carries
+    the command's output (Codex + Devin on the round-6 review)."""
+    return (src[j + 1:j + 3] == b"&1"
+            and not src[j + 3:j + 4].isdigit())
+
+
 def _pipe_pos(src: bytes, pos: int) -> int:
     """Index of the first UNQUOTED `|`/`|&` at or after `pos`, or -1.
 
@@ -1112,6 +1166,10 @@ def _pipe_pos(src: bytes, pos: int) -> int:
     # bodies are skipped whole: their quotes bind inside the sub, never
     # to the enclosing command.
     j = 0
+    # A stdout redirect EARLIER in this command segment also empties the
+    # pipe (`echo >/dev/null "$(cat x)" | sh`). Reset at every command
+    # separator so only the segment containing `pos` counts.
+    fd1_redir = False
     while j < pos:
         e = span_end(j)
         if e > 0:
@@ -1124,12 +1182,35 @@ def _pipe_pos(src: bytes, pos: int) -> int:
             esc = True
         elif c == 0x60 and not in_s:
             e = tick_end(j)
-            j = e if e > 0 else pos
+            if e > 0:
+                # Resume AT the closing tick's successor — a shared
+                # `j += 1` would skip the byte after it (the `"` in
+                # `"`cat x`" | sh`), losing the quote state (Devin +
+                # CodeRabbit on the round-6 review).
+                j = e
+                continue
+            j = pos
         elif c == 0x27 and not in_d:
             in_s = not in_s
         elif c == 0x22 and not in_s:
             in_d = not in_d
+        elif in_s or in_d:
+            pass
+        elif c == 0x3E and not _self_dup_stdout(src, j):
+            k = j - 1
+            while k >= 0 and src[k:k + 1].isdigit():
+                k -= 1
+            if int(src[k + 1:j] or b"1") == 1 and src[j - 1:j] != b"&":
+                fd1_redir = True
+        elif c == 0x26 and src[j + 1:j + 2] == b">":
+            fd1_redir = True  # `&>`/`&>>` redirect fd1
+        elif c in (0x3B, 0x0A, 0x7C):
+            fd1_redir = False  # new command segment
+        elif c == 0x26 and src[j - 1:j] not in (b"<", b">"):
+            fd1_redir = False  # `&&` / background `&` — not a redirect
         j += 1
+    if fd1_redir:
+        return -1
     while j < len(src):
         e = span_end(j)
         if e > 0:
@@ -1160,7 +1241,8 @@ def _pipe_pos(src: bytes, pos: int) -> int:
             k = j - 1
             while k >= 0 and src[k:k + 1].isdigit():
                 k -= 1
-            if int(src[k + 1:j] or b"1") == 1:
+            if int(src[k + 1:j] or b"1") == 1 and not _self_dup_stdout(
+                    src, j):
                 return -1  # stdout redirected — the pipe carries nothing
         elif c == 0x26:
             prev = src[j - 1:j]
