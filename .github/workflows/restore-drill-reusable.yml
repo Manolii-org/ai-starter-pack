@@ -98,11 +98,6 @@ jobs:
     name: Restore drill
     runs-on: ${{ inputs.runs_on }}
     timeout-minutes: ${{ inputs.timeout_minutes }}
-    env:
-      # run_id is unique across runs globally; job id is unique within the run —
-      # together they make the drill DB collision-free even for two callers in
-      # the same workflow run.
-      DRILL_DB: ${{ format('{0}-drill-{1}-{2}-{3}', inputs.source_database, github.run_id, github.run_attempt, github.job) }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -120,6 +115,11 @@ jobs:
           # kills pending steps, so restore+queries must finish with ~8m spare
           # for upload + delete.
           echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
+          # github.job is only set at step runtime (not during job-level env
+          # eval), so the per-invocation discriminator is generated here.
+          DRILL_DB="${SRC}-drill-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_JOB}"
+          echo "DRILL_DB=${DRILL_DB}" >> "$GITHUB_ENV"
+          export DRILL_DB
           # Azure caps DB names at 128 chars.
           if [ "${#DRILL_DB}" -gt 128 ]; then
             echo "::error::generated DRILL_DB '$DRILL_DB' exceeds Azure's 128-char DB name limit — shorten source_database"; exit 1
@@ -189,7 +189,7 @@ jobs:
           echo "restoring $SRC at point $RESTORE_TIME -> $DRILL_DB"
           # --no-wait: az returns once the restore is accepted; the poll loop
           # below owns the wait (a synchronous restore can exceed 10 min).
-          timeout 120 az sql db restore -g "$RG" -s "$SERVER" -n "$SRC" \
+          timeout -k 10 120 az sql db restore -g "$RG" -s "$SERVER" -n "$SRC" \
             --dest-name "$DRILL_DB" --time "$RESTORE_TIME" --no-wait -o none
           echo "restore_time=$RESTORE_TIME" >> "$GITHUB_OUTPUT"
           # Poll until Online, but stop ~12m before the job timeout so sanity
@@ -197,7 +197,7 @@ jobs:
           # pending steps entirely).
           DEADLINE=$(( JOB_START + (JOB_TIMEOUT - 12) * 60 ))
           while [ "$(date +%s)" -lt "$DEADLINE" ]; do
-            STATE=$(timeout 60 az sql db show -g "$RG" -s "$SERVER" -n "$DRILL_DB" --query status -o tsv 2>/dev/null || echo Provisioning)
+            STATE=$(timeout -k 10 60 az sql db show -g "$RG" -s "$SERVER" -n "$DRILL_DB" --query status -o tsv 2>/dev/null || echo Provisioning)
             echo "$DRILL_DB: $STATE"
             [ "$STATE" = "Online" ] && exit 0
             sleep 30
@@ -229,14 +229,20 @@ jobs:
               break
             fi
             echo "--- query: $q"
+            # Bound each query by the remaining deadline (cap 60s) — a query
+            # starting just before DEADLINE must still end before it, or the
+            # upload+teardown window shrinks and the job timeout cancels
+            # cleanup. -k sends KILL after the TERM grace so a hung client
+            # can't eat the budget either.
+            QTIME=$(( DEADLINE - $(date +%s) )); [ "$QTIME" -gt 60 ] && QTIME=60
             # -b: exit nonzero on a SQL batch error so a failed sanity query
             # fails the drill instead of being recorded as a result. The
             # password rides the SQLCMDPASSWORD env var — never -P (process args).
             if [ "$DB_AUTH" = "entra" ]; then
-              OUT=$(timeout 60 sqlcmd -b -S "$FQDN" -d "$DRILL_DB" --authentication-method=ActiveDirectoryDefault \
+              OUT=$(timeout -k 5 "$QTIME" sqlcmd -b -S "$FQDN" -d "$DRILL_DB" --authentication-method=ActiveDirectoryDefault \
                     -Q "$q" -h -1 -W -l 30 2>&1) || { FAILED=1; OUT="$OUT"; }
             else
-              OUT=$(timeout 60 sqlcmd -b -S "$FQDN" -d "$DRILL_DB" -U "$SQLCMDUSER" \
+              OUT=$(timeout -k 5 "$QTIME" sqlcmd -b -S "$FQDN" -d "$DRILL_DB" -U "$SQLCMDUSER" \
                     -Q "$q" -h -1 -W -l 30 2>&1) || { FAILED=1; OUT="$OUT"; }
             fi
             # Cap logged/stored output — queries are meant to return aggregate
@@ -299,8 +305,8 @@ jobs:
           TEARDOWN_DEADLINE=$(( $(date +%s) + 9 * 60 ))
           while [ "$(date +%s)" -lt "$TEARDOWN_DEADLINE" ]; do
             ERR=$(mktemp)
-            if timeout 60 az sql db show -g "$RG" -s "$SERVER" -n "$DRILL_DB" -o none 2>"$ERR"; then
-              timeout 240 az sql db delete -g "$RG" -s "$SERVER" -n "$DRILL_DB" -y -o none || true
+            if timeout -k 10 60 az sql db show -g "$RG" -s "$SERVER" -n "$DRILL_DB" -o none 2>"$ERR"; then
+              timeout -k 30 240 az sql db delete -g "$RG" -s "$SERVER" -n "$DRILL_DB" -y -o none || true
               sleep 15
               continue
             elif grep -qiE 'NotFound|not found|does not exist|ResourceNotFound' "$ERR"; then

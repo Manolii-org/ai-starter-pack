@@ -98,7 +98,9 @@ def test_fix_body_skeleton_for_unprotected_branch() -> None:
     body = cbp.fix_body(None, ["guards", "scan"])
     assert body["required_status_checks"]["checks"] == [
         {"context": "guards"}, {"context": "scan"}]
-    assert body["required_pull_request_reviews"] is None
+    # Unprotected-branch payloads must still carry safe merge settings —
+    # a checks-only PUT would leave merges review-free.
+    assert body["required_pull_request_reviews"]["required_approving_review_count"] == 1
 
 
 def _run(contract: Path, fixtures: Path, *extra: str) -> subprocess.CompletedProcess[str]:
