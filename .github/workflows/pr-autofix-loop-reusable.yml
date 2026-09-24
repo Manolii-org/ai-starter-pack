@@ -100,7 +100,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EVENT_NAME: ${{ github.event_name }}
           PR_HEAD_REF: ${{ github.event.pull_request.head.ref || '' }}
-          PR_HEAD_FORK: ${{ github.event.pull_request.head.repo.fork || '' }}
           ISSUE_NUM: ${{ github.event.issue.number || '' }}
           PR_NUM_DIRECT: ${{ github.event.pull_request.number || '' }}
           WR_PR_NUM: ${{ github.event.workflow_run.pull_requests[0].number || '' }}
@@ -129,16 +128,15 @@ jobs:
           fi
           if [[ "$EVENT_NAME" != "workflow_run" ]]; then
             # Review/comment triggers run with secrets + write token; checking
-            # out a fork head would hand PR-controlled files those privileges.
-            FORK="${PR_HEAD_FORK:-}"
-            if [[ -z "$FORK" ]]; then
-              FORK=$(gh api "repos/${REPOSITORY}/pulls/${PR_NUM}" \
-                --jq 'if .head.repo == null then "missing" else (.head.repo.fork|tostring) end' \
-                2>/dev/null || echo 'unknown')
-            fi
-            if [[ "$FORK" != "false" ]]; then
+            # out a cross-repo head would hand PR-controlled files those
+            # privileges. Compare repo IDs, not .fork — a caller that is itself
+            # a fork still has head.repo.fork=true on its own PRs.
+            SAME=$(gh api "repos/${REPOSITORY}/pulls/${PR_NUM}" \
+              --jq 'if .head.repo == null then "missing" elif (.head.repo.id == .base.repo.id) then "true" else "false" end' \
+              2>/dev/null || echo 'unknown')
+            if [[ "$SAME" != "true" ]]; then
               echo "skip=true" >> "$GITHUB_OUTPUT"
-              echo "Fork/unverifiable PR head (fork=$FORK) — autofix runs only on same-repo heads; skipping"
+              echo "Cross-repo/unverifiable PR head (same_repo=$SAME) — autofix runs only on same-repo heads; skipping"
               exit 0
             fi
           fi

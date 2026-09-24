@@ -20,7 +20,7 @@ reports every name missing. A read error (403 — token lacks admin scope) is a
 warning, not a finding: the audit degrades rather than fabricating drift.
 
 Fix payloads: `--emit-fixes DIR` writes one ready-to-apply PUT body per
-branch (`<owner>__<repo>__<branch>.json`) plus `apply-fixes.md` holding the
+branch (`<owner>__<repo>__<sanitized-branch>-<sha1[:8]>.json`) plus `apply-fixes.md` holding the
 exact `gh api -X PUT repos/{r}/branches/{b}/protection --input <file>`
 commands a human can run. Nothing is applied — flipping required checks can
 deadlock merges when a check name is wrong, so a human reviews each payload.
@@ -311,8 +311,9 @@ def main() -> int:
     ap.add_argument("--warn-only", action="store_true",
                     help="findings print as warnings; exit 0 regardless")
     ap.add_argument("--fixtures", type=Path, default=None,
-                    help="offline mode: read <owner>__<repo>__<branch>.json|"
-                         ".404 fixtures instead of gh api")
+                    help="offline mode: read <owner>__<repo>__<sanitized-branch>-"
+                         "<sha1[:8]>.json|.404 fixtures (the exact stem is "
+                         "fixture_name(repo, branch)) instead of gh api")
     args = ap.parse_args()
 
     doc = load_contract(args.contract)
