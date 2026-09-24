@@ -4725,6 +4725,17 @@ def test_quoted_key_with_colon_folds_flow_value(tmp_path):
     assert got == {"description: usage": ["one", "two"], "next": 1}
 
 
+def test_apostrophe_in_seq_key_folds_flow_value(tmp_path):
+    """A mid-scalar apostrophe is not a quote opener — `- author's:[a,`
+    must still find its map colon and fold the flow continuation. (Also
+    asserts PyYAML's own semantics: `key:[` is a scalar, `key: [` a map.)"""
+    mod = load_resolve_module()
+    got = mod._mini_yaml("items:\n  - author's:[a,\n    b]\n")
+    assert got == {"items": ["author's:[a, b]"]}
+    got = mod._mini_yaml("items:\n  - author's: [a,\n    b]\n")
+    assert got == {"items": [{"author's": ["a", "b"]}]}
+
+
 def test_sourced_and_bun_script_invocations_are_deps(tmp_path):
     """`source scripts/x.sh`, `bun scripts/x.ts`, `exec scripts/x.sh` are
     bundled-script invocations — script_dep_block must gate them like

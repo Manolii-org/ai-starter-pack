@@ -216,27 +216,38 @@ def _mini_yaml(text: str):
     def map_colon(v: str) -> int:
         # Index of the `:` that separates a mapping key from its value,
         # or -1. The key may be quoted — a `:` inside quotes is key
-        # content, not the separator.
-        in_s = in_d = esc = False
-        for i, ch in enumerate(v):
-            if esc:
-                esc = False
-            elif in_d and ch == "\\":
-                esc = True
-            elif in_d and ch == '"':
-                in_d = False
-            elif in_s and ch == "'":
-                if v[i + 1:i + 2] == "'":
-                    esc = True
-                else:
-                    in_s = False
-            elif not in_s and not in_d:
+        # content, not the separator. Quotes open a region only at a
+        # token boundary (same rule as strip_comment/flow_depth) — an
+        # apostrophe inside a plain scalar ("author's:") is text.
+        in_s = in_d = False
+        sep = 0
+        i = 0
+        while i < len(v):
+            ch = v[i]
+            if in_d:
+                if ch == "\\":
+                    i += 2
+                    continue
                 if ch == '"':
-                    in_d = True
-                elif ch == "'":
-                    in_s = True
-                elif ch == ":":
-                    return i
+                    in_d = False
+            elif in_s:
+                if ch == "'":
+                    if v[i + 1:i + 2] == "'":
+                        i += 2
+                        continue
+                    in_s = False
+            elif ch == '"' and not v[sep:i].strip():
+                in_d = True
+            elif ch == "'" and not v[sep:i].strip():
+                in_s = True
+            elif ch == ":":
+                return i
+            else:
+                if (ch in ",[{"
+                        or (ch == "-" and not v[sep:i].strip()
+                            and v[i + 1:i + 2] in (" ", "\t", ""))):
+                    sep = i + 1
+            i += 1
         return -1
 
     lines = []
@@ -280,7 +291,10 @@ def _mini_yaml(text: str):
     # Quoted keys are legal YAML in block mappings just as in flow maps —
     # `"version": 1` decodes to the same key as `version: 1`.
     key_re = re.compile(
-        r"^(\"(?:[^\"\\]|\\.)*\"|'(?:[^']|'')*'|[A-Za-z0-9_.-]+)"
+        # Plain-scalar keys may contain a mid-word apostrophe (`author's`) —
+        # quoted alternatives are tried first, so a leading ' still parses
+        # as a quoted key.
+        r"^(\"(?:[^\"\\]|\\.)*\"|'(?:[^']|'')*'|[A-Za-z0-9_.'-]+)"
         r"\s*:(?:\s+(.*))?$")
 
     def key_of(tok: str):
