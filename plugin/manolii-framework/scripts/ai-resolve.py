@@ -623,6 +623,44 @@ _NONEXEC_HEADS = frozenset({
 })
 
 
+def _operand_text(raw: bytes) -> bytes:
+    """Operand text of one shell word, cut at the first UNQUOTED
+    `<`/`>`/`;`/`|`/`&`/newline and stripped of leading `N<`/`N<>`
+    fd-glue — quoted or escaped separator bytes are literal filename
+    text, not operators (Devin on #127, round-17 review)."""
+    n = len(raw)
+    i = 0
+    while i < n and raw[i:i + 1].isdigit():
+        i += 1
+    if raw[i:i + 1] == b"<":
+        i += 1
+        if raw[i:i + 1] == b">":
+            i += 1
+    else:
+        i = 0
+    in_s = in_d = esc = False
+    j = i
+    while j < n:
+        c = raw[j]
+        if esc:
+            esc = False
+        elif c == 0x5C and not in_s:
+            esc = True
+        elif in_s:
+            if c == 0x27:
+                in_s = False
+        elif c == 0x27:
+            in_s = True
+        elif c == 0x22:
+            in_d = not in_d
+        elif in_d:
+            pass
+        elif c in b"<>;|&\n":
+            break
+        j += 1
+    return _word_text(raw[i:j])
+
+
 def _command_start(src: bytes, pos: int) -> int:
     """Start of the command containing `pos` — the byte after the last
     UNQUOTED separator before it. Separators inside quotes are literal —
@@ -1246,6 +1284,21 @@ _COND_STREAM_THROUGH = _STDIN_SINK_HEADS - {
     b"sha384sum", b"sha512sum", b"b2sum", b"cksum", b"sum"}
 
 
+def _fold_span_arg(win: bytes, w: tuple, subs: dict):
+    """Effective raw operand text for masked word `w` in `win` — a word
+    at a substitution's OPENER yields the whole `<(BODY)`/`>(BODY)`/
+    `$(BODY)` span as one operand (masked parens split it into fake
+    words that otherwise fold `<` as a redirect), a word strictly
+    INSIDE a span is inner program text (None), anything else is the
+    raw word itself (round-17 review)."""
+    a, b = w
+    if a in subs:
+        return win[a:subs[a]]
+    if any(s < a and b <= e for s, e in subs.items()):
+        return None
+    return win[a:b]
+
+
 def _seg_head_args(body: bytes) -> tuple:
     """(key, args) — the effective head name and folded argv of one
     command segment inside a substitution body.
@@ -1265,6 +1318,7 @@ def _seg_head_args(body: bytes) -> tuple:
     words = _shell_words(_mask_parens(body))
     words = [w for w in words
              if _word_text(body[w[0]:w[1]]) not in (b"{", b"}")]
+    subs = {a: b for a, b in _substitution_spans(body)}
     # Leading redirect words are not the head — `$(0<&0 cat)` runs cat
     # on the pipe, `$(>/dev/null cat)` runs cat diverted (Codex on
     # #1957, round-15 review). Fold them into the fd map first; a bare
@@ -1273,7 +1327,10 @@ def _seg_head_args(body: bytes) -> tuple:
     pend = None
     wi = 0
     while wi < len(words):
-        raw = body[words[wi][0]:words[wi][1]]
+        raw = _fold_span_arg(body, words[wi], subs)
+        if raw is None:
+            wi += 1
+            continue
         if pend is not None:
             fd, mode = pend
             pend = None
@@ -1293,7 +1350,9 @@ def _seg_head_args(body: bytes) -> tuple:
     key = _command_key(body[words[hi][0]:words[hi][1]])
     args: list[bytes] = []
     for w in words[hi + 1:]:
-        raw = body[w[0]:w[1]]
+        raw = _fold_span_arg(body, w, subs)
+        if raw is None:
+            continue
         if pend is not None:
             # A bare `<`/`>` operator's target lives in THIS word —
             # `cat < /dev/null` rebinds stdin to the file.
@@ -1311,6 +1370,66 @@ def _stdin_path_operand(t: bytes) -> bool:
     """True when operand `t` names the pipe itself — `-`, `/dev/stdin`,
     `/dev/fd/0`, `/proc/self/fd/0` (Codex on #1957, round-14 review)."""
     return t == b"-" or _fd_alias_target(t) == 0
+
+
+def _operand_feeds_stream(a: bytes) -> bool:
+    """True when operand `a` re-feeds the stream: a `-`/fd-path name, or a
+    `<(BODY)` process substitution whose inner body inherits the outer
+    stdin and forwards it into a /dev/fd path the head reads —
+    `cat <(cat)` re-reads the pipe (Codex on #127, round-17 review)."""
+    if _stdin_path_operand(a):
+        return True
+    if a[:2] == b"<(":
+        body = a[2:-1] if a.endswith(b")") else a[2:]
+        return _sub_flow(body) in ("exec", "fwd")
+    return False
+
+
+# Heads that read stdin to END OF FILE — after one runs, a later `;`
+# sibling sharing the same stdin sees only EOF (`sh -c 'cat >/dev/null;
+# sh'` runs sh on nothing — Devin on #9, round-17 review). Anything that
+# may exit early (`head`, `tail`, `dd`, `grep`, `sed`, `awk`, `read`,
+# `openssl`, `gpg`, interpreters) or reads nothing (`echo`, `date`,
+# `true`) deliberately stays OUT: a false "drained" answer under-detects.
+_SEG_STDIN_DRAINS = frozenset(
+    b"cat wc tee xargs tr jq yq sort uniq tac rev base64 xxd od sponge "
+    b"strings iconv expand unexpand comm join csplit tsort colrm col "
+    b"hexdump hd uudecode uuencode fmt column paste fold nl cut pr "
+    b"split diff cmp patch cksum sum md5sum sha1sum sha224sum "
+    b"sha256sum sha384sum sha512sum b2sum gzip gunzip zcat bzip2 "
+    b"bunzip2 bzcat xz unxz xzcat lz4 zstd bc dc mapfile readarray"
+    .split())
+
+
+def _seg_drains(body: bytes) -> bool:
+    """True when the segment's first command reads the shared stdin to
+    EOF — conservative membership plus stdin rebinding/operand checks
+    (a `< f` rebind or file operand drains FILES, not the stream)."""
+    ws = _shell_words(_mask_parens(body))
+    if not ws:
+        return False
+    w0 = _word_text(body[ws[0][0]:ws[0][1]])
+    if w0 in _SEG_RESERVED:
+        # `if wc`/`then cat` — the condition/action command decides.
+        return _seg_drains(body[ws[0][1]:])
+    key, args, sfd, _ = _seg_head_args(body)
+    if key is None or key not in _SEG_STDIN_DRAINS:
+        return False
+    if sfd is not None and sfd.get(0, _FD_IN) != _FD_IN:
+        return False
+    if key in (b"tee", b"tr", b"xargs", b"bc", b"dc",
+               b"mapfile", b"readarray"):
+        # `tee F`/`xargs CMD`/`tr`/`bc F` still read stdin to EOF —
+        # their operands are outputs or program text, not inputs.
+        return True
+    if key == b"cat":
+        ops = [a for a in args
+               if not a.startswith(b"-") and a != b"--"]
+    else:
+        ops = _reader_operands(key, args)
+    if ops and not any(_operand_feeds_stream(o) for o in ops):
+        return False
+    return True
 
 
 # Heads whose operands NEVER replace the stdin read — `tee F` still
@@ -1410,6 +1529,12 @@ def _reader_operands(key: bytes, args: list) -> list:
     operand values folded away; `--` ends option parsing; the first
     positional is dropped for program-first heads unless a program flag
     already supplied it (`grep -e p f` — `f` is a file)."""
+    if key == b"dd":
+        # `dd` operands are `key=value` — `dd status=none` still copies
+        # stdin to stdout; only `if=FILE` replaces the input (Codex on
+        # #1957, round-17 review).
+        return [a.split(b"=", 1)[1] for a in args
+                if a.startswith(b"if=")]
     flagops = _READER_FLAG_OPS.get(key, frozenset())
     progflags = _READER_PROG_FLAGS.get(key, frozenset())
     ops: list[bytes] = []
@@ -1509,9 +1634,9 @@ def _seg_prov(body: bytes, prov: str):
             elif not fd_in:
                 prov = "own"
             else:
-                ops = [a2 for a2 in args if _stdin_path_operand(a2) or (
+                ops = [a2 for a2 in args if _operand_feeds_stream(a2) or (
                     not a2.startswith(b"-") and a2 != b"--")]
-                if ops and not any(_stdin_path_operand(o) for o in ops):
+                if ops and not any(_operand_feeds_stream(o) for o in ops):
                     prov = "own"
         elif key in _EMIT_PIPE_READERS:
             if any(b"scripts/" in arg for arg in args):
@@ -1530,7 +1655,7 @@ def _seg_prov(body: bytes, prov: str):
                 # forwards the pipe (Codex on #1380, round-15 review).
                 ops = _reader_operands(key, args)
                 if ops and not any(
-                        _stdin_path_operand(o) for o in ops):
+                        _operand_feeds_stream(o) for o in ops):
                     prov = "own"
             # Otherwise the reader forwards its input — prov flows.
         elif key in _SEG_RESERVED:
@@ -1640,6 +1765,7 @@ def _sub_flow(a: bytes) -> str:
     # "thru" = a compound condition left the stream for its `then …`.
     prov = "up"
     fwd = False
+    drained = False     # a prior sibling read the shared stdin to EOF
     out = None          # aggregate fd1 of the finished `;` siblings
     stack: list = []    # (containing_prov, emits_capture, kind, out)
     prev_body = b""
@@ -1656,22 +1782,31 @@ def _sub_flow(a: bytes) -> str:
             emits = (ck in _STDIN_EMIT_HEADS
                      and not _stdout_redirected(prev_body))
             stack.append((prov, emits, sep, out))
-            prov = "up"
+            prov = "own" if drained else "up"
             out = None
         elif sep is not None and sep != b"|":
             if prov in ("up", "script"):
                 fwd = True  # a finished command emitted dep bytes
             # The compound's fd1 is the sum of its `;` segments — dep
             # bytes survive when ANY sibling emitted them (Devin on
-            # #1380/#1957, round-16 review).
+            # #1380/#1957, round-16 review). The next sibling inherits
+            # the shared stdin where the previous one left it — a
+            # full-read head (`cat`, `wc`) leaves only EOF, so the
+            # stream is empty for `cat >/dev/null; sh` (Devin on #9,
+            # round-17 review).
             out = ("up" if prov in ("up", "script")
                    else "up" if out == "up" else "own")
-            prov = "up"       # a fresh command reads the upstream pipe
+            prov = "own" if drained else "up"
         body, close_i = _region_body(a, s, e)
         r = _seg_prov(body, prov)
         if r is None:
             return "exec"  # a stage EXECUTED its input — dep regardless
         prov = r
+        if sep not in (b"|", b"&&", b"||") and _seg_drains(body):
+            # Region-first commands read the shared fd (a `|`
+            # continuation reads stage output; `&&`/`||` may not run).
+            # Inside `$(`/backtick captures the fd is the same one.
+            drained = True
         bw = _shell_words(_mask_parens(body))
         if bw and _word_text(body[bw[0][0]:bw[0][1]]) in _SEG_CLOSERS \
                 and not _shell_words(
@@ -1736,8 +1871,15 @@ def _emit_forwards_stdin(key: bytes, win: bytes, head_end: int) -> bool:
     — `date --date="$(cat)" | sh` parses the script as a date and
     emits a timestamp, never the bytes (Codex on #1957)."""
     words = _shell_words(win)
-    for a, b in _substitution_spans(win):
+    spans = _substitution_spans(win)
+    for a, b in spans:
         if a < head_end:
+            continue
+        if any(a2 < a and b <= b2 for a2, b2 in spans):
+            # A span nested inside another is evaluated through the
+            # containing body's flow — `echo "$(printf "$(cat)"
+            # | wc -l)"` captures a count, not the stream the inner
+            # `$(cat)` re-read (Devin on #127, round-17 review).
             continue
         # The command window can end mid-substitution (`echo $(printf
         # a; cat)` — an unquoted `;` closes the window while the body
@@ -1871,6 +2013,20 @@ def _stdin_exec_head(win: bytes) -> str:
                 continue
             break
         break
+    # A TOP-LEVEL substitution that EXECUTES the stream is a dep
+    # wherever it sits — `echo "$(sh)"`, `wc "$(sh)"`, `command -v
+    # "$(sh)"` all run the inner interpreter on upstream stdin even
+    # though the outer head emits its own text (Devin on #1380/#127,
+    # round-17 review). Nested spans are already decided through the
+    # containing body's flow.
+    tops = _substitution_spans(win)
+    for a, b in tops:
+        if any(a2 < a and b <= b2 for a2, b2 in tops):
+            continue
+        closed = b < len(win) or win[b - 1:b] == b")"
+        if not closed or _sub_flow(
+                win[a + 2:b - 1 if win[b - 1:b] == b")" else b]) == "exec":
+            return "exec"
     hi = _effective_head(words, win)
     if hi == -1:
         return "sink"
@@ -1914,7 +2070,10 @@ def _stdin_exec_head(win: bytes) -> str:
                 continue
             if a == b"--":
                 break
-            if a in (b"--quiet", b"--silent"):
+            if a in (b"--quiet", b"--silent", b"--count",
+                     b"--files-with-matches", b"--files-without-match"):
+                # `-c`/`-l`/`-L` emit a count or filenames — the pipe
+                # ends the same way `-q` does (Devin on #127, r17).
                 return "sink"
             if a in _GREP_OPERAND_OPTS:
                 skip_operand = True
@@ -1924,7 +2083,7 @@ def _stdin_exec_head(win: bytes) -> str:
                     if ch in b"efmABCDd":
                         skip_operand = ci == len(a) - 1
                         break
-                    if ch == 0x71:  # 'q'
+                    if ch in b"qclL":
                         return "sink"
     if key in (b"head", b"tail"):
         # Only a ZERO final limit ends the pipe — GNU head/tail let the
@@ -1999,8 +2158,11 @@ def _stdin_exec_head(win: bytes) -> str:
     # fd0 (Codex on #1957, round-15 review). `sub` starts AT the
     # head word, so these are folded here, not in the loop below.
     lead_pend = None
+    lead_subs = {a: b for a, b in _substitution_spans(win)}
     for lw in words[:hi]:
-        lraw = win[lw[0]:lw[1]]
+        lraw = _fold_span_arg(win, lw, lead_subs)
+        if lraw is None:
+            continue
         if lead_pend is not None:
             fd, mode = lead_pend
             lead_pend = None
@@ -2012,6 +2174,7 @@ def _stdin_exec_head(win: bytes) -> str:
     py_verdict = None
     sh_c = None          # a shell `-c`'s operand — the command string
     pending = None
+    skip_ops = 0         # operand words a clustered `-o`/`-O` consumed
     for n, w in enumerate(sub_words[1:], start=1):
         raw = sub[w[0]:w[1]]
         t = _word_text(raw)
@@ -2032,10 +2195,51 @@ def _stdin_exec_head(win: bytes) -> str:
         t, pending = _word_redirects(raw, fds)
         if not t:
             continue
+        if skip_ops:
+            skip_ops -= 1
+            continue
         if saw_program:
             # Everything after the program operand is argv for it —
             # `python -c 'x' -m code` never parses the `-m` (Codex on
             # #9, round-10 review).
+            continue
+        if t[:2] in (b"<(", b"$("):
+            # A substitution program operand IS the inner body's
+            # captured stdout — `sh <(cat)` and `sh $(cat)` run whatever
+            # the inner body emitted; the inner body reads the OUTER
+            # stdin (Codex on #127, round-17 review).
+            pb = t[2:-1] if t.endswith(b")") else t[2:]
+            if _sub_flow(pb) in ("exec", "fwd"):
+                return "exec"
+            saw_program = True
+            continue
+        if (key in _SH_STDIN_HEADS and len(t) > 2
+                and t[:1] == b"-" and t[1:2] != b"-"
+                and t[1:].isalpha()):
+            # Shell short-option clusters — `bash -es foo` carries -s
+            # INSIDE the cluster, so `foo` is $0 for a script read from
+            # stdin, not a program file (Devin on #9, round-17 review).
+            ci = 1
+            while ci < len(t):
+                ch = t[ci:ci + 1]
+                if ch == b"s":
+                    stdin_mode = True
+                elif ch == b"c":
+                    # `-c`'s operand is the rest of the cluster or the
+                    # NEXT word — `bash -ec x` runs x.
+                    saw_program = True
+                    if ci + 1 < len(t):
+                        sh_c = t[ci + 1:]
+                    elif n + 1 < len(sub_words):
+                        sh_c = _word_text(
+                            sub[sub_words[n + 1][0]:sub_words[n + 1][1]])
+                    break
+                elif ch in b"oO":
+                    # `-o OPT` / `-O OPT` consume an option operand.
+                    if ci + 1 >= len(t):
+                        skip_ops += 1
+                    break
+                ci += 1
             continue
         if t == b"-" or (t == b"-s" and key in _SH_STDIN_HEADS):
             # `-` (any interpreter) and shell `-s` mean "read stdin" —
@@ -2134,6 +2338,8 @@ def _pipe_to_exec(src: bytes, pos: int) -> bool:
     prov = "up"          # prov feeding the next `|` stage
     out = None           # aggregate fd1 inside an open compound
     depth = 0            # open compound/group statements
+    drained = False      # a prior `;`-sibling read the shared stdin to EOF
+    pipe_lead = True     # the boundary before the next seg was `|`
     j = pos
     while j < len(src):
         if (src[j:j + 1] != b"|" or src[j + 1:j + 2] == b"|"
@@ -2157,14 +2363,19 @@ def _pipe_to_exec(src: bytes, pos: int) -> bool:
                 out = "up"
             if c in (b")", b"}"):
                 depth = max(0, depth - 1)
-            # Inside the compound a sibling re-reads its stdin; once it
-            # closes, the next `|` reads the aggregated fd1.
-            prov = out if depth == 0 else "up"
+            # Inside the compound a sibling re-reads its stdin — but
+            # only what earlier siblings LEFT: a full-read head (`cat`,
+            # `wc`) empties it to EOF (Devin on #9, round-17 review).
+            # Once it closes, the next `|` reads the aggregated fd1.
+            prov = (out if depth == 0
+                    else "own" if drained else "up")
+            pipe_lead = False
             j += 1
         else:
             j += 1
             if src[j:j + 1] == b"&":
                 j += 1
+            pipe_lead = True
         while j < len(src) and src[j] in b" \t":
             j += 1
         if j >= len(src):
@@ -2178,6 +2389,12 @@ def _pipe_to_exec(src: bytes, pos: int) -> bool:
         if r is None:
             return True   # an exec stage consumed the dep stream
         prov = r
+        gd = _group_depth(seg)
+        if (not pipe_lead or first in _SEG_COND_OPENERS
+                or gd > 0) and _seg_drains(seg):
+            # This segment's first command read the compound's shared
+            # stdin — later `;` siblings only get what's left.
+            drained = True
         if first in _SEG_COND_OPENERS:
             depth += 1
         elif first in _SEG_CLOSERS:
@@ -2185,7 +2402,16 @@ def _pipe_to_exec(src: bytes, pos: int) -> bool:
             if depth == 0 and out is not None:
                 prov = out  # the compound's fd1 is its segments' sum
         else:
-            depth += _group_depth(seg)
+            depth += gd
+            if gd < 0 and depth <= 0 and out is not None:
+                # A `)`/`}` shared this segment's window — the group's
+                # fd1 is its `;` siblings' aggregate, not the last
+                # segment's provenance (`( cat; true )` still emits
+                # the pipe — Devin on #1957, round-17 review).
+                if prov in ("up", "script"):
+                    out = "up"
+                prov = out
+            depth = max(0, depth)
         if prov not in ("up", "script", "thru") and depth == 0:
             return False  # the stage replaced or diverted the stream
         j += len(win)
@@ -2707,6 +2933,14 @@ def _word_pending_target(fds: dict, fd, mode: str, raw: bytes) -> None:
     filename form; 'dup_in' (from `<&`) treats a non-numeric word as
     invalid bash — UNKNOWN, which counts as rebound (fail closed)."""
     t, _ = _word_unquote(raw)
+    if t[:2] == b"<(" and mode in ("file", "dup_in"):
+        # `< <(BODY)` — the inner body inherits the outer stdin and its
+        # captured stdout becomes the fd's content: `sh < <(cat)` still
+        # execs the pipe (Codex on #127, round-17 review).
+        body = t[2:-1] if t.endswith(b")") else t[2:]
+        fds[fd] = (_FD_IN if _sub_flow(body) in ("exec", "fwd")
+                   else _FD_FILE)
+        return
     if mode in ("file", "file2"):
         tgt = _fd_alias_target(t)
         v = _FD_FILE if tgt is None else fds.get(tgt, _FD_UNKNOWN)
@@ -4580,18 +4814,10 @@ def script_dep_block(plugin_dir: Path, src_bytes: bytes,
             # `<>…`, `0<…`) — `python <scripts/x.py` reads the script —
             # and so does a TRAILING redirect (`scripts/x.py<in`). Strip
             # both before comparing (Devin on vendored-resolver review).
-            m_in = re.match(rb"\d*<>?", tw)
-            cand = tw[m_in.end():] if m_in else tw
-            cand = cand.split(b"<", 1)[0].split(b">", 1)[0]
-            # Parens are masked, not removed — a `;`, `|`, or `&` inside
-            # a `$(...)` stays glued to its neighbour word
-            # (`$(cat x.sh; t)` → `x.sh;`, `$(cat x.sh;t)` → `x.sh;t`).
-            # Outside parens those chars end the command window, so
-            # glued separator text can only come from a masked
-            # substitution body — the operand ends before it
-            # (round-12 review).
-            cand = cand.split(b";", 1)[0].split(b"|", 1)[0]
-            cand = cand.split(b"&", 1)[0].split(b"\n", 1)[0]
+            # Separators QUOTED or escaped inside the word are literal
+            # filename bytes — `'x.sh;safe'` names a different file
+            # (Devin on #127, round-17 review).
+            cand = _operand_text(raw)
             # `$PWD/scripts/x.py`/`${P}/…` and any deeper path tail still
             # names the script — only a bare-prefix concat like
             # `xscripts/` is rejected.
@@ -4606,7 +4832,14 @@ def script_dep_block(plugin_dir: Path, src_bytes: bytes,
                     and b"scripts/" in tw
                     and not _glued_short_hides_path(tw)):
                 return True
-            if raw[:1] in (b"'", b'"'):
+            if (raw[:1] in (b"'", b'"') and len(raw) > 2
+                    and re.search(rb"\s", raw[1:-1])):
+                # A quoted operand carrying MULTIPLE words is program
+                # text the head interprets — `sh -c 'x;bash y'` splits
+                # `;` inside and still invokes. A single quoted operand
+                # is a literal path the cand check already handled
+                # (`bash 'x.sh;safe'` names a different file — Devin on
+                # #127, round-17 review).
                 return True
             return any(a <= epos - w[0] < b
                        for a, b in _quoted_spans(raw))

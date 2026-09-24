@@ -9369,3 +9369,59 @@ def test_pipe_to_exec_compound_segments(tmp_path):
             b"cat scripts/x.sh | ( cat ) ; sh",
             b"cat scripts/x.sh | tee log; sh"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_pipe_to_exec_round17(tmp_path):
+    """Round-17 review batch — substitution/fd-cluster/position edge
+    cases verified against live bash behaviour (Devin + Codex on
+    #9/#127/#1380/#1957)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (
+            # a `)` sharing a window still restores the group's
+            # aggregate fd1 — `( cat; true )` emits the pipe (live bash)
+            b"cat scripts/x.sh | ( cat; true ) | sh",
+            b"cat scripts/x.sh | ( cat; echo safe ) | sh",
+            # process substitution as redirect target / program /
+            # reader operand — the inner body inherits the outer stdin
+            b"cat scripts/x.sh | sh < <(cat)",
+            b"cat scripts/x.sh | sh <(cat)",
+            b"cat scripts/x.sh | sh $(cat)",
+            b"cat scripts/x.sh | cat <(cat) | sh",
+            b"cat scripts/x.sh | head <(cat) | sh",
+            # a `$(` inside ANY argv executes the stream — `wc` takes
+            # the expansion as a filename, but `sh` inside runs first
+            b'cat scripts/x.sh | wc "$(sh)" | sh',
+            b'cat scripts/x.sh | echo "$(sh)"',
+            # clustered shell flags carry -s
+            b"cat scripts/x.sh | bash -es foo",
+            # `dd` operands are key=value — `status=none` still copies
+            b"cat scripts/x.sh | dd status=none | sh",
+            # `tee >()` still forwards its stdin on fd1
+            b"cat scripts/x.sh | tee >(wc) | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # grep -c/-l/-L replace the stream like -q
+            b"cat scripts/x.sh | grep -c . | sh",
+            b"cat scripts/x.sh | grep -l . | sh",
+            # dd if=FILE rebinds the input
+            b"cat scripts/x.sh | dd if=/dev/null | sh",
+            # a full-EOF reader leaves only EOF for `;` siblings
+            b'cat scripts/x.sh | sh -c "cat >/dev/null; sh"',
+            b'cat scripts/x.sh | sh -c "cat >/dev/null; cat"',
+            b'cat scripts/x.sh | echo "$(if wc -l; then cat; fi)" | sh',
+            b"cat scripts/x.sh | ( wc; sh ) | cat",
+            b"cat scripts/x.sh | ( cat | wc; sh ) | cat",
+            # an inner substitution nested in a capture whose body ends
+            # the flow — `wc -l` swallows what `$(cat)` re-read
+            b'cat scripts/x.sh | echo "$(printf "$(cat)" | wc -l)" | sh',
+            b'cat scripts/x.sh | echo "$(cat >/dev/null)"',
+            # an operand-taking head gets the expansion as a PATH, not
+            # stdin — `wc "$(cat)"` reads a file named by the stream
+            b'cat scripts/x.sh | wc "$(cat)" | sh',
+            # procsub whose inner body does not read the stream
+            b"cat scripts/x.sh | sh < <(printf hi)",
+            b"cat scripts/x.sh | cat <(printf hi) | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
