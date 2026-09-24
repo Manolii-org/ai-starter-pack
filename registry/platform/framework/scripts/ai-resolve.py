@@ -34,6 +34,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -160,6 +161,7 @@ _DQ_ESCAPES = {
     "v": "\v", "f": "\f", "r": "\r", "e": "\x1b", '"': '"',
     "/": "/", "\\": "\\", "N": "\x85", "_": "\xa0",
     "L": "\u2028", "P": "\u2029",
+    " ": " ",  # YAML's standard \-space escape (PyYAML accepts it)
 }
 
 
@@ -1587,13 +1589,14 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
         # the catalog is a resolution input, so verify the worktree copy
         # byte-for-byte against the pinned object before trusting `index`.
         cat = subprocess.run(
-            ["git", "-C", str(registry_root), "show", "HEAD:./plugins.json"],
+            ["git", "-C", str(registry_root), "show",
+             f"{pinned_sha}:./plugins.json"],
             capture_output=True, timeout=10)
         if cat.returncode != 0:
             plan.conflicts.append((
                 repo_root / req,
                 f"pinned ref '{ref}' cannot verify the plugin catalog — "
-                "git show HEAD:./plugins.json failed; refusing to resolve "
+                "git show <pin>:./plugins.json failed; refusing to resolve "
                 "an index the pin cannot vouch for",
             ))
             return
@@ -1659,7 +1662,8 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
         rel_man = manifest_file.relative_to(registry_root).as_posix()
         try:
             man_blob = subprocess.run(
-                ["git", "-C", str(registry_root), "show", f"HEAD:./{rel_man}"],
+                ["git", "-C", str(registry_root), "show",
+                 f"{pinned_sha}:./{rel_man}"],
                 capture_output=True, timeout=10)
         except (OSError, subprocess.SubprocessError):
             man_blob = None
@@ -1720,7 +1724,7 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
             try:
                 tree = subprocess.run(
                     ["git", "-C", str(registry_root), "ls-tree", "-r",
-                     "HEAD", "--", rel_dir],
+                     pinned_sha, "--", rel_dir],
                     capture_output=True, text=True, timeout=10)
             except (OSError, subprocess.SubprocessError):
                 tree = None
@@ -1762,7 +1766,7 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
         try:
             stree = subprocess.run(
                 ["git", "-C", str(registry_root), "ls-tree", "-r",
-                 "--name-only", "HEAD", "--", rel_sdir],
+                 "--name-only", pinned_sha, "--", rel_sdir],
                 capture_output=True, text=True, timeout=10)
         except (OSError, subprocess.SubprocessError):
             stree = None
@@ -1805,7 +1809,7 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                 try:
                     blob = subprocess.run(
                         ["git", "-C", str(registry_root), "show",
-                         f"HEAD:./{rel_src}"],
+                         f"{pinned_sha}:./{rel_src}"],
                         capture_output=True, timeout=10)
                 except (OSError, subprocess.SubprocessError):
                     plan.conflicts.append((
@@ -2637,15 +2641,40 @@ def main() -> int:
                         f"{dst.relative_to(repo_root).as_posix()}: {re}\n")
 
         try:
+            def snapshot(d: Path):
+                # (bytes, mode) of d's current content WITHOUT following
+                # links, or None when d is absent / not a regular file.
+                # `exists && !is_symlink && read_bytes` would let a swap to
+                # a symlink between the check and the read smuggle the link
+                # target's bytes into the rollback journal.
+                if _HAS_DIRFD:
+                    try:
+                        fd = os.open(d.name, os.O_RDONLY | os.O_NOFOLLOW,
+                                     dir_fd=parent_fd(d.parent))
+                    except OSError:
+                        return None
+                    with os.fdopen(fd, "rb") as fh:
+                        st = os.fstat(fh.fileno())
+                        if not stat.S_ISREG(st.st_mode):
+                            return None
+                        return fh.read(), st.st_mode & 0o777
+                if d.is_symlink():
+                    return None
+                try:
+                    if d.is_file():
+                        return d.read_bytes(), d.stat().st_mode & 0o777
+                except OSError:
+                    pass
+                return None
+
             for src, dst in plan.writes:
                 rel_dst = dst.relative_to(repo_root).as_posix()
                 if not _HAS_DIRFD:
                     dst.parent.mkdir(parents=True, exist_ok=True)
-                existed = dst.is_file() and not dst.is_symlink()
-                undo.append((
-                    dst,
-                    dst.read_bytes() if existed else None,
-                    dst.stat().st_mode & 0o777 if existed else None))
+                snap = snapshot(dst)
+                undo.append((dst,
+                             snap[0] if snap else None,
+                             snap[1] if snap else None))
                 # Write the bytes the plan checksummed, not a fresh read of
                 # src — a registry file swapped between plan and apply
                 # would otherwise ship content the lock never digested.
@@ -2663,17 +2692,25 @@ def main() -> int:
                 for f in plan.removals:
                     # Regular files only — a symlink reached removals only
                     # through the kept-path branch, and unlink on it is
-                    # never a resolver-approved deletion.
-                    if f.is_file() and not f.is_symlink():
-                        undo.append((f, f.read_bytes(),
-                                     f.stat().st_mode & 0o777))
-                        if _HAS_DIRFD:
-                            os.unlink(f.name,
-                                      dir_fd=parent_fd(f.parent))
-                        else:
-                            f.unlink()
-                        print(f"  removed "
-                              f"{f.relative_to(repo_root).as_posix()}")
+                    # never a resolver-approved deletion. Re-stat WITHOUT
+                    # following links immediately before the unlink: a
+                    # candidate swapped for a symlink or directory after
+                    # planning must fail the whole apply (rollback), not
+                    # be silently skipped while its lock entry drops.
+                    snap = snapshot(f)
+                    if snap is None:
+                        if f.is_symlink() or f.exists():
+                            raise OSError(
+                                "prune target is not a regular file: "
+                                f"{f.relative_to(repo_root).as_posix()}")
+                        continue  # already gone — removal is a no-op
+                    undo.append((f, snap[0], snap[1]))
+                    if _HAS_DIRFD:
+                        os.unlink(f.name, dir_fd=parent_fd(f.parent))
+                    else:
+                        f.unlink()
+                    print(f"  removed "
+                          f"{f.relative_to(repo_root).as_posix()}")
         except OSError as e:
             rollback()
             for dfd in dfds.values():

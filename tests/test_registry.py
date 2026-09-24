@@ -6256,3 +6256,48 @@ def test_script_dep_block_quoted_hash(tmp_path):
     body3 = (b"---\nconsumer_scripts: [scripts/first.sh]\n---\n"
              b"bash scripts/first.sh # scripts/notes.sh\n")
     assert not mod.script_dep_block(pdir, body3)
+
+
+def test_dq_escape_space(tmp_path):
+    """YAML's standard `\\ ` escape decodes to a space (PyYAML accepts it —
+    Codex)."""
+    import yaml
+    mod = load_resolve_module()
+    for s, want in [
+            ('a: "Escaped\\ space"', 'Escaped space'),
+            ('a: "x\\ty"', 'x\ty'),
+            ('a: "\\u0041"', 'A')]:
+        doc = f"{s}\n"
+        assert mod._mini_yaml(doc)['a'] == want == yaml.safe_load(doc)['a']
+
+
+def test_prune_type_change_fails_closed(tmp_path):
+    """A prune candidate swapped for a symlink/dir after planning fails the
+    apply (rollback) instead of being silently skipped while its lock entry
+    drops (Codex on #1953)."""
+    import os, subprocess, json
+    repo = tmp_path / "repo"
+    (repo / ".claude" / "skills" / "old-skill").mkdir(parents=True)
+    stale = repo / ".claude" / "skills" / "old-skill" / "SKILL.md"
+    stale.write_text("stale")
+    reg = tmp_path / "reg"
+    (reg / "registry").mkdir(parents=True)
+    lockdir = repo / ".ai"
+    lockdir.mkdir()
+    (lockdir / "capability-lock.json").write_text(json.dumps({
+        "files": {".claude/skills/old-skill/SKILL.md":
+                  {"scope": "platform", "plugin": "old-skill",
+                   "sha256": "0" * 64, "exec": 0}},
+        "resolved": {"platform/old-skill": {"version": "0.0.0"}}}))
+    # swap the tracked file for a symlink before --apply --prune
+    stale.unlink()
+    stale.symlink_to(repo / ".ai" / "capability-lock.json")
+    manifest = repo / "ai-manifest.yaml"
+    manifest.write_text("version: 1\nuniverse: platform\nrequires: {}\n")
+    out = run_resolver(manifest, reg, repo, "--apply", "--prune")
+    assert out.returncode != 0
+    # the symlink itself must not have been deleted or followed
+    assert stale.is_symlink()
+    # lock must not have been rewritten (drop would leave it untracked)
+    assert json.loads((lockdir / "capability-lock.json"
+                       ).read_text())["files"]
