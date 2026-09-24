@@ -8898,3 +8898,136 @@ def test_script_dep_quoted_dup_target(tmp_path):
         pdir, b'echo "$(cat scripts/x.sh)" >&$FD | sh\n')
     assert mod.script_dep_block(
         pdir, b'echo "$(cat scripts/x.sh)" >&"$FD" | sh\n')
+
+
+def test_script_dep_sub_newline_separates(tmp_path):
+    """A newline inside a substitution body starts a new command —
+    `$(printf safe\\ncat)` runs cat on the pipe (cpdcheck + impaktful
+    reviews, round-13)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | echo "$(printf safe\ncat)" | sh\n')
+    assert mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | echo "$(true\ncat)" | sh\n')
+    # The last line being a sink still forwards nothing extra.
+    assert mod.script_dep_block(
+        pdir,
+        b'cat scripts/x.sh | echo "$(cat\nwc -l >/dev/null)" | sh\n')
+
+
+def test_script_dep_sub_wrapped_and_grouped_heads(tmp_path):
+    """A reader counts as head past wrappers and group openers —
+    `$(command cat)`, `$(env cat)`, `$(exec cat)`, `$( { cat; } )` and
+    `$( (cat) )` all run cat on the pipe (Codex + Devin + CodeRabbit on
+    #127/#9/#1380/#1957, round-13 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for sub in (b"command cat", b"env cat", b"exec cat",
+                b"command -n cat", b" { cat; } ", b" (cat) ",
+                b"sudo cat", b"stdbuf -o L cat", b"time cat"):
+        assert mod.script_dep_block(
+            pdir, b'cat scripts/x.sh | echo "$(' + sub + b')" | sh\n'), sub
+    # `command -v cat` only describes — it never reads the pipe.
+    assert not mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | echo "$(command -v cat)" | sh\n')
+    # A wrapper name as ARGUMENT is text, not a head.
+    assert not mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | echo "$(printf command cat)" | sh\n')
+
+
+def test_script_dep_cat_stdin_operands(tmp_path):
+    """`cat` reads the pipe when any operand is `-` or `/dev/stdin`,
+    wherever it sits (`cat f -`, `cat -n f -` read BOTH the file and
+    stdin — cpdcheck review, round-13)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for sub in (b"cat -", b"cat f -", b"cat - f", b"cat -n f -",
+                b"cat /dev/stdin", b"cat f /dev/stdin"):
+        assert mod.script_dep_block(
+            pdir, b'cat scripts/x.sh | echo "$(' + sub + b')" | sh\n'), sub
+    # A flag-only cat still reads stdin; a file-only cat does not.
+    assert mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | echo "$(cat -n)" | sh\n')
+    assert not mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | echo "$(cat f)" | sh\n')
+    assert not mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | echo "$(cat -n f)" | sh\n')
+    # `cat <f` reads the file — a rebind on fd0, not the pipe.
+    assert not mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | echo "$(cat <f)" | sh\n')
+
+
+def test_script_dep_inner_pipe_suppression(tmp_path):
+    """Only the LAST inner pipe stage's output reaches the capture —
+    `$(cat | wc -l)` emits a count and `$(cat scripts/x.sh | head -n 0)`
+    emits nothing, so neither forwards the script (Devin + CodeRabbit
+    on #1380/#127, round-13 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert not mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | echo "$(cat | wc -l)" | sh\n')
+    assert not mod.script_dep_block(
+        pdir,
+        b'echo "$(cat scripts/x.sh | head -n 0)" | sh\n')
+    # Pass-through last stages still forward.
+    assert mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | echo "$(cat | head -n 5)" | sh\n')
+    assert mod.script_dep_block(
+        pdir,
+        b'echo "$(cat scripts/x.sh | head -n 5)" | sh\n')
+    assert mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | echo "$(cat | cat)" | sh\n')
+    # An inner exec stage runs whatever flowed in.
+    assert mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | echo "$(cat | sh)" | sh\n')
+    assert mod.script_dep_block(
+        pdir,
+        b'echo "$(cat scripts/x.sh | sh)" | sh\n')
+
+
+def test_script_dep_input_side_fd_dup(tmp_path):
+    """`tee 1<&2` dups fd2 ONTO fd1 — tee writes the pipe's bytes to
+    stderr and hands the next stage nothing (Devin on #9, round-13
+    review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | tee 1<&2 | sh\n")
+    assert not mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | echo "$(tee 1<&2)" | sh\n')
+    # The restore half still restores: `2>&1 1<&2` keeps fd1 on the
+    # pipe.
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | tee 2>&1 1<&2 | sh\n")
+    # `0<&0`-style self-dups stay benign.
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | tee 0<&0 | sh\n")
+
+
+def test_script_dep_date_unquoted_sub(tmp_path):
+    """`date +$(cat)` field-splits the expansion — only its first token
+    joins the format and the rest become date operands, so the script
+    bytes are never forwarded (Codex on #1957, round-13 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert not mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | date +$(cat) | sh\n')
+    # The quoted form still forwards verbatim.
+    assert mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | date +"$(cat)" | sh\n')
+    # And on the output_exec side: an unquoted +$(cat f) is no exec.
+    assert not mod.script_dep_block(
+        pdir, b'date +$(cat scripts/x.sh) | sh\n')

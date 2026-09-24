@@ -964,7 +964,7 @@ def _py_module_verdict(mod: bytes, rest_words: list, sub: bytes) -> str:
     positional = 0
     stdin_live = False   # a `-` operand names the pipe
     getopt = top in _PY_MODULE_GETOPT
-    saw_dec = saw_enc = saw_t = saw_compress = False
+    saw_dec = saw_t = saw_compress = False
     for w in rest_words:
         raw = sub[w[0]:w[1]]
         if pending is not None:
@@ -986,7 +986,6 @@ def _py_module_verdict(mod: bytes, rest_words: list, sub: bytes) -> str:
                 continue
             if t in encode:
                 mode = "enc"
-                saw_enc = True
                 saw_compress |= top == b"gzip"
                 continue
             if t in flags:
@@ -1004,7 +1003,6 @@ def _py_module_verdict(mod: bytes, rest_words: list, sub: bytes) -> str:
                     saw_dec = True
                 elif c0 in encode:
                     mode = "enc"
-                    saw_enc = True
                     saw_compress |= top == b"gzip"
                 continue
             if (len(t) > 2 and t[1:2] != b"-"
@@ -1015,7 +1013,6 @@ def _py_module_verdict(mod: bytes, rest_words: list, sub: bytes) -> str:
                         saw_dec = True
                     elif c in cl_enc:
                         mode = "enc"
-                        saw_enc = True
                     elif top == b"quopri" and c == 0x74:  # 't'
                         saw_t = True
                 continue
@@ -1098,69 +1095,179 @@ _EMIT_PIPE_READERS = frozenset(
     b"diff cmp patch csplit tsort colrm col hexdump hd wc cksum "
     b"md5sum sha1sum sha256sum sha512sum b2sum sum uudecode uuencode "
     b"openssl gpg read mapfile readarray".split())
-# Leading operands after `cat` that still leave the PIPE as its input:
-# flags, `-`, and redirects that keep or rebind fd0 to the pipe
-# (`cat <&0`, `cat </dev/stdin`, `cat /dev/stdin`, `cat 2>/dev/null`).
-# A `< file` rebind does NOT match — the input becomes the file.
-_CAT_STDIN_PREFIX = re.compile(
-    rb"^(?:\s*(?:--|-[a-zA-Z]*|\d*<\s*&\s*0\b|\d*<\s*/dev/stdin\b|"
-    rb"/dev/stdin\b|\d*>\s*[^\s)]*))*")
 # Command separators inside a substitution body — each starts a NEW
 # command whose own head must be identified before a reader name in it
 # counts (`$(printf cat)` emits the text `cat`, it never reads the
-# pipe — Devin + CodeRabbit on #1380/#1957, round-12 review).
-# A bare `&` is NOT a separator here: `<&0`/`>&2`/`&>f` are redirect
-# operators that must stay with their command.
-_SUB_CMD_SPLIT = re.compile(rb"\$\(|&&|\|\||[;|`]")
+# pipe — Devin + CodeRabbit on #1380/#1957, round-12 review). Newlines
+# separate commands too (`$(printf safe\ncat)` runs cat — round-13
+# consumer reviews). A bare `&` is NOT a separator here:
+# `<&0`/`>&2`/`&>f` are redirect operators that must stay with their
+# command.
+_SUB_CMD_SPLIT = re.compile(rb"\$\(|&&|\|\||[;|`\n]")
+
+
+def _seg_head_args(body: bytes) -> tuple:
+    """(key, args) — the effective head name and folded argv of one
+    command segment inside a substitution body.
+
+    The head resolves through assignment prefixes and wrapper commands
+    (`command`, `env`, `exec`, `time`, `stdbuf`, `sudo`, `nohup`) with
+    their operand-taking options — `$(command cat)` and `$(env cat)`
+    run `cat` just as much as `$(cat)` does (Codex + Devin + CodeRabbit
+    on #127/#9/#1380/#1957, round-13 review). A leading `{`/`(` group
+    is skipped — `{ cat; }` still runs cat. Returns (None, []) when no
+    command head can be identified (fail closed upstream: the segment
+    keeps the flowing provenance). The returned fd map reflects the
+    segment's own redirects — a `< file` rebind means the head's input
+    is the file, not whatever the pipeline carried."""
+    words = _shell_words(_mask_parens(body))
+    words = [w for w in words
+             if _word_text(body[w[0]:w[1]]) not in (b"{", b"}")]
+    hi = _effective_head(words, body)
+    if hi is None:
+        return None, [], None
+    if hi < 0:
+        return b"", [], None  # `command -v` — describes, never runs
+    key = _command_key(body[words[hi][0]:words[hi][1]])
+    args: list[bytes] = []
+    scratch = _fresh_fds()
+    pend = None
+    for w in words[hi + 1:]:
+        raw = body[w[0]:w[1]]
+        if pend is not None:
+            pend = None
+            continue
+        at, pend = _word_redirects(raw, scratch)
+        if at:
+            args.append(at)
+    return key, args, scratch
+
+
+def _seg_prov(body: bytes, prov: str):
+    """Advance the output provenance `prov` through one pipeline stage
+    body. Returns None when the stage EXECUTES its input (a dep — the
+    stream is consumed by an interpreter); otherwise the provenance of
+    the stage's stdout.
+
+    A sink head emits a replacement (`wc -l`), a diverted stdout emits
+    nothing (`tee >/dev/null`), a `< file` rebind or a plain file
+    operand emits the file — each resets provenance to "own"."""
+    if not body.strip():
+        return prov
+    v = _stdin_exec_head(body)
+    if v == "exec":
+        return None
+    if v == "sink":
+        return "own"       # the stage emits a replacement, not content
+    # "other" — a pass-through or unknown head.
+    key, args, sfd = _seg_head_args(body)
+    if key is not None:
+        fd_in = sfd is None or sfd.get(0, _FD_IN) == _FD_IN
+        if key == b"cat":
+            # `cat` forwards the pipe when it reads stdin (no operand,
+            # or a `-`/`/dev/stdin` operand joins the input list —
+            # `cat f -` reads BOTH f and the pipe, round-13 review);
+            # a plugin script's bytes join the stream when its operand
+            # names one; a plain file operand (`cat f`) or a `< file`
+            # rebind emits unrelated bytes.
+            if any(b"scripts/" in arg for arg in args):
+                prov = "script"
+            elif not fd_in:
+                prov = "own"
+            else:
+                ops = [a2 for a2 in args if a2 == b"-" or (
+                    not a2.startswith(b"-") and a2 != b"--")]
+                if ops and not any(
+                        o in (b"-", b"/dev/stdin") for o in ops):
+                    prov = "own"
+        elif key in _EMIT_PIPE_READERS:
+            if any(b"scripts/" in arg for arg in args):
+                prov = "script"
+            elif not fd_in:
+                prov = "own"   # `head <f` reads the file, not stdin
+            # Otherwise the reader forwards its input — prov flows.
+        else:
+            # Not a known reader (e.g. `$(git status)`) — it emits its
+            # own text; a scripts/ operand still loads dep bytes it
+            # may re-emit.
+            prov = ("script"
+                    if any(b"scripts/" in arg for arg in args)
+                    else "own")
+    # A stage whose stdout is diverted forwards nothing — the next pipe
+    # stage (or the capture) reads an empty stream.
+    if _stdout_redirected(body):
+        return "own"
+    return prov
 
 
 def _sub_reads_stdin(a: bytes) -> bool:
-    """True when a substitution inside arg `a` re-reads the pipeline —
-    the emit head's output then IS upstream data (`echo "$(cat)"`),
-    not the head's own text (`echo "$(printf foo)"` — Devin +
-    CodeRabbit on #127/#1380/#1957, round-11 review).
+    """True when a substitution's captured stdout carries upstream pipe
+    bytes or plugin-script bytes — the emit head's output then IS that
+    data (`echo "$(cat)"`), not the head's own text (`echo "$(printf
+    foo)"` — Devin + CodeRabbit on #127/#1380/#1957, round-11 review).
 
     A reader name counts only as a command HEAD: `$(printf cat)` emits
     the literal text `cat` and reads nothing, and a reader whose own
     fd1 is redirected away hands the emit head nothing either
-    (`$(cat >/dev/null; echo safe)` — round-12 review).
+    (`$(cat >/dev/null; echo safe)` — round-12 review). Inside one
+    command the walk tracks PROVENANCE through inner pipelines: only
+    the last pipe stage's output reaches the capture, so `$(cat |
+    wc -l)` and `$(cat scripts/x.sh | head -n 0)` forward nothing
+    (Devin on #1380 + CodeRabbit on #127, round-13 review).
 
     `a` is a substitution BODY — the caller supplies each span."""
-    # Split the body into command regions: the body's own head is the
-    # first segment, and each separator (or nested substitution opener)
-    # starts a fresh command whose FIRST word is the head.
-    seps = [m for m in _SUB_CMD_SPLIT.finditer(a)]
+    # Split the body into command regions: each separator starts a
+    # fresh command whose FIRST word is the head. A lone `|` instead
+    # continues the pipeline — the next segment reads THIS segment's
+    # output, not the upstream pipe.
+    seps = list(_SUB_CMD_SPLIT.finditer(a))
     spans = [(0, seps[0].start() if seps else len(a))]
+    sepk = [None]
     for i, m in enumerate(seps):
         start = m.end()
         end = seps[i + 1].start() if i + 1 < len(seps) else len(a)
         spans.append((start, end))
-    for s, e in spans:
-        seg = a[s:e]
+        sepk.append(m.group(0))
+    # Provenance of the current pipeline's output: "up" = upstream pipe
+    # bytes flow through, "script" = a scripts/ operand's bytes joined
+    # the stream, "own" = the last stage emits its own content.
+    prov = "up"
+    for (s, e), sep in zip(spans, sepk):
+        if sep != b"|":
+            if sep is not None and prov in ("up", "script"):
+                return True  # a finished command captured dep bytes
+            prov = "up"       # a fresh command reads the upstream pipe
         # Strip the closing parens/quotes the region may carry.
-        body = seg.split(b")", 1)[0]
-        hm = re.match(rb"\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*"
-                      rb"([A-Za-z0-9_./-]+)", body)
-        if not hm:
-            continue
-        name = hm.group(1).rsplit(b"/", 1)[-1]
-        rest = body[hm.end():]
-        # `cat` forwards the pipe when it reads stdin (no operand) and
-        # forwards a plugin script's bytes when its operand names one —
-        # `$(cat scripts/x.sh)` hands the exec head the script even
-        # when no pipe feeds it. An unrelated operand (`cat f`) reads
-        # unrelated bytes and is not a dep.
-        if name == b"cat":
-            tail = _CAT_STDIN_PREFIX.sub(b"", rest)
-            reads = (not tail.strip()
-                     or b"scripts/" in tail)
-        else:
-            reads = name in _EMIT_PIPE_READERS
-        # A reader whose stdout is diverted forwards nothing to the
-        # enclosing emit head.
-        if reads and not _stdout_redirected(body):
-            return True
-    return False
+        body = a[s:e].split(b")", 1)[0]
+        r = _seg_prov(body, prov)
+        if r is None:
+            return True  # a stage EXECUTED its input — dep regardless
+        prov = r
+    return prov in ("up", "script")
+
+
+def _pipe_ends_prov(src: bytes, pos: int) -> bool:
+    """True when the pipeline starting at the unquoted `|`/`|&` at
+    `pos` still emits upstream/script bytes at its last stage — the
+    substitution's captured output then carries dep bytes (round-13
+    review)."""
+    prov = "up"
+    j = pos
+    while j < len(src):
+        if src[j:j + 1] != b"|" or src[j + 1:j + 2] == b"|":
+            break
+        j += 1
+        if src[j:j + 1] == b"&":
+            j += 1
+        while j < len(src) and src[j] in b" \t":
+            j += 1
+        win = _cmd_window(src, j)
+        r = _seg_prov(src[j:j + len(win)], prov)
+        if r is None:
+            return True  # an exec stage consumed the stream
+        prov = r
+        j += len(win)
+    return prov in ("up", "script")
 
 
 def _emit_forwards_stdin(key: bytes, win: bytes, head_end: int) -> bool:
@@ -1187,7 +1294,9 @@ def _emit_forwards_stdin(key: bytes, win: bytes, head_end: int) -> bool:
             if key == b"date":
                 w = next((w for w in words if w[0] <= a < w[1]), None)
                 if (w is None
-                        or _word_text(win[w[0]:w[1]])[:1] != b"+"):
+                        or _word_text(win[w[0]:w[1]])[:1] != b"+"
+                        or not _byte_in_dquotes(
+                            win[w[0]:w[1]], a - w[0])):
                     continue
             return True
     return False
@@ -1769,6 +1878,62 @@ def _redirect_apply(fds: dict, src: bytes, i: int) -> int:
     return i
 
 
+def _redirect_apply_in(fds: dict, src: bytes, i: int) -> int:
+    """Apply the input-side operator at `i` (`<`, `n<>`, `n<&M`,
+    `n<&-`) to `fds`; return the index AFTER it.
+
+    `<` rebinds a NON-stdin fd too — `tee 1<&2` writes the pipe's bytes
+    to fd2 (stderr) so the next pipe stage gets nothing (Devin on #9,
+    round-13 review). `n<<`/`n<<<` (heredoc/herestring) binds literal
+    text to fd n; only fd0 matters for the stream and it changes
+    nothing about fd1, so those just consume the operator."""
+    n = len(src)
+    k = i
+    while k > 0 and src[k - 1:k].isdigit():
+        k -= 1
+    digits = src[k:i]
+    # Same standalone-word rule as `>`: in `tee log2</x` the `2` is
+    # glued argument text, not an fd (round-12 review on the `>` side).
+    if digits and k > 0 and src[k - 1:k] not in b" \t\n;&|()<>":
+        digits = b""
+        k = i
+    fd = _fd_key(digits, 0)
+    i += 1
+    if src[i:i + 1] == b"<":
+        while i < n and src[i] == 0x3C:
+            i += 1
+        return i  # `<<`/`<<<` — the delimiter word is argument text
+    if src[i:i + 1] == b">":
+        i += 1  # `n<>` — read-write bind of fd n to the word target
+        fds[fd] = _fd_file_target(fds, src, i)
+        return i
+    if src[i:i + 1] != b"&":
+        fds[fd] = _fd_file_target(fds, src, i)
+        return i
+    i += 1  # `n<&` — an fd-dup or close target
+    m = i
+    while m < n and src[m:m + 1] in b" \t":
+        m += 1
+    if (src[m:m + 1] == b"-"
+            and (m + 1 == n or src[m + 1:m + 2] in b" \t\n;&|<>()")):
+        fds[fd] = _FD_CLOSED
+        return m + 1
+    d = m
+    while m < n and src[m:m + 1].isdigit():
+        m += 1
+    if m > d and (m == n or src[m:m + 1] in b" \t\n;&|<>()"):
+        # `n<&M` — fd n takes M's CURRENT alias (`1<&2` points fd1 at
+        # stderr; `0<&3` picks up a saved pipe).
+        fds[fd] = fds.get(_fd_key(src[d:m], -1), _FD_UNKNOWN)
+        return m
+    # `n<&word` — a non-numeric dup target is invalid bash; UNKNOWN
+    # counts as rebound (fail closed — same rule as `dup_in` in
+    # _word_pending_target).
+    t, end, _ = _fd_target_word(src, i)
+    fds[fd] = _FD_UNKNOWN
+    return max(end, i)
+
+
 # Redirect targets that alias an fd's CURRENT binding rather than a
 # plain file — `>/dev/stdout` keeps fd1 on the pipe, `>/dev/fd/3`
 # re-attaches whatever fd3 saved (the restore half of `3>&1 >/dev/null
@@ -1787,6 +1952,33 @@ def _fd_alias_target(t: bytes):
         if t.startswith(pre) and t[len(pre):].isdigit():
             return _fd_key(t[len(pre):], -1)
     return None
+
+
+def _byte_in_dquotes(raw: bytes, off: int) -> bool:
+    """True when byte `off` of word `raw` sits inside double quotes —
+    `+$(cat)` is UNQUOTED (the expansion field-splits; only its first
+    token joins the format word, Codex on #1957 round-13) while
+    `+"$(cat)"` is quoted (the whole expansion joins)."""
+    in_s = in_d = esc = False
+    i = 0
+    while i < off:
+        c = raw[i]
+        if esc:
+            esc = False
+        elif in_s:
+            if c == 0x27:
+                in_s = False
+        elif c == 0x5C:
+            esc = True
+        elif in_d:
+            if c == 0x22:
+                in_d = False
+        elif c == 0x27:
+            in_s = True
+        elif c == 0x22:
+            in_d = True
+        i += 1
+    return in_d
 
 
 def _has_expansion(raw: bytes) -> bool:
@@ -2144,6 +2336,9 @@ def _stdout_redirected(win: bytes) -> bool:
         elif depth == 0 and c == 0x3E and win[i + 1:i + 2] != b"(":
             i = _redirect_apply(fds, win, i)
             continue
+        elif depth == 0 and c == 0x3C and win[i + 1:i + 2] != b"(":
+            i = _redirect_apply_in(fds, win, i)
+            continue
         elif (depth == 0 and c == 0x26 and win[i + 1:i + 2] == b">"
                 and win[i - 1:i] not in (b"<", b">")):
             i = _redirect_apply(fds, win, i)
@@ -2389,10 +2584,14 @@ def _span_output_exec(src: bytes, a: int, after: int | None = None) -> bool:
         # `date` echoes ONLY its `+FORMAT` operand — `date "$(cat x)" |
         # sh` parses the script as a date string and emits a formatted
         # timestamp, never the file's bytes (Codex on #1380, round-12
-        # review). The substitution must sit inside a `+…` word.
+        # review). The substitution must sit inside a QUOTED `+…`
+        # word: `date +$(cat x)` field-splits the expansion — only its
+        # first token joins the format and the rest become date
+        # operands (Codex on #1957, round-13 review).
         rel_d = a - cs
         w = next((w for w in words if w[0] <= rel_d < w[1]), None)
-        if w is None or _word_text(win[w[0]:w[1]])[:1] != b"+":
+        if (w is None or _word_text(win[w[0]:w[1]])[:1] != b"+"
+                or not _byte_in_dquotes(win[w[0]:w[1]], rel_d - w[0])):
             return False
     # The enclosing command's window stops AT the substitution opener,
     # so the pipe check scans from `after` — just past the
@@ -2508,7 +2707,13 @@ def _command_literal(src: bytes, pos: int,
         # in which case its bytes never join the captured stream that
         # becomes code (`echo "$(cat x >/dev/null; echo safe)" | sh`
         # runs `safe`, never x — Devin on #1380/#1957, round-12 review).
-        return _stdout_redirected(win)
+        # An INNER pipeline continuation gets the same treatment: only
+        # its last stage's output reaches the capture (`cat scripts/x
+        # | head -n 0` emits nothing — round-13 review).
+        if _stdout_redirected(win):
+            return True
+        p = _pipe_pos(src, cs + len(win))
+        return p >= 0 and not _pipe_ends_prov(src, p)
     return not _pipe_to_exec(src, cs + len(win))
 
 
@@ -3772,7 +3977,7 @@ def script_dep_block(plugin_dir: Path, src_bytes: bytes,
             # substitution body — the operand ends before it
             # (round-12 review).
             cand = cand.split(b";", 1)[0].split(b"|", 1)[0]
-            cand = cand.split(b"&", 1)[0]
+            cand = cand.split(b"&", 1)[0].split(b"\n", 1)[0]
             # `$PWD/scripts/x.py`/`${P}/…` and any deeper path tail still
             # names the script — only a bare-prefix concat like
             # `xscripts/` is rejected.
