@@ -220,9 +220,10 @@ def fix_body(protection: dict | None, required: list[str]) -> dict:
     """Build a complete PUT /protection body: existing settings preserved,
     required_status_checks.checks merged with the missing contexts appended.
 
-    protection=None (unprotected branch) yields a minimal body — the caller
-    warns the human to review review/signature/restriction settings before
-    applying, since none existed to preserve."""
+    protection=None (unprotected branch) yields a baseline body — 1 required
+    approval + conversation resolution + enforce_admins, never a bare checks-
+    only PUT that would leave merges review-free. The caller still warns the
+    human to review the payload before applying it."""
     body: dict = {}
     if protection:
         existing = (protection.get("required_status_checks") or {}).get("checks") or []
@@ -266,10 +267,18 @@ def fix_body(protection: dict | None, required: list[str]) -> dict:
                 "checks": [{"context": c} for c in required],
             },
             "enforce_admins": True,
-            "required_pull_request_reviews": None,
+            "required_pull_request_reviews": {
+                "required_approving_review_count": 1,
+                "dismiss_stale_reviews": True,
+                "require_code_owner_reviews": False,
+                "require_last_push_approval": False,
+            },
+            "required_conversation_resolution": True,
             "restrictions": None,
         }
         for k in PUT_BOOL_KEYS:
+            if k == "required_conversation_resolution":
+                continue
             body[k] = False
     return body
 

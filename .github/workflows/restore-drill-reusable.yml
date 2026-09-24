@@ -164,6 +164,8 @@ jobs:
           SQLCMD_VERSION: ${{ inputs.sqlcmd_version }}
           EXPECTED_SHA: ${{ inputs.sqlcmd_sha256 }}
         run: |
+          set -euo pipefail
+          rm -f /tmp/sqlcmd.tar.bz2
           curl -fsSL --connect-timeout 15 --max-time 120 -o /tmp/sqlcmd.tar.bz2 \
             "https://github.com/microsoft/go-sqlcmd/releases/download/v${SQLCMD_VERSION}/sqlcmd-linux-amd64.tar.bz2"
           if [ -n "$EXPECTED_SHA" ]; then
@@ -234,7 +236,13 @@ jobs:
             # upload+teardown window shrinks and the job timeout cancels
             # cleanup. -k sends KILL after the TERM grace so a hung client
             # can't eat the budget either.
-            QTIME=$(( DEADLINE - $(date +%s) )); [ "$QTIME" -gt 60 ] && QTIME=60
+            QTIME=$(( DEADLINE - $(date +%s) ))
+            if [ "$QTIME" -le 0 ]; then
+              echo "::error::query budget exhausted — sanity queries incomplete; drill fails"
+              INCOMPLETE=1
+              break
+            fi
+            [ "$QTIME" -gt 60 ] && QTIME=60
             # -b: exit nonzero on a SQL batch error so a failed sanity query
             # fails the drill instead of being recorded as a result. The
             # password rides the SQLCMDPASSWORD env var — never -P (process args).
@@ -268,7 +276,7 @@ jobs:
           from pathlib import Path
           results = Path("drill-report/results.jsonl")
           rows = [json.loads(l) for l in results.read_text().splitlines()] if results.exists() else []
-          report = {"drill_db": os.environ["DRILL_DB"],
+          report = {"drill_db": os.environ.get("DRILL_DB", "unavailable"),
                     "run": os.environ["GITHUB_SERVER_URL"] + "/" + os.environ["GITHUB_REPOSITORY"]
                            + "/actions/runs/" + os.environ["GITHUB_RUN_ID"],
                     "queries": rows}
