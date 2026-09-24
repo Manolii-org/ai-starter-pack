@@ -875,7 +875,8 @@ def _origin_slug() -> str | None:
         r"^(?:https?|git|ssh)://(?:[^@/\s]+@)?github\.com(?::\d+)?/"
         r"([^/\s]+/[^/\s]+?)(?:\.git)?/?$", url) \
         or re.match(
-            r"^[^@\s]+@github\.com:([^/\s]+/[^/\s]+?)(?:\.git)?/?$", url)
+            # scp-style 'github.com:slug' — the leading user@ is optional
+            r"^(?:[^@\s]+@)?github\.com:([^/\s]+/[^/\s]+?)(?:\.git)?/?$", url)
     return m.group(1).lower() if m else None
 
 
@@ -896,7 +897,8 @@ def _repo_visibility(slug: str) -> str | None:
     attacker-editable, so neither proves privacy on its own."""
     try:
         out = subprocess.run(
-            ["gh", "api", f"repos/{slug}", "--jq", ".visibility"],
+            ["gh", "api", f"repos/{slug}", "--jq", ".visibility",
+             "--hostname", "github.com"],
             capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired):
         return None
