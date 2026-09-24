@@ -100,7 +100,8 @@ jobs:
           # (test_data.json, *.snap) are NOT executable; counting them in
           # expected_tests fabricates 'missing' journal entries.
           import os.path
-          TEST_EXTS = (".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".cs", ".rs")
+          TEST_EXTS = (".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
+                       ".mts", ".cts", ".go", ".cs", ".rs")
           is_test = lambda p: (
               p.endswith(TEST_EXTS) and (
                   os.path.basename(p).startswith("test_") or ".test." in p

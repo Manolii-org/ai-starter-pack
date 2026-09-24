@@ -266,49 +266,11 @@ jobs:
           [ "$INCOMPLETE" = 1 ] || [ "$FAILED" = 1 ] && { echo "::error::sanity queries incomplete or failed"; exit 1; }
           :
 
-      - name: Finalize drill report
-        # always() — a failed query step exits before report.json exists;
-        # the artifact must still carry a structured summary for diagnosis.
-        if: always()
-        shell: bash
-        env:
-          # Step outcomes make the report self-describing — an artifact with
-          # an empty queries list is otherwise indistinguishable from a run
-          # where a caller passed no queries.
-          RESTORE_OUTCOME: ${{ steps.restore.outcome }}
-          QUERIES_OUTCOME: ${{ steps.queries.outcome }}
-        run: |
-          mkdir -p drill-report
-          python3 - <<'PY'
-          import json, os
-          from pathlib import Path
-          results = Path("drill-report/results.jsonl")
-          rows = [json.loads(l) for l in results.read_text().splitlines()] if results.exists() else []
-          restore = os.environ.get("RESTORE_OUTCOME", "skipped")
-          queries = os.environ.get("QUERIES_OUTCOME", "skipped")
-          ok = restore == "success" and queries == "success"
-          report = {"drill_db": os.environ.get("DRILL_DB", "unavailable"),
-                    "status": "success" if ok else "failed",
-                    "failed_stage": None if ok else ("restore" if restore != "success" else "sanity-queries"),
-                    "run": os.environ["GITHUB_SERVER_URL"] + "/" + os.environ["GITHUB_REPOSITORY"]
-                           + "/actions/runs/" + os.environ["GITHUB_RUN_ID"],
-                    "queries": rows}
-          Path("drill-report/report.json").write_text(json.dumps(report, indent=2))
-          PY
-
-      - name: Upload drill report
-        if: always()
-        uses: actions/upload-artifact@b7c566a772e6d6bfb60ed0dc1cd7b42d9c8b3f24 # v6
-        with:
-          name: restore-drill-${{ github.run_number }}-a${{ github.run_attempt }}
-          path: drill-report/
-          retention-days: 90
-          if-no-files-found: warn
-
       - name: Drop throwaway database
+        id: teardown
         # always() — a restore Azure accepted before the CLI failed still
-        # provisions $DRILL_DB later, so verify existence and delete. The name
-        # embeds run_number+run_attempt, so only THIS invocation could own it.
+        # provisions $DRILL_DB later, so verify existence and delete. Runs
+        # BEFORE finalize so report.json records the true cleanup outcome.
         if: always()
         shell: bash
         env:
@@ -363,3 +325,47 @@ jobs:
           done
           echo "::error::$DRILL_DB still present or unverifiable after teardown budget — check Azure"
           exit 1
+
+      - name: Finalize drill report
+        # always() — a failed query step exits before report.json exists;
+        # the artifact must still carry a structured summary for diagnosis.
+        if: always()
+        shell: bash
+        env:
+          # Step outcomes make the report self-describing — an artifact with
+          # an empty queries list is otherwise indistinguishable from a run
+          # where a caller passed no queries.
+          RESTORE_OUTCOME: ${{ steps.restore.outcome }}
+          QUERIES_OUTCOME: ${{ steps.queries.outcome }}
+          TEARDOWN_OUTCOME: ${{ steps.teardown.outcome }}
+        run: |
+          mkdir -p drill-report
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          results = Path("drill-report/results.jsonl")
+          rows = [json.loads(l) for l in results.read_text().splitlines()] if results.exists() else []
+          outcomes = {stage: os.environ.get(v, "skipped")
+                      for stage, v in (("restore", "RESTORE_OUTCOME"),
+                                       ("sanity-queries", "QUERIES_OUTCOME"),
+                                       ("teardown", "TEARDOWN_OUTCOME"))}
+          ok = all(o == "success" for o in outcomes.values())
+          failed_stage = next((s for s, o in outcomes.items() if o != "success"), None)
+          report = {"drill_db": os.environ.get("DRILL_DB", "unavailable"),
+                    "status": "success" if ok else "failed",
+                    "failed_stage": failed_stage,
+                    "run": os.environ["GITHUB_SERVER_URL"] + "/" + os.environ["GITHUB_REPOSITORY"]
+                           + "/actions/runs/" + os.environ["GITHUB_RUN_ID"],
+                    "queries": rows}
+          Path("drill-report/report.json").write_text(json.dumps(report, indent=2))
+          PY
+
+      - name: Upload drill report
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6d6bfb60ed0dc1cd7b42d9c8b3f24 # v6
+        with:
+          name: restore-drill-${{ github.run_number }}-a${{ github.run_attempt }}
+          path: drill-report/
+          retention-days: 90
+          if-no-files-found: warn
+
