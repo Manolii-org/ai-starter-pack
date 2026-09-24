@@ -105,9 +105,10 @@ jobs:
           is_test = lambda p: (
               p.endswith(TEST_EXTS) and (
                   os.path.basename(p).startswith("test_") or ".test." in p
-                  or ".spec." in p or p.endswith("_test.go")
-                  or p.endswith("_test.py") or p.endswith("_test.ts")
-                  or p.endswith("_test.tsx") or p.endswith("_test.js")))
+                  or ".spec." in p
+                  # suffix-form tests (foo_test.go, foo_test.mjs, ...) —
+                  # compare the stem so every executable ext is covered
+                  or Path(os.path.basename(p)).stem.endswith("_test")))
 
           map_source = "default-heuristic"
           always, mappings = [], []
