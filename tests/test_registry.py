@@ -8145,11 +8145,14 @@ def test_script_dep_quiet_filters(tmp_path):
                  b"cat scripts/x.sh | head -n0 | sh",
                  b"cat scripts/x.sh | head -n 0 | sh",
                  b"cat scripts/x.sh | tail --bytes=0 | sh",
-                 b"cat scripts/x.sh | tail -c 0 | sh"):
+                 b"cat scripts/x.sh | tail -c 0 | sh",
+                 # `-e`'s operand glues (`-eq` = pattern "q"), so `x` is
+                 # a FILE operand — grep emits the file's matches, not
+                 # the pipe (round-16 review).
+                 b"cat scripts/x.sh | grep -eq x | sh"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
     for line in (b"cat scripts/x.sh | grep x | sh",
                  b"cat scripts/x.sh | grep -s x | sh",
-                 b"cat scripts/x.sh | grep -eq x | sh",
                  b"cat scripts/x.sh | head -n1 | sh"):
         assert mod.script_dep_block(pdir, line + b"\n"), line
 
@@ -9016,20 +9019,20 @@ def test_script_dep_input_side_fd_dup(tmp_path):
 
 
 def test_script_dep_date_unquoted_sub(tmp_path):
-    """`date +$(cat)` field-splits the expansion — only its first token
-    joins the format and the rest become date operands, so the script
-    bytes are never forwarded (Codex on #1957, round-13 review)."""
+    """`date +$(cat)` field-splits the expansion, but its first token
+    still joins the format operand and IS emitted — dep bytes reach a
+    downstream exec (Devin on #1380/#1957, round-16 review)."""
     mod = load_resolve_module()
     pdir = tmp_path / "plug"
     (pdir / "scripts").mkdir(parents=True)
     (pdir / "scripts" / "x.sh").write_bytes(b"x")
-    assert not mod.script_dep_block(
+    assert mod.script_dep_block(
         pdir, b'cat scripts/x.sh | date +$(cat) | sh\n')
-    # The quoted form still forwards verbatim.
+    # The quoted form forwards verbatim.
     assert mod.script_dep_block(
         pdir, b'cat scripts/x.sh | date +"$(cat)" | sh\n')
-    # And on the output_exec side: an unquoted +$(cat f) is no exec.
-    assert not mod.script_dep_block(
+    # And on the output_exec side: an unquoted +$(cat f) emits token one.
+    assert mod.script_dep_block(
         pdir, b'date +$(cat scripts/x.sh) | sh\n')
 
 
@@ -9335,3 +9338,34 @@ def test_seg_prov_structural_only_segments(tmp_path):
     assert mod.script_dep_block(
         pdir, b'cat scripts/x.sh | echo "$(if true; then cat; fi)"'
         b" | sh\n")
+
+
+def test_pipe_to_exec_compound_segments(tmp_path):
+    """`if`/`{ }`/`( )` compounds inside a pipe forward the dep when any
+    `;`-sibling emits it — `_cmd_window` stops at `;`, so the walk must
+    step into compounds rather than end the statement (Codex + Devin on
+    #1380/#1957, round-16 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (
+            # a forwarding sibling reaches fd1
+            b"cat scripts/x.sh | if :; then cat; fi | sh",
+            b"cat scripts/x.sh | if cat; then cat | wc; fi | sh",
+            b"cat scripts/x.sh | while :; do cat; done | sh",
+            b"cat scripts/x.sh | for i in a b; do cat; done | sh",
+            b"cat scripts/x.sh | ( cat ) | sh",
+            b"cat scripts/x.sh | { cat; } | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # every sibling emits own content — nothing dep on fd1
+            b"cat scripts/x.sh | if true; then echo hi; fi | sh",
+            b"cat scripts/x.sh | if cat | wc; fi | sh",
+            b"cat scripts/x.sh | while :; do cat | wc; done | sh",
+            b"cat scripts/x.sh | ( cat | wc ) | sh",
+            # a non-`|` boundary after the compound ends the statement —
+            # `sh` reads nothing
+            b"cat scripts/x.sh | ( cat ) ; sh",
+            b"cat scripts/x.sh | tee log; sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
