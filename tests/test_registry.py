@@ -5974,6 +5974,162 @@ def test_script_dep_block_dash_m_hyphenated_module(tmp_path):
     assert not mod.script_dep_block(pdir, b"python -m scripts-tools\n")
 
 
+def test_script_dep_exec_capable_program_heads(tmp_path):
+    """sed's `e` command and awk's system()/cmd|getline execute text inside
+    their program arguments — grouped with pure-output heads, `sed '1e
+    bash scripts/x.sh'` read as inert (Codex + Devin on vendored
+    review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    pdir.mkdir()
+    assert mod.script_dep_block(pdir, b"sed '1e bash scripts/x.sh' f\n")
+    assert mod.script_dep_block(
+        pdir, b"awk 'BEGIN{system(\"bash scripts/x.sh\")}' f\n")
+    assert mod.script_dep_block(
+        pdir, b"sed -n -e 'p' -e '1e bash scripts/x.sh' f\n")
+    # inert heads stay literal
+    assert not mod.script_dep_block(pdir, b'echo "bash scripts/x.sh"\n')
+    assert not mod.script_dep_block(pdir, b"grep -l bash scripts/x.sh\n")
+
+
+def test_script_dep_command_substitution_executes(tmp_path):
+    """`$(...)` runs BEFORE the outer command head — `echo "$(bash x)"`
+    executes x even though echo only prints. Single-quoted or escaped
+    `$(` stays literal (Codex on vendored review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    pdir.mkdir()
+    assert mod.script_dep_block(pdir, b"echo $(bash scripts/x.sh)\n")
+    assert mod.script_dep_block(pdir, b'echo "$(bash scripts/x.sh)"\n')
+    assert mod.script_dep_block(pdir,
+                                b'echo "$(x"$(bash scripts/x.sh)")"\n')
+    assert not mod.script_dep_block(
+        pdir, b"echo '$(bash scripts/x.sh)'\n")
+    assert not mod.script_dep_block(
+        pdir, b'echo "\\$(bash scripts/x.sh)"\n')
+
+
+def test_script_dep_quoted_separator_is_literal(tmp_path):
+    """A quoted `;`/`|`/`&` is not a command boundary — `echo "note; bash
+    x"` stays an echo. A backward _command_start scan cannot tell an
+    opening from a closing quote and split mid-string, turning the head
+    into `bash` (Codex on vendored review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    pdir.mkdir()
+    assert not mod.script_dep_block(
+        pdir, b'echo "note; bash scripts/x.sh"\n')
+    assert not mod.script_dep_block(
+        pdir, b'echo "a|b; bash scripts/x.sh"\n')
+    # real separators still split
+    assert mod.script_dep_block(pdir, b"echo ok; bash scripts/x.sh\n")
+
+
+def test_script_dep_python_module_after_options(tmp_path):
+    """`python -u -m scripts.check` and `python -X dev -m scripts.check`
+    run the module — only `python -m` matched before (Devin on
+    impaktful_3.0#1953)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    pdir.mkdir()
+    assert mod.script_dep_block(pdir, b"python -u -m scripts.check\n")
+    assert mod.script_dep_block(pdir, b"python -B -m scripts.check\n")
+    assert mod.script_dep_block(
+        pdir, b"python -X dev -m scripts.check\n")
+    assert mod.script_dep_block(
+        pdir, b'python -X "dev mode" -m scripts.check\n')
+    assert mod.script_dep_block(
+        pdir, b"python3 -B -u -m scripts.check\n")
+    # `-m` after a program operand is argv, not a module flag
+    assert not mod.script_dep_block(
+        pdir, b"python foo.py -m scripts.check\n")
+
+
+def test_script_dep_word_concatenation(tmp_path):
+    """A scripts/ word concatenated with a quoted suffix is a DIFFERENT
+    argument — `scripts'-tools'` unquotes to `scripts-tools`, never the
+    module `scripts` (Codex on vendored review). Quoted whole paths
+    still invoke."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    pdir.mkdir()
+    assert mod.script_dep_block(pdir, b"bash 'scripts/x.sh'\n")
+    assert mod.script_dep_block(pdir, b'bash "scripts/x.sh"\n')
+    assert not mod.script_dep_block(pdir, b"python -m scripts'-tools'\n")
+    assert not mod.script_dep_block(pdir, b"bash scripts/x.sh' more'\n")
+    assert not mod.script_dep_block(pdir, b"bash scripts/x.sh.bak\n")
+
+
+def test_yaml_load_strips_bom(tmp_path):
+    """A UTF-8 BOM is a signature, not content — PyYAML skips it; leaving
+    it would corrupt the first key for the mini parser (Codex on
+    vendored review)."""
+    mod = load_resolve_module()
+    doc = mod._yaml_load("\ufeffversion: 1\nuniverse: manolii\n")
+    assert doc == {"version": 1, "universe": "manolii"}
+
+
+def test_prune_restores_when_lock_write_fails(tmp_path):
+    """A failed apply must restore a staged prune by RENAME — the old
+    byte-rewrite rollback needed free space and could clobber a path
+    recreated after staging (Codex + Devin on vendored review)."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/SKILL.md",
+                                "---\nname: demo\ndescription: d\n---\nv1")]})
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    orphan = consumer / ".claude" / "skills" / "demo" / "SKILL.md"
+    assert orphan.is_file()
+    write_manifest(consumer, "manolii", [])
+    # Break only the lock write: .ai becomes non-writable.
+    (consumer / ".ai").chmod(0o555)
+    try:
+        r = run_resolver(m, reg_root, consumer, "--apply", "--prune")
+    finally:
+        (consumer / ".ai").chmod(0o755)
+    assert r.returncode == 2
+    assert orphan.is_file()          # renamed back, not byte-restored
+    assert not list(orphan.parent.glob(".ai-prune-*"))
+
+
+def test_legacy_null_digest_lock_fails_closed(tmp_path):
+    """A v1 lock entry with no digest cannot attribute byte/mode drift —
+    planning fails closed (conflict) rather than scheduling a repair it
+    cannot verify. The apply-time snapshot ALSO compares against the
+    plan's recorded digest, so a write that does get scheduled for a
+    null-digest entry can't be blind-allowed either (Devin on
+    vendored-resolver review)."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/run.sh",
+                                "#!/bin/sh\ntrue\n")]})
+    reg_sh = (reg_root / "registry" / "platform" / "framework"
+              / "skills" / "demo" / "run.sh")
+    reg_sh.chmod(0o755)
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    dst = consumer / ".claude" / "skills" / "demo" / "run.sh"
+    assert dst.stat().st_mode & 0o777 == 0o755
+    # Simulate a v1 lock: digest-less entry.
+    lockf = consumer / ".ai" / "capability-lock.json"
+    lock = json.loads(lockf.read_text())
+    rel = ".claude/skills/demo/run.sh"
+    assert rel in lock["files"]
+    lock["files"][rel] = None
+    lockf.write_text(json.dumps(lock))
+    # Mode drift with no digest to attribute it -> conflict, not repair.
+    dst.chmod(0o644)
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 1
+    assert "refusing to clobber" in r.stdout
+    assert dst.stat().st_mode & 0o777 == 0o644
+
+
 def test_script_dep_block_literal_text_not_invocation(tmp_path):
     """An interpreter+path inside text that only PRINTS (echo/printf/cat,
     quoted or not) or inside a `#` comment is documentation, not an

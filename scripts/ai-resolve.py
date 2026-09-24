@@ -101,7 +101,16 @@ SCRIPT_REF = re.compile(
     # over-blocking capabilities that merely document the path).
     # Boundary includes `-`: `python -m scripts-tools` is a DIFFERENT
     # module argument, not bare `-m scripts` (consumer review of the vendored resolver).
-    rb"|(?<![\w-])python(?:\d+(?:\.\d+)*)?[ \t]+-m[ \t]+scripts"
+    rb"|(?<![\w-])python(?:\d+(?:\.\d+)*)?[ \t]+"
+    # Interpreter options may precede `-m` — `python -u -m scripts.check`
+    # and `python -X dev -m scripts.check` run the module just the same.
+    # Each option token may bind the NEXT word as its operand (bare word
+    # or quoted string); a token starting with `-` is never an operand,
+    # so `-m` itself can't be swallowed.
+    rb"(?:-{1,2}[^\s|&;`'\"()\\]+[ \t]+"
+    rb"(?:(?:\"[^\n\"]*\"|'[^\n']*'"
+    rb"|[^\s|&;`'\"()\\-][^\s|&;`'\"()\\]*)[ \t]+)?)*"
+    rb"-m[ \t]+scripts"
     rb"(?:\.(?:[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*))?(?![\w.-])")
 # Backticked `scripts/x.py` is NOT an invocation context — prose uses it for
 # mentions. A real dependency that no interpreter/./ prefix expresses must be
@@ -425,6 +434,72 @@ def _shell_words(window: bytes) -> list[tuple[int, int]]:
     return spans
 
 
+def _quoted_spans(raw: bytes) -> list[tuple[int, int]]:
+    """Spans inside quotes of one shell word. `a'bash x'c` — the quoted
+    middle is operand text the command parses; an unterminated quote
+    spans to the end (the shell reads the rest as quoted — and a
+    fail-closed read of it as executable is the safe direction)."""
+    spans: list[tuple[int, int]] = []
+    i = 0
+    n = len(raw)
+    q: int | None = None
+    start = 0
+    while i < n:
+        c = raw[i]
+        if q is None:
+            if c == 0x5C and i + 1 < n:
+                i += 2
+                continue
+            if c in (0x27, 0x22):
+                q = c
+                start = i + 1
+        elif q == 0x27:
+            if c == 0x27:
+                spans.append((start, i))
+                q = None
+        else:
+            if c == 0x5C and i + 1 < n:
+                i += 2
+                continue
+            if c == 0x22:
+                spans.append((start, i))
+                q = None
+        i += 1
+    if q is not None:
+        spans.append((start, n))
+    return spans
+
+
+def _mask_parens(src: bytes) -> bytes:
+    """Length-preserving copy with UNQUOTED `(`/`)` masked to spaces —
+    both are shell metacharacters (substitution bodies, grouping), never
+    word content. Lets _shell_words split `$(bash x.sh)` body args."""
+    out = bytearray(src)
+    in_s = in_d = False
+    i = 0
+    n = len(src)
+    while i < n:
+        c = src[i]
+        if in_s:
+            if c == 0x27:
+                in_s = False
+        elif in_d:
+            if c == 0x5C:
+                i += 1
+            elif c == 0x22:
+                in_d = False
+        elif c == 0x5C:
+            i += 1
+        elif c == 0x22:
+            in_d = True
+        elif c == 0x27:
+            in_s = True
+        elif c in (0x28, 0x29):
+            out[i] = 0x20
+        i += 1
+    return bytes(out)
+
+
 def _word_text(raw: bytes) -> bytes:
     """Shell-unquoted text of one word, for option classification only."""
     out = bytearray()
@@ -488,26 +563,122 @@ _SCRIPT_SUFFIXES = (
 # prints; it is documentation, not an invocation (Devin on
 # vendored-resolver review). Kept to words that print or inspect: `eval`,
 # `xargs`, `env`, `sudo`, `command`, `sh -c` DO run their arguments and
-# are deliberately absent.
+# are deliberately absent — and so are `sed` and `awk`: GNU sed's `e`
+# command (`sed '1e bash scripts/x.sh'`) and awk's `system()`/`cmd |
+# getline` execute text inside their program arguments, so their
+# arguments are NOT provably inert (Codex + Devin on vendored-resolver
+# review).
 _NONEXEC_HEADS = frozenset({
     b"echo", b"printf", b"cat", b"head", b"tail", b"grep", b"egrep",
-    b"fgrep", b"sed", b"awk", b"less", b"more", b"man", b"wc", b"diff",
-    b"file", b"stat", b"ls", b"which", b"type", b"head", b"help",
+    b"fgrep", b"less", b"more", b"man", b"wc", b"diff", b"file",
+    b"stat", b"ls", b"which", b"type", b"head", b"help",
 })
 
 
 def _command_start(src: bytes, pos: int) -> int:
     """Start of the command containing `pos` — the byte after the last
-    separator before it. Quote state is ignored on the backward scan: a
-    ';' inside a quoted string may split early, which only shortens the
-    enclosing command and errs toward treating the match as a real
-    invocation (fail-closed)."""
-    i = pos
-    while i > 0 and src[i - 1] not in b"\n|&;`":
-        i -= 1
-    while i < pos and src[i] in b" \t":
+    UNQUOTED separator before it. Separators inside quotes are literal —
+    `echo "note; bash x"` is still the echo command, so a backward scan
+    (which cannot tell an opening from a closing quote) must not split
+    there. Quote state is therefore computed by a forward scan. A
+    backslash outside single quotes escapes the next byte; a backtick
+    counts as a separator even inside double quotes (its substitution
+    executes) but `$(` does NOT split — the enclosing command's head
+    still governs, and `$(...)` regions are handled separately by
+    _substitution_spans."""
+    start = 0
+    in_s = in_d = False
+    i = 0
+    while i < pos:
+        c = src[i]
+        if in_s:
+            if c == 0x27:
+                in_s = False
+        elif in_d:
+            if c == 0x5C:
+                i += 1
+            elif c == 0x60:
+                start = i + 1
+            elif c == 0x22:
+                in_d = False
+        elif c == 0x5C:
+            i += 1
+        elif c == 0x22:
+            in_d = True
+        elif c == 0x27:
+            in_s = True
+        elif c in b"\n|&;`":
+            start = i + 1
         i += 1
-    return i
+    while start < pos and src[start] in b" \t":
+        start += 1
+    return start
+
+
+def _substitution_spans(window: bytes) -> list[tuple[int, int]]:
+    """Byte spans of `$(...)` command substitutions in `window`.
+
+    The shell runs a substitution's contents BEFORE the outer command —
+    `echo "$(bash scripts/x.sh)"` executes the script even though echo
+    itself only prints, so spans inside one are not literal text. A
+    `$(` inside single quotes (or escaped) is literal and opens no
+    span; double quotes do not disable it. Nested `$(`s and balanced
+    inner parens are tracked by depth; an unclosed `$(` runs to the end
+    of the window (fail-closed)."""
+    spans: list[tuple[int, int]] = []
+    # [start, inner-paren depth, in_d before open] — inside `$(...)` the
+    # shell parses quotes fresh, so the enclosing double-quote state is
+    # saved at each open and restored at the matching close.
+    stack: list[list] = []
+    in_s = in_d = False
+    i = 0
+    n = len(window)
+    while i < n:
+        c = window[i]
+        if in_s:
+            if c == 0x27:
+                in_s = False
+            i += 1
+            continue
+        if c == 0x5C and i + 1 < n:
+            i += 2
+            continue
+        if in_d:
+            if c == 0x22:
+                in_d = False
+            elif (c == 0x24 and window[i + 1:i + 2] == b"("):
+                stack.append([i, 0, True])
+                in_d = False
+                i += 2
+                continue
+            i += 1
+            continue
+        if c == 0x22:
+            in_d = True
+            i += 1
+            continue
+        if c == 0x27:
+            in_s = True
+            i += 1
+            continue
+        if c == 0x24 and window[i + 1:i + 2] == b"(":
+            stack.append([i, 0, False])
+            i += 2
+            continue
+        if stack:
+            if c == 0x28:
+                stack[-1][1] += 1
+            elif c == 0x29:
+                if stack[-1][1] == 0:
+                    _s, _depth, outer_d = stack.pop()
+                    spans.append((_s, i + 1))
+                    in_d = outer_d
+                else:
+                    stack[-1][1] -= 1
+        i += 1
+    for s, _depth, _d in stack:
+        spans.append((s, n))
+    return spans
 
 
 def _glued_short_hides_path(text: bytes) -> bool:
@@ -1612,7 +1783,12 @@ def _yaml_load(text: str):
     """One YAML grammar in every environment: the restricted _mini_yaml
     subset — the vendored resolver has no runtime deps and parses the same
     installed set whether or not PyYAML happens to be present. Richer YAML
-    fails closed, never parses differently."""
+    fails closed, never parses differently. A single leading UTF-8 BOM is
+    a signature, not content — Windows editors write one and PyYAML skips
+    it; leaving it would corrupt the first key (Codex on
+    vendored-resolver review)."""
+    if text.startswith("\ufeff"):
+        text = text[1:]
     return _mini_yaml(text)
 
 
@@ -1710,15 +1886,49 @@ def script_dep_block(plugin_dir: Path, src_bytes: bytes,
             first and _command_key(enclosing[first[0][0]:first[0][1]])
             in _NONEXEC_HEADS)
         comment_from = cs + len(enclosing)
+        # `$(...)` regions of the enclosing command execute BEFORE its
+        # head — `echo "$(bash scripts/x.sh)"` runs the script even
+        # though echo only prints, so positions inside a substitution
+        # stay executable (never literal).
+        sub_spans = _substitution_spans(enclosing)
 
         def literal(pos: int) -> bool:
+            rel = pos - cs
+            if any(a <= rel < b for a, b in sub_spans):
+                return False
             return literal_all or pos >= comment_from
+
+        # A scripts/ path only invokes when it IS the whole shell word —
+        # `python -m scripts'-tools'` concatenates to `scripts-tools`, a
+        # different argument (Codex on vendored review). Parens are
+        # masked before word-splitting so a path inside `$(...)` splits
+        # cleanly. A match inside a QUOTED operand still counts: the
+        # quote's content is program/source text the command interprets
+        # — `sh -c 'bash x'`, `ssh host 'bash x'`, `sed '1e bash x'`,
+        # `awk 'BEGIN{system("bash x")}'` all execute what the quoted
+        # argument says.
+        enc_words = _shell_words(_mask_parens(enclosing))
+
+        def word_member(epos: int, text: bytes) -> bool:
+            w = next((w for w in enc_words if w[0] <= epos < w[1]), None)
+            if w is None:
+                return False
+            raw = enclosing[w[0]:w[1]]
+            if _word_text(raw) in (text, b"./" + text):
+                return True
+            if raw[:1] in (b"'", b'"'):
+                return True
+            return any(a <= epos - w[0] < b
+                       for a, b in _quoted_spans(raw))
 
         for n in SCRIPT_NAME.finditer(window):
             if literal(m.start() + n.start()):
                 continue
             if any(a <= n.start() and n.end() <= b
                    for a, b in redir_spans):
+                continue
+            if not word_member(m.start() + n.start() - cs,
+                               window[n.start():n.end()]):
                 continue
             p = n.group(1).decode("utf-8", errors="ignore")
             if (not re.search(r"\.(?:py|sh|ts|js|mjs|cjs|rb|pl)$", p)
@@ -1728,6 +1938,12 @@ def script_dep_block(plugin_dir: Path, src_bytes: bytes,
             refs.append(([p], [p]))
         for mod in MODULE_NAME.finditer(window):
             if literal(m.start() + mod.start()):
+                continue
+            arg_start = (mod.start()
+                         + mod.group(0).find(b"scripts"))
+            arg_text = (b"scripts." + mod.group(1)
+                        if mod.group(1) is not None else b"scripts")
+            if not word_member(m.start() + arg_start - cs, arg_text):
                 continue
             # `python -m scripts.a.b` runs a/b.py or the package entry
             # a/b/__main__.py — either satisfies the invocation. A bare
@@ -3300,6 +3516,28 @@ def main() -> int:
                         f"note: rollback could not restore "
                         f"{dst.relative_to(repo_root).as_posix()}: {re}\n")
 
+        # Pruned files are staged under `.ai-prune-<name>` and kept until
+        # the lock commits: restoring is a RENAME BACK (no byte rewrite,
+        # no free space needed — a rollback that recreated the file could
+        # die on ENOSPC or clobber a path recreated after staging).
+        staged: list[tuple[Path, Path, int | None]] = []
+
+        def restore_staged() -> None:
+            """Rename each staged prune back to its original name — only
+            while that name is still free. A file recreated at the path
+            after staging owns it and must not be overwritten."""
+            for f_, tmp_, dfd_ in reversed(staged):
+                try:
+                    if os.path.lexists(f_):
+                        continue
+                    if _HAS_DIRFD and dfd_ is not None:
+                        os.rename(tmp_.name, f_.name,
+                                  src_dir_fd=dfd_, dst_dir_fd=dfd_)
+                    else:
+                        tmp_.rename(f_)
+                except OSError:
+                    pass
+
         try:
             def snapshot(d: Path):
                 # (bytes, mode, (atime_ns, mtime_ns)) of d's current
@@ -3352,6 +3590,11 @@ def main() -> int:
                         f"{d.relative_to(repo_root).as_posix()}")
                 return None
 
+            # The registry digests the plan accepted for every written
+            # destination — the state a legacy (digest-less) lock entry
+            # compares against.
+            plan_dig = {rel: d for r in plan.resolved
+                        for rel, d in r["files"].items()}
             for src, dst in plan.writes:
                 rel_dst = dst.relative_to(repo_root).as_posix()
                 if not _HAS_DIRFD:
@@ -3370,8 +3613,25 @@ def main() -> int:
                         raise OSError(
                             "tracked destination vanished since planning: "
                             f"{rel_dst}")
-                elif (rel_dst not in locked_dig or want is None
-                        or hashlib.sha256(snap[0]).hexdigest() != want
+                elif rel_dst not in locked_dig:
+                    raise OSError(
+                        "destination changed since planning — refusing to "
+                        "clobber a possible concurrent edit: " f"{rel_dst}")
+                elif want is None:
+                    # Legacy lock rows carry no digest — the state the
+                    # plan accepted is 'bytes identical to the registry
+                    # source' (a mode-driven repair write). Compare
+                    # against the plan's recorded digest, not the absent
+                    # lock one; the mode is intentionally unchecked —
+                    # differing mode is the reason this write exists
+                    # (Devin on vendored-resolver review).
+                    if (hashlib.sha256(snap[0]).hexdigest()
+                            != plan_dig.get(rel_dst)):
+                        raise OSError(
+                            "destination changed since planning — refusing "
+                            "to clobber a possible concurrent edit: "
+                            f"{rel_dst}")
+                elif (hashlib.sha256(snap[0]).hexdigest() != want
                         or not (rec_mode is None
                                 or _exec_matches(rec_mode, snap[1]))):
                     raise OSError(
@@ -3442,8 +3702,8 @@ def main() -> int:
                         raise OSError(
                             "prune staging name already exists: "
                             f"{tmp.relative_to(repo_root).as_posix()}")
+                    dfd = parent_fd(f.parent) if _HAS_DIRFD else None
                     if _HAS_DIRFD:
-                        dfd = parent_fd(f.parent)
                         try:
                             os.rename(f.name, tmp.name,
                                       src_dir_fd=dfd, dst_dir_fd=dfd)
@@ -3501,14 +3761,17 @@ def main() -> int:
                         raise
                     if snap is None:
                         continue  # raced deletion — still a no-op
-                    undo.append((f, snap[0], snap[1], None, snap[2]))
-                    if _HAS_DIRFD:
-                        os.unlink(tmp.name, dir_fd=dfd)
-                    else:
-                        tmp.unlink()
+                    # Keep the staged file until the lock commits — a
+                    # failed apply restores it by RENAMING BACK (no byte
+                    # rewrite, no free space needed, cannot overwrite a
+                    # file recreated at the original name). It never
+                    # joins `undo` — the byte-restore path is the bug
+                    # class this avoids.
+                    staged.append((f, tmp, dfd))
                     print(f"  removed "
                           f"{f.relative_to(repo_root).as_posix()}")
         except OSError as e:
+            restore_staged()
             rollback()
             for dfd in dfds.values():
                 os.close(dfd)
@@ -3526,6 +3789,7 @@ def main() -> int:
                     "refusing to record a stale lock entry: "
                     f"{stale}")
         except OSError as e:
+            restore_staged()
             rollback()
             for dfd in dfds.values():
                 os.close(dfd)
@@ -3591,12 +3855,20 @@ def main() -> int:
         except OSError as e:
             # Roll the outputs back too — leaving them on disk untracked
             # would let the next run adopt them without provenance.
+            restore_staged()
             rollback()
             sys.stderr.write(f"FAIL: cannot write {LOCK_PATH}: {e}\n")
             return 2
         finally:
             for dfd in dfds.values():
                 os.close(dfd)
+        # The lock is committed — staged prunes are now durable.
+        for _f, tmp, _dfd in staged:
+            try:
+                tmp.unlink()
+            except OSError as e:
+                print("  note: staged prune entry left at "
+                      f"{tmp.relative_to(repo_root).as_posix()} ({e})")
         if args.prune:
             # Only once the lock is durably written — pruning an emptied
             # parent dir BEFORE this point would leave rollback() unable
