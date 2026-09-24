@@ -4254,10 +4254,11 @@ def test_pinned_exec_mode_conflicts(tmp_path):
     assert "exec bit differs from the pinned git tree" in r.stdout
 
 
-def test_partial_exec_mask_chmod_conflicts(tmp_path):
-    """0755 -> 0744 changes the mode but not the 'has exec bit' bool — the
-    lock must record the exact mask so a partial-mask local chmod is caught
-    instead of misread as a registry mode change."""
+def test_partial_exec_mask_chmod_is_checkout_artifact(tmp_path):
+    """0755 -> 0744 keeps the any-exec state — git stores only 100644/100755
+    and the umask picks the actual bits, so a partial-mask difference is a
+    checkout artifact and must NOT conflict (a different machine's checkout
+    looks exactly the same)."""
     reg_root = make_registry(tmp_path / "src", {
         "platform/framework": [("skills/demo/run.sh", "echo hi\n")],
     })
@@ -4272,18 +4273,19 @@ def test_partial_exec_mask_chmod_conflicts(tmp_path):
     dst = consumer / ".claude" / "skills" / "demo" / "run.sh"
     dst.chmod(0o744)
     r = run_resolver(m, reg_root, consumer, "--apply")
-    assert r.returncode == 1
-    assert "exec mode differs" in r.stdout
+    assert r.returncode == 0, r.stdout
 
 
-def test_lock_records_exact_exec_mask(tmp_path):
-    """The lock's exec map stores the installed st_mode & 0o111 mask as an
-    int — not a bool — so partial-mask changes stay detectable."""
+def test_lock_records_any_exec_state(tmp_path):
+    """The lock's exec map stores the any-exec state (0o111 or 0) — the
+    portable granularity, since umask decides which bits land."""
     reg_root = make_registry(tmp_path / "src", {
-        "platform/framework": [("skills/demo/run.sh", "echo hi\n")],
+        "platform/framework": [("skills/demo/run.sh", "echo hi\n"),
+                               ("skills/demo/SKILL.md", "---\nname: demo\n"
+                                "description: d\n---\nbody")],
     })
     (reg_root / "registry" / "platform" / "framework" / "skills"
-     / "demo" / "run.sh").chmod(0o755)
+     / "demo" / "run.sh").chmod(0o750)
     consumer = tmp_path / "consumer"
     consumer.mkdir()
     m = write_manifest(consumer, "manolii",
@@ -4292,12 +4294,12 @@ def test_lock_records_exact_exec_mask(tmp_path):
     lock = json.loads(
         (consumer / ".ai" / "capability-lock.json").read_text())
     assert lock["exec"][".claude/skills/demo/run.sh"] == 0o111
+    assert lock["exec"][".claude/skills/demo/SKILL.md"] == 0
 
 
 def test_legacy_bool_exec_record_conflicts_on_drift(tmp_path):
-    """A bool exec record can't distinguish a partial-mask chmod — any exec
-    drift against it conflicts rather than guessing (fail-closed
-    migration); --apply then upgrades it to an int record."""
+    """A bool record only expresses the any-exec state — drift that flips
+    that state conflicts; a consistent state upgrades to an int record."""
     reg_root = make_registry(tmp_path / "src", {
         "platform/framework": [("skills/demo/run.sh", "echo hi\n")],
     })
@@ -4308,7 +4310,7 @@ def test_legacy_bool_exec_record_conflicts_on_drift(tmp_path):
     dst = consumer / ".claude" / "skills" / "demo" / "run.sh"
     dst.parent.mkdir(parents=True)
     dst.write_text("echo hi\n")
-    dst.chmod(0o744)
+    dst.chmod(0o644)
     ai = consumer / ".ai"
     ai.mkdir()
     rel = ".claude/skills/demo/run.sh"
@@ -4332,9 +4334,66 @@ def test_legacy_bool_exec_record_conflicts_on_drift(tmp_path):
     assert lock["exec"][rel] == 0o111
 
 
+def test_legacy_bool_record_allows_registry_mode_repair(tmp_path):
+    """A bool 'false' record plus a non-exec destination proves the
+    installed mode — a registry +x change is an attributable repair, not
+    a conflict."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/run.sh", "echo hi\n")],
+    })
+    (reg_root / "registry" / "platform" / "framework" / "skills"
+     / "demo" / "run.sh").chmod(0o755)
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    dst = consumer / ".claude" / "skills" / "demo" / "run.sh"
+    dst.parent.mkdir(parents=True)
+    dst.write_text("echo hi\n")
+    dst.chmod(0o644)
+    ai = consumer / ".ai"
+    ai.mkdir()
+    rel = ".claude/skills/demo/run.sh"
+    (ai / "capability-lock.json").write_text(json.dumps({
+        "version": 1, "universe": "manolii",
+        "resolved": [{"plugin": "platform/framework", "scope": "platform",
+                      "ref": "1.0.0", "resolved_version": "1.0.0",
+                      "source": "platform/framework", "sha256": None}],
+        "files": {rel: hashlib.sha256(b"echo hi\n").hexdigest()},
+        "provenance": {rel: "platform/framework"},
+        "exec": {rel: False},
+    }))
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 0, r.stdout
+    assert dst.stat().st_mode & 0o111
+    lock = json.loads((ai / "capability-lock.json").read_text())
+    assert lock["exec"][rel] == 0o111
+
+
+def test_coincident_local_and_registry_chmod_conflicts(tmp_path):
+    """Consumer chmod + the SAME registry chmod must still conflict — the
+    dst matching the source does not prove the local change didn't happen;
+    only the installed-mode record can tell."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/run.sh", "echo hi\n")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    dst = consumer / ".claude" / "skills" / "demo" / "run.sh"
+    dst.chmod(0o755)
+    (reg_root / "registry" / "platform" / "framework" / "skills"
+     / "demo" / "run.sh").chmod(0o755)
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 1
+    assert "exec mode differs" in r.stdout
+
+
 def test_mode_divergent_collision_conflicts(tmp_path):
-    """Identical bytes + different exec masks is a collision, not a dedup —
-    otherwise the lock records one plugin's mode while the file carries the
+    """Identical bytes + different any-exec state is a collision, not a
+    dedup — the lock records one plugin's mode while the file carries the
     other's, and --check passes an inconsistent state."""
     reg_root = make_registry(tmp_path / "src", {
         "platform/framework": [("skills/shared/tool.sh", "echo x\n")],
@@ -4350,6 +4409,25 @@ def test_mode_divergent_collision_conflicts(tmp_path):
     r = run_resolver(m, reg_root, consumer, "--apply")
     assert r.returncode == 1
     assert "output-path collision" in r.stdout
+
+
+def test_partial_mask_collision_dedupes(tmp_path):
+    """0755 vs 0750 is the same any-exec state — identical bytes dedupe
+    instead of colliding (the raw mask varies by umask across machines)."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/shared/tool.sh", "echo x\n")],
+        "platform/other": [("skills/shared/tool.sh", "echo x\n")],
+    })
+    (reg_root / "registry" / "platform" / "framework" / "skills"
+     / "shared" / "tool.sh").chmod(0o755)
+    (reg_root / "registry" / "platform" / "other" / "skills"
+     / "shared" / "tool.sh").chmod(0o750)
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"},
+                        {"plugin": "platform/other", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
 
 
 def test_prune_refuses_chmodded_orphan(tmp_path):
@@ -4404,7 +4482,9 @@ def test_check_flags_orphan_exec_drift(tmp_path):
 def test_legacy_lock_provenance_backfill(tmp_path):
     """Locks written by the shipped pre-provenance resolver keep ownership
     only in the top-level 'files' map (resolved[] was serialised without
-    'files'). Those entries must stay prune-eligible after upgrade."""
+    'files'). Backfilled 'unknown' entries stay tracked but can never be
+    pruned — the record cannot distinguish an install from an adopted
+    consumer file, and deletion is irreversible."""
     reg_root = make_registry(tmp_path / "src", {})
     consumer = tmp_path / "consumer"
     consumer.mkdir()
@@ -4423,8 +4503,82 @@ def test_legacy_lock_provenance_backfill(tmp_path):
     }))
     m = write_manifest(consumer, "manolii", [])
     r = run_resolver(m, reg_root, consumer, "--apply", "--prune")
+    assert r.returncode == 1
+    assert "unverifiable provenance" in r.stdout
+    assert victim.is_file()
+    # Without --prune the entry stays tracked under 'unknown' provenance.
+    r = run_resolver(m, reg_root, consumer, "--apply")
     assert r.returncode == 0, r.stdout
-    assert not victim.exists()
+    lock = json.loads((ai / "capability-lock.json").read_text())
+    assert lock["provenance"][".claude/skills/demo/gone.md"] == "unknown"
+    assert victim.is_file()
+
+
+def test_unknown_provenance_written_file_upgrades(tmp_path):
+    """An 'unknown'-provenance path the resolver rewrites THIS run gains
+    real provenance — only carried (not-written) entries stay unknown."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/SKILL.md",
+                                "---\nname: demo\ndescription: d\n---\n"
+                                "new body")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    dst = consumer / ".claude" / "skills" / "demo" / "SKILL.md"
+    dst.parent.mkdir(parents=True)
+    dst.write_text("---\nname: demo\ndescription: d\n---\nold body")
+    ai = consumer / ".ai"
+    ai.mkdir()
+    rel = ".claude/skills/demo/SKILL.md"
+    (ai / "capability-lock.json").write_text(json.dumps({
+        "version": 1, "universe": "manolii",
+        "resolved": [{"plugin": "platform/framework", "scope": "platform",
+                      "ref": "1.0.0", "resolved_version": "1.0.0",
+                      "source": "platform/framework", "sha256": None}],
+        "files": {rel: hashlib.sha256(
+            b"---\nname: demo\ndescription: d\n---\nold body").hexdigest()},
+    }))
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 0, r.stdout
+    lock = json.loads((ai / "capability-lock.json").read_text())
+    assert lock["provenance"][rel] == "platform/framework"
+
+
+def test_mini_yaml_decodes_quoted_escapes():
+    """Double-quoted scalars decode YAML escapes; single-quoted decode ''."""
+    mod = load_resolve_module()
+    assert mod._mini_yaml('ref: "^\\u0031.0.0"') == {"ref": "^1.0.0"}
+    assert mod._mini_yaml('plugin: "platform\\u002fframework"') == {
+        "plugin": "platform/framework"}
+    assert mod._mini_yaml("d: 'it''s'") == {"d": "it's"}
+    assert mod._mini_yaml('d: "Don\\u0027t run" # note') == {
+        "d": "Don't run"}
+    try:
+        mod._mini_yaml('d: "bad\\q"')
+        raise AssertionError("unknown escape must raise")
+    except ValueError:
+        pass
+
+
+def test_apply_strips_privileged_mode_bits(tmp_path):
+    """A setuid/setgid registry source must never propagate its privileged
+    bits — copystat copies st_mode wholesale, which under a root-run
+    --apply would publish setuid on the output."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/run.sh", "echo hi\n")],
+    })
+    (reg_root / "registry" / "platform" / "framework" / "skills"
+     / "demo" / "run.sh").chmod(0o4755)
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    dst = consumer / ".claude" / "skills" / "demo" / "run.sh"
+    assert dst.stat().st_mode & 0o7000 == 0
+    assert dst.stat().st_mode & 0o111
 
 
 def test_unparseable_frontmatter_treated_as_deps():

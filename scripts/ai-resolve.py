@@ -83,6 +83,43 @@ SCRIPT_NAME = re.compile(
     rb"scripts/((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs))\b")
 
 
+_DQ_ESCAPES = {
+    "0": "\0", "a": "\a", "b": "\b", "t": "\t", "n": "\n",
+    "v": "\v", "f": "\f", "r": "\r", "e": "\x1b", '"': '"',
+    "/": "/", "\\": "\\", "N": "\x85", "_": "\xa0",
+    "L": "\u2028", "P": "\u2029",
+}
+
+
+def _dq_decode(s: str) -> str:
+    """YAML double-quoted scalar escapes — \\xNN, \\uNNNN, \\UNNNNNNNN and the
+    single-char set. Unknown escapes raise rather than reinterpret."""
+    out = []
+    i = 0
+    while i < len(s):
+        if s[i] != "\\":
+            out.append(s[i])
+            i += 1
+            continue
+        i += 1
+        if i >= len(s):
+            raise ValueError("trailing backslash in double-quoted scalar")
+        c = s[i]
+        i += 1
+        if c in _DQ_ESCAPES:
+            out.append(_DQ_ESCAPES[c])
+            continue
+        n = {"x": 2, "u": 4, "U": 8}.get(c)
+        if n is None:
+            raise ValueError(f"unsupported escape \\{c}")
+        hexs = s[i:i + n]
+        if len(hexs) != n or not re.fullmatch(r"[0-9a-fA-F]+", hexs):
+            raise ValueError(f"malformed escape \\{c}{hexs}")
+        out.append(chr(int(hexs, 16)))
+        i += n
+    return "".join(out)
+
+
 def _mini_yaml(text: str):
     """Stdlib-only YAML subset so the vendored resolver runs without PyYAML.
 
@@ -93,14 +130,32 @@ def _mini_yaml(text: str):
     folded scalars, flow maps with content, multi-doc, tabs) raises
     ValueError — callers must fail closed, never guess."""
     def strip_comment(s: str) -> str:
-        # ' #' starts a comment only outside quotes — strip at the first
-        # occurrence preceded by balanced quoting.
-        i = s.find(" #")
-        while i != -1:
-            head = s[:i]
-            if head.count('"') % 2 == 0 and head.count("'") % 2 == 0:
-                return head
-            i = s.find(" #", i + 1)
+        # ' #' starts a comment only outside quotes. Track quote state
+        # properly — an apostrophe inside a double-quoted scalar (or a
+        # backslash escape) must not corrupt the balance check.
+        in_s = in_d = False
+        i = 0
+        while i < len(s):
+            ch = s[i]
+            if in_d:
+                if ch == "\\":
+                    i += 2
+                    continue
+                if ch == '"':
+                    in_d = False
+            elif in_s:
+                if ch == "'":
+                    if s[i + 1:i + 2] == "'":
+                        i += 2   # doubled '' is an escaped quote
+                        continue
+                    in_s = False
+            elif ch == '"':
+                in_d = True
+            elif ch == "'":
+                in_s = True
+            elif ch == "#" and (i == 0 or s[i - 1] in " \t"):
+                return s[:i]
+            i += 1
         return s
 
     lines = []
@@ -129,10 +184,14 @@ def _mini_yaml(text: str):
             return {}
         if tok == "[]":
             return []
-        if tok[0] in "\"'":
-            if not (len(tok) > 1 and tok.endswith(tok[0])):
+        if tok[0] == '"':
+            if not (len(tok) > 1 and tok.endswith('"')):
                 raise ValueError(f"unterminated quoted scalar {tok!r}")
-            return tok[1:-1]
+            return _dq_decode(tok[1:-1])
+        if tok[0] == "'":
+            if not (len(tok) > 1 and tok.endswith("'")):
+                raise ValueError(f"unterminated quoted scalar {tok!r}")
+            return tok[1:-1].replace("''", "'")
         if re.fullmatch(r"-?\d+", tok):
             return int(tok)
         if re.fullmatch(r"-?\d+\.\d+", tok):
@@ -484,6 +543,9 @@ def atomic_replace(dst: Path, fill, src: Path | None = None) -> None:
             fill(f)
         if src is not None:
             shutil.copystat(src, tmp)   # keep copy2's mode/mtime semantics
+            # Never propagate privileged mode bits — a 4755/2755 source under
+            # a root-run --apply would publish setuid/setgid on the output.
+            os.chmod(tmp, tmp.stat().st_mode & 0o777)
         os.replace(tmp, dst)
     finally:
         if tmp.exists():
@@ -900,7 +962,10 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
             prior = plan.planned.get(rel_dst)
             if prior is not None:
                 prior_sha, prior_req, prior_exec = prior
-                if prior_sha != src_sha or prior_exec != src_exec:
+                # Exec compares on the any-exec state: git reproduces only
+                # 100644/100755 and the umask picks the actual bits, so a
+                # partial-mask difference is a checkout artifact, not content.
+                if prior_sha != src_sha or bool(prior_exec) != bool(src_exec):
                     plan.conflicts.append((
                         dst,
                         f"output-path collision: {req} provides different content or "
@@ -909,7 +974,7 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                 else:
                     plan.skips.append((dst, f"identical — already provided by {prior_req}"))
                     materialised[rel_dst] = src_sha
-                    exec_modes[rel_dst] = src_exec
+                    exec_modes[rel_dst] = 0o111 if src_exec else 0
                 continue
             if dst.exists() and not dst.is_file():
                 # A directory (or FIFO/socket) at the destination —
@@ -922,11 +987,23 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                 ))
                 continue
             if dst.exists():
-                # 'identical' means bytes AND the exec mask match — a registry
-                # file that gained/lost +x must fall through to the locked
-                # drift-repair path, not skip with stale permissions.
-                same_exec = ((dst.stat().st_mode ^ src_exec) & 0o111) == 0
-                if dst.read_bytes() == src_bytes and same_exec:
+                # 'identical' means bytes AND the any-exec state match — a
+                # registry file that gained/lost +x must fall through to the
+                # locked drift-repair path, not skip with stale permissions.
+                # The comparison is any-exec only: git stores 100644/100755
+                # and the umask selects the bits, so the mask itself is not a
+                # portable signal.
+                dst_exec = dst.stat().st_mode & 0o111
+                same_exec = bool(dst_exec) == bool(src_exec)
+                bytes_match = dst.read_bytes() == src_bytes
+                # For a tracked destination the on-disk mode must also match
+                # the installed-mode record — a consumer chmod that
+                # coincides with a registry chmod is still a local edit.
+                rec_exec = locked_exec.get(rel_dst)
+                exec_consistent = (rel_dst not in locked or rec_exec is None
+                                   or _exec_matches(rec_exec,
+                                                    dst.stat().st_mode))
+                if bytes_match and same_exec and exec_consistent:
                     plan.skips.append((dst, "identical"))
                     plan.planned[rel_dst] = (src_sha, req, src_exec)
                 elif rel_dst not in locked:
@@ -942,17 +1019,16 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                         "edit (restore it or delete it and re-resolve)",
                     ))
                     continue
-                elif not same_exec:
-                    # Bytes still match the install record but the exec mask
-                    # differs — the lock's installed-mode record distinguishes
-                    # a local chmod (refuse) from a registry mode change
-                    # (repair by rewriting). A legacy bool record can't tell
-                    # a partial-mask chmod from a registry change, so any
-                    # exec drift against it conflicts instead of guessing.
-                    dst_exec = dst.stat().st_mode & 0o111
-                    rec_exec = locked_exec.get(rel_dst)
-                    if (rec_exec is None or isinstance(rec_exec, bool)
-                            or dst_exec != rec_exec):
+                elif not same_exec or not exec_consistent:
+                    # Bytes match the install record but the exec state
+                    # differs from the source and/or the record — the lock's
+                    # installed-mode record distinguishes a local chmod
+                    # (refuse) from a registry mode change (repair by
+                    # rewriting). No record means the drift cannot be
+                    # attributed — fail closed.
+                    if (rec_exec is None
+                            or not _exec_matches(rec_exec,
+                                                 dst.stat().st_mode)):
                         plan.conflicts.append((
                             dst,
                             "exec mode differs from the installed-mode record "
@@ -972,13 +1048,13 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                     plan.planned[rel_dst] = (src_sha, req, src_exec)
                     plan.payload[rel_dst] = src_bytes
                 materialised[rel_dst] = src_sha
-                exec_modes[rel_dst] = src_exec
+                exec_modes[rel_dst] = 0o111 if src_exec else 0
             else:
                 plan.writes.append((src, dst))
                 plan.planned[rel_dst] = (src_sha, req, src_exec)
                 plan.payload[rel_dst] = src_bytes
                 materialised[rel_dst] = src_sha
-                exec_modes[rel_dst] = src_exec
+                exec_modes[rel_dst] = 0o111 if src_exec else 0
 
     for comp in ("hooks", "scripts", "data", "telemetry"):
         if (plugin_dir / comp).is_dir():
@@ -1115,11 +1191,11 @@ def lock_exec_modes(lock: dict) -> dict[str, int]:
 
 
 def _exec_matches(rec, mode: int) -> bool:
-    """An int record compares the exact exec mask; a legacy bool record
-    compares 'has any exec bit' — the only granularity it can express."""
-    if isinstance(rec, bool):
-        return bool(mode & 0o111) == rec
-    return (mode & 0o111) == rec
+    """Any-exec state comparison — git only stores 100644/100755, so the
+    umask decides which bits actually land and the exact mask is not a
+    portable signal. A nonzero mask records 'has an exec bit', which is
+    also all a legacy bool record can express."""
+    return bool(mode & 0o111) == bool(rec)
 
 
 def main() -> int:
@@ -1223,6 +1299,18 @@ def main() -> int:
         # Digest checks read THROUGH a symlink (that's what the lock recorded),
         # but removals act on the lexical path — unlinking a symlink entry must
         # remove the link, never its target.
+        if args.prune and install_prov[f] == "unknown":
+            # Backfilled from a pre-provenance legacy lock — the top-level
+            # files map never recorded installed-vs-adopted, so the entry may
+            # be a consumer file the resolver never wrote. Deletion would be
+            # irreversible: refuse and let a human remove it.
+            plan.conflicts.append((
+                lexical,
+                "legacy lock entry with unverifiable provenance — may be an "
+                "adopted consumer file; refusing to prune (delete it "
+                "manually, then re-resolve)",
+            ))
+            continue
         if args.prune:
             if (os.path.lexists(lexical) and not lexical.is_file()
                     and not lexical.is_symlink()):
@@ -1322,9 +1410,15 @@ def main() -> int:
                              for r in plan.resolved]
         expected_written = {dst.relative_to(repo_root).as_posix()
                             for _, dst in plan.writes}
-        expected_prov = {rel: r["plugin"] for r in plan.resolved
-                         for rel in r["files"]
-                         if rel in install_prov or rel in expected_written}
+        expected_prov = {}
+        for r in plan.resolved:
+            for rel in r["files"]:
+                if rel in expected_written:
+                    expected_prov[rel] = r["plugin"]
+                elif rel in install_prov:
+                    # Carried record — including 'unknown' backfill, which
+                    # must never silently upgrade to a real plugin name.
+                    expected_prov[rel] = install_prov[rel]
         for f in plan.removals:
             rel = f.relative_to(repo_root).as_posix()
             if rel in install_prov:
@@ -1383,8 +1477,6 @@ def main() -> int:
         return 0
 
     if args.apply:
-        planned_modes = {rel: mode for r in plan.resolved
-                         for rel, mode in r["exec"].items()}
         for src, dst in plan.writes:
             rel_dst = dst.relative_to(repo_root).as_posix()
             dst.parent.mkdir(parents=True, exist_ok=True)
@@ -1397,9 +1489,9 @@ def main() -> int:
             # And the exec mask the plan recorded — copystat would copy the
             # source's CURRENT mode, which may have drifted since planning;
             # the lock must describe the file that was actually installed.
-            mask = planned_modes.get(rel_dst)
-            if mask is not None:
-                os.chmod(dst, (dst.stat().st_mode & ~0o111) | mask)
+            planned = plan.planned.get(rel_dst)
+            if planned is not None:
+                os.chmod(dst, (dst.stat().st_mode & ~0o111) | planned[2])
         if args.prune:
             for f in plan.removals:
                 if f.is_file() or f.is_symlink():
@@ -1425,9 +1517,15 @@ def main() -> int:
         # registry content is adopted for drift-watching only — never
         # provenanced, so --prune can never unlink a file the resolver did
         # not put there.
-        new_prov = {rel: r["plugin"] for r in plan.resolved
-                    for rel in r["files"]
-                    if rel in install_prov or rel in written}
+        new_prov = {}
+        for r in plan.resolved:
+            for rel in r["files"]:
+                if rel in written:
+                    new_prov[rel] = r["plugin"]
+                elif rel in install_prov:
+                    # Carried record — 'unknown' legacy backfill stays
+                    # 'unknown' until this resolver actually writes the file.
+                    new_prov[rel] = install_prov[rel]
         if not args.prune:
             for f in plan.removals:
                 rel = f.relative_to(repo_root).as_posix()
