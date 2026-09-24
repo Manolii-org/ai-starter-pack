@@ -20,6 +20,8 @@
           "default_branch": {"type": "string"},
           "rollback_required": {"type": "boolean", "default": true, "description": "top-level convenience; per-lane flag wins when both set"},
           "secrets_required": {"type": "array", "items": {"type": "string"}, "uniqueItems": true, "description": "deploy secret names the repo must define — names only"},
+          "protected_branches": {"type": "array", "items": {"type": "string"}, "uniqueItems": true, "description": "protected branches with no deploy lane (e.g. develop) — audited for required_checks alongside lane branches"},
+          "required_checks": {"type": "array", "items": {"type": "string"}, "uniqueItems": true, "description": "check-run names branch protection must require on every audited branch of this repo (PR gates like guards/scan/e2e; never path-filtered job names — a skipped required check deadlocks PRs)"},
           "lanes": {
             "type": "array",
             "minItems": 1,
@@ -35,6 +37,7 @@
                 "rollback_required": {"type": "boolean", "description": "per-lane override; when omitted the repo-level flag applies (default true)"},
                 "health_check": {"type": "string", "description": "free-form liveness contract (URL, az command, containerapp revision-health)"},
                 "concurrency_group": {"type": "string", "description": "expected workflow concurrency group substring — serializes deploys"},
+                "required_checks": {"type": "array", "items": {"type": "string"}, "uniqueItems": true, "description": "extra check-run names required on THIS lane's branch only — merged over the repo-level required_checks"},
                 "notes": {"type": "string"}
               }
             }

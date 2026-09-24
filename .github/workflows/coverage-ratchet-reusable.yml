@@ -1,0 +1,264 @@
+name: Coverage Ratchet (Reusable)
+# Reusable workflow_call form. Caller owns `on:`.
+# Cite: .github/workflows/REUSABLE-WORKFLOWS.md
+#
+# Runs the caller's coverage command, extracts a single coverage percentage
+# via `metric_command` (a shell command whose stdout is parsed as a float),
+# and compares it against the in-repo baseline file.
+#
+#   - baseline file absent  -> prints measured value and exits 0 (seed it in
+#     a PR once a green run prints the number).
+#   - current <  baseline   -> fails in `enforce` mode; warns in `report`.
+#   - current >= baseline   -> prints the delta; a maintainer raises the
+#     baseline file in the same PR to lock the gain — or set
+#     `auto_commit_baseline: true` to have pushes to the default branch
+#     commit the raised baseline via a signed gh-api commit (requires the
+#     caller to grant `permissions: contents: write`).
+#
+# Caller example:
+#
+#   coverage:
+#     uses: Manolii-org/ai-starter-pack/.github/workflows/coverage-ratchet-reusable.yml@<tag-or-sha>
+#     with:
+#       node_version: '24'
+#       coverage_command: npm run test:coverage
+#       metric_command: >-
+#         python3 -c "import json; print(json.load(open('coverage/coverage-final.json'))['total']['lines']['pct'])"
+#
+# metric_command is arbitrary shell evaluated only on the runner — keep
+# secrets out of it. Pass NON-secret env through the caller's `env:` block
+# (env: is not legal on a `uses:` job; put it on the caller workflow's jobs
+# or in coverage_command itself).
+
+on:
+  workflow_call:
+    inputs:
+      runs_on:
+        type: string
+        required: false
+        default: 'ubuntu-latest'
+        description: Runner label — ubuntu-slim is fine when install+coverage fit the 15-minute cap and need no docker/sudo.
+      node_version:
+        type: string
+        required: false
+        default: ''
+        description: Node version for setup-node; empty skips the step.
+      python_version:
+        type: string
+        required: false
+        default: ''
+        description: Python version for setup-python; empty skips the step.
+      setup_command:
+        type: string
+        required: false
+        default: ''
+        description: Optional toolchain setup run before install (e.g. select a Go version from the hosted toolcache when node_version/python_version don't cover it). Runs once; use $GITHUB_PATH/$GITHUB_ENV to persist env for later steps.
+      install_command:
+        type: string
+        required: false
+        default: 'npm ci'
+        description: Dependency install shell command (arbitrary shell — keep secrets out).
+      coverage_command:
+        type: string
+        required: true
+        description: Runs the test suite with coverage instrumentation.
+      metric_command:
+        type: string
+        required: true
+        description: Shell command whose stdout parses as the coverage float (e.g. a python3/jq one-liner over the coverage report).
+      baseline_file:
+        type: string
+        required: false
+        default: '.ci/coverage-baseline.txt'
+        description: In-repo ratchet state — a bare float. Guard it in .ai/guards.json if it must not be hand-edited.
+      mode:
+        type: string
+        required: false
+        default: 'enforce'
+        description: 'enforce fails when coverage < baseline; report only warns.'
+      auto_commit_baseline:
+        type: boolean
+        required: false
+        default: false
+        description: >-
+          On push events to the repo's default branch, commit a raised
+          baseline via the signed gh-api commit technique (git/blobs →
+          git/trees → git/commits → PATCH refs) — no force-push. Caller must
+          grant permissions: contents: write. Ignored on pull_request events.
+      cache_path:
+        type: string
+        required: false
+        default: ''
+        description: Optional actions/cache path (e.g. a downloaded model wheel dir); empty skips caching.
+      cache_key:
+        type: string
+        required: false
+        default: ''
+        description: Cache key for cache_path; required when cache_path is set.
+      timeout_minutes:
+        type: number
+        required: false
+        default: 30
+        description: Step-level timeout on coverage_command.
+      job_timeout_minutes:
+        type: number
+        required: false
+        default: 45
+        description: Job-level ceiling — must leave >=10m over timeout_minutes for install.
+    secrets:
+      GH_PAT:
+        required: false
+        description: Optional elevated token for the baseline auto-commit on branches where GITHUB_TOKEN cannot push.
+
+permissions:
+  contents: read
+
+jobs:
+  # No `name:` — required-check contracts bind to the job id `coverage`.
+  coverage:
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: ${{ inputs.job_timeout_minutes }}
+    steps:
+      - name: Validate inputs
+        shell: bash
+        run: |
+          if ! echo "${{ inputs.mode }}" | grep -qxE 'enforce|report'; then
+            echo "::error::mode must be 'enforce' or 'report'"; exit 1
+          fi
+          if [ "${{ inputs.job_timeout_minutes }}" -lt $(( ${{ inputs.timeout_minutes }} + 10 )) ]; then
+            echo "::error::job_timeout_minutes must be >= timeout_minutes + 10"; exit 1
+          fi
+          case "${{ inputs.baseline_file }}" in
+            /*|*..*|*~) echo "::error::baseline_file must stay inside the workspace"; exit 1;;
+          esac
+          if [ -n "${{ inputs.cache_path }}" ] && [ -z "${{ inputs.cache_key }}" ]; then
+            echo "::error::cache_key required when cache_path is set"; exit 1
+          fi
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        if: ${{ inputs.node_version != '' }}
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: 'npm'
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869e46813c14d51 # v5
+        if: ${{ inputs.python_version != '' }}
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ inputs.cache_path != '' }}
+        with:
+          path: ${{ inputs.cache_path }}
+          key: ${{ inputs.cache_key }}
+
+      - name: Custom toolchain setup
+        if: ${{ inputs.setup_command != '' }}
+        shell: bash
+        timeout-minutes: 10
+        run: ${{ inputs.setup_command }}
+
+      - name: Install dependencies
+        shell: bash
+        timeout-minutes: 20
+        run: ${{ inputs.install_command }}
+
+      - name: Run coverage suite
+        shell: bash
+        timeout-minutes: ${{ inputs.timeout_minutes }}
+        run: ${{ inputs.coverage_command }}
+
+      - name: Extract coverage metric
+        id: metric
+        shell: bash
+        env:
+          METRIC_COMMAND: ${{ inputs.metric_command }}
+        run: |
+          set -euo pipefail
+          RAW=$(eval "$METRIC_COMMAND" | tail -1 | tr -d '[:space:]%')
+          if ! python3 -c "import sys; float(sys.argv[1])" "$RAW" 2>/dev/null; then
+            echo "::error::metric_command did not print a float — got '$RAW'"; exit 1
+          fi
+          echo "value=$RAW" >> "$GITHUB_OUTPUT"
+
+      - name: Compare against baseline
+        shell: bash
+        env:
+          CURRENT: ${{ steps.metric.outputs.value }}
+          BASELINE_FILE: ${{ inputs.baseline_file }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          python3 - <<'PY'
+          import os, sys
+          from pathlib import Path
+          current = round(float(os.environ["CURRENT"]), 1)
+          base_path = Path(os.environ["BASELINE_FILE"])
+          if not base_path.exists():
+              print(f"coverage-ratchet: no baseline at {base_path} — "
+                    f"this run measures {current}%. Seed the baseline file to activate.")
+              sys.exit(0)
+          baseline = round(float(base_path.read_text().strip()), 1)
+          if current < baseline:
+              msg = (f"coverage {current}% < baseline {baseline}% — "
+                     "add tests or justify the drop; do not lower the baseline to pass")
+              print(f"::error::{msg}" if os.environ["MODE"] == "enforce" else f"::warning::{msg}")
+              sys.exit(1 if os.environ["MODE"] == "enforce" else 0)
+          print(f"coverage-ratchet: {current}% >= baseline {baseline}% "
+                f"(+{round(current - baseline, 1)} — raise the baseline file to ratchet up)")
+          PY
+
+      - name: Auto-commit raised baseline on default-branch push
+        if: >-
+          inputs.auto_commit_baseline && github.event_name == 'push' &&
+          github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
+          CURRENT: ${{ steps.metric.outputs.value }}
+          BASELINE_FILE: ${{ inputs.baseline_file }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          """Signed-commit replay: git/blobs -> git/trees -> git/commits ->
+          PATCH refs/heads/<branch>. Produces a verified commit on protected
+          branches without force-pushing history."""
+          import json, os, subprocess, sys
+          from pathlib import Path
+          def gh(*args, body=None, method=None):
+              cmd = ["gh", "api", *args]
+              if method:
+                  cmd += ["-X", method]
+              if body is not None:
+                  cmd += ["--input", "-"]
+              proc = subprocess.run(cmd,
+                  input=json.dumps(body) if body is not None else None,
+                  capture_output=True, text=True)
+              if proc.returncode != 0:
+                  sys.exit(f"::error::gh api {args[0]} failed: {proc.stderr.strip()}")
+              return json.loads(proc.stdout)
+          current = round(float(os.environ["CURRENT"]), 1)
+          repo, branch = os.environ["REPO"], os.environ["BRANCH"]
+          base_path = Path(os.environ["BASELINE_FILE"])
+          old = base_path.read_text().strip() if base_path.exists() else "none"
+          if base_path.exists() and round(float(old), 1) >= current:
+              print(f"coverage {current} not above baseline {old} — nothing to commit")
+              sys.exit(0)
+          head = gh(f"repos/{repo}/git/ref/heads/{branch}")["object"]["sha"]
+          tree = gh(f"repos/{repo}/git/commits/{head}")["tree"]["sha"]
+          blob = gh(f"repos/{repo}/git/blobs", body={
+              "content": f"{current}\n", "encoding": "utf-8"})["sha"]
+          new_tree = gh(f"repos/{repo}/git/trees", body={
+              "base_tree": tree, "tree": [{"path": str(base_path), "mode": "100644",
+                                          "type": "blob", "sha": blob}]})["sha"]
+          commit = gh(f"repos/{repo}/git/commits", body={
+              "message": f"[coverage-ratchet] baseline {old} -> {current}",
+              "tree": new_tree, "parents": [head]})["sha"]
+          gh(f"repos/{repo}/git/refs/heads/{branch}", body={"sha": commit}, method="PATCH")
+          print(f"::notice::baseline bumped to {current} via signed commit {commit}")
+          PY

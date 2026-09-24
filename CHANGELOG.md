@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+### Added
+
+- **coverage-ratchet-reusable** — shared coverage gate: runs a suite, extracts
+  a float metric, and compares against an in-repo baseline file. Absent
+  baseline = measure-and-report (exits 0); below baseline = fail (enforce)
+  or warn (report). Optional `setup_command` for non-node/python toolchains,
+  `cache_path`/`cache_key`, and `auto_commit_baseline` for default-branch
+  pushes. Job is intentionally unnamed so required-check contracts bind to
+  the `coverage` job id.
+- **tia-shadow-reusable** — observe-only test-impact shadow. Diffs the PR,
+  computes which test files should have run (`.ai/tia-map.json` or basename
+  heuristic), compares to the caller's `tia-ran-tests` manifest artifact,
+  and uploads a `tia-shadow-<head-sha>.json` journal. Never gates.
+- **restore-drill-reusable** — scheduled Azure SQL restore drill:
+  `az sql db restore` (PITR) into a throwaway database, SELECT-only sanity
+  queries, JSONL + report artifacts, then deletes the drill DB even on
+  failure.
+- **check-branch-protection.py** — audits `deployment-contracts.yaml`
+  `required_checks` (repo-level and per-lane overrides) against live
+  `branches/{b}/protection` required status checks via `gh api`. Warn-only
+  without a PAT; `--emit-fixes` writes ready-to-run `gh api -X PUT`
+  payloads — it never applies changes itself.
+- **deployment-contract schema fields** — repo-level `protected_branches`
+  and `required_checks`, plus lane-level `required_checks` overrides, now
+  validate in `check-deployment-contract.py` and
+  `schemas/deployment-contract.schema.json`.
+
 ### Changed
 
 - **`/watch-pr` subscribe split (v2.1.0).** Docs/CI auto-merge PRs (paths ⊆

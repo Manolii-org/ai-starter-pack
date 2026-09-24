@@ -1,0 +1,190 @@
+name: Restore Drill (Reusable)
+# Reusable workflow_call form. Caller owns `on:` — intended schedule is
+# weekly (e.g. `cron: '30 4 * * 1'`); also safe under `workflow_dispatch`.
+#
+# Validates the Azure SQL recovery path end to end:
+#   1. PITR-restore the source database to a throwaway DB on the same server
+#      (`<source>-drill-<yyyymmdd>`) via `az sql db restore` — the same
+#      restore path an incident would use.
+#   2. Run read-only sanity queries (row counts, latest timestamps) — proves
+#      the restored data is actually queryable, not just provisioned.
+#   3. Always drop the throwaway DB afterwards (if: always()).
+#   4. Write a JSON report artifact + step summary (duration, row counts).
+#
+# Auth: az login via the caller's Azure credentials — prefer OIDC federated
+# (secrets AZURE_CLIENT_ID + AZURE_TENANT_ID + AZURE_SUBSCRIPTION_ID on the
+# caller repo, requires `permissions: id-token: write` on the calling job).
+#
+# Query auth: two modes via `db_auth` input —
+#   'sql-auth' : secrets DRILL_SQL_USER + DRILL_SQL_PASSWORD — a dedicated
+#                SELECT-only SQL login (CREATE USER ... ; GRANT SELECT).
+#   'entra'    : go-sqlcmd --authentication-method=ActiveDirectoryDefault
+#                using the OIDC app's token; requires that app to be a
+#                database user with db_datareader on the restored DB.
+#
+# sqlcmd is fetched as the go-sqlcmd release tarball (no apt repo adds).
+
+on:
+  workflow_call:
+    inputs:
+      resource_group:
+        type: string
+        required: true
+      sql_server:
+        type: string
+        required: true
+      source_database:
+        type: string
+        required: true
+        description: Database to restore FROM (latest PITR point is used).
+      sanity_queries:
+        type: string
+        required: false
+        default: 'SELECT COUNT(*) AS table_count FROM INFORMATION_SCHEMA.TABLES'
+        description: >-
+          Newline-separated SELECT statements run against the restored DB.
+          Each line must start with SELECT (enforced); keep them cheap —
+          row counts and MAX(timestamp) probes, not scans.
+      db_auth:
+        type: string
+        required: false
+        default: 'sql-auth'
+        description: 'sql-auth (DRILL_SQL_* secrets) or entra (OIDC app token).'
+      sqlcmd_version:
+        type: string
+        required: false
+        default: '1.9.0'
+        description: go-sqlcmd release version.
+      timeout_minutes:
+        type: number
+        required: false
+        default: 45
+        description: Job ceiling — restore of a mid-size GP database takes ~5-20m.
+    secrets:
+      DRILL_SQL_USER:
+        required: false
+      DRILL_SQL_PASSWORD:
+        required: false
+      AZURE_CLIENT_ID:
+        required: false
+      AZURE_TENANT_ID:
+        required: false
+      AZURE_SUBSCRIPTION_ID:
+        required: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  restore-drill:
+    name: Restore drill
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    env:
+      DRILL_DB: ${{ format('{0}-drill-{1}', inputs.source_database, github.run_number) }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Validate inputs
+        shell: bash
+        run: |
+          if ! echo "${{ inputs.db_auth }}" | grep -qxE 'sql-auth|entra'; then
+            echo "::error::db_auth must be sql-auth or entra"; exit 1
+          fi
+          while IFS= read -r q; do
+            [ -z "$q" ] && continue
+            echo "$q" | grep -qiE '^\s*select\b' || { echo "::error::sanity query is not SELECT-only: $q"; exit 1; }
+          done <<< '${{ inputs.sanity_queries }}'
+
+      - name: Azure login (OIDC)
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2.3.1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install go-sqlcmd
+        shell: bash
+        run: |
+          curl -fsSL "https://github.com/microsoft/go-sqlcmd/releases/download/v${{ inputs.sqlcmd_version }}/sqlcmd-linux-amd64.tar.bz2" \
+            | sudo tar -xj -C /usr/local/bin
+          sqlcmd --version
+
+      - name: Restore to throwaway database
+        id: restore
+        shell: bash
+        env:
+          RG: ${{ inputs.resource_group }}
+          SERVER: ${{ inputs.sql_server }}
+          SRC: ${{ inputs.source_database }}
+        run: |
+          set -euo pipefail
+          az sql db restore -g "$RG" -s "$SERVER" -n "$SRC" \
+            --dest-name "$DRILL_DB" -o none
+          # poll until Online (bounded by job timeout)
+          for i in $(seq 1 40); do
+            STATE=$(az sql db show -g "$RG" -s "$SERVER" -n "$DRILL_DB" --query status -o tsv 2>/dev/null || echo Provisioning)
+            echo "[$i] $DRILL_DB: $STATE"
+            [ "$STATE" = "Online" ] && exit 0
+            sleep 30
+          done
+          echo "::error::restore did not reach Online within poll window"; exit 1
+
+      - name: Sanity queries
+        shell: bash
+        env:
+          SERVER: ${{ inputs.sql_server }}
+          QUERIES: ${{ inputs.sanity_queries }}
+          DB_AUTH: ${{ inputs.db_auth }}
+          SQLCMDUSER: ${{ secrets.DRILL_SQL_USER }}
+          SQLCMDPASSWORD: ${{ secrets.DRILL_SQL_PASSWORD }}
+        run: |
+          set -euo pipefail
+          FQDN="$SERVER.database.windows.net"
+          mkdir -p drill-report && : > drill-report/results.jsonl
+          while IFS= read -r q; do
+            [ -z "$q" ] && continue
+            echo "--- query: $q"
+            if [ "$DB_AUTH" = "entra" ]; then
+              OUT=$(sqlcmd -S "$FQDN" -d "$DRILL_DB" --authentication-method=ActiveDirectoryDefault \
+                    -Q "$q" -h -1 -W 2>&1)
+            else
+              OUT=$(sqlcmd -S "$FQDN" -d "$DRILL_DB" -U "$SQLCMDUSER" -P "$SQLCMDPASSWORD" \
+                    -Q "$q" -h -1 -W -l 30 2>&1)
+            fi
+            echo "$OUT"
+            python3 -c 'import json,sys; print(json.dumps({"query": sys.argv[1], "output": sys.argv[2].strip()}))' \
+              "$q" "$OUT" >> drill-report/results.jsonl
+          done <<< "$QUERIES"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          rows = [json.loads(l) for l in Path("drill-report/results.jsonl").read_text().splitlines()]
+          report = {"drill_db": os.environ["DRILL_DB"],
+                    "run": os.environ["GITHUB_SERVER_URL"] + "/" + os.environ["GITHUB_REPOSITORY"]
+                           + "/actions/runs/" + os.environ["GITHUB_RUN_ID"],
+                    "queries": rows}
+          Path("drill-report/report.json").write_text(json.dumps(report, indent=2))
+          PY
+
+      - name: Upload drill report
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6d6bfb60ed0dc1cd7b42d9c8b3f24 # v6
+        with:
+          name: restore-drill-${{ github.run_number }}
+          path: drill-report/
+          retention-days: 90
+          if-no-files-found: warn
+
+      - name: Drop throwaway database
+        if: always()
+        shell: bash
+        env:
+          RG: ${{ inputs.resource_group }}
+          SERVER: ${{ inputs.sql_server }}
+        run: |
+          az sql db delete -g "$RG" -s "$SERVER" -n "$DRILL_DB" -y -o none \
+            || echo "::warning::cleanup of $DRILL_DB failed — check for orphan DB"
