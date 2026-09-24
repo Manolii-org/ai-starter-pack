@@ -665,8 +665,10 @@ header.
 Reusable coverage gate: runs the suite, extracts a float metric, compares
 against an in-repo baseline file. Absent baseline = measure-and-report
 (exits 0, prints the number to seed with); below baseline = fail in
-`enforce` mode, warn in `report` mode. The job has no `name:` —
-required-check contracts bind to the caller's `coverage` job id.
+`enforce` mode, warn in `report` mode. The job has no `name:` — with the
+caller below the reported check context is `coverage / coverage`
+(`<caller job id> / <called job name>`); required-check contracts must
+bind that composite string, not bare `coverage`.
 
 ```yaml
 jobs:

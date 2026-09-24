@@ -117,7 +117,8 @@ permissions:
   contents: read
 
 jobs:
-  # No `name:` — required-check contracts bind to the job id `coverage`.
+  # No `name:` — a caller binding `jobs.coverage` reports the composite check
+  # `coverage / coverage`; required-check contracts must use that full string.
   coverage:
     runs-on: ${{ inputs.runs_on }}
     timeout-minutes: ${{ inputs.job_timeout_minutes }}
