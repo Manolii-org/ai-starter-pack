@@ -124,7 +124,7 @@ env:
 | **integration-admission-reusable** | `config_path`, `base_sha`, `head_sha`, `installation_id`, `accepted_producer`, `pack_ref=v1`, `evidence_bundle_json=[]`, `runs_on`, `shadow=true`, `timeout_minutes=15` | none |
 | **pre-production-tier-reusable** | `gates` (JSON, required), `budget_minutes=45`, `job_timeout_minutes=60`, `runs_on`, `max_parallel=4`, `environment`, `checkout_fetch_depth=0`, `open_issue_on_failure=false` | `GATE_SECRETS` (optional) |
 | **tier-gate-summary-reusable** | `gate_name` (required), `applies` (required), `tier=fast`, `command`, `skip_reason`, `setup_command`, `runs_on`, `working_directory`, `timeout_minutes=10`, `checkout_fetch_depth=0` | none |
-| **coverage-ratchet-reusable** | `runs_on`, `node_version`, `python_version`, `setup_command`, `install_command`, `coverage_command` (req), `metric_command` (req), `baseline_file`, `mode=enforce`, `auto_commit_baseline=false`, `cache_path`, `cache_key`, `timeout_minutes=30`, `job_timeout_minutes=60` (validated ≥ timeout+25, +35 with `setup_command`) | `GH_PAT` (optional, for baseline auto-commit) |
+| **coverage-ratchet-reusable** | `runs_on`, `node_version`, `python_version`, `setup_command`, `install_command`, `coverage_command` (req), `metric_command` (req), `baseline_file`, `mode=enforce`, `auto_commit_baseline=false`, `cache_path`, `cache_key`, `timeout_minutes=30`, `job_timeout_minutes=65` (validated ≥ timeout+25, +35 with `setup_command`) | `GH_PAT` (optional, for baseline auto-commit) |
 | **tia-shadow-reusable** | `runs_on=ubuntu-slim`, `test_roots`, `timeout_minutes=5` | none |
 | **restore-drill-reusable** | `resource_group`, `sql_server`, `source_database` (req), `sanity_queries`, `db_auth=sql-auth`, `sqlcmd_version`, `timeout_minutes=45` | `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `DRILL_SQL_USER`, `DRILL_SQL_PASSWORD` |
 
@@ -695,8 +695,10 @@ computes which test files should have run (`.ai/tia-map.json` mappings or a
 basename heuristic under `test_roots`), compares to the caller's
 `tia-ran-tests` manifest artifact (one path per line, uploaded by the test
 job), and uploads a `tia-shadow-<head-sha>.json` journal (30d). Wire the
-journal to `needs:` the test job so it runs after the manifest exists;
-collect weeks of journals before proposing enforcement.
+journal to `needs:` the test job and give the CALLER job `if: ${{ always() }}`
+— the called job's own `always()` can't run when GitHub skips the caller after
+a test failure, which is exactly when the journal matters most. Collect weeks
+of journals before proposing enforcement.
 
 ## restore-drill (v1.19.0+)
 

@@ -104,6 +104,7 @@ jobs:
           persist-credentials: false
 
       - name: Validate inputs
+        id: validate
         shell: bash
         env:
           DB_AUTH: ${{ inputs.db_auth }}
@@ -115,9 +116,13 @@ jobs:
           # kills pending steps, so restore+queries must finish with ~8m spare
           # for upload + delete.
           echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
-          # github.job is only set at step runtime (not during job-level env
-          # eval), so the per-invocation discriminator is generated here.
-          DRILL_DB="${SRC}-drill-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_JOB}"
+          # Per-invocation discriminator. GITHUB_JOB identifies the job INSIDE
+          # this reusable ('restore-drill'), not the caller job — two callers in
+          # one run would otherwise mint the same DRILL_DB (and artifact name),
+          # letting one invocation's teardown delete the other's database.
+          NONCE=$(python3 -c 'import secrets; print(secrets.token_hex(4))')
+          echo "nonce=$NONCE" >> "$GITHUB_OUTPUT"
+          DRILL_DB="${SRC}-drill-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${NONCE}"
           echo "DRILL_DB=${DRILL_DB}" >> "$GITHUB_ENV"
           export DRILL_DB
           # Azure caps DB names at 128 chars.
@@ -296,7 +301,14 @@ jobs:
           ABSENT_CONFIRMED=0
           TEARDOWN_DEADLINE=$(( $(date +%s) + 9 * 60 ))
           if [ "$RESTORE_OUTCOME" = "skipped" ]; then
-            ABSENT_NEEDED=2     # no restore was ever requested
+            # A skipped restore never issued a request — nothing can be
+            # provisioning. Checking twice (~30s) just burns teardown budget.
+            echo "restore never requested — nothing to tear down"
+            exit 0
+          elif [ "$RESTORE_OUTCOME" = "success" ]; then
+            # DB reached Online; once deleted there is no pending provision to
+            # wait out — two consecutive absents are enough.
+            ABSENT_NEEDED=2
           else
             ABSENT_NEEDED=20    # ~5min continuous absence before we trust it
           fi
@@ -312,7 +324,11 @@ jobs:
                 echo "::error::$DRILL_DB present but no teardown budget left to delete it — check Azure"
                 rm -f "$ERR"; exit 1
               fi
-              timeout -k 10 "$DEL_BUDGET" az sql db delete -g "$RG" -s "$SERVER" -n "$DRILL_DB" -y -o none || true
+              if timeout -k 10 "$DEL_BUDGET" az sql db delete -g "$RG" -s "$SERVER" -n "$DRILL_DB" -y -o none; then
+                # Azure accepted the delete — no restore can still be pending,
+                # so two absents (vs the full 20) are safe to conclude on.
+                ABSENT_NEEDED=2
+              fi
               rm -f "$ERR"
               sleep 15
               continue
@@ -368,7 +384,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@b7c566a772e6d6bfb60ed0dc1cd7b42d9c8b3f24 # v6
         with:
-          name: restore-drill-${{ github.run_number }}-a${{ github.run_attempt }}
+          name: restore-drill-${{ github.run_number }}-a${{ github.run_attempt }}-${{ steps.validate.outputs.nonce || 'novalidate' }}
           path: drill-report/
           retention-days: 90
           if-no-files-found: warn

@@ -192,6 +192,13 @@ def fetch_protection(repo: str, branch: str,
         return None, f"branch {repo}@{branch} does not exist"
     if eerr:  # a read failure is unverifiable state, not "unprotected"
         return None, f"gh api branch read failed for {repo}@{branch}: {eerr}"
+    if isinstance(exists, dict) and exists.get("protected"):
+        # Branch reports protected but the protection read above 404'd — the
+        # token can see the branch but not its protection. Reporting
+        # "unprotected" here would emit a fix payload that clobbers real
+        # settings, so degrade to unverifiable instead.
+        return None, (f"protection unreadable for {repo}@{branch} "
+                      "(branch reports protected; token lacks admin read)")
     return None, None  # exists but unprotected — a finding, not an error
 
 
@@ -405,9 +412,10 @@ def main() -> int:
                 slug = fixture_name(repo, branch)
                 body = fix_body(protection, required)
                 warns = [] if protection else [
-                    "branch had no protection — payload sets ONLY "
-                    "required_status_checks + enforce_admins; review "
-                    "reviews/signatures/restrictions before applying"]
+                    "branch had no protection — payload sets the baseline: "
+                    "required_status_checks + enforce_admins + 1 required "
+                    "approval + stale-review dismissal + conversation "
+                    "resolution; review signatures/restrictions before applying"]
                 if protection and (protection.get("required_signatures") or {}).get("enabled"):
                     warns.append("GET showed required_signatures enabled — PUT cannot "
                                  "carry it (separate endpoint); verify signing is still "

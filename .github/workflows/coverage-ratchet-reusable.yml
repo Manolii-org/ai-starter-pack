@@ -106,8 +106,8 @@ on:
       job_timeout_minutes:
         type: number
         required: false
-        default: 60
-        description: Job-level ceiling — must be >= timeout_minutes + 25 (install cap + slack), or timeout_minutes + 35 when setup_command is set. Defaults 30+60 satisfy the no-setup case; with setup_command callers need >= timeout_minutes+35.
+        default: 65
+        description: Job-level ceiling — must be >= timeout_minutes + 25 (install cap + slack), or timeout_minutes + 35 when setup_command is set. Defaults 30+65 satisfy both cases.
     secrets:
       GH_PAT:
         required: false
