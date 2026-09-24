@@ -505,7 +505,10 @@ def test_symlinked_lockfile_destination_conflicts(tmp_path):
     (consumer / ".ai").symlink_to(outside)
     r = run_resolver(m, reg_root, consumer, "--apply")
     assert r.returncode == 1
-    assert "lockfile destination" in r.stdout
+    # Refused either at the apply mutex (fails closed when .ai is a
+    # symlink — round-7 review) or at the lockfile-destination check.
+    out = r.stdout + r.stderr
+    assert "mutex" in out or "lockfile destination" in out
     assert not any(outside.iterdir())
 
 
@@ -1004,7 +1007,10 @@ def test_lock_parent_not_dir_conflicts(tmp_path):
     (consumer / ".ai").write_text("not a dir")
     r = run_resolver(m, reg_root, consumer, "--apply")
     assert r.returncode == 1
-    assert "not a directory" in r.stdout
+    # Refused either at the apply mutex (fails closed — round-7 review)
+    # or at the plan-time "not a directory" lockfile-parent conflict.
+    out = r.stdout + r.stderr
+    assert "mutex" in out or "not a directory" in out
     assert not (consumer / ".claude" / "skills" / "demo" / "x.md").exists()
 
 
@@ -6057,7 +6063,10 @@ def test_script_dep_word_concatenation(tmp_path):
     assert mod.script_dep_block(pdir, b'bash "scripts/x.sh"\n')
     assert not mod.script_dep_block(pdir, b"python -m scripts'-tools'\n")
     assert not mod.script_dep_block(pdir, b"bash scripts/x.sh' more'\n")
-    assert not mod.script_dep_block(pdir, b"bash scripts/x.sh.bak\n")
+    # Any dotted extension is invocable — bash runs `x.sh.bak` if it is
+    # bundled (the extension allowlist was dropped on Codex's #123
+    # finding), so the invocation is a dep like any other script call.
+    assert mod.script_dep_block(pdir, b"bash scripts/x.sh.bak\n")
 
 
 def test_yaml_load_strips_bom(tmp_path):
@@ -6304,7 +6313,9 @@ def test_apply_rollback_removes_new_outputs(tmp_path):
         r = run_resolver(m, reg_root, consumer, "--apply")
     finally:
         os.chmod(ai_dir, 0o755)
-    assert r.returncode == 2, r.stdout + r.stderr
+    # rc=1: refused at the apply mutex (fails closed on an unroutable
+    # lock path — round-7 review); rc=2: the lock-write plan conflict.
+    assert r.returncode in (1, 2), r.stdout + r.stderr
     assert not (consumer / ".claude" / "skills" / "demo"
                 / "SKILL.md").exists()
     assert not (consumer / ".claude" / "commands" / "run.md").exists()
@@ -7513,3 +7524,517 @@ def test_prune_cleanup_revalidates_ancestor_chain(tmp_path):
     r = run_resolver(m, reg_root, consumer, "--apply", "--prune")
     # the external commands dir must survive the cleanup sweep
     assert (external / "commands").is_dir()
+
+
+def test_script_dep_stream_replacing_pipe_heads(tmp_path):
+    """A pipe head whose output REPLACES the stream ends the chain:
+    `cat x | wc -l | sh` feeds sh a line count, not the script (Devin on
+    #123); `python -m` takes its program from argv so the pipe is data
+    (Devin BUG_0003 on #1953)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    (pdir / "scripts" / "x.py").write_bytes(b"x")
+    for pipe in (b"cat scripts/x.sh | wc -l | sh",
+                 b"cat scripts/x.sh | sha256sum | bash",
+                 b"cat scripts/x.sh | echo done | sh",
+                 b"cat scripts/x.py | python -m json.tool",
+                 b"cat scripts/x.py | python -m json.tool | sh"):
+        assert not mod.script_dep_block(pdir, pipe + b"\n"), pipe
+    # transformers forward content — still execute downstream
+    for pipe in (b"cat scripts/x.sh | grep p | sh",
+                 b"cat scripts/x.sh | sed s/a/b/ | sh",
+                 b"cat scripts/x.sh | tr a b | bash"):
+        assert mod.script_dep_block(pdir, pipe + b"\n"), pipe
+
+
+def test_script_dep_env_split_string(tmp_path):
+    """`env -S`/`--split-string` re-parses its operand into a command —
+    `cat x | env -S 'bash -s'` executes the pipe (Codex on #1370)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for pipe in (b"cat scripts/x.sh | env -S 'bash -s'",
+                 b"cat scripts/x.sh | env --split-string 'sh'",
+                 b"cat scripts/x.sh | env -S'sh'",
+                 b"cat scripts/x.sh | env --split-string='sh -s'",
+                 b"cat scripts/x.sh | env A=1 -S 'bash'"):
+        assert mod.script_dep_block(pdir, pipe + b"\n"), pipe
+    # an operand whose inner command is a sink still ends the chain
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | env -S 'wc -l' | sh\n")
+    # env without -S runs the named command on the pipe, unchanged
+    assert mod.script_dep_block(pdir, b"cat scripts/x.sh | env sh\n")
+
+
+def test_script_dep_reader_heads_and_generic_suffix(tmp_path):
+    """grep/head/tail only read, so a bare use stays inert — but under an
+    executing context (`eval "$(grep p x)"`, `head x | sh`) the reader
+    supplies code (Codex on #1370). Any dotted extension counts as a
+    script — `bash scripts/setup.bash` is an invocation (Codex on #123).
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    (pdir / "scripts" / "setup.bash").write_bytes(b"x")
+    for line in (b'eval "$(grep p scripts/x.sh)"',
+                 b'eval "$(head -5 scripts/x.sh)"',
+                 b"grep p scripts/x.sh | sh",
+                 b"head -5 scripts/x.sh | bash",
+                 b"tail scripts/x.sh | python",
+                 b"bash scripts/setup.bash",
+                 b"./scripts/setup.bash"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    # bare reader invocations still read — no dep
+    for line in (b"grep p scripts/x.sh",
+                 b"head -5 scripts/x.sh",
+                 b"tail scripts/x.sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_substitution_output_piped(tmp_path):
+    """`echo "$(cat scripts/x.sh)" | sh` executes the substitution's
+    output — the file inside is a dep even though echo is a sink (Devin
+    on cpdcheck #6)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (b'echo "$(cat scripts/x.sh)" | sh',
+                 b'echo `cat scripts/x.sh` | bash',
+                 b'printf "%s" "$(cat scripts/x.sh)" | python'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    # no pipe — the output is just printed
+    assert not mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh)"\n')
+    # pipe to a non-executor still inert
+    assert not mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh)" | wc -l\n')
+
+
+def test_script_dep_single_quoted_backticks_literal(tmp_path):
+    """Backticks inside single quotes are literal text — `'run `x`'` is
+    an argument, not a substitution (Devin BUG_0002 on #1953)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (b"echo 'run `sh scripts/x.sh` today'",
+                 b"printf 'use `bash scripts/x.sh` here'",
+                 b"echo 'esc \\`sh scripts/x.sh\\`'"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    # inside double quotes a backtick still substitutes
+    assert mod.script_dep_block(
+        pdir, b'echo "run `sh scripts/x.sh` today"\n')
+    # a bare backtick substitution still counts
+    assert mod.script_dep_block(pdir, b"eval `cat scripts/x.sh`\n")
+
+
+def test_script_dep_heredoc_multiple_ops_one_line(tmp_path):
+    """`cat <<A; sh <<B` queues two heredocs on one line — B's body must
+    start after A's delimiter, not after the opening line, or A's body
+    is wrongly attributed to B's command (Devin on #1370)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    # an invocation in A's body must NOT be attributed to sh's heredoc —
+    # cat only reads it, so nothing executes
+    body = b"cat <<A; sh <<B\nbash scripts/x.sh\nA\ntext\nB\n"
+    assert not mod.script_dep_block(pdir, body)
+    # the same invocation in B's own body IS attributed to the exec head
+    body = b"cat <<A; sh <<B\ntext\nA\nbash scripts/x.sh\nB\n"
+    assert mod.script_dep_block(pdir, body)
+
+
+def test_read_source_refuses_links_and_nonregular(tmp_path):
+    """`_read_source` opens with O_NOFOLLOW and revalidates a regular
+    file — a source swapped for a symlink after the resolve-time check
+    cannot ship the link target's bytes, and a fifo cannot block the
+    read (Codex P1 on #1953)."""
+    import os
+    mod = load_resolve_module()
+    target = tmp_path / "target"
+    target.write_bytes(b"real")
+    got = mod._read_source(tmp_path, "target")
+    assert got is not None and got[0] == b"real"
+    link = tmp_path / "link"
+    link.symlink_to(target)
+    assert mod._read_source(tmp_path, "link") is None
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo)
+    assert mod._read_source(tmp_path, "fifo") is None
+    assert mod._read_source(tmp_path, "missing") is None
+    # An ANCESTOR swapped for a symlink is refused too — the leaf's
+    # O_NOFOLLOW alone still follows a linked parent dir (Codex P1 on
+    # cpdcheck #8).
+    if mod._HAS_DIRFD:
+        real_dir = tmp_path / "realdir"
+        real_dir.mkdir()
+        (real_dir / "leaf").write_bytes(b"x")
+        linked = tmp_path / "linked"
+        linked.symlink_to(real_dir, target_is_directory=True)
+        assert mod._read_source(tmp_path, "linked/leaf") is None
+
+
+def test_apply_writes_mutex_lockfile(tmp_path):
+    """--apply holds an exclusive flock on .ai/capability-apply.lock for
+    the plan→apply window so two resolvers can't lose each other's
+    installs (Devin BUG_0001 on #1953)."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/SKILL.md",
+                                "---\nname: demo\ndescription: d\n---\nv1")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    # Non-git consumer → .ai fallback; a git repo locks under its
+    # metadata dir instead so the worktree stays clean (Codex P2 on
+    # #1374 / cpdcheck #8).
+    assert (consumer / ".ai" / "capability-apply.lock").exists()
+    import subprocess
+    git_consumer = tmp_path / "git-consumer"
+    git_consumer.mkdir()
+    subprocess.run(["git", "-C", str(git_consumer), "init", "-q"],
+                   check=True)
+    m2 = write_manifest(git_consumer, "manolii",
+                        [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m2, reg_root, git_consumer, "--apply").returncode == 0
+    assert (git_consumer / ".git" / "capability-apply.lock").exists()
+    assert not (git_consumer / ".ai" / "capability-apply.lock").exists()
+
+
+def test_script_dep_stdin_executors_bc_dc(tmp_path):
+    """`bc`/`dc` interpret stdin as program text — `cat x | bc` runs the
+    file's contents, and bc's own output can carry code to a later `sh`
+    (Codex on #125 / #1374). They are NOT stream-replacing sinks."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "calc.bc").write_bytes(b"x")
+    for pipe in (b"cat scripts/calc.bc | bc",
+                 b"cat scripts/calc.bc | dc",
+                 b"cat scripts/calc.bc | bc | sh"):
+        assert mod.script_dep_block(pdir, pipe + b"\n"), pipe
+    # true sinks still end the chain
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/calc.bc | expr 1 + 1 | sh\n")
+
+
+def test_script_dep_suffix_punctuation(tmp_path):
+    """A dotted script name's extension may carry `-`/`_` —
+    `bash scripts/setup.foo-bar` is an invocation (Codex on #125)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "setup.foo-bar").write_bytes(b"x")
+    (pdir / "scripts" / "setup.foo_bar").write_bytes(b"x")
+    for line in (b"bash scripts/setup.foo-bar",
+                 b"bash scripts/setup.foo_bar",
+                 b"./scripts/setup.foo-bar"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_env_split_string_trailing_argv(tmp_path):
+    """`env -S 'sh' -c true` appends argv AFTER the operand — the `-c`
+    means stdin is never read (Devin BUG_0001 on #125); `-S 'bash'
+    /dev/null` runs the positional file (BUG_0002 on #1374)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    # operand plus trailing argv classifies as sink — chain ends
+    for pipe in (b"cat scripts/x.sh | env -S 'sh' -c true | sh",
+                 b"cat scripts/x.sh | env -S 'bash' /dev/null | sh"):
+        assert not mod.script_dep_block(pdir, pipe + b"\n"), pipe
+    # bare operand still executes the pipe
+    assert mod.script_dep_block(pdir, b"cat scripts/x.sh | env -S 'sh'\n")
+
+
+def test_script_dep_bare_env_is_a_sink(tmp_path):
+    """`env` with no command word prints the environ — it never forwards
+    stdin, so `cat x | env | sh` pipes env vars, not the script (Devin
+    BUG_0005 on #125)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for pipe in (b"cat scripts/x.sh | env | sh",
+                 b"cat scripts/x.sh | env -i | sh",
+                 b"cat scripts/x.sh | A=1 env | bash"):
+        assert not mod.script_dep_block(pdir, pipe + b"\n"), pipe
+    # env WITH a command word still wraps it
+    assert mod.script_dep_block(pdir, b"cat scripts/x.sh | env sh\n")
+
+
+def test_script_dep_stdout_redirect_before_pipe(tmp_path):
+    """`echo "$(cat x)" > f | sh` redirects stdout — the pipe carries
+    nothing, so the reader is inert (Devin BUG_0004 on #125). fd>1 and
+    input redirects do NOT redirect the pipe's payload."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (b'echo "$(cat scripts/x.sh)" > /dev/null | sh',
+                 b'echo "$(cat scripts/x.sh)" >> log | bash',
+                 b'echo "$(cat scripts/x.sh)" &> out | sh'):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    # fd2 redirect does not starve the pipe — still executes
+    for line in (b'echo "$(cat scripts/x.sh)" 2>&1 | sh',
+                 b'echo "$(cat scripts/x.sh)" 2>/dev/null | sh'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_later_substitution_is_an_arg(tmp_path):
+    """A `$(...)` between the substitution and the pipe is an ARGUMENT,
+    not a boundary — `echo "$(cat x)" $(true) | sh` still executes
+    (Devin BUG_0002 on #125/#1374, cpdcheck #8)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (b'echo "$(cat scripts/x.sh)" $(true) | sh',
+                 b'echo "$(cat scripts/x.sh)" `true` | sh',
+                 b'echo "$(cat scripts/x.sh)" "$(whoami)" | bash'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_inner_quotes_dont_hide_pipe(tmp_path):
+    """Quotes inside a LATER substitution must not flip the outer quote
+    state — `"$(cat x;" "y)" | sh` still pipes (Devin BUG_0003 on #125,
+    Codex on cpdcheck #8)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh; echo " ")" | sh\n')
+    # a comment before the pipe ends the command — nothing executes
+    assert not mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh)" # runs | sh\n')
+
+
+def test_script_dep_heredoc_literal_quotes_backticks(tmp_path):
+    """An unquoted heredoc body treats `'it\\'s'` as literal text yet
+    backticks still expand — the apostrophe must not hide a real
+    `sh scripts/x.sh` pair (CodeRabbit on #125)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    body = (b"cat <<'E'\n"
+            b"it's `sh scripts/x.sh` literal\n"
+            b"E\n")
+    # quoted delimiter → literal body, no exec
+    assert not mod.script_dep_block(pdir, body)
+    body = (b"sh <<'E'\n"
+            b"it's fine\n"
+            b"E\n")
+    # quoted delimiter on sh → literal body, nothing runs
+    assert not mod.script_dep_block(pdir, body)
+    # unquoted delimiter — the body is expanded by sh: a backtick
+    # command following a literal apostrophe still counts
+    body = (b"cat <<E\n"
+            b"it's `sh scripts/x.sh` literal\n"
+            b"E\n")
+    assert mod.script_dep_block(pdir, body)
+
+
+def test_script_dep_quoted_backtick_keeps_quote_state(tmp_path):
+    """The byte right after a closing backtick must still be read — a
+    skipped `"` flipped the outer quote state and hid the pipe (round-6
+    review on #125/#8)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (b'echo "`cat scripts/x.sh`" | sh',
+                 b'echo `true` "$(cat scripts/x.sh)" | sh',
+                 b'echo "`true`$(cat scripts/x.sh)" | bash'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_wrapped_env_split_string(tmp_path):
+    """A wrapper in front of `env` must not end the split-string pre-pass
+    (round-6 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (b'echo "$(cat scripts/x.sh)" | command env -S sh',
+                 b'echo "$(cat scripts/x.sh)" | nohup env -S bash',
+                 b'echo "$(cat scripts/x.sh)" | stdbuf -o0 env -S sh'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_env_split_string_forwarding_operand(tmp_path):
+    """`env -S 'cat'` is a COMMAND that forwards stdin — it must not fall
+    through to the bare-`env` sink (round-6 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (b"echo \"$(cat scripts/x.sh)\" | env -S 'cat' | sh",
+                 b"echo \"$(cat scripts/x.sh)\" | env -S 'tee /dev/null' | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_stdout_self_duplication(tmp_path):
+    """`>&1`/`1>&1` point stdout at itself — a no-op that leaves the pipe
+    intact (round-6 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (b'echo "$(cat scripts/x.sh)" >&1 | sh',
+                 b'echo "$(cat scripts/x.sh)" 1>&1 | bash'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_earlier_stdout_redirect(tmp_path):
+    """A fd1 redirect BEFORE the substitution empties the pipe too; a
+    redirect in an earlier command segment does not (round-6 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert not mod.script_dep_block(
+        pdir, b'echo >/dev/null "$(cat scripts/x.sh)" | sh\n')
+    assert mod.script_dep_block(
+        pdir, b'true >/dev/null; echo "$(cat scripts/x.sh)" | sh\n')
+    assert mod.script_dep_block(
+        pdir, b'true >/dev/null && echo "$(cat scripts/x.sh)" | sh\n')
+
+
+def test_script_dep_python_module_stdin(tmp_path):
+    """`python -m` is a sink only for modules that parse stdin as DATA —
+    `code` runs it, `base64 -d` decodes it into program text (round-6
+    review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.py").write_bytes(b"x")
+    for line in (b'echo "$(cat scripts/x.py)" | python -m code',
+                 b'echo "$(cat scripts/x.py)" | python -m base64 -d | sh',
+                 b'echo "$(cat scripts/x.py)" | python3 -mcode'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (b'echo "$(cat scripts/x.py)" | python -m json.tool',
+                 b'echo "$(cat scripts/x.py)" | python -m http.server'):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_nested_env_split_string(tmp_path):
+    """`env FOO=1 env -S sh` — the command word is itself a wrapper; the
+    INNER env's -S operand must still be classified (round-7 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (b'echo "$(cat scripts/x.sh)" | env FOO=1 env -S sh',
+                 b'echo "$(cat scripts/x.sh)" | env -i env -S bash'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_describe_wrapper_hides_env(tmp_path):
+    """`command -v env -S sh` only DESCRIBES env — the split operand
+    never runs (round-7 review on #8/#1374/#1955)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (b'echo "$(cat scripts/x.sh)" | command -v env -S sh',
+                 b'echo "$(cat scripts/x.sh)" | command -V env -S bash'):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_read_write_redirect(tmp_path):
+    """`<>`/`0<>` open fd0 read-write — they never touch stdout, so the
+    pipe stays live; `1<>`/`n<>` for n>=2 do break it (round-7 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh)" <> tmp | sh\n')
+    assert not mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh)" 1<> tmp | sh\n')
+
+
+def test_script_dep_oversized_fd_digits(tmp_path):
+    """A >4300-digit fd prefix raised ValueError in int() — the fd is
+    compared as a normalised byte span instead (round-7 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    huge = b"9" * 5000
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | " + huge + b">/dev/null | sh\n")
+    ones = b"0" * 4999 + b"1"
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | " + ones + b">/dev/null | sh\n")
+
+
+def test_script_dep_bc_dc_positional_still_reads_stdin(tmp_path):
+    """`bc file`/`dc file` run the file AND THEN read stdin — a
+    positional does not end the exec head's stdin use (round-7 review
+    on #1955)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (b"cat scripts/x.sh | bc init.bc",
+                 b"cat scripts/x.sh | dc -f a.dc"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_python_module_encode_sink(tmp_path):
+    """Codec modules are sinks in ENCODE mode — only `-d`/`-D`/`--decode`/
+    `--decompress` turns stdin into program text (round-7 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.py").write_bytes(b"x")
+    for line in (b'echo "$(cat scripts/x.py)" | python -m base64 -d | sh',
+                 b'echo "$(cat scripts/x.py)" | python -m gzip -d | sh',
+                 b'echo "$(cat scripts/x.py)" | python3 -mcode'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (b'echo "$(cat scripts/x.py)" | python -m base64 | sh',
+                 b'echo "$(cat scripts/x.py)" | python -m gzip > x.gz',
+                 b'echo "$(cat scripts/x.py)" | python -m bz2 | sh',
+                 b'echo "$(cat scripts/x.py)" | python -m pdb'):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_segment_stdout_redirect(tmp_path):
+    """A middle segment whose fd1 is redirected forwards nothing —
+    `cat x | tee >/dev/null | sh` is not a dep (round-7 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (b"cat scripts/x.sh | tee >/dev/null | sh",
+                 b"cat scripts/x.sh | sed s/a/b/ >/dev/null | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | tee /dev/stderr | sh\n")
+
+
+def test_script_dep_exec_head_own_redirect(tmp_path):
+    """`sh > file` still READS stdin — redirections inside the exec
+    head's argv are not positional arguments."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (b"cat scripts/x.sh | sh > /dev/null",
+                 b"cat scripts/x.sh | sh >y",
+                 b"cat scripts/x.sh | bash - > out"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | sh script.sh > log\n")
