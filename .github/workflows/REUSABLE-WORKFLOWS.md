@@ -124,6 +124,9 @@ env:
 | **integration-admission-reusable** | `config_path`, `base_sha`, `head_sha`, `installation_id`, `accepted_producer`, `pack_ref=v1`, `evidence_bundle_json=[]`, `runs_on`, `shadow=true`, `timeout_minutes=15` | none |
 | **pre-production-tier-reusable** | `gates` (JSON, required), `budget_minutes=45`, `job_timeout_minutes=60`, `runs_on`, `max_parallel=4`, `environment`, `checkout_fetch_depth=0`, `open_issue_on_failure=false` | `GATE_SECRETS` (optional) |
 | **tier-gate-summary-reusable** | `gate_name` (required), `applies` (required), `tier=fast`, `command`, `skip_reason`, `setup_command`, `runs_on`, `working_directory`, `timeout_minutes=10`, `checkout_fetch_depth=0` | none |
+| **coverage-ratchet-reusable** | `runs_on`, `node_version`, `python_version`, `setup_command`, `install_command`, `coverage_command` (req), `metric_command` (req), `baseline_file`, `mode=enforce`, `auto_commit_baseline=false`, `cache_path`, `cache_key`, `timeout_minutes=30`, `job_timeout_minutes=65` (validated ≥ timeout+25, +35 with `setup_command`) | `GH_PAT` (optional, for baseline auto-commit) |
+| **tia-shadow-reusable** | `runs_on=ubuntu-slim`, `test_roots`, `timeout_minutes=5` | none |
+| **restore-drill-reusable** | `resource_group`, `sql_server`, `source_database` (req), `sanity_queries`, `db_auth=sql-auth`, `sqlcmd_version`, `timeout_minutes=45` | `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `DRILL_SQL_USER`, `DRILL_SQL_PASSWORD` |
 
 **Notes:**
 - `GITHUB_TOKEN` auto-injected by workflow_call (never declare).
@@ -656,6 +659,64 @@ failures. Credentials travel via `secrets:` (GitHub forbids the secrets
 context inside `with:`); `test_env` carries NON-secret env only.
 `artifact_paths` are relative to `workdir`. Full input list in the file
 header.
+
+## coverage-ratchet (v1.19.0+)
+
+Reusable coverage gate: runs the suite, extracts a float metric, compares
+against an in-repo baseline file. Absent baseline = measure-and-report
+(exits 0, prints the number to seed with); below baseline = fail in
+`enforce` mode, warn in `report` mode. The job has no `name:` — with the
+caller below the reported check context is `coverage / coverage`
+(`<caller job id> / <called job name>`); required-check contracts must
+bind that composite string, not bare `coverage`.
+
+```yaml
+jobs:
+  coverage:
+    uses: Manolii-org/ai-starter-pack/.github/workflows/coverage-ratchet-reusable.yml@v1.19.0
+    with:
+      node_version: '22'
+      install_command: npm ci --ignore-scripts
+      coverage_command: npm run test:coverage -- --coverage.reporter=json-summary
+      metric_command: node -e "console.log(require('./coverage/coverage-summary.json').total.lines.pct)"
+      baseline_file: .ci/coverage-baseline.txt
+```
+
+`setup_command` is the escape hatch for toolchains node/python don't cover
+(e.g. Go from the hosted toolcache). `auto_commit_baseline` raises the
+baseline on default-branch pushes via a signed gh-api commit — requires a
+write-capable `GH_PAT` secret (the reusable's `permissions: contents: read`
+caps the caller token, so the option is rejected without GH_PAT).
+
+## tia-shadow (v1.19.0+)
+
+Observe-only test-impact shadow — never fails, never gates. Diffs the PR,
+computes which test files should have run (`.ai/tia-map.json` mappings or a
+basename heuristic under `test_roots`), compares to the caller's
+`tia-ran-tests` manifest artifact (one path per line, uploaded by the test
+job), and uploads a `tia-shadow-<head-sha>.json` journal (30d). Wire the
+journal to `needs:` the test job and give the CALLER job `if: ${{ always() }}`
+— the called job's own `always()` can't run when GitHub skips the caller after
+a test failure, which is exactly when the journal matters most. Collect weeks
+of journals before proposing enforcement.
+
+## restore-drill (v1.19.0+)
+
+Scheduled Azure SQL restore drill: `az sql db restore` (point-in-time) into
+a throwaway database on the same server, runs SELECT-only sanity queries,
+uploads `results.jsonl` + `report.json` (90d), and deletes the drill DB in
+an `if: always()` teardown — pass or fail. Caller owns `on:` (weekly
+schedule recommended).
+
+## check-branch-protection.py (v1.19.0+)
+
+Contract-side auditor for `deployment-contracts.yaml`: reads each repo's
+`protected_branches` and `required_checks` (repo-level, with per-lane
+overrides), queries `repos/{r}/branches/{b}/protection` via `gh api`, and
+fails (or warns without a PAT) when the live required contexts don't cover
+the contract. `--emit-fixes DIR` writes ready-to-run `gh api -X PUT`
+payloads that preserve the branch's existing protection settings — it
+never applies changes itself.
 
 ## check-guarded-paths (v1.17.0+)
 

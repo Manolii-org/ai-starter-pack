@@ -37,6 +37,7 @@ jobs:
   autofix:
     name: Autofix PR
     runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 30 # an autofix pass that has not finished in 30m is a runaway — kill it
     # Human collaborator reviews/comments, OR relayed bot review (**[@), OR CI workflow_run failure.
     # Do NOT blanket-exclude github-actions[bot] — that is the relay author.
     if: |
@@ -125,8 +126,31 @@ jobs:
             echo "No PR number; skipping"
             exit 0
           fi
+          if [[ "$EVENT_NAME" != "workflow_run" ]]; then
+            # Review/comment triggers run with secrets + write token; checking
+            # out a cross-repo head would hand PR-controlled files those
+            # privileges. Compare repo IDs, not .fork — a caller that is itself
+            # a fork still has head.repo.fork=true on its own PRs.
+            # Bounded: a stalled gh api would otherwise eat the 30m job
+            # ceiling before reaching the safe skip path; a timeout lands in
+            # the same 'unknown' (skip) bucket as an API error.
+            SAME=$(timeout -k 5 30 gh api "repos/${REPOSITORY}/pulls/${PR_NUM}" \
+              --jq 'if .head.repo == null then "missing" elif (.head.repo.id == .base.repo.id) then "true" else "false" end' \
+              2>/dev/null || echo 'unknown')
+            if [[ "$SAME" != "true" ]]; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "Cross-repo/unverifiable PR head (same_repo=$SAME) — autofix runs only on same-repo heads; skipping"
+              exit 0
+            fi
+          fi
           if [[ "$EVENT_NAME" == "workflow_run" ]]; then
-            CURRENT_HEAD_SHA=$(gh api "repos/${REPOSITORY}/pulls/${PR_NUM}" --jq '.head.sha' 2>/dev/null || echo '')
+            # Fail closed: an unverifiable head means the failed run cannot be
+            # proven stale — treat lookup failure like an unreadable head.
+            if ! CURRENT_HEAD_SHA=$(timeout -k 5 30 gh api "repos/${REPOSITORY}/pulls/${PR_NUM}" --jq '.head.sha' 2>/dev/null); then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "PR head lookup failed/timed out — cannot verify run freshness; skipping"
+              exit 0
+            fi
             if [[ -n "$WR_HEAD_SHA" && -n "$CURRENT_HEAD_SHA" && "$WR_HEAD_SHA" != "$CURRENT_HEAD_SHA" ]]; then
               echo "skip=true" >> "$GITHUB_OUTPUT"
               echo "Stale workflow_run: ${WR_HEAD_SHA} is not current PR head ${CURRENT_HEAD_SHA}; skipping before checkout and agent dispatch"
@@ -134,7 +158,11 @@ jobs:
             fi
           fi
           if [[ -z "$HEAD_REF" ]]; then
-            HEAD_REF=$(gh pr view "$PR_NUM" --json headRefName --jq '.headRefName' 2>/dev/null || echo '')
+            if ! HEAD_REF=$(timeout -k 5 30 gh pr view "$PR_NUM" --json headRefName --jq '.headRefName' 2>/dev/null) || [[ -z "$HEAD_REF" ]]; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "head-ref lookup failed/empty — cannot check out the PR branch; skipping"
+              exit 0
+            fi
           fi
           echo "skip=false" >> "$GITHUB_OUTPUT"
           echo "pr_number=$PR_NUM" >> "$GITHUB_OUTPUT"
@@ -196,7 +224,13 @@ jobs:
             fi
           fi
 
-          LABELS=$(gh pr view "$PR_NUM" --json labels --jq '[.labels[].name]' 2>/dev/null || echo '[]')
+          # Fail closed on opt-out labels: a failed lookup must not silently
+          # bypass a PR's skip-ai-review label.
+          if ! LABELS=$(timeout -k 5 30 gh pr view "$PR_NUM" --json labels --jq '[.labels[].name]' 2>/dev/null); then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "label lookup failed — opt-out labels unverifiable; skipping"
+            exit 0
+          fi
           if echo "$LABELS" | grep -q "skip-ai-review"; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
@@ -214,14 +248,22 @@ jobs:
         run: |
           set -euo pipefail
           MAX_FIXES="${MAX_FIXES:-1}"
-          # Count commits on this PR whose subject starts with [autofix]
-          COUNT=$(gh api "repos/${{ github.repository }}/pulls/${PR_NUM}/commits" --paginate \
-            --jq '[.[].commit.message | split("\n")[0] | select(startswith("[autofix]"))] | length' 2>/dev/null || echo 0)
+          # Count commits on this PR whose subject starts with [autofix].
+          # --paginate runs the jq per page, so awk sums across pages. Fail
+          # closed: a timed-out/failed enumeration must not read as 0, which
+          # would let an exhausted budget dispatch another agent pass.
+          if ! COUNT=$(timeout -k 5 30 gh api "repos/${{ github.repository }}/pulls/${PR_NUM}/commits" --paginate \
+            --jq '[.[].commit.message | split("\n")[0] | select(startswith("[autofix]"))] | length' 2>/dev/null \
+            | awk '{s+=$1} END {print s+0}'); then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Commit enumeration failed/timed out — budget unverifiable; skipping"
+            exit 0
+          fi
           echo "successful_fix_commits=$COUNT" >> "$GITHUB_OUTPUT"
           if [[ "$COUNT" -ge "$MAX_FIXES" ]]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "::notice::Per-PR autofix budget reached ($COUNT >= $MAX_FIXES successful [autofix] commits); skipping"
-            gh pr comment "$PR_NUM" --body "<!-- pack-autofix:budget-exhausted --> [autofix-budget] Skipping further Autofix — this PR already has ${COUNT} successful [autofix] commit(s) (cap ${MAX_FIXES}). Remove an autofix commit or raise max_successful_fixes if a further pass is intentional." || true
+            timeout -k 5 30 gh pr comment "$PR_NUM" --body "<!-- pack-autofix:budget-exhausted --> [autofix-budget] Skipping further Autofix — this PR already has ${COUNT} successful [autofix] commit(s) (cap ${MAX_FIXES}). Remove an autofix commit or raise max_successful_fixes if a further pass is intentional." || true
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi

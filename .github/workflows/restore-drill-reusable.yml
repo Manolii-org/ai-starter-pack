@@ -1,0 +1,391 @@
+name: Restore Drill (Reusable)
+# Reusable workflow_call form. Caller owns `on:` — intended schedule is
+# weekly (e.g. `cron: '30 4 * * 1'`); also safe under `workflow_dispatch`.
+#
+# Validates the Azure SQL recovery path end to end:
+#   1. PITR-restore the source database to a throwaway DB on the same server
+#      (`<source>-drill-<run_id>-<attempt>-<job>`) via `az sql db restore` — the same
+#      restore path an incident would use.
+#   2. Run read-only sanity queries (row counts, latest timestamps) — proves
+#      the restored data is actually queryable, not just provisioned.
+#   3. Always drop the throwaway DB afterwards (if: always()).
+#   4. Write a JSON report artifact + step summary (duration, row counts).
+#
+# Auth: az login via the caller's Azure credentials — prefer OIDC federated
+# (secrets AZURE_CLIENT_ID + AZURE_TENANT_ID + AZURE_SUBSCRIPTION_ID on the
+# caller repo, requires `permissions: id-token: write` on the calling job).
+#
+# Query auth: two modes via `db_auth` input —
+#   'sql-auth' : secrets DRILL_SQL_USER + DRILL_SQL_PASSWORD — a dedicated
+#                SELECT-only SQL login (CREATE USER ... ; GRANT SELECT).
+#   'entra'    : go-sqlcmd --authentication-method=ActiveDirectoryDefault
+#                using the OIDC app's token; requires that app to be a
+#                database user with db_datareader on the restored DB.
+#
+# sqlcmd is fetched as the go-sqlcmd release tarball (no apt repo adds).
+
+on:
+  workflow_call:
+    inputs:
+      resource_group:
+        type: string
+        required: true
+      sql_server:
+        type: string
+        required: true
+      source_database:
+        type: string
+        required: true
+        description: Database to restore FROM (latest PITR point is used).
+      sanity_queries:
+        type: string
+        required: false
+        default: 'SELECT COUNT(*) AS table_count FROM INFORMATION_SCHEMA.TABLES'
+        description: >-
+          Newline-separated SELECT statements run against the restored DB.
+          Each line must start with SELECT (enforced); keep them cheap —
+          row counts and MAX(timestamp) probes, not scans.
+      db_auth:
+        type: string
+        required: false
+        default: 'sql-auth'
+        description: 'sql-auth (DRILL_SQL_* secrets) or entra (OIDC app token).'
+      sqlcmd_version:
+        type: string
+        required: false
+        default: '1.9.0'
+        description: go-sqlcmd release version.
+      sqlcmd_sha256:
+        type: string
+        required: false
+        default: 'b896bac71cf6ad8feca125bb42be61999116d8566a078ed475893372ccf8c0f2'
+        description: >-
+          Expected SHA-256 of sqlcmd-linux-amd64.tar.bz2 for sqlcmd_version
+          (default is v1.9.0's). Verified after download — a substituted
+          release asset must never execute. Update BOTH when bumping
+          sqlcmd_version; empty skips verification (not recommended).
+      timeout_minutes:
+        type: number
+        required: false
+        default: 45
+        description: Job ceiling — restore of a mid-size GP database takes ~5-20m.
+      runs_on:
+        type: string
+        required: false
+        default: 'ubuntu-latest'
+        description: >-
+          Runner label. Point at a self-hosted VNet-attached runner (e.g.
+          'self-hosted' or 'cpd-vnet') when the SQL server has public access
+          disabled — hosted runners can't reach private endpoints.
+    secrets:
+      DRILL_SQL_USER:
+        required: false
+      DRILL_SQL_PASSWORD:
+        required: false
+      AZURE_CLIENT_ID:
+        required: false
+      AZURE_TENANT_ID:
+        required: false
+      AZURE_SUBSCRIPTION_ID:
+        required: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  restore-drill:
+    name: Restore drill
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Validate inputs
+        id: validate
+        shell: bash
+        env:
+          DB_AUTH: ${{ inputs.db_auth }}
+          QUERIES: ${{ inputs.sanity_queries }}
+          SRC: ${{ inputs.source_database }}
+          JOB_TIMEOUT: ${{ inputs.timeout_minutes }}
+        run: |
+          # Start clock for the per-step deadlines below — a job-level timeout
+          # kills pending steps, so restore+queries must finish with ~8m spare
+          # for upload + delete.
+          echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
+          # Per-invocation discriminator. GITHUB_JOB identifies the job INSIDE
+          # this reusable ('restore-drill'), not the caller job — two callers in
+          # one run would otherwise mint the same DRILL_DB (and artifact name),
+          # letting one invocation's teardown delete the other's database.
+          NONCE=$(python3 -c 'import secrets; print(secrets.token_hex(4))')
+          echo "nonce=$NONCE" >> "$GITHUB_OUTPUT"
+          DRILL_DB="${SRC}-drill-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${NONCE}"
+          echo "DRILL_DB=${DRILL_DB}" >> "$GITHUB_ENV"
+          export DRILL_DB
+          # Azure caps DB names at 128 chars.
+          if [ "${#DRILL_DB}" -gt 128 ]; then
+            echo "::error::generated DRILL_DB '$DRILL_DB' exceeds Azure's 128-char DB name limit — shorten source_database"; exit 1
+          fi
+          # The restore poll deadline is JOB_TIMEOUT-12m — anything <= 12 leaves
+          # no window to poll, and <= 20 starves the sanity-query budget.
+          if [ "$JOB_TIMEOUT" -le 20 ]; then
+            echo "::error::timeout_minutes must be > 20 — the deadline budgets need 12m (restore) + 8m (teardown) headroom"; exit 1
+          fi
+          if ! printf '%s' "$DB_AUTH" | grep -qxE 'sql-auth|entra'; then
+            echo "::error::db_auth must be sql-auth or entra"; exit 1
+          fi
+          mkdir -p drill-report && : > drill-report/results.jsonl
+          # Write the report skeleton now — a failed query step exits before
+          # the finalize step, and the upload always()s need SOMETHING there.
+          python3 -c 'import json,os; from pathlib import Path; Path("drill-report/report.json").write_text(json.dumps({"drill_db": os.environ["DRILL_DB"], "status": "incomplete", "queries": []}, indent=2))'
+          while IFS= read -r q; do
+            [ -z "$q" ] && continue
+            echo "$q" | grep -qiE '^\s*select\b' || { echo "::error::sanity query is not SELECT-only: $q"; exit 1; }
+            # SELECT ... INTO writes rows — the drill is read-only.
+            echo "$q" | grep -qiE '\binto\b' && { echo "::error::sanity query must not use SELECT ... INTO: $q"; exit 1; }
+            # Reject a second statement smuggled after ';' — a trailing
+            # semicolon is fine, anything after it is not.
+            body="${q%%;*}"
+            rest="${q#"$body"}"
+            rest="${rest#;}"
+            if printf '%s' "$rest" | grep -q '[^[:space:]]'; then
+              echo "::error::sanity query contains a second statement after ';': $q"; exit 1
+            fi
+          done <<< "$QUERIES"
+
+      - name: Azure login (OIDC)
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2.3.1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install go-sqlcmd
+        shell: bash
+        env:
+          SQLCMD_VERSION: ${{ inputs.sqlcmd_version }}
+          EXPECTED_SHA: ${{ inputs.sqlcmd_sha256 }}
+        run: |
+          set -euo pipefail
+          rm -f /tmp/sqlcmd.tar.bz2
+          curl -fsSL --connect-timeout 15 --max-time 120 -o /tmp/sqlcmd.tar.bz2 \
+            "https://github.com/microsoft/go-sqlcmd/releases/download/v${SQLCMD_VERSION}/sqlcmd-linux-amd64.tar.bz2"
+          if [ -n "$EXPECTED_SHA" ]; then
+            echo "$EXPECTED_SHA  /tmp/sqlcmd.tar.bz2" | sha256sum -c - || { echo "::error::sqlcmd tarball checksum mismatch"; exit 1; }
+          else
+            echo "::warning::sqlcmd_sha256 empty — skipping integrity check"
+          fi
+          sudo tar -xj -C /usr/local/bin -f /tmp/sqlcmd.tar.bz2
+          sqlcmd --version
+
+      - name: Restore to throwaway database
+        id: restore
+        shell: bash
+        env:
+          RG: ${{ inputs.resource_group }}
+          SERVER: ${{ inputs.sql_server }}
+          SRC: ${{ inputs.source_database }}
+          JOB_TIMEOUT: ${{ inputs.timeout_minutes }}
+        run: |
+          set -euo pipefail
+          # PITR requires --time within the source's retention window; use
+          # now-15m (latest restorable point lags wall-clock by a few minutes).
+          RESTORE_TIME=$(date -u -d '15 minutes ago' +%Y-%m-%dT%H:%M:%SZ)
+          echo "restoring $SRC at point $RESTORE_TIME -> $DRILL_DB"
+          # --no-wait: az returns once the restore is accepted; the poll loop
+          # below owns the wait (a synchronous restore can exceed 10 min).
+          timeout -k 10 120 az sql db restore -g "$RG" -s "$SERVER" -n "$SRC" \
+            --dest-name "$DRILL_DB" --time "$RESTORE_TIME" --no-wait -o none
+          echo "restore_time=$RESTORE_TIME" >> "$GITHUB_OUTPUT"
+          # Poll until Online, but stop ~12m before the job timeout so sanity
+          # queries + teardown still get scheduled (a job timeout cancels
+          # pending steps entirely).
+          DEADLINE=$(( JOB_START + (JOB_TIMEOUT - 12) * 60 ))
+          while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+            STATE=$(timeout -k 10 60 az sql db show -g "$RG" -s "$SERVER" -n "$DRILL_DB" --query status -o tsv 2>/dev/null || echo Provisioning)
+            echo "$DRILL_DB: $STATE"
+            [ "$STATE" = "Online" ] && exit 0
+            sleep 30
+          done
+          echo "::error::restore did not reach Online within poll window"; exit 1
+
+      - name: Sanity queries
+        id: queries
+        shell: bash
+        env:
+          SERVER: ${{ inputs.sql_server }}
+          QUERIES: ${{ inputs.sanity_queries }}
+          DB_AUTH: ${{ inputs.db_auth }}
+          SQLCMDUSER: ${{ secrets.DRILL_SQL_USER }}
+          SQLCMDPASSWORD: ${{ secrets.DRILL_SQL_PASSWORD }}
+          JOB_TIMEOUT: ${{ inputs.timeout_minutes }}
+        run: |
+          set -euo pipefail
+          FQDN="$SERVER.database.windows.net"
+          mkdir -p drill-report && : > drill-report/results.jsonl
+          # Stop ~10m before the job timeout so upload + delete get scheduled.
+          DEADLINE=$(( JOB_START + (JOB_TIMEOUT - 10) * 60 ))
+          FAILED=0
+          INCOMPLETE=0
+          while IFS= read -r q; do
+            [ -z "$q" ] && continue
+            if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+              echo "::error::query budget exhausted — sanity queries incomplete; drill fails"
+              INCOMPLETE=1
+              break
+            fi
+            echo "--- query: $q"
+            # Bound each query by the remaining deadline (cap 60s) — a query
+            # starting just before DEADLINE must still end before it, or the
+            # upload+teardown window shrinks and the job timeout cancels
+            # cleanup. -k sends KILL after the TERM grace so a hung client
+            # can't eat the budget either.
+            QTIME=$(( DEADLINE - $(date +%s) ))
+            if [ "$QTIME" -le 0 ]; then
+              echo "::error::query budget exhausted — sanity queries incomplete; drill fails"
+              INCOMPLETE=1
+              break
+            fi
+            [ "$QTIME" -gt 60 ] && QTIME=60
+            # -b: exit nonzero on a SQL batch error so a failed sanity query
+            # fails the drill instead of being recorded as a result. The
+            # password rides the SQLCMDPASSWORD env var — never -P (process args).
+            if [ "$DB_AUTH" = "entra" ]; then
+              OUT=$(timeout -k 5 "$QTIME" sqlcmd -b -S "$FQDN" -d "$DRILL_DB" --authentication-method=ActiveDirectoryDefault \
+                    -Q "$q" -h -1 -W -l 30 2>&1) || { FAILED=1; OUT="$OUT"; }
+            else
+              OUT=$(timeout -k 5 "$QTIME" sqlcmd -b -S "$FQDN" -d "$DRILL_DB" -U "$SQLCMDUSER" \
+                    -Q "$q" -h -1 -W -l 30 2>&1) || { FAILED=1; OUT="$OUT"; }
+            fi
+            # Log first line + row count only; the JSONL keeps the query and
+            # a short scalar preview. Row data stays out of logs and the
+            # uploaded artifact (data-loss exposure is bounded even if a
+            # caller's query returns full rows).
+            head -1 <<< "$OUT"
+            # sqlcmd prints a "(N rows affected)" footer even with -h -1 —
+            # exclude it so a single scalar doesn't read as multi-row.
+            ROWS=$(printf '%s\n' "$OUT" | grep -vE '^\([0-9]+ rows? affected\)' | grep -c . || true)
+            [ "$ROWS" -gt 1 ] && echo "::warning::sanity query returned $ROWS rows — drill queries should be metadata/scalar-only; output withheld"
+            python3 -c 'import json,sys; print(json.dumps({"query": sys.argv[1], "rows": int(sys.argv[3]), "output": sys.argv[2].strip()[:160]}))' \
+              "$q" "$(head -1 <<< "$OUT")" "$ROWS" >> drill-report/results.jsonl
+          done <<< "$QUERIES"
+          [ "$INCOMPLETE" = 1 ] || [ "$FAILED" = 1 ] && { echo "::error::sanity queries incomplete or failed"; exit 1; }
+          :
+
+      - name: Drop throwaway database
+        id: teardown
+        # always() — a restore Azure accepted before the CLI failed still
+        # provisions $DRILL_DB later, so verify existence and delete. Runs
+        # BEFORE finalize so report.json records the true cleanup outcome.
+        if: always()
+        shell: bash
+        env:
+          RG: ${{ inputs.resource_group }}
+          SERVER: ${{ inputs.sql_server }}
+          # Whether the restore step issued a request Azure may have accepted.
+          # A skipped restore (validation failure) can't leave a pending DB —
+          # two quick absents suffice. An attempted one requires ~5 minutes
+          # of continuous absence: accepted-but-slow provisions materialize
+          # minutes after the CLI times out, and exiting on early 404s is
+          # exactly how orphan drill DBs happen.
+          RESTORE_OUTCOME: ${{ steps.restore.outcome }}
+        run: |
+          # Poll, then delete. A failed lookup is NOT proof of absence: only
+          # an explicit NotFound counts; timeouts/5xx retry. Every call is
+          # bounded by the time LEFT before the 9-minute teardown deadline —
+          # an iteration that can't fit inside the remaining window is never
+          # started, so the job timeout can't cancel a delete mid-flight.
+          ABSENT_CONFIRMED=0
+          TEARDOWN_DEADLINE=$(( $(date +%s) + 9 * 60 ))
+          if [ "$RESTORE_OUTCOME" = "skipped" ]; then
+            # A skipped restore never issued a request — nothing can be
+            # provisioning. Checking twice (~30s) just burns teardown budget.
+            echo "restore never requested — nothing to tear down"
+            exit 0
+          elif [ "$RESTORE_OUTCOME" = "success" ]; then
+            # DB reached Online; once deleted there is no pending provision to
+            # wait out — two consecutive absents are enough.
+            ABSENT_NEEDED=2
+          else
+            ABSENT_NEEDED=20    # ~5min continuous absence before we trust it
+          fi
+          while :; do
+            REMAIN=$(( TEARDOWN_DEADLINE - $(date +%s) ))
+            [ "$REMAIN" -lt 10 ] && break
+            ERR=$(mktemp)
+            SHOW_BUDGET=$(( REMAIN - 5 )); [ "$SHOW_BUDGET" -gt 60 ] && SHOW_BUDGET=60
+            if timeout -k 10 "$SHOW_BUDGET" az sql db show -g "$RG" -s "$SERVER" -n "$DRILL_DB" -o none 2>"$ERR"; then
+              # DB exists — delete within whatever budget is left (30s tail).
+              DEL_BUDGET=$(( TEARDOWN_DEADLINE - $(date +%s) - 30 ))
+              if [ "$DEL_BUDGET" -lt 30 ]; then
+                echo "::error::$DRILL_DB present but no teardown budget left to delete it — check Azure"
+                rm -f "$ERR"; exit 1
+              fi
+              if timeout -k 10 "$DEL_BUDGET" az sql db delete -g "$RG" -s "$SERVER" -n "$DRILL_DB" -y -o none; then
+                # Azure accepted the delete — no restore can still be pending,
+                # so two absents (vs the full 20) are safe to conclude on.
+                ABSENT_NEEDED=2
+              fi
+              rm -f "$ERR"
+              sleep 15
+              continue
+            elif grep -qiE 'NotFound|not found|does not exist|ResourceNotFound' "$ERR"; then
+              ABSENT_CONFIRMED=$(( ABSENT_CONFIRMED + 1 ))
+              [ "$ABSENT_CONFIRMED" -ge "$ABSENT_NEEDED" ] && { echo "$DRILL_DB gone (or never created)"; rm -f "$ERR"; exit 0; }
+            else
+              # Transient lookup failure — retry, don't conclude absence.
+              echo "::warning::db show failed transiently: $(head -3 "$ERR")"
+              ABSENT_CONFIRMED=0
+            fi
+            rm -f "$ERR"
+            sleep 15
+          done
+          echo "::error::$DRILL_DB still present or unverifiable after teardown budget — check Azure"
+          exit 1
+
+      - name: Finalize drill report
+        # always() — a failed query step exits before report.json exists;
+        # the artifact must still carry a structured summary for diagnosis.
+        if: always()
+        shell: bash
+        env:
+          # Step outcomes make the report self-describing — an artifact with
+          # an empty queries list is otherwise indistinguishable from a run
+          # where a caller passed no queries.
+          RESTORE_OUTCOME: ${{ steps.restore.outcome }}
+          QUERIES_OUTCOME: ${{ steps.queries.outcome }}
+          TEARDOWN_OUTCOME: ${{ steps.teardown.outcome }}
+        run: |
+          mkdir -p drill-report
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          results = Path("drill-report/results.jsonl")
+          rows = [json.loads(l) for l in results.read_text().splitlines()] if results.exists() else []
+          outcomes = {stage: os.environ.get(v, "skipped")
+                      for stage, v in (("restore", "RESTORE_OUTCOME"),
+                                       ("sanity-queries", "QUERIES_OUTCOME"),
+                                       ("teardown", "TEARDOWN_OUTCOME"))}
+          ok = all(o == "success" for o in outcomes.values())
+          failed_stage = next((s for s, o in outcomes.items() if o != "success"), None)
+          report = {"drill_db": os.environ.get("DRILL_DB", "unavailable"),
+                    "status": "success" if ok else "failed",
+                    "failed_stage": failed_stage,
+                    "run": os.environ["GITHUB_SERVER_URL"] + "/" + os.environ["GITHUB_REPOSITORY"]
+                           + "/actions/runs/" + os.environ["GITHUB_RUN_ID"],
+                    "queries": rows}
+          Path("drill-report/report.json").write_text(json.dumps(report, indent=2))
+          PY
+
+      - name: Upload drill report
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6d6bfb60ed0dc1cd7b42d9c8b3f24 # v6
+        with:
+          name: restore-drill-${{ github.run_number }}-a${{ github.run_attempt }}-${{ steps.validate.outputs.nonce || 'novalidate' }}
+          path: drill-report/
+          retention-days: 90
+          if-no-files-found: warn
+
