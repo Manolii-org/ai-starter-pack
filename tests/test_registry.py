@@ -4546,6 +4546,58 @@ def test_unknown_provenance_written_file_upgrades(tmp_path):
     assert lock["provenance"][rel] == "platform/framework"
 
 
+def test_deleted_unknown_orphan_clears_lock(tmp_path):
+    """A deleted 'unknown'-provenance orphan has nothing to unlink — --prune
+    may clear its lock entry; only an EXISTING unknown path is refused."""
+    reg_root = make_registry(tmp_path / "src", {})
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    ai = consumer / ".ai"
+    ai.mkdir()
+    (ai / "capability-lock.json").write_text(json.dumps({
+        "version": 1, "universe": "manolii",
+        "resolved": [{"plugin": "platform/framework", "scope": "platform",
+                      "ref": "1.0.0", "resolved_version": "1.0.0",
+                      "source": "platform/framework", "sha256": None}],
+        "files": {".claude/skills/demo/gone.md":
+                  hashlib.sha256(b"installed by old resolver").hexdigest()},
+    }))
+    m = write_manifest(consumer, "manolii", [])
+    r = run_resolver(m, reg_root, consumer, "--apply", "--prune")
+    assert r.returncode == 0, r.stdout
+    lock = json.loads((ai / "capability-lock.json").read_text())
+    assert ".claude/skills/demo/gone.md" not in lock["files"]
+
+
+def test_symlinked_orphan_is_drift(tmp_path):
+    """A kept orphan swapped for a symlink — even to identical bytes — is a
+    type change: --check must flag it as drift."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/run.sh", "echo hi\n")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    write_manifest(consumer, "manolii", [])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    orphan = consumer / ".claude" / "skills" / "demo" / "run.sh"
+    twin = consumer / "twin.sh"
+    twin.write_text("echo hi\n")
+    orphan.unlink()
+    orphan.symlink_to(twin)
+    assert run_resolver(m, reg_root, consumer, "--check").returncode == 1
+
+
+def test_mini_yaml_flow_list_quoted_commas():
+    """A comma inside a quoted flow item belongs to the item, not the list."""
+    mod = load_resolve_module()
+    assert mod._mini_yaml('tags: ["a,b", c]') == {"tags": ["a,b", "c"]}
+    assert mod._mini_yaml("tags: ['x,y', 'z']") == {"tags": ["x,y", "z"]}
+    assert mod._mini_yaml('tags: [["a,b"], 2]') == {"tags": [["a,b"], 2]}
+
+
 def test_mini_yaml_decodes_quoted_escapes():
     """Double-quoted scalars decode YAML escapes; single-quoted decode ''."""
     mod = load_resolve_module()

@@ -173,13 +173,47 @@ def _mini_yaml(text: str):
     pos = [0]
     key_re = re.compile(r"^([A-Za-z0-9_.-]+)\s*:(?:\s+(.*))?$")
 
+    def flow_items(inner: str) -> list[str]:
+        # Split a flow list's item text on top-level commas only — a comma
+        # inside a quoted scalar or a nested flow belongs to the item.
+        items, depth = [], 0
+        in_s = in_d = esc = False
+        start = 0
+        for i, ch in enumerate(inner):
+            if esc:
+                esc = False
+            elif in_d and ch == "\\":
+                esc = True
+            elif in_d and ch == '"':
+                in_d = False
+            elif in_s and ch == "'":
+                if inner[i + 1:i + 2] == "'":
+                    esc = True  # '' escape — skip the second quote too
+                else:
+                    in_s = False
+            elif ch == '"' and not in_s:
+                in_d = True
+            elif ch == "'" and not in_d:
+                in_s = True
+            elif not in_s and not in_d:
+                if ch in "[{":
+                    depth += 1
+                elif ch in "]}":
+                    depth -= 1
+                elif ch == "," and depth == 0:
+                    items.append(inner[start:i])
+                    start = i + 1
+        items.append(inner[start:])
+        return items
+
     def scalar(tok: str):
         tok = tok.strip()
         if not tok:
             raise ValueError("empty scalar")
         if tok.startswith("[") and tok.endswith("]"):
             inner = tok[1:-1].strip()
-            return [] if not inner else [scalar(p) for p in inner.split(",")]
+            return ([] if not inner
+                    else [scalar(p) for p in flow_items(inner)])
         if tok == "{}":
             return {}
         if tok == "[]":
@@ -1299,11 +1333,14 @@ def main() -> int:
         # Digest checks read THROUGH a symlink (that's what the lock recorded),
         # but removals act on the lexical path — unlinking a symlink entry must
         # remove the link, never its target.
-        if args.prune and install_prov[f] == "unknown":
+        if (args.prune and install_prov[f] == "unknown"
+                and os.path.lexists(lexical)):
             # Backfilled from a pre-provenance legacy lock — the top-level
             # files map never recorded installed-vs-adopted, so the entry may
             # be a consumer file the resolver never wrote. Deletion would be
-            # irreversible: refuse and let a human remove it.
+            # irreversible: refuse and let a human remove it. An already-
+            # deleted path falls through to plan.removals — clearing its lock
+            # entry unlinks nothing.
             plan.conflicts.append((
                 lexical,
                 "legacy lock entry with unverifiable provenance — may be an "
@@ -1450,6 +1487,13 @@ def main() -> int:
             digest = locked_dig[rel]
             if not os.path.lexists(f):
                 orphan_drift.append(f"{rel} (missing)")
+                continue
+            if f.is_symlink():
+                # The lock records a resolver-written regular file — a link in
+                # its place is a type change even when it resolves to identical
+                # bytes (the digest check follows links; the exec check skips
+                # them).
+                orphan_drift.append(f"{rel} (replaced by a symlink)")
                 continue
             if digest is not None:
                 try:
