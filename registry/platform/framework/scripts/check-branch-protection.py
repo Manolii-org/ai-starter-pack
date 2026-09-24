@@ -57,9 +57,10 @@ PUT_BOOL_KEYS = ("required_linear_history", "allow_force_pushes",
                  "lock_branch", "allow_fork_syncing")
 
 
-def current_contexts(protection: dict) -> list[str]:
-    """Extract required check-run names from a GET protection response,
-    tolerating both API shapes (`checks[].context` and legacy `contexts[]`)."""
+def legacy_contexts(protection: dict) -> list[str]:
+    """Required check-run names from a legacy GET protection response only,
+    tolerating both API shapes (`checks[].context` and `contexts[]`).
+    Does NOT include ruleset-derived contexts (see `_ruleset_contexts`)."""
     rsc = protection.get("required_status_checks") or {}
     if not isinstance(rsc, dict):
         return []
@@ -71,6 +72,36 @@ def current_contexts(protection: dict) -> list[str]:
     if isinstance(ctxs, list):
         return [c for c in ctxs if isinstance(c, str)]
     return []
+
+
+def current_contexts(protection: dict) -> list[str]:
+    """Effective required contexts: legacy protection UNION ruleset-required
+    checks. A check satisfied only by a ruleset still counts as enforced —
+    but fix_body must not copy it into a legacy PUT, so the two sources
+    stay distinguishable via `_ruleset_contexts`."""
+    seen = legacy_contexts(protection)
+    for c in protection.get("_ruleset_contexts") or []:
+        if c not in seen:
+            seen.append(c)
+    return seen
+
+
+def _ruleset_contexts(repo: str, ref: str) -> tuple[list[str], bool, str | None]:
+    """(contexts, ruleset_present, error) from repos/{repo}/rules/branches/{ref}.
+    ruleset_present=True when the branch is governed by ANY ruleset — even one
+    without a required-status-checks rule — since fix payloads need the
+    'edit the ruleset, not legacy protection' caveat either way."""
+    rules, rerr = _gh_json(f"repos/{repo}/rules/branches/{ref}")
+    if rerr and rerr != "404":
+        return [], False, rerr
+    ctxs: list[str] = []
+    present = isinstance(rules, list) and bool(rules)
+    for rule in rules or []:
+        if rule.get("type") == "required_status_checks":
+            params = rule.get("parameters") or {}
+            ctxs += [c["context"] for c in params.get("required_status_checks") or []
+                     if isinstance(c, dict) and c.get("context")]
+    return ctxs, present, None
 
 
 def _gh_json(endpoint: str, timeout: int = 30) -> tuple[list | dict | None, str | None]:
@@ -123,25 +154,27 @@ def fetch_protection(repo: str, branch: str,
     body, err = _gh_json(f"repos/{repo}/branches/{ref}/protection")
     if err and err != "404":
         return None, f"gh api protection read failed for {repo}@{branch}: {err}"
+    # Legacy protection and rulesets can coexist — always check both, so a
+    # check enforced only by a ruleset isn't falsely reported missing.
+    rctx, rpresent, rerr = _ruleset_contexts(repo, ref)
     if err is None and isinstance(body, dict):
+        body["_ruleset_contexts"] = rctx
+        if rpresent:
+            body["_ruleset_managed"] = True
+        if rerr:  # ruleset read failed but legacy exists — warn, don't fail
+            body["_ruleset_fetch_error"] = rerr
         return body, None
-    # 404: the legacy endpoint misses repository RULESETS — check those before
-    # calling the branch unprotected. Also distinguishes nonexistent branches.
-    rules, rerr = _gh_json(f"repos/{repo}/rules/branches/{ref}")
-    if rerr and rerr != "404":
+    # Legacy 404: check rulesets before calling the branch unprotected.
+    # Also distinguishes nonexistent branches.
+    if rerr:
         return None, f"gh api rulesets read failed for {repo}@{branch}: {rerr}"
-    if isinstance(rules, list) and rules:
-        checks = []
-        for rule in rules:
-            params = rule.get("parameters") or {}
-            if rule.get("type") == "required_status_checks":
-                checks += [c["context"] for c in params.get("required_status_checks") or []
-                           if isinstance(c, dict) and c.get("context")]
+    if rpresent:
         # Synthetic protection view: fix payloads are emitted but carry a
         # ruleset caveat (a legacy PUT cannot edit rulesets).
         return {"required_status_checks": {"strict": False,
-                "checks": [{"context": c} for c in checks]},
-                "_ruleset_managed": True}, None
+                "checks": []},
+                "_ruleset_managed": True,
+                "_ruleset_contexts": rctx}, None
     exists, eerr = _gh_json(f"repos/{repo}/branches/{ref}")
     if eerr == "404" or exists is None:
         return None, f"branch {repo}@{branch} does not exist"
@@ -181,10 +214,14 @@ def fix_body(protection: dict | None, required: list[str]) -> dict:
         existing = (protection.get("required_status_checks") or {}).get("checks") or []
         app_ids = {e.get("context"): e.get("app_id")
                    for e in existing if isinstance(e, dict)}
+        # Base the PUT on LEGACY contexts only — ruleset-enforced contexts
+        # counted toward the audit union must not be copied into legacy
+        # protection (they belong to the ruleset). `required` here is the
+        # contract list; append only what's absent from the union.
+        union = set(current_contexts(protection))
         checks = [{"context": c, "app_id": app_ids.get(c)}
-                  for c in current_contexts(protection)]
-        checks += [{"context": c} for c in required
-                   if c not in {x["context"] for x in checks}]
+                  for c in legacy_contexts(protection)]
+        checks += [{"context": c} for c in required if c not in union]
         rsc = protection.get("required_status_checks") or {}
         body["required_status_checks"] = {
             "strict": bool(rsc.get("strict")), "checks": checks}
@@ -314,7 +351,7 @@ def main() -> int:
             lines += [f"## {f['repo']}@{f['branch']}", "",
                       "```sh",
                       f"gh api -X PUT repos/{f['repo']}/branches/{f['branch']}/protection "
-                      f"--input {f['file']}",
+                      f"--input '{(d / f['file']).resolve()}'",
                       "```", ""]
             for w in f["warnings"]:
                 lines.append(f"> ⚠️ {w}\n")

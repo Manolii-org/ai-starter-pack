@@ -123,7 +123,10 @@ jobs:
                   patterns = (f"test_{stem}.*", f"{stem}.test.*", f"{stem}.spec.*", f"{stem}_test.*")
                   expected.update(t for t in all_files
                                   if t != c
-                                  and t.split("/", 1)[0] in roots
+                                  # full-path-prefix match — nested roots like
+                                  # packages/api/tests/ must not collapse to
+                                  # the first component ('packages')
+                                  and any(t == r or t.startswith(r + "/") for r in roots)
                                   and is_test(t)
                                   and any(fnmatch.fnmatch(Path(t).name, pat) for pat in patterns))
 

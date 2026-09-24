@@ -106,8 +106,8 @@ on:
       job_timeout_minutes:
         type: number
         required: false
-        default: 45
-        description: Job-level ceiling — must exceed timeout_minutes by the combined install/setup step budgets (~25m, or ~35m when setup_command is set).
+        default: 60
+        description: Job-level ceiling — must be >= timeout_minutes + 25 (install cap + slack), or timeout_minutes + 35 when setup_command is set. Defaults 30+60 satisfy the no-setup case; with setup_command callers need >= timeout_minutes+35.
     secrets:
       GH_PAT:
         required: false
@@ -162,7 +162,8 @@ jobs:
         if: ${{ inputs.node_version != '' }}
         with:
           node-version: ${{ inputs.node_version }}
-          cache: 'npm'
+          # No implicit npm cache — 'npm' hard-fails on yarn/pnpm repos, and
+          # callers needing caching opt in via cache_path/cache_key.
 
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869e46813c14d51 # v5
         if: ${{ inputs.python_version != '' }}
@@ -272,16 +273,19 @@ jobs:
           head = gh(f"repos/{repo}/git/ref/heads/{branch}")["object"]["sha"]
           # Compare against the LIVE baseline at head, not the stale checkout —
           # a concurrent push may already have raised it (TOCTOU on a ratchet
-          # silently lowers coverage).
-          try:
-              import base64
-              live_blob = gh(f"repos/{repo}/contents/{base_path}", body=None)
+          # silently lowers coverage). A 404 on the contents call means no
+          # baseline exists yet — that is a seed, not an error.
+          import base64
+          probe = subprocess.run(
+              ["gh", "api", f"repos/{repo}/contents/{base_path}"],
+              capture_output=True, text=True, timeout=60)
+          if probe.returncode != 0 and "404" not in probe.stderr and "Not Found" not in probe.stderr:
+              sys.exit(f"::error::gh api contents/{base_path} failed: {probe.stderr.strip()}")
+          live_text = None
+          if probe.returncode == 0:
+              live_blob = json.loads(probe.stdout)
               live = gh(f"repos/{repo}/git/blobs/{live_blob['sha']}")
               live_text = base64.b64decode(live["content"]).decode().strip()
-          except SystemExit:
-              raise
-          except Exception:
-              live_text = None  # no baseline on head — seed it
           if live_text is not None and round(float(live_text), 1) >= current:
               print(f"coverage {current} not above live baseline {live_text} — nothing to commit")
               sys.exit(0)

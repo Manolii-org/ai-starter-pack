@@ -55,6 +55,15 @@ on:
         required: false
         default: '1.9.0'
         description: go-sqlcmd release version.
+      sqlcmd_sha256:
+        type: string
+        required: false
+        default: 'b896bac71cf6ad8feca125bb42be61999116d8566a078ed475893372ccf8c0f2'
+        description: >-
+          Expected SHA-256 of sqlcmd-linux-amd64.tar.bz2 for sqlcmd_version
+          (default is v1.9.0's). Verified after download — a substituted
+          release asset must never execute. Update BOTH when bumping
+          sqlcmd_version; empty skips verification (not recommended).
       timeout_minutes:
         type: number
         required: false
@@ -100,6 +109,14 @@ jobs:
           while IFS= read -r q; do
             [ -z "$q" ] && continue
             echo "$q" | grep -qiE '^\s*select\b' || { echo "::error::sanity query is not SELECT-only: $q"; exit 1; }
+            # Reject a second statement smuggled after ';' — a trailing
+            # semicolon is fine, anything after it is not.
+            body="${q%%;*}"
+            rest="${q#"$body"}"
+            rest="${rest#;}"
+            if printf '%s' "$rest" | grep -q '[^[:space:]]'; then
+              echo "::error::sanity query contains a second statement after ';': $q"; exit 1
+            fi
           done <<< "$QUERIES"
 
       - name: Azure login (OIDC)
@@ -113,10 +130,16 @@ jobs:
         shell: bash
         env:
           SQLCMD_VERSION: ${{ inputs.sqlcmd_version }}
+          EXPECTED_SHA: ${{ inputs.sqlcmd_sha256 }}
         run: |
-          curl -fsSL --connect-timeout 15 --max-time 120 \
-            "https://github.com/microsoft/go-sqlcmd/releases/download/v${SQLCMD_VERSION}/sqlcmd-linux-amd64.tar.bz2" \
-            | sudo tar -xj -C /usr/local/bin
+          curl -fsSL --connect-timeout 15 --max-time 120 -o /tmp/sqlcmd.tar.bz2 \
+            "https://github.com/microsoft/go-sqlcmd/releases/download/v${SQLCMD_VERSION}/sqlcmd-linux-amd64.tar.bz2"
+          if [ -n "$EXPECTED_SHA" ]; then
+            echo "$EXPECTED_SHA  /tmp/sqlcmd.tar.bz2" | sha256sum -c - || { echo "::error::sqlcmd tarball checksum mismatch"; exit 1; }
+          else
+            echo "::warning::sqlcmd_sha256 empty — skipping integrity check"
+          fi
+          sudo tar -xj -C /usr/local/bin -f /tmp/sqlcmd.tar.bz2
           sqlcmd --version
 
       - name: Restore to throwaway database
