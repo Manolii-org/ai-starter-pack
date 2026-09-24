@@ -643,16 +643,18 @@ jobs:
   e2e:
     uses: Manolii-org/ai-starter-pack/.github/workflows/e2e-playwright-reusable.yml@v1.18.0
     with:
-      playwright_args: "--grep @smoke"
-      test_env_json: >-
-        {"TEST_USER_EMAIL":"${{ secrets.E2E_TEST_USER_EMAIL }}",
-         "TEST_USER_PASSWORD":"${{ secrets.E2E_TEST_USER_PASSWORD }}"}
+      playwright_args_json: '["--grep", "@smoke"]'
+    secrets:
+      E2E_TEST_USER_EMAIL: ${{ secrets.E2E_TEST_USER_EMAIL }}
+      E2E_TEST_USER_PASSWORD: ${{ secrets.E2E_TEST_USER_PASSWORD }}
 ```
 
 Convention: specs write verification screenshots to `e2e-artifacts/*.png`
 with `page.screenshot(...)` so every PR carries visual evidence, not just
-failures. Keep secrets in `test_env_json` (step-env injection) — never in
-`playwright_args`. Full input list in the file header.
+failures. Credentials travel via `secrets:` (GitHub forbids the secrets
+context inside `with:`); `test_env` carries NON-secret env only.
+`artifact_paths` are relative to `workdir`. Full input list in the file
+header.
 
 ## check-guarded-paths (v1.17.0+)
 

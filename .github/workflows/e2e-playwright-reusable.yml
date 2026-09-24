@@ -16,18 +16,21 @@ name: E2E Playwright Gate (Reusable)
 #   e2e:
 #     uses: Manolii-org/ai-starter-pack/.github/workflows/e2e-playwright-reusable.yml@<tag-or-sha>
 #     with:
-#       playwright_args: "--grep @smoke"
-#       test_env_json: >-
-#         {"TEST_USER_EMAIL":"${{ secrets.E2E_TEST_USER_EMAIL }}",
-#         "TEST_USER_PASSWORD":"${{ secrets.E2E_TEST_USER_PASSWORD }}"}
+#       playwright_args_json: '["--grep", "@smoke"]'
+#     secrets:
+#       E2E_TEST_USER_EMAIL: ${{ secrets.E2E_TEST_USER_EMAIL }}
+#       E2E_TEST_USER_PASSWORD: ${{ secrets.E2E_TEST_USER_PASSWORD }}
 #
-# `test_env_json` lands ONLY on the playwright step, so a missing
-# E2E_TEST_USER_* secret degrades to whatever the suite runs unauthenticated
-# (the smoke-tier convention: auth.setup skips when creds are absent).
+# Credentials travel via `secrets:` (GitHub forbids the secrets context in
+# `with:`); the declared secrets land on the playwright step as TEST_USER_*.
+# A missing E2E_TEST_USER_* secret degrades to whatever the suite runs
+# unauthenticated (the smoke-tier convention: auth.setup skips when creds
+# are absent). `test_env` is for NON-secret env only (PLAYWRIGHT_BASE_URL,
+# feature flags) — dotenv-style KEY=VALUE lines merged into the job env.
 #
 # Security: caller-controlled strings reach the shell as argv words via
-# $VAR expansion (never re-parsed as shell source); secrets belong in
-# test_env_json, which is a job-env injection — never in playwright_args.
+# arrays/expansion (never re-parsed as shell source); secrets belong in
+# `secrets:` — never in playwright_args_json or test_env.
 
 on:
   workflow_call:
@@ -62,16 +65,24 @@ on:
         required: false
         default: 'chromium'
         description: Space-separated playwright browser set for `playwright install`.
-      playwright_args:
+      playwright_args_json:
+        type: string
+        required: false
+        default: '[]'
+        description: >-
+          JSON array of extra argv strings for `playwright test`, e.g.
+          '["--grep", "@smoke"]'. An array (not a string) so args containing
+          whitespace survive intact.
+      test_env:
         type: string
         required: false
         default: ''
-        description: Extra argv for `playwright test`, e.g. `--grep @smoke` or `--project=chromium`.
-      test_env_json:
-        type: string
-        required: false
-        default: '{}'
-        description: JSON object injected as env on the playwright step (test creds, base URL overrides).
+        description: >-
+          Dotenv-style KEY=VALUE lines injected into the job env before the
+          playwright step (NON-secret values only: PLAYWRIGHT_BASE_URL,
+          feature flags). Only lines matching an identifier KEY= prefix are
+          applied. Credentials go through `secrets:` — the secrets context
+          is not allowed inside `with:`.
       artifact_name:
         type: string
         required: false
@@ -81,7 +92,9 @@ on:
         type: string
         required: false
         default: "playwright-report/\ntest-results/\ne2e-artifacts/"
-        description: Newline-separated paths uploaded with the e2e report artifact.
+        description: >-
+          Newline-separated artifact paths, relative to `workdir` (absolute
+          paths pass through untouched).
       retention_days:
         type: number
         required: false
@@ -91,19 +104,26 @@ on:
         type: number
         required: false
         default: 30
-        description: Hard bound on the playwright test step.
+        description: Step-level timeout on the playwright test run.
+    secrets:
+      E2E_TEST_USER_EMAIL:
+        required: false
+        description: Synthetic test-account email — lands as TEST_USER_EMAIL.
+      E2E_TEST_USER_PASSWORD:
+        required: false
+        description: Synthetic test-account password — lands as TEST_USER_PASSWORD.
 
 jobs:
   e2e:
     runs-on: ${{ inputs.runs_on }}
     env:
-      # pass caller-controlled values through env, not shell source — a value
-      # like `--grep @smoke; curl evil` must never reach the run: program; an
-      # env-var value is never re-parsed for shell metacharacters, so it
-      # stays literal argv words
+      # pass caller-controlled values through env, not shell source — values
+      # are never re-parsed for shell metacharacters
       BROWSERS: ${{ inputs.browsers }}
-      PLAYWRIGHT_ARGS: ${{ inputs.playwright_args }}
-      TEST_TIMEOUT_MIN: ${{ inputs.timeout_minutes }}
+      PLAYWRIGHT_ARGS_JSON: ${{ inputs.playwright_args_json }}
+      TEST_ENV_LINES: ${{ inputs.test_env }}
+      ARTIFACT_PATHS_IN: ${{ inputs.artifact_paths }}
+      WORKDIR: ${{ inputs.workdir }}
     # job bound covers install (~35m) + the step-level test timeout; keep
     # timeout_minutes under ~50 or raise this ceiling too
     timeout-minutes: 90
@@ -132,10 +152,49 @@ jobs:
         timeout-minutes: 15
         run: npx playwright install --with-deps $BROWSERS
 
+      - name: Apply test env
+        if: ${{ inputs.test_env != '' }}
+        run: |
+          # Only well-formed KEY= lines reach the env — a malformed line can
+          # not inject a comment or a second assignment into $GITHUB_ENV.
+          echo "$TEST_ENV_LINES" | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' >> "$GITHUB_ENV" || true
+
+      - name: Resolve artifact paths
+        id: artifacts
+        run: |
+          {
+            echo 'paths<<EOF'
+            echo "$ARTIFACT_PATHS_IN" | while IFS= read -r p; do
+              [ -z "$p" ] && continue
+              case "$p" in
+                /*) echo "$p" ;;
+                *) echo "$WORKDIR/$p" ;;
+              esac
+            done
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Run Playwright suite
         working-directory: ${{ inputs.workdir }}
-        env: ${{ fromJSON(inputs.test_env_json) }}
-        run: timeout ${TEST_TIMEOUT_MIN}m npx playwright test $PLAYWRIGHT_ARGS
+        timeout-minutes: ${{ inputs.timeout_minutes }}
+        env:
+          TEST_USER_EMAIL: ${{ secrets.E2E_TEST_USER_EMAIL }}
+          TEST_USER_PASSWORD: ${{ secrets.E2E_TEST_USER_PASSWORD }}
+        run: |
+          python3 -c '
+            import json, os, sys
+            try:
+                args = json.loads(os.environ.get("PLAYWRIGHT_ARGS_JSON") or "[]")
+                if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+                    raise ValueError("expected a JSON array of strings")
+                if args:
+                    print("\n".join(args))
+            except Exception as e:
+                print(f"::error::playwright_args_json invalid: {e}", file=sys.stderr)
+                sys.exit(1)
+          ' > /tmp/pw_args.txt
+          mapfile -t EXTRA_ARGS < /tmp/pw_args.txt
+          npx playwright test "${EXTRA_ARGS[@]}"
 
       - name: Upload e2e artifacts
         if: ${{ always() }}
@@ -143,4 +202,4 @@ jobs:
         with:
           name: ${{ inputs.artifact_name != '' && inputs.artifact_name || format('e2e-{0}', github.event.repository.name) }}
           retention-days: ${{ inputs.retention_days }}
-          path: ${{ inputs.artifact_paths }}
+          path: ${{ steps.artifacts.outputs.paths }}
