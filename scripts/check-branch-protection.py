@@ -143,6 +143,11 @@ def fetch_protection(repo: str, branch: str,
     """Return (protection_json, error). protection_json=None means the branch
     is unprotected (no legacy protection AND no rulesets); error is set only
     for real fetch failures — including a branch that does not exist."""
+    # Validate before the fixture branch too: a contract repo name is
+    # interpolated verbatim into apply-fixes.md shell commands, and --fixtures
+    # is where contract content is most likely hand-crafted.
+    if not SLUG_RE.fullmatch(repo):
+        return None, f"'{repo}' is not a valid owner/name slug"
     if getattr(args, "fixtures", None):
         stem = Path(args.fixtures) / fixture_name(repo, branch)
         body_path = Path(f"{stem}.json")
@@ -154,8 +159,6 @@ def fetch_protection(repo: str, branch: str,
             return json.loads(body_path.read_text(encoding="utf-8")), None
         except (OSError, ValueError) as exc:
             return None, f"bad fixture {body_path}: {exc}"
-    if not SLUG_RE.fullmatch(repo):
-        return None, f"'{repo}' is not a valid owner/name slug"
     ref = urllib.parse.quote(branch, safe="")
     body, err = _gh_json(f"repos/{repo}/branches/{ref}/protection")
     if err and err != "404":
