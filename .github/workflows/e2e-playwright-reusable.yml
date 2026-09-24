@@ -163,7 +163,7 @@ jobs:
               [ -z "$p" ] && continue
               case "$p" in
                 "$GITHUB_WORKSPACE"/*) echo "$p" ;;
-                /*) echo "::warning::skipping absolute artifact path outside workspace: $p" ;;
+                /*) echo "::warning::skipping absolute artifact path outside workspace: $p" >&2 ;;
                 *) echo "$WORKDIR/$p" ;;
               esac
             done
