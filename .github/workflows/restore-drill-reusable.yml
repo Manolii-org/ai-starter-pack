@@ -255,13 +255,15 @@ jobs:
               OUT=$(timeout -k 5 "$QTIME" sqlcmd -b -S "$FQDN" -d "$DRILL_DB" -U "$SQLCMDUSER" \
                     -Q "$q" -h -1 -W -l 30 2>&1) || { FAILED=1; OUT="$OUT"; }
             fi
-            # Cap logged/stored output — queries are meant to return aggregate
-            # scalars; truncation bounds exposure if one returns rows anyway.
-            # Substring cap, not `| head` — under pipefail a big OUT makes head
-            # close the pipe early and SIGPIPE-fails a successful query.
-            printf '%s\n' "${OUT:0:2000}"
-            python3 -c 'import json,sys; print(json.dumps({"query": sys.argv[1], "output": sys.argv[2].strip()[:500]}))' \
-              "$q" "$OUT" >> drill-report/results.jsonl
+            # Log first line + row count only; the JSONL keeps the query and
+            # a short scalar preview. Row data stays out of logs and the
+            # uploaded artifact (data-loss exposure is bounded even if a
+            # caller's query returns full rows).
+            head -1 <<< "$OUT"
+            ROWS=$(printf '%s\n' "$OUT" | grep -c . || true)
+            [ "$ROWS" -gt 1 ] && echo "::warning::sanity query returned $ROWS rows — drill queries should be metadata/scalar-only; output withheld"
+            python3 -c 'import json,sys; print(json.dumps({"query": sys.argv[1], "rows": int(sys.argv[3]), "output": sys.argv[2].strip()[:160]}))' \
+              "$q" "$(head -1 <<< "$OUT")" "$ROWS" >> drill-report/results.jsonl
           done <<< "$QUERIES"
           [ "$INCOMPLETE" = 1 ] || [ "$FAILED" = 1 ] && { echo "::error::sanity queries incomplete or failed"; exit 1; }
           :

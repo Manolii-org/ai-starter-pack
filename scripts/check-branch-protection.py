@@ -407,6 +407,10 @@ def main() -> int:
                     "branch had no protection — payload sets ONLY "
                     "required_status_checks + enforce_admins; review "
                     "reviews/signatures/restrictions before applying"]
+                if protection and (protection.get("required_signatures") or {}).get("enabled"):
+                    warns.append("GET showed required_signatures enabled — PUT cannot "
+                                 "carry it (separate endpoint); verify signing is still "
+                                 "required after applying")
                 if protection and protection.get("_ruleset_managed"):
                     warns.append("branch is ruleset-managed — a PUT sets legacy "
                                  "protection alongside the ruleset; prefer "
