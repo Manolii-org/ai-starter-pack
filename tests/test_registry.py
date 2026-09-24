@@ -6233,3 +6233,26 @@ def test_mini_yaml_quoted_fold_trailing_comment():
         pass
     assert mod._mini_yaml('plugin: "a\n    b#c" # tail\n') == {
         "plugin": "a b#c"}
+
+
+def test_script_dep_block_quoted_hash(tmp_path):
+    """`"a#b"`/`a#b` mid-word is NOT a shell comment — later script args
+    still reach the gate (Devin Review); a real ` # comment` still ends
+    the scan."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    body = (b"---\nconsumer_scripts: [scripts/first.sh]\n---\n"
+            b'bash scripts/first.sh "a#b" scripts/second.sh\n')
+    (pdir / "scripts" / "second.sh").write_bytes(b"x")
+    assert mod.script_dep_block(pdir, body)
+    (pdir / "scripts" / "second.sh").unlink()
+    assert mod.script_dep_block(pdir, body)
+    # mid-word unquoted hash is not a comment either
+    body2 = (b"---\nconsumer_scripts: [scripts/first.sh]\n---\n"
+             b"bash scripts/first.sh a#b scripts/second.sh\n")
+    assert mod.script_dep_block(pdir, body2)
+    # a real comment still bounds the window
+    body3 = (b"---\nconsumer_scripts: [scripts/first.sh]\n---\n"
+             b"bash scripts/first.sh # scripts/notes.sh\n")
+    assert not mod.script_dep_block(pdir, body3)

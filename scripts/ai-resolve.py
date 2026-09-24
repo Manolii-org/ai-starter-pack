@@ -117,10 +117,37 @@ SCRIPT_NAME = re.compile(
 # `-m scripts.a.b` extraction — the dotted module resolves to either
 # scripts/a/b.py or the package scripts/a/b/__init__.py; both are checked.
 MODULE_NAME = re.compile(rb"-m[ \t]+scripts\.([A-Za-z0-9_.]+)")
-# Command-region boundary for dep scanning — matches SCRIPT_REF's own
-# exclusion set plus '#': a shell comment after the invocation is not
-# part of the command's argument list.
-_CMD_BOUND = re.compile(rb"[\n|&;`#]")
+def _cmd_window(src: bytes, start: int) -> bytes:
+    """The command region starting at `start` — up to the first UNQUOTED
+    shell metacharacter (newline, |, &, ;, backtick) or comment. A '#'
+    ends the region only at a word start (unquoted and preceded by
+    whitespace) — `a#b` and `\"a#b\"` are literal text, and metachars
+    inside quotes are literal too."""
+    in_s = in_d = esc = False
+    i = start
+    while i < len(src):
+        c = src[i]
+        if esc:
+            esc = False
+        elif in_d and c == 0x5C:
+            esc = True
+        elif in_d and c == 0x22:
+            in_d = False
+        elif in_s and c == 0x27:
+            in_s = False
+        elif c == 0x22:
+            in_d = True
+        elif c == 0x27:
+            in_s = True
+        elif c == 0x5C:
+            esc = True
+        elif c in b"\n|&;`":
+            break
+        elif c == 0x23 and (i == start or src[i - 1] in b" \t"):
+            break
+        i += 1
+    return src[start:i]
+
 # A `|`/`>` block-scalar indicator with optional chomping (+/-) and
 # explicit-indentation (1-9) modifiers in either order: `|`, `>+`, `|-`,
 # `|2`, `|2-`, `|-2`, `|+2`, `|2+`. `|0` is not legal YAML (digit is 1-9)
@@ -1139,12 +1166,10 @@ def script_dep_block(plugin_dir: Path, src_bytes: bytes,
         # A single invocation may carry SEVERAL scripts/ arguments —
         # `bash scripts/first.sh scripts/second.sh` ends its regex match
         # at first.sh, but second.sh is just as much a dependency. Scan
-        # the whole command region (bounded by the same shell metachars
-        # the matcher uses, plus '#' which opens a shell comment) so
-        # every argument reaches the bundled/declared checks.
-        bound = _CMD_BOUND.search(src_bytes, m.end())
-        window = src_bytes[m.start():bound.start()
-                           if bound else len(src_bytes)]
+        # the whole command region (bounded by UNQUOTED shell metachars
+        # and word-start comments — quote-aware, so "a#b" hides nothing)
+        # so every argument reaches the bundled/declared checks.
+        window = _cmd_window(src_bytes, m.start())
         # Each ref carries (declared alternatives, bundled probes): any
         # bundled probe hit means the dep is bundled (the resolver cannot
         # materialise scripts/); otherwise at least one declared
