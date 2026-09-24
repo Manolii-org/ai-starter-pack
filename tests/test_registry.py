@@ -437,9 +437,9 @@ def test_plugin_root_commands_not_materialised(tmp_path):
     assert ".claude/commands/doctor.md" not in lock["files"]
 
 
-def test_prune_removes_symlink_entry_not_target(tmp_path):
-    """An orphan lock entry that is a symlink to a required file: prune must
-    unlink the LINK, never its target."""
+def test_prune_conflicts_symlink_entry_preserves_target(tmp_path):
+    """An orphan lock entry replaced by a symlink is a type change — prune
+    conflicts instead of unlinking it; the link AND its target survive."""
     reg_root = make_registry(tmp_path / "src", {
         "platform/framework": [("skills/demo/real.md", "required content")],
     })
@@ -460,9 +460,10 @@ def test_prune_removes_symlink_entry_not_target(tmp_path):
         "platform/framework")
     lock_file.write_text(json.dumps(lock))
     r = run_resolver(m, reg_root, consumer, "--apply", "--prune")
-    assert r.returncode == 0, r.stdout
+    assert r.returncode == 1
+    assert "symlink" in r.stdout
+    assert link.is_symlink()
     assert target.read_text() == "required content"  # target survived
-    assert not link.exists() and not link.is_symlink()  # link removed
 
 
 def test_symlinked_lockfile_destination_conflicts(tmp_path):
@@ -3897,7 +3898,7 @@ def test_check_detects_stale_lock(tmp_path):
     run_resolver(m, reg_root, consumer, "--apply")
     lock_p = consumer / ".ai" / "capability-lock.json"
     doc = json.loads(lock_p.read_text())
-    doc["files"][".claude/skills/demo/x.md"] = "0" * 64
+    doc["resolved"][0]["resolved_version"] = "9.9.9"
     lock_p.write_text(json.dumps(doc))
     r = run_resolver(m, reg_root, consumer, "--check")
     assert r.returncode == 1
@@ -4132,8 +4133,8 @@ def test_mini_yaml_manifest_grammar():
                           "  bare folded\nname: x\n")
     assert doc2 == {"description": "first second line",
                     "other": "bare folded", "name": "x"}
-    for bad in ("a: &anchor", "x: {k: v}", "a:\n\tb: 1",
-                "a: \"unterminated"):
+    for bad in ("a: &anchor", "a:\n\tb: 1",
+                "a: \"unterminated", "x: [a,"):
         with pytest.raises(ValueError):
             mod._mini_yaml(bad)
 
@@ -4254,11 +4255,11 @@ def test_pinned_exec_mode_conflicts(tmp_path):
     assert "exec bit differs from the pinned git tree" in r.stdout
 
 
-def test_partial_exec_mask_chmod_is_checkout_artifact(tmp_path):
-    """0755 -> 0744 keeps the any-exec state — git stores only 100644/100755
-    and the umask picks the actual bits, so a partial-mask difference is a
-    checkout artifact and must NOT conflict (a different machine's checkout
-    looks exactly the same)."""
+def test_partial_exec_mask_chmod_conflicts(tmp_path):
+    """0755 -> 0744 differs from the installed-mode record — the lock
+    records the full installed mask (copystat ignores umask, so the
+    installed bits are deterministic), and a chmod inside the exec bits
+    is a local edit that must not be silently overwritten."""
     reg_root = make_registry(tmp_path / "src", {
         "platform/framework": [("skills/demo/run.sh", "echo hi\n")],
     })
@@ -4273,12 +4274,14 @@ def test_partial_exec_mask_chmod_is_checkout_artifact(tmp_path):
     dst = consumer / ".claude" / "skills" / "demo" / "run.sh"
     dst.chmod(0o744)
     r = run_resolver(m, reg_root, consumer, "--apply")
-    assert r.returncode == 0, r.stdout
+    assert r.returncode == 1
+    assert "exec mode differs" in r.stdout
 
 
-def test_lock_records_any_exec_state(tmp_path):
-    """The lock's exec map stores the any-exec state (0o111 or 0) — the
-    portable granularity, since umask decides which bits land."""
+def test_lock_records_full_installed_mode(tmp_path):
+    """The lock's exec map stores the full installed mask — copystat
+    applies the source's exact bits, so the record can detect a chmod
+    inside the exec bits (0755 -> 0744) that a bool could not."""
     reg_root = make_registry(tmp_path / "src", {
         "platform/framework": [("skills/demo/run.sh", "echo hi\n"),
                                ("skills/demo/SKILL.md", "---\nname: demo\n"
@@ -4293,8 +4296,8 @@ def test_lock_records_any_exec_state(tmp_path):
     assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
     lock = json.loads(
         (consumer / ".ai" / "capability-lock.json").read_text())
-    assert lock["exec"][".claude/skills/demo/run.sh"] == 0o111
-    assert lock["exec"][".claude/skills/demo/SKILL.md"] == 0
+    assert lock["exec"][".claude/skills/demo/run.sh"] == 0o750
+    assert lock["exec"][".claude/skills/demo/SKILL.md"] == 0o644
 
 
 def test_legacy_bool_exec_record_conflicts_on_drift(tmp_path):
@@ -4331,7 +4334,7 @@ def test_legacy_bool_exec_record_conflicts_on_drift(tmp_path):
     dst.chmod(0o755)
     assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
     lock = json.loads((ai / "capability-lock.json").read_text())
-    assert lock["exec"][rel] == 0o111
+    assert lock["exec"][rel] == 0o755
 
 
 def test_legacy_bool_record_allows_registry_mode_repair(tmp_path):
@@ -4367,7 +4370,7 @@ def test_legacy_bool_record_allows_registry_mode_repair(tmp_path):
     assert r.returncode == 0, r.stdout
     assert dst.stat().st_mode & 0o111
     lock = json.loads((ai / "capability-lock.json").read_text())
-    assert lock["exec"][rel] == 0o111
+    assert lock["exec"][rel] == 0o755
 
 
 def test_coincident_local_and_registry_chmod_conflicts(tmp_path):
@@ -4590,6 +4593,84 @@ def test_symlinked_orphan_is_drift(tmp_path):
     assert run_resolver(m, reg_root, consumer, "--check").returncode == 1
 
 
+def test_prune_refuses_symlinked_orphan(tmp_path):
+    """An orphan swapped for a symlink — even to identical bytes — is a
+    type change (the digest check follows links): --prune must conflict,
+    not unlink the consumer's link."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/run.sh", "echo hi\n")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    write_manifest(consumer, "manolii", [])
+    orphan = consumer / ".claude" / "skills" / "demo" / "run.sh"
+    twin = consumer / "twin.sh"
+    twin.write_text("echo hi\n")
+    orphan.unlink()
+    orphan.symlink_to(twin)
+    r = run_resolver(m, reg_root, consumer, "--apply", "--prune")
+    assert r.returncode == 1
+    assert "symlink" in r.stdout
+    assert orphan.is_symlink()
+    assert twin.read_text() == "echo hi\n"
+
+
+def test_matching_local_edit_conflicts_on_ownership(tmp_path):
+    """Consumer edits a resolver-installed file to bytes that coincide
+    with the new registry content — the edit was never resolver-written,
+    so recording the new digest would let a later --prune delete it."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/SKILL.md",
+                                "---\nname: demo\ndescription: d\n---\nA")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    edited = "---\nname: demo\ndescription: d\n---\nB"
+    (consumer / ".claude" / "skills" / "demo" / "SKILL.md"
+     ).write_text(edited)
+    (reg_root / "registry" / "platform" / "framework" / "skills"
+     / "demo" / "SKILL.md").write_text(edited)
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 1
+    assert "modified since install" in r.stdout
+
+
+def test_legacy_resolved_files_backfill_is_unknown(tmp_path):
+    """A legacy lock's resolved[].files records digests for written AND
+    adopted-on-match files alike — backfilled provenance must be
+    'unknown', so --prune refuses rather than deleting a possibly
+    consumer-owned file."""
+    reg_root = make_registry(tmp_path / "src", {})
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    victim = consumer / ".claude" / "skills" / "demo" / "keep.md"
+    victim.parent.mkdir(parents=True)
+    victim.write_text("hand-maintained")
+    ai = consumer / ".ai"
+    ai.mkdir()
+    rel = ".claude/skills/demo/keep.md"
+    (ai / "capability-lock.json").write_text(json.dumps({
+        "version": 1, "universe": "manolii",
+        "resolved": [{"plugin": "platform/framework", "scope": "platform",
+                      "ref": "1.0.0", "resolved_version": "1.0.0",
+                      "source": "platform/framework", "sha256": None,
+                      "files": {rel: hashlib.sha256(
+                          b"hand-maintained").hexdigest()}}],
+        "files": {rel: hashlib.sha256(b"hand-maintained").hexdigest()},
+    }))
+    m = write_manifest(consumer, "manolii", [])
+    r = run_resolver(m, reg_root, consumer, "--apply", "--prune")
+    assert r.returncode == 1
+    assert "unverifiable provenance" in r.stdout
+    assert victim.is_file()
+
+
 def test_mini_yaml_flow_list_quoted_commas():
     """A comma inside a quoted flow item belongs to the item, not the list."""
     mod = load_resolve_module()
@@ -4600,6 +4681,52 @@ def test_mini_yaml_flow_list_quoted_commas():
     # item's start opens a quoted region.
     assert mod._mini_yaml("surfaces: [editor's-tool, claude-code]") == {
         "surfaces": ["editor's-tool", "claude-code"]}
+
+
+def test_mini_yaml_nested_quoted_brackets():
+    """A quote at a NESTED item boundary opens a quoted region too — a `]`
+    inside it must not corrupt the outer bracket depth."""
+    mod = load_resolve_module()
+    assert mod._mini_yaml('x: [["a]b", c], d]') == {
+        "x": [["a]b", "c"], "d"]}
+    assert mod._mini_yaml("x: [['a]b', c], d]") == {
+        "x": [["a]b", "c"], "d"]}
+    assert mod._mini_yaml('x: [["a", "b]c"], d]') == {
+        "x": [["a", "b]c"], "d"]}
+
+
+def test_mini_yaml_flow_maps():
+    """`{k: v}` flow maps parse — requires entries and feature_flags may
+    use them; quoted values keep embedded commas."""
+    mod = load_resolve_module()
+    assert mod._mini_yaml(
+        'requires: [{plugin: platform/framework, ref: "^1.0"}]') == {
+            "requires": [{"plugin": "platform/framework", "ref": "^1.0"}]}
+    assert mod._mini_yaml(
+        "feature_flags: {kl_integration: true, x: 2}") == {
+            "feature_flags": {"kl_integration": True, "x": 2}}
+    assert mod._mini_yaml('x: [{a: "1,2", b: [y, {z: w}]}]') == {
+        "x": [{"a": "1,2", "b": ["y", {"z": "w"}]}]}
+    try:
+        mod._mini_yaml("x: {a b}")
+        raise AssertionError("keyless flow-map item must raise")
+    except ValueError:
+        pass
+
+
+def test_mini_yaml_multiline_flow_list():
+    """A flow collection folded across deeper lines joins with one space
+    — each continuation line still strips its own comment."""
+    mod = load_resolve_module()
+    assert mod._mini_yaml("tags: [a,\n  b,\n  c]") == {
+        "tags": ["a", "b", "c"]}
+    assert mod._mini_yaml('tags: [\n  "a#b", # inline\n  c]') == {
+        "tags": ["a#b", "c"]}
+    try:
+        mod._mini_yaml("x: [a,")
+        raise AssertionError("unterminated flow must raise")
+    except ValueError:
+        pass
 
 
 def test_mini_yaml_decodes_quoted_escapes():

@@ -125,15 +125,17 @@ def _mini_yaml(text: str):
 
     Covers the ai-manifest + plugin-frontmatter grammar: block mappings,
     block sequences (scalar items and `- key: value` inline maps continued
-    by deeper-indented keys), flow `[a, b]` lists, `{}` empty maps, comments,
-    and plain/quoted/int/float/bool/null scalars. Anything richer (anchors,
-    folded scalars, flow maps with content, multi-doc, tabs) raises
+    by deeper-indented keys), flow `[a, b]` lists and `{k: v}` maps —
+    nested collections and collections folded across lines included —
+    comments, and plain/quoted/int/float/bool/null scalars. Anything
+    richer (anchors, folded block scalars, multi-doc, tabs) raises
     ValueError — callers must fail closed, never guess."""
     def strip_comment(s: str) -> str:
         # ' #' starts a comment only outside quotes. Track quote state
         # properly — an apostrophe inside a double-quoted scalar (or a
         # backslash escape) must not corrupt the balance check.
         in_s = in_d = False
+        sep = 0
         i = 0
         while i < len(s):
             ch = s[i]
@@ -149,22 +151,78 @@ def _mini_yaml(text: str):
                         i += 2   # doubled '' is an escaped quote
                         continue
                     in_s = False
-            elif ch == '"':
+            elif ch == '"' and not s[sep:i].strip():
                 in_d = True
-            elif ch == "'":
+            elif ch == "'" and not s[sep:i].strip():
                 in_s = True
             elif ch == "#" and (i == 0 or s[i - 1] in " \t"):
                 return s[:i]
+            else:
+                # Quotes open a region only at a token boundary — a quote
+                # inside an already-started scalar (an apostrophe like
+                # "don't") is plain text, not a quote opener.
+                if ch in ":,-[{":
+                    sep = i + 1
             i += 1
         return s
 
+    def flow_depth(s: str) -> int:
+        # Bracket depth outside quoted regions — used to fold a flow
+        # collection that continues on the next line(s). Quote gating
+        # matches strip_comment (quotes only open at a token boundary).
+        depth = 0
+        in_s = in_d = False
+        sep = i = 0
+        while i < len(s):
+            ch = s[i]
+            if in_d:
+                if ch == "\\":
+                    i += 2
+                    continue
+                if ch == '"':
+                    in_d = False
+            elif in_s:
+                if ch == "'":
+                    if s[i + 1:i + 2] == "'":
+                        i += 2
+                        continue
+                    in_s = False
+            elif ch == '"' and not s[sep:i].strip():
+                in_d = True
+            elif ch == "'" and not s[sep:i].strip():
+                in_s = True
+            else:
+                if ch in "[{":
+                    depth += 1
+                    sep = i + 1
+                elif ch in "]}":
+                    depth -= 1
+                elif ch in ":,-":
+                    sep = i + 1
+            i += 1
+        return depth
+
     lines = []
-    for raw in text.splitlines():
+    raw_lines = text.splitlines()
+    li = 0
+    while li < len(raw_lines):
+        raw = raw_lines[li]
+        li += 1
         if not raw.strip() or raw.lstrip().startswith("#"):
             continue
         body = strip_comment(raw.rstrip())
         if not body.strip():
             continue
+        # A flow collection may continue on deeper lines — fold each
+        # (comment-stripped) line in with one space until the brackets
+        # balance.
+        while flow_depth(body) > 0 and li < len(raw_lines):
+            part = strip_comment(raw_lines[li].strip())
+            li += 1
+            if part.strip():
+                body += " " + part
+        if flow_depth(body) != 0:
+            raise ValueError("unterminated flow collection")
         indent = len(body) - len(body.lstrip())
         if "\t" in body[:indent]:
             raise ValueError("tab indentation is not supported")
@@ -178,7 +236,7 @@ def _mini_yaml(text: str):
         # inside a quoted scalar or a nested flow belongs to the item.
         items, depth = [], 0
         in_s = in_d = esc = False
-        start = 0
+        start = sep = 0
         for i, ch in enumerate(inner):
             if esc:
                 esc = False
@@ -191,24 +249,30 @@ def _mini_yaml(text: str):
                     esc = True  # '' escape — skip the second quote too
                 else:
                     in_s = False
-            elif ch == '"' and not in_s:
-                # Quotes only open a quoted region at the START of an item —
-                # a " inside an already-started plain scalar is plain text.
-                if not inner[start:i].strip():
-                    in_d = True
-            elif ch == "'" and not in_d:
+            elif ch == '"' and not in_s and not inner[sep:i].strip():
+                # Quotes only open a quoted region at an item boundary — a
+                # " inside an already-started plain scalar is plain text.
+                # `sep` tracks the most recent structural opener/comma at
+                # ANY depth, so a quote right after `[` or a nested `,`
+                # opens a region too.
+                in_d = True
+            elif ch == "'" and not in_d and not inner[sep:i].strip():
                 # Same for ': YAML allows apostrophes in plain scalars, so
                 # `editor's-tool` mid-item must not swallow the comma.
-                if not inner[start:i].strip():
-                    in_s = True
+                in_s = True
             elif not in_s and not in_d:
                 if ch in "[{":
                     depth += 1
+                    sep = i + 1
                 elif ch in "]}":
                     depth -= 1
-                elif ch == "," and depth == 0:
-                    items.append(inner[start:i])
-                    start = i + 1
+                elif ch in ":-":
+                    sep = i + 1
+                elif ch == ",":
+                    sep = i + 1
+                    if depth == 0:
+                        items.append(inner[start:i])
+                        start = i + 1
         items.append(inner[start:])
         return items
 
@@ -224,6 +288,21 @@ def _mini_yaml(text: str):
             return {}
         if tok == "[]":
             return []
+        if tok.startswith("{") and tok.endswith("}"):
+            # Flow map — `{k: v, ...}`; keys are bare scalars in the
+            # supported subset (quoted keys stay fail-closed).
+            out_map: dict = {}
+            for item in flow_items(tok[1:-1].strip()):
+                m = re.match(r"^([A-Za-z0-9_.-]+)\s*:\s*(.*)$",
+                             item.strip(), re.S)
+                if not m:
+                    raise ValueError(
+                        f"unsupported flow-map item {item!r}")
+                if m.group(1) in out_map:
+                    raise ValueError(
+                        f"duplicate key {m.group(1)!r} in flow map")
+                out_map[m.group(1)] = scalar(m.group(2))
+            return out_map
         if tok[0] == '"':
             if not (len(tok) > 1 and tok.endswith('"')):
                 raise ValueError(f"unterminated quoted scalar {tok!r}")
@@ -999,9 +1078,10 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                 continue
             src_sha = hashlib.sha256(src_bytes).hexdigest()
             src_exec = src.stat().st_mode & 0o111
+            src_mode = (src.stat().st_mode & 0o666) | src_exec
             prior = plan.planned.get(rel_dst)
             if prior is not None:
-                prior_sha, prior_req, prior_exec = prior
+                prior_sha, prior_req, prior_exec, prior_mode = prior
                 # Exec compares on the any-exec state: git reproduces only
                 # 100644/100755 and the umask picks the actual bits, so a
                 # partial-mask difference is a checkout artifact, not content.
@@ -1014,7 +1094,9 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                 else:
                     plan.skips.append((dst, f"identical — already provided by {prior_req}"))
                     materialised[rel_dst] = src_sha
-                    exec_modes[rel_dst] = 0o111 if src_exec else 0
+                    # The installed file carries the FIRST provider's mode —
+                    # record that, not this provider's.
+                    exec_modes[rel_dst] = prior_mode
                 continue
             if dst.exists() and not dst.is_file():
                 # A directory (or FIFO/socket) at the destination —
@@ -1043,9 +1125,28 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                 exec_consistent = (rel_dst not in locked or rec_exec is None
                                    or _exec_matches(rec_exec,
                                                     dst.stat().st_mode))
+                if (bytes_match and same_exec and exec_consistent
+                        and rel_dst in locked
+                        and locked[rel_dst] is not None
+                        and locked[rel_dst] != src_sha):
+                    # dst's bytes changed since install — they merely
+                    # coincide with the new registry content. Recording
+                    # the new digest would claim resolver ownership of a
+                    # local edit and let a later --prune delete it; fail
+                    # closed and let the operator decide instead.
+                    plan.conflicts.append((
+                        dst,
+                        "materialised file modified since install — its "
+                        "bytes now match the registry source, but the local "
+                        "edit was never resolver-installed; refusing to "
+                        "record ownership of it (delete the file and "
+                        "re-resolve, or restore the installed bytes)",
+                    ))
+                    continue
                 if bytes_match and same_exec and exec_consistent:
                     plan.skips.append((dst, "identical"))
-                    plan.planned[rel_dst] = (src_sha, req, src_exec)
+                    plan.planned[rel_dst] = (src_sha, req, src_exec,
+                                             src_mode)
                 elif rel_dst not in locked:
                     plan.conflicts.append((
                         dst,
@@ -1081,20 +1182,22 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                         # dst mode still matches the install record — the
                         # registry changed mode; repair by rewriting.
                         plan.writes.append((src, dst))
-                        plan.planned[rel_dst] = (src_sha, req, src_exec)
+                        plan.planned[rel_dst] = (src_sha, req, src_exec,
+                                                 src_mode)
                         plan.payload[rel_dst] = src_bytes
                 else:
                     plan.writes.append((src, dst))  # registry drift — update
-                    plan.planned[rel_dst] = (src_sha, req, src_exec)
+                    plan.planned[rel_dst] = (src_sha, req, src_exec,
+                                             src_mode)
                     plan.payload[rel_dst] = src_bytes
                 materialised[rel_dst] = src_sha
-                exec_modes[rel_dst] = 0o111 if src_exec else 0
+                exec_modes[rel_dst] = src_mode
             else:
                 plan.writes.append((src, dst))
-                plan.planned[rel_dst] = (src_sha, req, src_exec)
+                plan.planned[rel_dst] = (src_sha, req, src_exec, src_mode)
                 plan.payload[rel_dst] = src_bytes
                 materialised[rel_dst] = src_sha
-                exec_modes[rel_dst] = 0o111 if src_exec else 0
+                exec_modes[rel_dst] = src_mode
 
     for comp in ("hooks", "scripts", "data", "telemetry"):
         if (plugin_dir / comp).is_dir():
@@ -1194,14 +1297,17 @@ def lock_provenance(lock: dict) -> dict[str, str]:
     if isinstance(prov, dict):
         return dict(prov)
     out: dict[str, str] = {}
+    # A legacy lock records digests for resolver-written AND adopted-on-
+    # match files alike — resolved[].files cannot tell them apart either,
+    # so every backfilled entry is 'unknown': prune refuses to unlink what
+    # it cannot prove this resolver wrote.
     for r in lock.get("resolved", []):
         rf = r.get("files", {}) if isinstance(r, dict) else {}
-        who = str(r.get("plugin", "?")) if isinstance(r, dict) else "?"
         keys = rf.keys() if isinstance(rf, dict) else (
             rf if isinstance(rf, list) else ())
         for k in keys:
             if isinstance(k, str):
-                out.setdefault(k, who)
+                out.setdefault(k, "unknown")
     # Locks written by the shipped resolver before 'provenance' existed hold
     # all ownership in the top-level 'files' map — their resolved[] entries
     # were already serialised without 'files'. Attribute those entries
@@ -1220,10 +1326,11 @@ def lock_provenance(lock: dict) -> dict[str, str]:
 
 
 def lock_exec_modes(lock: dict) -> dict[str, int]:
-    """rel path -> installed exec mask (st_mode & 0o111), for chmod-drift
+    """rel path -> installed mode (st_mode & 0o777), for chmod-drift
     attribution: the lock records the mode the resolver materialised, so a
     local chmod (dst mode != record) is distinguishable from a registry
-    mode change (dst mode == record != src mode). Legacy bool values are
+    mode change (dst mode == record != src mode). Records written by
+    this resolver hold the full installed mask; legacy bool values are
     kept as-is — they cannot distinguish a partial-mask chmod, so exec
     drift against them conflicts rather than guesses."""
     execmap = lock.get("exec")
@@ -1231,10 +1338,16 @@ def lock_exec_modes(lock: dict) -> dict[str, int]:
 
 
 def _exec_matches(rec, mode: int) -> bool:
-    """Any-exec state comparison — git only stores 100644/100755, so the
-    umask decides which bits actually land and the exact mask is not a
-    portable signal. A nonzero mask records 'has an exec bit', which is
-    also all a legacy bool record can express."""
+    """Match an installed-mode record against a live st_mode.
+
+    Records this resolver writes hold the full installed mask (mode &
+    0o777), so a chmod inside the exec bits (0755 -> 0744) differs from
+    the record. Legacy records — bools and the old any-exec masks
+    0o111/0 — express only an on/off state (git reproduces 100644/100755
+    and the umask picks the actual bits), so they compare by any-exec."""
+    if (isinstance(rec, int) and not isinstance(rec, bool)
+            and rec not in (0, 0o111)):
+        return (mode & 0o777) == rec
     return bool(mode & 0o111) == bool(rec)
 
 
@@ -1361,6 +1474,16 @@ def main() -> int:
                     lexical,
                     "lockfile-tracked path exists as a non-regular file "
                     "(directory/socket/…) — refusing to prune it",
+                ))
+            elif lexical.is_symlink():
+                # The lock records a resolver-written regular file — a
+                # link in its place is a type change even when it resolves
+                # to identical bytes (the digest check follows links).
+                plan.conflicts.append((
+                    lexical,
+                    "prune candidate replaced by a symlink — refusing to "
+                    "remove a possibly hand-edited path (delete or "
+                    "restore it manually, then re-resolve)",
                 ))
             elif (lexical.is_file()
                     and (digest is None or sha256(lexical) != digest)):
