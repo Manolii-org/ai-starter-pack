@@ -44,8 +44,7 @@ from pathlib import Path
 try:
     import yaml
 except ImportError:
-    sys.stderr.write("FAIL: PyYAML required (pip install pyyaml)\n")
-    sys.exit(2)
+    yaml = None  # stdlib _mini_yaml subset below is the no-deps fallback
 
 SCOPES = ("platform", "manolii", "buro", "impaktful", "cpdcheck", "repo", "personal")
 LOCAL_SCOPES = {"repo", "personal"}
@@ -87,15 +86,185 @@ SCRIPT_NAME = re.compile(
     rb"scripts/((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs))\b")
 
 
+def _mini_yaml(text: str):
+    """Stdlib-only YAML subset so the vendored resolver runs without PyYAML.
+
+    Covers the ai-manifest + plugin-frontmatter grammar: block mappings,
+    block sequences (scalar items and `- key: value` inline maps continued
+    by deeper-indented keys), flow `[a, b]` lists, `{}` empty maps, comments,
+    and plain/quoted/int/float/bool/null scalars. Anything richer (anchors,
+    folded scalars, flow maps with content, multi-doc, tabs) raises
+    ValueError — callers must fail closed, never guess."""
+    def strip_comment(s: str) -> str:
+        # ' #' starts a comment only outside quotes — strip at the first
+        # occurrence preceded by balanced quoting.
+        i = s.find(" #")
+        while i != -1:
+            head = s[:i]
+            if head.count('"') % 2 == 0 and head.count("'") % 2 == 0:
+                return head
+            i = s.find(" #", i + 1)
+        return s
+
+    lines = []
+    for raw in text.splitlines():
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        body = strip_comment(raw.rstrip())
+        if not body.strip():
+            continue
+        indent = len(body) - len(body.lstrip())
+        if "\t" in body[:indent]:
+            raise ValueError("tab indentation is not supported")
+        lines.append((indent, body.lstrip()))
+
+    pos = [0]
+    key_re = re.compile(r"^([A-Za-z0-9_.-]+)\s*:(?:\s+(.*))?$")
+
+    def scalar(tok: str):
+        tok = tok.strip()
+        if not tok:
+            raise ValueError("empty scalar")
+        if tok.startswith("[") and tok.endswith("]"):
+            inner = tok[1:-1].strip()
+            return [] if not inner else [scalar(p) for p in inner.split(",")]
+        if tok == "{}":
+            return {}
+        if tok == "[]":
+            return []
+        if tok[0] in "\"'":
+            if not (len(tok) > 1 and tok.endswith(tok[0])):
+                raise ValueError(f"unterminated quoted scalar {tok!r}")
+            return tok[1:-1]
+        if re.fullmatch(r"-?\d+", tok):
+            return int(tok)
+        if re.fullmatch(r"-?\d+\.\d+", tok):
+            return float(tok)
+        if tok in ("true", "false", "True", "False"):
+            return tok.lower() == "true"
+        if tok in ("null", "~"):
+            return None
+        if tok[0] in "[{|>&!%@`":
+            raise ValueError(f"unsupported scalar {tok!r}")
+        return tok
+
+    def parse(indent: int):
+        if lines[pos[0]][0] != indent:
+            raise ValueError("inconsistent indentation")
+        first = lines[pos[0]][1]
+        if first == "-" or first.startswith("- "):
+            seq = []
+            while (pos[0] < len(lines)
+                   and lines[pos[0]][0] == indent
+                   and (lines[pos[0]][1] == "-"
+                        or lines[pos[0]][1].startswith("- "))):
+                item = lines[pos[0]][1][1:].lstrip()
+                pos[0] += 1
+                if not item:
+                    seq.append(parse(lines[pos[0]][0])
+                               if pos[0] < len(lines)
+                               and lines[pos[0]][0] > indent else None)
+                    continue
+                km = key_re.match(item)
+                if km:
+                    d = {}
+                    if km.group(2) is not None:
+                        d[km.group(1)] = scalar(km.group(2))
+                    elif (pos[0] < len(lines)
+                          and lines[pos[0]][0] > indent):
+                        d[km.group(1)] = parse(lines[pos[0]][0])
+                    else:
+                        d[km.group(1)] = None
+                    while pos[0] < len(lines) and lines[pos[0]][0] > indent:
+                        more = parse(lines[pos[0]][0])
+                        if not isinstance(more, dict):
+                            raise ValueError("nested sequence inside item map")
+                        d.update(more)
+                    seq.append(d)
+                else:
+                    seq.append(scalar(item))
+            return seq
+        out = {}
+        while pos[0] < len(lines) and lines[pos[0]][0] == indent:
+            km = key_re.match(lines[pos[0]][1])
+            if not km:
+                raise ValueError(f"unsupported line {lines[pos[0]][1]!r}")
+            k, v = km.group(1), km.group(2)
+            pos[0] += 1
+            if v is not None:
+                if re.fullmatch(r"[>|][+-]?", v.strip()):
+                    # Block scalar: every deeper-indented line is literal
+                    # content (even lines shaped like keys or seq items).
+                    vals = []
+                    while (pos[0] < len(lines)
+                           and lines[pos[0]][0] > indent):
+                        vals.append(lines[pos[0]][1])
+                        pos[0] += 1
+                    out[k] = (" ".join(vals)
+                              if v.strip().startswith(">") else "\n".join(vals))
+                else:
+                    out[k] = scalar(v)
+                    # Plain scalars may continue on deeper-indented lines that
+                    # are not a new key or seq item — YAML folds them with one
+                    # space. A deeper key after a scalar is mixed content:
+                    # reject.
+                    while (pos[0] < len(lines)
+                           and lines[pos[0]][0] > indent
+                           and not key_re.match(lines[pos[0]][1])
+                           and not lines[pos[0]][1].startswith("-")):
+                        out[k] = str(out[k]) + " " + lines[pos[0]][1]
+                        pos[0] += 1
+                    if (pos[0] < len(lines) and lines[pos[0]][0] > indent):
+                        raise ValueError("nested structure after scalar value")
+            elif pos[0] < len(lines) and lines[pos[0]][0] > indent:
+                # `key:` empty followed by deeper plain text is a folded
+                # scalar in YAML; a deeper key/seq is a nested structure.
+                if (not key_re.match(lines[pos[0]][1])
+                        and not lines[pos[0]][1].startswith("-")):
+                    vals = []
+                    while (pos[0] < len(lines)
+                           and lines[pos[0]][0] > indent
+                           and not key_re.match(lines[pos[0]][1])
+                           and not lines[pos[0]][1].startswith("-")):
+                        vals.append(lines[pos[0]][1])
+                        pos[0] += 1
+                    out[k] = " ".join(vals)
+                    if (pos[0] < len(lines)
+                            and lines[pos[0]][0] > indent):
+                        raise ValueError("nested structure after scalar")
+                else:
+                    out[k] = parse(lines[pos[0]][0])
+            else:
+                out[k] = None
+        return out
+
+    if not lines:
+        return {}
+    root = parse(lines[0][0])
+    if pos[0] != len(lines):
+        raise ValueError("trailing unparseable structure")
+    return root
+
+
+def _yaml_load(text: str):
+    """PyYAML when installed, _mini_yaml otherwise — the vendored script
+    must run in consumer repos with no Python runtime deps."""
+    if yaml is not None:
+        return yaml.safe_load(text)
+    return _mini_yaml(text)
+
+
 def _frontmatter(src_bytes: bytes) -> dict:
     m = re.match(rb"\A---\s*\n(.*?)\n---\s*\n", src_bytes, re.S)
     if not m:
         return {}
     try:
-        fm = yaml.safe_load(m.group(1).decode("utf-8", errors="ignore")) or {}
-    except yaml.YAMLError:
-        return {}
-    return fm if isinstance(fm, dict) else {}
+        fm = _yaml_load(m.group(1).decode("utf-8", errors="ignore")) or {}
+    except Exception:
+        # Frontmatter that fails to parse must not read as 'no deps declared' —
+        # fail closed so the file is skipped rather than shipped half-gated.
+        return {"_unparseable": True}
+    return fm if isinstance(fm, dict) else {"_unparseable": True}
 
 
 def declares_script_deps(src_bytes: bytes) -> bool:
@@ -103,7 +272,8 @@ def declares_script_deps(src_bytes: bytes) -> bool:
     explicit metadata, since prose heuristics can't distinguish
     "run `scripts/x.py`" from "routing uses `scripts/x.py`"."""
     fm = _frontmatter(src_bytes)
-    return any(fm.get(k) for k in SCRIPT_DEP_KEYS)
+    return fm.get("_unparseable", False) or any(
+        fm.get(k) for k in SCRIPT_DEP_KEYS)
 
 
 def declared_consumer_scripts(src_bytes: bytes) -> set[str]:
@@ -159,13 +329,20 @@ class Plan:
     # rel_dst -> (src_sha256, plugin_req) for every planned write — cross-plugin
     # output-path collision detection (the last writer must never win silently)
     planned: dict[str, tuple[str, str]] = field(default_factory=dict)
+    # rel_dst -> verified source bytes, captured at plan time so --apply
+    # writes what was checksummed instead of re-reading a mutable registry.
+    payload: dict[str, bytes] = field(default_factory=dict)
 
 
 def load_manifest(path: Path) -> dict:
     if not path.is_file():
         sys.stderr.write(f"FAIL: manifest not found: {path}\n")
         sys.exit(2)
-    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    try:
+        data = _yaml_load(path.read_text(encoding="utf-8")) or {}
+    except Exception as e:
+        sys.stderr.write(f"FAIL: cannot parse ai-manifest.yaml: {e}\n")
+        sys.exit(2)
     if not isinstance(data, dict):
         sys.stderr.write("FAIL: ai-manifest.yaml must be a mapping\n")
         sys.exit(2)
@@ -178,6 +355,23 @@ def load_manifest(path: Path) -> dict:
         sys.exit(2)
     if not isinstance(data["requires"], list):
         sys.stderr.write("FAIL: requires must be a list\n")
+        sys.exit(2)
+    for i, entry in enumerate(data["requires"]):
+        # Each entry must be a {plugin: str, ref: str} map — a non-mapping
+        # crashes plan_requirement later, and an unquoted `ref: 1.10` parses
+        # as the float 1.1, silently resolving a different requirement.
+        if (not isinstance(entry, dict)
+                or not isinstance(entry.get("plugin"), str)
+                or not isinstance(entry.get("ref"), str)):
+            sys.stderr.write(
+                f"FAIL: requires[{i}] must map string 'plugin' and 'ref' "
+                "(quote numeric-looking refs, e.g. ref: \"1.10\")\n")
+            sys.exit(2)
+    surfaces = data.get("surfaces")
+    if surfaces is not None and (
+            not isinstance(surfaces, list)
+            or not all(isinstance(s, str) for s in surfaces)):
+        sys.stderr.write("FAIL: surfaces must be a list of strings\n")
         sys.exit(2)
     return data
 
@@ -687,7 +881,12 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                 ))
                 continue
             if dst.exists():
-                if dst.read_bytes() == src_bytes:
+                # 'identical' means bytes AND the exec bit match — a registry
+                # file that gained/lost +x must fall through to the locked
+                # drift-repair path, not skip with stale permissions.
+                same_exec = ((dst.stat().st_mode ^ src.stat().st_mode)
+                             & 0o111) == 0
+                if dst.read_bytes() == src_bytes and same_exec:
                     plan.skips.append((dst, "identical"))
                     plan.planned[rel_dst] = (src_sha, req)
                 elif rel_dst not in locked:
@@ -706,10 +905,12 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                 else:
                     plan.writes.append((src, dst))  # registry drift — update
                     plan.planned[rel_dst] = (src_sha, req)
+                    plan.payload[rel_dst] = src_bytes
                 materialised[rel_dst] = src_sha
             else:
                 plan.writes.append((src, dst))
                 plan.planned[rel_dst] = (src_sha, req)
+                plan.payload[rel_dst] = src_bytes
                 materialised[rel_dst] = src_sha
 
     for comp in ("hooks", "scripts", "data", "telemetry"):
@@ -781,7 +982,36 @@ def load_lock(repo_root: Path) -> tuple[dict, str | None]:
             if not ok:
                 return {}, ("resolved entry 'files' must map paths to "
                             "digests or list path strings")
+    provenance = doc.get("provenance")
+    if "provenance" in doc and (
+            not isinstance(provenance, dict)
+            or not all(isinstance(k, str) and isinstance(v, str)
+                       for k, v in provenance.items())):
+        return {}, "'provenance' must map repo-relative paths to plugin names"
     return doc, None
+
+
+def lock_provenance(lock: dict) -> dict[str, str]:
+    """rel path -> the plugin req that installed it, for prune attribution.
+
+    The 'provenance' map is the authority; entries are backfilled from
+    resolved[].files so locks written before the field existed still carry
+    an install trail. A path present only in the top-level 'files' map (a
+    forged or hand-written entry) has NO provenance — --prune refuses it."""
+    out: dict[str, str] = {}
+    prov = lock.get("provenance")
+    if isinstance(prov, dict):
+        for k, v in prov.items():
+            out[k] = v
+    for r in lock.get("resolved", []):
+        rf = r.get("files", {}) if isinstance(r, dict) else {}
+        who = str(r.get("plugin", "?")) if isinstance(r, dict) else "?"
+        keys = rf.keys() if isinstance(rf, dict) else (
+            rf if isinstance(rf, list) else ())
+        for k in keys:
+            if isinstance(k, str):
+                out.setdefault(k, who)
+    return out
 
 
 def main() -> int:
@@ -827,9 +1057,10 @@ def main() -> int:
                     f"surface '{s}' is advisory-only — no renderer yet "
                     "(claude-code is the only implemented surface)")
     for req in manifest["requires"]:
-        plan_requirement(req["plugin"], str(req["ref"]), universe,
+        plan_requirement(req["plugin"], req["ref"], universe,
                          registry_root, index, repo_root, locked_dig, plan,
                          write_components=claude_selected)
+    install_prov = lock_provenance(lock)
 
     # Orphan detection: lockfile files no longer required. Without --prune an
     # orphan is simply kept (and stays lockfile-tracked) — modified or not.
@@ -873,13 +1104,33 @@ def main() -> int:
         # Digest checks read THROUGH a symlink (that's what the lock recorded),
         # but removals act on the lexical path — unlinking a symlink entry must
         # remove the link, never its target.
-        if (args.prune and lexical.is_file()
-                and (digest is None or sha256(lexical) != digest)):
-            plan.conflicts.append((
-                lexical,
-                "prune candidate modified since install — refusing to remove a "
-                "possibly hand-edited file (delete or restore it manually, then re-resolve)",
-            ))
+        if args.prune:
+            if (os.path.lexists(lexical) and not lexical.is_file()
+                    and not lexical.is_symlink()):
+                plan.conflicts.append((
+                    lexical,
+                    "lockfile-tracked path exists as a non-regular file "
+                    "(directory/socket/…) — refusing to prune it",
+                ))
+            elif (lexical.is_file()
+                    and (digest is None or sha256(lexical) != digest)):
+                plan.conflicts.append((
+                    lexical,
+                    "prune candidate modified since install — refusing to remove a "
+                    "possibly hand-edited file (delete or restore it manually, then re-resolve)",
+                ))
+            elif f not in install_prov:
+                # A lockfile 'files' entry with no install provenance is a
+                # forged or hand-written claim — pruning it would unlink a
+                # file the resolver never recorded installing.
+                plan.conflicts.append((
+                    lexical,
+                    "lockfile entry without install provenance — refusing to "
+                    "prune a path the resolver never installed "
+                    "(repair .ai/capability-lock.json manually)",
+                ))
+            else:
+                plan.removals.append(lexical)
         else:
             plan.removals.append(lexical)
 
@@ -949,15 +1200,22 @@ def main() -> int:
             expected_files[rel] = locked_dig[rel]
         expected_resolved = [{k: v for k, v in r.items() if k != "files"}
                              for r in plan.resolved]
+        expected_prov = {rel: r["plugin"] for r in plan.resolved
+                         for rel in r["files"]}
+        for f in plan.removals:
+            rel = f.relative_to(repo_root).as_posix()
+            if rel in install_prov:
+                expected_prov[rel] = install_prov[rel]
         lock_missing = not lock_file.is_file()
         expected_lock = {
             "version": 1,
             "universe": universe,
             "resolved": expected_resolved,
             "files": expected_files,
+            "provenance": expected_prov,
         }
         lock_stale = lock != expected_lock
-        if drift or plan.removals or lock_missing or lock_stale:
+        if drift or lock_missing or lock_stale:
             if lock_missing:
                 print("\nDRIFT: capability lock missing — run --apply to "
                       "establish ownership")
@@ -971,13 +1229,19 @@ def main() -> int:
 
     if args.apply:
         for src, dst in plan.writes:
+            rel_dst = dst.relative_to(repo_root).as_posix()
             dst.parent.mkdir(parents=True, exist_ok=True)
-            atomic_replace(dst, lambda f, s=src: shutil.copyfileobj(
-                s.open("rb"), f), src=src)
+            # Write the bytes the plan checksummed, not a fresh read of src —
+            # a registry file swapped between plan and apply would otherwise
+            # ship content the lock never digested.
+            atomic_replace(dst,
+                           lambda f, b=plan.payload[rel_dst]: f.write(b),
+                           src=src)
         if args.prune:
             for f in plan.removals:
                 if f.is_file() or f.is_symlink():
                     f.unlink()
+                    print(f"  removed {f.relative_to(repo_root).as_posix()}")
             for f in plan.removals:
                 d = f.parent
                 while d != repo_root and d.is_dir() and not any(d.iterdir()):
@@ -991,11 +1255,19 @@ def main() -> int:
             for f in plan.removals:
                 rel = f.relative_to(repo_root).as_posix()
                 new_files[rel] = locked_dig[rel]
+        new_prov = {rel: r["plugin"] for r in plan.resolved
+                    for rel in r["files"]}
+        if not args.prune:
+            for f in plan.removals:
+                rel = f.relative_to(repo_root).as_posix()
+                if rel in install_prov:
+                    new_prov[rel] = install_prov[rel]
         lock_doc = {
             "version": 1,
             "universe": universe,
             "resolved": [{k: v for k, v in r.items() if k != "files"} for r in plan.resolved],
             "files": new_files,
+            "provenance": new_prov,
         }
         lock_file = repo_root / LOCK_PATH
         lock_file.parent.mkdir(parents=True, exist_ok=True)

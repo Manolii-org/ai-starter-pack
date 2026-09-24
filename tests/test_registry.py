@@ -456,6 +456,8 @@ def test_prune_removes_symlink_entry_not_target(tmp_path):
     lock = json.loads(lock_file.read_text())
     lock["files"][".claude/skills/demo/stale-link.md"] = hashlib.sha256(
         target.read_bytes()).hexdigest()
+    lock["provenance"][".claude/skills/demo/stale-link.md"] = (
+        "platform/framework")
     lock_file.write_text(json.dumps(lock))
     r = run_resolver(m, reg_root, consumer, "--apply", "--prune")
     assert r.returncode == 0, r.stdout
@@ -3966,3 +3968,150 @@ def test_skip_worktree_modified_plugins_json_conflicts_under_pin(tmp_path):
     r = run_resolver(m, reg_root, consumer, "--apply")
     assert r.returncode == 1
     assert "plugins.json differs" in r.stdout
+
+
+def test_exec_bit_drift_is_repaired(tmp_path):
+    """Exec-bit drift on a locked file is drift, not 'identical' — the skip
+    check compares mode, else a registry +x change never lands."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/run.sh",
+                                "#!/bin/sh\ntrue\n")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    dst = consumer / ".claude" / "skills" / "demo" / "run.sh"
+    assert not dst.stat().st_mode & 0o111
+    src = (reg_root / "registry" / "platform" / "framework" / "skills"
+           / "demo" / "run.sh")
+    src.chmod(0o755)
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    assert dst.stat().st_mode & 0o111
+
+
+def test_prune_refuses_nonregular_orphan(tmp_path):
+    """A lockfile entry whose on-disk path is a directory (or other
+    non-regular file) conflicts under --prune — never silently skipped."""
+    reg_root = make_registry(tmp_path / "src", {})
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii", [])
+    (consumer / ".claude" / "skills" / "junk").mkdir(parents=True)
+    ai = consumer / ".ai"
+    ai.mkdir()
+    (ai / "capability-lock.json").write_text(json.dumps({
+        "version": 1, "universe": "manolii", "resolved": [],
+        "files": {".claude/skills/junk": "0" * 64},
+        "provenance": {".claude/skills/junk": "platform/framework"},
+    }))
+    r = run_resolver(m, reg_root, consumer, "--apply", "--prune")
+    assert r.returncode == 1
+    assert "non-regular" in r.stdout
+    assert (consumer / ".claude" / "skills" / "junk").is_dir()
+
+
+def test_prune_refuses_unattributed_orphan(tmp_path):
+    """A lockfile 'files' claim with no install provenance (forged or
+    hand-written) must never unlink a path the resolver did not install."""
+    reg_root = make_registry(tmp_path / "src", {})
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii", [])
+    victim = consumer / ".claude" / "skills" / "demo" / "keep.md"
+    victim.parent.mkdir(parents=True)
+    victim.write_text("hand-maintained")
+    ai = consumer / ".ai"
+    ai.mkdir()
+    (ai / "capability-lock.json").write_text(json.dumps({
+        "version": 1, "universe": "manolii", "resolved": [],
+        "files": {".claude/skills/demo/keep.md":
+                  hashlib.sha256(b"hand-maintained").hexdigest()},
+    }))
+    r = run_resolver(m, reg_root, consumer, "--apply", "--prune")
+    assert r.returncode == 1
+    assert "provenance" in r.stdout
+    assert victim.read_text() == "hand-maintained"
+
+
+def test_check_passes_with_kept_orphan(tmp_path):
+    """Kept orphans are legitimate state — --check must not flag them as
+    drift once the lock records them."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/SKILL.md",
+                                "---\nname: demo\ndescription: d\n---\nbody")],
+        "platform/other": [("skills/extra/SKILL.md",
+                            "---\nname: extra\ndescription: d\n---\nbody")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"},
+                        {"plugin": "platform/other", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    # Drop 'other' — its file becomes a kept orphan, still lock-tracked.
+    write_manifest(consumer, "manolii",
+                   [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    r = run_resolver(m, reg_root, consumer, "--check")
+    assert r.returncode == 0, r.stdout
+    assert "OK" in r.stdout
+
+
+def test_manifest_requires_entry_types_validated(tmp_path):
+    """A non-mapping or unquoted-numeric requires entry must FAIL up front —
+    `ref: 1.10` parses as the float 1.1, silently resolving a wrong pin."""
+    reg_root = make_registry(tmp_path / "src", {})
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = consumer / "ai-manifest.yaml"
+    m.write_text("version: 1\nuniverse: manolii\nrequires:\n"
+                 "  - plugin: platform/framework\n    ref: 1.10\n")
+    r = run_resolver(m, reg_root, consumer)
+    assert r.returncode == 2
+    assert "requires[0]" in r.stderr
+
+
+def load_resolve_module():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("ai_resolve", RESOLVE)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["ai_resolve"] = mod  # dataclass annotation lookup needs this
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_mini_yaml_manifest_grammar():
+    """The stdlib fallback must cover the manifest/frontmatter grammar and
+    reject richer YAML explicitly — fail closed, never guess."""
+    mod = load_resolve_module()
+    doc = mod._mini_yaml(
+        "# c\nversion: 1\nuniverse: manolii\nrequires:\n"
+        "  - plugin: platform/framework\n    ref: \"^1.14\"\n"
+        "  - plugin: platform/other\n    ref: \"1.0\"\n"
+        "surfaces: [claude-code]\nfeature_flags: {}\n")
+    assert doc == {
+        "version": 1, "universe": "manolii",
+        "requires": [{"plugin": "platform/framework", "ref": "^1.14"},
+                     {"plugin": "platform/other", "ref": "1.0"}],
+        "surfaces": ["claude-code"], "feature_flags": {},
+    }
+    # Plain scalars fold across deeper-indented continuation lines.
+    doc2 = mod._mini_yaml("description: first\n  second line\nother:\n"
+                          "  bare folded\nname: x\n")
+    assert doc2 == {"description": "first second line",
+                    "other": "bare folded", "name": "x"}
+    for bad in ("a: &anchor", "x: {k: v}", "a:\n\tb: 1",
+                "a: \"unterminated"):
+        with pytest.raises(ValueError):
+            mod._mini_yaml(bad)
+
+
+def test_unparseable_frontmatter_treated_as_deps():
+    """Frontmatter that will not parse must fail closed — treated as
+    deps-declared (skip), never as clean."""
+    mod = load_resolve_module()
+    src = b"---\nname: [unclosed\n---\nbody"
+    assert mod.declares_script_deps(src) is True
+    assert mod.declared_consumer_scripts(src) == set()
