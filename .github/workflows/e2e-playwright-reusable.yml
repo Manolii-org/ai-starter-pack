@@ -125,9 +125,9 @@ jobs:
       TEST_ENV_LINES: ${{ inputs.test_env }}
       ARTIFACT_PATHS_IN: ${{ inputs.artifact_paths }}
       WORKDIR: ${{ inputs.workdir }}
-    # job bound covers install (~35m) + the step-level test timeout; keep
-    # timeout_minutes under ~50 or raise this ceiling too
-    timeout-minutes: 90
+    # job bound = test timeout + headroom for checkout/install/browser/upload,
+    # so a caller can never starve the always() artifact steps
+    timeout-minutes: ${{ inputs.timeout_minutes + 60 }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -163,14 +163,21 @@ jobs:
         run: |
           {
             echo 'paths<<EOF'
-            echo "$ARTIFACT_PATHS_IN" | while IFS= read -r p; do
-              [ -z "$p" ] && continue
-              case "$p" in
-                "$GITHUB_WORKSPACE"/*) echo "$p" ;;
-                /*) echo "::warning::skipping absolute artifact path outside workspace: $p" >&2 ;;
-                *) echo "$WORKDIR/$p" ;;
-              esac
-            done
+            python3 - <<'PY'
+            import os
+            import sys
+
+            workspace = os.path.realpath(os.environ["GITHUB_WORKSPACE"])
+            for raw in os.environ["ARTIFACT_PATHS_IN"].splitlines():
+                if not raw:
+                    continue
+                candidate = raw if os.path.isabs(raw) else os.path.join(os.environ["WORKDIR"], raw)
+                resolved = os.path.realpath(candidate)
+                if os.path.commonpath((workspace, resolved)) == workspace:
+                    print(resolved)
+                else:
+                    print(f"::warning::skipping artifact path outside workspace: {raw}", file=sys.stderr)
+            PY
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 
