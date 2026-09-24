@@ -137,12 +137,13 @@ CANONICAL_PACK_SLUG = "manolii-org/ai-starter-pack"
 
 # Trusted private mirrors — registry/private-mirrors.txt holds the
 # sha256(lowercase owner/repo slug) of each org-owned repo that may carry
-# universe content. Digests, not plaintext slugs: this repo is public, so
-# a committed slug list would itself disclose the private repo names the
-# PACK-SURFACE scan exists to keep out (and would fail that scan the
-# moment a real mirror was declared). The marker waiver requires the
-# origin slug's digest to appear here: `slug != canonical` alone is not
-# proof of privacy (a public fork is also non-canonical).
+# universe content. Digests are enumerable, not confidential — mirror
+# slugs are guessable by construction — but they keep cross-org
+# identifiers out of this public repo, where a plaintext slug list
+# would fail the PACK-SURFACE scan this gate complements (and would do
+# so the moment a real mirror was declared). The marker waiver requires
+# the origin slug's digest to appear here: `slug != canonical` alone is
+# not proof of privacy (a public fork is also non-canonical).
 PRIVATE_MIRRORS_PATH = REGISTRY / "private-mirrors.txt"
 
 SCOPE_SCHEMA_PATH = REPO / "schemas" / "registry-scope.schema.json"
@@ -883,7 +884,7 @@ def _origin_slug() -> str | None:
 def _trusted_mirrors() -> set[str]:
     """Declared private-mirror digests (sha256 of the lowercase
     owner/repo slug) from registry/private-mirrors.txt — the committed,
-    non-disclosing trust record the marker waiver checks against."""
+    scan-safe trust record the marker waiver checks against."""
     if not PRIVATE_MIRRORS_PATH.is_file():
         return set()
     return {line.strip().lower()
