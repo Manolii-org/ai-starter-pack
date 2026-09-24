@@ -106,6 +106,14 @@ on:
         required: false
         default: 30
         description: Step-level timeout on the playwright test run.
+      job_timeout_minutes:
+        type: number
+        required: false
+        default: 90
+        description: >-
+          Job-level timeout ceiling; must exceed timeout_minutes by enough
+          headroom for checkout/install/browser-install/artifact upload
+          (GitHub expressions cannot compute sums, so callers raise both).
     secrets:
       E2E_TEST_USER_EMAIL:
         required: false
@@ -125,9 +133,9 @@ jobs:
       TEST_ENV_LINES: ${{ inputs.test_env }}
       ARTIFACT_PATHS_IN: ${{ inputs.artifact_paths }}
       WORKDIR: ${{ inputs.workdir }}
-    # job bound = test timeout + headroom for checkout/install/browser/upload,
-    # so a caller can never starve the always() artifact steps
-    timeout-minutes: ${{ inputs.timeout_minutes + 60 }}
+    # caller-set ceiling: keep job_timeout_minutes > timeout_minutes with room
+    # for install + browser + upload (GH expressions can't add, so no auto-sum)
+    timeout-minutes: ${{ inputs.job_timeout_minutes }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
