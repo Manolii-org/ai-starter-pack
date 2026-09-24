@@ -812,7 +812,7 @@ _PYTHON_STDIN_EXEC = frozenset({b"code", b"asyncio"})
 # (`python -m base64 -d | sh`) — so decode mode is "other" and the pipe
 # walk continues (Devin on #8, CodeRabbit on #125, round-7 review).
 _PYTHON_STDIN_TRANSFORM = frozenset({b"base64", b"quopri", b"uu", b"gzip"})
-_PYTHON_DECODE_FLAGS = frozenset({b"-d", b"-D", b"--decode",
+_PYTHON_DECODE_FLAGS = frozenset({b"-d", b"-D", b"-u", b"--decode",
                                   b"--decompress"})
 
 
@@ -978,6 +978,35 @@ def _stdin_exec_head(win: bytes) -> str:
     key = _command_key(win[words[hi][0]:words[hi][1]])
     if key in _STDIN_SINK_HEADS:
         return "sink"
+    args = [_word_text(win[w[0]:w[1]]) for w in words[hi + 1:]]
+    if key in (b"grep", b"egrep", b"fgrep", b"zgrep"):
+        # `grep -q`/`--quiet`/`--silent` emits NO bytes — the pipe ends
+        # (`cat x | grep -q p | sh` feeds sh nothing, Devin on #1374).
+        # Short-option clusters stop at an operand flag (`-eq` is `-e`
+        # with operand 'q', NOT quiet mode).
+        for a in args:
+            if a == b"--":
+                break
+            if a in (b"--quiet", b"--silent"):
+                return "sink"
+            if a.startswith(b"-") and not a.startswith(b"--"):
+                for ch in a[1:]:
+                    if ch in b"efmABCDd":
+                        break
+                    if ch == 0x71:  # 'q'
+                        return "sink"
+    if key in (b"head", b"tail"):
+        # `head -n 0`/`-c 0`/`--lines=0`/`--bytes=0` print nothing —
+        # the pipe ends the same way (Devin on #1374).
+        for ai, a in enumerate(args):
+            if a == b"--":
+                break
+            if (a in (b"-n", b"-c", b"--lines", b"--bytes")
+                    and ai + 1 < len(args) and args[ai + 1] == b"0"):
+                return "sink"
+            if a in (b"-n0", b"-c0", b"--lines=0", b"--bytes=0",
+                     b"-n=0", b"-c=0"):
+                return "sink"
     if key not in _STDIN_EXEC_HEADS:
         return "other"
     # The interpreter's own program operand ends the chain: `-c 'x'` runs
@@ -1004,8 +1033,18 @@ def _stdin_exec_head(win: bytes) -> str:
         # treating `>`/`file` as positionals would wrongly sink
         # `cat x | sh > y`. `N>`/`N<`/`&>`/`<<-`-style glued forms skip
         # only themselves; a word ending in the operator takes the NEXT
-        # word as its target.
+        # word as its target. But an fd0 INPUT redirect (`<`, `0<`,
+        # `<<`, `<<<`, `<&3`, `<>`) rebinds stdin — the head then reads
+        # THAT file/fd, not the pipe (`cat x | sh </dev/null` executes
+        # nothing from the pipe — Devin on #125/#8/#1955, round-8
+        # review). `<(` is a process-substitution argument, not a
+        # redirect; `<&0`/`0<&0` is a self-dup that keeps the pipe.
         if re.match(rb"^(?:[0-9]+)?[<>]", t) or t.startswith(b"&>"):
+            m = re.match(rb"^([0-9]*)<", t)
+            if m and not t[len(m.group(1)):].startswith(b"<("):
+                if (m.group(1).lstrip(b"0") or b"0") == b"0" \
+                        and t[m.end():] != b"&0":
+                    return "sink"
             if (re.fullmatch(rb"[0-9]*[<>]+[|&-]?", t)
                     or t in (b"&>", b"&>>")):
                 redir_target_next = True
@@ -1174,46 +1213,97 @@ def _heredoc_spans(src: bytes) -> list[tuple[int, int, int]]:
     return spans
 
 
-def _self_dup_stdout(src: bytes, j: int) -> bool:
-    """True when the `>` at `j` is a stdout self-duplication (`>&1`,
-    `1>&1`). Pointing fd1 at itself is a no-op — the pipe still carries
-    the command's output (Codex + Devin on the round-6 review)."""
-    return (src[j + 1:j + 3] == b"&1"
-            and not src[j + 3:j + 4].isdigit())
+_FD_OUT, _FD_ERR, _FD_IN = "out", "err", "in"
+_FD_FILE, _FD_CLOSED, _FD_UNKNOWN = "file", "closed", "unknown"
 
 
-def _redirect_fd1(src: bytes, j: int) -> bool:
-    """True when the `>` at `j` (the SECOND byte of the operator)
-    redirects fd 1.
+def _fresh_fds() -> dict:
+    """Default fd map for one command segment: 0→in, 1→out, 2→err."""
+    return {0: _FD_IN, 1: _FD_OUT, 2: _FD_ERR}
 
-    The fd is the digit run immediately before the operator: absent
-    digits mean fd 1 for a bare `>`/`>>`/`>&` but fd 0 for the read-write
-    `n<>` form — `<>`/`0<>` open fd0 and never touch stdout (Devin
-    BUG_0003 on #8). `&>` is reported at the `&`, not here. Digit spans
-    are compared as BYTES — `int()` on a >4300-digit fd prefix raises
-    ValueError, a hostile-script resolver crash (Codex P2 on #125)."""
-    if src[j - 1:j] == b"&":
-        return False  # `&>` — counted by the `&` branch, not as bare `>`
-    if src[j - 1:j] == b"<":
-        # `n<>` — fd is the digit run before `<` (default 0).
-        k = j - 2
-        while k >= 0 and src[k:k + 1].isdigit():
-            k -= 1
-        return (src[k + 1:j - 1].lstrip(b"0") or b"0") == b"1"
-    k = j - 1
-    while k >= 0 and src[k:k + 1].isdigit():
+
+def _fd_diverted(fds: dict) -> bool:
+    """True when fd 1 provably does NOT reach the downstream pipe."""
+    return fds.get(1, _FD_UNKNOWN) != _FD_OUT
+
+
+def _fd_key(digits: bytes, default):
+    """Canonical fd key for a digit span — `int` for sane spans, the
+    zero-stripped BYTES for absurd ones, so `0001` ≡ `1` while a
+    >4300-digit prefix never reaches `int()` (Codex P2 on #125)."""
+    if not digits:
+        return default
+    norm = digits.lstrip(b"0") or b"0"
+    return norm if len(norm) > 9 else int(norm)
+
+
+def _redirect_apply(fds: dict, src: bytes, i: int) -> int:
+    """Apply the redirect operator at `i` to `fds`; return the index
+    AFTER it. `i` points at an unquoted `>` byte, or at `&` of `&>`/`&>>`.
+
+    Bash applies redirects left-to-right into the command's own fd
+    table — `3>&1 1>&3` leaves stdout on the original pipe (Codex on
+    #1955), so an fd-duplication `N>&M` records the target fd's CURRENT
+    alias rather than a diversion. `>&word` with a non-numeric word is a
+    FILENAME redirect (`>&1foo` writes file `1foo` — Codex on #125);
+    `N>&-` closes the fd; everything else targets a file. Digit spans
+    stay BYTES-sized — `int()` on a >4300-digit fd prefix raises
+    ValueError (Codex P2 on #125)."""
+    n = len(src)
+    if src[i:i + 1] == b"&":  # `&>`/`&>>` — all output fds to file
+        fds[1] = _FD_FILE
+        fds[2] = _FD_FILE
+        i += 1
+        while i < n and src[i] == 0x3E:
+            i += 1
+        return i
+    # `>` — walk to the FIRST `>` of a `>>`-style run: the fd digits
+    # live before it (`2>>err` is fd2, CodeRabbit on #1955).
+    j = i
+    while j > 0 and src[j - 1] == 0x3E:
+        j -= 1
+    if j > 0 and src[j - 1] == 0x3C:  # `n<>` — read-write on fd n
+        op_start, default = j - 1, 0
+    else:
+        op_start, default = j, 1
+    k = op_start
+    while k > 0 and src[k - 1:k].isdigit():
         k -= 1
-    digits = src[k + 1:j]
-    return not digits or (digits.lstrip(b"0") or b"0") == b"1"
+    digits = src[k:op_start]
+    fd = _fd_key(digits, default)
+    i = j + 1
+    while i < n and src[i] == 0x3E:  # consume the `>` run
+        i += 1
+    if src[i:i + 1] != b"&":
+        fds[fd] = _FD_FILE
+        return i
+    i += 1
+    if src[i:i + 1] == b"-":
+        fds[fd] = _FD_CLOSED
+        return i + 1
+    m = i
+    while m < n and src[m:m + 1].isdigit():
+        m += 1
+    if m > i and (m == n or src[m:m + 1] in b" \t\n;&|<>()"):
+        # `N>&M` — an fd-DUP: N takes M's current alias (`>&1` is a
+        # self-dup no-op; `1>&3` after `3>&1` stays on the pipe).
+        fds[fd] = fds.get(_fd_key(src[i:m], -1), _FD_UNKNOWN)
+        return m
+    # `>&word` non-numeric — a filename target, not an fd dup.
+    fds[fd] = _FD_FILE
+    if fd == 1 and not digits:
+        fds[2] = _FD_FILE  # `>&word` without an fd prefix binds 1&2
+    return i
 
 
 def _stdout_redirected(win: bytes) -> bool:
-    """True when an unquoted redirect inside the command window `win`
-    sends fd 1 (or every fd, `&>`) elsewhere — the segment forwards
-    nothing to the next pipe stage (`cmd | tee >/dev/null | sh` feeds
-    sh nothing). Procsub/grouping parens, quotes and backtick pairs are
-    honoured; an unclosed backtick fails toward "redirected" (the chain
-    is treated as broken — not a dep)."""
+    """True when unquoted redirects inside the command window `win`
+    leave fd 1 pointing anywhere but the original pipe — the segment
+    forwards nothing to the next pipe stage (`cmd | tee >/dev/null | sh`
+    feeds sh nothing). Procsub/grouping parens, quotes and backtick
+    pairs are honoured; an unclosed backtick fails toward "redirected"
+    (the chain is treated as broken — not a dep)."""
+    fds = _fresh_fds()
     in_s = in_d = esc = False
     depth = 0
     i = 0
@@ -1221,11 +1311,13 @@ def _stdout_redirected(win: bytes) -> bool:
         c = win[i]
         if esc:
             esc = False
-        elif c == 0x5C:
-            esc = True
         elif in_s:
+            # `\` is literal inside '...' — it does NOT escape the
+            # closing quote (`'a\''>x'` ends at the second `'`).
             if c == 0x27:
                 in_s = False
+        elif c == 0x5C:
+            esc = True
         elif in_d:
             if c == 0x22:
                 in_d = False
@@ -1243,13 +1335,14 @@ def _stdout_redirected(win: bytes) -> bool:
         elif c == 0x29:
             depth = max(0, depth - 1)
         elif depth == 0 and c == 0x3E and win[i + 1:i + 2] != b"(":
-            if _redirect_fd1(win, i) and not _self_dup_stdout(win, i):
-                return True
-        elif depth == 0 and c == 0x26 and win[i + 1:i + 2] == b">":
-            if win[i - 1:i] not in (b"<", b">"):
-                return True  # `&>`/`&>>` redirect fd1
+            i = _redirect_apply(fds, win, i)
+            continue
+        elif (depth == 0 and c == 0x26 and win[i + 1:i + 2] == b">"
+                and win[i - 1:i] not in (b"<", b">")):
+            i = _redirect_apply(fds, win, i)
+            continue
         i += 1
-    return False
+    return _fd_diverted(fds)
 
 
 def _pipe_pos(src: bytes, pos: int) -> int:
@@ -1263,7 +1356,12 @@ def _pipe_pos(src: bytes, pos: int) -> int:
     `$(...)`, `<(`/`>(`, and backtick substitutions are balanced spans —
     arguments, not separators — and are SKIPPED so their inner quotes
     never leak into the outer quote state (Devin BUG_0002/0003 on #125)."""
-    subs = _substitution_spans(src)
+    # Spans append on CLOSE, so a nested inner span precedes its outer
+    # opener — `$(outer $(inner))` records inner first. span_end keys
+    # on the OPEN offset, so the list must be sorted by `a` or the early
+    # `a > j` break misses the outer span and a `|` or `;` inside it is
+    # read as the command's end (Devin on #125/#8, round-8 review).
+    subs = sorted(_substitution_spans(src))
 
     def span_end(j: int) -> int:
         """End of the substitution span OPENING at j, else -1."""
@@ -1294,9 +1392,11 @@ def _pipe_pos(src: bytes, pos: int) -> int:
     # to the enclosing command.
     j = 0
     # A stdout redirect EARLIER in this command segment also empties the
-    # pipe (`echo >/dev/null "$(cat x)" | sh`). Reset at every command
-    # separator so only the segment containing `pos` counts.
-    fd1_redir = False
+    # pipe (`echo >/dev/null "$(cat x)" | sh`). The fd map is reset at
+    # every command separator so only the segment containing `pos`
+    # counts; fd-dup ALIASES are tracked (`3>&1 1>&3` keeps stdout on
+    # the pipe — Codex on #1955).
+    fds = _fresh_fds()
     while j < pos:
         e = span_end(j)
         if e > 0:
@@ -1323,17 +1423,18 @@ def _pipe_pos(src: bytes, pos: int) -> int:
             in_d = not in_d
         elif in_s or in_d:
             pass
-        elif c == 0x3E and not _self_dup_stdout(src, j):
-            if _redirect_fd1(src, j):
-                fd1_redir = True
+        elif c == 0x3E and src[j + 1:j + 2] != b"(":
+            j = _redirect_apply(fds, src, j)
+            continue
         elif c == 0x26 and src[j + 1:j + 2] == b">":
-            fd1_redir = True  # `&>`/`&>>` redirect fd1
+            j = _redirect_apply(fds, src, j)  # `&>`/`&>>` -> fds 1&2
+            continue
         elif c in (0x3B, 0x0A, 0x7C):
-            fd1_redir = False  # new command segment
+            fds = _fresh_fds()  # new command segment
         elif c == 0x26 and src[j - 1:j] not in (b"<", b">"):
-            fd1_redir = False  # `&&` / background `&` — not a redirect
+            fds = _fresh_fds()  # `&&` / background `&` — not a redirect
         j += 1
-    if fd1_redir:
+    if _fd_diverted(fds):
         return -1
     while j < len(src):
         e = span_end(j)
@@ -1343,7 +1444,9 @@ def _pipe_pos(src: bytes, pos: int) -> int:
         c = src[j]
         if esc:
             esc = False
-        elif c == 0x5C:
+        elif c == 0x5C and not in_s:
+            # `\` inside '...' is LITERAL — it cannot escape the closing
+            # quote (`'a\''>x'` keeps `>x` quoted, CodeRabbit on #1955).
             esc = True
         elif c == 0x27 and not in_d:
             in_s = not in_s
@@ -1361,16 +1464,23 @@ def _pipe_pos(src: bytes, pos: int) -> int:
             if src[j + 1:j + 2] == b"|":
                 return -1
             return j
-        elif c == 0x3E:  # `>`/`>>`/`>&` — the fd decides
-            if _redirect_fd1(src, j) and not _self_dup_stdout(src, j):
+        elif c == 0x3E:  # `>`/`>>`/`>&`/`n<>` — the fd map decides
+            j = _redirect_apply(fds, src, j)
+            if _fd_diverted(fds):
                 return -1  # stdout redirected — the pipe carries nothing
+            continue
         elif c == 0x26:
             prev = src[j - 1:j]
             nxt = src[j + 1:j + 2]
             if prev in (b"<", b">"):
-                pass  # redirect target (`2>&1`, `>&2`, `<&0`)
+                pass  # `N>&M` was already consumed by the `>` branch
+            elif nxt == b">":
+                j = _redirect_apply(fds, src, j)  # `&>`/`&>>` -> 1&2
+                if _fd_diverted(fds):
+                    return -1
+                continue
             else:
-                return -1  # `&>`/`&>>` redirect fd1; `&&`/`& ` separate
+                return -1  # `&&`/`& ` separate commands
         elif c in (0x3B, 0x0A, 0x28, 0x29):
             return -1
         elif c == 0x23 and src[j - 1:j] in b" \t\n;&|":

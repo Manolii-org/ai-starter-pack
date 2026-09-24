@@ -8038,3 +8038,138 @@ def test_script_dep_exec_head_own_redirect(tmp_path):
         assert mod.script_dep_block(pdir, line + b"\n"), line
     assert not mod.script_dep_block(
         pdir, b"cat scripts/x.sh | sh script.sh > log\n")
+
+
+def test_script_dep_nested_sub_span_order(tmp_path):
+    """`$(...)` spans are recorded at CLOSE, so a nested inner span
+    precedes its outer opener — the pipe past `$(outer $(inner))` must
+    still be found (Devin on #125/#8, round-8 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir,
+        b'echo "$(cat scripts/x.sh)" $(echo x; echo $(true)) | sh\n')
+    # And a `;` inside a nested sub must NOT end the outer command.
+    assert mod.script_dep_block(
+        pdir,
+        b'echo $(cat scripts/x.sh; $(true)) | sh\n')
+
+
+def test_script_dep_fd_dup_alias(tmp_path):
+    """`3>&1 1>&3` leaves stdout on the pipe — fd dups take the target's
+    CURRENT alias (Codex on #1955). `1>&2` still diverts."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | cat 3>&1 1>&3 | sh\n")
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | cat 1>&2 | sh\n")
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | cat >&2 | sh\n")
+    # 3>file then 1>&3 diverts through the alias.
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | cat 3>/tmp/o 1>&3 | sh\n")
+    # `1>&9` on a never-opened fd errors at runtime — treated as
+    # diverted (nothing reaches the pipe).
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | cat 1>&9 | sh\n")
+
+
+def test_script_dep_dup_word_filename(tmp_path):
+    """`>&1foo` redirects to a FILE named `1foo` — only a pure digit
+    word after `>&` is an fd dup (Codex on #125)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | tee >&1 | sh\n")
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | tee >&1foo | sh\n")
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | tee >&1- | sh\n")
+
+
+def test_script_dep_fd2_append(tmp_path):
+    """`2>>err` touches fd2 — stdout still flows down the pipe
+    (CodeRabbit on #1955)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | tee 2>>err | sh\n")
+    assert mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh)" 2>>err | sh\n')
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | tee >>/dev/null | sh\n")
+
+
+def test_script_dep_stdin_rebound(tmp_path):
+    """An fd0 redirect rebinds stdin — `sh </dev/null` never reads the
+    pipe, so nothing is a dep (Devin on #125/#8/#1955)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (b"cat scripts/x.sh | sh </dev/null",
+                 b"cat scripts/x.sh | sh < /tmp/y",
+                 b"cat scripts/x.sh | sh 0</tmp/y",
+                 b"cat scripts/x.sh | sh <&3",
+                 b"cat scripts/x.sh | sh <<EOF\ncat\nEOF",
+                 b"cat scripts/x.sh | sh <<</tmp/y"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    # `0<&0` is a self-dup — stdin stays the pipe.
+    assert mod.script_dep_block(pdir, b"cat scripts/x.sh | sh <&0\n")
+    assert mod.script_dep_block(pdir, b"cat scripts/x.sh | sh 0<&0\n")
+
+
+def test_script_dep_quiet_filters(tmp_path):
+    """Output-suppressing options end the pipe even on forwarding
+    heads: `grep -q`, `head -n 0`, `tail -c 0` (Devin on #1374)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (b"cat scripts/x.sh | grep -q x | sh",
+                 b"cat scripts/x.sh | grep -vq x | sh",
+                 b"cat scripts/x.sh | grep --silent x | sh",
+                 b"cat scripts/x.sh | head -n0 | sh",
+                 b"cat scripts/x.sh | head -n 0 | sh",
+                 b"cat scripts/x.sh | tail --bytes=0 | sh",
+                 b"cat scripts/x.sh | tail -c 0 | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (b"cat scripts/x.sh | grep x | sh",
+                 b"cat scripts/x.sh | grep -s x | sh",
+                 b"cat scripts/x.sh | grep -eq x | sh",
+                 b"cat scripts/x.sh | head -n1 | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_python_base64_urlsafe(tmp_path):
+    """`python -m base64 -u` is a DECODE flag — the emitted stream is
+    program text again (Codex on #1374)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.b64").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir, b'cat scripts/x.b64 | python -m base64 -u | sh\n')
+    assert not mod.script_dep_block(
+        pdir, b'cat scripts/x.b64 | python -m base64 -e | sh\n')
+
+
+def test_script_dep_backslash_inside_singles(tmp_path):
+    """`\\'` inside single quotes is literal — it does NOT escape the
+    closing quote, so `'a\\''>x'` keeps `>x` quoted (CodeRabbit on
+    #1955)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | tee 'a\\' '>x' | sh\n")
