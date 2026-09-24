@@ -192,9 +192,15 @@ def _mini_yaml(text: str):
                 else:
                     in_s = False
             elif ch == '"' and not in_s:
-                in_d = True
+                # Quotes only open a quoted region at the START of an item —
+                # a " inside an already-started plain scalar is plain text.
+                if not inner[start:i].strip():
+                    in_d = True
             elif ch == "'" and not in_d:
-                in_s = True
+                # Same for ': YAML allows apostrophes in plain scalars, so
+                # `editor's-tool` mid-item must not swallow the comma.
+                if not inner[start:i].strip():
+                    in_s = True
             elif not in_s and not in_d:
                 if ch in "[{":
                     depth += 1

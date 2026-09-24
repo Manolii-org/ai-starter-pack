@@ -4596,6 +4596,10 @@ def test_mini_yaml_flow_list_quoted_commas():
     assert mod._mini_yaml('tags: ["a,b", c]') == {"tags": ["a,b", "c"]}
     assert mod._mini_yaml("tags: ['x,y', 'z']") == {"tags": ["x,y", "z"]}
     assert mod._mini_yaml('tags: [["a,b"], 2]') == {"tags": [["a,b"], 2]}
+    # Apostrophes are legal inside PLAIN flow scalars — only a quote at an
+    # item's start opens a quoted region.
+    assert mod._mini_yaml("surfaces: [editor's-tool, claude-code]") == {
+        "surfaces": ["editor's-tool", "claude-code"]}
 
 
 def test_mini_yaml_decodes_quoted_escapes():
