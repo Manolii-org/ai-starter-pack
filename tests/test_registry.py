@@ -8500,3 +8500,225 @@ def test_script_dep_flags_after_program_operand(tmp_path):
     # `-m` BEFORE `-c` still governs
     assert mod.script_dep_block(
         pdir, b"cat scripts/x.sh | python -m code -c | sh\n")
+
+
+def test_script_dep_nested_sub_propagates(tmp_path):
+    """A `;` inside the ENCLOSING substitution does not end the output
+    flow — `echo "$(echo "$(cat x)"; echo foo)" | sh` still pipes the
+    captured text to sh (Devin on #127, round-11 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir,
+        b'cat scripts/x.sh | echo "$(echo "$(cat scripts/x.sh)";'
+        b' echo foo)" | sh\n')
+    # backtick-free single-sub form still works
+    assert mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh; echo foo)" | sh\n')
+
+
+def test_script_dep_emit_sub_must_read_stdin(tmp_path):
+    """Emit heads forward the pipe only through an arg substitution
+    that RE-READS it — `echo "$(printf foo)"` emits its own text, and
+    `$(cat f)` reads a file operand, not the pipe (Devin + CodeRabbit
+    on #127/#1380, round-11 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert not mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | echo "$(printf foo)" | sh\n')
+    assert not mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | echo "$(cat f)" | sh\n')
+    assert mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | echo "$(cat)" | sh\n')
+    assert mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | echo "$(cat -)" | sh\n')
+    assert mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | echo "$(head)" | sh\n')
+
+
+def test_script_dep_date_only_plus_fmt_forwards(tmp_path):
+    """`date` echoes only a `+FORMAT` operand verbatim —
+    `date --date="$(cat)" | sh` parses the script as a date, it never
+    echoes the bytes (Codex on #1957, round-11 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | date "+$(cat)" | sh\n')
+    assert not mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | date --date="$(cat)" | sh\n')
+    assert not mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | date "$(cat)" | sh\n')
+
+
+def test_script_dep_head_zero_spelling(tmp_path):
+    """Any all-zero `-n` count ends the pipe (`00`, `+0`) — but a
+    NEGATIVE count like `-n -0` emits every line (Devin on #127,
+    round-11 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | head -n 00 | sh\n")
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | head -n +0 | sh\n")
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | head --lines=00 | sh\n")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | head -n -0 | sh\n")
+
+
+def test_script_dep_codec_last_mode_wins(tmp_path):
+    """Codec direction flags are last-wins: `base64 -d -e` ENCODES (the
+    pipe becomes ciphertext — a sink), `-e -d` decodes, and getopt
+    cluster letters apply in order (`-ed` decodes, `-de` encodes —
+    Devin on #1380/#1957, round-11 review). `-e` is not a quopri flag
+    at all, so `quopri -d -e` aborts."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.b64").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.b64 | python -m base64 -e -d | sh\n")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.b64 | python -m base64 -ed | sh\n")
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.b64 | python -m base64 -d -e | sh\n")
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.b64 | python -m base64 -de | sh\n")
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.b64 | python -m quopri -d -e | sh\n")
+
+
+def test_script_dep_codec_operands_and_terminator(tmp_path):
+    """A `--` ends option parsing (`base64 -d -- -` still decodes the
+    pipe); base64 uses only its FIRST operand while quopri iterates
+    (`quopri -d missing -` still decodes stdin); gzip and uu crash on
+    a `-` operand (Devin + Codex on #127/#1957, round-11 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.b64").write_bytes(b"x")
+    (pdir / "scripts" / "x.gz").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.b64 | python -m base64 -d -- - | sh\n")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.b64 | python -m base64 -d - f | sh\n")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.b64 | python -m quopri -d missing - | sh\n")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.b64 | python -m quopri -d - missing | sh\n")
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.b64 | python -m base64 -d f - | sh\n")
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.gz | python -m gzip -d - | sh\n")
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.b64 | python -m uu -d - | sh\n")
+
+
+def test_script_dep_codec_long_prefix_and_abort(tmp_path):
+    """argparse/optparse modules resolve unique long prefixes
+    (`uu --de`, `gzip --decomp` decode); `uu -t` exits before the pipe
+    is read, and an ambiguous/unknown long aborts (CodeRabbit on #127,
+    round-11 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.uu").write_bytes(b"x")
+    (pdir / "scripts" / "x.gz").write_bytes(b"x")
+    (pdir / "scripts" / "x.b64").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.uu | python -m uu --de | sh\n")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.uu | python -m uu --dec | sh\n")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.gz | python -m gzip --decomp | sh\n")
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.uu | python -m uu -d -t | sh\n")
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.uu | python -m uu --t | sh\n")
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.uu | python -m uu --nope | sh\n")
+    # getopt modules have no long options at all
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.b64 | python -m base64 --decode | sh\n")
+
+
+def test_script_dep_codec_redirect_words(tmp_path):
+    """Redirect words in the MODULE's argv are folded, not operands:
+    `python -m base64 -d 2>/dev/null` and `0<&0` still decode (Codex +
+    Devin on #127/#1380/#1957, round-11 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.b64").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.b64 | python -m base64 -d 2>/dev/null | sh\n")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.b64 | python -m base64 -d 0<&0 | sh\n")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.b64 | python -m base64 -d 2> f | sh\n")
+    # an input redirect away from the pipe still sinks
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.b64 | python -m base64 -d </dev/null | sh\n")
+
+
+def test_script_dep_python_first_m_wins(tmp_path):
+    """Only the FIRST `-m` selects the module — later words are its
+    argv (`python -m code -m base64` opens the REPL, `python -m
+    json.tool -m code` parses data — Devin on #127, round-11)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | python -m code -m base64 | sh\n")
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | python -m json.tool -m code | sh\n")
+    # and a `-m` inside module argv is an invalid codec flag — the
+    # module aborts (getopt rejects it), so the pipe is never decoded
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | python -m base64 -d -m code | sh\n")
+
+
+def test_script_dep_dup_target_spacing(tmp_path):
+    """`>& 1` spaced still DUPS the fd — stdout stays on the pipe —
+    while `>& 2` diverts it; a `-` alone closes (Devin on #9/#1957,
+    round-11 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh)" >& 1 | sh\n')
+    assert not mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh)" >& 2 | sh\n')
+    assert not mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh)" >& - | sh\n')
+    # and a spaced `<&` pending target behaves like the glued form
+    assert mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | sh <& 0\n')
+
+
+def test_script_dep_quoted_dup_target(tmp_path):
+    """A quoted or escaped `$`/backtick in a `>&` target is a literal
+    FILENAME — `>&'$FD'` and `>&\\$FD` divert the pipe, while the bare
+    expansion may restore an fd (Devin on #1380, round-11 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert not mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh)" >&\'$FD\' | sh\n')
+    assert not mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh)" >&\\$FD | sh\n')
+    assert mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh)" >&$FD | sh\n')
+    assert mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh)" >&"$FD" | sh\n')
