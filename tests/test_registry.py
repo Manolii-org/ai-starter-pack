@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -6079,6 +6080,39 @@ def test_apply_rollback_removes_new_outputs(tmp_path):
     assert not (consumer / ".claude" / "commands" / "run.md").exists()
 
 
+def test_apply_rollback_restores_file_timestamps(tmp_path):
+    """Rollback must put back the prior file's mtimes, not a fresh
+    `now` — a resolver-owned file restored byte-identically should be
+    indistinguishable from the pre-failure state (Codex on #123)."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/SKILL.md",
+                                "---\nname: demo\ndescription: d\n---\nv1")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    skill = consumer / ".claude" / "skills" / "demo" / "SKILL.md"
+    times = (1_600_000_000_000_000_000, 1_500_000_000_000_000_000)
+    os.utime(skill, ns=times)
+    # registry drift triggers a replace; lock write fails -> rollback
+    reg_file = (reg_root / "registry" / "platform" / "framework"
+                / "skills" / "demo" / "SKILL.md")
+    reg_file.write_text("---\nname: demo\ndescription: d\n---\nv2")
+    os.chmod(consumer / ".ai", 0o555)
+    try:
+        r = run_resolver(m, reg_root, consumer, "--apply")
+    finally:
+        os.chmod(consumer / ".ai", 0o755)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert skill.read_bytes() == b"---\nname: demo\ndescription: d\n---\nv1"
+    # mtime survives the round-trip. atime is NOT asserted — the resolver
+    # reads the file during planning, which refreshes it before the
+    # snapshot is taken, so the recorded atime is legitimately ~now.
+    assert skill.stat().st_mtime_ns == times[1]
+
+
 def test_mode_drift_does_not_hide_local_edit(tmp_path):
     """Install A@0644, hand-edit the consumer copy to B@0644, then move the
     registry to B@0600 — the local edit must still CONFLICT, not be
@@ -6545,10 +6579,57 @@ def test_mini_yaml_signed_and_dot_scalars():
         ('x: 1.\n', {'x': 1.0}),
         ('x: -1e3\n', {'x': '-1e3'}),
         ('x: +1e3\n', {'x': '+1e3'}),
+        # Non-decimal spellings Codex flagged on #123 — hex, binary,
+        # legacy octal, underscore runs, signed exponents, sexagesimal,
+        # .inf/.nan. `0o`/`0X`/`0B`/unsigned-exponent/`.Nan`/`-.nan` are
+        # NOT PyYAML numbers and stay strings.
+        ('x: 0x1\n', {'x': 1}),
+        ('x: 0x10\n', {'x': 16}),
+        ('x: +0x1\n', {'x': 1}),
+        ('x: -0x10\n', {'x': -16}),
+        ('x: 0b101\n', {'x': 5}),
+        ('x: 012\n', {'x': 10}),
+        ('x: -012\n', {'x': -10}),
+        ('x: 00\n', {'x': 0}),
+        ('x: 1_000\n', {'x': 1000}),
+        ('x: 1_2_3\n', {'x': 123}),
+        ('x: 1_0.5\n', {'x': 10.5}),
+        ('x: 0.5_0\n', {'x': 0.5}),
+        ('x: 1.0E+3\n', {'x': 1000.0}),
+        ('x: -1.5e-2\n', {'x': -0.015}),
+        ('x: 1e+3\n', {'x': '1e+3'}),  # no dot in mantissa → string
+        ('x: 1:30\n', {'x': 90}),
+        ('x: -1:2:3\n', {'x': -3723}),
+        ('x: 08\n', {'x': '08'}),
+        ('x: 09\n', {'x': '09'}),
+        ('x: 0o7\n', {'x': '0o7'}),
+        ('x: 0X1\n', {'x': '0X1'}),
+        ('x: 0B1\n', {'x': '0B1'}),
+        ('x: 1.0e3\n', {'x': '1.0e3'}),
+        ('x: +1.e5\n', {'x': '+1.e5'}),
+        ('x: .inf\n', {'x': float('inf')}),
+        ('x: -.INF\n', {'x': -float('inf')}),
+        ('x: -.nan\n', {'x': '-.nan'}),
+        ('x: .Nan\n', {'x': '.Nan'}),
     ]:
         assert mod._mini_yaml(doc) == want, doc
         if yaml is not None:
             assert mod._mini_yaml(doc) == yaml.safe_load(doc), doc
+    assert math.isnan(mod._mini_yaml('x: .NaN\n')['x'])
+    if yaml is not None:
+        assert math.isnan(yaml.safe_load('x: .NaN\n')['x'])
+
+
+def test_mini_yaml_rejects_embedded_mapping_value():
+    """`description: foo: bar` is a ScannerError in PyYAML — a `:` + space
+    inside a plain scalar is a nested mapping value, never text. The mini
+    parser must fail closed, not ship 'foo: bar' as a valid value
+    (Devin on #123)."""
+    mod = load_resolve_module()
+    for bad in ["description: foo: bar", "x: a: b", "x: foo:",
+                "x: [a: b]", "x:\n  description: foo: bar"]:
+        with pytest.raises(ValueError):
+            mod._mini_yaml(bad + "\n")
 
 
 def test_mini_yaml_block_scalar_tab_indentation():
@@ -6623,14 +6704,21 @@ def test_script_dep_extensionless_option_values(tmp_path):
     mod = load_resolve_module()
     dep = lambda b: mod.script_dep_block(tmp_path, b.encode())
     assert not dep("python -m http.server --directory scripts/site")
+    assert not dep("python -m http.server --directory=scripts/site")
+    assert not dep("python -m http.server -d scripts/site")
+    assert not dep("python -m http.server -dscripts/site")
     assert not dep("python run.py --input=scripts/fixtures")
-    assert not dep("DATA=scripts/fixtures bash run.sh")
     # still gated: positional after `--`, short flag, plain arg
     assert dep("bash -- scripts/run")
     assert dep("bash -x scripts/run")
     assert dep("bash opts scripts/run")
+    # An env-prefix `VAR=scripts/x` is a mention, not an invocation — the
+    # interpreter's args carry no scripts/ path; a real dep declares
+    # requires_scripts/consumer_scripts in frontmatter.
+    assert not dep("DATA=scripts/fixtures bash run.sh")
     # extended names count even after a long option — fail-closed
     assert dep("python run.py --out scripts/out.py")
+    assert dep("python run.py --input scripts/data.py")
 
 
 def test_script_dep_sq_continuation_is_not_a_join(tmp_path):

@@ -33,6 +33,7 @@ import argparse
 import errno
 import hashlib
 import json
+import math
 import os
 import re
 import stat
@@ -333,6 +334,226 @@ def _redirection_target_spans(window: bytes) -> list[tuple[int, int]]:
             word_start = i
         i += 1
     end_word(n)
+    return spans
+
+
+# Single-letter interpreter flags that never take an operand. The next
+# word stays positional (`python -u scripts/foo.py`, `bash -e scripts/x.sh`).
+# `-d` is not here: it is the short form that takes a directory argument
+# (`python -m http.server -d scripts/site`).
+_BOOL_SHORT: dict[bytes, frozenset[int]] = {
+    b"python": frozenset(b"bBEhiIOPqsSuvVx"),
+    b"bash": frozenset(b"eEfhimpnuxv"),
+    b"sh": frozenset(b"eEfhimpnuxv"),
+    b"zsh": frozenset(b"eEfhimpnuxv"),
+}
+# Long options that do not take an operand. Anything else in `--opt` or
+# `--opt=value` form binds the following word / the text after `=` — that
+# path is not an invoked script (`--directory scripts/site`).
+_BOOL_LONG = frozenset({
+    b"--debug", b"--help", b"--interactive", b"--login", b"--noediting",
+    b"--noprofile", b"--norc", b"--posix", b"--quiet", b"--silent",
+    b"--verbose", b"--version", b"--yes",
+})
+_BOOL_LONG_PREFIXES = (b"--allow-", b"--experimental-", b"--no-")
+
+
+def _shell_words(window: bytes) -> list[tuple[int, int]]:
+    """Byte spans of shell words in `window`.
+
+    Quotes and backslash escapes stay inside the word. A redirection
+    operator with no surrounding space is part of the adjacent word;
+    option classification only cares about words that start with `-`."""
+    spans: list[tuple[int, int]] = []
+    i = 0
+    n = len(window)
+    in_s = in_d = False
+    word_start: int | None = None
+
+    def end_word(end: int) -> None:
+        nonlocal word_start
+        if word_start is not None and word_start < end:
+            spans.append((word_start, end))
+        word_start = None
+
+    while i < n:
+        c = window[i]
+        if in_s:
+            if word_start is None:
+                word_start = i
+            if c == 0x27:
+                in_s = False
+            i += 1
+            continue
+        if in_d:
+            if word_start is None:
+                word_start = i
+            if c == 0x5C and i + 1 < n:
+                i += 2
+                continue
+            if c == 0x22:
+                in_d = False
+            i += 1
+            continue
+        if c == 0x5C and i + 1 < n:
+            if word_start is None:
+                word_start = i
+            i += 2
+            continue
+        if c in b" \t":
+            end_word(i)
+            i += 1
+            continue
+        if c == 0x27:
+            if word_start is None:
+                word_start = i
+            in_s = True
+            i += 1
+            continue
+        if c == 0x22:
+            if word_start is None:
+                word_start = i
+            in_d = True
+            i += 1
+            continue
+        if word_start is None:
+            word_start = i
+        i += 1
+    end_word(n)
+    return spans
+
+
+def _word_text(raw: bytes) -> bytes:
+    """Shell-unquoted text of one word, for option classification only."""
+    out = bytearray()
+    i = 0
+    n = len(raw)
+    in_s = in_d = False
+    while i < n:
+        c = raw[i]
+        if in_s:
+            if c == 0x27:
+                in_s = False
+            else:
+                out.append(c)
+            i += 1
+            continue
+        if in_d:
+            if c == 0x5C and i + 1 < n:
+                out.append(raw[i + 1])
+                i += 2
+                continue
+            if c == 0x22:
+                in_d = False
+            else:
+                out.append(c)
+            i += 1
+            continue
+        if c == 0x27:
+            in_s = True
+        elif c == 0x22:
+            in_d = True
+        elif c == 0x5C and i + 1 < n:
+            out.append(raw[i + 1])
+            i += 2
+            continue
+        else:
+            out.append(c)
+        i += 1
+    return bytes(out)
+
+
+def _command_key(word: bytes) -> bytes:
+    base = _word_text(word).rsplit(b"/", 1)[-1]
+    if base.startswith(b"python"):
+        return b"python"
+    return base
+
+
+def _long_option_takes_value(text: bytes) -> bool:
+    """True when `--opt` (no `=`) binds the following word."""
+    if text in _BOOL_LONG:
+        return False
+    return not text.startswith(_BOOL_LONG_PREFIXES)
+
+
+_SCRIPT_SUFFIXES = (
+    b".py", b".sh", b".ts", b".js", b".mjs", b".cjs", b".rb", b".pl",
+)
+
+
+def _glued_short_hides_path(text: bytes) -> bool:
+    """A short option with the operand glued on (`-dscripts/site`).
+
+    `-d` always takes that operand. Any other flag hides the path only
+    when it is not itself a script file — `node -rscripts/preload.js`
+    still counts as an invocation."""
+    if len(text) < 3 or text[1:2] == b"d":
+        return len(text) >= 3
+    name = text[2:].rsplit(b"/", 1)[-1].rsplit(b"=", 1)[-1]
+    return not name.endswith(_SCRIPT_SUFFIXES)
+
+
+def _option_value_spans(window: bytes) -> list[tuple[int, int]]:
+    """Byte spans of words that are option operands, not invoked scripts.
+
+    `python -m http.server --directory scripts/site` serves that directory;
+    it does not execute `scripts/site`. The same goes for `--directory=…`,
+    `-d scripts/site`, and a path glued onto the flag (`-dscripts/site`).
+    A later positional (`--directory scripts/site scripts/serve.py`) is
+    still an invocation. `--` ends option parsing. Interpreter flags that
+    never take an operand (`python -u`, `bash -e`, `bash --posix`) leave
+    the next word positional."""
+    words = _shell_words(window)
+    if not words:
+        return []
+    bools = _BOOL_SHORT.get(_command_key(window[words[0][0]:words[0][1]]),
+                            frozenset())
+    spans: list[tuple[int, int]] = []
+    i = 0
+    ended = False
+    while i < len(words):
+        start, end = words[i]
+        text = _word_text(window[start:end])
+        if ended or text == b"-" or not text.startswith(b"-"):
+            i += 1
+            continue
+        if text == b"--":
+            ended = True
+            i += 1
+            continue
+        if text.startswith(b"--"):
+            eq = window.find(b"=", start, end)
+            if eq != -1:
+                if eq + 1 < end:
+                    spans.append((eq + 1, end))
+                i += 1
+                continue
+            if _long_option_takes_value(text) and i + 1 < len(words):
+                spans.append(words[i + 1])
+                i += 2
+                continue
+            i += 1
+            continue
+        # Short option. A pure letter cluster (`-euo`, `-OO`) is flags,
+        # not an attached operand. A tail with a path or `=` is the value
+        # (`-dscripts/site`, `-d=scripts/site`). A separate following word
+        # is an operand only for interpreters whose flags we know (`-d`,
+        # `-o`, `-W`); other commands stay fail-closed so
+        # `node -r scripts/preload.js` is still an invocation.
+        if len(text) >= 2 and (65 <= text[1] <= 90 or 97 <= text[1] <= 122):
+            tail = text[2:]
+            if tail and not tail.isalpha():
+                if b"scripts/" in text and _glued_short_hides_path(text):
+                    spans.append((start, end))
+                i += 1
+                continue
+            if (not tail and bools and text[1] not in bools
+                    and i + 1 < len(words)):
+                spans.append(words[i + 1])
+                i += 2
+                continue
+        i += 1
     return spans
 
 
@@ -997,13 +1218,41 @@ def _mini_yaml(text: str):
             if not (len(tok) > 1 and tok.endswith("'")):
                 raise ValueError(f"unterminated quoted scalar {tok!r}")
             return tok[1:-1].replace("''", "'")
-        # PyYAML numeric grammar: a leading '+' is legal on ints and
-        # floats (`+1` -> 1, `+1.5` -> 1.5), `.5` and `1.` are floats —
-        # but bare exponents (`-1e3`) are NOT (they stay strings).
-        if re.fullmatch(r"[-+]?\d+", tok):
-            return int(tok)
-        if re.fullmatch(r"[-+]?(?:\d+\.\d*|\.\d+)", tok):
-            return float(tok)
+        # PyYAML numeric grammar — the resolver's own regexes verbatim.
+        # Ints: binary `0b`, legacy `0…` octal, decimal, hex `0x`,
+        # sexagesimal `1:2:3` — `0o`/`0X`/`0B` are strings. Floats: the
+        # mantissa MUST carry a `.` (so `1e3`/`1e+3` stay strings), the
+        # exponent sign is mandatory, `.inf`/`.Inf`/`.INF` are signed,
+        # `.nan`/`.NaN`/`.NAN` unsigned (`.Nan`, `-.nan` stay strings).
+        sign = -1 if tok[:1] == "-" else 1
+        if re.fullmatch(r"[-+]?0b[0-1_]+", tok):
+            return sign * int(tok.lstrip("+-").replace("_", ""), 2)
+        if re.fullmatch(r"[-+]?0[0-7_]+", tok):
+            return sign * int(tok.lstrip("+-").replace("_", ""), 8)
+        if re.fullmatch(r"[-+]?(?:0|[1-9][0-9_]*)", tok):
+            return sign * int(tok.lstrip("+-").replace("_", ""))
+        if re.fullmatch(r"[-+]?0x[0-9a-fA-F_]+", tok):
+            return sign * int(tok.lstrip("+-").replace("_", ""), 16)
+        if re.fullmatch(r"[-+]?[1-9][0-9_]*(?::[0-5]?[0-9])+", tok):
+            v = 0
+            for part in tok.lstrip("+-").split(":"):
+                v = v * 60 + int(part.replace("_", ""))
+            return sign * v
+        if re.fullmatch(
+                r"[-+]?(?:[0-9][0-9_]*)\.[0-9_]*(?:[eE][-+][0-9]+)?"
+                r"|\.[0-9][0-9_]*(?:[eE][-+][0-9]+)?", tok):
+            return sign * float(tok.lstrip("+-").replace("_", ""))
+        if re.fullmatch(r"[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])+\.[0-9_]*",
+                        tok):
+            head, _, frac = tok.lstrip("+-").rpartition(":")
+            v = 0
+            for part in head.split(":"):
+                v = v * 60 + int(part.replace("_", ""))
+            return sign * (v + float(frac.replace("_", "")) / 60)
+        if tok.lstrip("+-") in (".inf", ".Inf", ".INF"):
+            return math.inf * sign
+        if tok in (".nan", ".NaN", ".NAN"):
+            return math.nan
         # YAML 1.1 booleans/nulls, matching PyYAML safe_load: yes/no/
         # on/off are bools in ANY letter case; single-letter y/n stay
         # strings. A `requires_scripts: off` must read False, not the
@@ -1017,6 +1266,11 @@ def _mini_yaml(text: str):
             return None
         if tok[0] in "[{|>&!%@`":
             raise ValueError(f"unsupported scalar {tok!r}")
+        if re.search(r":(?:\s|$)", tok):
+            # `a: b` inside a plain scalar is a nested mapping value —
+            # PyYAML scanner error, never text ('description: foo: bar').
+            raise ValueError(
+                f"mapping values are not allowed in a plain scalar: {tok!r}")
         return tok
 
     def block_scalar(indicator: str, vals: list) -> str:
@@ -1404,30 +1658,21 @@ def script_dep_block(plugin_dir: Path, src_bytes: bytes,
         # `>&`, `&>`, `&>>`, `2>`, `<<`, `<<-`, `<<<`, `<&`). An input
         # redirect (`<`, `<>`) still counts — the command reads it.
         redir_spans = _redirection_target_spans(window)
+        # Option operands are not invoked scripts — `--directory
+        # scripts/site`, `-d scripts/site`, `-dscripts/site` name a
+        # directory to serve. Applied to EXTENSIONLESS names only: an
+        # operand with a script extension could still be an input file
+        # (`--input scripts/data.py`), so it stays gated (fail-closed).
+        opt_spans = _option_value_spans(window)
         for n in SCRIPT_NAME.finditer(window):
             if any(a <= n.start() and n.end() <= b
                    for a, b in redir_spans):
                 continue
             p = n.group(1).decode("utf-8", errors="ignore")
-            if not re.search(
-                    r"\.(?:py|sh|ts|js|mjs|cjs|rb|pl)$", p):
-                # An extensionless scripts/ path is ambiguous — it can
-                # name a directory or file passed to an option
-                # (`--directory scripts/site`, `--opt=scripts/site`) or
-                # a VAR= assignment, not an invocation. Skip it when the
-                # previous word is a long option or carries `=`; keep it
-                # after a bare `--` terminator or a short flag so a real
-                # `bash -x scripts/run` still gates (fail-closed).
-                j = n.start() - 1
-                while j >= 0 and window[j] in b" \t":
-                    j -= 1
-                end = j + 1
-                while j >= 0 and window[j] not in b" \t":
-                    j -= 1
-                prev = window[j + 1:end]
-                if (len(prev) > 2 and prev.startswith(b"--")) \
-                        or b"=" in prev:
-                    continue
+            if (not re.search(r"\.(?:py|sh|ts|js|mjs|cjs|rb|pl)$", p)
+                    and any(a <= n.start() and n.end() <= b
+                            for a, b in opt_spans)):
+                continue
             refs.append(([p], [p]))
         for mod in MODULE_NAME.finditer(window):
             # `python -m scripts.a.b` runs a/b.py or the package entry
@@ -2901,7 +3146,7 @@ def main() -> int:
                          tuple[int, int] | None]] = []
 
         def rollback() -> None:
-            for dst, prior, mode, ino in reversed(undo):
+            for dst, prior, mode, ino, times in reversed(undo):
                 try:
                     if prior is None:
                         if ino is not None:
@@ -2932,9 +3177,14 @@ def main() -> int:
                         else:
                             dst.unlink(missing_ok=True)
                     else:
+                        # Restore bytes, mode AND the original timestamps —
+                        # a fresh inode without `times` would read as a
+                        # change to timestamp-based builds and watchers
+                        # even though the apply failed.
                         atomic_replace(
                             dst,
                             lambda f, b=prior: f.write(b),
+                            times=times,
                             mode=mode,
                             dfd=parent_fd(dst.parent))
                 except OSError as re:
@@ -2947,8 +3197,9 @@ def main() -> int:
 
         try:
             def snapshot(d: Path):
-                # (bytes, mode) of d's current content WITHOUT following
-                # links — None only when d is confirmed ABSENT. A link or
+                # (bytes, mode, (atime_ns, mtime_ns)) of d's current
+                # content WITHOUT following links — None only when d is
+                # confirmed ABSENT. A link or
                 # non-regular file raises: recording one as 'absent' would
                 # journal a bogus prior state, and --apply must abort on a
                 # destination swapped in after planning rather than write
@@ -2977,14 +3228,17 @@ def main() -> int:
                             raise OSError(
                                 "destination is not a regular file: "
                                 f"{d.relative_to(repo_root).as_posix()}")
-                        return fh.read(), st.st_mode & 0o777
+                        return (fh.read(), st.st_mode & 0o777,
+                                (st.st_atime_ns, st.st_mtime_ns))
                 if d.is_symlink():
                     raise OSError(
                         "destination is a symlink: "
                         f"{d.relative_to(repo_root).as_posix()}")
                 try:
                     if d.is_file():
-                        return d.read_bytes(), d.stat().st_mode & 0o777
+                        st = d.stat()
+                        return (d.read_bytes(), st.st_mode & 0o777,
+                                (st.st_atime_ns, st.st_mtime_ns))
                 except FileNotFoundError:
                     return None
                 if os.path.lexists(d):
@@ -3019,7 +3273,8 @@ def main() -> int:
                         "clobber a possible concurrent edit: " f"{rel_dst}")
                 undo.append((dst,
                              snap[0] if snap else None,
-                             snap[1] if snap else None, None))
+                             snap[1] if snap else None, None,
+                             snap[2] if snap else None))
                 # Write the bytes the plan checksummed, not a fresh read of
                 # src — a registry file swapped between plan and apply
                 # would otherwise ship content the lock never digested.
@@ -3043,7 +3298,8 @@ def main() -> int:
                                      follow_symlinks=False)
                     else:
                         st = os.stat(dst, follow_symlinks=False)
-                    undo[-1] = (dst, None, None, (st.st_dev, st.st_ino))
+                    undo[-1] = (dst, None, None,
+                                (st.st_dev, st.st_ino), None)
             if args.prune:
                 for f in plan.removals:
                     rel_f = f.relative_to(repo_root).as_posix()
@@ -3135,7 +3391,7 @@ def main() -> int:
                         raise
                     if snap is None:
                         continue  # raced deletion — still a no-op
-                    undo.append((f, snap[0], snap[1], None))
+                    undo.append((f, snap[0], snap[1], None, snap[2]))
                     if _HAS_DIRFD:
                         os.unlink(tmp.name, dir_fd=dfd)
                     else:
