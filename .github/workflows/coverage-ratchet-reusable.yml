@@ -284,9 +284,12 @@ jobs:
           base_path = Path(os.environ["BASELINE_FILE"])
           head = gh(f"repos/{repo}/git/ref/heads/{branch}")["object"]["sha"]
           if head != os.environ["TRIGGER_SHA"]:
-              sys.exit(f"::warning::branch head {head[:8]} moved past triggering "
-                       f"commit {os.environ['TRIGGER_SHA'][:8]} — skipping baseline "
-                       "write; the newer head's own run will ratchet if eligible")
+              # Warn + pass — the run's coverage result still stands; a newer
+              # head supersedes this baseline write, it doesn't invalidate it.
+              print(f"::warning::branch head {head[:8]} moved past triggering "
+                    f"commit {os.environ['TRIGGER_SHA'][:8]} — skipping baseline "
+                    "write; the newer head's own run will ratchet if eligible")
+              sys.exit(0)
           # Compare against the LIVE baseline at head, not the stale checkout —
           # a concurrent push may already have raised it (TOCTOU on a ratchet
           # silently lowers coverage). A 404 on the contents call means no

@@ -93,9 +93,14 @@ jobs:
               ["git", "diff", "--name-only", "-z", f"{base}...{head}"],
               capture_output=True, text=True, check=True).stdout.split("\0") if p]
           roots = [r.strip("/") for r in os.environ["TEST_ROOTS"].split(",") if r.strip()]
-          is_test = lambda p: ("/test_" in p or "/tests/" in p or p.startswith("tests/")
-                               or p.startswith("e2e/") or ".test." in p or ".spec." in p
-                               or p.endswith("_test.go") or p.endswith("_test.py"))
+          # Runnable test patterns only — fixtures/snapshots/data under tests/
+          # are NOT executable; counting them in expected_tests fabricates
+          # 'missing' journal entries.
+          import os.path
+          is_test = lambda p: (
+              os.path.basename(p).startswith("test_") or ".test." in p
+              or ".spec." in p or p.endswith("_test.go") or p.endswith("_test.py")
+              or p.endswith("_test.ts") or p.endswith("_test.tsx"))
 
           map_source = "default-heuristic"
           always, mappings = [], []
@@ -166,7 +171,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@b7c566a772e6d6bfb60ed0dc1cd7b42d9c8b3f24 # v6
         with:
-          name: tia-shadow-${{ github.event.pull_request.head.sha }}
+          name: tia-shadow-${{ github.event.pull_request.head.sha }}-a${{ github.run_attempt }}
           path: tia-shadow.json
           retention-days: 30
           if-no-files-found: warn
