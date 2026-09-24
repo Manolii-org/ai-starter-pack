@@ -5388,3 +5388,68 @@ def test_prune_requires_full_mode_record(tmp_path):
     r = run_resolver(m, reg_root, consumer, "--apply", "--prune")
     assert r.returncode == 1
     assert orphan.is_file()
+
+
+def test_mini_yaml_block_scalar_keep_and_fold_parity():
+    """Keep-chomp preserves terminators, literal trailing spaces survive,
+    and `>` folding keeps breaks around more-indented lines — asserted
+    against PyYAML when importable."""
+    mod = load_resolve_module()
+    cases = [
+        "plugin: |+\n      platform/framework\nref: x\n",
+        "v: |-\n      a  \n",
+        "v: |\n      a  \n",
+        "x: >\n  a\n    b\n  c\n",
+        "x: >\n  a\n\n  b\n",
+        "x: >\n  a\n\n\n  b\n",
+        "x: >+\n  a\n\n  b\n\n",
+        "x: |+\n  a\n\n  b\n\n",
+        "x: |+\n  a\n\n",
+        "v: >-\n  a\n  b\n",
+    ]
+    try:
+        import yaml as pyyaml
+    except ImportError:
+        pyyaml = None
+    for y in cases:
+        got = mod._mini_yaml(y)
+        if pyyaml is not None:
+            assert pyyaml.safe_load(y) == got, y
+    # Hard assertions independent of PyYAML availability.
+    assert mod._mini_yaml("v: |-\n      a  \n") == {"v": "a  "}
+    assert mod._mini_yaml("v: |\n      a  \n") == {"v": "a  \n"}
+    assert mod._mini_yaml("x: >\n  a\n    b\n  c\n") == {"x": "a\n  b\nc\n"}
+    assert mod._mini_yaml("plugin: |+\n      a\n") == {"plugin": "a\n"}
+
+
+def test_keep_chomped_plugin_name_fails_validation():
+    """`plugin: |+` keeps the trailing newline YAML keeps — the plugin
+    name is then (correctly) invalid, not silently stripped."""
+    mod = load_resolve_module()
+    doc = mod._mini_yaml("plugin: |+\n      platform/framework\nref: x\n")
+    assert doc["plugin"] == "platform/framework\n"
+    assert not mod.REQUIRES_RE.match(doc["plugin"])
+
+
+def test_prune_cleanup_survives_readonly_parent(tmp_path):
+    """A missing orphan's empty dir under a read-only parent must not
+    strand the lock update — directory cleanup is best-effort."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/old/SKILL.md",
+                                "---\nname: old\ndescription: d\n---\nv1")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    orphan = consumer / ".claude" / "skills" / "old" / "SKILL.md"
+    orphan.unlink()  # manually deleted — missing orphan, empty dir stays
+    (consumer / ".claude" / "skills").chmod(0o555)
+    write_manifest(consumer, "manolii", [])
+    r = run_resolver(m, reg_root, consumer, "--apply", "--prune")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "cleanup skipped" in r.stdout
+    lock = json.loads(
+        (consumer / ".ai" / "capability-lock.json").read_text())
+    assert ".claude/skills/old/SKILL.md" not in lock["files"]

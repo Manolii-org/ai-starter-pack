@@ -60,7 +60,9 @@ LOCK_PATH = ".ai/capability-lock.json"
 # any-exec on/off (see _exec_matches).
 EXEC_TAG = 0o10000
 REQUIRES_RE = re.compile(
-    r"^(platform|manolii|buro|impaktful|cpdcheck|repo|personal)/([a-z0-9][a-z0-9-]*)$"
+    # \Z not $ — `$` also matches before one trailing '\n', which would
+    # accept a keep-chomped `|+` plugin name carrying its terminator.
+    r"^(platform|manolii|buro|impaktful|cpdcheck|repo|personal)/([a-z0-9][a-z0-9-]*)\Z"
 )
 SEMVER_REF = re.compile(r"v?\d+(?:\.\d+){0,2}")
 # A materialised file that INVOKES a sibling script — the resolver does not
@@ -282,8 +284,9 @@ def _mini_yaml(text: str):
                     raise ValueError(
                         "inconsistent block scalar indentation")
                 # YAML dedents block content by the first line's indent —
-                # deeper lines keep their extra (relative) indentation.
-                lines.append((ind, raw[content_indent:].rstrip()))
+                # deeper lines keep their extra (relative) indentation,
+                # and trailing spaces are literal content too.
+                lines.append((ind, raw[content_indent:]))
                 continue
             block_indent = None
             content_indent = None
@@ -469,26 +472,30 @@ def _mini_yaml(text: str):
         return tok
 
     def block_scalar(indicator: str, vals: list[str]) -> str:
-        # Literal `|` joins lines verbatim, folded `>` joins runs of
-        # non-blank lines with a space and turns each blank line into a
-        # line break. Chomping: `x-` strips the trailing newline, `x+`
-        # keeps it, plain `x` clips to exactly one.
+        # Literal `|` joins lines verbatim — every content line carries
+        # its own terminator. Folded `>`: a break between two ordinary
+        # non-blank lines becomes a space; a break adjacent to a blank or
+        # more-indented line (still leading-space after dedent) stays a
+        # newline, except the break AFTER a blank line, which is absorbed.
+        # Chomping: `x-` strips trailing newlines, `x+` keeps them all,
+        # plain `x` clips to exactly one.
         if indicator.startswith(">"):
             parts: list[str] = []
-            run: list[str] = []
-            for v in vals:
-                if v:
-                    run.append(v)
-                else:
-                    if run:
-                        parts.append(" ".join(run))
-                        run = []
+            for i, v in enumerate(vals):
+                parts.append(v)
+                if i == len(vals) - 1:
                     parts.append("\n")
-            if run:
-                parts.append(" ".join(run))
+                elif not v:
+                    if not vals[i + 1]:
+                        parts.append("\n")
+                elif not vals[i + 1] or v[:1] in " \t" \
+                        or vals[i + 1][:1] in " \t":
+                    parts.append("\n")
+                else:
+                    parts.append(" ")
             text = "".join(parts)
         else:
-            text = "\n".join(vals)
+            text = "".join(v + "\n" for v in vals)
         if indicator.endswith("-"):
             return text.rstrip("\n")
         if indicator.endswith("+"):
@@ -2023,9 +2030,18 @@ def main() -> int:
                     print(f"  removed {f.relative_to(repo_root).as_posix()}")
             for f in plan.removals:
                 d = f.parent
-                while d != repo_root and d.is_dir() and not any(d.iterdir()):
-                    d.rmdir()
-                    d = d.parent
+                try:
+                    while (d != repo_root and d.is_dir()
+                           and not any(d.iterdir())):
+                        d.rmdir()
+                        d = d.parent
+                except OSError:
+                    # Best-effort cleanup — a read-only parent (or a
+                    # missing orphan's dir) must not abort before the lock
+                    # update: a left-behind empty dir is cosmetic.
+                    print("  note: empty-directory cleanup skipped for "
+                          f"{d.relative_to(repo_root).as_posix()} "
+                          "(permission denied)")
         new_files = {rel: digest for r in plan.resolved
                      for rel, digest in r["files"].items()}
         if not args.prune:
