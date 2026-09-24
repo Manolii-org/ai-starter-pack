@@ -177,6 +177,8 @@ jobs:
         if: ${{ always() }}
         id: artifacts
         run: |
+          paths_file=$(mktemp)
+          trap 'rm -f "$paths_file"' EXIT
           python3 -c '
           import os, sys
           workspace = os.path.realpath(os.environ["GITHUB_WORKSPACE"])
@@ -189,10 +191,10 @@ jobs:
                   print(resolved)
               else:
                   print(f"::warning::skipping artifact path outside workspace: {raw}", file=sys.stderr)
-          ' > /tmp/artifact-paths.txt
+          ' > "$paths_file"
           {
             echo 'paths<<EOF'
-            cat /tmp/artifact-paths.txt
+            cat "$paths_file"
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 
