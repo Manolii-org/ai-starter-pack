@@ -7352,7 +7352,7 @@ def test_script_dep_dash_ksh_and_variable_interpreters(tmp_path):
             pdir, head + b" scripts/x.sh\n"), head
     assert mod.script_dep_block(pdir, b"$PYTHON scripts/x.py\n")
     assert mod.script_dep_block(pdir, b"${PYTHON} scripts/x.py\n")
-    assert mod.script_dep_block(pdir, b"${NODE} scripts/x.js\n") or True
+    assert mod.script_dep_block(pdir, b"${NODE} scripts/x.js\n")
     # loose prose must not become an invocation
     assert not mod.script_dep_block(
         pdir, b"set $FOO to the scripts/x.py path\n")
