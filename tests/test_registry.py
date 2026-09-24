@@ -9450,3 +9450,57 @@ def test_pipe_to_exec_round18(tmp_path):
             # eval running a sink still replaces the stream
             b"cat scripts/x.sh | eval wc -l | sh"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_pipe_to_exec_round19(tmp_path):
+    """Round-19 review batch — eval's fd map bounds the inner command;
+    bare eval emits nothing; `source /dev/stdin` executes the pipe;
+    region bodies balance nested substitution parens; a quoted FILENAME
+    operand is not program text (Devin + Codex on #127/#9/#1380)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (
+            # `eval PROG` runs PROG on the same stdin/stdout
+            b"cat scripts/x.sh | eval cat | sh",
+            b"cat scripts/x.sh | eval sh | sh",
+            # source of an fd-path operand executes the stream
+            b"cat scripts/x.sh | source /dev/stdin",
+            b"cat scripts/x.sh | . /dev/stdin",
+            # nested procsub: inner `)` no longer truncates the body
+            b"cat scripts/x.sh | echo \"$(cat <(cat))\" | sh",
+            # a `<(cat)` codec operand re-reads the upstream pipe
+            b"cat scripts/x.sh | python -m base64 -d <(cat) | sh",
+            b"cat scripts/x.sh | python -m gzip -d <(cat) | sh",
+            # nested `date +FORMAT` echoes the capture back out
+            b"cat scripts/x.sh | echo \"$(date +$(cat))\" | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # eval's own `< f` rebind feeds the inner command the FILE
+            b"cat scripts/x.sh | eval cat </dev/null | sh",
+            b"cat scripts/x.sh | eval sh </dev/null | sh",
+            # bare/empty eval emits nothing
+            b"cat scripts/x.sh | eval | sh",
+            b"cat scripts/x.sh | eval '' | sh",
+            # `source FILE` reads the file, not the pipe
+            b"cat scripts/x.sh | source /etc/profile | sh",
+            # inert inner procsub (`echo safe` does not read the pipe)
+            b"cat scripts/x.sh | echo \"$(cat <(echo safe))\" | sh",
+            b"cat scripts/x.sh | python -m base64 -d <(echo safe) | sh",
+            # a quoted FILENAME operand names a different file
+            b"bash 'scripts/x.sh;safe'",
+            b'bash "scripts/absent.sh;safe"',
+            # nested `date --date=` parses the capture — emits a
+            # timestamp, never the script bytes (Devin on #1957)
+            b"cat scripts/x.sh | echo \"$(date --date=$(cat))\" | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    # Program-text operands still detect — `sh -c`, eval, sed/awk
+    # programs, ssh remote commands all interpret the quoted text.
+    for line in (
+            b"sh -c 'bash scripts/x.sh'",
+            b"sh -c 'x;bash scripts/x.sh'",
+            b"eval 'bash scripts/x.sh'",
+            b"sed '1e bash scripts/x.sh' f",
+            b"ssh h 'bash scripts/x.sh'"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line

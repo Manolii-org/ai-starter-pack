@@ -661,6 +661,98 @@ def _operand_text(raw: bytes) -> bytes:
     return _word_text(raw[i:j])
 
 
+def _in_expand(body: bytes, rp: int) -> bool:
+    """True when body[rp] sits inside an executing `$(`/backtick
+    substitution — used for UNQUOTED heredoc bodies, where the shell
+    parses no quotes at all (`'`/`"` are literal bytes) and only
+    substitutions expand (round-19 review)."""
+    stack: list[int] = []   # open substitutions; >0 = paren depth, 0 = bt
+    i = 0
+    while i < len(body):
+        c = body[i]
+        if i == rp:
+            return bool(stack)
+        if c == 0x5C:
+            i += 2
+            continue
+        if c == 0x60:
+            if stack and stack[-1] == 0:
+                stack.pop()
+            else:
+                stack.append(0)
+            i += 1
+            continue
+        if body[i:i + 2] == b"$(":
+            stack.append(1)
+            i += 2
+            continue
+        if stack and stack[-1] > 0:
+            if c == 0x28:
+                stack[-1] += 1
+            elif c == 0x29:
+                stack[-1] -= 1
+                if stack[-1] == 0:
+                    stack.pop()
+        i += 1
+    return bool(stack)
+
+
+def _operand_is_program(enc_words: list, wi: int,
+                        enclosing: bytes) -> bool:
+    """True when enc_words[wi] is program text the enclosing command's
+    head interprets — a `sh -c`/`perl -e` flag operand, `eval` argv, a
+    program-first reader's first positional (`sed '1e x'`, `awk '{…}'`,
+    or its `-e`/`-f` script), or the remote command of `ssh h '…'`. A
+    quoted FILENAME operand is not: `bash 'x.sh;safe'` names a different
+    file (Devin on #9/#127, round-19 review)."""
+    hi = _effective_head(enc_words, enclosing)
+    if hi is None or hi < 0 or wi <= hi:
+        return False
+    key = _command_key(enclosing[enc_words[hi][0]:enc_words[hi][1]])
+    if key == b"eval":
+        return True
+    # Inline-program flags only — `-c`/`-e` take program TEXT, while
+    # `-f`/`--file` name a FILE and pattern flags (`grep -e`, `jq -f`)
+    # are not shell-interpreted.
+    pflags = frozenset()
+    if key in _SH_STDIN_HEADS:
+        pflags = {b"-c", b"--command"}
+    elif key == b"python" or key == b"python3":
+        pflags = {b"-c"}
+    elif key in (b"perl", b"ruby", b"node", b"php", b"lua", b"tclsh"):
+        pflags = {b"-e", b"-r", b"--eval"}
+    elif key == b"sed":
+        pflags = {b"-e", b"--expression"}
+    flagops = _READER_FLAG_OPS.get(key, frozenset())
+    ended = False
+    positional = 0
+    j = hi + 1
+    while j < len(enc_words):
+        t = _word_text(enclosing[enc_words[j][0]:enc_words[j][1]])
+        if not ended and t != b"-" and t.startswith(b"-"):
+            if t == b"--":
+                ended = True
+            elif t in pflags or t in flagops:
+                if j + 1 == wi:
+                    return t in pflags
+                j += 2
+                continue
+            elif len(t) > 2 and t[:2] in pflags and j == wi:
+                return True   # glued `-cPROG`/`-ePROG`
+            j += 1
+            continue
+        positional += 1
+        if j == wi:
+            # sed/awk's first positional is its PROGRAM (`sed '1e x'`,
+            # `awk 'BEGIN{system("x")}'`); ssh's operands after the host
+            # join into the remote command.
+            return ((key in (b"sed", b"awk", b"gawk", b"mawk", b"nawk")
+                     and positional == 1)
+                    or (key == b"ssh" and positional > 1))
+        j += 1
+    return False
+
+
 def _command_start(src: bytes, pos: int) -> int:
     """Start of the command containing `pos` — the byte after the last
     UNQUOTED separator before it. Separators inside quotes are literal —
@@ -1069,7 +1161,10 @@ def _py_module_verdict(mod: bytes, rest_words: list, sub: bytes) -> str:
         positional += 1
         if getopt:
             opts_done = True
-        if _stdin_path_operand(t):
+        if _operand_feeds_stream(t):
+            # `-`/fd-path, or a `<(BODY)` process substitution whose
+            # inner command re-reads the upstream pipe into an fd the
+            # decoder consumes (Codex on #1957, round-19 review).
             stdin_live = True
             continue
         if top in _PY_MODULE_ITER_OPS:
@@ -1659,16 +1754,29 @@ def _seg_prov(body: bytes, prov: str):
                     prov = "own"
             # Otherwise the reader forwards its input — prov flows.
         elif key == b"eval":
-            # `eval` joins its operands into a command and runs it on
-            # the SAME stdin/stdout — `eval cat` forwards the pipe just
-            # like `cat` (Codex on #1380, round-18 review). Analyze the
-            # joined program text: an inner exec consumes dep bytes, a
-            # reader forwards them, anything else emits its own.
-            inner = _sub_flow(b" ".join(args))
-            if inner == "exec":
-                return None if prov in ("up", "script", "thru") else "own"
-            if inner == "none":
+            prog = b" ".join(args)
+            if not prog.strip() or not fd_in:
+                # Bare `eval`/`eval ''` runs nothing and emits nothing,
+                # and a `< f` rebind means the inner command reads the
+                # FILE, not the pipe (Devin on #127/#1380/#9, round-19).
                 prov = "own"
+            else:
+                # `eval` joins its operands into a command run on the
+                # SAME stdin/stdout — `eval cat` forwards the pipe just
+                # like `cat` (Codex on #1380, round-18 review).
+                inner = _sub_flow(prog)
+                if inner == "exec":
+                    return None if prov in (
+                        "up", "script", "thru") else "own"
+                if inner == "none":
+                    prov = "own"
+        elif key in (b"source", b"."):
+            # `source FILE` executes FILE in this shell — `source
+            # /dev/stdin` executes the upstream pipe itself (Codex on
+            # #1380, round-19 review).
+            if fd_in and any(_stdin_path_operand(a) for a in args):
+                return None if prov in ("up", "script", "thru") else "own"
+            prov = "own"
         elif key in _SEG_RESERVED:
             # Compound/conjunction keywords are transparent to the
             # stream: `if :; then cat; fi` runs cat on the `if`
@@ -1720,6 +1828,7 @@ def _region_body(a: bytes, s: int, e: int) -> tuple:
     escaped `)` is literal — `cat "hi)" -` keeps its `-` operand and
     everything after it (Devin on #1957, round-16 review)."""
     in_s = in_d = esc = False
+    depth = 0
     i = s
     while i < e:
         c = a[i]
@@ -1735,9 +1844,22 @@ def _region_body(a: bytes, s: int, e: int) -> tuple:
         elif c == 0x22:
             in_d = not in_d
         elif in_d:
-            pass
+            if a[i:i + 2] == b"$(":
+                depth += 1
+                i += 1
+        elif a[i:i + 2] in (b"$(", b"<(", b">("):
+            # A nested substitution/subshell OPENER's own `)` does not
+            # close the region — `$(cat <(echo safe))` reads to its
+            # matching close, not the inner one (Devin on #9, round-19).
+            depth += 1
+            i += 1
+        elif c == 0x28:
+            depth += 1
         elif c == 0x29:
-            return a[s:i], i
+            if depth:
+                depth -= 1
+            else:
+                return a[s:i], i
         i += 1
     return a[s:e], None
 
@@ -1789,9 +1911,18 @@ def _sub_flow(a: bytes) -> str:
             prov = (eff if emits and eff in ("up", "script")
                     else "own" if emits else cprov)
         elif sep in (b"$(", b"`"):
-            ck, _, _, _ = _seg_head_args(prev_body)
-            emits = (ck in _STDIN_EMIT_HEADS
-                     and not _stdout_redirected(prev_body))
+            ck, _, _, hend = _seg_head_args(prev_body)
+            if ck == b"date":
+                # `date` echoes captured text only inside a `+FORMAT`
+                # operand — `date --date=$(cat)` parses the capture and
+                # emits a timestamp (Devin on #1957, round-19 review).
+                tail = prev_body[hend:].split()
+                emits = (bool(tail)
+                         and tail[-1].lstrip(b"\"'").startswith(b"+"))
+            else:
+                emits = (ck in _STDIN_EMIT_HEADS
+                         and _emit_forwards_stdin(ck, prev_body, hend)
+                         and not _stdout_redirected(prev_body))
             stack.append((prov, emits, sep, out))
             prov = "own" if drained else "up"
             out = None
@@ -4852,8 +4983,29 @@ def script_dep_block(plugin_dir: Path, src_bytes: bytes,
                 # (`bash 'x.sh;safe'` names a different file — Devin on
                 # #127, round-17 review).
                 return True
-            return any(a <= epos - w[0] < b
-                       for a, b in _quoted_spans(raw))
+            # The quoted-span fallback accepts a path inside (a) a
+            # DOUBLE-quoted span containing `$(`/`` ` `` — the
+            # substitution expands and executes regardless of operand
+            # role (`x="$(bash x)"`), or (b) an operand the head parses
+            # as PROGRAM text (`sh -c '…'`, `eval '…'`, `sed '1e …'`,
+            # `ssh h '…'`). A quoted FILENAME operand stays a literal
+            # path — `bash 'x.sh;safe'` names a different file (Devin on
+            # #9, round-19).
+            # An UNQUOTED heredoc body is data, not argv — `'`/`"` are
+            # literal bytes there and only `$(`/backtick regions expand
+            # (`it's `sh x`` still runs sh — round-19 review).
+            hpos = cs + epos
+            for ha, hb, hmode in _heredoc_spans(scan):
+                if ha <= hpos < hb and hmode == _HD_EXPAND:
+                    return _in_expand(scan[ha:hb], hpos - ha)
+            quoted = [span for span in _quoted_spans(raw)
+                      if span[0] <= epos - w[0] < span[1]]
+            for qa, qb in quoted:
+                if qa > 0 and raw[qa - 1:qa] == b'"' and (
+                        b"$(" in raw[qa:qb] or b"`" in raw[qa:qb]):
+                    return True
+            return bool(quoted) and _operand_is_program(
+                enc_words, enc_words.index(w), enclosing)
 
         for n in SCRIPT_NAME.finditer(window):
             if literal(m.start() + n.start()):
