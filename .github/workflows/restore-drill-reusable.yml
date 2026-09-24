@@ -260,7 +260,9 @@ jobs:
             # uploaded artifact (data-loss exposure is bounded even if a
             # caller's query returns full rows).
             head -1 <<< "$OUT"
-            ROWS=$(printf '%s\n' "$OUT" | grep -c . || true)
+            # sqlcmd prints a "(N rows affected)" footer even with -h -1 —
+            # exclude it so a single scalar doesn't read as multi-row.
+            ROWS=$(printf '%s\n' "$OUT" | grep -vE '^\([0-9]+ rows? affected\)' | grep -c . || true)
             [ "$ROWS" -gt 1 ] && echo "::warning::sanity query returned $ROWS rows — drill queries should be metadata/scalar-only; output withheld"
             python3 -c 'import json,sys; print(json.dumps({"query": sys.argv[1], "rows": int(sys.argv[3]), "output": sys.argv[2].strip()[:160]}))' \
               "$q" "$(head -1 <<< "$OUT")" "$ROWS" >> drill-report/results.jsonl
