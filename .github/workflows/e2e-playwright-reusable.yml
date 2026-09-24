@@ -78,11 +78,12 @@ on:
         required: false
         default: ''
         description: >-
-          Dotenv-style KEY=VALUE lines injected into the job env before the
-          playwright step (NON-secret values only: PLAYWRIGHT_BASE_URL,
-          feature flags). Only lines matching an identifier KEY= prefix are
-          applied. Credentials go through `secrets:` — the secrets context
-          is not allowed inside `with:`.
+          Dotenv-style KEY=VALUE lines merged into the playwright process
+          env only (NON-secret values: PLAYWRIGHT_BASE_URL, feature flags).
+          Only lines matching an identifier KEY= prefix are applied; the
+          value is everything after the first `=` — it is never re-parsed
+          or job-wide. Credentials go through `secrets:` — the secrets
+          context is not allowed inside `with:`.
       artifact_name:
         type: string
         required: false
@@ -93,8 +94,8 @@ on:
         required: false
         default: "playwright-report/\ntest-results/\ne2e-artifacts/"
         description: >-
-          Newline-separated artifact paths, relative to `workdir` (absolute
-          paths pass through untouched).
+          Newline-separated artifact paths, relative to `workdir`. Absolute
+          paths are accepted only inside the workspace.
       retention_days:
         type: number
         required: false
@@ -152,14 +153,8 @@ jobs:
         timeout-minutes: 15
         run: npx playwright install --with-deps $BROWSERS
 
-      - name: Apply test env
-        if: ${{ inputs.test_env != '' }}
-        run: |
-          # Only well-formed KEY= lines reach the env — a malformed line can
-          # not inject a comment or a second assignment into $GITHUB_ENV.
-          echo "$TEST_ENV_LINES" | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' >> "$GITHUB_ENV" || true
-
       - name: Resolve artifact paths
+        if: ${{ always() }}
         id: artifacts
         run: |
           {
@@ -167,7 +162,8 @@ jobs:
             echo "$ARTIFACT_PATHS_IN" | while IFS= read -r p; do
               [ -z "$p" ] && continue
               case "$p" in
-                /*) echo "$p" ;;
+                "$GITHUB_WORKSPACE"/*) echo "$p" ;;
+                /*) echo "::warning::skipping absolute artifact path outside workspace: $p" ;;
                 *) echo "$WORKDIR/$p" ;;
               esac
             done
@@ -181,20 +177,22 @@ jobs:
           TEST_USER_EMAIL: ${{ secrets.E2E_TEST_USER_EMAIL }}
           TEST_USER_PASSWORD: ${{ secrets.E2E_TEST_USER_PASSWORD }}
         run: |
-          python3 -c '
-            import json, os, sys
-            try:
-                args = json.loads(os.environ.get("PLAYWRIGHT_ARGS_JSON") or "[]")
-                if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
-                    raise ValueError("expected a JSON array of strings")
-                if args:
-                    print("\n".join(args))
-            except Exception as e:
-                print(f"::error::playwright_args_json invalid: {e}", file=sys.stderr)
-                sys.exit(1)
-          ' > /tmp/pw_args.txt
-          mapfile -t EXTRA_ARGS < /tmp/pw_args.txt
-          npx playwright test "${EXTRA_ARGS[@]}"
+          python3 <<'PY'
+          import json, os, re, subprocess, sys
+          try:
+              args = json.loads(os.environ.get("PLAYWRIGHT_ARGS_JSON") or "[]")
+              if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+                  raise ValueError("expected a JSON array of strings")
+          except Exception as e:
+              print(f"::error::playwright_args_json invalid: {e}", file=sys.stderr)
+              sys.exit(1)
+          env = dict(os.environ)
+          for line in (os.environ.get("TEST_ENV_LINES") or "").splitlines():
+              m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", line)
+              if m:
+                  env[m.group(1)] = m.group(2)
+          subprocess.run(["npx", "playwright", "test", *args], env=env, check=True)
+          PY
 
       - name: Upload e2e artifacts
         if: ${{ always() }}
