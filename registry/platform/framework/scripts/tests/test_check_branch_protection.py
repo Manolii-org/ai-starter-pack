@@ -37,7 +37,7 @@ def _write_contract(tmp_path: Path) -> Path:
 
 
 def _fixture(fixtures: Path, repo: str, branch: str, protection: dict | None) -> None:
-    base = fixtures / f"{repo.replace('/', '__')}__{branch}"
+    base = fixtures / cbp.fixture_name(repo, branch)
     if protection is None:
         base.with_suffix(".404").touch()
     else:
@@ -86,7 +86,8 @@ def test_audited_lane_overrides_repo_level() -> None:
 def test_fix_body_preserves_existing_settings() -> None:
     body = cbp.fix_body(_prot(["guards"]), ["guards", "scan"])
     assert body["enforce_admins"] is True
-    assert body["required_signatures"] is True
+    # required_signatures is not a PUT-body field (own endpoint) — dropped.
+    assert "required_signatures" not in body
     assert body["required_pull_request_reviews"]["required_approving_review_count"] == 1
     checks = body["required_status_checks"]["checks"]
     assert [c["context"] for c in checks] == ["guards", "scan"]
@@ -131,7 +132,8 @@ def test_e2e_unprotected_branch_reports_all_missing(tmp_path: Path) -> None:
     fixes_dir = tmp_path / "fixes"
     out = _run(contract, fixtures, "--emit-fixes", str(fixes_dir))
     assert out.returncode == 1
-    body = json.loads((fixes_dir / "Org__app__develop.json").read_text())
+    body = json.loads(
+        (fixes_dir / f"{cbp.fixture_name('Org/app', 'develop')}.json").read_text())
     assert {c["context"] for c in body["required_status_checks"]["checks"]} == {
         "guards", "scan"}
     assert "gh api -X PUT" in (fixes_dir / "apply-fixes.md").read_text()

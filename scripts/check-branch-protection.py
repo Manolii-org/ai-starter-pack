@@ -32,6 +32,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import re
@@ -51,9 +52,11 @@ load_contract = _cdc.load_contract
 SLUG_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 # Put-body surface GitHub accepts. Anything else in a GET response (urls,
 # contexts_url, nested read-only fields) must be stripped or the PUT fails.
+# required_signatures is NOT a PUT body field (it has its own endpoint) —
+# including it gets the payload rejected.
 PUT_BOOL_KEYS = ("required_linear_history", "allow_force_pushes",
                  "allow_deletions", "block_creations",
-                 "required_conversation_resolution", "required_signatures",
+                 "required_conversation_resolution",
                  "lock_branch", "allow_fork_syncing")
 
 
@@ -91,7 +94,7 @@ def _ruleset_contexts(repo: str, ref: str) -> tuple[list[str], bool, str | None]
     ruleset_present=True when the branch is governed by ANY ruleset — even one
     without a required-status-checks rule — since fix payloads need the
     'edit the ruleset, not legacy protection' caveat either way."""
-    rules, rerr = _gh_json(f"repos/{repo}/rules/branches/{ref}")
+    rules, rerr = _gh_json(f"repos/{repo}/rules/branches/{ref}?per_page=100")
     if rerr and rerr != "404":
         return [], False, rerr
     ctxs: list[str] = []
@@ -128,8 +131,11 @@ def _gh_json(endpoint: str, timeout: int = 30) -> tuple[list | dict | None, str 
 def fixture_name(repo: str, branch: str) -> str:
     """Filesystem-safe stem for fixture/fix-payload files — '/' and other
     non-[A-Za-z0-9_.-] chars in lane branches would otherwise descend into
-    nonexistent subdirs."""
-    return f"{repo.replace('/', '__')}__{re.sub(r'[^A-Za-z0-9_.-]', '_', branch)}"
+    nonexistent subdirs. The sha1 suffix keeps colliding sanitizations
+    (e.g. 'rc/a' vs 'rc_a') from sharing one payload file."""
+    return (f"{repo.replace('/', '__')}__"
+            f"{re.sub(r'[^A-Za-z0-9_.-]', '_', branch)}-"
+            f"{hashlib.sha1(branch.encode()).hexdigest()[:8]}")
 
 
 def fetch_protection(repo: str, branch: str,
@@ -251,7 +257,7 @@ def fix_body(protection: dict | None, required: list[str]) -> dict:
             "restrictions": None,
         }
         for k in PUT_BOOL_KEYS:
-            body[k] = None
+            body[k] = False
     return body
 
 
