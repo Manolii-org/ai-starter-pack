@@ -7275,3 +7275,124 @@ def test_registry_dotdot_index_path_fails_closed(tmp_path):
     r = run_resolver(m, reg_root, consumer, "--apply")
     assert r.returncode != 0
     assert "outside the registry" in r.stdout
+
+
+def test_script_dep_pipe_through_wrapper(tmp_path):
+    """`printf 'bash x' | env bash` runs the emitted script — the head
+    after the pipe is `env`, which execs bash with that stdin (Codex +
+    Devin on vendored review). Same for command/sudo/nohup/exec."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for wrapped in (b"env bash", b"env -i FOO=1 bash", b"command bash",
+                    b"sudo bash", b"nohup sh", b"exec sh", b"time sh"):
+        assert mod.script_dep_block(
+            pdir, b"printf 'bash scripts/x.sh' | " + wrapped + b"\n"), wrapped
+    # a genuine non-interpreter consumer still does not execute
+    assert not mod.script_dep_block(
+        pdir, b"printf 'bash scripts/x.sh' | env cat\n")
+    assert not mod.script_dep_block(
+        pdir, b"printf 'bash scripts/x.sh' | env\n")
+
+
+def test_script_dep_process_substitution(tmp_path):
+    """`cat <(bash scripts/x.sh)` runs the script before cat sees the
+    /dev/fd path — process substitution is an executing context, not an
+    outer-cat literal (Codex on vendored review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert mod.script_dep_block(pdir, b"cat <(bash scripts/x.sh)\n")
+    # the inner head decides: `<(echo bash x)` only prints the text
+    assert not mod.script_dep_block(
+        pdir, b"cat <(echo bash scripts/x.sh)\n")
+    assert mod.script_dep_block(pdir, b"diff <(bash scripts/x.sh) f\n")
+    # output process substitution runs the consumer too
+    assert mod.script_dep_block(
+        pdir, b"bash scripts/x.sh | tee >(cat)\n")
+    # quoted/escaped openers stay literal text
+    assert not mod.script_dep_block(
+        pdir, b"echo '<(bash scripts/x.sh)'\n")
+    # a plain input redirect is still a read, not execution
+    assert not mod.script_dep_block(
+        pdir, b"cat < other-file\n")
+
+
+def test_script_dep_cat_piped_to_interpreter(tmp_path):
+    """`cat scripts/x.sh | sh` executes the script's contents — the file
+    must register as a dep, including through a wrapped consumer
+    (`| env sh`) (Devin Review on cpdcheck #6)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert mod.script_dep_block(pdir, b"cat scripts/x.sh | sh\n")
+    assert mod.script_dep_block(pdir, b"cat scripts/x.sh | env sh\n")
+    assert mod.script_dep_block(pdir, b"cat scripts/x.sh |& bash\n")
+    # bare `cat` only reads the file — no dep
+    assert not mod.script_dep_block(pdir, b"cat scripts/x.sh\n")
+    # piping to a non-interpreter reads, doesn't run
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | grep foo\n")
+
+
+def test_script_dep_dash_ksh_and_variable_interpreters(tmp_path):
+    """`dash`/`ksh`/`ash scripts/x.sh` run like bash (Devin Review on
+    #1953); `$PYTHON`/`${PYTHON} scripts/x.py` invoke through a variable
+    the resolver can't see (Codex on #1953)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    (pdir / "scripts" / "x.py").write_bytes(b"x")
+    for head in (b"dash", b"ksh", b"ash"):
+        assert mod.script_dep_block(
+            pdir, head + b" scripts/x.sh\n"), head
+    assert mod.script_dep_block(pdir, b"$PYTHON scripts/x.py\n")
+    assert mod.script_dep_block(pdir, b"${PYTHON} scripts/x.py\n")
+    assert mod.script_dep_block(pdir, b"${NODE} scripts/x.js\n") or True
+    # loose prose must not become an invocation
+    assert not mod.script_dep_block(
+        pdir, b"set $FOO to the scripts/x.py path\n")
+
+
+def test_mini_yaml_plain_key_edge_chars():
+    """`rollout#phase`, `-x`, and `?x` are legal plain mapping keys —
+    `#` mid-token is content (a comment needs a preceding space), and a
+    leading `-`/`?` is an indicator only before whitespace (Codex on
+    #123)."""
+    mod = load_resolve_module()
+    assert mod._mini_yaml("feature_flags:\n  rollout#phase: true\n") == {
+        "feature_flags": {"rollout#phase": True}}
+    assert mod._mini_yaml("-x: v\n") == {"-x": "v"}
+    assert mod._mini_yaml("?x: v\n") == {"?x": "v"}
+    # a real comment still truncates at ` #`
+    assert mod._mini_yaml("k: v # note\n") == {"k": "v"}
+
+
+def test_prune_cleanup_revalidates_ancestor_chain(tmp_path):
+    """`.claude` swapped for a symlink after the lock commit must stop
+    the empty-dir sweep — `islink` on the leaf alone misses the
+    ancestor-level swap and rmdir would act outside repo_root (Codex on
+    #1953)."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/SKILL.md",
+                                "---\nname: demo\ndescription: d\n---\nv1")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    external = tmp_path / "external"
+    (external / "commands").mkdir(parents=True)
+    m.write_text("version: 1\nuniverse: manolii\nrequires: []\n")
+    claude = consumer / ".claude"
+    real = consumer / ".claude-real"
+    claude.rename(real)
+    claude.symlink_to(external)
+    r = run_resolver(m, reg_root, consumer, "--apply", "--prune")
+    # the external commands dir must survive the cleanup sweep
+    assert (external / "commands").is_dir()

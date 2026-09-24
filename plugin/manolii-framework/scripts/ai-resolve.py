@@ -76,12 +76,29 @@ SCRIPT_REF = re.compile(
     # (?<![\w-]) before the alternation — `source`/`exec` must be a command
     # word, not a suffix of `resource`/`outsource`/`oncexec`, and not the
     # tail of hyphenated prose like `open-source` or `re-exec`.
-    rb"(?<![\w-])(?:python(?:\d+(?:\.\d+)*)?|bash|sh|zsh|node|npx|tsx|ts-node|deno"
+    # The shell set matches _STDIN_EXEC_HEADS — `dash scripts/x.sh` and
+    # `ksh scripts/x.sh` execute exactly like `bash` (Devin on
+    # vendored-resolver review). `cat` is here too: on its own it only
+    # reads (the literal gate drops it), but `cat scripts/x.sh | sh`
+    # executes the file's contents.
+    rb"(?<![\w-])(?:python(?:\d+(?:\.\d+)*)?|bash|dash|ksh|ash|sh|zsh|cat"
+    rb"|node|npx|tsx|ts-node|deno"
     # Separators are HORIZONTAL whitespace only — `\s` would let a command
     # word at end of one line join a `scripts/` path at the start of the
     # next (`source\nscripts/x.sh` is not an invocation).
     rb"|ruby|perl|source|exec|bun|bunx|uv[ \t]+run|pipenv[ \t]+run)"
     rb"[ \t]+[^\n|&;`]*?scripts/(?:[A-Za-z0-9_.-]+/)"
+    rb"*(?:[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs|cjs|rb|pl)|[A-Za-z0-9_-]+)"
+    rb"(?![\w.])"
+    # An interpreter held in a variable — `$PYTHON scripts/setup.py`,
+    # `${NODE} scripts/x.js` — runs the script just as a literal
+    # interpreter word does, and the resolver cannot know the variable's
+    # value, so it counts as a dependency (Codex on vendored-resolver
+    # review). Only options may sit between the head and the path; a
+    # loose `[^\n]*?` would turn prose like `$VAR and scripts/x.sh` into
+    # an invocation.
+    rb"|\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)"
+    rb"[ \t]+(?:-[^\s|&;`]*[ \t]+)*scripts/(?:[A-Za-z0-9_.-]+/)"
     rb"*(?:[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs|cjs|rb|pl)|[A-Za-z0-9_-]+)"
     rb"(?![\w.])"
     rb"|\./scripts/(?:[A-Za-z0-9_.-]+/)"
@@ -616,15 +633,16 @@ def _command_start(src: bytes, pos: int) -> int:
 
 
 def _substitution_spans(window: bytes) -> list[tuple[int, int]]:
-    """Byte spans of `$(...)` command substitutions in `window`.
+    """Byte spans of `$(...)` and `<(`/`>(` substitutions in `window`.
 
     The shell runs a substitution's contents BEFORE the outer command —
-    `echo "$(bash scripts/x.sh)"` executes the script even though echo
-    itself only prints, so spans inside one are not literal text. A
-    `$(` inside single quotes (or escaped) is literal and opens no
-    span; double quotes do not disable it. Nested `$(`s and balanced
-    inner parens are tracked by depth; an unclosed `$(` runs to the end
-    of the window (fail-closed)."""
+    `echo "$(bash scripts/x.sh)"` and `cat <(bash scripts/x.sh)` both
+    execute the script even though the outer head only prints or reads,
+    so spans inside one are not literal text. An opener inside single
+    quotes (or escaped) is literal and opens no span; double quotes do
+    not disable it. Nested substitutions and balanced inner parens are
+    tracked by depth; an unclosed opener runs to the end of the window
+    (fail-closed)."""
     spans: list[tuple[int, int]] = []
     # [start, inner-paren depth, in_d before open] — inside `$(...)` the
     # shell parses quotes fresh, so the enclosing double-quote state is
@@ -646,7 +664,9 @@ def _substitution_spans(window: bytes) -> list[tuple[int, int]]:
         if in_d:
             if c == 0x22:
                 in_d = False
-            elif (c == 0x24 and window[i + 1:i + 2] == b"("):
+            elif (c == 0x24 and window[i + 1:i + 2] == b"(") or (
+                    c in (0x3C, 0x3E) and window[i + 1:i + 2] == b"("
+                    and window[i - 1:i] not in (b"<", b">", b"&", b"|")):
                 stack.append([i, 0, True])
                 in_d = False
                 i += 2
@@ -661,7 +681,16 @@ def _substitution_spans(window: bytes) -> list[tuple[int, int]]:
             in_s = True
             i += 1
             continue
-        if c == 0x24 and window[i + 1:i + 2] == b"(":
+        if (c == 0x24 and window[i + 1:i + 2] == b"(") or (
+                # `<(cmd)`/`>(cmd)` process substitution — bash/zsh run the
+                # body BEFORE the outer command sees its /dev/fd path, so
+                # `cat <(bash scripts/x.sh)` executes the script the same
+                # way `$(bash x)` does (Codex on vendored-resolver review).
+                # The 2-char openers share the `$(`'s paren balancing.
+                c in (0x3C, 0x3E) and window[i + 1:i + 2] == b"("
+                # `<<`/`<>`/`>>` are redirections, not substitution — the
+                # char before must not be another redirect char.
+                and window[i - 1:i] not in (b"<", b">", b"&", b"|")):
             stack.append([i, 0, False])
             i += 2
             continue
@@ -688,12 +717,46 @@ _STDIN_EXEC_HEADS = frozenset({
     b"sh", b"bash", b"dash", b"zsh", b"ksh", b"ash",
     b"python", b"perl", b"ruby", b"node", b"php", b"lua", b"tclsh",
 })
+# Heads that only prepare an environment and then exec the command
+# behind them — `| env bash` and `| command bash` both launch bash on
+# the pipe, so the real consumer is the word after the wrapper (Codex +
+# Devin on vendored-resolver review). `sudo` and `nohup` are the same
+# shape; `exec` replaces the shell with what follows.
+_EXEC_WRAPPERS = frozenset({
+    b"env", b"command", b"sudo", b"nohup", b"stdbuf", b"exec", b"time",
+})
+
+
+def _stdin_exec_head(win: bytes) -> bool:
+    """True when `win`'s effective command executes its stdin.
+
+    Wrapper heads are skipped along with their options and `VAR=value`
+    assignments, so `env -i FOO=1 bash` resolves to `bash`."""
+    words = _shell_words(_mask_parens(win))
+    i = 0
+    while i < len(words):
+        text = _word_text(win[words[i][0]:words[i][1]])
+        key = _command_key(win[words[i][0]:words[i][1]])
+        if key in _EXEC_WRAPPERS:
+            i += 1
+            # Skip the wrapper's own operands: options and, for `env`,
+            # NAME=value assignments. Anything else is the real head.
+            while i < len(words):
+                t = _word_text(win[words[i][0]:words[i][1]])
+                if t.startswith(b"-") or re.match(rb"[A-Za-z_][A-Za-z0-9_]*=",
+                                                  t):
+                    i += 1
+                    continue
+                break
+            continue
+        return key in _STDIN_EXEC_HEADS and not text.startswith(b"-")
+    return False
 
 
 def _pipe_to_exec(src: bytes, pos: int) -> bool:
     """True when an unquoted `|` (or `|&`) at `pos` pipes into a command
     whose head executes stdin — `printf 'bash x' | sh` runs the text the
-    printf only seemed to print."""
+    printf only seemed to print, and so does `| env bash`."""
     j = pos
     if src[j:j + 1] != b"|" or src[j + 1:j + 2] == b"|":
         return False
@@ -702,10 +765,7 @@ def _pipe_to_exec(src: bytes, pos: int) -> bool:
         j += 1
     while j < len(src) and src[j] in b" \t":
         j += 1
-    win = _cmd_window(src, j)
-    w = _shell_words(_mask_parens(win))
-    return (bool(w)
-            and _command_key(win[w[0][0]:w[0][1]]) in _STDIN_EXEC_HEADS)
+    return _stdin_exec_head(_cmd_window(src, j))
 
 
 _HEREDOC_DELIM = re.compile(rb"['\"]?([A-Za-z0-9_.-]+)['\"]?")
@@ -1161,7 +1221,13 @@ def _mini_yaml(text: str):
         # whitespace — `rollout:phase: true` keys on `rollout:phase`
         # (PyYAML agrees). '#' can't appear at all (comment territory).
         r"^(\"(?:[^\"\\]|\\.)*\"|'(?:[^']|'')*'"
-        r"|[^\s?:,\[\]{}#&*!|>'\"%@`-](?:[^\s\[\]{},:#]|:(?=\S))*)"
+        # A leading `-`/`?` is an indicator only when followed by space —
+        # `-x: v` and `?x: v` are legal plain keys (PyYAML agrees). `#`
+        # mid-token is plain content too (`rollout#phase` — a comment
+        # needs a preceding space, which the tail's \s exclusion
+        # already rules out) (Codex on vendored-resolver review).
+        r"|(?:[-?](?=\S)|[^\s?:,\[\]{}#&*!|>'\"%@`-])"
+        r"(?:[^\s\[\]{},:]|:(?=\S))*)"
         # The ':' separates a key only when followed by spaces or EOL — a
         # tab is not a separator (`key:\tv` is a ScannerError in PyYAML).
         # re.S: a folded multiline quoted value can carry a literal '\n'.
@@ -4092,16 +4158,22 @@ def main() -> int:
             for f in plan.removals:
                 d = f.parent
                 try:
-                    # Revalidate each ancestor WITHOUT following links —
-                    # the verified dir FDs are closed by now, and an
-                    # ancestor swapped to a symlink would make is_dir/
-                    # iterdir/rmdir act outside repo_root (Codex on
-                    # vendored-resolver review).
+                    # Revalidate the WHOLE ancestor chain WITHOUT
+                    # following links — the verified dir FDs are closed
+                    # by now, and `islink(d)` only checks the final
+                    # component: `.claude` swapped to a symlink would
+                    # make is_dir/iterdir/rmdir act on a `commands`
+                    # dir outside repo_root (Codex on vendored-resolver
+                    # review).
+                    chain = [d] + list(d.parents)
+                    chain = chain[:chain.index(repo_root)]
                     while (d != repo_root
-                           and not os.path.islink(d) and d.is_dir()
+                           and not any(os.path.islink(a) for a in chain)
+                           and d.is_dir()
                            and not any(d.iterdir())):
                         d.rmdir()
                         d = d.parent
+                        chain = chain[1:]
                 except OSError:
                     # Best-effort cleanup — a read-only parent (or a
                     # missing orphan's dir) is cosmetic; the lock is
