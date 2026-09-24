@@ -6057,7 +6057,10 @@ def test_script_dep_word_concatenation(tmp_path):
     assert mod.script_dep_block(pdir, b'bash "scripts/x.sh"\n')
     assert not mod.script_dep_block(pdir, b"python -m scripts'-tools'\n")
     assert not mod.script_dep_block(pdir, b"bash scripts/x.sh' more'\n")
-    assert not mod.script_dep_block(pdir, b"bash scripts/x.sh.bak\n")
+    # Any dotted extension is invocable — bash runs `x.sh.bak` if it is
+    # bundled (the extension allowlist was dropped on Codex's #123
+    # finding), so the invocation is a dep like any other script call.
+    assert mod.script_dep_block(pdir, b"bash scripts/x.sh.bak\n")
 
 
 def test_yaml_load_strips_bom(tmp_path):
@@ -7513,3 +7516,162 @@ def test_prune_cleanup_revalidates_ancestor_chain(tmp_path):
     r = run_resolver(m, reg_root, consumer, "--apply", "--prune")
     # the external commands dir must survive the cleanup sweep
     assert (external / "commands").is_dir()
+
+
+def test_script_dep_stream_replacing_pipe_heads(tmp_path):
+    """A pipe head whose output REPLACES the stream ends the chain:
+    `cat x | wc -l | sh` feeds sh a line count, not the script (Devin on
+    #123); `python -m` takes its program from argv so the pipe is data
+    (Devin BUG_0003 on #1953)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    (pdir / "scripts" / "x.py").write_bytes(b"x")
+    for pipe in (b"cat scripts/x.sh | wc -l | sh",
+                 b"cat scripts/x.sh | sha256sum | bash",
+                 b"cat scripts/x.sh | echo done | sh",
+                 b"cat scripts/x.py | python -m json.tool",
+                 b"cat scripts/x.py | python -m json.tool | sh"):
+        assert not mod.script_dep_block(pdir, pipe + b"\n"), pipe
+    # transformers forward content — still execute downstream
+    for pipe in (b"cat scripts/x.sh | grep p | sh",
+                 b"cat scripts/x.sh | sed s/a/b/ | sh",
+                 b"cat scripts/x.sh | tr a b | bash"):
+        assert mod.script_dep_block(pdir, pipe + b"\n"), pipe
+
+
+def test_script_dep_env_split_string(tmp_path):
+    """`env -S`/`--split-string` re-parses its operand into a command —
+    `cat x | env -S 'bash -s'` executes the pipe (Codex on #1370)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for pipe in (b"cat scripts/x.sh | env -S 'bash -s'",
+                 b"cat scripts/x.sh | env --split-string 'sh'",
+                 b"cat scripts/x.sh | env -S'sh'",
+                 b"cat scripts/x.sh | env --split-string='sh -s'",
+                 b"cat scripts/x.sh | env A=1 -S 'bash'"):
+        assert mod.script_dep_block(pdir, pipe + b"\n"), pipe
+    # an operand whose inner command is a sink still ends the chain
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | env -S 'wc -l' | sh\n")
+    # env without -S runs the named command on the pipe, unchanged
+    assert mod.script_dep_block(pdir, b"cat scripts/x.sh | env sh\n")
+
+
+def test_script_dep_reader_heads_and_generic_suffix(tmp_path):
+    """grep/head/tail only read, so a bare use stays inert — but under an
+    executing context (`eval "$(grep p x)"`, `head x | sh`) the reader
+    supplies code (Codex on #1370). Any dotted extension counts as a
+    script — `bash scripts/setup.bash` is an invocation (Codex on #123).
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    (pdir / "scripts" / "setup.bash").write_bytes(b"x")
+    for line in (b'eval "$(grep p scripts/x.sh)"',
+                 b'eval "$(head -5 scripts/x.sh)"',
+                 b"grep p scripts/x.sh | sh",
+                 b"head -5 scripts/x.sh | bash",
+                 b"tail scripts/x.sh | python",
+                 b"bash scripts/setup.bash",
+                 b"./scripts/setup.bash"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    # bare reader invocations still read — no dep
+    for line in (b"grep p scripts/x.sh",
+                 b"head -5 scripts/x.sh",
+                 b"tail scripts/x.sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_substitution_output_piped(tmp_path):
+    """`echo "$(cat scripts/x.sh)" | sh` executes the substitution's
+    output — the file inside is a dep even though echo is a sink (Devin
+    on cpdcheck #6)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (b'echo "$(cat scripts/x.sh)" | sh',
+                 b'echo `cat scripts/x.sh` | bash',
+                 b'printf "%s" "$(cat scripts/x.sh)" | python'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    # no pipe — the output is just printed
+    assert not mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh)"\n')
+    # pipe to a non-executor still inert
+    assert not mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh)" | wc -l\n')
+
+
+def test_script_dep_single_quoted_backticks_literal(tmp_path):
+    """Backticks inside single quotes are literal text — `'run `x`'` is
+    an argument, not a substitution (Devin BUG_0002 on #1953)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (b"echo 'run `sh scripts/x.sh` today'",
+                 b"printf 'use `bash scripts/x.sh` here'",
+                 b"echo 'esc \\`sh scripts/x.sh\\`'"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    # inside double quotes a backtick still substitutes
+    assert mod.script_dep_block(
+        pdir, b'echo "run `sh scripts/x.sh` today"\n')
+    # a bare backtick substitution still counts
+    assert mod.script_dep_block(pdir, b"eval `cat scripts/x.sh`\n")
+
+
+def test_script_dep_heredoc_multiple_ops_one_line(tmp_path):
+    """`cat <<A; sh <<B` queues two heredocs on one line — B's body must
+    start after A's delimiter, not after the opening line, or A's body
+    is wrongly attributed to B's command (Devin on #1370)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    # an invocation in A's body must NOT be attributed to sh's heredoc —
+    # cat only reads it, so nothing executes
+    body = b"cat <<A; sh <<B\nbash scripts/x.sh\nA\ntext\nB\n"
+    assert not mod.script_dep_block(pdir, body)
+    # the same invocation in B's own body IS attributed to the exec head
+    body = b"cat <<A; sh <<B\ntext\nA\nbash scripts/x.sh\nB\n"
+    assert mod.script_dep_block(pdir, body)
+
+
+def test_read_source_refuses_links_and_nonregular(tmp_path):
+    """`_read_source` opens with O_NOFOLLOW and revalidates a regular
+    file — a source swapped for a symlink after the resolve-time check
+    cannot ship the link target's bytes, and a fifo cannot block the
+    read (Codex P1 on #1953)."""
+    import os
+    mod = load_resolve_module()
+    target = tmp_path / "target"
+    target.write_bytes(b"real")
+    assert mod._read_source(target) == b"real"
+    link = tmp_path / "link"
+    link.symlink_to(target)
+    assert mod._read_source(link) is None
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo)
+    assert mod._read_source(fifo) is None
+    assert mod._read_source(tmp_path / "missing") is None
+
+
+def test_apply_writes_mutex_lockfile(tmp_path):
+    """--apply holds an exclusive flock on .ai/capability-apply.lock for
+    the plan→apply window so two resolvers can't lose each other's
+    installs (Devin BUG_0001 on #1953)."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/SKILL.md",
+                                "---\nname: demo\ndescription: d\n---\nv1")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    assert (consumer / ".ai" / "capability-apply.lock").exists()

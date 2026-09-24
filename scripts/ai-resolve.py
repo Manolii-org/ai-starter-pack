@@ -30,6 +30,7 @@ ai-starter-pack repo works). Remote fetch (github:org/repo@ref) lands in P1.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import errno
 import hashlib
 import json
@@ -80,16 +81,23 @@ SCRIPT_REF = re.compile(
     # `ksh scripts/x.sh` execute exactly like `bash` (Devin on
     # vendored-resolver review). `cat` is here too: on its own it only
     # reads (the literal gate drops it), but `cat scripts/x.sh | sh`
-    # executes the file's contents.
-    rb"(?<![\w-])(?:python(?:\d+(?:\.\d+)*)?|bash|dash|ksh|ash|sh|zsh|cat"
-    rb"|node|npx|tsx|ts-node|deno"
+    # executes the file's contents. grep/head/tail are the same shape —
+    # they only read, so a bare `grep p scripts/x` stays inert, but
+    # `eval "$(grep p scripts/x)"` and `grep p scripts/x | sh` run the
+    # contents (Codex on #1370).
     # Separators are HORIZONTAL whitespace only — `\s` would let a command
     # word at end of one line join a `scripts/` path at the start of the
     # next (`source\nscripts/x.sh` is not an invocation).
+    rb"(?<![\w-])(?:python(?:\d+(?:\.\d+)*)?|bash|dash|ksh|ash|sh|zsh|cat"
+    rb"|node|npx|tsx|ts-node|deno"
+    rb"|grep|egrep|fgrep|head|tail"
     rb"|ruby|perl|source|exec|bun|bunx|uv[ \t]+run|pipenv[ \t]+run"
     rb"|poetry[ \t]+run|pdm[ \t]+run|hatch[ \t]+run)"
+    # Any extension counts — registry-lint permits regular script files
+    # without an allowlist, so `bash scripts/setup.bash` is a real
+    # invocation (`.bash` was whitelisting-out, Codex on #123).
     rb"[ \t]+[^\n|&;`]*?scripts/(?:[A-Za-z0-9_.-]+/)"
-    rb"*(?:[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs|cjs|rb|pl)|[A-Za-z0-9_-]+)"
+    rb"*(?:[A-Za-z0-9_.-]+\.[A-Za-z0-9]+|[A-Za-z0-9_-]+)"
     rb"(?![\w.])"
     # An interpreter held in a variable — `$PYTHON scripts/setup.py`,
     # `${NODE} scripts/x.js`, `"$PYTHON" scripts/x.py` (the double quotes
@@ -104,16 +112,16 @@ SCRIPT_REF = re.compile(
     rb"[ \t]+(?:-[^\s|&;`]*[ \t]+"
     rb"(?:(?:\"[^\n\"]*\"|'[^\n']*'|[^\s|&;`'-][^\s|&;`]*)[ \t]+)?)*"
     rb"scripts/(?:[A-Za-z0-9_.-]+/)"
-    rb"*(?:[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs|cjs|rb|pl)|[A-Za-z0-9_-]+)"
+    rb"*(?:[A-Za-z0-9_.-]+\.[A-Za-z0-9]+|[A-Za-z0-9_-]+)"
     rb"(?![\w.])"
     rb"|\./scripts/(?:[A-Za-z0-9_.-]+/)"
-    rb"*(?:[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs|cjs|rb|pl)|[A-Za-z0-9_-]+)"
+    rb"*(?:[A-Za-z0-9_.-]+\.[A-Za-z0-9]+|[A-Za-z0-9_-]+)"
     rb"(?![\w.])"
     # POSIX `.` — the dot builtin sources a file just like `source`. The
     # lookbehind keeps `..`, `foo.` and `./` out; `. ` requires whitespace
     # after the dot, so `./scripts/x.sh` still binds only to the exec alt.
     rb"|(?<![\w./\\-])\.[ \t]+[^\n|&;`]*?scripts/(?:[A-Za-z0-9_.-]+/)"
-    rb"*(?:[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs|cjs|rb|pl)|[A-Za-z0-9_-]+)"
+    rb"*(?:[A-Za-z0-9_.-]+\.[A-Za-z0-9]+|[A-Za-z0-9_-]+)"
     rb"(?![\w.])"
     # `python -m scripts.check` — the module form invokes the same file
     # (scripts/check.py, or a package's __init__.py). Extraction maps the
@@ -148,7 +156,7 @@ CONSUMER_SCRIPT_KEYS = ("consumer_scripts",)
 # consumer-repository commands.
 SCRIPT_NAME = re.compile(
     rb"scripts/((?:[A-Za-z0-9_.-]+/)"
-    rb"*(?:[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs|cjs|rb|pl)|[A-Za-z0-9_-]+))"
+    rb"*(?:[A-Za-z0-9_.-]+\.[A-Za-z0-9]+|[A-Za-z0-9_-]+))"
     rb"(?![\w.])")
 # `-m scripts.a.b` extraction — the dotted module resolves to
 # scripts/a/b.py or the runnable scripts/a/b/__main__.py (`python -m`
@@ -752,16 +760,31 @@ _WRAPPER_OPT_OPERAND = {
 # `command -v`/`-V` only describe a command — they never run it (Devin
 # Review on #1370).
 _WRAPPER_DESCRIBE = frozenset({b"-v", b"-V"})
+# Heads whose output provably does NOT carry the input stream — a pipe
+# into one ends the chain without executing anything downstream: `cat x
+# | wc -l | sh` feeds sh a line count, not the script (Devin on #123).
+# Kept to commands that REPLACE the stream: digest/count/printer tools.
+# Filters and transformers (grep/sed/awk/tr/sort/uniq/tee/…) still emit
+# script content — they are NOT here, so the walk continues past them.
+_STDIN_SINK_HEADS = frozenset({
+    b"wc", b"md5sum", b"sha1sum", b"sha224sum", b"sha256sum",
+    b"sha384sum", b"sha512sum", b"b2sum", b"cksum", b"sum",
+    b"echo", b"printf", b"yes", b"true", b"false", b"sleep",
+    b"date", b"seq", b"pwd", b"uname", b"hostname", b"cal", b"factor",
+    b"bc", b"dc", b"expr", b"env", b"printenv",
+})
 _ASSIGN_WORD = re.compile(rb"[A-Za-z_][A-Za-z0-9_]*=")
 # Interpreter options whose OPERAND is the program — `sh -c 'x'` and
 # `python -c 'x'` never read stdin, so piping a script into them is inert
 # (Devin Review on #1953). `-e` means errexit for shells but the eval
-# operand for perl/ruby/node/lua, so the table is per-head.
+# operand for perl/ruby/node/lua, so the table is per-head. `python -m`
+# takes its program from the named module (`python -m json.tool` parses
+# the pipe as DATA), so it ends the chain the same way.
 _EXEC_OPERAND_FLAGS = {
     b"sh": frozenset({b"-c"}), b"bash": frozenset({b"-c"}),
     b"dash": frozenset({b"-c"}), b"zsh": frozenset({b"-c"}),
     b"ksh": frozenset({b"-c"}), b"ash": frozenset({b"-c"}),
-    b"python": frozenset({b"-c"}),
+    b"python": frozenset({b"-c", b"-m"}),
     b"perl": frozenset({b"-e", b"-E"}),
     b"ruby": frozenset({b"-e"}),
     b"node": frozenset({b"-e", b"--eval"}),
@@ -810,18 +833,59 @@ def _stdin_exec_head(win: bytes) -> str:
 
     "exec"  — the head executes what it reads on stdin (`sh`, `python`).
     "sink"  — the head ends the stream without executing it: a
-              describe-mode wrapper (`command -v`), or an interpreter
+              describe-mode wrapper (`command -v`), an interpreter
               whose program comes from argv (`sh -c 'true'`,
-              `python f.py` — the pipe's contents are ignored).
+              `python f.py` — the pipe's contents are ignored), or a
+              head that replaces the stream (`wc -l`, `sha256sum` —
+              downstream sees a count/digest, not the script).
     "other" — anything else; a `|` walk continues past it (a filter or
               an unknown head may still forward the script downstream)."""
     words = _shell_words(_mask_parens(win))
+    # `env -S`/`--split-string` re-parses its operand into the command
+    # line — `cat x | env -S 'bash -s'` execs bash on the pipe, quoted
+    # operand or not (Codex on #1370). Classify the operand text as the
+    # command; an operand that doesn't classify falls through to the
+    # normal wrapper walk.
+    for w in words:
+        t = _word_text(win[w[0]:w[1]])
+        if _ASSIGN_WORD.match(t):
+            continue
+        if _command_key(win[w[0]:w[1]]) == b"env":
+            j = words.index(w) + 1
+            while j < len(words):
+                tj = _word_text(win[words[j][0]:words[j][1]])
+                if _ASSIGN_WORD.match(tj):
+                    j += 1
+                    continue
+                operand = None
+                if tj in (b"-S", b"--split-string"):
+                    if j + 1 < len(words):
+                        operand = _word_text(
+                            win[words[j + 1][0]:words[j + 1][1]])
+                elif tj.startswith(b"--split-string="):
+                    operand = tj[len(b"--split-string="):]
+                elif tj.startswith(b"-S") and len(tj) > 2:
+                    operand = tj[2:]
+                if operand is not None:
+                    v = _stdin_exec_head(operand)
+                    if v != "other":
+                        return v
+                    break
+                if tj.startswith(b"-"):
+                    j += 2 if (b"=" not in tj
+                               and tj in _WRAPPER_OPT_OPERAND[b"env"]
+                               and j + 1 < len(words)) else 1
+                    continue
+                break
+        break
     hi = _effective_head(words, win)
     if hi == -1:
         return "sink"
     if hi is None:
         return "other"
     key = _command_key(win[words[hi][0]:words[hi][1]])
+    if key in _STDIN_SINK_HEADS:
+        return "sink"
     if key not in _STDIN_EXEC_HEADS:
         return "other"
     # The interpreter's own program operand ends the chain: `-c 'x'` runs
@@ -961,6 +1025,12 @@ def _heredoc_spans(src: bytes) -> list[tuple[int, int, int]]:
                         else _HD_EXPAND)
                 spans.append((start_off, offs[i], mode))
                 pending.pop(0)
+                if pending:
+                    # The next queued heredoc's body starts on the line
+                    # AFTER this delimiter — `cat <<A; sh <<B` would
+                    # otherwise attribute A's body to B's command too
+                    # (Devin on #1370).
+                    pending[0][4] = offs[i] + len(ln) + 1
             i += 1
             continue
         for delim, strip, quoted, op_pos in _heredoc_ops(ln):
@@ -976,7 +1046,52 @@ def _heredoc_spans(src: bytes) -> list[tuple[int, int, int]]:
     return spans
 
 
-def _span_output_exec(src: bytes, a: int) -> bool:
+def _pipe_pos(src: bytes, pos: int) -> int:
+    """Index of the first UNQUOTED `|`/`|&` at or after `pos`, or -1.
+
+    A `;`, `&`, newline, another substitution opener, or `||` ends the
+    scan — the enclosing command is over, so nothing downstream executes
+    this command's output. Redirection operators don't terminate: the
+    pipeline still connects (`echo "$(x)" > f | sh` pipes to sh)."""
+    in_s = in_d = esc = False
+    # Learn the quote state AT pos first — `pos` typically sits right
+    # after a substitution close, so `"` or `'` there may be CLOSING a
+    # quote, not opening one (`"$(x)" | sh`).
+    j = 0
+    while j < pos:
+        c = src[j]
+        if esc:
+            esc = False
+        elif c == 0x5C and not in_s:
+            esc = True
+        elif c == 0x27 and not in_d:
+            in_s = not in_s
+        elif c == 0x22 and not in_s:
+            in_d = not in_d
+        j += 1
+    while j < len(src):
+        c = src[j]
+        if esc:
+            esc = False
+        elif c == 0x5C:
+            esc = True
+        elif c == 0x27 and not in_d:
+            in_s = not in_s
+        elif c == 0x22 and not in_s:
+            in_d = not in_d
+        elif in_s or in_d:
+            pass
+        elif c == 0x7C:
+            if src[j + 1:j + 2] == b"|":
+                return -1
+            return j
+        elif c in (0x3B, 0x26, 0x0A, 0x60, 0x28, 0x29):
+            return -1
+        j += 1
+    return -1
+
+
+def _span_output_exec(src: bytes, a: int, after: int | None = None) -> bool:
     """True when the substitution starting at `a` produces output the
     enclosing command EXECUTES — so a reader inside it (`cat scripts/x`)
     supplies code, not data (Codex on #123).
@@ -984,8 +1099,10 @@ def _span_output_exec(src: bytes, a: int) -> bool:
     - `<(`/`>(` operands are fd-paths the head opens and runs:
       `bash <(cat x)` and `source <(cat x)` execute x's contents.
     - `$(` output becomes code as `eval`'s argument
-      (`eval "$(cat x)"`) or the operand of a `-c`/`-e`-style program
-      flag (`bash -c "$(cat x)"`, `node -e "$(cat x)"`)."""
+      (`eval "$(cat x)"`), the operand of a `-c`/`-e`-style program
+      flag (`bash -c "$(cat x)"`, `node -e "$(cat x)"`), or as the
+      enclosing command's output piped to an executor
+      (`echo "$(cat x)" | sh` — Devin on cpdcheck #6)."""
     procsub = src[a] in (0x3C, 0x3E)
     cs = _command_start(src, a)
     win = _cmd_window(src, cs)
@@ -997,6 +1114,13 @@ def _span_output_exec(src: bytes, a: int) -> bool:
     if procsub:
         return key in _STDIN_EXEC_HEADS or key in (b"source", b".")
     if key == b"eval":
+        return True
+    # The enclosing command's window stops AT the substitution opener,
+    # so the pipe check scans from `after` — just past the
+    # substitution's close — to the next unquoted `|` (`echo "$(cat x)"
+    # | sh` — Devin on #6).
+    p = (cs + len(win)) if after is None else _pipe_pos(src, after)
+    if p >= 0 and _pipe_to_exec(src, p):
         return True
     flags = _EXEC_OPERAND_FLAGS.get(key, frozenset())
     if not flags:
@@ -1028,15 +1152,36 @@ def _descend_sub(src: bytes, pos: int,
         body_end = b - 1 if src[b - 1:b] == b")" else b
         return _command_literal(
             src[a + 2:body_end], pos - a - 2,
-            output_exec or _span_output_exec(src, a))
-    ticks = [t for t in range(a0, b0) if src[t] == 0x60]
+            output_exec or _span_output_exec(src, a, b))
+    # Backtick pairing is quote-aware: ticks inside a single-quoted span
+    # are literal (`'grep `x` y'` is an argument, not a substitution —
+    # Devin BUG_0002 on #1953), as is a backslash-escaped tick; inside
+    # double quotes a tick still opens a substitution.
+    in_s = in_d = esc = False
+    ticks: list[int] = []
+    for t in range(a0, b0):
+        c = src[t]
+        if esc:
+            esc = False
+            continue
+        if c == 0x5C and not in_s:  # backslash
+            esc = True
+            continue
+        if c == 0x27 and not in_d:  # single quote
+            in_s = not in_s
+            continue
+        if c == 0x22 and not in_s:  # double quote
+            in_d = not in_d
+            continue
+        if c == 0x60 and not in_s:
+            ticks.append(t)
     for t1, t2 in zip(ticks[::2], ticks[1::2]):
         if t1 < pos < t2:
             # `eval \`cmd\`` / `bash -c \`cmd\`` execute the output the
             # same way the `$(` forms do (backtick is not procsub).
             return _command_literal(
                 src[t1 + 1:t2], pos - t1 - 1,
-                output_exec or _span_output_exec(src, t1))
+                output_exec or _span_output_exec(src, t1, t2 + 1))
     return None
 
 
@@ -1083,11 +1228,12 @@ def _glued_short_hides_path(text: bytes) -> bool:
 
     `-d` always takes that operand. Any other flag hides the path only
     when it is not itself a script file — `node -rscripts/preload.js`
-    still counts as an invocation."""
+    still counts as an invocation. Any dotted extension counts —
+    scripts/ has no allowlist (`-rscripts/x.bash` is an invocation)."""
     if len(text) < 3 or text[1:2] == b"d":
         return len(text) >= 3
     name = text[2:].rsplit(b"/", 1)[-1].rsplit(b"=", 1)[-1]
-    return not name.endswith(_SCRIPT_SUFFIXES)
+    return not re.search(rb"\.[A-Za-z0-9]+$", name)
 
 
 def _option_value_spans(window: bytes) -> list[tuple[int, int]]:
@@ -2358,7 +2504,7 @@ def script_dep_block(plugin_dir: Path, src_bytes: bytes,
                                window[n.start():n.end()]):
                 continue
             p = n.group(1).decode("utf-8", errors="ignore")
-            if (not re.search(r"\.(?:py|sh|ts|js|mjs|cjs|rb|pl)$", p)
+            if (not re.search(r"\.[A-Za-z0-9]+$", p)
                     and any(a <= n.start() and n.end() <= b
                             for a, b in opt_spans)):
                 continue
@@ -2600,6 +2746,83 @@ def secure_dir_fd(root: Path, rel: str) -> int:
     except BaseException:
         os.close(fd)
         raise
+
+
+def _read_source(src: Path) -> bytes | None:
+    """Read a registry component file without following a raced symlink.
+
+    The resolve-time `resolved_src` check runs BEFORE this read — a
+    process that can modify the registry checkout can swap the path for
+    a symlink in between, and `Path.read_bytes()` would then ship the
+    link target's bytes (Codex P1 on #1953). `O_NOFOLLOW` fails on the
+    swap (`ELOOP`); `fstat` revalidates a regular file so a raced fifo
+    cannot block the read either. Returns None on any failure — the
+    caller surfaces a plan conflict."""
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    try:
+        # O_NONBLOCK too — a fifo open blocks for a writer BEFORE fstat
+        # can reject it; on regular files the flag is inert.
+        fd = os.open(src, os.O_RDONLY | os.O_NONBLOCK | nofollow)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return None
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+@contextlib.contextmanager
+def _repo_apply_mutex(repo_root: Path):
+    """Serialize concurrent `--apply` runs against the same checkout.
+
+    Two resolvers in one working tree interleave a lost update: both
+    read the lock, each applies its own plan, and the last
+    `atomic_replace` of the lockfile silently drops the other's
+    installs (Devin BUG_0001 on #1953). An exclusive flock on
+    `.ai/capability-apply.lock` is held across the whole plan→apply
+    window. fcntl is POSIX-only — without it the mutex degrades to a
+    no-op rather than refusing to run on that platform."""
+    try:
+        import fcntl
+    except ImportError:
+        yield
+        return
+    lock_dir = repo_root / ".ai"
+    if lock_dir.is_symlink():
+        # Never create the mutex file through a link — the apply's own
+        # lockfile-destination check surfaces the conflict downstream;
+        # serialize nothing here (there is no trusted dir to lock in).
+        yield
+        return
+    try:
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(lock_dir / "capability-apply.lock"),
+                     os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+                     0o644)
+    except OSError:
+        # `.ai` unroutable (a plain file, or the lock path is itself a
+        # link) — the apply's checks will report it; proceed unlocked.
+        yield
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 def atomic_replace(dst: Path, fill,
@@ -3021,7 +3244,14 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                     f"{req}: {rel} is or resolves through a symlink — "
                     "refusing to materialise the link target"))
                 continue
-            src_bytes = src.read_bytes()
+            src_bytes = _read_source(src)
+            if src_bytes is None:
+                plan.conflicts.append((
+                    dst,
+                    f"{req}: {rel} cannot be read without following a "
+                    "link or non-regular file — refusing to materialise "
+                    "unverifiable bytes"))
+                continue
             if pinned:
                 # Compare against the pinned git OBJECT, not the index or
                 # status output: --untracked-files=all is blind to ignored
@@ -3518,6 +3748,15 @@ def main() -> int:
         ap.error("--prune requires --apply")
 
     repo_root = Path(args.repo_root).resolve()
+    if args.apply:
+        # The mutex must be taken BEFORE the lock is read — the plan
+        # that applies is the one the lock snapshot describes.
+        with _repo_apply_mutex(repo_root):
+            return _run(args, repo_root)
+    return _run(args, repo_root)
+
+
+def _run(args: argparse.Namespace, repo_root: Path) -> int:
     manifest_path = Path(args.manifest)
     if not manifest_path.is_absolute():
         manifest_path = repo_root / manifest_path
