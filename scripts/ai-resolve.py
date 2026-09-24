@@ -41,10 +41,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-try:
-    import yaml
-except ImportError:
-    yaml = None  # stdlib _mini_yaml subset below is the no-deps fallback
+
 
 SCOPES = ("platform", "manolii", "buro", "impaktful", "cpdcheck", "repo", "personal")
 LOCAL_SCOPES = {"repo", "personal"}
@@ -179,6 +176,10 @@ def _mini_yaml(text: str):
                         more = parse(lines[pos[0]][0])
                         if not isinstance(more, dict):
                             raise ValueError("nested sequence inside item map")
+                        dup = d.keys() & more.keys()
+                        if dup:
+                            raise ValueError(
+                                f"duplicate key {sorted(dup)[0]!r}")
                         d.update(more)
                     seq.append(d)
                 else:
@@ -190,6 +191,11 @@ def _mini_yaml(text: str):
             if not km:
                 raise ValueError(f"unsupported line {lines[pos[0]][1]!r}")
             k, v = km.group(1), km.group(2)
+            if k in out:
+                # Duplicate keys silently keep the last value in YAML — a
+                # manifest that states a ref twice must be a parse error,
+                # not a coin flip on which value won.
+                raise ValueError(f"duplicate key {k!r}")
             pos[0] += 1
             if v is not None:
                 if re.fullmatch(r"[>|][+-]?", v.strip()):
@@ -216,6 +222,15 @@ def _mini_yaml(text: str):
                         pos[0] += 1
                     if (pos[0] < len(lines) and lines[pos[0]][0] > indent):
                         raise ValueError("nested structure after scalar value")
+            elif (pos[0] < len(lines)
+                  and lines[pos[0]][0] == indent
+                  and (lines[pos[0]][1] == "-"
+                       or lines[pos[0]][1].startswith("- "))):
+                # Indentationless block sequence: `key:` followed by `-`
+                # items at the SAME indent is valid YAML (yaml.dump emits
+                # it). The seq parser stops at the next non-dash line, so
+                # sibling mapping keys are not consumed.
+                out[k] = parse(indent)
             elif pos[0] < len(lines) and lines[pos[0]][0] > indent:
                 # `key:` empty followed by deeper plain text is a folded
                 # scalar in YAML; a deeper key/seq is a nested structure.
@@ -247,10 +262,10 @@ def _mini_yaml(text: str):
 
 
 def _yaml_load(text: str):
-    """PyYAML when installed, _mini_yaml otherwise — the vendored script
-    must run in consumer repos with no Python runtime deps."""
-    if yaml is not None:
-        return yaml.safe_load(text)
+    """One YAML grammar in every environment: the restricted _mini_yaml
+    subset — the vendored resolver has no runtime deps and parses the same
+    installed set whether or not PyYAML happens to be present. Richer YAML
+    fails closed, never parses differently."""
     return _mini_yaml(text)
 
 
@@ -475,7 +490,9 @@ def atomic_replace(dst: Path, fill, src: Path | None = None) -> None:
 
 def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                      index: dict, repo_root: Path, locked: dict, plan: Plan,
-                     write_components: bool = True) -> None:
+                     write_components: bool = True,
+                     locked_exec: dict | None = None) -> None:
+    locked_exec = locked_exec or {}
     m = REQUIRES_RE.match(req)
     if not m:
         plan.conflicts.append((repo_root / req, "malformed plugin reference"))
@@ -692,9 +709,11 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
         return
 
     materialised: dict[str, str] = {}
+    exec_modes: dict[str, bool] = {}
     component_files = (collect_component_files(plugin_dir)
                        if write_components else {})
     pinned_scripts: set[str] | None = None
+    pinned_modes: dict[str, str] = {}
     if pinned:
         # Worktree enumeration alone is not authoritative under a pin: a
         # tracked component DELETED while marked skip-worktree leaves status
@@ -711,7 +730,7 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
             try:
                 tree = subprocess.run(
                     ["git", "-C", str(registry_root), "ls-tree", "-r",
-                     "--name-only", "HEAD", "--", rel_dir],
+                     "HEAD", "--", rel_dir],
                     capture_output=True, text=True, timeout=10)
             except (OSError, subprocess.SubprocessError):
                 tree = None
@@ -722,7 +741,16 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                     "tree — refusing to record a pin over unverifiable state",
                 ))
                 return
-            tracked = {ln for ln in tree.stdout.splitlines() if ln}
+            # '<mode> <type> <sha>\t<path>' — modes are pin inputs too: a
+            # skip-worktree exec-bit flip passes the blob comparison while
+            # copystat ships the wrong permissions under the pin's name.
+            tracked = set()
+            for ln in tree.stdout.splitlines():
+                if not ln:
+                    continue
+                meta, _, path = ln.partition("\t")
+                tracked.add(path)
+                pinned_modes[path] = meta.split(" ", 1)[0]
             present = {
                 src.relative_to(registry_root).as_posix()
                 for src in verify_files.get(comp, [])
@@ -812,6 +840,15 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                         "divergence) — refusing to materialise",
                     ))
                     continue
+                if ((pinned_modes.get(rel_src) == "100755")
+                        != bool(src.stat().st_mode & 0o111)):
+                    plan.conflicts.append((
+                        dst,
+                        f"{req}: {rel} exec bit differs from the pinned git "
+                        "tree (a skip-worktree mode flip hides it from "
+                        "status) — refusing to materialise",
+                    ))
+                    continue
             if (b"CLAUDE_PLUGIN_ROOT" in src_bytes
                     or declares_script_deps(src_bytes)
                     or script_dep_block(plugin_dir, src_bytes,
@@ -869,6 +906,7 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                 else:
                     plan.skips.append((dst, f"identical — already provided by {prior_req}"))
                     materialised[rel_dst] = src_sha
+                    exec_modes[rel_dst] = bool(src.stat().st_mode & 0o111)
                 continue
             if dst.exists() and not dst.is_file():
                 # A directory (or FIFO/socket) at the destination —
@@ -902,16 +940,40 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                         "edit (restore it or delete it and re-resolve)",
                     ))
                     continue
+                elif not same_exec:
+                    # Bytes still match the install record but the exec bit
+                    # differs — the lock's installed-mode record distinguishes
+                    # a local chmod (refuse) from a registry mode change
+                    # (repair by rewriting).
+                    dst_exec = bool(dst.stat().st_mode & 0o111)
+                    rec_exec = locked_exec.get(rel_dst)
+                    if rec_exec is None or dst_exec != rec_exec:
+                        plan.conflicts.append((
+                            dst,
+                            "exec bit differs from the installed-mode record "
+                            "— refusing to clobber a possible local chmod "
+                            "(restore the mode or delete the file and "
+                            "re-resolve)",
+                        ))
+                        continue
+                    else:
+                        # dst mode still matches the install record — the
+                        # registry changed mode; repair by rewriting.
+                        plan.writes.append((src, dst))
+                        plan.planned[rel_dst] = (src_sha, req)
+                        plan.payload[rel_dst] = src_bytes
                 else:
                     plan.writes.append((src, dst))  # registry drift — update
                     plan.planned[rel_dst] = (src_sha, req)
                     plan.payload[rel_dst] = src_bytes
                 materialised[rel_dst] = src_sha
+                exec_modes[rel_dst] = bool(src.stat().st_mode & 0o111)
             else:
                 plan.writes.append((src, dst))
                 plan.planned[rel_dst] = (src_sha, req)
                 plan.payload[rel_dst] = src_bytes
                 materialised[rel_dst] = src_sha
+                exec_modes[rel_dst] = bool(src.stat().st_mode & 0o111)
 
     for comp in ("hooks", "scripts", "data", "telemetry"):
         if (plugin_dir / comp).is_dir():
@@ -926,6 +988,7 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
         "resolved_version": version,
         "source": entry["path"],
         "files": materialised,
+        "exec": exec_modes,
         "sha256": sha256(manifest_file) if manifest_file.is_file() else None,
     })
 
@@ -988,21 +1051,28 @@ def load_lock(repo_root: Path) -> tuple[dict, str | None]:
             or not all(isinstance(k, str) and isinstance(v, str)
                        for k, v in provenance.items())):
         return {}, "'provenance' must map repo-relative paths to plugin names"
+    execmap = doc.get("exec")
+    if "exec" in doc and (
+            not isinstance(execmap, dict)
+            or not all(isinstance(k, str) and isinstance(v, bool)
+                       for k, v in execmap.items())):
+        return {}, "'exec' must map repo-relative paths to booleans"
     return doc, None
 
 
 def lock_provenance(lock: dict) -> dict[str, str]:
     """rel path -> the plugin req that installed it, for prune attribution.
 
-    The 'provenance' map is the authority; entries are backfilled from
-    resolved[].files so locks written before the field existed still carry
-    an install trail. A path present only in the top-level 'files' map (a
-    forged or hand-written entry) has NO provenance — --prune refuses it."""
-    out: dict[str, str] = {}
+    The 'provenance' map is the authority when present — locks written by
+    provenance-aware code deliberately omit adopted-on-match files (a file
+    the resolver never wrote is never prune-eligible). Backfill from
+    resolved[].files only for locks that predate the field. A path present
+    only in the top-level 'files' map (a forged or hand-written entry) has
+    NO provenance — it is released from tracking, never pruned."""
     prov = lock.get("provenance")
     if isinstance(prov, dict):
-        for k, v in prov.items():
-            out[k] = v
+        return dict(prov)
+    out: dict[str, str] = {}
     for r in lock.get("resolved", []):
         rf = r.get("files", {}) if isinstance(r, dict) else {}
         who = str(r.get("plugin", "?")) if isinstance(r, dict) else "?"
@@ -1012,6 +1082,15 @@ def lock_provenance(lock: dict) -> dict[str, str]:
             if isinstance(k, str):
                 out.setdefault(k, who)
     return out
+
+
+def lock_exec_modes(lock: dict) -> dict[str, bool]:
+    """rel path -> exec bit as installed, for chmod-drift attribution: the
+    lock records the mode the resolver materialised, so a local chmod (dst
+    mode != record) is distinguishable from a registry mode change (dst
+    mode == record != src mode)."""
+    execmap = lock.get("exec")
+    return dict(execmap) if isinstance(execmap, dict) else {}
 
 
 def main() -> int:
@@ -1056,11 +1135,13 @@ def main() -> int:
                 plan.advisories.append(
                     f"surface '{s}' is advisory-only — no renderer yet "
                     "(claude-code is the only implemented surface)")
+    install_prov = lock_provenance(lock)
+    locked_exec = lock_exec_modes(lock)
     for req in manifest["requires"]:
         plan_requirement(req["plugin"], req["ref"], universe,
                          registry_root, index, repo_root, locked_dig, plan,
-                         write_components=claude_selected)
-    install_prov = lock_provenance(lock)
+                         write_components=claude_selected,
+                         locked_exec=locked_exec)
 
     # Orphan detection: lockfile files no longer required. Without --prune an
     # orphan is simply kept (and stays lockfile-tracked) — modified or not.
@@ -1100,6 +1181,15 @@ def main() -> int:
                 "(repair .ai/capability-lock.json manually)",
             ))
             continue
+        if f not in install_prov:
+            # Never resolver-installed: a pre-existing identical file adopted
+            # on sight, a forged claim, or a v1-lock entry. It is the
+            # consumer's file — never a prune candidate, never an orphan the
+            # resolver tracks; the next lock simply stops watching it.
+            plan.advisories.append(
+                f"{f}: not resolver-installed — releasing lock tracking "
+                "(file kept)")
+            continue
         digest = locked_dig[f]
         # Digest checks read THROUGH a symlink (that's what the lock recorded),
         # but removals act on the lexical path — unlinking a symlink entry must
@@ -1118,16 +1208,6 @@ def main() -> int:
                     lexical,
                     "prune candidate modified since install — refusing to remove a "
                     "possibly hand-edited file (delete or restore it manually, then re-resolve)",
-                ))
-            elif f not in install_prov:
-                # A lockfile 'files' entry with no install provenance is a
-                # forged or hand-written claim — pruning it would unlink a
-                # file the resolver never recorded installing.
-                plan.conflicts.append((
-                    lexical,
-                    "lockfile entry without install provenance — refusing to "
-                    "prune a path the resolver never installed "
-                    "(repair .ai/capability-lock.json manually)",
                 ))
             else:
                 plan.removals.append(lexical)
@@ -1198,14 +1278,24 @@ def main() -> int:
         for f in plan.removals:
             rel = f.relative_to(repo_root).as_posix()
             expected_files[rel] = locked_dig[rel]
-        expected_resolved = [{k: v for k, v in r.items() if k != "files"}
+        expected_resolved = [{k: v for k, v in r.items()
+                              if k not in ("files", "exec")}
                              for r in plan.resolved]
+        expected_written = {dst.relative_to(repo_root).as_posix()
+                            for _, dst in plan.writes}
         expected_prov = {rel: r["plugin"] for r in plan.resolved
-                         for rel in r["files"]}
+                         for rel in r["files"]
+                         if rel in install_prov or rel in expected_written}
         for f in plan.removals:
             rel = f.relative_to(repo_root).as_posix()
             if rel in install_prov:
                 expected_prov[rel] = install_prov[rel]
+        expected_exec = {rel: mode for r in plan.resolved
+                         for rel, mode in r["exec"].items()}
+        for f in plan.removals:
+            rel = f.relative_to(repo_root).as_posix()
+            if rel in locked_exec:
+                expected_exec[rel] = locked_exec[rel]
         lock_missing = not lock_file.is_file()
         expected_lock = {
             "version": 1,
@@ -1213,9 +1303,31 @@ def main() -> int:
             "resolved": expected_resolved,
             "files": expected_files,
             "provenance": expected_prov,
+            "exec": expected_exec,
         }
         lock_stale = lock != expected_lock
-        if drift or lock_missing or lock_stale:
+        # Kept orphans are still lockfile-tracked: a modified or deleted one
+        # is drift, not a pass — the expected-lock comparison is
+        # self-referential, so verify on-disk bytes against the recorded
+        # digest. A v1-lock orphan with no recorded digest can only be
+        # existence-verified; --apply upgrades it to a full record.
+        orphan_drift = []
+        for f in plan.removals:
+            rel = f.relative_to(repo_root).as_posix()
+            digest = locked_dig[rel]
+            if not os.path.lexists(f):
+                orphan_drift.append(f"{rel} (missing)")
+                continue
+            if digest is not None:
+                try:
+                    on_disk = sha256(f)
+                except OSError:
+                    on_disk = None
+                if on_disk != digest:
+                    orphan_drift.append(f"{rel} (modified)")
+        if drift or orphan_drift or lock_missing or lock_stale:
+            for od in orphan_drift:
+                print(f"  drift   {od}")
             if lock_missing:
                 print("\nDRIFT: capability lock missing — run --apply to "
                       "establish ownership")
@@ -1255,19 +1367,36 @@ def main() -> int:
             for f in plan.removals:
                 rel = f.relative_to(repo_root).as_posix()
                 new_files[rel] = locked_dig[rel]
+        written = {dst.relative_to(repo_root).as_posix()
+                   for _, dst in plan.writes}
+        # Provenance = files this resolver wrote THIS run or carried from an
+        # earlier install record. A pre-existing file that merely matched the
+        # registry content is adopted for drift-watching only — never
+        # provenanced, so --prune can never unlink a file the resolver did
+        # not put there.
         new_prov = {rel: r["plugin"] for r in plan.resolved
-                    for rel in r["files"]}
+                    for rel in r["files"]
+                    if rel in install_prov or rel in written}
         if not args.prune:
             for f in plan.removals:
                 rel = f.relative_to(repo_root).as_posix()
                 if rel in install_prov:
                     new_prov[rel] = install_prov[rel]
+        new_exec = {rel: mode for r in plan.resolved
+                    for rel, mode in r["exec"].items()}
+        if not args.prune:
+            for f in plan.removals:
+                rel = f.relative_to(repo_root).as_posix()
+                if rel in locked_exec:
+                    new_exec[rel] = locked_exec[rel]
         lock_doc = {
             "version": 1,
             "universe": universe,
-            "resolved": [{k: v for k, v in r.items() if k != "files"} for r in plan.resolved],
+            "resolved": [{k: v for k, v in r.items()
+                          if k not in ("files", "exec")} for r in plan.resolved],
             "files": new_files,
             "provenance": new_prov,
+            "exec": new_exec,
         }
         lock_file = repo_root / LOCK_PATH
         lock_file.parent.mkdir(parents=True, exist_ok=True)

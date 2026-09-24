@@ -4012,9 +4012,10 @@ def test_prune_refuses_nonregular_orphan(tmp_path):
     assert (consumer / ".claude" / "skills" / "junk").is_dir()
 
 
-def test_prune_refuses_unattributed_orphan(tmp_path):
-    """A lockfile 'files' claim with no install provenance (forged or
-    hand-written) must never unlink a path the resolver did not install."""
+def test_prune_releases_unattributed_orphan(tmp_path):
+    """A lockfile 'files' claim with no install provenance (forged, hand-
+    written, or adopted-on-match) must never unlink a path the resolver did
+    not install — it is released from tracking, never pruned."""
     reg_root = make_registry(tmp_path / "src", {})
     consumer = tmp_path / "consumer"
     consumer.mkdir()
@@ -4030,9 +4031,38 @@ def test_prune_refuses_unattributed_orphan(tmp_path):
                   hashlib.sha256(b"hand-maintained").hexdigest()},
     }))
     r = run_resolver(m, reg_root, consumer, "--apply", "--prune")
-    assert r.returncode == 1
-    assert "provenance" in r.stdout
+    assert r.returncode == 0
+    assert "not resolver-installed" in r.stdout
     assert victim.read_text() == "hand-maintained"
+    lock = json.loads((ai / "capability-lock.json").read_text())
+    assert ".claude/skills/demo/keep.md" not in lock["files"]
+
+
+def test_prune_keeps_adopted_prematch(tmp_path):
+    """A consumer file that merely matches registry content is adopted for
+    drift-watching only — never provenanced, so --prune releases tracking
+    instead of deleting the consumer's own file."""
+    body = "---\nname: demo\ndescription: d\n---\nshared bytes\n"
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/SKILL.md", body)],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    own = consumer / ".claude" / "skills" / "demo" / "SKILL.md"
+    own.parent.mkdir(parents=True)
+    own.write_text(body)
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    lock = json.loads((consumer / ".ai" / "capability-lock.json").read_text())
+    assert ".claude/skills/demo/SKILL.md" in lock["files"]
+    assert ".claude/skills/demo/SKILL.md" not in lock.get("provenance", {})
+    write_manifest(consumer, "manolii", [])
+    r = run_resolver(m, reg_root, consumer, "--apply", "--prune")
+    assert r.returncode == 0, r.stdout
+    assert own.read_text() == body
+    lock = json.loads((consumer / ".ai" / "capability-lock.json").read_text())
+    assert ".claude/skills/demo/SKILL.md" not in lock["files"]
 
 
 def test_check_passes_with_kept_orphan(tmp_path):
@@ -4106,6 +4136,122 @@ def test_mini_yaml_manifest_grammar():
                 "a: \"unterminated"):
         with pytest.raises(ValueError):
             mod._mini_yaml(bad)
+
+
+def test_mini_yaml_indentationless_sequence():
+    """`key:` followed by `-` items at the SAME indent is valid YAML —
+    yaml.dump emits it for requires lists. Sibling keys must not be
+    consumed as seq items."""
+    mod = load_resolve_module()
+    doc = mod._mini_yaml(
+        "version: 1\nuniverse: manolii\nrequires:\n"
+        "- plugin: platform/framework\n  ref: \"^1.14\"\n"
+        "- plugin: platform/other\n  ref: \"1.0\"\n"
+        "surfaces: [claude-code]\n")
+    assert doc == {
+        "version": 1, "universe": "manolii",
+        "requires": [{"plugin": "platform/framework", "ref": "^1.14"},
+                     {"plugin": "platform/other", "ref": "1.0"}],
+        "surfaces": ["claude-code"],
+    }
+    try:
+        import yaml as pyyaml
+    except ImportError:
+        pyyaml = None
+    if pyyaml is not None:
+        assert pyyaml.safe_load(
+            "requires:\n- plugin: a\n  ref: '1.0'\nother: 2\n") == \
+            mod._mini_yaml("requires:\n- plugin: a\n  ref: '1.0'\nother: 2\n")
+
+
+def test_mini_yaml_rejects_duplicate_keys():
+    """Duplicate keys silently keep the last value in YAML — the resolver
+    must reject them outright instead of resolving an ambiguous manifest."""
+    mod = load_resolve_module()
+    for bad in ("a: 1\na: 2\n",
+                "x:\n  k: 1\n  k: 2\n",
+                "requires:\n- plugin: a\n  ref: '1.0'\n  ref: '2.0'\n"):
+        with pytest.raises(ValueError):
+            mod._mini_yaml(bad)
+
+
+def test_check_flags_modified_or_missing_kept_orphan(tmp_path):
+    """A kept orphan is still lockfile-tracked: editing or deleting it is
+    drift, not a pass — --check verifies on-disk bytes vs the recorded
+    digest."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/SKILL.md",
+                                "---\nname: demo\ndescription: d\n---\nbody")],
+        "platform/other": [("skills/extra/SKILL.md",
+                            "---\nname: extra\ndescription: d\n---\nbody")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"},
+                        {"plugin": "platform/other", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    write_manifest(consumer, "manolii",
+                   [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    orphan = consumer / ".claude" / "skills" / "extra" / "SKILL.md"
+    assert run_resolver(m, reg_root, consumer, "--check").returncode == 0
+    orphan.write_text("hand edit — no longer the installed bytes")
+    r = run_resolver(m, reg_root, consumer, "--check")
+    assert r.returncode == 1
+    assert "modified" in r.stdout
+    orphan.write_text("---\nname: extra\ndescription: d\n---\nbody")
+    assert run_resolver(m, reg_root, consumer, "--check").returncode == 0
+    orphan.unlink()
+    r = run_resolver(m, reg_root, consumer, "--check")
+    assert r.returncode == 1
+    assert "missing" in r.stdout
+
+
+def test_apply_conflicts_on_local_exec_bit_drift(tmp_path):
+    """A local chmod on a managed file is indistinguishable from a registry
+    mode change — fail closed as a conflict instead of silently repairing."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/run.sh", "echo hi\n")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    dst = consumer / ".claude" / "skills" / "demo" / "run.sh"
+    os.chmod(dst, (dst.stat().st_mode & ~0o111) if dst.stat().st_mode & 0o111
+             else dst.stat().st_mode | 0o111)
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 1
+    assert "exec bit differs" in r.stdout
+
+
+def test_pinned_exec_mode_conflicts(tmp_path):
+    """A skip-worktree exec-bit flip passes the blob comparison — the
+    resolver must compare the pinned tree's mode, not just its bytes."""
+    import subprocess as sp
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/x.md", "v1")],
+    })
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    sp.run(["git", "init", "-q"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "add", "-A"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "commit", "-qm", "init"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "tag", "v1.0.0"], cwd=reg_root, env=env, check=True)
+    rel = "registry/platform/framework/skills/demo/x.md"
+    sp.run(["git", "update-index", "--skip-worktree", rel],
+           cwd=reg_root, env=env, check=True)
+    f = reg_root / rel
+    os.chmod(f, f.stat().st_mode | 0o111)
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "tag:v1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 1
+    assert "exec bit differs from the pinned git tree" in r.stdout
 
 
 def test_unparseable_frontmatter_treated_as_deps():
