@@ -788,7 +788,11 @@ _STDIN_SINK_HEADS = frozenset({
 # `cat x | echo "$(cat)" | sh` executes x despite the echo head
 # (Devin on #1374, round-9 review). `expr` echoes a non-numeric
 # operand; the other sinks interpret argv as filenames/values.
-_STDIN_EMIT_HEADS = frozenset({b"echo", b"printf", b"yes", b"expr"})
+_STDIN_EMIT_HEADS = frozenset(
+    {b"echo", b"printf", b"yes", b"expr", b"date"})
+# `date` joins the emit heads: its FORMAT operand is echoed verbatim
+# — `date "+$(cat x)" | sh` executes x's content (CodeRabbit on #1955,
+# round-10 review).
 # grep long options whose required operand may be a separate word —
 # `grep --regexp -q` makes `-q` the PATTERN, not quiet mode (Devin +
 # CodeRabbit on #1374/#127/#9, round-9 review). Glued `--opt=val`
@@ -834,38 +838,67 @@ _PYTHON_STDIN_EXEC = frozenset({b"code", b"asyncio"})
 # (`python -m base64 -d | sh`) — so decode mode is "other" and the pipe
 # walk continues (Devin on #8, CodeRabbit on #125, round-7 review).
 _PYTHON_STDIN_TRANSFORM = frozenset({b"base64", b"quopri", b"uu", b"gzip"})
-_PYTHON_DECODE_FLAGS = frozenset({b"-d", b"-D", b"-u", b"--decode",
-                                  b"--decompress"})
-# Letters that may cluster in a codec module's short flags —
-# `python -m base64 -du` decodes (Codex on #1374, round-9 review).
-_PY_CLUSTER_LETTERS = frozenset(b"deuDE")
-_PY_DECODE_LETTERS = frozenset(b"dDu")
-
-
-def _py_decode_flag(t: bytes) -> bool:
-    """True when `t` selects decode/decompress mode for a codec
-    module — a lone flag or a single-dash cluster of codec letters
-    containing a decode letter (`-du`, `-ud`)."""
-    if t in _PYTHON_DECODE_FLAGS:
-        return True
-    body = t[1:]
-    return (len(t) > 2 and t[:1] == b"-" and t[1:2] != b"-"
-            and all(c in _PY_CLUSTER_LETTERS for c in body)
-            and any(c in _PY_DECODE_LETTERS for c in body))
+# Codec flag tables are PER MODULE — `gzip` rejects `-u` while `base64`
+# decodes with it, and the modules abort on an unrecognized flag
+# before emitting anything (Codex on #127, round-10 review).
+_PY_MODULE_DECODE = {
+    b"base64": frozenset({b"-d", b"-u"}),
+    b"quopri": frozenset({b"-d"}),
+    b"uu": frozenset({b"-d", b"--decode"}),
+    b"gzip": frozenset({b"-d", b"--decompress"}),
+}
+_PY_MODULE_FLAGS = {
+    b"base64": frozenset({b"-d", b"-e", b"-u", b"-h"}),
+    b"quopri": frozenset({b"-d", b"-e", b"-t"}),
+    b"uu": frozenset({b"-d", b"-t", b"--decode", b"--text",
+                      b"-h", b"--help"}),
+    b"gzip": frozenset({b"-d", b"--decompress", b"--fast", b"--best",
+                        b"-h", b"--help"}),
+}
+# getopt-driven modules cluster short flags (`-du` decodes); argparse
+# modules (gzip, uu) do not (Codex on #1374, round-9 review).
+_PY_MODULE_CLUSTER = {b"base64": frozenset(b"deu"),
+                      b"quopri": frozenset(b"det")}
+_PY_MODULE_CLUSTER_DECODE = {b"base64": frozenset(b"du"),
+                             b"quopri": frozenset(b"d")}
 
 
 def _py_module_verdict(mod: bytes, rest_words: list, sub: bytes) -> str:
     """Verdict for `python -m MOD <rest>` — "exec" when stdin IS the
-    program, "other" when a decode flag emits the original stream (the
-    walk decides downstream), else "sink"."""
+    program, "other" when a valid decode flag emits the original
+    stream, else "sink". A positional operand names a file the module
+    reads INSTEAD of the pipe (`python -m gzip -d x.gz` leaves stdin
+    unread), a lone `-` still means stdin, and an unrecognized flag
+    aborts the module before any output — all "sink" (Codex on
+    #127/#1374, round-10 review)."""
     top = mod.split(b".")[0]
     if top in _PYTHON_STDIN_EXEC:
         return "exec"
-    if top in _PYTHON_STDIN_TRANSFORM and any(
-            _py_decode_flag(_word_text(sub[w[0]:w[1]]))
-            for w in rest_words):
-        return "other"
-    return "sink"
+    if top not in _PYTHON_STDIN_TRANSFORM:
+        return "sink"
+    flags = _PY_MODULE_FLAGS[top]
+    decode = _PY_MODULE_DECODE[top]
+    cluster = _PY_MODULE_CLUSTER.get(top, frozenset())
+    cl_dec = _PY_MODULE_CLUSTER_DECODE.get(top, frozenset())
+    saw_decode = False
+    for w in rest_words:
+        t = _word_text(sub[w[0]:w[1]])
+        if t == b"-":
+            continue  # positional `-` — still reads stdin
+        if not t.startswith(b"-"):
+            return "sink"  # file operand — the pipe is not the input
+        if t in decode:
+            saw_decode = True
+            continue
+        if t in flags:
+            continue
+        if (len(t) > 2 and t[:1] == b"-" and t[1:2] != b"-"
+                and all(c in cluster for c in t[1:])):
+            if any(c in cl_dec for c in t[1:]):
+                saw_decode = True
+            continue
+        return "sink"  # invalid flag — the module aborts
+    return "other" if saw_decode else "sink"
 
 
 def _effective_head(words: list, win: bytes) -> int | None:
@@ -1123,13 +1156,16 @@ def _stdin_exec_head(win: bytes) -> str:
             # Operand spans are computed quote-blind, so an unquoted
             # `</dev/null` after `-s` still rebinds stdin (`sh -s
             # </dev/null` — Codex on #1374, round-9 review). Quoted
-            # words keep their `<`/`>` as literals.
-            if b"'" not in raw and b'"' not in raw:
-                _, pending = _word_redirects(t, fds)
+            # operator bytes stay literal inside _word_redirects.
+            _, pending = _word_redirects(raw, fds)
             continue
-        if b"'" not in raw and b'"' not in raw:
-            t, pending = _word_redirects(t, fds)
+        t, pending = _word_redirects(raw, fds)
         if not t:
+            continue
+        if saw_program:
+            # Everything after the program operand is argv for it —
+            # `python -c 'x' -m code` never parses the `-m` (Codex on
+            # #9, round-10 review).
             continue
         if t == b"-" or (t == b"-s" and key in _SH_STDIN_HEADS):
             # `-` (any interpreter) and shell `-s` mean "read stdin" —
@@ -1347,12 +1383,18 @@ def _redirect_apply(fds: dict, src: bytes, i: int) -> int:
     stay BYTES-sized — `int()` on a >4300-digit fd prefix raises
     ValueError (Codex P2 on #125)."""
     n = len(src)
-    if src[i:i + 1] == b"&":  # `&>`/`&>>` — all output fds to file
-        fds[1] = _FD_FILE
-        fds[2] = _FD_FILE
+    if src[i:i + 1] == b"&":  # `&>`/`&>>` — all output fds to target
         i += 1
         while i < n and src[i] == 0x3E:
             i += 1
+        # The target may be an fd-backed device path — `&>/dev/stdout`
+        # keeps fd1 (and fd2, aliased to it) on the pipe (Devin on
+        # #127, round-10 review).
+        t, _ = _fd_target_word(src, i)
+        tgt = _fd_alias_target(t)
+        v = _FD_FILE if tgt is None else fds.get(tgt, _FD_UNKNOWN)
+        fds[1] = v
+        fds[2] = v
         return i
     # `>` — walk to the FIRST `>` of a `>>`-style run: the fd digits
     # live before it (`2>>err` is fd2, CodeRabbit on #1955).
@@ -1372,9 +1414,11 @@ def _redirect_apply(fds: dict, src: bytes, i: int) -> int:
     while i < n and src[i] == 0x3E:  # consume the `>` run
         i += 1
     if src[i:i + 1] == b"|":
-        # `>|` — the noclobber-bypass form targets a FILE; the `|` is
-        # part of the operator, not a pipe (CodeRabbit on #1955/#9).
-        fds[fd] = _FD_FILE
+        # `>|` — the noclobber-bypass form; the `|` is part of the
+        # operator, not a pipe (CodeRabbit on #1955/#9). The target
+        # can still be an fd alias (`>| /dev/stdout`, Devin on #9,
+        # round-10 review).
+        fds[fd] = _fd_file_target(fds, src, i + 1)
         return i + 1
     if src[i:i + 1] != b"&":
         fds[fd] = _fd_file_target(fds, src, i)
@@ -1391,10 +1435,23 @@ def _redirect_apply(fds: dict, src: bytes, i: int) -> int:
         # self-dup no-op; `1>&3` after `3>&1` stays on the pipe).
         fds[fd] = fds.get(_fd_key(src[i:m], -1), _FD_UNKNOWN)
         return m
-    # `>&word` non-numeric — a filename target, not an fd dup.
-    fds[fd] = _FD_FILE
+    # `>&word`: a literal word is a filename target, not an fd dup.
+    # A `$`/backtick EXPANSION resolves at runtime — possibly to an fd
+    # that restores the pipe (`1>&$FD` after `3>&1`, Codex on #127,
+    # round-10 review) — so bind the fd's DEFAULT, not a proven file
+    # diversion (a restore still registers the dep; a real diversion
+    # only over-blocks, which is the safe direction).
+    t, _ = _fd_target_word(src, i)
+    if b"$" in t or b"`" in t:
+        fds[fd] = _fresh_fds().get(fd, _FD_UNKNOWN)
+        if fd == 1 and not digits:
+            fds[2] = _FD_ERR
+        return i
+    tgt = _fd_alias_target(t)
+    v = _FD_FILE if tgt is None else fds.get(tgt, _FD_UNKNOWN)
+    fds[fd] = v
     if fd == 1 and not digits:
-        fds[2] = _FD_FILE  # `>&word` without an fd prefix binds 1&2
+        fds[2] = v  # `>&word` without an fd prefix binds 1&2
     return i
 
 
@@ -1418,9 +1475,10 @@ def _fd_alias_target(t: bytes):
     return None
 
 
-def _fd_file_target(fds: dict, src: bytes, i: int) -> str:
-    """Binding a filename-style redirect target at `i` assigns — an fd
-    ALIAS for fd-backed device paths, else _FD_FILE."""
+def _fd_target_word(src: bytes, i: int) -> tuple:
+    """(target, end) — the filename-style redirect target beginning at
+    `i`: spaces skipped, word text to the next metachar, whole-word
+    quotes stripped."""
     n = len(src)
     while i < n and src[i] in b" \t":
         i += 1
@@ -1430,20 +1488,78 @@ def _fd_file_target(fds: dict, src: bytes, i: int) -> str:
     t = src[i:j]
     if len(t) > 1 and t[:1] in b"'\"" and t[-1:] == t[:1]:
         t = t[1:-1]  # a quoted whole-word target
+    return t, j
+
+
+def _fd_file_target(fds: dict, src: bytes, i: int) -> str:
+    """Binding a filename-style redirect target at `i` assigns — an fd
+    ALIAS for fd-backed device paths, else _FD_FILE."""
+    t, _ = _fd_target_word(src, i)
     tgt = _fd_alias_target(t)
     return _FD_FILE if tgt is None else fds.get(tgt, _FD_UNKNOWN)
+
+
+def _word_unquote(raw: bytes) -> tuple:
+    """(canon, quoted) — `canon` is the shell-unquoted text of the word
+    (same bytes as _word_text); `quoted[i]` marks bytes that came from
+    inside '…'/"…" or a backslash escape, which are literal — never
+    operators or separators (Devin on #127, round-10 review)."""
+    canon = bytearray()
+    quoted: list[bool] = []
+    i = 0
+    n = len(raw)
+    in_s = in_d = False
+    while i < n:
+        c = raw[i]
+        if in_s:
+            if c == 0x27:
+                in_s = False
+            else:
+                canon.append(c)
+                quoted.append(True)
+            i += 1
+            continue
+        if in_d:
+            if c == 0x5C and i + 1 < n:
+                canon.append(raw[i + 1])
+                quoted.append(True)
+                i += 2
+                continue
+            if c == 0x22:
+                in_d = False
+            else:
+                canon.append(c)
+                quoted.append(True)
+            i += 1
+            continue
+        if c == 0x27:
+            in_s = True
+        elif c == 0x22:
+            in_d = True
+        elif c == 0x5C and i + 1 < n:
+            canon.append(raw[i + 1])
+            quoted.append(True)
+            i += 2
+            continue
+        else:
+            canon.append(c)
+            quoted.append(False)
+        i += 1
+    return bytes(canon), quoted
 
 
 # Metacharacters that end a redirect's glued target word.
 _RED_TGT_STOP = b"<>&|();"
 
 
-def _redir_target(t: bytes, i: int) -> tuple:
+def _redir_target(t: bytes, q: list, i: int) -> tuple:
     """The redirect target glued at `i`, or None when the word ends
-    there (the target is then the NEXT word)."""
+    there (the target is then the NEXT word). `q` is the quoted mask
+    from _word_unquote — a stop byte inside quotes is literal text
+    (`>'a;b'` writes the file `a;b`)."""
     n = len(t)
     j = i
-    while j < n and t[j] not in _RED_TGT_STOP:
+    while j < n and (q[j] or t[j] not in _RED_TGT_STOP):
         j += 1
     return (t[i:j], j) if j > i else (None, i)
 
@@ -1465,6 +1581,13 @@ def _word_pending_target(fds: dict, fd, mode: str, t: bytes) -> None:
     elif t.isdigit():
         # `0<& 0` / `0<& 00` — a self-dup keeps the pipe (Codex on #127).
         fds[fd] = fds.get(_fd_key(t, -1), _FD_UNKNOWN)
+    elif b"$" in t or b"`" in t:
+        # `>& $FD`-style dynamic dup — the expansion may restore a
+        # saved fd, so bind the fd's DEFAULT: a restore still
+        # registers the dep (Codex on #127, round-10 review).
+        fds[fd] = _fresh_fds().get(fd, _FD_UNKNOWN)
+        if fd == 1 and mode == "dup":
+            fds[2] = _FD_ERR
     elif mode == "dup":
         fds[fd] = _FD_FILE
         if fd == 1:
@@ -1473,52 +1596,80 @@ def _word_pending_target(fds: dict, fd, mode: str, t: bytes) -> None:
         fds[fd] = _FD_UNKNOWN
 
 
-def _word_redirects(t: bytes, fds: dict) -> tuple:
-    """Fold the redirect operators inside word `t` into `fds`.
+def _word_redirects(raw: bytes, fds: dict) -> tuple:
+    """Fold the redirect operators inside word `raw` into `fds`.
 
-    Returns (arg, pending): `arg` is the text before the first
+    Returns (arg, pending): `arg` is the unquoted text before the first
     unquoted `<`/`>` (`-s` in `-s</dev/null`, `file` in `file>x` —
     CodeRabbit on #9, round-9 review); `pending` is (fd, mode) when
     the word ENDS at an operator awaiting its target in the next
     word (`> f`, `0<&` 3), else None. `<(`/`>(` are process-
-    substitution argument text, not redirects. An fd prefix counts
-    only as a word-INITIAL digit run (`12>f` is fd12; `file2>f`'s
-    `2` is arg text — the fd is 1)."""
+    substitution argument text, not redirects. Only UNQUOTED
+    `<`/`>`/`&` bytes act as operators — `<"/dev/null"` rebinds stdin
+    while `'a>b'` keeps `>` literal (Devin on #127, round-10 review).
+    An fd prefix counts only as a word-INITIAL unquoted digit run
+    (`12>f` is fd12; `file2>f`'s `2` is arg text — the fd is 1)."""
+    t, q = _word_unquote(raw)
     n = len(t)
+
+    def op(i: int) -> bool:  # byte at i is an unquoted metachar
+        return not q[i]
+
     i = 0
     while i < n:
-        if t[i:i + 1] in b"<>" and t[i:i + 2] not in (b"<(", b">("):
+        if q[i]:
+            i += 1
+            continue
+        if t[i:i + 1] in b"<>" and not (
+                t[i:i + 2] in (b"<(", b">(") and i + 1 < n and not q[i + 1]):
             break
-        if t[i:i + 1] == b"&" and t[i:i + 2] == b"&>":
+        if t[i:i + 1] == b"&" and t[i:i + 2] == b"&>" and not q[i + 1]:
             break
         i += 1
     arg = t[:i]
     pending = None
+    fd_prefix = False
     while i < n:
+        if q[i]:
+            i += 1
+            continue
         c = t[i:i + 1]
+        if c not in b"<>&":
+            i += 1
+            continue
         fd_default = 0 if c == b"<" else 1
-        if arg.isdigit() and i == len(arg):
+        if (arg.isdigit() and i == len(arg) and not fd_prefix
+                and not any(q[:i])):
             fd = _fd_key(arg, fd_default)
             arg = b""
+            fd_prefix = True
         else:
             fd = fd_default
         if c == b"&":
-            if t[i:i + 2] != b"&>":
+            if t[i:i + 2] != b"&>" or (i + 1 < n and q[i + 1]):
                 break  # bare `&` — background/separator text
-            i += 2  # `&>`/`&>>` — output fds 1&2 to a file
-            while i < n and t[i:i + 1] == b">":
+            i += 2  # `&>`/`&>>` — output fds 1&2 to target
+            while i < n and t[i:i + 1] == b">" and op(i):
                 i += 1
-            fds[1] = fds[2] = _FD_FILE
-            if i >= n:
+            tgt, i = _redir_target(t, q, i)
+            if tgt is None:
                 pending = (1, "file2")
+            else:
+                # `&>/dev/stdout` keeps fd1 (and fd2 aliased to it) on
+                # the pipe (Devin on #127, round-10 review).
+                tgt_fd = _fd_alias_target(tgt)
+                v = (_FD_FILE if tgt_fd is None
+                     else fds.get(tgt_fd, _FD_UNKNOWN))
+                fds[1] = v
+                fds[2] = v
             continue
         i += 1
         if c == b">":
-            while i < n and t[i:i + 1] == b">":
+            while i < n and t[i:i + 1] == b">" and op(i):
                 i += 1  # `>>`
-            if i < n and t[i:i + 1] == b"|":  # `>|` clobber
+            if i < n and t[i:i + 1] == b"|" and op(i):  # `>|` clobber
                 i += 1
-                tgt, i = _redir_target(t, i)
+                tgt, i = _redir_target(t, q, i)
                 if tgt is None:
                     pending = (fd, "file")
                 else:
@@ -1526,21 +1677,32 @@ def _word_redirects(t: bytes, fds: dict) -> tuple:
                     fds[fd] = (_FD_FILE if tgt_fd is None
                                else fds.get(tgt_fd, _FD_UNKNOWN))
                 continue
-            if i < n and t[i:i + 1] == b"&":  # `>&` — dup or close
+            if i < n and t[i:i + 1] == b"&" and op(i):  # `>&`
                 i += 1
-                tgt, i = _redir_target(t, i)
+                tgt, i = _redir_target(t, q, i)
                 if tgt is None:
                     pending = (fd, "dup")
                 elif tgt == b"-":
                     fds[fd] = _FD_CLOSED
                 elif tgt.isdigit():
                     fds[fd] = fds.get(_fd_key(tgt, -1), _FD_UNKNOWN)
+                elif b"$" in tgt or b"`" in tgt:
+                    # `>&$FD` — the expansion may restore a saved fd;
+                    # bind the fd's DEFAULT so a restore registers the
+                    # dep (Codex on #127, round-10 review).
+                    fds[fd] = _fresh_fds().get(fd, _FD_UNKNOWN)
+                    if fd == 1 and not fd_prefix:
+                        fds[2] = _FD_ERR
                 else:
-                    fds[fd] = _FD_FILE
-                    if fd == 1:
-                        fds[2] = _FD_FILE  # `>&word` binds 1&2
+                    v = _FD_FILE
+                    tgt_fd = _fd_alias_target(tgt)
+                    if tgt_fd is not None:
+                        v = fds.get(tgt_fd, _FD_UNKNOWN)
+                    fds[fd] = v
+                    if fd == 1 and not fd_prefix:
+                        fds[2] = v  # `>&word` binds 1&2
                 continue
-            tgt, i = _redir_target(t, i)  # `>`/`>>` filename target
+            tgt, i = _redir_target(t, q, i)  # `>`/`>>` filename target
             if tgt is None:
                 pending = (fd, "file")
             else:
@@ -1550,20 +1712,20 @@ def _word_redirects(t: bytes, fds: dict) -> tuple:
             continue
         # `<` side — `<<`/`<<-`/`<<<` hand the fd the heredoc body or
         # herestring (still not the pipe); `<>` opens rw; `<&` dups.
-        if t[i:i + 1] == b"<":
+        if t[i:i + 1] == b"<" and op(i):
             i += 1
-            if t[i:i + 1] == b"-":
+            if t[i:i + 1] == b"-" and op(i):
                 i += 1
-            if t[i:i + 1] == b"<":
+            if t[i:i + 1] == b"<" and op(i):
                 i += 1  # `<<<`
             fds[fd] = _FD_FILE
-            tgt, i = _redir_target(t, i)
+            tgt, i = _redir_target(t, q, i)
             if tgt is None:
                 pending = (fd, "file")
             continue
-        if t[i:i + 1] == b">":  # `<>` read-write
+        if t[i:i + 1] == b">" and op(i):  # `<>` read-write
             i += 1
-            tgt, i = _redir_target(t, i)
+            tgt, i = _redir_target(t, q, i)
             if tgt is None:
                 pending = (fd, "file")
             else:
@@ -1571,19 +1733,23 @@ def _word_redirects(t: bytes, fds: dict) -> tuple:
                 fds[fd] = (_FD_FILE if tgt_fd is None
                            else fds.get(tgt_fd, _FD_UNKNOWN))
             continue
-        if t[i:i + 1] == b"&":  # `<&` — dup or close
+        if t[i:i + 1] == b"&" and op(i):  # `<&` — dup or close
             i += 1
-            tgt, i = _redir_target(t, i)
+            tgt, i = _redir_target(t, q, i)
             if tgt is None:
                 pending = (fd, "dup_in")
             elif tgt == b"-":
                 fds[fd] = _FD_CLOSED
             elif tgt.isdigit():
                 fds[fd] = fds.get(_fd_key(tgt, -1), _FD_UNKNOWN)
+            elif b"$" in tgt or b"`" in tgt:
+                # `<&$FD` — dynamic dup; bind the fd's default so a
+                # possible pipe-binding still registers the dep.
+                fds[fd] = _fresh_fds().get(fd, _FD_UNKNOWN)
             else:
                 fds[fd] = _FD_UNKNOWN  # `<&word` — invalid syntax
             continue
-        tgt, i = _redir_target(t, i)  # `<file`
+        tgt, i = _redir_target(t, q, i)  # `<file`
         if tgt is None:
             pending = (fd, "file")
         else:
@@ -1829,6 +1995,13 @@ def _span_output_exec(src: bytes, a: int, after: int | None = None) -> bool:
     key = _command_key(win[words[hi][0]:words[hi][1]])
     if procsub:
         return key in _STDIN_EXEC_HEADS or key in (b"source", b".")
+    if (not procsub and key in _STDIN_SINK_HEADS
+            and key not in _STDIN_EMIT_HEADS):
+        # A stream-replacing head's output is never the substitution's
+        # text — `wc "$(cat x)" | sh` hands sh a line count, not the
+        # file (CodeRabbit on #1955, round-10 review). Emit heads
+        # forward argv text, so they keep the pipe check.
+        return False
     if key == b"eval":
         return True
     # The enclosing command's window stops AT the substitution opener,

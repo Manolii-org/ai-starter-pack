@@ -8375,3 +8375,128 @@ def test_script_dep_amp_gt_binds_both_fds(tmp_path):
     # target in the next word binds both fds too
     assert not mod.script_dep_block(
         pdir, b'echo "$(cat scripts/x.sh)" &> f f2 | sh\n')
+
+
+def test_script_dep_amp_gt_fd_alias_target(tmp_path):
+    """`&>/dev/stdout` rebinds fds 1+2 to stdout's CURRENT target — the
+    pipe — not a file (Devin on #127, round-10 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh)" &>/dev/stdout | sh\n')
+    assert mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh)" &> /dev/stdout | sh\n')
+    # a real file still diverts
+    assert not mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh)" &>/dev/null | sh\n')
+
+
+def test_script_dep_clobber_fd_alias(tmp_path):
+    """`>|` follows the same fd-alias rule as `>` — `>| /dev/stdout`
+    keeps the pipe (Devin on #9, round-10 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh)" >| /dev/stdout | sh\n')
+    assert not mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh)" >| /dev/null | sh\n')
+
+
+def test_script_dep_quoted_redirect_target(tmp_path):
+    """Quotes around a redirect TARGET do not quote the operator —
+    `sh -s <"/dev/null"` reads the device, not the pipe; a quoted
+    OPERATOR byte stays literal (`'a<b'` is arg text) (Devin on #127,
+    round-10 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert not mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | sh -s <"/dev/null"\n')
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | sh -s <'/dev/null'\n")
+    # quoted operator chars are literal argument text
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | sh -s 'a<b'\n")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | sh -s 'a>b'\n")
+    # quoted fd alias still aliases
+    assert mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | sh -s <"/dev/stdin"\n')
+
+
+def test_script_dep_expansion_dup_target(tmp_path):
+    """`1>&$FD` can restore a saved fd at runtime — bind the fd's
+    default so a possible pipe-restore still registers the dep (Codex
+    on #127, round-10 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh)" 3>&1 >/dev/null 1>&$FD | sh\n')
+    assert mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | sh <&$FD\n')
+
+
+def test_script_dep_codec_module_flags(tmp_path):
+    """Codec decode flags are per-module: `gzip -u` aborts (no decode),
+    `base64 -u` decodes, a positional operand reads a FILE not the
+    pipe, a lone `-` still means stdin (Codex on #127, round-10
+    review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.gz").write_bytes(b"x")
+    (pdir / "scripts" / "x.b64").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.gz | python -m gzip -d | sh\n")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.b64 | python -m base64 -u | sh\n")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.b64 | python -m base64 -du | sh\n")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.b64 | python -m base64 -d - | sh\n")
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.gz | python -m gzip -u | sh\n")
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.gz | python -m gzip -d f.gz | sh\n")
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.b64 | python -m base64 -d f.b64 | sh\n")
+
+
+def test_script_dep_sink_head_sub_arg(tmp_path):
+    """A `$(...)` inside a stream-replacing head's args is data, not
+    code — `wc "$(cat x)" | sh` hands sh a count (CodeRabbit on #1955,
+    round-10 review). Emit heads still forward the text."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert not mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | wc "$(cat scripts/x.sh)" | sh\n')
+    assert not mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | md5sum "$(cat scripts/x.sh)" | sh\n')
+    assert mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | echo "$(cat scripts/x.sh)" | sh\n')
+    assert mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | date "+$(cat scripts/x.sh)" | sh\n')
+
+
+def test_script_dep_flags_after_program_operand(tmp_path):
+    """Words after `-c` are argv for the program string, never flags —
+    `python -c 'x' -m code` runs `x`, it does not open a REPL on stdin
+    (Codex on #9, round-10 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert not mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | python -c "x" -m code\n')
+    # `-m` BEFORE `-c` still governs
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | python -m code -c | sh\n")
