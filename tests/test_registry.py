@@ -8598,13 +8598,16 @@ def test_script_dep_codec_last_mode_wins(tmp_path):
 
 def test_script_dep_codec_operands_and_terminator(tmp_path):
     """A `--` ends option parsing (`base64 -d -- -` still decodes the
-    pipe); base64 uses only its FIRST operand while quopri iterates
-    (`quopri -d missing -` still decodes stdin); gzip and uu crash on
-    a `-` operand (Devin + Codex on #127/#1957, round-11 review)."""
+    pipe); base64 uses only its FIRST operand while quopri and gzip
+    iterate (`quopri -d missing -` still decodes stdin). A `-` operand
+    names stdin for ALL FOUR codec modules — verified against CPython
+    3.12: `gzip -d -` and `uu -d -` decode the pipe, they do not crash
+    (Devin + Codex + CodeRabbit on #127/#9/#1380/#1957, round-12)."""
     mod = load_resolve_module()
     pdir = tmp_path / "plug"
     (pdir / "scripts").mkdir(parents=True)
     (pdir / "scripts" / "x.b64").write_bytes(b"x")
+    (pdir / "scripts" / "x.uu").write_bytes(b"x")
     (pdir / "scripts" / "x.gz").write_bytes(b"x")
     assert mod.script_dep_block(
         pdir, b"cat scripts/x.b64 | python -m base64 -d -- - | sh\n")
@@ -8616,10 +8619,183 @@ def test_script_dep_codec_operands_and_terminator(tmp_path):
         pdir, b"cat scripts/x.b64 | python -m quopri -d - missing | sh\n")
     assert not mod.script_dep_block(
         pdir, b"cat scripts/x.b64 | python -m base64 -d f - | sh\n")
-    assert not mod.script_dep_block(
+    assert mod.script_dep_block(
         pdir, b"cat scripts/x.gz | python -m gzip -d - | sh\n")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.uu | python -m uu -d - | sh\n")
+    # gzip iterates operands like quopri — a later `-` still reads the
+    # pipe even after a file operand.
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.gz | python -m gzip -d f.gz - | sh\n")
+    # uu's SECOND operand is the output file — the decoded bytes leave
+    # stdout, so the pipe ends there.
     assert not mod.script_dep_block(
-        pdir, b"cat scripts/x.b64 | python -m uu -d - | sh\n")
+        pdir, b"cat scripts/x.uu | python -m uu -d - out | sh\n")
+    # A no-operand decode reads stdin for every codec module.
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.gz | python -m gzip -d | sh\n")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.uu | python -m uu -d | sh\n")
+
+
+def test_script_dep_codec_getopt_stops_at_operand(tmp_path):
+    """getopt modules stop option parsing at the FIRST operand —
+    `base64 -d - -e` decodes stdin and treats `-e` as a second operand
+    (verified), so the last-wins direction rule must not see it
+    (Codex on #9, round-12 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.b64").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.b64 | python -m base64 -d - -e | sh\n")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.b64 | python -m quopri -d - -e | sh\n")
+
+
+def test_script_dep_codec_mutex_flags_abort(tmp_path):
+    """Mutually-exclusive flag pairs abort the module before the pipe
+    is read: `quopri -d -t` (and the cluster spelling `-dt`) and gzip
+    `--fast -d` both exit with an error (CodeRabbit on #9, round-12
+    review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.qp").write_bytes(b"x")
+    (pdir / "scripts" / "x.gz").write_bytes(b"x")
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.qp | python -m quopri -d -t | sh\n")
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.qp | python -m quopri -dt | sh\n")
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.gz | python -m gzip --fast -d | sh\n")
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.gz | python -m gzip --best -d | sh\n")
+
+
+def test_script_dep_unquoted_sub_forwards(tmp_path):
+    """An UNQUOTED `$(cat)` still forwards the pipe — paren masking
+    splits it across words, so the emit-head check must scan the
+    window's substitution spans, not the masked argv (Devin on #1380,
+    round-12 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | echo $(cat) | sh\n")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | echo $(cat -) | sh\n")
+    # A cross-word substitution body still resolves.
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | echo $(printf a; cat) | sh\n")
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | echo $(printf cat) | sh\n")
+
+
+def test_script_dep_sub_reader_must_be_head(tmp_path):
+    """A reader NAME is only a read when it heads its command:
+    `$(printf cat)` emits the text `cat`, and a reader whose own fd1
+    is diverted contributes nothing to the captured output (Devin +
+    CodeRabbit on #1380/#1957, round-12 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert not mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | echo "$(printf cat)" | sh\n')
+    assert not mod.script_dep_block(
+        pdir,
+        b'echo "$(cat scripts/x.sh >/dev/null; echo safe)" | sh\n')
+    assert not mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | echo "$(cat >/dev/null)" | sh\n')
+    # An explicit fd0 self-dup still reads the pipe.
+    assert mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | echo "$(cat 0<&0)" | sh\n')
+
+
+def test_script_dep_redirect_words_are_not_argv(tmp_path):
+    """Redirect words never reach a head's argv — `grep x 2> -q` writes
+    stderr to a file named `-q` (quiet mode is NOT enabled) and
+    `head -n 0 2> -n 10` never sees a second limit (Codex + Devin on
+    #1380/#1957, round-12 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | grep x 2> -q | sh\n")
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | head -n 0 2> -n 10 | sh\n")
+
+
+def test_script_dep_head_tail_signed_zero(tmp_path):
+    """A signed zero's meaning is per-command (GNU coreutils):
+    `tail -n +0` emits everything while `tail -n -0` emits nothing;
+    `head` is the reverse (Codex on #1380, round-12 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | tail -n +0 | sh\n")
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | tail -n -0 | sh\n")
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | head -n -0 | sh\n")
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | head -n +0 | sh\n")
+    # An unsigned zero ends the pipe for both.
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | tail -n 0 | sh\n")
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | head -n 0 | sh\n")
+
+
+def test_script_dep_glued_digit_is_not_fd(tmp_path):
+    """An fd prefix is only a STANDALONE digit run — in
+    `tee log2>/dev/null` the `2` is glued to `log`, so fd1 (not fd2)
+    goes to the file and the pipe ends (Devin on #1380, round-12
+    review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | tee log2>/dev/null | sh\n")
+    # A separated digit IS an fd — stdout still carries the script.
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | tee log 2>/dev/null | sh\n")
+
+
+def test_script_dep_quoted_numeric_dup(tmp_path):
+    """`>&"1"` is an fd DUP — bash removes the quotes before reading
+    the target, so the stream is forwarded, not written to a file
+    named `1` (Devin on #1957, round-12 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh)" >&"1" | sh\n')
+    assert not mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh)" >&"2" | sh\n')
+
+
+def test_script_dep_date_substitution_gating(tmp_path):
+    """`date` echoes ONLY a `+FORMAT` operand — `date "$(cat x)" | sh`
+    parses the file as a date string and emits a timestamp, never the
+    bytes (Codex on #1380, round-12 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir, b'date "+$(cat scripts/x.sh)" | sh\n')
+    assert not mod.script_dep_block(
+        pdir, b'date "$(cat scripts/x.sh)" | sh\n')
+    assert not mod.script_dep_block(
+        pdir, b'date --date="$(cat scripts/x.sh)" +%s | sh\n')
 
 
 def test_script_dep_codec_long_prefix_and_abort(tmp_path):
