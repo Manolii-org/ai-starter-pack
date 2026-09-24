@@ -69,6 +69,14 @@ on:
         required: false
         default: 45
         description: Job ceiling — restore of a mid-size GP database takes ~5-20m.
+      runs_on:
+        type: string
+        required: false
+        default: 'ubuntu-latest'
+        description: >-
+          Runner label. Point at a self-hosted VNet-attached runner (e.g.
+          'self-hosted' or 'cpd-vnet') when the SQL server has public access
+          disabled — hosted runners can't reach private endpoints.
     secrets:
       DRILL_SQL_USER:
         required: false
@@ -88,7 +96,7 @@ permissions:
 jobs:
   restore-drill:
     name: Restore drill
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs_on }}
     timeout-minutes: ${{ inputs.timeout_minutes }}
     env:
       # run_id is unique across runs globally; job id is unique within the run —
