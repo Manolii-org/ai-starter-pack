@@ -785,8 +785,7 @@ _ASSIGN_WORD = re.compile(rb"[A-Za-z_][A-Za-z0-9_]*=")
 # operand for perl/ruby/node/lua, so the table is per-head. `python -m`
 # takes its program from the named module (`python -m json.tool` parses
 # the pipe as DATA), so it ends the chain the same way — EXCEPT for
-# modules that evaluate stdin as program text, listed in
-# _PYTHON_STDIN_MODULES below.
+# the exec/transform modules classified by _py_module_verdict below.
 _EXEC_OPERAND_FLAGS = {
     b"sh": frozenset({b"-c"}), b"bash": frozenset({b"-c"}),
     b"dash": frozenset({b"-c"}), b"zsh": frozenset({b"-c"}),
@@ -799,14 +798,36 @@ _EXEC_OPERAND_FLAGS = {
     b"lua": frozenset({b"-e"}),
     b"tclsh": frozenset(),
 }
-# `-m` modules that run stdin as program text rather than parsing it as
-# data — `cat scripts/x.py | python -m code` executes the file, and
-# `base64 -d` emits program text a downstream `sh` runs. The `-m` sink
-# rule does not apply to them (Codex + Devin on the round-6 review).
-_PYTHON_STDIN_MODULES = frozenset({
-    b"code", b"base64", b"quopri", b"uu", b"gzip", b"bz2", b"lzma",
-    b"zlib", b"binascii", b"pdb", b"idlelib", b"asyncio",
-})
+# `-m` modules that run stdin as PROGRAM text — `python -m code` and
+# `python -m asyncio` open a REPL over the pipe. Everything else with a
+# `-m` entry point parses stdin as DATA (`-m` is a sink for them):
+# verified against the stdlib — `bz2`/`lzma`/`zlib`/`binascii` have no
+# stdin filter entry point, `pdb` requires a program argv, `idlelib`
+# never touches stdin (Devin + CodeRabbit on the round-7 review).
+_PYTHON_STDIN_EXEC = frozenset({b"code", b"asyncio"})
+# `-m` modules that TRANSFORM stdin to stdout. Encoding (`base64`,
+# `uu`, `gzip` compression) emits non-executable bytes — a downstream
+# `sh` can't run them, so encode mode is a SINK. Decoding emits the
+# ORIGINAL stream — program text a downstream interpreter executes
+# (`python -m base64 -d | sh`) — so decode mode is "other" and the pipe
+# walk continues (Devin on #8, CodeRabbit on #125, round-7 review).
+_PYTHON_STDIN_TRANSFORM = frozenset({b"base64", b"quopri", b"uu", b"gzip"})
+_PYTHON_DECODE_FLAGS = frozenset({b"-d", b"-D", b"--decode",
+                                  b"--decompress"})
+
+
+def _py_module_verdict(mod: bytes, rest_words: list, sub: bytes) -> str:
+    """Verdict for `python -m MOD <rest>` — "exec" when stdin IS the
+    program, "other" when a decode flag emits the original stream (the
+    walk decides downstream), else "sink"."""
+    top = mod.split(b".")[0]
+    if top in _PYTHON_STDIN_EXEC:
+        return "exec"
+    if top in _PYTHON_STDIN_TRANSFORM and any(
+            _word_text(sub[w[0]:w[1]]) in _PYTHON_DECODE_FLAGS
+            for w in rest_words):
+        return "other"
+    return "sink"
 
 
 def _effective_head(words: list, win: bytes) -> int | None:
@@ -881,6 +902,11 @@ def _stdin_exec_head(win: bytes) -> str:
                 tw = _word_text(win[words[wi][0]:words[wi][1]])
                 if not tw.startswith(b"-") or tw == b"-":
                     break
+                if wkey == b"command" and tw in _WRAPPER_DESCRIBE:
+                    # `command -v env -S sh` only DESCRIBES env — the
+                    # split operand never runs (Devin on #8/#1374/#1955,
+                    # round-7 review). Describe mode is a sink.
+                    return "sink"
                 wi += 2 if (b"=" not in tw and tw in opts
                             and wi + 1 < len(words)) else 1
             continue
@@ -936,6 +962,12 @@ def _stdin_exec_head(win: bytes) -> str:
                 # and never forwards stdin — `cat x | env | sh` pipes
                 # env vars, not the script (Devin BUG_0005 on #125).
                 return "sink"
+            if _command_key(win[words[j][0]:words[j][1]]) in _EXEC_WRAPPERS:
+                # `env FOO=1 env -S sh` — the command word is itself a
+                # wrapper; keep scanning at it so the INNER env's -S
+                # operand gets classified (CodeRabbit round-7 on #125).
+                wi = j
+                continue
             break
         break
     hi = _effective_head(words, win)
@@ -958,24 +990,46 @@ def _stdin_exec_head(win: bytes) -> str:
     # masking, so `$(...)` words keep their coordinates.
     sub_words = _shell_words(sub)
     flags = _EXEC_OPERAND_FLAGS.get(key, frozenset())
+    redir_target_next = False
     for n, w in enumerate(sub_words[1:], start=1):
         if w in operands:
             continue
         t = _word_text(sub[w[0]:w[1]])
+        if redir_target_next:
+            # A bare `>`/`<` operator's target — not a positional arg.
+            redir_target_next = False
+            continue
+        # Redirection tokens are not program arguments: `sh > file`
+        # still reads stdin (the redirect only re-targets its output) —
+        # treating `>`/`file` as positionals would wrongly sink
+        # `cat x | sh > y`. `N>`/`N<`/`&>`/`<<-`-style glued forms skip
+        # only themselves; a word ending in the operator takes the NEXT
+        # word as its target.
+        if re.match(rb"^(?:[0-9]+)?[<>]", t) or t.startswith(b"&>"):
+            if (re.fullmatch(rb"[0-9]*[<>]+[|&-]?", t)
+                    or t in (b"&>", b"&>>")):
+                redir_target_next = True
+            continue
         if t in (b"-", b"-s"):
             break
         if key == b"python" and t in (b"-m", b"--module"):
-            # The module decides: most parse stdin as DATA, but a few run
-            # it as program text (`python -m code`) or decode it into
-            # program text for a downstream interpreter (`-m base64 -d`).
+            # The module decides: most parse stdin as DATA, `code`/
+            # `asyncio` run it as program text, and codec modules emit
+            # program text only in DECODE mode for a downstream
+            # interpreter (`-m base64 -d | sh`).
             mod = (_word_text(sub[sub_words[n + 1][0]:sub_words[n + 1][1]])
                    if n + 1 < len(sub_words) else b"")
-            return ("exec" if mod.split(b".")[0] in _PYTHON_STDIN_MODULES
-                    else "sink")
+            return _py_module_verdict(mod, sub_words[n + 2:], sub)
         if t.startswith(b"-m") and key == b"python" and len(t) > 2:
-            return ("exec" if t[2:].split(b".")[0] in _PYTHON_STDIN_MODULES
-                    else "sink")
-        if t in flags or not t.startswith(b"-"):
+            return _py_module_verdict(t[2:], sub_words[n + 1:], sub)
+        if t in flags:
+            return "sink"
+        if not t.startswith(b"-"):
+            if key in (b"bc", b"dc"):
+                # `bc file`/`dc file` run the file AND THEN read stdin —
+                # a positional is not a program-from-argv sink for them
+                # (Codex on #1955, round-7 review).
+                continue
             return "sink"
     return "exec"
 
@@ -1002,7 +1056,10 @@ def _pipe_to_exec(src: bytes, pos: int) -> bool:
         verdict = _stdin_exec_head(win)
         if verdict == "exec":
             return True
-        if verdict == "sink":
+        if verdict == "sink" or _stdout_redirected(win):
+            # A sink consumes nothing, and a segment whose fd1 is
+            # redirected forwards nothing — either way the chain is
+            # broken (`cat x | tee >/dev/null | sh` is not a dep).
             return False
         j += len(win)
     return False
@@ -1125,6 +1182,76 @@ def _self_dup_stdout(src: bytes, j: int) -> bool:
             and not src[j + 3:j + 4].isdigit())
 
 
+def _redirect_fd1(src: bytes, j: int) -> bool:
+    """True when the `>` at `j` (the SECOND byte of the operator)
+    redirects fd 1.
+
+    The fd is the digit run immediately before the operator: absent
+    digits mean fd 1 for a bare `>`/`>>`/`>&` but fd 0 for the read-write
+    `n<>` form — `<>`/`0<>` open fd0 and never touch stdout (Devin
+    BUG_0003 on #8). `&>` is reported at the `&`, not here. Digit spans
+    are compared as BYTES — `int()` on a >4300-digit fd prefix raises
+    ValueError, a hostile-script resolver crash (Codex P2 on #125)."""
+    if src[j - 1:j] == b"&":
+        return False  # `&>` — counted by the `&` branch, not as bare `>`
+    if src[j - 1:j] == b"<":
+        # `n<>` — fd is the digit run before `<` (default 0).
+        k = j - 2
+        while k >= 0 and src[k:k + 1].isdigit():
+            k -= 1
+        return (src[k + 1:j - 1].lstrip(b"0") or b"0") == b"1"
+    k = j - 1
+    while k >= 0 and src[k:k + 1].isdigit():
+        k -= 1
+    digits = src[k + 1:j]
+    return not digits or (digits.lstrip(b"0") or b"0") == b"1"
+
+
+def _stdout_redirected(win: bytes) -> bool:
+    """True when an unquoted redirect inside the command window `win`
+    sends fd 1 (or every fd, `&>`) elsewhere — the segment forwards
+    nothing to the next pipe stage (`cmd | tee >/dev/null | sh` feeds
+    sh nothing). Procsub/grouping parens, quotes and backtick pairs are
+    honoured; an unclosed backtick fails toward "redirected" (the chain
+    is treated as broken — not a dep)."""
+    in_s = in_d = esc = False
+    depth = 0
+    i = 0
+    while i < len(win):
+        c = win[i]
+        if esc:
+            esc = False
+        elif c == 0x5C:
+            esc = True
+        elif in_s:
+            if c == 0x27:
+                in_s = False
+        elif in_d:
+            if c == 0x22:
+                in_d = False
+        elif c == 0x27:
+            in_s = True
+        elif c == 0x22:
+            in_d = True
+        elif c == 0x60:
+            e = win.find(b"`", i + 1)
+            if e < 0:
+                return True
+            i = e
+        elif c == 0x28:
+            depth += 1
+        elif c == 0x29:
+            depth = max(0, depth - 1)
+        elif depth == 0 and c == 0x3E and win[i + 1:i + 2] != b"(":
+            if _redirect_fd1(win, i) and not _self_dup_stdout(win, i):
+                return True
+        elif depth == 0 and c == 0x26 and win[i + 1:i + 2] == b">":
+            if win[i - 1:i] not in (b"<", b">"):
+                return True  # `&>`/`&>>` redirect fd1
+        i += 1
+    return False
+
+
 def _pipe_pos(src: bytes, pos: int) -> int:
     """Index of the first UNQUOTED `|`/`|&` at or after `pos`, or -1.
 
@@ -1197,10 +1324,7 @@ def _pipe_pos(src: bytes, pos: int) -> int:
         elif in_s or in_d:
             pass
         elif c == 0x3E and not _self_dup_stdout(src, j):
-            k = j - 1
-            while k >= 0 and src[k:k + 1].isdigit():
-                k -= 1
-            if int(src[k + 1:j] or b"1") == 1 and src[j - 1:j] != b"&":
+            if _redirect_fd1(src, j):
                 fd1_redir = True
         elif c == 0x26 and src[j + 1:j + 2] == b">":
             fd1_redir = True  # `&>`/`&>>` redirect fd1
@@ -1238,11 +1362,7 @@ def _pipe_pos(src: bytes, pos: int) -> int:
                 return -1
             return j
         elif c == 0x3E:  # `>`/`>>`/`>&` — the fd decides
-            k = j - 1
-            while k >= 0 and src[k:k + 1].isdigit():
-                k -= 1
-            if int(src[k + 1:j] or b"1") == 1 and not _self_dup_stdout(
-                    src, j):
+            if _redirect_fd1(src, j) and not _self_dup_stdout(src, j):
                 return -1  # stdout redirected — the pipe carries nothing
         elif c == 0x26:
             prev = src[j - 1:j]
@@ -3028,26 +3148,32 @@ def _repo_apply_mutex(repo_root: Path):
     else:
         lock_dir = repo_root / ".ai"
         if lock_dir.is_symlink():
-            # Never create the mutex file through a link — the apply's own
-            # lockfile-destination check surfaces the conflict downstream;
-            # serialize nothing here (there is no trusted dir to lock in).
-            yield
-            return
+            # Never create the mutex file through a link — and never
+            # proceed UNLOCKED either: on a flock-capable platform an
+            # unacquired mutex means concurrent applies lose the
+            # ownership check the lockfile snapshot depends on (Devin
+            # BUG_0002 on #125, round-7 review).
+            raise SystemExit(
+                "ai-resolve: refusing to apply — the apply mutex cannot "
+                "be taken (.ai is a symlink); fix the checkout or run "
+                "from a git worktree")
         try:
             lock_dir.mkdir(parents=True, exist_ok=True)
         except OSError:
-            yield
-            return
+            raise SystemExit(
+                "ai-resolve: refusing to apply — the apply-mutex "
+                "directory cannot be created; concurrent applies would "
+                "be unserialised")
     try:
         fd = os.open(str(lock_dir / "capability-apply.lock"),
                      os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
                      0o644)
     except OSError:
         # lock path unroutable (the dir is a file, or the lock path is
-        # itself a link) — the apply's checks will report it; proceed
-        # unlocked.
-        yield
-        return
+        # itself a link) — fail closed rather than apply unsynchronised.
+        raise SystemExit(
+            "ai-resolve: refusing to apply — the apply mutex cannot be "
+            "opened; concurrent applies would be unserialised")
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield
@@ -3477,7 +3603,14 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                     f"{req}: {rel} is or resolves through a symlink — "
                     "refusing to materialise the link target"))
                 continue
-            got = _read_source(plugin_dir / comp, rel.as_posix())
+            # Anchor the descriptor walk at registry_root, not
+            # plugin_dir/comp — a swap on the plugin tree's ancestors
+            # between resolved_src and the open would reroute the
+            # pathname lookup around the checked root (Codex P1 on
+            # #1374, round-7 review).
+            got = _read_source(
+                registry_root,
+                src.relative_to(registry_root).as_posix())
             if got is None:
                 plan.conflicts.append((
                     dst,

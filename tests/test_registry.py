@@ -505,7 +505,10 @@ def test_symlinked_lockfile_destination_conflicts(tmp_path):
     (consumer / ".ai").symlink_to(outside)
     r = run_resolver(m, reg_root, consumer, "--apply")
     assert r.returncode == 1
-    assert "lockfile destination" in r.stdout
+    # Refused either at the apply mutex (fails closed when .ai is a
+    # symlink — round-7 review) or at the lockfile-destination check.
+    out = r.stdout + r.stderr
+    assert "mutex" in out or "lockfile destination" in out
     assert not any(outside.iterdir())
 
 
@@ -1004,7 +1007,10 @@ def test_lock_parent_not_dir_conflicts(tmp_path):
     (consumer / ".ai").write_text("not a dir")
     r = run_resolver(m, reg_root, consumer, "--apply")
     assert r.returncode == 1
-    assert "not a directory" in r.stdout
+    # Refused either at the apply mutex (fails closed — round-7 review)
+    # or at the plan-time "not a directory" lockfile-parent conflict.
+    out = r.stdout + r.stderr
+    assert "mutex" in out or "not a directory" in out
     assert not (consumer / ".claude" / "skills" / "demo" / "x.md").exists()
 
 
@@ -6307,7 +6313,9 @@ def test_apply_rollback_removes_new_outputs(tmp_path):
         r = run_resolver(m, reg_root, consumer, "--apply")
     finally:
         os.chmod(ai_dir, 0o755)
-    assert r.returncode == 2, r.stdout + r.stderr
+    # rc=1: refused at the apply mutex (fails closed on an unroutable
+    # lock path — round-7 review); rc=2: the lock-write plan conflict.
+    assert r.returncode in (1, 2), r.stdout + r.stderr
     assert not (consumer / ".claude" / "skills" / "demo"
                 / "SKILL.md").exists()
     assert not (consumer / ".claude" / "commands" / "run.md").exists()
@@ -7918,3 +7926,115 @@ def test_script_dep_python_module_stdin(tmp_path):
     for line in (b'echo "$(cat scripts/x.py)" | python -m json.tool',
                  b'echo "$(cat scripts/x.py)" | python -m http.server'):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_nested_env_split_string(tmp_path):
+    """`env FOO=1 env -S sh` — the command word is itself a wrapper; the
+    INNER env's -S operand must still be classified (round-7 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (b'echo "$(cat scripts/x.sh)" | env FOO=1 env -S sh',
+                 b'echo "$(cat scripts/x.sh)" | env -i env -S bash'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_describe_wrapper_hides_env(tmp_path):
+    """`command -v env -S sh` only DESCRIBES env — the split operand
+    never runs (round-7 review on #8/#1374/#1955)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (b'echo "$(cat scripts/x.sh)" | command -v env -S sh',
+                 b'echo "$(cat scripts/x.sh)" | command -V env -S bash'):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_read_write_redirect(tmp_path):
+    """`<>`/`0<>` open fd0 read-write — they never touch stdout, so the
+    pipe stays live; `1<>`/`n<>` for n>=2 do break it (round-7 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    assert mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh)" <> tmp | sh\n')
+    assert not mod.script_dep_block(
+        pdir, b'echo "$(cat scripts/x.sh)" 1<> tmp | sh\n')
+
+
+def test_script_dep_oversized_fd_digits(tmp_path):
+    """A >4300-digit fd prefix raised ValueError in int() — the fd is
+    compared as a normalised byte span instead (round-7 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    huge = b"9" * 5000
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | " + huge + b">/dev/null | sh\n")
+    ones = b"0" * 4999 + b"1"
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | " + ones + b">/dev/null | sh\n")
+
+
+def test_script_dep_bc_dc_positional_still_reads_stdin(tmp_path):
+    """`bc file`/`dc file` run the file AND THEN read stdin — a
+    positional does not end the exec head's stdin use (round-7 review
+    on #1955)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (b"cat scripts/x.sh | bc init.bc",
+                 b"cat scripts/x.sh | dc -f a.dc"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_python_module_encode_sink(tmp_path):
+    """Codec modules are sinks in ENCODE mode — only `-d`/`-D`/`--decode`/
+    `--decompress` turns stdin into program text (round-7 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.py").write_bytes(b"x")
+    for line in (b'echo "$(cat scripts/x.py)" | python -m base64 -d | sh',
+                 b'echo "$(cat scripts/x.py)" | python -m gzip -d | sh',
+                 b'echo "$(cat scripts/x.py)" | python3 -mcode'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (b'echo "$(cat scripts/x.py)" | python -m base64 | sh',
+                 b'echo "$(cat scripts/x.py)" | python -m gzip > x.gz',
+                 b'echo "$(cat scripts/x.py)" | python -m bz2 | sh',
+                 b'echo "$(cat scripts/x.py)" | python -m pdb'):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_segment_stdout_redirect(tmp_path):
+    """A middle segment whose fd1 is redirected forwards nothing —
+    `cat x | tee >/dev/null | sh` is not a dep (round-7 review)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (b"cat scripts/x.sh | tee >/dev/null | sh",
+                 b"cat scripts/x.sh | sed s/a/b/ >/dev/null | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    assert mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | tee /dev/stderr | sh\n")
+
+
+def test_script_dep_exec_head_own_redirect(tmp_path):
+    """`sh > file` still READS stdin — redirections inside the exec
+    head's argv are not positional arguments."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (b"cat scripts/x.sh | sh > /dev/null",
+                 b"cat scripts/x.sh | sh >y",
+                 b"cat scripts/x.sh | bash - > out"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | sh script.sh > log\n")
