@@ -138,22 +138,26 @@ jobs:
           node-version: ${{ inputs.node_version }}
 
       - name: Install dependencies
+        shell: bash
         working-directory: ${{ inputs.workdir }}
         timeout-minutes: 20
         run: ${{ inputs.install_command }}
 
       - name: Build
+        shell: bash
         if: ${{ inputs.build_command != '' }}
         working-directory: ${{ inputs.workdir }}
         timeout-minutes: 20
         run: ${{ inputs.build_command }}
 
       - name: Install Playwright browsers
+        shell: bash
         working-directory: ${{ inputs.workdir }}
         timeout-minutes: 15
         run: npx playwright install --with-deps $BROWSERS
 
       - name: Resolve artifact paths
+        shell: bash
         if: ${{ always() }}
         id: artifacts
         run: |
@@ -171,6 +175,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Run Playwright suite
+        shell: bash
         working-directory: ${{ inputs.workdir }}
         timeout-minutes: ${{ inputs.timeout_minutes }}
         env:
