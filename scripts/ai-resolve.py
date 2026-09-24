@@ -73,7 +73,12 @@ SCRIPT_REF = re.compile(
     rb"\b(?:python(?:\d+(?:\.\d+)*)?|bash|sh|zsh|node|npx|tsx|ts-node|deno"
     rb"|ruby|perl|source|exec|bun|bunx|uv\s+run|pipenv\s+run)"
     rb"\s+[^\n|&;`]*?scripts/(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs)\b"
-    rb"|\./scripts/(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs)\b")
+    rb"|\./scripts/(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs)\b"
+    # POSIX `.` — the dot builtin sources a file just like `source`. The
+    # lookbehind keeps `..`, `foo.` and `./` out; `. ` requires whitespace
+    # after the dot, so `./scripts/x.sh` still binds only to the exec alt.
+    rb"|(?<![\w./\\-])\.\s+[^\n|&;`]*?scripts/(?:[A-Za-z0-9_.-]+/)*"
+    rb"[A-Za-z0-9_.-]+\.(?:py|sh|ts|js|mjs)\b")
 # Backticked `scripts/x.py` is NOT an invocation context — prose uses it for
 # mentions. A real dependency that no interpreter/./ prefix expresses must be
 # declared explicitly: `requires_scripts: [...]` in the file's frontmatter.
@@ -134,8 +139,9 @@ def _mini_yaml(text: str):
     block sequences (scalar items and `- key: value` inline maps continued
     by deeper-indented keys), flow `[a, b]` lists and `{k: v}` maps —
     nested collections and collections folded across lines included —
-    comments, and plain/quoted/int/float/bool/null scalars. Anything
-    richer (anchors, folded block scalars, multi-doc, tabs) raises
+    comments, `|`/`>` block scalars (literal content, '#' lines included),
+    single-document `---`/`...` markers, and plain/quoted/int/float/bool/
+    null scalars. Anything richer (anchors, multi-doc, tabs) raises
     ValueError — callers must fail closed, never guess."""
     def strip_comment(s: str) -> str:
         # ' #' starts a comment only outside quotes. Track quote state
@@ -253,14 +259,38 @@ def _mini_yaml(text: str):
     lines = []
     raw_lines = text.splitlines()
     li = 0
+    block_indent = None  # set: deeper-indented lines are literal content
     while li < len(raw_lines):
         raw = raw_lines[li]
         li += 1
+        if block_indent is not None:
+            # Inside a `|`/`>` block scalar — content is literal: '#' lines
+            # are NOT comments and blank lines are content too. The block
+            # ends at the first non-blank line no deeper than the key.
+            if not raw.strip():
+                lines.append((block_indent + 1, ""))
+                continue
+            ind = len(raw) - len(raw.lstrip(" \t"))
+            if ind > block_indent:
+                lines.append((ind, raw[block_indent:].rstrip()))
+                continue
+            block_indent = None
         if not raw.strip() or raw.lstrip().startswith("#"):
             continue
         body = strip_comment(raw.rstrip())
         if not body.strip():
             continue
+        # Single-document markers: a leading `---` is boilerplate, `...`
+        # ends the document — anything after it is trailing garbage. A `---`
+        # anywhere else lands in `lines` and fails at parse time, so
+        # multi-document input still raises.
+        if body.strip() == "---" and not lines:
+            continue
+        if body.strip() == "...":
+            for rest in raw_lines[li:]:
+                if rest.strip() and not rest.lstrip().startswith("#"):
+                    raise ValueError("content after document end '...'")
+            break
         # A flow collection may continue on deeper lines — fold each
         # (comment-stripped) line in with one space until the brackets
         # balance. Folding is gated on the VALUE actually opening a
@@ -286,6 +316,15 @@ def _mini_yaml(text: str):
         if "\t" in body[:indent]:
             raise ValueError("tab indentation is not supported")
         lines.append((indent, body.lstrip()))
+        # A `|`/`>` value opens a literal block on the deeper lines that
+        # follow — `- |` seq items too (the value after the dash is the
+        # indicator itself).
+        bci = map_colon(value)
+        if (bci != -1
+                and re.fullmatch(r"[>|][+-]?", value[bci + 1:].strip())):
+            block_indent = indent
+        elif re.fullmatch(r"[>|][+-]?", value):
+            block_indent = indent
 
     pos = [0]
     # Quoted keys are legal YAML in block mappings just as in flow maps —
@@ -1319,18 +1358,19 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                         "edit (restore it or delete it and re-resolve)",
                     ))
                     continue
-                elif rel_dst not in locked_prov:
-                    # Locked but never resolver-written: the file was
-                    # ADOPTED — the consumer already owned it when it first
-                    # matched the registry. The registry changing later must
-                    # not rewrite a consumer-owned file nor claim provenance
-                    # over it (a later --prune would then delete it).
+                elif locked_prov.get(rel_dst) in (None, "unknown"):
+                    # ADOPTED, or locked before provenance existed: nothing
+                    # proves this resolver ever wrote the file — a legacy
+                    # lock recorded adopted and installed files alike.
+                    # Registry drift must not rewrite a possibly
+                    # consumer-owned file nor stamp fresh provenance over
+                    # it (a later --prune would then delete it).
                     plan.conflicts.append((
                         dst,
-                        "adopted file, never resolver-installed — the "
-                        "registry version changed since adoption; delete "
-                        "the file and re-resolve to take the registry "
-                        "version, or drop the requirement to keep yours",
+                        "file not provably resolver-installed — the "
+                        "registry version changed; delete the file and "
+                        "re-resolve to take the registry version, or "
+                        "drop the requirement to keep yours",
                     ))
                     continue
                 elif (not same_exec or not exec_consistent
@@ -1802,6 +1842,13 @@ def main() -> int:
                 # them).
                 orphan_drift.append(f"{rel} (replaced by a symlink)")
                 continue
+            if not f.is_file():
+                # A fifo, device, socket or directory in the recorded file's
+                # place IS drift — and hashing must never run here: opening
+                # a fifo blocks until a writer shows up.
+                orphan_drift.append(
+                    f"{rel} (replaced by a non-regular file)")
+                continue
             if digest is not None:
                 try:
                     on_disk = sha256(f)
@@ -1828,14 +1875,26 @@ def main() -> int:
         return 0
 
     if args.apply:
-        # Probe the lock destination BEFORE materialising anything — if .ai
-        # cannot take the lock, components would land with no ownership
-        # record and every later run treats them as untracked local files.
-        lock_file.parent.mkdir(parents=True, exist_ok=True)
-        probe_fd, probe_name = tempfile.mkstemp(
-            dir=lock_file.parent, prefix=".lock-probe.", suffix=".tmp")
-        os.close(probe_fd)
-        Path(probe_name).unlink()
+        # Probe the lock destination AND every write/removal parent BEFORE
+        # materialising anything — a read-only target found mid-apply would
+        # strand earlier writes with no ownership record, and the retry
+        # would adopt them as local files (the next registry update then
+        # conflicts instead of updating).
+        probe_dirs = {lock_file.parent} | {dst.parent
+                                         for _, dst in plan.writes}
+        if args.prune:
+            probe_dirs |= {f.parent for f in plan.removals}
+        pd = lock_file.parent
+        try:
+            for pd in sorted(probe_dirs):
+                pd.mkdir(parents=True, exist_ok=True)
+                probe_fd, probe_name = tempfile.mkstemp(
+                    dir=pd, prefix=".write-probe.", suffix=".tmp")
+                os.close(probe_fd)
+                Path(probe_name).unlink()
+        except OSError as e:
+            sys.stderr.write(f"FAIL: cannot write to {pd}: {e}\n")
+            return 2
         for src, dst in plan.writes:
             rel_dst = dst.relative_to(repo_root).as_posix()
             dst.parent.mkdir(parents=True, exist_ok=True)

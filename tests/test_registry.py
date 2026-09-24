@@ -58,7 +58,7 @@ def run_resolver(manifest: Path, registry_root: Path, repo_root: Path, *flags: s
     return subprocess.run(
         [sys.executable, str(RESOLVE), "--manifest", str(manifest),
          "--registry", str(registry_root), "--repo-root", str(repo_root), *flags],
-        capture_output=True, text=True)
+        capture_output=True, text=True, timeout=120)
 
 
 def test_platform_require_materialises(tmp_path):
@@ -4770,7 +4770,7 @@ def test_sourced_and_bun_script_invocations_are_deps(tmp_path):
     (plug / "scripts" / "setup.sh").write_text("x")
     for invocation, expect in (
             (b"source scripts/setup.sh", True),
-            (b". scripts/setup.sh", False),   # `. ` sourcing is prose-prone
+            (b". scripts/setup.sh", True),    # POSIX `.` builtin sources too
             (b"resource scripts/setup.sh", False),  # `source` inside a word
             (b"bun scripts/setup.sh", True),
             (b"exec scripts/setup.sh", True),
@@ -4882,9 +4882,11 @@ def test_legacy_lock_provenance_backfill(tmp_path):
     assert victim.is_file()
 
 
-def test_unknown_provenance_written_file_upgrades(tmp_path):
-    """An 'unknown'-provenance path the resolver rewrites THIS run gains
-    real provenance — only carried (not-written) entries stay unknown."""
+def test_unknown_provenance_drift_conflicts(tmp_path):
+    """A legacy lock cannot distinguish a resolver-installed file from an
+    adopted consumer file ('unknown' provenance). Registry drift must NOT
+    rewrite it and stamp fresh provenance — a later --prune would then
+    delete a file that may be consumer-owned. Conflict instead."""
     reg_root = make_registry(tmp_path / "src", {
         "platform/framework": [("skills/demo/SKILL.md",
                                 "---\nname: demo\ndescription: d\n---\n"
@@ -4909,9 +4911,12 @@ def test_unknown_provenance_written_file_upgrades(tmp_path):
     m = write_manifest(consumer, "manolii",
                        [{"plugin": "platform/framework", "ref": "1.0.0"}])
     r = run_resolver(m, reg_root, consumer, "--apply")
-    assert r.returncode == 0, r.stdout
+    assert r.returncode == 1
+    assert "not provably resolver-installed" in r.stdout
+    assert dst.read_text() == "---\nname: demo\ndescription: d\n---\nold body"
+    # And it can never acquire provenance that makes it prune-eligible.
     lock = json.loads((ai / "capability-lock.json").read_text())
-    assert lock["provenance"][rel] == "platform/framework"
+    assert lock.get("provenance", {}).get(rel) != "platform/framework"
 
 
 def test_deleted_unknown_orphan_clears_lock(tmp_path):
@@ -5136,3 +5141,80 @@ def test_unparseable_frontmatter_treated_as_deps():
     src = b"---\nname: [unclosed\n---\nbody"
     assert mod.declares_script_deps(src) is True
     assert mod.declared_consumer_scripts(src) == set()
+
+
+def test_mini_yaml_single_document_markers():
+    """`---`/`...` document markers are accepted for a single document;
+    a second `---` (multi-doc) and content after `...` still fail closed."""
+    mod = load_resolve_module()
+    doc = mod._mini_yaml(
+        "---\nversion: 1\nuniverse: buro\nrequires: []\n...\n")
+    assert doc == {"version": 1, "universe": "buro", "requires": []}
+    with pytest.raises(ValueError):
+        mod._mini_yaml("---\na: 1\n---\nb: 2\n")
+    with pytest.raises(ValueError):
+        mod._mini_yaml("a: 1\n...\nb: 2\n")
+
+
+def test_block_scalar_hash_lines_preserved(tmp_path):
+    """Literal `#` lines inside a `|`/`>` block scalar are content, not
+    comments — `requires_scripts: |` holding only `# scripts/x.sh` must
+    still gate materialisation."""
+    mod = load_resolve_module()
+    fm = ("---\nname: gated\nrequires_scripts: |\n"
+          "  # scripts/setup.sh\n---\nbody").encode()
+    assert mod.declares_script_deps(fm) is True
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/gated/SKILL.md", fm.decode())],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode == 0, r.stdout
+    assert not (consumer / ".claude" / "skills" / "gated" / "SKILL.md"
+                ).exists()
+
+
+def test_fifo_orphan_is_drift_not_hang(tmp_path):
+    """A kept orphan replaced by a fifo must be reported as drift —
+    sha256() opening a fifo would block on a writer forever."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/run.sh", "echo hi\n")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    write_manifest(consumer, "manolii", [])
+    assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
+    orphan = consumer / ".claude" / "skills" / "demo" / "run.sh"
+    orphan.unlink()
+    os.mkfifo(orphan)
+    r = run_resolver(m, reg_root, consumer, "--check")  # timeout kills a hang
+    assert r.returncode == 1
+    assert "non-regular" in r.stdout
+
+
+def test_apply_preflights_every_destination(tmp_path):
+    """A later unwritable target must fail --apply BEFORE the first write —
+    otherwise earlier files land without an ownership record and the retry
+    adopts them as local files."""
+    reg_root = make_registry(tmp_path / "src", {
+        "platform/framework": [("skills/demo/SKILL.md",
+                                "---\nname: demo\ndescription: d\n---\nbody"),
+                               ("agents/runner.md", "agent body\n")],
+    })
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    agents_dir = consumer / ".claude" / "agents"
+    agents_dir.mkdir(parents=True)
+    agents_dir.chmod(0o555)
+    m = write_manifest(consumer, "manolii",
+                       [{"plugin": "platform/framework", "ref": "1.0.0"}])
+    r = run_resolver(m, reg_root, consumer, "--apply")
+    assert r.returncode != 0
+    assert not (consumer / ".claude" / "skills" / "demo" / "SKILL.md"
+                ).exists()
