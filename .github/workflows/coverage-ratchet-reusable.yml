@@ -226,6 +226,11 @@ jobs:
           current = float(os.environ["CURRENT"])
           cur_d = round(current, 1)
           base_path = Path(os.environ["BASELINE_FILE"])
+          # A committed symlink can escape the checkout (the literal-path
+          # guard only sees the link name). Refuse to follow one.
+          if base_path.is_symlink():
+              print(f"::error::baseline file {base_path} is a symlink — baseline must be a regular file")
+              sys.exit(1)
           if not base_path.exists():
               print(f"coverage-ratchet: no baseline at {base_path} — "
                     f"this run measures {cur_d}%. Seed the baseline file to activate.")

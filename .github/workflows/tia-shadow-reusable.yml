@@ -57,7 +57,10 @@ jobs:
     name: TIA shadow
     runs-on: ${{ inputs.runs_on }}
     timeout-minutes: ${{ inputs.timeout_minutes }}
-    if: ${{ github.event_name == 'pull_request' }}
+    # always() — a caller doing `needs: [test-job]` still wants the journal
+    # when that test job FAILED (the manifest upload is what makes the
+    # failure-vs-coverage gap visible); needs-failure must not skip it.
+    if: ${{ always() && github.event_name == 'pull_request' }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -94,13 +97,16 @@ jobs:
               capture_output=True, text=True, check=True).stdout.split("\0") if p]
           roots = [r.strip("/") for r in os.environ["TEST_ROOTS"].split(",") if r.strip()]
           # Runnable test patterns only — fixtures/snapshots/data under tests/
-          # are NOT executable; counting them in expected_tests fabricates
-          # 'missing' journal entries.
+          # (test_data.json, *.snap) are NOT executable; counting them in
+          # expected_tests fabricates 'missing' journal entries.
           import os.path
+          TEST_EXTS = (".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".cs", ".rs")
           is_test = lambda p: (
-              os.path.basename(p).startswith("test_") or ".test." in p
-              or ".spec." in p or p.endswith("_test.go") or p.endswith("_test.py")
-              or p.endswith("_test.ts") or p.endswith("_test.tsx"))
+              p.endswith(TEST_EXTS) and (
+                  os.path.basename(p).startswith("test_") or ".test." in p
+                  or ".spec." in p or p.endswith("_test.go")
+                  or p.endswith("_test.py") or p.endswith("_test.ts")
+                  or p.endswith("_test.tsx") or p.endswith("_test.js")))
 
           map_source = "default-heuristic"
           always, mappings = [], []
@@ -161,7 +167,10 @@ jobs:
               "unexpected": sorted(set(ran) - expected) if ran is not None else None,
               "map_source": map_source,
           }
-          Path("tia-shadow.json").write_text(json.dumps(journal, indent=2))
+          # RUNNER_TEMP, not the checkout — writing into the workspace would
+          # let a PR-controlled tia-shadow.json masquerade as the journal if
+          # this script ever fails between write and upload.
+          Path(os.environ["RUNNER_TEMP"], "tia-shadow.json").write_text(json.dumps(journal, indent=2))
           print(f"tia-shadow: {len(changed)} changed, {len(expected)} expected, "
                 f"ran={'unknown (no tia-ran-tests artifact)' if ran is None else len(ran)}, "
                 f"missing={None if ran is None else len(journal['missing'])}")
@@ -172,6 +181,6 @@ jobs:
         uses: actions/upload-artifact@b7c566a772e6d6bfb60ed0dc1cd7b42d9c8b3f24 # v6
         with:
           name: tia-shadow-${{ github.event.pull_request.head.sha }}-a${{ github.run_attempt }}
-          path: tia-shadow.json
+          path: ${{ runner.temp }}/tia-shadow.json
           retention-days: 30
           if-no-files-found: warn

@@ -4,7 +4,7 @@ name: Restore Drill (Reusable)
 #
 # Validates the Azure SQL recovery path end to end:
 #   1. PITR-restore the source database to a throwaway DB on the same server
-#      (`<source>-drill-<yyyymmdd>`) via `az sql db restore` — the same
+#      (`<source>-drill-<run_id>-<attempt>-<job>`) via `az sql db restore` — the same
 #      restore path an incident would use.
 #   2. Run read-only sanity queries (row counts, latest timestamps) — proves
 #      the restored data is actually queryable, not just provisioned.
@@ -177,6 +177,7 @@ jobs:
           sqlcmd --version
 
       - name: Restore to throwaway database
+        id: restore
         shell: bash
         env:
           RG: ${{ inputs.resource_group }}
@@ -207,6 +208,7 @@ jobs:
           echo "::error::restore did not reach Online within poll window"; exit 1
 
       - name: Sanity queries
+        id: queries
         shell: bash
         env:
           SERVER: ${{ inputs.sql_server }}
@@ -269,6 +271,12 @@ jobs:
         # the artifact must still carry a structured summary for diagnosis.
         if: always()
         shell: bash
+        env:
+          # Step outcomes make the report self-describing — an artifact with
+          # an empty queries list is otherwise indistinguishable from a run
+          # where a caller passed no queries.
+          RESTORE_OUTCOME: ${{ steps.restore.outcome }}
+          QUERIES_OUTCOME: ${{ steps.queries.outcome }}
         run: |
           mkdir -p drill-report
           python3 - <<'PY'
@@ -276,7 +284,12 @@ jobs:
           from pathlib import Path
           results = Path("drill-report/results.jsonl")
           rows = [json.loads(l) for l in results.read_text().splitlines()] if results.exists() else []
+          restore = os.environ.get("RESTORE_OUTCOME", "skipped")
+          queries = os.environ.get("QUERIES_OUTCOME", "skipped")
+          ok = restore == "success" and queries == "success"
           report = {"drill_db": os.environ.get("DRILL_DB", "unavailable"),
+                    "status": "success" if ok else "failed",
+                    "failed_stage": None if ok else ("restore" if restore != "success" else "sanity-queries"),
                     "run": os.environ["GITHUB_SERVER_URL"] + "/" + os.environ["GITHUB_REPOSITORY"]
                            + "/actions/runs/" + os.environ["GITHUB_RUN_ID"],
                     "queries": rows}
@@ -301,26 +314,45 @@ jobs:
         env:
           RG: ${{ inputs.resource_group }}
           SERVER: ${{ inputs.sql_server }}
+          # Whether the restore step issued a request Azure may have accepted.
+          # A skipped restore (validation failure) can't leave a pending DB —
+          # two quick absents suffice. An attempted one requires ~5 minutes
+          # of continuous absence: accepted-but-slow provisions materialize
+          # minutes after the CLI times out, and exiting on early 404s is
+          # exactly how orphan drill DBs happen.
+          RESTORE_OUTCOME: ${{ steps.restore.outcome }}
         run: |
-          # Poll, then delete — a restore accepted just before a CLI timeout
-          # can materialize seconds later, and a single `db show` 404 is how
-          # orphan drill DBs happen. A failed lookup is NOT proof of absence:
-          # only an explicit NotFound counts as absent; timeouts/5xx retry.
-          # Bound retries to a 9-minute window — the query step reserves ~10m
-          # for upload + this loop; iterating 20 unbounded attempts would let
-          # the job timeout cancel mid-teardown and orphan the DB.
+          # Poll, then delete. A failed lookup is NOT proof of absence: only
+          # an explicit NotFound counts; timeouts/5xx retry. Every call is
+          # bounded by the time LEFT before the 9-minute teardown deadline —
+          # an iteration that can't fit inside the remaining window is never
+          # started, so the job timeout can't cancel a delete mid-flight.
           ABSENT_CONFIRMED=0
           TEARDOWN_DEADLINE=$(( $(date +%s) + 9 * 60 ))
-          while [ "$(date +%s)" -lt "$TEARDOWN_DEADLINE" ]; do
+          if [ "$RESTORE_OUTCOME" = "skipped" ]; then
+            ABSENT_NEEDED=2     # no restore was ever requested
+          else
+            ABSENT_NEEDED=20    # ~5min continuous absence before we trust it
+          fi
+          while :; do
+            REMAIN=$(( TEARDOWN_DEADLINE - $(date +%s) ))
+            [ "$REMAIN" -lt 10 ] && break
             ERR=$(mktemp)
-            if timeout -k 10 60 az sql db show -g "$RG" -s "$SERVER" -n "$DRILL_DB" -o none 2>"$ERR"; then
-              timeout -k 30 240 az sql db delete -g "$RG" -s "$SERVER" -n "$DRILL_DB" -y -o none || true
+            SHOW_BUDGET=$(( REMAIN - 5 )); [ "$SHOW_BUDGET" -gt 60 ] && SHOW_BUDGET=60
+            if timeout -k 10 "$SHOW_BUDGET" az sql db show -g "$RG" -s "$SERVER" -n "$DRILL_DB" -o none 2>"$ERR"; then
+              # DB exists — delete within whatever budget is left (30s tail).
+              DEL_BUDGET=$(( TEARDOWN_DEADLINE - $(date +%s) - 30 ))
+              if [ "$DEL_BUDGET" -lt 30 ]; then
+                echo "::error::$DRILL_DB present but no teardown budget left to delete it — check Azure"
+                rm -f "$ERR"; exit 1
+              fi
+              timeout -k 10 "$DEL_BUDGET" az sql db delete -g "$RG" -s "$SERVER" -n "$DRILL_DB" -y -o none || true
+              rm -f "$ERR"
               sleep 15
               continue
             elif grep -qiE 'NotFound|not found|does not exist|ResourceNotFound' "$ERR"; then
-              # Two consecutive confirmed-absents = really gone (or never created).
               ABSENT_CONFIRMED=$(( ABSENT_CONFIRMED + 1 ))
-              [ "$ABSENT_CONFIRMED" -ge 2 ] && { echo "$DRILL_DB gone (or never created)"; rm -f "$ERR"; exit 0; }
+              [ "$ABSENT_CONFIRMED" -ge "$ABSENT_NEEDED" ] && { echo "$DRILL_DB gone (or never created)"; rm -f "$ERR"; exit 0; }
             else
               # Transient lookup failure — retry, don't conclude absence.
               echo "::warning::db show failed transiently: $(head -3 "$ERR")"
