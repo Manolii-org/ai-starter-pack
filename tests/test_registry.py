@@ -10089,7 +10089,6 @@ def test_pipe_to_exec_round26(tmp_path):
             b"ionice -c3 sh -c 'bash scripts/x.sh'",
             b"taskset -c 0 sh -c 'bash scripts/x.sh'",
             b"taskset --cpu-list 0 sh -c 'bash scripts/x.sh'",
-            b"taskset -c0 sh -c 'bash scripts/x.sh'",
             b"taskset 0x1 sh -c 'bash scripts/x.sh'",
             # `&&` separates even before a redirect — `x &&>f cmd`
             # runs cmd with its output redirected (Devin on #128,
@@ -10101,6 +10100,10 @@ def test_pipe_to_exec_round26(tmp_path):
             # query-mode forms never exec a command
             b"taskset -p -c 0-3 1234",
             b"ionice -p 1234",
+            # util-linux `-c` binds ONLY a separate operand — `-c0`
+            # aborts "invalid option -- '0'" before the command
+            # (Codex on #1393, round-52 review — verified live)
+            b"taskset -c0 sh -c 'bash scripts/x.sh'",
             # an inert single action emits nothing executable
             b"find . -exec true \\; | sh"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
@@ -10534,7 +10537,6 @@ def test_pipe_to_exec_round34(tmp_path):
             # glued short option values carry their operand in-word —
             # the command word after still runs
             b"cat scripts/x.sh | prlimit -o1 sh",
-            b"cat scripts/x.sh | taskset -c0,1 sh",
             b"cat scripts/x.sh | nice -n5 sh",
             b"cat scripts/x.sh | sudo -uroot sh",
             b"cat scripts/x.sh | ionice -c1 sh",
@@ -10581,7 +10583,11 @@ def test_pipe_to_exec_round34(tmp_path):
             b'cat scripts/x.sh | sh -s"$X"<&foo',
             b'cat scripts/x.sh | sh -s<&foo',
             b"cat scripts/x.sh | sh -s\"$X\"<&'$FD'",
-            b'cat scripts/x.sh | sh -s<&\\$FD'):
+            b'cat scripts/x.sh | sh -s<&\\$FD',
+            # a glued `-cLIST` aborts "invalid option" on util-linux
+            # — the command never runs (Codex on #1393, round-52 —
+            # verified live)
+            b"cat scripts/x.sh | taskset -c0,1 sh"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
 
 
@@ -11508,7 +11514,6 @@ def test_script_dep_round48(tmp_path):
             b"ionice -c2 -n 5 sh scripts/x.sh",
             b"taskset 0x1 sh scripts/x.sh",
             b"taskset -c 0 sh scripts/x.sh",
-            b"taskset -c0 sh scripts/x.sh",
             b"chrt -o 0 sh scripts/x.sh",
             b"chrt -T 1 -P 2 -D 3 0 sh scripts/x.sh",
             b"flock /tmp/l -c 'sh scripts/x.sh'",
@@ -11566,7 +11571,11 @@ def test_script_dep_round48(tmp_path):
             b"split --filter='$(printf sh)' - | sh",
             # kept semantics — an empty/benign source execs nothing
             b"split --filter=true scripts/x.sh | sh",
-            b"split -n r/1/1 - </dev/null | sh"):
+            b"split -n r/1/1 - </dev/null | sh",
+            # `-c0` aborts "invalid option -- '0'" — util-linux `-c`
+            # binds only a separate operand (Codex on #1393,
+            # round-52 review — verified live)
+            b"taskset -c0 sh scripts/x.sh"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
 
 
@@ -11839,4 +11848,93 @@ def test_script_dep_round51(tmp_path):
             # run (Devin on #1959)
             b"xargs echo 'sh scripts/x.sh'",
             b"sudo echo 'sh scripts/x.sh'"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round52(tmp_path):
+    """Review round-52 fixes: wrapped-argv interpreter operands exec a
+    positional script file (`flock L sh x`, `xargs bash x`, `xargs
+    python3 x`), taskset's `-c`/`--cpu-list` bind ONLY as a separate
+    operand (`-c0`/`--cpu-list=0` abort), `sort -o`/`--output` diverts
+    the stream to a FILE, `--additional-suffix` rejects a `/` value,
+    `grep --binary-files` has a fixed {binary,text,without-match}
+    domain, `pr --pages=00` aborts like `--pages=0`, split's filter
+    never fires when fd0 is /dev/null, and `find -OLEVEL` binds only
+    in the option region before the first path (verified live).
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts/x.sh").write_text("echo X\n")
+    (pdir / "scripts/x.py").write_text("print(1)\n")
+
+    for line in (
+            # an interpreter head inside a wrapper's argv runs its
+            # positional script file (Codex on #130/#1959 + Devin on
+            # #130/#1393)
+            b"flock L sh scripts/x.sh",
+            b"flock L bash scripts/x.sh",
+            b"xargs sh scripts/x.sh",
+            b"xargs bash /tmp/scripts/x.sh",
+            b"xargs python3 scripts/x.py",
+            b"flock L python3 scripts/x.py",
+            # taskset's separate-operand forms still reach the command
+            b"taskset -c 0 sh scripts/x.sh",
+            b"taskset 0 sh scripts/x.sh",
+            b"taskset --cpu 0 sh scripts/x.sh",
+            # sort's output aliases keep the stream on stdout
+            b"cat scripts/x.sh | sort --output=/dev/stdout | sh",
+            b"cat scripts/x.sh | sort -o - | sh",
+            b"cat scripts/x.sh | sort -o/dev/stdout | sh",
+            # a plain suffix binds; a binary-files mode binds
+            b"split --additional-suffix=ok "
+            b"--filter='sh scripts/x.sh' -",
+            b"cat scripts/x.sh | grep --binary-files=binary "
+            b"scripts/x.sh | sh",
+            # pages=01 paginates and emits
+            b"cat scripts/x.sh | pr --pages=01 | sh",
+            # a LIVE fd0 feeds the filter
+            b"split --filter='sh scripts/x.sh' - </dev/stdin",
+            # `-OLEVEL` in the pre-path option region is valid GNU
+            b"find -O3 . -exec sh scripts/x.sh \\;",
+            # program text after sh -c still runs (wrapped + bare)
+            b"flock L -c 'sh scripts/x.sh'",
+            b"flock L sh -c 'cat scripts/x.sh'"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+    for line in (
+            # util-linux binds `-c`/`--cpu-list` ONLY separately —
+            # `-c0` exits "invalid option", `--cpu-list=0` "doesn't
+            # allow an argument" (Codex on #1393)
+            b"taskset -c0 sh scripts/x.sh",
+            b"taskset --cpu-list=0 sh scripts/x.sh",
+            # `-o`/`--output FILE` diverts the result — the pipe sees
+            # nothing (Codex on #1393)
+            b"cat scripts/x.sh | sort --out /tmp/o | sh",
+            b"cat scripts/x.sh | sort -o /tmp/o | sh",
+            # a `/` in --additional-suffix aborts "invalid suffix …
+            # contains directory separator" (Codex on #130)
+            b"split --additional-suffix=/bad "
+            b"--filter='sh scripts/x.sh' -",
+            # `wat` is not a binary-files type — aborts "unknown
+            # binary-files type" (Codex on #130)
+            b"grep --binary-files=wat scripts/x.sh",
+            # `00` is a zero head — aborts "invalid page range" like
+            # `0` (Devin on #12)
+            b"cat scripts/x.sh | pr --pages=00 | sh",
+            # fd0 on /dev/null yields zero chunks — the filter never
+            # fires (Devin on #1959)
+            b"split --filter='sh scripts/x.sh' </dev/null",
+            b"split --filter='sh scripts/x.sh' - </dev/null",
+            # `-O*` inside the expression is an unknown predicate /
+            # bad decimal — find aborts before the action (Devin on
+            # #1959/#12)
+            b"find . -exec sh scripts/x.sh \\; -O3",
+            b"find . -exec sh scripts/x.sh \\; -O9",
+            b"find . -exec sh scripts/x.sh \\; -Oabc",
+            # after a program flag the positional is argv ($0), not
+            # the script (Devin on #1959, preserved)
+            b"flock L echo -c 'sh scripts/x.sh'",
+            b"flock L sh -c : scripts/x.sh",
+            b"flock L sh -c 'echo P' scripts/x.sh"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line

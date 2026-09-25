@@ -1113,6 +1113,8 @@ def _find_expr_spans(enc_words: list, hi: int, enclosing: bytes):
     terminal = _ARGV_PROGRAM_WRAPPER_TERMINAL[b"find"]
     k = hi + 1
     dead = unterminated = False
+    opt_region = True             # GNU options (`-O`/`-H`/`-L`/`-P`/
+                                  # `-D`) precede the first path word
     while k < len(enc_words):
         t = _word_text(enclosing[enc_words[k][0]:enc_words[k][1]])
         if t in _FIND_ACTION:
@@ -1211,14 +1213,22 @@ def _find_expr_spans(enc_words: list, hi: int, enclosing: bytes):
         if t in terminal:
             spans.append(("terminal", k, k))
         elif (t.startswith(b"-") and t != b"-"
-                and t not in _FIND_ZERO_OP
-                and not t.startswith(b"-O")):
-            # An unknown predicate aborts find BEFORE it traverses —
-            # `find . -exec bash x \; -bogus` prints "unknown
-            # predicate" and runs nothing (Devin on #130, round-51
-            # review — verified live). Same net effect as a terminal
-            # word: every action in the expression is dead.
-            spans.append(("terminal", k, k))
+                and t not in _FIND_ZERO_OP):
+            # `-OLEVEL` binds only in the option region BEFORE any
+            # path — `find -O3 .` reorders tests, but `-O3` inside the
+            # expression is an unknown predicate and `-Oabc` aborts
+            # "specify a decimal number" — either way find exits
+            # before the action (Devin on #1959/#12, round-52 review
+            # — verified live). Any other unlisted dash-word is an
+            # unknown predicate too (`-bogus` — round-51): a terminal
+            # word kills every action in the expression.
+            if not (opt_region and t.startswith(b"-O")
+                    and t[2:].isdigit()):
+                spans.append(("terminal", k, k))
+        else:
+            # The first positional ends GNU's option region — `-O`
+            # after it is a predicate, not an option.
+            opt_region = False
         k += 1
     # A terminal word ANYWHERE exits before every action (round-40) —
     # action spans are dropped under a terminal so callers that only
@@ -1549,8 +1559,7 @@ def _operand_is_program(enc_words: list, wi: int,
                     # option, so the NEXT positional is the command
                     # (bare `taskset MASK cmd` still skips it).
                     if (wk == b"taskset"
-                            and (t.startswith(b"-c")
-                                 or t.startswith(b"--cpu-list"))):
+                            and t in (b"-c", b"--cpu-list")):
                         possk = 0
                     cls = _wrapper_opt_class(wk, t)
                     if cls == "describe":
@@ -1661,7 +1670,7 @@ def _operand_is_program(enc_words: list, wi: int,
                  for aw in enc_words[hi + 1:]]
         afilt, _afin, _atout, fidx = _split_scan(key, aargs)
         return (fidx is not None and wi - hi - 1 == fidx
-                and _afin != b"/dev/null"
+                and not _split_dead_input(_afin, enclosing)
                 and _filter_script_role(afilt) == "exec")
     if key in _ARGV_PROGRAM_WRAPPERS:
         # The program operand belongs to the command the wrapper execs —
@@ -2242,6 +2251,18 @@ def _wrapper_opt_class(key: bytes, t: bytes):
     `prlimit -p1` is query mode — the trailing command never runs."""
     if not t.startswith(b"-") or t == b"-":
         return None
+    if key == b"taskset":
+        # util-linux binds `-c`/`--cpu-list` ONLY as a separate
+        # operand — `-c0` exits "invalid option" and `--cpu-list=0`
+        # "doesn't allow an argument", both before the command runs
+        # (Codex on #1393, round-52 review — verified live). Long
+        # prefixes like `--cpu` still abbreviate normally.
+        if t in (b"-c", b"--cpu-list"):
+            return "operand_next"
+        if (t.startswith(b"--cpu-list=")
+                or (t.startswith(b"-c")
+                    and not t.startswith(b"--"))):
+            return "describe"
     vals = _WRAPPER_OPT_OPERAND.get(key, frozenset())
     desc = _WRAPPER_DESCRIBE.get(key, frozenset())
     flags = _WRAPPER_FLAGS.get(key, frozenset())
@@ -2818,8 +2839,7 @@ def _effective_head(words: list, win: bytes) -> int | None:
                     # option, so the NEXT positional is the command
                     # (bare `taskset MASK cmd` still skips it).
                     if (key == b"taskset"
-                            and (t.startswith(b"-c")
-                                 or t.startswith(b"--cpu-list"))):
+                            and t in (b"-c", b"--cpu-list")):
                         pos_skip = 0
                     cls = _wrapper_opt_class(key, t)
                     if cls == "describe":
@@ -3096,6 +3116,70 @@ def _sort_files0(args: list):
     return found
 
 
+def _sort_out(args: list):
+    """sort's `-o`/`--output` operand — GNU unambiguous prefixes bind
+    the same way (`--out`), `-o` glued or separate (Codex on #1393,
+    round-52 review). None when stdout is the destination."""
+    gnu = _READER_GNU_OPS[b"sort"]
+    for i, a in enumerate(args):
+        if a == b"--":
+            break
+        if a.startswith(b"--"):
+            name = a.split(b"=", 1)[0]
+            if name in gnu:
+                resolved = name
+            else:
+                cands = [o for o in gnu if o.startswith(name)]
+                if len(cands) != 1:
+                    continue
+                resolved = cands[0]
+            if resolved == b"--output":
+                return (a.split(b"=", 1)[1] if b"=" in a
+                        else (args[i + 1] if i + 1 < len(args)
+                              else b""))
+            continue
+        if a[:1] == b"-" and a != b"-" and not a.startswith(b"--"):
+            for j in range(1, len(a)):
+                c = a[j:j + 1]
+                if c == b"o":
+                    return (a[j + 1:] if j + 1 < len(a)
+                            else (args[i + 1] if i + 1 < len(args)
+                                  else b""))
+                if c in (b"k", b"t", b"T", b"S"):
+                    break       # operand short — rest is its value
+    return None
+
+
+def _sort_diverts(args: list) -> bool:
+    """True when sort writes its result to a FILE instead of stdout —
+    a downstream pipe then sees nothing (`sort --out /tmp/o` — Codex
+    on #1393, round-52 review, verified live). An stdout alias (`-`,
+    `/dev/stdout`, `/dev/fd/1`) keeps the stream live."""
+    out = _sort_out(args)
+    return (out is not None and out != b"-"
+            and _fd_alias_target(out) != 1)
+
+
+def _split_dead_input(afin, enclosing: bytes) -> bool:
+    """True when split's effective INPUT yields ZERO chunks — a
+    `/dev/null` operand, or stdin (None/`-`) rebound to `/dev/null`
+    or closed (`split --filter='sh x' </dev/null` never fires the
+    filter — Devin on #1959, round-52 review, verified live)."""
+    if afin == b"/dev/null":
+        return True
+    if afin is not None and afin[:1] == b"<":
+        # A `</dev/null`-style word IS the fd-0 redirect, not an input
+        # operand — the real input is its target.
+        afin = None
+    if afin not in (None, b"-"):
+        return False
+    tgts: dict = {}
+    _k, _a, sfd, _he = _seg_head_args(enclosing, tgts)
+    if sfd is not None and sfd.get(0, _FD_IN) not in (_FD_IN, _FD_FILE):
+        return True                     # `<&-` — stdin closed
+    return tgts.get(0) == b"/dev/null"
+
+
 # split's option map for the filter/input scan (round-43 audit of
 # `split --help`): required-arg longs consume the next word BEFORE it
 # can read as `--filter` (`split --lines --filter sh` aborts "invalid
@@ -3151,6 +3235,11 @@ def _split_arg_ok(opt: bytes, v: bytes) -> bool:
                 and all(x.isdigit() and int(x) != 0 for x in p)):
             return False
         return len(p) == 1 or int(p[0]) <= int(p[1])
+    if opt == b"--additional-suffix":
+        # A suffix containing `/` aborts "invalid suffix … contains
+        # directory separator" before input is read or the filter
+        # runs (Codex on #130, round-52 review — verified live).
+        return b"/" not in v
     return True
 
 
@@ -3994,6 +4083,14 @@ _READER_OPT_VALUES = {
         b"-t": frozenset({b"d", b"o", b"x"}),
         b"--radix": frozenset({b"d", b"o", b"x"}),
     },
+    b"grep": {
+        # `--binary-files` picks a fixed MODE — binary/text/
+        # without-match; anything else exits "unknown binary-files
+        # type" before any read (Codex on #130, round-52 review —
+        # verified live).
+        b"--binary-files": frozenset(
+            {b"binary", b"text", b"without-match"}),
+    },
 }
 # Reader options whose operand must be a non-negative integer — an
 # invalid value aborts before any read (`tail --pid nope`, `pr
@@ -4021,7 +4118,7 @@ def _pages_ok(v: bytes) -> bool:
     if v[:1] == b"+":
         v = v[1:]
     head, sep, tail = v.partition(b":")
-    if not head.isdigit() or head == b"0":
+    if not head.isdigit() or int(head) == 0:
         return False
     # `--pages FIRST:LAST` — LAST must be >= FIRST (`1:0` and `2:1`
     # abort "invalid page range" before any read — Devin on #130/#12/
@@ -4422,7 +4519,12 @@ def _seg_prov(body: bytes, prov: str,
             # split/csplit route their scripts/ operand through their
             # own branch below — whether the file's bytes reach stdout
             # is a `-n K/N`/filter question, not a read question.
-            if (key not in (b"split", b"csplit")
+            if key == b"sort" and _sort_diverts(args):
+                # `-o`/`--output FILE` sends the result to FILE — a
+                # downstream pipe sees nothing (`sort --out /tmp/o`
+                # — Codex on #1393, round-52 review, verified live).
+                prov = "own"
+            elif (key not in (b"split", b"csplit")
                     and any(b"scripts/" in arg for arg in args)):
                 prov = "script"
             elif key in (b"split", b"csplit"):
@@ -5307,8 +5409,7 @@ def _stdin_exec_head(win: bytes) -> str:
                 # option, so the NEXT positional is the command (bare
                 # `taskset MASK cmd` still skips it).
                 if (wkey == b"taskset"
-                        and (tw.startswith(b"-c")
-                             or tw.startswith(b"--cpu-list"))):
+                        and tw in (b"-c", b"--cpu-list")):
                     pos = 0
                 wi += 2 if (cls == "operand_next"
                             and wi + 1 < len(words)) else 1
@@ -7379,7 +7480,11 @@ def _command_literal(src: bytes, pos: int,
         _af, _ai, _at, fidx = _split_scan(key, aargs)
         if (fidx is not None
                 and words[1 + fidx][0] <= pos < words[1 + fidx][1]):
-            return False
+            # The filter fires only when a chunk exists — an input
+            # yielding none (`split --filter='sh x' </dev/null` —
+            # Devin on #1959, round-52 review, verified live) leaves
+            # the operand as inert text.
+            return _split_dead_input(_ai, win)
     if output_exec:
         # The command's output is code — unless its own fd1 is diverted,
         # in which case its bytes never join the captured stream that
@@ -8918,9 +9023,48 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                                 # live). Recurse so the wrapped head's
                                 # role decides (`flock L sh -c P`
                                 # still runs P).
-                                return _operand_is_program(
-                                    enc_words[ws:], wi0 - ws,
-                                    enclosing)
+                                if _operand_is_program(
+                                        enc_words[ws:], wi0 - ws,
+                                        enclosing):
+                                    return True
+                                # An interpreter's positional script
+                                # file runs too — `flock L sh x`,
+                                # `xargs bash x`, `xargs python3 x`
+                                # exec it (Codex on #130/#1959 + Devin
+                                # on #130/#1393, round-52 review —
+                                # verified live). After a program
+                                # flag the positional is argv ($0),
+                                # not the script (`flock L sh -c :
+                                # x` runs `:`).
+                                hkey = _command_key(
+                                    enclosing[enc_words[ws][0]:
+                                              enc_words[ws][1]])
+                                if (hkey in _SH_STDIN_HEADS
+                                        or hkey
+                                        in _EXEC_OPERAND_FLAGS):
+                                    pflags2 = _EXEC_OPERAND_FLAGS.get(
+                                        hkey, frozenset())
+                                    pfchars2 = {
+                                        p2[1:] for p2 in pflags2
+                                        if len(p2) == 2}
+                                    j2 = ws + 1
+                                    while j2 < wi0:
+                                        tj2 = _word_text(
+                                            enclosing[
+                                                enc_words[j2][0]:
+                                                enc_words[j2][1]])
+                                        if (tj2 in pflags2
+                                                or (len(tj2) > 2
+                                                    and tj2[:1] == b"-"
+                                                    and tj2[1:2] != b"-"
+                                                    and any(
+                                                        c2 in tj2[1:]
+                                                        for c2 in
+                                                        pfchars2))):
+                                            return False
+                                        j2 += 1
+                                    return True
+                                return False
                 return True
             # A glued non-`-d` short-option operand whose tail is a script
             # IS the invocation (`node -rscripts/preload.js`) — the same
