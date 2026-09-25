@@ -1093,7 +1093,6 @@ def _operand_is_program(enc_words: list, wi: int,
             continue
         if wk in _EXEC_WRAPPERS:
             j += 1
-            optops = _WRAPPER_OPT_OPERAND.get(wk, frozenset())
             possk = _WRAPPER_POS_SKIP.get(wk, 0)
             while j < len(enc_words):
                 t = _word_text(
@@ -2217,7 +2216,6 @@ def _effective_head(words: list, win: bytes) -> int | None:
         key = _command_key(win[words[i][0]:words[i][1]])
         if key in _EXEC_WRAPPERS:
             i += 1
-            takes_operand = _WRAPPER_OPT_OPERAND.get(key, frozenset())
             pos_skip = _WRAPPER_POS_SKIP.get(key, 0)
             while i < len(words):
                 t = _word_text(win[words[i][0]:words[i][1]])
@@ -3728,7 +3726,6 @@ def _stdin_exec_head(win: bytes) -> str:
             # any operand-taking option of its own, as _effective_head
             # does, then keep looking for `env`.
             wi += 1
-            opts = _WRAPPER_OPT_OPERAND.get(wkey, frozenset())
             pos = _WRAPPER_POS_SKIP.get(wkey, 0)
             while wi < len(words):
                 tw = _word_text(win[words[wi][0]:words[wi][1]])
