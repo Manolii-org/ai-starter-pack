@@ -10845,3 +10845,130 @@ def test_script_dep_round41(tmp_path):
             b"cat scripts/x.sh | split --unbuffered - | sh",
             b"cat scripts/x.sh | csplit - 2 | sh"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round42(tmp_path):
+    """Round-42 review (Devin/Codex/CodeRabbit on #130/#1393/#1959/#12 —
+    every behavior verified against real GNU bash/find/flock/split/strings/
+    gawk):
+    * `-quit` exits only when EVALUATED — later words still parse
+      (`-quit -help` prints usage) and a later `-o`/`-or`/`,` branch
+      revives the action (`find . -false -quit -o -exec` runs it);
+    * `-D` is a pre-path debug option (no operand; `find . -D x` errors
+      "unknown predicate"), while `-files0-from` is a global option
+      that consumes the NUL list filename (`-files0-from --help` reads
+      `--help` as the file);
+    * `-newerBm` is a valid form (B = birth stamp) and consumes its
+      reference operand like every other -newerXY;
+    * the find action's EFFECTIVE head decides — `env bash x`,
+      `timeout 5 bash x`, `sudo sh x` reach the interpreter behind the
+      wrapper, an unlisted head fails closed (`-exec tsx x`), and a
+      non-exec head emits the path so a `| sh` after the find still
+      runs it (`-exec cat x \\; | sh`);
+    * a positional AFTER an interpreter program flag is argv ($0…),
+      not the script — `sh -c : x.sh` runs `:`;
+    * flock post-lockfile dash words are literal argv[0] — `-n`/
+      `--help` fail ENOENT and nothing after them runs;
+    * `pr --indent` takes a required argument;
+    * `awk -e/--source` (program text) and `-E/--exec` (program file)
+      supply the program — later positionals are data files; `--trace`
+      is a gawk boolean;
+    * `strings` mode options validate their value — `--unicode bad`
+      aborts before reading;
+    * split's `--filter` resolves unique GNU prefixes (`--fil=cat`)
+      and the filter's own stdout decides the stream — `cat` forwards,
+      `true`/`false` emit nothing; the `-n` K/N stdout modes need a
+      seekable input and never forward the pipe."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_text("echo HIT\n")
+    for line in (
+            # `-quit` on a false/`-o` branch leaves the action live —
+            # `find . -false -quit -o -exec` runs it (verified live)
+            b"find . -false -quit -o -exec sh scripts/x.sh \\;",
+            # `-quit` after the action does not undo it (round-41)
+            b"find . -exec sh scripts/x.sh \\; -quit",
+            # `-quit -o -exec` — the model keeps dep (real quits first;
+            # over-block is the safe direction)
+            b"find . -quit -o -exec sh scripts/x.sh \\;",
+            # `-files0-from` consumes the list filename — `--help`
+            # is read as the file, not a terminal word (verified live)
+            b"find -files0-from --help -exec sh scripts/x.sh \\;",
+            # `-newerBm` consumes its reference like -newermt
+            b"find . -newerBm REF -exec sh scripts/x.sh \\;",
+            # wrapper heads unwrap to the interpreter (EXEC-RAN/
+            # TO-RAN verified live)
+            b"find . -exec env bash scripts/x.sh \\;",
+            b"find . -exec timeout 5 bash scripts/x.sh \\;",
+            b"find . -exec sudo sh scripts/x.sh \\;",
+            b"find . -exec nice sh scripts/x.sh \\;",
+            b"find . -exec env sh -c 'bash scripts/x.sh' \\;",
+            # an unlisted head may still interpret — fail closed
+            b"find . -exec tsx scripts/x.sh \\;",
+            b"find . -exec deno run scripts/x.sh \\;",
+            # a non-exec head emits the path — the find pipeline's
+            # own `| sh` still runs it (verified live)
+            b"find . -exec cat scripts/x.sh \\; | sh",
+            # interpreter argv[0] reads the script file (round-41)
+            b"find . -exec sh scripts/x.sh \\;",
+            b"find . -exec sh -c 'sh scripts/x.sh' \\;",
+            b"find . -exec python scripts/x.sh \\;",
+            # split's unique-prefix `--fil`/`--f` resolve to --filter —
+            # the filter's stdout forwards the chunks (verified live)
+            b"cat scripts/x.sh | split --fil=cat - | sh",
+            b"cat scripts/x.sh | split --f cat - | sh",
+            b"cat scripts/x.sh | split --filter='cat' - | sh",
+            # `pr --indent` takes a required argument — the stream
+            # still forwards (verified live)
+            b"cat scripts/x.sh | pr --indent 4 | sh",
+            # `--trace` is a boolean — the program positional still
+            # reads the pipe (over-block on gawk < 5.3)
+            b"cat scripts/x.sh | awk --trace '{print}' | sh",
+            # a valid strings mode value still forwards
+            b"cat scripts/x.sh | strings --unicode l | sh",
+            b"cat scripts/x.sh | strings -e l | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # `-quit` with no later `-o` kills the action (verified live)
+            b"find . -quit -exec sh scripts/x.sh \\;",
+            # `-quit` does not stop PARSING — a later `-help` still
+            # prints usage and exits (verified live)
+            b"find . -exec sh scripts/x.sh \\; -quit -help",
+            # `-D` takes no operand — `--help` is still a terminal
+            # word (`find . -D dbg --help` prints usage — verified)
+            b"find . -D dbg --help -exec sh scripts/x.sh \\;",
+            # post-lockfile dash words are literal argv[0] — flock
+            # fails ENOENT and nothing after runs (verified live)
+            b"flock /tmp/l -n sh scripts/x.sh",
+            b"flock /tmp/l --help sh scripts/x.sh",
+            # a positional AFTER the interpreter's program flag is
+            # argv ($0), not the script — `sh -c : x.sh` runs `:`
+            # (verified live)
+            b"find . -exec sh -c : scripts/x.sh \\;",
+            # non-exec heads print/read the literal name — no pipe to
+            # an exec head means nothing runs (verified live)
+            b"find . -exec cat scripts/x.sh \\;",
+            b"find . -exec echo scripts/x.sh \\;",
+            b"find . -exec awk '{print}' scripts/x.sh \\;",
+            # a silent filter emits nothing on stdout — `--filter=
+            # true`/`false` leave sh at EOF (verified live)
+            b"cat scripts/x.sh | split --filter=true - | sh",
+            b"cat scripts/x.sh | split --filter=false - | sh",
+            # the `-n` K/N stdout modes need a seekable input and
+            # abort on the pipe ("cannot determine file size") —
+            # verified live: numeric AND l/r modes
+            b"cat scripts/x.sh | split -n 1/1 - | sh",
+            b"cat scripts/x.sh | split -n l/1 - | sh",
+            # `strings` mode options validate their value — a bad
+            # mode aborts before any read (verified live)
+            b"cat scripts/x.sh | strings --unicode bad | sh",
+            b"cat scripts/x.sh | strings --unicode=bad | sh",
+            b"cat scripts/x.sh | strings -e bad | sh",
+            b"cat scripts/x.sh | strings -t q | sh",
+            # awk program flags supply the program — later operands
+            # are data files that replace the stream (verified live)
+            b"cat scripts/x.sh | awk --source '{print}' /dev/null | sh",
+            b"cat scripts/x.sh | awk --exec f /dev/null | sh",
+            b"cat scripts/x.sh | awk -e '{print}' /dev/null | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
