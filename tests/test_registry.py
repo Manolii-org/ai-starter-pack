@@ -11079,3 +11079,92 @@ def test_script_dep_round43(tmp_path):
             # no downstream pipe — the action's file is only printed
             b"find . -exec awk '{print}' scripts/x.sh \\;"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round44(tmp_path):
+    r"""Round-44 review findings, all verified against live GNU tools:
+
+    * `split --unbuffered`/`-u` is a real flag — the scan must keep
+      the filter (Devin/Codex/CodeRabbit on #130/#1959/#12/#1393);
+    * obsolete `-NUM` line counts are valid split shorts (`-1000`
+      still runs the filter — CodeRabbit);
+    * `split --help`/`--version` exit BEFORE any filter runs,
+      regardless of position (Devin/Codex);
+    * invalid split operands abort before the filter: `--lines=xyz`,
+      `-a xyz`, `-t ''`/`xy`, bad CHUNKS; any `-n` aborts on a pipe
+      ("cannot determine file size") and `K/N` chunk-selects refuse
+      `--filter` outright (Devin);
+    * `xargs --he`/`flock --vers` resolve to terminal modes via GNU
+      unique prefix, and ambiguous/unknown options (`--ver`, `-Z`)
+      error out before the wrapped argv (Codex);
+    * `flock L -- sh x` execs the literal `--` — ENOENT, nothing
+      after it runs (Devin);
+    * `find . -quit -exec echo -o \; -exec sh x \;` still quits —
+      the `-o` inside echo's argv is not a find branch (Devin);
+    * `sh -lc : x.sh` binds the program inside the cluster — x.sh is
+      left as $0, never executed (Devin)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_text("echo HIT\n")
+    for line in (
+            # --unbuffered/-u keep the filter (verified live)
+            b"cat scripts/x.sh | split --unbuffered --filter=sh - | sh",
+            b"cat scripts/x.sh | split -u --filter=sh - | sh",
+            b"cat scripts/x.sh | split --un --filter=sh - | sh",
+            # obsolete -NUM line count (verified live)
+            b"cat scripts/x.sh | split -1000 --filter=sh - | sh",
+            # valid operands keep the filter (verified live)
+            b"cat scripts/x.sh | split -b 1K --filter=sh - | sh",
+            b"cat scripts/x.sh | split -b1KB --filter=sh - | sh",
+            b"cat scripts/x.sh | split -l 5 --filter=sh - | sh",
+            b"cat scripts/x.sh | split --numeric-suffixes --filter=sh - | sh",
+            # `-n 2` on a FILE input still runs the filter — a
+            # scripts/ input file's chunks reach sh (verified live)
+            b"split -n 2 --filter=sh scripts/x.sh | sh",
+            # find: a REAL expr branch after -quit still revives the
+            # action (verified live)
+            b"find . -false -quit -o -exec sh scripts/x.sh \\;",
+            # xargs -E/--eof take no separate operand — the next word
+            # is the command (verified live)
+            b"xargs -E sh scripts/x.sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # terminal split modes — never run the filter, either
+            # position (verified live)
+            b"cat scripts/x.sh | split --filter=sh --help | sh",
+            b"cat scripts/x.sh | split --help --filter=sh - | sh",
+            b"cat scripts/x.sh | split --filter=sh --version - | sh",
+            # invalid operands abort before the filter (verified live)
+            b"cat scripts/x.sh | split --filter=sh --lines=xyz - | sh",
+            b"cat scripts/x.sh | split --filter=sh -l xyz - | sh",
+            b"cat scripts/x.sh | split --filter=sh -a xyz - | sh",
+            b"cat scripts/x.sh | split --filter=sh -t xy - | sh",
+            b"cat scripts/x.sh | split --filter=sh -n x/y - | sh",
+            # any -n needs seekable input; K/N refuses --filter —
+            # abort either way (verified live)
+            b"cat scripts/x.sh | split --filter=sh -n 2 - | sh",
+            b"cat scripts/x.sh | split --filter=sh -n 1/1 - | sh",
+            # a missing required operand aborts too (verified live:
+            # "option '--filter' requires an argument")
+            b"cat scripts/x.sh | split --filter=sh --filter | sh",
+            # a glued positional after --numeric-suffixes is INPUT —
+            # a missing file aborts before the filter (verified live)
+            b"cat scripts/x.sh | split --numeric-suffixes 5 --filter=sh - | sh",
+            # terminal prefixes and error exits kill the wrapped argv
+            # (verified live)
+            b"xargs --he sh scripts/x.sh",
+            b"flock --vers /dev/null sh scripts/x.sh",
+            b"xargs --ver sh scripts/x.sh",
+            b"xargs -Z sh scripts/x.sh",
+            # post-lockfile `--` is flock's literal argv[0] — ENOENT
+            # (verified live)
+            b"flock /dev/null -- sh scripts/x.sh",
+            # `-o` inside an action argv is not a find branch — -quit
+            # still kills the later action (verified live)
+            b"find . -quit -exec echo -o \\; -exec sh scripts/x.sh \\;",
+            # `-lc` binds the program inside the cluster — x.sh is $0
+            # (verified live)
+            b"find . -exec sh -lc : scripts/x.sh \\;",
+            b"find . -exec sh -cl : scripts/x.sh \\;"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line

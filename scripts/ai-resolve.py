@@ -946,6 +946,103 @@ _FIND_ONE_OP = frozenset({
 _FIND_TWO_OP = frozenset({b"-fprintf"})
 _FIND_ACTION = frozenset({b"-exec", b"-execdir", b"-ok", b"-okdir"})
 
+# GNU long-option tables for the argv wrappers — getopt_long resolves
+# any UNAMBIGUOUS prefix, so `xargs --he` IS `--help` and `flock
+# --vers` IS `--version` (both terminal); an ambiguous or unknown
+# option errors out BEFORE the wrapped argv (`xargs --ver` /
+# `xargs -Z` / `flock --ver` print "ambiguous"/"invalid option" and
+# exit — Codex on #1959, round-44 review — verified live).
+_WRAPPER_LONG = {
+    b"xargs": frozenset({
+        b"--arg-file", b"--buffer-size", b"--delimiter", b"--eof",
+        b"--exit", b"--help", b"--interactive", b"--max-args",
+        b"--max-chars", b"--max-lines", b"--max-procs",
+        b"--no-run-if-empty", b"--null", b"--open-tty",
+        b"--parallel", b"--process-slot-var", b"--replace",
+        b"--show-limits", b"--verbose", b"--version"}),
+    b"flock": frozenset({
+        b"--close", b"--command", b"--conflict-exit-code",
+        b"--exclusive", b"--fcntl", b"--help", b"--no-fork",
+        b"--nonblock", b"--shared", b"--timeout", b"--unlock",
+        b"--verbose", b"--version"}),
+}
+# Long options consuming the NEXT word when `=` is absent;
+# `--eof`/`--replace`/`--max-lines` take OPTIONAL args — a separate
+# word stays positional (`xargs --eof echo` runs echo — round-44,
+# verified live).
+_WRAPPER_REQ_LONG = {
+    b"xargs": frozenset({
+        b"--arg-file", b"--buffer-size", b"--delimiter",
+        b"--max-args", b"--max-chars", b"--max-procs",
+        b"--process-slot-var"}),
+    b"flock": frozenset({
+        b"--command", b"--timeout", b"--conflict-exit-code"}),
+}
+_WRAPPER_OPTARG_LONG = {
+    b"xargs": frozenset({b"--eof", b"--max-lines", b"--replace"}),
+    b"flock": frozenset(),
+}
+# Short letters per wrapper (GNU xargs `0a:d:eE:iI:l:L:n:P:prs:txo`,
+# util-linux flock) — a REQUIRED-arg letter ends the cluster (the
+# rest is its operand, else the next word); an OPTIONAL-arg letter
+# ends it the same way but never reaches the next word (`xargs -e
+# echo` runs echo). Terminal letters (`flock -h`/`-V`) are
+# deliberately ABSENT from the flag set so they fall to the
+# exit-before-argv result alongside genuinely unknown letters.
+_WRAPPER_REQ_SHORT = {
+    b"xargs": frozenset({b"a", b"d", b"I", b"L", b"n", b"P", b"s"}),
+    b"flock": frozenset({b"E", b"c", b"w"}),
+}
+_WRAPPER_OPT_SHORT = {
+    b"xargs": frozenset({b"E", b"e", b"i", b"l"}),
+    b"flock": frozenset(),
+}
+_WRAPPER_FLAG_SHORT = {
+    b"xargs": frozenset({b"0", b"o", b"p", b"r", b"t", b"x"}),
+    b"flock": frozenset({b"F", b"e", b"n", b"o", b"s",
+                         b"u", b"v", b"x"}),
+}
+
+
+def _wrapper_opt_skip(key: bytes, t: bytes):
+    """Words a GNU `xargs`/`flock` option `t` consumes (1 = itself,
+    2 = itself + the next word) — or None when the tool exits BEFORE
+    the wrapped argv: a unique long-prefix resolving to a terminal
+    mode, an ambiguous/unknown option, a `=` operand on a true flag
+    (round-44 — verified live: `xargs --ver` and `flock --ver` print
+    "option is ambiguous", `xargs -Z` "invalid option"; `xargs
+    --eof echo` leaves echo positional)."""
+    if t.startswith(b"--"):
+        name = t.split(b"=", 1)[0]
+        if name in _WRAPPER_LONG[key]:
+            resolved = name
+        else:
+            cands = [o for o in _WRAPPER_LONG[key]
+                     if o.startswith(name)]
+            if len(cands) != 1:
+                return None             # ambiguous/unknown → exits
+            resolved = cands[0]
+        if resolved in _ARGV_PROGRAM_WRAPPER_TERMINAL[key]:
+            return None                 # --help/--version — exits
+        if resolved in _WRAPPER_REQ_LONG[key]:
+            return 1 if b"=" in t else 2
+        if resolved in _WRAPPER_OPTARG_LONG[key]:
+            return 1                    # optional arg — glued only
+        if b"=" in t:
+            return None                 # flag + `=` → error exit
+        return 1
+    j = 1
+    while j < len(t):
+        c = t[j:j + 1]
+        if c in _WRAPPER_REQ_SHORT[key]:
+            return 1 if j + 1 < len(t) else 2
+        if c in _WRAPPER_OPT_SHORT[key]:
+            return 1                    # optional arg — glued only
+        if c not in _WRAPPER_FLAG_SHORT[key]:
+            return None                 # unknown/terminal letter
+        j += 1
+    return 1
+
 
 def _find_newer_op(t: bytes) -> bool:
     """`-newerXY REFERENCE` — a predicate named by two letters
@@ -996,10 +1093,35 @@ def _find_expr_spans(enc_words: list, hi: int, enclosing: bytes):
             # -o -exec` runs it — Devin/Codex/CodeRabbit round-42
             # review, verified live). Dead only when no such branch
             # follows; keeping dep on `-quit -o -exec` is the safe
-            # direction (real quits first — over-block).
-            later = [_word_text(enclosing[enc_words[m][0]:
-                                        enc_words[m][1]])
-                     for m in range(k + 1, len(enc_words))]
+            # direction (real quits first — over-block). Only EXPR-
+            # level words count — a `-o`/`,` inside an action argv or
+            # a predicate operand is the command's data (`find .
+            # -quit -exec echo -o \; -exec sh x \;` still quits —
+            # Devin on #12, round-44 review, verified live).
+            later = []
+            m = k + 1
+            while m < len(enc_words):
+                tm = _word_text(
+                    enclosing[enc_words[m][0]:enc_words[m][1]])
+                if tm in _FIND_ACTION:
+                    m += 1
+                    while m < len(enc_words):
+                        if _word_text(
+                                enclosing[enc_words[m][0]:
+                                          enc_words[m][1]]) in (
+                                    b";", b"+"):
+                            break
+                        m += 1
+                    m += 1
+                    continue
+                if tm in _FIND_TWO_OP:
+                    m += 3
+                    continue
+                if tm in _FIND_ONE_OP or _find_newer_op(tm):
+                    m += 2
+                    continue
+                later.append(tm)
+                m += 1
             if not any(x in (b"-o", b"-or", b",") for x in later):
                 dead = True
             k += 1
@@ -1043,22 +1165,35 @@ def _argv_wrap_start(enc_words: list, hi: int, enclosing: bytes):
     while j < len(enc_words):
         t = _word_text(enclosing[enc_words[j][0]:enc_words[j][1]])
         if not ended and t != b"-" and t.startswith(b"-"):
-            if t == b"--":
-                ended = True
-            elif key == b"flock" and pos_skip == 0:
+            if key == b"flock" and pos_skip == 0:
                 # After the lockfile every word is command argv —
-                # only an exact `-c`/`--command` binds a shell
-                # command string at the NEXT word; any other word,
-                # even dash-shaped, is the literal argv[0] flock
-                # execs — `flock L -n`/`flock L --help` fail ENOENT
-                # (Devin on #130, round-42 review, verified live;
-                # `-cCMD`/`--command=CMD` fail identically — util-
-                # linux getopt stops at the lockfile: round-41). The
-                # argv index stays marked so callers can tell the
-                # dead argv[0] from words after it.
+                # `--` included (`flock L -- sh x` execs the literal
+                # `--`, ENOENT — Devin on #1959, round-44 review,
+                # verified live). Only an exact `-c`/`--command`
+                # binds a shell command string at the NEXT word; any
+                # other word, even dash-shaped, is the literal
+                # argv[0] flock execs — `flock L -n`/`flock L --help`
+                # fail ENOENT (Devin on #130, round-42 review,
+                # verified live; `-cCMD`/`--command=CMD` fail
+                # identically — util-linux getopt stops at the
+                # lockfile: round-41). The argv index stays marked so
+                # callers can tell the dead argv[0] from words after
+                # it.
                 if t in (b"-c", b"--command"):
                     return j + 1 if j + 1 < len(enc_words) else None
                 return j
+            if t == b"--":
+                ended = True
+            elif key in _WRAPPER_LONG:
+                # GNU option semantics — unique-prefix terminal
+                # modes and ambiguous/unknown options exit before
+                # the wrapped argv (Codex on #1959, round-44 —
+                # verified live).
+                skip = _wrapper_opt_skip(key, t)
+                if skip is None:
+                    return None
+                j += skip
+                continue
             elif t in terminal:
                 return None
             elif t in optops:
@@ -2645,9 +2780,38 @@ _SPLIT_REQ_LONG = frozenset({
     b"--lines", b"--number", b"--separator", b"--suffix-length"})
 _SPLIT_LONG = _SPLIT_REQ_LONG | frozenset({
     b"--numeric-suffixes", b"--hex-suffixes", b"--debug",
-    b"--elide-empty-files", b"--verbose", b"--help", b"--version"})
+    b"--elide-empty-files", b"--unbuffered", b"--verbose",
+    b"--help", b"--version"})
 _SPLIT_REQ_SHORT = frozenset({b"a", b"b", b"C", b"l", b"n", b"t"})
-_SPLIT_FLAG_SHORT = frozenset({b"d", b"e", b"u", b"x"})
+# Digits are split's obsolete `-NUM` line-count form (`split -1000`
+# still runs the filter — CodeRabbit on #130/#1959, round-44 review,
+# verified live).
+_SPLIT_FLAG_SHORT = frozenset({b"d", b"e", b"u", b"x"}
+                              | {bytes([c]) for c in b"0123456789"})
+
+
+def _split_arg_ok(opt: bytes, v: bytes) -> bool:
+    """False when `split` aborts on the option's operand — before any
+    filter or input is touched (Devin on #1959, round-44 review —
+    verified live): `--lines`/`-l` and `--suffix-length`/`-a` want
+    pure digits; the SIZE options `-b`/`--bytes`/`-C`/`--line-bytes`
+    want a leading digit (SI suffixes like `1K`/`1KB`/`1k` are all
+    legal — under-validating stays over-block-safe); `-t`/
+    `--separator` wants exactly one byte (`''` and `xy` abort); and
+    `-n`/`--number` wants a CHUNKS form — `N`, `K/N`, `l/N`, `l/K/N`,
+    `r/N`, `r/K/N`."""
+    if opt in (b"--lines", b"-l", b"--suffix-length", b"-a"):
+        return v.isdigit()
+    if opt in (b"--bytes", b"-b", b"--line-bytes", b"-C"):
+        return v[:1].isdigit()
+    if opt in (b"--separator", b"-t"):
+        return len(v) == 1
+    if opt in (b"--number", b"-n"):
+        p = v.split(b"/")
+        if len(p) > 1 and p[0] in (b"l", b"r"):
+            p = p[1:]
+        return 1 <= len(p) <= 2 and all(x.isdigit() for x in p)
+    return True
 
 
 def _split_scan(key: bytes, args: list):
@@ -2659,10 +2823,23 @@ def _split_scan(key: bytes, args: list):
     round-43 — verified live: `--filter=true --filter=sh` runs sh).
     GNU getopt_long resolves unique prefixes against the full long
     set; an unknown or ambiguous option aborts before any read, so
-    the scan reports no filter (over-block-safe)."""
+    the scan reports no filter (over-block-safe). `--help`/
+    `--version` are terminal modes: they print and exit no matter
+    where they appear, before any filter runs (`--filter=sh --help`
+    shows usage — Devin/Codex on #130/#1959/#12/#1393, round-44 —
+    verified live). An invalid operand (`--lines=xyz`), a missing
+    operand (`split --filter` at end), any `-n` with stdin input
+    ("cannot determine file size"), and a K/N chunk-select combined
+    with `--filter` ("does not process a chunk extracted to
+    stdout") likewise abort before a filter runs — all reported as
+    no-filter."""
     if key != b"split":
         return None, None
     filt = inp = None
+    nmode = False               # `-n`/`--number` seen — needs a
+                                # seekable input
+    nslash = False              # a K/N chunk-select form — refuses
+                                # `--filter`
     i = 0
     while i < len(args):
         a = args[i]
@@ -2680,17 +2857,35 @@ def _split_scan(key: bytes, args: list):
                 if len(cands) != 1:
                     return None, None
                 resolved = cands[0]
+            if resolved in (b"--help", b"--version"):
+                return None, None       # terminal mode — exits first
+            if resolved not in _SPLIT_REQ_LONG:
+                # Flags never consume the next word; a `=` on a true
+                # flag aborts "doesn't allow an argument" while the
+                # `=N` forms of --numeric-suffixes/--hex-suffixes are
+                # their OPTIONAL args (round-44 — verified live:
+                # `split --numeric-suffixes 5` reads file "5", so the
+                # separate word stays positional).
+                if (b"=" in a and resolved not in
+                        (b"--numeric-suffixes", b"--hex-suffixes")):
+                    return None, None
+                i += 1
+                continue
+            if b"=" in a:
+                v = a.split(b"=", 1)[1]
+            elif i + 1 < len(args):
+                v = args[i + 1]
+                i += 1
+            else:
+                return None, None       # "requires an argument" abort
             if resolved == b"--filter":
-                if b"=" in a:
-                    filt = a.split(b"=", 1)[1]
-                elif i + 1 < len(args):
-                    filt = args[i + 1]
-                    i += 1
-                else:
-                    filt = b""
-            elif resolved in _SPLIT_REQ_LONG:
-                if b"=" not in a:
-                    i += 1          # consumes the next word as operand
+                filt = v
+            else:
+                if not _split_arg_ok(resolved, v):
+                    return None, None
+                if resolved == b"--number":
+                    nmode = True
+                    nslash = nslash or b"/" in v
             i += 1
             continue
         if len(a) > 1 and a[:1] == b"-" and a != b"-":
@@ -2700,9 +2895,18 @@ def _split_scan(key: bytes, args: list):
                 c = a[j:j + 1]
                 if c in _SPLIT_REQ_SHORT:
                     if j + 1 < len(a):
-                        j = len(a)      # glued operand
-                    else:
+                        v = a[j + 1:]   # glued operand
+                    elif i + 1 < len(args):
+                        v = args[i + 1]
                         i += 1          # next word is the operand
+                    else:
+                        abort = True    # "requires an argument"
+                        break
+                    if not _split_arg_ok(b"-" + c, v):
+                        abort = True
+                    elif c == b"n":
+                        nmode = True
+                        nslash = nslash or b"/" in v
                     break
                 if c in _SPLIT_FLAG_SHORT:
                     j += 1
@@ -2716,6 +2920,11 @@ def _split_scan(key: bytes, args: list):
         if inp is None:
             inp = a                     # first positional = INPUT
         i += 1
+    if nslash and filt is not None:
+        return None, None       # `--filter` never sees a chunk
+                                # selected to stdout
+    if nmode and (inp is None or _stdin_path_operand(inp)):
+        return None, None       # `-n` aborts on an unseekable pipe
     return filt, inp
 
 
@@ -7820,12 +8029,25 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                                 # review — verified live).
                                 pflags = _EXEC_OPERAND_FLAGS.get(
                                     akey, frozenset())
+                                # A 1-letter program flag inside a
+                                # short cluster binds the program the
+                                # same — `sh -lc : x.sh` runs `:` and
+                                # leaves x.sh as $0 (Devin on #130,
+                                # round-44 review — verified live).
+                                pfchars = {p[1:] for p in pflags
+                                           if len(p) == 2}
                                 j = ahi + 1
                                 while j < wi0 - s1:
                                     tj = _word_text(
                                         enclosing[sub[j][0]:
                                                   sub[j][1]])
-                                    if tj in pflags:
+                                    if (tj in pflags
+                                            or (len(tj) > 2
+                                                and tj[:1] == b"-"
+                                                and tj[1:2] != b"-"
+                                                and any(c in tj[1:]
+                                                        for c in
+                                                        pfchars))):
                                         return False
                                     j += 1
                                 return True
