@@ -1658,9 +1658,32 @@ _WRAPPER_OPT_OPERAND = {
 # only describes a command (Devin Review on #1370); `setpriv --dump`
 # prints state, and `prlimit -p` targets a pid — both reject a
 # trailing COMMAND (Codex on #128, round-31 — verified live).
+# `--help`/`--version` print and exit on every binary wrapper —
+# verified live on coreutils + util-linux (Devin on #11, round-32).
 _WRAPPER_DESCRIBE = {b"command": frozenset({b"-v", b"-V"}),
-                    b"setpriv": frozenset({b"-d", b"--dump"}),
-                    b"prlimit": frozenset({b"-p", b"--pid"})}
+                    b"env": frozenset({b"--help", b"--version"}),
+                    b"nohup": frozenset({b"--help", b"--version"}),
+                    b"stdbuf": frozenset({b"--help", b"--version"}),
+                    b"timeout": frozenset({b"--help", b"--version"}),
+                    b"nice": frozenset({b"--help", b"--version"}),
+                    b"sudo": frozenset({b"-V", b"--version"}),
+                    b"exec": frozenset({b"--help"}),
+                    b"setsid": frozenset({b"-h", b"--help",
+                                          b"-V", b"--version"}),
+                    b"ionice": frozenset({b"-h", b"--help",
+                                          b"-V", b"--version"}),
+                    b"taskset": frozenset({b"-h", b"--help",
+                                           b"-V", b"--version"}),
+                    b"chrt": frozenset({b"-h", b"--help",
+                                        b"-V", b"--version"}),
+                    b"unshare": frozenset({b"-h", b"--help",
+                                           b"-V", b"--version"}),
+                    b"setpriv": frozenset({b"-d", b"--dump",
+                                           b"-h", b"--help",
+                                           b"-V", b"--version"}),
+                    b"prlimit": frozenset({b"-p", b"--pid",
+                                           b"-h", b"--help",
+                                           b"-V", b"--version"})}
 # Heads whose output provably does NOT carry the input stream — a pipe
 # into one ends the chain without executing anything downstream: `cat x
 # | wc -l | sh` feeds sh a line count, not the script (Devin on #123).
@@ -1716,6 +1739,82 @@ _EXEC_OPERAND_FLAGS = {
     b"lua": frozenset({b"-e"}),
     b"tclsh": frozenset(),
 }
+# Program-flag heads: options that consume the NEXT word, so they may
+# sit between the program flag and its operand (`bash -O extglob -c
+# 'P'`, `python -X dev -c 'P'` — Devin on #11, round-32 — verified
+# live; `dash -O` is NOT an option and errors out, so it stays
+# absent; `perl -x` takes its script, not a value).
+_EXEC_VALUE_OPTS = {
+    b"bash": frozenset({b"-O", b"-o"}),
+    b"sh": frozenset({b"-o"}), b"dash": frozenset({b"-o"}),
+    b"zsh": frozenset({b"-o"}), b"ksh": frozenset({b"-o"}),
+    b"ash": frozenset({b"-o"}),
+    b"python": frozenset({b"-X", b"-W",
+                          b"--check-hash-based-pycs"}),
+    b"perl": frozenset({b"-I", b"-M", b"-m"}),
+    b"ruby": frozenset({b"-I", b"-r"}),
+    b"node": frozenset({b"-r", b"--require", b"--import"}),
+    b"bun": frozenset({b"-r", b"--require", b"--preload"}),
+    b"php": frozenset({b"-d", b"-c"}),
+    b"lua": frozenset({b"-l"}),
+}
+# A positional expansion inside a `-c` program text — its content can
+# reach stdout (`bash -c 'printf %s "$0"' "$(cat x)" | sh` — Devin on
+# #11, round-32 — verified live).
+_POS_REF = re.compile(rb"\$\{?[0-9@*]")
+# Shell heads whose `-c` program text can reference positional
+# parameters ($0…); other interpreters name argv differently
+# (sys.argv, $ARGV) and are out of scope.
+_SHELL_PROG_HEADS = frozenset(
+    {b"sh", b"bash", b"dash", b"zsh", b"ksh", b"ash"})
+
+
+def _prog_capture_role(win: bytes, words: list, hi: int, rel: int,
+                       flags: frozenset, key: bytes) -> str | None:
+    """Role of the substitution at `rel` under a program-flag head:
+    "program" — it IS the flag's own operand (executed as code);
+    "emit" — a positional ($0…) the `-c` program text may forward to
+    stdout; None — data (Devin on #11, round-32)."""
+    valopts = _EXEC_VALUE_OPTS.get(key, frozenset())
+    k = next((i for i, w in enumerate(words)
+              if w[0] <= rel < w[1]), None)
+    if k is None:
+        return None
+    j = hi + 1
+    while j <= k:
+        t = _word_text(win[words[j][0]:words[j][1]])
+        if j == k:
+            return ("program" if any(t.startswith(f) for f in flags)
+                    else None)
+        if t in flags:
+            # Options (and their value words) may sit between the flag
+            # and its operand (`bash -O extglob -c 'P'`).
+            m = j + 1
+            while m < k:
+                tm = _word_text(win[words[m][0]:words[m][1]])
+                if tm in valopts:
+                    m += 2
+                    continue
+                if not tm.startswith(b"-"):
+                    break
+                m += 1
+            if m == k:
+                return "program"
+            # The capture is a positional AFTER the program operand —
+            # its content executes only when the program text forwards
+            # positionals to stdout (`bash -c 'printf %s "$0"' "$(cat
+            # x)" | sh` — verified live).
+            if (m < k and key in _SHELL_PROG_HEADS
+                    and _POS_REF.search(
+                        _word_text(win[words[m][0]:words[m][1]]))):
+                return "emit"
+            return None
+        if not t.startswith(b"-"):
+            return None  # an operand ends option parsing
+        j += 2 if t in valopts else 1
+    return None
+
+
 # `-m` modules that run stdin as PROGRAM text — `python -m code` and
 # `python -m asyncio` open a REPL over the pipe. Everything else with a
 # `-m` entry point parses stdin as DATA (`-m` is a sink for them):
@@ -3445,7 +3544,13 @@ def _stdin_exec_head(win: bytes) -> str:
                 if tw in _WRAPPER_DESCRIBE.get(wkey, ()):
                     # `command -v env -S sh` only DESCRIBES env — the
                     # split operand never runs (Devin on #8/#1374/#1955,
-                    # round-7 review). Describe mode is a sink.
+                    # round-7 review). But a substitution inside the
+                    # tail still executes during expansion — `cat x |
+                    # setpriv --dump "$(sh)"` runs sh on the pipe
+                    # (Devin on #11, round-32 — verified live).
+                    for sp, _e in _substitution_spans(win):
+                        if _sub_flow(_sub_inner(win, sp)) == "exec":
+                            return "exec"
                     return "sink"
                 # `taskset -c LIST cmd` — the mask came via the
                 # option, so the NEXT positional is the command (bare
@@ -5032,29 +5137,15 @@ def _span_output_exec(src: bytes, a: int, after: int | None = None) -> bool:
     # "$(cat x)" >f` still runs the capture).
     flags = _EXEC_OPERAND_FLAGS.get(key, frozenset())
     if flags:
-        rel = a - cs
-        for k in range(len(words)):
-            if words[k][0] <= rel < words[k][1]:
-                # The capture must be the flag's own operand — the
-                # first non-option word after it, or glued to it
-                # (`-c$(cat x)`). Later words are positional
-                # parameters ($0…), not program text (Devin on #1957,
-                # round-30 review — verified live).
-                hit = False
-                for j in range(hi + 1, k + 1):
-                    t = _word_text(win[words[j][0]:words[j][1]])
-                    if j == k:
-                        hit = any(t.startswith(f) for f in flags)
-                        break
-                    if t in flags:
-                        hit = all(
-                            _word_text(win[words[m][0]:words[m][1]]
-                                       ).startswith(b"-")
-                            for m in range(j + 1, k))
-                        break
-                    if not t.startswith(b"-"):
-                        break  # an operand ends option parsing
-                return hit
+        role = _prog_capture_role(win, words, hi, a - cs, flags, key)
+        if role == "program":
+            return True
+        if role != "emit":
+            return False
+        # "emit" — a positional the `-c` program echoes to stdout
+        # (`bash -c 'printf %s "$0"' "$(cat x)" | sh`): dep iff the
+        # stage's stdout reaches an executor downstream — same gate as
+        # the plain capture path below (Devin on #11, round-32).
     # The enclosing command's window stops AT the substitution opener,
     # so the pipe check scans from `after` — just past the
     # substitution's close — to the next unquoted `|` (`echo "$(cat x)"
@@ -5091,6 +5182,7 @@ def _sub_survives_body(body: bytes, pos: int) -> bool:
     if skey == b"eval":
         return True
     sflags = _EXEC_OPERAND_FLAGS.get(skey, frozenset())
+    emits_positional = False
     if sflags:
         rel = pos - scs
         for k in range(len(swords)):
@@ -5099,23 +5191,14 @@ def _sub_survives_body(body: bytes, pos: int) -> bool:
                 # non-option word after the flag (`bash -c "$(cat
                 # x)"`) — or glued to the flag itself (`-c$(cat x)`).
                 # Words after the value are positional parameters
-                # ($0…), not program text (Devin on #1957, round-30
-                # review — verified live).
-                for j in range(shi + 1, k + 1):
-                    t = _word_text(swin[swords[j][0]:swords[j][1]])
-                    if j == k:
-                        if any(t.startswith(f) for f in sflags):
-                            return True
-                        break
-                    if t in sflags:
-                        if all(_word_text(
-                                swin[swords[m][0]:swords[m][1]]
-                                ).startswith(b"-")
-                               for m in range(j + 1, k)):
-                            return True
-                        break
-                    if not t.startswith(b"-"):
-                        break  # an operand ends option parsing
+                # ($0…) — data unless the program text echoes
+                # positionals to stdout (Devin on #1957, round-30 +
+                # #11, round-32 — verified live).
+                role = _prog_capture_role(
+                    swin, swords, shi, rel, sflags, skey)
+                if role == "program":
+                    return True
+                emits_positional = role == "emit"
                 break
     # A containing stage whose own stdout is diverted drops the
     # capture's bytes — `$(echo "$(cat x)" >/dev/null)` emits nothing.
@@ -5124,8 +5207,9 @@ def _sub_survives_body(body: bytes, pos: int) -> bool:
     # The containing stage must emit the capture's bytes onward —
     # `echo "$(cat x)"`/`printf "$(cat x)"` echo them to stdout, while
     # `cat "$(cat x)"` treats them as a filename and `wc -l <"$(cat
-    # x)"` digests them.
-    if skey not in _STDIN_EMIT_HEADS:
+    # x)"` digests them. A `-c` program echoing a positional counts
+    # too (`bash -c 'echo "$0"' "$(cat x)"` — round-32).
+    if not emits_positional and skey not in _STDIN_EMIT_HEADS:
         return False
     if skey == b"date":
         # `date` emits only its `+FORMAT` operand (same gate as
@@ -5184,6 +5268,7 @@ def _enclosing_sub_exec(src: bytes, a: int) -> bool:
     if skey == b"eval":
         return True
     sflags = _EXEC_OPERAND_FLAGS.get(skey, frozenset())
+    emits_positional = False
     if sflags:
         rel = pos - scs
         for k in range(len(swords)):
@@ -5192,23 +5277,14 @@ def _enclosing_sub_exec(src: bytes, a: int) -> bool:
                 # non-option word after the flag (`bash -c "$(cat
                 # x)"`) — or glued to the flag itself (`-c$(cat x)`).
                 # Words after the value are positional parameters
-                # ($0…), not program text (Devin on #1957, round-30
-                # review — verified live).
-                for j in range(shi + 1, k + 1):
-                    t = _word_text(swin[swords[j][0]:swords[j][1]])
-                    if j == k:
-                        if any(t.startswith(f) for f in sflags):
-                            return True
-                        break
-                    if t in sflags:
-                        if all(_word_text(
-                                swin[swords[m][0]:swords[m][1]]
-                                ).startswith(b"-")
-                               for m in range(j + 1, k)):
-                            return True
-                        break
-                    if not t.startswith(b"-"):
-                        break  # an operand ends option parsing
+                # ($0…) — data unless the program text echoes
+                # positionals to stdout (Devin on #1957, round-30 +
+                # #11, round-32 — verified live).
+                role = _prog_capture_role(
+                    swin, swords, shi, rel, sflags, skey)
+                if role == "program":
+                    return True
+                emits_positional = role == "emit"
                 break
     # A containing stage whose own stdout is diverted drops the
     # capture's bytes — `$(echo "$(cat x)" >/dev/null)` emits nothing
@@ -5218,8 +5294,9 @@ def _enclosing_sub_exec(src: bytes, a: int) -> bool:
     # The containing stage must emit the capture's bytes onward —
     # `echo "$(cat x)"`/`printf "$(cat x)"` echo them to stdout, while
     # `cat "$(cat x)"` treats them as a filename and `wc -l <"$(cat
-    # x)"` digests them.
-    if skey not in _STDIN_EMIT_HEADS:
+    # x)"` digests them. A `-c` program echoing a positional counts
+    # too (`bash -c 'echo "$0"' "$(cat x)"` — round-32).
+    if not emits_positional and skey not in _STDIN_EMIT_HEADS:
         return False
     if skey == b"date":
         # `date` emits only its `+FORMAT` operand (same gate as

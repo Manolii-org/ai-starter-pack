@@ -10353,3 +10353,66 @@ def test_pipe_to_exec_round31(tmp_path):
             b'prlimit -p 1 sh -c "bash scripts/x.sh"',
             b'prlimit --pid 1 sh -c "bash scripts/x.sh"'):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_pipe_to_exec_round32(tmp_path):
+    """Round-32: interpreter value-options between a program flag and
+    its operand (bash -O, python -X), positional captures a `-c`
+    program echoes to stdout, substitutions inside describe-mode
+    wrapper tails, and --help/--version never execing (Devin on #11 —
+    verified live)."""
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location(
+        "reg_r32", Path(__file__).parent.parent / "scripts" / "ai-resolve.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["reg_r32"] = mod
+    spec.loader.exec_module(mod)
+    pdir = tmp_path
+    (pdir / "scripts").mkdir()
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo HIT\n")
+    for line in (
+            # a value-option may sit between the program flag and its
+            # operand (verified live: `dash -O` is not an option)
+            b'bash -O extglob -c "$(cat scripts/x.sh)"',
+            b'bash -o nounset -c "$(cat scripts/x.sh)"',
+            b'dash -o nounset -c "$(cat scripts/x.sh)"',
+            b'python -X dev -c "$(cat scripts/x.sh)"',
+            b'python -W ignore -c "$(cat scripts/x.sh)"',
+            b'perl -I lib -e "$(cat scripts/x.sh)"',
+            b'node -r lib -e "$(cat scripts/x.sh)"',
+            # a positional capture still executes when the `-c`
+            # program echoes it to stdout piped to an exec head
+            b'bash -c "printf %s \"$0\"" "$(cat scripts/x.sh)" | sh',
+            b'bash -c "echo $0" "$(cat scripts/x.sh)" | sh',
+            b'bash -c "echo \"$@\"" "$(cat scripts/x.sh)" | sh',
+            # describe mode drops the command but substitutions in
+            # its operands still run during expansion
+            b'cat scripts/x.sh | setpriv --dump "$(sh)"',
+            b'cat scripts/x.sh | setpriv -d "$(sh)"',
+            b'cat scripts/x.sh | command -v "$(sh)"',
+            b'cat scripts/x.sh | prlimit -p 1 "$(sh)"'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # `dash -O` errors (no such option) — no exec
+            b'dash -O extglob -c "$(cat scripts/x.sh)"',
+            # positional capture with no positional reference stays
+            # data (round-30 rule)
+            b'bash -O extglob -c "true" "$(cat scripts/x.sh)" | sh',
+            b'bash -c "true" "$(cat scripts/x.sh)" | sh',
+            b'python -c x "$(cat scripts/x.sh)" | sh',
+            # positional emit needs the downstream exec — bare output
+            # to the terminal is not executed
+            b'bash -c "printf %s \"$0\"" "$(cat scripts/x.sh)"',
+            # describe tails still classify: a `$(cat)` capture eats
+            # the pipe into argv — nothing executes
+            b'cat scripts/x.sh | setpriv --dump "$(cat)"',
+            b'cat scripts/x.sh | command -v "$(cat)"',
+            # --help/--version print and exit on every wrapper
+            b'cat scripts/x.sh | setpriv --help sh',
+            b'cat scripts/x.sh | setpriv --dump sh -c "bash scripts/x.sh"',
+            b'cat scripts/x.sh | prlimit --version sh',
+            b'cat scripts/x.sh | unshare --version sh -c "bash scripts/x.sh"',
+            b'cat scripts/x.sh | env --help sh',
+            b'cat scripts/x.sh | sudo -V sh'):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
