@@ -12589,15 +12589,120 @@ def test_script_dep_round60(tmp_path):
             # the scripts/ path after a program flag is argv ($0),
             # never read or executed
             b"split --filter='bash -c true scripts/x.sh' -l1 f",
-            b"split --filter='bash -ctrue scripts/x.sh' -l1 f",
             b"split --filter='sh -c true scripts/x.sh' -l1 f",
             b"split --filter='sh -ec \"true\" scripts/x.sh' -l1 f",
             b"split --filter='sh -s scripts/x.sh' -l1 f",
             b"split --filter='python -c \"x\" scripts/x.py' -l1 f",
             b"split --filter='perl -e \"x\" scripts/x.pl' -l1 f",
-            b"split --filter='sh - scripts/x.sh' -l1 f",
             # a `pr` operand parse that would have crashed int() —
             # GNU aborts "invalid line width" on the huge value
             b"cat scripts/x.sh | pr -w " + pad + b" --columns 36 | sh",
             b"cat scripts/x.sh | pr --pages=-" + pad + b" | sh"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round61(tmp_path):
+    """Round-61 review regression — Devin #1393/#1959/#130 + Codex
+    #1393 findings, all verified live (bash 5 / dash / coreutils
+    8.32 / util-linux 2.37):
+    - A shell `-c` in a cluster takes the NEXT word as its program —
+      the chars after it are still flags (`bash -sc 'sh x'` runs x;
+      `-cs`, `-cx`, `-scx` too), and `-s` only moves the program to
+      stdin when NO `-c` appears (`sh -s x` -> x is argv; `sh -s -c
+      'sh x'` still runs x).
+    - `-` as a word is per-interpreter: shells read it as
+      end-of-options (`sh - x` runs x — bash AND dash) while
+      python/perl/ruby/node/lua read the PROGRAM from stdin.
+    - `cat -n`/`-b`/`--number` inside `date +$(…)` numbers the
+      captured bytes — a narrow IFS emits the NUMBERED field, `sh`
+      runs `1`, never the script (Devin on #130).
+    - `sed --binary`/`--zero-terminated` are real GNU options that
+      forward the stream (Codex on #1393).
+    - `taskset --cpu 0 CMD` uniquely abbreviates `--cpu-list` — the
+      mask already binds via the option, so `sh` is the command
+      (Devin on #1959); `taskset --cpu=0` still aborts.
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo HIT\n")
+    for line in (
+            # -c wins over -s in any cluster order — the program is
+            # always the next word
+            b"split --filter='bash -sc \"sh scripts/x.sh\" foo' -l1 f",
+            b"split --filter='bash -sc scripts/x.sh' -l1 f",
+            b"split --filter='bash -cs scripts/x.sh' -l1 f",
+            b"split --filter='sh -cx scripts/x.sh' -l1 f",
+            b"split --filter='sh -scx scripts/x.sh' -l1 f",
+            b"split --filter='sh -s -c \"sh scripts/x.sh\" f' -l1 f",
+            # `-` ends shell options — the next word is the program
+            b"split --filter='sh - scripts/x.sh' -l1 f",
+            b"split --filter='bash - scripts/x.sh' -l1 f",
+            # python's `-s` is a plain flag, not stdin-program
+            b"split --filter='python -s scripts/x.py' -l1 f",
+            # verbatim capture still deps
+            b"IFS=,; date +$(cat scripts/x.sh) | sh",
+            b"IFS=,; date +$(cat -E scripts/x.sh) | sh",
+            # sed's stream mode options forward the pipe
+            b"cat scripts/x.sh | sed '' --binary | sh",
+            b"cat scripts/x.sh | sed '' --zero-terminated | sh",
+            b"cat scripts/x.sh | sed --bin '' | sh",
+            # taskset cpu-list abbreviations bind the mask inline —
+            # sh is the wrapped command
+            b"cat scripts/x.sh | taskset --cpu 0 sh",
+            b"cat scripts/x.sh | taskset --cp 0 sh",
+            b"cat scripts/x.sh | taskset --cpu-list 0 sh",
+            b"cat scripts/x.sh | taskset -c 0 sh",
+            b"cat scripts/x.sh | taskset 0x1 sh",
+            # `-ok … ;` is the legal interactive action
+            b"find . -exec sh scripts/x.sh \\; -ok echo {} \\;",
+            b"find . -ok echo {} \\; -exec sh scripts/x.sh \\;",
+            b"find . -execdir sh scripts/x.sh \\; -exec echo {} +"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # -s moves the program to stdin only without -c
+            b"split --filter='sh -s scripts/x.sh' -l1 f",
+            b"split --filter='sh -es scripts/x.sh' -l1 f",
+            b"split --filter='sh -s -c \"true\" scripts/x.sh' -l1 f",
+            # `-` is the stdin program for non-shell interpreters —
+            # the scripts/ word is argv
+            b"split --filter='python - scripts/x.py' -l1 f",
+            b"split --filter='perl - scripts/x.pl' -l1 f",
+            b"split --filter='ruby - scripts/x.rb' -l1 f",
+            # numbered captures emit line-prefixed bytes — never the
+            # script
+            b"IFS=,; date +$(cat -n scripts/x.sh) | sh",
+            b"IFS=,; date +$(cat -b scripts/x.sh) | sh",
+            b"IFS=,; date +$(cat --number scripts/x.sh) | sh",
+            b"IFS=,; date +$(cat -An scripts/x.sh) | sh",
+            b"date +$(cat -n scripts/x.sh) | sh",
+            # `taskset --cpu=0` aborts "doesn't allow an argument";
+            # `-p` is the pid query mode
+            b"cat scripts/x.sh | taskset --cpu=0 sh",
+            b"cat scripts/x.sh | taskset -p 0 sh",
+            # `-ok`/`-okdir` accept only `;` — a `{} +` terminator is
+            # a "missing argument" parse abort BEFORE traversal, so
+            # no action in the expression runs (Devin on #12,
+            # round-61 — verified live on findutils 4.8)
+            b"find . -exec sh scripts/x.sh \\; -ok echo {} +",
+            b"find . -exec sh scripts/x.sh \\; -okdir echo {} +",
+            b"find . -ok echo {} + -exec sh scripts/x.sh \\;",
+            b"find . -exec sh scripts/x.sh \\; -ok echo"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round61_dash_c_cluster(tmp_path):
+    """`bash -ctrue x.sh`: chars after `-c` are still flags — the
+    NEXT word is the program (`bash -ctrue` parses -t/-r/-u/-e and
+    tries to exec x.sh — Devin on #1393, round-61 — verified live),
+    so a scripts/ operand in program position deps like any other
+    `sh x` invocation."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo HIT\n")
+    for line in (
+            b"split --filter='bash -ctrue scripts/x.sh' -l1 f",
+            b"split --filter='sh -ctrue scripts/x.sh' -l1 f",
+            b"split --filter='bash -cl scripts/x.sh' -l1 f"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line

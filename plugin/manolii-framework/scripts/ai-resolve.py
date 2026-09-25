@@ -1178,7 +1178,17 @@ def _find_expr_spans(enc_words: list, hi: int, enclosing: bytes):
                     break
                 end += 1
             if end < len(enc_words):
-                if end == start:
+                if (t in (b"-ok", b"-okdir")
+                        and _word_text(
+                            enclosing[enc_words[end][0]:
+                                      enc_words[end][1]]) == b"+"):
+                    # `-ok`/`-okdir` accept only `;` — a `{} +`
+                    # terminator aborts "missing argument to `-ok'"
+                    # before traversal, so NO action in the
+                    # expression runs (Devin on #12, round-61
+                    # review — verified live on findutils 4.8).
+                    unterminated = True
+                elif end == start:
                     # The terminator IS the first argv word — `-exec`
                     # with no command aborts the whole expression
                     # ("invalid argument `;' to `-exec`") before any
@@ -1689,13 +1699,11 @@ def _operand_is_program(enc_words: list, wi: int,
                         # verified live).
                         j += 1
                         break
-                    # `taskset -c LIST cmd` — the mask came via the
-                    # option, so the NEXT positional is the command
-                    # (bare `taskset MASK cmd` still skips it).
-                    if (wk == b"taskset"
-                            and t in (b"-c", b"--cpu-list")):
-                        possk = 0
                     cls = _wrapper_opt_class(wk, t)
+                    if wk == b"taskset" and cls == "operand_next":
+                        # Same `--cpu* LIST` abbreviation reset as
+                        # _effective_head (Devin on #1959, round-61).
+                        possk = 0
                     if cls == "describe":
                         # Query/describe modes never reach a command —
                         # `ionice -p 1 sh`, `taskset --pid $$ sh`, and
@@ -2410,9 +2418,15 @@ def _wrapper_opt_class(key: bytes, t: bytes):
         # prefixes like `--cpu` still abbreviate normally.
         if t in (b"-c", b"--cpu-list"):
             return "operand_next"
+        tn = t.split(b"=", 1)[0]
         if (t.startswith(b"--cpu-list=")
                 or (t.startswith(b"-c")
-                    and not t.startswith(b"--"))):
+                    and not t.startswith(b"--"))
+                or (t.startswith(b"--") and b"=" in t
+                    and b"--cpu-list".startswith(tn))):
+            # Any abbreviated `--cpu…=LIST` binds its arg inline and
+            # still aborts "doesn't allow an argument" (`taskset
+            # --cpu=0` — Devin on #1959, round-61 — verified live).
             return "describe"
     vals = _WRAPPER_OPT_OPERAND.get(key, frozenset())
     desc = _WRAPPER_DESCRIBE.get(key, frozenset())
@@ -2987,13 +3001,15 @@ def _effective_head(words: list, win: bytes) -> int | None:
                         # live).
                         i += 1
                         break
-                    # `taskset -c LIST cmd` — the mask came via the
-                    # option, so the NEXT positional is the command
-                    # (bare `taskset MASK cmd` still skips it).
-                    if (key == b"taskset"
-                            and t in (b"-c", b"--cpu-list")):
-                        pos_skip = 0
                     cls = _wrapper_opt_class(key, t)
+                    if key == b"taskset" and cls == "operand_next":
+                        # `taskset -c/--cpu*/-c LIST cmd` — the mask
+                        # came via ANY cpu-list spelling (unique
+                        # prefixes like `--cpu` abbreviate normally —
+                        # Devin on #1959, round-61 review, verified
+                        # live), so the NEXT positional is the
+                        # command. `taskset MASK cmd` still skips it.
+                        pos_skip = 0
                     if cls == "describe":
                         return -1
                     if (cls == "operand_next"
@@ -3574,14 +3590,20 @@ def _interp_program_end(head: bytes, filt: bytes, start: int,
                         mstart: int):
     """End offset of an interpreter's PROGRAM word in `filt` — the
     `-c`/`-e`/`-m`/`--eval` operand or the first non-option word —
-    or `mstart` when a shell `-s` moves the program to stdin (every
-    later word is argv), or None for unknown heads. A glued flag
-    (`-cCODE`, `perl -eCODE`, `python -mmod`) keeps the program
-    inside its own word."""
+    or `mstart` when the program comes from stdin (a shell `-s`, or
+    a bare `-` word for python/perl/ruby/node/lua), or None for
+    unknown heads. POSIX-style interpreters glue the program flag
+    operand (`perl -eCODE`, `python -cCODE`); the SHELLS do not —
+    after `-c` the remaining cluster chars are still flags and the
+    program is always the NEXT word (`bash -sc 'sh x'` runs x —
+    Devin on #1393, round-61 review — verified live on bash and
+    dash)."""
     flags = _PROG_FLAG.get(head)
     if flags is None:
         return None
     longs = _PROG_FLAG_LONG.get(head, frozenset())
+    sh = head in _SH_PROG_HEADS
+    s_seen = False
     n = len(filt)
     pos = start
     while pos < n and filt[pos:pos + 1] not in (b" ", b"\t"):
@@ -3590,7 +3612,7 @@ def _interp_program_end(head: bytes, filt: bytes, start: int,
         while pos < n and filt[pos:pos + 1] in (b" ", b"\t"):
             pos += 1
         if pos >= n:
-            return None
+            break
         wend = pos
         if filt[pos:pos + 1] in (b"'", b'"'):
             e = filt.find(filt[pos:pos + 1], pos + 1)
@@ -3601,8 +3623,16 @@ def _interp_program_end(head: bytes, filt: bytes, start: int,
                    not in (b" ", b"\t", b"\n", b"|", b"&", b";", b"`")):
                 wend += 1
         t = filt[pos:wend]
-        if t[:1] != b"-" or t == b"-":
-            return wend            # first non-option word = program
+        if t == b"-":
+            if sh:
+                pos = wend         # `-` = end of options (`sh - x`
+                                   # runs x — bash and dash, verified)
+                continue
+            return mstart    # `python -`/`perl -` — program on stdin
+        if t[:1] != b"-":
+            # First non-option word: the program — unless `-s` moved
+            # it to stdin, in which case this word is argv.
+            return mstart if s_seen else wend
         if t == b"--":
             pos = wend
             continue
@@ -3615,9 +3645,15 @@ def _interp_program_end(head: bytes, filt: bytes, start: int,
             continue
         for j in range(1, len(t)):
             c = t[j:j + 1]
-            if (head in _SH_PROG_HEADS and c == b"s"):
-                return mstart      # `-s` — program comes from stdin
+            if sh and c == b"s":
+                s_seen = True      # `-s` — program from stdin; a
+                                     # later `-c` still wins (`-s -c`)
+                continue
             if c in flags:
+                if sh:
+                    break          # a shell `-c` takes the NEXT
+                                   # word — chars after it in the
+                                   # cluster are still flags (`-scx`)
                 if j + 1 < len(t):
                     return wend    # glued program inside the word
                 break              # next word is the program
@@ -3639,7 +3675,7 @@ def _interp_program_end(head: bytes, filt: bytes, start: int,
                not in (b" ", b"\t", b"\n", b"|", b"&", b";", b"`")):
             wend += 1
         return wend
-    return None
+    return mstart if s_seen else None
 
 
 def _filter_script_role(filt: bytes):
@@ -4035,7 +4071,6 @@ def _date_capture_dep(inner: bytes,
     if not words:
         return True
     key = _command_key(inner[words[0][0]:words[0][1]])
-    ws_ifs = ifs is None or any(c in b" \t\n" for c in ifs)
     if key == b"cat":
         seen = False
         numbered = 0            # 1 = `cat -n`, 2 = `cat -b` (last wins)
@@ -4089,15 +4124,17 @@ def _date_capture_dep(inner: bytes,
             except OSError:
                 return True
             i += 1
+        if numbered:
+            # `-n`/`-b`/`--number`/`--number-nonblank` prefix every
+            # emitted line with its number — under a whitespace IFS
+            # the extra fields abort `date` ("extra operand '1'"),
+            # and under a narrow IFS the single emitted field is the
+            # NUMBERED text: `date +$(cat -n F) | sh` runs `1`, never
+            # the script (Devin on #130, round-61 review — verified
+            # live).
+            return False
         data = bytes(concat)
         total = len(_ifs_fields(data, ifs))
-        if numbered and ws_ifs:
-            if numbered == 1:
-                total += data.count(b"\n") + bool(
-                    data and not data.endswith(b"\n"))
-            else:
-                total += sum(
-                    1 for ln in data.split(b"\n") if ln.strip())
         if not seen and stream_src is not None \
                 and _RESOLVE_ROOT is not None:
             # Bare `cat` re-reads the upstream stream — a KNOWN
@@ -4655,6 +4692,11 @@ _READER_GNU_OPS = {
                        b"--posix", b"--regexp-extended",
                        b"--follow-symlinks", b"--separate", b"--sandbox",
                        b"--null-data", b"--debug", b"--unbuffered",
+                       # `--binary` and `--zero-terminated` are real
+                       # sed options that still forward the stream
+                       # (`sed '' --binary` — Codex on #1393,
+                       # round-61 review — verified live).
+                       b"--binary", b"--zero-terminated",
                        b"--help", b"--version"}),
     b"awk": frozenset({b"--assign", b"--characters-as-bytes",
                        b"--copyright", b"--debug", b"--dump-variables",
@@ -5920,11 +5962,12 @@ def _stdin_exec_head(win: bytes) -> str:
                         if _sub_flow(_sub_inner(win, sp)) == "exec":
                             return "exec"
                     return "sink"
-                # `taskset -c LIST cmd` — the mask came via the
-                # option, so the NEXT positional is the command (bare
-                # `taskset MASK cmd` still skips it).
+                # `taskset -c/--cpu* LIST cmd` — the mask came via
+                # any cpu-list spelling (abbreviations included —
+                # Devin on #1959, round-61), so the NEXT positional is
+                # the command. `taskset MASK cmd` still skips it.
                 if (wkey == b"taskset"
-                        and tw in (b"-c", b"--cpu-list")):
+                        and cls == "operand_next"):
                     pos = 0
                 wi += 2 if (cls == "operand_next"
                             and wi + 1 < len(words)) else 1
