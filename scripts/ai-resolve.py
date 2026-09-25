@@ -967,12 +967,17 @@ _FIND_ACTION = frozenset({b"-exec", b"-execdir", b"-ok", b"-okdir"})
 # dash-shaped at expression level is an unknown predicate and aborts
 # find before traversal (round-51 — verified live).
 _FIND_ZERO_OP = frozenset({
-    b"-a", b"-and", b"-daystart", b"-debug", b"-delete", b"-depth",
-    b"-empty", b"-executable", b"-false", b"-follow", b"-H", b"-L",
+    b"-a", b"-and", b"-daystart", b"-delete", b"-depth",
+    b"-empty", b"-executable", b"-false", b"-follow",
     b"-ignore_readdir_race", b"-ls", b"-mount", b"-nogroup",
-    b"-noleaf", b"-not", b"-nouser", b"-nowarn", b"-o", b"-or",
-    b"-P", b"-print", b"-print0", b"-prune", b"-readable",
-    b"-true", b"-warn", b"-writable", b"-xdev"})
+    b"-noignore_readdir_race", b"-noleaf", b"-not", b"-nouser",
+    b"-nowarn", b"-o", b"-or", b"-print", b"-print0", b"-prune",
+    b"-readable", b"-true", b"-warn", b"-writable", b"-xdev"})
+# `-H`/`-L`/`-P`/`-debug` are GLOBAL options — legal only in the
+# pre-path option region; inside the expression they are unknown
+# predicates and find aborts before traversal (`find . -H -exec …`
+# errors — Devin on #12/#1959, round-53 review — verified live).
+_FIND_GLOBAL_FLAG = frozenset({b"-H", b"-L", b"-P", b"-debug"})
 
 # GNU long-option tables for the argv wrappers — getopt_long resolves
 # any UNAMBIGUOUS prefix, so `xargs --he` IS `--help` and `flock
@@ -1212,6 +1217,13 @@ def _find_expr_spans(enc_words: list, hi: int, enclosing: bytes):
             continue
         if t in terminal:
             spans.append(("terminal", k, k))
+        elif t in _FIND_GLOBAL_FLAG:
+            # A global flag inside the expression is an unknown
+            # predicate — find exits before any action (round-53).
+            # In the option region it consumes in place and the
+            # region stays open.
+            if not opt_region:
+                spans.append(("terminal", k, k))
         elif (t.startswith(b"-") and t != b"-"
                 and t not in _FIND_ZERO_OP):
             # `-OLEVEL` binds only in the option region BEFORE any
@@ -3116,12 +3128,26 @@ def _sort_files0(args: list):
     return found
 
 
+# sort options that take a SEPARATE operand word — the next arg is
+# their value even when it looks like an option (`sort -T
+# --output=/dev/null` reads `--output=/dev/null` as the temp DIR and
+# still streams stdout — Devin on #130, round-53 review — verified
+# live). `-o`/`--output` resolves instead of skipping.
+_SORT_OP_OPS = frozenset({
+    b"--batch-size", b"--buffer-size", b"--compress-program",
+    b"--field-separator", b"--files0-from", b"--key",
+    b"--parallel", b"--random-source", b"--temporary-directory"})
+
+
 def _sort_out(args: list):
     """sort's `-o`/`--output` operand — GNU unambiguous prefixes bind
     the same way (`--out`), `-o` glued or separate (Codex on #1393,
     round-52 review). None when stdout is the destination."""
     gnu = _READER_GNU_OPS[b"sort"]
-    for i, a in enumerate(args):
+    i = 0
+    while i < len(args):
+        a = args[i]
+        i += 1
         if a == b"--":
             break
         if a.startswith(b"--"):
@@ -3135,29 +3161,33 @@ def _sort_out(args: list):
                 resolved = cands[0]
             if resolved == b"--output":
                 return (a.split(b"=", 1)[1] if b"=" in a
-                        else (args[i + 1] if i + 1 < len(args)
-                              else b""))
+                        else (args[i] if i < len(args) else b""))
+            if resolved in _SORT_OP_OPS and b"=" not in a:
+                i += 1          # separate operand word
             continue
         if a[:1] == b"-" and a != b"-" and not a.startswith(b"--"):
             for j in range(1, len(a)):
                 c = a[j:j + 1]
                 if c == b"o":
                     return (a[j + 1:] if j + 1 < len(a)
-                            else (args[i + 1] if i + 1 < len(args)
+                            else (args[i] if i < len(args)
                                   else b""))
                 if c in (b"k", b"t", b"T", b"S"):
-                    break       # operand short — rest is its value
+                    if j + 1 == len(a):
+                        i += 1  # separate operand word
+                    break       # glued operand ends the word
     return None
 
 
 def _sort_diverts(args: list) -> bool:
     """True when sort writes its result to a FILE instead of stdout —
     a downstream pipe then sees nothing (`sort --out /tmp/o` — Codex
-    on #1393, round-52 review, verified live). An stdout alias (`-`,
-    `/dev/stdout`, `/dev/fd/1`) keeps the stream live."""
+    on #1393, round-52 review, verified live). Only an fd-1 device
+    alias (`/dev/stdout`, `/dev/fd/1`) keeps the stream — `-o -`
+    creates a file LITERALLY named `-` (Devin on #1393, round-52 —
+    verified live: output goes to `./-`, not the pipe)."""
     out = _sort_out(args)
-    return (out is not None and out != b"-"
-            and _fd_alias_target(out) != 1)
+    return out is not None and _fd_alias_target(out) != 1
 
 
 def _split_dead_input(afin, enclosing: bytes) -> bool:
@@ -3216,13 +3246,16 @@ def _split_arg_ok(opt: bytes, v: bytes) -> bool:
     `-n`/`--number` wants a CHUNKS form — `N`, `K/N`, `l/N`, `l/K/N`,
     `r/N`, `r/K/N` — with every component nonzero and K ≤ N
     (`-n 0`, `-n 0/1`, `-n 2/1` all abort — round-46, verified
-    live)."""
+    live). Every numeric operand accepts ONE leading `+`
+    (`--lines=+1`, `-n +1`, `-b +1K` all run — Codex on #1959,
+    round-53 review — verified live; `+0`/`+` alone still abort)."""
+    n = v[1:] if v[:1] == b"+" else v
     if opt in (b"--lines", b"-l"):
-        return v.isdigit() and int(v) != 0
+        return n.isdigit() and int(n) != 0
     if opt in (b"--suffix-length", b"-a"):
-        return v.isdigit()
+        return n.isdigit()
     if opt in (b"--bytes", b"-b", b"--line-bytes", b"-C"):
-        return v[:1].isdigit() and v[:1] != b"0"
+        return n[:1].isdigit() and n[:1] != b"0"
     if opt in (b"--separator", b"-t"):
         # SEP is one byte or the `\0` NUL escape (Codex on #1959,
         # round-45 review — verified live).
@@ -3231,6 +3264,7 @@ def _split_arg_ok(opt: bytes, v: bytes) -> bool:
         p = v.split(b"/")
         if len(p) > 1 and p[0] in (b"l", b"r"):
             p = p[1:]
+        p = [x[1:] if x[:1] == b"+" else x for x in p]
         if not (1 <= len(p) <= 2
                 and all(x.isdigit() and int(x) != 0 for x in p)):
             return False
@@ -9036,9 +9070,24 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                                 # flag the positional is argv ($0),
                                 # not the script (`flock L sh -c :
                                 # x` runs `:`).
+                                # The wrapped argv's EFFECTIVE head
+                                # decides — `flock L env bash x` /
+                                # `xargs env bash x` reach bash
+                                # through `env` (Codex on #1393,
+                                # round-53 review — verified live).
+                                # The word AT the resolved head is the
+                                # command itself (exec'd); before it,
+                                # the inner wrapper's own argv
+                                # (`env VAR=1 x`) is not the command.
+                                sub2 = enc_words[ws:]
+                                wh2 = _effective_head(sub2, enclosing)
+                                if wh2 is None or wh2 < 0:
+                                    return False
+                                if wi0 - ws <= wh2:
+                                    return wi0 - ws == wh2
                                 hkey = _command_key(
-                                    enclosing[enc_words[ws][0]:
-                                              enc_words[ws][1]])
+                                    enclosing[sub2[wh2][0]:
+                                              sub2[wh2][1]])
                                 if (hkey in _SH_STDIN_HEADS
                                         or hkey
                                         in _EXEC_OPERAND_FLAGS):
@@ -9047,7 +9096,7 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                                     pfchars2 = {
                                         p2[1:] for p2 in pflags2
                                         if len(p2) == 2}
-                                    j2 = ws + 1
+                                    j2 = ws + wh2 + 1
                                     while j2 < wi0:
                                         tj2 = _word_text(
                                             enclosing[

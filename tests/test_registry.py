@@ -11882,9 +11882,8 @@ def test_script_dep_round52(tmp_path):
             b"taskset -c 0 sh scripts/x.sh",
             b"taskset 0 sh scripts/x.sh",
             b"taskset --cpu 0 sh scripts/x.sh",
-            # sort's output aliases keep the stream on stdout
+            # sort's fd-1 output aliases keep the stream on stdout
             b"cat scripts/x.sh | sort --output=/dev/stdout | sh",
-            b"cat scripts/x.sh | sort -o - | sh",
             b"cat scripts/x.sh | sort -o/dev/stdout | sh",
             # a plain suffix binds; a binary-files mode binds
             b"split --additional-suffix=ok "
@@ -11909,9 +11908,11 @@ def test_script_dep_round52(tmp_path):
             b"taskset -c0 sh scripts/x.sh",
             b"taskset --cpu-list=0 sh scripts/x.sh",
             # `-o`/`--output FILE` diverts the result — the pipe sees
-            # nothing (Codex on #1393)
+            # nothing; `-o -` writes a file literally named `-`
+            # (Codex + Devin on #1393)
             b"cat scripts/x.sh | sort --out /tmp/o | sh",
             b"cat scripts/x.sh | sort -o /tmp/o | sh",
+            b"cat scripts/x.sh | sort -o - | sh",
             # a `/` in --additional-suffix aborts "invalid suffix …
             # contains directory separator" (Codex on #130)
             b"split --additional-suffix=/bad "
@@ -11937,4 +11938,78 @@ def test_script_dep_round52(tmp_path):
             b"flock L echo -c 'sh scripts/x.sh'",
             b"flock L sh -c : scripts/x.sh",
             b"flock L sh -c 'echo P' scripts/x.sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round53(tmp_path):
+    """Review round-53 fixes: sort's operand-taking long options consume
+    the NEXT argument even when it looks like an option (`sort -T
+    --output=/dev/null` parses --output… as the temp DIR, leaving stdout
+    live), find's global `-H`/`-L`/`-P`/`-debug` flags are legal only in
+    the pre-path option region while `-noignore_readdir_race` is a valid
+    expression option, an `env` link inside a wrapper's argv still
+    resolves to the interpreter behind it (`flock L env bash x`), and
+    split accepts a leading `+` on its numeric operands (`-l +1` runs
+    the filter; `-l +0` aborts — all verified live).
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts/x.sh").write_text("echo X\n")
+
+    for line in (
+            # `-T`/`--temporary-directory` (and friends) consume the
+            # next word as their operand — `--output=…` is then a temp
+            # dir, so the stream stays on stdout (Devin on #130)
+            b"cat scripts/x.sh | sort -T --output=/dev/null | sh",
+            b"cat scripts/x.sh | sort --temporary-directory "
+            b"--output=/dev/null | sh",
+            b"cat scripts/x.sh | sort --compress-program "
+            b"--output=/dev/null | sh",
+            # `-noignore_readdir_race` is a valid expression option —
+            # traversal still reaches the action (Codex on #130/#1959)
+            b"find . -noignore_readdir_race -exec sh scripts/x.sh \\;",
+            # the GLOBAL flags work before the first path
+            b"find -H . -exec sh scripts/x.sh \\;",
+            b"find -L -P -debug . -exec sh scripts/x.sh \\;",
+            # an `env` wrapper inside argv forwards to the command —
+            # the interpreter head still reads its script operand
+            # (Codex on #1393, verified live: NEST_RAN)
+            b"flock L env bash scripts/x.sh",
+            b"flock L env V=1 sh scripts/x.sh",
+            b"xargs env bash scripts/x.sh",
+            b"xargs env python3 scripts/x.sh",
+            # split numeric operands may carry a leading `+` — the
+            # filter still runs (Codex on #1959)
+            b"split --lines=+1 --filter='sh scripts/x.sh' -",
+            b"split -l +1 --filter='sh scripts/x.sh' -",
+            b"split -n +1 --filter='sh scripts/x.sh' -",
+            b"split -b +1K --filter='sh scripts/x.sh' -",
+            b"split -b +1KB --filter='sh scripts/x.sh' -",
+            b"split -a +1 --filter='sh scripts/x.sh' -"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+    for line in (
+            # `-H`/`-L`/`-P`/`-debug` inside the expression are unknown
+            # predicates — find aborts before any traversal (Devin on
+            # #12/#1959)
+            b"find . -H -exec sh scripts/x.sh \\;",
+            b"find . -L -exec sh scripts/x.sh \\;",
+            b"find . -P -exec sh scripts/x.sh \\;",
+            b"find . -debug -exec sh scripts/x.sh \\;",
+            # `env`'s own argv0 is a direct exec, not an interpreter
+            # read — same family as `env x`/`xargs x`/`nice x`/`flock L
+            # x`, none of which SCRIPT_REF sees (accepted gap)
+            b"flock L env scripts/x.sh",
+            b"env scripts/x.sh",
+            # after `bash -c P` the trailing word is $0, not a script
+            b"flock L env bash -c 'echo P' scripts/x.sh",
+            # `-l +0`/`-l +` abort (invalid line count); `-n +0/1` and
+            # the mixed-sign K/N forms error out on the stdout/filter
+            # conflict even though they parse (Codex on #1959)
+            b"split -l +0 --filter='sh scripts/x.sh' -",
+            b"split -l + --filter='sh scripts/x.sh' -",
+            b"split -n +0/1 --filter='sh scripts/x.sh' -",
+            b"split -n +1/1 --filter='sh scripts/x.sh' -",
+            b"split -n 1/+2 --filter='sh scripts/x.sh' -"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
