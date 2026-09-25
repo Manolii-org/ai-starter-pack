@@ -10540,7 +10540,16 @@ def test_pipe_to_exec_round34(tmp_path):
             b'cat scripts/x.sh | "sh"',
             # describe-mode tails still EVALUATE their substitutions
             b'cat scripts/x.sh | setpriv --dump "$(sh)"',
-            b'cat scripts/x.sh | prlimit -p 1 "$(sh)"'):
+            b'cat scripts/x.sh | prlimit -p 1 "$(sh)"',
+            # a dynamic fd-dup target still binds stdin's default —
+            # only the TARGET's own expansion counts, so `sh -s"$X"`
+            # keeps the dup dynamic while `foo` stays literal
+            b'cat scripts/x.sh | sh -s"$X"<&$FD',
+            b'cat scripts/x.sh | sh -s<&$FD',
+            b'cat scripts/x.sh | sh -s<&a"$X"',
+            b'cat scripts/x.sh | sh -s<&"$FD"',
+            b'cat scripts/x.sh | sh -s"$X"<&0',
+            b'cat scripts/x.sh | sh >&"$FD"'):
         assert mod.script_dep_block(pdir, line + b"\n"), line
     for line in (
             # an ambiguous GNU prefix is an option error — nothing
@@ -10560,5 +10569,13 @@ def test_pipe_to_exec_round34(tmp_path):
             # names a `sh;` binary (ENOENT), not sh
             b'cat scripts/x.sh | "sh;"',
             b'cat scripts/x.sh | "sh{"',
-            b'cat scripts/x.sh | "sh x"'):
+            b'cat scripts/x.sh | "sh x"',
+            # a literal or single-quoted non-numeric `<&`/`>&` target
+            # is an ambiguous redirect — bash aborts before `sh` runs,
+            # and an expansion EARLIER in the same word does not make
+            # the literal target dynamic
+            b'cat scripts/x.sh | sh -s"$X"<&foo',
+            b'cat scripts/x.sh | sh -s<&foo',
+            b"cat scripts/x.sh | sh -s\"$X\"<&'$FD'",
+            b'cat scripts/x.sh | sh -s<&\\$FD'):
         assert not mod.script_dep_block(pdir, line + b"\n"), line

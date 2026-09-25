@@ -4705,12 +4705,17 @@ def _fd_file_target(fds: dict, src: bytes, i: int) -> str:
 
 
 def _word_unquote(raw: bytes) -> tuple:
-    """(canon, quoted) — `canon` is the shell-unquoted text of the word
-    (same bytes as _word_text); `quoted[i]` marks bytes that came from
-    inside '…'/"…" or a backslash escape, which are literal — never
-    operators or separators (Devin on #127, round-10 review)."""
+    """(canon, quoted, expandable) — `canon` is the shell-unquoted text
+    of the word (same bytes as _word_text); `quoted[i]` marks bytes
+    that came from inside '…'/"…" or a backslash escape, which are
+    literal — never operators or separators (Devin on #127, round-10
+    review). `expandable[i]` marks canon bytes that sit in an
+    EXPANSION-ACTIVE context (unquoted or inside "…") — where a `$` or
+    backtick still performs an expansion; single quotes and escapes
+    suppress it."""
     canon = bytearray()
     quoted: list[bool] = []
+    expandable: list[bool] = []
     i = 0
     n = len(raw)
     in_s = in_d = False
@@ -4722,12 +4727,15 @@ def _word_unquote(raw: bytes) -> tuple:
             else:
                 canon.append(c)
                 quoted.append(True)
+                expandable.append(False)
             i += 1
             continue
         if in_d:
             if c == 0x5C and i + 1 < n:
                 canon.append(raw[i + 1])
                 quoted.append(True)
+                # `\"`/`\$` inside "…" is escaped — the byte is literal.
+                expandable.append(raw[i + 1] not in b'"$`\\')
                 i += 2
                 continue
             if c == 0x22:
@@ -4735,6 +4743,7 @@ def _word_unquote(raw: bytes) -> tuple:
             else:
                 canon.append(c)
                 quoted.append(True)
+                expandable.append(True)
             i += 1
             continue
         if c == 0x27:
@@ -4744,13 +4753,15 @@ def _word_unquote(raw: bytes) -> tuple:
         elif c == 0x5C and i + 1 < n:
             canon.append(raw[i + 1])
             quoted.append(True)
+            expandable.append(False)
             i += 2
             continue
         else:
             canon.append(c)
             quoted.append(False)
+            expandable.append(True)
         i += 1
-    return bytes(canon), quoted
+    return bytes(canon), quoted, expandable
 
 
 # Metacharacters that end a redirect's glued target word.
@@ -4777,7 +4788,7 @@ def _word_pending_target(fds: dict, fd, mode: str, raw: bytes) -> None:
     a filename or fd-backed alias; 'dup' expects `N`/`-`/the `>&word`
     filename form; 'dup_in' (from `<&`) treats a non-numeric word as
     invalid bash — UNKNOWN, which counts as rebound (fail closed)."""
-    t, _ = _word_unquote(raw)
+    t, _, _e = _word_unquote(raw)
     if t[:2] == b"<(" and mode in ("file", "dup_in"):
         # `< <(BODY)` — the inner body inherits the outer stdin and its
         # captured stdout becomes the fd's content: `sh < <(cat)` still
@@ -4828,8 +4839,17 @@ def _word_redirects(raw: bytes, fds: dict) -> tuple:
     while `'a>b'` keeps `>` literal (Devin on #127, round-10 review).
     An fd prefix counts only as a word-INITIAL unquoted digit run
     (`12>f` is fd12; `file2>f`'s `2` is arg text — the fd is 1)."""
-    t, q = _word_unquote(raw)
+    t, q, ex = _word_unquote(raw)
     n = len(t)
+
+    def tgt_exp(a: int, b: int) -> bool:
+        # True when the canon span a:b (a redirect TARGET) holds a
+        # runtime expansion — only the target's own expandable bytes
+        # count, so an expansion earlier in the word (`-s"$X"<&foo`)
+        # does not poison the literal target while `'$FD'` stays
+        # literal (Devin on #1957, round-34 review — verified live).
+        return any(ex[k] and t[k:k + 1] in (b"$", b"`")
+                   for k in range(a, b))
 
     def op(i: int) -> bool:  # byte at i is an unquoted metachar
         return not q[i]
@@ -4898,6 +4918,7 @@ def _word_redirects(raw: bytes, fds: dict) -> tuple:
                 continue
             if i < n and t[i:i + 1] == b"&" and op(i):  # `>&`
                 i += 1
+                ts = i
                 tgt, i = _redir_target(t, q, i)
                 if tgt is None:
                     pending = (fd, "dup")
@@ -4905,12 +4926,14 @@ def _word_redirects(raw: bytes, fds: dict) -> tuple:
                     fds[fd] = _FD_CLOSED
                 elif tgt.isdigit():
                     fds[fd] = fds.get(_fd_key(tgt, -1), _FD_UNKNOWN)
-                elif _has_expansion(raw):
+                elif tgt_exp(ts, i):
                     # `>&$FD` — the expansion may restore a saved fd;
                     # bind the fd's DEFAULT so a restore registers the
                     # dep (Codex on #127, round-10 review). Checked on
-                    # the raw WORD so a quoted/escaped `$` (`>&'$FD'`)
-                    # stays a literal filename (Devin on #1380).
+                    # the raw TARGET SPAN so a quoted/escaped `$`
+                    # (`>&'$FD'`) stays a literal filename (Devin on
+                    # #1380) — and an expansion elsewhere in the word
+                    # no longer counts (Devin on #1957, round-34).
                     fds[fd] = _fresh_fds().get(fd, _FD_UNKNOWN)
                     if fd == 1 and not fd_prefix:
                         fds[2] = _FD_ERR
@@ -4956,6 +4979,7 @@ def _word_redirects(raw: bytes, fds: dict) -> tuple:
             continue
         if t[i:i + 1] == b"&" and op(i):  # `<&` — dup or close
             i += 1
+            ts = i
             tgt, i = _redir_target(t, q, i)
             if tgt is None:
                 pending = (fd, "dup_in")
@@ -4963,10 +4987,12 @@ def _word_redirects(raw: bytes, fds: dict) -> tuple:
                 fds[fd] = _FD_CLOSED
             elif tgt.isdigit():
                 fds[fd] = fds.get(_fd_key(tgt, -1), _FD_UNKNOWN)
-            elif _has_expansion(raw):
+            elif tgt_exp(ts, i):
                 # `<&$FD` — dynamic dup; bind the fd's default so a
                 # possible pipe-binding still registers the dep.
-                # Quoted/escaped `$` is a literal (invalid) word.
+                # Quoted/escaped `$` is a literal (invalid) word; an
+                # expansion BEFORE the target in the same word no
+                # longer poisons it (Devin on #1957, round-34).
                 fds[fd] = _fresh_fds().get(fd, _FD_UNKNOWN)
             else:
                 fds[fd] = _FD_UNKNOWN  # `<&word` — invalid syntax
