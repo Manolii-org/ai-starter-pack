@@ -12217,3 +12217,63 @@ def test_script_dep_round56(tmp_path):
             b"cat scripts/x.sh | sort -o /tmp/a -o /tmp/b | sh"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
 
+
+
+def test_script_dep_round57(tmp_path):
+    """Round-57 review findings (Devin/Codex on #130/#1393/#1959/#12 —
+    all verified live):
+
+    - A GNU SIZE's unit is OPTIONAL — `split -b 1` is a legal plain
+      count; `1KiB` is the binary unit (round-56 over-rejected both).
+    - GNU sort compares OUTFILE PATHS — `-o X -o X` is legal and
+      streams; only a different second path aborts "multiple output
+      files specified" (round-56 over-blocked).
+    - A shell redirect never reaches find's argv — `-H 2>/dev/null
+      -L` still binds both global flags (round-56 wrongly ended the
+      option region on the redirect word).
+    - `-D`/`-files0-from` mid-expression are unknown predicates and
+      abort (`find . -D help` → "unknown predicate `-D'").
+    - GNU non-negative numeric options cap at uintmax —
+      `tail --max-unchanged-stats=<2**64>` aborts "Value too large
+      for defined data type"; 2**64-1 runs.
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts/x.sh").write_text("echo X\n")
+
+    for line in (
+            # plain nonzero counts and binary units are legal
+            b"split -b 1 --filter=sh scripts/x.sh",
+            b"split --bytes=1 --filter=sh scripts/x.sh",
+            b"split -b 1KiB --filter=sh scripts/x.sh",
+            b"split --line-bytes=1 --filter=sh scripts/x.sh",
+            b"split -C1 --filter=sh scripts/x.sh",
+            # identical output specs keep the stdout stream
+            b"cat scripts/x.sh | sort -o /dev/stdout "
+            b"-o /dev/stdout | sh",
+            # a redirect between global flags still binds them
+            b"find -H 2>/dev/null -L . -exec sh scripts/x.sh \\;",
+            b"find -H >/dev/null -P . -exec sh scripts/x.sh \\;",
+            # uintmax boundary value runs
+            b"cat scripts/x.sh | tail "
+            b"--max-unchanged-stats=18446744073709551615 | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+    for line in (
+            # malformed SIZE still aborts before the filter runs
+            b"split -b 1bad --filter=sh scripts/x.sh",
+            b"split -b 1Ki --filter=sh scripts/x.sh",
+            b"split -b 0 --filter=sh scripts/x.sh",
+            # a second DIFFERENT output spec aborts
+            b"cat scripts/x.sh | sort -o /dev/stdout -o /tmp/o | sh",
+            b"cat scripts/x.sh | sort -o /tmp/a -o /tmp/b | sh",
+            # overflow past uintmax aborts before any read
+            b"cat scripts/x.sh | tail "
+            b"--max-unchanged-stats=18446744073709551616 | sh",
+            b"cat scripts/x.sh | tail "
+            b"--max-unchanged-stats=9999999999999999999999 | sh",
+            # mid-expression -D/-files0-from are unknown predicates
+            b"find . -D help -exec sh scripts/x.sh \\;",
+            b"find . -files0-from f -exec sh scripts/x.sh \\;"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line

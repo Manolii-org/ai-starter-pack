@@ -1146,11 +1146,17 @@ def _find_expr_spans(enc_words: list, hi: int, enclosing: bytes):
                 and t != b"--"
                 and t not in _FIND_GLOBAL_FLAG
                 and t not in (b"-D", b"-files0-from")
-                and not (t.startswith(b"-O") and t[2:].isdigit())):
+                and not (t.startswith(b"-O") and t[2:].isdigit())
+                and not (rw[:1] in (b"<", b">")
+                         or (len(rw) > 1 and rw[:1].isdigit()
+                             and rw[1:2] in (b"<", b">")))):
             # The option region ends at the first word that is not a
             # GNU pre-expression option — a path OR a predicate alike
             # (`find -name x -H` → unknown predicate — Devin on #130,
-            # round-54 review — verified live).
+            # round-54 review — verified live). A shell redirect word
+            # never reaches find's argv — `-H 2>/dev/null -L` still
+            # binds both flags (Devin on #130, round-57 — verified
+            # live).
             opt_region = False
         if t in _FIND_ACTION:
             expr_begun = True
@@ -1241,9 +1247,15 @@ def _find_expr_spans(enc_words: list, hi: int, enclosing: bytes):
             k += 3
             continue
         if t in _FIND_ONE_OP or _find_newer_op(t):
-            # `-D`/`-files0-from` are GNU pre-expression options in the
-            # option region — they do not start the expression there
-            # (mid-expression the operand-consumption over-blocks).
+            # `-D`/`-files0-from` are GNU pre-expression options —
+            # legal only in the option region. Mid-expression they
+            # are unknown predicates and abort before any action
+            # (`find . -D help` → "unknown predicate `-D'" — Devin
+            # on #130, round-57 review — verified live).
+            if t in (b"-D", b"-files0-from") and not opt_region:
+                spans.append(("terminal", k, k))
+                k += 2
+                continue
             if t not in (b"-D", b"-files0-from") or not opt_region:
                 expr_begun = True
             if (t == b"-D" and k + 1 < len(enc_words)
@@ -3271,8 +3283,11 @@ _SORT_OP_OPS = frozenset({
     b"--parallel", b"--random-source", b"--temporary-directory"})
 
 
-# A second `-o`/`--output` aborts sort — the sentinel marks that
-# abort so `_sort_diverts` ends the stage (nothing reaches stdout).
+# A second `-o`/`--output` naming a DIFFERENT file aborts sort — GNU
+# only compares paths, so `-o X -o X` is legal and still streams
+# (`sort -o /dev/stdout -o /dev/stdout` prints — Devin on
+# #1393/#1959/#12, round-57 — verified live). The sentinel marks the
+# abort so `_sort_diverts` ends the stage.
 _SORT_DUP_OUT = b"\x00sort-dup-output"
 
 
@@ -3302,10 +3317,11 @@ def _sort_out(args: list):
                     continue
                 resolved = cands[0]
             if resolved == b"--output":
-                if out is not None:
-                    dup = True
-                out = (a.split(b"=", 1)[1] if b"=" in a
+                val = (a.split(b"=", 1)[1] if b"=" in a
                        else (args[i] if i < len(args) else b""))
+                if out is not None and val != out:
+                    dup = True
+                out = val
                 if b"=" not in a:
                     i += 1      # separate operand word
                 continue
@@ -3316,15 +3332,16 @@ def _sort_out(args: list):
             for j in range(1, len(a)):
                 c = a[j:j + 1]
                 if c == b"o":
-                    if out is not None:
-                        dup = True
                     if j + 1 < len(a):
-                        out = a[j + 1:]
+                        val = a[j + 1:]
                     elif i < len(args):
-                        out = args[i]
+                        val = args[i]
                         i += 1  # separate operand word
                     else:
-                        out = b""
+                        val = b""
+                    if out is not None and val != out:
+                        dup = True
+                    out = val
                     break
                 if c in (b"k", b"t", b"T", b"S"):
                     if j + 1 == len(a):
@@ -3410,12 +3427,14 @@ def _split_arg_ok(opt: bytes, v: bytes) -> bool:
         return n.isdigit()
     if opt in (b"--bytes", b"-b", b"--line-bytes", b"-C"):
         # A GNU SIZE is digits + one optional unit (`1K`=1024,
-        # `1KB`=1000, `1b`=512, `1k`=1024 — all verified live);
-        # anything else aborts "invalid number of bytes" before the
-        # filter runs (`-b 1bad` — Devin on #130, round-56 —
-        # verified live).
+        # `1KB`=1000, `1KiB`=1024, `1b`=512, `1k`=1024 — all verified
+        # live); a bare count is legal too (`-b 1` runs — Devin/Codex
+        # on #1393/#1959/#12, round-57 — verified live); anything else
+        # aborts "invalid number of bytes" before the filter runs
+        # (`-b 1bad`, `-b 1Ki` — Devin on #130, round-56 — verified
+        # live).
         return (n[:1] != b"0"
-                and re.fullmatch(rb"[0-9]+(b|k|[KMGTPEZY]B?)", n)
+                and re.fullmatch(rb"[0-9]+(b|k|[KMGTPEZY](i?B)?)?", n)
                 is not None)
     if opt in (b"--separator", b"-t"):
         # SEP is one byte or the `\0` NUL escape (Codex on #1959,
@@ -4324,8 +4343,13 @@ def _pages_ok(v: bytes) -> bool:
 def _num_ok(v: bytes) -> bool:
     """Digits with an optional leading `+` — GNU's non-negative
     integer options (`tail --pid`, `pr --indent`) accept `+1` and
-    reject `-1`/`nope` (Devin on #1959, round-46 — verified live)."""
-    return v.isdigit() or (v[:1] == b"+" and v[1:].isdigit())
+    reject `-1`/`nope` (Devin on #1959, round-46 — verified live).
+    An all-digit value PAST uintmax aborts "Value too large for
+    defined data type" before any read (`tail
+    --max-unchanged-stats=<2**64>` — Codex on #130, round-57
+    review — verified live; 2**64-1 runs)."""
+    n = v[1:] if v[:1] == b"+" else v
+    return n.isdigit() and int(n) <= (1 << 64) - 1
 
 
 # Complete GNU long-option sets per reader head — abbreviation resolves
