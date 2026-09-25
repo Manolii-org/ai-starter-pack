@@ -10641,9 +10641,9 @@ def test_pipe_to_exec_round35(tmp_path):
             b"cat scripts/x.sh | sort --sort numeric | sh",
             b"cat scripts/x.sh | sort --sor numeric | sh",
             # an EXACT long option resolves even under prefix overlap —
-            # `cat --number` is valid though `--number-nonblank` shares
-            # the prefix (Codex on #1393, round-39 review)
-            b"cat --number scripts/x.sh | sort | sh",
+            # `cat --show-ends` is valid though the --show-* family
+            # shares the prefix shape (Codex on #1393, round-39 review)
+            b"cat --show-ends scripts/x.sh | sort | sh",
             # remaining real sort options still forward the stream
             b"cat scripts/x.sh | sort --human-numeric-sort | sh",
             b"cat scripts/x.sh | sort --ignore-nonprinting | sh",
@@ -10664,6 +10664,11 @@ def test_pipe_to_exec_round35(tmp_path):
             b"date +$(cat -b scripts/x.sh) | sh",
             b"date +$(cat --number scripts/x.sh) | sh",
             b"date +$(cat -vn scripts/x.sh) | sh",
+            # `cat --number` resolves as the exact long option even
+            # under the --number-nonblank prefix overlap, but its
+            # numbered output can't execute downstream anyway (Devin
+            # on #130, round-60 — verified live)
+            b"cat --number scripts/x.sh | sort | sh",
             # an ambiguous GNU long-option prefix aborts the command —
             # `--s` matches both --sort and --stable
             b"cat scripts/x.sh | sort --s numeric | sh",
@@ -12501,4 +12506,98 @@ def test_script_dep_round59(tmp_path):
             b"cat scripts/x.sh | pr -tn | sh",
             b"cat scripts/x.sh | pr --number-lines | sh",
             b"cat scripts/x.sh | pr --number-lines=: | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round60(tmp_path):
+    """Round-60 review regression — Devin #130/#1393/#12/#1959 + Codex
+    #1959 findings, all verified live on coreutils 8.32:
+    - A `cat` leading a pipe with `-n`/-b/--number/--number-nonblank
+      rewrites every output line — the numbered text can't run
+      downstream (`cat --number scripts/x.sh | sh` runs `1`, never
+      the script — Devin on #130).
+    - split's `/dev/stdin`/`/dev/fd/0`/`/proc/self/fd/0` INPUT operand
+      obeys the same dead-stdin check as `-`/absent — `split -l1
+      /dev/stdin --filter=X </dev/null` yields no chunks, the filter
+      never fires (Devin on #12).
+    - A `-exec` whose terminator is its FIRST argv word aborts the
+      whole find expression ("invalid argument `;' to `-exec`")
+      before any action runs — earlier spans die too (Devin on
+      #1959).
+    - A split `--filter` interpreter's program flag (`-c`/`-e`/`-m`/
+      `--eval`) makes a following scripts/ path argv ($0), not the
+      program (`bash -c true scripts/x.sh` — Codex on #1959); a
+      shell `-s` reads the program from stdin the same way. The
+      program word itself still execs (`bash -c 'sh x' y`).
+    - The int() conversions strip `+`/zero-padding — a 5000-digit
+      padded `-a`/`pr -w` operand parses without hitting Python's
+      4300-digit limit (Devin on #1393).
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo HIT\n")
+    pad = b"0" * 5000 + b"1"
+    for line in (
+            # verbatim cat still deps; numbered cat anywhere in the
+            # leading stage does not
+            b"cat scripts/x.sh | sh",
+            b"cat -E scripts/x.sh | sh",
+            b"cat /etc/hosts scripts/x.sh | sh",
+            b"cat <scripts/x.sh | sh",
+            # a live stdin makes the fd-0 alias operand dep the same
+            # way `-` does
+            b"split -l1 /dev/stdin --filter='sh scripts/x.sh' <scripts/x.sh",
+            b"split -l1 /dev/stdin --filter='sh scripts/x.sh'",
+            # a real -exec action still deps
+            b"find . -exec sh scripts/x.sh \\; | cat",
+            b"find . -exec sh x \\; -exec sh scripts/x.sh \\; | cat",
+            # the -c program text itself execs the script inside it
+            b"split --filter='bash -c \"sh scripts/x.sh\" foo' -l1 f",
+            b"split --filter='sh scripts/x.sh' -l1 f",
+            # padded numeric operands parse (no int() crash) and dep
+            b"split -a +" + pad + b" --filter='sh scripts/x.sh' f",
+            b"split -a " + pad + b" -l1 f --filter='sh scripts/x.sh'",
+            b"cat scripts/x.sh | pr --pages=+" + pad + b" | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # the flagged over-flag: numbering transforms the bytes
+            # before any downstream head sees them
+            b"cat --number scripts/x.sh | sh",
+            b"cat -n scripts/x.sh | sh",
+            b"cat -b scripts/x.sh | sh",
+            b"cat --number-nonblank scripts/x.sh | sh",
+            b"cat -An scripts/x.sh | sh",
+            b"cat --number /etc/hosts scripts/x.sh | sh",
+            b"cat --number <scripts/x.sh | sh",
+            b"cat --number scripts/x.sh | sort | sh",
+            # dead stdin through every fd-0 alias — no chunks, no
+            # filter
+            b"split -l1 /dev/stdin --filter='sh scripts/x.sh' </dev/null",
+            b"split -l1 /dev/fd/0 --filter='sh scripts/x.sh' </dev/null",
+            b"split -l1 /proc/self/fd/0 --filter='sh scripts/x.sh' </dev/null",
+            b"split -l1 /dev/stdin --filter='sh scripts/x.sh' <&-",
+            # `-exec`/`{} +`-empty argv or a missing terminator kills
+            # every action in the expression
+            b"find . -exec \\; | cat",
+            b"find . -exec echo A \\; -exec \\; | cat",
+            b"find . -exec \\; -exec sh scripts/x.sh \\; | cat",
+            b"find . -exec echo A \\; -exec | cat",
+            # a pure-reader filter head only emits the script's bytes
+            # to the chunk stream — chunk files, not an exec
+            b"split --filter='cat scripts/x.sh' -l1 f",
+            # the scripts/ path after a program flag is argv ($0),
+            # never read or executed
+            b"split --filter='bash -c true scripts/x.sh' -l1 f",
+            b"split --filter='bash -ctrue scripts/x.sh' -l1 f",
+            b"split --filter='sh -c true scripts/x.sh' -l1 f",
+            b"split --filter='sh -ec \"true\" scripts/x.sh' -l1 f",
+            b"split --filter='sh -s scripts/x.sh' -l1 f",
+            b"split --filter='python -c \"x\" scripts/x.py' -l1 f",
+            b"split --filter='perl -e \"x\" scripts/x.pl' -l1 f",
+            b"split --filter='sh - scripts/x.sh' -l1 f",
+            # a `pr` operand parse that would have crashed int() —
+            # GNU aborts "invalid line width" on the huge value
+            b"cat scripts/x.sh | pr -w " + pad + b" --columns 36 | sh",
+            b"cat scripts/x.sh | pr --pages=-" + pad + b" | sh"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
