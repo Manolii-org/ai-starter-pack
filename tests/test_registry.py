@@ -12277,3 +12277,71 @@ def test_script_dep_round57(tmp_path):
             b"find . -D help -exec sh scripts/x.sh \\;",
             b"find . -files0-from f -exec sh scripts/x.sh \\;"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round58(tmp_path):
+    """Round-58 review findings (Devin/Codex on #130/#1393/#1959/#12 —
+    all verified live on coreutils 8.32):
+
+    - A split SIZE may be zero-PADDED (`-b 01` runs; `00` aborts
+      "Numerical result out of range") and the computed bytes cap at
+      INTMAX — `...808`, `1ZiB`, and the coreutils>=9.5 `1R`/`1Q`
+      units all abort "Value too large" before the filter runs.
+    - `-l` lines count to UINTMAX; `-a` suffix length and `-n` chunk
+      components cap at INTMAX.
+    - `_num_ok` must not crash on >Python-4300-digit operands (a
+      digit-length guard precedes int()).
+    - `pr`'s operand-taking shorts are only `-D`/`-h`/`-l`/`-N`/`-o`/
+      `-w`/`-W` — `-r` (`--no-file-warnings`), `-d`/`-J`/`-T` are
+      flags and `-e`/`-i`/`-n`/`-s`/`-S` bind only glued; `nl -p` is
+      a flag too (`nl -p f` reads f as the file).
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts/x.sh").write_text("echo X\n")
+
+    for line in (
+            # zero-padded sizes and boundary values run the filter
+            b"split -b 01 --filter=sh scripts/x.sh",
+            b"split -b 01K --filter=sh scripts/x.sh",
+            b"split -b 9223372036854775807 --filter=sh scripts/x.sh",
+            b"split -l 18446744073709551615 --filter=sh scripts/x.sh",
+            b"split -a 9223372036854775807 --filter=sh scripts/x.sh",
+            # l/N writes EVERY chunk, so the filter still runs
+            b"split -n l/9223372036854775807 --filter=sh "
+            b"scripts/x.sh",
+            # flag-only pr shorts never consume the next word
+            b"cat scripts/x.sh | pr -r | sh",
+            b"cat scripts/x.sh | pr -d | sh",
+            b"cat scripts/x.sh | pr -J | sh",
+            # optional-arg shorts bind only glued — `,` is a file
+            b"cat scripts/x.sh | pr -s | sh",
+            b"cat scripts/x.sh | pr -n | sh",
+            # nl -p is --no-renumber, a flag
+            b"cat scripts/x.sh | nl -p | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+    for line in (
+            # zero values and intmax overflow abort before the filter
+            b"split -b 00 --filter=sh scripts/x.sh",
+            b"split -b 0K --filter=sh scripts/x.sh",
+            b"split -b 9223372036854775808 --filter=sh scripts/x.sh",
+            b"split -b 1ZiB --filter=sh scripts/x.sh",
+            b"split -b 1R --filter=sh scripts/x.sh",
+            b"split -b 1Q --filter=sh scripts/x.sh",
+            b"split -l 18446744073709551616 --filter=sh scripts/x.sh",
+            b"split -a 9223372036854775808 --filter=sh scripts/x.sh",
+            b"split -n 9223372036854775808/1 --filter=sh scripts/x.sh",
+            b"split -n 0 --filter=sh scripts/x.sh",
+            # a K/N chunk-select refuses --filter outright
+            b"split -n 1/9223372036854775807 --filter=sh "
+            b"scripts/x.sh",
+            # past Python's int() limit — must not crash, and aborts
+            b"cat scripts/x.sh | tail --max-unchanged-stats="
+            + b"9" * 5000 + b" | sh",
+            b"split -b " + b"9" * 5000 + b" --filter=sh scripts/x.sh",
+            # pr required-arg shorts at argv end abort
+            b"cat scripts/x.sh | pr -D | sh",
+            b"cat scripts/x.sh | pr -N | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line

@@ -3421,10 +3421,24 @@ def _split_arg_ok(opt: bytes, v: bytes) -> bool:
     (`--lines=+1`, `-n +1`, `-b +1K` all run — Codex on #1959,
     round-53 review — verified live; `+0`/`+` alone still abort)."""
     n = v[1:] if v[:1] == b"+" else v
+    # xstrtol/xstrtoumax reject the operand once its digits overflow —
+    # zero-padding is legal (`-b 01` runs — Devin on #130, round-58
+    # review — verified live), a zero VALUE aborts (`-b 00`/`-l 00`
+    # "Numerical result out of range" — verified live), and the bound
+    # is per-option: -l counts to UINTMAX while -b/-C sizes, -a
+    # suffix length, and -n chunk parts cap at INTMAX (verified live
+    # at 2**63/-a/-n and 2**64/-l boundaries, coreutils 8.32). The
+    # digit-length guard also keeps int() under Python's 4300-digit
+    # parse limit (Devin on #1393/#12, round-58 review).
+    _INTMAX = (1 << 63) - 1
+    _UINTMAX = (1 << 64) - 1
     if opt in (b"--lines", b"-l"):
-        return n.isdigit() and int(n) != 0
+        d = n.lstrip(b"0")
+        return (n.isdigit() and len(d) <= 20
+                and int(d or b"0") <= _UINTMAX and bool(d))
     if opt in (b"--suffix-length", b"-a"):
-        return n.isdigit()
+        d = n.lstrip(b"0")
+        return n.isdigit() and len(d) <= 19 and int(d or b"0") <= _INTMAX
     if opt in (b"--bytes", b"-b", b"--line-bytes", b"-C"):
         # A GNU SIZE is digits + one optional unit (`1K`=1024,
         # `1KB`=1000, `1KiB`=1024, `1b`=512, `1k`=1024 — all verified
@@ -3432,10 +3446,55 @@ def _split_arg_ok(opt: bytes, v: bytes) -> bool:
         # on #1393/#1959/#12, round-57 — verified live); anything else
         # aborts "invalid number of bytes" before the filter runs
         # (`-b 1bad`, `-b 1Ki` — Devin on #130, round-56 — verified
-        # live).
-        return (n[:1] != b"0"
-                and re.fullmatch(rb"[0-9]+(b|k|[KMGTPEZY](i?B)?)?", n)
-                is not None)
+        # live). The COMPUTED size must not exceed INTMAX —
+        # `-b 9223372036854775807` runs but `...808`, `1ZiB`, and the
+        # coreutils>=9.5 `1R`/`1Q` units all abort "Value too large"
+        # (Devin on #1393/#12, Codex on #1959, round-58 — verified
+        # live). Unrecognized units abort the same way, so the table
+        # only names units GNU actually parses.
+        m = re.fullmatch(rb"([0-9]+)(b|k|[KMGTPEZY](i?B)?)?", n)
+        if m is None:
+            return False
+        _SPLIT_UNIT = {b"": 1, b"b": 512,
+                       b"k": 1024, b"K": 1024, b"KB": 1000,
+                       b"KiB": 1024, b"M": 1024**2, b"MB": 1000**2,
+                       b"MiB": 1024**2, b"G": 1024**3, b"GB": 1000**3,
+                       b"GiB": 1024**3, b"T": 1024**4, b"TB": 1000**4,
+                       b"TiB": 1024**4, b"P": 1024**5, b"PB": 1000**5,
+                       b"PiB": 1024**5, b"E": 1024**6, b"EB": 1000**6,
+                       b"EiB": 1024**6, b"Z": 1024**7, b"ZB": 1000**7,
+                       b"ZiB": 1024**7, b"Y": 1024**8, b"YB": 1000**8,
+                       b"YiB": 1024**8}
+        d = m.group(1)
+        return (len(d) <= 19
+                and 0 < int(d) * _SPLIT_UNIT[m.group(2) or b""]
+                <= _INTMAX)
+    if opt in (b"--separator", b"-t"):
+        # SEP is one byte or the `\0` NUL escape (Codex on #1959,
+        # round-45 review — verified live).
+        return len(v) == 1 or v == b"\\0"
+    if opt in (b"--number", b"-n"):
+        p = v.split(b"/")
+        if len(p) > 1 and p[0] in (b"l", b"r"):
+            p = p[1:]
+        p = [x[1:] if x[:1] == b"+" else x for x in p]
+        # Each component is an intmax-bounded nonzero count
+        # (`1/9223372036854775807` runs, `9223372036854775808/1`
+        # aborts "invalid chunk number" — round-58, verified live).
+        if not (1 <= len(p) <= 2
+                and all(x.isdigit()
+                        and len(x.lstrip(b"0")) <= 19
+                        and 0 < int(x.lstrip(b"0") or b"0") <= _INTMAX
+                        for x in p)):
+            return False
+        return len(p) == 1 or int(p[0].lstrip(b"0")) <= int(
+            p[1].lstrip(b"0"))
+    if opt == b"--additional-suffix":
+        # A suffix containing `/` aborts "invalid suffix … contains
+        # directory separator" before input is read or the filter
+        # runs (Codex on #130, round-52 review — verified live).
+        return b"/" not in v
+    return True
     if opt in (b"--separator", b"-t"):
         # SEP is one byte or the `\0` NUL escape (Codex on #1959,
         # round-45 review — verified live).
@@ -4166,7 +4225,10 @@ _READER_FLAG_OPS = {
     b"iconv": frozenset({b"-f", b"-t", b"--from-code", b"--to-code",
                          b"-o", b"--output"}),
     b"fold": frozenset({b"-w", b"--width"}),
-    b"nl": frozenset({b"-b", b"-f", b"-h", b"-i", b"-l", b"-n", b"-p",
+    # `-p` (`--no-renumber`) is a flag, not a required-arg short —
+    # `nl -p f` reads `f` as the FILE, and `nl -p` at argv end runs
+    # (round-58 audit of `nl --help`, verified live).
+    b"nl": frozenset({b"-b", b"-f", b"-h", b"-i", b"-l", b"-n",
                       b"-s", b"-v", b"-w",
                       # Required-arg longs (round-41 audit).
                       b"--body-numbering", b"--footer-numbering",
@@ -4205,8 +4267,13 @@ _READER_FLAG_OPS = {
                       b"--max-count", b"--after-context",
                       b"--before-context", b"--context", b"--glob",
                       b"--type", b"--type-not"}),
-    b"pr": frozenset({b"-e", b"-h", b"-i", b"-l", b"-n", b"-o", b"-r",
-                      b"-s", b"-w", b"-J", b"-S", b"-T", b"-W", b"-d",
+    # Only REQUIRED-arg shorts belong here — `-r`/`-d`/`-J`/`-T`/`-a`/
+    # `-m`/`-t`/`-v`/`-c`/`-f`/`-F` are flags and `-e`/`-i`/`-n`/`-s`/
+    # `-S` bind a value only when glued (`pr -s,`); listing either
+    # class made `pr -r` at argv end abort "option requires an
+    # argument" and stole the next file operand (Codex on #1393,
+    # round-58 review — verified live on coreutils 8.32).
+    b"pr": frozenset({b"-D", b"-h", b"-l", b"-N", b"-o", b"-w", b"-W",
                       # Required-arg longs (round-41 audit —
                       # `--pages` verified live; `--indent` errors
                       # "option requires an argument" — CodeRabbit on
@@ -4349,7 +4416,11 @@ def _num_ok(v: bytes) -> bool:
     --max-unchanged-stats=<2**64>` — Codex on #130, round-57
     review — verified live; 2**64-1 runs)."""
     n = v[1:] if v[:1] == b"+" else v
-    return n.isdigit() and int(n) <= (1 << 64) - 1
+    # int() raises ValueError past Python's 4300-digit parse limit —
+    # a digit-length guard keeps resolution from crashing on absurd
+    # operands (Devin on #1393/#12, round-58 review — verified live).
+    return (n.isdigit() and len(n) <= 20
+            and (len(n) < 20 or int(n) <= (1 << 64) - 1))
 
 
 # Complete GNU long-option sets per reader head — abbreviation resolves
