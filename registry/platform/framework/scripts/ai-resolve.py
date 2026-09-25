@@ -909,20 +909,33 @@ _ARGV_PROGRAM_WRAPPER_OPTOPS = {
                          b"--command", b"--timeout",
                          b"--conflict-exit-code"}),
 }
+# Terminal modes print and exit BEFORE any wrapped argv — `flock --help
+# sh P` shows usage, never runs P (Codex on #1393, round-39 review —
+# verified live). Same for xargs/find `--help`/`--version`.
+_ARGV_PROGRAM_WRAPPER_TERMINAL = {
+    b"xargs": frozenset({b"--help", b"--version"}),
+    b"find": frozenset({b"--help", b"--version",
+                        b"-help", b"-version"}),
+    b"flock": frozenset({b"-h", b"--help",
+                         b"-V", b"--version"}),
+}
 
 
 def _argv_wrap_start(enc_words: list, hi: int, enclosing: bytes):
     """Index of the wrapped command's first word after an argv-spawning
     wrapper head at `hi`, or None."""
     key = _command_key(enclosing[enc_words[hi][0]:enc_words[hi][1]])
+    terminal = _ARGV_PROGRAM_WRAPPER_TERMINAL.get(key, frozenset())
     if key == b"find":
         # The argv starts after `-exec`/`-execdir`/`-ok`/`-okdir` —
         # find's other words are paths and tests, not the command
-        # (Codex on #128, round-25 review).
+        # (Codex on #128, round-25 review). Terminal modes exit first.
         for k in range(hi + 1, len(enc_words)):
-            if _word_text(enclosing[enc_words[k][0]:
-                                     enc_words[k][1]]) in (
-                    b"-exec", b"-execdir", b"-ok", b"-okdir"):
+            t = _word_text(enclosing[enc_words[k][0]:
+                                     enc_words[k][1]])
+            if t in terminal:
+                return None
+            if t in (b"-exec", b"-execdir", b"-ok", b"-okdir"):
                 return k + 1 if k + 1 < len(enc_words) else None
         return None
     optops = _ARGV_PROGRAM_WRAPPER_OPTOPS.get(key, frozenset())
@@ -936,6 +949,8 @@ def _argv_wrap_start(enc_words: list, hi: int, enclosing: bytes):
         if not ended and t != b"-" and t.startswith(b"-"):
             if t == b"--":
                 ended = True
+            elif t in terminal:
+                return None
             elif t in optops:
                 j += 2
                 continue
@@ -1129,10 +1144,13 @@ def _operand_is_program(enc_words: list, wi: int,
         # `-exec`/`-execdir`/`-ok`/`-okdir` introduce an argv the
         # action execs — it runs to `;`/`+` (or end of words) and each
         # action execs its own argv (Codex on #128, round-25 review —
-        # verified live).
+        # verified live). `-help`/`--help` etc. exit before exec.
+        find_terminal = _ARGV_PROGRAM_WRAPPER_TERMINAL[b"find"]
         k = hi + 1
         while k < len(enc_words):
             t = _word_text(enclosing[enc_words[k][0]:enc_words[k][1]])
+            if t in find_terminal:
+                return False
             if t in (b"-exec", b"-execdir", b"-ok", b"-okdir"):
                 start = k + 1
                 end = start
@@ -1154,6 +1172,7 @@ def _operand_is_program(enc_words: list, wi: int,
         # command argv — `flock L sh -c 'P'` runs P (Codex on #128,
         # round-25 review — verified live).
         flock_optops = _ARGV_PROGRAM_WRAPPER_OPTOPS[b"flock"]
+        flock_terminal = _ARGV_PROGRAM_WRAPPER_TERMINAL[b"flock"]
         pos0 = ended = False
         j = hi + 1
         while j < len(enc_words):
@@ -1161,6 +1180,8 @@ def _operand_is_program(enc_words: list, wi: int,
             if not ended and t != b"-" and t.startswith(b"-"):
                 if t == b"--":
                     ended = True
+                elif t in flock_terminal:
+                    return False
                 elif t in (b"-c", b"--command"):
                     if j + 1 == wi:
                         return True
@@ -2549,21 +2570,18 @@ def _ifs_fields(data: bytes, ifs: bytes | None) -> list:
     if any(c in b" \t\n" for c in ifs):
         if not nonws:
             return data.split()
-        # Mixed IFS — a delimiter is [ws* nonws ws*] or a ws run;
-        # trailing delimiters emit nothing (`IFS=', '` gives `echo,`
-        # one field — Devin round-37, verified live) while a leading
-        # non-whitespace delimiter emits an empty head field.
-        d = re.sub(rb"[\s" + re.escape(nonws) + rb"]+$", b"",
-                   data.strip(b" \t\n"))
-        if not d:
-            return []
-        parts = [p for p in re.split(
-            rb"[\s" + re.escape(nonws) + rb"]+", d) if p]
-        lead = re.match(rb"\s*", data)
-        if (lead.end() < len(data)
-                and data[lead.end():lead.end() + 1] in nonws):
-            parts.insert(0, b"")
-        return parts
+        # Mixed IFS — each non-whitespace char is its own delimiter
+        # with adjacent IFS whitespace folded in; adjacent delimiters
+        # emit empty fields (`IFS=', '` gives `a,,b` THREE fields —
+        # Devin round-39, verified live). Trailing delimiters emit
+        # nothing (`echo,` → 1) while a leading one emits an empty
+        # head field (`,a` → 2, ` ,a` → 2 — verified live).
+        parts = re.split(
+            rb"[\s]*[" + re.escape(nonws) + rb"][\s]*|[\s]+",
+            data.lstrip(b" \t\n"))
+        if parts and parts[-1] == b"":
+            parts.pop()
+        return parts or [b""]
     if not nonws:
         return [data]
     # Pure non-whitespace IFS — EVERY delimiter emits a field (no
@@ -3070,11 +3088,15 @@ _READER_GNU_OPS = {
                        b"--re-interval", b"--sandbox", b"--source",
                        b"--traditional", b"--use-lc-numeric",
                        b"--version", b"--bignum"}),
+    # `--check` is deliberately absent: it is a validation mode that
+    # emits nothing on stdout — an unknown-option abort models the
+    # observable stdout the same way.
     b"sort": frozenset({b"--batch-size", b"--buffer-size",
                         b"--compress-program", b"--debug",
                         b"--dictionary-order", b"--field-separator",
                         b"--files0-from", b"--general-numeric-sort",
-                        b"--ignore-case", b"--ignore-leading-blanks",
+                        b"--human-numeric-sort", b"--ignore-case",
+                        b"--ignore-leading-blanks", b"--ignore-nonprinting",
                         b"--key", b"--merge", b"--month-sort",
                         b"--numeric-sort", b"--numeric-storage",
                         b"--output", b"--parallel", b"--random-sort",
@@ -3179,15 +3201,21 @@ def _reader_operands(key: bytes, args: list):
             if a == b"--":
                 ended = True
             elif gnu is not None and a.startswith(b"--"):
-                # GNU getopt_long: the prefix resolves only when it
-                # names EXACTLY one long option — ambiguity or an
-                # unknown name aborts the command (round-35).
+                # GNU getopt_long: an EXACT option name always
+                # resolves even when another option shares its
+                # prefix (`cat --number` is valid though
+                # `--number-nonblank` exists — Devin round-39,
+                # verified live); a non-exact prefix must name
+                # EXACTLY one option — ambiguity or an unknown name
+                # aborts the command (round-35).
                 base = a.split(b"=", 1)[0]
-                cands = [o for o in gnu if o == base
-                         or o.startswith(base)]
-                if len(cands) != 1:
-                    return None
-                resolved = cands[0]
+                if base in gnu:
+                    resolved = base
+                else:
+                    cands = [o for o in gnu if o.startswith(base)]
+                    if len(cands) != 1:
+                        return None
+                    resolved = cands[0]
                 prog_seen |= resolved in progflags
                 if resolved in flagops and b"=" not in a:
                     i += 2
@@ -7302,6 +7330,29 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
             # names the script — only a bare-prefix concat like
             # `xscripts/` is rejected.
             if cand in (text, b"./" + text) or cand.endswith(b"/" + text):
+                # A path inside an argv-wrapper's argv invokes only when
+                # the wrapper reaches it — `flock --help sh x` prints
+                # help and exits, and a wrapper's OWN operand
+                # (`xargs -a scripts/list` is the arg-file, not argv)
+                # is never exec'd (Codex on #1393, round-39 review).
+                wi0 = enc_words.index(w)
+                whi = _effective_head(enc_words, enclosing)
+                if whi is not None and whi >= 0:
+                    wkey = _command_key(
+                        enclosing[enc_words[whi][0]:
+                                  enc_words[whi][1]])
+                    if wkey in _ARGV_PROGRAM_WRAPPERS:
+                        if wkey == b"find":
+                            ws = _find_action_start(
+                                enc_words, whi, wi0, enclosing)
+                            if (ws is None or _argv_wrap_start(
+                                    enc_words, whi, enclosing) is None):
+                                return False
+                        else:
+                            ws = _argv_wrap_start(
+                                enc_words, whi, enclosing)
+                            if ws is None or wi0 <= ws:
+                                return False
                 return True
             # A glued non-`-d` short-option operand whose tail is a script
             # IS the invocation (`node -rscripts/preload.js`) — the same
