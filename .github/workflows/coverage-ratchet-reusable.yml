@@ -38,7 +38,7 @@ on:
         type: string
         required: false
         default: 'ubuntu-latest'
-        description: Runner label — ubuntu-slim is fine when install+coverage fit the 15-minute cap and need no docker/sudo.
+        description: Runner label — ubuntu-slim is fine when install+coverage fit the 15-minute cap and need no docker/sudo. Self-hosted runners must be >= v2.327.1 when python_version is set (setup-python v6 runs on Node 24).
       node_version:
         type: string
         required: false

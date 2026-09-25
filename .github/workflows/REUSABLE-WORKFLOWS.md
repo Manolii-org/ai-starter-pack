@@ -700,10 +700,11 @@ journal to `needs:` the test job and give the CALLER job `if: ${{ always() }}`
 a test failure, which is exactly when the journal matters most. Collect weeks
 of journals before proposing enforcement.
 
-The reusable requests `actions: read` (artifact download), so the caller job
-must also declare `permissions:` granting it — otherwise GitHub rejects the
-whole workflow at startup (`startup_failure`, zero jobs run, required checks
-hang "waiting for status"):
+The reusable requests `actions: read` (artifact download), so the caller job's
+effective permissions must include it. A job-level `permissions:` block is only
+needed when the effective default doesn't already grant `actions: read` — if it
+is missing, GitHub rejects the whole workflow at startup (`startup_failure`,
+zero jobs run, required checks hang "waiting for status"):
 
 ```yaml
   tia-shadow:
