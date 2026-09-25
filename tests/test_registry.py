@@ -10053,3 +10053,50 @@ def test_pipe_to_exec_round25d(tmp_path):
             b'cat scripts/x.sh | xargs -a /dev/null cat /etc/hostname | sh',
             b'date +$(printf %s "x") | sh'):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+def test_pipe_to_exec_round26(tmp_path):
+    """Round-26: find multi-action -exec emit heads, nested `env -S`
+    wrapper chains, `&&>` separators, and ionice/taskset exec wrappers
+    (Devin + Codex on #128)."""
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location(
+        "reg_r26", Path(__file__).parent.parent / "scripts" / "ai-resolve.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["reg_r26"] = mod
+    spec.loader.exec_module(mod)
+    pdir = tmp_path
+    (pdir / "scripts").mkdir()
+    (pdir / "scripts" / "x.sh").write_bytes(b"e\n")
+    for line in (
+            # every -exec action runs per match — an EMITTING action's
+            # text reaches the pipe even when an earlier action is inert
+            # (Devin on #128, round-26 review — verified live)
+            b"find . -exec true \\; -exec echo 'bash scripts/x.sh' \\; | sh",
+            b"find . -exec printf 'bash scripts/x.sh' \\; -exec true \\; | sh",
+            # a wrapper chain may contain env again — `env env -S 'x'`
+            # re-parses through the INNER env (Codex on #128 — live)
+            b"env env -S 'bash scripts/x.sh'",
+            b"timeout 1 env env -S 'bash scripts/x.sh'",
+            b"env FOO=1 env -S 'bash scripts/x.sh'",
+            # ionice/taskset exec their COMMAND (util-linux wrappers —
+            # Codex on #128, round-26 review — verified live)
+            b"ionice -c 3 sh -c 'bash scripts/x.sh'",
+            b"ionice -c3 sh -c 'bash scripts/x.sh'",
+            b"taskset -c 0 sh -c 'bash scripts/x.sh'",
+            b"taskset --cpu-list 0 sh -c 'bash scripts/x.sh'",
+            b"taskset -c0 sh -c 'bash scripts/x.sh'",
+            b"taskset 0x1 sh -c 'bash scripts/x.sh'",
+            # `&&` separates even before a redirect — `x &&>f cmd`
+            # runs cmd with its output redirected (Devin on #128,
+            # round-26 review — verified in bash/dash)
+            b"echo ok &&>out bash scripts/x.sh",
+            b"echo ok &&>out bash scripts/x.sh >log"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # query-mode forms never exec a command
+            b"taskset -p -c 0-3 1234",
+            b"ionice -p 1234",
+            # an inert single action emits nothing executable
+            b"find . -exec true \\; | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line

@@ -941,6 +941,32 @@ def _argv_wrap_start(enc_words: list, hi: int, enclosing: bytes):
     return None
 
 
+def _find_action_start(enc_words: list, hi: int, wi: int,
+                       enclosing: bytes):
+    """Start index of the `find` `-exec`/`-execdir`/`-ok`/`-okdir`
+    action argv that CONTAINS word `wi`, or None — every action runs
+    per match, so the action owning the operand (not the first one)
+    decides its role (Devin on #128, round-26 review — verified live:
+    `find . -exec true \\; -exec echo P \\;` still prints P)."""
+    k = hi + 1
+    while k < len(enc_words):
+        t = _word_text(enclosing[enc_words[k][0]:enc_words[k][1]])
+        if t in (b"-exec", b"-execdir", b"-ok", b"-okdir"):
+            start = k + 1
+            end = start
+            while end < len(enc_words):
+                tt = _word_text(
+                    enclosing[enc_words[end][0]:enc_words[end][1]])
+                if tt in (b";", b"+"):
+                    break
+                end += 1
+            if start <= wi < end:
+                return start
+            k = end
+        k += 1
+    return None
+
+
 def _xargs_argfile(args: list):
     """The operand of the LAST xargs `-a`/`--arg-file` before the
     utility argv, or None when argv items come from stdin. GNU xargs
@@ -1051,7 +1077,12 @@ def _operand_is_program(enc_words: list, wi: int,
                         b"env", frozenset()) else 1
                     continue
                 break
-            break
+            # env's command word may itself be a wrapper — `env env -S
+            # 'x'` re-parses through the INNER env, `timeout 1 env -S
+            # 'x'` through env after a wrapper (Codex on #128,
+            # round-26 review — verified live). Keep scanning at it.
+            j = k
+            continue
         if wk in _EXEC_WRAPPERS:
             j += 1
             optops = _WRAPPER_OPT_OPERAND.get(wk, frozenset())
@@ -1063,6 +1094,13 @@ def _operand_is_program(enc_words: list, wi: int,
                     j += 1
                     continue
                 if t.startswith(b"-") and t != b"-":
+                    # `taskset -c LIST cmd` — the mask came via the
+                    # option, so the NEXT positional is the command
+                    # (bare `taskset MASK cmd` still skips it).
+                    if (wk == b"taskset"
+                            and (t.startswith(b"-c")
+                                 or t.startswith(b"--cpu-list"))):
+                        possk = 0
                     j += 2 if t in optops else 1
                     continue
                 if possk:
@@ -1371,6 +1409,15 @@ def _command_start(src: bytes, pos: int) -> int:
             in_s = True
         elif c in b"\n|&;`":
             if c == 0x26:
+                if src[i + 1:i + 2] == b"&":
+                    # `&&` is always the AND-IF separator — `x &&>f
+                    # cmd` runs cmd with its stdout redirected: the
+                    # `>` is cmd's redirect, not a glued `&>` (Devin
+                    # on #128, round-26 review — verified in
+                    # bash/dash).
+                    start = i + 2
+                    i += 1
+                    continue
                 # `&` glued to a redirect is operator text, not a
                 # background separator — `0<&0 sh`, `cmd >&2`,
                 # `x &>f` (mirrors the segment splitter's rule).
@@ -1379,7 +1426,7 @@ def _command_start(src: bytes, pos: int) -> int:
                     p -= 1
                 pv = src[p:p + 1] if p >= 0 else b""
                 if (pv in (b"<", b">")
-                        or src[i + 1:i + 2] in (b">", b"&")):
+                        or src[i + 1:i + 2] == b">"):
                     i += 1
                     continue
             if c == 0x60:
@@ -1514,11 +1561,19 @@ _EXEC_WRAPPERS = frozenset({
     # and `setsid --wait …` still exec P; its flags are all boolean
     # (Codex on #128, round-25 review — verified live).
     b"setsid",
+    # `ionice -c C CMD`/`taskset [mask|-c LIST] CMD` exec CMD after
+    # their scheduling options (Codex on #128, round-26 review —
+    # verified live).
+    b"ionice", b"taskset",
 })
 # Positional words a wrapper consumes BEFORE the wrapped command —
 # `timeout DURATION sh -c P` execs `sh` after its duration operand
 # (Codex on #128/#1382, round-20 review).
-_WRAPPER_POS_SKIP = {b"timeout": 1}
+_WRAPPER_POS_SKIP = {b"timeout": 1,
+                     # `taskset MASK CMD` — the mask is a positional
+                     # UNLESS `-c`/`--cpu-list` already carried it
+                     # (handled inline at each skip loop).
+                     b"taskset": 1}
 # Wrapper options that bind the FOLLOWING word — `sudo -u root bash`
 # skips `root` before identifying `bash`; `env -C /tmp bash` and
 # `stdbuf -o L bash` are the same shape (Devin Review on #1370).
@@ -1540,6 +1595,14 @@ _WRAPPER_OPT_OPERAND = {
     # attached, `-n 10`/`--adjustment 10` take the next word (Codex on
     # #128, round-24 review — verified live).
     b"nice": frozenset({b"-n", b"--adjustment"}),
+    # ionice's class/data/target options all bind the next word
+    # (util-linux `ionice --help` — Codex on #128, round-26).
+    b"ionice": frozenset({b"-c", b"-n", b"-p", b"-P", b"-u",
+                          b"--class", b"--classdata", b"--pid",
+                          b"--process-group", b"--user"}),
+    # taskset's `-c`/`--cpu-list` takes the CPU LIST; without it the
+    # mask is positional (pos_skip).
+    b"taskset": frozenset({b"-c", b"--cpu-list"}),
     b"setsid": frozenset(),
     b"nohup": frozenset(),
     b"command": frozenset(),
@@ -1872,6 +1935,13 @@ def _effective_head(words: list, win: bytes) -> int | None:
                 if key == b"command" and t in _WRAPPER_DESCRIBE:
                     return -1
                 if t.startswith(b"-"):
+                    # `taskset -c LIST cmd` — the mask came via the
+                    # option, so the NEXT positional is the command
+                    # (bare `taskset MASK cmd` still skips it).
+                    if (key == b"taskset"
+                            and (t.startswith(b"-c")
+                                 or t.startswith(b"--cpu-list"))):
+                        pos_skip = 0
                     if (b"=" not in t and t in takes_operand
                             and i + 1 < len(words)):
                         i += 2
@@ -3189,6 +3259,7 @@ def _stdin_exec_head(win: bytes) -> str:
             # does, then keep looking for `env`.
             wi += 1
             opts = _WRAPPER_OPT_OPERAND.get(wkey, frozenset())
+            pos = _WRAPPER_POS_SKIP.get(wkey, 0)
             while wi < len(words):
                 tw = _word_text(win[words[wi][0]:words[wi][1]])
                 if not tw.startswith(b"-") or tw == b"-":
@@ -3198,12 +3269,18 @@ def _stdin_exec_head(win: bytes) -> str:
                     # split operand never runs (Devin on #8/#1374/#1955,
                     # round-7 review). Describe mode is a sink.
                     return "sink"
+                # `taskset -c LIST cmd` — the mask came via the
+                # option, so the NEXT positional is the command (bare
+                # `taskset MASK cmd` still skips it).
+                if (wkey == b"taskset"
+                        and (tw.startswith(b"-c")
+                             or tw.startswith(b"--cpu-list"))):
+                    pos = 0
                 wi += 2 if (b"=" not in tw and tw in opts
                             and wi + 1 < len(words)) else 1
             # A wrapper's own leading operand (timeout's DURATION) is
             # not the command either — `timeout 1 env -S sh` still runs
             # the split shell (Devin on #128/#1382, round-21 review).
-            pos = _WRAPPER_POS_SKIP.get(wkey, 0)
             while pos and wi < len(words):
                 tw = _word_text(win[words[wi][0]:words[wi][1]])
                 if tw.startswith(b"-"):
@@ -6181,7 +6258,16 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                 # on #128, round-22 review).
                 ekey = wkey
                 if wkey in _ARGV_PROGRAM_WRAPPERS:
-                    ws = _argv_wrap_start(enc_words, whi, enclosing)
+                    if wkey == b"find":
+                        # `find` runs EVERY -exec/-ok action — the
+                        # action that owns the operand, not the first,
+                        # decides whether its text is emitted (Devin
+                        # on #128, round-26 review — verified live).
+                        ws = _find_action_start(
+                            enc_words, whi, wi0, enclosing)
+                    else:
+                        ws = _argv_wrap_start(
+                            enc_words, whi, enclosing)
                     if ws is None or wi0 <= ws:
                         ekey = b""
                     else:
