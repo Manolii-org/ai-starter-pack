@@ -12706,3 +12706,83 @@ def test_script_dep_round61_dash_c_cluster(tmp_path):
             b"split --filter='sh -ctrue scripts/x.sh' -l1 f",
             b"split --filter='bash -cl scripts/x.sh' -l1 f"):
         assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round62_operand_sink_gate(tmp_path):
+    """An emit/transform head that aborts on its own flags or ends the
+    stream emits none of the operand's bytes — the dep must not fire
+    (verified live): `tail --pid nope`/`--follow=wat` exit "invalid
+    argument" before any read, `tail -n 0`/`head -n 0` emit nothing,
+    `cat -n` prefixes `N<TAB>` per line (`sh` runs `1`, not the
+    script), and `grep -q` emits no bytes at all. `cat -n` of a file
+    WITH separators still executes the post-separator command (the
+    round-62 `_numbered_flows` rule), while a `-`/stdin operand gets
+    the same prefix and is neutered (`cat -n f -` runs `1`, not the
+    piped script)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo SEPFREE\n")
+    (pdir / "scripts" / "sep.sh").write_bytes(b"true; echo RAN\n")
+    for line in (
+            # flag-abort / zero-limit emit heads feed nothing downstream
+            b"tail --pid nope scripts/x.sh | sh",
+            b"tail --pid=nope scripts/x.sh | sh",
+            b"tail --follow=wat scripts/x.sh | sh",
+            b"tail -n 0 scripts/x.sh | sh",
+            b"head -n 0 scripts/x.sh | sh",
+            # numbered operands feed `N` to sh, never the command
+            b"cat -n scripts/x.sh | sh",
+            b"cat -b scripts/x.sh | sh",
+            b"cat --number scripts/x.sh | sh",
+            # quiet grep emits nothing
+            b"grep -q p scripts/x.sh | sh",
+            # a `-`/stdin operand inside a numbering read is numbered
+            # and neutered too
+            b"cat scripts/x.sh | cat -n - | sh",
+            b"cat scripts/x.sh | cat -n f - | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # the live-head cases still dep
+            b"tail scripts/x.sh | sh",
+            b"tail -n 1 scripts/x.sh | sh",
+            b"tail -n +1 scripts/x.sh | sh",
+            b"tail -c +1 scripts/x.sh | sh",
+            b"tail --pid=1 scripts/x.sh | sh",
+            b"head scripts/x.sh | sh",
+            b"cat scripts/x.sh | sh",
+            b"grep p scripts/x.sh | sh",
+            # `cat -n` of a file WITH a top-level separator still
+            # executes the post-separator command
+            b"cat -n scripts/sep.sh | sh",
+            # sh-family program positions are untouched
+            b"sh scripts/x.sh",
+            b"bash scripts/x.sh",
+            b"sh -c scripts/x.sh",
+            b"bash -o nounset scripts/x.sh",
+            b"bash -o nounset -c scripts/x.sh",
+            # a scripts/ argv word is a reference dep even at $0
+            b"sh -c 'true' scripts/x.sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round62_quoted_positional(tmp_path):
+    """A bare positional of a sh-family head is the program FILE — but
+    only unquoted: a quoted name is one literal filename whose
+    scripts/ bytes are filename fragments (`bash 'x.sh;safe'` opens
+    the literal `x.sh;safe` name, `find -exec sh 'bash x.sh'` a file
+    named `bash x.sh` — verified live)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo X\n")
+    for line in (
+            b"bash 'scripts/x.sh;safe'",
+            b"bash 'scripts/x.sh safe'",
+            b"find . -exec sh 'bash scripts/x.sh' \\;",
+            b"flock /tmp/l.lock 'bash scripts/x.sh'"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b"bash 'scripts/x.sh'",
+            b"sh 'scripts/x.sh'"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line

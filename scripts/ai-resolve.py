@@ -1165,12 +1165,17 @@ def _find_expr_spans(enc_words: list, hi: int, enclosing: bytes):
             while end < len(enc_words):
                 tt = _word_text(
                     enclosing[enc_words[end][0]:enc_words[end][1]])
-                # `+` ends the action argv only as the `{} +`
-                # pair — a bare `+` is passed to the command
-                # (`find . -exec echo + --help \;` prints `+ --help`
-                # — Devin on #1959, round-45 review, verified live).
+                # `+` ends the action argv only as the `{} +` pair on
+                # `-exec`/`-execdir` — a bare `+` is passed to the
+                # command (`find . -exec echo + --help \;` prints
+                # `+ --help` — Devin on #1959, round-45 review,
+                # verified live). `-ok`/`-okdir` take ONLY `;` —
+                # `{} +` is literal argv (`find . -ok echo {} + \;`
+                # prompts and runs — Devin on #1959, round-62
+                # review — verified live on findutils 4.8).
                 if (tt == b";" or
-                        (tt == b"+" and end > start and
+                        (tt == b"+" and t in (b"-exec", b"-execdir")
+                         and end > start and
                          _word_text(
                              enclosing[enc_words[end - 1][0]:
                                        enc_words[end - 1][1]])
@@ -1178,17 +1183,7 @@ def _find_expr_spans(enc_words: list, hi: int, enclosing: bytes):
                     break
                 end += 1
             if end < len(enc_words):
-                if (t in (b"-ok", b"-okdir")
-                        and _word_text(
-                            enclosing[enc_words[end][0]:
-                                      enc_words[end][1]]) == b"+"):
-                    # `-ok`/`-okdir` accept only `;` — a `{} +`
-                    # terminator aborts "missing argument to `-ok'"
-                    # before traversal, so NO action in the
-                    # expression runs (Devin on #12, round-61
-                    # review — verified live on findutils 4.8).
-                    unterminated = True
-                elif end == start:
+                if end == start:
                     # The terminator IS the first argv word — `-exec`
                     # with no command aborts the whole expression
                     # ("invalid argument `;' to `-exec`") before any
@@ -1879,7 +1874,12 @@ def _operand_is_program(enc_words: list, wi: int,
     ended = False
     positional = 0
     sh_cmd = False        # a sh-family cluster held `c` — program is
-                          # the first POSITIONAL word
+                          # a POSITIONAL word
+    s_seen = False        # a sh-family cluster held `s` — the
+                          # program comes from stdin, positionals
+                          # are argv
+    o_seen = 0            # shell `o`/`O` cluster letters — each binds
+                          # one following word BEFORE the `-c` operand
     got_prog = False      # sed/awk saw a -e/-f/--program flag — its
                           # positionals are INPUT FILES, not a script
     j = hi + 1
@@ -1890,18 +1890,22 @@ def _operand_is_program(enc_words: list, wi: int,
                 ended = True
             elif key in _SH_STDIN_HEADS and not t.startswith(b"--"):
                 # sh `-c` never binds attached text — the command
-                # string is the first NON-OPTION word: `bash -ce 'P'`,
-                # `sh -c -e 'P'` and `bash -xec 'P'` all run P, while
-                # `bash -cwhoami` is a parse error (CodeRabbit on
-                # #128, round-22 review — verified live).
+                # string is a following NON-OPTION word: `bash -ce
+                # 'P'`, `sh -c -e 'P'` and `bash -xec 'P'` all run P,
+                # while `bash -cwhoami` is a parse error (CodeRabbit
+                # on #128, round-22 review — verified live). Each
+                # `o`/`O` letter in the cluster binds one following
+                # word first, in argv order (`bash -o nounset -c P`
+                # — CodeRabbit on #128, round-23; `bash -oc n P`
+                # gives o→n, c→P — Codex on #130, round-62 review —
+                # verified live on bash and dash).
+                o_seen += sum(1 for k in range(1, len(t))
+                              if t[k:k + 1] in (b"o", b"O"))
+                if b"s" in t[1:]:
+                    s_seen = True     # `-s` — program from stdin;
+                                      # positionals are argv
                 if b"c" in t[1:]:
                     sh_cmd = True
-                if t[-1:] in (b"o", b"O"):
-                    # `-o OPT`/`-O OPT` consume the NEXT word — it is
-                    # not the command string (`bash -o pipefail -c P`
-                    # — CodeRabbit on #128, round-23 review).
-                    j += 2
-                    continue
             elif t in pflags or t in flagops:
                 if j + 1 == wi:
                     return t in pflags
@@ -1979,6 +1983,14 @@ def _operand_is_program(enc_words: list, wi: int,
                     continue
             j += 1
             continue
+        if key in _SH_STDIN_HEADS and t == b"-":
+            # For shells a bare `-` ends option parsing like `--` —
+            # the NEXT word is the program verbatim, dashes included
+            # (`sh - -c x` opens a file named `-c` — Devin on #1959,
+            # round-62 review — verified live on bash and dash).
+            ended = True
+            j += 1
+            continue
         positional += 1
         if j == wi:
             # sed/awk's first positional is its PROGRAM (`sed '1e x'`,
@@ -1987,8 +1999,19 @@ def _operand_is_program(enc_words: list, wi: int,
             # `sed -e p`/`awk -f f` the positionals are INPUT FILES
             # (Devin on #128, round-23 review). ssh's operands after
             # the host join into the remote command; a sh `-c`
-            # cluster's first positional is its command string.
-            return ((sh_cmd and positional == 1)
+            # cluster's command string is the positional AFTER any
+            # `o`/`O` option-name operands. A bare positional is the
+            # program FILE — but only unquoted: a quoted name is one
+            # literal filename whose scripts/ bytes are filename
+            # fragments (`bash 'x.sh;safe'`, `sh 'bash x.sh'` both open
+            # a different name — verified live).
+            return (((sh_cmd or (key in _SH_STDIN_HEADS and not s_seen
+                                 and not sh_cmd
+                                 and enclosing[
+                                     enc_words[wi][0]:
+                                     enc_words[wi][0] + 1]
+                                 not in (b"'", b'"')))
+                     and positional == o_seen + 1)
                     or (key in (b"sed", b"awk", b"gawk", b"mawk", b"nawk")
                         and positional == 1 and not got_prog)
                     or (key == b"ssh" and positional > 1))
@@ -2382,6 +2405,28 @@ _WRAPPER_FLAGS = {
                            b"--map-auto", b"--persistent",
                            b"--cleanup",
                            b"-f", b"-r", b"-c"}),
+    # util-linux chrt — boolean policy/sched flags (util-linux `chrt
+    # --help`); `-T`/`-P`/`-D` are operands and `-p`/`-m` query modes
+    # (their own tables). Any other option aborts "unrecognized
+    # option" before the command runs — `chrt --bogus 0 sh` never
+    # reaches sh (Codex on #1393, round-62 review — verified live).
+    b"chrt": frozenset({b"-b", b"--batch", b"-d", b"--deadline",
+                        b"-f", b"--fifo", b"-i", b"--idle",
+                        b"-o", b"--other", b"-r", b"--rr",
+                        b"-R", b"--reset-on-fork",
+                        b"-a", b"--all-tasks",
+                        b"-v", b"--verbose"}),
+    # util-linux taskset — `-a`/`--all-tasks` is the only boolean
+    # flag (`-c`/`--cpu-list` is special-cased in
+    # _wrapper_opt_class; `-p` is a query mode). `taskset --bogus`
+    # aborts before the command (Codex on #1393, round-62 review —
+    # verified live).
+    b"taskset": frozenset({b"-a", b"--all-tasks"}),
+    # util-linux ionice — `-t`/`--ignore` is the only boolean flag
+    # (`-c`/`-n` are operands, `-p`/`-P`/`-u` query modes). Same
+    # "unrecognized option" abort (Codex on #1393, round-62 —
+    # verified live).
+    b"ionice": frozenset({b"-t", b"--ignore"}),
 }
 # Wrapper flags whose argument is OPTIONAL and attached-only —
 # `unshare --mount` (unshares mounts), `--mount=/tmp/m` (binds the
@@ -3597,7 +3642,12 @@ def _interp_program_end(head: bytes, filt: bytes, start: int,
     after `-c` the remaining cluster chars are still flags and the
     program is always the NEXT word (`bash -sc 'sh x'` runs x —
     Devin on #1393, round-61 review — verified live on bash and
-    dash)."""
+    dash). For a shell, `-` and `--` also end option parsing — the
+    NEXT word is the program verbatim, dashes included (`sh - -c x`
+    opens a file named `-c`), and `-o`/`-O` letters in a cluster
+    each bind one following word BEFORE the `-c` operand
+    (`bash -co W1 W2` gives `o`→W1, `c`→W2) — Devin/Codex on
+    #1393/#130, round-62 review, verified live."""
     flags = _PROG_FLAG.get(head)
     if flags is None:
         return None
@@ -3624,18 +3674,53 @@ def _interp_program_end(head: bytes, filt: bytes, start: int,
                 wend += 1
         t = filt[pos:wend]
         if t == b"-":
-            if sh:
-                pos = wend         # `-` = end of options (`sh - x`
-                                   # runs x — bash and dash, verified)
-                continue
-            return mstart    # `python -`/`perl -` — program on stdin
+            if not sh:
+                return mstart  # `python -`/`perl -` — stdin program
+            # `-` ends options — the NEXT word is the program
+            # verbatim, dashes included (`sh - -c x` opens a file
+            # named `-c` — Devin on #1959, round-62 review —
+            # verified live on bash and dash).
+            pos = wend
+            while pos < n and filt[pos:pos + 1] in (b" ", b"\t"):
+                pos += 1
+            if pos >= n:
+                return mstart        # `sh -` alone reads stdin
+            if filt[pos:pos + 1] in (b"'", b'"'):
+                e = filt.find(filt[pos:pos + 1], pos + 1)
+                wend = e + 1 if e >= 0 else n
+            else:
+                wend = pos
+                while (wend < n
+                       and filt[wend:wend + 1]
+                       not in (b" ", b"\t", b"\n", b"|", b"&",
+                               b";", b"`")):
+                    wend += 1
+            return mstart if s_seen else wend
         if t[:1] != b"-":
             # First non-option word: the program — unless `-s` moved
             # it to stdin, in which case this word is argv.
             return mstart if s_seen else wend
         if t == b"--":
+            # Post-`--` words are positional, never flags — the next
+            # word is the program verbatim (`bash -- -c x` opens a
+            # file named `-c` — Devin on #1393, round-62 review —
+            # verified live).
             pos = wend
-            continue
+            while pos < n and filt[pos:pos + 1] in (b" ", b"\t"):
+                pos += 1
+            if pos >= n:
+                return mstart
+            if filt[pos:pos + 1] in (b"'", b'"'):
+                e = filt.find(filt[pos:pos + 1], pos + 1)
+                wend = e + 1 if e >= 0 else n
+            else:
+                wend = pos
+                while (wend < n
+                       and filt[wend:wend + 1]
+                       not in (b" ", b"\t", b"\n", b"|", b"&",
+                               b";", b"`")):
+                    wend += 1
+            return mstart if s_seen else wend
         if t.startswith(b"--"):
             if t[2:].split(b"=", 1)[0] in longs:
                 if b"=" in t:
@@ -3643,25 +3728,55 @@ def _interp_program_end(head: bytes, filt: bytes, start: int,
                 break              # next word is the program
             pos = wend
             continue
+        o_ops = 0
+        prog_flag = False
         for j in range(1, len(t)):
             c = t[j:j + 1]
+            if sh and c in (b"o", b"O"):
+                # `-o`/`-O` bind a FOLLOWING word as the option-name
+                # operand — never glued — and the cluster's other
+                # chars still scan as flags (`bash -o nounset x`
+                # runs x; `bash -onounset -c p` makes `-c` the
+                # option name — Codex on #130, round-62 review —
+                # verified live on bash and dash).
+                o_ops += 1
+                continue
             if sh and c == b"s":
                 s_seen = True      # `-s` — program from stdin; a
                                      # later `-c` still wins (`-s -c`)
                 continue
             if c in flags:
                 if sh:
-                    break          # a shell `-c` takes the NEXT
-                                   # word — chars after it in the
-                                   # cluster are still flags (`-scx`)
+                    # A shell `-c` flags the program word — every
+                    # `o`/`O` in the cluster still binds its operand
+                    # first (`bash -co W1 W2`: `o` eats W1, `c` eats
+                    # W2 — verified live).
+                    prog_flag = True
+                    continue
                 if j + 1 < len(t):
                     return wend    # glued program inside the word
+                prog_flag = True
                 break              # next word is the program
-        else:
-            pos = wend
+        pos = wend
+        for _ in range(o_ops):
+            # Each `o`/`O` consumes one following word, bound in argv
+            # order BEFORE the program flag's word.
+            while pos < n and filt[pos:pos + 1] in (b" ", b"\t"):
+                pos += 1
+            if pos >= n:
+                break
+            if filt[pos:pos + 1] in (b"'", b'"'):
+                e = filt.find(filt[pos:pos + 1], pos + 1)
+                pos = e + 1 if e >= 0 else n
+            else:
+                while (pos < n
+                       and filt[pos:pos + 1]
+                       not in (b" ", b"\t", b"\n", b"|", b"&",
+                               b";", b"`")):
+                    pos += 1
+        if not prog_flag:
             continue
         # A program flag's operand is the NEXT word — find its end.
-        pos = wend
         while pos < n and filt[pos:pos + 1] in (b" ", b"\t"):
             pos += 1
         if pos >= n:
@@ -3693,6 +3808,12 @@ def _filter_script_role(filt: bytes):
     round-60 review — verified live)."""
     if b"scripts/" not in filt:
         return None
+    # The filter command IS a bundled script invoked by path — the
+    # $SHELL -c execs it directly (`split --filter='./scripts/x'`
+    # — Codex on #1959, round-62 review — verified live).
+    fw = filt.lstrip(b" \t\"'").split(None, 1)[0].rstrip(b"\"'")
+    if fw.startswith((b"./scripts/", b"scripts/")):
+        return "exec"
     m = SCRIPT_REF.search(filt)
     if m is None:
         return None
@@ -4124,17 +4245,23 @@ def _date_capture_dep(inner: bytes,
             except OSError:
                 return True
             i += 1
-        if numbered:
+        data = bytes(concat)
+        if numbered and data:
             # `-n`/`-b`/`--number`/`--number-nonblank` prefix every
             # emitted line with its number — under a whitespace IFS
             # the extra fields abort `date` ("extra operand '1'"),
-            # and under a narrow IFS the single emitted field is the
-            # NUMBERED text: `date +$(cat -n F) | sh` runs `1`, never
-            # the script (Devin on #130, round-61 review — verified
-            # live).
-            return False
-        data = bytes(concat)
+            # while under a narrow IFS the single emitted field is
+            # the NUMBERED text and still flows downstream
+            # (`IFS=,; date +$(cat -n F)` prints `1\t…` — Devin on
+            # #12, round-62 review — verified live).
+            data = _numbered_data(data)
         total = len(_ifs_fields(data, ifs))
+        if numbered and total == 1:
+            # The emitted field is `N<TAB>…` — the number neuters
+            # each line's first command (`1` runs, fails; the file's
+            # commands are its argv and never execute); only text
+            # after a top-level `;`/`&`/`|` still runs.
+            return _numbered_execs(data)
         if not seen and stream_src is not None \
                 and _RESOLVE_ROOT is not None:
             # Bare `cat` re-reads the upstream stream — a KNOWN
@@ -4143,13 +4270,22 @@ def _date_capture_dep(inner: bytes,
             if _PIN_SOURCE is not None:
                 data = _pinned_bytes(stream_src)
                 if data is not None:
-                    return len(_ifs_fields(data, ifs)) == 1
+                    if numbered:
+                        data = _numbered_data(data)
+                    if len(_ifs_fields(data, ifs)) != 1:
+                        return False
+                    return not numbered or _numbered_execs(data)
                 return True
             try:
                 p = _RESOLVE_ROOT / stream_src.decode(
                     "utf-8", "surrogateescape")
                 if p.is_file():
-                    return len(_ifs_fields(p.read_bytes(), ifs)) == 1
+                    sdata = p.read_bytes()
+                    if numbered:
+                        sdata = _numbered_data(sdata)
+                    if len(_ifs_fields(sdata, ifs)) != 1:
+                        return False
+                    return not numbered or _numbered_execs(sdata)
             except OSError:
                 pass
         # no file operand — cat reads the (indeterminate) pipe itself
@@ -4221,6 +4357,63 @@ def _operand_feeds_stream(a: bytes) -> bool:
     if a[:2] == b"<(":
         body = a[2:-1] if a.endswith(b")") else a[2:]
         return _sub_flow(body) in ("exec", "fwd")
+    return False
+
+
+def _numbered_data(data: bytes) -> bytes:
+    """What a `cat -n`/`nl`/`pr -n`-style reader emits: every line
+    prefixed `N<TAB>`."""
+    return b"1\t" + data.replace(b"\n", b"\n1\t")
+
+
+def _numbered_execs(data: bytes) -> bool:
+    """True when NUMBERED bytes still execute — the `N<TAB>` prefix
+    neuters each line's first command (`1: not found`), so only
+    text after a top-level `;`/`&`/`|` can still run."""
+    for line in data.split(b"\n"):
+        for _ in _sub_cmd_seps(line):
+            return True
+    return False
+
+
+def _numbered_flows(ops: list) -> bool:
+    """True when a NUMBERED reader's emitted bytes still carry an
+    executable command: the `N<TAB>` prefix neuters only each line's
+    FIRST command (`1: not found`), while text after a top-level
+    `;`/`&`/`|` still runs (`cat -n sep.sh | sh` executes the
+    post-separator command — Devin on #130, round-62 review —
+    verified live). Only scripts/-named operands can carry the dep
+    (a plain file's commands running is outside the gate's model,
+    same as an unnumbered read); a stream-fed operand's bytes get the
+    same `N<TAB>` prefix, so its commands are neutered too. An
+    unreadable operand can't be ruled out — flows."""
+    if _RESOLVE_ROOT is None:
+        return True
+    for a in ops:
+        if _operand_feeds_stream(a):
+            # A `-`/stdin/fd operand reads the pipe — its bytes get the
+            # same `N<TAB>` prefix, so the stream's own commands are
+            # neutered exactly like a file's (`cat -n f - | sh` runs
+            # `1`, not the piped script — verified live).
+            continue
+        if b"scripts/" not in a:
+            continue
+        if _PIN_SOURCE is not None:
+            data = _pinned_bytes(a)
+            if data is None:
+                return True
+        else:
+            try:
+                p = _RESOLVE_ROOT / a.decode(
+                    "utf-8", "surrogateescape")
+                if not p.is_file():
+                    return True
+                data = p.read_bytes()
+            except OSError:
+                return True
+        for line in data.split(b"\n"):
+            for _ in _sub_cmd_seps(line):
+                return True
     return False
 
 
@@ -4555,6 +4748,14 @@ _READER_OPT_VALUES = {
         # verified live).
         b"--binary-files": frozenset(
             {b"binary", b"text", b"without-match"}),
+    },
+    b"tail": {
+        # `--follow` accepts only `name`/`descriptor` (`--retry`
+        # flips it to `name`; bare `--follow` defaults to
+        # `descriptor`) — `tail --follow=wat` exits "invalid
+        # argument 'wat' for '--follow'" before any read (Codex on
+        # #130, round-62 review — verified live).
+        b"--follow": frozenset({b"name", b"descriptor"}),
     },
 }
 # Reader options whose operand must parse as a number — an invalid
@@ -4891,7 +5092,17 @@ def _reader_operands(key: bytes, args: list):
                 if resolved in optarg:
                     # An optional-arg long binds a value ONLY glued
                     # (`--color=auto`); a separate word stays a
-                    # positional operand (round-41 audit).
+                    # positional operand (round-41 audit). A glued
+                    # value still validates against the fixed set —
+                    # `tail --follow=wat` aborts "invalid argument"
+                    # before any read (Codex on #130, round-62
+                    # review — verified live).
+                    if b"=" in a:
+                        vset = _READER_OPT_VALUES.get(
+                            key, {}).get(resolved)
+                        if (vset is not None
+                                and a.split(b"=", 1)[1] not in vset):
+                            return None
                     prog_seen |= resolved in progflags
                     i += 1
                     continue
@@ -6095,19 +6306,26 @@ def _stdin_exec_head(win: bytes) -> str:
             return "sink"     # `cat --zzz` aborts — emits nothing
         # `cat -n`/`--number` and `-b`/`--number-nonblank` prefix a
         # line number — downstream `sh` runs `1`, never the script's
-        # command (Codex on #1959, round-59 review — verified live:
-        # `cat -n x | sh` errors "1: not found"). The other display
-        # flags (-E/-T/-v/-A/-s/-u) keep every line's command intact —
-        # `echo X$` still runs `echo` — so they stay flowing.
+        # FIRST command per line (Codex on #1959, round-59 review —
+        # verified live: `cat -n x | sh` errors "1: not found").
+        # Text after a top-level `;`/`&`/`|` still executes (`cat -n
+        # sep.sh | sh` — Devin on #130, round-62 review — verified
+        # live), so only a separator-free operand set sinks. The
+        # other display flags (-E/-T/-v/-A/-s/-u) keep every line's
+        # command intact — `echo X$` still runs `echo` — so they
+        # stay flowing.
+        numbered = False
         for a in args:
             if a == b"--":
                 break
             if a.startswith(b"--"):
                 if a.split(b"=", 1)[0].startswith(b"--number"):
-                    return "sink"
+                    numbered = True
             elif (a.startswith(b"-") and a != b"-"
                     and any(c in b"nb" for c in a[1:])):
-                return "sink"
+                numbered = True
+        if numbered and not _numbered_flows(ops):
+            return "sink"
         if ops and not any(
                 _operand_feeds_stream(a2) or b"scripts/" in a2
                 for a2 in ops):
@@ -6145,7 +6363,7 @@ def _stdin_exec_head(win: bytes) -> str:
             elif len(a) > 2 and a[:2] == b"-b":
                 body = a[2:]
             i2 += 1
-        if body != b"n":
+        if body != b"n" and not _numbered_flows(ops):
             return "sink"
     if key == b"pr":
         # `pr` emits the stream verbatim (paged) — its commands still
@@ -6158,6 +6376,7 @@ def _stdin_exec_head(win: bytes) -> str:
         ops = _reader_operands(key, args)
         if ops is None:
             return "sink"
+        numbered = False
         for a in args:
             if a == b"--":
                 break
@@ -6165,13 +6384,16 @@ def _stdin_exec_head(win: bytes) -> str:
                 base = a.split(b"=", 1)[0]
                 if (len(base) > 2
                         and b"--number-lines".startswith(base)):
-                    return "sink"
+                    numbered = True
             elif len(a) > 1 and a.startswith(b"-"):
                 for c in a[1:]:
                     if c == 0x6E:                       # n
-                        return "sink"
+                        numbered = True
+                        break
                     if c in b"DhlNowWeisS":
                         break
+        if numbered and not _numbered_flows(ops):
+            return "sink"
     if key in (b"grep", b"egrep", b"fgrep", b"zgrep"):
         # `grep -q`/`--quiet`/`--silent` emits NO bytes — the pipe ends
         # (`cat x | grep -q p | sh` feeds sh nothing, Devin on #1374).
@@ -6203,6 +6425,14 @@ def _stdin_exec_head(win: bytes) -> str:
                     if ch in b"qclL":
                         return "sink"
     if key in (b"head", b"tail"):
+        # A bad fixed-domain/numeric operand aborts before any read —
+        # `tail --follow=wat` exits "invalid argument 'wat' for
+        # '--follow'", `tail --pid nope` exits too (Codex on #130,
+        # round-62 review — verified live); the emitted stream is
+        # empty either way.
+        ops = _reader_operands(key, args)
+        if ops is None:
+            return "sink"
         # Only a ZERO final limit ends the pipe — GNU head/tail let the
         # LAST `-n`/`-c` win (`head -n 0 -n 10` forwards 10 lines,
         # CodeRabbit + Codex on #127/#1374). Covers `-n 0`, `-n0`,
@@ -8176,8 +8406,8 @@ def _option_value_spans(window: bytes) -> list[tuple[int, int]]:
     words = _shell_words(window)
     if not words:
         return []
-    bools = _BOOL_SHORT.get(_command_key(window[words[0][0]:words[0][1]]),
-                            frozenset())
+    wkey = _command_key(window[words[0][0]:words[0][1]])
+    bools = _BOOL_SHORT.get(wkey, frozenset())
     spans: list[tuple[int, int]] = []
     i = 0
     ended = False
@@ -8194,12 +8424,21 @@ def _option_value_spans(window: bytes) -> list[tuple[int, int]]:
         if text.startswith(b"--"):
             eq = window.find(b"=", start, end)
             if eq != -1:
-                if eq + 1 < end:
+                # A `split --filter=CMD` value is program text the
+                # filter's $SHELL -c execs — not an inert option
+                # operand (`--filter='./scripts/x'` — Codex on
+                # #1959, round-62 review — verified live).
+                if eq + 1 < end and not (
+                        wkey == b"split" and eq - start > 2
+                        and b"--filter".startswith(
+                            window[start:eq])):
                     spans.append((eq + 1, end))
                 i += 1
                 continue
             if _long_option_takes_value(text) and i + 1 < len(words):
-                spans.append(words[i + 1])
+                if not (wkey == b"split"
+                        and b"--filter".startswith(text)):
+                    spans.append(words[i + 1])
                 i += 2
                 continue
             i += 1
@@ -9730,6 +9969,22 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                                         j2 += 1
                                     return True
                                 return False
+                    # An emit/transform head that aborts on its flags
+                    # or ends the stream emits none of the operand's
+                    # bytes — `tail --pid nope x | sh`, `tail
+                    # --follow=wat x`, `tail -n 0 x`, `head -n 0 x`,
+                    # `cat -n x | sh` and `grep -q p x | sh` all feed
+                    # sh nothing (the sink classification covers the
+                    # abort, zero-limit, and numbering tables —
+                    # verified live). Two sets stay ungated: stdin-sink
+                    # heads emit their OPERAND onward (`echo x | sh`
+                    # prints x for sh to run — "sink" there only means
+                    # stdin is ignored), and interpreter heads sink
+                    # the pipe but exec their operand (`python -c x`).
+                    if (wkey not in _STDIN_SINK_HEADS
+                            and wkey not in _EXEC_OPERAND_FLAGS
+                            and _stdin_exec_head(enclosing) == "sink"):
+                        return False
                 return True
             # A glued non-`-d` short-option operand whose tail is a script
             # IS the invocation (`node -rscripts/preload.js`) — the same
