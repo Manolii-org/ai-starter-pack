@@ -3413,10 +3413,16 @@ _SPLIT_FLAG_SHORT = frozenset({b"d", b"e", b"u", b"x"}
 # `-n`/`-c`, split `-b`/`-C`, etc. (`1K`=1024, `1KB`=1000, `1KiB`=1024,
 # `1b`=512 — all verified live; unrecognized units abort "invalid
 # number" before any read).
+# Lowercase `m` is GNU's legacy alias for `M` and the lowercase-B
+# forms exist ONLY for k and m — `1m`, `1kB`, `1kiB`, `1mB`, `1miB`
+# all parse while `1g`, `1mb`, `1gb`, `1gB` abort "invalid number"
+# (Devin on #1393/#1959/#12, round-59 review — verified live).
 _GNU_SIZE_UNITS = {b"": 1, b"b": 512,
-                   b"k": 1024, b"K": 1024, b"KB": 1000,
-                   b"KiB": 1024, b"M": 1024**2, b"MB": 1000**2,
-                   b"MiB": 1024**2, b"G": 1024**3, b"GB": 1000**3,
+                   b"k": 1024, b"K": 1024, b"KB": 1000, b"kB": 1000,
+                   b"KiB": 1024, b"kiB": 1024,
+                   b"m": 1024**2, b"M": 1024**2, b"MB": 1000**2,
+                   b"mB": 1000**2, b"MiB": 1024**2, b"miB": 1024**2,
+                   b"G": 1024**3, b"GB": 1000**3,
                    b"GiB": 1024**3, b"T": 1024**4, b"TB": 1000**4,
                    b"TiB": 1024**4, b"P": 1024**5, b"PB": 1000**5,
                    b"PiB": 1024**5, b"E": 1024**6, b"EB": 1000**6,
@@ -3474,13 +3480,16 @@ def _split_arg_ok(opt: bytes, v: bytes) -> bool:
         # (Devin on #1393/#12, Codex on #1959, round-58 — verified
         # live). Unrecognized units abort the same way, so the table
         # only names units GNU actually parses.
-        m = re.fullmatch(rb"([0-9]+)(b|k|[KMGTPEZY](i?B)?)?", n)
-        if m is None:
-            return False
-        d = m.group(1)
-        return (len(d) <= 19
-                and 0 < int(d) * _GNU_SIZE_UNITS[m.group(2) or b""]
-                <= _INTMAX)
+        m = re.fullmatch(rb"([0-9]+)([a-zA-Z]{0,3})", n)
+        u = _GNU_SIZE_UNITS.get(m.group(2) or b"") if m else None
+        # Significant-digit count is the bound, not field width —
+        # `-b <20 zeros>1` runs (Devin on #130, round-59 review —
+        # verified live); the stripped form also keeps int() under
+        # Python's 4300-digit parse limit.
+        d = m.group(1).lstrip(b"0") if m else None
+        return (m is not None and u is not None
+                and len(d) <= 19
+                and 0 < int(d or b"0") * u <= _INTMAX)
     if opt in (b"--separator", b"-t"):
         # SEP is one byte or the `\0` NUL escape (Codex on #1959,
         # round-45 review — verified live).
@@ -3711,14 +3720,21 @@ def _split_scan(key: bytes, args: list, seekable_stdin: bool = False):
     # (Codex on #130, round-58 review — verified live).
     if (nsuf not in (None, b"")
             and not (nsuf.isdigit()
-                     and len(nsuf.lstrip(b"0") or b"0") <= suflen)):
+                     # `-a 0` auto-computes the length, so ANY start
+                     # fits (`-a0 --numeric-suffixes=0` runs — Devin
+                     # on #1959, round-59 review — verified live).
+                     and (suflen == 0
+                          or len(nsuf.lstrip(b"0") or b"0")
+                          <= suflen))):
         return None, None, False, None       # invalid start for
                                 # numerical suffix (`=bad`, `=100` at
                                 # -a2 — Devin/Codex round-50, verified
                                 # live)
     if (hsuf not in (None, b"")
             and not (all(c in b"0123456789abcdef" for c in hsuf)
-                     and len(hsuf.lstrip(b"0") or b"0") <= suflen)):
+                     and (suflen == 0
+                          or len(hsuf.lstrip(b"0") or b"0")
+                          <= suflen))):
         return None, None, False, None       # invalid start for
                                 # hexadecimal suffix — same bound
                                 # (verified live)
@@ -4394,23 +4410,29 @@ _READER_OPT_VALUES = {
             {b"binary", b"text", b"without-match"}),
     },
 }
-# Reader options whose operand must be a non-negative integer — an
-# invalid value aborts before any read (`tail --pid nope`, `pr
-# --indent xyz` — Codex on #130, round-45 review, verified live).
-# GNU accepts a leading `+` (`tail --pid=+1`, `pr --indent=+1` run)
-# but rejects `-1` (Devin on #1959, round-46 review, verified live).
+# Reader options whose operand must parse as a number — an invalid
+# value aborts before any read (`tail --pid nope`, `pr --indent xyz`
+# — Codex on #130, round-45 review, verified live). The digit is the
+# numeric domain: 0 = GNU non-negative integer (`+1` runs, `-1`
+# aborts — Devin on #1959, round-46) bound to UINTMAX; pr's options
+# parse as C `int` instead — 1 = zero-or-more (`-o 0` runs), 2 =
+# SIGNED (`-N -1` and `-N -2147483648` run, `-2147483649` aborts),
+# 3 = strictly positive (`-l 0` aborts, `2147483647` runs,
+# `2147483648` aborts) — Devin on #1393/#1959/#12, round-59 review,
+# all verified live.
 _READER_NUM_VALS = {
     # `--max-unchanged-stats` shares the non-negative-integer domain —
     # `tail --max-unchanged-stats=bad` aborts before any read (Codex
     # on #130, round-48 review — verified live).
-    b"tail": frozenset({b"--pid", b"--max-unchanged-stats"}),
-    # `-N`/`-l`/`-w`/`-W` and their longs plus `--columns` are
-    # numeric-only — `pr -N nope` aborts "invalid starting line
-    # number" before the read (Devin on #1959, round-58 review —
-    # verified live).
-    b"pr": frozenset({b"--indent", b"-o", b"-N", b"-l", b"-w", b"-W",
-                      b"--first-line-number", b"--length", b"--width",
-                      b"--page-width", b"--columns"}),
+    b"tail": {b"--pid": 0, b"--max-unchanged-stats": 0},
+    # `-N` is `first line number` (signed); `-o` is `indent` (zero
+    # legal); `-l`/`-w`/`-W`/`--columns` want a positive int.
+    b"pr": {b"--indent": 1, b"-o": 1,
+            b"-N": 2, b"--first-line-number": 2,
+            b"-l": 3, b"--length": 3,
+            b"-w": 3, b"--width": 3,
+            b"-W": 3, b"--page-width": 3,
+            b"--columns": 3},
 }
 
 # Page-range operands — `--pages FIRST[:LAST]` and the `+FIRST[:LAST]`
@@ -4447,24 +4469,35 @@ def _pages_ok(v: bytes) -> bool:
                 and h <= int(td) <= (1 << 64) - 1))
 
 
-def _num_ok(v: bytes) -> bool:
-    """Digits with an optional leading `+` — GNU's non-negative
-    integer options (`tail --pid`, `pr --indent`) accept `+1` and
-    reject `-1`/`nope` (Devin on #1959, round-46 — verified live).
-    An all-digit value PAST uintmax aborts "Value too large for
-    defined data type" before any read (`tail
-    --max-unchanged-stats=<2**64>` — Codex on #130, round-57
-    review — verified live; 2**64-1 runs)."""
-    n = v[1:] if v[:1] == b"+" else v
-    # int() raises ValueError past Python's 4300-digit parse limit —
-    # a digit-length guard keeps resolution from crashing on absurd
-    # operands (Devin on #1393/#12, round-58 review — verified live).
-    # Zero-padding is legal too — `head -n <5000 zeros>1` prints one
-    # line (Devin on #12, round-58 review — verified live), so the
-    # bound counts SIGNIFICANT digits.
+def _num_ok(v: bytes, dom: int = 0) -> bool:
+    """Digit forms by domain (see _READER_NUM_VALS). int() raises
+    ValueError past Python's 4300-digit parse limit — a
+    significant-digit guard keeps resolution from crashing on absurd
+    operands, and zero-padding is legal everywhere (`head -n <5000
+    zeros>1` prints one line — Devin on #12/#1393, round-58 review,
+    verified live).
+
+    dom 0 — `+`-prefixed or bare digits up to UINTMAX (`tail --pid`);
+    dom 1 — pr's unsigned C int (`-o 0` legal, bound 2147483647);
+    dom 2 — pr's SIGNED C int (`-N -1`, `-N -2147483648` run);
+    dom 3 — pr's positive C int (`-l 0` aborts)."""
+    neg = v[:1] == b"-"
+    if neg and dom != 2:
+        return False
+    n = v[1:] if v[:1] in (b"+", b"-") else v
     d = n.lstrip(b"0")
-    return (n.isdigit() and len(d) <= 20
-            and int(d or b"0") <= (1 << 64) - 1)
+    if not n.isdigit():
+        return False
+    if dom == 2:
+        return (len(d) <= 10
+                and int(d or b"0") <= (2147483648 if neg
+                                       else 2147483647))
+    if dom == 3:
+        return (len(d) <= 10
+                and 0 < int(d or b"0") <= 2147483647)
+    if dom == 1:
+        return len(d) <= 10 and int(d or b"0") <= 2147483647
+    return len(d) <= 20 and int(d or b"0") <= (1 << 64) - 1
 
 
 # Complete GNU long-option sets per reader head — abbreviation resolves
@@ -4639,6 +4672,7 @@ def _reader_operands(key: bytes, args: list):
     gnu = _READER_GNU_OPS.get(key)
     ops: list[bytes] = []
     prog_seen = ended = False
+    prw = prc = None      # pr's effective page width / --columns
     i = 0
     while i < len(args):
         a = args[i]
@@ -4678,19 +4712,26 @@ def _reader_operands(key: bytes, args: list):
                         return None
                     valset = _READER_OPT_VALUES.get(
                         key, {}).get(resolved)
-                    numv = resolved in _READER_NUM_VALS.get(
-                        key, frozenset())
+                    dom = _READER_NUM_VALS.get(
+                        key, {}).get(resolved)
                     rangev = resolved in _READER_PAGE_VALS.get(
                         key, frozenset())
-                    if valset is not None or numv or rangev:
+                    if (valset is not None or dom is not None
+                            or rangev):
                         v = (a.split(b"=", 1)[1] if b"=" in a
                              else args[i + 1])
                         if valset is not None and v not in valset:
                             return None
-                        if numv and not _num_ok(v):
+                        if dom is not None and not _num_ok(v, dom):
                             return None
                         if rangev and not _pages_ok(v):
                             return None
+                        if key == b"pr" and dom is not None:
+                            if resolved in (b"-w", b"--width",
+                                            b"-W", b"--page-width"):
+                                prw = int(v)
+                            elif resolved == b"--columns":
+                                prc = int(v)
                     i += 1 if b"=" in a else 2
                     continue
                 if resolved in optarg:
@@ -4719,22 +4760,24 @@ def _reader_operands(key: bytes, args: list):
                     return None
                 valset = _READER_OPT_VALUES.get(
                     key, {}).get(a)
-                numv = a in _READER_NUM_VALS.get(key, frozenset())
+                dom = _READER_NUM_VALS.get(key, {}).get(a)
                 rangev = a in _READER_PAGE_VALS.get(key, frozenset())
-                if valset is not None or numv or rangev:
+                if (valset is not None or dom is not None or rangev):
                     v = args[i + 1]
                     if valset is not None and v not in valset:
                         return None
-                    if numv and not _num_ok(v):
+                    if dom is not None and not _num_ok(v, dom):
                         return None
                     if rangev and not _pages_ok(v):
                         return None
+                    if (key == b"pr" and dom is not None
+                            and a in (b"-w", b"-W")):
+                        prw = int(v)
                 i += 2
                 continue
             elif (len(a) > 2 and a[:2] in flagops
                     and (a[:2] in _READER_OPT_VALUES.get(key, {})
-                         or a[:2] in _READER_NUM_VALS.get(
-                             key, frozenset())
+                         or a[:2] in _READER_NUM_VALS.get(key, {})
                          or a[:2] in _READER_PAGE_VALS.get(
                              key, frozenset()))):
                 # A glued fixed-domain/numeric value aborts like its
@@ -4745,12 +4788,15 @@ def _reader_operands(key: bytes, args: list):
                 valset = _READER_OPT_VALUES.get(key, {}).get(a[:2])
                 if valset is not None and v not in valset:
                     return None
-                if (a[:2] in _READER_NUM_VALS.get(key, frozenset())
-                        and not _num_ok(v)):
+                dom = _READER_NUM_VALS.get(key, {}).get(a[:2])
+                if dom is not None and not _num_ok(v, dom):
                     return None
                 if (a[:2] in _READER_PAGE_VALS.get(key, frozenset())
                         and not _pages_ok(v)):
                     return None
+                if (key == b"pr" and dom is not None
+                        and a[:2] in (b"-w", b"-W")):
+                    prw = int(v)
                 i += 1
                 continue
             elif (len(a) > 2 and a[:2] in progflags) or (
@@ -4773,6 +4819,13 @@ def _reader_operands(key: bytes, args: list):
             continue
         ops.append(a)
         i += 1
+    if (key == b"pr" and prc is not None
+            and prc > ((prw if prw is not None else 72) + 1) // 2):
+        # `--columns` aborts "page width too narrow" once a column
+        # gets under two chars — the bound is (width + 1) / 2 on the
+        # last -w/-W, defaulting to 72 (verified live: 36 runs / 37
+        # aborts at 72, 50 runs / 51 aborts at -w 100).
+        return None
     if key in _READER_PROGRAM_FIRST and not prog_seen and ops:
         ops = ops[1:]
     return ops
@@ -5882,10 +5935,85 @@ def _stdin_exec_head(win: bytes) -> str:
         ops = _reader_operands(key, args)
         if ops is None:
             return "sink"     # `cat --zzz` aborts — emits nothing
+        # `cat -n`/`--number` and `-b`/`--number-nonblank` prefix a
+        # line number — downstream `sh` runs `1`, never the script's
+        # command (Codex on #1959, round-59 review — verified live:
+        # `cat -n x | sh` errors "1: not found"). The other display
+        # flags (-E/-T/-v/-A/-s/-u) keep every line's command intact —
+        # `echo X$` still runs `echo` — so they stay flowing.
+        for a in args:
+            if a == b"--":
+                break
+            if a.startswith(b"--"):
+                if a.split(b"=", 1)[0].startswith(b"--number"):
+                    return "sink"
+            elif (a.startswith(b"-") and a != b"-"
+                    and any(c in b"nb" for c in a[1:])):
+                return "sink"
         if ops and not any(
                 _operand_feeds_stream(a2) or b"scripts/" in a2
                 for a2 in ops):
             return "sink"
+    if key == b"nl":
+        # `nl` numbers body lines by default (`-b t`) — same
+        # transform as `cat -n`, so `sh` runs the NUMBER, not the
+        # script (verified live: `nl` emits `     1\techo X`). Only
+        # `-b n`/`--body-numbering=n` skips numbering — its output is
+        # still space-padded (`       echo X`) but leading blanks are
+        # shell-insignificant, so that mode forwards the script
+        # (round-59 — verified live).
+        ops = _reader_operands(key, args)
+        if ops is None:
+            return "sink"
+        body = b"t"
+        i2 = 0
+        while i2 < len(args):
+            a = args[i2]
+            if a == b"--":
+                break
+            if a.startswith(b"--"):
+                base = a.split(b"=", 1)[0]
+                if (len(base) > 2
+                        and b"--body-numbering".startswith(base)):
+                    if b"=" in a:
+                        body = a.split(b"=", 1)[1]
+                    elif i2 + 1 < len(args):
+                        body = args[i2 + 1]
+                        i2 += 1
+            elif a == b"-b":
+                if i2 + 1 < len(args):
+                    body = args[i2 + 1]
+                    i2 += 1
+            elif len(a) > 2 and a[:2] == b"-b":
+                body = a[2:]
+            i2 += 1
+        if body != b"n":
+            return "sink"
+    if key == b"pr":
+        # `pr` emits the stream verbatim (paged) — its commands still
+        # execute between the page headers. But `-n`/`--number-lines`
+        # prefixes `N<TAB>` per content line — `sh` runs `N`, not the
+        # command (same transform as `cat -n`; round-59 — verified
+        # live). Inside a short cluster `n` counts only BEFORE an
+        # operand-taking short: `pr -wn` is `-w` with operand `n`
+        # (a bad value — aborts), never numbering.
+        ops = _reader_operands(key, args)
+        if ops is None:
+            return "sink"
+        for a in args:
+            if a == b"--":
+                break
+            if a.startswith(b"--"):
+                base = a.split(b"=", 1)[0]
+                if (len(base) > 2
+                        and b"--number-lines".startswith(base)):
+                    return "sink"
+            elif len(a) > 1 and a.startswith(b"-"):
+                for c in a[1:]:
+                    if c == 0x6E:                       # n
+                        return "sink"
+                    if c in b"DhlNowWeisS":
+                        break
     if key in (b"grep", b"egrep", b"fgrep", b"zgrep"):
         # `grep -q`/`--quiet`/`--silent` emits NO bytes — the pipe ends
         # (`cat x | grep -q p | sh` feeds sh nothing, Devin on #1374).
@@ -5953,13 +6081,12 @@ def _stdin_exec_head(win: bytes) -> str:
         # round-58 review — verified live: sign, unit suffixes, and a
         # UINTMAX bound all accepted).
         if last is not None:
-            m = re.fullmatch(rb"[+-]?([0-9]+)(b|k|[KMGTPEZY](i?B)?)?",
-                             last)
+            m = re.fullmatch(rb"[+-]?([0-9]+)([a-zA-Z]{0,3})", last)
             d = m.group(1).lstrip(b"0") if m else None
-            if (m is None or len(d) > 20
-                    or int(d or b"0")
-                    * _GNU_SIZE_UNITS[m.group(2) or b""]
-                    > (1 << 64) - 1):
+            u = (_GNU_SIZE_UNITS.get(m.group(2) or b"")
+                 if m else None)
+            if (m is None or u is None or len(d) > 20
+                    or int(d or b"0") * u > (1 << 64) - 1):
                 return "sink"
         # A signed zero's meaning is PER COMMAND (verified against GNU
         # coreutils): `head -n +0`/`head -n -0` — +0 emits nothing,

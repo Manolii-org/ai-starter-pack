@@ -8951,12 +8951,18 @@ def test_script_dep_cat_stdin_operands(tmp_path):
     pdir = tmp_path / "plug"
     (pdir / "scripts").mkdir(parents=True)
     (pdir / "scripts" / "x.sh").write_bytes(b"x")
-    for sub in (b"cat -", b"cat f -", b"cat - f", b"cat -n f -",
+    for sub in (b"cat -", b"cat f -", b"cat - f",
                 b"cat /dev/stdin", b"cat f /dev/stdin"):
         assert mod.script_dep_block(
             pdir, b'cat scripts/x.sh | echo "$(' + sub + b')" | sh\n'), sub
-    # A flag-only cat still reads stdin; a file-only cat does not.
-    assert mod.script_dep_block(
+    # `cat -n f -` numbers every line — the capture emits `   1\t…`
+    # and the downstream `sh` runs `1`, not the script (round-59 —
+    # verified live; supersedes this case's former flag-only reading).
+    assert not mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | echo "$(cat -n f -)" | sh\n')
+    # Bare `cat -n` also numbers stdin — `$(…)` emits `   1\t…` and
+    # `sh` runs `1` (round-59 — verified live).
+    assert not mod.script_dep_block(
         pdir, b'cat scripts/x.sh | echo "$(cat -n)" | sh\n')
     assert not mod.script_dep_block(
         pdir, b'cat scripts/x.sh | echo "$(cat f)" | sh\n')
@@ -12317,9 +12323,9 @@ def test_script_dep_round58(tmp_path):
             b"cat scripts/x.sh | pr -J | sh",
             # optional-arg shorts bind only glued — `,` is a file
             b"cat scripts/x.sh | pr -s | sh",
-            b"cat scripts/x.sh | pr -n | sh",
-            # nl -p is --no-renumber, a flag
-            b"cat scripts/x.sh | nl -p | sh",
+            # nl -p is --no-renumber, a flag — but nl still numbers
+            # body lines by default (round-59): moved to the False
+            # block below.
             # zero-padded suffix starts fit the suffix length
             b"split --numeric-suffixes=01 -l1 --filter=sh "
             b"scripts/x.sh",
@@ -12332,6 +12338,11 @@ def test_script_dep_round58(tmp_path):
         assert mod.script_dep_block(pdir, line + b"\n"), line
 
     for line in (
+            # `pr -n`/`nl` prefix line numbers — `sh` runs `1`, not
+            # the script (round-59 — verified live; supersedes the
+            # former flag-only readings above)
+            b"cat scripts/x.sh | pr -n | sh",
+            b"cat scripts/x.sh | nl -p | sh",
             # zero values and intmax overflow abort before the filter
             b"split -b 00 --filter=sh scripts/x.sh",
             b"split -b 0K --filter=sh scripts/x.sh",
@@ -12377,4 +12388,117 @@ def test_script_dep_round58(tmp_path):
             b"cat scripts/x.sh | chrt --max sh scripts/x.sh",
             # past uintmax even padded — 'invalid number' aborts
             b"cat scripts/x.sh | head -n " + b"9" * 5000 + b" | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round59(tmp_path):
+    """Round-59 review regression — Devin #130/#1393/#12/#1959 + Codex
+    #1959 findings, all verified live on coreutils 8.32:
+    - GNU SIZE lowercase units `m`, `kB`, `kiB`, `mB`, `miB` parse;
+      `kb`/`g`/`gB`/`mb`/`gb` abort.
+    - pr numeric operands are C `int` and per-option domains differ:
+      `-N`/`--first-line-number` signed (INT_MIN..INT_MAX), `-o`/
+      `--indent` zero-or-more, `-l`/`-w`/`-W`/`--columns` positive.
+    - `pr --columns` aborts "page width too narrow" once each column
+      is under two chars — bound (width+1)/2, default width 72.
+    - `split -b` counts SIGNIFICANT digits — zero padding past 19
+      chars still parses.
+    - `split -a0` auto-computes suffix length — any numeric/hex
+      `--numeric-suffixes=`/`--hex-suffixes=` start fits.
+    - `cat -n`/-b/--number/--number-nonblank, `nl` (default/-b t) and
+      `pr -n`/`--number-lines` prefix line numbers — `sh` runs `N`,
+      not the script, so the dep must NOT fire. `nl -b n` pads with
+      spaces only — still executes.
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts/x.sh").write_text("echo X\n")
+
+    for line in (
+            # lowercase/multi-char GNU SIZE units that GNU accepts
+            b"cat scripts/x.sh | head -n 1m | sh",
+            b"cat scripts/x.sh | head -n 1mB | sh",
+            b"cat scripts/x.sh | head -n 1miB | sh",
+            b"cat scripts/x.sh | head -n 1kB | sh",
+            b"cat scripts/x.sh | head -n 1kiB | sh",
+            b"cat scripts/x.sh | head -c 1kiB | sh",
+            b"split -b 1m --filter=sh scripts/x.sh",
+            b"split -b 1kB --filter=sh scripts/x.sh",
+            b"split -b 1miB --filter=sh scripts/x.sh",
+            # -b significant digits — padding past 19 chars still runs
+            b"split -b 0000000000000000000001 --filter=sh "
+            b"scripts/x.sh",
+            # -a0 auto-length: any suffix start fits
+            b"split -a0 --numeric-suffixes=0 --filter=sh "
+            b"scripts/x.sh",
+            b"split -a0 --numeric-suffixes=999 --filter=sh "
+            b"scripts/x.sh",
+            b"split -a0 --hex-suffixes=fff --filter=sh "
+            b"scripts/x.sh",
+            # pr -N signed: -1, INT_MIN, INT_MAX all run
+            b"cat scripts/x.sh | pr -N -1 | sh",
+            b"cat scripts/x.sh | pr -N-1 | sh",
+            b"cat scripts/x.sh | pr -N -2147483648 | sh",
+            b"cat scripts/x.sh | pr -N 2147483647 | sh",
+            b"cat scripts/x.sh | pr --first-line-number=-1 | sh",
+            b"cat scripts/x.sh | pr --first-line-number=+5 | sh",
+            # pr -o accepts zero and +; -w/-l/-W up to INT_MAX run
+            b"cat scripts/x.sh | pr -o 0 | sh",
+            b"cat scripts/x.sh | pr -o +3 | sh",
+            b"cat scripts/x.sh | pr -o0 | sh",
+            b"cat scripts/x.sh | pr -l 2147483647 | sh",
+            b"cat scripts/x.sh | pr -l +5 | sh",
+            # --columns fits the page-width bound
+            b"cat scripts/x.sh | pr --columns 36 | sh",
+            b"cat scripts/x.sh | pr --columns +2 | sh",
+            b"cat scripts/x.sh | pr -w 100 --columns 50 | sh",
+            b"cat scripts/x.sh | pr --columns 50 -w 100 | sh",
+            # nl -b n forwards verbatim (space-padded still executes)
+            b"cat scripts/x.sh | nl -b n | sh",
+            b"cat scripts/x.sh | nl --body-numbering=n | sh",
+            b"cat scripts/x.sh | nl -bn | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+    for line in (
+            # unknown/unparseable units abort before the read
+            b"cat scripts/x.sh | head -n 1kb | sh",
+            b"cat scripts/x.sh | head -n 1g | sh",
+            b"cat scripts/x.sh | head -n 1gB | sh",
+            b"cat scripts/x.sh | head -n 1mb | sh",
+            b"cat scripts/x.sh | head -c 1giB | sh",
+            b"split -b 1g --filter=sh scripts/x.sh",
+            b"split -b 1kb --filter=sh scripts/x.sh",
+            # pr -N/-o bounds: int32 domain, -o rejects negatives
+            b"cat scripts/x.sh | pr -N -2147483649 | sh",
+            b"cat scripts/x.sh | pr -N 2147483648 | sh",
+            b"cat scripts/x.sh | pr -o -1 | sh",
+            b"cat scripts/x.sh | pr -o 2147483648 | sh",
+            # pr -l/-w/-W positive-only domain
+            b"cat scripts/x.sh | pr -l 0 | sh",
+            b"cat scripts/x.sh | pr -l -1 | sh",
+            b"cat scripts/x.sh | pr -w 0 | sh",
+            b"cat scripts/x.sh | pr -W 0 | sh",
+            b"cat scripts/x.sh | pr -l 2147483648 | sh",
+            # --columns past (width+1)/2 aborts "page width too narrow"
+            b"cat scripts/x.sh | pr --columns 37 | sh",
+            b"cat scripts/x.sh | pr --columns 0 | sh",
+            b"cat scripts/x.sh | pr --columns -1 | sh",
+            b"cat scripts/x.sh | pr --columns 100 | sh",
+            b"cat scripts/x.sh | pr -w 100 --columns 51 | sh",
+            b"cat scripts/x.sh | pr -w 7 --columns 5 | sh",
+            # numbering heads transform every content line — `sh`
+            # receives `     1\tCMD` and runs `1`, not the script
+            b"cat scripts/x.sh | cat -n | sh",
+            b"cat scripts/x.sh | cat --number | sh",
+            b"cat scripts/x.sh | cat -b | sh",
+            b"cat scripts/x.sh | cat --number-nonblank | sh",
+            b"cat scripts/x.sh | cat -An | sh",
+            b"cat scripts/x.sh | nl | sh",
+            b"cat scripts/x.sh | nl -b t | sh",
+            b"cat scripts/x.sh | nl --body-numbering=a | sh",
+            b"cat scripts/x.sh | pr -n | sh",
+            b"cat scripts/x.sh | pr -tn | sh",
+            b"cat scripts/x.sh | pr --number-lines | sh",
+            b"cat scripts/x.sh | pr --number-lines=: | sh"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
