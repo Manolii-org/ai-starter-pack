@@ -9551,7 +9551,10 @@ def test_pipe_to_exec_round19(tmp_path):
     for line in (
             # clustered program flags bind the next word (Codex on #128)
             b"sh -ec 'bash scripts/x.sh'",
-            b"perl -eE 'system(q(bash scripts/x.sh))'",
+            # `perl -we` — w flag + -e binds the NEXT word (-eE instead
+            # glues program text "E" onto -e; negative case below —
+            # CodeRabbit on #128, round-22; verified live)
+            b"perl -we 'system(q(bash scripts/x.sh))'",
             # perl -E / node -E / awk --source take program text
             # (Devin + Codex on #128/#1382)
             b"perl -E 'system(q(bash scripts/x.sh))'",
@@ -9622,4 +9625,41 @@ def test_pipe_to_exec_round19(tmp_path):
             # multi-word utility is a literal program name (ENOENT),
             # not program text
             b'xargs -n 5 "bash scripts/x.sh"'):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    # Round-22 positive cases — each executes the bundled script.
+    for line in (
+            # a `c` ANYWHERE in a sh option cluster binds the FIRST
+            # POSITIONAL word as the command string — `-ce`, `-c -e`
+            # and `-xce` all run P (CodeRabbit on #128; verified live)
+            b"bash -ce 'bash scripts/x.sh'",
+            b"sh -c -e 'bash scripts/x.sh'",
+            b"bash -xec 'bash scripts/x.sh'",
+            # node -p/--print evaluates its operand like -e (Codex)
+            b"node -p 'bash scripts/x.sh'",
+            b"node --print 'bash scripts/x.sh'",
+            # a substitution GENERATING eval's command is opaque —
+            # `eval "$(printf sh)"` expands to `eval sh` and runs the
+            # pipe (Devin on #1382; verified live)
+            b'cat scripts/x.sh | eval "$(printf sh)"',
+            b'cat scripts/x.sh | eval `printf sh`'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    # Round-22 negative cases.
+    for line in (
+            # `perl -eE` glues program text "E" onto -e — the operand
+            # is a filename, not program text (CodeRabbit on #128)
+            b"perl -eE 'system(q(bash scripts/x.sh))'",
+            # a wrapped command's FILENAME operand stays a literal
+            # name through xargs — 'x.sh safe' ENOENTs, never runs
+            # (Devin on #128)
+            b"xargs bash 'scripts/x.sh safe'",
+            # a backtick inside single quotes (or escaped) is literal
+            # text, never a substitution (Devin + Codex on #128/#1382)
+            b"cat scripts/x.sh | echo '`cat`' | sh",
+            b"cat scripts/x.sh | echo \\`cat\\` | sh",
+            # gzip COMPRESS mode emits transformed bytes, not the
+            # stream — a `-` then any filename operand can't forward
+            # the script (Devin on #128/#1382)
+            b"cat scripts/x.sh | python -m gzip - | sh",
+            b"cat scripts/x.sh | python -m gzip - bad | sh",
+            b"cat scripts/x.sh | python -m gzip bad - | sh"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line

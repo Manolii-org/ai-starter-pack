@@ -835,13 +835,17 @@ def _operand_is_program(enc_words: list, wi: int,
         pflags = {b"-c", b"--command"}
     elif key == b"python" or key == b"python3":
         pflags = {b"-c"}
-    elif key in (b"perl", b"ruby", b"node", b"php", b"lua", b"tclsh"):
+    elif key in (b"perl", b"ruby", b"php", b"lua", b"tclsh"):
         pflags = {b"-e", b"-r", b"--eval"}
         if key == b"perl":
             # `perl -E` takes program text like -e (plus feature
             # bundles) — listed in _EXEC_OPERAND_FLAGS too (Devin on
             # #128, round-21 review).
             pflags |= {b"-E"}
+    elif key == b"node":
+        # `node -p`/`--print` evaluates its operand like -e (Codex on
+        # #128, round-22 review).
+        pflags = {b"-e", b"-r", b"--eval", b"-p", b"--print"}
     elif key == b"sed":
         pflags = {b"-e", b"--expression"}
     elif key in (b"awk", b"gawk", b"mawk", b"nawk"):
@@ -851,12 +855,22 @@ def _operand_is_program(enc_words: list, wi: int,
     flagops = _READER_FLAG_OPS.get(key, frozenset())
     ended = False
     positional = 0
+    sh_cmd = False        # a sh-family cluster held `c` — program is
+                          # the first POSITIONAL word
     j = hi + 1
     while j < len(enc_words):
         t = _word_text(enclosing[enc_words[j][0]:enc_words[j][1]])
         if not ended and t != b"-" and t.startswith(b"-"):
             if t == b"--":
                 ended = True
+            elif (key in _SH_STDIN_HEADS and not t.startswith(b"--")
+                    and b"c" in t[1:]):
+                # sh `-c` never binds attached text — the command
+                # string is the first NON-OPTION word: `bash -ce 'P'`,
+                # `sh -c -e 'P'` and `bash -xec 'P'` all run P, while
+                # `bash -cwhoami` is a parse error (CodeRabbit on
+                # #128, round-22 review — verified live).
+                sh_cmd = True
             elif t in pflags or t in flagops:
                 if j + 1 == wi:
                     return t in pflags
@@ -867,33 +881,35 @@ def _operand_is_program(enc_words: list, wi: int,
                 # `--eval=P`/`--expression=P`/`--command=P` — the word
                 # itself is the program text (Codex on #11, round-20).
                 return True
-            elif len(t) > 2 and t[:2] in pflags and j == wi:
-                return True   # glued `-cPROG`/`-ePROG`
-            elif (not t.startswith(b"--") and len(t) > 2
-                    and b"-" + t[-1:] in pflags):
-                # A clustered option ending on a program flag binds the
-                # NEXT word — `sh -ec 'P'` runs P (Codex on #128,
-                # round-21 review).
-                if j + 1 == wi:
-                    return True
-                j += 2
-                continue
-            elif (not t.startswith(b"--") and len(t) > 2
-                    and any(b"-" + t[k:k + 1] in pflags
-                            for k in range(1, len(t) - 1))
-                    and j == wi):
-                # A program flag mid-cluster takes the remainder —
-                # `sh -ce P`/`sed -neE` style glued program text.
-                return True
+            elif not t.startswith(b"--") and len(t) > 2:
+                k = next((k for k in range(1, len(t))
+                          if b"-" + t[k:k + 1] in pflags), None)
+                if k is not None:
+                    if k == len(t) - 1:
+                        # The cluster ENDS on a program flag — it binds
+                        # the NEXT word (`perl -we 'P'`, `sh -ec 'P'`,
+                        # Codex on #128, round-21 review).
+                        if j + 1 == wi:
+                            return True
+                        j += 2
+                        continue
+                    # A mid-cluster program flag takes the attached
+                    # remainder — `perl -eE 'system(…)'` runs program
+                    # "E", NOT the next word (CodeRabbit on #128,
+                    # round-22 review — verified live).
+                    if j == wi:
+                        return True
             j += 1
             continue
         positional += 1
         if j == wi:
             # sed/awk's first positional is its PROGRAM (`sed '1e x'`,
             # `awk 'BEGIN{system("x")}'`); ssh's operands after the host
-            # join into the remote command.
-            return ((key in (b"sed", b"awk", b"gawk", b"mawk", b"nawk")
-                     and positional == 1)
+            # join into the remote command; a sh `-c` cluster's first
+            # positional is its command string.
+            return ((sh_cmd and positional == 1)
+                    or (key in (b"sed", b"awk", b"gawk", b"mawk", b"nawk")
+                        and positional == 1)
                     or (key == b"ssh" and positional > 1))
         j += 1
     return False
@@ -1322,6 +1338,12 @@ def _py_module_verdict(mod: bytes, rest_words: list, sub: bytes) -> str:
             # still reads the pipe; CodeRabbit on #128, round-21).
             # Only an invalid operand ends the stream.
             if not t.endswith(b".gz"):
+                if mode != "dec":
+                    # Compress mode accepts ANY filename operand —
+                    # `gzip bad` compresses it; keep scanning, a later
+                    # `-` still reads the pipe and emits TRANSFORMED
+                    # bytes (Devin on #128, round-22 review).
+                    continue
                 return "other" if stdin_live else "sink"
             continue
         if _operand_feeds_stream(t):
@@ -1955,21 +1977,48 @@ def _seg_prov(body: bytes, prov: str):
                         sub_read = True
                         break
                 # Backtick substitutions read the same stdin —
-                # _substitution_spans covers only `$(`/`<(`/`>(`.
+                # _substitution_spans covers only `$(`/`<(`/`>(`. A
+                # literal tick (single-quoted/escaped) is skipped; an
+                # unclosed one still makes the generated command
+                # opaque, same as a closed pair.
+                has_bt = False
                 bt = 0
-                while not sub_read:
-                    pa = prog.find(b"`", bt)
-                    if pa < 0:
-                        break
-                    pb = pa + 1
-                    while pb < len(prog) and prog[pb] != 0x60:
-                        pb += 2 if prog[pb] == 0x5C else 1
-                    if pb >= len(prog):
-                        break
-                    if _sub_reads_stdin(prog[pa + 1:pb]):
-                        sub_read = True
-                    bt = pb + 1
+                in_s = False
+                while bt < len(prog):
+                    c = prog[bt]
+                    if c == 0x5C:
+                        bt += 2
+                        continue
+                    if in_s:
+                        if c == 0x27:
+                            in_s = False
+                        bt += 1
+                        continue
+                    if c == 0x27:
+                        in_s = True
+                        bt += 1
+                        continue
+                    if c == 0x60:
+                        has_bt = True
+                        pb = bt + 1
+                        while pb < len(prog) and prog[pb] != 0x60:
+                            pb += 2 if prog[pb] == 0x5C else 1
+                        if (not sub_read and pb < len(prog)
+                                and _sub_reads_stdin(prog[bt + 1:pb])):
+                            sub_read = True
+                        bt = pb + 1
+                        continue
+                    bt += 1
                 if sub_read or (inner == "exec" and fd_in):
+                    return None if prov in (
+                        "up", "script", "thru") else "own"
+                if (pspans or has_bt) and fd_in:
+                    # A substitution PRODUCES the evaluated command
+                    # text — `eval "$(printf sh)"` runs sh on the pipe
+                    # though `inner` only sees literal `$(` (Devin on
+                    # #1382, round-22 review). Opaque generation can't
+                    # prove the result won't consume stdin — fail
+                    # closed when the pipe is live.
                     return None if prov in (
                         "up", "script", "thru") else "own"
                 if inner == "none" or not fd_in or inner == "exec":
@@ -2266,20 +2315,36 @@ def _emit_forwards_stdin(key: bytes, win: bytes, head_end: int) -> bool:
     words = _shell_words(win)
     spans = _substitution_spans(win)
     # Backtick pairs substitute too — `_substitution_spans` covers only
-    # `$(`/`<(`/`>(`; an unclosed pair runs to the window end.
+    # `$(`/`<(`/`>(`; an unclosed pair runs to the window end. A tick
+    # inside single quotes or after a backslash is literal text, never
+    # a substitution — `echo '`cat`'` prints the ticks (Devin + Codex
+    # on #128/#1382, round-22 review).
     bt_spans: list[tuple[int, int]] = []
     bt = 0
-    while True:
-        pa = win.find(b"`", bt)
-        if pa < 0:
-            break
-        pb = pa + 1
-        while pb < len(win) and win[pb] != 0x60:
-            pb += 2 if win[pb] == 0x5C else 1
-        bt_spans.append((pa, pb + 1 if pb < len(win) else len(win)))
-        if pb >= len(win):
-            break
-        bt = pb + 1
+    in_s = False
+    while bt < len(win):
+        c = win[bt]
+        if c == 0x5C:
+            bt += 2   # `\`` is a literal tick (inside '…' too — the
+                      # escape itself is literal there, same outcome)
+            continue
+        if in_s:
+            if c == 0x27:
+                in_s = False
+            bt += 1
+            continue
+        if c == 0x27:
+            in_s = True
+            bt += 1
+            continue
+        if c == 0x60:
+            pb = bt + 1
+            while pb < len(win) and win[pb] != 0x60:
+                pb += 2 if win[pb] == 0x5C else 1
+            bt_spans.append((bt, pb + 1))
+            bt = pb + 1
+            continue
+        bt += 1
     all_spans = spans + bt_spans
     for a, b in all_spans:
         if a < head_end:
@@ -2295,7 +2360,9 @@ def _emit_forwards_stdin(key: bytes, win: bytes, head_end: int) -> bool:
         # runs on). An unclosed body may hold a reader we cannot see —
         # fail closed and count it as forwarding.
         if win[a:a + 1] == b"`":
-            closed = b < len(win) and win[b - 1:b] == b"`"
+            # The closer can sit AT the window end — `echo `cat` `
+            # closes at the last byte (CodeRabbit on #128, round-22).
+            closed = b - 1 > a and win[b - 1:b] == b"`"
             body = win[a + 1:b - 1 if closed else b]
         else:
             closed = b < len(win) or win[b - 1:b] == b")"
@@ -5275,11 +5342,27 @@ def script_dep_block(plugin_dir: Path, src_bytes: bytes,
                 # `xargs -n 5 'bash x.sh'` looks up a binary literally
                 # named `bash x.sh` (ENOENT, never runs it).
                 wi0 = enc_words.index(w)
-                if (_operand_is_program(enc_words, wi0, enclosing)
-                        or (wkey not in _STDIN_EXEC_HEADS
-                            and not (wkey in _ARGV_PROGRAM_WRAPPERS
-                                     and wi0 == _argv_wrap_start(
-                                         enc_words, whi, enclosing)))):
+                if _operand_is_program(enc_words, wi0, enclosing):
+                    return True
+                # Emit-text fallback — the head must ECHO the operand
+                # onward (`printf 'bash x' | sh`): stdin execs take a
+                # filename (`bash 'x safe'`), exec-flag heads take
+                # program-or-file (`perl -eE 'system(…)'` runs program
+                # "E" — the operand is a filename, CodeRabbit on #128,
+                # round-22), and an argv-wrapper's UTILITY slot is a
+                # literal program name (`xargs bash 'x safe'` — Devin
+                # on #128, round-22 review).
+                ekey = wkey
+                if wkey in _ARGV_PROGRAM_WRAPPERS:
+                    ws = _argv_wrap_start(enc_words, whi, enclosing)
+                    if ws is None or wi0 <= ws:
+                        ekey = b""
+                    else:
+                        ekey = _command_key(
+                            enclosing[enc_words[ws][0]:
+                                      enc_words[ws][1]])
+                if (ekey and ekey not in _STDIN_EXEC_HEADS
+                        and ekey not in _EXEC_OPERAND_FLAGS):
                     return True
             # The quoted-span fallback accepts a path inside (a) a
             # DOUBLE-quoted span containing `$(`/`` ` `` — the
