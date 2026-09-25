@@ -700,6 +700,24 @@ journal to `needs:` the test job and give the CALLER job `if: ${{ always() }}`
 a test failure, which is exactly when the journal matters most. Collect weeks
 of journals before proposing enforcement.
 
+The reusable requests `actions: read` (artifact download), so the caller job's
+effective permissions must include it. A job-level `permissions:` block is only
+needed when the effective default doesn't already grant `actions: read` — if it
+is missing, GitHub rejects the whole workflow at startup (`startup_failure`,
+zero jobs run, required checks hang "waiting for status"):
+
+```yaml
+  tia-shadow:
+    needs: test
+    if: always()
+    uses: Manolii-org/ai-starter-pack/.github/workflows/tia-shadow-reusable.yml@<sha>
+    permissions:
+      contents: read
+      actions: read
+    with:
+      test_roots: 'app,components,lib'
+```
+
 ## restore-drill (v1.19.0+)
 
 Scheduled Azure SQL restore drill: `az sql db restore` (point-in-time) into

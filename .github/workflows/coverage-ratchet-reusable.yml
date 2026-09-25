@@ -26,9 +26,10 @@ name: Coverage Ratchet (Reusable)
 #         python3 -c "import json; print(json.load(open('coverage/coverage-final.json'))['total']['lines']['pct'])"
 #
 # metric_command is arbitrary shell evaluated only on the runner — keep
-# secrets out of it. Pass NON-secret env through the caller's `env:` block
-# (env: is not legal on a `uses:` job; put it on the caller workflow's jobs
-# or in coverage_command itself).
+# secrets out of it. Non-secret env vars the command needs must be inlined
+# in the command itself (`FOO=bar npm run test:coverage`): `env:` is not
+# legal on a `uses:` job, and env set on the caller's other jobs does not
+# propagate into the called workflow.
 
 on:
   workflow_call:
@@ -37,7 +38,7 @@ on:
         type: string
         required: false
         default: 'ubuntu-latest'
-        description: Runner label — ubuntu-slim is fine when install+coverage fit the 15-minute cap and need no docker/sudo.
+        description: Runner label — ubuntu-slim is fine when install+coverage fit the 15-minute cap and need no docker/sudo. Self-hosted runners must be >= v2.327.1 when python_version is set (setup-python v6 runs on Node 24).
       node_version:
         type: string
         required: false
@@ -168,7 +169,7 @@ jobs:
           # No implicit npm cache — 'npm' hard-fails on yarn/pnpm repos, and
           # callers needing caching opt in via cache_path/cache_key.
 
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869e46813c14d51 # v5
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
         if: ${{ inputs.python_version != '' }}
         with:
           python-version: ${{ inputs.python_version }}
