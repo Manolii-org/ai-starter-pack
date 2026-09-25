@@ -2511,11 +2511,11 @@ _READER_FLAG_OPS = {
                         b"--field-separator", b"--output",
                         b"--temporary-directory", b"--buffer-size",
                         # Operand-valued options — their value is not
-                        # a file operand (Codex on #1957, round-24
+                        # a file operand (Codex on #1957, round-24/30
                         # review — verified live).
                         b"--parallel", b"--compress-program",
                         b"--random-source", b"--batch-size",
-                        b"--files0-from"}),
+                        b"--files0-from", b"--sort"}),
     b"fmt": frozenset({b"-w", b"--width", b"-g", b"--goal",
                         b"-p", b"--prefix"}),
     b"expand": frozenset({b"-t", b"--tabs"}),
@@ -2524,6 +2524,9 @@ _READER_FLAG_OPS = {
                        b"--characters", b"--bytes", b"--delimiter",
                        b"--output-delimiter"}),
     b"paste": frozenset({b"-d", b"--delimiters"}),
+    # tac's only value-taking option — `-b`/`--before` and `-r`/`--regex`
+    # are boolean (Codex on #1957, round-30 review — verified live).
+    b"tac": frozenset({b"-s", b"--separator"}),
     b"join": frozenset({b"-1", b"-2", b"-e", b"-j", b"-t", b"-o",
                         b"-a", b"-v"}),
     b"jq": frozenset({b"-f", b"--from-file", b"-L", b"--indent"}),
@@ -2592,7 +2595,12 @@ def _reader_operands(key: bytes, args: list) -> list:
         if not ended and a != b"-" and a.startswith(b"-"):
             if a == b"--":
                 ended = True
-            elif a in flagops:
+            elif a in flagops or (a.startswith(b"--") and len(a) > 2
+                                  and any(f[:len(a)] == a
+                                          for f in flagops)):
+                # A long option — or its unique GNU prefix (`tac --sep
+                # x` resolves to --separator — Codex on #1957, round-30
+                # review) — consumes the following word as its value.
                 prog_seen |= a in progflags
                 i += 2
                 continue
@@ -5002,9 +5010,26 @@ def _span_output_exec(src: bytes, a: int, after: int | None = None) -> bool:
         rel = a - cs
         for k in range(len(words)):
             if words[k][0] <= rel < words[k][1]:
-                return any(
-                    _word_text(win[words[j][0]:words[j][1]]) in flags
-                    for j in range(hi + 1, k))
+                # The capture must be the flag's own operand — the
+                # first non-option word after it, or glued to it
+                # (`-c$(cat x)`). Later words are positional
+                # parameters ($0…), not program text (Devin on #1957,
+                # round-30 review — verified live).
+                hit = False
+                for j in range(hi + 1, k + 1):
+                    t = _word_text(win[words[j][0]:words[j][1]])
+                    if j == k:
+                        hit = any(t.startswith(f) for f in flags)
+                        break
+                    if t in flags:
+                        hit = all(
+                            _word_text(win[words[m][0]:words[m][1]]
+                                       ).startswith(b"-")
+                            for m in range(j + 1, k))
+                        break
+                    if not t.startswith(b"-"):
+                        break  # an operand ends option parsing
+                return hit
     # The enclosing command's window stops AT the substitution opener,
     # so the pipe check scans from `after` — just past the
     # substitution's close — to the next unquoted `|` (`echo "$(cat x)"
@@ -5045,10 +5070,27 @@ def _sub_survives_body(body: bytes, pos: int) -> bool:
         rel = pos - scs
         for k in range(len(swords)):
             if swords[k][0] <= rel < swords[k][1]:
-                if any(_word_text(swin[swords[j][0]:swords[j][1]])
-                       in sflags
-                       for j in range(shi + 1, k)):
-                    return True
+                # The capture must BE the flag's value — the first
+                # non-option word after the flag (`bash -c "$(cat
+                # x)"`) — or glued to the flag itself (`-c$(cat x)`).
+                # Words after the value are positional parameters
+                # ($0…), not program text (Devin on #1957, round-30
+                # review — verified live).
+                for j in range(shi + 1, k + 1):
+                    t = _word_text(swin[swords[j][0]:swords[j][1]])
+                    if j == k:
+                        if any(t.startswith(f) for f in sflags):
+                            return True
+                        break
+                    if t in sflags:
+                        if all(_word_text(
+                                swin[swords[m][0]:swords[m][1]]
+                                ).startswith(b"-")
+                               for m in range(j + 1, k)):
+                            return True
+                        break
+                    if not t.startswith(b"-"):
+                        break  # an operand ends option parsing
                 break
     # A containing stage whose own stdout is diverted drops the
     # capture's bytes — `$(echo "$(cat x)" >/dev/null)` emits nothing.
@@ -5121,10 +5163,27 @@ def _enclosing_sub_exec(src: bytes, a: int) -> bool:
         rel = pos - scs
         for k in range(len(swords)):
             if swords[k][0] <= rel < swords[k][1]:
-                if any(_word_text(swin[swords[j][0]:swords[j][1]])
-                       in sflags
-                       for j in range(shi + 1, k)):
-                    return True
+                # The capture must BE the flag's value — the first
+                # non-option word after the flag (`bash -c "$(cat
+                # x)"`) — or glued to the flag itself (`-c$(cat x)`).
+                # Words after the value are positional parameters
+                # ($0…), not program text (Devin on #1957, round-30
+                # review — verified live).
+                for j in range(shi + 1, k + 1):
+                    t = _word_text(swin[swords[j][0]:swords[j][1]])
+                    if j == k:
+                        if any(t.startswith(f) for f in sflags):
+                            return True
+                        break
+                    if t in sflags:
+                        if all(_word_text(
+                                swin[swords[m][0]:swords[m][1]]
+                                ).startswith(b"-")
+                               for m in range(j + 1, k)):
+                            return True
+                        break
+                    if not t.startswith(b"-"):
+                        break  # an operand ends option parsing
                 break
     # A containing stage whose own stdout is diverted drops the
     # capture's bytes — `$(echo "$(cat x)" >/dev/null)` emits nothing

@@ -10252,3 +10252,52 @@ def test_pipe_to_exec_round29(tmp_path):
             b'date "$(bash -c "$(cat scripts/x.sh)")" | sh',
             b'echo "$(eval "$(cat scripts/x.sh)")" | sh'):
         assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_pipe_to_exec_round30(tmp_path):
+    """Round-30: sort's --sort and tac's -s/--separator consume a value
+    word (GNU long prefixes too), and a capture AFTER a program flag's
+    value is a positional ($0), not program text (Devin + Codex on
+    #1957)."""
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location(
+        "reg_r30", Path(__file__).parent.parent / "scripts" / "ai-resolve.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["reg_r30"] = mod
+    spec.loader.exec_module(mod)
+    pdir = tmp_path
+    (pdir / "scripts").mkdir()
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo HIT\n")
+    for line in (
+            # the capture sits AFTER the flag's own value — it is $0,
+            # never program text (`bash -c 'true' "$(cat x)"` runs
+            # `true`, verified live)
+            b'bash -c "true" "$(cat scripts/x.sh)" | sh',
+            b'bash -c "echo hi" "$(cat scripts/x.sh)" | sh',
+            b'python -c x "$(cat scripts/x.sh)" | sh',
+            b'perl -e x "$(cat scripts/x.sh)" | sh',
+            # same positional rule inside a non-format date operand
+            b'date "$(bash -c true "$(cat scripts/x.sh)")" | sh'):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # option values are not file operands — the stream flows
+            # through sort/tac unchanged (verified live)
+            b'cat scripts/x.sh | sort --sort numeric | sh',
+            b'cat scripts/x.sh | sort --sort=numeric | sh',
+            b'cat scripts/x.sh | tac --separator x | sh',
+            b'cat scripts/x.sh | tac -s x | sh',
+            # GNU unique long-prefix resolution consumes the value
+            b'cat scripts/x.sh | tac --sep x | sh',
+            # boolean tac flags leave stdin flowing
+            b'cat scripts/x.sh | tac -r | sh',
+            b'cat scripts/x.sh | tac -b | sh',
+            # the capture IS the flag's value — program text either way
+            b'bash -c "$(cat scripts/x.sh)" | sh',
+            b'sh -c "$(cat scripts/x.sh)" | sh',
+            b'sh -c -e "$(cat scripts/x.sh)" | sh',
+            b'python -c "$(cat scripts/x.sh)" | sh',
+            b'perl -e "$(cat scripts/x.sh)" | sh',
+            # glued to the flag word itself
+            b'bash -c$(cat scripts/x.sh) | sh'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
