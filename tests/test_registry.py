@@ -12319,7 +12319,16 @@ def test_script_dep_round58(tmp_path):
             b"cat scripts/x.sh | pr -s | sh",
             b"cat scripts/x.sh | pr -n | sh",
             # nl -p is --no-renumber, a flag
-            b"cat scripts/x.sh | nl -p | sh"):
+            b"cat scripts/x.sh | nl -p | sh",
+            # zero-padded suffix starts fit the suffix length
+            b"split --numeric-suffixes=01 -l1 --filter=sh "
+            b"scripts/x.sh",
+            # -a 0 selects auto-length (runs); padded counts parse
+            b"split -a 0 --filter=sh scripts/x.sh",
+            b"split -a 0001 --filter=sh scripts/x.sh",
+            b"split -a " + b"0" * 5000 + b"1 --filter=sh scripts/x.sh",
+            b"cat scripts/x.sh | head -n 00001 | sh",
+            b"cat scripts/x.sh | pr -N 00001 | sh"):
         assert mod.script_dep_block(pdir, line + b"\n"), line
 
     for line in (
@@ -12343,5 +12352,29 @@ def test_script_dep_round58(tmp_path):
             b"split -b " + b"9" * 5000 + b" --filter=sh scripts/x.sh",
             # pr required-arg shorts at argv end abort
             b"cat scripts/x.sh | pr -D | sh",
-            b"cat scripts/x.sh | pr -N | sh"):
+            b"cat scripts/x.sh | pr -N | sh",
+            # pr numeric options reject non-numeric operands
+            b"cat scripts/x.sh | pr -N nope | sh",
+            b"cat scripts/x.sh | pr -N2x | sh",
+            b"cat scripts/x.sh | pr -l nope | sh",
+            b"cat scripts/x.sh | pr -w nope | sh",
+            b"cat scripts/x.sh | pr --columns=nope | sh",
+            b"cat scripts/x.sh | pr --first-line-number=nope | sh",
+            # a suffix start one digit past the suffix length aborts
+            b"split --numeric-suffixes=100 -a2 --filter=sh "
+            b"scripts/x.sh",
+            b"split --numeric-suffixes=" + b"9" * 5000
+            + b" --filter=sh scripts/x.sh",
+            b"split --hex-suffixes=" + b"f" * 5000
+            + b" --filter=sh scripts/x.sh",
+            # pr --pages components past uintmax abort "too large"
+            b"cat scripts/x.sh | pr --pages=18446744073709551616 | sh",
+            b"cat scripts/x.sh | pr --pages=1:18446744073709551616 "
+            b"| sh",
+            b"cat scripts/x.sh | pr --pages=" + b"9" * 5000 + b" | sh",
+            # chrt -m/--max prints the priority table — never execs
+            b"cat scripts/x.sh | chrt -m 1 sh scripts/x.sh",
+            b"cat scripts/x.sh | chrt --max sh scripts/x.sh",
+            # past uintmax even padded — 'invalid number' aborts
+            b"cat scripts/x.sh | head -n " + b"9" * 5000 + b" | sh"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line

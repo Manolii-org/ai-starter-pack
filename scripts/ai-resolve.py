@@ -2325,6 +2325,12 @@ _WRAPPER_DESCRIBE = {b"command": frozenset({b"-v", b"-V"}),
                                            b"-h", b"--help",
                                            b"-V", b"--version"}),
                     b"chrt": frozenset({b"-p", b"--pid",
+                                        # `-m`/`--max` prints the
+                                        # priority table and exits —
+                                        # a trailing command never
+                                        # runs (Codex on #1393,
+                                        # round-58 — verified live).
+                                        b"-m", b"--max",
                                         b"-h", b"--help",
                                         b"-V", b"--version"}),
                     b"unshare": frozenset({b"-h", b"--help",
@@ -3403,6 +3409,22 @@ _SPLIT_FLAG_SHORT = frozenset({b"d", b"e", b"u", b"x"}
                               | {bytes([c]) for c in b"0123456789"})
 
 
+# GNU SIZE suffix multipliers — the table `xstrtol` accepts for head
+# `-n`/`-c`, split `-b`/`-C`, etc. (`1K`=1024, `1KB`=1000, `1KiB`=1024,
+# `1b`=512 — all verified live; unrecognized units abort "invalid
+# number" before any read).
+_GNU_SIZE_UNITS = {b"": 1, b"b": 512,
+                   b"k": 1024, b"K": 1024, b"KB": 1000,
+                   b"KiB": 1024, b"M": 1024**2, b"MB": 1000**2,
+                   b"MiB": 1024**2, b"G": 1024**3, b"GB": 1000**3,
+                   b"GiB": 1024**3, b"T": 1024**4, b"TB": 1000**4,
+                   b"TiB": 1024**4, b"P": 1024**5, b"PB": 1000**5,
+                   b"PiB": 1024**5, b"E": 1024**6, b"EB": 1000**6,
+                   b"EiB": 1024**6, b"Z": 1024**7, b"ZB": 1000**7,
+                   b"ZiB": 1024**7, b"Y": 1024**8, b"YB": 1000**8,
+                   b"YiB": 1024**8}
+
+
 def _split_arg_ok(opt: bytes, v: bytes) -> bool:
     """False when `split` aborts on the option's operand — before any
     filter or input is touched (Devin on #1959, round-44 review —
@@ -3455,19 +3477,9 @@ def _split_arg_ok(opt: bytes, v: bytes) -> bool:
         m = re.fullmatch(rb"([0-9]+)(b|k|[KMGTPEZY](i?B)?)?", n)
         if m is None:
             return False
-        _SPLIT_UNIT = {b"": 1, b"b": 512,
-                       b"k": 1024, b"K": 1024, b"KB": 1000,
-                       b"KiB": 1024, b"M": 1024**2, b"MB": 1000**2,
-                       b"MiB": 1024**2, b"G": 1024**3, b"GB": 1000**3,
-                       b"GiB": 1024**3, b"T": 1024**4, b"TB": 1000**4,
-                       b"TiB": 1024**4, b"P": 1024**5, b"PB": 1000**5,
-                       b"PiB": 1024**5, b"E": 1024**6, b"EB": 1000**6,
-                       b"EiB": 1024**6, b"Z": 1024**7, b"ZB": 1000**7,
-                       b"ZiB": 1024**7, b"Y": 1024**8, b"YB": 1000**8,
-                       b"YiB": 1024**8}
         d = m.group(1)
         return (len(d) <= 19
-                and 0 < int(d) * _SPLIT_UNIT[m.group(2) or b""]
+                and 0 < int(d) * _GNU_SIZE_UNITS[m.group(2) or b""]
                 <= _INTMAX)
     if opt in (b"--separator", b"-t"):
         # SEP is one byte or the `\0` NUL escape (Codex on #1959,
@@ -3638,7 +3650,9 @@ def _split_scan(key: bytes, args: list, seekable_stdin: bool = False):
                 if not _split_arg_ok(resolved, v):
                     return None, None, False, None
                 if resolved == b"--suffix-length":
-                    suflen = int(v)
+                    # zero-padded is legal and int() is capped —
+                    # `-a <5000 zeros>1` runs (Devin on #12, round-58)
+                    suflen = int(v.lstrip(b"0") or b"0")
                 if resolved == b"--number":
                     np_ = v.split(b"/")
                     if len(np_) > 1 and np_[0] in (b"l", b"r"):
@@ -3667,7 +3681,7 @@ def _split_scan(key: bytes, args: list, seekable_stdin: bool = False):
                     if not _split_arg_ok(b"-" + c, v):
                         abort = True
                     elif c == b"a":
-                        suflen = int(v)
+                        suflen = int(v.lstrip(b"0") or b"0")
                     elif c == b"n":
                         np_ = v.split(b"/")
                         if len(np_) > 1 and np_[0] in (b"l", b"r"):
@@ -3689,15 +3703,22 @@ def _split_scan(key: bytes, args: list, seekable_stdin: bool = False):
         i += 1
     if npos > 2:
         return None, None, False, None       # "extra operand" abort
+    # A suffix-start is valid iff its significant digits fit the
+    # suffix length — zero-padding is legal (`=01` runs — verified
+    # live) while one more digit aborts "start value is too large for
+    # the suffix length". Comparing digit COUNTS instead of int()
+    # also skips Python's 4300-digit parse limit on absurd values
+    # (Codex on #130, round-58 review — verified live).
     if (nsuf not in (None, b"")
-            and not (nsuf.isdigit() and int(nsuf) < 10 ** suflen)):
+            and not (nsuf.isdigit()
+                     and len(nsuf.lstrip(b"0") or b"0") <= suflen)):
         return None, None, False, None       # invalid start for
                                 # numerical suffix (`=bad`, `=100` at
                                 # -a2 — Devin/Codex round-50, verified
                                 # live)
     if (hsuf not in (None, b"")
             and not (all(c in b"0123456789abcdef" for c in hsuf)
-                     and int(hsuf, 16) < 16 ** suflen)):
+                     and len(hsuf.lstrip(b"0") or b"0") <= suflen)):
         return None, None, False, None       # invalid start for
                                 # hexadecimal suffix — same bound
                                 # (verified live)
@@ -4383,7 +4404,13 @@ _READER_NUM_VALS = {
     # `tail --max-unchanged-stats=bad` aborts before any read (Codex
     # on #130, round-48 review — verified live).
     b"tail": frozenset({b"--pid", b"--max-unchanged-stats"}),
-    b"pr": frozenset({b"--indent", b"-o"}),
+    # `-N`/`-l`/`-w`/`-W` and their longs plus `--columns` are
+    # numeric-only — `pr -N nope` aborts "invalid starting line
+    # number" before the read (Devin on #1959, round-58 review —
+    # verified live).
+    b"pr": frozenset({b"--indent", b"-o", b"-N", b"-l", b"-w", b"-W",
+                      b"--first-line-number", b"--length", b"--width",
+                      b"--page-width", b"--columns"}),
 }
 
 # Page-range operands — `--pages FIRST[:LAST]` and the `+FIRST[:LAST]`
@@ -4399,12 +4426,25 @@ def _pages_ok(v: bytes) -> bool:
     if v[:1] == b"+":
         v = v[1:]
     head, sep, tail = v.partition(b":")
-    if not head.isdigit() or int(head) == 0:
+    # Either component past UINTMAX aborts "argument too large" before
+    # the read (`--pages=18446744073709551616`, `=1:18446744073709551616`
+    # — Codex on #130, round-58 review — verified live). The digit
+    # guard also keeps int() under the 4300-digit parse limit.
+    hd = head.lstrip(b"0") or b"0"
+    td = tail.lstrip(b"0") or b"0"
+    if len(hd) > 20 or len(td) > 20:
+        return False
+    if not head.isdigit():
+        return False
+    h = int(hd)
+    if h == 0 or h > (1 << 64) - 1:
         return False
     # `--pages FIRST:LAST` — LAST must be >= FIRST (`1:0` and `2:1`
     # abort "invalid page range" before any read — Devin on #130/#12/
     # #1959, round-50 review — verified live).
-    return not sep or (tail.isdigit() and int(tail) >= int(head))
+    return (not sep
+            or (tail.isdigit()
+                and h <= int(td) <= (1 << 64) - 1))
 
 
 def _num_ok(v: bytes) -> bool:
@@ -4419,8 +4459,12 @@ def _num_ok(v: bytes) -> bool:
     # int() raises ValueError past Python's 4300-digit parse limit —
     # a digit-length guard keeps resolution from crashing on absurd
     # operands (Devin on #1393/#12, round-58 review — verified live).
-    return (n.isdigit() and len(n) <= 20
-            and (len(n) < 20 or int(n) <= (1 << 64) - 1))
+    # Zero-padding is legal too — `head -n <5000 zeros>1` prints one
+    # line (Devin on #12, round-58 review — verified live), so the
+    # bound counts SIGNIFICANT digits.
+    d = n.lstrip(b"0")
+    return (n.isdigit() and len(d) <= 20
+            and int(d or b"0") <= (1 << 64) - 1)
 
 
 # Complete GNU long-option sets per reader head — abbreviation resolves
@@ -5903,6 +5947,20 @@ def _stdin_exec_head(win: bytes) -> str:
             if v is not None:
                 last = v
             ai += 1
+        # The limit must PARSE as a signed GNU SIZE — `head -n nope`
+        # and `head -n <2**64>` abort "invalid number of lines" before
+        # any read, so nothing flows downstream (Devin on #12/#1393,
+        # round-58 review — verified live: sign, unit suffixes, and a
+        # UINTMAX bound all accepted).
+        if last is not None:
+            m = re.fullmatch(rb"[+-]?([0-9]+)(b|k|[KMGTPEZY](i?B)?)?",
+                             last)
+            d = m.group(1).lstrip(b"0") if m else None
+            if (m is None or len(d) > 20
+                    or int(d or b"0")
+                    * _GNU_SIZE_UNITS[m.group(2) or b""]
+                    > (1 << 64) - 1):
+                return "sink"
         # A signed zero's meaning is PER COMMAND (verified against GNU
         # coreutils): `head -n +0`/`head -n -0` — +0 emits nothing,
         # -0 emits everything; `tail -n +0`/`tail -n -0` — the
