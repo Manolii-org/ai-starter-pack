@@ -168,7 +168,7 @@ jobs:
           # No implicit npm cache — 'npm' hard-fails on yarn/pnpm repos, and
           # callers needing caching opt in via cache_path/cache_key.
 
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869e46813c14d51 # v5
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
         if: ${{ inputs.python_version != '' }}
         with:
           python-version: ${{ inputs.python_version }}
