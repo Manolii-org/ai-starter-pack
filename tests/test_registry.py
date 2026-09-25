@@ -9191,10 +9191,13 @@ def test_script_dep_fd_path_operands(tmp_path):
     assert mod.script_dep_block(
         pdir, b"cat scripts/x.sh | python -m base64 -d /dev/stdin | sh\n")
     assert mod.script_dep_block(
-        pdir, b"cat scripts/x.sh | python -m gzip -d /dev/fd/0 | sh\n")
-    assert mod.script_dep_block(
         pdir,
         b"cat scripts/x.sh | python -m uu -d /proc/self/fd/0 | sh\n")
+    # `python -m gzip -d` accepts only `-` or a *.gz filename — an
+    # fd path fails the suffix check and the module exits before
+    # touching stdin (verified against CPython gzip.main, round-21).
+    assert not mod.script_dep_block(
+        pdir, b"cat scripts/x.sh | python -m gzip -d /dev/fd/0 | sh\n")
     assert not mod.script_dep_block(
         pdir, b"cat scripts/x.sh | python -m base64 -d /etc/passwd | sh\n")
 
@@ -9502,7 +9505,7 @@ def test_pipe_to_exec_round19(tmp_path):
             # a quoted multi-word FILENAME is one literal name — the
             # whitespace shortcut only applies to program text (Devin
             # on #1957)
-            b"bash 'scripts/x.sh safe'",
+            b"bash 'scripts/x.sh safe'"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
     # Program-text operands still detect — `sh -c`, eval, sed/awk
     # programs, ssh remote commands all interpret the quoted text.
@@ -9543,4 +9546,80 @@ def test_pipe_to_exec_round19(tmp_path):
             b"cat scripts/x.sh | source /dev/null /dev/stdin | sh",
             # xargs' own flag operands are not program text
             b"xargs -n 5 'bash scripts/x.sh'"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    # Round-21 positive cases — each executes the bundled script.
+    for line in (
+            # clustered program flags bind the next word (Codex on #128)
+            b"sh -ec 'bash scripts/x.sh'",
+            b"perl -eE 'system(q(bash scripts/x.sh))'",
+            # perl -E / node -E / awk --source take program text
+            # (Devin + Codex on #128/#1382)
+            b"perl -E 'system(q(bash scripts/x.sh))'",
+            b"awk --source='BEGIN{system(\"bash scripts/x.sh\")}'",
+            # quoted `)` inside `$(` does not close the substitution
+            # (Devin on #128/#1382/#1957)
+            b'bash "$(printf \')\'; bash scripts/x.sh)"',
+            b"cat <<X\n$(printf ')'; bash scripts/x.sh)\nX\n",
+            # gzip iterates operands: `-` before a bad name already
+            # emitted decoded stdin (Devin on #1382/#1957)
+            b"cat scripts/x.sh | python -m gzip -d - bad | sh",
+            b"cat scripts/x.sh | python -m gzip -d f.gz - | sh",
+            # `$(` args to eval/source expand in the PARENT's stdin
+            # context before `< f` rebinds (Codex on #11/#1382)
+            b"cat scripts/x.sh | eval \"$(cat)\" < /dev/null",
+            b"cat scripts/x.sh | source <(cat) < /dev/null | sh",
+            # no-operand xargs options don't consume the command head
+            # (Codex + CodeRabbit + Devin on #128/#1382/#1957)
+            b"xargs --show-limits sh -c 'bash scripts/x.sh'",
+            b"xargs --eof sh -c 'bash scripts/x.sh'",
+            b"xargs -l sh -c 'bash scripts/x.sh'",
+            # timeout's DURATION is not the wrapped command — env -S
+            # still splits into a shell (Devin on #128/#1382)
+            b"cat scripts/x.sh | timeout 1 env -S 'sh'",
+            # `+$(cat)` stays a single format word; unquoted can still
+            # emit a one-word payload (`date +x` → `x`), so both count
+            b'cat scripts/x.sh | date "+$(cat)" | sh',
+            b"cat scripts/x.sh | date +$(cat) | sh",
+            # backtick pairs are substitution words like `$(` — inside
+            # and outside double quotes, in eval argv, and through an
+            # emit head's output (round-21 backtick parity; _cmd_window
+            # used to cut the window at the opener so `eval `cat`` saw
+            # an empty program)
+            b"cat scripts/x.sh | eval `cat` | sh",
+            b"cat scripts/x.sh | echo `cat` | sh",
+            b'cat scripts/x.sh | echo "`cat`" | sh',
+            # a backtick arg sub expands in the PARENT stdin context
+            # before eval's own `< f` rebind — same rule as `$(`
+            b"cat scripts/x.sh | eval `cat` < /dev/null",
+            b"cat scripts/x.sh | eval `cat` -n < /dev/null | sh",
+            # a script ref inside a closed backtick sub pipes out
+            b'echo "`cat scripts/x.sh`" | sh',
+            b"echo `cat scripts/x.sh` | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    # Round-21 negative cases.
+    for line in (
+            # evaluated program reads the REBOUND stdin, not the pipe
+            # (Devin on #128/#1382/#1957)
+            b"cat scripts/x.sh | eval sh </dev/null",
+            b"cat scripts/x.sh | eval cat </dev/null | sh",
+            # gzip positional file sink: invalid name before any `-`
+            b"cat scripts/x.sh | python -m gzip -d bad | sh",
+            # QUOTED heredoc body is literal — no expansions at all
+            b"cat <<'X'\n$(bash scripts/x.sh)\nX\n",
+            # `xargs --eof=END` attached operand is an option, but an
+            # eof-set head still execs the following program (keep
+            # positive); the bare `--eof` also takes no operand
+            b"cat scripts/x.sh | eval 'bash f' </dev/null",
+            # an emit head's constant/discarded backtick output is not
+            # the script's bytes — `$(` parity throughout
+            b"cat scripts/x.sh | echo `printf x` | sh",
+            b'cat scripts/x.sh | echo "`printf x`" | sh',
+            b'cat scripts/x.sh | echo "`cat`" >/dev/null | sh',
+            # `$(` parity: bash's operand is the sub OUTPUT (a name),
+            # not the script text — same hole as `bash $(echo …)`
+            b"bash `echo scripts/x.sh`",
+            # xargs execs its utility operand verbatim — a quoted
+            # multi-word utility is a literal program name (ENOENT),
+            # not program text
+            b'xargs -n 5 "bash scripts/x.sh"'):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
