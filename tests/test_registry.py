@@ -11349,3 +11349,101 @@ def test_script_dep_round46(tmp_path):
             # list — `; sh` sees EOF (round-25 semantics kept)
             b"cat scripts/x.sh | sh -c 'sort --files0-from=-; sh'"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round47(tmp_path):
+    """Review round-47 — each case verified against live GNU tools:
+
+    * `find -D help` (anywhere in the debugopts list) prints the -D
+      usage and exits BEFORE the expression — `-D exec,help` never
+      runs the action; `-D all` excludes help and runs. A terminal
+      word anywhere drops every action span.
+    * `split`'s input is classified independently of any `< f` stdin
+      rebind: a named operand still wins (`split -n r/1/1 F
+      </dev/null` streams F's chunk), and a redirect feeds the
+      filter (`split --filter=sh - <x` runs x's bytes through
+      $SHELL).
+    * `find -exec split x \\;` is NOT a dep — split writes chunk
+      FILES and find's stdout stays empty — while `--filter=CMD`
+      execs the operand's bytes and `-n K/N` emits a chunk (pipe
+      decides).
+    * `xargs -a - --help`/`--version`/a parse error exits BEFORE the
+      argfile or stdin is touched — the pipe stays unread for a
+      SIBLING command and the stage emits only usage text.
+    * A DYNAMIC `IFS=$v`/`IFS=$(…)` assignment REPLACES the tracked
+      IFS — an earlier literal cannot stay in effect.
+    * The SCRIPT_REF arg window is quote-aware — a QUOTED `|`/`&`/`;`
+      is operand text, so `--filter="cat | sh"` keeps a later
+      `scripts/` operand in reach.
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (
+            # a `< f` stdin rebind feeds split's filter — the script's
+            # bytes execute through $SHELL (was: fd_in discarded the
+            # classification entirely)
+            b"split --filter=sh - <scripts/x.sh",
+            b"split --filter=sh <scripts/x.sh",
+            b"split --filter=sh - < scripts/x.sh",
+            b"cat scripts/x.sh | split --filter=sh - <scripts/x.sh",
+            # a named operand still wins over the rebind — F's chunk
+            # streams to stdout (was: `not fd_in` short-circuited to
+            # "own" before the split branch ran)
+            b"split -n r/1/1 scripts/x.sh </dev/null | sh",
+            b"split -n 1/1 scripts/x.sh </dev/null | sh",
+            b"split -n l/1/1 scripts/x.sh </dev/null | sh",
+            # terminal xargs exits before the argfile/stdin is read —
+            # a SIBLING command still sees the pipe
+            b"cat scripts/x.sh | (xargs -a - --help; sh)",
+            b"cat scripts/x.sh | (xargs -a - --version; sh)",
+            b"cat scripts/x.sh | (xargs --help >/dev/null; sh)",
+            b"cat scripts/x.sh | (xargs -a /dev/null --help >/dev/null; sh)",
+            # a find `-exec split` filter execs the operand's bytes
+            b"find . -exec split --filter=sh scripts/x.sh \\;",
+            b"find . -exec split --filter=\"cat | sh\" scripts/x.sh \\;",
+            b"find . -exec split -n 1/1 scripts/x.sh \\; | sh",
+            # a quoted `|`/`;` inside an option operand is TEXT — the
+            # scripts/ path still counts as the filter's input
+            b"split --filter=\"cat | sh\" scripts/x.sh",
+            b"split --filter='cat | sh' scripts/x.sh",
+            b"split --filter=sh scripts/x.sh",
+            # kept semantics — the filter forwards/emits (round-46)
+            b"split --filter=cat scripts/x.sh | sh",
+            b"cat scripts/x.sh | split -n r/1/1 | sh",
+            # `-D all` excludes help — the action still runs
+            b"find -D all . -exec sh scripts/x.sh \\;"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # `-D help` is terminal — the action never runs
+            b"find -D help /dev/null -exec sh scripts/x.sh \\;",
+            b"find -D exec,help . -exec sh scripts/x.sh \\;",
+            b"find -D help -D all . -exec sh scripts/x.sh \\;",
+            # `-exec split x \\;` writes chunk FILES — find's stdout
+            # stays empty, a downstream exec sees nothing
+            b"find . -exec split scripts/x.sh \\; | sh",
+            b"find . -exec split -l1 scripts/x.sh \\; | sh",
+            # a swallowed/non-running filter execs nothing — the
+            # input was rebound to an empty file
+            b"split --filter=sh - </dev/null | sh",
+            b"cat scripts/x.sh | split --filter=sh - </dev/null | sh",
+            b"split -n r/1/1 - </dev/null | sh",
+            # terminal xargs emits only usage — the stream never
+            # reaches the next PIPE stage's stdin
+            b"cat scripts/x.sh | xargs --help | sh",
+            b"cat scripts/x.sh | xargs -a - --help | sh",
+            b"cat scripts/x.sh | xargs --version | sh",
+            # kept semantics — bare split writes chunk files (round-41)
+            b"split scripts/x.sh | sh",
+            b"cat scripts/x.sh | split -l1 | sh",
+            b"split --filter=true scripts/x.sh | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    # a dynamic `IFS=` REPLACES the tracked value — `IFS=','; IFS=$v`
+    # leaves IFS unknown (not the stale literal)
+    assert mod._line_ifs(b"IFS=','; IFS=$v; date +x\n", 20) is None
+    assert mod._line_ifs(b"IFS=','; IFS=$(cat f); date +x\n", 25) is None
+    assert mod._line_ifs(b"IFS='x'; IFS=$v; date +x\n", 18) is None
+    # a literal still binds — and a command-scoped prefix does not
+    assert mod._line_ifs(b"IFS=','; date +x\n", 8) == b","
+    assert mod._line_ifs(b"IFS=',' date +x\n", 18) is None

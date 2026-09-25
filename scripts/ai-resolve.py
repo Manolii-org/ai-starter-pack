@@ -100,7 +100,12 @@ SCRIPT_REF = re.compile(
     # Any extension counts — registry-lint permits regular script files
     # without an allowlist, so `bash scripts/setup.bash` is a real
     # invocation (`.bash` was whitelisting-out, Codex on #123).
-    rb"[ \t]+[^\n|&;`]*?scripts/(?:[A-Za-z0-9_.-]+/)"
+    # The arg window is quote-aware — a QUOTED `|`/`&`/`;`/backtick is
+    # operand text, not a separator (`split --filter="cat | sh"
+    # scripts/x.sh` still reaches the path — Devin on #1959, round-47
+    # review — verified live).
+    rb"[ \t]+(?:\"[^\n\"]*\"|'[^\n']*'|[^\n|&;`])*?"
+    rb"scripts/(?:[A-Za-z0-9_.-]+/)"
     rb"*(?:[A-Za-z0-9_.-]+\.[A-Za-z0-9_-]+|[A-Za-z0-9_-]+)"
     rb"(?![\w.])"
     # An interpreter held in a variable — `$PYTHON scripts/setup.py`,
@@ -1172,11 +1177,26 @@ def _find_expr_spans(enc_words: list, hi: int, enclosing: bytes):
             k += 3
             continue
         if t in _FIND_ONE_OP or _find_newer_op(t):
+            if (t == b"-D" and k + 1 < len(enc_words)
+                    and b"help" in _word_text(
+                        enclosing[enc_words[k + 1][0]:
+                                  enc_words[k + 1][1]]).split(b",")):
+                # `-D help` (anywhere in the debugopts list) prints the
+                # -D usage and exits BEFORE the expression — `find -D
+                # exec,help . -exec …` never runs the action; `all`
+                # excludes help and runs (Codex on #1393, round-47
+                # review — verified live).
+                spans.append(("terminal", k, k))
             k += 2
             continue
         if t in terminal:
             spans.append(("terminal", k, k))
         k += 1
+    # A terminal word ANYWHERE exits before every action (round-40) —
+    # action spans are dropped under a terminal so callers that only
+    # consume "action" entries stay consistent with _argv_wrap_start.
+    if any(s[0] == "terminal" for s in spans):
+        return [s for s in spans if s[0] == "terminal"]
     return spans
 
 
@@ -1319,7 +1339,7 @@ def _xargs_argfile(args: list):
                 cands = [o for o in _WRAPPER_LONG[b"xargs"]
                          if o.startswith(base)]
                 if len(cands) != 1:
-                    break           # exits — no argfile is ever read
+                    return _XARGS_EXIT   # exits — nothing is read
                 resolved = cands[0]
             if resolved == b"--arg-file":
                 seen = True
@@ -1339,7 +1359,7 @@ def _xargs_argfile(args: list):
             if (resolved in _ARGV_PROGRAM_WRAPPER_TERMINAL[b"xargs"]
                     or (b"=" in a and resolved not in
                         _WRAPPER_OPTARG_LONG[b"xargs"])):
-                break               # help/version or flag+`=` exits;
+                return _XARGS_EXIT  # help/version or flag+`=` exits;
                                     # a glued value on an OPTIONAL-arg
                                     # long keeps scanning (`-a -
                                     # --eof=STOP -a /dev/null` reads
@@ -1382,10 +1402,18 @@ def _xargs_argfile(args: list):
             else:
                 i += 1              # all-flag cluster
             if j == -1:
-                break               # exits — no argfile is ever read
+                return _XARGS_EXIT  # exits — no argfile is ever read
             continue
         break              # utility argv begins — its `-a` is its arg
     return found if seen else None
+
+
+# xargs exits BEFORE reading an argfile or stdin — `--help`/`--version`
+# and an ambiguous prefix or unknown option all end in usage text
+# (Devin on #12, round-47 review — verified live: `xargs -a - --help`
+# leaves the pipe for a SIBLING command). The sentinel can't collide
+# with a real argv word.
+_XARGS_EXIT = b"\x00xargs-exit"
 
 
 def _xargs_utility(args: list) -> list:
@@ -2786,7 +2814,7 @@ def _fold_span_arg(win: bytes, w: tuple, subs: dict):
     return win[a:b]
 
 
-def _seg_head_args(body: bytes) -> tuple:
+def _seg_head_args(body: bytes, tgts: dict | None = None) -> tuple:
     """(key, args) — the effective head name and folded argv of one
     command segment inside a substitution body.
 
@@ -2801,7 +2829,10 @@ def _seg_head_args(body: bytes) -> tuple:
     segment's own redirects — a `< file` rebind means the head's input
     is the file, not whatever the pipeline carried; the redirect's
     target may sit in the NEXT word (`cat < /dev/null` — Devin on
-    #9/#1957, round-14 review)."""
+    #9/#1957, round-14 review). When `tgts` is given, tgts[0] records
+    # the LAST real filename bound to stdin (`< f`/`<> f`/a pending
+    # next-word target) — fd aliases and `<<`-family content are not
+    # filenames (round-47 review)."""
     words = _shell_words(_mask_parens(body))
     words = [w for w in words
              if _word_text(body[w[0]:w[1]]) not in (b"{", b"}")]
@@ -2821,10 +2852,10 @@ def _seg_head_args(body: bytes) -> tuple:
         if pend is not None:
             fd, mode = pend
             pend = None
-            _word_pending_target(scratch, fd, mode, raw)
+            _word_pending_target(scratch, fd, mode, raw, tgts)
             wi += 1
             continue
-        at, pend = _word_redirects(raw, scratch)
+        at, pend = _word_redirects(raw, scratch, tgts)
         if at:
             break
         wi += 1
@@ -2845,9 +2876,9 @@ def _seg_head_args(body: bytes) -> tuple:
             # `cat < /dev/null` rebinds stdin to the file.
             fd, mode = pend
             pend = None
-            _word_pending_target(scratch, fd, mode, raw)
+            _word_pending_target(scratch, fd, mode, raw, tgts)
             continue
-        at, pend = _word_redirects(raw, scratch)
+        at, pend = _word_redirects(raw, scratch, tgts)
         if at:
             args.append(at)
     return key, args, scratch, words[hi][1]
@@ -3208,9 +3239,13 @@ def _line_ifs(src: bytes, end: int) -> bytes | None:
                 if t.startswith(b"IFS="):
                     v = t[4:]
                     # a dynamic value (`IFS=$(x)`, `IFS=$y`) cannot
-                    # be evaluated statically — the assignment is
-                    # skipped rather than guessed (Devin round-37)
-                    if b"$" not in v and b"`" not in v:
+                    # be evaluated statically — it REPLACES IFS with
+                    # an unknown one: the tracked value resets rather
+                    # than keeping the stale earlier literal (Devin on
+                    # #1393, round-47 review — verified live).
+                    if b"$" in v or b"`" in v:
+                        ifs = None
+                    else:
                         ifs = v
     return ifs
 
@@ -4068,7 +4103,8 @@ def _seg_prov(body: bytes, prov: str,
     if v == "sink":
         return "own"       # the stage emits a replacement, not content
     # "other" — a pass-through or unknown head.
-    key, args, sfd, head_end = _seg_head_args(body)
+    tgt0: dict = {}
+    key, args, sfd, head_end = _seg_head_args(body, tgt0)
     if key is not None:
         fd_in = sfd is None or sfd.get(0, _FD_IN) == _FD_IN
         if key == b"cat":
@@ -4094,6 +4130,78 @@ def _seg_prov(body: bytes, prov: str,
             if (key not in (b"split", b"csplit")
                     and any(b"scripts/" in arg for arg in args)):
                 prov = "script"
+            elif key in (b"split", b"csplit"):
+                # split/csplit write chunks to FILES — the input
+                # stream never reaches stdout UNLESS a `--filter CMD`
+                # pipes each chunk to CMD (Codex on #130, round-41).
+                # The filter's own stdout decides: `--filter=cat`
+                # forwards, `--filter=true`/`false` emit nothing
+                # (Devin/Codex on #130, round-42 — verified live),
+                # and a filter that EXECUTES its stdin (`sh`) is a
+                # dep. GNU getopt_long resolves unique prefixes —
+                # `--fil=cat` is `--filter` (CodeRabbit on #1959,
+                # round-42 — verified live; csplit has no --fi*
+                # option, so the prefix check is split-only). The
+                # `-n` K/N stdout modes need a seekable input and
+                # abort on the pipe ("cannot determine file size"),
+                # so they still own the stream — verified live.
+                filt, finput, tout = _split_scan(key, args)
+                # split's INPUT: a named operand wins regardless of a
+                # `< f` rebind (`split -n r/1/1 F </dev/null` still
+                # emits F's chunk — Devin on #1959, round-47 review
+                # — verified live); otherwise the stage's stdin —
+                # itself possibly a `< f` file, so `--filter=sh -
+                # <scripts/x.sh` feeds the SCRIPT to the filter
+                # (Codex on #130/#1959, round-47 — verified live).
+                src = finput
+                if src is None or _stdin_path_operand(src):
+                    src = tgt0.get(0)
+                    if src is not None and _stdin_path_operand(src):
+                        src = None   # `< /dev/stdin` keeps the pipe
+                if tout and filt is None:
+                    # `-n K/N`/`l/K/N`/`r/K/N` print the selected
+                    # chunk to stdout — the INPUT flows through like
+                    # a reader's (CodeRabbit on #130, round-46 review
+                    # — verified live: `split -n r/1/1` streams a
+                    # pipe, `split -n 1/1 F` streams F). A named FILE
+                    # replaces the upstream pipe; `-`/no operand
+                    # keeps it.
+                    if src is not None:
+                        prov = ("script" if b"scripts/" in src
+                                else "own")
+                elif filt is None or filt == b"" or filt == b"-":
+                    # A missing or `-` filter operand is not a
+                    # runnable command — `split --filter -` execs `-`
+                    # (ENOENT).
+                    prov = "own"
+                else:
+                    # The filter sees split's INPUT chunks — a named
+                    # FILE or `< f` rebind replaces the upstream pipe
+                    # (`split --filter=cat /dev/null` forwards the
+                    # file — Devin on #130/#12, round-43 — verified
+                    # live); `sh` runs its stdin through `$SHELL -c`,
+                    # so a LIST like `cat | sh`/`true; sh` executes
+                    # too — `_sub_flow`, not _stdin_exec_head
+                    # (CodeRabbit on #130, round-43 — verified live).
+                    if src is not None:
+                        prov = ("script" if b"scripts/" in src
+                                else "own")
+                    v3 = _sub_flow(filt)
+                    if v3 == "exec":
+                        return (None
+                                if prov in ("up", "script", "thru")
+                                else "own")
+                    if v3 == "none":
+                        prov = "own"
+                    # "fwd" — the filter re-emits the chunks onward.
+            elif (key == b"xargs"
+                    and _xargs_argfile(args) is _XARGS_EXIT):
+                # `--help`/`--version`/a parse error exits BEFORE the
+                # argfile or stdin is touched — the stage emits only
+                # usage text while the pipe stays unread for a
+                # SIBLING (`xargs -a - --help; sh` runs the pipe —
+                # Devin on #12, round-47 review — verified live).
+                prov = "own"
             elif not fd_in:
                 prov = "own"   # `< file` rebind — the stage (and any
                 # utility it execs) reads the file, not the pipe
@@ -4147,59 +4255,6 @@ def _seg_prov(body: bytes, prov: str,
                 # never proven dead — prov flows on (the round-25
                 # unconditional `prov = "own"` was the under-block).
                 prov = "own"
-            elif key in (b"split", b"csplit"):
-                # split/csplit write chunks to FILES — the input
-                # stream never reaches stdout UNLESS a `--filter CMD`
-                # pipes each chunk to CMD (Codex on #130, round-41).
-                # The filter's own stdout decides: `--filter=cat`
-                # forwards, `--filter=true`/`false` emit nothing
-                # (Devin/Codex on #130, round-42 — verified live),
-                # and a filter that EXECUTES its stdin (`sh`) is a
-                # dep. GNU getopt_long resolves unique prefixes —
-                # `--fil=cat` is `--filter` (CodeRabbit on #1959,
-                # round-42 — verified live; csplit has no --fi*
-                # option, so the prefix check is split-only). The
-                # `-n` K/N stdout modes need a seekable input and
-                # abort on the pipe ("cannot determine file size"),
-                # so they still own the stream — verified live.
-                filt, finput, tout = _split_scan(key, args)
-                if tout and filt is None:
-                    # `-n K/N`/`l/K/N`/`r/K/N` print the selected chunk
-                    # to stdout — the INPUT flows through like a
-                    # reader's (CodeRabbit on #130, round-46 review —
-                    # verified live: `split -n r/1/1` streams a pipe,
-                    # `split -n 1/1 F` streams F). A named FILE
-                    # replaces the upstream pipe; `-`/no operand keeps
-                    # it.
-                    if (finput is not None
-                            and not _stdin_path_operand(finput)):
-                        prov = ("script" if b"scripts/" in finput
-                                else "own")
-                elif filt is None or filt == b"" or filt == b"-":
-                    # A missing or `-` filter operand is not a runnable
-                    # command — `split --filter -` execs `-` (ENOENT).
-                    prov = "own"
-                else:
-                    # The filter sees split's INPUT chunks — a named
-                    # FILE replaces the upstream pipe (`split
-                    # --filter=cat /dev/null` forwards the file, not
-                    # the pipe — Devin on #130/#12, round-43 —
-                    # verified live); `sh` runs its stdin through
-                    # `$SHELL -c`, so a LIST like `cat | sh`/`true; sh`
-                    # executes too — `_sub_flow`, not _stdin_exec_head
-                    # (CodeRabbit on #130, round-43 — verified live).
-                    if (finput is not None
-                            and not _stdin_path_operand(finput)):
-                        prov = ("script" if b"scripts/" in finput
-                                else "own")
-                    v3 = _sub_flow(filt)
-                    if v3 == "exec":
-                        return (None
-                                if prov in ("up", "script", "thru")
-                                else "own")
-                    if v3 == "none":
-                        prov = "own"
-                    # "fwd" — the filter re-emits the chunks onward.
             elif key not in _READER_STDIN_OPS and key not in (
                     _OPAQUE_PROG_HEADS):
                 # File operands replace the input — `head -n 1
@@ -5320,11 +5375,20 @@ def _pipe_to_exec(src: bytes, pos: int) -> bool:
     flow_src: bytes | None = None
     if pos:
         s0 = _command_start(src, pos - 1)
-        _k0, _a0, _f0, _h0 = _seg_head_args(src[s0:pos])
+        tgt0: dict = {}
+        _k0, _a0, _f0, _h0 = _seg_head_args(src[s0:pos], tgt0)
         flow_src = next(
             (_operand_text(a2) for a2 in _a0 if b"scripts/" in a2),
             None)
-        if flow_src is not None and _k0 in (b"split", b"csplit"):
+        # A `< f` stdin rebind is another input the stage reads —
+        # `split --filter=sh - <scripts/x.sh` execs the script through
+        # the filter just like a named operand (Devin on #1959/#12,
+        # round-47 review — verified live).
+        stdin_src = tgt0.get(0)
+        if (_k0 in (b"split", b"csplit")
+                and (flow_src is not None
+                     or (stdin_src is not None
+                         and b"scripts/" in stdin_src))):
             # Whether the file's bytes enter the stream is the stage's
             # OWN provenance question — `split -n K/N x` emits one
             # chunk to stdout, bare `split x` writes chunk files and
@@ -5948,7 +6012,8 @@ def _redir_target(t: bytes, q: list, i: int) -> tuple:
     return (t[i:j], j) if j > i else (None, i)
 
 
-def _word_pending_target(fds: dict, fd, mode: str, raw: bytes) -> None:
+def _word_pending_target(fds: dict, fd, mode: str, raw: bytes,
+                         tgts: dict | None = None) -> None:
     """Apply a redirect whose target arrived as the NEXT word
     (`> f`, `0<& 3`, `>& $FD`). `raw` is the raw word — quoting decides
     whether a `$`/backtick expands (single-quoted/escaped bytes are
@@ -5957,6 +6022,11 @@ def _word_pending_target(fds: dict, fd, mode: str, raw: bytes) -> None:
     filename form; 'dup_in' (from `<&`) treats a non-numeric word as
     invalid bash — UNKNOWN, which counts as rebound (fail closed)."""
     t, _, _e = _word_unquote(raw)
+    if t[:2] == b"<(" and mode in ("file", "dup_in"):
+        pass  # process-sub — falls through to the class bind below
+    elif (tgts is not None and fd == 0 and mode == "file"
+          and _fd_alias_target(t) is None):
+        tgts[0] = t  # a real filename bound to stdin
     if t[:2] == b"<(" and mode in ("file", "dup_in"):
         # `< <(BODY)` — the inner body inherits the outer stdin and its
         # captured stdout becomes the fd's content: `sh < <(cat)` still
@@ -5994,7 +6064,8 @@ def _word_pending_target(fds: dict, fd, mode: str, raw: bytes) -> None:
         fds[fd] = _FD_UNKNOWN
 
 
-def _word_redirects(raw: bytes, fds: dict) -> tuple:
+def _word_redirects(raw: bytes, fds: dict,
+                    tgts: dict | None = None) -> tuple:
     """Fold the redirect operators inside word `raw` into `fds`.
 
     Returns (arg, pending): `arg` is the unquoted text before the first
@@ -6142,6 +6213,9 @@ def _word_redirects(raw: bytes, fds: dict) -> tuple:
                 pending = (fd, "file")
             else:
                 tgt_fd = _fd_alias_target(tgt)
+                if (tgts is not None and fd == 0
+                        and tgt_fd is None):
+                    tgts[0] = tgt
                 fds[fd] = (_FD_FILE if tgt_fd is None
                            else fds.get(tgt_fd, _FD_UNKNOWN))
             continue
@@ -6170,6 +6244,8 @@ def _word_redirects(raw: bytes, fds: dict) -> tuple:
             pending = (fd, "file")
         else:
             tgt_fd = _fd_alias_target(tgt)
+            if tgts is not None and fd == 0 and tgt_fd is None:
+                tgts[0] = tgt
             fds[fd] = (_FD_FILE if tgt_fd is None
                        else fds.get(tgt_fd, _FD_UNKNOWN))
     return arg, pending
@@ -8211,6 +8287,39 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                             akey = _command_key(
                                 enclosing[sub[ahi][0]:sub[ahi][1]])
                             if akey in _NONEXEC_HEADS:
+                                if akey in (b"split", b"csplit"):
+                                    # split writes chunk FILES — the
+                                    # operand is read, not printed, so
+                                    # `-exec split x \; | sh` reaches
+                                    # an EMPTY stdout (Devin on #130,
+                                    # round-47 review — verified live).
+                                    # But `-n K/N` emits the selected
+                                    # chunk and `--filter CMD` execs
+                                    # the operand's bytes through CMD
+                                    # (`-exec split --filter=sh x \;`
+                                    # runs x — Devin on #130,
+                                    # round-47 — verified live).
+                                    aargs = [_word_text(
+                                        enclosing[aw[0]:aw[1]])
+                                        for aw in sub[ahi + 1:]]
+                                    afilt, _afin, atout = _split_scan(
+                                        akey, aargs)
+                                    if atout:
+                                        return _pipe_to_exec(
+                                            scan,
+                                            cs + len(enclosing))
+                                    if (afilt is not None
+                                            and afilt
+                                            not in (b"", b"-")):
+                                        v5 = _sub_flow(afilt)
+                                        if v5 == "exec":
+                                            return True
+                                        if v5 == "none":
+                                            return False
+                                        return _pipe_to_exec(
+                                            scan,
+                                            cs + len(enclosing))
+                                    return False
                                 # `echo x`/`cat x` print the operand —
                                 # a dep only when the find command's
                                 # own stdout pipes to an exec head
