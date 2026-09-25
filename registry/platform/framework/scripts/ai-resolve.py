@@ -861,7 +861,10 @@ def _hd_sub_spans(body: bytes) -> list[tuple[int, int]]:
 # the inner command's stdin is /dev/null, not the pipe (Codex on
 # #128/#1382, round-20 review). Deliberately NOT in _EXEC_WRAPPERS:
 # stdin flow is not delegated to the inner command.
-_ARGV_PROGRAM_WRAPPERS = frozenset({b"xargs"})
+# `find` spawns a command after `-exec`/`-execdir`/`-ok`/`-okdir`
+# (`find . -exec sh -c 'P' \;` — Codex on #128, round-25 review);
+# `flock FILE CMD…` runs CMD holding the lock (`flock L sh -c 'P'`).
+_ARGV_PROGRAM_WRAPPERS = frozenset({b"xargs", b"find", b"flock"})
 _ARGV_PROGRAM_WRAPPER_OPTOPS = {
     # Only options that take a SEPARATE operand word. GNU xargs binds
     # `-e`/`-l`/`--eof`/`--replace`/`--max-lines` only as an attached
@@ -873,6 +876,13 @@ _ARGV_PROGRAM_WRAPPER_OPTOPS = {
                          b"-L", b"-n", b"-P", b"-R", b"-s",
                          b"--arg-file", b"--delimiter",
                          b"--max-args", b"--max-procs", b"--max-chars"}),
+    # `flock`'s operand-taking options — `-c`/`--command` binds the
+    # command STRING, `-w`/`--timeout`/`-E`/`--conflict-exit-code`
+    # bind values; the remaining flags are boolean (Codex on #128,
+    # round-25 review).
+    b"flock": frozenset({b"-c", b"-w", b"-E",
+                         b"--command", b"--timeout",
+                         b"--conflict-exit-code"}),
 }
 
 
@@ -880,7 +890,20 @@ def _argv_wrap_start(enc_words: list, hi: int, enclosing: bytes):
     """Index of the wrapped command's first word after an argv-spawning
     wrapper head at `hi`, or None."""
     key = _command_key(enclosing[enc_words[hi][0]:enc_words[hi][1]])
+    if key == b"find":
+        # The argv starts after `-exec`/`-execdir`/`-ok`/`-okdir` —
+        # find's other words are paths and tests, not the command
+        # (Codex on #128, round-25 review).
+        for k in range(hi + 1, len(enc_words)):
+            if _word_text(enclosing[enc_words[k][0]:
+                                     enc_words[k][1]]) in (
+                    b"-exec", b"-execdir", b"-ok", b"-okdir"):
+                return k + 1 if k + 1 < len(enc_words) else None
+        return None
     optops = _ARGV_PROGRAM_WRAPPER_OPTOPS.get(key, frozenset())
+    # `flock FILE CMD…` — the FIRST positional is the lockfile; the
+    # command argv begins one word later (Codex on #128, round-25).
+    pos_skip = 1 if key == b"flock" else 0
     ended = False
     j = hi + 1
     while j < len(enc_words):
@@ -893,18 +916,27 @@ def _argv_wrap_start(enc_words: list, hi: int, enclosing: bytes):
                 continue
             j += 1
             continue
+        if pos_skip:
+            pos_skip -= 1
+            j += 1
+            continue
         return j
     return None
 
 
 def _xargs_argfile(args: list):
-    """The operand of the LAST xargs `-a`/`--arg-file` before `--`, or
-    None when argv items come from stdin. GNU xargs lets a later `-a`
-    replace an earlier one (`-a /dev/null -a -` still reads the pipe —
-    verified live). `-a F`, `--arg-file F`, glued `-aF` and
-    `--arg-file=F` all bind it (Devin + Codex on #128/#1382)."""
+    """The operand of the LAST xargs `-a`/`--arg-file` before the
+    utility argv, or None when argv items come from stdin. GNU xargs
+    lets a later `-a` replace an earlier one (`-a /dev/null -a -`
+    still reads the pipe — verified live). `-a F`, `--arg-file F`,
+    glued `-aF` and `--arg-file=F` all bind it (Devin + Codex on
+    #128/#1382). Option parsing ends at the first non-option word — a
+    `-a`-shaped UTILITY argument is not an xargs option (`xargs -a
+    /dev/null echo -a -` prints `-a -`, Devin on #128, round-25
+    review — verified live)."""
     found: bytes | None = None
     seen = False
+    optops = _ARGV_PROGRAM_WRAPPER_OPTOPS[b"xargs"]
     i = 0
     n = len(args)
     while i < n:
@@ -926,6 +958,12 @@ def _xargs_argfile(args: list):
         elif a.startswith(b"-a") and len(a) > 2:
             seen = True
             found = a[2:]
+        elif a != b"-" and a.startswith(b"-"):
+            if a in optops:
+                i += 2
+                continue
+        else:
+            break          # utility argv begins — its `-a` is its arg
         i += 1
     return found if seen else None
 
@@ -1023,6 +1061,64 @@ def _operand_is_program(enc_words: list, wi: int,
     key = _command_key(enclosing[enc_words[hi][0]:enc_words[hi][1]])
     if key == b"eval":
         return True
+    if key == b"find":
+        # `-exec`/`-execdir`/`-ok`/`-okdir` introduce an argv the
+        # action execs — it runs to `;`/`+` (or end of words) and each
+        # action execs its own argv (Codex on #128, round-25 review —
+        # verified live).
+        k = hi + 1
+        while k < len(enc_words):
+            t = _word_text(enclosing[enc_words[k][0]:enc_words[k][1]])
+            if t in (b"-exec", b"-execdir", b"-ok", b"-okdir"):
+                start = k + 1
+                end = start
+                while end < len(enc_words):
+                    tt = _word_text(
+                        enclosing[enc_words[end][0]:enc_words[end][1]])
+                    if tt in (b";", b"+"):
+                        break
+                    end += 1
+                if start <= wi < end:
+                    return _operand_is_program(
+                        enc_words[start:end], wi - start, enclosing)
+                k = end
+            k += 1
+        return False
+    if key == b"flock":
+        # `-c`/`--command` binds a command STRING (program text);
+        # otherwise the word after the lockfile positional begins the
+        # command argv — `flock L sh -c 'P'` runs P (Codex on #128,
+        # round-25 review — verified live).
+        flock_optops = _ARGV_PROGRAM_WRAPPER_OPTOPS[b"flock"]
+        pos0 = ended = False
+        j = hi + 1
+        while j < len(enc_words):
+            t = _word_text(enclosing[enc_words[j][0]:enc_words[j][1]])
+            if not ended and t != b"-" and t.startswith(b"-"):
+                if t == b"--":
+                    ended = True
+                elif t in (b"-c", b"--command"):
+                    if j + 1 == wi:
+                        return True
+                    j += 2
+                    continue
+                elif t.startswith(b"--command="):
+                    if j == wi:
+                        return True
+                    j += 1
+                    continue
+                elif t in flock_optops:
+                    j += 2
+                    continue
+                j += 1
+                continue
+            if not pos0:
+                pos0 = True      # the lockfile operand
+                j += 1
+                continue
+            return _operand_is_program(enc_words[j:], wi - j,
+                                       enclosing)
+        return False
     if key in _ARGV_PROGRAM_WRAPPERS:
         # The program operand belongs to the command the wrapper execs —
         # evaluate it as that command's argv.
@@ -1385,6 +1481,10 @@ _EXEC_WRAPPERS = frozenset({
     # `nice` execs its COMMAND — `nice -n 10 sh -c 'P'` runs P
     # (Codex on #128, round-24 review — verified live).
     b"nice",
+    # `setsid` runs its program in a new session — `setsid sh -c 'P'`
+    # and `setsid --wait …` still exec P; its flags are all boolean
+    # (Codex on #128, round-25 review — verified live).
+    b"setsid",
 })
 # Positional words a wrapper consumes BEFORE the wrapped command —
 # `timeout DURATION sh -c P` execs `sh` after its duration operand
@@ -1411,6 +1511,7 @@ _WRAPPER_OPT_OPERAND = {
     # attached, `-n 10`/`--adjustment 10` take the next word (Codex on
     # #128, round-24 review — verified live).
     b"nice": frozenset({b"-n", b"--adjustment"}),
+    b"setsid": frozenset(),
     b"nohup": frozenset(),
     b"command": frozenset(),
 }
@@ -1975,10 +2076,105 @@ def _seg_head_args(body: bytes) -> tuple:
     return key, args, scratch, words[hi][1]
 
 
+def _sort_files0(args: list):
+    """The operand of sort's `--files0-from` — a FILE holding the
+    NUL-delimited input list — or None. `--files0-from F` and
+    `--files0-from=F` bind it; the list replaces stdin input, so a
+    real file leaves the shared stdin unread while a `-`/fd-0 alias
+    drains it as the list (Devin on #128, round-25 review — verified
+    live)."""
+    found: bytes | None = None
+    for i, a in enumerate(args):
+        if a == b"--":
+            break
+        if a == b"--files0-from":
+            found = args[i + 1] if i + 1 < len(args) else b""
+        elif a.startswith(b"--files0-from="):
+            found = a[len(b"--files0-from="):]
+    return found
+
+
 def _stdin_path_operand(t: bytes) -> bool:
     """True when operand `t` names the pipe itself — `-`, `/dev/stdin`,
     `/dev/fd/0`, `/proc/self/fd/0` (Codex on #1957, round-14 review)."""
     return t == b"-" or _fd_alias_target(t) == 0
+
+
+# The repo root the current resolve runs against — `script_dep_block`
+# binds it for its duration so content-aware gates can read `cat`-ed
+# capture files (a single-word `date +$(cat F)` capture still emits —
+# Devin on #128, round-25 review — verified live). None = no probing.
+_RESOLVE_ROOT: Path | None = None
+
+
+def _date_capture_dep(inner: bytes) -> bool:
+    """True when an UNQUOTED `+$(INNER)`/`+`INNER`` capture can still
+    join the format operand — the bytes reach a downstream exec unless
+    the expansion PROVABLY field-splits to other than one word. `cat
+    FILE…` with every operand a readable file gives an exact count
+    (one word → dep; an empty or >=2-word capture makes `date +`/`date
+    +a b` emit nothing or error); `echo`/`printf` of literal operands
+    counts the joined fields the same way. Every other inner is
+    indeterminate — fail closed (Devin on #128, round-25 review —
+    verified live on GNU date)."""
+    words = _shell_words(_mask_parens(inner))
+    if not words:
+        return True
+    key = _command_key(inner[words[0][0]:words[0][1]])
+    if key == b"cat":
+        total, seen = 0, False
+        i = 1
+        while i < len(words):
+            t = _operand_text(inner[words[i][0]:words[i][1]])
+            if t == b"--":
+                i += 1
+                continue
+            if t.startswith(b"-") and t != b"-":
+                i += 1
+                continue      # display flags keep the word count
+            if _stdin_path_operand(t) or _RESOLVE_ROOT is None:
+                return True
+            try:
+                p = _RESOLVE_ROOT / t.decode(
+                    "utf-8", "surrogateescape")
+                if not p.is_file():
+                    return True
+                seen = True
+                total += len(p.read_bytes().split())
+            except OSError:
+                return True
+            i += 1
+        # no file operand — cat reads the (indeterminate) pipe itself
+        return not seen or total == 1
+    if key in (b"echo", b"printf"):
+        if _RESOLVE_ROOT is None:
+            return True
+        parts: list[bytes] = []
+        i = 1
+        while i < len(words):
+            t = _operand_text(inner[words[i][0]:words[i][1]])
+            if t.startswith(b"-") and t != b"-":
+                i += 1
+                continue
+            parts.append(t)
+            i += 1
+        return len(b" ".join(parts).split()) == 1
+    return True
+
+
+def _sub_inner(src: bytes, a: int) -> bytes:
+    """Body text of the `$(`/`<(`/`>(`/backtick region starting at
+    `a`, or b"" — used by the date capture gate (Devin on #128,
+    round-25 review)."""
+    if src[a:a + 1] == b"`":
+        k = a + 1
+        while k < len(src) and src[k] != 0x60:
+            k += 2 if src[k] == 0x5C else 1
+        return src[a + 1:k]
+    for s, e in _substitution_spans(src):
+        if s == a:
+            return src[a + 2:e - 1 if src[e - 1:e] == b")" else e]
+    return b""
 
 
 def _operand_feeds_stream(a: bytes) -> bool:
@@ -2076,6 +2272,14 @@ def _seg_drains(body: bytes) -> bool:
         ops = [a for a in args if _operand_feeds_stream(a) or (
             not a.startswith(b"-") and a != b"--")]
     else:
+        if key == b"sort":
+            # `--files0-from F` reads the input-file LIST from F —
+            # the shared stdin is left untouched; `-`/fd-0 aliases
+            # drain it as the list (Devin on #128, round-25 review —
+            # verified live).
+            f0 = _sort_files0(args)
+            if f0 is not None:
+                return _stdin_path_operand(f0)
         ops = _reader_operands(key, args)
     if ops and not any(_operand_feeds_stream(o) for o in ops):
         return False
@@ -2311,6 +2515,12 @@ def _seg_prov(body: bytes, prov: str):
         elif key in _EMIT_PIPE_READERS:
             if any(b"scripts/" in arg for arg in args):
                 prov = "script"
+            elif not fd_in:
+                prov = "own"   # `< file` rebind — the stage (and any
+                # utility it execs) reads the file, not the pipe
+                # (`xargs -a /dev/null cat </dev/null` emits
+                # /dev/null's bytes — Devin on #128, round-25 review
+                # — verified live).
             elif (key == b"xargs"
                     and _xargs_argfile(args) is not None
                     and not _stdin_path_operand(_xargs_argfile(args))):
@@ -2332,8 +2542,14 @@ def _seg_prov(body: bytes, prov: str):
                     prov = "own"
                 # "other"/"none" — the utility reads and re-emits the
                 # live pipe (cat), so prov flows on.
-            elif not fd_in:
-                prov = "own"   # `head <f` reads the file, not stdin
+            elif (key == b"sort"
+                    and _sort_files0(args) is not None
+                    and not _stdin_path_operand(_sort_files0(args))):
+                # `sort --files0-from F` reads the filename list from
+                # F — the shared stdin is ignored and sort emits
+                # unrelated bytes (Devin on #128, round-25 review —
+                # verified live).
+                prov = "own"
             elif key not in _READER_STDIN_OPS and key not in (
                     _OPAQUE_PROG_HEADS):
                 # File operands replace the input — `head -n 1
@@ -2636,14 +2852,15 @@ def _sub_flow(a: bytes) -> str:
                 # the conservative may-forward verdict stands (Codex on
                 # #1957, round-21 review — verified on GNU date).
                 tail = prev_body[hend:].split()
-                # Quoted-only: `date "+$(cat)"` emits the capture,
-                # but UNQUOTED `date +$(cat)`/`date +`cat`` field-
-                # splits it into extra operands — date errors and
-                # nothing reaches a downstream exec (Codex on #1957,
-                # round-24 review — verified live).
+                # Quoted `date "+$(cat)"` emits the capture. UNQUOTED
+                # `date +$(cat)`/`date +`cat`` field-splits — a split
+                # to !=1 word makes date error out, but a SINGLE-word
+                # capture still joins the format (Devin on #128,
+                # round-25 review — verified live).
                 emits = (bool(tail)
                          and tail[-1].lstrip(b"\"'").startswith(b"+")
-                         and tail[-1].count(b'"') % 2 == 1)
+                         and (tail[-1].count(b'"') % 2 == 1
+                              or _date_capture_dep(body)))
             else:
                 # Emit heads echo their argv to fd1 — the substitution
                 # being OPENED supplies that argv, so its capture lands
@@ -2820,16 +3037,16 @@ def _emit_forwards_stdin(key: bytes, win: bytes, head_end: int) -> bool:
                        b - 1 if closed and win[b - 1:b] == b")" else b]
         if not closed or _sub_reads_stdin(body):
             if key == b"date":
-                # `date` echoes only a `+FORMAT` operand, and a capture
-                # joins it only when the substitution sits INSIDE
-                # double quotes — `date "+$(cat)"` emits it, but
-                # UNQUOTED `date +$(cat)`/`date +`cat`` field-splits
-                # into extra operands and date errors (Codex on
-                # #1957, round-24 review — verified live).
+                # `date` echoes only a `+FORMAT` operand — `date
+                # "+$(cat)"` emits the capture inside double quotes;
+                # an UNQUOTED `+$(…)`/`+`…`` still joins it when the
+                # capture field-splits to one word (Devin on #128,
+                # round-25 review — verified live).
                 w = next((w for w in words if w[0] <= a < w[1]), None)
                 if (w is None
                         or _word_text(win[w[0]:w[1]])[:1] != b"+"
-                        or win[w[0]:a].count(b'"') % 2 == 0):
+                        or (win[w[0]:a].count(b'"') % 2 == 0
+                            and not _date_capture_dep(body))):
                     continue
             return True
     return False
@@ -4434,10 +4651,12 @@ def _span_output_exec(src: bytes, a: int, after: int | None = None) -> bool:
         rel_d = a - cs
         w = next((w for w in words if w[0] <= rel_d < w[1]), None)
         if (w is None or _word_text(win[w[0]:w[1]])[:1] != b"+"
-                or win[w[0]:rel_d].count(b'"') % 2 == 0):
-            # An UNQUOTED `+$(…)`/`+`…`` field-splits into extra
-            # operands — date errors and nothing reaches a downstream
-            # exec (Codex on #1957, round-24 review — verified live).
+                or (win[w[0]:rel_d].count(b'"') % 2 == 0
+                    and not _date_capture_dep(_sub_inner(src, a)))):
+            # An UNQUOTED `+$(…)`/`+`…`` reaches a downstream exec
+            # only when its capture provably field-splits to one
+            # word — a >=2-word split errors inside date (Codex on
+            # #1957 round-24 + Devin on #128, round-25 review).
             return False
     # The enclosing command's window stops AT the substitution opener,
     # so the pipe check scans from `after` — just past the
@@ -5752,6 +5971,18 @@ def script_dep_block(plugin_dir: Path, src_bytes: bytes,
     Under a tag:/sha: pin, `pinned_scripts` carries the scripts/-relative
     paths the PINNED git tree holds — the worktree's is_file() would honour
     ignored/untracked plants and index-hidden deletions the pin never saw."""
+    # Content-aware gates probe files under the repo root while the scan
+    # runs (Devin on #128, round-25 review).
+    global _RESOLVE_ROOT
+    _RESOLVE_ROOT = plugin_dir
+    try:
+        return _script_dep_block(plugin_dir, src_bytes, pinned_scripts)
+    finally:
+        _RESOLVE_ROOT = None
+
+
+def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
+                      pinned_scripts: set[str] | None = None) -> bool:
     sdir = plugin_dir / "scripts"
     declared = declared_consumer_scripts(src_bytes)
     # A POSIX backslash-newline continuation is part of one logical
@@ -5920,6 +6151,25 @@ def script_dep_block(plugin_dir: Path, src_bytes: bytes,
                     # `bash "x.sh;$(printf safe)"` still opens the
                     # literal `x.sh;safe` name (Devin on #128, round-20).
                     return True
+            # The path may sit inside a `<(…)` region — then the INNER
+            # head's emit operand lands on an fd the enclosing head can
+            # execute (`source <(printf 'bash x')` runs printf's text —
+            # Codex on #128, round-25 review — verified live).
+            for ra, rb in _substitution_spans(enclosing):
+                if not (ra <= epos < rb):
+                    continue
+                if enclosing[ra:ra + 1] == b"<":
+                    inner = enclosing[ra + 2:
+                        rb - 1 if enclosing[rb - 1:rb] == b")" else rb]
+                    iws = _shell_words(inner)
+                    ihi = _effective_head(iws, inner)
+                    ikey = (_command_key(
+                        inner[iws[ihi][0]:iws[ihi][1]])
+                        if ihi is not None and ihi >= 0 else b"")
+                    if (ikey in _STDIN_EMIT_HEADS
+                            and _span_output_exec(scan, cs + ra)):
+                        return True
+                break
             return bool(quoted) and _operand_is_program(
                 enc_words, enc_words.index(w), enclosing)
 
