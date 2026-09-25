@@ -10607,6 +10607,12 @@ def test_pipe_to_exec_round35(tmp_path):
             # `+echo HIT` is a valid format and reaches sh
             b"IFS=; date +$(cat scripts/x.sh) | sh",
             b"IFS=z; date +$(cat scripts/x.sh) | sh",
+            # an IFS whose value contains parens survives paren-
+            # stripping — `x(y` matches nothing in `echo HIT`
+            b"IFS='x(y'; date +$(cat scripts/x.sh) | sh",
+            b'IFS="x(y"; date +$(cat scripts/x.sh) | sh',
+            # `,` never appears in `echo HIT` → still one field
+            b"IFS=,; date +$(cat scripts/x.sh) | sh",
             # a unique GNU prefix still binds its value operand —
             # `numeric` is --sort's argument; sort re-emits the pipe
             b"cat scripts/x.sh | sort --so numeric | sh",
@@ -10639,6 +10645,9 @@ def test_pipe_to_exec_round35(tmp_path):
             # shell — the capture splits on the default IFS
             b"(IFS=); date +$(cat scripts/x.sh) | sh",
             b"x=$(IFS=); date +$(cat scripts/x.sh) | sh",
+            # a dynamic `IFS=$(...)` value can't be evaluated — the
+            # default split applies
+            b"IFS=$(echo ,); date +$(cat scripts/x.sh) | sh",
             # an all-whitespace IFS behaves like the default split
             b'IFS=" "; date +$(cat scripts/x.sh) | sh',
             # the plain 2-word capture still errors the same way

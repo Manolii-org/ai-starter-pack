@@ -2543,19 +2543,33 @@ def _ifs_fields(data: bytes, ifs: bytes | None) -> list:
         return data.split()
     nonws = bytes(c for c in ifs if c not in b" \t\n")
     if any(c in b" \t\n" for c in ifs):
-        if nonws and re.search(rb"[" + re.escape(nonws) + rb"]", data):
-            return [b"", b""]       # provably ≥2 fields
-        return data.split()
+        if not nonws:
+            return data.split()
+        # Mixed IFS — a delimiter is [ws* nonws ws*] or a ws run;
+        # trailing delimiters emit nothing (`IFS=', '` gives `echo,`
+        # one field — Devin round-37, verified live) while a leading
+        # non-whitespace delimiter emits an empty head field.
+        d = re.sub(rb"[\s" + re.escape(nonws) + rb"]+$", b"",
+                   data.strip(b" \t\n"))
+        if not d:
+            return []
+        parts = [p for p in re.split(
+            rb"[\s" + re.escape(nonws) + rb"]+", d) if p]
+        lead = re.match(rb"\s*", data)
+        if (lead.end() < len(data)
+                and data[lead.end():lead.end() + 1] in nonws):
+            parts.insert(0, b"")
+        return parts
     if not nonws:
         return [data]
-    # Pure non-whitespace IFS — every delimiter emits a field; a
-    # LEADING one also emits an empty head field (`IFS=,` gives `,a`
-    # two fields, `a,` one — verified live).
-    parts = [p for p in re.split(
-        rb"[" + re.escape(nonws) + rb"]+", data) if p]
-    if data[:1] in nonws:
-        parts.insert(0, b"")
-    return parts
+    # Pure non-whitespace IFS — EVERY delimiter emits a field (no
+    # collapsing: `IFS=,` gives `a,,` two fields — Devin round-37,
+    # verified live); only the last trailing empty drops (`a,`→1,
+    # `,a`→2 — verified live).
+    parts = re.split(rb"[" + re.escape(nonws) + rb"]", data)
+    if parts and parts[-1] == b"":
+        parts.pop()
+    return parts or [b""]
 
 
 def _line_ifs(src: bytes, end: int) -> bytes | None:
@@ -2568,11 +2582,34 @@ def _line_ifs(src: bytes, end: int) -> bytes | None:
     live). None = shell default."""
     ifs = None
     region = src[:end]
-    for _ in range(4):              # strip nested subshell/capture
-        r2 = re.sub(rb"\([^()]*\)", b"", region)
-        if r2 == region:
-            break
-        region = r2
+    # Strip `(...)`/`$(...)` spans only where the paren is OUTSIDE
+    # quotes — a quoted `IFS="x(y"` or `IFS='('` value survives, and
+    # an `IFS=$(...)` dynamic value keeps its `$` marker so the
+    # assignment is skipped below (Devin on #128, round-37 review).
+    out = bytearray()
+    i = 0
+    depth = 0
+    while i < len(region):
+        c = region[i:i + 1]
+        if c in (b'"', b"'"):
+            j = region.find(c, i + 1)
+            end = len(region) if j < 0 else j + 1
+            if not depth:
+                out += region[i:end]
+            i = end
+            continue
+        if c == b"(":
+            depth += 1
+            i += 1
+            continue
+        if c == b")" and depth:
+            depth -= 1
+            i += 1
+            continue
+        if not depth:
+            out += c
+        i += 1
+    region = bytes(out)
     for stmt in re.split(rb"[;\n&|]+", region):
         wsv = _shell_words(_mask_parens(stmt))
         if (wsv and all(
@@ -2583,7 +2620,12 @@ def _line_ifs(src: bytes, end: int) -> bytes | None:
                     continue
                 t = _operand_text(stmt[w0:w1])
                 if t.startswith(b"IFS="):
-                    ifs = t[4:]
+                    v = t[4:]
+                    # a dynamic value (`IFS=$(x)`, `IFS=$y`) cannot
+                    # be evaluated statically — the assignment is
+                    # skipped rather than guessed (Devin round-37)
+                    if b"$" not in v and b"`" not in v:
+                        ifs = v
     return ifs
 
 
