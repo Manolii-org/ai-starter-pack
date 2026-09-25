@@ -898,22 +898,36 @@ def _argv_wrap_start(enc_words: list, hi: int, enclosing: bytes):
 
 
 def _xargs_argfile(args: list):
-    """The operand of xargs's `-a`/`--arg-file` option in `args`, or
-    None — `-a F`, `--arg-file F`, glued `-aF` and `--arg-file=F` all
-    bind it (Devin + Codex on #128/#1382, round-24 review)."""
+    """The operand of the LAST xargs `-a`/`--arg-file` before `--`, or
+    None when argv items come from stdin. GNU xargs lets a later `-a`
+    replace an earlier one (`-a /dev/null -a -` still reads the pipe —
+    verified live). `-a F`, `--arg-file F`, glued `-aF` and
+    `--arg-file=F` all bind it (Devin + Codex on #128/#1382)."""
+    found: bytes | None = None
+    seen = False
     i = 0
-    while i < len(args):
+    n = len(args)
+    while i < n:
         a = args[i]
         if a == b"--":
             break
         if a in (b"-a", b"--arg-file"):
-            return args[i + 1] if i + 1 < len(args) else b""
+            seen = True
+            if i + 1 < n:
+                found = args[i + 1]
+                i += 2
+            else:
+                found = b""
+                i += 1
+            continue
         if a.startswith(b"--arg-file="):
-            return a[len(b"--arg-file="):]
-        if a.startswith(b"-a") and len(a) > 2:
-            return a[2:]
+            seen = True
+            found = a[len(b"--arg-file="):]
+        elif a.startswith(b"-a") and len(a) > 2:
+            seen = True
+            found = a[2:]
         i += 1
-    return None
+    return found if seen else None
 
 
 def _xargs_utility(args: list) -> list:

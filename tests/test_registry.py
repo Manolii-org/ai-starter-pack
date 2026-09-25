@@ -9779,6 +9779,9 @@ def test_pipe_to_exec_round24(tmp_path):
             # `sh -c 'sh'` executes it
             b"cat scripts/x.sh | xargs -a /dev/null sh -c 'sh'",
             b"cat scripts/x.sh | xargs --arg-file=/dev/null sh -c 'sh'",
+            # a LATER `-a` replaces an earlier one (GNU semantics) —
+            # `-` wins and the pipe is read as items again
+            b"cat scripts/x.sh | xargs -a /dev/null -a - echo | sh",
             # `sh -c > /dev/null CMD` — redirect words are skipped;
             # the real command string follows
             b"cat scripts/x.sh | sh -c > /dev/null sh",
@@ -9816,6 +9819,9 @@ def test_pipe_to_exec_round24(tmp_path):
             # `xargs -a F` + a non-executing utility — the default
             # `echo` sinks the live pipe
             b"cat scripts/x.sh | xargs -a /dev/null echo | sh",
+            # a LATER `-a` replaces `-` with a real file — the items
+            # are no longer the pipe, and `echo` sinks it
+            b"cat scripts/x.sh | xargs -a - -a /dev/null echo | sh",
             # `mapfile`/`readarray` without `-n` drain stdin to EOF —
             # nothing left for `; sh`
             b"cat scripts/x.sh | sh -c 'mapfile; sh'",
