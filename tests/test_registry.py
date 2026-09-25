@@ -12068,3 +12068,75 @@ def test_script_dep_round54(tmp_path):
             # stdin to the list file
             b"cat scripts/x.sh | sort --files0-from=/dev/null | sh"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round55(tmp_path):
+    """Round-55 review findings (Codex on #1393, Devin on #130 —
+    all verified live):
+
+    - A shell redirection after the expression attaches to the find
+      command itself, never the expression — `find . -exec sh x \\;
+      >/dev/null` still runs the action. Round-54's positional-word
+      terminal treated `>f`/`2>f`/`<f` words as expression
+      positionals and dropped every action.
+    - A one/two-operand predicate with no remaining operand aborts
+      "missing argument" before traversal — `find … -exec sh x \\;
+      -size` retains no action.
+    - A backtick closer AT the scanned position is still inside the
+      pair's word (`x.sh`` `) — the enclosing command owns it, so
+      `split --filter=sh x`` ` executes the file.
+    - A glued short-option value is validated against the numeric
+      and page domains, not only the fixed-value domain — `pr -obad`
+      aborts "invalid line offset" before the stage forwards.
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts/x.sh").write_text("echo X\n")
+
+    for line in (
+            # redirects after the expression still run the action
+            # (Codex on #1393 — the >/dev/null form was the finding)
+            b"find . -exec sh scripts/x.sh \\; >/dev/null",
+            b"find . -exec sh scripts/x.sh \\; > /tmp/o",
+            b"find . -exec sh scripts/x.sh \\; 2>/dev/null | sh",
+            b"find . -exec sh scripts/x.sh \\; </dev/null",
+            b"find . -exec sh scripts/x.sh \\; 2>&1 | sh",
+            b"find . -exec sh scripts/x.sh \\; >&2",
+            b"find . -exec sh scripts/x.sh \\; <>f",
+            b"find . -exec sh scripts/x.sh \\; 0<f",
+            # heredoc/here-string forms attach too
+            b"find . -exec sh scripts/x.sh \\; <<EOF\nfoo\nEOF",
+            b"find . -exec sh scripts/x.sh \\; << EOF\nfoo\nEOF",
+            b"find . -exec sh scripts/x.sh \\; <<-EOF\nfoo\nEOF",
+            b"find . -exec sh scripts/x.sh \\; <<- EOF\nfoo\nEOF",
+            b"find . -exec sh scripts/x.sh \\; <<<w",
+            # a redirect in the option region leaves the expression
+            # intact
+            b"find -H >f . -exec sh scripts/x.sh \\;",
+            b"find . -exec sh scripts/x.sh \\; >f -name x",
+            b"find . -exec sh scripts/x.sh \\; >f -exec sh"
+            b" scripts/x.sh \\;",
+            # empty `` `` `` at a word's tail still resolves the
+            # operand to the prefixed name (Codex on #1393)
+            b"split --filter=sh scripts/x.sh``",
+            b"sh scripts/x.sh``",
+            b"cat scripts/x.sh`` | sh",
+            # a valid glued value still forwards
+            b"cat scripts/x.sh | pr -o5 | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+    for line in (
+            # a missing predicate operand aborts before any action
+            # (Devin on #130 — `-size` with no number)
+            b"find . -exec sh scripts/x.sh \\; -size",
+            b"find . -exec sh scripts/x.sh \\; -name",
+            b"find . -exec sh scripts/x.sh \\; -newer",
+            # a bare operator at argv end is a shell parse error
+            b"find . -exec sh scripts/x.sh \\; >",
+            # an invalid glued numeric/page value aborts before the
+            # stage forwards (Devin on #130)
+            b"cat scripts/x.sh | pr -obad | sh",
+            b"cat scripts/x.sh | pr --indent=bad | sh",
+            b"cat scripts/x.sh | pr -o bad | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line

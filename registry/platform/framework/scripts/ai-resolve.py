@@ -1217,6 +1217,11 @@ def _find_expr_spans(enc_words: list, hi: int, enclosing: bytes):
             continue
         if t in _FIND_TWO_OP:
             expr_begun = True
+            if k + 2 >= len(enc_words):
+                # A two-operand predicate at argv end aborts "missing
+                # argument" before traversal (Devin on #130, round-55
+                # — verified live).
+                spans.append(("terminal", k, k))
             k += 3
             continue
         if t in _FIND_ONE_OP or _find_newer_op(t):
@@ -1234,6 +1239,11 @@ def _find_expr_spans(enc_words: list, hi: int, enclosing: bytes):
                 # exec,help . -exec …` never runs the action; `all`
                 # excludes help and runs (Codex on #1393, round-47
                 # review — verified live).
+                spans.append(("terminal", k, k))
+            if k + 1 >= len(enc_words):
+                # A predicate with no operand aborts "missing argument"
+                # — the earlier actions never ran (Devin on #130,
+                # round-55 — verified live).
                 spans.append(("terminal", k, k))
             k += 2
             continue
@@ -1263,6 +1273,40 @@ def _find_expr_spans(enc_words: list, hi: int, enclosing: bytes):
             expr_begun = True
         elif t in (b"!", b"(", b")", b","):
             expr_begun = True
+        elif (t[:1] in (b"<", b">")
+                or (len(t) > 1 and t[:1].isdigit()
+                    and t[1:2] in (b"<", b">"))):
+            # A shell redirect attaches to the find command itself,
+            # never the expression — `find . -exec sh x \; >/dev/null`
+            # still runs the action (Codex on #1393, round-55 —
+            # verified live). A word ENDING in a bare operator takes
+            # the NEXT word as its target (`> f`, `2> f`, `>& f`), and
+            # `<<`/`<<-` opens a heredoc whose body words run to the
+            # delimiter.
+            hd = None
+            if t[:1] == b"<" and t[1:2] == b"<" and t[2:3] != b"<":
+                hd = t[2:]
+                if hd[:1] == b"-":
+                    hd = hd[1:]
+            if (t[-1:] in (b"<", b">", b"&", b"|")
+                    or t.endswith(b"<<-")):
+                if k + 1 >= len(enc_words):
+                    # `find … >` is a shell parse error — nothing runs.
+                    spans.append(("terminal", k, k))
+                elif hd == b"":
+                    hd = _word_text(
+                        enclosing[enc_words[k + 1][0]:
+                                  enc_words[k + 1][1]])
+                k += 1
+            if hd:
+                k += 1
+                while k < len(enc_words):
+                    hw = _word_text(
+                        enclosing[enc_words[k][0]:enc_words[k][1]])
+                    k += 1
+                    if hw == hd:
+                        break
+                continue
         else:
             # The first positional ends GNU's option region — `-O`
             # after it is a predicate, not an option. A positional AFTER
@@ -1931,12 +1975,15 @@ def _command_start(src: bytes, pos: int) -> int:
                 i += 1
             elif c == 0x60:
                 k = i + 1
-                while k < pos and src[k] != 0x60:
+                while k <= pos and k < len(src) and src[k] != 0x60:
                     k += 2 if src[k] == 0x5C else 1
-                if k < pos:
+                if k <= pos and k < len(src) and src[k] == 0x60:
                     # A paired substitution closes the command's arg —
                     # words AFTER it belong to the enclosing command
-                    # (Devin on #1382, round-24 review).
+                    # (Devin on #1382, round-24 review). A closer AT
+                    # pos is still inside the pair's word — the
+                    # enclosing command owns it (`x.sh`` ` keeps the
+                    # split head — Codex on #1393, round-55 review).
                     i = k
                 else:
                     start = i + 1
@@ -1972,15 +2019,16 @@ def _command_start(src: bytes, pos: int) -> int:
                     continue
             if c == 0x60:
                 k = i + 1
-                while k < pos and src[k] != 0x60:
+                while k <= pos and k < len(src) and src[k] != 0x60:
                     k += 2 if src[k] == 0x5C else 1
-                if k < pos:
+                if k <= pos and k < len(src) and src[k] == 0x60:
                     # Skip a BALANCED backtick pair whole — words
                     # after its closer stay inside the enclosing
                     # command (`echo `printf ok` bash x` is still
                     # echo's argv — Devin on #1382, round-24 review —
                     # verified live). A pos inside the pair keeps the
-                    # separator treatment.
+                    # separator treatment; a closer AT pos is inside
+                    # the pair's word, not an opener (round-55).
                     i = k
                 else:
                     start = i + 1
@@ -4487,11 +4535,24 @@ def _reader_operands(key: bytes, args: list):
                 i += 2
                 continue
             elif (len(a) > 2 and a[:2] in flagops
-                    and a[:2] in _READER_OPT_VALUES.get(key, {})):
-                # A glued fixed-domain value — `-Ubad` aborts like
-                # `-U bad` does; `-Uhex` binds like `-U hex`.
+                    and (a[:2] in _READER_OPT_VALUES.get(key, {})
+                         or a[:2] in _READER_NUM_VALS.get(
+                             key, frozenset())
+                         or a[:2] in _READER_PAGE_VALS.get(
+                             key, frozenset()))):
+                # A glued fixed-domain/numeric value aborts like its
+                # separate form — `-Ubad` like `-U bad`, `-obad` like
+                # `-o bad` (Devin on #130, round-55 — verified live:
+                # `pr -obad` exits "invalid line offset").
                 v = a[2:]
-                if v not in _READER_OPT_VALUES[key][a[:2]]:
+                valset = _READER_OPT_VALUES.get(key, {}).get(a[:2])
+                if valset is not None and v not in valset:
+                    return None
+                if (a[:2] in _READER_NUM_VALS.get(key, frozenset())
+                        and not _num_ok(v)):
+                    return None
+                if (a[:2] in _READER_PAGE_VALS.get(key, frozenset())
+                        and not _pages_ok(v)):
                     return None
                 i += 1
                 continue
