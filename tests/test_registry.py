@@ -10929,6 +10929,11 @@ def test_script_dep_round42(tmp_path):
             # `pr --indent` takes a required argument — the stream
             # still forwards (verified live)
             b"cat scripts/x.sh | pr --indent 4 | sh",
+            # `-n 1/1` chunk-select streams a buffered pipe on
+            # coreutils ≥9.x — the input is copied to a temp file
+            # (Codex on #130/#1959, round-51 — verified live on 9.4;
+            # 8.32 aborts — union models the running case)
+            b"cat scripts/x.sh | split -n 1/1 - | sh",
             # `--trace` is a boolean — the program positional still
             # reads the pipe (over-block on gawk < 5.3)
             b"cat scripts/x.sh | awk --trace '{print}' | sh",
@@ -10962,10 +10967,9 @@ def test_script_dep_round42(tmp_path):
             # true`/`false` leave sh at EOF (verified live)
             b"cat scripts/x.sh | split --filter=true - | sh",
             b"cat scripts/x.sh | split --filter=false - | sh",
-            # the `-n` K/N stdout modes need a seekable input and
-            # abort on the pipe ("cannot determine file size") —
-            # verified live: numeric AND l/r modes
-            b"cat scripts/x.sh | split -n 1/1 - | sh",
+            # `-n l/N` writes N chunk FILES — nothing reaches stdout
+            # (a K/N select streams the buffered pipe on coreutils
+            # ≥9.x — moved to the dep list, round-51)
             b"cat scripts/x.sh | split -n l/1 - | sh",
             # `strings` mode options validate their value — a bad
             # mode aborts before any read (verified live)
@@ -11129,6 +11133,9 @@ def test_script_dep_round44(tmp_path):
             # `-n 2` on a FILE input still runs the filter — a
             # scripts/ input file's chunks reach sh (verified live)
             b"split -n 2 --filter=sh scripts/x.sh | sh",
+            # `-n 2` + filter on a pipe: ≥9.x buffers the unseekable
+            # input and runs the filter on each chunk (round-51 union)
+            b"cat scripts/x.sh | split --filter=sh -n 2 - | sh",
             # find: a REAL expr branch after -quit still revives the
             # action (verified live)
             b"find . -false -quit -o -exec sh scripts/x.sh \\;",
@@ -11138,6 +11145,9 @@ def test_script_dep_round44(tmp_path):
             b"xargs -E sh scripts/x.sh"):
         assert mod.script_dep_block(pdir, line + b"\n"), line
     for line in (
+            # `-n` streams an unseekable pipe on ≥9.x — the filter
+            # runs on the buffered input (the `-n l/2`/`r/2 -n l/2`
+            # cases moved to the dep list — round-51 union)
             # terminal split modes — never run the filter, either
             # position (verified live)
             b"cat scripts/x.sh | split --filter=sh --help | sh",
@@ -11149,9 +11159,7 @@ def test_script_dep_round44(tmp_path):
             b"cat scripts/x.sh | split --filter=sh -a xyz - | sh",
             b"cat scripts/x.sh | split --filter=sh -t xy - | sh",
             b"cat scripts/x.sh | split --filter=sh -n x/y - | sh",
-            # any -n needs seekable input; K/N refuses --filter —
-            # abort either way (verified live)
-            b"cat scripts/x.sh | split --filter=sh -n 2 - | sh",
+            # K/N refuses --filter — abort (verified live)
             b"cat scripts/x.sh | split --filter=sh -n 1/1 - | sh",
             # a missing required operand aborts too (verified live:
             # "option '--filter' requires an argument")
@@ -11184,9 +11192,10 @@ def test_script_dep_round45(tmp_path):
     options, `split --separator='\\0'`, iconv `--usage`, and reader
     numeric option values — each verified against live GNU tools:
 
-    * `split -n r/2 --filter=sh -` streams a pipe — round-robin needs
-      no seekable input; `l/N`, `l/K/N`, `K/N` and plain `N` still
-      abort on stdin (Devin/Codex);
+    * `split -n r/2 --filter=sh -` streams a pipe — and on coreutils
+      ≥9.x EVERY `-n` form does (the unseekable input is buffered to
+      a temp file — the round-51 union model keeps the running case;
+      `l/2`/`r/2 -n l/2` filter cases moved to the dep list);
     * `+` ends a find `-exec` only as the `{} +` pair — a bare `+` is
       passed to the command, and `-quit` stays dead when the `-o`
       lives inside an action argv (Devin);
@@ -11210,6 +11219,11 @@ def test_script_dep_round45(tmp_path):
             # round-robin streams a pipe — the filter runs the chunks
             # (verified live)
             b"cat scripts/x.sh | split -n r/2 --filter=sh - | sh",
+            # `-n` streams an unseekable pipe on ≥9.x — the filter
+            # runs on the buffered input; LAST -n wins either way
+            # (round-51 union, verified live on 9.4)
+            b"cat scripts/x.sh | split -n l/2 --filter=sh - | sh",
+            b"cat scripts/x.sh | split -n r/2 -n l/2 --filter=sh - | sh",
             b"cat scripts/x.sh | split --number=r/2 --filter=sh - | sh",
             # a bare `+` inside the action argv is data — the later
             # action still runs (verified live)
@@ -11226,12 +11240,9 @@ def test_script_dep_round45(tmp_path):
             b"cat scripts/x.sh | pr --indent 4 | sh"):
         assert mod.script_dep_block(pdir, line + b"\n"), line
     for line in (
-            # non-round-robin `-n` still needs seekable input — l/
-            # and plain modes abort on a pipe; LAST -n wins (verified)
-            b"cat scripts/x.sh | split -n l/2 --filter=sh - | sh",
-            b"cat scripts/x.sh | split -n r/2 -n l/2 --filter=sh - | sh",
             # r/K/N is a chunk-select — refuses --filter outright
-            # (verified live)
+            # (verified live; the `-n l/2`/`r/2 -n l/2` filter cases
+            # moved to the dep list under the ≥9.x union — round-51)
             b"cat scripts/x.sh | split -n r/1/2 --filter=sh - | sh",
             # `{}`-terminated action ends at `+` — `--help` is then a
             # real terminal word (verified live)
@@ -11502,6 +11513,8 @@ def test_script_dep_round48(tmp_path):
             b"chrt -T 1 -P 2 -D 3 0 sh scripts/x.sh",
             b"flock /tmp/l -c 'sh scripts/x.sh'",
             b"flock -n /tmp/l sh -c 'sh scripts/x.sh'",
+            # `-n 1/1` streams a buffered pipe on ≥9.x (round-51 union)
+            b"cat scripts/x.sh | split -n 1/1 | sh",
             b"flock --verb /tmp/l -c 'sh scripts/x.sh'",
             b"flock -w5 /tmp/l -c 'sh scripts/x.sh'",
             b"sudo sh scripts/x.sh",
@@ -11547,9 +11560,8 @@ def test_script_dep_round48(tmp_path):
             # a bad numeric value aborts before any read
             b"cat scripts/x.sh | tail --max-unchanged-stats=bad | sh",
             b"cat scripts/x.sh | tail --max-unchanged-stats=-1 | sh",
-            # an unseekable stdin keeps the `-n` abort — and a pipe
+            # an empty input means no chunk — and a pipe
             # input means the expanding filter never sees a script
-            b"cat scripts/x.sh | split -n 1/1 | sh",
             b"split -n 1/1 - </dev/null | sh",
             b"split --filter='$(printf sh)' - | sh",
             # kept semantics — an empty/benign source execs nothing
@@ -11746,3 +11758,85 @@ def test_script_dep_round50(tmp_path):
             b"unshare -R /tmp sh scripts/x.sh",
             b"unshare --kill-child=SIGTERM sh scripts/x.sh"):
         assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round51(tmp_path):
+    """Review round-51 fixes: `--` ends a wrapper's options (the next
+    word is argv[0]), a `split --filter=CMD` operand is program text
+    even with no downstream pipe, split's filter never fires on an
+    EMPTY /dev/null input, an unknown find predicate aborts before
+    traversal, sort refuses operands alongside --files0-from, only a
+    `-c` bound DIRECTLY after flock's lockfile binds command text,
+    and `-n` chunk-selects stream an unseekable pipe on coreutils
+    ≥9.x (union-of-versions, fail-closed).
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts/x.sh").write_text("echo X\n")
+    (pdir / "scripts/y.sh").write_text("echo Y\n")
+    (pdir / "scripts/f0").write_bytes(b"a\x00\n")
+
+    for line in (
+            # `--` terminates the wrapper's options — `unshare -- sh`
+            # runs sh (the strict option class read `--` as an
+            # abort — Devin on #1393)
+            b"unshare -- sh scripts/x.sh",
+            b"unshare --mount -- sh scripts/x.sh",
+            # a `--filter=CMD` operand is program text the filter's
+            # $SHELL -c runs even without a downstream pipe (Devin
+            # on #1393/#12, Codex on #1959)
+            b"split --filter='sh scripts/x.sh' input",
+            b"split --filter='sh scripts/x.sh' -",
+            b"split --filter='echo x; sh scripts/x.sh' input",
+            # coreutils ≥9.x buffers unseekable pipe input to a temp
+            # file, so `-n` chunk-selects STREAM the pipe (Codex on
+            # #130/#1959 — verified live on 9.4; 8.32 aborts —
+            # union models the running case)
+            b"cat scripts/x.sh | split -n 1/1 | sh",
+            b"cat scripts/x.sh | split -n l/1/1 | sh",
+            b"cat scripts/x.sh | split -n r/1/1 | sh",
+            # a `< file` rebind is seekable either way
+            b"cat /dev/null | split -n 1/1 - <scripts/x.sh | sh",
+            # a `-c` directly after the lockfile still binds command
+            # text; `flock L sh -c PROG` runs PROG
+            b"flock L -c 'sh scripts/x.sh'",
+            b"flock L sh -c 'cat scripts/x.sh'",
+            # the wrapped command's own argv[0] remains an exec
+            b"flock -- /tmp/l -c 'sh scripts/x.sh'",
+            # a wrapped emit head still forwards to |sh
+            b"flock L echo -c 'sh scripts/x.sh' | sh",
+            # a find action runs while only known primaries follow
+            b"find . -exec bash scripts/x.sh \\; -print",
+            b"find . -name '*.sh' -exec bash scripts/x.sh \\;"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+    for line in (
+            # the word after `--` is argv[0] — `unshare -- echo`
+            # just prints (Codex on #130)
+            b"unshare -- echo scripts/x.sh",
+            # an EMPTY input yields zero chunks — the filter never
+            # fires (Devin on #130: `--filter='echo RAN'` does not
+            # run on /dev/null)
+            b"split --filter='sh scripts/x.sh' /dev/null",
+            b"cat scripts/x.sh | split --filter='echo RAN' /dev/null"
+            b" | sh",
+            # sort refuses operands alongside --files0-from ("extra
+            # operand … cannot be combined" abort — Devin on #130)
+            b"sort --files0-from=scripts/f0 f | sh",
+            b"cat scripts/x.sh | sort --files0-from=f0 extra | sh",
+            # an unknown predicate aborts find BEFORE it traverses —
+            # no action runs (Devin on #130)
+            b"find . -exec bash scripts/x.sh \\; -bogus",
+            b"find . -exec sh scripts/x.sh \\; --bogus",
+            # `-c` inside the wrapped command's argv is argv DATA —
+            # `flock L echo -c 'sh x'` prints the string (Devin on
+            # #1959)
+            b"flock L echo -c 'sh scripts/x.sh'",
+            b"flock -- /tmp/l echo -c 'sh scripts/x.sh'",
+            # a wrapped emit head's output to a terminal is never
+            # exec'd — bare `xargs echo 'sh x'` prints, it does not
+            # run (Devin on #1959)
+            b"xargs echo 'sh scripts/x.sh'",
+            b"sudo echo 'sh scripts/x.sh'"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
