@@ -91,6 +91,10 @@ SCRIPT_REF = re.compile(
     rb"(?<![\w-])(?:python(?:\d+(?:\.\d+)*)?|bash|dash|ksh|ash|sh|zsh|cat"
     rb"|node|npx|tsx|ts-node|deno"
     rb"|grep|egrep|fgrep|head|tail"
+    # `split` reads a file operand the same way — bare reads stay
+    # inert via _NONEXEC_HEADS, but `-n K/N` chunk-selects stream
+    # the file's bytes to stdout (round-46, verified live).
+    rb"|split"
     rb"|ruby|perl|source|exec|bun|bunx|uv[ \t]+run|pipenv[ \t]+run"
     rb"|poetry[ \t]+run|pdm[ \t]+run|hatch[ \t]+run)"
     # Any extension counts — registry-lint permits regular script files
@@ -657,6 +661,9 @@ _NONEXEC_HEADS = frozenset({
     b"echo", b"printf", b"cat", b"head", b"tail", b"grep", b"egrep",
     b"fgrep", b"less", b"more", b"man", b"wc", b"diff", b"file",
     b"stat", b"ls", b"which", b"type", b"head", b"help",
+    # `split` reads its operand — never executes argv text (its
+    # `--filter` exec is a downstream-flow question, like cat's `|`).
+    b"split",
 })
 
 
@@ -939,10 +946,15 @@ _FIND_ONE_OP = frozenset({
     # `-files0-from` is a GLOBAL option consuming the NUL-separated
     # path list's filename — `find -files0-from --help -exec …` reads
     # `--help` as the filename, not a terminal word (Codex on #1959,
-    # round-42 review — verified live). `-D` is a pre-path debug
-    # option instead: `find . -D x` errors "unknown predicate" (Codex
-    # on #130, round-42 review — verified live), so it stays out.
-    b"-files0-from"})
+    # round-42 review — verified live).
+    b"-files0-from",
+    # `-D` is a PRE-PATH global option with one operand — `find -D
+    # --help /dev/null -exec …` consumes `--help` as the debugopts
+    # and STILL runs the action (Codex on #1959, round-46 review —
+    # verified live). Mid-expression `find . -D x` errors "unknown
+    # predicate" (round-42): operand-consuming there only over-
+    # blocks, the safe direction.
+    b"-D"})
 _FIND_TWO_OP = frozenset({b"-fprintf"})
 _FIND_ACTION = frozenset({b"-exec", b"-execdir", b"-ok", b"-okdir"})
 
@@ -993,11 +1005,15 @@ _WRAPPER_OPTARG_LONG = {
 # deliberately ABSENT from the flag set so they fall to the
 # exit-before-argv result alongside genuinely unknown letters.
 _WRAPPER_REQ_SHORT = {
-    b"xargs": frozenset({b"a", b"d", b"I", b"L", b"n", b"P", b"s"}),
+    # `-E` takes a REQUIRED eof-string operand (`xargs -E END echo`
+    # consumes END — CodeRabbit on #130, round-46 review, verified
+    # live); only lowercase `-e` is the optional-arg form.
+    b"xargs": frozenset({b"a", b"d", b"E", b"I", b"L", b"n", b"P",
+                          b"s"}),
     b"flock": frozenset({b"E", b"c", b"w"}),
 }
 _WRAPPER_OPT_SHORT = {
-    b"xargs": frozenset({b"E", b"e", b"i", b"l"}),
+    b"xargs": frozenset({b"e", b"i", b"l"}),
     b"flock": frozenset(),
 }
 _WRAPPER_FLAG_SHORT = {
@@ -1321,29 +1337,52 @@ def _xargs_argfile(args: list):
                 i += 1 if b"=" in a else 2
                 continue
             if (resolved in _ARGV_PROGRAM_WRAPPER_TERMINAL[b"xargs"]
-                    or b"=" in a):
-                break               # help/version or flag+`=` exits
+                    or (b"=" in a and resolved not in
+                        _WRAPPER_OPTARG_LONG[b"xargs"])):
+                break               # help/version or flag+`=` exits;
+                                    # a glued value on an OPTIONAL-arg
+                                    # long keeps scanning (`-a -
+                                    # --eof=STOP -a /dev/null` reads
+                                    # /dev/null — Devin on #130,
+                                    # round-46 review, verified live)
             i += 1                  # flag / optional-arg long
             continue
-        if a == b"-a":
-            seen = True
-            if i + 1 < n:
-                found = args[i + 1]
-                i += 2
-            else:
-                found = b""
-                i += 1
-            continue
-        if a.startswith(b"-a") and len(a) > 2:
-            seen = True
-            found = a[2:]
-            i += 1
-            continue
         if a != b"-" and a.startswith(b"-"):
-            skip = _wrapper_opt_skip(b"xargs", a)
-            if skip is None:
+            # Short-cluster walk: flag letters pass through; the first
+            # arg-letter ends the cluster (required consumes rest/next
+            # word, optional consumes the glued rest only). `a`
+            # ANYWHERE binds the argfile — `-0a/dev/null` reads
+            # /dev/null (CodeRabbit on #130, round-46 review —
+            # verified live).
+            j = 1
+            while j < len(a):
+                c = a[j:j + 1]
+                if c == b"a":
+                    seen = True
+                    if j + 1 < len(a):
+                        found = a[j + 1:]
+                        i += 1
+                    elif i + 1 < n:
+                        found = args[i + 1]
+                        i += 2
+                    else:
+                        found = b""
+                        i += 1
+                    break
+                if c in _WRAPPER_REQ_SHORT[b"xargs"]:
+                    i += 1 if j + 1 < len(a) else 2
+                    break
+                if c in _WRAPPER_OPT_SHORT[b"xargs"]:
+                    i += 1          # rest is its glued optional arg
+                    break
+                if c not in _WRAPPER_FLAG_SHORT[b"xargs"]:
+                    j = -1          # unknown/terminal letter → exits
+                    break
+                j += 1
+            else:
+                i += 1              # all-flag cluster
+            if j == -1:
                 break               # exits — no argfile is ever read
-            i += skip
             continue
         break              # utility argv begins — its `-a` is its arg
     return found if seen else None
@@ -2857,17 +2896,24 @@ _SPLIT_FLAG_SHORT = frozenset({b"d", b"e", b"u", b"x"}
 def _split_arg_ok(opt: bytes, v: bytes) -> bool:
     """False when `split` aborts on the option's operand — before any
     filter or input is touched (Devin on #1959, round-44 review —
-    verified live): `--lines`/`-l` and `--suffix-length`/`-a` want
-    pure digits; the SIZE options `-b`/`--bytes`/`-C`/`--line-bytes`
-    want a leading digit (SI suffixes like `1K`/`1KB`/`1k` are all
-    legal — under-validating stays over-block-safe); `-t`/
+    verified live): `--lines`/`-l` wants pure NONZERO digits —
+    `-l 0` aborts "invalid number of lines" (Devin on #12, Codex on
+    #1959, round-46 review — verified live); `--suffix-length`/`-a`
+    takes digits including zero (`split -a0` runs — round-46);
+    the SIZE options `-b`/`--bytes`/`-C`/`--line-bytes` want a leading
+    NONZERO digit (`-b0` aborts; SI suffixes like `1K`/`1KB`/`1k` are
+    all legal — under-validating stays over-block-safe); `-t`/
     `--separator` wants exactly one byte (`''` and `xy` abort); and
     `-n`/`--number` wants a CHUNKS form — `N`, `K/N`, `l/N`, `l/K/N`,
-    `r/N`, `r/K/N`."""
-    if opt in (b"--lines", b"-l", b"--suffix-length", b"-a"):
+    `r/N`, `r/K/N` — with every component nonzero and K ≤ N
+    (`-n 0`, `-n 0/1`, `-n 2/1` all abort — round-46, verified
+    live)."""
+    if opt in (b"--lines", b"-l"):
+        return v.isdigit() and int(v) != 0
+    if opt in (b"--suffix-length", b"-a"):
         return v.isdigit()
     if opt in (b"--bytes", b"-b", b"--line-bytes", b"-C"):
-        return v[:1].isdigit()
+        return v[:1].isdigit() and v[:1] != b"0"
     if opt in (b"--separator", b"-t"):
         # SEP is one byte or the `\0` NUL escape (Codex on #1959,
         # round-45 review — verified live).
@@ -2876,14 +2922,22 @@ def _split_arg_ok(opt: bytes, v: bytes) -> bool:
         p = v.split(b"/")
         if len(p) > 1 and p[0] in (b"l", b"r"):
             p = p[1:]
-        return 1 <= len(p) <= 2 and all(x.isdigit() for x in p)
+        if not (1 <= len(p) <= 2
+                and all(x.isdigit() and int(x) != 0 for x in p)):
+            return False
+        return len(p) == 1 or int(p[0]) <= int(p[1])
     return True
 
 
 def _split_scan(key: bytes, args: list):
-    """(filter, input) — split's LAST `--filter CMD` operand and its
-    first positional INPUT operand (None when split reads stdin —
-    `-`/fd-0 also name it). csplit has no `--filter`: (None, None).
+    """(filter, input, to_stdout) — split's LAST `--filter CMD`
+    operand, its first positional INPUT operand (None when split
+    reads stdin — `-`/fd-0 also name it), and whether the chunks go
+    to STDOUT (the two-part `-n K/N`/`l/K/N`/`r/K/N` select forms
+    print chunk K to stdout — `split -n r/1/1` streams a pipe,
+    `split -n 1/1 F` streams F — CodeRabbit on #130, round-46
+    review — verified live; one-part `N`/`l/N`/`r/N` write chunk
+    FILES instead). csplit has no `--filter`: (None, None, False).
 
     A repeated `--filter` binds its LAST value (Devin on #12,
     round-43 — verified live: `--filter=true --filter=sh` runs sh).
@@ -2900,7 +2954,7 @@ def _split_scan(key: bytes, args: list):
     stdout") likewise abort before a filter runs — all reported as
     no-filter."""
     if key != b"split":
-        return None, None
+        return None, None, False
     filt = inp = None
     nmode = False               # `-n`/`--number` seen — needs a
                                 # seekable input
@@ -2926,10 +2980,10 @@ def _split_scan(key: bytes, args: list):
             else:
                 cands = [o for o in _SPLIT_LONG if o.startswith(base)]
                 if len(cands) != 1:
-                    return None, None
+                    return None, None, False
                 resolved = cands[0]
             if resolved in (b"--help", b"--version"):
-                return None, None       # terminal mode — exits first
+                return None, None, False       # terminal mode — exits first
             if resolved not in _SPLIT_REQ_LONG:
                 # Flags never consume the next word; a `=` on a true
                 # flag aborts "doesn't allow an argument" while the
@@ -2939,7 +2993,7 @@ def _split_scan(key: bytes, args: list):
                 # separate word stays positional).
                 if (b"=" in a and resolved not in
                         (b"--numeric-suffixes", b"--hex-suffixes")):
-                    return None, None
+                    return None, None, False
                 i += 1
                 continue
             if b"=" in a:
@@ -2948,12 +3002,12 @@ def _split_scan(key: bytes, args: list):
                 v = args[i + 1]
                 i += 1
             else:
-                return None, None       # "requires an argument" abort
+                return None, None, False       # "requires an argument" abort
             if resolved == b"--filter":
                 filt = v
             else:
                 if not _split_arg_ok(resolved, v):
-                    return None, None
+                    return None, None, False
                 if resolved == b"--number":
                     nmode = True
                     np_ = v.split(b"/")
@@ -2997,20 +3051,20 @@ def _split_scan(key: bytes, args: list):
                 abort = True            # unknown letter → abort
                 break
             if abort:
-                return None, None
+                return None, None, False
             i += 1
             continue
         if inp is None:
             inp = a                     # first positional = INPUT
         i += 1
     if nslash and filt is not None:
-        return None, None       # `--filter` never sees a chunk
+        return None, None, False       # `--filter` never sees a chunk
                                 # selected to stdout
     if (nmode and not nrmode
             and (inp is None or _stdin_path_operand(inp))):
-        return None, None       # non-round-robin `-n` aborts on an
+        return None, None, False       # non-round-robin `-n` aborts on an
                                 # unseekable pipe
-    return filt, inp
+    return filt, inp, nslash
 
 
 def _stdin_path_operand(t: bytes) -> bool:
@@ -3649,13 +3703,22 @@ _READER_OPT_VALUES = {
         b"--radix": frozenset({b"d", b"o", b"x"}),
     },
 }
-# Reader options whose operand must be all digits — an invalid value
-# aborts before any read (`tail --pid nope`, `pr --indent xyz` —
-# Codex on #130, round-45 review, verified live).
+# Reader options whose operand must be a non-negative integer — an
+# invalid value aborts before any read (`tail --pid nope`, `pr
+# --indent xyz` — Codex on #130, round-45 review, verified live).
+# GNU accepts a leading `+` (`tail --pid=+1`, `pr --indent=+1` run)
+# but rejects `-1` (Devin on #1959, round-46 review, verified live).
 _READER_NUM_VALS = {
     b"tail": frozenset({b"--pid"}),
     b"pr": frozenset({b"--indent", b"-o"}),
 }
+
+
+def _num_ok(v: bytes) -> bool:
+    """Digits with an optional leading `+` — GNU's non-negative
+    integer options (`tail --pid`, `pr --indent`) accept `+1` and
+    reject `-1`/`nope` (Devin on #1959, round-46 — verified live)."""
+    return v.isdigit() or (v[:1] == b"+" and v[1:].isdigit())
 
 
 # Complete GNU long-option sets per reader head — abbreviation resolves
@@ -3876,7 +3939,7 @@ def _reader_operands(key: bytes, args: list):
                              else args[i + 1])
                         if valset is not None and v not in valset:
                             return None
-                        if numv and not v.isdigit():
+                        if numv and not _num_ok(v):
                             return None
                     i += 1 if b"=" in a else 2
                     continue
@@ -3911,7 +3974,7 @@ def _reader_operands(key: bytes, args: list):
                     v = args[i + 1]
                     if valset is not None and v not in valset:
                         return None
-                    if numv and not v.isdigit():
+                    if numv and not _num_ok(v):
                         return None
                 i += 2
                 continue
@@ -4025,7 +4088,11 @@ def _seg_prov(body: bytes, prov: str,
                 if ops and not any(_operand_feeds_stream(o) for o in ops):
                     prov = "own"
         elif key in _EMIT_PIPE_READERS:
-            if any(b"scripts/" in arg for arg in args):
+            # split/csplit route their scripts/ operand through their
+            # own branch below — whether the file's bytes reach stdout
+            # is a `-n K/N`/filter question, not a read question.
+            if (key not in (b"split", b"csplit")
+                    and any(b"scripts/" in arg for arg in args)):
                 prov = "script"
             elif not fd_in:
                 prov = "own"   # `< file` rebind — the stage (and any
@@ -4069,12 +4136,16 @@ def _seg_prov(body: bytes, prov: str,
                 # "none" — the utility reads and re-emits the live pipe
                 # (cat), so prov flows on.
             elif (key == b"sort"
-                    and _sort_files0(args) is not None
-                    and not _stdin_path_operand(_sort_files0(args))):
-                # `sort --files0-from F` reads the filename list from
-                # F — the shared stdin is ignored and sort emits
-                # unrelated bytes (Devin on #128, round-25 review —
-                # verified live).
+                    and _sort_files0(args) == b"/dev/null"):
+                # `sort --files0-from /dev/null` reads an EMPTY list —
+                # the shared stdin is ignored and nothing is emitted
+                # (Devin on #128, round-25 review — verified live). A
+                # regular list file may itself name `-`/`/dev/stdin`,
+                # which pulls the pipe INTO the sorted output (Codex
+                # on #1393, round-46 review — verified live); its
+                # contents are static-unknowable, so the stream is
+                # never proven dead — prov flows on (the round-25
+                # unconditional `prov = "own"` was the under-block).
                 prov = "own"
             elif key in (b"split", b"csplit"):
                 # split/csplit write chunks to FILES — the input
@@ -4091,8 +4162,20 @@ def _seg_prov(body: bytes, prov: str,
                 # `-n` K/N stdout modes need a seekable input and
                 # abort on the pipe ("cannot determine file size"),
                 # so they still own the stream — verified live.
-                filt, finput = _split_scan(key, args)
-                if filt is None or filt == b"" or filt == b"-":
+                filt, finput, tout = _split_scan(key, args)
+                if tout and filt is None:
+                    # `-n K/N`/`l/K/N`/`r/K/N` print the selected chunk
+                    # to stdout — the INPUT flows through like a
+                    # reader's (CodeRabbit on #130, round-46 review —
+                    # verified live: `split -n r/1/1` streams a pipe,
+                    # `split -n 1/1 F` streams F). A named FILE
+                    # replaces the upstream pipe; `-`/no operand keeps
+                    # it.
+                    if (finput is not None
+                            and not _stdin_path_operand(finput)):
+                        prov = ("script" if b"scripts/" in finput
+                                else "own")
+                elif filt is None or filt == b"" or filt == b"-":
                     # A missing or `-` filter operand is not a runnable
                     # command — `split --filter -` execs `-` (ENOENT).
                     prov = "own"
@@ -5241,6 +5324,22 @@ def _pipe_to_exec(src: bytes, pos: int) -> bool:
         flow_src = next(
             (_operand_text(a2) for a2 in _a0 if b"scripts/" in a2),
             None)
+        if flow_src is not None and _k0 in (b"split", b"csplit"):
+            # Whether the file's bytes enter the stream is the stage's
+            # OWN provenance question — `split -n K/N x` emits one
+            # chunk to stdout, bare `split x` writes chunk files and
+            # leaves stdout empty, and `split --filter=sh x` already
+            # executes them (CodeRabbit on #130, round-46 review —
+            # verified live). Other heads keep the blanket prov: exec
+            # and capture heads have dep paths outside stream prov
+            # (`bash -c "echo $0" "$(cat x)"`), and the reader heads
+            # forward their operand unconditionally.
+            r0 = _seg_prov(src[s0:pos], "up", None, _line_ifs(src, s0))
+            if r0 is None:
+                return True    # the stage itself executed the file
+            prov = r0
+            if prov == "own":
+                flow_src = None
     out = None           # aggregate fd1 inside an open compound
     depth = 0            # open compound/group statements
     drained = False      # a prior `;`-sibling read the shared stdin to EOF

@@ -11251,3 +11251,100 @@ def test_script_dep_round45(tmp_path):
             b"cat scripts/x.sh | pr --indent xyz | sh",
             b"cat scripts/x.sh | pr -o xyz | sh"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round46(tmp_path):
+    """Review round-46 — split zero/chunk-select counts, `-n K/N`
+    stdout streams, find's pre-path `-D`, signed reader numerics,
+    xargs `-E`/cluster `-a`/optional-arg `=` scan, and sort
+    `--files0-from` list indirection — each verified against live
+    GNU tools:
+
+    * `split -l 0`/`-b0`/`-C0`/`-n 0`/`-n r/0`/`-n 0/1`/`-n 2/1`
+      abort "invalid number …/chunk number" before any filter or
+      input; `-a0` stays legal (Devin/Codex);
+    * `split -n r/1/1` streams chunk 1 to stdout on a pipe; `1/1`
+      and `l/1/1` stream a FILE — only the two-part K/N forms emit
+      to stdout (CodeRabbit);
+    * `find -D --help` consumes `--help` as the debugopts operand
+      pre-path and still runs the action (Codex);
+    * `tail --pid=+1`/`pr --indent=+1` run — GNU accepts a leading
+      `+` but rejects `-1` (Devin);
+    * `xargs -E END` consumes END as the required eof-string —
+      `-e` alone is the optional form (CodeRabbit);
+    * `xargs -0a/dev/null` binds the argfile mid-cluster; a glued
+      `--eof=STOP`/`--replace=R` does not end the argfile scan —
+      last `-a` still wins (Devin + CodeRabbit);
+    * `sort --files0-from F` may name `-`/`/dev/stdin` inside F —
+      the stream is never proven dead (over-block; `/dev/null` is
+      the provably-empty exception) (Codex)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_text("echo HIT\n")
+    for line in (
+            # `-n K/N` prints the selected chunk to stdout — the
+            # input flows through like a reader's (verified live)
+            b"cat scripts/x.sh | split -n r/1/1 | sh",
+            b"cat scripts/x.sh | split -n r/1/1 - | sh",
+            b"cat scripts/x.sh | split --number=r/1/1 | sh",
+            b"split -n 1/1 scripts/x.sh | sh",
+            b"split -n l/1/1 scripts/x.sh | sh",
+            # `-a0` is legal — the filter still runs (verified live)
+            b"cat scripts/x.sh | split -a0 -l1 --filter=sh - | sh",
+            # `-D` consumes the next word pre-path — `--help` is the
+            # debugopts operand, not a terminal word (verified live)
+            b"find -D --help /dev/null -exec sh scripts/x.sh \\;",
+            # signed numeric operands stay valid (verified live)
+            b"cat scripts/x.sh | tail --pid=+1 | sh",
+            b"cat scripts/x.sh | tail --pid +1 | sh",
+            b"cat scripts/x.sh | pr --indent=+1 | sh",
+            # `-E` takes a required operand — END is not the utility
+            # and the live pipe feeds the argfile-replaced utility's
+            # stdin (verified live)
+            b"cat scripts/x.sh | xargs -E END -a /dev/null sh -c 'sh'",
+            b"cat scripts/x.sh | xargs -0E END -a /dev/null sh -c 'sh'",
+            # `-a` inside a short cluster binds the argfile —
+            # the utility inherits the live pipe (verified live)
+            b"cat scripts/x.sh | xargs -0a/dev/null sh -c 'sh'",
+            b"cat scripts/x.sh | sh -c 'xargs -0a/dev/null true; sh'",
+            # glued OPTIONAL-arg longs keep the argfile scan going —
+            # last `-a` wins = /dev/null, pipe stays live (verified)
+            b"cat scripts/x.sh | xargs -a - --eof=STOP -a /dev/null sh -c 'sh'",
+            b"cat scripts/x.sh | sh -c 'xargs -a - --eof=STOP -a /dev/null true; sh'",
+            # a regular list file may name /dev/stdin — the stream
+            # is never proven dead (Codex on #1393; over-block)
+            b"cat scripts/x.sh | sort --files0-from scripts/x.sh | sh",
+            b"cat scripts/x.sh | sort --files0-from=names.lst | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # zero/invalid split counts abort before any filter or
+            # read (verified live)
+            b"cat scripts/x.sh | split -l0 --filter=sh - | sh",
+            b"cat scripts/x.sh | split -l 0 --filter=sh - | sh",
+            b"cat scripts/x.sh | split --lines=0 --filter=sh - | sh",
+            b"cat scripts/x.sh | split -b0 --filter=sh - | sh",
+            b"cat scripts/x.sh | split -C0 --filter=sh - | sh",
+            b"cat scripts/x.sh | split -n 0 --filter=sh - | sh",
+            b"cat scripts/x.sh | split -n r/0 --filter=sh - | sh",
+            b"cat scripts/x.sh | split -n l/0 --filter=sh - | sh",
+            b"cat scripts/x.sh | split -n 0/0 --filter=sh - | sh",
+            b"cat scripts/x.sh | split -n 1/0 --filter=sh - | sh",
+            b"cat scripts/x.sh | split -n 0/1 --filter=sh - | sh",
+            b"cat scripts/x.sh | split -n 2/1 --filter=sh - | sh",
+            # a `-n` K/N stdout select combined with --filter aborts
+            # "does not process a chunk extracted to stdout" — the
+            # filter never runs (verified live)
+            b"cat scripts/x.sh | split -n r/1/1 --filter=sh - | sh",
+            b"split -n 1/1 --filter=sh scripts/x.sh | sh",
+            # negative numerics still abort (verified live)
+            b"cat scripts/x.sh | tail --pid=-1 | sh",
+            b"cat scripts/x.sh | pr --indent=-1 | sh",
+            # `/dev/null` is the provably-empty list — nothing is
+            # emitted (round-25 semantics kept)
+            b"cat scripts/x.sh | sort --files0-from /dev/null | sh",
+            b"cat scripts/x.sh | sort --files0-from=/dev/null | sh",
+            # the stdin-alias list form still drains the pipe as the
+            # list — `; sh` sees EOF (round-25 semantics kept)
+            b"cat scripts/x.sh | sh -c 'sort --files0-from=-; sh'"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
