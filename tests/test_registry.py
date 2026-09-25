@@ -10599,6 +10599,7 @@ def test_pipe_to_exec_round35(tmp_path):
     (pdir / "scripts").mkdir()
     (pdir / "scripts" / "x.sh").write_bytes(b"echo HIT\n")
     (pdir / "scripts" / "y.sh").write_bytes(b"a:\n")
+    (pdir / "scripts" / "z.sh").write_bytes(b"a,,\n")
     for line in (
             # each enclosing capture level's emit check must recurse —
             # the inner `$(cat` reaches sh through two echo captures
@@ -10622,7 +10623,16 @@ def test_pipe_to_exec_round35(tmp_path):
             # `numeric` is --sort's argument; sort re-emits the pipe
             b"cat scripts/x.sh | sort --so numeric | sh",
             b"cat scripts/x.sh | sort --sort numeric | sh",
-            b"cat scripts/x.sh | sort --sor numeric | sh"):
+            b"cat scripts/x.sh | sort --sor numeric | sh",
+            # an EXACT long option resolves even under prefix overlap —
+            # `cat --number` is valid though `--number-nonblank` shares
+            # the prefix (Codex on #1393, round-39 review)
+            b"cat --number scripts/x.sh | sort | sh",
+            # remaining real sort options still forward the stream
+            b"cat scripts/x.sh | sort --human-numeric-sort | sh",
+            b"cat scripts/x.sh | sort --ignore-nonprinting | sh",
+            # under `IFS=', '` `a:` has no delimiter — still one field
+            b"IFS=', '; date +$(cat scripts/y.sh) | sh"):
         assert mod.script_dep_block(pdir, line + b"\n"), line
     for line in (
             # `cat -n`/`cat -b` prepend a line number per numbered
@@ -10656,5 +10666,14 @@ def test_pipe_to_exec_round35(tmp_path):
             # an all-whitespace IFS behaves like the default split
             b'IFS=" "; date +$(cat scripts/x.sh) | sh',
             # the plain 2-word capture still errors the same way
-            b"date +$(cat scripts/x.sh) | sh"):
+            b"date +$(cat scripts/x.sh) | sh",
+            # under `IFS=', '` adjacent commas each delimit a field —
+            # `a,,` is TWO fields, so date rejects the capture
+            b"IFS=', '; date +$(cat scripts/z.sh) | sh",
+            # terminal modes print and exit before the wrapped argv —
+            # `flock --help sh P` never runs P (Codex on #1393, r39)
+            b"flock /tmp/l --help sh scripts/x.sh",
+            b"flock /tmp/l --version sh scripts/x.sh",
+            b"find . --help -exec sh scripts/x.sh",
+            b"xargs --help sh scripts/x.sh"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
