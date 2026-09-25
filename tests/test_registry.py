@@ -10631,6 +10631,16 @@ def test_pipe_to_exec_round35(tmp_path):
             b"IFS=x date +$(cat scripts/x.sh) | sh",
             # IFS=H splits `echo HIT` into two fields → date rejects
             b"IFS=H; date +$(cat scripts/x.sh) | sh",
+            # a whitespace-containing IFS still splits on its
+            # non-whitespace chars — `IFS='c '` cuts `echo` at `c`
+            b"IFS='c '; date +$(cat scripts/x.sh) | sh",
+            b"IFS=c; date +$(cat scripts/x.sh) | sh",
+            # a subshell `(IFS=)` assignment never reaches the parent
+            # shell — the capture splits on the default IFS
+            b"(IFS=); date +$(cat scripts/x.sh) | sh",
+            b"x=$(IFS=); date +$(cat scripts/x.sh) | sh",
+            # an all-whitespace IFS behaves like the default split
+            b'IFS=" "; date +$(cat scripts/x.sh) | sh',
             # the plain 2-word capture still errors the same way
             b"date +$(cat scripts/x.sh) | sh"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line

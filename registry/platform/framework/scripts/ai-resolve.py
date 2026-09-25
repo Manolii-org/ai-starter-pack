@@ -2534,13 +2534,28 @@ def _ifs_fields(data: bytes, ifs: bytes | None) -> list:
     whitespace-containing IFS splits normally; an IFS of only
     non-whitespace chars (or the empty IFS) splits only on its own
     characters, so `IFS=; date +$(cat x)` keeps `echo HIT` as ONE
-    field (Devin on #128, round-35 review — verified live)."""
-    if ifs is None or any(c in b" \t\n" for c in ifs):
+    field (Devin on #128, round-35 review — verified live). An IFS
+    MIXING whitespace and other chars still splits on both (`IFS='c '`
+    cuts `echo` at `c` — Devin on #128, round-36 review)."""
+    if not data:
+        return []
+    if ifs is None:
         return data.split()
-    if not ifs:
-        return [data] if data else []
-    return [p for p in re.split(rb"[" + re.escape(ifs) + rb"]", data)
-            if p]
+    nonws = bytes(c for c in ifs if c not in b" \t\n")
+    if any(c in b" \t\n" for c in ifs):
+        if nonws and re.search(rb"[" + re.escape(nonws) + rb"]", data):
+            return [b"", b""]       # provably ≥2 fields
+        return data.split()
+    if not nonws:
+        return [data]
+    # Pure non-whitespace IFS — every delimiter emits a field; a
+    # LEADING one also emits an empty head field (`IFS=,` gives `,a`
+    # two fields, `a,` one — verified live).
+    parts = [p for p in re.split(
+        rb"[" + re.escape(nonws) + rb"]+", data) if p]
+    if data[:1] in nonws:
+        parts.insert(0, b"")
+    return parts
 
 
 def _line_ifs(src: bytes, end: int) -> bytes | None:
@@ -2548,10 +2563,17 @@ def _line_ifs(src: bytes, end: int) -> bytes | None:
     `IFS=` assignment STANDALONE STATEMENT (`IFS=; date +$(cat x)`
     leaves `echo HIT` one field). A command-prefix `IFS=x` binds only
     for the command's own environment — after word-splitting — so it
-    does NOT count (Devin on #128, round-35 review — verified live).
-    None = shell default."""
+    does NOT count, and a `(IFS=)` subshell assignment never reaches
+    the parent shell (Devin on #128, round-35/36 review — verified
+    live). None = shell default."""
     ifs = None
-    for stmt in re.split(rb"[;\n&|]+", src[:end]):
+    region = src[:end]
+    for _ in range(4):              # strip nested subshell/capture
+        r2 = re.sub(rb"\([^()]*\)", b"", region)
+        if r2 == region:
+            break
+        region = r2
+    for stmt in re.split(rb"[;\n&|]+", region):
         wsv = _shell_words(_mask_parens(stmt))
         if (wsv and all(
                 re.match(rb"[A-Za-z_][A-Za-z0-9_]*=",
