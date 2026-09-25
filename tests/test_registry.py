@@ -9019,21 +9019,30 @@ def test_script_dep_input_side_fd_dup(tmp_path):
 
 
 def test_script_dep_date_unquoted_sub(tmp_path):
-    """`date +$(cat)` field-splits the expansion, but its first token
-    still joins the format operand and IS emitted — dep bytes reach a
-    downstream exec (Devin on #1380/#1957, round-16 review)."""
+    """UNQUOTED `date +$(cat)`/`date +`cat`` field-split the expansion
+    into extra operands — date errors and nothing reaches a downstream
+    exec, so the path is NOT dep bytes (Codex on #1957, round-24 review
+    — supersedes the round-16 over-block). Only the quoted `"+$(…)`
+    form joins the format operand and emits."""
     mod = load_resolve_module()
     pdir = tmp_path / "plug"
     (pdir / "scripts").mkdir(parents=True)
     (pdir / "scripts" / "x.sh").write_bytes(b"x")
-    assert mod.script_dep_block(
+    assert not mod.script_dep_block(
         pdir, b'cat scripts/x.sh | date +$(cat) | sh\n')
+    assert not mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | date +`cat` | sh\n')
     # The quoted form forwards verbatim.
     assert mod.script_dep_block(
         pdir, b'cat scripts/x.sh | date +"$(cat)" | sh\n')
-    # And on the output_exec side: an unquoted +$(cat f) emits token one.
     assert mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | date "+$(cat)" | sh\n')
+    # And on the output_exec side: an unquoted +$(cat f) is likewise
+    # not a dep.
+    assert not mod.script_dep_block(
         pdir, b'date +$(cat scripts/x.sh) | sh\n')
+    assert mod.script_dep_block(
+        pdir, b'date "+$(cat scripts/x.sh)" | sh\n')
 
 
 def test_script_dep_quoted_separator_literals(tmp_path):
@@ -9475,8 +9484,9 @@ def test_pipe_to_exec_round19(tmp_path):
             b"cat scripts/x.sh | echo \"$(cat <(cat))\" | sh",
             # a `<(cat)` codec operand re-reads the upstream pipe
             b"cat scripts/x.sh | python -m base64 -d <(cat) | sh",
-            # nested `date +FORMAT` echoes the capture back out
-            b"cat scripts/x.sh | echo \"$(date +$(cat))\" | sh"):
+            # nested `date +FORMAT` echoes the capture back out —
+            # quoted-only since round 24 (unquoted +$( field-splits)
+            b"cat scripts/x.sh | echo \"$(date \"+$(cat)\")\" | sh"):
         assert mod.script_dep_block(pdir, line + b"\n"), line
     for line in (
             # eval's own `< f` rebind feeds the inner command the FILE
@@ -9579,10 +9589,11 @@ def test_pipe_to_exec_round19(tmp_path):
             # timeout's DURATION is not the wrapped command — env -S
             # still splits into a shell (Devin on #128/#1382)
             b"cat scripts/x.sh | timeout 1 env -S 'sh'",
-            # `+$(cat)` stays a single format word; unquoted can still
-            # emit a one-word payload (`date +x` → `x`), so both count
+            # `+$(cat)` stays a single format word only inside quotes —
+            # the UNQUOTED form field-splits into extra operands and
+            # date errors, so it is NOT a dep (round-24 flip; the
+            # round-21 comment below assumed a one-word emit)
             b'cat scripts/x.sh | date "+$(cat)" | sh',
-            b"cat scripts/x.sh | date +$(cat) | sh",
             # backtick pairs are substitution words like `$(` — inside
             # and outside double quotes, in eval argv, and through an
             # emit head's output (round-21 backtick parity; _cmd_window
@@ -9601,6 +9612,10 @@ def test_pipe_to_exec_round19(tmp_path):
         assert mod.script_dep_block(pdir, line + b"\n"), line
     # Round-21 negative cases.
     for line in (
+            # UNQUOTED `date +$(cat)` field-splits the capture into
+            # extra operands — date errors, nothing reaches the exec
+            # (round-24 flip: was positive on a one-word emit theory)
+            b"cat scripts/x.sh | date +$(cat) | sh",
             # evaluated program reads the REBOUND stdin, not the pipe
             # (Devin on #128/#1382/#1957)
             b"cat scripts/x.sh | eval sh </dev/null",
@@ -9730,4 +9745,95 @@ def test_pipe_to_exec_round19(tmp_path):
             b"cat scripts/x.sh | eval \"$(cat | wc -l)\"",
             b"cat scripts/x.sh | eval `cat | wc -l`",
             b"cat scripts/x.sh | eval \"$(cat | head -n 0)\""):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_pipe_to_exec_round24(tmp_path):
+    """Round-24 review batch — unquoted heredoc bodies are program text
+    (`bash <<EOF` bodies execute; `'$(x)'` inside still expands); `xargs
+    -a` fd-aliased operands read the pipe while real files leave the
+    utility's own stdin classification; `sh -c > /dev/null CMD` skips
+    redirect words; `mapfile -n`/`readarray -n` leave a tail; `nice`
+    execs its COMMAND; formatter flag operands forward stdin; glued
+    program-file flags (`sed -ep`, `awk -fprog`) name files so
+    positionals stay input files; glued backtick suffixes glue a
+    filename; UNQUOTED `date +$(…)`/`date +`…`` field-split and never
+    reach a downstream exec (Devin + Codex + CodeRabbit on
+    #128/#1382/#1957/#11 — verified live on bash and dash)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (
+            # an _HD_EXEC heredoc body is the inner script — plain
+            # lines run, and `'`/`"` do NOT suppress `$(` expansion
+            # inside it (apostrophes are literal in the body)
+            b"bash <<EOF\n'$(bash scripts/x.sh)'\nEOF",
+            b"bash <<EOF\nbash scripts/x.sh\nEOF",
+            b"bash <<EOF\nsh scripts/x.sh\nEOF",
+            # `xargs -a -`/`--arg-file=-` read the PIPE as the item
+            # source — the stream flows on like bare xargs
+            b"cat scripts/x.sh | xargs -a - echo | sh",
+            b"cat scripts/x.sh | xargs --arg-file=- echo | sh",
+            # `xargs -a F` leaves the live pipe to the utility —
+            # `sh -c 'sh'` executes it
+            b"cat scripts/x.sh | xargs -a /dev/null sh -c 'sh'",
+            b"cat scripts/x.sh | xargs --arg-file=/dev/null sh -c 'sh'",
+            # `sh -c > /dev/null CMD` — redirect words are skipped;
+            # the real command string follows
+            b"cat scripts/x.sh | sh -c > /dev/null sh",
+            b"cat scripts/x.sh | bash -c > /dev/null sh",
+            # `mapfile -n N`/`readarray -n N` copy at most N records —
+            # the tail still reaches a later `; sh`
+            b"cat scripts/x.sh | sh -c 'mapfile -n 1; sh'",
+            b"cat scripts/x.sh | sh -c 'readarray -n5; sh'",
+            b"cat scripts/x.sh | sh -c 'mapfile --line-count 1; sh'",
+            # `nice` is an exec wrapper — it runs its COMMAND operand
+            # (with `-n`/`--adjustment` glued or separate)
+            b"nice sh -c 'bash scripts/x.sh'",
+            b"nice -n 10 sh -c 'bash scripts/x.sh'",
+            b"nice -n10 sh -c 'bash scripts/x.sh'",
+            b"nice --adjustment 5 bash -c 'bash scripts/x.sh'",
+            b"cat scripts/x.sh | nice -n 10 sh -c 'sh'",
+            # formatter flag operands are not file operands — stdin
+            # still forwards to the exec
+            b"cat scripts/x.sh | fmt -w 999 | sh",
+            b"cat scripts/x.sh | expand -t 8 | sh",
+            b"cat scripts/x.sh | sort --parallel 2 | sh",
+            b"cat scripts/x.sh | unexpand --tabs 4 | sh",
+            # operand-valued flags don't consume the program —
+            # `sed -l 80 '1e x'` still treats the positional as the
+            # sed program (got_prog only marks -e/-f/-file forms)
+            b"sed -l 80 '1e bash scripts/x.sh'",
+            b"sed --line-length 80 '1e bash scripts/x.sh'",
+            b"awk -v x=1 '{system(\"bash scripts/x.sh\")}'"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # an _HD_EXEC heredoc body's NON-executing lines are data —
+            # echo/printf lines emit bytes, not program text
+            b"bash <<EOF\necho scripts/x.sh\nEOF",
+            b"bash <<EOF\nprintf '%s' scripts/x.sh\nEOF",
+            # `xargs -a F` + a non-executing utility — the default
+            # `echo` sinks the live pipe
+            b"cat scripts/x.sh | xargs -a /dev/null echo | sh",
+            # `mapfile`/`readarray` without `-n` drain stdin to EOF —
+            # nothing left for `; sh`
+            b"cat scripts/x.sh | sh -c 'mapfile; sh'",
+            b"cat scripts/x.sh | sh -c 'readarray; sh'",
+            # UNQUOTED `date +$(…)`/`date +`…`` field-split into
+            # extra operands — date errors, nothing reaches the exec
+            # (quoted `"+$(…)` still emits — see
+            # test_script_dep_date_unquoted_sub)
+            b"cat scripts/x.sh | date +$(cat) | sh",
+            b"cat scripts/x.sh | date +`cat` | sh",
+            # a balanced backtick pair glues the arg — words after its
+            # closer stay inside echo's argv
+            b"echo `printf ok` bash scripts/x.sh",
+            # a glued backtick suffix is filename text — bash opens
+            # `x.sh.bak`, not `x.sh`
+            b"bash scripts/x.sh`printf .bak`",
+            # a glued program-file flag names a file, so the
+            # positional is an input file too — never program text
+            b"sed -ep 'bash scripts/x.sh'",
+            b"awk -fprog.awk 'bash scripts/x.sh'"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
