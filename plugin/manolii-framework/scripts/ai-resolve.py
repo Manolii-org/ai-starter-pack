@@ -2136,7 +2136,6 @@ def _seg_prov(body: bytes, prov: str):
                 # literal tick (single-quoted/escaped) is skipped; an
                 # unclosed one still makes the generated command
                 # opaque, same as a closed pair.
-                has_bt = False
                 bt = 0
                 in_s = in_d = False
                 while bt < len(prog):
@@ -2162,7 +2161,6 @@ def _seg_prov(body: bytes, prov: str):
                         bt += 1
                         continue
                     if c == 0x60:
-                        has_bt = True
                         pb = bt + 1
                         while pb < len(prog) and prog[pb] != 0x60:
                             pb += 2 if prog[pb] == 0x5C else 1
