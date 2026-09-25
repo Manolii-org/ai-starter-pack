@@ -1353,6 +1353,18 @@ def _command_start(src: bytes, pos: int) -> int:
         elif c == 0x27:
             in_s = True
         elif c in b"\n|&;`":
+            if c == 0x26:
+                # `&` glued to a redirect is operator text, not a
+                # background separator — `0<&0 sh`, `cmd >&2`,
+                # `x &>f` (mirrors the segment splitter's rule).
+                p = i - 1
+                while p >= 0 and src[p] in b" \t":
+                    p -= 1
+                pv = src[p:p + 1] if p >= 0 else b""
+                if (pv in (b"<", b">")
+                        or src[i + 1:i + 2] in (b">", b"&")):
+                    i += 1
+                    continue
             if c == 0x60:
                 k = i + 1
                 while k < pos and src[k] != 0x60:
@@ -2345,7 +2357,8 @@ _READER_FLAG_OPS = {
                         b"--parallel", b"--compress-program",
                         b"--random-source", b"--batch-size",
                         b"--files0-from"}),
-    b"fmt": frozenset({b"-w", b"--width"}),
+    b"fmt": frozenset({b"-w", b"--width", b"-g", b"--goal",
+                        b"-p", b"--prefix"}),
     b"expand": frozenset({b"-t", b"--tabs"}),
     b"unexpand": frozenset({b"-t", b"--tabs"}),
     b"cut": frozenset({b"-f", b"-c", b"-b", b"-d", b"--fields",

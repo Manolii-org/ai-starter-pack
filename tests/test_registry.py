@@ -9950,3 +9950,46 @@ def test_pipe_to_exec_round25(tmp_path):
             # literal name (ENOENT), not program text
             b"flock /tmp/l.lock 'bash scripts/x.sh'"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_pipe_to_exec_round25b(tmp_path):
+    """Round-25b review fixes: `fmt` goal/prefix flag operands; `&`
+    glued to a redirect is not a command separator (`0<&0 sh -c`,
+    `>&2`, `&>f`) (Codex on #1957)."""
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location(
+        "reg_r25b", Path(__file__).parent.parent / "scripts" / "ai-resolve.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["reg_r25b"] = mod
+    spec.loader.exec_module(mod)
+    pdir = tmp_path
+    (pdir / "scripts").mkdir()
+    (pdir / "scripts" / "x.sh").write_bytes(b"e\n")
+    (pdir / "scripts" / "two.sh").write_bytes(b"a b\n")
+    for line in (
+            # `0<&0`/`>&2` fd-dups are redirects, not separators — the
+            # head stays `sh` and the -c string executes (Codex on
+            # #1957, round-25b review — verified live on bash+dash)
+            b"0<&0 sh -c 'bash scripts/x.sh'",
+            b'0<&0 sh -c "bash scripts/x.sh"',
+            b"1>&2 sh -c 'bash scripts/x.sh'",
+            b"0<&0 cat scripts/x.sh | sh",
+            # `fmt -g GOAL`/`-p PREFIX` (and long forms) take operands —
+            # the value is not a file operand, stdin is still the text
+            # (Codex on #1957, round-25b review)
+            b"cat scripts/x.sh | fmt -g 70 | sh",
+            b"cat scripts/x.sh | fmt -p PRE | sh",
+            b"cat scripts/x.sh | fmt --goal 70 | sh",
+            b"cat scripts/x.sh | fmt --prefix=P | sh",
+            # regressions — a real `&` separator still splits
+            b"echo a & bash scripts/x.sh",
+            b"echo a && bash scripts/x.sh",
+            b"bash scripts/x.sh &",
+            b"echo a &>f; bash scripts/x.sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # fmt diverted to a file emits nothing on stdout
+            b"cat scripts/x.sh | fmt -g 70 > /dev/null | sh",
+            b"0<&0 echo bash"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
