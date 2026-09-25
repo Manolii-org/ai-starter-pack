@@ -12786,3 +12786,133 @@ def test_script_dep_round62_quoted_positional(tmp_path):
             b"bash 'scripts/x.sh'",
             b"sh 'scripts/x.sh'"):
         assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round63_numbered_stream_operand(tmp_path):
+    """A `-`/feed-stream operand inside a numbering cat reads the
+    UPSTREAM stream — `cat x | cat -n -` emits `1\tX` (digits+tab
+    per line), which `|sh` cannot run (Devin on #1393, round-63
+    review — verified live). The provenance must thread through
+    `$(`-capture and emit-head gates too (`echo "$(cat -n -)"` —
+    the capture's stdout is numbered text, not dep bytes)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo X\n")
+    (pdir / "f").write_bytes(b"echo F\n")
+    for line in (
+            b"cat scripts/x.sh | cat -n - | sh",
+            b"cat scripts/x.sh | cat -n | sh",
+            b"cat scripts/x.sh | cat -n f - | sh",
+            b"cat scripts/x.sh | cat -n - f | sh",
+            b"cat scripts/x.sh | cat -n - | sh; echo S",
+            b"cat scripts/x.sh | echo \"$(cat -n f -)\" | sh",
+            b"cat scripts/x.sh | echo \"$(cat -n -)\" | sh",
+            b"cat scripts/x.sh | echo \"$(cat f)\" | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # bare `cat -` forwards verbatim — still a dep
+            b"cat scripts/x.sh | cat - | sh",
+            b"cat scripts/x.sh | cat - f | sh",
+            b"cat scripts/x.sh | head -n 1 - | sh",
+            b"cat scripts/x.sh | echo \"$(cat)\" | sh",
+            # non-numbered mixed operands still forward x verbatim
+            b"cat scripts/x.sh | echo \"$(cat f -)\" | sh",
+            b"cat scripts/x.sh | echo \"$(cat -)\" | sh",
+            # `-v` keeps the bytes runnable (show-nonprinting doesn't
+            # alter `echo X`)
+            b"cat scripts/x.sh | cat -v - | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round63_find_redirect_operand(tmp_path):
+    """`find . -name > out -exec sh x` never runs -exec: the redirect
+    words leave find's argv, so `-name` binds `-exec` itself as the
+    pattern and find aborts "paths must precede expression" before
+    reaching the action (Devin on #130, round-63 review — verified
+    live). Only a COMPLETE predicate + redirect + action still runs
+    the action."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo X\n")
+    for line in (
+            b"find . -name > out -exec sh scripts/x.sh \\;",
+            b"find . -type > out -exec sh scripts/x.sh \\;",
+            b"find . -newer > out -exec sh scripts/x.sh \\;",
+            b"find . -perm > out -exec sh scripts/x.sh \\;"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b"find . -exec sh scripts/x.sh \\;",
+            b"find . -name 'a*' > out -exec sh scripts/x.sh \\;",
+            b"find . -type f > out -exec sh scripts/x.sh \\;",
+            b"find . -newer a > out -exec sh scripts/x.sh \\;"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round63_nice_strict_table(tmp_path):
+    """util-linux `nice` aborts "unrecognized option" on any unknown
+    option — `nice --bogus x` never runs x (Codex on #1393, round-63
+    review — verified live) — but `nice -5` is the legacy glued
+    ADJUSTMENT, not an unknown option, and `-n`/`--adjustment` take
+    separate operands."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo X\n")
+    for line in (
+            b"nice --bogus sh scripts/x.sh",
+            b"nice --bogus=n sh scripts/x.sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b"nice -5 sh scripts/x.sh",
+            b"nice -n 2 sh scripts/x.sh",
+            b"nice -n2 sh scripts/x.sh",
+            b"nice --adjustment=2 sh scripts/x.sh",
+            b"nice --adjustment 2 sh scripts/x.sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round63_split_output_prefix(tmp_path):
+    """`split -n 1/1 - pfx` treats `pfx` as the chunk output PREFIX —
+    it is never opened as input (Devin on #1959, round-63 review —
+    verified live). The INPUT positional and the --filter value are
+    the only dep words."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo X\n")
+    for line in (
+            b"split -n 1/1 - scripts/x.sh | sh",
+            b"split -n 2/4 - scripts/x.sh | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b"split -n 1/1 scripts/x.sh pfx | sh",
+            b"split -n 1/1 scripts/x.sh | sh",
+            b"split --filter='sh scripts/x.sh' /etc/hosts",
+            b"split --filter='./scripts/x.sh' /etc/hosts",
+            b"split --filter=./scripts/x.sh /etc/hosts"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round63_filter_emit_head(tmp_path):
+    """`split --filter='echo sh scripts/x.sh'` runs `echo` — the
+    filter PRINTS `sh scripts/x.sh` as chunk text, it never execs
+    x.sh (Devin on #1959, round-63 review — verified live). The
+    emit-head check applies to the filter's command word, not the
+    head word of the scripts/ reference inside it."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo X\n")
+    for line in (
+            b"split --filter='echo sh scripts/x.sh' /etc/hosts",
+            b"split --filter='echo scripts/x.sh | sh' /etc/hosts",
+            b"split --filter='printf %s scripts/x.sh' /etc/hosts",
+            b"split --filter='yes sh scripts/x.sh' /etc/hosts"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b"split --filter='sh scripts/x.sh' /etc/hosts",
+            b"split --filter='bash scripts/x.sh' -",
+            b"split --filter='cat scripts/x.sh' - | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line

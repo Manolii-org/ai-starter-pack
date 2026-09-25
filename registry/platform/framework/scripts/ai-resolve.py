@@ -1128,6 +1128,31 @@ def _find_expr_spans(enc_words: list, hi: int, enclosing: bytes):
                                   # word after it aborts "paths must
                                   # precede expression" (Devin on
                                   # #1959, round-54 — verified live)
+
+    def _nxt_arg(j):
+        # Index of the next word that reaches find's argv, skipping
+        # shell redirect words — `> f` consumes two words, `>f`/
+        # `2>f`/`2>&1` one (redirects never reach argv: `find .
+        # -name > f` aborts "missing argument" while `find . -name
+        # > f -exec …` binds `-exec` itself as the -name pattern —
+        # Devin on #130, round-63 review — verified live). A `<(…)`
+        # process-sub tokenizes as `<` + inner words; the bare `<`
+        # still names a target, so the same skip covers it.
+        while j < len(enc_words):
+            rj = enclosing[enc_words[j][0]:enc_words[j][1]]
+            if (rj[:1] in (b"<", b">")
+                    or (len(rj) > 1 and rj[:1].isdigit()
+                        and rj[1:2] in (b"<", b">"))):
+                if re.fullmatch(rb"[0-9]*[<>]+&?", rj):
+                    # bare operator — the NEXT word is its target
+                    j += 2
+                else:
+                    # glued target (`>f`, `2>&1`, `>>f`) — one word
+                    j += 1
+                continue
+            return j
+        return len(enc_words)
+
     while k < len(enc_words):
         t = _word_text(enclosing[enc_words[k][0]:enc_words[k][1]])
         rw = enclosing[enc_words[k][0]:enc_words[k][1]]
@@ -1238,10 +1263,11 @@ def _find_expr_spans(enc_words: list, hi: int, enclosing: bytes):
                     m += 1
                     continue
                 if tm in _FIND_TWO_OP:
-                    m += 3
+                    m = _nxt_arg(m + 1)
+                    m = _nxt_arg(m + 1)
                     continue
                 if tm in _FIND_ONE_OP or _find_newer_op(tm):
-                    m += 2
+                    m = _nxt_arg(m + 1)
                     continue
                 later.append(tm)
                 m += 1
@@ -1251,12 +1277,16 @@ def _find_expr_spans(enc_words: list, hi: int, enclosing: bytes):
             continue
         if t in _FIND_TWO_OP:
             expr_begun = True
-            if k + 2 >= len(enc_words):
-                # A two-operand predicate at argv end aborts "missing
-                # argument" before traversal (Devin on #130, round-55
-                # — verified live).
+            o1 = _nxt_arg(k + 1)
+            o2 = _nxt_arg(o1 + 1) if o1 < len(enc_words) else o1
+            if o2 >= len(enc_words):
+                # A two-operand predicate without both argv operands
+                # aborts "missing argument" before traversal (Devin
+                # on #130, round-55 — verified live).
                 spans.append(("terminal", k, k))
-            k += 3
+                k = len(enc_words)
+            else:
+                k = o2 + 1
             continue
         if t in _FIND_ONE_OP or _find_newer_op(t):
             # `-D`/`-files0-from` are GNU pre-expression options —
@@ -1266,26 +1296,29 @@ def _find_expr_spans(enc_words: list, hi: int, enclosing: bytes):
             # on #130, round-57 review — verified live).
             if t in (b"-D", b"-files0-from") and not opt_region:
                 spans.append(("terminal", k, k))
-                k += 2
+                k = _nxt_arg(k + 1) + 1
                 continue
             if t not in (b"-D", b"-files0-from") or not opt_region:
                 expr_begun = True
-            if (t == b"-D" and k + 1 < len(enc_words)
+            o1 = _nxt_arg(k + 1)
+            if (t == b"-D" and o1 < len(enc_words)
                     and b"help" in _word_text(
-                        enclosing[enc_words[k + 1][0]:
-                                  enc_words[k + 1][1]]).split(b",")):
+                        enclosing[enc_words[o1][0]:
+                                  enc_words[o1][1]]).split(b",")):
                 # `-D help` (anywhere in the debugopts list) prints the
                 # -D usage and exits BEFORE the expression — `find -D
                 # exec,help . -exec …` never runs the action; `all`
                 # excludes help and runs (Codex on #1393, round-47
                 # review — verified live).
                 spans.append(("terminal", k, k))
-            if k + 1 >= len(enc_words):
+            if o1 >= len(enc_words):
                 # A predicate with no operand aborts "missing argument"
                 # — the earlier actions never ran (Devin on #130,
                 # round-55 — verified live).
                 spans.append(("terminal", k, k))
-            k += 2
+                k = len(enc_words)
+            else:
+                k = o1 + 1
             continue
         if t in terminal:
             spans.append(("terminal", k, k))
@@ -2405,6 +2438,13 @@ _WRAPPER_FLAGS = {
                            b"--map-auto", b"--persistent",
                            b"--cleanup",
                            b"-f", b"-r", b"-c"}),
+    # util-linux nice — only `-n`/`--adjustment` (operand table),
+    # `-N` legacy glued numerics (handled inline in
+    # _wrapper_opt_class), and `--help`/`--version` exist; any other
+    # option aborts "unrecognized option" before the command runs —
+    # `nice --bogus sh` never reaches sh (Codex on #1393, round-63
+    # review — verified live).
+    b"nice": frozenset(),
     # util-linux chrt — boolean policy/sched flags (util-linux `chrt
     # --help`); `-T`/`-P`/`-D` are operands and `-p`/`-m` query modes
     # (their own tables). Any other option aborts "unrecognized
@@ -2473,6 +2513,11 @@ def _wrapper_opt_class(key: bytes, t: bytes):
             # still aborts "doesn't allow an argument" (`taskset
             # --cpu=0` — Devin on #1959, round-61 — verified live).
             return "describe"
+    if key == b"nice" and len(t) > 1 and t[1:].isdigit():
+        # util-linux `nice -N` is the legacy glued ADJUSTMENT — `nice
+        # -5 sh` still runs sh; it isn't an unknown option (Codex on
+        # #1393, round-63 review — verified live).
+        return "operand_glued"
     vals = _WRAPPER_OPT_OPERAND.get(key, frozenset())
     desc = _WRAPPER_DESCRIBE.get(key, frozenset())
     flags = _WRAPPER_FLAGS.get(key, frozenset())
@@ -3817,6 +3862,16 @@ def _filter_script_role(filt: bytes):
     m = SCRIPT_REF.search(filt)
     if m is None:
         return None
+    if (fw in _STDIN_EMIT_HEADS
+            and not any(e <= m.start()
+                        for _s, e, _k in _sub_cmd_seps(filt))):
+        # A printer head only EMITS the path text — `echo sh x.sh`
+        # prints `sh x.sh` for downstream, it never runs x.sh
+        # (Devin on #1959, round-63 review — verified live). The
+        # emitted-path-exec gap covers what a `|sh` would do with
+        # it. Past a command boundary or `$(` the match is its own
+        # command, not the printer's argv — `echo x; sh x` runs x.
+        return None
     head = filt[m.start():].split(None, 1)[0].lstrip(b'"')
     if head in _FILTER_READERS:
         return "emit"
@@ -4376,7 +4431,7 @@ def _numbered_execs(data: bytes) -> bool:
     return False
 
 
-def _numbered_flows(ops: list) -> bool:
+def _numbered_flows(ops: list, stream_src=None) -> bool:
     """True when a NUMBERED reader's emitted bytes still carry an
     executable command: the `N<TAB>` prefix neuters only each line's
     FIRST command (`1: not found`), while text after a top-level
@@ -4384,18 +4439,20 @@ def _numbered_flows(ops: list) -> bool:
     post-separator command — Devin on #130, round-62 review —
     verified live). Only scripts/-named operands can carry the dep
     (a plain file's commands running is outside the gate's model,
-    same as an unnumbered read); a stream-fed operand's bytes get the
-    same `N<TAB>` prefix, so its commands are neutered too. An
-    unreadable operand can't be ruled out — flows."""
+    same as an unnumbered read). A `-`/stdin operand reads the
+    segment's stdin — when the stream provably carries a scripts/
+    file (`stream_src`), its bytes get the same sep analysis as a
+    file operand (`cat x | cat -n - | sh` runs `1` — Devin on #1393,
+    round-63 review — verified live); an unprovable stream can't be
+    ruled out and flows. An unreadable operand can't be ruled out —
+    flows."""
     if _RESOLVE_ROOT is None:
         return True
     for a in ops:
         if _operand_feeds_stream(a):
-            # A `-`/stdin/fd operand reads the pipe — its bytes get the
-            # same `N<TAB>` prefix, so the stream's own commands are
-            # neutered exactly like a file's (`cat -n f - | sh` runs
-            # `1`, not the piped script — verified live).
-            continue
+            if stream_src is None:
+                return True
+            a = stream_src
         if b"scripts/" not in a:
             continue
         if _PIN_SOURCE is not None:
@@ -5230,7 +5287,7 @@ def _seg_prov(body: bytes, prov: str,
             # reset the provenance before `fi` sees it.
             return prov
         if first in _SEG_COND_OPENERS:
-            v2 = _stdin_exec_head(rest)
+            v2 = _stdin_exec_head(rest, stream_src)
             if v2 == "exec":
                 return None if prov in ("up", "script", "thru") else "own"
             k2, _, _, _ = _seg_head_args(rest)
@@ -5250,7 +5307,7 @@ def _seg_prov(body: bytes, prov: str,
                 return "own"
             return prov  # a reader forwards its emission (`if cat`)
         body = rest
-    v = _stdin_exec_head(body)
+    v = _stdin_exec_head(body, stream_src)
     if v == "exec":
         # Executing UPSTREAM/SCRIPT bytes is a dep — but an interpreter
         # handed replaced content (`cat scripts/x.sh | wc -l | sh` —
@@ -5441,7 +5498,8 @@ def _seg_prov(body: bytes, prov: str,
                 # live). `-a -`/`-a /dev/stdin` read the pipe as items
                 # — forwarded like bare xargs (Devin on #1382/#128,
                 # round-24 review).
-                v2 = _stdin_exec_head(b" ".join(_xargs_utility(args)))
+                v2 = _stdin_exec_head(
+                    b" ".join(_xargs_utility(args)), stream_src)
                 if v2 == "exec":
                     return (None if prov in ("up", "script", "thru")
                             else "own")
@@ -5503,7 +5561,7 @@ def _seg_prov(body: bytes, prov: str,
                 # substitutions inside `prog` expanded in the PARENT's
                 # stdin context, so `eval "$(cat)" < /dev/null` still
                 # executes the pipe (Devin on #1382, round-20 review).
-                inner = _sub_flow(prog)
+                inner = _sub_flow(prog, stream_src)
                 # The inner "exec" reads the EVALUATED command's stdin —
                 # bound by `fd_in` like any other head (`eval sh <
                 # /dev/null` runs sh on nothing — Devin on
@@ -5522,7 +5580,7 @@ def _seg_prov(body: bytes, prov: str,
                         continue  # nested — decided via the container
                     pbody = prog[pa + 2:
                                  pb - 1 if prog[pb - 1:pb] == b")" else pb]
-                    pflow = _sub_flow(pbody)
+                    pflow = _sub_flow(pbody, stream_src)
                     if pflow in ("exec", "fwd"):
                         # The captured output carries the stream into
                         # the evaluated command — `eval "$(cat)"`
@@ -5573,7 +5631,8 @@ def _seg_prov(body: bytes, prov: str,
                         while pb < len(prog) and prog[pb] != 0x60:
                             pb += 2 if prog[pb] == 0x5C else 1
                         if pb < len(prog):
-                            bflow = _sub_flow(prog[bt + 1:pb])
+                            bflow = _sub_flow(prog[bt + 1:pb],
+                                               stream_src)
                             if not sub_read and bflow in (
                                     "exec", "fwd"):
                                 sub_read = True
@@ -5641,7 +5700,7 @@ def _seg_prov(body: bytes, prov: str,
     return prov
 
 
-def _sub_reads_stdin(a: bytes) -> bool:
+def _sub_reads_stdin(a: bytes, stream_src=None) -> bool:
     """True when a substitution's captured stdout carries upstream pipe
     bytes or plugin-script bytes — the emit head's output then IS that
     data (`echo "$(cat)"`), not the head's own text (`echo "$(printf
@@ -5657,7 +5716,7 @@ def _sub_reads_stdin(a: bytes) -> bool:
     (Devin on #1380 + CodeRabbit on #127, round-13 review).
 
     `a` is a substitution BODY — the caller supplies each span."""
-    return _sub_flow(a) in ("exec", "fwd")
+    return _sub_flow(a, stream_src) in ("exec", "fwd")
 
 
 def _region_body(a: bytes, s: int, e: int) -> tuple:
@@ -5703,7 +5762,7 @@ def _region_body(a: bytes, s: int, e: int) -> tuple:
     return a[s:e], None
 
 
-def _sub_flow(a: bytes) -> str:
+def _sub_flow(a: bytes, stream_src=None) -> str:
     """How a substitution body / `sh -c` command list treats upstream
     pipe bytes: "exec" — a stage EXECUTED dep bytes; "fwd" — the list's
     stdout carried dep bytes (captured or piped onward); "none".
@@ -5736,9 +5795,11 @@ def _sub_flow(a: bytes) -> str:
     # the stream, "own" = the last stage emits its own content,
     # "thru" = a compound condition left the stream for its `then …`.
     prov = "up"
-    flow_src: bytes | None = None  # scripts/ operand behind a "script"
-    # prov — lets the date gate count the stream's words (Codex on
-    # #1957, round-29 review).
+    # scripts/ operand whose bytes provably fill the stream — behind a
+    # "script" prov for walked segments; the caller's `stream_src` is
+    # the stdin provenance for the FIRST segment (and any `$(`-capture
+    # inside it — Codex on #1957, round-29; Devin on #1393, round-63).
+    flow_src = stream_src
     ifs: bytes | None = None  # last bare `IFS=` assignment seen — the
     # expansion's field-split uses it (`IFS=; date +$(cat x)` emits
     # ONE format word — Devin on #128, round-35 review).
@@ -6049,7 +6110,7 @@ def _emit_forwards_stdin(key: bytes, win: bytes, head_end: int,
             closed = b < len(win) or win[b - 1:b] == b")"
             body = win[a + 2:
                        b - 1 if closed and win[b - 1:b] == b")" else b]
-        if not closed or _sub_reads_stdin(body):
+        if not closed or _sub_reads_stdin(body, stream_src):
             if key == b"date":
                 # `date` echoes only a `+FORMAT` operand — `date
                 # "+$(cat)"` emits the capture inside double quotes;
@@ -6112,8 +6173,12 @@ def _sh_c_word(sub: bytes, sub_words: list, n: int):
     return None
 
 
-def _stdin_exec_head(win: bytes) -> str:
+def _stdin_exec_head(win: bytes, stream_src=None) -> str:
     """Classify `win`'s effective command as a pipe consumer.
+
+    `stream_src` is the scripts/ operand whose bytes provably fill the
+    segment's stdin (provenance-carried) — a `-` operand's numbering
+    gate analyzes those bytes; None = unprovable, flows.
 
     "exec"  — the head executes what it reads on stdin (`sh`, `python`).
     "sink"  — the head ends the stream without executing it: a
@@ -6170,7 +6235,8 @@ def _stdin_exec_head(win: bytes) -> str:
                     # setpriv --dump "$(sh)"` runs sh on the pipe
                     # (Devin on #11, round-32 — verified live).
                     for sp, _e in _substitution_spans(win):
-                        if _sub_flow(_sub_inner(win, sp)) == "exec":
+                        if (_sub_flow(_sub_inner(win, sp), stream_src)
+                                == "exec"):
                             return "exec"
                     return "sink"
                 # `taskset -c/--cpu* LIST cmd` — the mask came via
@@ -6264,7 +6330,8 @@ def _stdin_exec_head(win: bytes) -> str:
             continue
         closed = b < len(win) or win[b - 1:b] == b")"
         if not closed or _sub_flow(
-                win[a + 2:b - 1 if win[b - 1:b] == b")" else b]) == "exec":
+                win[a + 2:b - 1 if win[b - 1:b] == b")" else b],
+                stream_src) == "exec":
             return "exec"
     hi = _effective_head(words, win)
     if hi == -1:
@@ -6324,7 +6391,7 @@ def _stdin_exec_head(win: bytes) -> str:
             elif (a.startswith(b"-") and a != b"-"
                     and any(c in b"nb" for c in a[1:])):
                 numbered = True
-        if numbered and not _numbered_flows(ops):
+        if numbered and not _numbered_flows(ops, stream_src):
             return "sink"
         if ops and not any(
                 _operand_feeds_stream(a2) or b"scripts/" in a2
@@ -6363,7 +6430,7 @@ def _stdin_exec_head(win: bytes) -> str:
             elif len(a) > 2 and a[:2] == b"-b":
                 body = a[2:]
             i2 += 1
-        if body != b"n" and not _numbered_flows(ops):
+        if body != b"n" and not _numbered_flows(ops, stream_src):
             return "sink"
     if key == b"pr":
         # `pr` emits the stream verbatim (paged) — its commands still
@@ -6392,7 +6459,7 @@ def _stdin_exec_head(win: bytes) -> str:
                         break
                     if c in b"DhlNowWeisS":
                         break
-        if numbered and not _numbered_flows(ops):
+        if numbered and not _numbered_flows(ops, stream_src):
             return "sink"
     if key in (b"grep", b"egrep", b"fgrep", b"zgrep"):
         # `grep -q`/`--quiet`/`--silent` emits NO bytes — the pipe ends
@@ -6569,7 +6636,7 @@ def _stdin_exec_head(win: bytes) -> str:
             # the inner body emitted; the inner body reads the OUTER
             # stdin (Codex on #127, round-17 review).
             pb = t[2:-1] if t.endswith(b")") else t[2:]
-            if _sub_flow(pb) in ("exec", "fwd"):
+            if _sub_flow(pb, stream_src) in ("exec", "fwd"):
                 return "exec"
             saw_program = True
             continue
@@ -6673,7 +6740,7 @@ def _stdin_exec_head(win: bytes) -> str:
         # a later stage (Devin + CodeRabbit on #1380/#1957, round-15
         # review), `sh -c 'cat'` re-emits it downstream, anything else
         # leaves it unread.
-        flow = _sub_flow(sh_c)
+        flow = _sub_flow(sh_c, stream_src)
         if flow == "exec":
             return "exec"
         return "other" if flow == "fwd" else "sink"
@@ -9969,6 +10036,31 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                                         j2 += 1
                                     return True
                                 return False
+                    # split's SECOND positional is the output PREFIX
+                    # — `split -n 1/1 - x` names chunks `xaa` and
+                    # never reads x (Devin on #1959, round-63 review
+                    # — verified live); only the INPUT positional (or
+                    # a --filter value) can be a dep.
+                    if wkey == b"split":
+                        sargs = [_operand_text(
+                                     enclosing[w2[0]:w2[1]])
+                                 for w2 in enc_words[whi + 1:]]
+                        _sf, sinp, _st, fidx = _split_scan(
+                            wkey, sargs)
+                        wraw = enclosing[w[0]:w[1]]
+                        otxt = _operand_text(wraw)
+                        if (otxt != sinp
+                                and not re.match(
+                                    rb"[0-9]*[<>]", wraw)
+                                and not (wi0 > 0
+                                         and re.fullmatch(
+                                             rb"[0-9]*[<>]+&?",
+                                             enclosing[
+                                                 enc_words[wi0 - 1][0]:
+                                                 enc_words[wi0 - 1][1]]))
+                                and not (fidx is not None
+                                         and wi0 - whi - 1 == fidx)):
+                            return False
                     # An emit/transform head that aborts on its flags
                     # or ends the stream emits none of the operand's
                     # bytes — `tail --pid nope x | sh`, `tail
