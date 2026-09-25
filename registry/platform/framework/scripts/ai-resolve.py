@@ -1565,6 +1565,10 @@ _EXEC_WRAPPERS = frozenset({
     # their scheduling options (Codex on #128, round-26 review —
     # verified live).
     b"ionice", b"taskset",
+    # `chrt [opts] PRIO CMD`/`unshare [opts] CMD` exec CMD after the
+    # scheduler/namespace options (Codex on #128, round-28 review —
+    # verified live).
+    b"chrt", b"unshare",
 })
 # Positional words a wrapper consumes BEFORE the wrapped command —
 # `timeout DURATION sh -c P` execs `sh` after its duration operand
@@ -1573,7 +1577,11 @@ _WRAPPER_POS_SKIP = {b"timeout": 1,
                      # `taskset MASK CMD` — the mask is a positional
                      # UNLESS `-c`/`--cpu-list` already carried it
                      # (handled inline at each skip loop).
-                     b"taskset": 1}
+                     b"taskset": 1,
+                     # `chrt [opts] PRIO CMD` — the priority is the
+                     # positional before the command (`chrt -o 0 sh`
+                     # runs sh — Codex on #128, round-28).
+                     b"chrt": 1}
 # Wrapper options that bind the FOLLOWING word — `sudo -u root bash`
 # skips `root` before identifying `bash`; `env -C /tmp bash` and
 # `stdbuf -o L bash` are the same shape (Devin Review on #1370).
@@ -1603,6 +1611,24 @@ _WRAPPER_OPT_OPERAND = {
     # taskset's `-c`/`--cpu-list` takes the CPU LIST; without it the
     # mask is positional (pos_skip).
     b"taskset": frozenset({b"-c", b"--cpu-list"}),
+    # chrt's deadline params and `-p` query take operands; the policy
+    # flags (-o/-f/-r/-b/-i/-d/-R/-m/-v) are boolean (util-linux
+    # `chrt --help` — Codex on #128, round-28).
+    b"chrt": frozenset({b"-p", b"-T", b"-P", b"-D",
+                        b"--pid", b"--sched-runtime",
+                        b"--sched-period", b"--sched-deadline"}),
+    # unshare's separate-word operands (util-linux `unshare --help`;
+    # `[=file]`-style optional args bind attached only — Codex on
+    # #128, round-28).
+    b"unshare": frozenset({b"--setgroups", b"--setuid", b"--setgid",
+                           b"--root", b"--wd", b"--mount-proc",
+                           b"--mount-bind", b"--mount-ro-bind",
+                           b"--propagation", b"--monotonic",
+                           b"--boottime", b"--map-user",
+                           b"--map-users", b"--map-group",
+                           b"--map-groups", b"--map-auto",
+                           b"--load-interp",
+                           b"--kill-child-signo"}),
     b"setsid": frozenset(),
     b"nohup": frozenset(),
     b"command": frozenset(),
@@ -2266,6 +2292,23 @@ def _date_capture_dep(inner: bytes) -> bool:
                 continue
             parts.append(t)
             i += 1
+        if key == b"printf":
+            # parts[0] is the FORMAT — interpreted, not emitted
+            # literally: `printf %s a b` concatenates "ab" into ONE
+            # word whenever the format and every operand carry no
+            # unquoted whitespace (Devin on #128, round-28 review —
+            # verified live: `sh` receives the joined text).
+            if not parts:
+                return False
+            if len(parts) == 1:
+                # `printf %s` emits "" — only literal format text
+                # remains after its directives are dropped.
+                lit = re.sub(rb"%.", b"", parts[0])
+                out = lit.split()
+                return len(out) == 1
+            # operands — the format concatenates each arg's output
+            # into one stream; only provable cases return False.
+            return True
         return len(b" ".join(parts).split()) == 1
     return True
 
@@ -4789,24 +4832,74 @@ def _span_output_exec(src: bytes, a: int, after: int | None = None) -> bool:
             # word — a >=2-word split errors inside date (Codex on
             # #1957 round-24 + Devin on #128, round-25 review).
             return False
+    # `$(` is code when it sits in the operand word of a program flag —
+    # checked BEFORE the pipe: `-c` consumes the capture as program
+    # text, not stdout, so a `>` diversion can't stop it (`bash -c
+    # "$(cat x)" >f` still runs the capture).
+    flags = _EXEC_OPERAND_FLAGS.get(key, frozenset())
+    if flags:
+        rel = a - cs
+        for k in range(len(words)):
+            if words[k][0] <= rel < words[k][1]:
+                return any(
+                    _word_text(win[words[j][0]:words[j][1]]) in flags
+                    for j in range(hi + 1, k))
     # The enclosing command's window stops AT the substitution opener,
     # so the pipe check scans from `after` — just past the
     # substitution's close — to the next unquoted `|` (`echo "$(cat x)"
     # | sh` — Devin on #6).
     p = (cs + len(win)) if after is None else _pipe_pos(src, after)
     if p >= 0 and _pipe_to_exec(src, p):
-        return True
-    flags = _EXEC_OPERAND_FLAGS.get(key, frozenset())
-    if not flags:
-        return False
-    # `$(` is code when it sits in the operand word of a program flag.
-    rel = a - cs
-    for k in range(len(words)):
-        if words[k][0] <= rel < words[k][1]:
-            return any(
-                _word_text(win[words[j][0]:words[j][1]]) in flags
-                for j in range(hi + 1, k))
+        # A `>`/`&>` diversion on the containing stage leaves fd1
+        # pointing at a file — the pipe carries an EMPTY stream (`echo
+        # "$(cat x)" >/dev/null | sh` hands sh a newline only — Devin
+        # on #11/#128, round-28 review — verified live).
+        return not _stdout_redirected(win)
     return False
+
+
+def _sub_survives_body(body: bytes, pos: int) -> bool:
+    """True when a nested substitution at `pos` inside `body` emits
+    bytes that reach the body's output OR execute inside it — the
+    containing stage's head must emit them onward (emit head, with
+    `date`'s `+FORMAT` gate), its own stdout must not be diverted,
+    and every later `|` stage must forward the stream (a sink ends
+    it; an exec stage means the bytes ran — Devin on #11/#128,
+    round-27/28 review — verified live)."""
+    scs = _command_start(body, pos)
+    swin = _cmd_window(body, scs)
+    swords = _shell_words(_mask_parens(swin))
+    shi = _effective_head(swords, swin)
+    if shi is None or shi < 0:
+        return False
+    # A containing stage whose own stdout is diverted drops the
+    # capture's bytes — `$(echo "$(cat x)" >/dev/null)` emits nothing.
+    if _stdout_redirected(swin):
+        return False
+    skey = _command_key(swin[swords[shi][0]:swords[shi][1]])
+    # The containing stage must emit the capture's bytes onward —
+    # `echo "$(cat x)"`/`printf "$(cat x)"` echo them to stdout, while
+    # `cat "$(cat x)"` treats them as a filename and `wc -l <"$(cat
+    # x)"` digests them.
+    if skey not in _STDIN_EMIT_HEADS:
+        return False
+    if skey == b"date":
+        # `date` emits only its `+FORMAT` operand (same gate as
+        # _span_output_exec).
+        rel_d = pos - scs
+        w = next((w for w in swords if w[0] <= rel_d < w[1]), None)
+        if (w is None
+                or _word_text(swin[w[0]:w[1]])[:1] != b"+"):
+            return False
+    p = _pipe_pos(body, scs + len(swin))
+    while p >= 0:
+        v = _stdin_exec_head(body[p + 1:])
+        if v == "exec":
+            return True
+        if v != "other":
+            return False
+        p = _pipe_pos(body, p + 1)
+    return True
 
 
 def _enclosing_sub_exec(src: bytes, a: int) -> bool:
@@ -4819,12 +4912,12 @@ def _enclosing_sub_exec(src: bytes, a: int) -> bool:
     if not outer:
         return False
     oa, ob = min(outer, key=lambda s: s[1] - s[0])
-    if not _span_output_exec(src, oa, ob):
-        return False
-    # The inner capture's bytes must also SURVIVE the enclosing body's
-    # own stages to reach the outer capture — `$(echo "$(cat x)" | wc
-    # -c)` emits a byte count, not the file (Devin on #11, round-27
-    # review — verified live).
+    # The inner capture's bytes must SURVIVE the enclosing body's own
+    # stages — checked FIRST, because an exec inside the body is a dep
+    # on its own (`$(echo "$(cat x)" | sh)` runs x whatever the outer
+    # capture feeds) and a dead stage kills them whatever the outer
+    # output does (`$(echo "$(cat x)" | wc -c)` emits a byte count,
+    # not the file — Devin on #11, round-27/28 review, live-verified).
     bstart = oa + 2
     body = src[bstart:ob - 1 if src[ob - 1:ob] == b")" else ob]
     pos = a - bstart
@@ -4833,6 +4926,11 @@ def _enclosing_sub_exec(src: bytes, a: int) -> bool:
     swords = _shell_words(_mask_parens(swin))
     shi = _effective_head(swords, swin)
     if shi is None or shi < 0:
+        return False
+    # A containing stage whose own stdout is diverted drops the
+    # capture's bytes — `$(echo "$(cat x)" >/dev/null)` emits nothing
+    # (Devin on #11/#128, round-27/28 review — verified live).
+    if _stdout_redirected(swin):
         return False
     skey = _command_key(swin[swords[shi][0]:swords[shi][1]])
     # The containing stage must emit the capture's bytes onward —
@@ -4860,7 +4958,9 @@ def _enclosing_sub_exec(src: bytes, a: int) -> bool:
         if v != "other":
             return False
         p = _pipe_pos(body, p + 1)
-    return True
+    # The bytes join the outer capture — dep iff THAT output reaches an
+    # exec downstream.
+    return _span_output_exec(src, oa, ob)
 
 
 def _descend_sub(src: bytes, pos: int,
@@ -4887,10 +4987,20 @@ def _descend_sub(src: bytes, pos: int,
     if inner:
         a, b = min(inner, key=lambda s: s[1] - s[0])
         body_end = b - 1 if src[b - 1:b] == b")" else b
+        # A `$(` nested inside another `$(` evaluates against its
+        # PARENT body's pipeline — _command_start skips the enclosing
+        # `$(` and _span_output_exec would see the outer command's
+        # pipe/redirect instead of the inner stage's (Devin on #11,
+        # round-28 review — verified live).
+        nested = any(s[0] < a and b <= s[1]
+                     and src[s[0]:s[0] + 1] == b"$"
+                     for s in _substitution_spans(src))
+        downstream = (_enclosing_sub_exec(src, a) if nested
+                      else _span_output_exec(src, a, b))
         return _command_literal(
             src[a + 2:body_end], pos - a - 2,
-            output_exec or _span_output_exec(src, a, b)
-            or _enclosing_sub_exec(src, a))
+            (output_exec and _sub_survives_body(src, a))
+            or downstream)
     # Backtick pairing is quote-aware: ticks inside a single-quoted span
     # are literal (`'grep `x` y'` is an argument, not a substitution —
     # Devin BUG_0002 on #1953), as is a backslash-escaped tick; inside
@@ -4923,10 +5033,19 @@ def _descend_sub(src: bytes, pos: int,
         if t1 < pos < t2:
             # `eval \`cmd\`` / `bash -c \`cmd\`` execute the output the
             # same way the `$(` forms do (backtick is not procsub).
+            # A backtick pair nested inside a `$(` evaluates against
+            # the parent's body pipeline the same way (round-28).
+            tick_nested = any(
+                s[0] < t1 and t2 + 1 <= s[1]
+                and src[s[0]:s[0] + 1] == b"$"
+                for s in _substitution_spans(src))
+            downstream = (_enclosing_sub_exec(src, t1)
+                          if tick_nested
+                          else _span_output_exec(src, t1, t2 + 1))
             return _command_literal(
                 src[t1 + 1:t2], pos - t1 - 1,
-                output_exec or _span_output_exec(src, t1, t2 + 1)
-                or _enclosing_sub_exec(src, t1))
+                (output_exec and _sub_survives_body(src, t1))
+                or downstream)
     return None
 
 
@@ -6321,7 +6440,10 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                 # FILE, `awk -f f 'bash x'` too, `ssh -p 22 'bash x'`
                 # is a hostname, `node -r 'bash x'` a module path
                 # (Devin on #128, round-23 review — verified live).
-                if ekey in _STDIN_EMIT_HEADS:
+                # An emit head whose stdout is diverted emits nothing
+                # (`echo 'bash x' >/dev/null | sh` — round-28).
+                if (ekey in _STDIN_EMIT_HEADS
+                        and not _stdout_redirected(enclosing)):
                     return True
             # The quoted-span fallback accepts a path inside (a) a
             # DOUBLE-quoted span containing `$(`/`` ` `` — the

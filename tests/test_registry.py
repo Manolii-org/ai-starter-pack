@@ -10134,3 +10134,55 @@ def test_pipe_to_exec_round27(tmp_path):
             b'echo $(echo "$(cat scripts/x.sh)" | grep x) | sh',
             b'echo $(echo "$(cat scripts/x.sh)" | sh) | sh'):
         assert mod.script_dep_block(pdir, line + b"\n"), line
+
+def test_pipe_to_exec_round28(tmp_path):
+    """Round-28: chrt/unshare exec wrappers, a containing stage's `>`
+    diversion drops capture bytes (inner subs, ticks, and emitted
+    operands alike), and printf's format counts once (Devin + Codex
+    on #128)."""
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location(
+        "reg_r28", Path(__file__).parent.parent / "scripts" / "ai-resolve.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["reg_r28"] = mod
+    spec.loader.exec_module(mod)
+    pdir = tmp_path
+    (pdir / "scripts").mkdir()
+    (pdir / "scripts" / "x.sh").write_bytes(b"e\n")
+    for line in (
+            # a `>` diversion on the containing stage drops the bytes
+            # — outer capture, emitted operand, and inner sub alike
+            # (Devin on #11/#128 — `sh` sees only a newline, live)
+            b'echo "$(cat scripts/x.sh)" >/dev/null | sh',
+            b'echo "$(cat scripts/x.sh)" >f | sh',
+            b'echo $(echo "$(cat scripts/x.sh)" >/dev/null) | sh',
+            b'echo $(echo `cat scripts/x.sh` >/dev/null) | sh',
+            b'echo $(echo `cat scripts/x.sh` | wc -c) | sh',
+            b"echo 'bash scripts/x.sh' >/dev/null | sh",
+            b"printf 'bash scripts/x.sh' >/dev/null | sh",
+            # query-mode forms never exec a command
+            b"chrt -p 1234",
+            b"chrt -o -p 0 1234"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # chrt [opts] PRIO CMD and unshare [opts] CMD exec their
+            # command operand (Codex on #128 — verified live)
+            b"chrt -o 0 sh -c 'bash scripts/x.sh'",
+            b"chrt -f 20 sh -c 'bash scripts/x.sh'",
+            b"unshare sh -c 'bash scripts/x.sh'",
+            b"unshare --fork sh -c 'bash scripts/x.sh'",
+            b"unshare -r sh -c 'bash scripts/x.sh'",
+            b"unshare --wd /tmp sh -c 'bash scripts/x.sh'",
+            # `2>` diverts only stderr — stdout still reaches the pipe
+            b'echo "$(cat scripts/x.sh)" 2>f | sh',
+            b'echo $(echo "$(cat scripts/x.sh)" 2>f) | sh',
+            # program-flag consumption is redirect-independent —
+            # `-c`/`eval` read the capture as program text, not stdout
+            b'bash -c "$(cat scripts/x.sh)" >f',
+            b'eval "$(cat scripts/x.sh)" >f',
+            # live stages still propagate through the nesting
+            b'echo $(echo `cat scripts/x.sh`) | sh',
+            b'echo $(echo "$(cat scripts/x.sh)" | cat) | sh',
+            b'echo $(echo "$(cat scripts/x.sh)" | sh) | sh'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
