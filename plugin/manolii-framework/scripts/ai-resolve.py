@@ -953,12 +953,15 @@ _FIND_ACTION = frozenset({b"-exec", b"-execdir", b"-ok", b"-okdir"})
 # `xargs -Z` / `flock --ver` print "ambiguous"/"invalid option" and
 # exit — Codex on #1959, round-44 review — verified live).
 _WRAPPER_LONG = {
+    # `--buffer-size`/`--parallel` are NOT xargs options — rejected
+    # on findutils 4.8 (Devin on #130/#12, round-45 review, verified
+    # live).
     b"xargs": frozenset({
-        b"--arg-file", b"--buffer-size", b"--delimiter", b"--eof",
+        b"--arg-file", b"--delimiter", b"--eof",
         b"--exit", b"--help", b"--interactive", b"--max-args",
         b"--max-chars", b"--max-lines", b"--max-procs",
         b"--no-run-if-empty", b"--null", b"--open-tty",
-        b"--parallel", b"--process-slot-var", b"--replace",
+        b"--process-slot-var", b"--replace",
         b"--show-limits", b"--verbose", b"--version"}),
     b"flock": frozenset({
         b"--close", b"--command", b"--conflict-exit-code",
@@ -972,7 +975,7 @@ _WRAPPER_LONG = {
 # verified live).
 _WRAPPER_REQ_LONG = {
     b"xargs": frozenset({
-        b"--arg-file", b"--buffer-size", b"--delimiter",
+        b"--arg-file", b"--delimiter",
         b"--max-args", b"--max-chars", b"--max-procs",
         b"--process-slot-var"}),
     b"flock": frozenset({
@@ -1024,6 +1027,12 @@ def _wrapper_opt_skip(key: bytes, t: bytes):
             resolved = cands[0]
         if resolved in _ARGV_PROGRAM_WRAPPER_TERMINAL[key]:
             return None                 # --help/--version — exits
+        if key == b"flock" and resolved == b"--command":
+            # `--command` only parses in the command position AFTER
+            # the lockfile — before it the option is rejected
+            # ("unrecognized option" — Devin on #12, round-45
+            # review, verified live).
+            return None
         if resolved in _WRAPPER_REQ_LONG[key]:
             return 1 if b"=" in t else 2
         if resolved in _WRAPPER_OPTARG_LONG[key]:
@@ -1034,6 +1043,8 @@ def _wrapper_opt_skip(key: bytes, t: bytes):
     j = 1
     while j < len(t):
         c = t[j:j + 1]
+        if key == b"flock" and c == b"c":
+            return None                 # `-c` pre-lockfile exits
         if c in _WRAPPER_REQ_SHORT[key]:
             return 1 if j + 1 < len(t) else 2
         if c in _WRAPPER_OPT_SHORT[key]:
@@ -1078,7 +1089,16 @@ def _find_expr_spans(enc_words: list, hi: int, enclosing: bytes):
             while end < len(enc_words):
                 tt = _word_text(
                     enclosing[enc_words[end][0]:enc_words[end][1]])
-                if tt in (b";", b"+"):
+                # `+` ends the action argv only as the `{} +`
+                # pair — a bare `+` is passed to the command
+                # (`find . -exec echo + --help \;` prints `+ --help`
+                # — Devin on #1959, round-45 review, verified live).
+                if (tt == b";" or
+                        (tt == b"+" and end > start and
+                         _word_text(
+                             enclosing[enc_words[end - 1][0]:
+                                       enc_words[end - 1][1]])
+                         == b"{}")):
                     break
                 end += 1
             if not dead:
@@ -1105,11 +1125,17 @@ def _find_expr_spans(enc_words: list, hi: int, enclosing: bytes):
                     enclosing[enc_words[m][0]:enc_words[m][1]])
                 if tm in _FIND_ACTION:
                     m += 1
+                    astart = m
                     while m < len(enc_words):
-                        if _word_text(
-                                enclosing[enc_words[m][0]:
-                                          enc_words[m][1]]) in (
-                                    b";", b"+"):
+                        tmw = _word_text(
+                            enclosing[enc_words[m][0]:
+                                      enc_words[m][1]])
+                        if (tmw == b";" or
+                                (tmw == b"+" and m > astart and
+                                 _word_text(
+                                     enclosing[enc_words[m - 1][0]:
+                                               enc_words[m - 1][1]])
+                                 == b"{}")):
                             break
                         m += 1
                     m += 1
@@ -1258,17 +1284,48 @@ def _xargs_argfile(args: list):
     #128/#1382). Option parsing ends at the first non-option word — a
     `-a`-shaped UTILITY argument is not an xargs option (`xargs -a
     /dev/null echo -a -` prints `-a -`, Devin on #128, round-25
-    review — verified live)."""
+    review — verified live). GNU unique-prefix resolution applies
+    too — `--arg-f F` IS `--arg-file` (Devin on #130, round-45
+    review, verified live)."""
     found: bytes | None = None
     seen = False
-    optops = _ARGV_PROGRAM_WRAPPER_OPTOPS[b"xargs"]
     i = 0
     n = len(args)
     while i < n:
         a = args[i]
         if a == b"--":
             break
-        if a in (b"-a", b"--arg-file"):
+        if a.startswith(b"--"):
+            base = a.split(b"=", 1)[0]
+            if base in _WRAPPER_LONG[b"xargs"]:
+                resolved = base
+            else:
+                cands = [o for o in _WRAPPER_LONG[b"xargs"]
+                         if o.startswith(base)]
+                if len(cands) != 1:
+                    break           # exits — no argfile is ever read
+                resolved = cands[0]
+            if resolved == b"--arg-file":
+                seen = True
+                if b"=" in a:
+                    found = a.split(b"=", 1)[1]
+                    i += 1
+                elif i + 1 < n:
+                    found = args[i + 1]
+                    i += 2
+                else:
+                    found = b""
+                    i += 1
+                continue
+            if resolved in _WRAPPER_REQ_LONG[b"xargs"]:
+                i += 1 if b"=" in a else 2
+                continue
+            if (resolved in _ARGV_PROGRAM_WRAPPER_TERMINAL[b"xargs"]
+                    or b"=" in a):
+                break               # help/version or flag+`=` exits
+            i += 1                  # flag / optional-arg long
+            continue
+        if a == b"-a":
             seen = True
             if i + 1 < n:
                 found = args[i + 1]
@@ -1277,19 +1334,18 @@ def _xargs_argfile(args: list):
                 found = b""
                 i += 1
             continue
-        if a.startswith(b"--arg-file="):
-            seen = True
-            found = a[len(b"--arg-file="):]
-        elif a.startswith(b"-a") and len(a) > 2:
+        if a.startswith(b"-a") and len(a) > 2:
             seen = True
             found = a[2:]
-        elif a != b"-" and a.startswith(b"-"):
-            if a in optops:
-                i += 2
-                continue
-        else:
-            break          # utility argv begins — its `-a` is its arg
-        i += 1
+            i += 1
+            continue
+        if a != b"-" and a.startswith(b"-"):
+            skip = _wrapper_opt_skip(b"xargs", a)
+            if skip is None:
+                break               # exits — no argfile is ever read
+            i += skip
+            continue
+        break              # utility argv begins — its `-a` is its arg
     return found if seen else None
 
 
@@ -1297,7 +1353,6 @@ def _xargs_utility(args: list) -> list:
     """The utility argv xargs execs — option operands folded away,
     `--` ended. Defaults to `echo` when no command word follows
     (Devin on #11/#1382, round-24 review)."""
-    optops = _ARGV_PROGRAM_WRAPPER_OPTOPS[b"xargs"]
     i = 0
     ended = False
     while i < len(args):
@@ -1305,8 +1360,15 @@ def _xargs_utility(args: list) -> list:
         if not ended and a != b"-" and a.startswith(b"-"):
             if a == b"--":
                 ended = True
-            elif a in optops:
-                i += 2
+            else:
+                # GNU unique-prefix resolution — `--arg-f F` consumes
+                # its operand like `--arg-file` (Devin on #130,
+                # round-45 review, verified live); an ambiguous or
+                # unknown option exits before the utility runs.
+                skip = _wrapper_opt_skip(b"xargs", a)
+                if skip is None:
+                    return []
+                i += skip
                 continue
             i += 1
             continue
@@ -2779,7 +2841,9 @@ _SPLIT_REQ_LONG = frozenset({
     b"--additional-suffix", b"--bytes", b"--filter", b"--line-bytes",
     b"--lines", b"--number", b"--separator", b"--suffix-length"})
 _SPLIT_LONG = _SPLIT_REQ_LONG | frozenset({
-    b"--numeric-suffixes", b"--hex-suffixes", b"--debug",
+    # `--debug` is not a real split option (rejected on coreutils
+    # 8.32 — Devin on #130, round-45 review, verified live).
+    b"--numeric-suffixes", b"--hex-suffixes",
     b"--elide-empty-files", b"--unbuffered", b"--verbose",
     b"--help", b"--version"})
 _SPLIT_REQ_SHORT = frozenset({b"a", b"b", b"C", b"l", b"n", b"t"})
@@ -2805,7 +2869,9 @@ def _split_arg_ok(opt: bytes, v: bytes) -> bool:
     if opt in (b"--bytes", b"-b", b"--line-bytes", b"-C"):
         return v[:1].isdigit()
     if opt in (b"--separator", b"-t"):
-        return len(v) == 1
+        # SEP is one byte or the `\0` NUL escape (Codex on #1959,
+        # round-45 review — verified live).
+        return len(v) == 1 or v == b"\\0"
     if opt in (b"--number", b"-n"):
         p = v.split(b"/")
         if len(p) > 1 and p[0] in (b"l", b"r"):
@@ -2840,6 +2906,11 @@ def _split_scan(key: bytes, args: list):
                                 # seekable input
     nslash = False              # a K/N chunk-select form — refuses
                                 # `--filter`
+    nrmode = False              # round-robin `r/N`/`r/K/N` — streams
+                                # a pipe, no seek needed (Devin on
+                                # #1959/#1393, round-45 review —
+                                # verified live). LAST `-n` wins
+                                # (`-n r/2 -n l/2` still seeks).
     i = 0
     while i < len(args):
         a = args[i]
@@ -2885,7 +2956,15 @@ def _split_scan(key: bytes, args: list):
                     return None, None
                 if resolved == b"--number":
                     nmode = True
-                    nslash = nslash or b"/" in v
+                    np_ = v.split(b"/")
+                    if len(np_) > 1 and np_[0] in (b"l", b"r"):
+                        np_ = np_[1:]
+                    # Only the two-part K/N forms select a chunk —
+                    # `r/N` and `l/N` write every chunk (verified:
+                    # `l/2`+filter runs on a file, `r/2`+filter
+                    # streams a pipe — round-45).
+                    nslash = len(np_) == 2
+                    nrmode = v[:1] == b"r"
             i += 1
             continue
         if len(a) > 1 and a[:1] == b"-" and a != b"-":
@@ -2906,7 +2985,11 @@ def _split_scan(key: bytes, args: list):
                         abort = True
                     elif c == b"n":
                         nmode = True
-                        nslash = nslash or b"/" in v
+                        np_ = v.split(b"/")
+                        if len(np_) > 1 and np_[0] in (b"l", b"r"):
+                            np_ = np_[1:]
+                        nslash = len(np_) == 2
+                        nrmode = v[:1] == b"r"
                     break
                 if c in _SPLIT_FLAG_SHORT:
                     j += 1
@@ -2923,8 +3006,10 @@ def _split_scan(key: bytes, args: list):
     if nslash and filt is not None:
         return None, None       # `--filter` never sees a chunk
                                 # selected to stdout
-    if nmode and (inp is None or _stdin_path_operand(inp)):
-        return None, None       # `-n` aborts on an unseekable pipe
+    if (nmode and not nrmode
+            and (inp is None or _stdin_path_operand(inp))):
+        return None, None       # non-round-robin `-n` aborts on an
+                                # unseekable pipe
     return filt, inp
 
 
@@ -3564,6 +3649,13 @@ _READER_OPT_VALUES = {
         b"--radix": frozenset({b"d", b"o", b"x"}),
     },
 }
+# Reader options whose operand must be all digits — an invalid value
+# aborts before any read (`tail --pid nope`, `pr --indent xyz` —
+# Codex on #130, round-45 review, verified live).
+_READER_NUM_VALS = {
+    b"tail": frozenset({b"--pid"}),
+    b"pr": frozenset({b"--indent", b"-o"}),
+}
 
 
 # Complete GNU long-option sets per reader head — abbreviation resolves
@@ -3760,6 +3852,13 @@ def _reader_operands(key: bytes, args: list):
                     if len(cands) != 1:
                         return None
                     resolved = cands[0]
+                if resolved in (b"--help", b"--version",
+                                b"--usage"):
+                    # Print-and-exit modes — the reader never
+                    # touches the stream (`iconv --usage`, `tail
+                    # --version` — Codex on #1959, round-45 review,
+                    # verified live).
+                    return None
                 if resolved in flagops:
                     prog_seen |= resolved in progflags
                     if b"=" not in a and i + 1 >= len(args):
@@ -3770,10 +3869,14 @@ def _reader_operands(key: bytes, args: list):
                         return None
                     valset = _READER_OPT_VALUES.get(
                         key, {}).get(resolved)
-                    if valset is not None:
+                    numv = resolved in _READER_NUM_VALS.get(
+                        key, frozenset())
+                    if valset is not None or numv:
                         v = (a.split(b"=", 1)[1] if b"=" in a
                              else args[i + 1])
-                        if v not in valset:
+                        if valset is not None and v not in valset:
+                            return None
+                        if numv and not v.isdigit():
                             return None
                     i += 1 if b"=" in a else 2
                     continue
@@ -3803,9 +3906,12 @@ def _reader_operands(key: bytes, args: list):
                     return None
                 valset = _READER_OPT_VALUES.get(
                     key, {}).get(a)
-                if valset is not None:
+                numv = a in _READER_NUM_VALS.get(key, frozenset())
+                if valset is not None or numv:
                     v = args[i + 1]
-                    if v not in valset:
+                    if valset is not None and v not in valset:
+                        return None
+                    if numv and not v.isdigit():
                         return None
                 i += 2
                 continue

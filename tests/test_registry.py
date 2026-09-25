@@ -11168,3 +11168,86 @@ def test_script_dep_round44(tmp_path):
             b"find . -exec sh -lc : scripts/x.sh \\;",
             b"find . -exec sh -cl : scripts/x.sh \\;"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round45(tmp_path):
+    """Review round-45 — split round-robin `-n` streaming, find's `{} +`
+    terminator guard, xargs `--arg-f` prefix argfiles, rejected wrapper
+    options, `split --separator='\\0'`, iconv `--usage`, and reader
+    numeric option values — each verified against live GNU tools:
+
+    * `split -n r/2 --filter=sh -` streams a pipe — round-robin needs
+      no seekable input; `l/N`, `l/K/N`, `K/N` and plain `N` still
+      abort on stdin (Devin/Codex);
+    * `+` ends a find `-exec` only as the `{} +` pair — a bare `+` is
+      passed to the command, and `-quit` stays dead when the `-o`
+      lives inside an action argv (Devin);
+    * `xargs --arg-f F` binds the argfile via GNU unique prefix —
+      _xargs_argfile/_xargs_utility share the prefix table (Devin);
+    * `xargs --parallel`/`--buffer-size` and `split --debug` are
+      rejected by the installed GNU tools — never reach argv (Devin);
+    * `flock -c X LOCK`/`--command X LOCK` abort — the command-string
+      options only parse AFTER the lockfile (Devin);
+    * `--separator='\\0'`/`-t '\\0'` is split's NUL escape — the
+      filter still runs (Codex);
+    * `iconv --usage` is a print-and-exit mode — the stream dies
+      unread (Codex);
+    * `tail --pid nope`/`pr --indent xyz` abort on non-digit
+      operands before reading (Codex)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_text("echo HIT\n")
+    for line in (
+            # round-robin streams a pipe — the filter runs the chunks
+            # (verified live)
+            b"cat scripts/x.sh | split -n r/2 --filter=sh - | sh",
+            b"cat scripts/x.sh | split --number=r/2 --filter=sh - | sh",
+            # a bare `+` inside the action argv is data — the later
+            # action still runs (verified live)
+            b"find . -exec echo + --help \\; -exec sh scripts/x.sh \\;",
+            # `-e`/`-i`/`--eof` optional args leave the next word as
+            # the command — argfile still binds (verified live)
+            b"cat scripts/x.sh | xargs --arg-f scripts/x.sh cat | sh",
+            b"cat scripts/x.sh | xargs --arg-file scripts/x.sh cat | sh",
+            # NUL separator escape — the filter still runs (verified)
+            b"cat scripts/x.sh | split --separator='\\0' --lines=1 --filter=sh - | sh",
+            b"cat scripts/x.sh | split -t '\\0' --filter=sh - | sh",
+            # digit operands stay valid (verified live)
+            b"cat scripts/x.sh | tail --pid 9 | sh",
+            b"cat scripts/x.sh | pr --indent 4 | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # non-round-robin `-n` still needs seekable input — l/
+            # and plain modes abort on a pipe; LAST -n wins (verified)
+            b"cat scripts/x.sh | split -n l/2 --filter=sh - | sh",
+            b"cat scripts/x.sh | split -n r/2 -n l/2 --filter=sh - | sh",
+            # r/K/N is a chunk-select — refuses --filter outright
+            # (verified live)
+            b"cat scripts/x.sh | split -n r/1/2 --filter=sh - | sh",
+            # `{}`-terminated action ends at `+` — `--help` is then a
+            # real terminal word (verified live)
+            b"find . -exec echo {} + --help \\; -exec sh scripts/x.sh \\;",
+            # `-quit` still wins when the `-o` lives inside an action
+            # argv (verified live)
+            b"find . -quit -exec echo + -o \\; -exec sh scripts/x.sh \\;",
+            # the argfile consumes the pipe's utility — xargs reads
+            # /dev/null, not the stream (verified live)
+            b"cat scripts/x.sh | xargs --arg-f /dev/null echo | sh",
+            # rejected options exit before argv (verified live)
+            b"xargs --parallel sh scripts/x.sh",
+            b"xargs --buffer-size=100 sh scripts/x.sh",
+            b"cat scripts/x.sh | split --debug --filter=sh - | sh",
+            # `-c`/`--command` before the lockfile abort (verified)
+            b"flock -c X /dev/null sh scripts/x.sh",
+            b"flock --command X /dev/null sh scripts/x.sh",
+            # print-and-exit modes never read the stream (verified)
+            b"cat scripts/x.sh | iconv --usage | sh",
+            b"cat scripts/x.sh | iconv --version | sh",
+            # non-digit option operands abort before reading
+            # (verified live)
+            b"cat scripts/x.sh | tail --pid nope | sh",
+            b"cat scripts/x.sh | tail --pid=nope | sh",
+            b"cat scripts/x.sh | pr --indent xyz | sh",
+            b"cat scripts/x.sh | pr -o xyz | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
