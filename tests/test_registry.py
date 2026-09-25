@@ -11125,8 +11125,9 @@ def test_script_dep_round44(tmp_path):
             # find: a REAL expr branch after -quit still revives the
             # action (verified live)
             b"find . -false -quit -o -exec sh scripts/x.sh \\;",
-            # xargs -E/--eof take no separate operand — the next word
-            # is the command (verified live)
+            # xargs -E/--eof take their operand — here `sh` is the
+            # eof-string and `scripts/x.sh` the utility word itself,
+            # so the dep still fires through argv (verified live)
             b"xargs -E sh scripts/x.sh"):
         assert mod.script_dep_block(pdir, line + b"\n"), line
     for line in (
