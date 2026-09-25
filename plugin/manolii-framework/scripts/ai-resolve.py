@@ -697,6 +697,43 @@ def _in_expand(body: bytes, rp: int) -> bool:
     return bool(stack)
 
 
+# Heads that exec the command in their argv tail but consume the pipe
+# themselves — `xargs sh -c 'P'` still runs P as PROGRAM text even though
+# the inner command's stdin is /dev/null, not the pipe (Codex on
+# #128/#1382, round-20 review). Deliberately NOT in _EXEC_WRAPPERS:
+# stdin flow is not delegated to the inner command.
+_ARGV_PROGRAM_WRAPPERS = frozenset({b"xargs"})
+_ARGV_PROGRAM_WRAPPER_OPTOPS = {
+    b"xargs": frozenset({b"-a", b"-d", b"-e", b"-E", b"-I", b"-J",
+                         b"-L", b"-l", b"-n", b"-P", b"-R", b"-s",
+                         b"--arg-file", b"--delimiter", b"--eof",
+                         b"--replace", b"--max-lines", b"--max-args",
+                         b"--max-procs", b"--max-chars",
+                         b"--show-limits"}),
+}
+
+
+def _argv_wrap_start(enc_words: list, hi: int, enclosing: bytes):
+    """Index of the wrapped command's first word after an argv-spawning
+    wrapper head at `hi`, or None."""
+    key = _command_key(enclosing[enc_words[hi][0]:enc_words[hi][1]])
+    optops = _ARGV_PROGRAM_WRAPPER_OPTOPS.get(key, frozenset())
+    ended = False
+    j = hi + 1
+    while j < len(enc_words):
+        t = _word_text(enclosing[enc_words[j][0]:enc_words[j][1]])
+        if not ended and t != b"-" and t.startswith(b"-"):
+            if t == b"--":
+                ended = True
+            elif t in optops:
+                j += 2
+                continue
+            j += 1
+            continue
+        return j
+    return None
+
+
 def _operand_is_program(enc_words: list, wi: int,
                         enclosing: bytes) -> bool:
     """True when enc_words[wi] is program text the enclosing command's
@@ -711,6 +748,14 @@ def _operand_is_program(enc_words: list, wi: int,
     key = _command_key(enclosing[enc_words[hi][0]:enc_words[hi][1]])
     if key == b"eval":
         return True
+    if key in _ARGV_PROGRAM_WRAPPERS:
+        # The program operand belongs to the command the wrapper execs —
+        # evaluate it as that command's argv.
+        start = _argv_wrap_start(enc_words, hi, enclosing)
+        if start is None or wi <= start:
+            return False
+        return _operand_is_program(enc_words[start:], wi - start,
+                                   enclosing)
     # Inline-program flags only — `-c`/`-e` take program TEXT, while
     # `-f`/`--file` name a FILE and pattern flags (`grep -e`, `jq -f`)
     # are not shell-interpreted.
@@ -737,6 +782,11 @@ def _operand_is_program(enc_words: list, wi: int,
                     return t in pflags
                 j += 2
                 continue
+            elif (t.startswith(b"--") and b"=" in t
+                    and t.split(b"=", 1)[0] in pflags and j == wi):
+                # `--eval=P`/`--expression=P`/`--command=P` — the word
+                # itself is the program text (Codex on #11, round-20).
+                return True
             elif len(t) > 2 and t[:2] in pflags and j == wi:
                 return True   # glued `-cPROG`/`-ePROG`
             j += 1
@@ -905,7 +955,12 @@ _SH_STDIN_HEADS = frozenset(
 # shape; `exec` replaces the shell with what follows.
 _EXEC_WRAPPERS = frozenset({
     b"env", b"command", b"sudo", b"nohup", b"stdbuf", b"exec", b"time",
+    b"timeout",
 })
+# Positional words a wrapper consumes BEFORE the wrapped command —
+# `timeout DURATION sh -c P` execs `sh` after its duration operand
+# (Codex on #128/#1382, round-20 review).
+_WRAPPER_POS_SKIP = {b"timeout": 1}
 # Wrapper options that bind the FOLLOWING word — `sudo -u root bash`
 # skips `root` before identifying `bash`; `env -C /tmp bash` and
 # `stdbuf -o L bash` are the same shape (Devin Review on #1370).
@@ -922,6 +977,7 @@ _WRAPPER_OPT_OPERAND = {
                           b"--input", b"--output", b"--error"}),
     b"exec": frozenset({b"-a"}),
     b"time": frozenset({b"-o", b"-f", b"--output", b"--format"}),
+    b"timeout": frozenset({b"-s", b"-k", b"--signal", b"--kill-after"}),
     b"nohup": frozenset(),
     b"command": frozenset(),
 }
@@ -1161,6 +1217,12 @@ def _py_module_verdict(mod: bytes, rest_words: list, sub: bytes) -> str:
         positional += 1
         if getopt:
             opts_done = True
+        if top == b"gzip" and t != b"-":
+            # `python -m gzip` accepts only `-` or a *.gz FILENAME — an
+            # fd-path or `<(BODY)` operand fails the suffix check and
+            # the module aborts without reading it (Devin on #128,
+            # round-20 review).
+            return "sink"
         if _operand_feeds_stream(t):
             # `-`/fd-path, or a `<(BODY)` process substitution whose
             # inner command re-reads the upstream pipe into an fd the
@@ -1217,6 +1279,7 @@ def _effective_head(words: list, win: bytes) -> int | None:
         if key in _EXEC_WRAPPERS:
             i += 1
             takes_operand = _WRAPPER_OPT_OPERAND.get(key, frozenset())
+            pos_skip = _WRAPPER_POS_SKIP.get(key, 0)
             while i < len(words):
                 t = _word_text(win[words[i][0]:words[i][1]])
                 if redir_pend is not None:
@@ -1239,6 +1302,12 @@ def _effective_head(words: list, win: bytes) -> int | None:
                         i += 2
                     else:
                         i += 1
+                    continue
+                if pos_skip:
+                    # A wrapper's own leading operand (timeout's
+                    # DURATION) — the wrapped command starts after it.
+                    pos_skip -= 1
+                    i += 1
                     continue
                 break
             continue
@@ -1755,26 +1824,31 @@ def _seg_prov(body: bytes, prov: str):
             # Otherwise the reader forwards its input — prov flows.
         elif key == b"eval":
             prog = b" ".join(args)
-            if not prog.strip() or not fd_in:
-                # Bare `eval`/`eval ''` runs nothing and emits nothing,
-                # and a `< f` rebind means the inner command reads the
-                # FILE, not the pipe (Devin on #127/#1380/#9, round-19).
+            if not prog.strip():
+                # Bare `eval`/`eval ''` runs nothing and emits nothing.
                 prov = "own"
             else:
                 # `eval` joins its operands into a command run on the
                 # SAME stdin/stdout — `eval cat` forwards the pipe just
-                # like `cat` (Codex on #1380, round-18 review).
+                # like `cat` (Codex on #1380, round-18 review). A `< f`
+                # rebind feeds the EVALUATED program the file — but
+                # substitutions inside `prog` expanded in the PARENT's
+                # stdin context, so `eval "$(cat)" < /dev/null` still
+                # executes the pipe (Devin on #1382, round-20 review).
                 inner = _sub_flow(prog)
                 if inner == "exec":
                     return None if prov in (
                         "up", "script", "thru") else "own"
-                if inner == "none":
+                if inner == "none" or not fd_in:
                     prov = "own"
         elif key in (b"source", b"."):
-            # `source FILE` executes FILE in this shell — `source
-            # /dev/stdin` executes the upstream pipe itself (Codex on
-            # #1380, round-19 review).
-            if fd_in and any(_stdin_path_operand(a) for a in args):
+            # `source FILE` executes FILE in this shell — only the FIRST
+            # operand is the file; later words are the script's
+            # positional parameters (`source /dev/null /dev/stdin` reads
+            # /dev/null — Codex + Devin on #128/#1382, round-20 review).
+            # A `<(BODY)` operand executes the forwarded stream too
+            # (`source <(cat)` — CodeRabbit on #128).
+            if fd_in and args and _operand_feeds_stream(args[0]):
                 return None if prov in ("up", "script", "thru") else "own"
             prov = "own"
         elif key in _SEG_RESERVED:
@@ -1920,8 +1994,12 @@ def _sub_flow(a: bytes) -> str:
                 emits = (bool(tail)
                          and tail[-1].lstrip(b"\"'").startswith(b"+"))
             else:
+                # Emit heads echo their argv to fd1 — the substitution
+                # being OPENED supplies that argv, so its capture lands
+                # on the output stream. `prev_body` ends at the opener
+                # and cannot name it (Devin on #128/#1382 + Codex on
+                # #11, round-20 review).
                 emits = (ck in _STDIN_EMIT_HEADS
-                         and _emit_forwards_stdin(ck, prev_body, hend)
                          and not _stdout_redirected(prev_body))
             stack.append((prov, emits, sep, out))
             prov = "own" if drained else "up"
@@ -4975,13 +5053,13 @@ def script_dep_block(plugin_dir: Path, src_bytes: bytes,
                     and not _glued_short_hides_path(tw)):
                 return True
             if (raw[:1] in (b"'", b'"') and len(raw) > 2
-                    and re.search(rb"\s", raw[1:-1])):
-                # A quoted operand carrying MULTIPLE words is program
-                # text the head interprets — `sh -c 'x;bash y'` splits
-                # `;` inside and still invokes. A single quoted operand
-                # is a literal path the cand check already handled
-                # (`bash 'x.sh;safe'` names a different file — Devin on
-                # #127, round-17 review).
+                    and re.search(rb"\s", raw[1:-1])
+                    and _operand_is_program(
+                        enc_words, enc_words.index(w), enclosing)):
+                # A quoted MULTI-word operand is program text only when
+                # the head interprets it — `sh -c 'x;bash y'` splits `;`
+                # inside and still invokes; `bash 'x.sh safe'` is one
+                # literal filename (Devin on #1957, round-20 review).
                 return True
             # The quoted-span fallback accepts a path inside (a) a
             # DOUBLE-quoted span containing `$(`/`` ` `` — the
@@ -5001,8 +5079,12 @@ def script_dep_block(plugin_dir: Path, src_bytes: bytes,
             quoted = [span for span in _quoted_spans(raw)
                       if span[0] <= epos - w[0] < span[1]]
             for qa, qb in quoted:
-                if qa > 0 and raw[qa - 1:qa] == b'"' and (
-                        b"$(" in raw[qa:qb] or b"`" in raw[qa:qb]):
+                if (qa > 0 and raw[qa - 1:qa] == b'"'
+                        and _in_expand(raw[qa:qb], epos - w[0] - qa)):
+                    # The matched path must sit INSIDE an executing
+                    # substitution of the double-quoted span —
+                    # `bash "x.sh;$(printf safe)"` still opens the
+                    # literal `x.sh;safe` name (Devin on #128, round-20).
                     return True
             return bool(quoted) and _operand_is_program(
                 enc_words, enc_words.index(w), enclosing)

@@ -9472,7 +9472,6 @@ def test_pipe_to_exec_round19(tmp_path):
             b"cat scripts/x.sh | echo \"$(cat <(cat))\" | sh",
             # a `<(cat)` codec operand re-reads the upstream pipe
             b"cat scripts/x.sh | python -m base64 -d <(cat) | sh",
-            b"cat scripts/x.sh | python -m gzip -d <(cat) | sh",
             # nested `date +FORMAT` echoes the capture back out
             b"cat scripts/x.sh | echo \"$(date +$(cat))\" | sh"):
         assert mod.script_dep_block(pdir, line + b"\n"), line
@@ -9493,7 +9492,17 @@ def test_pipe_to_exec_round19(tmp_path):
             b'bash "scripts/absent.sh;safe"',
             # nested `date --date=` parses the capture — emits a
             # timestamp, never the script bytes (Devin on #1957)
-            b"cat scripts/x.sh | echo \"$(date --date=$(cat))\" | sh"):
+            b"cat scripts/x.sh | echo \"$(date --date=$(cat))\" | sh",
+            # gzip requires a *.gz filename — `/dev/fd/63` aborts the
+            # module before it reads the stream (Devin on #128)
+            b"cat scripts/x.sh | python -m gzip -d <(cat) | sh",
+            # the `$(printf)` path lives outside the substitution — bash
+            # opens the literal `x.sh;safe` name (Devin on #128)
+            b'bash "scripts/x.sh;$(printf safe)"',
+            # a quoted multi-word FILENAME is one literal name — the
+            # whitespace shortcut only applies to program text (Devin
+            # on #1957)
+            b"bash 'scripts/x.sh safe'",
         assert not mod.script_dep_block(pdir, line + b"\n"), line
     # Program-text operands still detect — `sh -c`, eval, sed/awk
     # programs, ssh remote commands all interpret the quoted text.
@@ -9502,5 +9511,36 @@ def test_pipe_to_exec_round19(tmp_path):
             b"sh -c 'x;bash scripts/x.sh'",
             b"eval 'bash scripts/x.sh'",
             b"sed '1e bash scripts/x.sh' f",
-            b"ssh h 'bash scripts/x.sh'"):
+            b"ssh h 'bash scripts/x.sh'",
+            # round-20: emit heads echo a capture opened inside their
+            # argv to fd1 (Devin on #128/#1382 + Codex on #11)
+            b"cat scripts/x.sh | echo \"$(echo $(cat))\" | sh",
+            b"cat scripts/x.sh | sh -c 'echo \"$(cat)\" | sh'",
+            b"cat scripts/x.sh | sh -c 'echo $(cat)' | sh",
+            # eval's `< f` rebind does not erase bytes its argument
+            # substitution already captured (Devin on #1382)
+            b"cat scripts/x.sh | sh -c 'eval \"$(cat)\" < /dev/null' | sh",
+            # `source`/`.` execute a `<(BODY)` filename operand
+            # (CodeRabbit on #128)
+            b"cat scripts/x.sh | source <(cat) | sh",
+            b"cat scripts/x.sh | . <(cat) | sh",
+            # wrapped program heads — timeout execs its argv (with stdin
+            # delegated), xargs execs it (stdin held for its own argv)
+            # (Codex on #128/#1382)
+            b"cat scripts/x.sh | timeout 1 sh -c 'bash scripts/x.sh'",
+            b"cat scripts/x.sh | xargs sh -c 'bash scripts/x.sh'",
+            b"cat scripts/x.sh | timeout 1 sh | sh",
+            # `=`-attached program flags (Codex on #11)
+            b"node --eval='bash scripts/x.sh'",
+            b"sed --expression='1e bash scripts/x.sh' f"):
         assert mod.script_dep_block(pdir, line + b"\n"), line
+    # Round-20 negative cases — none of these executes the bundled
+    # script's bytes.
+    for line in (
+            # `source` runs only its FIRST operand — later words are
+            # the script's positional parameters (Codex + Devin on
+            # #128/#1382)
+            b"cat scripts/x.sh | source /dev/null /dev/stdin | sh",
+            # xargs' own flag operands are not program text
+            b"xargs -n 5 'bash scripts/x.sh'"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
