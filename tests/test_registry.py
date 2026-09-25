@@ -12013,3 +12013,58 @@ def test_script_dep_round53(tmp_path):
             b"split -n +1/1 --filter='sh scripts/x.sh' -",
             b"split -n 1/+2 --filter='sh scripts/x.sh' -"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round54(tmp_path):
+    """Review round-54 fixes: an operand-taking sort option shadows a
+    later `--files0-from=` word (`sort -T --files0-from=/dev/null` reads
+    it as the temp DIR — stdout stays live), find's option region ends
+    at the first predicate as well as the first path (`find -name x -H`
+    is `unknown predicate`), a path after the expression aborts
+    (`find -noignore_readdir_race .` → `paths must precede
+    expression`), `-d` is the `-depth` alias, and setsid's option set is
+    fully enumerated so an unknown option exits before the wrapped
+    command (all verified live).
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts/x.sh").write_text("echo X\n")
+
+    for line in (
+            # `-T`/`--temporary-directory` consume the next word — the
+            # files0-from word is the DIR operand, stdin survives
+            # (Devin on #130)
+            b"cat scripts/x.sh | sort -T --files0-from=/dev/null | sh",
+            b"cat scripts/x.sh | sort --temporary-directory "
+            b"--files0-from=/dev/null | sh",
+            # `-d` is GNU's `-depth` alias — the action still runs
+            # (Codex on #130)
+            b"find . -d -exec sh scripts/x.sh \\;",
+            # global flags still legal before the first path
+            b"find -H . -exec sh scripts/x.sh \\;",
+            # setsid's real boolean flags still reach the command
+            b"cat scripts/x.sh | setsid -w sh",
+            b"cat scripts/x.sh | setsid --fork sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+    for line in (
+            # a predicate ends the option region — `-H`/`-L` after it
+            # are unknown predicates and find aborts (Devin on #130)
+            b"find -name x -H -exec sh scripts/x.sh \\;",
+            b"find -name x -L -exec sh scripts/x.sh \\;",
+            # a path after the expression aborts "paths must precede
+            # expression" before any action runs (Devin on #1959)
+            b"find -noignore_readdir_race . -exec sh scripts/x.sh \\;",
+            b"find -name x . -exec sh scripts/x.sh \\;",
+            b"find . -name x . -exec sh scripts/x.sh \\;",
+            # setsid with an unknown/terminal option exits before the
+            # wrapped command (Codex on #1393)
+            b"cat scripts/x.sh | setsid --bogus sh",
+            b"cat scripts/x.sh | setsid -x sh",
+            b"cat scripts/x.sh | setsid --fork=x sh",
+            b"cat scripts/x.sh | setsid --help sh",
+            # `--files0-from=/dev/null` as a REAL option still drains
+            # stdin to the list file
+            b"cat scripts/x.sh | sort --files0-from=/dev/null | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line

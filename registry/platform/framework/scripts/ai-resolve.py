@@ -967,7 +967,7 @@ _FIND_ACTION = frozenset({b"-exec", b"-execdir", b"-ok", b"-okdir"})
 # dash-shaped at expression level is an unknown predicate and aborts
 # find before traversal (round-51 — verified live).
 _FIND_ZERO_OP = frozenset({
-    b"-a", b"-and", b"-daystart", b"-delete", b"-depth",
+    b"-a", b"-and", b"-d", b"-daystart", b"-delete", b"-depth",
     b"-empty", b"-executable", b"-false", b"-follow",
     b"-ignore_readdir_race", b"-ls", b"-mount", b"-nogroup",
     b"-noignore_readdir_race", b"-noleaf", b"-not", b"-nouser",
@@ -1120,9 +1120,24 @@ def _find_expr_spans(enc_words: list, hi: int, enclosing: bytes):
     dead = unterminated = False
     opt_region = True             # GNU options (`-O`/`-H`/`-L`/`-P`/
                                   # `-D`) precede the first path word
+    expr_begun = False            # the first predicate/operator word
+                                  # starts the expression — a path
+                                  # word after it aborts "paths must
+                                  # precede expression" (Devin on
+                                  # #1959, round-54 — verified live)
     while k < len(enc_words):
         t = _word_text(enclosing[enc_words[k][0]:enc_words[k][1]])
+        if (opt_region
+                and t not in _FIND_GLOBAL_FLAG
+                and t not in (b"-D", b"-files0-from")
+                and not (t.startswith(b"-O") and t[2:].isdigit())):
+            # The option region ends at the first word that is not a
+            # GNU pre-expression option — a path OR a predicate alike
+            # (`find -name x -H` → unknown predicate — Devin on #130,
+            # round-54 review — verified live).
+            opt_region = False
         if t in _FIND_ACTION:
+            expr_begun = True
             start = k + 1
             end = start
             while end < len(enc_words):
@@ -1153,6 +1168,7 @@ def _find_expr_spans(enc_words: list, hi: int, enclosing: bytes):
             k = end + 1
             continue
         if t == b"-quit":
+            expr_begun = True
             # `-quit` exits only when EVALUATED — later words still
             # PARSE (`-help` after it prints usage — Devin on #12,
             # round-42 review, verified live) and a later `-o`/`-or`/`,`
@@ -1200,9 +1216,15 @@ def _find_expr_spans(enc_words: list, hi: int, enclosing: bytes):
             k += 1
             continue
         if t in _FIND_TWO_OP:
+            expr_begun = True
             k += 3
             continue
         if t in _FIND_ONE_OP or _find_newer_op(t):
+            # `-D`/`-files0-from` are GNU pre-expression options in the
+            # option region — they do not start the expression there
+            # (mid-expression the operand-consumption over-blocks).
+            if t not in (b"-D", b"-files0-from") or not opt_region:
+                expr_begun = True
             if (t == b"-D" and k + 1 < len(enc_words)
                     and b"help" in _word_text(
                         enclosing[enc_words[k + 1][0]:
@@ -1237,9 +1259,18 @@ def _find_expr_spans(enc_words: list, hi: int, enclosing: bytes):
             if not (opt_region and t.startswith(b"-O")
                     and t[2:].isdigit()):
                 spans.append(("terminal", k, k))
+        elif t in _FIND_ZERO_OP:
+            expr_begun = True
+        elif t in (b"!", b"(", b")", b","):
+            expr_begun = True
         else:
             # The first positional ends GNU's option region — `-O`
-            # after it is a predicate, not an option.
+            # after it is a predicate, not an option. A positional AFTER
+            # the expression has begun aborts the whole parse — `find .
+            # -name x .` errors "paths must precede expression" before
+            # any action runs (Devin on #1959, round-54 — verified live).
+            if expr_begun:
+                spans.append(("terminal", k, k))
             opt_region = False
         k += 1
     # A terminal word ANYWHERE exits before every action (round-40) —
@@ -2223,6 +2254,13 @@ _WRAPPER_DESCRIBE = {b"command": frozenset({b"-v", b"-V"}),
 # #1393, round-50 review — verified live). Wrappers absent here keep
 # the permissive skip-anything behaviour.
 _WRAPPER_FLAGS = {
+    # util-linux setsid — every operational flag is boolean (`-c`/
+    # `--ctty`, `-f`/`--fork`, `-w`/`--wait`); any other option aborts
+    # before the program runs (`setsid --bogus sh` → "unrecognized
+    # option" — Codex on #1393, round-54 review — verified live).
+    b"setsid": frozenset({b"-c", b"--ctty",
+                          b"-f", b"--fork",
+                          b"-w", b"--wait"}),
     # util-linux unshare — `[=<file>]`-style optional-arg options sit
     # in _WRAPPER_OPTARG_FLAGS instead (an attached `=` binds, a
     # separate word stays positional).
@@ -3101,10 +3139,23 @@ def _sort_files0(args: list):
     live)."""
     found: bytes | None = None
     gnu = _READER_GNU_OPS[b"sort"]
-    for i, a in enumerate(args):
+    i = 0
+    while i < len(args):
+        a = args[i]
+        i += 1
         if a == b"--":
             break
         if not a.startswith(b"--"):
+            # A short operand letter ends the cluster — its value is the
+            # rest of the word, else the NEXT word (`sort -T
+            # --files0-from=/dev/null` reads it as the temp DIR — Devin
+            # on #130, round-54 review — verified live).
+            if a[:1] == b"-" and a != b"-":
+                for j in range(1, len(a)):
+                    if a[j:j + 1] in (b"k", b"t", b"T", b"S", b"o"):
+                        if j + 1 == len(a):
+                            i += 1
+                        break
             continue
         # GNU getopt_long resolves any UNAMBIGUOUS long prefix —
         # `--files0-f` and even `--files` abbreviate `--files0-from`
@@ -3124,7 +3175,11 @@ def _sort_files0(args: list):
             if b"=" in a:
                 found = a.split(b"=", 1)[1]
             else:
-                found = args[i + 1] if i + 1 < len(args) else b""
+                found = args[i] if i < len(args) else b""
+                i += 1
+            continue
+        if resolved in _SORT_OP_OPS and b"=" not in a:
+            i += 1              # separate operand word
     return found
 
 
