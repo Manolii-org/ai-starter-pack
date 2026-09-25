@@ -2536,7 +2536,11 @@ def _ifs_fields(data: bytes, ifs: bytes | None) -> list:
     characters, so `IFS=; date +$(cat x)` keeps `echo HIT` as ONE
     field (Devin on #128, round-35 review — verified live). An IFS
     MIXING whitespace and other chars still splits on both (`IFS='c '`
-    cuts `echo` at `c` — Devin on #128, round-36 review)."""
+    cuts `echo` at `c` — Devin on #128, round-36 review). Command
+    substitution strips ALL trailing newlines BEFORE field-splitting,
+    so a trailing `\n` is never a field of its own even when IFS
+    excludes it (Devin on #128, round-38 review — verified live)."""
+    data = data.rstrip(b"\n")
     if not data:
         return []
     if ifs is None:

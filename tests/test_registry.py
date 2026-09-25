@@ -10598,6 +10598,7 @@ def test_pipe_to_exec_round35(tmp_path):
     pdir = tmp_path
     (pdir / "scripts").mkdir()
     (pdir / "scripts" / "x.sh").write_bytes(b"echo HIT\n")
+    (pdir / "scripts" / "y.sh").write_bytes(b"a:\n")
     for line in (
             # each enclosing capture level's emit check must recurse —
             # the inner `$(cat` reaches sh through two echo captures
@@ -10613,6 +10614,10 @@ def test_pipe_to_exec_round35(tmp_path):
             b'IFS="x(y"; date +$(cat scripts/x.sh) | sh',
             # `,` never appears in `echo HIT` → still one field
             b"IFS=,; date +$(cat scripts/x.sh) | sh",
+            # command substitution strips the file's trailing
+            # newline BEFORE splitting — `a:\n` under IFS=: is ONE
+            # field, so `+a` reaches sh
+            b"IFS=:; date +$(cat scripts/y.sh) | sh",
             # a unique GNU prefix still binds its value operand —
             # `numeric` is --sort's argument; sort re-emits the pipe
             b"cat scripts/x.sh | sort --so numeric | sh",
