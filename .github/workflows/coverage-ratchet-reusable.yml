@@ -26,9 +26,10 @@ name: Coverage Ratchet (Reusable)
 #         python3 -c "import json; print(json.load(open('coverage/coverage-final.json'))['total']['lines']['pct'])"
 #
 # metric_command is arbitrary shell evaluated only on the runner — keep
-# secrets out of it. Pass NON-secret env through the caller's `env:` block
-# (env: is not legal on a `uses:` job; put it on the caller workflow's jobs
-# or in coverage_command itself).
+# secrets out of it. Non-secret env vars the command needs must be inlined
+# in the command itself (`FOO=bar npm run test:coverage`): `env:` is not
+# legal on a `uses:` job, and env set on the caller's other jobs does not
+# propagate into the called workflow.
 
 on:
   workflow_call:
