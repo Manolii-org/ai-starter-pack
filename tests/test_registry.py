@@ -9993,3 +9993,24 @@ def test_pipe_to_exec_round25b(tmp_path):
             b"cat scripts/x.sh | fmt -g 70 > /dev/null | sh",
             b"0<&0 echo bash"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+def test_pipe_to_exec_round25c(tmp_path):
+    """Round-25c: `cut --output-delimiter` takes an operand — the value
+    is not a file operand (Codex on #1957)."""
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location(
+        "reg_r25c", Path(__file__).parent.parent / "scripts" / "ai-resolve.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["reg_r25c"] = mod
+    spec.loader.exec_module(mod)
+    pdir = tmp_path
+    (pdir / "scripts").mkdir()
+    (pdir / "scripts" / "x.sh").write_bytes(b"e\n")
+    for line in (
+            b'cat scripts/x.sh | cut -f1 --output-delimiter " " | sh',
+            b'cat scripts/x.sh | cut -f1 --output-delimiter=" " | sh'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    assert not mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | cut -f1 --output-delimiter " " '
+              b'> /dev/null | sh\n')
