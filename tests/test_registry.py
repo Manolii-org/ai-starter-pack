@@ -11447,3 +11447,104 @@ def test_script_dep_round47(tmp_path):
     # a literal still binds — and a command-scoped prefix does not
     assert mod._line_ifs(b"IFS=','; date +x\n", 8) == b","
     assert mod._line_ifs(b"IFS=',' date +x\n", 18) is None
+
+
+def test_script_dep_round48(tmp_path):
+    """Round-48 review fixes (each verified live against bash/util-linux):
+    a `< file` stdin rebind is seekable so `split -n K/N` streams the
+    chunk instead of aborting; a substitution-bearing `--filter`
+    operand expands to an opaque command and must be treated as
+    executing its chunks; flock's pre-lockfile words go through the
+    shared validated GNU walk so unique-prefix terminal modes
+    (`--vers` → `--version`) and ambiguous prefixes (`--ve`) exit
+    before the command argv; `tail --max-unchanged-stats` shares the
+    non-negative-integer domain (`=bad` aborts before any read); and
+    query/describe modes (`ionice -p/-P/-u`, `taskset -p`, `chrt -p`,
+    `prlimit -p`, `setpriv --dump`, `sudo -l/-v/-e`, `command -v`)
+    never reach a trailing command — words after them are query
+    operands."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "pack"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_text("echo hi\n")
+    for line in (
+            # seekable stdin — `-n K/N` streams the rebound file's chunk
+            b"split -n 1/1 - <scripts/x.sh | sh",
+            b"split -n 1/1 <scripts/x.sh | sh",
+            b"split -n l/1/1 <scripts/x.sh | sh",
+            b"split -n r/1/1 <scripts/x.sh | sh",
+            b"cat /dev/null | split -n 1/1 - <scripts/x.sh | sh",
+            # the same redirect feeds `--filter` too
+            b"split --filter='$(printf sh)' - <scripts/x.sh | sh",
+            # an expanding filter operand resolves to an opaque
+            # command — `$(printf sh)` runs sh on every chunk
+            b"split --filter='$(printf sh)' scripts/x.sh",
+            b'split --filter="$(printf sh)" scripts/x.sh',
+            b"find . -exec split --filter='$(printf sh)' scripts/x.sh \\;",
+            # kept semantics — literal filter heads and exec-mode
+            # wrappers still count
+            b"split --filter=sh scripts/x.sh",
+            b"split --filter=cat scripts/x.sh | sh",
+            b"ionice -c 2 sh scripts/x.sh",
+            b"ionice -c2 -n 5 sh scripts/x.sh",
+            b"taskset 0x1 sh scripts/x.sh",
+            b"taskset -c 0 sh scripts/x.sh",
+            b"taskset -c0 sh scripts/x.sh",
+            b"chrt -o 0 sh scripts/x.sh",
+            b"chrt -T 1 -P 2 -D 3 0 sh scripts/x.sh",
+            b"flock /tmp/l -c 'sh scripts/x.sh'",
+            b"flock -n /tmp/l sh -c 'sh scripts/x.sh'",
+            b"flock --verb /tmp/l -c 'sh scripts/x.sh'",
+            b"flock -w5 /tmp/l -c 'sh scripts/x.sh'",
+            b"sudo sh scripts/x.sh",
+            b"sudo -n -u root sh scripts/x.sh",
+            b"command sh scripts/x.sh",
+            b"prlimit --cpu=1 sh scripts/x.sh",
+            b"cat scripts/x.sh | tail --max-unchanged-stats=2 | sh",
+            b"cat scripts/x.sh | tail --max-unchanged-stats=+2 | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # query/describe modes — the trailing words are PID/name
+            # operands, never a command
+            b"ionice -p 1 sh scripts/x.sh",
+            b"ionice -p1 sh scripts/x.sh",
+            b"ionice -P 1 sh scripts/x.sh",
+            b"ionice -u adrian sh scripts/x.sh",
+            b"ionice --pid 1 sh scripts/x.sh",
+            b"ionice --pid=1 sh scripts/x.sh",
+            b"ionice --process-group 1 sh scripts/x.sh",
+            b"ionice --user adrian sh scripts/x.sh",
+            b"taskset -p 1 sh scripts/x.sh",
+            b"taskset -p1 sh scripts/x.sh",
+            b"taskset --pid 1 sh scripts/x.sh",
+            b"chrt -p 1 sh scripts/x.sh",
+            b"chrt -p1 sh scripts/x.sh",
+            b"chrt --pid 1 sh scripts/x.sh",
+            b"prlimit -p 1 sh scripts/x.sh",
+            b"prlimit --pid 1 sh scripts/x.sh",
+            b"setpriv --dump sh scripts/x.sh",
+            b"command -v sh scripts/x.sh",
+            b"sudo -l sh scripts/x.sh",
+            b"sudo -v sh scripts/x.sh",
+            b"sudo -e sh scripts/x.sh",
+            # flock's pre-lockfile walk resolves GNU prefixes — a
+            # unique terminal prefix or an ambiguous one exits before
+            # the command argv
+            b"flock --vers /tmp/l -c 'sh scripts/x.sh'",
+            b"flock --ver /tmp/l -c 'sh scripts/x.sh'",
+            b"flock --ve /tmp/l -c 'sh scripts/x.sh'",
+            b"flock --version /tmp/l -c 'sh scripts/x.sh'",
+            b"flock --bogus /tmp/l -c 'sh scripts/x.sh'",
+            b"flock -V /tmp/l -c 'sh scripts/x.sh'",
+            # a bad numeric value aborts before any read
+            b"cat scripts/x.sh | tail --max-unchanged-stats=bad | sh",
+            b"cat scripts/x.sh | tail --max-unchanged-stats=-1 | sh",
+            # an unseekable stdin keeps the `-n` abort — and a pipe
+            # input means the expanding filter never sees a script
+            b"cat scripts/x.sh | split -n 1/1 | sh",
+            b"split -n 1/1 - </dev/null | sh",
+            b"split --filter='$(printf sh)' - | sh",
+            # kept semantics — an empty/benign source execs nothing
+            b"split --filter=true scripts/x.sh | sh",
+            b"split -n r/1/1 - </dev/null | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line

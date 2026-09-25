@@ -1512,6 +1512,13 @@ def _operand_is_program(enc_words: list, wi: int,
                                  or t.startswith(b"--cpu-list"))):
                         possk = 0
                     cls = _wrapper_opt_class(wk, t)
+                    if cls == "describe":
+                        # Query/describe modes never reach a command —
+                        # `ionice -p 1 sh`, `taskset --pid $$ sh`, and
+                        # `chrt -p 1 sh` all read `sh` as another PID
+                        # operand and error out (Codex on #1393,
+                        # round-48 review — verified live).
+                        return False
                     j += 2 if (cls == "operand_next"
                                and j + 1 < len(enc_words)) else 1
                     continue
@@ -1551,8 +1558,6 @@ def _operand_is_program(enc_words: list, wi: int,
         # round-41 review — verified live). Every other word after
         # the lockfile is literal argv — `flock L sh -c 'P'` runs P
         # (Codex on #128, round-25 review — verified live).
-        flock_optops = _ARGV_PROGRAM_WRAPPER_OPTOPS[b"flock"]
-        flock_terminal = _ARGV_PROGRAM_WRAPPER_TERMINAL[b"flock"]
         pos0 = ended = False
         j = hi + 1
         while j < len(enc_words):
@@ -1560,8 +1565,6 @@ def _operand_is_program(enc_words: list, wi: int,
             if not ended and t != b"-" and t.startswith(b"-"):
                 if t == b"--":
                     ended = True
-                elif t in flock_terminal:
-                    return False
                 elif pos0:
                     # Post-lockfile argv — an exact `-c`/`--command`
                     # binds command text; any other DASH word is the
@@ -1574,8 +1577,17 @@ def _operand_is_program(enc_words: list, wi: int,
                         j += 2
                         continue
                     return False
-                elif t in flock_optops:
-                    j += 2
+                else:
+                    # Pre-lockfile — the shared validated walk resolves
+                    # unique long prefixes (`--vers` is `--version`,
+                    # `--ve` is ambiguous between --version/--verbose
+                    # — both exit BEFORE the command argv: Devin on
+                    # #130, round-48 review, verified live), terminal
+                    # shorts, glued operands, and operand options.
+                    skip = _wrapper_opt_skip(b"flock", t)
+                    if skip is None:
+                        return False
+                    j += skip
                     continue
                 j += 1
                 continue
@@ -2024,17 +2036,22 @@ _WRAPPER_OPT_OPERAND = {
     b"nice": frozenset({b"-n", b"--adjustment"}),
     # ionice's class/data/target options all bind the next word
     # (util-linux `ionice --help` — Codex on #128, round-26).
-    b"ionice": frozenset({b"-c", b"-n", b"-p", b"-P", b"-u",
-                          b"--class", b"--classdata", b"--pid",
-                          b"--process-group", b"--user"}),
+    # `-p`/`-P`/`-u` are QUERY modes — a trailing word is another PID
+    # operand, never a command (`ionice -p 1 sh` errors "invalid PID
+    # argument" — Codex on #1393, round-48 review — verified live).
+    # They live in _WRAPPER_DESCRIBE instead.
+    b"ionice": frozenset({b"-c", b"-n", b"--class", b"--classdata"}),
     # taskset's `-c`/`--cpu-list` takes the CPU LIST; without it the
-    # mask is positional (pos_skip).
+    # mask is positional (pos_skip). `-p`/`--pid` is a query mode —
+    # the remaining words are PID operands (`taskset -p $$ sh` errors
+    # "invalid PID" — Codex on #1393, round-48 — verified live), so it
+    # lives in _WRAPPER_DESCRIBE.
     b"taskset": frozenset({b"-c", b"--cpu-list"}),
     # chrt's deadline params and `-p` query take operands; the policy
     # flags (-o/-f/-r/-b/-i/-d/-R/-m/-v) are boolean (util-linux
     # `chrt --help` — Codex on #128, round-28).
-    b"chrt": frozenset({b"-p", b"-T", b"-P", b"-D",
-                        b"--pid", b"--sched-runtime",
+    b"chrt": frozenset({b"-T", b"-P", b"-D",
+                        b"--sched-runtime",
                         b"--sched-period", b"--sched-deadline"}),
     # unshare's separate-word operands (util-linux `unshare --help`;
     # `[=file]`-style optional args bind attached only — Codex on
@@ -2080,15 +2097,29 @@ _WRAPPER_DESCRIBE = {b"command": frozenset({b"-v", b"-V"}),
                     b"stdbuf": frozenset({b"--help", b"--version"}),
                     b"timeout": frozenset({b"--help", b"--version"}),
                     b"nice": frozenset({b"--help", b"--version"}),
-                    b"sudo": frozenset({b"-V", b"--version"}),
+                    # `-l`/`--list`, `-v`/`--validate` and `-e`/`--edit`
+                    # never reach a trailing command — `-l` lists the
+                    # privilege, `-v` exits with a usage error when a
+                    # command follows, and `-e` edits the named files
+                    # (verified live, round-48).
+                    b"sudo": frozenset({b"-l", b"--list",
+                                        b"-v", b"--validate",
+                                        b"-e", b"--edit",
+                                        b"-V", b"--version"}),
                     b"exec": frozenset({b"--help"}),
                     b"setsid": frozenset({b"-h", b"--help",
                                           b"-V", b"--version"}),
-                    b"ionice": frozenset({b"-h", b"--help",
+                    b"ionice": frozenset({b"-p", b"-P", b"-u",
+                                          b"--pid",
+                                          b"--process-group",
+                                          b"--user",
+                                          b"-h", b"--help",
                                           b"-V", b"--version"}),
-                    b"taskset": frozenset({b"-h", b"--help",
+                    b"taskset": frozenset({b"-p", b"--pid",
+                                           b"-h", b"--help",
                                            b"-V", b"--version"}),
-                    b"chrt": frozenset({b"-h", b"--help",
+                    b"chrt": frozenset({b"-p", b"--pid",
+                                        b"-h", b"--help",
                                         b"-V", b"--version"}),
                     b"unshare": frozenset({b"-h", b"--help",
                                            b"-V", b"--version"}),
@@ -2960,7 +2991,7 @@ def _split_arg_ok(opt: bytes, v: bytes) -> bool:
     return True
 
 
-def _split_scan(key: bytes, args: list):
+def _split_scan(key: bytes, args: list, seekable_stdin: bool = False):
     """(filter, input, to_stdout) — split's LAST `--filter CMD`
     operand, its first positional INPUT operand (None when split
     reads stdin — `-`/fd-0 also name it), and whether the chunks go
@@ -2983,7 +3014,10 @@ def _split_scan(key: bytes, args: list):
     ("cannot determine file size"), and a K/N chunk-select combined
     with `--filter` ("does not process a chunk extracted to
     stdout") likewise abort before a filter runs — all reported as
-    no-filter."""
+    no-filter. `seekable_stdin` lifts the unseekable-pipe reject when
+    fd 0 is rebound to a regular file — `split -n 1/1 - <F` streams
+    F's chunk (Devin on #130/#12/#1393, round-48 review — verified
+    live)."""
     if key != b"split":
         return None, None, False
     filt = inp = None
@@ -3091,7 +3125,7 @@ def _split_scan(key: bytes, args: list):
     if nslash and filt is not None:
         return None, None, False       # `--filter` never sees a chunk
                                 # selected to stdout
-    if (nmode and not nrmode
+    if (nmode and not nrmode and not seekable_stdin
             and (inp is None or _stdin_path_operand(inp))):
         return None, None, False       # non-round-robin `-n` aborts on an
                                 # unseekable pipe
@@ -3744,7 +3778,10 @@ _READER_OPT_VALUES = {
 # GNU accepts a leading `+` (`tail --pid=+1`, `pr --indent=+1` run)
 # but rejects `-1` (Devin on #1959, round-46 review, verified live).
 _READER_NUM_VALS = {
-    b"tail": frozenset({b"--pid"}),
+    # `--max-unchanged-stats` shares the non-negative-integer domain —
+    # `tail --max-unchanged-stats=bad` aborts before any read (Codex
+    # on #130, round-48 review — verified live).
+    b"tail": frozenset({b"--pid", b"--max-unchanged-stats"}),
     b"pr": frozenset({b"--indent", b"-o"}),
 }
 
@@ -4145,7 +4182,16 @@ def _seg_prov(body: bytes, prov: str,
                 # `-n` K/N stdout modes need a seekable input and
                 # abort on the pipe ("cannot determine file size"),
                 # so they still own the stream — verified live.
-                filt, finput, tout = _split_scan(key, args)
+                # A `< file` stdin rebind is SEEKABLE — `-n K/N`
+                # chunk-selects work on it (`split -n 1/1 -
+                # <scripts/x.sh | sh` streams the script — Devin on
+                # #130/#12/#1393, round-48 review, verified live).
+                # `< /dev/stdin`/an absent rebind stays a pipe.
+                t0 = tgt0.get(0)
+                seek0 = (t0 is not None
+                         and _fd_alias_target(t0) != 0)
+                filt, finput, tout = _split_scan(
+                    key, args, seekable_stdin=seek0)
                 # split's INPUT: a named operand wins regardless of a
                 # `< f` rebind (`split -n r/1/1 F </dev/null` still
                 # emits F's chunk — Devin on #1959, round-47 review
@@ -4186,7 +4232,14 @@ def _seg_prov(body: bytes, prov: str,
                     if src is not None:
                         prov = ("script" if b"scripts/" in src
                                 else "own")
-                    v3 = _sub_flow(filt)
+                    # A `$`/backtick in the filter operand expands to
+                    # an OPAQUE command — `$(printf sh)` resolves to
+                    # `sh` before split runs and execs each chunk
+                    # (Codex on #1959, round-48 review — verified
+                    # live); the command list can't be disproven, so
+                    # treat it as executing its stdin.
+                    v3 = ("exec" if (b"$" in filt or b"`" in filt)
+                          else _sub_flow(filt))
                     if v3 == "exec":
                         return (None
                                 if prov in ("up", "script", "thru")
@@ -8249,6 +8302,13 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                 # is never exec'd (Codex on #1393, round-39 review).
                 wi0 = enc_words.index(w)
                 whi = _effective_head(enc_words, enclosing)
+                if whi is not None and whi < 0:
+                    # A describe-only head never reaches a trailing
+                    # command — `command -v sh x`, `ionice -p $$ sh x`,
+                    # `taskset --pid $$ sh x`, `chrt -p $$ sh x` all
+                    # read the words as query operands and exit
+                    # (Codex on #1393, round-48 review — verified live).
+                    return False
                 if whi is not None and whi >= 0:
                     wkey = _command_key(
                         enclosing[enc_words[whi][0]:
@@ -8311,7 +8371,10 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                                     if (afilt is not None
                                             and afilt
                                             not in (b"", b"-")):
-                                        v5 = _sub_flow(afilt)
+                                        v5 = ("exec" if (
+                                            b"$" in afilt
+                                            or b"`" in afilt)
+                                            else _sub_flow(afilt))
                                         if v5 == "exec":
                                             return True
                                         if v5 == "none":
