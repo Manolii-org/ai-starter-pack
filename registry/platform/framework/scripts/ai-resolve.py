@@ -1815,6 +1815,102 @@ def _prog_capture_role(win: bytes, words: list, hi: int, rel: int,
     return None
 
 
+def _unquoted_herestring(seg: bytes) -> bool:
+    """`<<<` at top level of `seg` — outside quotes, parens, and
+    backticks (a `<<<` inside `$(…)` is the INNER body's own
+    redirect)."""
+    i, depth = 0, 0
+    in_s = in_d = in_bt = False
+    while i < len(seg):
+        c = seg[i:i + 1]
+        if in_s:
+            if c == b"'":
+                in_s = False
+        elif in_bt:
+            if c == b"`":
+                in_bt = False
+            elif c == b"\\":
+                i += 1
+        elif in_d:
+            if c == b'"':
+                in_d = False
+            elif c == b"\\":
+                i += 1
+        elif c == b"'":
+            in_s = True
+        elif c == b'"':
+            in_d = True
+        elif c == b"`":
+            in_bt = True
+        elif c == b"\\":
+            i += 1
+        elif c == b"(":
+            depth += 1
+        elif c == b")":
+            depth = max(0, depth - 1)
+        elif c == b"<" and depth == 0 and seg[i:i + 3] == b"<<<":
+            return True
+        i += 1
+    return False
+
+
+def _herestring_pos(swin: bytes, words: list, rel: int) -> bool:
+    """True when position `rel` in `swin` lies inside a `<<<`
+    here-string target — its expansion feeds the head's fd0 instead of
+    the pipe, so a passthrough head emits it (`cat <<<"$(echo x)"` —
+    Devin on #11, round-33 review — verified live)."""
+    scratch = _fresh_fds()
+    pending = False
+    for w in words:
+        raw = swin[w[0]:w[1]]
+        if pending:
+            # This word is the `<<<` target — `rel` must sit inside
+            # it; a later word is a separate operand.
+            return w[0] <= rel < w[1]
+        _t, pend = _word_redirects(raw, scratch)
+        if w[0] <= rel < w[1]:
+            # `<<<tgt` glued — an unquoted `<<<` anywhere before the
+            # position opens the target the position sits in.
+            return _unquoted_herestring(raw[:rel - w[0]])
+        pending = (pend is not None and pend[0] == 0
+                   and pend[1] == "file"
+                   and _unquoted_herestring(raw))
+    # `rel` fell past every word — a pending `<<<` means the target is
+    # whatever follows, typically the `$(` _cmd_window cut away.
+    return pending
+
+
+def _passthrough_emit_herestring(skey: bytes, swin: bytes,
+                                 words: list, hi: int, rel: int) -> bool:
+    """True when a passthrough head emits the `<<<` target containing
+    `rel` — `cat <<<"$(echo x)"` feeds the here-string to fd0 and the
+    head echoes it. `tee` reads stdin regardless of file operands;
+    `cat`/`pv` only when no file operand replaces the stdin feed
+    (Devin on #11, round-33 review — verified live)."""
+    if skey not in _PIPE_PASSTHRU:
+        return False
+    if not _herestring_pos(swin, words, rel):
+        return False
+    if skey == b"tee":
+        return True
+    sargs: list = []
+    scratch = _fresh_fds()
+    pend = None
+    subs = {a: b for a, b in _substitution_spans(swin)}
+    for w in words[hi + 1:]:
+        raw = _fold_span_arg(swin, w, subs)
+        if raw is None:
+            continue
+        if pend is not None:
+            pend = None
+            continue
+        at, pend = _word_redirects(raw, scratch)
+        if at:
+            sargs.append(at)
+    return all(_operand_feeds_stream(o)
+               for o in _reader_operands(skey, sargs))
+
+
 # `-m` modules that run stdin as PROGRAM text — `python -m code` and
 # `python -m asyncio` open a REPL over the pipe. Everything else with a
 # `-m` entry point parses stdin as DATA (`-m` is a sink for them):
@@ -2359,6 +2455,28 @@ def _stdin_path_operand(t: bytes) -> bool:
 # capture files (a single-word `date +$(cat F)` capture still emits —
 # Devin on #128, round-25 review — verified live). None = no probing.
 _RESOLVE_ROOT: Path | None = None
+# Under a sha:/tag: pin the authoritative content of a plugin file is
+# the pinned git OBJECT — a skip-worktree-modified worktree copy must
+# not flip a dep verdict the pin records (Devin on #11, round-33
+# review). (registry_root, pinned_sha, plugin_dir prefix) or None.
+_PIN_SOURCE: tuple[Path, str, str] | None = None
+
+
+def _pinned_bytes(rel: bytes) -> bytes | None:
+    """`rel`'s content at the pinned ref — `rel` is _RESOLVE_ROOT
+    (plugin_dir)-relative. None when it can't be read there."""
+    if _PIN_SOURCE is None:
+        return None
+    root, sha, prefix = _PIN_SOURCE
+    try:
+        p = subprocess.run(
+            ["git", "-C", str(root), "show",
+             f"{sha}:./{prefix}"
+             f"{rel.decode('utf-8', 'surrogateescape')}"],
+            capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return p.stdout if p.returncode == 0 else None
 
 
 def _date_capture_dep(inner: bytes,
@@ -2392,6 +2510,14 @@ def _date_capture_dep(inner: bytes,
                 continue      # display flags keep the word count
             if _stdin_path_operand(t) or _RESOLVE_ROOT is None:
                 return True
+            if _PIN_SOURCE is not None:
+                data = _pinned_bytes(t)
+                if data is None:
+                    return True
+                seen = True
+                total += len(data.split())
+                i += 1
+                continue
             try:
                 p = _RESOLVE_ROOT / t.decode(
                     "utf-8", "surrogateescape")
@@ -2405,7 +2531,13 @@ def _date_capture_dep(inner: bytes,
         if not seen and stream_src is not None \
                 and _RESOLVE_ROOT is not None:
             # Bare `cat` re-reads the upstream stream — a KNOWN
-            # scripts/ source gives its word count.
+            # scripts/ source gives its word count (the PINNED
+            # object's bytes under a pin — never the worktree's).
+            if _PIN_SOURCE is not None:
+                data = _pinned_bytes(stream_src)
+                if data is not None:
+                    return len(data.split()) == 1
+                return True
             try:
                 p = _RESOLVE_ROOT / stream_src.decode(
                     "utf-8", "surrogateescape")
@@ -2725,12 +2857,22 @@ def _reader_operands(key: bytes, args: list) -> list:
                 # A long option — or its unique GNU prefix (`tac --sep
                 # x` resolves to --separator — Codex on #1957, round-30
                 # review) — consumes the following word as its value.
-                prog_seen |= a in progflags
+                # The prefix resolves for the PROGRAM flag too — `grep
+                # --reg PAT FILE` supplies the pattern via --regexp, so
+                # FILE is a file operand, not the pattern (Devin on
+                # #11, round-33 review — verified live).
+                prog_seen |= (a in progflags
+                              or (a.startswith(b"--") and len(a) > 2
+                                  and any(f[:len(a)] == a
+                                          for f in progflags)))
                 i += 2
                 continue
             elif (len(a) > 2 and a[:2] in progflags) or (
                     a.startswith(b"--") and b"=" in a
-                    and a.split(b"=", 1)[0] in progflags):
+                    and (a.split(b"=", 1)[0] in progflags
+                         or any(f[:len(a.split(b"=", 1)[0])]
+                                == a.split(b"=", 1)[0]
+                                for f in progflags))):
                 # glued `-ePAT` or long `--regexp=P`/`--file=F` program
                 prog_seen = True
             i += 1
@@ -3673,6 +3815,17 @@ def _stdin_exec_head(win: bytes) -> str:
             # pipe — `cat x | echo "$(cat)" | sh` executes x.
             return "other"
         return "sink"
+    if key == b"cat":
+        # `cat FILE` replaces the upstream stream — its bytes never
+        # reach a later exec (`cat x | cat /dev/null | sh` runs
+        # nothing; Devin on #11, round-33 review — verified live). A
+        # scripts/ operand keeps flowing so the file→stream dep still
+        # fires; `-`/fd/proc-sub operands forward the pipe.
+        ops = _reader_operands(key, args)
+        if ops and not any(
+                _operand_feeds_stream(a2) or b"scripts/" in a2
+                for a2 in ops):
+            return "sink"
     if key in (b"grep", b"egrep", b"fgrep", b"zgrep"):
         # `grep -q`/`--quiet`/`--silent` emits NO bytes — the pipe ends
         # (`cat x | grep -q p | sh` feeds sh nothing, Devin on #1374).
@@ -5208,8 +5361,12 @@ def _sub_survives_body(body: bytes, pos: int) -> bool:
     # `echo "$(cat x)"`/`printf "$(cat x)"` echo them to stdout, while
     # `cat "$(cat x)"` treats them as a filename and `wc -l <"$(cat
     # x)"` digests them. A `-c` program echoing a positional counts
-    # too (`bash -c 'echo "$0"' "$(cat x)"` — round-32).
-    if not emits_positional and skey not in _STDIN_EMIT_HEADS:
+    # too (`bash -c 'echo "$0"' "$(cat x)"` — round-32), and a
+    # passthrough head echoes a `<<<` target it sits in (`cat
+    # <<<"$(echo x)"` — round-33).
+    if (not emits_positional and skey not in _STDIN_EMIT_HEADS
+            and not _passthrough_emit_herestring(
+                skey, swin, swords, shi, pos - scs)):
         return False
     if skey == b"date":
         # `date` emits only its `+FORMAT` operand (same gate as
@@ -5295,8 +5452,12 @@ def _enclosing_sub_exec(src: bytes, a: int) -> bool:
     # `echo "$(cat x)"`/`printf "$(cat x)"` echo them to stdout, while
     # `cat "$(cat x)"` treats them as a filename and `wc -l <"$(cat
     # x)"` digests them. A `-c` program echoing a positional counts
-    # too (`bash -c 'echo "$0"' "$(cat x)"` — round-32).
-    if not emits_positional and skey not in _STDIN_EMIT_HEADS:
+    # too (`bash -c 'echo "$0"' "$(cat x)"` — round-32), and a
+    # passthrough head echoes a `<<<` target it sits in (`cat
+    # <<<"$(echo x)"` — round-33).
+    if (not emits_positional and skey not in _STDIN_EMIT_HEADS
+            and not _passthrough_emit_herestring(
+                skey, swin, swords, shi, pos - scs)):
         return False
     if skey == b"date":
         # `date` emits only its `+FORMAT` operand (same gate as
@@ -6633,7 +6794,8 @@ def declared_consumer_scripts(src_bytes: bytes) -> set[str]:
 
 
 def script_dep_block(plugin_dir: Path, src_bytes: bytes,
-                     pinned_scripts: set[str] | None = None) -> bool:
+                     pinned_scripts: set[str] | None = None,
+                     pin_source: tuple[Path, str] | None = None) -> bool:
     """True when the file's script usage cannot run under a resolver install:
     a bundled plugin script (scripts/ isn't materialised), an explicit
     requires_scripts dep, or an unbundled invocation that isn't listed in
@@ -6641,15 +6803,27 @@ def script_dep_block(plugin_dir: Path, src_bytes: bytes,
 
     Under a tag:/sha: pin, `pinned_scripts` carries the scripts/-relative
     paths the PINNED git tree holds — the worktree's is_file() would honour
-    ignored/untracked plants and index-hidden deletions the pin never saw."""
+    ignored/untracked plants and index-hidden deletions the pin never saw.
+    `pin_source` = (registry_root, pinned_sha): content-aware gates then
+    read the pinned OBJECT's bytes, not the worktree's (a skip-worktree
+    edit must not flip a verdict the pin records — Devin on #11,
+    round-33 review)."""
     # Content-aware gates probe files under the repo root while the scan
     # runs (Devin on #128, round-25 review).
-    global _RESOLVE_ROOT
+    global _RESOLVE_ROOT, _PIN_SOURCE
     _RESOLVE_ROOT = plugin_dir
+    if pin_source is not None:
+        root, sha = pin_source
+        try:
+            prefix = plugin_dir.relative_to(root).as_posix() + "/"
+        except ValueError:
+            prefix = ""
+        _PIN_SOURCE = (root, sha, prefix)
     try:
         return _script_dep_block(plugin_dir, src_bytes, pinned_scripts)
     finally:
         _RESOLVE_ROOT = None
+        _PIN_SOURCE = None
 
 
 def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
@@ -7739,8 +7913,10 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                     continue
             if (b"CLAUDE_PLUGIN_ROOT" in src_bytes
                     or declares_script_deps(src_bytes)
-                    or script_dep_block(plugin_dir, src_bytes,
-                                        pinned_scripts)):
+                    or script_dep_block(
+                        plugin_dir, src_bytes, pinned_scripts,
+                        (registry_root, pinned_sha)
+                        if pinned else None)):
                 # Files depending on the plugin install root or on sibling
                 # scripts/ cannot run in a resolver install — the resolver
                 # does not materialise scripts (surface wiring is a later

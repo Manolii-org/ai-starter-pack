@@ -10416,3 +10416,89 @@ def test_pipe_to_exec_round32(tmp_path):
             b'cat scripts/x.sh | env --help sh',
             b'cat scripts/x.sh | sudo -V sh'):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_pipe_to_exec_round33(tmp_path):
+    """Round-33: GNU long-option PREFIX abbreviations still consume the
+    program operand (`grep --reg PAT FILE`), a `cat FILE` mid-pipe
+    replaces the stream, pinned script content reads use the pinned
+    object's bytes, and a passthrough head emits a `<<<$(…)`
+    here-string target (Devin on #11 — verified live)."""
+    import importlib.util
+    import subprocess as sp
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location(
+        "reg_r33", Path(__file__).parent.parent / "scripts" / "ai-resolve.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["reg_r33"] = mod
+    spec.loader.exec_module(mod)
+    pdir = tmp_path / "plugin"
+    pdir.mkdir()
+    (pdir / "scripts").mkdir()
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo HIT\n")
+    for line in (
+            # `--reg`/`--re` abbreviate --regexp/--regex and still take
+            # the PATTERN operand — the FILE operand is read (verified
+            # live: GNU long options resolve any unambiguous prefix)
+            b"grep --reg PAT scripts/x.sh | sh",
+            b"grep --re PAT scripts/x.sh | sh",
+            b"grep --regex=PAT scripts/x.sh | sh",
+            b"grep -E PAT scripts/x.sh | sh",
+            b"grep -e PAT scripts/x.sh | sh",
+            # `cat` with only stream-feeding operands forwards the pipe
+            b"cat scripts/x.sh | cat - | sh",
+            b"cat scripts/x.sh | cat /dev/null - | sh",
+            # `cat`/`pv`/`tee` emit a `<<<$(…)` here-string target's
+            # expansion — the capture's output reaches the exec
+            b'date +$(cat <<<$(echo scripts/x.sh)) | sh',
+            b'echo "$(cat <<<$(echo scripts/x.sh))" | sh',
+            b'date +$(cat <<< $(echo scripts/x.sh)) | sh',
+            b'date +$(cat <<<y$(echo scripts/x.sh)) | sh',
+            # the LAST input redirect wins — `<<<` after `<<` makes the
+            # here-string the stream (verified live)
+            b'date +$(cat <<DELIM <<<$(echo scripts/x.sh)) | sh',
+            # a substitution nested inside the here-string's target is
+            # still emitted
+            b'echo "$(cat <<<$(echo $(cat scripts/x.sh)))" | sh'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # `cat FILE` mid-pipe replaces the stream — the captured
+            # script's bytes never reach `sh`
+            b"cat scripts/x.sh | cat /dev/null | sh",
+            b"cat scripts/x.sh | cat /etc/hostname | sh",
+            # `tee`/`pv`/`echo` emitted-path-exec is out of model scope
+            # (no invocation head anchors the analysis — same family
+            # as bare `echo scripts/x.sh | sh`)
+            b"echo scripts/x.sh | sh",
+            # `<<<$(x)` is data when the head isn't a passthrough or a
+            # file operand overrides stdin
+            b'date +$(grep p <<<$(echo scripts/x.sh)) | sh',
+            b'date +$(cat f <<<$(echo scripts/x.sh)) | sh',
+            b'date +$(cat "$(echo scripts/x.sh)" <<<y) | sh',
+            b'date +$(cat <<< x y$(echo scripts/x.sh)) | sh',
+            b'echo "$(cat <<<$(echo scripts/x.sh) f)" | sh'):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    # Pinned content reads: commit scripts/x.sh with ONE word, then dirty
+    # the worktree to two — the verdict must follow the PINNED object's
+    # bytes (worktree edits never flip it).
+    reg_root = tmp_path / "registry"
+    pf = reg_root / "platform" / "framework"
+    (pf / "scripts").mkdir(parents=True)
+    (pf / "scripts" / "x.sh").write_bytes(b"one\n")
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    sp.run(["git", "init", "-q"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "add", "-A"], cwd=reg_root, env=env, check=True)
+    sp.run(["git", "commit", "-qm", "init"], cwd=reg_root, env=env, check=True)
+    sha = sp.run(["git", "rev-parse", "HEAD"], cwd=reg_root,
+                 env=env, check=True, capture_output=True,
+                 text=True).stdout.strip()
+    (pf / "scripts" / "x.sh").write_bytes(b"one two\n")
+    for line in (
+            b"date +$(cat scripts/x.sh) | sh",
+            b"cat scripts/x.sh | date +$(cat) | sh"):
+        assert mod.script_dep_block(
+            pf, line + b"\n", pinned_scripts={"x.sh"},
+            pin_source=(reg_root, sha)), line
+        # the two-word worktree alone would field-split — non-dep
+        assert not mod.script_dep_block(pf, line + b"\n"), line
