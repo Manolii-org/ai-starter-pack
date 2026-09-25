@@ -1118,6 +1118,9 @@ def _find_expr_spans(enc_words: list, hi: int, enclosing: bytes):
     terminal = _ARGV_PROGRAM_WRAPPER_TERMINAL[b"find"]
     k = hi + 1
     dead = unterminated = False
+    hd_delim = None               # (delimiter, nl offset) of a
+                                  # pending heredoc — body words
+                                  # start AFTER the redirect line
     opt_region = True             # GNU options (`-O`/`-H`/`-L`/`-P`/
                                   # `-D`) precede the first path word
     expr_begun = False            # the first predicate/operator word
@@ -1127,7 +1130,20 @@ def _find_expr_spans(enc_words: list, hi: int, enclosing: bytes):
                                   # #1959, round-54 — verified live)
     while k < len(enc_words):
         t = _word_text(enclosing[enc_words[k][0]:enc_words[k][1]])
+        rw = enclosing[enc_words[k][0]:enc_words[k][1]]
+        if (hd_delim is not None
+                and enc_words[k][0] > hd_delim[1]):
+            # Words past the redirect's line are the heredoc BODY —
+            # data, not find argv — until the delimiter word. Words
+            # ON the redirect's own line stay argv (`find . <<EOF
+            # -exec sh x \;` still runs the action — Devin on
+            # #1393/#1959/#12, round-56 review — verified live).
+            if t == hd_delim[0]:
+                hd_delim = None
+            k += 1
+            continue
         if (opt_region
+                and t != b"--"
                 and t not in _FIND_GLOBAL_FLAG
                 and t not in (b"-D", b"-files0-from")
                 and not (t.startswith(b"-O") and t[2:].isdigit())):
@@ -1256,6 +1272,14 @@ def _find_expr_spans(enc_words: list, hi: int, enclosing: bytes):
             # region stays open.
             if not opt_region:
                 spans.append(("terminal", k, k))
+        elif t == b"--" and opt_region:
+            # GNU's end-of-options marker is legal in the pre-path
+            # region — `find -- . -exec …` still runs the action.
+            # Mid-expression it is an unknown predicate (the dash
+            # branch below marks it terminal — `find . --` aborts
+            # "unknown predicate" — Codex on #1393, round-56 review
+            # — verified live).
+            opt_region = False
         elif (t.startswith(b"-") and t != b"-"
                 and t not in _FIND_ZERO_OP):
             # `-OLEVEL` binds only in the option region BEFORE any
@@ -1273,16 +1297,25 @@ def _find_expr_spans(enc_words: list, hi: int, enclosing: bytes):
             expr_begun = True
         elif t in (b"!", b"(", b")", b","):
             expr_begun = True
-        elif (t[:1] in (b"<", b">")
-                or (len(t) > 1 and t[:1].isdigit()
-                    and t[1:2] in (b"<", b">"))):
+        elif (rw[:1] in (b"<", b">")
+                or (len(rw) > 1 and rw[:1].isdigit()
+                    and rw[1:2] in (b"<", b">"))):
             # A shell redirect attaches to the find command itself,
             # never the expression — `find . -exec sh x \; >/dev/null`
             # still runs the action (Codex on #1393, round-55 —
-            # verified live). A word ENDING in a bare operator takes
-            # the NEXT word as its target (`> f`, `2> f`, `>& f`), and
-            # `<<`/`<<-` opens a heredoc whose body words run to the
-            # delimiter.
+            # verified live). The RAW word decides: a QUOTED `'>f'`
+            # is a literal operand — `find . -exec sh x \; '>f'`
+            # aborts "paths must precede expression" (Devin on
+            # #12/#1959, round-56 — verified live). A word ENDING in a
+            # bare operator takes the NEXT word as its target (`> f`,
+            # `2> f`, `>& f`), and `<<`/`<<-` opens a heredoc. The
+            # heredoc BODY begins on the line AFTER the redirect —
+            # same-line words stay argv (`find . <<EOF -exec …` runs
+            # the action — Devin on #1393/#1959/#12, round-56 —
+            # verified live), so only words past the first newline
+            # are body. No newline in the window means the body lies
+            # outside it — don't hide the remaining argv. (Raw-word
+            # gate needs `rw`; `t` above already strips quotes.)
             hd = None
             if t[:1] == b"<" and t[1:2] == b"<" and t[2:3] != b"<":
                 hd = t[2:]
@@ -1299,14 +1332,9 @@ def _find_expr_spans(enc_words: list, hi: int, enclosing: bytes):
                                   enc_words[k + 1][1]])
                 k += 1
             if hd:
-                k += 1
-                while k < len(enc_words):
-                    hw = _word_text(
-                        enclosing[enc_words[k][0]:enc_words[k][1]])
-                    k += 1
-                    if hw == hd:
-                        break
-                continue
+                nl = enclosing.find(b"\n", enc_words[k][1])
+                if nl >= 0:
+                    hd_delim = (hd, nl)
         else:
             # The first positional ends GNU's option region — `-O`
             # after it is a predicate, not an option. A positional AFTER
@@ -2481,6 +2509,7 @@ _EXEC_OPERAND_FLAGS = {
     b"lua": frozenset({b"-e"}),
     b"tclsh": frozenset(),
 }
+
 # Program-flag heads: options that consume the NEXT word, so they may
 # sit between the program flag and its operand (`bash -O extglob -c
 # 'P'`, `python -X dev -c 'P'` — Devin on #11, round-32 — verified
@@ -3242,11 +3271,21 @@ _SORT_OP_OPS = frozenset({
     b"--parallel", b"--random-source", b"--temporary-directory"})
 
 
+# A second `-o`/`--output` aborts sort — the sentinel marks that
+# abort so `_sort_diverts` ends the stage (nothing reaches stdout).
+_SORT_DUP_OUT = b"\x00sort-dup-output"
+
+
 def _sort_out(args: list):
     """sort's `-o`/`--output` operand — GNU unambiguous prefixes bind
     the same way (`--out`), `-o` glued or separate (Codex on #1393,
-    round-52 review). None when stdout is the destination."""
+    round-52 review). None when stdout is the destination. A SECOND
+    output spec aborts 'multiple output files specified' before any
+    bytes move — reported as the _SORT_DUP_OUT sentinel (Devin on
+    #130, round-56 review — verified live)."""
     gnu = _READER_GNU_OPS[b"sort"]
+    out = None
+    dup = False
     i = 0
     while i < len(args):
         a = args[i]
@@ -3263,8 +3302,13 @@ def _sort_out(args: list):
                     continue
                 resolved = cands[0]
             if resolved == b"--output":
-                return (a.split(b"=", 1)[1] if b"=" in a
-                        else (args[i] if i < len(args) else b""))
+                if out is not None:
+                    dup = True
+                out = (a.split(b"=", 1)[1] if b"=" in a
+                       else (args[i] if i < len(args) else b""))
+                if b"=" not in a:
+                    i += 1      # separate operand word
+                continue
             if resolved in _SORT_OP_OPS and b"=" not in a:
                 i += 1          # separate operand word
             continue
@@ -3272,14 +3316,21 @@ def _sort_out(args: list):
             for j in range(1, len(a)):
                 c = a[j:j + 1]
                 if c == b"o":
-                    return (a[j + 1:] if j + 1 < len(a)
-                            else (args[i] if i < len(args)
-                                  else b""))
+                    if out is not None:
+                        dup = True
+                    if j + 1 < len(a):
+                        out = a[j + 1:]
+                    elif i < len(args):
+                        out = args[i]
+                        i += 1  # separate operand word
+                    else:
+                        out = b""
+                    break
                 if c in (b"k", b"t", b"T", b"S"):
                     if j + 1 == len(a):
                         i += 1  # separate operand word
                     break       # glued operand ends the word
-    return None
+    return _SORT_DUP_OUT if dup else out
 
 
 def _sort_diverts(args: list) -> bool:
@@ -3358,7 +3409,14 @@ def _split_arg_ok(opt: bytes, v: bytes) -> bool:
     if opt in (b"--suffix-length", b"-a"):
         return n.isdigit()
     if opt in (b"--bytes", b"-b", b"--line-bytes", b"-C"):
-        return n[:1].isdigit() and n[:1] != b"0"
+        # A GNU SIZE is digits + one optional unit (`1K`=1024,
+        # `1KB`=1000, `1b`=512, `1k`=1024 — all verified live);
+        # anything else aborts "invalid number of bytes" before the
+        # filter runs (`-b 1bad` — Devin on #130, round-56 —
+        # verified live).
+        return (n[:1] != b"0"
+                and re.fullmatch(rb"[0-9]+(b|k|[KMGTPEZY]B?)", n)
+                is not None)
     if opt in (b"--separator", b"-t"):
         # SEP is one byte or the `\0` NUL escape (Codex on #1959,
         # round-45 review — verified live).
@@ -3560,7 +3618,7 @@ def _split_scan(key: bytes, args: list, seekable_stdin: bool = False):
                                 # -a2 — Devin/Codex round-50, verified
                                 # live)
     if (hsuf not in (None, b"")
-            and not (all(c in b"0123456789abcdefABCDEF" for c in hsuf)
+            and not (all(c in b"0123456789abcdef" for c in hsuf)
                      and int(hsuf, 16) < 16 ** suflen)):
         return None, None, False, None       # invalid start for
                                 # hexadecimal suffix — same bound

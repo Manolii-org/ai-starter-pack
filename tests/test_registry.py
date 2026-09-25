@@ -12140,3 +12140,80 @@ def test_script_dep_round55(tmp_path):
             b"cat scripts/x.sh | pr --indent=bad | sh",
             b"cat scripts/x.sh | pr -o bad | sh"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round56(tmp_path):
+    """Round-56 review findings (Codex on #130/#1393/#1959, Devin on
+    #130/#1393/#1959/#12 — all verified live):
+
+    - `find -- . -exec …` — GNU's `--` ends the OPTION region only;
+      the expression still parses, so the action runs. Mid-expression
+      `find . --` is an unknown predicate and aborts.
+    - A QUOTED redirect word is a literal operand, not a shell
+      redirect — `find . -exec sh x \\; '>f'` aborts "paths must
+      precede expression".
+    - A heredoc's body begins on the line AFTER the `<<` word —
+      same-line words are still argv (`find . <<EOF -exec sh x \\;`
+      runs the action; `-help` on that line still prints usage).
+    - `split --hex-suffixes=A` aborts "invalid start value" — GNU
+      accepts lowercase hex digits only.
+    - `split -b 1bad` aborts "invalid number of bytes" — a SIZE is
+      digits plus one optional unit; `1K`/`1KB`/`1k`/`1b` are legal.
+    - `sort -o a -o b` aborts "multiple output files specified".
+    - `bash "missing | filename" scripts/x.sh` names the quoted word
+      as the script file — x.sh is $0, never executed.
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts/x.sh").write_text("echo X\n")
+
+    for line in (
+            # `--` ends only the option region — the action runs
+            b"find -- . -exec sh scripts/x.sh \\;",
+            b"find -- -exec sh scripts/x.sh \\;",
+            # heredoc argv still parses on the redirect's own line
+            b"find . <<EOF -exec sh scripts/x.sh \\;",
+            b"find . <<EOF -exec sh scripts/x.sh \\;\nbody\nEOF",
+            b"find . -exec sh scripts/x.sh \\; <<EOF\nbody\nEOF",
+            # lowercase hex start is legal
+            b"cat scripts/x.sh | split --hex-suffixes=a "
+            b"--filter=sh - | sh",
+            # legal GNU sizes
+            b"split -b 1K --filter=sh scripts/x.sh",
+            b"split -b 1KB --filter=sh scripts/x.sh",
+            b"split -b 1k --filter=sh scripts/x.sh",
+            b"split -b 1b --filter=sh scripts/x.sh",
+            # a single -o to an fd-1 alias keeps the stream
+            b"cat scripts/x.sh | sort -o /dev/stdout | sh",
+            # a scripts/ word in interpreter argv is still a bundled
+            # dependency — declared or not it must block
+            # (test_script_dep_block_second_arg semantics: the word
+            # is a reference, not only an exec position — Codex's
+            # operand-position claim is out of scope for the dep
+            # gate)
+            b"bash scripts/x.sh arg0",
+            b'bash "missing | filename" scripts/x.sh',
+            b"sh scripts scripts/x.sh",
+            b"bash -c 'true' scripts/x.sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+    for line in (
+            # `--` mid-expression is an unknown predicate — aborts
+            b"find . -- -exec sh scripts/x.sh \\;",
+            # a QUOTED redirect is a positional after the expression
+            b"find . -exec sh scripts/x.sh \\; '>f'",
+            b"find . -exec sh scripts/x.sh \\; '2>f'",
+            # `-help` on the redirect's own line still exits first
+            b"find . <<EOF -help",
+            # uppercase hex start value aborts split
+            b"cat scripts/x.sh | split --hex-suffixes=A "
+            b"--filter=sh - | sh",
+            # a malformed SIZE aborts before the filter runs
+            b"split -b 1bad --filter=sh scripts/x.sh",
+            b"split -b 0 --filter=sh scripts/x.sh",
+            # a second output spec aborts sort
+            b"cat scripts/x.sh | sort -o /dev/stdout -o /tmp/o | sh",
+            b"cat scripts/x.sh | sort -o /tmp/a -o /tmp/b | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
