@@ -10100,3 +10100,37 @@ def test_pipe_to_exec_round26(tmp_path):
             # an inert single action emits nothing executable
             b"find . -exec true \\; | sh"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+def test_pipe_to_exec_round27(tmp_path):
+    """Round-27: an inner `$(` capture only rides the enclosing `$(`
+    when its bytes survive the enclosing body's own stages — a sink
+    like `wc -c` replaces them with a count (Devin on #11)."""
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location(
+        "reg_r27", Path(__file__).parent.parent / "scripts" / "ai-resolve.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["reg_r27"] = mod
+    spec.loader.exec_module(mod)
+    pdir = tmp_path
+    (pdir / "scripts").mkdir()
+    (pdir / "scripts" / "x.sh").write_bytes(b"e\n")
+    for line in (
+            # the inner capture's bytes are digested inside the body —
+            # the outer capture emits only a count (Devin on #11,
+            # round-27 review — `sh: 13: not found` live)
+            b'echo $(echo "$(cat scripts/x.sh)" | wc -c) | sh',
+            b'echo $(echo "$(cat scripts/x.sh)" | wc -l) | sh',
+            # a non-emitting containing stage drops the bytes too —
+            # `cat "$(cat x)"` treats them as a filename, `wc -l
+            # <"$(cat x)"` digests them (modeled conservatively
+            # pre-round-27; unchanged here)
+            ):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # forwarding stages keep the bytes alive to the outer
+            # capture and the exec after it (verified live)
+            b'echo $(echo "$(cat scripts/x.sh)" | cat) | sh',
+            b'echo $(echo "$(cat scripts/x.sh)" | grep x) | sh',
+            b'echo $(echo "$(cat scripts/x.sh)" | sh) | sh'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line

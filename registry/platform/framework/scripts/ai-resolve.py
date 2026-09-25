@@ -4819,7 +4819,48 @@ def _enclosing_sub_exec(src: bytes, a: int) -> bool:
     if not outer:
         return False
     oa, ob = min(outer, key=lambda s: s[1] - s[0])
-    return _span_output_exec(src, oa, ob)
+    if not _span_output_exec(src, oa, ob):
+        return False
+    # The inner capture's bytes must also SURVIVE the enclosing body's
+    # own stages to reach the outer capture — `$(echo "$(cat x)" | wc
+    # -c)` emits a byte count, not the file (Devin on #11, round-27
+    # review — verified live).
+    bstart = oa + 2
+    body = src[bstart:ob - 1 if src[ob - 1:ob] == b")" else ob]
+    pos = a - bstart
+    scs = _command_start(body, pos)
+    swin = _cmd_window(body, scs)
+    swords = _shell_words(_mask_parens(swin))
+    shi = _effective_head(swords, swin)
+    if shi is None or shi < 0:
+        return False
+    skey = _command_key(swin[swords[shi][0]:swords[shi][1]])
+    # The containing stage must emit the capture's bytes onward —
+    # `echo "$(cat x)"`/`printf "$(cat x)"` echo them to stdout, while
+    # `cat "$(cat x)"` treats them as a filename and `wc -l <"$(cat
+    # x)"` digests them.
+    if skey not in _STDIN_EMIT_HEADS:
+        return False
+    if skey == b"date":
+        # `date` emits only its `+FORMAT` operand (same gate as
+        # _span_output_exec).
+        rel_d = pos - scs
+        w = next((w for w in swords if w[0] <= rel_d < w[1]), None)
+        if (w is None
+                or _word_text(swin[w[0]:w[1]])[:1] != b"+"):
+            return False
+    # Every later `|` stage inside the body must forward the stream —
+    # a stream-replacing sink (wc/digest/count) ends it before the
+    # outer capture forms.
+    p = _pipe_pos(body, scs + len(swin))
+    while p >= 0:
+        v = _stdin_exec_head(body[p + 1:])
+        if v == "exec":
+            return True
+        if v != "other":
+            return False
+        p = _pipe_pos(body, p + 1)
+    return True
 
 
 def _descend_sub(src: bytes, pos: int,
