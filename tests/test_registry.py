@@ -10310,3 +10310,46 @@ def test_pipe_to_exec_round30(tmp_path):
             b'unshare --wd / sh -c "bash scripts/x.sh"',
             b'unshare --map-user 0 sh -c "bash scripts/x.sh"'):
         assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_pipe_to_exec_round31(tmp_path):
+    """Round-31: `prlimit [opts] COMMAND` and `setpriv [opts] PROGRAM`
+    are exec wrappers; `prlimit -p`/`setpriv --dump` are query modes
+    that reject a trailing command (Codex on #128 — verified live)."""
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location(
+        "reg_r31", Path(__file__).parent.parent / "scripts" / "ai-resolve.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["reg_r31"] = mod
+    spec.loader.exec_module(mod)
+    pdir = tmp_path
+    (pdir / "scripts").mkdir()
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo HIT\n")
+    for line in (
+            # prlimit resource limits attach `[=lim]` — the command
+            # head survives to exec (verified live: `prlimit --cpu 1`
+            # tries to exec `1`)
+            b'prlimit --cpu=1 sh -c "bash scripts/x.sh"',
+            b'prlimit --nofile=64 sh -c "bash scripts/x.sh"',
+            b'prlimit sh -c "bash scripts/x.sh"',
+            # `-o LIST` consumes the next word
+            b'prlimit -o pid sh -c "bash scripts/x.sh"',
+            # setpriv boolean flags leave PROGRAM as head
+            b'setpriv --nnp sh -c "bash scripts/x.sh"',
+            b'setpriv --no-new-privs sh -c "bash scripts/x.sh"',
+            b'setpriv --reset-env sh -c "bash scripts/x.sh"',
+            # while its value options still consume
+            b'setpriv --reuid 0 sh -c "bash scripts/x.sh"',
+            b'setpriv --regid 0 sh -c "bash scripts/x.sh"',
+            b'setpriv --pdeathsig keep sh -c "bash scripts/x.sh"'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # query modes reject a trailing command entirely — nothing
+            # executes (verified live: both error "mutually
+            # exclusive"/"incompatible")
+            b'setpriv --dump sh -c "bash scripts/x.sh"',
+            b'setpriv -d sh -c "bash scripts/x.sh"',
+            b'prlimit -p 1 sh -c "bash scripts/x.sh"',
+            b'prlimit --pid 1 sh -c "bash scripts/x.sh"'):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line

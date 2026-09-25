@@ -1569,6 +1569,11 @@ _EXEC_WRAPPERS = frozenset({
     # scheduler/namespace options (Codex on #128, round-28 review —
     # verified live).
     b"chrt", b"unshare",
+    # `prlimit [opts] COMMAND`/`setpriv [opts] PROGRAM` exec their
+    # wrapped program; `-p`/`--dump` are query modes, handled by
+    # _WRAPPER_DESCRIBE (Codex on #128, round-31 review — verified
+    # live).
+    b"prlimit", b"setpriv",
 })
 # Positional words a wrapper consumes BEFORE the wrapped command —
 # `timeout DURATION sh -c P` execs `sh` after its duration operand
@@ -1631,13 +1636,31 @@ _WRAPPER_OPT_OPERAND = {
                            b"--map-user", b"--map-users",
                            b"--map-group", b"--map-groups",
                            b"-R", b"-w", b"-S", b"-G"}),
+    # `setpriv`'s uid/gid/caps/label options bind the next word; the
+    # rest are boolean (util-linux `setpriv --help` — Codex on #128,
+    # round-31).
+    b"setpriv": frozenset({b"--ambient-caps", b"--inh-caps",
+                           b"--bounding-set", b"--ruid", b"--euid",
+                           b"--rgid", b"--egid", b"--reuid",
+                           b"--regid", b"--groups", b"--securebits",
+                           b"--pdeathsig", b"--selinux-label",
+                           b"--apparmor-profile"}),
+    # `prlimit -o LIST` is its only separate-word operand — resource
+    # limits take attached `[=lim]` (`--cpu 1` tries to exec `1`), and
+    # `-p` query mode is in _WRAPPER_DESCRIBE (Codex on #128,
+    # round-31 — verified live).
+    b"prlimit": frozenset({b"-o", b"--output"}),
     b"setsid": frozenset(),
     b"nohup": frozenset(),
     b"command": frozenset(),
 }
-# `command -v`/`-V` only describe a command — they never run it (Devin
-# Review on #1370).
-_WRAPPER_DESCRIBE = frozenset({b"-v", b"-V"})
+# Flags that make a wrapper never exec its tail — `command -v`/`-V`
+# only describes a command (Devin Review on #1370); `setpriv --dump`
+# prints state, and `prlimit -p` targets a pid — both reject a
+# trailing COMMAND (Codex on #128, round-31 — verified live).
+_WRAPPER_DESCRIBE = {b"command": frozenset({b"-v", b"-V"}),
+                    b"setpriv": frozenset({b"-d", b"--dump"}),
+                    b"prlimit": frozenset({b"-p", b"--pid"})}
 # Heads whose output provably does NOT carry the input stream — a pipe
 # into one ends the chain without executing anything downstream: `cat x
 # | wc -l | sh` feeds sh a line count, not the script (Devin on #123).
@@ -1965,7 +1988,7 @@ def _effective_head(words: list, win: bytes) -> int | None:
                 if _ASSIGN_WORD.match(t):
                     i += 1
                     continue
-                if key == b"command" and t in _WRAPPER_DESCRIBE:
+                if t in _WRAPPER_DESCRIBE.get(key, ()):
                     return -1
                 if t.startswith(b"-"):
                     # `taskset -c LIST cmd` — the mask came via the
@@ -3419,7 +3442,7 @@ def _stdin_exec_head(win: bytes) -> str:
                 tw = _word_text(win[words[wi][0]:words[wi][1]])
                 if not tw.startswith(b"-") or tw == b"-":
                     break
-                if wkey == b"command" and tw in _WRAPPER_DESCRIBE:
+                if tw in _WRAPPER_DESCRIBE.get(wkey, ()):
                     # `command -v env -S sh` only DESCRIBES env — the
                     # split operand never runs (Devin on #8/#1374/#1955,
                     # round-7 review). Describe mode is a sink.
