@@ -10186,3 +10186,69 @@ def test_pipe_to_exec_round28(tmp_path):
             b'echo $(echo "$(cat scripts/x.sh)" | cat) | sh',
             b'echo $(echo "$(cat scripts/x.sh)" | sh) | sh'):
         assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_pipe_to_exec_round29(tmp_path):
+    """Round-29: a condition's own `>` diversion drops the stream
+    (`if cat >/dev/null`), an unquoted `date +$(…)` from stdin only
+    joins when the stream's words field-split to one, group-closer
+    `)` is not a codec operand, and program-flag substitutions inside
+    a date format still count as exec (Codex on #1957)."""
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location(
+        "reg_r29", Path(__file__).parent.parent / "scripts" / "ai-resolve.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["reg_r29"] = mod
+    spec.loader.exec_module(mod)
+    pdir = tmp_path
+    (pdir / "scripts").mkdir()
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo HIT\n")
+    (pdir / "scripts" / "single.sh").write_bytes(b"HIT\n")
+    (pdir / "scripts" / "enc.sh").write_bytes(b"ZWNobyBISVQK\n")
+    for line in (
+            # the condition's own stdout is redirected — the stream
+            # drains into the file, `then`/downstream see EOF
+            b'cat scripts/x.sh | if cat >/dev/null; then :; fi | sh',
+            b'cat scripts/x.sh | if cat >/dev/null; then cat; fi | sh',
+            b'cat scripts/x.sh | if cat >/dev/null; then cat; fi '
+            b'| cat | sh',
+            # `date +$(cat)` from stdin: the script is 2 words → date
+            # sees `+<fmt> <word2>` and errors — never a format
+            b'cat scripts/x.sh | date +$(cat) | sh',
+            b'cat scripts/x.sh | cat | date +$(cat) | sh',
+            b'cat scripts/x.sh | tee | date +$(cat) | sh',
+            b'cat scripts/x.sh | date +`cat` | sh',
+            # a non-script stream stays indeterminate-count → fail
+            # closed stays True only via provenance — `wc -l` emits
+            # a count, not the bytes
+            b'cat scripts/x.sh | wc -l | date +$(cat) | sh',
+            # `date` non-format operand: the inner eval's emission is
+            # never echoed, but the eval still executes the script —
+            # counted via the program-flag path, not the echo path;
+            # echo's capture re-emission is not a date format either
+            b'date "$(echo "$(cat scripts/x.sh)")" | sh',
+            b'date "$(echo "$(cat scripts/x.sh)" >/dev/null)" | sh',
+            # an encoder (no -d) forwards script bytes, not decoded
+            b'( cat scripts/x.sh | python -m base64 ) | sh'):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # the undiverted condition still forwards the stream
+            b'cat scripts/x.sh | if cat; then cat >/dev/null; fi | sh',
+            # a 1-word stream DOES field-join `+FMT` — date echoes it
+            b'cat scripts/single.sh | date +$(cat) | sh',
+            b'cat scripts/single.sh | cat | date +$(cat) | sh',
+            b'cat scripts/single.sh | date +`cat` | sh',
+            # quoted `+"$(…)"` joins regardless of word count
+            b'date "+$(cat scripts/x.sh)" | sh',
+            # a bare `)` is not a base64 operand — the group still
+            # decodes+execs the script
+            b'( cat scripts/enc.sh | python -m base64 -d ) | sh',
+            b'( cat scripts/enc.sh | python3 -m base64 -d ) | sh',
+            # `eval`/`bash -c` inside a date format run the script
+            # before date reads its own argument — dep by exec, not
+            # by echoed output
+            b'date "$(eval "$(cat scripts/x.sh)")" | sh',
+            b'date "$(bash -c "$(cat scripts/x.sh)")" | sh',
+            b'echo "$(eval "$(cat scripts/x.sh)")" | sh'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line

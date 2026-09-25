@@ -1818,6 +1818,11 @@ def _py_module_verdict(mod: bytes, rest_words: list, sub: bytes) -> str:
         t, pending = _word_redirects(raw, scratch)
         if not t:
             continue  # pure redirect word (`2>/dev/null`, `0<&0`)
+        if t == b")":
+            # An unquoted group closer ends the stage — it is not an
+            # operand (`( cat x | python -m base64 -d ) | sh` — Codex
+            # on #1957, round-29 review — verified live).
+            break
         if (not opts_done and not (getopt and positional)
                 and t.startswith(b"-") and t != b"-"):
             if t == b"--":
@@ -2232,14 +2237,18 @@ def _stdin_path_operand(t: bytes) -> bool:
 _RESOLVE_ROOT: Path | None = None
 
 
-def _date_capture_dep(inner: bytes) -> bool:
+def _date_capture_dep(inner: bytes,
+                      stream_src: bytes | None = None) -> bool:
     """True when an UNQUOTED `+$(INNER)`/`+`INNER`` capture can still
     join the format operand — the bytes reach a downstream exec unless
     the expansion PROVABLY field-splits to other than one word. `cat
     FILE…` with every operand a readable file gives an exact count
     (one word → dep; an empty or >=2-word capture makes `date +`/`date
     +a b` emit nothing or error); `echo`/`printf` of literal operands
-    counts the joined fields the same way. Every other inner is
+    counts the joined fields the same way. A bare `cat` re-reads the
+    upstream stream — when `stream_src` names the scripts/ file whose
+    bytes flow there, its word count is the count (Codex on #1957,
+    round-29 review — verified live). Every other inner is
     indeterminate — fail closed (Devin on #128, round-25 review —
     verified live on GNU date)."""
     words = _shell_words(_mask_parens(inner))
@@ -2269,6 +2278,17 @@ def _date_capture_dep(inner: bytes) -> bool:
             except OSError:
                 return True
             i += 1
+        if not seen and stream_src is not None \
+                and _RESOLVE_ROOT is not None:
+            # Bare `cat` re-reads the upstream stream — a KNOWN
+            # scripts/ source gives its word count.
+            try:
+                p = _RESOLVE_ROOT / stream_src.decode(
+                    "utf-8", "surrogateescape")
+                if p.is_file():
+                    return len(p.read_bytes().split()) == 1
+            except OSError:
+                pass
         # no file operand — cat reads the (indeterminate) pipe itself
         return not seen or total == 1
     if key in (b"echo", b"printf"):
@@ -2590,7 +2610,8 @@ def _reader_operands(key: bytes, args: list) -> list:
     return ops
 
 
-def _seg_prov(body: bytes, prov: str):
+def _seg_prov(body: bytes, prov: str,
+              stream_src: bytes | None = None):
     """Advance the output provenance `prov` through one pipeline stage
     body. Returns None when the stage EXECUTES its input (a dep — the
     stream is consumed by an interpreter); otherwise the provenance of
@@ -2634,6 +2655,12 @@ def _seg_prov(body: bytes, prov: str):
                 return "thru"
             if v2 == "sink":
                 return "own"  # a reader replaced the stream (`if wc`)
+            # The condition forwarded the stream — unless its first
+            # stage's own fd1 is diverted: `if cat >/dev/null` drains
+            # the script to a file and `then`/downstream see nothing
+            # (Codex on #1957, round-29 review — verified live).
+            if _stdout_redirected(_cmd_window(rest, 0)):
+                return "own"
             return prov  # a reader forwards its emission (`if cat`)
         body = rest
     v = _stdin_exec_head(body)
@@ -2873,7 +2900,8 @@ def _seg_prov(body: bytes, prov: str):
             if any(b"scripts/" in arg for arg in args):
                 prov = "script"
             elif not (key in _STDIN_EMIT_HEADS
-                      and _emit_forwards_stdin(key, body, head_end)):
+                      and _emit_forwards_stdin(key, body, head_end,
+                                               stream_src)):
                 prov = "own"
     # A stage whose stdout is diverted forwards nothing — the next pipe
     # stage (or the capture) reads an empty stream.
@@ -2977,13 +3005,21 @@ def _sub_flow(a: bytes) -> str:
     # the stream, "own" = the last stage emits its own content,
     # "thru" = a compound condition left the stream for its `then …`.
     prov = "up"
+    flow_src: bytes | None = None  # scripts/ operand behind a "script"
+    # prov — lets the date gate count the stream's words (Codex on
+    # #1957, round-29 review).
     fwd = False
     drained = False     # a prior sibling read the shared stdin to EOF
     out = None          # aggregate fd1 of the finished `;` siblings
     stack: list = []    # (containing_prov, emits_capture, kind, out)
     prev_body = b""
+    prev_in: bytes | None = None
     for (s, e), sep in zip(spans, sepk):
         body, close_i = _region_body(a, s, e)
+        # The stream a `$(` inside THIS region drains is this region's
+        # own stdin — snapshot it before the region's provenance update
+        # clears it (Codex on #1957, round-29).
+        in_src = flow_src
         tail_done = False
         if sep == b"`" and stack and stack[-1][2] == b"`":
             # A second backtick CLOSES the substitution it opened. The
@@ -2993,7 +3029,7 @@ def _sub_flow(a: bytes) -> str:
             # tail can change the emission (like the `)` close below).
             eff = ("up" if out == "up" or prov in ("up", "script")
                    else out if out is not None else prov)
-            cprov, emits, _, out, pprev = stack.pop()
+            cprov, emits, _, out, pprev, cflow = stack.pop()
             if emits == "eval":
                 # The captured text is evaluated on the containing
                 # stdin — dep bytes in it are executed, not emitted
@@ -3001,10 +3037,25 @@ def _sub_flow(a: bytes) -> str:
                 if eff in ("up", "script"):
                     return "exec"
                 prov = "own"
+                flow_src = None
             else:
                 emits = emits and not _stdout_redirected(pprev + body)
-                prov = (eff if emits and eff in ("up", "script")
-                        else "own" if emits else cprov)
+                if emits and eff in ("up", "script"):
+                    prov = eff      # inner emission — flow_src stays
+                elif emits:
+                    prov = "own"
+                    flow_src = None
+                else:
+                    if drained:
+                        # The inner capture drained the shared stdin
+                        # into bytes it never emitted — they die with
+                        # the capture, downstream sees EOF (Codex on
+                        # #1957, round-29 review — verified live).
+                        prov = "own"
+                        flow_src = None
+                    else:
+                        prov = cprov
+                        flow_src = cflow
             tail_done = True
         elif sep in (b"$(", b"`"):
             ck, _, _, hend = _seg_head_args(prev_body)
@@ -3027,7 +3078,7 @@ def _sub_flow(a: bytes) -> str:
                 emits = (bool(tail)
                          and tail[-1].lstrip(b"\"'").startswith(b"+")
                          and (tail[-1].count(b'"') % 2 == 1
-                              or _date_capture_dep(body)))
+                              or _date_capture_dep(body, prev_in)))
             else:
                 # Emit heads echo their argv to fd1 — the substitution
                 # being OPENED supplies that argv, so its capture lands
@@ -3040,8 +3091,11 @@ def _sub_flow(a: bytes) -> str:
                 emits = ("eval" if ck == b"eval" else
                          ck in _STDIN_EMIT_HEADS
                          and not _stdout_redirected(prev_body))
-            stack.append((prov, emits, sep, out, prev_body))
+            stack.append((prov, emits, sep, out, prev_body,
+                          flow_src))
             prov = "own" if drained else "up"
+            if drained:
+                flow_src = None
             out = None
         elif sep is not None and sep != b"|":
             if prov in ("up", "script"):
@@ -3056,12 +3110,24 @@ def _sub_flow(a: bytes) -> str:
             out = ("up" if prov in ("up", "script")
                    else "up" if out == "up" else "own")
             prov = "own" if drained else "up"
+            if drained:
+                flow_src = None
         # A backtick-CLOSE pop already decided the tail region's
         # provenance — reclassifying ` " ` alone as a fresh command
         # would wrongly reset it (quoted-backtick form, round-21).
-        r = prov if tail_done else _seg_prov(body, prov)
+        r = prov if tail_done else _seg_prov(body, prov, in_src)
         if r is None:
             return "exec"  # a stage EXECUTED its input — dep regardless
+        if r == "script":
+            # Remember the scripts/ operand feeding the stream — a
+            # bare `$(cat)` capture re-reads it (Codex on #1957,
+            # round-29 review).
+            _k, _a, _f, _h = _seg_head_args(body)
+            flow_src = next(
+                (_operand_text(a2) for a2 in _a
+                 if b"scripts/" in a2), flow_src)
+        elif r == "own":
+            flow_src = None
         prov = r
         if sep not in (b"|", b"&&", b"||") and _seg_drains(body):
             # Region-first commands read the shared fd (a `|`
@@ -3076,6 +3142,8 @@ def _sub_flow(a: bytes) -> str:
             # not the re-fed upstream — `if true; then echo hi; fi`
             # emitted `hi`, `if cat; fi` emitted the pipe.
             prov = out
+            if out != "up":
+                flow_src = None
         if close_i is not None and stack and stack[-1][2] == b"$(":
             # The text after `)` is the containing command's own —
             # `echo "$(cat)" >/dev/null` diverts its fd1 there. Scan
@@ -3086,7 +3154,7 @@ def _sub_flow(a: bytes) -> str:
             tail = a[close_i + 1:e]
             eff = ("up" if out == "up" or prov in ("up", "script")
                    else out if out is not None else prov)
-            cprov, emits, _, out, _pprev = stack.pop()
+            cprov, emits, _, out, _pprev, cflow = stack.pop()
             if emits == "eval":
                 # eval executes the captured text on its own stdin —
                 # dep bytes are run regardless of where fd1 points
@@ -3094,12 +3162,27 @@ def _sub_flow(a: bytes) -> str:
                 if eff in ("up", "script"):
                     return "exec"
                 prov = "own"
+                flow_src = None
             else:
                 emits = emits and not _stdout_redirected(
                     prev_body + tail)
-                prov = (eff if emits and eff in ("up", "script")
-                        else "own" if emits else cprov)
+                if emits and eff in ("up", "script"):
+                    prov = eff      # inner emission — flow_src stays
+                elif emits:
+                    prov = "own"
+                    flow_src = None
+                elif drained:
+                    # The inner capture drained the shared stdin into
+                    # bytes it never emitted — they die with the
+                    # capture, downstream sees EOF (Codex on #1957,
+                    # round-29 review — verified live).
+                    prov = "own"
+                    flow_src = None
+                else:
+                    prov = cprov
+                    flow_src = cflow
         prev_body = body
+        prev_in = in_src
     return "fwd" if fwd or prov in ("up", "script") else "none"
 
 
@@ -3109,6 +3192,15 @@ def _pipe_ends_prov(src: bytes, pos: int) -> bool:
     substitution's captured output then carries dep bytes (round-13
     review)."""
     prov = "up"
+    # The stage ENDING at pos supplies the stream — a scripts/ operand
+    # there makes its word count knowable (Codex on #1957, round-29).
+    flow_src: bytes | None = None
+    if pos:
+        s0 = _command_start(src, pos - 1)
+        _k0, _a0, _f0, _h0 = _seg_head_args(src[s0:pos])
+        flow_src = next(
+            (_operand_text(a2) for a2 in _a0 if b"scripts/" in a2),
+            None)
     j = pos
     while j < len(src):
         if src[j:j + 1] != b"|" or src[j + 1:j + 2] == b"|":
@@ -3118,10 +3210,18 @@ def _pipe_ends_prov(src: bytes, pos: int) -> bool:
             j += 1
         while j < len(src) and src[j] in b" \t":
             j += 1
+        in_src = flow_src
         win = _cmd_window(src, j)
-        r = _seg_prov(src[j:j + len(win)], prov)
+        r = _seg_prov(src[j:j + len(win)], prov, in_src)
         if r is None:
             return True  # an exec stage consumed the stream
+        if r == "script":
+            _k, _a, _f, _h = _seg_head_args(src[j:j + len(win)])
+            flow_src = next(
+                (_operand_text(a2) for a2 in _a
+                 if b"scripts/" in a2), flow_src)
+        elif r == "own":
+            flow_src = None
         prov = r
         j += len(win)
     # "thru" — a compound stage's condition never read the stream, so a
@@ -3130,7 +3230,8 @@ def _pipe_ends_prov(src: bytes, pos: int) -> bool:
     return prov in ("up", "script", "thru")
 
 
-def _emit_forwards_stdin(key: bytes, win: bytes, head_end: int) -> bool:
+def _emit_forwards_stdin(key: bytes, win: bytes, head_end: int,
+                         stream_src: bytes | None = None) -> bool:
     """True when emit head `key` re-emits upstream bytes — some
     substitution in its operands (past `head_end`) re-reads the pipe.
 
@@ -3213,7 +3314,8 @@ def _emit_forwards_stdin(key: bytes, win: bytes, head_end: int) -> bool:
                 if (w is None
                         or _word_text(win[w[0]:w[1]])[:1] != b"+"
                         or (win[w[0]:a].count(b'"') % 2 == 0
-                            and not _date_capture_dep(body))):
+                            and not _date_capture_dep(body,
+                                                      stream_src))):
                     continue
             return True
     return False
@@ -3721,6 +3823,15 @@ def _pipe_to_exec(src: bytes, pos: int) -> bool:
     bytes, not x — round-16 review); a stage that EXECUTES the stream
     ends it as a dep; anything else forwards it."""
     prov = "up"          # prov feeding the next `|` stage
+    # The stage ENDING at pos supplies the stream — a scripts/ operand
+    # there makes its word count knowable (Codex on #1957, round-29).
+    flow_src: bytes | None = None
+    if pos:
+        s0 = _command_start(src, pos - 1)
+        _k0, _a0, _f0, _h0 = _seg_head_args(src[s0:pos])
+        flow_src = next(
+            (_operand_text(a2) for a2 in _a0 if b"scripts/" in a2),
+            None)
     out = None           # aggregate fd1 inside an open compound
     depth = 0            # open compound/group statements
     drained = False      # a prior `;`-sibling read the shared stdin to EOF
@@ -3754,6 +3865,8 @@ def _pipe_to_exec(src: bytes, pos: int) -> bool:
             # Once it closes, the next `|` reads the aggregated fd1.
             prov = (out if depth == 0
                     else "own" if drained else "up")
+            if prov == "own":
+                flow_src = None
             pipe_lead = False
             j += 1
         else:
@@ -3770,9 +3883,16 @@ def _pipe_to_exec(src: bytes, pos: int) -> bool:
         ws = _shell_words(_mask_parens(seg))
         first = (_word_text(seg[ws[0][0]:ws[0][1]])
                  if ws else None)
-        r = _seg_prov(seg, prov)
+        r = _seg_prov(seg, prov, flow_src)
         if r is None:
             return True   # an exec stage consumed the dep stream
+        if r == "script":
+            _k, _a, _f, _h = _seg_head_args(seg)
+            flow_src = next(
+                (_operand_text(a2) for a2 in _a
+                 if b"scripts/" in a2), flow_src)
+        elif r == "own":
+            flow_src = None
         prov = r
         gd = _group_depth(seg)
         if (not pipe_lead or first in _SEG_COND_OPENERS
@@ -4783,6 +4903,45 @@ def _pipe_pos(src: bytes, pos: int) -> int:
     return -1
 
 
+# Heads whose pipeline stage forwards the stdin stream unchanged —
+# a bare `cat`/`tee`/`pv` passes the same bytes to the next stage's
+# stdin, so an unquoted `date +$(cat)` gate finds the scripts/
+# operand behind the stream by walking back through them (Codex on
+# #1957, round-29 review — verified live).
+_PIPE_PASSTHRU = frozenset({b"cat", b"tee", b"pv"})
+
+
+def _upstream_script_operand(src: bytes, pos: int) -> bytes | None:
+    """The scripts/ operand feeding the stage starting at `pos`, or
+    None. The shared stdin of a `date +$(cat)` capture is the previous
+    pipeline stage's output; through transparent stages (`cat`, `tee`)
+    it stays the same stream (Codex on #1957, round-29 review —
+    verified live)."""
+    p = 0
+    prev = -1
+    while True:
+        q = _pipe_pos(src, p)
+        if q < 0 or q >= pos:
+            break
+        prev = q
+        p = q + 1
+    if prev < 0:
+        return None
+    s = _command_start(src, prev - 1)
+    k, args, _f, _h = _seg_head_args(src[s:prev])
+    if k is None:
+        return None
+    found = next(
+        (_operand_text(a2) for a2 in args if b"scripts/" in a2), None)
+    if found is not None:
+        return found
+    if (k in _PIPE_PASSTHRU and all(
+            a2.startswith(b"-") or _operand_feeds_stream(a2)
+            for a2 in args)):
+        return _upstream_script_operand(src, s)
+    return None
+
+
 def _span_output_exec(src: bytes, a: int, after: int | None = None) -> bool:
     """True when the substitution starting at `a` produces output the
     enclosing command EXECUTES — so a reader inside it (`cat scripts/x`)
@@ -4826,7 +4985,9 @@ def _span_output_exec(src: bytes, a: int, after: int | None = None) -> bool:
         w = next((w for w in words if w[0] <= rel_d < w[1]), None)
         if (w is None or _word_text(win[w[0]:w[1]])[:1] != b"+"
                 or (win[w[0]:rel_d].count(b'"') % 2 == 0
-                    and not _date_capture_dep(_sub_inner(src, a)))):
+                    and not _date_capture_dep(
+                        _sub_inner(src, a),
+                        _upstream_script_operand(src, cs)))):
             # An UNQUOTED `+$(…)`/`+`…`` reaches a downstream exec
             # only when its capture provably field-splits to one
             # word — a >=2-word split errors inside date (Codex on
@@ -4872,11 +5033,27 @@ def _sub_survives_body(body: bytes, pos: int) -> bool:
     shi = _effective_head(swords, swin)
     if shi is None or shi < 0:
         return False
+    skey = _command_key(swin[swords[shi][0]:swords[shi][1]])
+    # The containing stage may consume the capture as PROGRAM text —
+    # `eval "$(cat x)"` runs it, and a program-flag operand position
+    # (`bash -c "$(cat x)"`) does too; neither cares about the stage's
+    # stdout (Devin on #1957, round-29 review — verified live).
+    if skey == b"eval":
+        return True
+    sflags = _EXEC_OPERAND_FLAGS.get(skey, frozenset())
+    if sflags:
+        rel = pos - scs
+        for k in range(len(swords)):
+            if swords[k][0] <= rel < swords[k][1]:
+                if any(_word_text(swin[swords[j][0]:swords[j][1]])
+                       in sflags
+                       for j in range(shi + 1, k)):
+                    return True
+                break
     # A containing stage whose own stdout is diverted drops the
     # capture's bytes — `$(echo "$(cat x)" >/dev/null)` emits nothing.
     if _stdout_redirected(swin):
         return False
-    skey = _command_key(swin[swords[shi][0]:swords[shi][1]])
     # The containing stage must emit the capture's bytes onward —
     # `echo "$(cat x)"`/`printf "$(cat x)"` echo them to stdout, while
     # `cat "$(cat x)"` treats them as a filename and `wc -l <"$(cat
@@ -4885,11 +5062,17 @@ def _sub_survives_body(body: bytes, pos: int) -> bool:
         return False
     if skey == b"date":
         # `date` emits only its `+FORMAT` operand (same gate as
-        # _span_output_exec).
+        # _span_output_exec) — and an UNQUOTED `+$(…)` joins it only
+        # when the capture provably field-splits to one word (Codex on
+        # #1957, round-29 review — verified live).
         rel_d = pos - scs
         w = next((w for w in swords if w[0] <= rel_d < w[1]), None)
         if (w is None
-                or _word_text(swin[w[0]:w[1]])[:1] != b"+"):
+                or _word_text(swin[w[0]:w[1]])[:1] != b"+"
+                or (swin[w[0]:rel_d].count(b'"') % 2 == 0
+                    and not _date_capture_dep(
+                        _sub_inner(body, pos),
+                        _upstream_script_operand(body, scs)))):
             return False
     p = _pipe_pos(body, scs + len(swin))
     while p >= 0:
@@ -4927,12 +5110,27 @@ def _enclosing_sub_exec(src: bytes, a: int) -> bool:
     shi = _effective_head(swords, swin)
     if shi is None or shi < 0:
         return False
+    skey = _command_key(swin[swords[shi][0]:swords[shi][1]])
+    # The containing stage may consume the capture as PROGRAM text —
+    # `$(eval "$(cat x)")` runs it regardless of what the outer capture
+    # feeds (`date "$(eval "$(cat x)")"` — Devin on #1957, round-29).
+    if skey == b"eval":
+        return True
+    sflags = _EXEC_OPERAND_FLAGS.get(skey, frozenset())
+    if sflags:
+        rel = pos - scs
+        for k in range(len(swords)):
+            if swords[k][0] <= rel < swords[k][1]:
+                if any(_word_text(swin[swords[j][0]:swords[j][1]])
+                       in sflags
+                       for j in range(shi + 1, k)):
+                    return True
+                break
     # A containing stage whose own stdout is diverted drops the
     # capture's bytes — `$(echo "$(cat x)" >/dev/null)` emits nothing
     # (Devin on #11/#128, round-27/28 review — verified live).
     if _stdout_redirected(swin):
         return False
-    skey = _command_key(swin[swords[shi][0]:swords[shi][1]])
     # The containing stage must emit the capture's bytes onward —
     # `echo "$(cat x)"`/`printf "$(cat x)"` echo them to stdout, while
     # `cat "$(cat x)"` treats them as a filename and `wc -l <"$(cat
@@ -4941,11 +5139,17 @@ def _enclosing_sub_exec(src: bytes, a: int) -> bool:
         return False
     if skey == b"date":
         # `date` emits only its `+FORMAT` operand (same gate as
-        # _span_output_exec).
+        # _span_output_exec) — an UNQUOTED `+$(…)` joins it only when
+        # the capture provably field-splits to one word (Codex on
+        # #1957, round-29 review — verified live).
         rel_d = pos - scs
         w = next((w for w in swords if w[0] <= rel_d < w[1]), None)
         if (w is None
-                or _word_text(swin[w[0]:w[1]])[:1] != b"+"):
+                or _word_text(swin[w[0]:w[1]])[:1] != b"+"
+                or (swin[w[0]:rel_d].count(b'"') % 2 == 0
+                    and not _date_capture_dep(
+                        _sub_inner(body, pos),
+                        _upstream_script_operand(body, scs)))):
             return False
     # Every later `|` stage inside the body must forward the stream —
     # a stream-replacing sink (wc/digest/count) ends it before the
