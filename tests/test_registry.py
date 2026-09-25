@@ -10972,3 +10972,110 @@ def test_script_dep_round42(tmp_path):
             b"cat scripts/x.sh | awk --exec f /dev/null | sh",
             b"cat scripts/x.sh | awk -e '{print}' /dev/null | sh"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round43(tmp_path):
+    r"""Round-43: per-domain strings value sets, split filter's
+    last-wins + operand-aware scan + input-file provenance + shell-
+    list filters, required-arg missing operands, find `-context` and
+    reader-head downstream pipes, cat multi-file concat, awk
+    `--pretty-print` optional arg.
+
+    Verified live (bash/dash, coreutils 9.x, binutils 2.38, gawk 5.1):
+    * `strings -U/--unicode` accepts letters {d,s,i,l,e,x,h} plus the
+      names {default,invalid,locale,escape,hex,highlight,show} —
+      separately from `-e/--encoding` {s,S,l,L,b,B} and
+      `-t/--radix` {d,o,x}; `-s SEP`/`-T BFD` are required-arg shorts;
+    * `awk --pretty-print[=F]` is optional-arg — a separate word is
+      the program, not the file;
+    * a required option at argv end aborts ("option requires an
+      argument") — `pr --indent`/`tail --pid`/`strings -U` forward
+      nothing;
+    * split's `--filter` binds its LAST value, option operands are
+      consumed before `--filter` is recognized (`--lines --filter sh`
+      errors), the filter runs via `$SHELL -c` so `cat | sh`/`true; sh`
+      execute, and a positional INPUT replaces the upstream pipe;
+    * `find`'s `-context` is a one-operand predicate on SELinux builds
+      (over-block-safe elsewhere — non-SELinux aborts);
+    * a find action whose head is a PROGRAM_FIRST reader still pipes
+      its stdout onward — `-exec awk '{p}' x.sh \; | sh` runs x.sh's
+      bytes;
+    * `cat f1 f2` concatenates BEFORE field-splitting — `f1`=`a`,
+      `f2`=`b` emits `ab` as ONE field, not two."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_text("echo HIT\n")
+    # Two one-word files that merge into ONE field — `a`+`b` → `ab`
+    # (no trailing newline on `a`).
+    (pdir / "scripts" / "a.sh").write_bytes(b"a")
+    (pdir / "scripts" / "b.sh").write_bytes(b"b")
+    for line in (
+            # -U/--unicode take letters AND names (verified live)
+            b"cat scripts/x.sh | strings -U d | sh",
+            b"cat scripts/x.sh | strings -U x | sh",
+            b"cat scripts/x.sh | strings --unicode=hex | sh",
+            b"cat scripts/x.sh | strings --unicode default | sh",
+            b"cat scripts/x.sh | strings -Uhex | sh",
+            b"cat scripts/x.sh | strings -U default | sh",
+            # -s/-T required-arg shorts consume the operand (verified)
+            b"cat scripts/x.sh | strings -s , | sh",
+            b"cat scripts/x.sh | strings -T elf64-x86-64 | sh",
+            # --pretty-print is optional-arg — 'p' is still the
+            # program, `-` still the stdin file (verified live)
+            b"cat scripts/x.sh | awk --pretty-print '{print}' - | sh",
+            # split filters: a $SHELL -c LIST executes (verified live)
+            b"cat scripts/x.sh | split --filter='cat | sh' - | sh",
+            b"cat scripts/x.sh | split --filter='true; sh' - | sh",
+            # the LAST repeated --filter wins (verified live)
+            b"cat scripts/x.sh | split --filter=true --filter=sh - | sh",
+            # stdin input + forwarding filter still flows (verified)
+            b"cat scripts/x.sh | split --filter=cat - | sh",
+            b"cat scripts/x.sh | split --filter=sh -- - | sh",
+            # a scripts/ INPUT FILE's chunks reach the filter — `cat`
+            # re-emits them downstream (verified live)
+            b"split --filter=cat scripts/x.sh | sh",
+            b"split --filter=sh scripts/x.sh | sh",
+            # -context consumes `--help` as the CONTEXT operand —
+            # the action still runs (SELinux builds; over-block-safe)
+            b"find . ! -context --help -exec sh scripts/x.sh \\;",
+            # a reader-headed find action still pipes its stdout to
+            # a downstream exec head (verified live)
+            b"find . -exec awk '{print}' scripts/x.sh \\; | sh",
+            b"find . -exec sed -n p scripts/x.sh \\; | sh",
+            # cat concatenates files before IFS field-splitting —
+            # `a`+`b` is ONE field and still joins the format word
+            # (verified live)
+            b"IFS=,; date +$(cat scripts/a.sh scripts/b.sh) | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # fixed-domain rejects still abort before any read
+            b"cat scripts/x.sh | strings -U z | sh",
+            b"cat scripts/x.sh | strings --unicode=bad | sh",
+            # a required option at argv end aborts — nothing forwards
+            # (verified live: "option requires an argument")
+            b"cat scripts/x.sh | strings -U | sh",
+            b"cat scripts/x.sh | pr --indent | sh",
+            b"cat scripts/x.sh | tail --pid | sh",
+            b"cat scripts/x.sh | strings -s | sh",
+            # --pretty-print exiting mode never reads stdin — a `-`
+            # operand is still the input file, but gawk pretty-prints
+            # and exits; the model keeps dep anyway (over-block) —
+            # assert only the SEPARATE program word is not swallowed
+            # (verified live: '1' ran as program, wrote awkprof.out)
+            # => covered by the positive above.
+            # split: a required-arg option's operand swallows --filter
+            # (verified live: "invalid number of lines: '--filter'")
+            b"cat scripts/x.sh | split --lines --filter sh | sh",
+            b"cat scripts/x.sh | split -l --filter=sh - | sh",
+            # last --filter wins — here the last is `true` (verified)
+            b"cat scripts/x.sh | split --filter=sh --filter=true - | sh",
+            # a named INPUT replaces the upstream pipe — /dev/null's
+            # chunks reach the filter, not the script (verified live)
+            b"cat scripts/x.sh | split --filter=cat /dev/null | sh",
+            b"cat scripts/x.sh | split --filter=sh /dev/null | sh",
+            # an unknown/ambiguous option aborts — no filter at all
+            b"cat scripts/x.sh | split --bogus --filter=sh - | sh",
+            # no downstream pipe — the action's file is only printed
+            b"find . -exec awk '{print}' scripts/x.sh \\;"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line

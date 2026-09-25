@@ -931,6 +931,11 @@ _FIND_ONE_OP = frozenset({
     b"-newer", b"-path", b"-perm", b"-printf", b"-regex",
     b"-regextype", b"-samefile", b"-size", b"-type", b"-uid",
     b"-used", b"-user", b"-wholename", b"-xtype",
+    # `-context` is the SELinux-enabled build's security-context
+    # predicate — `find . ! -context --help` reads `--help` as the
+    # CONTEXT value where SELinux find accepts it (Codex on #1959,
+    # round-43 — over-block-safe elsewhere).
+    b"-context",
     # `-files0-from` is a GLOBAL option consuming the NUL-separated
     # path list's filename — `find -files0-from --help -exec …` reads
     # `--help` as the filename, not a terminal word (Codex on #1959,
@@ -2630,32 +2635,88 @@ def _sort_files0(args: list):
     return found
 
 
-def _split_filter_cmd(key: bytes, args: list):
-    """The `CMD` operand of split's `--filter CMD`, or None.
+# split's option map for the filter/input scan (round-43 audit of
+# `split --help`): required-arg longs consume the next word BEFORE it
+# can read as `--filter` (`split --lines --filter sh` aborts "invalid
+# number of lines: '--filter'" — Codex on #1959, round-43 — verified
+# live). `-f` is not a split short.
+_SPLIT_REQ_LONG = frozenset({
+    b"--additional-suffix", b"--bytes", b"--filter", b"--line-bytes",
+    b"--lines", b"--number", b"--separator", b"--suffix-length"})
+_SPLIT_LONG = _SPLIT_REQ_LONG | frozenset({
+    b"--numeric-suffixes", b"--hex-suffixes", b"--debug",
+    b"--elide-empty-files", b"--verbose", b"--help", b"--version"})
+_SPLIT_REQ_SHORT = frozenset({b"a", b"b", b"C", b"l", b"n", b"t"})
+_SPLIT_FLAG_SHORT = frozenset({b"d", b"e", b"u", b"x"})
 
-    GNU getopt_long resolves UNIQUE prefixes — `--fil=cat` is
-    `--filter` (CodeRabbit on #1959, round-42 review — verified
-    live): `--filter` is split's only `--f*` option so every `--f`
-    prefix is unambiguous. csplit has no `--filter` at all, so the
-    check is split-only. `--filter CMD` binds the next arg (separate
-    form verified round-41)."""
+
+def _split_scan(key: bytes, args: list):
+    """(filter, input) — split's LAST `--filter CMD` operand and its
+    first positional INPUT operand (None when split reads stdin —
+    `-`/fd-0 also name it). csplit has no `--filter`: (None, None).
+
+    A repeated `--filter` binds its LAST value (Devin on #12,
+    round-43 — verified live: `--filter=true --filter=sh` runs sh).
+    GNU getopt_long resolves unique prefixes against the full long
+    set; an unknown or ambiguous option aborts before any read, so
+    the scan reports no filter (over-block-safe)."""
     if key != b"split":
-        return None
+        return None, None
+    filt = inp = None
     i = 0
     while i < len(args):
         a = args[i]
         if a == b"--":
+            i += 1
+            if i < len(args) and inp is None:
+                inp = args[i]
             break
-        if len(a) > 2 and a.startswith(b"--f"):
+        if len(a) > 2 and a.startswith(b"--"):
             base = a.split(b"=", 1)[0]
-            if b"--filter".startswith(base):
+            if base in _SPLIT_LONG:
+                resolved = base
+            else:
+                cands = [o for o in _SPLIT_LONG if o.startswith(base)]
+                if len(cands) != 1:
+                    return None, None
+                resolved = cands[0]
+            if resolved == b"--filter":
                 if b"=" in a:
-                    return a.split(b"=", 1)[1]
-                if i + 1 < len(args):
-                    return args[i + 1]
-                return b""
+                    filt = a.split(b"=", 1)[1]
+                elif i + 1 < len(args):
+                    filt = args[i + 1]
+                    i += 1
+                else:
+                    filt = b""
+            elif resolved in _SPLIT_REQ_LONG:
+                if b"=" not in a:
+                    i += 1          # consumes the next word as operand
+            i += 1
+            continue
+        if len(a) > 1 and a[:1] == b"-" and a != b"-":
+            j = 1
+            abort = False
+            while j < len(a):
+                c = a[j:j + 1]
+                if c in _SPLIT_REQ_SHORT:
+                    if j + 1 < len(a):
+                        j = len(a)      # glued operand
+                    else:
+                        i += 1          # next word is the operand
+                    break
+                if c in _SPLIT_FLAG_SHORT:
+                    j += 1
+                    continue
+                abort = True            # unknown letter → abort
+                break
+            if abort:
+                return None, None
+            i += 1
+            continue
+        if inp is None:
+            inp = a                     # first positional = INPUT
         i += 1
-    return None
+    return filt, inp
 
 
 def _stdin_path_operand(t: bytes) -> bool:
@@ -2827,8 +2888,16 @@ def _date_capture_dep(inner: bytes,
     key = _command_key(inner[words[0][0]:words[0][1]])
     ws_ifs = ifs is None or any(c in b" \t\n" for c in ifs)
     if key == b"cat":
-        total, seen = 0, False
+        seen = False
         numbered = 0            # 1 = `cat -n`, 2 = `cat -b` (last wins)
+        concat = bytearray()    # cat CONCATENATES every operand's
+                                # bytes BEFORE the expansion field-
+                                # splits — `cat f1 f2` merges f1's
+                                # tail field with f2's head, so
+                                # per-file counting is wrong (`f1`=
+                                # `a`, `f2`=`b` emits `ab` — ONE
+                                # field, not two — Devin on #1393,
+                                # round-43 — verified live).
         i = 1
         while i < len(words):
             t = _operand_text(inner[words[i][0]:words[i][1]])
@@ -2858,15 +2927,7 @@ def _date_capture_dep(inner: bytes,
                 if data is None:
                     return True
                 seen = True
-                total += len(_ifs_fields(data, ifs))
-                if numbered and ws_ifs:
-                    if numbered == 1:
-                        total += data.count(b"\n") + bool(
-                            data and not data.endswith(b"\n"))
-                    else:
-                        total += sum(
-                            1 for ln in data.split(b"\n")
-                            if ln.strip())
+                concat += data
                 i += 1
                 continue
             try:
@@ -2875,19 +2936,19 @@ def _date_capture_dep(inner: bytes,
                 if not p.is_file():
                     return True
                 seen = True
-                data = p.read_bytes()
-                total += len(_ifs_fields(data, ifs))
-                if numbered and ws_ifs:
-                    if numbered == 1:
-                        total += data.count(b"\n") + bool(
-                            data and not data.endswith(b"\n"))
-                    else:
-                        total += sum(
-                            1 for ln in data.split(b"\n")
-                            if ln.strip())
+                concat += p.read_bytes()
             except OSError:
                 return True
             i += 1
+        data = bytes(concat)
+        total = len(_ifs_fields(data, ifs))
+        if numbered and ws_ifs:
+            if numbered == 1:
+                total += data.count(b"\n") + bool(
+                    data and not data.endswith(b"\n"))
+            else:
+                total += sum(
+                    1 for ln in data.split(b"\n") if ln.strip())
         if not seen and stream_src is not None \
                 and _RESOLVE_ROOT is not None:
             # Bare `cat` re-reads the upstream stream — a KNOWN
@@ -3133,7 +3194,7 @@ _READER_FLAG_OPS = {
                        # `-e`/`--source`/`-E`/`--exec` are program-
                        # supplying too — _READER_PROG_FLAGS, round-42).
                        b"--exec", b"--include", b"--load",
-                       b"--pretty-print", b"--source"}),
+                       b"--source"}),
     b"sort": frozenset({b"-k", b"-t", b"-o", b"-T", b"-S", b"--key",
                         b"--field-separator", b"--output",
                         b"--temporary-directory", b"--buffer-size",
@@ -3179,7 +3240,12 @@ _READER_FLAG_OPS = {
     b"hexdump": frozenset({b"-e", b"-f", b"-n", b"-s",
                            b"--format", b"--format-file",
                            b"--length", b"--skip"}),
-    b"strings": frozenset({b"-n", b"-t", b"-e", b"-U", b"--bytes",
+    b"strings": frozenset({b"-n", b"-t", b"-e", b"-U",
+                          # `-s`/`-T` are the required-arg shorts for
+                          # `--output-separator`/`--target` — `strings
+                          # -s ,` consumes `,`, not a file (CodeRabbit
+                          # on #130, round-43 — verified live).
+                          b"-s", b"-T", b"--bytes",
                           b"--radix", b"--encoding",
                           # Required-arg longs (round-41 audit).
                           b"--unicode", b"--output-separator",
@@ -3220,7 +3286,13 @@ _READER_GNU_OPTARG = {
     b"od": frozenset({b"--strings", b"--width"}),
     b"tail": frozenset({b"--follow"}),
     b"awk": frozenset({b"--dump-variables", b"--lint",
-                       b"--profile"}),
+                       b"--profile",
+                       # `--pretty-print[=FILE]` is OPTIONAL-arg — the
+                       # separate word is still the PROGRAM (`awk
+                       # --pretty-print '1' F` runs '1' on F,
+                       # pretty-printing to awkprof.out — Codex on
+                       # #130, round-43 — verified live).
+                       b"--pretty-print"}),
     b"hexdump": frozenset({b"--color"}),
     b"split": frozenset({b"--numeric-suffixes",
                          b"--hex-suffixes"}),
@@ -3261,9 +3333,26 @@ _READER_PROG_FLAGS[b"rg"] = frozenset({b"-e", b"-f", b"--regexp",
 # same fixed domains).
 _READER_OPT_VALUES = {
     b"strings": {
-        b"-e": b"sSlbBL", b"--encoding": b"sSlbBL",
-        b"-U": b"sSlbBL", b"--unicode": b"sSlbBL",
-        b"-t": b"dox", b"--radix": b"dox",
+        # `-e`/`--encoding` picks a byte encoding ({s,S,l,L,b,B} —
+        # verified live on binutils 2.38).
+        b"-e": frozenset({b"s", b"S", b"l", b"L", b"b", b"B"}),
+        b"--encoding": frozenset({b"s", b"S", b"l", b"L", b"b",
+                                  b"B"}),
+        # `-U`/`--unicode` picks the unicode MODE — a DIFFERENT
+        # domain: single letters AND full names both bind (`-U d`,
+        # `--unicode=hex` — Devin/Codex/CodeRabbit on #130/#1959/
+        # #12, round-43 — verified live). `show`/`s` ride along for
+        # newer binutils builds (over-block-safe).
+        b"-U": frozenset({b"d", b"s", b"i", b"l", b"e", b"x",
+                          b"h", b"default", b"invalid", b"locale",
+                          b"escape", b"hex", b"highlight",
+                          b"show"}),
+        b"--unicode": frozenset({b"d", b"s", b"i", b"l", b"e",
+                                 b"x", b"h", b"default", b"invalid",
+                                 b"locale", b"escape", b"hex",
+                                 b"highlight", b"show"}),
+        b"-t": frozenset({b"d", b"o", b"x"}),
+        b"--radix": frozenset({b"d", b"o", b"x"}),
     },
 }
 
@@ -3464,13 +3553,18 @@ def _reader_operands(key: bytes, args: list):
                     resolved = cands[0]
                 if resolved in flagops:
                     prog_seen |= resolved in progflags
+                    if b"=" not in a and i + 1 >= len(args):
+                        # A required-arg long at argv end aborts —
+                        # `pr --indent` errors "option '--indent'
+                        # requires an argument" (Devin on #130,
+                        # round-43 — verified live).
+                        return None
                     valset = _READER_OPT_VALUES.get(
                         key, {}).get(resolved)
                     if valset is not None:
                         v = (a.split(b"=", 1)[1] if b"=" in a
-                             else args[i + 1]
-                             if i + 1 < len(args) else b"")
-                        if len(v) != 1 or v not in valset:
+                             else args[i + 1])
+                        if v not in valset:
                             return None
                     i += 1 if b"=" in a else 2
                     continue
@@ -3493,21 +3587,25 @@ def _reader_operands(key: bytes, args: list):
                 # A value option consumes the following word (short
                 # options are exact; long options resolved above).
                 prog_seen |= a in progflags
+                if i + 1 >= len(args):
+                    # `strings -U` / `tail --pid` with no operand
+                    # aborts — "option requires an argument" (Devin
+                    # on #130, round-43 — verified live).
+                    return None
                 valset = _READER_OPT_VALUES.get(
                     key, {}).get(a)
                 if valset is not None:
-                    v = args[i + 1] if i + 1 < len(args) else b""
-                    if len(v) != 1 or v not in valset:
+                    v = args[i + 1]
+                    if v not in valset:
                         return None
                 i += 2
                 continue
             elif (len(a) > 2 and a[:2] in flagops
                     and a[:2] in _READER_OPT_VALUES.get(key, {})):
                 # A glued fixed-domain value — `-Ubad` aborts like
-                # `-U bad` does.
+                # `-U bad` does; `-Uhex` binds like `-U hex`.
                 v = a[2:]
-                if len(v) != 1 or v not in (
-                        _READER_OPT_VALUES[key][a[:2]]):
+                if v not in _READER_OPT_VALUES[key][a[:2]]:
                     return None
                 i += 1
                 continue
@@ -3678,19 +3776,32 @@ def _seg_prov(body: bytes, prov: str,
                 # `-n` K/N stdout modes need a seekable input and
                 # abort on the pipe ("cannot determine file size"),
                 # so they still own the stream — verified live.
-                filt = _split_filter_cmd(key, args)
+                filt, finput = _split_scan(key, args)
                 if filt is None or filt == b"" or filt == b"-":
                     # A missing or `-` filter operand is not a runnable
                     # command — `split --filter -` execs `-` (ENOENT).
                     prov = "own"
                 else:
-                    v3 = _stdin_exec_head(filt)
+                    # The filter sees split's INPUT chunks — a named
+                    # FILE replaces the upstream pipe (`split
+                    # --filter=cat /dev/null` forwards the file, not
+                    # the pipe — Devin on #130/#12, round-43 —
+                    # verified live); `sh` runs its stdin through
+                    # `$SHELL -c`, so a LIST like `cat | sh`/`true; sh`
+                    # executes too — `_sub_flow`, not _stdin_exec_head
+                    # (CodeRabbit on #130, round-43 — verified live).
+                    if (finput is not None
+                            and not _stdin_path_operand(finput)):
+                        prov = ("script" if b"scripts/" in finput
+                                else "own")
+                    v3 = _sub_flow(filt)
                     if v3 == "exec":
                         return (None
                                 if prov in ("up", "script", "thru")
                                 else "own")
-                    if v3 == "sink":
+                    if v3 == "none":
                         prov = "own"
+                    # "fwd" — the filter re-emits the chunks onward.
             elif key not in _READER_STDIN_OPS and key not in (
                     _OPAQUE_PROG_HEADS):
                 # File operands replace the input — `head -n 1
@@ -7721,9 +7832,16 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                             if akey in _READER_PROGRAM_FIRST:
                                 # awk/sed/jq positional operands are
                                 # DATA files — only a program slot
-                                # executes (`awk '{p}' x.sh` prints).
-                                return _operand_is_program(
-                                    sub, wi0 - s1, enclosing)
+                                # executes (`awk '{p}' x.sh` prints);
+                                # but their bytes still reach a
+                                # downstream exec pipe (`-exec awk
+                                # '{p}' x.sh \; | sh` — CodeRabbit on
+                                # #1959, round-43 — verified live).
+                                return (_operand_is_program(
+                                            sub, wi0 - s1, enclosing)
+                                        or _pipe_to_exec(
+                                            scan,
+                                            cs + len(enclosing)))
                             # An unlisted head may still be an
                             # interpreter (`-exec tsx x.ts`,
                             # `-exec deno run x`) — fail closed
