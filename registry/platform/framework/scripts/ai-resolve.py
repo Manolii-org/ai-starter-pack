@@ -615,10 +615,18 @@ def _word_text(raw: bytes) -> bytes:
 
 
 def _command_key(word: bytes) -> bytes:
-    base = _word_text(word).rsplit(b"/", 1)[-1]
-    # A word can carry a trailing control operator the window split
-    # left glued — `sh;`, `cat&`, `sh;}` (Devin on #9, round-16).
-    base = base.rstrip(b";&{}()")
+    # `_operand_text` cuts at the first UNQUOTED control byte — `sh;` →
+    # `sh` — while a quoted separator stays part of the literal name:
+    # `"sh;"` names a `sh;` binary (ENOENT), not sh (Devin on #1957,
+    # round-34 review — verified live).
+    ot = _operand_text(word)
+    # Subshell/group glue strips only unquoted — `cat x | (sh)` runs sh.
+    while ot and ot[-1:] in b"()":
+        pos = len(ot) - 1
+        if any(a <= pos < b for a, b in _quoted_spans(ot)):
+            break
+        ot = ot[:-1]
+    base = _word_text(ot).rsplit(b"/", 1)[-1]
     if base.startswith(b"python"):
         return b"python"
     return base
@@ -1101,7 +1109,9 @@ def _operand_is_program(enc_words: list, wi: int,
                             and (t.startswith(b"-c")
                                  or t.startswith(b"--cpu-list"))):
                         possk = 0
-                    j += 2 if t in optops else 1
+                    cls = _wrapper_opt_class(wk, t)
+                    j += 2 if (cls == "operand_next"
+                               and j + 1 < len(enc_words)) else 1
                     continue
                 if possk:
                     possk -= 1
@@ -1684,6 +1694,46 @@ _WRAPPER_DESCRIBE = {b"command": frozenset({b"-v", b"-V"}),
                     b"prlimit": frozenset({b"-p", b"--pid",
                                            b"-h", b"--help",
                                            b"-V", b"--version"})}
+
+
+def _wrapper_opt_class(key: bytes, t: bytes):
+    """Option class for wrapper `key` word `t`: "describe" (the wrapper
+    never execs a trailing command), "operand_next" (binds the NEXT
+    word), "operand_glued" (`-oVAL`/`--opt=VAL` carry it in-word), or
+    None. GNU long options resolve any unambiguous PREFIX — `setpriv
+    --rui` abbreviates `--ruid` and still consumes `1000`, while an
+    ambiguous or unknown prefix errors and binds nothing (Devin on
+    #1957, round-34 review — verified live). Glued shorts bind too:
+    `prlimit -p1` is query mode — the trailing command never runs."""
+    if not t.startswith(b"-") or t == b"-":
+        return None
+    vals = _WRAPPER_OPT_OPERAND.get(key, frozenset())
+    desc = _WRAPPER_DESCRIBE.get(key, frozenset())
+    if t.startswith(b"--"):
+        name = t.split(b"=", 1)[0]
+        if name in vals or name in desc:
+            kind = "operand" if name in vals else "describe"
+        else:
+            uniq = {o for o in vals | desc if o.startswith(name)}
+            if len(uniq) != 1:
+                return None
+            o = next(iter(uniq))
+            kind = "operand" if o in vals else "describe"
+        if kind == "describe":
+            return "describe"
+        return "operand_glued" if b"=" in t else "operand_next"
+    if len(t) > 2:
+        head2 = t[:2]
+        if head2 in desc:
+            return "describe"
+        if head2 in vals:
+            return "operand_glued"
+        return None
+    if t in desc:
+        return "describe"
+    if t in vals:
+        return "operand_next"
+    return None
 # Heads whose output provably does NOT carry the input stream — a pipe
 # into one ends the chain without executing anything downstream: `cat x
 # | wc -l | sh` feeds sh a line count, not the script (Devin on #123).
@@ -2183,8 +2233,6 @@ def _effective_head(words: list, win: bytes) -> int | None:
                 if _ASSIGN_WORD.match(t):
                     i += 1
                     continue
-                if t in _WRAPPER_DESCRIBE.get(key, ()):
-                    return -1
                 if t.startswith(b"-"):
                     # `taskset -c LIST cmd` — the mask came via the
                     # option, so the NEXT positional is the command
@@ -2193,7 +2241,10 @@ def _effective_head(words: list, win: bytes) -> int | None:
                             and (t.startswith(b"-c")
                                  or t.startswith(b"--cpu-list"))):
                         pos_skip = 0
-                    if (b"=" not in t and t in takes_operand
+                    cls = _wrapper_opt_class(key, t)
+                    if cls == "describe":
+                        return -1
+                    if (cls == "operand_next"
                             and i + 1 < len(words)):
                         i += 2
                     else:
@@ -3683,7 +3734,8 @@ def _stdin_exec_head(win: bytes) -> str:
                 tw = _word_text(win[words[wi][0]:words[wi][1]])
                 if not tw.startswith(b"-") or tw == b"-":
                     break
-                if tw in _WRAPPER_DESCRIBE.get(wkey, ()):
+                cls = _wrapper_opt_class(wkey, tw)
+                if cls == "describe":
                     # `command -v env -S sh` only DESCRIBES env — the
                     # split operand never runs (Devin on #8/#1374/#1955,
                     # round-7 review). But a substitution inside the
@@ -3701,7 +3753,7 @@ def _stdin_exec_head(win: bytes) -> str:
                         and (tw.startswith(b"-c")
                              or tw.startswith(b"--cpu-list"))):
                     pos = 0
-                wi += 2 if (b"=" not in tw and tw in opts
+                wi += 2 if (cls == "operand_next"
                             and wi + 1 < len(words)) else 1
             # A wrapper's own leading operand (timeout's DURATION) is
             # not the command either — `timeout 1 env -S sh` still runs

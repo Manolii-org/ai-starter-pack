@@ -10502,3 +10502,63 @@ def test_pipe_to_exec_round33(tmp_path):
             pin_source=(reg_root, sha)), line
         # the two-word worktree alone would field-split — non-dep
         assert not mod.script_dep_block(pf, line + b"\n"), line
+
+
+def test_pipe_to_exec_round34(tmp_path):
+    """Round-34: GNU unambiguous option PREFIX abbreviations still bind
+    (`setpriv --rui` → --ruid), glued short option values classify
+    (`prlimit -p1` is query mode — the tail never runs), and a quoted
+    separator is part of the literal command name (`"sh;"` is ENOENT,
+    not sh) (Devin on #1957 — verified live)."""
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location(
+        "reg_r34", Path(__file__).parent.parent / "scripts" / "ai-resolve.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["reg_r34"] = mod
+    spec.loader.exec_module(mod)
+    pdir = tmp_path
+    (pdir / "scripts").mkdir()
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo HIT\n")
+    for line in (
+            # unambiguous GNU long-option prefixes still take the value
+            # operand — the utility word after it executes
+            b"cat scripts/x.sh | setpriv --rui 1000 sh",
+            b"cat scripts/x.sh | setpriv --ruid 1000 sh",
+            b"cat scripts/x.sh | setpriv --bounding 5 sh",
+            b"cat scripts/x.sh | prlimit --out=of sh",
+            # glued short option values carry their operand in-word —
+            # the command word after still runs
+            b"cat scripts/x.sh | prlimit -o1 sh",
+            b"cat scripts/x.sh | taskset -c0,1 sh",
+            b"cat scripts/x.sh | nice -n5 sh",
+            b"cat scripts/x.sh | sudo -uroot sh",
+            b"cat scripts/x.sh | ionice -c1 sh",
+            # unquoted subshell/paren glue still splits
+            b"cat scripts/x.sh | sh;",
+            b"cat scripts/x.sh | (sh)",
+            b'cat scripts/x.sh | "sh"',
+            # describe-mode tails still EVALUATE their substitutions
+            b'cat scripts/x.sh | setpriv --dump "$(sh)"',
+            b'cat scripts/x.sh | prlimit -p 1 "$(sh)"'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # an ambiguous GNU prefix is an option error — nothing
+            # after it runs
+            b"cat scripts/x.sh | setpriv --r 1000 sh",
+            # glued/describe modes never exec a trailing command
+            # (`prlimit -p1`: --pid and COMMAND are mutually
+            # exclusive — verified live)
+            b"cat scripts/x.sh | prlimit -p1 sh",
+            b"cat scripts/x.sh | prlimit --pi 1 sh",
+            b"cat scripts/x.sh | prlimit --pid=1 sh",
+            b"cat scripts/x.sh | setpriv --du sh",
+            # `timeout -s9 sh` — `sh` is the DURATION operand, an
+            # invalid interval — the command never runs
+            b"cat scripts/x.sh | timeout -s9 sh",
+            # quoted separators are literal name bytes — `"sh;"`
+            # names a `sh;` binary (ENOENT), not sh
+            b'cat scripts/x.sh | "sh;"',
+            b'cat scripts/x.sh | "sh{"',
+            b'cat scripts/x.sh | "sh x"'):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
