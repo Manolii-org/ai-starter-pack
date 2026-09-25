@@ -1101,7 +1101,7 @@ def _find_expr_spans(enc_words: list, hi: int, enclosing: bytes):
     spans = []
     terminal = _ARGV_PROGRAM_WRAPPER_TERMINAL[b"find"]
     k = hi + 1
-    dead = False
+    dead = unterminated = False
     while k < len(enc_words):
         t = _word_text(enclosing[enc_words[k][0]:enc_words[k][1]])
         if t in _FIND_ACTION:
@@ -1122,8 +1122,16 @@ def _find_expr_spans(enc_words: list, hi: int, enclosing: bytes):
                          == b"{}")):
                     break
                 end += 1
-            if not dead:
-                spans.append(("action", start, end))
+            if end < len(enc_words):
+                if not dead:
+                    spans.append(("action", start, end))
+            else:
+                # A `-exec` with no `;`/`{} +` terminator makes find
+                # exit on a parse error BEFORE traversing — no action
+                # ever runs (`find . -exec sh x` → "missing argument
+                # to `-exec`" — Devin on #130, round-49 review —
+                # verified live).
+                unterminated = True
             k = end + 1
             continue
         if t == b"-quit":
@@ -1195,7 +1203,9 @@ def _find_expr_spans(enc_words: list, hi: int, enclosing: bytes):
     # A terminal word ANYWHERE exits before every action (round-40) —
     # action spans are dropped under a terminal so callers that only
     # consume "action" entries stay consistent with _argv_wrap_start.
-    if any(s[0] == "terminal" for s in spans):
+    # An UNTERMINATED action is a parse error — it kills every action
+    # in the expression, not just itself.
+    if unterminated or any(s[0] == "terminal" for s in spans):
         return [s for s in spans if s[0] == "terminal"]
     return spans
 
@@ -2358,7 +2368,7 @@ def _herestring_pos(swin: bytes, words: list, rel: int) -> bool:
             # position opens the target the position sits in.
             return _unquoted_herestring(raw[:rel - w[0]])
         pending = (pend is not None and pend[0] == 0
-                   and pend[1] == "file"
+                   and pend[1] in ("file", "hdoc")
                    and _unquoted_herestring(raw))
     # `rel` fell past every word — a pending `<<<` means the target is
     # whatever follows, typically the `$(` _cmd_window cut away.
@@ -3785,6 +3795,23 @@ _READER_NUM_VALS = {
     b"pr": frozenset({b"--indent", b"-o"}),
 }
 
+# Page-range operands — `--pages FIRST[:LAST]` and the `+FIRST[:LAST]`
+# operand form abort on anything but a non-zero number with an optional
+# `:LAST` (`--pages=bad`, `--pages=2:`, `+bad`, `0` all exit before the
+# read — Codex on #130, round-49 review — verified live).
+_READER_PAGE_VALS = {
+    b"pr": frozenset({b"--pages"}),
+}
+
+
+def _pages_ok(v: bytes) -> bool:
+    if v[:1] == b"+":
+        v = v[1:]
+    head, sep, tail = v.partition(b":")
+    if not head.isdigit() or head == b"0":
+        return False
+    return not sep or tail.isdigit()
+
 
 def _num_ok(v: bytes) -> bool:
     """Digits with an optional leading `+` — GNU's non-negative
@@ -4006,12 +4033,16 @@ def _reader_operands(key: bytes, args: list):
                         key, {}).get(resolved)
                     numv = resolved in _READER_NUM_VALS.get(
                         key, frozenset())
-                    if valset is not None or numv:
+                    rangev = resolved in _READER_PAGE_VALS.get(
+                        key, frozenset())
+                    if valset is not None or numv or rangev:
                         v = (a.split(b"=", 1)[1] if b"=" in a
                              else args[i + 1])
                         if valset is not None and v not in valset:
                             return None
                         if numv and not _num_ok(v):
+                            return None
+                        if rangev and not _pages_ok(v):
                             return None
                     i += 1 if b"=" in a else 2
                     continue
@@ -4042,11 +4073,14 @@ def _reader_operands(key: bytes, args: list):
                 valset = _READER_OPT_VALUES.get(
                     key, {}).get(a)
                 numv = a in _READER_NUM_VALS.get(key, frozenset())
-                if valset is not None or numv:
+                rangev = a in _READER_PAGE_VALS.get(key, frozenset())
+                if valset is not None or numv or rangev:
                     v = args[i + 1]
                     if valset is not None and v not in valset:
                         return None
                     if numv and not _num_ok(v):
+                        return None
+                    if rangev and not _pages_ok(v):
                         return None
                 i += 2
                 continue
@@ -4067,6 +4101,14 @@ def _reader_operands(key: bytes, args: list):
                                 for f in progflags))):
                 # glued `-ePAT` or long `--regexp=P`/`--file=F` program
                 prog_seen = True
+            i += 1
+            continue
+        if key == b"pr" and a[:1] == b"+":
+            # `pr +FIRST[:LAST]` — a page spec, not a file operand;
+            # an invalid one aborts like `--pages` (Codex on #130,
+            # round-49 review — verified live: `+bad` errors out).
+            if not _pages_ok(a[1:]):
+                return None
             i += 1
             continue
         ops.append(a)
@@ -4190,6 +4232,9 @@ def _seg_prov(body: bytes, prov: str,
                 t0 = tgt0.get(0)
                 seek0 = (t0 is not None
                          and _fd_alias_target(t0) != 0)
+                dead0 = (sfd is not None
+                         and sfd.get(0, _FD_IN)
+                         not in (_FD_IN, _FD_FILE))
                 filt, finput, tout = _split_scan(
                     key, args, seekable_stdin=seek0)
                 # split's INPUT: a named operand wins regardless of a
@@ -4204,7 +4249,13 @@ def _seg_prov(body: bytes, prov: str,
                     src = tgt0.get(0)
                     if src is not None and _stdin_path_operand(src):
                         src = None   # `< /dev/stdin` keeps the pipe
-                if tout and filt is None:
+                if dead0 and src is None:
+                    # `<&-`/`0>`/`<&M` left stdin unreadable — a `-`/
+                    # absent input dies EBADF before any chunk or
+                    # filter runs (Devin on #130/#12, round-49 review
+                    # — verified live).
+                    prov = "own"
+                elif tout and filt is None:
                     # `-n K/N`/`l/K/N`/`r/K/N` print the selected
                     # chunk to stdout — the INPUT flows through like
                     # a reader's (CodeRabbit on #130, round-46 review
@@ -4232,13 +4283,16 @@ def _seg_prov(body: bytes, prov: str,
                     if src is not None:
                         prov = ("script" if b"scripts/" in src
                                 else "own")
-                    # A `$`/backtick in the filter operand expands to
-                    # an OPAQUE command — `$(printf sh)` resolves to
-                    # `sh` before split runs and execs each chunk
-                    # (Codex on #1959, round-48 review — verified
-                    # live); the command list can't be disproven, so
-                    # treat it as executing its stdin.
-                    v3 = ("exec" if (b"$" in filt or b"`" in filt)
+                    # A `$`/backtick in the filter's COMMAND WORD
+                    # expands to an opaque head — `$(printf sh)`
+                    # resolves to `sh` before split runs and execs
+                    # each chunk (Codex on #1959, round-48 review —
+                    # verified live). An expansion in a LATER word
+                    # is just an argument — `true $HOME` still drops
+                    # the bytes (Devin on #1393, round-49 review —
+                    # verified live).
+                    ftok = filt.split(None, 1)[0]
+                    v3 = ("exec" if (b"$" in ftok or b"`" in ftok)
                           else _sub_flow(filt))
                     if v3 == "exec":
                         return (None
@@ -6075,11 +6129,23 @@ def _word_pending_target(fds: dict, fd, mode: str, raw: bytes,
     filename form; 'dup_in' (from `<&`) treats a non-numeric word as
     invalid bash — UNKNOWN, which counts as rebound (fail closed)."""
     t, _, _e = _word_unquote(raw)
-    if t[:2] == b"<(" and mode in ("file", "dup_in"):
-        pass  # process-sub — falls through to the class bind below
-    elif (tgts is not None and fd == 0 and mode == "file"
-          and _fd_alias_target(t) is None):
-        tgts[0] = t  # a real filename bound to stdin
+    if tgts is not None and fd == 0:
+        # tgts[0] is the LAST literal filename bound to stdin — keep
+        # it only when this pending target is itself a literal file.
+        # `<<`-family binds collected content, `<&M`/`-` dups or
+        # closes the fd, and a `$`/backtick target resolves only at
+        # runtime (`cat x | split --filter=sh - <"$FD"` still streams
+        # the pipe when FD=/dev/stdin — Codex on #1959, round-49
+        # review — verified live).
+        if (mode == "file" and t[:2] != b"<("
+                and _fd_alias_target(t) is None
+                and not _has_expansion(raw)):
+            tgts[0] = t  # a real filename bound to stdin
+        elif not (mode in ("dup", "dup_in") and t.isdigit()
+                  and _fd_key(t, -1) == 0):
+            # A self-dup (`<& 0`) leaves fd0 — and its filename —
+            # untouched; every other target retires the record.
+            tgts.pop(0, None)
     if t[:2] == b"<(" and mode in ("file", "dup_in"):
         # `< <(BODY)` — the inner body inherits the outer stdin and its
         # captured stdout becomes the fd's content: `sh < <(cat)` still
@@ -6088,7 +6154,12 @@ def _word_pending_target(fds: dict, fd, mode: str, raw: bytes,
         fds[fd] = (_FD_IN if _sub_flow(body) in ("exec", "fwd")
                    else _FD_FILE)
         return
-    if mode in ("file", "file2"):
+    if mode == "hdoc":
+        # `<<`/`<<<` — the pending word is the delimiter or
+        # herestring content, not a filename; the fd binds to the
+        # collected body.
+        fds[fd] = _FD_FILE
+    elif mode in ("file", "file2"):
         tgt = _fd_alias_target(t)
         v = _FD_FILE if tgt is None else fds.get(tgt, _FD_UNKNOWN)
         fds[fd] = v
@@ -6147,14 +6218,25 @@ def _word_redirects(raw: bytes, fds: dict,
         return not q[i]
 
     i = 0
+    depth = 0
     while i < n:
         if q[i]:
             i += 1
             continue
-        if t[i:i + 1] in b"<>" and not (
-                t[i:i + 2] in (b"<(", b">(") and i + 1 < n and not q[i + 1]):
+        if t[i:i + 1] == b"(":
+            # `$(`, `$((`, `<(`/`>(` bodies — `<`/`>` inside are the
+            # SUBSTITUTION's own syntax, not this command's redirects
+            # (`date +$(cat <<< $(echo x))` — Devin on #130, round-49
+            # review — verified live).
+            depth += 1
+        elif t[i:i + 1] == b")" and depth:
+            depth -= 1
+        elif depth == 0 and t[i:i + 1] in b"<>" and not (
+                t[i:i + 2] in (b"<(", b">(") and i + 1 < n
+                and not q[i + 1]):
             break
-        if t[i:i + 1] == b"&" and t[i:i + 2] == b"&>" and not q[i + 1]:
+        elif depth == 0 and t[i:i + 1] == b"&" \
+                and t[i:i + 2] == b"&>" and not q[i + 1]:
             break
         i += 1
     arg = t[:i]
@@ -6164,8 +6246,16 @@ def _word_redirects(raw: bytes, fds: dict,
         if q[i]:
             i += 1
             continue
+        if t[i:i + 1] == b"(":
+            depth += 1
+            i += 1
+            continue
+        if t[i:i + 1] == b")" and depth:
+            depth -= 1
+            i += 1
+            continue
         c = t[i:i + 1]
-        if c not in b"<>&":
+        if c not in b"<>&" or depth:
             i += 1
             continue
         fd_default = 0 if c == b"<" else 1
@@ -6242,6 +6332,10 @@ def _word_redirects(raw: bytes, fds: dict,
             if tgt is None:
                 pending = (fd, "file")
             else:
+                if tgts is not None and fd == 0:
+                    # `0>`/`0>>` rebind stdin for WRITING — the earlier
+                    # `< f` record no longer applies.
+                    tgts.pop(0, None)
                 tgt_fd = _fd_alias_target(tgt)
                 fds[fd] = (_FD_FILE if tgt_fd is None
                            else fds.get(tgt_fd, _FD_UNKNOWN))
@@ -6255,12 +6349,20 @@ def _word_redirects(raw: bytes, fds: dict,
             if t[i:i + 1] == b"<" and op(i):
                 i += 1  # `<<<`
             fds[fd] = _FD_FILE
+            if tgts is not None and fd == 0:
+                # The fd now carries the heredoc body or herestring
+                # CONTENT — not a seekable filename — so the earlier
+                # `< f` record is stale (`split -n 1/1 - <f <<<x`
+                # dies "cannot determine file size" — Devin on #12,
+                # round-49 review — verified live).
+                tgts.pop(0, None)
             tgt, i = _redir_target(t, q, i)
             if tgt is None:
-                pending = (fd, "file")
+                pending = (fd, "hdoc")
             continue
         if t[i:i + 1] == b">" and op(i):  # `<>` read-write
             i += 1
+            ts = i
             tgt, i = _redir_target(t, q, i)
             if tgt is None:
                 pending = (fd, "file")
@@ -6268,7 +6370,13 @@ def _word_redirects(raw: bytes, fds: dict,
                 tgt_fd = _fd_alias_target(tgt)
                 if (tgts is not None and fd == 0
                         and tgt_fd is None):
-                    tgts[0] = tgt
+                    if tgt_exp(ts, i):
+                        # `<$F` — the bound name is runtime-decided;
+                        # keep the pipe candidate, not a fixed file
+                        # (Codex on #1959, round-49 review).
+                        tgts.pop(0, None)
+                    else:
+                        tgts[0] = tgt
                 fds[fd] = (_FD_FILE if tgt_fd is None
                            else fds.get(tgt_fd, _FD_UNKNOWN))
             continue
@@ -6276,6 +6384,15 @@ def _word_redirects(raw: bytes, fds: dict,
             i += 1
             ts = i
             tgt, i = _redir_target(t, q, i)
+            if (tgts is not None and fd == 0
+                    and not (tgt is not None and tgt.isdigit()
+                             and _fd_key(tgt, -1) == 0)):
+                # `<&M`/`<&-`/`<&$F`/`<&w` rebinds or CLOSES stdin —
+                # the recorded filename no longer describes fd0
+                # (`split -n 1/1 - <f <&-` dies EBADF — Devin on
+                # #130/#12, round-49 review — verified live). A
+                # self-dup keeps it.
+                tgts.pop(0, None)
             if tgt is None:
                 pending = (fd, "dup_in")
             elif tgt == b"-":
@@ -6292,13 +6409,21 @@ def _word_redirects(raw: bytes, fds: dict,
             else:
                 fds[fd] = _FD_UNKNOWN  # `<&word` — invalid syntax
             continue
+        ts = i
         tgt, i = _redir_target(t, q, i)  # `<file`
         if tgt is None:
             pending = (fd, "file")
         else:
             tgt_fd = _fd_alias_target(tgt)
             if tgts is not None and fd == 0 and tgt_fd is None:
-                tgts[0] = tgt
+                if tgt_exp(ts, i):
+                    # `<$F`/``<`cmd` `` — a runtime-decided name is
+                    # unknown: keep stdin pipe-capable rather than
+                    # recording a fixed file (Codex on #1959,
+                    # round-49 review — verified live).
+                    tgts.pop(0, None)
+                else:
+                    tgts[0] = tgt
             fds[fd] = (_FD_FILE if tgt_fd is None
                        else fds.get(tgt_fd, _FD_UNKNOWN))
     return arg, pending
@@ -8301,6 +8426,17 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                 # (`xargs -a scripts/list` is the arg-file, not argv)
                 # is never exec'd (Codex on #1393, round-39 review).
                 wi0 = enc_words.index(w)
+                rdm = re.match(rb"^([0-9]*)(<<<|<<|<>|<&|<)", tw)
+                if rdm is not None and rdm.group(1) in (b"", b"0") \
+                        and not _has_expansion(raw):
+                    # A `<`-glued word feeds fd0 only until a LATER
+                    # redirect overrides or closes it — `split -n 1/1
+                    # - <x.sh <&-`/`<<<y` never reads x.sh (Devin on
+                    # #130/#12, round-49 review — verified live).
+                    tgts0: dict = {}
+                    _seg_head_args(enclosing, tgts0)
+                    if tgts0.get(0) != tw[rdm.end():]:
+                        return False
                 whi = _effective_head(enc_words, enclosing)
                 if whi is not None and whi < 0:
                     # A describe-only head never reaches a trailing
@@ -8362,8 +8498,23 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                                     aargs = [_word_text(
                                         enclosing[aw[0]:aw[1]])
                                         for aw in sub[ahi + 1:]]
-                                    afilt, _afin, atout = _split_scan(
+                                    afilt, afin, atout = _split_scan(
                                         akey, aargs)
+                                    # `split IN PREFIX` — the word is
+                                    # exec'd only as the INPUT operand
+                                    # or inside the filter command; a
+                                    # SECOND positional is the output
+                                    # prefix — written to, never read
+                                    # (`-exec split --filter=sh in x.sh`
+                                    # writes x.sh* files — Devin on
+                                    # #130, round-49 review — verified
+                                    # live).
+                                    if not (
+                                            afin == cand
+                                            or (afilt is not None
+                                                and b"scripts/"
+                                                in afilt)):
+                                        return False
                                     if atout:
                                         return _pipe_to_exec(
                                             scan,
@@ -8371,9 +8522,10 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                                     if (afilt is not None
                                             and afilt
                                             not in (b"", b"-")):
+                                        ftok5 = afilt.split(None, 1)[0]
                                         v5 = ("exec" if (
-                                            b"$" in afilt
-                                            or b"`" in afilt)
+                                            b"$" in ftok5
+                                            or b"`" in ftok5)
                                             else _sub_flow(afilt))
                                         if v5 == "exec":
                                             return True

@@ -9896,7 +9896,6 @@ def test_pipe_to_exec_round25(tmp_path):
             b"find . -exec sh -c 'bash scripts/x.sh' \\;",
             b"find . -execdir sh -c 'bash scripts/x.sh' \\;",
             b"find . -ok sh -c 'bash scripts/x.sh' \\;",
-            b"find . -exec sh -c 'bash scripts/x.sh' +",
             b"find . -name x -exec sh -c 'bash scripts/x.sh' \\; -type f",
             # `flock L -c 'P'` binds P as the command string; `flock L
             # CMD…` runs the argv after the lockfile (Codex on #128)
@@ -9933,6 +9932,11 @@ def test_pipe_to_exec_round25(tmp_path):
             # unread and unrelated bytes are emitted (Devin on #128)
             b"cat scripts/x.sh | sort --files0-from /dev/null | sh",
             b"cat scripts/x.sh | sort --files0-from=/dev/null | sh",
+            # a bare `+` ends `-exec` only right after `{}` — `+` alone
+            # leaves the argv unterminated: find exits on the parse
+            # error (`missing argument to `-exec`') and nothing runs
+            # (round-49 — verified live on GNU find)
+            b"find . -exec sh -c 'bash scripts/x.sh' +",
             # the stdin-alias form drains the pipe as the list —
             # `; sh` then sees EOF (Devin on #128)
             b"cat scripts/x.sh | sh -c 'sort --files0-from=-; sh'",
@@ -11548,3 +11552,90 @@ def test_script_dep_round48(tmp_path):
             b"split --filter=true scripts/x.sh | sh",
             b"split -n r/1/1 - </dev/null | sh"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round49(tmp_path):
+    """Round-49 review fixes (each verified live against bash):
+    a `$`/backtick in a `--filter` COMMAND WORD expands to an opaque
+    head and must be treated as exec (`$(printf sh)` resolves to sh),
+    while an expansion in a LATER word is just an argument
+    (`true $HOME` drops the chunk bytes); the last-bound stdin file
+    record (`tgts[0]`) retires on `<<`-family, `<&`-rebind/close, `0>`,
+    and dynamic `<$F` targets — only a self-dup `<&0` keeps it; a
+    dead fd0 (`<&-`, `0>`, `<&1`) makes a `-`/absent split input die
+    EBADF before chunks or filters run; a `-exec` argv with no
+    `;`/`{} +` terminator is a parse error that kills EVERY action;
+    `split IN PREFIX` execs the word only as INPUT or inside the
+    filter — a second positional is the written output prefix;
+    `pr --pages`/`+N` aborts before any read on a bad page spec.
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts/x.sh").write_text("echo X\n")
+    (pdir / "scripts/y.sh").write_text("echo Y\n")
+
+    for line in (
+            # expansion in a LATER filter word is just an argument —
+            # `true $HOME` drops the bytes (Devin on #1393)
+            b"split --filter='true $HOME' scripts/x.sh | sh",
+            b"split --filter='echo $HOME' scripts/x.sh | sh",
+            # a literal-quoted $FD target does not expand — the pipe
+            # is consumed by the file bind, not exec'd (Codex on
+            # #1959 — `<'$FD'` keeps fd0 bound to a literal name)
+            b"cat scripts/x.sh | split --filter=sh - <'$FD'",
+            # stale last-bound record: `<<`-family rebinds fd0 to
+            # content; `<&-` closes it; `<&1` dupes the write-side
+            # fd — `split -n 1/1 -` dies before any chunk
+            b"split -n 1/1 - <scripts/x.sh <<<y | sh",
+            b"split -n 1/1 - <scripts/x.sh <<EOF | sh",
+            b"split -n 1/1 - <scripts/x.sh <&- | sh",
+            b"split -n 1/1 - <scripts/x.sh <&1 | sh",
+            b"split --filter=sh - <scripts/x.sh <&-",
+            # unterminated `-exec` argv is a find parse error —
+            # `missing argument to '-exec'` kills every action
+            b"find . -exec sh scripts/x.sh",
+            b"find . -exec sh scripts/x.sh ;",
+            b"find . -exec sh scripts/x.sh \\; -exec cat scripts/y.sh",
+            b"find . -exec sh scripts/x.sh +",
+            # `split IN PREFIX` — a second positional is the output
+            # prefix, written not read (Devin on #130)
+            b"find . -exec split --filter=sh /dev/null scripts/x.sh \\;",
+            (b"find . -exec split -n 1/1 /dev/null scripts/x.sh \\;"
+             b" | sh"),
+            # `pr --pages=bad`/`+bad` abort before the read (Codex on
+            # #130)
+            b"cat scripts/x.sh | pr --pages=bad | sh",
+            b"cat scripts/x.sh | pr +bad | sh",
+            b"cat scripts/x.sh | pr --pages | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+    for line in (
+            # the expansion is in the filter's COMMAND WORD — opaque
+            # head; `$(printf sh)` resolves to sh and execs chunks
+            b"split --filter='$(printf sh)' scripts/x.sh",
+            # dynamic `<$FD`/`<"$FD"` targets — name resolved at
+            # runtime; keep the pipe candidate (Codex on #1959)
+            b"cat scripts/x.sh | split --filter=sh - <\"$FD\"",
+            b"cat scripts/x.sh | split --filter=sh - <$FD",
+            # `sh $X` — an unset X collapses to bare `sh` (reads
+            # stdin, execs the chunks); a set X reads FILE X — the
+            # dynamic case stays fail-closed (verified live)
+            b"split --filter='sh $X' scripts/x.sh | sh",
+            # self-dup `<&0` leaves fd0 — and its filename — bound
+            b"split -n 1/1 - <scripts/x.sh <&0 | sh",
+            # literal `< file` record still feeds the chunk
+            b"split -n 1/1 - <scripts/x.sh | sh",
+            b"split -n 1/1 scripts/x.sh | sh",
+            # `-exec` terminated with `\\;`/`{} +` runs the argv
+            b"find . -exec sh scripts/x.sh \\;",
+            b"find . -exec sh scripts/x.sh {} +",
+            # the word IS the input operand — read by the chunker
+            b"find . -exec split --filter=sh scripts/x.sh \\;",
+            b"find . -exec split -n 1/1 scripts/x.sh out \\; | sh",
+            # a valid `pr --pages`/`+N` spec keeps the stream live
+            b"cat scripts/x.sh | pr --pages=1 | sh",
+            b"cat scripts/x.sh | pr --pages=1:9 | sh",
+            b"cat scripts/x.sh | pr +2 | sh",
+            b"cat scripts/x.sh | pr --pages 2 | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
