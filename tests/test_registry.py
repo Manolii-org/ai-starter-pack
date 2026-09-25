@@ -9634,9 +9634,13 @@ def test_pipe_to_exec_round19(tmp_path):
             b"bash -ce 'bash scripts/x.sh'",
             b"sh -c -e 'bash scripts/x.sh'",
             b"bash -xec 'bash scripts/x.sh'",
-            # node -p/--print evaluates its operand like -e (Codex)
-            b"node -p 'bash scripts/x.sh'",
-            b"node --print 'bash scripts/x.sh'",
+            # node -p/--print evaluates its operand like -e (Codex) —
+            # the operand must be VALID JavaScript (bare `bash x.sh`
+            # is not; CodeRabbit on #128, round-23)
+            b"node -p 'require(\"node:child_process\")"
+            b".execSync(\"bash scripts/x.sh\")'",
+            b"node --print 'require(\"node:child_process\")"
+            b".execSync(\"bash scripts/x.sh\")'",
             # a substitution GENERATING eval's command is opaque —
             # `eval "$(printf sh)"` expands to `eval sh` and runs the
             # pipe (Devin on #1382; verified live)
@@ -9662,4 +9666,68 @@ def test_pipe_to_exec_round19(tmp_path):
             b"cat scripts/x.sh | python -m gzip - | sh",
             b"cat scripts/x.sh | python -m gzip - bad | sh",
             b"cat scripts/x.sh | python -m gzip bad - | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    # Round-23 positive cases — each executes the bundled script.
+    for line in (
+            # `env -S`/`--split-string` re-parses its operand INTO a
+            # command line — the operand is program text even as the
+            # LAST word (Codex on #128; verified live)
+            b"cat scripts/x.sh | env -S 'bash scripts/x.sh'",
+            b"cat scripts/x.sh | timeout 1 env -S 'bash scripts/x.sh'",
+            b"cat scripts/x.sh | env --split-string 'bash scripts/x.sh'",
+            # `-o`/`-O` consume their option name — `bash -o pipefail
+            # -c P` still runs P (CodeRabbit on #128; verified live)
+            b"bash -o pipefail -c 'bash scripts/x.sh'",
+            b"cat scripts/x.sh | bash -o pipefail -c 'sh'",
+            b"cat scripts/x.sh | bash -O extglob -c 'sh'",
+            # a `c` flag mid-line: `sh -c -e sh` runs the next
+            # NON-OPTION word on stdin (Devin on #1957; verified on
+            # bash and dash)
+            b"cat scripts/x.sh | sh -c -e sh",
+            b"cat scripts/x.sh | bash -c -e sh",
+            # bun's eval/print flags evaluate their operand like node
+            # (Codex on #128)
+            b"bun --eval 'require(\"./scripts/x.sh\")'",
+            b"bun -e 'require(\"./scripts/x.sh\")'",
+            # a backslash inside '…' is LITERAL — it cannot eat the
+            # closing quote, so the tick after it substitutes
+            # (CodeRabbit/Codex on #128/#1382; verified live)
+            b"cat scripts/x.sh | echo 'a\\' `cat` | sh",
+            # an apostrophe inside "…" is literal — it must NOT open
+            # single-quote state, so the tick substitutes
+            # (CodeRabbit on #128; verified live)
+            b"cat scripts/x.sh | echo \"it's `cat`\" | sh",
+            b"cat scripts/x.sh | eval 'x' `cat` | sh",
+            # ssh operands AFTER the destination form the remote
+            # command — option operands are consumed first (Devin on
+            # #128; verified live)
+            b"ssh -p 22 host 'bash scripts/x.sh'",
+            b"ssh -p22 host 'bash scripts/x.sh'",
+            b"ssh -o User=x -i id host 'bash scripts/x.sh'"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    # Round-23 negative cases.
+    for line in (
+            # `node -r` preloads a MODULE file — a filename operand,
+            # not program text (Devin on #128; verified live)
+            b"node -r 'bash scripts/x.sh'",
+            b"node --require 'bash scripts/x.sh'",
+            # after `sed -e`/`awk -f` the positionals are INPUT
+            # FILES, not the program (Devin on #128; verified live)
+            b"sed -e p 'bash scripts/x.sh'",
+            b"awk -f f 'bash scripts/x.sh'",
+            b"sed --expression p 'bash scripts/x.sh'",
+            # `xargs -a F` reads argv items from F — it does NOT
+            # drain the shared stdin (Devin on #1957; verified live)
+            b"cat scripts/x.sh | xargs -a /dev/null | sh",
+            b"cat scripts/x.sh | xargs --arg-file=/dev/null | sh",
+            # ssh's option operands are not the destination — `-p
+            # 22` means the NEXT word is still not the remote
+            # command (Devin on #128)
+            b"ssh -p 22 'bash scripts/x.sh'",
+            # a substitution that DRAINS stdin generates
+            # stdin-independent command text for eval — `eval
+            # "$(cat|wc -l)"` runs a count on EOF (Devin on #11)
+            b"cat scripts/x.sh | eval \"$(cat | wc -l)\"",
+            b"cat scripts/x.sh | eval `cat | wc -l`",
+            b"cat scripts/x.sh | eval \"$(cat | head -n 0)\""):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
