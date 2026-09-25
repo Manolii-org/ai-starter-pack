@@ -1956,8 +1956,9 @@ def _passthrough_emit_herestring(skey: bytes, swin: bytes,
         at, pend = _word_redirects(raw, scratch)
         if at:
             sargs.append(at)
-    return all(_operand_feeds_stream(o)
-               for o in _reader_operands(skey, sargs))
+    sops = _reader_operands(skey, sargs)
+    return (sops is not None
+            and all(_operand_feeds_stream(o) for o in sops))
 
 
 # `-m` modules that run stdin as PROGRAM text — `python -m code` and
@@ -2528,8 +2529,45 @@ def _pinned_bytes(rel: bytes) -> bytes | None:
     return p.stdout if p.returncode == 0 else None
 
 
+def _ifs_fields(data: bytes, ifs: bytes | None) -> list:
+    """Field-split `data` under the effective IFS — None or a
+    whitespace-containing IFS splits normally; an IFS of only
+    non-whitespace chars (or the empty IFS) splits only on its own
+    characters, so `IFS=; date +$(cat x)` keeps `echo HIT` as ONE
+    field (Devin on #128, round-35 review — verified live)."""
+    if ifs is None or any(c in b" \t\n" for c in ifs):
+        return data.split()
+    if not ifs:
+        return [data] if data else []
+    return [p for p in re.split(rb"[" + re.escape(ifs) + rb"]", data)
+            if p]
+
+
+def _line_ifs(src: bytes, end: int) -> bytes | None:
+    """Effective IFS before position `end` — the value of the LAST
+    `IFS=` assignment STANDALONE STATEMENT (`IFS=; date +$(cat x)`
+    leaves `echo HIT` one field). A command-prefix `IFS=x` binds only
+    for the command's own environment — after word-splitting — so it
+    does NOT count (Devin on #128, round-35 review — verified live).
+    None = shell default."""
+    ifs = None
+    for stmt in re.split(rb"[;\n&|]+", src[:end]):
+        wsv = _shell_words(_mask_parens(stmt))
+        if (wsv and all(
+                re.match(rb"[A-Za-z_][A-Za-z0-9_]*=",
+                         _operand_text(stmt[w0:w1])) for w0, w1 in wsv)):
+            for w0, w1 in wsv:
+                if stmt[w0:w0 + 1] in (b'"', b"'"):
+                    continue
+                t = _operand_text(stmt[w0:w1])
+                if t.startswith(b"IFS="):
+                    ifs = t[4:]
+    return ifs
+
+
 def _date_capture_dep(inner: bytes,
-                      stream_src: bytes | None = None) -> bool:
+                      stream_src: bytes | None = None,
+                      ifs: bytes | None = None) -> bool:
     """True when an UNQUOTED `+$(INNER)`/`+`INNER`` capture can still
     join the format operand — the bytes reach a downstream exec unless
     the expansion PROVABLY field-splits to other than one word. `cat
@@ -2546,8 +2584,10 @@ def _date_capture_dep(inner: bytes,
     if not words:
         return True
     key = _command_key(inner[words[0][0]:words[0][1]])
+    ws_ifs = ifs is None or any(c in b" \t\n" for c in ifs)
     if key == b"cat":
         total, seen = 0, False
+        numbered = 0            # 1 = `cat -n`, 2 = `cat -b` (last wins)
         i = 1
         while i < len(words):
             t = _operand_text(inner[words[i][0]:words[i][1]])
@@ -2555,8 +2595,21 @@ def _date_capture_dep(inner: bytes,
                 i += 1
                 continue
             if t.startswith(b"-") and t != b"-":
+                # `cat -n`/`--number` prefixes every line with its
+                # number — one EXTRA word per line; `-b`/
+                # `--number-nonblank` numbers non-blank lines only
+                # (Devin on #128, round-35 review — verified live).
+                for longo in (b"--number", b"--number-nonblank"):
+                    if t == longo:
+                        numbered = 1 if longo == b"--number" else 2
+                if not t.startswith(b"--"):
+                    for c in t[1:]:
+                        if c == 0x6E:   # n
+                            numbered = 1
+                        elif c == 0x62:  # b
+                            numbered = 2
                 i += 1
-                continue      # display flags keep the word count
+                continue
             if _stdin_path_operand(t) or _RESOLVE_ROOT is None:
                 return True
             if _PIN_SOURCE is not None:
@@ -2564,7 +2617,15 @@ def _date_capture_dep(inner: bytes,
                 if data is None:
                     return True
                 seen = True
-                total += len(data.split())
+                total += len(_ifs_fields(data, ifs))
+                if numbered and ws_ifs:
+                    if numbered == 1:
+                        total += data.count(b"\n") + bool(
+                            data and not data.endswith(b"\n"))
+                    else:
+                        total += sum(
+                            1 for ln in data.split(b"\n")
+                            if ln.strip())
                 i += 1
                 continue
             try:
@@ -2573,7 +2634,16 @@ def _date_capture_dep(inner: bytes,
                 if not p.is_file():
                     return True
                 seen = True
-                total += len(p.read_bytes().split())
+                data = p.read_bytes()
+                total += len(_ifs_fields(data, ifs))
+                if numbered and ws_ifs:
+                    if numbered == 1:
+                        total += data.count(b"\n") + bool(
+                            data and not data.endswith(b"\n"))
+                    else:
+                        total += sum(
+                            1 for ln in data.split(b"\n")
+                            if ln.strip())
             except OSError:
                 return True
             i += 1
@@ -2585,13 +2655,13 @@ def _date_capture_dep(inner: bytes,
             if _PIN_SOURCE is not None:
                 data = _pinned_bytes(stream_src)
                 if data is not None:
-                    return len(data.split()) == 1
+                    return len(_ifs_fields(data, ifs)) == 1
                 return True
             try:
                 p = _RESOLVE_ROOT / stream_src.decode(
                     "utf-8", "surrogateescape")
                 if p.is_file():
-                    return len(p.read_bytes().split()) == 1
+                    return len(_ifs_fields(p.read_bytes(), ifs)) == 1
             except OSError:
                 pass
         # no file operand — cat reads the (indeterminate) pipe itself
@@ -2629,12 +2699,12 @@ def _date_capture_dep(inner: bytes,
                 # `printf %s` emits "" — only literal format text
                 # remains after its directives are dropped.
                 lit = re.sub(rb"%.", b"", parts[0])
-                out = lit.split()
+                out = _ifs_fields(lit, ifs)
                 return len(out) == 1
             # operands — the format concatenates each arg's output
             # into one stream; only provable cases return False.
             return True
-        return len(b" ".join(parts).split()) == 1
+        return len(_ifs_fields(b" ".join(parts), ifs)) == 1
     return True
 
 
@@ -2757,6 +2827,8 @@ def _seg_drains(body: bytes) -> bool:
             if f0 is not None:
                 return _stdin_path_operand(f0)
         ops = _reader_operands(key, args)
+        if ops is None:
+            return False    # option error — the head emits nothing
     if ops and not any(_operand_feeds_stream(o) for o in ops):
         return False
     return True
@@ -2879,11 +2951,148 @@ _READER_PROG_FLAGS[b"rg"] = frozenset({b"-e", b"-f", b"--regexp",
                                       b"--file"})
 
 
-def _reader_operands(key: bytes, args: list) -> list:
+# Complete GNU long-option sets per reader head — abbreviation resolves
+# only against the FULL set: a prefix matching ≥2 options (or none) is
+# a command error, not an abbreviation (`sort --s` matches both
+# `--sort` and `--stable` — GNU sort aborts before reading a byte;
+# Devin on #128, round-35 review — verified live). Heads parsed by
+# non-GNU option parsers (jq/yq/rg/xxd) are absent — they never
+# abbreviate.
+_READER_GNU_OPS = {
+    b"cat": frozenset({b"--number", b"--number-nonblank", b"--show-all",
+                       b"--show-ends", b"--show-nonprinting",
+                       b"--show-tabs", b"--squeeze-blank", b"--help",
+                       b"--version"}),
+    b"head": frozenset({b"--lines", b"--bytes", b"--quiet", b"--silent",
+                        b"--verbose", b"--zero-terminated", b"--help",
+                        b"--version"}),
+    b"tail": frozenset({b"--lines", b"--bytes", b"--follow", b"--pid",
+                        b"--quiet", b"--silent", b"--retry",
+                        b"--sleep-interval", b"--verbose",
+                        b"--zero-terminated", b"--help", b"--version"}),
+    b"grep": frozenset({b"--extended-regexp", b"--fixed-strings",
+                        b"--basic-regexp", b"--regexp", b"--ignore-case",
+                        b"--word-regexp", b"--line-regexp", b"--count",
+                        b"--color", b"--colour", b"--line-buffered",
+                        b"--line-number", b"--with-filename",
+                        b"--no-filename", b"--invert-match", b"--silent",
+                        b"--quiet", b"--files-with-matches",
+                        b"--files-without-match", b"--max-count",
+                        b"--before-context", b"--after-context",
+                        b"--context", b"--binary", b"--text",
+                        b"--directories", b"--devices", b"--recursive",
+                        b"--dereference-recursive", b"--include",
+                        b"--exclude", b"--exclude-from",
+                        b"--exclude-dir", b"--file", b"--group-separator",
+                        b"--no-group-separator", b"--only-matching",
+                        b"--byte-offset", b"--null", b"--help",
+                        b"--version", b"--perl-regexp"}),
+    b"sed": frozenset({b"--expression", b"--file", b"--in-place",
+                       b"--quiet", b"--silent", b"--line-length",
+                       b"--posix", b"--regexp-extended",
+                       b"--follow-symlinks", b"--separate", b"--sandbox",
+                       b"--null-data", b"--debug", b"--help",
+                       b"--version"}),
+    b"awk": frozenset({b"--assign", b"--character-set", b"--copyright",
+                       b"--debug", b"--dump-variables", b"--exec",
+                       b"--field-separator", b"--file", b"--gen-pot",
+                       b"--help", b"--include", b"--lint", b"--lint-old",
+                       b"--load", b"--non-decimal-data", b"--optimize",
+                       b"--posix", b"--pretty-print", b"--profile",
+                       b"--re-interval", b"--sandbox", b"--source",
+                       b"--traditional", b"--use-lc-numeric",
+                       b"--version", b"--bignum"}),
+    b"sort": frozenset({b"--batch-size", b"--buffer-size",
+                        b"--compress-program", b"--debug",
+                        b"--dictionary-order", b"--field-separator",
+                        b"--files0-from", b"--general-numeric-sort",
+                        b"--ignore-case", b"--ignore-leading-blanks",
+                        b"--key", b"--merge", b"--month-sort",
+                        b"--numeric-sort", b"--numeric-storage",
+                        b"--output", b"--parallel", b"--random-sort",
+                        b"--random-source", b"--reverse", b"--sort",
+                        b"--stable", b"--temporary-directory",
+                        b"--unique", b"--version-sort",
+                        b"--zero-terminated", b"--help", b"--version"}),
+    b"fmt": frozenset({b"--width", b"--goal", b"--prefix",
+                       b"--split-only", b"--tagged-paragraph",
+                       b"--uniform-spacing", b"--crown-margin",
+                       b"--help", b"--version"}),
+    b"expand": frozenset({b"--tabs", b"--initial", b"--help",
+                          b"--version"}),
+    b"unexpand": frozenset({b"--tabs", b"--all", b"--first-only",
+                            b"--help", b"--version"}),
+    b"cut": frozenset({b"--fields", b"--characters", b"--bytes",
+                       b"--delimiter", b"--complement",
+                       b"--only-delimited", b"--output-delimiter",
+                       b"--zero-terminated", b"--help", b"--version"}),
+    b"paste": frozenset({b"--delimiters", b"--serial",
+                         b"--zero-terminated", b"--help", b"--version"}),
+    b"tac": frozenset({b"--separator", b"--before", b"--regex",
+                       b"--help", b"--version"}),
+    b"join": frozenset({b"--check-order", b"--header", b"--ignore-case",
+                        b"--nocheck-order", b"--zero-terminated",
+                        b"--help", b"--version"}),
+    b"iconv": frozenset({b"--from-code", b"--to-code", b"--output",
+                         b"--list", b"--verbose", b"--help",
+                         b"--version"}),
+    b"fold": frozenset({b"--width", b"--bytes", b"--spaces", b"--help",
+                        b"--version"}),
+    b"nl": frozenset({b"--body-numbering", b"--header-numbering",
+                      b"--footer-numbering", b"--starting-line-number",
+                      b"--line-increment", b"--no-renumber",
+                      b"--join-blank-lines", b"--number-format",
+                      b"--number-width", b"--number-separator",
+                      b"--section-delimiter", b"--help", b"--version"}),
+    b"od": frozenset({b"--address-radix", b"--skip-bytes",
+                      b"--read-bytes", b"--strings", b"--format",
+                      b"--width", b"--traditional", b"--endian",
+                      b"--help", b"--version"}),
+    b"hexdump": frozenset({b"--canonical", b"--one-byte-hexadecimal",
+                           b"--one-byte-octal", b"--two-bytes-decimal",
+                           b"--two-bytes-octal",
+                           b"--two-bytes-hexadecimal", b"--format",
+                           b"--format-file", b"--length", b"--skip",
+                           b"--no-squeezing", b"--color", b"--help",
+                           b"--version"}),
+    b"strings": frozenset({b"--all", b"--bytes", b"--encoding",
+                           b"--print-file-name", b"--radix", b"--target",
+                           b"--include-all-whitespace",
+                           b"--output-separator", b"--help",
+                           b"--version"}),
+    b"split": frozenset({b"--lines", b"--bytes", b"--line-bytes",
+                         b"--number", b"--additional-suffix",
+                         b"--suffix-length", b"--filter",
+                         b"--elide-empty-files", b"--numeric-suffixes",
+                         b"--hex-suffixes", b"--verbose", b"--help",
+                         b"--version"}),
+    b"pr": frozenset({b"--columns", b"--across",
+                      b"--show-control-chars", b"--double-space",
+                      b"--date-format", b"--expand-tabs", b"--form-feed",
+                      b"--header", b"--output-tabs", b"--join-lines",
+                      b"--length", b"--merge", b"--number-lines",
+                      b"--first-line-number", b"--indent",
+                      b"--no-file-warnings", b"--separator",
+                      b"--sep-string", b"--omit-header",
+                      b"--omit-pagination", b"--show-nonprinting",
+                      b"--width", b"--page-width", b"--help",
+                      b"--version"}),
+}
+_READER_GNU_OPS[b"egrep"] = _READER_GNU_OPS[b"grep"]
+_READER_GNU_OPS[b"fgrep"] = _READER_GNU_OPS[b"grep"]
+_READER_GNU_OPS[b"zgrep"] = _READER_GNU_OPS[b"grep"]
+_READER_GNU_OPS[b"hd"] = _READER_GNU_OPS[b"hexdump"]
+
+
+def _reader_operands(key: bytes, args: list):
     """Positional file operands of reader head `key` — flags and their
     operand values folded away; `--` ends option parsing; the first
     positional is dropped for program-first heads unless a program flag
-    already supplied it (`grep -e p f` — `f` is a file)."""
+    already supplied it (`grep -e p f` — `f` is a file). Returns None
+    when an option error aborts the command before it reads anything —
+    an ambiguous or unrecognized GNU long prefix (`sort --s` matches
+    both --sort and --stable; Devin on #128, round-35 review —
+    verified live)."""
     if key == b"dd":
         # `dd` operands are `key=value` — `dd status=none` still copies
         # stdin to stdout; only `if=FILE` replaces the input (Codex on
@@ -2892,6 +3101,7 @@ def _reader_operands(key: bytes, args: list) -> list:
                 if a.startswith(b"if=")]
     flagops = _READER_FLAG_OPS.get(key, frozenset())
     progflags = _READER_PROG_FLAGS.get(key, frozenset())
+    gnu = _READER_GNU_OPS.get(key)
     ops: list[bytes] = []
     prog_seen = ended = False
     i = 0
@@ -2900,20 +3110,26 @@ def _reader_operands(key: bytes, args: list) -> list:
         if not ended and a != b"-" and a.startswith(b"-"):
             if a == b"--":
                 ended = True
-            elif a in flagops or (a.startswith(b"--") and len(a) > 2
-                                  and any(f[:len(a)] == a
-                                          for f in flagops)):
-                # A long option — or its unique GNU prefix (`tac --sep
-                # x` resolves to --separator — Codex on #1957, round-30
-                # review) — consumes the following word as its value.
-                # The prefix resolves for the PROGRAM flag too — `grep
-                # --reg PAT FILE` supplies the pattern via --regexp, so
-                # FILE is a file operand, not the pattern (Devin on
-                # #11, round-33 review — verified live).
-                prog_seen |= (a in progflags
-                              or (a.startswith(b"--") and len(a) > 2
-                                  and any(f[:len(a)] == a
-                                          for f in progflags)))
+            elif gnu is not None and a.startswith(b"--"):
+                # GNU getopt_long: the prefix resolves only when it
+                # names EXACTLY one long option — ambiguity or an
+                # unknown name aborts the command (round-35).
+                base = a.split(b"=", 1)[0]
+                cands = [o for o in gnu if o == base
+                         or o.startswith(base)]
+                if len(cands) != 1:
+                    return None
+                resolved = cands[0]
+                prog_seen |= resolved in progflags
+                if resolved in flagops and b"=" not in a:
+                    i += 2
+                    continue
+                i += 1
+                continue
+            elif a in flagops:
+                # A value option consumes the following word (short
+                # options are exact; long options resolved above).
+                prog_seen |= a in progflags
                 i += 2
                 continue
             elif (len(a) > 2 and a[:2] in progflags) or (
@@ -2934,7 +3150,8 @@ def _reader_operands(key: bytes, args: list) -> list:
 
 
 def _seg_prov(body: bytes, prov: str,
-              stream_src: bytes | None = None):
+              stream_src: bytes | None = None,
+              ifs: bytes | None = None):
     """Advance the output provenance `prov` through one pipeline stage
     body. Returns None when the stage EXECUTES its input (a dep — the
     stream is consumed by an interpreter); otherwise the provenance of
@@ -3054,8 +3271,8 @@ def _seg_prov(body: bytes, prov: str,
                     if (ukey not in _READER_STDIN_OPS
                             and ukey not in _OPAQUE_PROG_HEADS):
                         uops = _reader_operands(ukey, uargs[1:])
-                        if uops and not any(
-                                _operand_feeds_stream(o) for o in uops):
+                        if uops is None or (uops and not any(
+                                _operand_feeds_stream(o) for o in uops)):
                             prov = "own"
                 # "none" — the utility reads and re-emits the live pipe
                 # (cat), so prov flows on.
@@ -3078,8 +3295,8 @@ def _seg_prov(body: bytes, prov: str,
                 # text, not input files — `$(bash -c cat)` still
                 # forwards the pipe (Codex on #1380, round-15 review).
                 ops = _reader_operands(key, args)
-                if ops and not any(
-                        _operand_feeds_stream(o) for o in ops):
+                if ops is None or (ops and not any(
+                        _operand_feeds_stream(o) for o in ops)):
                     prov = "own"
             # Otherwise the reader forwards its input — prov flows.
         elif key == b"eval":
@@ -3224,7 +3441,7 @@ def _seg_prov(body: bytes, prov: str,
                 prov = "script"
             elif not (key in _STDIN_EMIT_HEADS
                       and _emit_forwards_stdin(key, body, head_end,
-                                               stream_src)):
+                                               stream_src, ifs)):
                 prov = "own"
     # A stage whose stdout is diverted forwards nothing — the next pipe
     # stage (or the capture) reads an empty stream.
@@ -3331,6 +3548,9 @@ def _sub_flow(a: bytes) -> str:
     flow_src: bytes | None = None  # scripts/ operand behind a "script"
     # prov — lets the date gate count the stream's words (Codex on
     # #1957, round-29 review).
+    ifs: bytes | None = None  # last bare `IFS=` assignment seen — the
+    # expansion's field-split uses it (`IFS=; date +$(cat x)` emits
+    # ONE format word — Devin on #128, round-35 review).
     fwd = False
     drained = False     # a prior sibling read the shared stdin to EOF
     out = None          # aggregate fd1 of the finished `;` siblings
@@ -3339,6 +3559,14 @@ def _sub_flow(a: bytes) -> str:
     prev_in: bytes | None = None
     for (s, e), sep in zip(spans, sepk):
         body, close_i = _region_body(a, s, e)
+        bws = _shell_words(_mask_parens(body))
+        if bws and all(
+                re.match(rb"[A-Za-z_][A-Za-z0-9_]*=",
+                         _operand_text(body[w0:w1])) for w0, w1 in bws):
+            # An assignment-only sibling — `IFS=` before `date +$(…)`
+            # changes the expansion's field-split (round-35).
+            ifs = _line_ifs(body, len(body))
+            continue
         # The stream a `$(` inside THIS region drains is this region's
         # own stdin — snapshot it before the region's provenance update
         # clears it (Codex on #1957, round-29).
@@ -3401,7 +3629,8 @@ def _sub_flow(a: bytes) -> str:
                 emits = (bool(tail)
                          and tail[-1].lstrip(b"\"'").startswith(b"+")
                          and (tail[-1].count(b'"') % 2 == 1
-                              or _date_capture_dep(body, prev_in)))
+                              or _date_capture_dep(body, prev_in,
+                                                   ifs)))
             else:
                 # Emit heads echo their argv to fd1 — the substitution
                 # being OPENED supplies that argv, so its capture lands
@@ -3438,7 +3667,8 @@ def _sub_flow(a: bytes) -> str:
         # A backtick-CLOSE pop already decided the tail region's
         # provenance — reclassifying ` " ` alone as a fresh command
         # would wrongly reset it (quoted-backtick form, round-21).
-        r = prov if tail_done else _seg_prov(body, prov, in_src)
+        r = (prov if tail_done
+             else _seg_prov(body, prov, in_src, ifs))
         if r is None:
             return "exec"  # a stage EXECUTED its input — dep regardless
         if r == "script":
@@ -3535,7 +3765,8 @@ def _pipe_ends_prov(src: bytes, pos: int) -> bool:
             j += 1
         in_src = flow_src
         win = _cmd_window(src, j)
-        r = _seg_prov(src[j:j + len(win)], prov, in_src)
+        r = _seg_prov(src[j:j + len(win)], prov, in_src,
+                      _line_ifs(src, j))
         if r is None:
             return True  # an exec stage consumed the stream
         if r == "script":
@@ -3554,7 +3785,8 @@ def _pipe_ends_prov(src: bytes, pos: int) -> bool:
 
 
 def _emit_forwards_stdin(key: bytes, win: bytes, head_end: int,
-                         stream_src: bytes | None = None) -> bool:
+                         stream_src: bytes | None = None,
+                         ifs: bytes | None = None) -> bool:
     """True when emit head `key` re-emits upstream bytes — some
     substitution in its operands (past `head_end`) re-reads the pipe.
 
@@ -3638,7 +3870,8 @@ def _emit_forwards_stdin(key: bytes, win: bytes, head_end: int,
                         or _word_text(win[w[0]:w[1]])[:1] != b"+"
                         or (win[w[0]:a].count(b'"') % 2 == 0
                             and not _date_capture_dep(body,
-                                                      stream_src))):
+                                                      stream_src,
+                                                      ifs))):
                     continue
             return True
     return False
@@ -3859,7 +4092,8 @@ def _stdin_exec_head(win: bytes) -> str:
             args.append(at)
     if key in _STDIN_SINK_HEADS:
         if key in _STDIN_EMIT_HEADS and _emit_forwards_stdin(
-                key, win, words[hi][1]):
+                key, win, words[hi][1],
+                ifs=_line_ifs(win, len(win))):
             # Emit-argv heads forward a substitution's re-read of the
             # pipe — `cat x | echo "$(cat)" | sh` executes x.
             return "other"
@@ -3871,6 +4105,8 @@ def _stdin_exec_head(win: bytes) -> str:
         # scripts/ operand keeps flowing so the file→stream dep still
         # fires; `-`/fd/proc-sub operands forward the pipe.
         ops = _reader_operands(key, args)
+        if ops is None:
+            return "sink"     # `cat --zzz` aborts — emits nothing
         if ops and not any(
                 _operand_feeds_stream(a2) or b"scripts/" in a2
                 for a2 in ops):
@@ -4223,7 +4459,7 @@ def _pipe_to_exec(src: bytes, pos: int) -> bool:
         ws = _shell_words(_mask_parens(seg))
         first = (_word_text(seg[ws[0][0]:ws[0][1]])
                  if ws else None)
-        r = _seg_prov(seg, prov, flow_src)
+        r = _seg_prov(seg, prov, flow_src, _line_ifs(src, j))
         if r is None:
             return True   # an exec stage consumed the dep stream
         if r == "script":
@@ -5353,7 +5589,8 @@ def _span_output_exec(src: bytes, a: int, after: int | None = None) -> bool:
                 or (win[w[0]:rel_d].count(b'"') % 2 == 0
                     and not _date_capture_dep(
                         _sub_inner(src, a),
-                        _upstream_script_operand(src, cs)))):
+                        _upstream_script_operand(src, cs),
+                        _line_ifs(src, a)))):
             # An UNQUOTED `+$(…)`/`+`…`` reaches a downstream exec
             # only when its capture provably field-splits to one
             # word — a >=2-word split errors inside date (Codex on
@@ -5455,7 +5692,8 @@ def _sub_survives_body(body: bytes, pos: int) -> bool:
                 or (swin[w[0]:rel_d].count(b'"') % 2 == 0
                     and not _date_capture_dep(
                         _sub_inner(body, pos),
-                        _upstream_script_operand(body, scs)))):
+                        _upstream_script_operand(body, scs),
+                        _line_ifs(body, pos)))):
             return False
     p = _pipe_pos(body, scs + len(swin))
     while p >= 0:
@@ -5546,7 +5784,8 @@ def _enclosing_sub_exec(src: bytes, a: int) -> bool:
                 or (swin[w[0]:rel_d].count(b'"') % 2 == 0
                     and not _date_capture_dep(
                         _sub_inner(body, pos),
-                        _upstream_script_operand(body, scs)))):
+                        _upstream_script_operand(body, scs),
+                        _line_ifs(body, pos)))):
             return False
     # Every later `|` stage inside the body must forward the stream —
     # a stream-replacing sink (wc/digest/count) ends it before the
@@ -5559,9 +5798,13 @@ def _enclosing_sub_exec(src: bytes, a: int) -> bool:
         if v != "other":
             return False
         p = _pipe_pos(body, p + 1)
-    # The bytes join the outer capture — dep iff THAT output reaches an
-    # exec downstream.
-    return _span_output_exec(src, oa, ob)
+    # The bytes join the outer capture — dep iff THAT output reaches
+    # an exec downstream. When the enclosing `$(` is itself nested in
+    # another `$(`'s body the check recurses one level out — evaluating
+    # it at line level mixes quote contexts (`date +"$(echo "$(echo
+    # $(cat x))")" | sh` — Devin on #128, round-35 review).
+    return (_enclosing_sub_exec(src, oa)
+            or _span_output_exec(src, oa, ob))
 
 
 def _descend_sub(src: bytes, pos: int,

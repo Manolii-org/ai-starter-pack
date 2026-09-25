@@ -10579,3 +10579,58 @@ def test_pipe_to_exec_round34(tmp_path):
             b"cat scripts/x.sh | sh -s\"$X\"<&'$FD'",
             b'cat scripts/x.sh | sh -s<&\\$FD'):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_pipe_to_exec_round35(tmp_path):
+    """Round-35: a nested capture's emit check recurses through every
+    enclosing `$(` level (`date +"$(echo "$(echo $(cat x))")"`), the
+    date field-split gate counts `cat -n`/`-b` numbering and honors a
+    bare `IFS=` statement — and an ambiguous GNU long-option prefix
+    (`sort --s`) is a command abort, not a value option (Devin on #128
+    — verified live)."""
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location(
+        "reg_r35", Path(__file__).parent.parent / "scripts" / "ai-resolve.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["reg_r35"] = mod
+    spec.loader.exec_module(mod)
+    pdir = tmp_path
+    (pdir / "scripts").mkdir()
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo HIT\n")
+    for line in (
+            # each enclosing capture level's emit check must recurse —
+            # the inner `$(cat` reaches sh through two echo captures
+            b'date +"$(echo "$(echo $(cat scripts/x.sh))")" | sh',
+            b'date +"$(echo $(echo $(cat scripts/x.sh)))" | sh',
+            # a bare `IFS=` statement leaves `echo HIT` one field —
+            # `+echo HIT` is a valid format and reaches sh
+            b"IFS=; date +$(cat scripts/x.sh) | sh",
+            b"IFS=z; date +$(cat scripts/x.sh) | sh",
+            # a unique GNU prefix still binds its value operand —
+            # `numeric` is --sort's argument; sort re-emits the pipe
+            b"cat scripts/x.sh | sort --so numeric | sh",
+            b"cat scripts/x.sh | sort --sort numeric | sh",
+            b"cat scripts/x.sh | sort --sor numeric | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # `cat -n`/`cat -b` prepend a line number per numbered
+            # line — the capture emits TWO words and date rejects the
+            # extra operand before sh sees it
+            b"date +$(cat -n scripts/x.sh) | sh",
+            b"date +$(cat -b scripts/x.sh) | sh",
+            b"date +$(cat --number scripts/x.sh) | sh",
+            b"date +$(cat -vn scripts/x.sh) | sh",
+            # an ambiguous GNU long-option prefix aborts the command —
+            # `--s` matches both --sort and --stable
+            b"cat scripts/x.sh | sort --s numeric | sh",
+            # an unrecognized long option aborts the same way
+            b"cat scripts/x.sh | sort --frobnicate numeric | sh",
+            # a prefix IFS binds only for the command's environment —
+            # word-splitting already used the default IFS
+            b"IFS=x date +$(cat scripts/x.sh) | sh",
+            # IFS=H splits `echo HIT` into two fields → date rejects
+            b"IFS=H; date +$(cat scripts/x.sh) | sh",
+            # the plain 2-word capture still errors the same way
+            b"date +$(cat scripts/x.sh) | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
