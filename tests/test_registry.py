@@ -10636,7 +10636,13 @@ def test_pipe_to_exec_round35(tmp_path):
             b"cat scripts/x.sh | sort --human-numeric-sort | sh",
             b"cat scripts/x.sh | sort --ignore-nonprinting | sh",
             # under `IFS=', '` `a:` has no delimiter — still one field
-            b"IFS=', '; date +$(cat scripts/y.sh) | sh"):
+            b"IFS=', '; date +$(cat scripts/y.sh) | sh",
+            # a dynamic `IFS=$(...)`/`IFS=$X` value can't be proven
+            # to split — it binds ONE unknown value at runtime
+            # (`IFS=$(echo ,)` leaves `echo HIT` one field — round-50,
+            # verified live), so it binds like an EMPTY IFS
+            b"IFS=$(echo ,); date +$(cat scripts/x.sh) | sh",
+            b"IFS=$UNKNOWN; date +$(cat scripts/x.sh) | sh"):
         assert mod.script_dep_block(pdir, line + b"\n"), line
     for line in (
             # `cat -n`/`cat -b` prepend a line number per numbered
@@ -10664,9 +10670,6 @@ def test_pipe_to_exec_round35(tmp_path):
             # shell — the capture splits on the default IFS
             b"(IFS=); date +$(cat scripts/x.sh) | sh",
             b"x=$(IFS=); date +$(cat scripts/x.sh) | sh",
-            # a dynamic `IFS=$(...)` value can't be evaluated — the
-            # default split applies
-            b"IFS=$(echo ,); date +$(cat scripts/x.sh) | sh",
             # an all-whitespace IFS behaves like the default split
             b'IFS=" "; date +$(cat scripts/x.sh) | sh',
             # the plain 2-word capture still errors the same way
@@ -11444,10 +11447,11 @@ def test_script_dep_round47(tmp_path):
             b"split --filter=true scripts/x.sh | sh"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
     # a dynamic `IFS=` REPLACES the tracked value — `IFS=','; IFS=$v`
-    # leaves IFS unknown (not the stale literal)
-    assert mod._line_ifs(b"IFS=','; IFS=$v; date +x\n", 20) is None
-    assert mod._line_ifs(b"IFS=','; IFS=$(cat f); date +x\n", 25) is None
-    assert mod._line_ifs(b"IFS='x'; IFS=$v; date +x\n", 18) is None
+    # leaves IFS unproven (not the stale literal): it binds like an
+    # EMPTY IFS (`b""`), not the shell default (round-50)
+    assert mod._line_ifs(b"IFS=','; IFS=$v; date +x\n", 20) == b""
+    assert mod._line_ifs(b"IFS=','; IFS=$(cat f); date +x\n", 25) == b""
+    assert mod._line_ifs(b"IFS='x'; IFS=$v; date +x\n", 18) == b""
     # a literal still binds — and a command-scoped prefix does not
     assert mod._line_ifs(b"IFS=','; date +x\n", 8) == b","
     assert mod._line_ifs(b"IFS=',' date +x\n", 18) is None
@@ -11638,4 +11642,107 @@ def test_script_dep_round49(tmp_path):
             b"cat scripts/x.sh | pr --pages=1:9 | sh",
             b"cat scripts/x.sh | pr +2 | sh",
             b"cat scripts/x.sh | pr --pages 2 | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round50(tmp_path):
+    """Round-50 review fixes (each verified live against bash):
+    an unrecognised unshare option aborts before the program runs
+    (`unshare --bogus sh`); GNU unique prefixes of `--files0-from`
+    (`--files0-f`) bind the same list operand; a dynamic `IFS=$X`/
+    `IFS=$(…)` value can't be proven to split, so it binds like an
+    EMPTY IFS (one field); `--numeric-suffixes`/`--hex-suffixes`
+    values are validated against the FINAL suffix length; an
+    all-whitespace `--filter` has no command word; a third split
+    positional is an "extra operand" abort; `pr --pages=F:L` needs
+    L >= F; `flock -- L -c CMD` still binds CMD after `--`; and a
+    `scripts/` path inside `--filter` text executes the bundled
+    script (`sh scripts/x.sh`) or emits its bytes (`cat`).
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts/x.sh").write_text("echo X\n")
+    (pdir / "scripts/y.sh").write_text("echo Y\n")
+
+    for line in (
+            # unrecognised unshare options abort before the program
+            # runs (Codex on #1393)
+            b"unshare --bogus sh scripts/x.sh",
+            b"unshare -y sh scripts/x.sh",
+            # a `=` on a pure flag aborts "doesn't allow an argument"
+            b"unshare --map-root-user=x sh scripts/x.sh",
+            b"unshare --fork=x sh scripts/x.sh",
+            # split suffix-start values are validated — non-numeric,
+            # non-hex, and past the suffix-length bound all abort
+            b"cat scripts/x.sh | split --numeric-suffixes=bad"
+            b" --filter=sh -",
+            b"cat scripts/x.sh | split --numeric-suffixes=0x10"
+            b" --filter=sh -",
+            b"cat scripts/x.sh | split --numeric-suffixes=100"
+            b" --filter=sh -",
+            b"cat scripts/x.sh | split --hex-suffixes=xyz"
+            b" --filter=sh -",
+            b"cat scripts/x.sh | split --hex-suffixes=100"
+            b" --filter=sh -",
+            # a third positional is "extra operand" — the filter
+            # never runs
+            b"cat scripts/x.sh | split --filter=sh in1 in2 in3 | sh",
+            b"cat scripts/x.sh | split -- in1 in2 in3 | sh",
+            b"cat scripts/x.sh | split --filter=sh - p extra | sh",
+            # `pr --pages=F:L` with L < F aborts before any read
+            b"cat scripts/x.sh | pr --pages=1:0 | sh",
+            b"cat scripts/x.sh | pr --pages=2:1 | sh",
+            # a `-c`-shaped word directly after `--` is the lockfile
+            # — `sh` is argv[0] but nothing pipes in
+            b"flock -- -c sh",
+            # a literal `--` word post-lockfile is the dead argv[0]
+            b"cat scripts/x.sh | flock -- /tmp/l -- sh",
+            # an all-whitespace `--filter` has no command word — the
+            # $SHELL -c no-op drops the chunk bytes
+            b"cat scripts/x.sh | split --filter=' ' - | sh",
+            # two positionals are legal (INPUT + PREFIX) but in1 is
+            # not a scripts/ input — its chunks aren't script bytes
+            b"cat scripts/x.sh | split --filter=sh in1 in2 | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+    for line in (
+            # unique prefixes of --files0-from resolve to the same
+            # operand — the list file replaces stdin (Codex on
+            # #1393)
+            b"cat scripts/x.sh | sort --files0-f scripts/y.sh | sh",
+            b"cat scripts/x.sh | sort --files0- scripts/y.sh | sh",
+            b"cat scripts/x.sh | sort --files0 scripts/y.sh | sh",
+            # `flock -- L -c CMD` binds CMD even after the `--` that
+            # ended the pre-lockfile options (Devin on #130)
+            b"flock -- /tmp/l -c 'sh scripts/x.sh'",
+            # suffix values inside the bound still run the filter
+            b"cat scripts/x.sh | split --numeric-suffixes=5"
+            b" --filter=sh - | sh",
+            b"cat scripts/x.sh | split --hex-suffixes=ff"
+            b" --filter=sh - | sh",
+            b"cat scripts/x.sh | split --numeric-suffixes=100 -a4"
+            b" --filter=sh - | sh",
+            b"cat scripts/x.sh | split -a4 --numeric-suffixes=100"
+            b" --filter=sh - | sh",
+            # two positionals (INPUT + PREFIX) are legal — INPUT
+            # IS the scripts/ file, and its chunks reach the filter
+            b"cat scripts/x.sh | split --filter=sh scripts/x.sh p"
+            b" | sh",
+            # a scripts/ path in the filter text — interpreter head
+            # EXECUTES it (Devin on #1959)
+            b"split --filter='sh scripts/x.sh' -",
+            b"split --filter='bash scripts/x.sh' -",
+            b"split --filter='echo x; sh scripts/x.sh' -",
+            # a reader head re-emits the script's bytes to |sh
+            b"split --filter='cat scripts/x.sh' - | sh",
+            b"split --filter='head -1 scripts/x.sh' - | sh",
+            # valid page range keeps the stream live
+            b"cat scripts/x.sh | pr --pages=2:2 | sh",
+            # unshare's own options parse and still exec the program
+            b"unshare --mount sh scripts/x.sh",
+            b"unshare --mount=/tmp/m sh scripts/x.sh",
+            b"unshare -fm sh scripts/x.sh",
+            b"unshare -R /tmp sh scripts/x.sh",
+            b"unshare --kill-child=SIGTERM sh scripts/x.sh"):
         assert mod.script_dep_block(pdir, line + b"\n"), line

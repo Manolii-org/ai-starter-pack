@@ -1236,24 +1236,27 @@ def _argv_wrap_start(enc_words: list, hi: int, enclosing: bytes):
     j = hi + 1
     while j < len(enc_words):
         t = _word_text(enclosing[enc_words[j][0]:enc_words[j][1]])
+        if (key == b"flock" and pos_skip == 0
+                and t != b"-" and t.startswith(b"-")):
+            # After the lockfile every word is command argv —
+            # `--` included (`flock L -- sh x` execs the literal
+            # `--`, ENOENT — Devin on #1959, round-44 review,
+            # verified live). Only an exact `-c`/`--command`
+            # binds a shell command string at the NEXT word — even
+            # after a `--` that ended the PRE-lockfile options
+            # (`flock -- L -c CMD` still runs CMD — Devin on #130,
+            # round-50 review — verified live); any other word,
+            # even dash-shaped, is the literal argv[0] flock
+            # execs — `flock L -n`/`flock L --help` fail ENOENT
+            # (Devin on #130, round-42 review, verified live;
+            # `-cCMD`/`--command=CMD` fail identically — util-linux
+            # getopt stops at the lockfile: round-41). The argv
+            # index stays marked so callers can tell the dead
+            # argv[0] from words after it.
+            if t in (b"-c", b"--command"):
+                return j + 1 if j + 1 < len(enc_words) else None
+            return j
         if not ended and t != b"-" and t.startswith(b"-"):
-            if key == b"flock" and pos_skip == 0:
-                # After the lockfile every word is command argv —
-                # `--` included (`flock L -- sh x` execs the literal
-                # `--`, ENOENT — Devin on #1959, round-44 review,
-                # verified live). Only an exact `-c`/`--command`
-                # binds a shell command string at the NEXT word; any
-                # other word, even dash-shaped, is the literal
-                # argv[0] flock execs — `flock L -n`/`flock L --help`
-                # fail ENOENT (Devin on #130, round-42 review,
-                # verified live; `-cCMD`/`--command=CMD` fail
-                # identically — util-linux getopt stops at the
-                # lockfile: round-41). The argv index stays marked so
-                # callers can tell the dead argv[0] from words after
-                # it.
-                if t in (b"-c", b"--command"):
-                    return j + 1 if j + 1 < len(enc_words) else None
-                return j
             if t == b"--":
                 ended = True
             elif key in _WRAPPER_LONG:
@@ -1572,21 +1575,26 @@ def _operand_is_program(enc_words: list, wi: int,
         j = hi + 1
         while j < len(enc_words):
             t = _word_text(enclosing[enc_words[j][0]:enc_words[j][1]])
+            if pos0 and t in (b"-c", b"--command"):
+                # Post-lockfile argv — an exact `-c`/`--command`
+                # binds command text even after a `--` that ended
+                # the pre-lockfile options (`flock -- L -c CMD`
+                # still runs CMD — Devin on #130, round-50 review,
+                # verified live).
+                if j + 1 == wi:
+                    return True
+                j += 2
+                continue
             if not ended and t != b"-" and t.startswith(b"-"):
+                if pos0:
+                    # Post-lockfile argv — `--` and every other DASH
+                    # word is the literal argv[0] name flock fails
+                    # to exec (ENOENT — nothing after it runs
+                    # either: Devin on #130, round-42/44 review,
+                    # verified live).
+                    return False
                 if t == b"--":
                     ended = True
-                elif pos0:
-                    # Post-lockfile argv — an exact `-c`/`--command`
-                    # binds command text; any other DASH word is the
-                    # literal argv[0] name flock fails to exec
-                    # (ENOENT — nothing after it runs either: Devin
-                    # on #130, round-42 review, verified live).
-                    if t in (b"-c", b"--command"):
-                        if j + 1 == wi:
-                            return True
-                        j += 2
-                        continue
-                    return False
                 else:
                     # Pre-lockfile — the shared validated walk resolves
                     # unique long prefixes (`--vers` is `--version`,
@@ -1610,6 +1618,22 @@ def _operand_is_program(enc_words: list, wi: int,
             return _operand_is_program(enc_words[j:], wi - j,
                                        enclosing)
         return False
+    if key == b"split":
+        # `--filter CMD` runs CMD via $SHELL -c — its operand is
+        # program text: `split --filter='sh scripts/x.sh'` execs the
+        # bundled script even with no downstream pipe (Codex on
+        # #1959, round-50 review — verified live). The LAST-binding
+        # and abort rules of the pipeline scan decide which word is
+        # the live filter operand (`--filter='sh x' --filter=true`
+        # never runs the first). A READER head inside it only reads
+        # the path — `cat scripts/x.sh` re-emits the bytes (the
+        # pipeline scan marks them "script" provenance for `|sh`);
+        # the literal-read gate treats it the same as bare `cat`.
+        aargs = [_word_text(enclosing[aw[0]:aw[1]])
+                 for aw in enc_words[hi + 1:]]
+        afilt, _afin, _atout, fidx = _split_scan(key, aargs)
+        return (fidx is not None and wi - hi - 1 == fidx
+                and _filter_script_role(afilt) == "exec")
     if key in _ARGV_PROGRAM_WRAPPERS:
         # The program operand belongs to the command the wrapper execs —
         # evaluate it as that command's argv.
@@ -2076,6 +2100,9 @@ _WRAPPER_OPT_OPERAND = {
                            b"--monotonic", b"--boottime",
                            b"--map-user", b"--map-users",
                            b"--map-group", b"--map-groups",
+                           # `--setenv NAME=VALUE` binds its operand
+                           # (util-linux 2.40+)
+                           b"--setenv",
                            b"-R", b"-w", b"-S", b"-G"}),
     # `setpriv`'s uid/gid/caps/label options bind the next word; the
     # rest are boolean (util-linux `setpriv --help` — Codex on #128,
@@ -2139,6 +2166,40 @@ _WRAPPER_DESCRIBE = {b"command": frozenset({b"-v", b"-V"}),
                     b"prlimit": frozenset({b"-p", b"--pid",
                                            b"-h", b"--help",
                                            b"-V", b"--version"})}
+# Boolean wrapper flags — no operand. Only wrappers with a fully
+# enumerated GNU option set get an entry: an option word NOT in
+# operand/describe/flags then provably aborts (`unshare --bogus sh`
+# exits "unrecognized option" before the program runs — Codex on
+# #1393, round-50 review — verified live). Wrappers absent here keep
+# the permissive skip-anything behaviour.
+_WRAPPER_FLAGS = {
+    # util-linux unshare — `[=<file>]`-style optional-arg options sit
+    # in _WRAPPER_OPTARG_FLAGS instead (an attached `=` binds, a
+    # separate word stays positional).
+    b"unshare": frozenset({b"--fork", b"--map-root-user",
+                           b"--map-current-user", b"--keep-caps",
+                           # `--map-auto` (2.39+), `--persistent` and
+                           # `--cleanup` (2.40+) are booleans — newer
+                           # util-linux versions than the host's still
+                           # honor them
+                           b"--map-auto", b"--persistent",
+                           b"--cleanup",
+                           b"-f", b"-r", b"-c"}),
+}
+# Wrapper flags whose argument is OPTIONAL and attached-only —
+# `unshare --mount` (unshares mounts), `--mount=/tmp/m` (binds the
+# persistence FILE), `--kill-child=SIGTERM`, `--mount-proc=/proc`, and
+# the namespace shorts `-m`/`-u`/`-i`/`-n`/`-p`/`-U`/`-C`/`-T` (all
+# `[=<file>]`); a following word is never consumed (util-linux
+# `unshare --help` — Codex on #1393, round-50 review).
+_WRAPPER_OPTARG_FLAGS = {
+    b"unshare": frozenset({b"--mount", b"--uts", b"--ipc", b"--net",
+                           b"--pid", b"--user", b"--cgroup",
+                           b"--time", b"--kill-child",
+                           b"--mount-proc",
+                           b"-m", b"-u", b"-i", b"-n", b"-p",
+                           b"-U", b"-C", b"-T"}),
+}
 
 
 def _wrapper_opt_class(key: bytes, t: bytes):
@@ -2154,18 +2215,34 @@ def _wrapper_opt_class(key: bytes, t: bytes):
         return None
     vals = _WRAPPER_OPT_OPERAND.get(key, frozenset())
     desc = _WRAPPER_DESCRIBE.get(key, frozenset())
+    flags = _WRAPPER_FLAGS.get(key, frozenset())
+    oflags = _WRAPPER_OPTARG_FLAGS.get(key, frozenset())
+    # A wrapper with a fully enumerated option set aborts on anything
+    # unrecognised — `unshare --bogus` exits before the program runs
+    # (Codex on #1393, round-50 review — verified live). Wrappers
+    # without a flag table keep the permissive skip.
+    strict = key in _WRAPPER_FLAGS or key in _WRAPPER_OPTARG_FLAGS
     if t.startswith(b"--"):
         name = t.split(b"=", 1)[0]
-        if name in vals or name in desc:
-            kind = "operand" if name in vals else "describe"
+        pool = vals | desc | flags | oflags
+        if name in pool:
+            resolved = name
         else:
-            uniq = {o for o in vals | desc if o.startswith(name)}
+            uniq = {o for o in pool if o.startswith(name)}
             if len(uniq) != 1:
-                return None
-            o = next(iter(uniq))
-            kind = "operand" if o in vals else "describe"
-        if kind == "describe":
+                return "describe" if strict else None
+            resolved = next(iter(uniq))
+        if resolved in desc:
             return "describe"
+        if resolved in oflags:
+            # `[=file]`-style optional arg — an attached `=` binds, a
+            # separate word stays positional (`unshare --mount=/x`,
+            # `--kill-child=SIGTERM` — verified live).
+            return "operand_glued" if b"=" in t else None
+        if resolved in flags:
+            # A pure flag + `=` aborts "doesn't allow an argument"
+            # (`unshare --map-root-user=x` — verified live).
+            return "describe" if b"=" in t else None
         return "operand_glued" if b"=" in t else "operand_next"
     if len(t) > 2:
         head2 = t[:2]
@@ -2173,11 +2250,33 @@ def _wrapper_opt_class(key: bytes, t: bytes):
             return "describe"
         if head2 in vals:
             return "operand_glued"
+        if not strict:
+            return None
+        # Cluster scan — `-fm` is `-f` + `-m`; an optional-arg letter
+        # swallows the rest of the word (`-mfoo` = `-m` + file `foo`),
+        # a required-operand letter binds it or the next word, and an
+        # unknown letter aborts (`unshare -y` — verified live).
+        j = 1
+        while j < len(t):
+            c2 = b"-" + t[j:j + 1]
+            if c2 in desc:
+                return "describe"
+            if c2 in vals:
+                return ("operand_glued" if j + 1 < len(t)
+                        else "operand_next")
+            if c2 in oflags:
+                return None            # rest of word = optional arg
+            if c2 in flags:
+                j += 1
+                continue
+            return "describe"          # unknown letter — aborts
         return None
     if t in desc:
         return "describe"
     if t in vals:
         return "operand_next"
+    if strict and t not in flags and t not in oflags:
+        return "describe"              # unknown single letter — aborts
     return None
 # Heads whose output provably does NOT carry the input stream — a pipe
 # into one ends the chain without executing anything downstream: `cat x
@@ -2933,13 +3032,31 @@ def _sort_files0(args: list):
     drains it as the list (Devin on #128, round-25 review — verified
     live)."""
     found: bytes | None = None
+    gnu = _READER_GNU_OPS[b"sort"]
     for i, a in enumerate(args):
         if a == b"--":
             break
-        if a == b"--files0-from":
-            found = args[i + 1] if i + 1 < len(args) else b""
-        elif a.startswith(b"--files0-from="):
-            found = a[len(b"--files0-from="):]
+        if not a.startswith(b"--"):
+            continue
+        # GNU getopt_long resolves any UNAMBIGUOUS long prefix —
+        # `--files0-f` and even `--files` abbreviate `--files0-from`
+        # and bind the list file the same way (Codex on #1393,
+        # round-50 review — verified live). An ambiguous or unknown
+        # prefix aborts the command — the abort is modelled by
+        # `_reader_operands`, so it is simply skipped here.
+        name = a.split(b"=", 1)[0]
+        if name in gnu:
+            resolved = name
+        else:
+            cands = [o for o in gnu if o.startswith(name)]
+            if len(cands) != 1:
+                continue
+            resolved = cands[0]
+        if resolved == b"--files0-from":
+            if b"=" in a:
+                found = a.split(b"=", 1)[1]
+            else:
+                found = args[i + 1] if i + 1 < len(args) else b""
     return found
 
 
@@ -3001,6 +3118,31 @@ def _split_arg_ok(opt: bytes, v: bytes) -> bool:
     return True
 
 
+# split --filter heads that only READ a scripts/ operand and re-emit
+# its bytes — distinct from interpreter heads that EXECUTE it.
+_FILTER_READERS = frozenset(
+    {b"cat", b"grep", b"egrep", b"fgrep", b"head", b"tail", b"split"})
+
+
+def _filter_script_role(filt: bytes):
+    """How a split `--filter` command text uses a bundled scripts/
+    path: "exec" when an interpreter head runs it (`sh
+    scripts/x.sh` — the filter's $SHELL -c executes the file —
+    Codex on #1959, round-50 review — verified live), "emit" when a
+    pure-reader head re-emits the file's BYTES to the chunk stream
+    (`cat`/`head`/`grep` — the script's own content reaches `|sh`),
+    or None. Emitted-path heads (`echo scripts/x.sh` — emits the
+    path STRING a downstream `|sh` would then run) are the
+    accepted emitted-path-exec gap and return None."""
+    if b"scripts/" not in filt:
+        return None
+    m = SCRIPT_REF.search(filt)
+    if m is None:
+        return None
+    head = filt[m.start():].split(None, 1)[0].lstrip(b'"')
+    return "emit" if head in _FILTER_READERS else "exec"
+
+
 def _split_scan(key: bytes, args: list, seekable_stdin: bool = False):
     """(filter, input, to_stdout) — split's LAST `--filter CMD`
     operand, its first positional INPUT operand (None when split
@@ -3029,8 +3171,18 @@ def _split_scan(key: bytes, args: list, seekable_stdin: bool = False):
     F's chunk (Devin on #130/#12/#1393, round-48 review — verified
     live)."""
     if key != b"split":
-        return None, None, False
+        return None, None, False, None
     filt = inp = None
+    fidx = None                 # args index of the word whose value
+                                # bound `filt` (the LAST --filter)
+    npos = 0                    # INPUT + PREFIX are the only
+                                # positionals — a third aborts
+                                # "extra operand" (Devin on #130,
+                                # round-50 review — verified live)
+    suflen = 2                  # `-a`/`--suffix-length` — LAST wins
+    nsuf = hsuf = None          # --numeric-suffixes=/--hex-suffixes=
+                                # optional start values — validated
+                                # against the FINAL suffix length
     nmode = False               # `-n`/`--number` seen — needs a
                                 # seekable input
     nslash = False              # a K/N chunk-select form — refuses
@@ -3045,6 +3197,7 @@ def _split_scan(key: bytes, args: list, seekable_stdin: bool = False):
         a = args[i]
         if a == b"--":
             i += 1
+            npos += len(args) - i
             if i < len(args) and inp is None:
                 inp = args[i]
             break
@@ -3055,10 +3208,10 @@ def _split_scan(key: bytes, args: list, seekable_stdin: bool = False):
             else:
                 cands = [o for o in _SPLIT_LONG if o.startswith(base)]
                 if len(cands) != 1:
-                    return None, None, False
+                    return None, None, False, None
                 resolved = cands[0]
             if resolved in (b"--help", b"--version"):
-                return None, None, False       # terminal mode — exits first
+                return None, None, False, None       # terminal mode
             if resolved not in _SPLIT_REQ_LONG:
                 # Flags never consume the next word; a `=` on a true
                 # flag aborts "doesn't allow an argument" while the
@@ -3066,9 +3219,16 @@ def _split_scan(key: bytes, args: list, seekable_stdin: bool = False):
                 # their OPTIONAL args (round-44 — verified live:
                 # `split --numeric-suffixes 5` reads file "5", so the
                 # separate word stays positional).
-                if (b"=" in a and resolved not in
-                        (b"--numeric-suffixes", b"--hex-suffixes")):
-                    return None, None, False
+                if resolved in (b"--numeric-suffixes",
+                                b"--hex-suffixes"):
+                    if b"=" in a:
+                        v = a.split(b"=", 1)[1]
+                        if resolved == b"--numeric-suffixes":
+                            nsuf = v
+                        else:
+                            hsuf = v
+                elif b"=" in a:
+                    return None, None, False, None
                 i += 1
                 continue
             if b"=" in a:
@@ -3077,12 +3237,15 @@ def _split_scan(key: bytes, args: list, seekable_stdin: bool = False):
                 v = args[i + 1]
                 i += 1
             else:
-                return None, None, False       # "requires an argument" abort
+                return None, None, False, None       # "requires an argument"
             if resolved == b"--filter":
                 filt = v
+                fidx = i
             else:
                 if not _split_arg_ok(resolved, v):
-                    return None, None, False
+                    return None, None, False, None
+                if resolved == b"--suffix-length":
+                    suflen = int(v)
                 if resolved == b"--number":
                     nmode = True
                     np_ = v.split(b"/")
@@ -3112,6 +3275,8 @@ def _split_scan(key: bytes, args: list, seekable_stdin: bool = False):
                         break
                     if not _split_arg_ok(b"-" + c, v):
                         abort = True
+                    elif c == b"a":
+                        suflen = int(v)
                     elif c == b"n":
                         nmode = True
                         np_ = v.split(b"/")
@@ -3126,20 +3291,35 @@ def _split_scan(key: bytes, args: list, seekable_stdin: bool = False):
                 abort = True            # unknown letter → abort
                 break
             if abort:
-                return None, None, False
+                return None, None, False, None
             i += 1
             continue
         if inp is None:
             inp = a                     # first positional = INPUT
+        npos += 1
         i += 1
+    if npos > 2:
+        return None, None, False, None       # "extra operand" abort
+    if (nsuf not in (None, b"")
+            and not (nsuf.isdigit() and int(nsuf) < 10 ** suflen)):
+        return None, None, False, None       # invalid start for
+                                # numerical suffix (`=bad`, `=100` at
+                                # -a2 — Devin/Codex round-50, verified
+                                # live)
+    if (hsuf not in (None, b"")
+            and not (all(c in b"0123456789abcdefABCDEF" for c in hsuf)
+                     and int(hsuf, 16) < 16 ** suflen)):
+        return None, None, False, None       # invalid start for
+                                # hexadecimal suffix — same bound
+                                # (verified live)
     if nslash and filt is not None:
-        return None, None, False       # `--filter` never sees a chunk
-                                # selected to stdout
+        return None, None, False, None       # `--filter` never sees a
+                                # chunk selected to stdout
     if (nmode and not nrmode and not seekable_stdin
             and (inp is None or _stdin_path_operand(inp))):
-        return None, None, False       # non-round-robin `-n` aborts on an
-                                # unseekable pipe
-    return filt, inp, nslash
+        return None, None, False, None       # non-round-robin `-n`
+                                # aborts on an unseekable pipe
+    return filt, inp, nslash, fidx
 
 
 def _stdin_path_operand(t: bytes) -> bool:
@@ -3240,7 +3420,9 @@ def _line_ifs(src: bytes, end: int) -> bytes | None:
     for the command's own environment — after word-splitting — so it
     does NOT count, and a `(IFS=)` subshell assignment never reaches
     the parent shell (Devin on #128, round-35/36 review — verified
-    live). None = shell default."""
+    live). None = shell default; b"" = an assignment in force whose
+    value cannot be proven to split — explicit `IFS=` or a dynamic
+    `IFS=$X`/`IFS=$(...)` (round-50)."""
     ifs = None
     region = src[:end]
     # Strip `(...)`/`$(...)` spans only where the paren is OUTSIDE
@@ -3284,11 +3466,13 @@ def _line_ifs(src: bytes, end: int) -> bytes | None:
                     v = t[4:]
                     # a dynamic value (`IFS=$(x)`, `IFS=$y`) cannot
                     # be evaluated statically — it REPLACES IFS with
-                    # an unknown one: the tracked value resets rather
-                    # than keeping the stale earlier literal (Devin on
-                    # #1393, round-47 review — verified live).
+                    # an unknown one that cannot be PROVEN to split:
+                    # `IFS=$UNKNOWN` may resolve empty (`echo a b`
+                    # joins as ONE field — Devin on #1393, round-50
+                    # review — verified live), so it binds like an
+                    # EMPTY IFS, not the shell default.
                     if b"$" in v or b"`" in v:
-                        ifs = None
+                        ifs = b""
                     else:
                         ifs = v
     return ifs
@@ -3810,7 +3994,10 @@ def _pages_ok(v: bytes) -> bool:
     head, sep, tail = v.partition(b":")
     if not head.isdigit() or head == b"0":
         return False
-    return not sep or tail.isdigit()
+    # `--pages FIRST:LAST` — LAST must be >= FIRST (`1:0` and `2:1`
+    # abort "invalid page range" before any read — Devin on #130/#12/
+    # #1959, round-50 review — verified live).
+    return not sep or (tail.isdigit() and int(tail) >= int(head))
 
 
 def _num_ok(v: bytes) -> bool:
@@ -4235,7 +4422,7 @@ def _seg_prov(body: bytes, prov: str,
                 dead0 = (sfd is not None
                          and sfd.get(0, _FD_IN)
                          not in (_FD_IN, _FD_FILE))
-                filt, finput, tout = _split_scan(
+                filt, finput, tout, fidx3 = _split_scan(
                     key, args, seekable_stdin=seek0)
                 # split's INPUT: a named operand wins regardless of a
                 # `< f` rebind (`split -n r/1/1 F </dev/null` still
@@ -4290,10 +4477,29 @@ def _seg_prov(body: bytes, prov: str,
                     # verified live). An expansion in a LATER word
                     # is just an argument — `true $HOME` still drops
                     # the bytes (Devin on #1393, round-49 review —
-                    # verified live).
-                    ftok = filt.split(None, 1)[0]
+                    # verified live). An all-whitespace filter has
+                    # no command word at all (Devin on #130,
+                    # round-50 review — verified live).
+                    fparts = filt.split(None, 1)
+                    ftok = fparts[0] if fparts else b""
                     v3 = ("exec" if (b"$" in ftok or b"`" in ftok)
                           else _sub_flow(filt))
+                    if not ftok:
+                        # `--filter=' '` — no command word; the
+                        # $SHELL -c no-op drops the chunk bytes
+                        # (round-50, verified live: exit 1 filter,
+                        # nothing reaches `|sh`)
+                        v3 = "none"
+                    if v3 != "exec":
+                        frole = _filter_script_role(filt)
+                        if frole == "exec":
+                            v3 = "exec"
+                        elif frole == "emit" and v3 == "fwd":
+                            # The filter re-emits the script's own
+                            # bytes (`cat`/`head`/`grep` heads) —
+                            # provably script content joins the
+                            # stream.
+                            prov = "script"
                     if v3 == "exec":
                         return (None
                                 if prov in ("up", "script", "thru")
@@ -8498,8 +8704,8 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                                     aargs = [_word_text(
                                         enclosing[aw[0]:aw[1]])
                                         for aw in sub[ahi + 1:]]
-                                    afilt, afin, atout = _split_scan(
-                                        akey, aargs)
+                                    afilt, afin, atout, _f = (
+                                        _split_scan(akey, aargs))
                                     # `split IN PREFIX` — the word is
                                     # exec'd only as the INPUT operand
                                     # or inside the filter command; a
@@ -8522,11 +8728,38 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                                     if (afilt is not None
                                             and afilt
                                             not in (b"", b"-")):
-                                        ftok5 = afilt.split(None, 1)[0]
+                                        fp5 = afilt.split(None, 1)
+                                        ftok5 = (fp5[0]
+                                                 if fp5 else b"")
                                         v5 = ("exec" if (
                                             b"$" in ftok5
                                             or b"`" in ftok5)
                                             else _sub_flow(afilt))
+                                        if not ftok5:
+                                            v5 = "none"
+                                        if v5 != "exec":
+                                            # `sh scripts/x.sh` in
+                                            # the filter EXECUTES
+                                            # the bundled script —
+                                            # a dep even with no
+                                            # downstream pipe
+                                            # (Devin on #1959,
+                                            # round-50 review).
+                                            role5 = (
+                                                _filter_script_role(
+                                                    afilt))
+                                            if role5 == "exec":
+                                                v5 = "exec"
+                                            elif (role5 == "emit"
+                                                    and v5 == "fwd"):
+                                                # reader head —
+                                                # the script's
+                                                # bytes reach the
+                                                # find pipeline
+                                                return _pipe_to_exec(
+                                                    scan,
+                                                    cs + len(
+                                                        enclosing))
                                         if v5 == "exec":
                                             return True
                                         if v5 == "none":
@@ -8736,6 +8969,32 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                             and _span_output_exec(scan, cs + ra)):
                         return True
                 break
+            if quoted:
+                # `split --filter='reader scripts/x.sh'` — the
+                # filter's $SHELL -c runs a READER head, which only
+                # re-emits the bundled script's bytes into the chunk
+                # stream; it is a dep when a downstream exec head
+                # consumes them (`--filter='cat x' - | sh` — Devin on
+                # #1959, round-50 review — verified live). An
+                # interpreter head was already credited as program
+                # text by `_operand_is_program` above.
+                wi0 = enc_words.index(w)
+                whi = _effective_head(enc_words, enclosing)
+                wkey = (_command_key(
+                    enclosing[enc_words[whi][0]:enc_words[whi][1]])
+                        if whi is not None and whi >= 0 else b"")
+                if wkey == b"split":
+                    aargs = [_word_text(enclosing[aw[0]:aw[1]])
+                             for aw in enc_words[whi + 1:]]
+                    afilt, _afin, _atout, fidx = _split_scan(
+                        wkey, aargs)
+                    if (fidx is not None
+                            and wi0 - whi - 1 == fidx
+                            and afilt not in (None, b"", b"-")
+                            and _filter_script_role(afilt) == "emit"
+                            and _sub_flow(afilt) == "fwd"):
+                        return _pipe_to_exec(
+                            scan, cs + len(enclosing))
             return bool(quoted) and _operand_is_program(
                 enc_words, enc_words.index(w), enclosing)
 
