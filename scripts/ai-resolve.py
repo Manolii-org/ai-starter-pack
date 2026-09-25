@@ -723,6 +723,23 @@ def _tick_pair_glues(raw: bytes, j: int) -> bool:
     return j < n          # trailing bytes after empty pairs
 
 
+def _word_unquoted_tick(raw: bytes) -> bool:
+    """True when `raw` holds a backtick outside single quotes — a
+    substitution expands inside the operand (`"`x`"` expands; `'x'`
+    and `\\`x`` are literal)."""
+    in_s = esc = False
+    for c in raw:
+        if esc:
+            esc = False
+        elif c == 0x5C and not in_s:
+            esc = True
+        elif c == 0x27:
+            in_s = not in_s
+        elif c == 0x60:
+            return True
+    return False
+
+
 def _in_expand(body: bytes, rp: int) -> bool:
     """True when body[rp] sits inside an executing `$(`/backtick
     substitution — used for UNQUOTED heredoc bodies, where the shell
@@ -2164,7 +2181,16 @@ def _date_capture_dep(inner: bytes) -> bool:
         parts: list[bytes] = []
         i = 1
         while i < len(words):
-            t = _operand_text(inner[words[i][0]:words[i][1]])
+            raw = inner[words[i][0]:words[i][1]]
+            if (_substitution_spans(raw)
+                    or _word_unquoted_tick(raw)):
+                # An operand containing a substitution expands at
+                # runtime — the emitted word count can't be counted
+                # from literal fields (Devin on #11, round-25c
+                # review): `printf %s "$(cat x)"` still emits x's
+                # bytes.
+                return True
+            t = _operand_text(raw)
             if t.startswith(b"-") and t != b"-":
                 i += 1
                 continue
@@ -2554,8 +2580,22 @@ def _seg_prov(body: bytes, prov: str):
                             else "own")
                 if v2 == "sink":
                     prov = "own"
-                # "other"/"none" — the utility reads and re-emits the
-                # live pipe (cat), so prov flows on.
+                elif v2 == "other":
+                    # An "other" utility inherits the live pipe — unless
+                    # its own file operands replace the input: `xargs -a
+                    # /dev/null cat /dev/null` emits the file and leaves
+                    # the pipe unread, like a normal reader stage
+                    # (Devin on #11, round-25c review — verified live).
+                    uargs = _xargs_utility(args)
+                    ukey = _command_key(uargs[0]) if uargs else b""
+                    if (ukey not in _READER_STDIN_OPS
+                            and ukey not in _OPAQUE_PROG_HEADS):
+                        uops = _reader_operands(ukey, uargs[1:])
+                        if uops and not any(
+                                _operand_feeds_stream(o) for o in uops):
+                            prov = "own"
+                # "none" — the utility reads and re-emits the live pipe
+                # (cat), so prov flows on.
             elif (key == b"sort"
                     and _sort_files0(args) is not None
                     and not _stdin_path_operand(_sort_files0(args))):
@@ -4692,6 +4732,19 @@ def _span_output_exec(src: bytes, a: int, after: int | None = None) -> bool:
     return False
 
 
+def _enclosing_sub_exec(src: bytes, a: int) -> bool:
+    """True when `a` lies inside an enclosing `$(` whose own output
+    reaches an exec — the inner capture's bytes ride the outer capture
+    (`date +$(printf %s "$(cat x)") | sh` emits x's bytes downstream;
+    Devin on #11, round-25c review — verified live)."""
+    outer = [s for s in _substitution_spans(src)
+             if s[0] < a < s[1] and src[s[0]:s[0] + 1] == b"$"]
+    if not outer:
+        return False
+    oa, ob = min(outer, key=lambda s: s[1] - s[0])
+    return _span_output_exec(src, oa, ob)
+
+
 def _descend_sub(src: bytes, pos: int,
                  region: tuple[int, int] | None = None,
                  output_exec: bool = False) -> bool | None:
@@ -4718,7 +4771,8 @@ def _descend_sub(src: bytes, pos: int,
         body_end = b - 1 if src[b - 1:b] == b")" else b
         return _command_literal(
             src[a + 2:body_end], pos - a - 2,
-            output_exec or _span_output_exec(src, a, b))
+            output_exec or _span_output_exec(src, a, b)
+            or _enclosing_sub_exec(src, a))
     # Backtick pairing is quote-aware: ticks inside a single-quoted span
     # are literal (`'grep `x` y'` is an argument, not a substitution —
     # Devin BUG_0002 on #1953), as is a backslash-escaped tick; inside
@@ -4753,7 +4807,8 @@ def _descend_sub(src: bytes, pos: int,
             # same way the `$(` forms do (backtick is not procsub).
             return _command_literal(
                 src[t1 + 1:t2], pos - t1 - 1,
-                output_exec or _span_output_exec(src, t1, t2 + 1))
+                output_exec or _span_output_exec(src, t1, t2 + 1)
+                or _enclosing_sub_exec(src, t1))
     return None
 
 
@@ -6066,6 +6121,12 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
             if w is None:
                 return False
             raw = enclosing[w[0]:w[1]]
+            # A word glued to a backtick delimiter is substitution
+            # content, not a filename with a tick — `` `cat x` `` runs
+            # `cat x` (Devin on #11, round-25c review).
+            raw = raw.strip(b"`")
+            if not raw:
+                return False
             tw = _word_text(raw)
             # Input-redirect glue stays inside the word (`<scripts/x.py`,
             # `<>…`, `0<…`) — `python <scripts/x.py` reads the script —

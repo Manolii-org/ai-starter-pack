@@ -10014,3 +10014,42 @@ def test_pipe_to_exec_round25c(tmp_path):
     assert not mod.script_dep_block(
         pdir, b'cat scripts/x.sh | cut -f1 --output-delimiter " " '
               b'> /dev/null | sh\n')
+
+def test_pipe_to_exec_round25d(tmp_path):
+    """Round-25d: an inner `$(`/backtick capture inherits its ENCLOSING
+    `$(`'s output-exec context (nested date captures), and an xargs
+    "other" utility's own file operands replace the live pipe (Devin
+    on #11)."""
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location(
+        "reg_r25d", Path(__file__).parent.parent / "scripts" / "ai-resolve.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["reg_r25d"] = mod
+    spec.loader.exec_module(mod)
+    pdir = tmp_path
+    (pdir / "scripts").mkdir()
+    (pdir / "scripts" / "x.sh").write_bytes(b"e\n")
+    for line in (
+            # the inner `$(cat x)`/`"$(cat x)"` capture rides the outer
+            # `$(…)` whose output joins date's +format and reaches `sh`
+            # (Devin on #11, round-25d review — verified live)
+            b'date +$(printf %s "$(cat scripts/x.sh)") | sh',
+            b'date +$(echo "$(cat scripts/x.sh)") | sh',
+            b'date +$(echo `cat scripts/x.sh`) | sh',
+            b'date +$(printf "$(cat scripts/x.sh)") | sh',
+            # output-exec contexts still reach through the nesting
+            b'bash -c "$(echo "$(cat scripts/x.sh)")"',
+            b'eval "$(echo "$(cat scripts/x.sh)")"',
+            b'$(echo "$(cat scripts/x.sh)") | sh'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # a truly inert nest prints the bytes only — no exec
+            b'echo "$(printf %s "$(cat scripts/x.sh)")"',
+            b'echo "$(cat scripts/x.sh)"',
+            # the xargs utility's own file operand replaces the pipe —
+            # `cat /dev/null` emits no script bytes (Devin on #11)
+            b'cat scripts/x.sh | xargs -a /dev/null cat /dev/null | sh',
+            b'cat scripts/x.sh | xargs -a /dev/null cat /etc/hostname | sh',
+            b'date +$(printf %s "x") | sh'):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
