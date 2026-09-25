@@ -10299,5 +10299,14 @@ def test_pipe_to_exec_round30(tmp_path):
             b'python -c "$(cat scripts/x.sh)" | sh',
             b'perl -e "$(cat scripts/x.sh)" | sh',
             # glued to the flag word itself
-            b'bash -c$(cat scripts/x.sh) | sh'):
+            b'bash -c$(cat scripts/x.sh) | sh',
+            # `[=arg]`-optional and boolean unshare options never
+            # consume the next word — `sh` stays the command head
+            # (Devin on #11 — verified live)
+            b'unshare --mount-proc sh -c "bash scripts/x.sh"',
+            b'unshare --kill-child sh -c "bash scripts/x.sh"',
+            b'unshare --map-auto sh -c "bash scripts/x.sh"',
+            # while real separate-word operands keep consuming
+            b'unshare --wd / sh -c "bash scripts/x.sh"',
+            b'unshare --map-user 0 sh -c "bash scripts/x.sh"'):
         assert mod.script_dep_block(pdir, line + b"\n"), line

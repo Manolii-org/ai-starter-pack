@@ -1619,16 +1619,18 @@ _WRAPPER_OPT_OPERAND = {
                         b"--sched-period", b"--sched-deadline"}),
     # unshare's separate-word operands (util-linux `unshare --help`;
     # `[=file]`-style optional args bind attached only — Codex on
-    # #128, round-28).
+    # #128, round-28). `--mount-proc[=<dir>]`/`--kill-child[=<sig>]`
+    # take only ATTACHED optional args, `--map-auto` is boolean, and
+    # `--load-interp`/`--kill-child-signo` are not util-linux options
+    # at all — none consumes the next word (Devin on #11, round-30
+    # review — verified live).
     b"unshare": frozenset({b"--setgroups", b"--setuid", b"--setgid",
-                           b"--root", b"--wd", b"--mount-proc",
-                           b"--mount-bind", b"--mount-ro-bind",
-                           b"--propagation", b"--monotonic",
-                           b"--boottime", b"--map-user",
-                           b"--map-users", b"--map-group",
-                           b"--map-groups", b"--map-auto",
-                           b"--load-interp",
-                           b"--kill-child-signo"}),
+                           b"--root", b"--wd", b"--mount-bind",
+                           b"--mount-ro-bind", b"--propagation",
+                           b"--monotonic", b"--boottime",
+                           b"--map-user", b"--map-users",
+                           b"--map-group", b"--map-groups",
+                           b"-R", b"-w", b"-S", b"-G"}),
     b"setsid": frozenset(),
     b"nohup": frozenset(),
     b"command": frozenset(),
