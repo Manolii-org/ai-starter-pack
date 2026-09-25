@@ -10759,3 +10759,89 @@ def test_script_dep_round40(tmp_path):
             b"cat scripts/x.sh | sort --numeric-storage | sh",
             b"cat scripts/x.sh | awk --character-set=x '{print}' | sh"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round41(tmp_path):
+    """Round-41 review (Codex/Devin/CodeRabbit on #130/#1393/#1959/#12 —
+    every behavior verified against real GNU bash/find/flock/split):
+    * find operand primaries (`-fprint0`/`-atime`/`-newerXY`) consume
+      the next word, so `-fprint0 --help` writes a FILE named --help
+      and `-newerXt` is the only invalid XY form;
+    * `-quit` cuts the expression where it stands — actions BEFORE it
+      ran, words after are dead (`find . -quit -exec` runs nothing);
+    * util-linux flock binds command text only to an exact `-c`/
+      `--command` AFTER the lockfile — the attached `-cCMD`/
+      `--command=CMD` forms and other post-file dash words are
+      literal argv[0] names that fail to exec;
+    * a `scripts/` path inside a find action argv counts only where
+      the action's own command would exec it (`-exec sh x.sh` yes,
+      `-exec echo x.sh` just prints the name);
+    * `=value` on a flag-only GNU option aborts before reading
+      (`cat --number=1`), while option arguments in separate-word
+      form still feed the stream (`tail --max-unchanged-stats 1`,
+      `pr --pages 1`);
+    * split/csplit write chunks to FILES — nothing reaches stdout
+      without `--filter` (`split | sh` leaves sh at EOF)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_text("echo HIT\n")
+    for line in (
+            # operand primaries consume `--help` as their operand —
+            # the action still runs (verified live)
+            b"find . -fprint0 --help -exec sh scripts/x.sh \\;",
+            b"find . -atime --help -exec sh scripts/x.sh \\;",
+            b"find . -newermt REF -exec sh scripts/x.sh \\;",
+            b"find . -neweram REF -exec sh scripts/x.sh \\;",
+            # `-quit` only kills LATER words — earlier actions ran
+            b"find . -exec sh scripts/x.sh \\; -quit",
+            # an exact post-file `-c`/`--command` binds command text
+            b"flock /tmp/l -c 'sh scripts/x.sh'",
+            b"flock /tmp/l --command 'sh scripts/x.sh'",
+            b"flock /tmp/l -c 'bash scripts/x.sh' ; true",
+            # interpreter argv[0] in an action reads the script file
+            b"find . -exec sh scripts/x.sh \\;",
+            b"find . -exec bash scripts/x.sh \\;",
+            b"find . -exec python scripts/x.sh \\;",
+            # separate-word values of required-arg long options are
+            # consumed — the stream still forwards (verified live)
+            b"cat scripts/x.sh | tail --max-unchanged-stats 1 | sh",
+            b"cat scripts/x.sh | pr --pages 1 | sh",
+            b"cat scripts/x.sh | strings --unicode l | sh",
+            # `--filter` pipes each chunk to a command — it reaches
+            # stdout (verified live)
+            b"cat scripts/x.sh | split --filter='cat' - | sh",
+            # glued `=v` on an arg-taking option still forwards
+            b"cat scripts/x.sh | tail --pid=1 | sh",
+            b"cat scripts/x.sh | pr --pages=1 | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # `-quit` before the action kills it (verified live)
+            b"find . -quit -exec sh scripts/x.sh \\;",
+            # post-file attached `-c`/`--command=` are literal
+            # command names flock fails to exec (verified live)
+            b"flock /tmp/l -c'sh scripts/x.sh'",
+            b"flock /tmp/l --command='sh scripts/x.sh'",
+            # a non-`-c` post-file dash word is literal argv[0] —
+            # `flock L -w 1 -c P` execs `-w` and fails (verified)
+            b"flock /tmp/l -w 1 -c 'sh scripts/x.sh'",
+            # `-c` before the lockfile is an invalid option —
+            # flock aborts (verified live)
+            b"flock -c 'sh scripts/x.sh' /tmp/l",
+            # `-exec` argv[0] like `echo`/`cat` prints/reads the
+            # literal name — never execs it (verified live)
+            b"find . -exec echo scripts/x.sh \\;",
+            b"find . -exec cat scripts/x.sh \\;",
+            b"find . -exec wc -l scripts/x.sh \\;",
+            # `=v` on a flag-only GNU option aborts the command —
+            # `cat --number=1` errors before reading (verified)
+            b"cat scripts/x.sh | cat --number=1 | sh",
+            b"cat scripts/x.sh | sort --human-numeric-sort=bad | sh",
+            b"cat scripts/x.sh | strings --all=x | sh",
+            # split/csplit emit files (byte counts), never the
+            # input stream (verified live)
+            b"cat scripts/x.sh | split - | sh",
+            b"cat scripts/x.sh | split --separator , - | sh",
+            b"cat scripts/x.sh | split --unbuffered - | sh",
+            b"cat scripts/x.sh | csplit - 2 | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line

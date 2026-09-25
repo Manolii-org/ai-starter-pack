@@ -923,16 +923,26 @@ _ARGV_PROGRAM_WRAPPER_TERMINAL = {
 # `find . -name --help`, `--help` is a PATTERN, not the help action
 # (round-40 review — verified live: GNU find prints no usage).
 _FIND_ONE_OP = frozenset({
-    b"-amin", b"-anewer", b"-cmin", b"-cnewer", b"-ctime",
-    b"-fls", b"-fprint", b"-fstype", b"-gid", b"-group",
-    b"-ilname", b"-iname", b"-inum", b"-ipath", b"-iregex",
-    b"-iwholename", b"-links", b"-lname", b"-maxdepth",
-    b"-mindepth", b"-mmin", b"-mtime", b"-name", b"-newer",
-    b"-newermt", b"-path", b"-perm", b"-printf", b"-regex",
+    b"-amin", b"-anewer", b"-atime", b"-cmin", b"-cnewer",
+    b"-ctime", b"-fls", b"-fprint", b"-fprint0", b"-fstype",
+    b"-gid", b"-group", b"-ilname", b"-iname", b"-inum",
+    b"-ipath", b"-iregex", b"-iwholename", b"-links", b"-lname",
+    b"-maxdepth", b"-mindepth", b"-mmin", b"-mtime", b"-name",
+    b"-newer", b"-path", b"-perm", b"-printf", b"-regex",
     b"-regextype", b"-samefile", b"-size", b"-type", b"-uid",
     b"-used", b"-user", b"-wholename", b"-xtype", b"-D"})
-_FIND_TWO_OP = frozenset({b"-fprintf", b"-newerXY"})
+_FIND_TWO_OP = frozenset({b"-fprintf"})
 _FIND_ACTION = frozenset({b"-exec", b"-execdir", b"-ok", b"-okdir"})
+
+
+def _find_newer_op(t: bytes) -> bool:
+    """`-newerXY REFERENCE` — a predicate named by two letters
+    ({a,c,m} for the file's own stamp x {a,B,c,m,t} for the
+    reference) taking ONE operand: `find . -neweram --help` reads
+    `--help` as the time spec, not a terminal option (round-41
+    review — verified live: `-newerXt` is the invalid form)."""
+    return (t.startswith(b"-newer") and len(t) == 8
+            and t[6:7] in b"acm" and t[7:8] in b"aBcmt")
 
 
 def _find_expr_spans(enc_words: list, hi: int, enclosing: bytes):
@@ -960,10 +970,16 @@ def _find_expr_spans(enc_words: list, hi: int, enclosing: bytes):
             spans.append(("action", start, end))
             k = end + 1
             continue
+        if t == b"-quit":
+            # `-quit` exits when EVALUATED — words after it are dead
+            # (`find . -quit -exec` runs nothing) while earlier
+            # actions already ran (`find . -exec x \; -quit` still
+            # runs x — round-41 review, verified live).
+            break
         if t in _FIND_TWO_OP:
             k += 3
             continue
-        if t in _FIND_ONE_OP:
+        if t in _FIND_ONE_OP or _find_newer_op(t):
             k += 2
             continue
         if t in terminal:
@@ -1003,19 +1019,18 @@ def _argv_wrap_start(enc_words: list, hi: int, enclosing: bytes):
                 ended = True
             elif t in terminal:
                 return None
-            elif (key == b"flock" and
-                    (t in (b"-c", b"--command")
-                     or t.startswith(b"--command=")
-                     or (t.startswith(b"-c") and len(t) > 2
-                         and not t.startswith(b"--")))):
-                # flock's `-c` binds a command STRING — the operand
-                # IS the wrapped program (`flock L -c ./x.sh` runs
-                # x.sh via the shell — CodeRabbit on #130, round-40,
+            elif key == b"flock" and pos_skip == 0:
+                # After the lockfile every word is command argv —
+                # only an exact `-c`/`--command` binds a shell
+                # command string at the NEXT word; any other word,
+                # even dash-shaped, is the literal argv[0] flock
+                # execs (`flock L -n` fails on `-n`; `-cCMD`/
+                # `--command=CMD` fail identically — util-linux
+                # getopt stops at the lockfile: round-41 review,
                 # verified live).
-                if (t.startswith(b"--command=")
-                        or (t.startswith(b"-c") and len(t) > 2)):
-                    return j
-                return j + 1 if j + 1 < len(enc_words) else None
+                if t in (b"-c", b"--command"):
+                    return j + 1 if j + 1 < len(enc_words) else None
+                return j
             elif t in optops:
                 j += 2
                 continue
@@ -1036,10 +1051,37 @@ def _find_action_start(enc_words: list, hi: int, wi: int,
     per match, so the action owning the operand (not the first one)
     decides its role (Devin on #128, round-26 review — verified live:
     `find . -exec true \\; -exec echo P \\;` still prints P)."""
+    span = _find_action_span(enc_words, hi, wi, enclosing)
+    return span[0] if span is not None else None
+
+
+def _find_action_span(enc_words: list, hi: int, wi: int,
+                      enclosing: bytes):
+    """(argv_start, argv_end) of the `find` action argv containing
+    word `wi`, or None."""
     for s in _find_expr_spans(enc_words, hi, enclosing):
         if s[0] == "action" and s[1] <= wi < s[2]:
-            return s[1]
+            return s[1], s[2]
     return None
+
+
+def _is_wrap_argv0(enc_words: list, wi: int, enclosing: bytes) -> bool:
+    """True when word `wi` is a program wrapper's exec'd argv[0] —
+    a literal command name (`flock L -cCMD` names a FILE flock fails
+    to exec — round-41, verified live), not an option's glued
+    operand (`node -rP` is)."""
+    whi = _effective_head(enc_words, enclosing)
+    if whi is None or whi < 0:
+        return False
+    wkey = _command_key(
+        enclosing[enc_words[whi][0]:enc_words[whi][1]])
+    if wkey not in _ARGV_PROGRAM_WRAPPERS:
+        return False
+    if wkey == b"find":
+        s = _find_action_span(enc_words, whi, wi, enclosing)
+        return s is not None and wi == s[0]
+    ws = _argv_wrap_start(enc_words, whi, enclosing)
+    return ws is not None and wi == ws
 
 
 def _xargs_argfile(args: list):
@@ -1206,10 +1248,15 @@ def _operand_is_program(enc_words: list, wi: int,
                     enc_words[s[1]:s[2]], wi - s[1], enclosing)
         return False
     if key == b"flock":
-        # `-c`/`--command` binds a command STRING (program text);
-        # otherwise the word after the lockfile positional begins the
-        # command argv — `flock L sh -c 'P'` runs P (Codex on #128,
-        # round-25 review — verified live).
+        # `-c`/`--command` binds a command STRING (program text) —
+        # but ONLY as an exact word AFTER the lockfile positional:
+        # util-linux getopt stops option parsing at the lockfile, so
+        # `-c`/`--command` before it is an invalid option, and the
+        # attached forms `-cCMD`/`--command=CMD` are literal command
+        # NAMES flock fails to exec (Devin + CodeRabbit on #1959,
+        # round-41 review — verified live). Every other word after
+        # the lockfile is literal argv — `flock L sh -c 'P'` runs P
+        # (Codex on #128, round-25 review — verified live).
         flock_optops = _ARGV_PROGRAM_WRAPPER_OPTOPS[b"flock"]
         flock_terminal = _ARGV_PROGRAM_WRAPPER_TERMINAL[b"flock"]
         pos0 = ended = False
@@ -1221,15 +1268,17 @@ def _operand_is_program(enc_words: list, wi: int,
                     ended = True
                 elif t in flock_terminal:
                     return False
-                elif t in (b"-c", b"--command"):
-                    if j + 1 == wi:
-                        return True
-                    j += 2
-                    continue
-                elif (t.startswith(b"--command=")
-                      or (t.startswith(b"-c") and len(t) > 2)):
+                elif pos0:
+                    # Post-lockfile argv — an exact `-c`/`--command`
+                    # binds command text; any other word is argv[0]
+                    # (a literal name, never program text).
+                    if t in (b"-c", b"--command"):
+                        if j + 1 == wi:
+                            return True
+                        j += 2
+                        continue
                     if j == wi:
-                        return True
+                        return False
                     j += 1
                     continue
                 elif t in flock_optops:
@@ -1241,6 +1290,8 @@ def _operand_is_program(enc_words: list, wi: int,
                 pos0 = True      # the lockfile operand
                 j += 1
                 continue
+            if j == wi:
+                return False     # argv[0] is a literal command name
             return _operand_is_program(enc_words[j:], wi - j,
                                        enclosing)
         return False
@@ -3010,7 +3061,11 @@ _READER_PROGRAM_FIRST = frozenset(
 _READER_FLAG_OPS = {
     b"head": frozenset({b"-n", b"-c", b"--lines", b"--bytes"}),
     b"tail": frozenset({b"-n", b"-c", b"--lines", b"--bytes",
-                        b"--sleep-interval"}),
+                        b"--sleep-interval",
+                        # `--max-unchanged-stats`/`-F` consumed words round-40
+                        # treated as file operands (Devin on #1959, round-41
+                        # review — verified live).
+                        b"--max-unchanged-stats", b"--pid"}),
     b"grep": frozenset({b"-e", b"-f", b"-m", b"-A", b"-B", b"-C", b"-D",
                         b"--regexp", b"--file", b"--max-count",
                         b"--after-context", b"--before-context",
@@ -3021,7 +3076,10 @@ _READER_FLAG_OPS = {
     b"sed": frozenset({b"-e", b"-f", b"--expression", b"--file",
                        b"-l", b"--line-length"}),
     b"awk": frozenset({b"-f", b"-v", b"-F", b"--file", b"--assign",
-                       b"--field-separator"}),
+                       b"--field-separator",
+                       # Remaining required-arg longs (round-41 audit).
+                       b"--exec", b"--include", b"--load",
+                       b"--pretty-print", b"--source"}),
     b"sort": frozenset({b"-k", b"-t", b"-o", b"-T", b"-S", b"--key",
                         b"--field-separator", b"--output",
                         b"--temporary-directory", b"--buffer-size",
@@ -3051,23 +3109,69 @@ _READER_FLAG_OPS = {
                          b"-o", b"--output"}),
     b"fold": frozenset({b"-w", b"--width"}),
     b"nl": frozenset({b"-b", b"-f", b"-h", b"-i", b"-l", b"-n", b"-p",
-                      b"-s", b"-v", b"-w"}),
-    b"od": frozenset({b"-A", b"-j", b"-N", b"-S", b"-t", b"-w"}),
+                      b"-s", b"-v", b"-w",
+                      # Required-arg longs (round-41 audit).
+                      b"--body-numbering", b"--footer-numbering",
+                      b"--header-numbering", b"--join-blank-lines",
+                      b"--line-increment", b"--number-format",
+                      b"--number-separator", b"--number-width",
+                      b"--section-delimiter",
+                      b"--starting-line-number"}),
+    b"od": frozenset({b"-A", b"-j", b"-N", b"-S", b"-t", b"-w",
+                      # Required-arg longs (round-41 audit).
+                      b"--address-radix", b"--endian", b"--format",
+                      b"--read-bytes", b"--skip-bytes"}),
     b"xxd": frozenset({b"-g", b"-c", b"-l", b"-o", b"-s"}),
-    b"hexdump": frozenset({b"-e", b"-f", b"-n", b"-s"}),
+    b"hexdump": frozenset({b"-e", b"-f", b"-n", b"-s",
+                           b"--format", b"--format-file",
+                           b"--length", b"--skip"}),
     b"strings": frozenset({b"-n", b"-t", b"-e", b"--bytes",
-                          b"--radix", b"--encoding"}),
-    b"split": frozenset({b"-l", b"-b", b"-C", b"-n", b"-a",
+                          b"--radix", b"--encoding",
+                          # Required-arg longs (round-41 audit).
+                          b"--unicode", b"--output-separator",
+                          b"--target"}),
+    b"split": frozenset({b"-l", b"-b", b"-C", b"-n", b"-a", b"-t",
                          b"--lines", b"--bytes", b"--line-bytes",
-                         b"--number", b"--suffix-length"}),
+                         b"--number", b"--suffix-length",
+                         # `--separator` takes SEP; `--filter` takes
+                         # COMMAND (separate word verified — round-41).
+                         b"--separator", b"--filter",
+                         b"--additional-suffix"}),
     b"rg": frozenset({b"-e", b"-f", b"-m", b"-A", b"-B", b"-C", b"-g",
                       b"-t", b"-T", b"--regexp", b"--file",
                       b"--max-count", b"--after-context",
                       b"--before-context", b"--context", b"--glob",
                       b"--type", b"--type-not"}),
     b"pr": frozenset({b"-e", b"-h", b"-i", b"-l", b"-n", b"-o", b"-r",
-                      b"-s", b"-w", b"-J", b"-S", b"-T", b"-W", b"-d"}),
+                      b"-s", b"-w", b"-J", b"-S", b"-T", b"-W", b"-d",
+                      # Required-arg longs (round-41 audit —
+                      # `--pages` verified live).
+                      b"--columns", b"--date-format",
+                      b"--first-line-number", b"--header", b"--length",
+                      b"--page-width", b"--pages", b"--width"}),
 }
+# GNU long options taking an OPTIONAL argument — valid only glued
+# (`--color=always`); a separate word is NOT the option's operand
+# (`grep --color always` uses `always` as the PATTERN — getopt_long
+# optional_argument semantics, round-41 audit).
+_READER_GNU_OPTARG = {
+    b"grep": frozenset({b"--color", b"--colour"}),
+    b"sed": frozenset({b"--in-place"}),
+    b"pr": frozenset({b"--expand-tabs", b"--indent",
+                      b"--number-lines", b"--output-tabs",
+                      b"--sep-string", b"--separator"}),
+    b"od": frozenset({b"--strings", b"--width"}),
+    b"tail": frozenset({b"--follow"}),
+    b"awk": frozenset({b"--dump-variables", b"--lint",
+                       b"--profile"}),
+    b"hexdump": frozenset({b"--color"}),
+    b"split": frozenset({b"--numeric-suffixes",
+                         b"--hex-suffixes"}),
+}
+_READER_GNU_OPTARG[b"egrep"] = _READER_GNU_OPTARG[b"grep"]
+_READER_GNU_OPTARG[b"fgrep"] = _READER_GNU_OPTARG[b"grep"]
+_READER_GNU_OPTARG[b"zgrep"] = _READER_GNU_OPTARG[b"grep"]
+_READER_GNU_OPTARG[b"hd"] = _READER_GNU_OPTARG[b"hexdump"]
 _READER_FLAG_OPS[b"egrep"] = _READER_FLAG_OPS[b"grep"]
 _READER_FLAG_OPS[b"fgrep"] = _READER_FLAG_OPS[b"grep"]
 _READER_FLAG_OPS[b"zgrep"] = _READER_FLAG_OPS[b"grep"]
@@ -3251,6 +3355,7 @@ def _reader_operands(key: bytes, args: list):
         return [a.split(b"=", 1)[1] for a in args
                 if a.startswith(b"if=")]
     flagops = _READER_FLAG_OPS.get(key, frozenset())
+    optarg = _READER_GNU_OPTARG.get(key, frozenset())
     progflags = _READER_PROG_FLAGS.get(key, frozenset())
     gnu = _READER_GNU_OPS.get(key)
     ops: list[bytes] = []
@@ -3277,10 +3382,23 @@ def _reader_operands(key: bytes, args: list):
                     if len(cands) != 1:
                         return None
                     resolved = cands[0]
-                prog_seen |= resolved in progflags
-                if resolved in flagops and b"=" not in a:
-                    i += 2
+                if resolved in flagops:
+                    prog_seen |= resolved in progflags
+                    i += 1 if b"=" in a else 2
                     continue
+                if resolved in optarg:
+                    # An optional-arg long binds a value ONLY glued
+                    # (`--color=auto`); a separate word stays a
+                    # positional operand (round-41 audit).
+                    prog_seen |= resolved in progflags
+                    i += 1
+                    continue
+                if b"=" in a:
+                    # `=v` on a flag-only option aborts before any
+                    # read — `cat --number=1` errors out (Codex +
+                    # CodeRabbit round-41, verified live).
+                    return None
+                prog_seen |= resolved in progflags
                 i += 1
                 continue
             elif a in flagops:
@@ -3439,6 +3557,16 @@ def _seg_prov(body: bytes, prov: str,
                 # `sort --files0-from F` reads the filename list from
                 # F — the shared stdin is ignored and sort emits
                 # unrelated bytes (Devin on #128, round-25 review —
+                # verified live).
+                prov = "own"
+            elif (key in (b"split", b"csplit")
+                    and not any(a == b"--filter"
+                                or a.startswith(b"--filter=")
+                                for a in args)):
+                # split/csplit write chunks to FILES — the input
+                # stream never reaches stdout (`cat x | split | sh`
+                # leaves sh at EOF; a `--filter CMD` pipes each chunk
+                # to CMD instead — Codex on #130, round-41 review —
                 # verified live).
                 prov = "own"
             elif key not in _READER_STDIN_OPS and key not in (
@@ -7404,11 +7532,31 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                                   enc_words[whi][1]])
                     if wkey in _ARGV_PROGRAM_WRAPPERS:
                         if wkey == b"find":
-                            ws = _find_action_start(
+                            span = _find_action_span(
                                 enc_words, whi, wi0, enclosing)
-                            if (ws is None or _argv_wrap_start(
+                            if (span is None or _argv_wrap_start(
                                     enc_words, whi, enclosing) is None):
                                 return False
+                            # Inside the action argv only an exec
+                            # position runs the path — argv[0] itself
+                            # (`-exec x.sh`), an operand an interpreter
+                            # reads as its script (`-exec sh x.sh`),
+                            # or a program-text slot (`-exec sh -c x`)
+                            # — `-exec echo x.sh` just prints the name
+                            # (Devin on #1393, round-41 review —
+                            # verified live).
+                            s1, s2 = span
+                            if wi0 == s1:
+                                return True
+                            akey = _command_key(
+                                enclosing[enc_words[s1][0]:
+                                          enc_words[s1][1]])
+                            if (akey in _SH_STDIN_HEADS
+                                    or akey in _EXEC_OPERAND_FLAGS):
+                                return True
+                            return _operand_is_program(
+                                enc_words[s1:s2], wi0 - s1,
+                                enclosing)
                         else:
                             ws = _argv_wrap_start(
                                 enc_words, whi, enclosing)
@@ -7425,7 +7573,9 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
             if (tw.startswith(b"-") and not tw.startswith(b"--")
                     and len(tw) > 2 and tw[1:2].isalpha()
                     and b"scripts/" in tw
-                    and not _glued_short_hides_path(tw)):
+                    and not _glued_short_hides_path(tw)
+                    and not _is_wrap_argv0(
+                        enc_words, enc_words.index(w), enclosing)):
                 return True
             if (raw[:1] in (b"'", b'"') and len(raw) > 2
                     and re.search(rb"\s", raw[1:-1])):
