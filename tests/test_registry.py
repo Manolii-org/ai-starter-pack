@@ -10677,3 +10677,85 @@ def test_pipe_to_exec_round35(tmp_path):
             b"find . --help -exec sh scripts/x.sh",
             b"xargs --help sh scripts/x.sh"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round40(tmp_path):
+    """Round-40 review (Codex/Devin/CodeRabbit on #130/#1393/#1959/#12 —
+    every behavior verified against real GNU bash/find/xargs/flock):
+    * the wrapped-command word itself executes (`xargs ./x.sh`,
+      `flock L ./x.sh` — the word AT the wrap start is the command);
+    * `flock -c`/`--command` bind a command STRING that runs via the
+      shell (`flock L -c ./x.sh` → x.sh runs);
+    * a find terminal-mode word ANYWHERE in the expression exits
+      before actions (`find . -exec A \\; -help` prints usage), while
+      a predicate operand (`-name --help`) is a PATTERN, not a
+      terminal;
+    * IFS field-splitting uses only whitespace bytes PRESENT in IFS
+      (`IFS=', '` keeps `a\tb` one field) and a whitespace-only
+      capture yields ZERO fields."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_text("echo HIT\n")
+    (pdir / "scripts" / "wsonly.sh").write_text("  \n")
+    (pdir / "scripts" / "tab.sh").write_text("a\tb\n")
+    for line in (
+            # the word AT the wrap start is the wrapped command —
+            # `xargs ./scripts/x.sh` runs it (verified live)
+            b"xargs ./scripts/x.sh",
+            b"xargs -n2 ./scripts/x.sh",
+            b"flock /tmp/l ./scripts/x.sh",
+            # option-looking words AFTER the command word are the
+            # command's argv — `flock L ./x.sh --help` still runs
+            # x.sh (verified live)
+            b"flock /tmp/l ./scripts/x.sh --help",
+            b"xargs ./scripts/x.sh --help",
+            # `flock -c`/`--command` binds the operand as SHELL text —
+            # `flock L -c ./x.sh` runs it (verified live); the bare
+            # `flock -c scripts/x.sh` form stays a prose mention like
+            # every bare mid-command `scripts/` path (SCRIPT_REF)
+            b"flock /tmp/l -c ./scripts/x.sh",
+            b"flock /tmp/l -c 'sh scripts/x.sh'",
+            b"flock /tmp/l --command 'sh scripts/x.sh'",
+            # a predicate operand is not a terminal — `find . -name
+            # --help -exec ...` runs the action for matches (verified)
+            b"find . -name --help -exec sh scripts/x.sh \\;",
+            b"find . -path --version -exec sh scripts/x.sh \\;",
+            # a tab is not a delimiter under `IFS=', '` — `a\tb`
+            # emits ONE field (verified live)
+            b"IFS=', '; date +$(cat scripts/tab.sh) | sh",
+            # audit-synced real long options still forward the stream
+            b"cat scripts/x.sh | sed --unbuffered s/a/b/ | sh",
+            b"cat scripts/x.sh | strings --unicode=l | sh",
+            b"cat scripts/x.sh | tail --max-unchanged-stats=1 | sh",
+            b"cat scripts/x.sh | od --output-duplicates | sh",
+            b"cat scripts/x.sh | iconv --silent | sh",
+            b"cat scripts/x.sh | grep --null-data x | sh",
+            b"cat scripts/x.sh | awk --no-optimize '{print}' | sh",
+            b"IFS=': '; date +$(cat scripts/y.sh) | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # a terminal-mode word AFTER the action still exits
+            # before it runs — `find . -exec A \; -help` prints
+            # usage only (verified live)
+            b"find . -exec sh scripts/x.sh \\; -help",
+            b"find . -exec sh scripts/x.sh \\; --version",
+            b"find . -exec sh scripts/x.sh \\; -version",
+            # a predicate operand that IS `-exec` is not an action —
+            # `find . -name -exec sh x` errors on the stray `sh`
+            b"find . -name -exec sh scripts/x.sh \\;",
+            # a whitespace-only capture under mixed IFS yields ZERO
+            # fields — date gets only `+` and emits a newline
+            b"IFS=', '; date +$(cat scripts/wsonly.sh) | sh",
+            # the -c operand is program text — inside it the path is
+            # just an echo argument, never exec'd (verified live)
+            b"flock /tmp/l -c 'echo scripts/x.sh'",
+            # a bare mid-command path is a prose mention even under
+            # `-c` — SCRIPT_REF only counts exec contexts
+            b"flock /tmp/l -c scripts/x.sh",
+            # audit-synced NON-options still abort — the phantom
+            # hexdump names and `--numeric-storage` never existed
+            b"cat scripts/x.sh | hexdump --one-byte-hexadecimal | sh",
+            b"cat scripts/x.sh | sort --numeric-storage | sh",
+            b"cat scripts/x.sh | awk --character-set=x '{print}' | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line

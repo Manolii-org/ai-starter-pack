@@ -919,6 +919,57 @@ _ARGV_PROGRAM_WRAPPER_TERMINAL = {
     b"flock": frozenset({b"-h", b"--help",
                          b"-V", b"--version"}),
 }
+# find primaries that consume the NEXT word as an operand — inside
+# `find . -name --help`, `--help` is a PATTERN, not the help action
+# (round-40 review — verified live: GNU find prints no usage).
+_FIND_ONE_OP = frozenset({
+    b"-amin", b"-anewer", b"-cmin", b"-cnewer", b"-ctime",
+    b"-fls", b"-fprint", b"-fstype", b"-gid", b"-group",
+    b"-ilname", b"-iname", b"-inum", b"-ipath", b"-iregex",
+    b"-iwholename", b"-links", b"-lname", b"-maxdepth",
+    b"-mindepth", b"-mmin", b"-mtime", b"-name", b"-newer",
+    b"-newermt", b"-path", b"-perm", b"-printf", b"-regex",
+    b"-regextype", b"-samefile", b"-size", b"-type", b"-uid",
+    b"-used", b"-user", b"-wholename", b"-xtype", b"-D"})
+_FIND_TWO_OP = frozenset({b"-fprintf", b"-newerXY"})
+_FIND_ACTION = frozenset({b"-exec", b"-execdir", b"-ok", b"-okdir"})
+
+
+def _find_expr_spans(enc_words: list, hi: int, enclosing: bytes):
+    """Classify a `find` expression: [("action", argv_start, argv_end)]
+    for each -exec/-execdir/-ok/-okdir argv plus ("terminal", k, k) for
+    terminal-mode words OUTSIDE predicate operands and action argv.
+    A terminal word ANYWHERE in the expression exits before actions
+    run (`find . -exec echo A \\; -help` prints usage only — round-40,
+    verified live), while `-exec sh -help \\;` passes `-help` to the
+    action (verified: the action runs)."""
+    spans = []
+    terminal = _ARGV_PROGRAM_WRAPPER_TERMINAL[b"find"]
+    k = hi + 1
+    while k < len(enc_words):
+        t = _word_text(enclosing[enc_words[k][0]:enc_words[k][1]])
+        if t in _FIND_ACTION:
+            start = k + 1
+            end = start
+            while end < len(enc_words):
+                tt = _word_text(
+                    enclosing[enc_words[end][0]:enc_words[end][1]])
+                if tt in (b";", b"+"):
+                    break
+                end += 1
+            spans.append(("action", start, end))
+            k = end + 1
+            continue
+        if t in _FIND_TWO_OP:
+            k += 3
+            continue
+        if t in _FIND_ONE_OP:
+            k += 2
+            continue
+        if t in terminal:
+            spans.append(("terminal", k, k))
+        k += 1
+    return spans
 
 
 def _argv_wrap_start(enc_words: list, hi: int, enclosing: bytes):
@@ -929,14 +980,15 @@ def _argv_wrap_start(enc_words: list, hi: int, enclosing: bytes):
     if key == b"find":
         # The argv starts after `-exec`/`-execdir`/`-ok`/`-okdir` —
         # find's other words are paths and tests, not the command
-        # (Codex on #128, round-25 review). Terminal modes exit first.
-        for k in range(hi + 1, len(enc_words)):
-            t = _word_text(enclosing[enc_words[k][0]:
-                                     enc_words[k][1]])
-            if t in terminal:
-                return None
-            if t in (b"-exec", b"-execdir", b"-ok", b"-okdir"):
-                return k + 1 if k + 1 < len(enc_words) else None
+        # (Codex on #128, round-25 review). A terminal word ANYWHERE
+        # in the expression — even after an action — exits first
+        # (round-40, verified live).
+        spans = _find_expr_spans(enc_words, hi, enclosing)
+        if any(s[0] == "terminal" for s in spans):
+            return None
+        for s in spans:
+            if s[0] == "action" and s[1] < len(enc_words):
+                return s[1]
         return None
     optops = _ARGV_PROGRAM_WRAPPER_OPTOPS.get(key, frozenset())
     # `flock FILE CMD…` — the FIRST positional is the lockfile; the
@@ -951,6 +1003,19 @@ def _argv_wrap_start(enc_words: list, hi: int, enclosing: bytes):
                 ended = True
             elif t in terminal:
                 return None
+            elif (key == b"flock" and
+                    (t in (b"-c", b"--command")
+                     or t.startswith(b"--command=")
+                     or (t.startswith(b"-c") and len(t) > 2
+                         and not t.startswith(b"--")))):
+                # flock's `-c` binds a command STRING — the operand
+                # IS the wrapped program (`flock L -c ./x.sh` runs
+                # x.sh via the shell — CodeRabbit on #130, round-40,
+                # verified live).
+                if (t.startswith(b"--command=")
+                        or (t.startswith(b"-c") and len(t) > 2)):
+                    return j
+                return j + 1 if j + 1 < len(enc_words) else None
             elif t in optops:
                 j += 2
                 continue
@@ -971,22 +1036,9 @@ def _find_action_start(enc_words: list, hi: int, wi: int,
     per match, so the action owning the operand (not the first one)
     decides its role (Devin on #128, round-26 review — verified live:
     `find . -exec true \\; -exec echo P \\;` still prints P)."""
-    k = hi + 1
-    while k < len(enc_words):
-        t = _word_text(enclosing[enc_words[k][0]:enc_words[k][1]])
-        if t in (b"-exec", b"-execdir", b"-ok", b"-okdir"):
-            start = k + 1
-            end = start
-            while end < len(enc_words):
-                tt = _word_text(
-                    enclosing[enc_words[end][0]:enc_words[end][1]])
-                if tt in (b";", b"+"):
-                    break
-                end += 1
-            if start <= wi < end:
-                return start
-            k = end
-        k += 1
+    for s in _find_expr_spans(enc_words, hi, enclosing):
+        if s[0] == "action" and s[1] <= wi < s[2]:
+            return s[1]
     return None
 
 
@@ -1142,29 +1194,16 @@ def _operand_is_program(enc_words: list, wi: int,
         return True
     if key == b"find":
         # `-exec`/`-execdir`/`-ok`/`-okdir` introduce an argv the
-        # action execs — it runs to `;`/`+` (or end of words) and each
-        # action execs its own argv (Codex on #128, round-25 review —
-        # verified live). `-help`/`--help` etc. exit before exec.
-        find_terminal = _ARGV_PROGRAM_WRAPPER_TERMINAL[b"find"]
-        k = hi + 1
-        while k < len(enc_words):
-            t = _word_text(enclosing[enc_words[k][0]:enc_words[k][1]])
-            if t in find_terminal:
-                return False
-            if t in (b"-exec", b"-execdir", b"-ok", b"-okdir"):
-                start = k + 1
-                end = start
-                while end < len(enc_words):
-                    tt = _word_text(
-                        enclosing[enc_words[end][0]:enc_words[end][1]])
-                    if tt in (b";", b"+"):
-                        break
-                    end += 1
-                if start <= wi < end:
-                    return _operand_is_program(
-                        enc_words[start:end], wi - start, enclosing)
-                k = end
-            k += 1
+        # action execs — each action runs its own argv (Codex on #128,
+        # round-25 review — verified live). A terminal-mode word
+        # ANYWHERE in the expression exits first (round-40).
+        spans = _find_expr_spans(enc_words, hi, enclosing)
+        if any(s[0] == "terminal" for s in spans):
+            return False
+        for s in spans:
+            if s[0] == "action" and s[1] <= wi < s[2]:
+                return _operand_is_program(
+                    enc_words[s[1]:s[2]], wi - s[1], enclosing)
         return False
     if key == b"flock":
         # `-c`/`--command` binds a command STRING (program text);
@@ -1187,7 +1226,8 @@ def _operand_is_program(enc_words: list, wi: int,
                         return True
                     j += 2
                     continue
-                elif t.startswith(b"--command="):
+                elif (t.startswith(b"--command=")
+                      or (t.startswith(b"-c") and len(t) > 2)):
                     if j == wi:
                         return True
                     j += 1
@@ -2567,21 +2607,33 @@ def _ifs_fields(data: bytes, ifs: bytes | None) -> list:
     if ifs is None:
         return data.split()
     nonws = bytes(c for c in ifs if c not in b" \t\n")
-    if any(c in b" \t\n" for c in ifs):
+    ws = bytes(c for c in b" \t\n" if c in ifs)
+    if ws:
+        # Only whitespace bytes actually IN IFS delimit — `IFS=', '`
+        # leaves a tab inside the field (`a\tb` → ONE field —
+        # CodeRabbit on #130, round-40 review — verified live).
         if not nonws:
-            return data.split()
+            s = data.strip(ws)
+            return (re.split(rb"[" + re.escape(ws) + rb"]+", s)
+                    if s else [])
         # Mixed IFS — each non-whitespace char is its own delimiter
         # with adjacent IFS whitespace folded in; adjacent delimiters
         # emit empty fields (`IFS=', '` gives `a,,b` THREE fields —
         # Devin round-39, verified live). Trailing delimiters emit
         # nothing (`echo,` → 1) while a leading one emits an empty
-        # head field (`,a` → 2, ` ,a` → 2 — verified live).
+        # head field (`,a` → 2, ` ,a` → 2 — verified live). Input
+        # that is ONLY IFS whitespace emits ZERO fields — `IFS=', '`
+        # on ` ` yields $#=0 (Devin on #12, round-40 — verified live).
+        s = data.lstrip(ws)
+        if not s:
+            return []
         parts = re.split(
-            rb"[\s]*[" + re.escape(nonws) + rb"][\s]*|[\s]+",
-            data.lstrip(b" \t\n"))
+            rb"[" + re.escape(ws) + rb"]*[" + re.escape(nonws)
+            + rb"][" + re.escape(ws) + rb"]*|[" + re.escape(ws)
+            + rb"]+", s)
         if parts and parts[-1] == b"":
             parts.pop()
-        return parts or [b""]
+        return parts
     if not nonws:
         return [data]
     # Pure non-whitespace IFS — EVERY delimiter emits a field (no
@@ -3055,6 +3107,7 @@ _READER_GNU_OPS = {
     b"tail": frozenset({b"--lines", b"--bytes", b"--follow", b"--pid",
                         b"--quiet", b"--silent", b"--retry",
                         b"--sleep-interval", b"--verbose",
+                        b"--max-unchanged-stats",
                         b"--zero-terminated", b"--help", b"--version"}),
     b"grep": frozenset({b"--extended-regexp", b"--fixed-strings",
                         b"--basic-regexp", b"--regexp", b"--ignore-case",
@@ -3072,18 +3125,22 @@ _READER_GNU_OPS = {
                         b"--exclude-dir", b"--file", b"--group-separator",
                         b"--no-group-separator", b"--only-matching",
                         b"--byte-offset", b"--null", b"--help",
+                        b"--binary-files", b"--initial-tab",
+                        b"--label", b"--no-ignore-case",
+                        b"--no-messages", b"--null-data",
                         b"--version", b"--perl-regexp"}),
     b"sed": frozenset({b"--expression", b"--file", b"--in-place",
                        b"--quiet", b"--silent", b"--line-length",
                        b"--posix", b"--regexp-extended",
                        b"--follow-symlinks", b"--separate", b"--sandbox",
-                       b"--null-data", b"--debug", b"--help",
-                       b"--version"}),
-    b"awk": frozenset({b"--assign", b"--character-set", b"--copyright",
-                       b"--debug", b"--dump-variables", b"--exec",
-                       b"--field-separator", b"--file", b"--gen-pot",
-                       b"--help", b"--include", b"--lint", b"--lint-old",
-                       b"--load", b"--non-decimal-data", b"--optimize",
+                       b"--null-data", b"--debug", b"--unbuffered",
+                       b"--help", b"--version"}),
+    b"awk": frozenset({b"--assign", b"--characters-as-bytes",
+                       b"--copyright", b"--debug", b"--dump-variables",
+                       b"--exec", b"--field-separator", b"--file",
+                       b"--gen-pot", b"--help", b"--include", b"--lint",
+                       b"--lint-old", b"--load", b"--no-optimize",
+                       b"--non-decimal-data", b"--optimize",
                        b"--posix", b"--pretty-print", b"--profile",
                        b"--re-interval", b"--sandbox", b"--source",
                        b"--traditional", b"--use-lc-numeric",
@@ -3098,7 +3155,7 @@ _READER_GNU_OPS = {
                         b"--human-numeric-sort", b"--ignore-case",
                         b"--ignore-leading-blanks", b"--ignore-nonprinting",
                         b"--key", b"--merge", b"--month-sort",
-                        b"--numeric-sort", b"--numeric-storage",
+                        b"--numeric-sort",
                         b"--output", b"--parallel", b"--random-sort",
                         b"--random-source", b"--reverse", b"--sort",
                         b"--stable", b"--temporary-directory",
@@ -3124,7 +3181,8 @@ _READER_GNU_OPS = {
                         b"--nocheck-order", b"--zero-terminated",
                         b"--help", b"--version"}),
     b"iconv": frozenset({b"--from-code", b"--to-code", b"--output",
-                         b"--list", b"--verbose", b"--help",
+                         b"--list", b"--verbose", b"--silent",
+                         b"--usage", b"--help",
                          b"--version"}),
     b"fold": frozenset({b"--width", b"--bytes", b"--spaces", b"--help",
                         b"--version"}),
@@ -3137,24 +3195,27 @@ _READER_GNU_OPS = {
     b"od": frozenset({b"--address-radix", b"--skip-bytes",
                       b"--read-bytes", b"--strings", b"--format",
                       b"--width", b"--traditional", b"--endian",
+                      b"--output-duplicates",
                       b"--help", b"--version"}),
-    b"hexdump": frozenset({b"--canonical", b"--one-byte-hexadecimal",
+    b"hexdump": frozenset({b"--canonical", b"--one-byte-char",
                            b"--one-byte-octal", b"--two-bytes-decimal",
                            b"--two-bytes-octal",
-                           b"--two-bytes-hexadecimal", b"--format",
+                           b"--two-bytes-hex", b"--format",
                            b"--format-file", b"--length", b"--skip",
                            b"--no-squeezing", b"--color", b"--help",
                            b"--version"}),
     b"strings": frozenset({b"--all", b"--bytes", b"--encoding",
                            b"--print-file-name", b"--radix", b"--target",
                            b"--include-all-whitespace",
-                           b"--output-separator", b"--help",
+                           b"--output-separator", b"--data",
+                           b"--unicode", b"--help",
                            b"--version"}),
     b"split": frozenset({b"--lines", b"--bytes", b"--line-bytes",
                          b"--number", b"--additional-suffix",
                          b"--suffix-length", b"--filter",
                          b"--elide-empty-files", b"--numeric-suffixes",
-                         b"--hex-suffixes", b"--verbose", b"--help",
+                         b"--hex-suffixes", b"--separator",
+                         b"--unbuffered", b"--verbose", b"--help",
                          b"--version"}),
     b"pr": frozenset({b"--columns", b"--across",
                       b"--show-control-chars", b"--double-space",
@@ -3165,8 +3226,8 @@ _READER_GNU_OPS = {
                       b"--no-file-warnings", b"--separator",
                       b"--sep-string", b"--omit-header",
                       b"--omit-pagination", b"--show-nonprinting",
-                      b"--width", b"--page-width", b"--help",
-                      b"--version"}),
+                      b"--pages", b"--width", b"--page-width",
+                      b"--help", b"--version"}),
 }
 _READER_GNU_OPS[b"egrep"] = _READER_GNU_OPS[b"grep"]
 _READER_GNU_OPS[b"fgrep"] = _READER_GNU_OPS[b"grep"]
@@ -7351,7 +7412,10 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                         else:
                             ws = _argv_wrap_start(
                                 enc_words, whi, enclosing)
-                            if ws is None or wi0 <= ws:
+                            # The word AT ws IS the wrapped command —
+                            # `xargs ./scripts/x.sh` executes it
+                            # (Codex on #130, round-40, verified live).
+                            if ws is None or wi0 < ws:
                                 return False
                 return True
             # A glued non-`-d` short-option operand whose tail is a script
