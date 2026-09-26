@@ -615,7 +615,8 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
                     f"{REVIEW_MARKER}\n"
                     "## PR Assessment\n"
                     "⚠️ Assessment system encountered an error. "
-                    "Manual review recommended."
+                    "Manual review recommended.\n\n"
+                    "**Merge danger:** unknown (assessment error)"
                 ),
                 "event": "COMMENT",
             }

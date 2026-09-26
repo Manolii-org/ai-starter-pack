@@ -133,7 +133,10 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
         meta_block = (
             "PR metadata (UNTRUSTED — needed for skills that compare the diff "
             "against the stated scope, e.g. under-delivery):\n"
-            f"<untrusted_pr_meta>\nTitle: {pr_title}\n\n{pr_body[:4000]}\n</untrusted_pr_meta>\n\n"
+            f"<untrusted_pr_meta>\nTitle: {pr_title}\n\n"
+            + pr_body[:12000]
+            + ("\n[body truncated]" if len(pr_body) > 12000 else "")
+            + "\n</untrusted_pr_meta>\n\n"
         )
     user_message = (
         "Analyze the following PR diff and return findings JSON.\n\n"

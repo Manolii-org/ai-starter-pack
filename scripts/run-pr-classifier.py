@@ -187,8 +187,11 @@ def main() -> None:
         # judgement and confuses reviewers.
         door = data.get("door") if data.get("door") in _VALID_DOORS else "unknown"
         blast = data.get("blast_radius") if data.get("blast_radius") in _VALID_BLAST else "unknown"
-        danger_reason = data.get("danger_reason", "")
-        if not (door != "unknown" and blast != "unknown" and str(danger_reason).strip()):
+        danger_reason = data.get("danger_reason")
+        if not isinstance(danger_reason, str) or len(danger_reason) > 160:
+            danger_reason = ""
+        danger_reason = danger_reason.strip()
+        if not (door != "unknown" and blast != "unknown" and danger_reason):
             door, blast, danger_reason = "unknown", "unknown", ""
 
         manifest = {

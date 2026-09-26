@@ -571,7 +571,7 @@ on:
 # the completed run's PR number, else its run id, so completions for different
 # PRs do not share a group and cancel each other.
 concurrency:
-  group: pr-autofix-${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number || github.event.workflow_run.id || github.run_id }}
+  group: pr-autofix-${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number || format('run-{0}', github.event.workflow_run.id) || github.run_id }}
   cancel-in-progress: true
 
 permissions:

@@ -26,7 +26,7 @@ python_scripts:
 workflow_files:
   location: .github/workflows/
   rules:
-    - "All actions must be pinned to a full SHA commit hash, not a tag"
+    - "Third-party actions must be pinned to a full SHA commit hash; first-party pack reusables use `@v*` tags; `./`-path local refs are exempt"
     - "Secrets must be passed via env: block, never inline in run: commands"
     - "New workflows must include a concurrency group to cancel stale runs"
 
@@ -35,7 +35,7 @@ testing:
   rules:
     - "No tautological tests: an assertion must not re-derive its expected value from the implementation under test (e.g. `expect(add(a,b)).toBe(a+b)`, `assert result == fn(input)` where the expected side calls the same code path)"
     - "Every assertion must pin a literal, a fixture, or a value computed independently of the code under test"
-    - "No test that cannot fail: `expect(mock).toHaveBeenCalled()` on a mock you just configured, or asserting a constant equals itself, counts as tautological"
+    - "No test that cannot fail: asserting a constant equals itself (`expect(200).toBe(200)`, `assert 'ok' == 'ok'`), or asserting only on fixture/setup values that never passed through the code under test, counts as tautological"
 
 test_coverage:
   # Diff-wide (no location): must run even when a PR touches no test file —
