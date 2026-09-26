@@ -161,11 +161,14 @@ jobs:
 
 ### Proxy Mode
 
-Callers of `pr-assessment-reusable` must include `ready_for_review` and
-`converted_to_draft` in `on.pull_request.types`. `classify` runs only when
+Callers of `pr-assessment-reusable` must include `ready_for_review`,
+`converted_to_draft`, and `edited` in `on.pull_request.types`. `classify` runs only when
 `github.event_name == 'pull_request'` and `draft != true`. Without
 `ready_for_review`, a PR opened as a draft never starts assessment when it
-is marked ready. `converted_to_draft` starts a skip run; callers must also
+is marked ready. `converted_to_draft` starts a skip run; `edited` re-runs
+assessment when the title/body changes without a push — metadata-based
+checks (scope-adherence under-delivery) would otherwise keep evaluating
+the stale description. Callers must also
 set workflow-level `concurrency` with `cancel-in-progress: true` so an
 in-flight LLM/SAST run is cancelled. Do not add `paths` or `paths-ignore`
 on the caller: GitHub applies those filters to `converted_to_draft`, so a
@@ -182,7 +185,7 @@ name: PR Assessment
 on:
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, edited]
 
 concurrency:
   group: pr-assessment-${{ github.ref }}

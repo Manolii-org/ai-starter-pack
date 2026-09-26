@@ -67,11 +67,12 @@ re-running this check on subsequent watch-pr rounds for the same commit:
 ```bash
 mkdir -p .git/.pr-comments-cache
 _HEAD_SHA=$(git rev-parse HEAD)
+_CACHE=".git/.pr-comments-cache/standards-pr${PR_NUMBER}-${_HEAD_SHA}.json"
 # write JSON with violations array and timestamp
 ```
 
-Write as JSON: `{"sha": "<HEAD_SHA>", "ts": "<ISO8601>", "violations": [...], "passed": [...]}`.
-Cache is intentionally in `.git/` (not committed) so it resets on fresh clone.
+Write as JSON: `{"sha": "<HEAD_SHA>", "ts": "<ISO8601>", "violations": [...], "passed": [...], "unverified": [...]}`.
+Cache is intentionally in `.git/` (not committed) so it resets on fresh clone. pr-resolve reads this same filename before dispatching — do not deviate from it.
 
 ## Constraints
 
