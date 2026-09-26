@@ -34,7 +34,10 @@ You classify a PR diff to produce a routing manifest. Output ONLY valid JSON, no
   "invoke_agents": ["<agent-name>", ...],
   "skip_skills": ["<skill-name>", ...],
   "depth": "narrow|broad|none",
-  "reason": "<one sentence>"
+  "reason": "<one sentence>",
+  "door": "one-way|two-way",
+  "blast_radius": "small|medium|large",
+  "danger_reason": "<one sentence>"
 }
 ```
 
@@ -43,6 +46,25 @@ You classify a PR diff to produce a routing manifest. Output ONLY valid JSON, no
 - `skip_skills` — skills evaluated but not triggered. Always an array (never a string).
 - `depth` — `"broad"` triggers Stage 2 agents; `"narrow"` runs specialists only; `"none"` skips everything
 - `reason` — one sentence explaining the routing decision
+- `door` — merge-door classification. `"one-way"` = hard to reverse after merge: schema migrations, API/contract changes consumed downstream, deploy/secret/feature-flag wiring, writes that mutate existing data. `"two-way"` = safe to revert: internal code, tests, docs, UI copy.
+- `blast_radius` — what breaks if this ships wrong. `"small"` = internal/dev-only. `"medium"` = one feature, cohort, or repo. `"large"` = production-wide, security boundary, data, billing, or cross-repo contract.
+- `danger_reason` — one sentence, at most 160 characters, naming the concrete thing that makes this dangerous. Omit all three fields only when the diff is unreadable; never emit `door`/`blast_radius` without `danger_reason`.
+
+## Merge Danger Rubric
+
+Classify `door` and `blast_radius` for every diff, independent of routing:
+
+- `door: "one-way"` when the diff includes ANY of: SQL/DDL migrations, schema or
+  API contract changes other services depend on, deploy/secrets/env wiring,
+  feature-flag defaults flipped on, writes that mutate or backfill existing data,
+  workflow files that auto-run on push to main. Otherwise `"two-way"`.
+- `blast_radius: "large"` when a bad merge reaches: production data or secrets,
+  auth/security boundaries, billing, cross-repo consumers, or every user.
+  `"medium"` when it reaches one feature, tenant cohort, or repository.
+  `"small"` for internal-only surfaces (tests, docs, tooling, dev scripts).
+- `danger_reason` names the concrete mechanism, not a category. Good:
+  `"adds NOT NULL column to sessions — rewrite locks prod table"`. Bad:
+  `"risky change"`.
 
 ## Classification Rules
 

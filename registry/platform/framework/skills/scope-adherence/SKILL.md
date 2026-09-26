@@ -1,7 +1,7 @@
 ---
 name: scope-adherence
 version: 1.0.0
-description: "Checks if a PR diff stays within the stated scope. Flags files modified that appear unrelated to the PR title/description, and new abstractions with only one call site."
+description: "Checks if a PR diff stays within the stated scope. Flags files modified that appear unrelated to the PR title/description, new abstractions with only one call site, and promised outcomes the diff does not deliver."
 type: skill
 disable-model-invocation: true  # slash/CI-invoked checklist — removed from model-facing catalogue to cut per-session tokens (2026-07-06); delete this line to restore auto-invocation
 model: haiku
@@ -34,6 +34,9 @@ For each new function, class, or module introduced: is it called from more than 
 
 ### 3. Formatting creep
 In files directly related to the stated task: are there formatting-only changes (whitespace, comment rewording, import reordering) that account for >20% of the changed lines in that file but are unrelated to the functional change? Flag these sections.
+
+### 4. Under-delivery (spec axis)
+Scope adherence is bidirectional — the diff must not only stay inside the stated scope but also cover it. For each concrete claim in the PR title/description ("adds endpoint X", "fixes retry for Y", "adds validation to Z"): is there a corresponding change in the diff? Flag each stated outcome with no matching diff change — a description that promises more than the diff delivers usually means the implementer agent ran out of context mid-task, and the PR review is where that should surface. Skip vague marketing phrasing; only check concrete, verifiable claims.
 
 ## Output
 

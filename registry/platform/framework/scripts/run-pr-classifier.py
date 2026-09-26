@@ -37,6 +37,10 @@ _FALLBACK_MANIFEST = {
     "invoke_agents": ["systems-consistency", "architecture-impact", "security-deep-dive"],
     "depth": "broad",
     "reason": "classifier-fallback: running all checks",
+    # Unclassified, not "two-way door": a failed classifier cannot judge danger.
+    "door": "unknown",
+    "blast_radius": "unknown",
+    "danger_reason": "",
 }
 
 _VALID_SKILLS = {
@@ -49,6 +53,8 @@ _VALID_SKILLS = {
     "scope-adherence",
 }
 _VALID_AGENTS = {"systems-consistency", "architecture-impact", "security-deep-dive"}
+_VALID_DOORS = {"one-way", "two-way"}
+_VALID_BLAST = {"small", "medium", "large"}
 
 
 def _load_agent(agent_path: pathlib.Path) -> tuple[dict, str]:
@@ -176,13 +182,21 @@ def main() -> None:
         if depth == "broad" and not invoke_skills and not invoke_agents:
             depth = "narrow"
 
+        door = data.get("door") if data.get("door") in _VALID_DOORS else "unknown"
+        blast = data.get("blast_radius") if data.get("blast_radius") in _VALID_BLAST else "unknown"
+        danger_reason = data.get("danger_reason", "") if (door != "unknown" or blast != "unknown") else ""
+
         manifest = {
             "invoke_skills": invoke_skills,
             "invoke_agents": invoke_agents,
             "depth": depth,
             "reason": data.get("reason", ""),
+            "door": door,
+            "blast_radius": blast,
+            "danger_reason": danger_reason,
         }
         print(f"[classifier] skills={invoke_skills} agents={invoke_agents} depth={manifest['depth']}")
+        print(f"[classifier] merge_danger: door={door} blast_radius={blast}")
     except Exception as exc:
         print(f"[classifier] Failed ({exc}), using fallback manifest")
         manifest = _FALLBACK_MANIFEST

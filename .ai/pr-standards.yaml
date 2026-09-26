@@ -1,0 +1,50 @@
+# PR standards manifest — starter.
+# Consumed by .claude/agents/pr-standards-checker.md during PR review.
+# This file is repo-owned: customize rules for this codebase, and increment
+# `version` on any rule change. The pr-standards-checker agent reads whatever
+# rules are here — add, remove, or reword sections freely.
+
+version: "1.0.0"
+last_updated: "2026-09-26"
+
+commit_format:
+  style: conventional_commits
+  pattern: "^(feat|fix|chore|docs|refactor|test|ci|perf|build)(\\([a-z0-9-]+\\))?: .{1,80}$"
+  rules:
+    - "Scope in parentheses is optional but recommended"
+    - "No 'wip' or 'temp' commit messages in final PRs"
+
+python_scripts:
+  location: scripts/
+  rules:
+    - "All scripts must have a module docstring"
+    - "No bare except clauses — always catch specific exception types"
+    - "No hardcoded secrets, tokens, or API keys — read from environment"
+    - "Scripts that run in CI hooks must exit 0 on non-critical failures (never block the agent loop)"
+    - "Scripts with testable logic should have a corresponding test under scripts/tests/ or tests/"
+
+workflow_files:
+  location: .github/workflows/
+  rules:
+    - "All actions must be pinned to a full SHA commit hash, not a tag"
+    - "Secrets must be passed via env: block, never inline in run: commands"
+    - "New workflows must include a concurrency group to cancel stale runs"
+
+testing:
+  location: "**/*.{test,spec}.{ts,tsx,js,py}, **/test_*.py, **/tests/**/*.py"
+  rules:
+    - "No tautological tests: an assertion must not re-derive its expected value from the implementation under test (e.g. `expect(add(a,b)).toBe(a+b)`, `assert result == fn(input)` where the expected side calls the same code path)"
+    - "Every assertion must pin a literal, a fixture, or a value computed independently of the code under test"
+    - "No test that cannot fail: `expect(mock).toHaveBeenCalled()` on a mock you just configured, or asserting a constant equals itself, counts as tautological"
+
+test_coverage:
+  # Diff-wide (no location): must run even when a PR touches no test file —
+  # a source-only diff is exactly where missing coverage hides.
+  rules:
+    - "Changed functions with observable behaviour need at least one assertion a mutation would kill — test presence alone is not coverage"
+    - "A source-only diff that adds or changes behaviour should come with a test change; if none exists, flag it"
+
+security:
+  rules:
+    - "No hardcoded credentials, API keys, or tokens in any committed file"
+    - "PII (names, emails, phone numbers) must not appear in committed .ai/ files"

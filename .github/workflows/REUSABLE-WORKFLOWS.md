@@ -567,8 +567,11 @@ on:
     workflows: [Static Review, PR Assessment, Secret Scan, CI]
     types: [completed]
 
+# workflow_run payloads carry no pull_request/issue context — fall through to
+# the completed run's PR number, else its run id, so completions for different
+# PRs do not share a group and cancel each other.
 concurrency:
-  group: pr-autofix-${{ github.event.pull_request.number || github.event.issue.number }}
+  group: pr-autofix-${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number || github.event.workflow_run.id || github.run_id }}
   cancel-in-progress: true
 
 permissions:
@@ -578,7 +581,7 @@ permissions:
 
 jobs:
   autofix:
-    uses: Manolii-org/ai-starter-pack/.github/workflows/pr-autofix-loop-reusable.yml@v1.14.0
+    uses: Manolii-org/ai-starter-pack/.github/workflows/pr-autofix-loop-reusable.yml@v1.15.0
     with:
       provider_mode: proxy
       litellm_proxy_url: ${{ vars.LITELLM_PROXY_URL }}

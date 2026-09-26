@@ -94,7 +94,20 @@ class Judge:
         self.sha = sha
         self.repo = os.getenv("GITHUB_REPOSITORY", "")
         self.token = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")
+        self.merge_danger = self._load_merge_danger()
         self.judge_log_dir = Path(".ai/judge-log")
+
+    @staticmethod
+    def _load_merge_danger() -> dict:
+        """Read the classifier's merge-danger verdict from the classify job output.
+
+        'unknown'/absent means unclassified — never rendered as a safe verdict.
+        """
+        try:
+            data = json.loads(os.getenv("MERGE_DANGER", "{}") or "{}")
+        except json.JSONDecodeError:
+            return {}
+        return data if isinstance(data, dict) else {}
 
     def load_candidates(self) -> list[Finding]:
         """Load all findings from .ai/candidates/*.json (skip manifest.json)."""
@@ -300,6 +313,16 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
             REVIEW_MARKER,
             "## PR Assessment Review",
         ]
+
+        door = self.merge_danger.get("door")
+        if door in ("one-way", "two-way"):
+            blast = self.merge_danger.get("blast_radius", "unknown")
+            line = f"**Merge danger:** {door} door · blast radius: {blast}"
+            reason = str(self.merge_danger.get("danger_reason", "")).replace("\n", " ").strip()
+            if reason:
+                line += f" — {reason}"
+            body_lines.append(line)
+            body_lines.append("")
 
         errors = [f for f in surviving if f["severity"] == "ERROR"]
         warnings = [f for f in surviving if f["severity"] == "WARNING"]
