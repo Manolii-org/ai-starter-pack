@@ -479,6 +479,10 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
                     review.get("commit_id") == self.sha
                     and author == JUDGE_REVIEW_AUTHOR
                     and REVIEW_MARKER in body
+                    # A DISMISSED verdict is dead: judged→none→judged at the
+                    # same SHA would otherwise find the dismissed review and
+                    # suppress the replacement assessment.
+                    and review.get("state") != "DISMISSED"
                 ):
                     # Reviews are returned oldest-first; only the LATEST judge
                     # review at this commit decides dedup. The tracker must live
