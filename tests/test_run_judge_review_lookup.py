@@ -130,6 +130,18 @@ def test_latest_review_decides_aba(judge, monkeypatch):
     assert judge._review_exists_at_sha() is False, "stale A review suppressed the re-run"
 
 
+def test_latest_review_decides_aba_across_pages(judge, monkeypatch):
+    """Same A→B→A but the stale A match sits on page 1 and the newer B verdict on
+    page 2 — an early return on the page-1 match would suppress the re-run."""
+    page_one = (
+        [_review(rj.REVIEW_MARKER, commit_id="other")] * (rj._REVIEWS_PER_PAGE - 1)
+        + [_review(MARKED + "\n## PR Assessment Review")]
+    )
+    page_two = [_review(f"{rj.REVIEW_MARKER}\n<!-- meta:otherdigest1 -->")]
+    monkeypatch.setattr(rj.urllib.request, "urlopen", _paged([page_one, page_two]))
+    assert judge._review_exists_at_sha() is False, "cross-page stale digest suppressed the re-run"
+
+
 def test_ignores_a_review_on_a_different_sha(judge, monkeypatch):
     page = [_review(rj.REVIEW_MARKER, commit_id="deadbeef")]
     monkeypatch.setattr(rj.urllib.request, "urlopen", _paged([page]))

@@ -344,8 +344,13 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
             )
             if reason:
                 line += f" — {reason}"
-            body_lines.append(line)
-            body_lines.append("")
+        else:
+            # An unclassified verdict must still surface — omitting the line
+            # would make a classifier failure indistinguishable from a clean
+            # low-risk assessment.
+            line = "**Merge danger:** unknown (unclassified)"
+        body_lines.append(line)
+        body_lines.append("")
 
         errors = [f for f in surviving if f["severity"] == "ERROR"]
         warnings = [f for f in surviving if f["severity"] == "WARNING"]
@@ -421,6 +426,7 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
         if not self.token or not self.repo:
             return False
 
+        latest_digest_matches = None
         for page in range(1, _MAX_REVIEW_PAGES + 1):
             try:
                 url = (
@@ -448,7 +454,6 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
                 logger.error("Unexpected reviews response shape — skipping duplicate check")
                 return False
 
-            latest_digest_matches = None
             for review in reviews:
                 author = (review.get("user") or {}).get("login")
                 body = review.get("body") or ""
@@ -458,15 +463,14 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
                     and REVIEW_MARKER in body
                 ):
                     # Reviews are returned oldest-first; only the LATEST judge
-                    # review at this commit decides dedup. An older review with
-                    # a matching digest must not suppress a fresh verdict when
-                    # a different metadata state was assessed between (A→B→A).
+                    # review at this commit decides dedup. The tracker must live
+                    # across pages — returning True on a page-1 match would let
+                    # a stale digest suppress a newer contradicting verdict that
+                    # sits on a later page (A→B→A across the page boundary).
                     latest_digest_matches = f"<!-- meta:{self.meta_digest} -->" in body
-            if latest_digest_matches:
-                return True
 
             if len(reviews) < _REVIEWS_PER_PAGE:
-                return False
+                return bool(latest_digest_matches)
 
         logger.error(f"Hit the {_MAX_REVIEW_PAGES}-page cap scanning reviews")
         return False
@@ -608,8 +612,10 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
                 )
                 if reason:
                     line += f" — {reason}"
-                body_lines.append(line)
-                body_lines.append("")
+            else:
+                line = "**Merge danger:** unknown (unclassified)"
+            body_lines.append(line)
+            body_lines.append("")
             body_lines.append("No actionable findings produced by specialist agents.")
             request_body = {
                 "body": "\n".join(body_lines),
