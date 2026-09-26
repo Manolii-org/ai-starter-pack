@@ -31,6 +31,9 @@ _ANTHROPIC_API_VERSION = "2023-06-01"
 # can never crowd another category past the inventory cap.
 _DANGER_CATEGORIES = [
     ("migration", re.compile(r"migrations?/|\.sql", re.I)),
+    # Schema contracts are one-way in the rubric; ranked before sensitive
+    # categories — buckets isolate it, so it can never crowd auth paths.
+    ("schema", re.compile(r"schema", re.I)),
     ("workflow", re.compile(r"\.github/workflows", re.I)),
     ("dockerfile", re.compile(r"dockerfile", re.I)),
     ("terraform", re.compile(r"terraform", re.I)),
@@ -38,7 +41,6 @@ _DANGER_CATEGORIES = [
     ("lockfile", re.compile(r"package-lock|pnpm-lock|yarn\.lock", re.I)),
     ("auth", re.compile(r"auth|secret|credential|token", re.I)),
     ("package", re.compile(r"package\.json", re.I)),
-    ("schema", re.compile(r"schema", re.I)),
     ("shell", re.compile(r"\.sh$|\.bash$", re.I)),
     ("other", re.compile(r".")),
 ]
