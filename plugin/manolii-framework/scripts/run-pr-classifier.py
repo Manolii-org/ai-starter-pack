@@ -32,6 +32,13 @@ _DANGER_PATH_RE = re.compile(
     r"\.sh$|\.bash$)",
     re.I,
 )
+# One-way-door surfaces outrank everything else — a flood of merely-dangerous
+# files (e.g. 500 shell scripts) must not push a migration past the cap.
+_ONE_WAY_PATH_RE = re.compile(
+    r"(migrations?/|\.sql|schema|\.github/workflows|dockerfile|terraform|"
+    r"deploy|package-lock|pnpm-lock|yarn\.lock)",
+    re.I,
+)
 
 # Fallback manifest when classifier fails — run everything.
 _FALLBACK_MANIFEST = {
@@ -188,7 +195,15 @@ def main() -> None:
     )
     # Danger-relevant paths first so high-risk files never fall off the cap.
     changed_paths = sorted(
-        changed_paths, key=lambda p: (0 if _DANGER_PATH_RE.search(p) else 1, p)
+        changed_paths,
+        key=lambda p: (
+            0
+            if _ONE_WAY_PATH_RE.search(p)
+            else 1
+            if _DANGER_PATH_RE.search(p)
+            else 2,
+            p,
+        ),
     )
     inventory = "\n".join(changed_paths[:500])
     if len(changed_paths) > 500:
