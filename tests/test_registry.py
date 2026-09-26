@@ -14215,3 +14215,41 @@ def test_script_dep_round84_spaced_redir_target(tmp_path):
             b'(cat scripts/x.sh >&2) 2>&1 > /dev/null | sh',
             b'(cat scripts/x.sh >&2) 2> /dev/null 2>&1 | sh'):
         assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round85_fd2_fwd_edges(tmp_path):
+    """Round-85: None fd-map guard, exec-on-own-chain, numbered
+    emitted streams, missing redirect target — all verified live
+    (CodeRabbit/Devin on #133/#17/#1963)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (
+            # Headless/describe-only stages yield a None fd map —
+            # `(cat x | command -v sh) |&` raised AttributeError
+            # (CodeRabbit on #133, round-85).
+            b'(cat scripts/x.sh | command -v sh) |& sh',
+            b'cat scripts/x.sh | { wc -l; } |& sh',
+            b'(cat scripts/x.sh | X=1) |& sh',
+            # An exec stage on an `own` chain runs the REPLACEMENT
+            # text, not the script — `wc -l | sh >&2` runs the count
+            # (verified live: `sh:: not found`).
+            b'(cat scripts/x.sh | wc -l | sh >&2) |& sh',
+            # Numbered emitted streams die on `N\t` regardless of
+            # provenance (verified live: `1: not found`).
+            b'(echo bash scripts/x.sh | cat -n >&2) |& sh',
+            b'(echo bash scripts/x.sh | cat >&2) |& cat -n | sh',
+            b'(echo bash scripts/x.sh | cat >&2) |& nl | sh',
+            # `2> |&` is a bash syntax error — no viable pipe.
+            b'(echo bash scripts/x.sh >&2) 2> |& sh'):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # fd1→fd2 forwarders and exec-on-fd2 still merge under `|&`.
+            b'(echo bash scripts/x.sh | cat >&2) |& sh',
+            b'(cat scripts/x.sh | cat >&2) |& sh',
+            b'(cat scripts/x.sh | sh >&2) |& cat',
+            # `nl -b n` space-pads but keeps the command word —
+            # verified live: RAN_X.
+            b'(cat scripts/x.sh | nl -b n >&2) |& sh'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line

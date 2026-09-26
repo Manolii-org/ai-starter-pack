@@ -7224,6 +7224,67 @@ def _sh_c_word(sub: bytes, sub_words: list, n: int):
     return None
 
 
+def _stage_numbers_stream(stg: bytes) -> bool:
+    """True when the stage's head prepends a line number to content
+    lines — `cat -n`/`-b`, `nl` body-numbering on, `pr -n`. The `N\t`
+    prefix kills ANY command word flowing through (`1 bash x` runs
+    `1`, not `bash`), so numbering sinks the stream no matter the
+    content's provenance — unlike `_stdin_exec_head`'s numbered gate,
+    no scripts/ stream operand is needed (Devin on #17/#1963,
+    round-85 — verified live)."""
+    key, args, _sfd, _he = _seg_head_args(stg, {})
+    if key == b"cat":
+        for a in args:
+            if a == b"--":
+                break
+            if a.startswith(b"--"):
+                if a.split(b"=", 1)[0].startswith(b"--number"):
+                    return True
+            elif (a.startswith(b"-") and a != b"-"
+                    and any(c in b"nb" for c in a[1:])):
+                return True
+        return False
+    if key == b"nl":
+        body = b"t"
+        i2 = 0
+        while i2 < len(args):
+            a = args[i2]
+            if a == b"--":
+                break
+            if a.startswith(b"--"):
+                base = a.split(b"=", 1)[0]
+                if (len(base) > 2
+                        and b"--body-numbering".startswith(base)):
+                    if b"=" in a:
+                        body = a.split(b"=", 1)[1]
+                    elif i2 + 1 < len(args):
+                        body = args[i2 + 1]
+                        i2 += 1
+            elif a == b"-b":
+                if i2 + 1 < len(args):
+                    body = args[i2 + 1]
+                    i2 += 1
+            elif len(a) > 2 and a[:2] == b"-b":
+                body = a[2:]
+            i2 += 1
+        return body != b"n"
+    if key == b"pr":
+        # `-n`/`--number-lines` prefixes `N<TAB>` per content line;
+        # inside a cluster `n` counts only before an operand-taking
+        # short (same as _stdin_exec_head's pr branch).
+        for a in args:
+            if a == b"--":
+                break
+            if a.startswith(b"--"):
+                if a.split(b"=", 1)[0] == b"--number-lines":
+                    return True
+            elif (a.startswith(b"-") and a != b"-"
+                    and b"n" in a[1:]):
+                return True
+        return False
+    return False
+
+
 def _fwd_stage_prov(stg: bytes, prov: str, stream_src,
                     ifs: bytes | None = None):
     """_seg_prov for an fd1→fd2 FORWARDER stage under fd2on: the
@@ -7237,6 +7298,12 @@ def _fwd_stage_prov(stg: bytes, prov: str, stream_src,
     if v == "exec":
         return None
     if v == "sink":
+        return "own"
+    if prov in ("up", "thru") and _stage_numbers_stream(stg):
+        # Numbered emitted/unknown content is dead either way —
+        # `_stdin_exec_head` only sinks numbering when a scripts/
+        # operand proves the stream (`cat -n` on an emitted `bash x`
+        # yields `1 bash x` — Devin on #17/#1963, round-85).
         return "own"
     return _seg_prov(stg, prov, stream_src, ifs)
 
@@ -8029,11 +8096,16 @@ def _group_fd1_prov(src: bytes, pos: int):
                             None)
                     p2_ = _fwd_stage_prov(
                         stg2, chain, chain_src, _line_ifs(src, ga))
-                    if p2_ is None or p2_ == "script":
+                    if (p2_ == "script"
+                            or (p2_ is None
+                                and chain in ("up", "script", "thru"))):
                         prov = "script"
                     elif (p2_ is not None and p2_ != "own"
                             and prov == "own"):
                         prov = p2_
+                    # p2_ None on an 'own' chain: the stage executed
+                    # a REPLACEMENT stream (`wc -l`'s count — Devin on
+                    # #17/#1963, round-85) — contributes 'own'.
                 chain = "own"
                 chain_src = None
                 continue
@@ -8041,7 +8113,23 @@ def _group_fd1_prov(src: bytes, pos: int):
                 chain = "own"        # diverted — nothing passes on
                 chain_src = None
                 continue
+            _bw = _shell_words(_mask_parens(stg))
+            if (_bw and all(
+                    _ASSIGN_WORD.match(
+                        _word_text(stg[wa:wb]))
+                    for wa, wb in _bw)):
+                # A stage of only `NAME=value` words has no command
+                # — it reads nothing and emits nothing, so the
+                # stream dies there (`cat x | X=1` — CodeRabbit on
+                # #133, round-85 — verified live).
+                chain = "own"
+                chain_src = None
+                continue
             p_ = _seg_prov(stg, chain, chain_src, _line_ifs(src, ga))
+            if p_ in ("up", "thru") and _stage_numbers_stream(stg):
+                # `cat -n`/`nl`/`pr -n` prefix `N\t` — kills the
+                # command word regardless of provenance (round-85).
+                p_ = "own"
             if p_ is None:
                 chain = "own"
                 chain_src = None
@@ -8077,6 +8165,7 @@ def _redir_word(src: bytes, k: int, subs):
     `\\c` escapes, and `$(`/`<(`/`>(` spans stay inside the word."""
     while k < len(src) and src[k:k + 1] in b" \t":
         k += 1
+    t0 = k
     while k < len(src):
         c2 = src[k:k + 1]
         if c2 in b" \t\n;|&()<>":
@@ -8101,7 +8190,10 @@ def _redir_word(src: bytes, k: int, subs):
             k = e + 1
             continue
         k += 1
-    return k
+    # A separator right after the blanks is no target at all —
+    # `2> |&`/end-of-line is a bash SYNTAX ERROR, so the group's
+    # pipe is not viable (Devin on #133, round-85 — verified live).
+    return k if k > t0 else None
 
 
 def _closer_redir(src: bytes, j: int, subs):
@@ -8518,7 +8610,21 @@ def _pipe_to_exec(src: bytes, pos: int, od_tails=frozenset()) -> bool:
                  if ws else None)
         pin = prov
         psrc = flow_src
-        r = _seg_prov(seg, prov, flow_src, _line_ifs(src, j))
+        if (ws and all(
+                _ASSIGN_WORD.match(
+                    _word_text(seg[wa:wb]))
+                for wa, wb in ws)):
+            # A stage of only `NAME=value` words has no command —
+            # it reads nothing and emits nothing, so the stream
+            # dies there (`cat x | X=1` — round-85 — verified live).
+            r = "own"
+        else:
+            r = _seg_prov(seg, prov, flow_src, _line_ifs(src, j))
+        if r in ("up", "thru") and _stage_numbers_stream(seg):
+            # `cat -n`/`nl`/`pr -n` prefix `N\t` — kills the command
+            # word regardless of the stream's provenance (Devin on
+            # #1963, round-85 — verified live).
+            r = "own"
         if r is None:
             return True   # an exec stage consumed the dep stream
         if r == "script":
@@ -8593,28 +8699,38 @@ def _pipe_to_exec(src: bytes, pos: int, od_tails=frozenset()) -> bool:
                     if g2[1] is not None:
                         flow_src = g2[1]
                 elif (g2 is not None and g2[3]
-                        and _seg_head_args(seg, {})[2].get(1)
+                        and (_seg_head_args(seg, {})[2] or {}).get(1)
                             == _FD_ERR):
                     # The stage's fd1→fd2 lands on the group's merged
                     # stderr — the stream continues there instead of
                     # ending (`(echo bash x | cat >&2) |& sh` forwards
                     # the emitted text to sh — Devin on #1963,
                     # round-84 — verified live). Re-evaluate it as a
-                    # forwarder on the chain it read.
+                    # forwarder on the chain it read. A head-less or
+                    # describe-only stage yields no fd map — it emits
+                    # nothing either way (CodeRabbit on #133, r-85).
                     r2 = _fwd_stage_prov(
                         re.sub(rb"[0-9]*>&2\b", b"", seg),
                         pin, psrc, _line_ifs(src, j))
                     if r2 is None:
-                        return True   # it executes its input on fd2
-                    prov = r2
-                    if r2 == "script":
-                        _k4, _a4, _f4, _h4 = _seg_head_args(seg, {})
-                        flow_src = next(
-                            (_operand_text(a5)
-                             for a5 in _a4 if b"scripts/" in a5),
-                            flow_src)
-                    elif r2 == "own":
+                        # An exec stage running SCRIPT/emitted input
+                        # is the dep — on 'own' input it executes a
+                        # replacement stream (`wc -l`'s count — Devin
+                        # on #17/#1963, round-85 — verified live).
+                        if pin != "own":
+                            return True
+                        prov = "own"
                         flow_src = None
+                    else:
+                        prov = r2
+                        if r2 == "script":
+                            _k4, _a4, _f4, _h4 = _seg_head_args(seg, {})
+                            flow_src = next(
+                                (_operand_text(a5)
+                                 for a5 in _a4 if b"scripts/" in a5),
+                                flow_src)
+                        elif r2 == "own":
+                            flow_src = None
             if prov not in ("up", "script", "thru"):
                 return False  # the stage replaced or diverted the stream
         j += len(win)
