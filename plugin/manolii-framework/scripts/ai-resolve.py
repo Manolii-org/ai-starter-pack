@@ -3529,6 +3529,13 @@ def _effective_head(words: list, win: bytes) -> int | None:
             i += 1
             continue
         key = _command_key(win[words[i][0]:words[i][1]])
+        if key in (b"{", b"}", b""):
+            # A bare group opener/closer can't head a command — `{`
+            # splits off as its own word (unlike `(`, which glues
+            # onto the head) — `{ echo bash x; } | sh` resolves to
+            # echo (Devin on #132, round-82 — verified live).
+            i += 1
+            continue
         if key in _EXEC_WRAPPERS:
             i += 1
             pos_skip = _WRAPPER_POS_SKIP.get(key, 0)
@@ -4051,6 +4058,8 @@ def _strtold_fraction(text: bytes):
             digits = (m.group(1) or "") + (m.group(2) or "")
             if not digits:
                 return None
+            if not int(digits, 16):
+                return Fraction(0)    # `0x0p±N` is zero at any exponent
             f = (Fraction(int(digits, 16))
                  / (16 ** len(m.group(2) or "")))
             if m.group(3):
@@ -4067,6 +4076,18 @@ def _strtold_fraction(text: bytes):
                 f *= Fraction(2) ** pe
         else:
             e_ = re.search(r"[eE]([+-]?[0-9]+)$", t2)
+            mant = (e_ is not None and t2[:e_.start()] or t2)
+            if (re.fullmatch(
+                    r"(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)"
+                    r"(?:[eE][+-]?[0-9]+)?", t2) is not None
+                    and not re.search(r"[1-9]", mant)):
+                # A decimal mantissa is zero iff every digit is 0 —
+                # `float(mant)` would underflow to 0.0 for nonzero
+                # values below binary64's range (`0.`+400 zeros+`1`
+                # — CodeRabbit/Devin on #1963/#133/#1431/#17,
+                # round-78 review — flock rejects it as ERANGE,
+                # verified live).
+                return Fraction(0)    # `0e±N`/`0.0e±N` is zero
             if e_ is not None:
                 de = int(e_.group(1))
                 # Same bound for decimal exponents — `1e-100000000`
@@ -5444,8 +5465,82 @@ def _numbered_execs(data: bytes) -> bool:
     return False
 
 
+def _emit_execs(data: bytes) -> bool:
+    """True when emitted bytes can still execute a command — per
+    line, a `cat -n`-style `N<TAB>` prefix eats only the first
+    command (a `;`/`&`/`|` tail still runs), while an unnumbered
+    non-blank line runs as-is (mixed `|&` merges carry raw fd2
+    bytes alongside numbered fd1 bytes — Devin on #133, round-87).
+    """
+    for line in data.split(b"\n"):
+        i = 0
+        while i < len(line) and line[i:i + 1] == b" ":
+            i += 1
+        j = i
+        while j < len(line) and line[j:j + 1].isdigit():
+            j += 1
+        if j > i and line[j:j + 1] == b"\t":
+            for _ in _sub_cmd_seps(line):
+                return True
+        elif line.strip():
+            return True
+    return False
+
+
+def _emit_script_execs(data: bytes) -> bool:
+    """True when provable emitted bytes can execute script content —
+    numbered `N<TAB>` lines carry the stream's bytes with each line's
+    first command eaten (a top-level `;`/`&`/`|` tail still runs),
+    while raw sibling text that doesn't echo a numbered line revives
+    only by naming a `scripts/` file (`cat -n; echo OK` — `OK` never
+    runs the script — Devin on #133/#17, round-91 — verified live)."""
+    lines = data.split(b"\n")
+    numbered = []
+    for line in lines:
+        i = 0
+        while i < len(line) and line[i:i + 1] == b" ":
+            i += 1
+        j = i
+        while j < len(line) and line[j:j + 1].isdigit():
+            j += 1
+        if j > i and line[j:j + 1] == b"\t":
+            numbered.append(line[j + 1:])
+    for line in lines:
+        i = 0
+        while i < len(line) and line[i:i + 1] == b" ":
+            i += 1
+        j = i
+        while j < len(line) and line[j:j + 1].isdigit():
+            j += 1
+        if j > i and line[j:j + 1] == b"\t":
+            for _ in _sub_cmd_seps(line):
+                return True
+            continue
+        t = line.lstrip()
+        if not t:
+            continue
+        if t[:1] in (b"(", b"{"):
+            # A lone compound opener is a syntax error, not a command
+            # (`echo "(" | sh` fails — Devin on #133, round-91).
+            t = t[1:].lstrip()
+            if not t:
+                continue
+        w = t.split(b" ", 1)[0]
+        if b"(" in w or b"{" in w or w.isdigit():
+            # A bare number isn't a command — `wc -l`'s `0` output
+            # fails `0: not found` (Devin on #133, round-91 —
+            # verified live).
+            continue
+        if not numbered:
+            return True
+        if b"scripts/" in t or t in numbered:
+            return True
+    return False
+
+
 def _numbered_flows(ops: list, stream_src=None,
-                    redir_tgt: bytes | None = None) -> bool:
+                    redir_tgt: bytes | None = None,
+                    emit: bytes | None = None) -> bool:
     """True when a NUMBERED reader's emitted bytes still carry an
     executable command: the `N<TAB>` prefix neuters only each line's
     FIRST command (`1: not found`), while text after a top-level
@@ -5470,6 +5565,14 @@ def _numbered_flows(ops: list, stream_src=None,
     # (`cat --number <sep.sh | sh` reads sep.sh, round-64 review).
     for a in ops or [redir_tgt or b"-"]:
         if _operand_feeds_stream(a):
+            # `emit` is the stream's provable content — an `echo`'d
+            # line's separators survive the N\t prefix (`echo 'a;b' |
+            # cat -n | sh` runs b — round-86) while a separator-free
+            # emit is dead (all first commands).
+            if emit is not None:
+                if _numbered_execs(emit):
+                    return True
+                continue
             if stream_src is None:
                 return True
             a = stream_src
@@ -7206,6 +7309,920 @@ def _sh_c_word(sub: bytes, sub_words: list, n: int):
     return None
 
 
+def _number_sep_unsafe(key: bytes, args: list) -> bool:
+    """True when a numberer's separator can itself split commands —
+    `nl -s ';'` / `nl --number-separator=';'` / `pr -n';'` emit
+    `N;cmd`, and text after the `;` executes raw, so the stream is
+    NOT a numbered sink (Devin on #1431/#17, round-91 — verified
+    live: `nl -s ';'` prints `     1;sh x` and `sh` runs it)."""
+    if key == b"nl":
+        sep = None
+        i2 = 0
+        while i2 < len(args):
+            a = args[i2]
+            if a == b"--":
+                break
+            if a.startswith(b"--"):
+                base = a.split(b"=", 1)[0]
+                if (len(base) > 2
+                        and b"--number-separator".startswith(base)):
+                    if b"=" in a:
+                        sep = a.split(b"=", 1)[1]
+                    elif i2 + 1 < len(args):
+                        sep = args[i2 + 1]
+                        i2 += 1
+            elif a == b"-s":
+                if i2 + 1 < len(args):
+                    sep = args[i2 + 1]
+                    i2 += 1
+            elif len(a) > 2 and a[:2] == b"-s":
+                sep = a[2:]
+            i2 += 1
+        return sep is not None and any(c in b";&|\n" for c in sep)
+    if key == b"pr":
+        for a in args:
+            if a == b"--":
+                break
+            if a.startswith(b"--"):
+                continue
+            if len(a) > 1 and a.startswith(b"-"):
+                for ci, c in enumerate(a[1:]):
+                    if c == 0x6E:                       # n
+                        # `pr -n<SEP>` — SEP chars follow `n` in the
+                        # cluster (`-n';'` = sep `;`).
+                        return any(c2 in b";&|\n" for c2 in a[ci + 2:])
+                    if c in b"DhlNowWeisS":
+                        break
+    return False
+
+
+def _stage_numbers_stream(stg: bytes) -> bool:
+    """True when the stage's head prepends a line number to content
+    lines — `cat -n`/`-b`, `nl` body-numbering on, `pr -n`. The `N\t`
+    prefix kills ANY command word flowing through (`1 bash x` runs
+    `1`, not `bash`), so numbering sinks the stream no matter the
+    content's provenance — unlike `_stdin_exec_head`'s numbered gate,
+    no scripts/ stream operand is needed (Devin on #17/#1963,
+    round-85 — verified live)."""
+    key, args, _sfd, _he = _seg_head_args(stg, {})
+    if key == b"cat":
+        for a in args:
+            if a == b"--":
+                break
+            if a.startswith(b"--"):
+                if a.split(b"=", 1)[0].startswith(b"--number"):
+                    return True
+            elif (a.startswith(b"-") and a != b"-"
+                    and any(c in b"nb" for c in a[1:])):
+                return True
+        return False
+    if key == b"nl":
+        body = b"t"
+        i2 = 0
+        while i2 < len(args):
+            a = args[i2]
+            if a == b"--":
+                break
+            if a.startswith(b"--"):
+                base = a.split(b"=", 1)[0]
+                if (len(base) > 2
+                        and b"--body-numbering".startswith(base)):
+                    if b"=" in a:
+                        body = a.split(b"=", 1)[1]
+                    elif i2 + 1 < len(args):
+                        body = args[i2 + 1]
+                        i2 += 1
+            elif a == b"-b":
+                if i2 + 1 < len(args):
+                    body = args[i2 + 1]
+                    i2 += 1
+            elif len(a) > 2 and a[:2] == b"-b":
+                body = a[2:]
+            i2 += 1
+        # Only `a`/`t` number EVERY (non-empty) line — `pBRE` numbers
+        # just regex matches, so an unmatching stream line survives
+        # unnumbered (`nl -bp'^safe'` — Devin on #1431, round-90 —
+        # verified live); `n` numbers nothing.
+        if _number_sep_unsafe(key, args):
+            return False
+        return body in (b"a", b"t")
+    if key == b"pr":
+        # `-n`/`--number-lines` prefixes `N<TAB>` per content line;
+        # inside a cluster `n` counts only before an operand-taking
+        # short (same as _stdin_exec_head's pr branch) — `pr -hname`
+        # is `-h` with header 'name', NOT numbering (Devin on #1963,
+        # round-86 — verified live).
+        for a in args:
+            if a == b"--":
+                break
+            if a.startswith(b"--"):
+                if a.split(b"=", 1)[0] == b"--number-lines":
+                    return True
+            elif a.startswith(b"-") and a != b"-":
+                for ch in a[1:]:
+                    if ch == 0x6E:               # n
+                        # `pr -n<SEP>` — a command-separator SEP lets
+                        # the line tail run (`pr -n';'` — Devin on
+                        # #1431/#17, round-91 — verified live).
+                        return not _number_sep_unsafe(key, args)
+                    if ch in b"DhlNowWeisS":
+                        break
+        return False
+    return False
+
+
+_EMIT_SCALAR = frozenset(
+    b"wc seq date whoami hostname uname tty pwd base64 cksum sum "
+    b"md5sum sha1sum sha224sum sha256sum sha384sum sha512sum b2sum "
+    b"uuidgen".split())
+
+_EMIT_NOOUT = frozenset(
+    b"true false : test [ [[ cd exit return alias unalias umask "
+    b"readonly export declare local typeset set shift trap wait "
+    b"let break continue getopts".split())
+
+
+def _number_lines(data: bytes) -> bytes:
+    """`cat -n`-style transform — every non-empty line gains a `N\\t`
+    prefix, which neuters its first command (`1: not found`) while a
+    `;`/`&`/`|` tail still runs (Devin on #1963, round-87 — verified
+    live)."""
+    out = []
+    n = 1
+    for line in data.split(b"\n"):
+        if line:
+            out.append(str(n).encode() + b"\t" + line)
+            n += 1
+        else:
+            out.append(line)
+    return b"\n".join(out)
+
+
+def _stream_bytes(stream_src) -> bytes | None:
+    """Provable content bytes of a `scripts/` operand — the bundled
+    file's bytes when readable and bounded below one read buffer
+    (round-91); larger or missing files stay unprovable."""
+    if stream_src is None or b"scripts/" not in stream_src:
+        return None
+    if _PIN_SOURCE is not None:
+        data = _pinned_bytes(stream_src)
+        return data if data is not None and len(data) <= 65536 else None
+    if _RESOLVE_ROOT is None:
+        return None
+    try:
+        p = _RESOLVE_ROOT / stream_src.decode("utf-8", "surrogateescape")
+        if not p.is_file() or p.stat().st_size > 65536:
+            return None
+        return p.read_bytes()
+    except OSError:
+        return None
+
+
+def _emit_own(stg: bytes) -> bytes | None:
+    """Bytes a stage emits when its output is its OWN (prov 'own') —
+    None when unprovable. Inert assignments and headless stages emit
+    nothing; `echo` joins its operands (`-e` escapes may decode into
+    separators — unprovable); no-output heads (`true`/`test`/`cd`…)
+    emit nothing; scalar/sink heads (`wc`, sums, `seq`, `date`,
+    `yes`…) emit their operands — separator-free unless an operand
+    literally carries one (`date '+a;b'` — unprovable)."""
+    _bw = _shell_words(_mask_backticks(_mask_parens(stg)))
+    if _assign_words_inert(_bw, stg):
+        return b""
+    _tg: dict = {}
+    key, args, _f, _h = _seg_head_args(stg, _tg)
+    if key is None:
+        return b""
+    if key == b"echo":
+        out = []
+        ends_nl = True
+        for a in args:
+            t = _word_text(a)
+            if t == b"-n":
+                ends_nl = False
+                continue
+            if t in (b"-e", b"-E", b"-ne", b"-en"):
+                return None          # escapes may decode to seps
+            if t.startswith(b"-") and t != b"-":
+                return None          # unknown flag — unprovable
+            if (b"$" in t or b"`" in t or b"\\" in t or b"\n" in t):
+                return None
+            out.append(t)
+        return b" ".join(out) + (b"\n" if ends_nl else b"")
+    if key in _EMIT_NOOUT:
+        return b""
+    if key in _EMIT_SCALAR or key in _STDIN_SINK_HEADS:
+        for a in args:
+            t = _word_text(a)
+            if t.startswith(b"-") and t != b"-":
+                continue             # flags don't emit
+            if (any(True for _ in _sub_cmd_seps(t))
+                    or b"$" in t or b"`" in t or b"\\" in t):
+                return None          # literal sep/sub — unprovable
+        if key == b"date":
+            return _emit_own_date(args)
+        if key in _EMIT_SCALAR:
+            # A scalar head's output is provably not a command word
+            # — model it as a bare number, dead under exec
+            # (`wc -l | sh` runs `0` — round-91 — verified live).
+            return b"0\n"
+        # A sink head's own output is arbitrary text — an
+        # exec-able-shaped placeholder keeps the emitted stream
+        # unruled-out (round-91).
+        return b"x\n"
+    if _reader_operands(key, args):
+        return None                  # file-emit — unprovable
+    return None
+
+
+def _emit_own_date(args) -> bytes | None:
+    """`date`'s own output — bare `date` prints a (dead) timestamp;
+    a `+FORMAT` operand prints the format's literal text when it
+    holds no `%` directives (`date '+sh x' | sh` runs `sh x` — Devin
+    on #17/#1963, round-92 — verified live); a `%`-bearing format or
+    an operand-taking option's value stays unprovable, and extra or
+    non-`+` operands make date error out (nothing on fd1). A second
+    output-format option conflicts with `+FORMAT` (`--rfc-3339=sec
+    '+x'` errors "multiple output formats" — Devin on #1431/#17,
+    round-93 — verified live); `--help`/`--version` exit before the
+    format runs; and `-d`/`--date`-class options make the emit
+    unprovable — a bad value errors to nothing while a good one
+    emits the format (`date -d tomorrow '+sh x'` runs `sh x`)."""
+    _TAKES = (b"--date", b"--file", b"--reference", b"--set")
+    _FMTOPT = (b"--iso-8601", b"--rfc-3339", b"--rfc-email")
+    term = False                     # --help/--version — early exit
+    valopt = False                   # value options — validity unprovable
+    fmtopt = False                   # a second output-format option
+    ops = []
+    i2 = 0
+    end = len(args)
+    while i2 < end:
+        a = args[i2]
+        i2 += 1
+        if a == b"--":
+            break
+        if a.startswith(b"--"):
+            base = a.split(b"=", 1)[0]
+            if (len(base) > 2
+                    and (b"--version".startswith(base)
+                         or b"--help".startswith(base))):
+                term = True          # unique abbrev of version/help
+                continue
+            if base in _TAKES:
+                valopt = True
+                if b"=" not in a:
+                    i2 += 1          # consume the option's value arg
+                continue
+            if base in _FMTOPT:
+                fmtopt = True
+                if b"=" not in a and base != b"--rfc-email":
+                    i2 += 1          # --iso-8601/--rfc-3339 take an arg
+                continue
+            continue                 # inert longs (--universal, --debug…)
+        if a.startswith(b"-") and a != b"-":
+            cl = a[1:]
+            for ci2, c2 in enumerate(cl):
+                if c2 in b"dfrs":
+                    valopt = True
+                    if ci2 == len(cl) - 1:
+                        i2 += 1      # `-d VALUE` — value is next arg
+                    break            # mid-cluster — tail is the value
+                if c2 in b"IR":
+                    fmtopt = True
+                    if c2 == 0x49:   # -I takes an optional glued arg
+                        break        #   — cluster ends here
+            continue
+        ops.append(a)
+    ops.extend(args[i2:])            # operands after `--`
+    if term:
+        return b"0\n"                # version/help text — no script ref
+    if fmtopt:
+        return (b"" if ops else b"0\n")  # +FORMAT conflicts; alone prints a stamp
+    if len(ops) > 1:
+        return b""                   # extra operand — date errors
+    if not ops:
+        return b"0\n"
+    t = _word_text(ops[0])
+    if t[:1] != b"+":
+        return b""                   # non-format operand — date errors
+    if valopt:
+        return None                  # emit needs the value to parse — unprovable
+    if b"%" in t:
+        return None                  # directives interleave — unprovable
+    return t[1:] + b"\n"
+
+
+def _emit_stage_simple(stg: bytes, data, fd2on: bool):
+    """(fd1, fd2) byte pair a simple stage emits given stdin `data`,
+    else None when unprovable. fd2 bytes reach the group's pipe only
+    when the pipe merges (`|&`/post-closer `2>&1`)."""
+    _bws = _shell_words(_mask_backticks(_mask_parens(stg)))
+    if _all_assign_words(_bws, stg):
+        return b"", b""          # assign-only stage — emits nothing
+    sfd = _seg_head_args(stg, {})[2]
+    sfd1 = sfd.get(1) if sfd is not None else None
+    if sfd1 in (_FD_FILE, _FD_CLOSED):
+        return b"", b""        # diverted — nothing reaches either fd
+    stg2 = (re.sub(rb"[0-9]*>&2\b", b"", stg)
+            if sfd1 == _FD_ERR else stg)
+    p_ = _seg_prov(stg2, "up", None, None)
+    if p_ in ("up", "thru"):
+        if data is None:
+            return None          # unprovable input stays unprovable
+        if _stage_numbers_stream(stg2):
+            # `cat -n`/`nl`/`pr -n` rewrite the bytes — model the
+            # N\t prefix rather than passing them through unchanged
+            # (Devin on #1963, round-87).
+            out = _number_lines(data)
+        elif _seg_head_args(stg2, {})[0] in (b"cat", b"tee"):
+            out = data
+        else:
+            # Any other forwarder may transform (tr/sed/awk/cut map
+            # characters, head/tail drop lines) — unprovable.
+            return None
+    elif p_ == "own":
+        out = _emit_own(stg2)
+        if out is None:
+            return None
+    elif p_ == "script":
+        # `cat`/`tee` on a bundled file emits the file's provable
+        # bytes (file-emit — Devin on #133, round-91) — a numbering
+        # flag rewrites them as `N\t`-prefixed lines; other heads
+        # transform unprovably.
+        _k2, _a2, _f2, _h2 = _seg_head_args(stg2, {})
+        if _k2 not in (b"cat", b"tee"):
+            return None
+        _src9 = next((_operand_text(a3) for a3 in _a2
+                      if b"scripts/" in a3), None)
+        out = _stream_bytes(_src9)
+        if out is None:
+            return None
+        if _stage_numbers_stream(stg2):
+            out = _number_lines(out)
+    else:
+        return None              # exec — unprovable bytes
+    if sfd1 == _FD_ERR:
+        return b"", out
+    return out, b""
+
+
+def _emit_chain(part: bytes, data, fd2on: bool, raw: bool = False):
+    """(fd1_out, fd2_out) of a `|`-chain on stdin `data`, else None.
+    A stage's fd2 reaches the shared stream only when its OWN pipe is
+    `|&` (or, for the last stage, when the chain's pipe merges). `raw`
+    asks for the faithful byte stream — real sibling writes glue
+    back-to-back — instead of `_join_emit`'s exec-shape newline join
+    (Devin on #133/#17/#1431/#1963, round-93)."""
+    bounds = []
+    amps = []
+    last = 0
+    for ss2, se2, k2 in _sub_cmd_seps(part):
+        if k2 == b"|":
+            bounds.append((last, ss2))
+            amps.append(part[se2:se2 + 1] == b"&")
+            last = se2
+    bounds.append((last, len(part)))
+    fd2s = []
+    for i2, (sa, sb) in enumerate(bounds):
+        stg = part[sa:sb]
+        r = _emit_stage_simple(stg, data, fd2on)
+        if r is None:
+            return None
+        if i2 < len(amps) and amps[i2]:
+            # `|&` binds the stage's fd2 onto fd1's FINAL binding —
+            # when the stage `>&2`'d fd1 into the group's stderr its
+            # fd2 bytes land on the group channel, not this pipe
+            # (CodeRabbit on #133, round-87 — verified live).
+            sfd = _seg_head_args(stg, {})[2]
+            sfd1 = sfd.get(1) if sfd is not None else None
+            if sfd1 == _FD_ERR:
+                data = r[0]
+                if fd2on:
+                    fd2s.append(r[1])
+            else:
+                data = r[0] + r[1]
+        else:
+            data = r[0]
+            if fd2on:
+                fd2s.append(r[1])
+    return data, (b"".join(fd2s) if raw else _join_emit(fd2s))
+
+
+def _join_emit(parts) -> bytes:
+    """Concat emitted byte pieces — sibling emissions are separate
+    writes, so glue a newline between pieces that lack one: the real
+    stream glues (`x` then `(` is `x(`), but for exec analysis each
+    sibling's output stands alone — `x` runs while a lone `(` is a
+    syntax error (Devin on #133, round-91 — verified live)."""
+    out = b""
+    for p in parts:
+        if p:
+            out += (b"" if out.endswith(b"\n") or not out else b"\n") + p
+    return out
+
+
+def _emit_compound(seg: bytes, fd2on: bool, data, raw: bool = False):
+    """Emitted bytes of a `(…)`/`{…}` compound stage — the concat of
+    its `;`/`&` siblings' fd1 (+fd2 when merged) — else None. `raw`
+    joins sibling writes byte-faithfully (`b"".join`) — the real pipe
+    glues pieces, so an invocation can assemble ACROSS a piece
+    boundary either direction (`sh `+`cripts/x.sh` vs `sh`+`cripts/`
+    — Devin on #133/#17/#1431/#1963, round-93 — verified live)."""
+    subs = {a: b for a, b in _substitution_spans(seg)}
+    msk = bytearray(seg)
+    i = 0
+    while i < len(seg):
+        if i in subs:
+            msk[i:subs[i]] = b" " * (subs[i] - i)
+            i = subs[i]
+            continue
+        c = seg[i:i + 1]
+        if c == b"\\":
+            msk[i:i + 2] = b"  "
+            i += 2
+            continue
+        if c in (b"'", b'"', b"`"):
+            e = i + 1
+            while e < len(seg):
+                if c != b"'" and seg[e:e + 1] == b"\\":
+                    e += 2
+                    continue
+                if seg[e:e + 1] == c:
+                    break
+                e += 1
+            if e >= len(seg):
+                i += 1
+                continue
+            msk[i:e] = b" " * (e - i)
+            i = e + 1
+            continue
+        i += 1
+    i = 0
+    while i < len(seg) and seg[i:i + 1] in b" \t":
+        i += 1
+    if seg[i:i + 1] not in (b"(", b"{"):
+        return None
+    op = i
+    cl = None
+    depth = 0
+    for k in range(op, len(seg)):
+        c2 = msk[k:k + 1]
+        if c2 in (b"(", b"{"):
+            depth += 1
+        elif c2 in (b")", b"}"):
+            depth -= 1
+            if depth == 0:
+                cl = k
+                break
+    if cl is None:
+        return None
+    # Post-closer redirects bind the GROUP's fds — `(...) >/dev/null
+    # |` kills fd1's bytes while `(...) 2>&1 >/dev/null |` still
+    # carries fd2's dup onto the pipe (Devin on #1431/#1963,
+    # round-87 — verified live).
+    grp_ops = []
+    k = cl + 1
+    while True:
+        while k < len(seg) and seg[k:k + 1] in b" \t":
+            k += 1
+        if k >= len(seg):
+            break
+        rj = _closer_redir(seg, k, subs)
+        if rj is None:
+            return None          # trailing junk — unprovable
+        grp_ops.extend(rj[1])
+        k = rj[0]
+    _g1, _g2 = "pipe", "err"
+    for _rfd, _kind, _arg in grp_ops:
+        _nv = ("file" if _kind == "file" else
+               "closed" if _kind == "close" else
+               _g1 if _arg == 1 else _g2 if _arg == 2 else "other")
+        if _rfd == 1:
+            _g1 = _nv
+        elif _rfd == 2:
+            _g2 = _nv
+    if fd2on:
+        _g2 = _g1                # `|&` dups fd2 onto fd1's binding
+    g1on = _g1 == "pipe"
+    g2on = _g2 == "pipe"
+    outs = []
+    bounds = []
+    last = op + 1
+    for ss3, se3, kd in _sub_cmd_seps(seg[op + 1:cl]):
+        # `&&`/`||` are sibling boundaries too — a conditional branch
+        # still re-reads shared stdin and emits on the group's fds
+        # (`true && cat x` runs the `cat` — Devin on #1431/#1963,
+        # round-91 — verified live).
+        if kd in (b";", b"\n", b"&", b"&&", b"||"):
+            bounds.append((last, op + 1 + ss3, kd))
+            last = op + 1 + se3
+    bounds.append((last, cl, None))
+    prev_kd = None
+    prev_exit = None
+    for sa3, sb3, kd in bounds:
+        sib = seg[sa3:sb3]
+        if prev_exit is not None and (
+                (prev_kd == b"&&" and prev_exit != 0)
+                or (prev_kd == b"||" and prev_exit == 0)):
+            # `true || sib` / `false && sib` provably skips the
+            # conditional branch — it emits nothing AND does not
+            # read the shared stdin (so a later sibling still gets
+            # the full stream — `true || cat; cat` — Devin on #17,
+            # round-92 — verified live). The skipped branch keeps
+            # the prior exit status for the next link.
+            prev_kd = kd
+            continue
+        r = _emit_chain(sib, data, g2on, raw)
+        if r is None:
+            return None
+        outs.append((r[0] if g1on else b"")
+                    + (r[1] if g2on else b""))
+        if kd is not None and _sib_drains_stdin(sib):
+            # Siblings share ONE stdin — a `;`/newline/`&&`/`||`
+            # sibling whose FIRST `|` stage drains it leaves EOF for
+            # the rest (`cat >/dev/null; cat` — Devin on #133,
+            # round-90; `cat | true; cat` — Devin on #133, round-91 —
+            # verified live); a `&` sibling RACES them, so later
+            # input is unprovable.
+            data = (None if kd == b"&"
+                    else b"" if _sib_drain_complete(sib, data)
+                    else None)
+        prev_kd = kd
+        prev_exit = _sib_exit_known(sib)
+    return b"".join(outs) if raw else _join_emit(outs)
+
+
+def _emit_stage_bytes(seg: bytes, data, amp: bool, raw: bool = False):
+    """Bytes a stage lands on the NEXT pipe — its fd1 output plus fd2
+    when `amp` (the stage's own `|&`). None = unprovable."""
+    t = seg.lstrip()
+    if t[:1] in (b"(", b"{"):
+        return _emit_compound(seg, amp, data, raw)
+    if any(k2 == b"|" for _s2, _e2, k2 in _sub_cmd_seps(seg)):
+        r = _emit_chain(seg, data, amp, raw)
+        return None if r is None else r[0] + r[1]
+    r = _emit_stage_simple(seg, data, amp)
+    if r is None:
+        return None
+    _sfd = _seg_head_args(seg, {})[2]
+    _sfd1 = _sfd.get(1) if _sfd is not None else None
+    if amp and _sfd1 != _FD_ERR:
+        # `|&` dups fd2 onto fd1's binding — when the stage already
+        # bound fd1 to fd2 (`cmd >&2 |&`), fd2 lands on real stderr,
+        # not the pipe (Devin on #133, round-91 — verified live).
+        return r[0] + r[1]
+    return r[0]
+
+
+def _feed_compound_span(src: bytes, pos: int):
+    """(opener,) index when the feed ending just before `pos` is a
+    `(…)`/`{…}` compound (optionally followed by redirects), else
+    None. Quote/substitution text is masked so braces inside it don't
+    count."""
+    subs = {a: b for a, b in _substitution_spans(src[:pos])}
+    msk = bytearray(src[:pos])
+    i = 0
+    while i < pos:
+        if i in subs:
+            msk[i:subs[i]] = b" " * (subs[i] - i)
+            i = subs[i]
+            continue
+        c = src[i:i + 1]
+        if c == b"\\":
+            msk[i:i + 2] = b"  "
+            i += 2
+            continue
+        if c in (b"'", b'"', b"`"):
+            e = i + 1
+            while e < pos:
+                if c != b"'" and src[e:e + 1] == b"\\":
+                    e += 2
+                    continue
+                if src[e:e + 1] == c:
+                    break
+                e += 1
+            if e >= pos:
+                i += 1
+                continue
+            msk[i:e] = b" " * (e - i)
+            i = e + 1
+            continue
+        i += 1
+    i = pos - 1
+    while i >= 0 and msk[i:i + 1] in b" \t":
+        i -= 1
+    # Skip a post-closer redirect tail back to the `)`/`}` itself —
+    # a `;`/bare `&`/`|`/newline first means the compound isn't the
+    # feed. The `&` inside `2>&1`/`>&-`/`&>` redirect ops is not a
+    # separator — it is glued to `>` (Devin on #133, round-87 —
+    # `(echo x >&2) 2>&1 |` still feeds the compound's stderr).
+    while i >= 0:
+        c = msk[i:i + 1]
+        if c == b"&" and (msk[i - 1:i] == b">"
+                         or msk[i + 1:i + 2] == b">"):
+            i -= 1
+            continue
+        if c in (b")", b"}", b";", b"&", b"|", b"\n"):
+            break
+        i -= 1
+    if i < 0 or msk[i:i + 1] not in (b")", b"}"):
+        return None
+    depth = 0
+    for k in range(i, -1, -1):
+        c = msk[k:k + 1]
+        if c in (b")", b"}"):
+            depth += 1
+        elif c in (b"(", b"{"):
+            depth -= 1
+            if depth == 0:
+                return k
+    return None
+
+
+def _sib_exit_known(sib: bytes):
+    """0/1 when a sibling's exit status is provable — `true`/`:`
+    exits 0, `false` exits 1, a leading `!` inverts — used to skip
+    provably-dead `&&`/`||` branches (`true || x`/`false && x` —
+    Devin on #17, round-92 — verified live). A file-target redirect
+    on the last `|` stage makes the exit unprovable — its open is
+    attempted BEFORE the command runs (`true </missing` exits
+    nonzero — Devin on #17/#1431/#1963, round-93 — verified live);
+    anything else is unknown (None)."""
+    st = sib
+    pos = 0
+    for ss, se, k in _sub_cmd_seps(sib):
+        if k == b"|":
+            pos = se
+    st = st[pos:].lstrip()
+    neg = False
+    if st[:1] == b"!":
+        neg = True
+        st = st[1:].lstrip()
+    key, _a9, sfd9, _h9 = _seg_head_args(st, {})
+    if sfd9 is not None and any(
+            v == _FD_FILE for v in sfd9.values()):
+        return None                  # file open can fail — exit unprovable
+    if key in (b"true", b":"):
+        return 1 if neg else 0
+    if key == b"false":
+        return 0 if neg else 1
+    return None
+
+
+def _sib_drains_stdin(sib: bytes) -> bool:
+    """True when a compound sibling's FIRST `|` stage provably reads
+    shared stdin to EOF — only the chain head reads shared stdin;
+    later `|` stages read the upstream pipe (`cat | true; cat` — the
+    `cat` still drains — Devin on #133, round-91 — verified live)."""
+    for ss, _se, k in _sub_cmd_seps(sib):
+        if k == b"|":
+            return _seg_drains(sib[:ss])
+    return _seg_drains(sib)
+
+
+def _sib_drain_complete(sib: bytes, data) -> bool:
+    """True when a draining sibling provably finishes shared stdin —
+    a lone command always does; a pipeline's first stage can be cut
+    short by SIGPIPE when a later stage exits early, so only provable
+    input bounded below one read buffer completes provably (Devin on
+    #133, round-91)."""
+    if not any(k == b"|" for _s, _e, k in _sub_cmd_seps(sib)):
+        return True
+    return data is not None and len(data) <= 65536
+
+
+def _emit_feed(src: bytes, pos: int, amp: bool, data=None,
+               raw: bool = False):
+    """Provable emit bytes of the segment feeding the `|`/`|&` at
+    `pos` — a compound feed emits its siblings' concat; a plain feed
+    strips leading openers (inner-compound stages) and chains
+    normally. None = unprovable. `raw` returns the byte-faithful
+    stream (no synthetic newlines) for emitted-ref scanning."""
+    if not pos:
+        return None
+    cb = _feed_compound_span(src, pos)
+    if cb is not None:
+        return _emit_compound(src[cb:pos], amp, data, raw)
+    s0 = _command_start(src, pos - 1)
+    if s0 is None:
+        return None
+    return _emit_stage_bytes(src[s0:pos].lstrip(b" \t({"), data, amp,
+                             raw)
+
+
+def _all_assign_words(words: list, win: bytes) -> bool:
+    """Every word is a `NAME=value` assignment (substitution-bearing
+    or not) — the stage has no command of its own."""
+    return bool(words) and all(
+        _ASSIGN_WORD.match(_word_text(win[wa:wb])) for wa, wb in words)
+
+
+def _backtick_bodies(stg: bytes):
+    """Bodies of `` `...` `` command substitutions outside single
+    quotes — the legacy form `_substitution_spans` doesn't track
+    (CodeRabbit on #133, round-87 — `cat x | X=`sh`` consumes the
+    stream the same way `$(sh)` does, verified live)."""
+    bodies = []
+    i = 0
+    in_s = False
+    while i < len(stg):
+        c = stg[i:i + 1]
+        if c == b"\\":
+            i += 2
+            continue
+        if in_s:
+            if c == b"'":
+                in_s = False
+            i += 1
+            continue
+        if c == b"'":
+            in_s = True
+            i += 1
+            continue
+        if c == b"`":
+            j = i + 1
+            while j < len(stg):
+                cj = stg[j:j + 1]
+                if cj == b"\\":
+                    j += 2
+                    continue
+                if cj == b"`":
+                    bodies.append(stg[i + 1:j])
+                    break
+                j += 1
+            i = j + 1 if j < len(stg) else len(stg)
+            continue
+        i += 1
+    return bodies
+
+
+def _assign_rhs_prov(stg: bytes, prov: str, stream_src=None):
+    """Prov for an all-`NAME=value` stage carrying substitutions —
+    `$(`/`<(`/`` ` `` bodies inherit the pipeline's stdin: an exec
+    head inside runs the stream right there (None = dep fired), a
+    stdin-draining body captures it away ('own'), and otherwise the
+    stage emits nothing on fd1 — the stream ends there ('own', not a
+    pass-through: `cat x | X=$(true) | sh` runs nothing — CodeRabbit
+    on #133, round-87 — verified live)."""
+    for a, b in _substitution_spans(stg):
+        if stg[a:a + 2] not in (b"$(", b"<("):
+            continue
+        body = stg[a + 2:b - 1]
+        if prov in ("up", "script") and (
+                _stdin_exec_head(body, stream_src) == "exec"
+                or _body_pipe_execs(body, stream_src)):
+            return None
+        if _seg_drains(body):
+            return "own"
+    for body in _backtick_bodies(stg):
+        if prov in ("up", "script") and (
+                _stdin_exec_head(body, stream_src) == "exec"
+                or _body_pipe_execs(body, stream_src)):
+            return None
+        if _seg_drains(body):
+            return "own"
+    return "own"
+
+
+def _body_pipe_execs(body: bytes, stream_src=None) -> bool:
+    """True when a stage inside a substitution body reaches an exec
+    head on the inherited stdin — a `|` forwards it downstream, and a
+    `;`/newline/`&`/`&&`/`||` sibling's head re-reads it directly
+    (`X=`true; sh`` runs the stream in the capture — Devin on #17,
+    round-91 — verified live). A provable draining SIMPLE sibling
+    leaves EOF for sequential followers; a `&` sibling races them, so
+    stdin stays open (unprovable)."""
+    last = 0
+    stdin_open = True
+    for ss, se, k in _sub_cmd_seps(body):
+        if k == b"|":
+            if _pipe_to_exec(body, ss):
+                return True
+            continue
+        if k in (b";", b"\n", b"&", b"&&", b"||"):
+            sib = body[last:ss]
+            if stdin_open:
+                h_end = next(
+                    (s2 for s2, _e2, k2 in _sub_cmd_seps(sib)
+                     if k2 == b"|"), len(sib))
+                if (_stdin_exec_head(sib[:h_end], stream_src)
+                        == "exec"):
+                    return True
+            if (k != b"&" and stdin_open and _seg_drains(sib)
+                    and not any(k2 == b"|" for _s2, _e2, k2 in
+                                _sub_cmd_seps(sib))):
+                stdin_open = False
+            last = se
+    if stdin_open and last < len(body):
+        tail = body[last:]
+        h_end = next((s2 for s2, _e2, k2 in _sub_cmd_seps(tail)
+                      if k2 == b"|"), len(tail))
+        if _stdin_exec_head(tail[:h_end], stream_src) == "exec":
+            return True
+    return False
+
+
+def _mask_backticks(seg: bytes) -> bytes:
+    """`seg` with each `` `...` `` body blanked — backtick bodies are
+    one WORD's substitution text, so their `|`/`;` must not split the
+    stage (`X=`cat | sh`` is a single `NAME=value` word, not a
+    pipeline — Devin on #133, round-90 — verified live). Single-quote
+    regions keep their backticks literal."""
+    msk = bytearray(seg)
+    i = 0
+    in_s = False
+    while i < len(seg):
+        c = seg[i:i + 1]
+        if c == b"\\" and not in_s:
+            i += 2
+            continue
+        if c == b"'":
+            in_s = not in_s
+            i += 1
+            continue
+        if in_s:
+            i += 1
+            continue
+        if c == b"`":
+            j = i + 1
+            while j < len(seg):
+                cj = seg[j:j + 1]
+                if cj == b"\\":
+                    j += 2
+                    continue
+                if cj == b"`":
+                    break
+                j += 1
+            e = j + 1 if j < len(seg) else len(seg)
+            # Keep the `` ` `` delimiters and fill the body with a
+            # non-word char — blanking to spaces would split the
+            # word (`X=`cat | sh`` must stay ONE `NAME=` word).
+            msk[i + 1:e - 1] = b"x" * max(0, e - 1 - i - 1)
+            i = e
+            continue
+        i += 1
+    return bytes(msk)
+
+
+def _assign_words_inert(words: list, win: bytes) -> bool:
+    """True when every word is a bare `NAME=value` assignment whose
+    RHS expands no substitution — such a stage reads nothing and
+    emits nothing, so the stream dies there. A `$(`/`<(`/`>(`/`...`
+    outside single quotes RUNS its body first, inheriting the
+    pipeline's stdin — `cat x | X="$(sh)"` executes the stream
+    inside the capture (Devin on #17/#1431, round-86 — verified
+    live); single-quoted text stays literal (`X='$(sh)'` is inert)."""
+    if not words:
+        return False
+    for wa, wb in words:
+        raw = win[wa:wb]
+        if not _ASSIGN_WORD.match(_word_text(raw)):
+            return False
+        i = raw.find(b"=") + 1
+        sq = esc = False
+        while i < len(raw):
+            c = raw[i:i + 1]
+            if esc:
+                esc = False
+            elif c == b"\\":
+                esc = True
+            elif sq:
+                if c == b"'":
+                    sq = False
+            elif c == b"'":
+                sq = True
+            elif c == b"`":
+                return False
+            elif (c in (b"$", b"<", b">")
+                    and raw[i + 1:i + 2] == b"("):
+                return False
+            i += 1
+    return True
+
+
+def _fwd_stage_prov(stg: bytes, prov: str, stream_src,
+                    ifs: bytes | None = None):
+    """_seg_prov for an fd1→fd2 FORWARDER stage under fd2on: the
+    stage's output lands on the merged stream the pipe reads, so its
+    own _stdin_exec_head class applies first — a numbering head
+    (`cat -n`, `nl`) emits prefixed text the exec side can't run, a
+    replacement head (`wc -l`) emits its own bytes, and an exec head
+    (`sh >&2`) runs the stream right there. Returns the _seg_prov
+    result vocabulary: None = the stage executes its input."""
+    v = _stdin_exec_head(stg, stream_src)
+    if v == "exec":
+        return None
+    if v == "sink":
+        return "own"
+    # No blanket numbering sink here — `_stdin_exec_head` already
+    # routed provable (scripts/-sourced) streams through
+    # `_numbered_flows`, and an unprovable stream can't be proven
+    # separator-free, so it flows (`echo 'a; sh x' | cat -n | sh`
+    # runs the `;`-tail — Devin on #17/#1963/#1431, round-86 —
+    # verified live).
+    return _seg_prov(stg, prov, stream_src, ifs)
+
+
 def _stdin_exec_head(win: bytes, stream_src=None) -> str:
     """Classify `win`'s effective command as a pipe consumer.
 
@@ -7466,7 +8483,8 @@ def _stdin_exec_head(win: bytes, stream_src=None) -> str:
             elif len(a) > 2 and a[:2] == b"-b":
                 body = a[2:]
             i2 += 1
-        if body != b"n" and not _numbered_flows(ops, stream_src, _rd0):
+        if (body != b"n" and not _number_sep_unsafe(key, args)
+                and not _numbered_flows(ops, stream_src, _rd0)):
             return "sink"
     if key == b"pr":
         # `pr` emits the stream verbatim (paged) — its commands still
@@ -7495,7 +8513,8 @@ def _stdin_exec_head(win: bytes, stream_src=None) -> str:
                         break
                     if c in b"DhlNowWeisS":
                         break
-        if numbered and not _numbered_flows(ops, stream_src, _rd0):
+        if (numbered and not _number_sep_unsafe(key, args)
+                and not _numbered_flows(ops, stream_src, _rd0)):
             return "sink"
     if key in (b"grep", b"egrep", b"fgrep", b"zgrep"):
         # `grep -q`/`--quiet`/`--silent` emits NO bytes — the pipe ends
@@ -7794,67 +8813,628 @@ def _stdin_exec_head(win: bytes, stream_src=None) -> str:
     return "exec"
 
 
-def _group_fd1_prov(src: bytes, s0: int, pos: int, od_tails):
-    """fd1 provenance of a compound feeding stage, or None.
+def _group_fd1_prov(src: bytes, pos: int):
+    """Merged fd1+fd2 provenance of a compound feeding stage, or None.
 
     `;`/`&` siblings inside `( )`/`{ }` share the group's stdout — a
     `>`/`&>` on the LAST sibling diverts only that command, so
     `(cat x; cat x >f) | sh` still writes the script into the pipe
     (Devin on #16/#1961/#132, round-76 review — verified live).
-    Returns (prov, operand_src) aggregated over the compound's
-    siblings, or None when the stage is a single simple command or
-    the divert applies to the whole group (a `>`/`&>` AFTER the
-    closer — `(cat x; cat y) >f | sh` still feeds sh nothing)."""
-    if not s0:
+    Sibling `>&2` text lands on the group's stderr, which reaches the
+    pipe whenever the group's final fd2 binding does: under `|&`
+    (which dups fd2 onto fd1's FINAL binding after post-closer
+    redirects — `(...) 2>/dev/null |&` still merges — Devin on #133,
+    round-82) or under a plain `|` when a post-closer `2>&1` bound
+    fd2 onto fd1's pipe target (`(cat x >&2; true) 2>&1 | sh` — Devin
+    on #133/#1431, round-83 — verified live). Returns
+    (prov, operand_src, opener_pos, fd2on) aggregated over the
+    compound's siblings — fd2on says the group's fd2 itself lands on
+    the pipe — or None when the stage doesn't end at a `)`/`}` closer
+    or when NEITHER group fd ends on the pipe (a whole-group divert
+    like `(cat x; cat y) >f | sh`)."""
+    # Quoted/escaped/backticked parens are operand text, not
+    # delimiters — the backward scan must not count them
+    # (`(cat x >&2; echo "(") |&` — Devin on #133, round-79 — verified
+    # live). Unlike `_quoted_spans` (which fails closed for exec
+    # detection), an UNTERMINATED quote/backtick before `pos` is prose
+    # — an apostrophe or a markdown fence — so it is left unmasked:
+    # here masking it would hide the group's real delimiters and drop
+    # real deps (`don't (cat x >&2; t) |&`, `echo '`'` — round-80).
+    msk = bytearray(src)
+    i = 0
+    while i < pos:
+        c = src[i:i + 1]
+        if c == b"\\":
+            msk[i:i + 2] = b"  "
+            i += 2
+            continue
+        if c in (b"'", b'"', b"`"):
+            # Find the matching closer — inside `"` and backtick a
+            # `\` escapes the next byte; inside `'` it is literal
+            # (POSIX), so `'` pairs with the next raw `'`
+            # (`echo "a \" ( b"` — Devin on #17, round-81 — verified
+            # live).
+            e = i + 1
+            while e < pos:
+                if c != b"'" and src[e:e + 1] == b"\\":
+                    e += 2
+                    continue
+                if src[e:e + 1] == c:
+                    break
+                e += 1
+            if e >= pos:
+                i += 1
+                continue
+            msk[i:e] = b" " * (e - i)
+            i = e + 1
+            continue
+        i += 1
+    subs = {a: b for a, b in _substitution_spans(src)}
+    for sa0, sb0 in subs.items():
+        # `$(`/`<(`/`>(` spans hold parens of their own — mask ones
+        # fully before `pos` so a substitution inside a post-closer
+        # redirect target can't shadow the real closer (`(cat x >&2)
+        # 2>$(mktemp) |&` — CodeRabbit on #133, round-83).
+        if sb0 <= pos:
+            msk[sa0:sb0] = b" " * (sb0 - sa0)
+    i = pos - 1
+    while i >= 0 and src[i:i + 1] in b" \t":
+        i -= 1
+    if i < 0:
         return None
-    dd0 = _open_depth(src, s0, od_tails)
-    if not dd0:
-        return None
-    op = cl = None
-    i = s0 - 1
+    grp_ops = []
+    if src[i:i + 1] in (b")", b"}"):
+        cl = i
+    else:
+        # Redirects may sit between the closer and the pipe —
+        # `(...) 2>/dev/null |&` — the last unmasked `)`/`}` before
+        # them is the closer when only spaces and redirects separate
+        # it from `pos` (Devin on #133, round-82 — verified live).
+        cand = max(msk.rfind(b")", 0, i + 1),
+                   msk.rfind(b"}", 0, i + 1))
+        if cand < 0:
+            return None
+        k = cand + 1
+        while True:
+            while k < len(src) and src[k:k + 1] in b" \t":
+                k += 1
+            if k >= pos:
+                break
+            rj = _closer_redir(src, k, subs)
+            if rj is None:
+                return None
+            grp_ops.extend(rj[1])
+            k = rj[0]
+        if k != pos:
+            return None
+        cl = cand
+    # Replay the group's post-closer fd bindings: fd1 starts on the
+    # pipe, fd2 on real stderr, and the operator's own `&` dups fd2
+    # onto fd1's FINAL binding LAST (`(...) 2>/dev/null |&` merges —
+    # verified live). A plain `|` still merges when the redirects
+    # bound fd2 onto fd1 first (`(...) 2>&1 |` — Devin on #133/#1431,
+    # round-83 — verified live).
+    _g1, _g2 = "pipe", "err"
+    for rfd, kind, arg in grp_ops:
+        if kind == "file":
+            nv = "file"
+        elif kind == "close":
+            nv = "closed"
+        else:
+            nv = _g1 if arg == 1 else (_g2 if arg == 2 else "other")
+        if rfd == 1:
+            _g1 = nv
+        elif rfd == 2:
+            _g2 = nv
+    if src[pos + 1:pos + 2] == b"&":
+        _g2 = _g1
+    fd2on = _g2 == "pipe"
+    i = cl
+    depth = 0
+    op = None
     while i >= 0:
-        if (src[i:i + 1] in (b"(", b"{")
-                and _open_depth(src, i, od_tails) == dd0 - 1):
-            op = i
-            break
+        c = msk[i:i + 1]
+        if c in (b")", b"}"):
+            depth += 1
+        elif c in (b"(", b"{"):
+            depth -= 1
+            if depth == 0:
+                op = i
+                break
         i -= 1
     if op is None:
         return None
-    i = s0
-    while i < pos:
-        if (src[i:i + 1] in (b")", b"}")
-                and _open_depth(src, i + 1, od_tails) == dd0 - 1):
-            cl = i
-            break
-        i += 1
-    if cl is None:
-        cl = pos
-    if _stdout_redirected(src[cl:pos]):
-        return None            # a divert after the closer covers all
+    if src[op - 1:op] in (b"$", b"<", b">"):
+        # `$(`/`<(`/`>(` open a substitution, not a command group —
+        # their `)` is the capture's close and its "siblings" live
+        # inside the capture, not on a shared fd1 (`echo "$(cat x)"
+        # $(echo x; echo $(true)) | sh` — Devin on #125/#8, round-8).
+        return None
+    if _g1 != "pipe" and _g2 != "pipe":
+        # Whole-group divert — neither fd reaches the pipe
+        # (`(cat x; cat y) >f | sh`, `(...) >/dev/null |&` — the `|&`
+        # dup lands fd2 on the file too — round-83 — verified live).
+        # A `2>&1 >/dev/null` order keeps fd2 on the pipe, so it
+        # survives (`(cat x >&2) 2>&1 >/dev/null |` runs x — Devin on
+        # #133, round-83 — verified live).
+        return None
     spans = []
     cur = op + 1
     for ss, se, kind in _sub_cmd_seps(src[op + 1:cl]):
-        if kind in (b";", b"\n", b"&"):
+        # `&&`/`||` are sibling boundaries too — the group's aggregate
+        # provenance must cover every feasible branch (`true && cat x`
+        # runs the `cat` — Devin on #1431, round-91 — verified live).
+        if kind in (b";", b"\n", b"&", b"&&", b"||"):
             spans.append((cur, op + 1 + ss))
             cur = op + 1 + se
+    # A ONE-sibling compound is still a group — `(cat x >&2) |& sh`
+    # merges its fd2 into the pipe exactly like a multi-sibling one
+    # (Devin on #133, round-81 — verified live).
     spans.append((cur, cl))
-    if len(spans) < 2:
-        return None
     prov = "own"
     out_src = None
     for ga, gb in spans:
         seg = src[ga:gb]
-        if not seg.strip() or _stdout_redirected(seg):
+        if not seg.strip():
             continue
-        if out_src is None:
-            _k2, _a2, _f2, _h2 = _seg_head_args(seg, {})
-            out_src = next(
-                (_operand_text(a3) for a3 in _a2 if b"scripts/" in a3),
-                None)
-        p_ = _seg_prov(seg, "up", None, _line_ifs(src, ga))
-        if p_ is not None and p_ != "own":
-            prov = p_
-    return prov, out_src
+        # A sibling that is an inner pipeline lands on the group's
+        # fds through its LAST stage only — an earlier `>` diverts
+        # just that stage (`true >/dev/null | cat x` still feeds x —
+        # CodeRabbit on #133, round-83 — verified live), and a sink
+        # last stage contributes 'own' no matter what an earlier
+        # stage read (`cat x | wc -l`/`head -n 0` hand the pipe a
+        # count/nothing — CodeRabbit/Devin on #133/#1431, round-83 —
+        # verified live). A stage whose fd1→fd2 lands on the group's
+        # stderr instead — contributing its content prov whenever the
+        # group's fd2 reaches the pipe (`cat x >&2 | cat >/dev/null`
+        # under `|&` or a post-closer `2>&1` — round-83 — verified
+        # live).
+        bounds = []
+        last = 0
+        for ss2, se2, k2 in _sub_cmd_seps(seg):
+            if k2 == b"|":
+                bounds.append((last, ss2))
+                last = se2
+        bounds.append((last, len(seg)))
+        chain = "up"
+        chain_src = None       # scripts/ operand feeding the chain
+        chain_emit = None      # provable bytes on the chain's stdin
+        for sbi, (sa, sb) in enumerate(bounds):
+            stg = seg[sa:sb]
+            sfd = _seg_head_args(stg, {})[2]
+            sfd1 = sfd.get(1) if sfd is not None else None
+            if sfd1 == _FD_ERR:
+                # fd1→fd2 — the stage's own-output prov lands on the
+                # group's stderr; the pipe chain carries nothing past
+                # it (a `>&2` stage emits nothing on fd1).
+                if fd2on:
+                    stg2 = re.sub(rb"[0-9]*>&2\b", b"", stg)
+                    if out_src is None:
+                        _k2, _a2, _f2, _h2 = _seg_head_args(stg2, {})
+                        out_src = next(
+                            (_operand_text(a3)
+                             for a3 in _a2 if b"scripts/" in a3),
+                            None)
+                    p2_ = _fwd_stage_prov(
+                        stg2, chain, chain_src, _line_ifs(src, ga))
+                    if (p2_ == "script"
+                            or (p2_ is None
+                                and chain in ("up", "script", "thru"))):
+                        prov = "script"
+                    elif (p2_ is not None and p2_ != "own"
+                            and prov == "own"):
+                        prov = p2_
+                    # p2_ None on an 'own' chain: the stage executed
+                    # a REPLACEMENT stream (`wc -l`'s count — Devin on
+                    # #17/#1963, round-85) — contributes 'own'.
+                chain = "own"
+                chain_src = None
+                chain_emit = b""     # nothing passes on fd1
+                continue
+            if sfd1 in (_FD_FILE, _FD_CLOSED):
+                chain = "own"        # diverted — nothing passes on
+                chain_src = None
+                chain_emit = b""     # (CodeRabbit on #133, round-87)
+                continue
+            _bw = _shell_words(_mask_backticks(_mask_parens(stg)))
+            if _assign_words_inert(_bw, stg):
+                # A stage of only inert `NAME=value` words has no
+                # command — it reads nothing and emits nothing, so
+                # the stream dies there (`cat x | X=1` — CodeRabbit
+                # on #133, round-85 — verified live).
+                chain = "own"
+                chain_src = None
+                chain_emit = b""
+                continue
+            if _all_assign_words(_bw, stg):
+                # All-assign stage carrying substitutions — `$(…)`
+                # bodies inherit the stream: an exec head runs it
+                # right here, a drain captures it (round-86).
+                p_ = _assign_rhs_prov(stg, chain, chain_src)
+            else:
+                p_ = _seg_prov(stg, chain, chain_src,
+                               _line_ifs(src, ga))
+            if _stage_numbers_stream(stg):
+                # `cat -n`/`nl`/`pr -n` prefix `N\t` — kills only
+                # each line's FIRST command; a `;`/`&`/`|` tail
+                # still runs, so sink only when the stream provably
+                # has no separator commands (round-86). Provable
+                # separator EMIT in an 'own' stream survives the
+                # prefix the same way (emit decides, not prov).
+                _tg9: dict = {}
+                _k9, _a9, _f9, _h9 = _seg_head_args(stg, _tg9)
+                _ops9 = _reader_operands(_k9, _a9)
+                _nf = (_ops9 is not None and _numbered_flows(
+                    _ops9, chain_src, _tg9.get(0),
+                    emit=chain_emit))
+                if p_ in ("script", "up", "thru") and not _nf:
+                    p_ = "own"
+                elif (p_ == "own" and _nf and chain_emit is not None
+                      and _numbered_execs(chain_emit)):
+                    # Promote only on PROVABLE separator emit — an
+                    # unprovable stream can't justify revival
+                    # (`cat x | cat -n >/dev/null` emits nothing —
+                    # CodeRabbit on #133, round-87 — verified live).
+                    p_ = "up"
+            _em9 = _emit_stage_simple(stg, chain_emit, fd2on)
+            chain_emit = None if _em9 is None else _em9[0]
+            if p_ is None:
+                chain = "own"
+                chain_src = None
+                break
+            chain = p_
+            if p_ == "script":
+                _k3, _a3x, _f3, _h3 = _seg_head_args(stg, {})
+                chain_src = next(
+                    (_operand_text(a4)
+                     for a4 in _a3x if b"scripts/" in a4),
+                    chain_src)
+            elif p_ == "own":
+                chain_src = None
+            if sbi == len(bounds) - 1 and _g1 == "pipe":
+                if out_src is None:
+                    _k2, _a2, _f2, _h2 = _seg_head_args(stg, {})
+                    out_src = next(
+                        (_operand_text(a3)
+                         for a3 in _a2 if b"scripts/" in a3),
+                        None)
+                if p_ == "script":
+                    prov = "script"  # strongest — a scripts/ operand
+                elif p_ != "own" and prov == "own":
+                    prov = p_
+    return prov, out_src, op, fd2on
+
+
+def _redir_word(src: bytes, k: int, subs):
+    """End index of the redirect-target word starting at `k`, else
+    None on an unterminated quote. The target may be separated from
+    its operator by blanks — `2> /dev/null` binds the same file as
+    `2>/dev/null` (Devin on #17, round-84 — verified live). Quotes,
+    `\\c` escapes, and `$(`/`<(`/`>(` spans stay inside the word."""
+    while k < len(src) and src[k:k + 1] in b" \t":
+        k += 1
+    t0 = k
+    while k < len(src):
+        c2 = src[k:k + 1]
+        if c2 in b" \t\n;|&()<>":
+            break
+        if k in subs:
+            k = subs[k]
+            continue
+        if c2 == b"\\":
+            k += 2
+            continue
+        if c2 in (b"'", b'"', b"`"):
+            e = k + 1
+            while e < len(src):
+                if c2 != b"'" and src[e:e + 1] == b"\\":
+                    e += 2
+                    continue
+                if src[e:e + 1] == c2:
+                    break
+                e += 1
+            if e >= len(src):
+                return None
+            k = e + 1
+            continue
+        k += 1
+    # A separator right after the blanks is no target at all —
+    # `2> |&`/end-of-line is a bash SYNTAX ERROR, so the group's
+    # pipe is not viable (Devin on #133, round-85 — verified live).
+    return k if k > t0 else None
+
+
+def _closer_redir(src: bytes, j: int, subs):
+    """Parse a redirect operator at `j` — `[fd]op target`. Returns
+    (end, ops) where ops is a list of (fd, kind, arg) bindings applied
+    in order ('file'/'close'/'dup'), or None when `src[j]` doesn't
+    start a redirect. `<`-family redirects bind fd0 — no pipe effect —
+    and dynamic `{fd}` prefixes return an empty ops list."""
+    k = j
+    fd = None
+    if src[k:k + 1] == b"{":
+        e = src.find(b"}", k + 1)
+        if e < 0:
+            return None
+        fd = -1                      # `{fd}` — runtime fd, unknown
+        k = e + 1
+    elif src[k:k + 1].isdigit():
+        while k < len(src) and src[k:k + 1].isdigit():
+            k += 1
+        fd = int(src[j:k])
+    c = src[k:k + 1]
+    if c == b"&" and src[k + 1:k + 2] == b">" and fd is None:
+        # `&>`/`&>>` — fd1 AND fd2 to the file.
+        k += 2
+        if src[k:k + 1] == b">":
+            k += 1
+        # The target may sit after blanks — `&> /dev/stdout` binds the
+        # fd alias the same as the glued form (Devin on #17, round-90
+        # — verified live); `ws` must be the word start, not the
+        # pre-blank position.
+        while k < len(src) and src[k:k + 1] in b" \t":
+            k += 1
+        ws = k
+        k = _redir_word(src, k, subs)
+        if k is None or k == ws:
+            return None
+        _a6 = _fd_alias_target(_word_text(src[ws:k]))
+        _o6 = "dup" if _a6 is not None else "file"
+        _v6 = _a6 if _a6 is not None else _word_text(src[ws:k])
+        return k, [(1, _o6, _v6), (2, _o6, _v6)]
+    if c == b">":
+        n = 1 if fd is None else fd
+        k += 1
+        if src[k:k + 1] == b">":
+            k += 1                   # >>
+        elif src[k:k + 1] == b"|":
+            k += 1                   # >| clobber-override
+        if src[k:k + 1] == b"&":
+            k += 1
+            # `>& 1` (spaced) still dups — whitespace before the digit
+            # target is legal (Devin on #133, round-87 — verified
+            # live). `>& -` spaced is NOT a close (bash errors on the
+            # word) — only the glued form closes.
+            while k < len(src) and src[k:k + 1] in b" \t":
+                k += 1
+            t = src[k:k + 1]
+            if t == b"-":
+                return (k + 1,
+                        [] if n == -1 else [(n, "close", None)])
+            if t.isdigit():
+                s = k
+                while k < len(src) and src[k:k + 1].isdigit():
+                    k += 1
+                return (k,
+                        [] if n == -1 else [(n, "dup", int(src[s:k]))])
+            # `[n]>&word` with a non-digit target is `[n]>word 2>&1`
+            # (POSIX) — fd n to the file, then fd2 dups fd n's new
+            # target.
+            ws = k
+            k = _redir_word(src, k, subs)
+            if k is None or k == ws:
+                return None
+            _a6 = _fd_alias_target(_word_text(src[ws:k]))
+            ops = ([] if n == -1 else
+                   [(n, "dup", _a6) if _a6 is not None
+                    else (n, "file", _word_text(src[ws:k]))])
+            ops.append((2, "dup", n))
+            return k, ops
+        ws = k
+        k = _redir_word(src, k, subs)
+        if k is None or k == ws:
+            return None
+        # A descriptor-backed target is a dup, not a file —
+        # `(...) 2>/dev/stdout` lands fd2 on fd1's pipe (Devin on
+        # #133, round-86 — verified live). Blanks may precede the
+        # target (`2> /dev/stdout` — Devin on #17, round-90); `ws`
+        # must point at the word, not the blanks, or the alias check
+        # misses it.
+        while ws < len(src) and src[ws:ws + 1] in b" \t":
+            ws += 1
+        _a6 = _fd_alias_target(_word_text(src[ws:k]))
+        return (k, [] if n == -1 else
+                [(n, "dup", _a6) if _a6 is not None
+                 else (n, "file", _word_text(src[ws:k]))])
+    if c == b"<":
+        k += 1
+        if src[k:k + 1] == b"<":
+            k += 1
+            if src[k:k + 1] == b"<":
+                k += 1               # <<<
+            elif src[k:k + 1] == b"-":
+                k += 1               # <<-
+        n2 = 0 if fd is None else fd
+        if src[k:k + 1] == b"&":
+            k += 1
+            t = src[k:k + 1]
+            if t == b"-":
+                # `[n]<&-` closes fd n — `(...) 1<&- |` dies on a
+                # closed stdout (Devin on #133, round-86 — verified
+                # live). fd0's own close changes nothing the pipe
+                # sees.
+                return (k + 1,
+                        [] if n2 in (0, -1) else [(n2, "close", None)])
+            if t.isdigit():
+                s = k
+                while k < len(src) and src[k:k + 1].isdigit():
+                    k += 1
+                # `[n]<&m` dups fd n onto fd m's CURRENT binding —
+                # `(...) 1<&2 |&` lands fd1 on real stderr before
+                # `|&` dups fd2, so nothing reaches the pipe
+                # (round-86 — verified live).
+                return (k,
+                        [] if n2 in (0, -1)
+                        else [(n2, "dup", int(src[s:k]))])
+        ws = k
+        k = _redir_word(src, k, subs)
+        if k is None or k == ws:
+            return None
+        # `n<word` binds fd n to READ the file — fd1's output dies on
+        # it (`(...) 1<f |`) the same as a write-binding; a bare
+        # `<`/`0<` rebinds only fd0.
+        return (k, [] if n2 in (0, -1)
+                else [(n2, "file", _word_text(src[ws:k]))])
+    return None
+
+
+def _group_pipe(src: bytes, start: int) -> int:
+    """Index of the `|`/`|&` following the `)`/`}` closer of the
+    compound that contains `start`, else -1. `;`/newline siblings
+    and inner `|`/`&&`/`||` separators inside the compound are
+    skipped — the compound still ends at its `)`/`}` (Devin on
+    #133/#17, round-81)."""
+    return _group_pipe_fds(src, start)[0]
+
+
+def _group_pipe_fds(src: bytes, start: int):
+    """(hit, fd1, fd2) — `_group_pipe` plus the group's final fd
+    bindings after post-closer redirects. Quote- and backtick-aware
+    (Devin on #132/#1428, round-77 — `(cat x >&2; true) |& sh` merges
+    the `>&2` sibling into the pipe). Post-closer redirects bind the
+    group's fds in order before `|&`'s own `2>&1` rebinds fd2 onto
+    fd1's final target — `(...) 2>/dev/null |&` still merges stderr
+    while `(...) >/dev/null |&` empties both (Devin on #133,
+    round-82 — verified live); a plain `|` still carries fd2 when a
+    post-closer `2>&1` bound it onto fd1's pipe target first
+    (`(...) 2>&1 |` — Devin on #133/#1431, round-83 — verified
+    live); the pipe is dead only when neither fd ends on it."""
+    i = start
+    in_s = in_d = esc = False
+    subs = {a: b for a, b in _substitution_spans(src)}
+    depth = 0
+    while i < len(src):
+        if i in subs and not (in_s or in_d or esc):
+            # `$(`/`<(`/`>(` bodies end at their own `)` — neither an
+            # inner group closer nor the containing group's — and a
+            # `|` inside is the capture's pipe, not this group's
+            # (`$(cat x; echo $(d) | w)` — CodeRabbit on #133, r-80).
+            i = subs[i]
+            continue
+        c = src[i:i + 1]
+        if esc:
+            esc = False
+        elif in_s:
+            if c == b"'":
+                in_s = False
+        elif in_d:
+            if c == b"\\":
+                i += 1
+            elif c == b'"':
+                in_d = False
+        elif c == b"\\":
+            esc = True
+        elif c == b"'":
+            in_s = True
+        elif c == b'"':
+            in_d = True
+        elif c == b"`":
+            e = src.find(b"`", i + 1)
+            if e < 0:
+                break
+            i = e
+        elif c == b"{" and src[i - 1:i] == b"$":
+            # Match the expansion's real `}` — a quoted `}` is value
+            # text, nested `${` count, and `\x` inside `"` is escaped
+            # (`echo ${x:-"}"}` — Devin on #1431/#17, round-81).
+            e = i + 1
+            bd = 1
+            sq = dq = False
+            while e < len(src):
+                q = src[e:e + 1]
+                if sq:
+                    if q == b"'":
+                        sq = False
+                elif dq:
+                    if q == b"\\":
+                        e += 1
+                    elif q == b'"':
+                        dq = False
+                elif q == b"\\":
+                    e += 1
+                elif q == b"'":
+                    sq = True
+                elif q == b'"':
+                    dq = True
+                elif q == b"{" and src[e - 1:e] == b"$":
+                    bd += 1
+                elif q == b"}":
+                    bd -= 1
+                    if bd == 0:
+                        break
+                e += 1
+            if e >= len(src):
+                break
+            i = e            # ${...} expansion — its `}` is no closer
+        elif c in (b"(", b"{") and src[i - 1:i] not in (
+                b"$", b"<", b">"):
+            # A NESTED group after `start` — its closer and `|` are
+            # inside the containing compound, not in place of them
+            # (`(cat x >&2; (t)) |&` — CodeRabbit on #133, round-80).
+            depth += 1
+        elif c in (b")", b"}"):
+            if depth:
+                depth -= 1
+                i += 1
+                continue
+            j = i + 1
+            # Post-closer redirects apply to the GROUP in order; a
+            # `|&` then rebinds fd2 onto fd1's final target — so
+            # `(...) 2>/dev/null |& sh` still merges stderr while
+            # `(...) >/dev/null |&` empties both (Devin on #133,
+            # round-82 — verified live). fd1 starts on the pipe (pipe
+            # setup precedes the element's redirects).
+            fd1, fd2 = "pipe", "err"
+            hit = None
+            while j < len(src):
+                while j < len(src) and src[j:j + 1] in b" \t":
+                    j += 1
+                if j >= len(src):
+                    break
+                c2 = src[j:j + 1]
+                if c2 == b"|":
+                    hit = j
+                    break
+                if c2 in (b")", b"}", b";", b"\n") or (
+                        c2 == b"&" and src[j + 1:j + 2] != b">"):
+                    # The `)`/`}` closed an INNER sibling — the outer
+                    # statement continues (`((cat x >&2; t); t) |&` —
+                    # Devin on #133, round-78 — verified live).
+                    i = j
+                    break
+                rj = _closer_redir(src, j, subs)
+                if rj is None:
+                    return -1, fd1, fd2
+                for rfd, kind, arg in rj[1]:
+                    if kind == "file":
+                        nv = "file"
+                    elif kind == "close":
+                        nv = "closed"
+                    else:            # dup — fd takes arg's binding
+                        nv = fd1 if arg == 1 else (
+                            fd2 if arg == 2 else "other")
+                    if rfd == 1:
+                        fd1 = nv
+                    elif rfd == 2:
+                        fd2 = nv
+                j = rj[0]
+            if hit is not None:
+                if src[hit + 1:hit + 2] == b"&":
+                    fd2 = fd1
+                return ((hit, fd1, fd2)
+                        if fd1 == "pipe" or fd2 == "pipe"
+                        else (-1, fd1, fd2))
+            if i != j:
+                return -1, fd1, fd2
+            continue
+        # `|`/`&&`/`||` before the containing closer are INNER
+        # separators (an inner pipeline or conditional inside the
+        # group), not the group's own pipe — keep scanning
+        # (`(cat x >&2; (true) | cat) |&` — Devin on #133/#17,
+        # round-81 — verified live). Outside a group they lead nowhere:
+        # no unquoted `)`/`}` follows, so the loop still ends at -1.
+        i += 1
+    return -1, "err", "err"
 
 
 def _pipe_to_exec(src: bytes, pos: int, od_tails=frozenset()) -> bool:
@@ -7907,7 +9487,23 @@ def _pipe_to_exec(src: bytes, pos: int, od_tails=frozenset()) -> bool:
             prov = r0
             if prov == "own":
                 flow_src = None
-        if _stdout_redirected(src[s0:pos].lstrip(b" \t({")):
+        gprov = _group_fd1_prov(src, pos)
+        if gprov is not None:
+            # The feeding stage is a multi-sibling compound — its fd1
+            # is shared, so aggregate every sibling: a `>`/`&>` on one
+            # diverts only that command, and under `|&` a sibling's
+            # `>&2` still lands on the merged stream (Devin on
+            # #132/#1428/#1961/#16, round-76/77 — verified live).
+            prov, flow_src, _gop, _gfd2 = gprov
+            if prov == "own" and flow_src is not None:
+                # A sibling EMITS text naming a script (`echo bash
+                # x`) — dep-carrying exactly like the non-group
+                # `echo bash x | sh` stream; the exec stage + the
+                # emitted-word gate decide bare-vs-invocation
+                # downstream (Devin on #1431/#1963/#17, round-78 —
+                # verified live).
+                prov = "up"
+        elif _stdout_redirected(src[s0:pos].lstrip(b" \t({")):
             # A `>`/`&>` on the feeding segment diverts its fd1
             # whatever the head — `xargs cat x >/dev/null | sh` and
             # `xargs split -n 1/1 x >/dev/null | sh` feed sh an empty
@@ -7921,12 +9517,6 @@ def _pipe_to_exec(src: bytes, pos: int, od_tails=frozenset()) -> bool:
             # (Devin on #16, round-72 review — verified live).
             prov = "own"
             flow_src = None
-            gprov = _group_fd1_prov(src, s0, pos, od_tails)
-            if gprov is not None:
-                # A divert on the LAST sibling of a compound leaves
-                # the others' emissions on the shared fd1 (Devin on
-                # #16/#1961/#132, round-76 review — verified live).
-                prov, flow_src = gprov
     out = None           # aggregate fd1 inside an open compound
     # The feeding segment may END mid-compound — `(cat x; true) | sh`
     # calls the walk from the `;` inside the `(`, and a `;`/`&` there
@@ -7937,9 +9527,19 @@ def _pipe_to_exec(src: bytes, pos: int, od_tails=frozenset()) -> bool:
     drained = False      # a prior `;`-sibling read the shared stdin to EOF
     pipe_lead = True     # the boundary before the next seg was `|`
     j = pos
+    last_seg = None
+    emit_b = _emit_feed(src, pos, src[pos + 1:pos + 2] == b"&")
+    # Per-depth shared stdin for compound siblings: every `;`/`&`/
+    # newline sibling re-reads the SAME upstream stream (mutated only
+    # by drains — `;`/newline drain → EOF; bare `&` races unprovably).
+    # sib0 keeps the PRISTINE entry stdin for _emit_feed at `)` — it
+    # re-models per-sibling drains itself (Devin on #133, round-90).
+    sib_in: dict = {}
+    sib0: dict = {}
+    chain_head = None   # first seg of the current sibling chain
     while j < len(src):
         if (src[j:j + 1] != b"|" or src[j + 1:j + 2] == b"|"
-                or src[j - 1:j] == b">"):
+                or src[j - 1:j] in b">|"):
             # A boundary rather than a `|` stage: `)`/`}` closes a
             # subshell/brace group (keep walking — its fd1 still
             # pipes onward); a `;`/`&`/newline inside an open
@@ -7948,6 +9548,33 @@ def _pipe_to_exec(src: bytes, pos: int, od_tails=frozenset()) -> bool:
             # pipeline statement (`cat x | tee log; sh` feeds sh
             # nothing — Devin on #1380/#1957, round-16 review).
             c = src[j:j + 1]
+            if depth > 0 and c in (b";", b"\n", b"&"):
+                # The next sibling restarts on the shared stdin — a
+                # drained chain-head leaves EOF for `;`/newline/`&&`,
+                # and a bare `&` races (unprovable). Only the chain's
+                # FIRST command reads the shared stdin — later `|`
+                # stages read the upstream fd1 (`( cat x | cat; sh )`
+                # — `cat x` drains nothing — Devin on #133, round-90).
+                if chain_head is not None and _seg_drains(chain_head):
+                    sib_in[depth] = (None
+                                     if c == b"&"
+                                     and src[j + 1:j + 2] != b"&"
+                                     else b"")
+                emit_b = sib_in.get(depth)
+            elif (depth > 0 and c == b"|"
+                  and (src[j + 1:j + 2] == b"|"
+                       or src[j - 1:j] == b"|")):
+                # A `||` inside a compound is a `;`-like sibling
+                # boundary — the conditional branch still re-reads
+                # shared stdin (`true && cat x`/`false || cat x` —
+                # Devin on #1431, round-91 — verified live).
+                if chain_head is not None and _seg_drains(chain_head):
+                    sib_in[depth] = b""
+                emit_b = sib_in.get(depth)
+            elif c not in (b")", b"}"):
+                emit_b = None
+            last_seg = None
+            chain_head = None
             if depth == 0 and c not in (b")", b"}"):
                 return False
             # The just-finished chain's output joins the compound's
@@ -7958,21 +9585,63 @@ def _pipe_to_exec(src: bytes, pos: int, od_tails=frozenset()) -> bool:
             elif prov in ("up", "script"):
                 out = "up"
             if c in (b")", b"}"):
+                _od = depth
                 depth = max(0, depth - 1)
+                sib_in.pop(_od, None)
+                if depth == 0:
+                    k2 = j + 1
+                    _subs2 = {a2: b2 for a2, b2 in
+                              _substitution_spans(src)}
+                    while True:
+                        while (k2 < len(src)
+                               and src[k2:k2 + 1] in b" \t"):
+                            k2 += 1
+                        if k2 >= len(src):
+                            break
+                        rj2 = _closer_redir(src, k2, _subs2)
+                        if rj2 is None:
+                            break
+                        k2 = rj2[0]
+                    if src[k2:k2 + 1] == b"|":
+                        # The group's prov is the fd1+fd2 aggregate,
+                        # not the last stage's fd1 channel — fd2 joins
+                        # under `) |&` or a post-closer `2>&1` before
+                        # `|` (`cat x | cat >&2` hands x to the pipe —
+                        # Devin on #17, round-82; `(cat x >&2; true)
+                        # 2>&1 |` — Devin on #133, round-83 — both
+                        # verified live). gfdp replays the post-closer
+                        # bindings itself and returns None when
+                        # neither group fd reaches the pipe.
+                        g2 = _group_fd1_prov(src, k2)
+                        if g2 is not None:
+                            out = g2[0]
+                            if g2[1] is not None:
+                                flow_src = g2[1]
+                            emit_b = _emit_feed(
+                                src, k2, src[k2 + 1:k2 + 2] == b"&",
+                                sib0.pop(_od, emit_b))
             # Inside the compound a sibling re-reads its stdin — but
             # only what earlier siblings LEFT: a full-read head (`cat`,
             # `wc`) empties it to EOF (Devin on #9, round-17 review).
             # Once it closes, the next `|` reads the aggregated fd1.
             prov = (out if depth == 0
                     else "own" if drained else "up")
-            if prov == "own":
+            if prov == "own" and out != "up":
+                # The drained sibling's 'own' prov is per-seg — the
+                # aggregate fd1 still carries earlier siblings'
+                # bytes (`cat x | ( cat; true ) | sh` — Devin on
+                # #133, round-87 — verified live), so only drop the
+                # source when the aggregate is 'own' too.
                 flow_src = None
             pipe_lead = False
             j += 1
         else:
+            lead_amp = src[j + 1:j + 2] == b"&"
             j += 1
             if src[j:j + 1] == b"&":
                 j += 1
+            if last_seg is not None:
+                emit_b = _emit_stage_bytes(last_seg, emit_b, lead_amp)
             pipe_lead = True
         while j < len(src) and src[j] in b" \t":
             j += 1
@@ -7980,11 +9649,73 @@ def _pipe_to_exec(src: bytes, pos: int, od_tails=frozenset()) -> bool:
             break
         win = _cmd_window(src, j)
         seg = src[j:j + len(win)]
-        ws = _shell_words(_mask_parens(seg))
+        # Backtick bodies are one word's substitution text — mask them
+        # or their `|`/`;` splits a `X=`cmd`` assign stage into fake
+        # pipeline stages (Devin on #133, round-90 — verified live).
+        ws = _shell_words(_mask_backticks(_mask_parens(seg)))
         first = (_word_text(seg[ws[0][0]:ws[0][1]])
                  if ws else None)
-        r = _seg_prov(seg, prov, flow_src, _line_ifs(src, j))
+        pin = prov
+        psrc = flow_src
+        if _assign_words_inert(ws, seg):
+            # A stage of only inert `NAME=value` words has no
+            # command — it reads nothing and emits nothing, so the
+            # stream dies there (`cat x | X=1` — round-85 — verified
+            # live).
+            r = "own"
+        elif _all_assign_words(ws, seg):
+            # All-assign stage carrying substitutions — `$(…)` bodies
+            # inherit the stream: an exec head runs it right here, a
+            # drain captures it (round-86).
+            r = _assign_rhs_prov(seg, prov, flow_src)
+        else:
+            r = _seg_prov(seg, prov, flow_src, _line_ifs(src, j))
+        if _stage_numbers_stream(seg):
+            # `cat -n`/`nl`/`pr -n` prefix `N\t` — kills only each
+            # line's FIRST command; a `;`/`&`/`|` tail still runs, so
+            # sink only when the stream provably has no separator
+            # commands (Devin on #1963/#1431/#17, round-86 — verified
+            # live). Provable separator EMIT in an 'own' stream
+            # survives the prefix the same way — emit decides, not
+            # prov.
+            _tg9: dict = {}
+            _k9, _a9, _f9, _h9 = _seg_head_args(seg, _tg9)
+            _ops9 = _reader_operands(_k9, _a9)
+            _nf = (_ops9 is not None and _numbered_flows(
+                _ops9, flow_src, _tg9.get(0), emit=emit_b))
+            if r in ("script", "up", "thru") and not _nf:
+                r = "own"
+            elif (r == "own" and _nf and emit_b is not None
+                  and _numbered_execs(emit_b)
+                  and not _stdout_redirected(seg)):
+                # Promote only on PROVABLE separator emit reaching the
+                # stage's fd1 — an unprovable or diverted stream can't
+                # justify revival (`cat x | cat -n >/dev/null` emits
+                # nothing — CodeRabbit on #133, round-87 — verified
+                # live).
+                r = "up"
+        if (r == "own" and emit_b is not None
+                and _emit_script_execs(emit_b)
+                and _stdin_exec_head(seg, psrc) == "exec"):
+            # Provable emitted bytes naming a bundled script reach an
+            # exec head's stdin even when the stream's PROV is 'own' —
+            # `(echo 'sh x' >&2 |& cat -n) |& sh` merges the inner |&'s
+            # fd2 bytes into the pipe (Devin on #133, round-87 —
+            # verified live).
+            return True
         if r is None:
+            if emit_b is not None and not _emit_script_execs(emit_b):
+                # An exec stage consumed the stream, but the provable
+                # emitted bytes cannot run (`echo 'sh x' | (cat -n;
+                # true) | sh` — every line's first command is eaten by
+                # the `N\t` prefix — Devin on #133, round-87 —
+                # verified live). PROVABLE deadness is unconditional:
+                # emit already accounts for the operands — a scripts/
+                # file's bytes never reach the stage when emit is
+                # empty or non-exec (`echo 'sh x' | (cat >/dev/null;
+                # cat) | sh` — Devin on #133, round-90 — verified
+                # live).
+                return False
             return True   # an exec stage consumed the dep stream
         if r == "script":
             _k, _a, _f, _h = _seg_head_args(seg)
@@ -7992,9 +9723,19 @@ def _pipe_to_exec(src: bytes, pos: int, od_tails=frozenset()) -> bool:
                 (_operand_text(a2) for a2 in _a
                  if b"scripts/" in a2), flow_src)
         elif r == "own":
-            flow_src = None
+            # An 'own' sibling inside an open compound does not erase
+            # the stream — the group's fd1 is shared, so `cat x |
+            # ( cat; true ) | sh` still feeds sh the script (Devin on
+            # #133, round-87 — verified live).
+            if depth == 0:
+                flow_src = None
+        last_seg = seg
         prov = r
         gd = _group_depth(seg)
+        if not pipe_lead or gd > 0:
+            # First seg of a sibling chain — its head is the only one
+            # reading the compound's shared stdin (round-90).
+            chain_head = seg
         if (not pipe_lead or first in _SEG_COND_OPENERS
                 or gd > 0) and _seg_drains(seg):
             # This segment's first command read the compound's shared
@@ -8005,7 +9746,10 @@ def _pipe_to_exec(src: bytes, pos: int, od_tails=frozenset()) -> bool:
             # compound — counting it leaves a phantom level after `fi`
             # (Devin on #1428/#1961, round-73 review — verified live).
             depth += 1
+            sib_in[depth] = sib0[depth] = emit_b
         elif first in _SEG_CLOSERS:
+            sib_in.pop(depth, None)
+            sib0.pop(depth, None)
             depth = max(0, depth - 1)
             if depth == 0 and out is not None:
                 prov = out  # the compound's fd1 is its segments' sum
@@ -8017,6 +9761,43 @@ def _pipe_to_exec(src: bytes, pos: int, od_tails=frozenset()) -> bool:
                 flow_src = None
         else:
             depth += gd
+            if gd > 0:
+                # The opened compound's siblings share this segment's
+                # stdin — capture it pristine AND mutable (drains).
+                sib_in[depth] = sib0[depth] = emit_b
+            if gd < 0 and depth <= 0:
+                # The group just closed — its fd1 emit is _emit_feed's
+                # at the `|` after the close, fed the compound's
+                # PRISTINE entry stdin (sib0, not the drained sib_in).
+                # last_seg clears so the next `|` doesn't re-apply the
+                # LAST sibling's transform to the aggregate (`(cat;
+                # true) | sh` — `true` emits b'', but `cat` already
+                # pushed the stream — Devin on #133, round-90 —
+                # verified live).
+                _cl = max(seg.rfind(b")"), seg.rfind(b"}"))
+                if _cl >= 0:
+                    # _emit_feed wants the `|` after the close — skip
+                    # blanks and post-closer redirects like the `)`
+                    # boundary path does.
+                    _k3 = j + _cl + 1
+                    _subs3 = {a2: b2 for a2, b2 in
+                              _substitution_spans(src)}
+                    while True:
+                        while (_k3 < len(src)
+                               and src[_k3:_k3 + 1] in b" \t"):
+                            _k3 += 1
+                        if _k3 >= len(src):
+                            break
+                        rj3 = _closer_redir(src, _k3, _subs3)
+                        if rj3 is None:
+                            break
+                        _k3 = rj3[0]
+                    if src[_k3:_k3 + 1] == b"|":
+                        emit_b = _emit_feed(
+                            src, _k3, src[_k3 + 1:_k3 + 2] == b"&",
+                            sib0.pop(depth - gd, emit_b))
+                        sib_in.pop(depth - gd, None)
+                        last_seg = None
             if gd < 0 and depth <= 0 and out is not None:
                 # A `)`/`}` shared this segment's window — the group's
                 # fd1 is its `;` siblings' aggregate, not the last
@@ -8033,7 +9814,65 @@ def _pipe_to_exec(src: bytes, pos: int, od_tails=frozenset()) -> bool:
                     flow_src = None
             depth = max(0, depth)
         if prov not in ("up", "script", "thru") and depth == 0:
-            return False  # the stage replaced or diverted the stream
+            # A stage that killed only fd1 still forwards its fd2
+            # bytes when the group's fd2 reaches the pipe — under
+            # `|&` or a post-closer `2>&1` (`cat x | cat >&2` sends x
+            # to the pipe — Devin on #17, round-82; `(cat x >&2;
+            # true) 2>&1 |` — Devin on #133, round-83 — verified
+            # live).
+            k2 = j + len(win)
+            _subs3 = {a3: b3 for a3, b3 in _substitution_spans(src)}
+            while True:
+                while (k2 < len(src)
+                       and src[k2:k2 + 1] in b" \t"):
+                    k2 += 1
+                if k2 >= len(src):
+                    break
+                rj3 = _closer_redir(src, k2, _subs3)
+                if rj3 is None:
+                    break
+                k2 = rj3[0]
+            if src[k2:k2 + 1] == b"|":
+                g2 = _group_fd1_prov(src, k2)
+                if g2 is not None and g2[0] != "own":
+                    prov = g2[0]
+                    if g2[1] is not None:
+                        flow_src = g2[1]
+                elif (g2 is not None and g2[3]
+                        and (_seg_head_args(seg, {})[2] or {}).get(1)
+                            == _FD_ERR):
+                    # The stage's fd1→fd2 lands on the group's merged
+                    # stderr — the stream continues there instead of
+                    # ending (`(echo bash x | cat >&2) |& sh` forwards
+                    # the emitted text to sh — Devin on #1963,
+                    # round-84 — verified live). Re-evaluate it as a
+                    # forwarder on the chain it read. A head-less or
+                    # describe-only stage yields no fd map — it emits
+                    # nothing either way (CodeRabbit on #133, r-85).
+                    r2 = _fwd_stage_prov(
+                        re.sub(rb"[0-9]*>&2\b", b"", seg),
+                        pin, psrc, _line_ifs(src, j))
+                    if r2 is None:
+                        # An exec stage running SCRIPT/emitted input
+                        # is the dep — on 'own' input it executes a
+                        # replacement stream (`wc -l`'s count — Devin
+                        # on #17/#1963, round-85 — verified live).
+                        if pin != "own":
+                            return True
+                        prov = "own"
+                        flow_src = None
+                    else:
+                        prov = r2
+                        if r2 == "script":
+                            _k4, _a4, _f4, _h4 = _seg_head_args(seg, {})
+                            flow_src = next(
+                                (_operand_text(a5)
+                                 for a5 in _a4 if b"scripts/" in a5),
+                                flow_src)
+                        elif r2 == "own":
+                            flow_src = None
+            if prov not in ("up", "script", "thru"):
+                return False  # the stage replaced or diverted the stream
         j += len(win)
     return False
 
@@ -9714,6 +11553,60 @@ def _descend_sub(src: bytes, pos: int,
     return None
 
 
+def _win_stage_fd1(win: bytes, off: int):
+    """fd1 binding of the stage containing `off` inside `win`, or
+    None.
+
+    `_seg_head_args(win)` alone answers with the LAST stage's
+    binding — wrong when the window continues past the word's stage
+    into a `)`/`}` and the group's post-closer redirects (`(cat x
+    >&2) 2>&1 |`: the trailing `2>&1`/`>/dev/null` are the group's,
+    while the word's `>&2` bound its own fd1 to fd2 — Devin on
+    #133, round-83 — verified live). Quote-, escape-, backtick- and
+    substitution-aware."""
+    wst5 = win
+    m5 = bytearray(win)
+    for a5, b5 in _substitution_spans(win):
+        m5[a5:b5] = b" " * (b5 - a5)
+    in5 = ind5 = es5 = False
+    ci5 = 0
+    while ci5 < len(win):
+        q5 = m5[ci5:ci5 + 1]
+        if es5:
+            es5 = False
+        elif in5:
+            in5 = q5 != b"'"
+        elif ind5:
+            if q5 == b"\\":
+                es5 = True
+            elif q5 == b'"':
+                ind5 = False
+        elif q5 == b"\\":
+            es5 = True
+        elif q5 == b"'":
+            in5 = True
+        elif q5 == b'"':
+            ind5 = True
+        elif q5 == b"`":
+            e5 = m5.find(b"`", ci5 + 1)
+            if e5 < 0:
+                break
+            ci5 = e5
+        elif q5 in (b")", b"}"):
+            wst5 = win[:ci5]
+            break
+        ci5 += 1
+    cur = 0
+    for s6, e6, k6 in _sub_cmd_seps(wst5):
+        if k6 in (b";", b"\n", b"&", b"|"):
+            if cur <= off < s6:
+                f6 = _seg_head_args(wst5[cur:s6], {})[2]
+                return f6.get(1) if f6 is not None else None
+            cur = e6
+    f6 = _seg_head_args(wst5[cur:], {})[2]
+    return f6.get(1) if f6 is not None else None
+
+
 def _command_literal(src: bytes, pos: int,
                      output_exec: bool = False) -> bool:
     """True when `pos` sits in text the shell does NOT execute.
@@ -9788,11 +11681,146 @@ def _command_literal(src: bytes, pos: int,
         # runs `safe`, never x — Devin on #1380/#1957, round-12 review).
         # An INNER pipeline continuation gets the same treatment: only
         # its last stage's output reaches the capture (`cat scripts/x
-        # | head -n 0` emits nothing — round-13 review).
-        if _stdout_redirected(win):
+        # | head -n 0` emits nothing — round-13 review). The window's
+        # leading `(`/`{` openers sit at group depth — strip them so a
+        # `>` redirect on the word's own head is seen (`(cat x
+        # >/dev/null | cat >&2) |& sh` runs nothing — Devin on #1431,
+        # round-82 — verified live).
+        if _stdout_redirected(win.lstrip(b" \t({")):
+            # A `>&2` divert inside a compound piped by `|&` still
+            # reaches the stream — the group's stderr IS the pipe, so
+            # the sibling's fd1→fd2 lands on it (`(cat x >&2; true)
+            # |& sh` runs x — Devin on #132/#1428, round-77 review —
+            # verified live). A bare `cmd >&2 |&` still dies: fd1
+            # binds to REAL stderr before `|&` copies fd1's binding
+            # (verified live — `cat x >&2 |& sh` feeds sh nothing).
+            p, _pf1, pf2 = _group_pipe_fds(src, cs + len(win))
+            if p < 0:
+                # The command window may INCLUDE the `)`/`}` and its
+                # post-closer redirects — `(cat x >&2) 2>&1 |` — so
+                # rescan from the word, which always sits before the
+                # containing closer (Devin on #133, round-83).
+                p, _pf1, pf2 = _group_pipe_fds(src, pos)
+            gp = (_group_fd1_prov(src, p)
+                  if p >= 0 and pf2 == "pipe" else None)
+            # The fd check wants the WORD's own stage, not the
+            # window's trailing post-closer redirects — `(cat x >&2)
+            # 2>&1 |` ends win on `>/dev/null`-style binds while the
+            # word's `>&2` bound its fd1 to fd2 (Devin on #133,
+            # round-83 — verified live).
+            _wfd5 = _win_stage_fd1(win, pos - cs)
+            if (gp is not None and gp[2] <= cs
+                    and _wfd5 == _FD_ERR):
+                return not _pipe_ends_prov(src, p)
             return True
         p = _pipe_pos(src, cs + len(win))
+        if p < 0:
+            # The window ended mid-compound — the pipe that matters is
+            # the GROUP's, past the `)`/`}` closer.
+            p = _group_pipe(src, cs + len(win))
         return p >= 0 and not _pipe_ends_prov(src, p)
+    # The word's command may end mid-compound — `(cat x >&2; true)
+    # |& sh` calls with the tail at the `;`, where _pipe_to_exec sees
+    # no `|` at all; the pipe that matters is the group's (Devin on
+    # #132/#1428, round-77 — verified live). Only a `)`/`}` closer
+    # whose opener precedes `cs` counts — `_group_pipe` returns -1
+    # for a compound that opens after the word's command.
+    # A pure reader's own fd1 may leave the stream entirely — a file
+    # or closed target never reaches any pipe (`(cat x >/dev/null |
+    # cat >&2) |& sh` sends x's bytes to the file — Devin on #1431,
+    # round-82 — verified live). Only readers: emit-heads reach the
+    # emitted-word gate and `split`'s filter still runs its operand's
+    # chunks no matter where its own fd1 points.
+    wfd1 = _win_stage_fd1(win, pos - cs)
+    if key in _NONEXEC_FILE_READERS and wfd1 in (_FD_FILE, _FD_CLOSED):
+        return True
+    p, _pf1, pf2 = _group_pipe_fds(src, cs + len(win))
+    if _pipe_pos(src, cs + len(win)) >= 0:
+        # The word's own `;`-sibling continues via an INNER `|` —
+        # the word's fd1 feeds that inner pipeline and only its LAST
+        # stage's output reaches the group's outer pipe
+        # (`( cat x | python -m base64 ) | sh` hands sh encoded
+        # bytes, not the script — round-29 semantics). Unless fd1
+        # went to fd2 inside a `|&` group — those bytes bypass the
+        # inner pipeline onto the merged stderr (`(cat x >&2 | cat
+        # >/dev/null) |&` still runs x — Devin on #17, round-82 —
+        # verified live).
+        if (wfd1 == _FD_ERR and p >= 0
+                and pf2 == "pipe"):
+            return not _pipe_to_exec(src, p)
+        if p >= 0:
+            p6, pf6 = p, pf2
+        else:
+            p6, _p6b, pf6 = _group_pipe_fds(src, pos)
+        if (key in _STDIN_EMIT_HEADS and p6 >= 0
+                and pf6 == "pipe"):
+            # The inner pipeline's LAST stage may be an fd1→fd2
+            # forwarder — it hands the stream to the group's stderr,
+            # which reaches the pipe under `|&`/post-closer `2>&1`
+            # (`(echo bash x | cat >&2) |& sh` runs the emitted text —
+            # Devin on #1963, round-84 — verified live). An emit
+            # head's operand isn't literal in that case — the emitted
+            # gate decides; reader heads keep the prov consult (their
+            # file's bytes classify by content: `cat -n >&2` still
+            # dies on the numbering). Find the containing `)`/`}`
+            # (quote/escape/substitution-aware) and test the stage
+            # right before it.
+            m6 = bytearray(src)
+            for a6, b6 in _substitution_spans(src):
+                m6[a6:b6] = b" " * (b6 - a6)
+            cl6 = -1
+            ci6 = cs + len(win)
+            in6 = ind6 = es6 = False
+            while ci6 < len(src):
+                q6 = m6[ci6:ci6 + 1]
+                if es6:
+                    es6 = False
+                elif in6:
+                    in6 = q6 != b"'"
+                elif ind6:
+                    if q6 == b"\\":
+                        es6 = True
+                    elif q6 == b'"':
+                        ind6 = False
+                elif q6 == b"\\":
+                    es6 = True
+                elif q6 == b"'":
+                    in6 = True
+                elif q6 == b'"':
+                    ind6 = True
+                elif q6 == b"`":
+                    e6 = m6.find(b"`", ci6 + 1)
+                    if e6 < 0:
+                        break
+                    ci6 = e6
+                elif q6 in (b")", b"}"):
+                    cl6 = ci6
+                    break
+                elif q6 in (b";", b"\n"):
+                    break
+                ci6 += 1
+            if cl6 > 0:
+                t6 = src[cs + len(win):cl6]
+                # The last stage's own fd1 binding decides — stage
+                # text after the final `|` (the forwarder reads the
+                # inner pipe).
+                last6 = 0
+                for s6, e6, k6 in _sub_cmd_seps(t6):
+                    if k6 == b"|":
+                        last6 = e6
+                lfd = _seg_head_args(t6[last6:], {})[2]
+                if lfd is not None and lfd.get(1) == _FD_ERR:
+                    return False   # defer to the emitted-word gate
+        return not _pipe_to_exec(src, cs + len(win))
+    if p >= 0 and _group_fd1_prov(src, p) is None:
+        # A `)`/`}` at pos-1 that _group_fd1_prov accepts is a real
+        # command group; a `$(` substitution close is not. amp follows
+        # the operator: `>&2` siblings die under `|` but merge under
+        # `|&` ((cat x >&2 | cat >/dev/null) |& sh runs x — Devin on
+        # #17, round-82 — verified live).
+        return not _pipe_to_exec(src, cs + len(win))
+    if p >= 0:
+        return not _pipe_to_exec(src, p)
     return not _pipe_to_exec(src, cs + len(win))
 
 
@@ -11748,7 +13776,70 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                     # CAPTURE, whose outer exec-ness the literal gate
                     # already decided — the operand stays a dep there.
                     # `split` keeps its own filter analysis above.
-                    return _pipe_to_exec(scan, cs + len(enclosing))
+                    # The word's own `;`-sibling may divert fd1 —
+                    # `cat x >&2; (true) |& sh` emits on real stderr
+                    # (dead) while `(true)`'s `|&` is a different
+                    # pipe entirely. The only divert that still lands
+                    # on the shared stream is fd1→fd2 inside a `|&`
+                    # compound (Devin on #132/#1428, round-77 —
+                    # verified live).
+                    wa2, wb2 = 0, len(enclosing)
+                    cur = 0
+                    for s3, e3, k3 in _sub_cmd_seps(enclosing):
+                        if k3 in (b";", b"\n", b"&"):
+                            if cur <= epos < s3:
+                                wa2, wb2 = cur, s3
+                                break
+                            cur = e3
+                    else:
+                        if cur <= epos:
+                            wa2, wb2 = cur, wb2
+                    wseg = enclosing[wa2:wb2]
+                    # The word's OWN pipeline stage — not the
+                    # sibling's last — decides where its emitted fd1
+                    # goes: `(echo bash x >&2 | cat >/dev/null) |&`
+                    # puts the word in the `>&2` stage; the last
+                    # stage's `>` is irrelevant (Devin on #17/#1963,
+                    # round-83 — verified live).
+                    wfd = _win_stage_fd1(wseg, epos - wa2)
+                    # The word's window may end mid-compound — the
+                    # pipe that matters is the GROUP's, past `)`/`}`
+                    # (`(echo bash x >&2; t) |&` — Devin on #133,
+                    # round-78 — verified live). An inner `|` right
+                    # after the word's window means the sibling is a
+                    # pipeline — the word's fd1 ends inside the
+                    # compound and only the inner LAST stage's output
+                    # reaches the outer pipe (`( echo bash x | tr a b
+                    # ) | sh` runs transformed text — round-81).
+                    # A one-command group's window may end AT its
+                    # `)`/`}` — `(echo bash x >&2) |& sh` — so fall
+                    # back to scanning from the command start for the
+                    # containing closer's pipe (Devin on #1431,
+                    # round-83 — verified live).
+                    p2g, _pf1, pf2 = _group_pipe_fds(
+                        scan, cs + len(enclosing))
+                    if p2g < 0:
+                        p2g, _pf1, pf2 = _group_pipe_fds(
+                            scan, cs + epos)
+                    p2 = p2g
+                    if _pipe_pos(scan, cs + len(enclosing)) >= 0:
+                        p2 = -1
+                    if wfd not in (None, _FD_OUT):
+                        # fd1→fd2 inside a compound whose fd2 reaches
+                        # the pipe (`|&`, or a post-closer `2>&1`
+                        # under a plain `|`) bypasses any inner
+                        # pipeline onto the merged stream
+                        # (`(cat x >&2 | cat >/dev/null) |&` runs x —
+                        # Devin on #17, round-82 — verified live).
+                        fd2on = p2g >= 0 and pf2 == "pipe"
+                        gp = (_group_fd1_prov(scan, p2g)
+                              if fd2on else None)
+                        if (wfd != _FD_ERR or not fd2on
+                                or gp is None or gp[2] > cs + wa2):
+                            return False
+                        return _pipe_to_exec(scan, p2g)
+                    return _pipe_to_exec(
+                        scan, p2 if p2 >= 0 else cs + len(enclosing))
                 return True
             # A glued non-`-d` short-option operand whose tail is a script
             # IS the invocation (`node -rscripts/preload.js`) — the same
@@ -11877,6 +13968,23 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                         and not _stdout_redirected(enclosing)
                         and _pipe_to_exec(scan, cs + len(enclosing))):
                     return True
+                if (ekey in _STDIN_EMIT_HEADS
+                        and _win_stage_fd1(
+                            enclosing, epos) == _FD_ERR):
+                    # A `>&2`-diverted emit still reaches the pipe
+                    # when the containing group's fd2 merges —
+                    # `(echo 'sh x' >&2 |& cat -n) |& sh` runs the
+                    # emitted text, while `| sh` (fd2 left on real
+                    # stderr) drops it (Devin on #133, round-87 —
+                    # verified live).
+                    _gs8 = (cs + 1
+                            if enclosing[:1] in (b"(", b"{")
+                            else cs + epos)
+                    _pg8, _p8a, _p8b = _group_pipe_fds(
+                        scan, _gs8)
+                    if (_pg8 >= 0 and _p8b == "pipe"
+                            and _pipe_to_exec(scan, _pg8)):
+                        return True
             # The quoted-span fallback accepts a path inside (a) a
             # DOUBLE-quoted span containing `$(`/`` ` `` — the
             # substitution expands and executes regardless of operand
@@ -12016,6 +14124,44 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                     or name in declared
                     for name in declared_alts):
                 return True  # unbundled + undeclared — would ship broken
+    # Emitted sibling bytes can ASSEMBLE an invocation no single
+    # source word holds — `(echo -n 'sh '; echo scripts/x.sh) | sh`
+    # writes `sh ` then `scripts/x.sh` into ONE glued pipe stream and
+    # the shell runs the script, while the source carries no
+    # keyword-adjacent ref for SCRIPT_REF to match (Devin on #1431,
+    # round-92 — verified live). Scan every top-level `|`'s provable
+    # emitted feed: when the emitted program reaching an exec head
+    # itself invokes a scripts/ path, gate it bundled-or-declared
+    # exactly like a source ref. The scan uses `raw=True` — the
+    # byte-faithful stream with NO synthetic newlines — because
+    # `_join_emit`'s inserted newline is only an exec-shape device:
+    # the real pipe glues writes, so an invocation assembles across
+    # piece boundaries (`sh `+`cripts/x.sh` matches; `sh`+`cripts/x.sh`
+    # does not — Devin on #133/#17/#1431/#1963, round-93 — verified
+    # live). Real newlines stay real command boundaries.
+    for _s2, _e2, _k2 in _sub_cmd_seps(scan):
+        if (_k2 != b"|" or scan[_s2 - 1:_s2] == b"|"
+                or scan[_e2:_e2 + 1] == b"|"):
+            continue
+        _eb = _emit_feed(scan, _s2, scan[_s2 + 1:_s2 + 2] == b"&",
+                         raw=True)
+        if _eb is None or b"scripts/" not in _eb:
+            continue
+        if not _pipe_to_exec(scan, _s2):
+            continue
+        for _em in SCRIPT_REF.finditer(_eb):
+            _rn = SCRIPT_NAME.search(_em.group(0))
+            if _rn is None:
+                continue
+            _p = _rn.group(1).decode("utf-8", errors="ignore")
+            if (_p in pinned_scripts
+                    if pinned_scripts is not None
+                    else (sdir / _p).is_file()):
+                return True
+            if not (f"scripts/{_p}" in declared
+                    or f"./scripts/{_p}" in declared
+                    or _p in declared):
+                return True
     return False
 
 
