@@ -14166,3 +14166,52 @@ def test_script_dep_round83_emit_head_fd2(tmp_path):
     # Real stderr under a plain `|` — emitted text dies there.
     assert not mod.script_dep_block(
         pdir, b'(echo bash scripts/x.sh >&2) | sh\n')
+
+
+def test_script_dep_round84_inner_fwd_fd2(tmp_path):
+    """An fd1→fd2 forwarder as an inner-pipeline LAST stage hands the
+    stream to the group's stderr — under `|&` or post-closer `2>&1`
+    the pipe still receives it: `(echo bash x | cat >&2) |& sh` runs
+    the emitted text, `(cat x | cat >&2) |& sh` runs the script's
+    bytes (Devin on #1963, round-84 — verified live: FORWARDED).
+    A numbering/sink forwarder (`cat -n >&2`, `nl >&2`, `wc -l >&2`)
+    emits prefixed/replaced text the downstream can't run — still no
+    dep (verified live: `cat -n` numbered stream → `sh: 1: not
+    found`). And a plain `|` leaves the forwarder's fd2 on real
+    stderr — emitted text dies there."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (
+            b'(echo bash scripts/x.sh | cat >&2) |& sh',
+            b'(echo bash scripts/x.sh | cat >&2) 2>&1 | sh',
+            b'(cat scripts/x.sh | cat >&2) |& sh',
+            b'(cat scripts/x.sh | cat >&2) 2>&1 | sh',
+            b'(cat scripts/x.sh | sh >&2) |& cat'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b'(echo bash scripts/x.sh | cat >&2) | sh',
+            b'(cat scripts/x.sh | cat -n >&2) |& sh',
+            b'(cat scripts/x.sh | nl >&2) |& sh',
+            b'(cat scripts/x.sh | pr -n >&2) |& sh',
+            b'(cat scripts/x.sh | wc -l >&2) |& sh',
+            b'(cat scripts/x.sh | head -n 0 >&2) |& sh'):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round84_spaced_redir_target(tmp_path):
+    """`2> /dev/null` and `2>&1 > /dev/null` — a blank between the
+    operator and its target binds the same file as the glued form
+    (Devin on #17/#1963, round-84 — verified live: `(cat x >&2; true)
+    2> /dev/null |& sh` still merges — `|&` re-dups fd2 after the
+    spaced divert)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (
+            b'(cat scripts/x.sh >&2; true) 2> /dev/null |& sh',
+            b'(cat scripts/x.sh >&2) 2>&1 > /dev/null | sh',
+            b'(cat scripts/x.sh >&2) 2> /dev/null 2>&1 | sh'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line

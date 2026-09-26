@@ -7224,6 +7224,23 @@ def _sh_c_word(sub: bytes, sub_words: list, n: int):
     return None
 
 
+def _fwd_stage_prov(stg: bytes, prov: str, stream_src,
+                    ifs: bytes | None = None):
+    """_seg_prov for an fd1→fd2 FORWARDER stage under fd2on: the
+    stage's output lands on the merged stream the pipe reads, so its
+    own _stdin_exec_head class applies first — a numbering head
+    (`cat -n`, `nl`) emits prefixed text the exec side can't run, a
+    replacement head (`wc -l`) emits its own bytes, and an exec head
+    (`sh >&2`) runs the stream right there. Returns the _seg_prov
+    result vocabulary: None = the stage executes its input."""
+    v = _stdin_exec_head(stg, stream_src)
+    if v == "exec":
+        return None
+    if v == "sink":
+        return "own"
+    return _seg_prov(stg, prov, stream_src, ifs)
+
+
 def _stdin_exec_head(win: bytes, stream_src=None) -> str:
     """Classify `win`'s effective command as a pipe consumer.
 
@@ -7826,8 +7843,9 @@ def _group_fd1_prov(src: bytes, pos: int):
     round-82) or under a plain `|` when a post-closer `2>&1` bound
     fd2 onto fd1's pipe target (`(cat x >&2; true) 2>&1 | sh` — Devin
     on #133/#1431, round-83 — verified live). Returns
-    (prov, operand_src, opener_pos) aggregated over the compound's
-    siblings, or None when the stage doesn't end at a `)`/`}` closer
+    (prov, operand_src, opener_pos, fd2on) aggregated over the
+    compound's siblings — fd2on says the group's fd2 itself lands on
+    the pipe — or None when the stage doesn't end at a `)`/`}` closer
     or when NEITHER group fd ends on the pipe (a whole-group divert
     like `(cat x; cat y) >f | sh`)."""
     # Quoted/escaped/backticked parens are operand text, not
@@ -7992,6 +8010,7 @@ def _group_fd1_prov(src: bytes, pos: int):
                 last = se2
         bounds.append((last, len(seg)))
         chain = "up"
+        chain_src = None       # scripts/ operand feeding the chain
         for sbi, (sa, sb) in enumerate(bounds):
             stg = seg[sa:sb]
             sfd = _seg_head_args(stg, {})[2]
@@ -8008,23 +8027,34 @@ def _group_fd1_prov(src: bytes, pos: int):
                             (_operand_text(a3)
                              for a3 in _a2 if b"scripts/" in a3),
                             None)
-                    p2_ = _seg_prov(
-                        stg2, chain, None, _line_ifs(src, ga))
-                    if p2_ == "script":
+                    p2_ = _fwd_stage_prov(
+                        stg2, chain, chain_src, _line_ifs(src, ga))
+                    if p2_ is None or p2_ == "script":
                         prov = "script"
                     elif (p2_ is not None and p2_ != "own"
                             and prov == "own"):
                         prov = p2_
                 chain = "own"
+                chain_src = None
                 continue
             if sfd1 in (_FD_FILE, _FD_CLOSED):
                 chain = "own"        # diverted — nothing passes on
+                chain_src = None
                 continue
-            p_ = _seg_prov(stg, chain, None, _line_ifs(src, ga))
+            p_ = _seg_prov(stg, chain, chain_src, _line_ifs(src, ga))
             if p_ is None:
                 chain = "own"
+                chain_src = None
                 break
             chain = p_
+            if p_ == "script":
+                _k3, _a3x, _f3, _h3 = _seg_head_args(stg, {})
+                chain_src = next(
+                    (_operand_text(a4)
+                     for a4 in _a3x if b"scripts/" in a4),
+                    chain_src)
+            elif p_ == "own":
+                chain_src = None
             if sbi == len(bounds) - 1 and _g1 == "pipe":
                 if out_src is None:
                     _k2, _a2, _f2, _h2 = _seg_head_args(stg, {})
@@ -8036,13 +8066,17 @@ def _group_fd1_prov(src: bytes, pos: int):
                     prov = "script"  # strongest — a scripts/ operand
                 elif p_ != "own" and prov == "own":
                     prov = p_
-    return prov, out_src, op
+    return prov, out_src, op, fd2on
 
 
 def _redir_word(src: bytes, k: int, subs):
     """End index of the redirect-target word starting at `k`, else
-    None on an unterminated quote. Quotes, `\\c` escapes, and
-    `$(`/`<(`/`>(` spans stay inside the word."""
+    None on an unterminated quote. The target may be separated from
+    its operator by blanks — `2> /dev/null` binds the same file as
+    `2>/dev/null` (Devin on #17, round-84 — verified live). Quotes,
+    `\\c` escapes, and `$(`/`<(`/`>(` spans stay inside the word."""
+    while k < len(src) and src[k:k + 1] in b" \t":
+        k += 1
     while k < len(src):
         c2 = src[k:k + 1]
         if c2 in b" \t\n;|&()<>":
@@ -8374,7 +8408,7 @@ def _pipe_to_exec(src: bytes, pos: int, od_tails=frozenset()) -> bool:
             # diverts only that command, and under `|&` a sibling's
             # `>&2` still lands on the merged stream (Devin on
             # #132/#1428/#1961/#16, round-76/77 — verified live).
-            prov, flow_src, _gop = gprov
+            prov, flow_src, _gop, _gfd2 = gprov
             if prov == "own" and flow_src is not None:
                 # A sibling EMITS text naming a script (`echo bash
                 # x`) — dep-carrying exactly like the non-group
@@ -8482,6 +8516,8 @@ def _pipe_to_exec(src: bytes, pos: int, od_tails=frozenset()) -> bool:
         ws = _shell_words(_mask_parens(seg))
         first = (_word_text(seg[ws[0][0]:ws[0][1]])
                  if ws else None)
+        pin = prov
+        psrc = flow_src
         r = _seg_prov(seg, prov, flow_src, _line_ifs(src, j))
         if r is None:
             return True   # an exec stage consumed the dep stream
@@ -8556,6 +8592,29 @@ def _pipe_to_exec(src: bytes, pos: int, od_tails=frozenset()) -> bool:
                     prov = g2[0]
                     if g2[1] is not None:
                         flow_src = g2[1]
+                elif (g2 is not None and g2[3]
+                        and _seg_head_args(seg, {})[2].get(1)
+                            == _FD_ERR):
+                    # The stage's fd1→fd2 lands on the group's merged
+                    # stderr — the stream continues there instead of
+                    # ending (`(echo bash x | cat >&2) |& sh` forwards
+                    # the emitted text to sh — Devin on #1963,
+                    # round-84 — verified live). Re-evaluate it as a
+                    # forwarder on the chain it read.
+                    r2 = _fwd_stage_prov(
+                        re.sub(rb"[0-9]*>&2\b", b"", seg),
+                        pin, psrc, _line_ifs(src, j))
+                    if r2 is None:
+                        return True   # it executes its input on fd2
+                    prov = r2
+                    if r2 == "script":
+                        _k4, _a4, _f4, _h4 = _seg_head_args(seg, {})
+                        flow_src = next(
+                            (_operand_text(a5)
+                             for a5 in _a4 if b"scripts/" in a5),
+                            flow_src)
+                    elif r2 == "own":
+                        flow_src = None
             if prov not in ("up", "script", "thru"):
                 return False  # the stage replaced or diverted the stream
         j += len(win)
@@ -10433,6 +10492,69 @@ def _command_literal(src: bytes, pos: int,
         if (wfd1 == _FD_ERR and p >= 0
                 and pf2 == "pipe"):
             return not _pipe_to_exec(src, p)
+        if p >= 0:
+            p6, pf6 = p, pf2
+        else:
+            p6, _p6b, pf6 = _group_pipe_fds(src, pos)
+        if (key in _STDIN_EMIT_HEADS and p6 >= 0
+                and pf6 == "pipe"):
+            # The inner pipeline's LAST stage may be an fd1→fd2
+            # forwarder — it hands the stream to the group's stderr,
+            # which reaches the pipe under `|&`/post-closer `2>&1`
+            # (`(echo bash x | cat >&2) |& sh` runs the emitted text —
+            # Devin on #1963, round-84 — verified live). An emit
+            # head's operand isn't literal in that case — the emitted
+            # gate decides; reader heads keep the prov consult (their
+            # file's bytes classify by content: `cat -n >&2` still
+            # dies on the numbering). Find the containing `)`/`}`
+            # (quote/escape/substitution-aware) and test the stage
+            # right before it.
+            m6 = bytearray(src)
+            for a6, b6 in _substitution_spans(src):
+                m6[a6:b6] = b" " * (b6 - a6)
+            cl6 = -1
+            ci6 = cs + len(win)
+            in6 = ind6 = es6 = False
+            while ci6 < len(src):
+                q6 = m6[ci6:ci6 + 1]
+                if es6:
+                    es6 = False
+                elif in6:
+                    in6 = q6 != b"'"
+                elif ind6:
+                    if q6 == b"\\":
+                        es6 = True
+                    elif q6 == b'"':
+                        ind6 = False
+                elif q6 == b"\\":
+                    es6 = True
+                elif q6 == b"'":
+                    in6 = True
+                elif q6 == b'"':
+                    ind6 = True
+                elif q6 == b"`":
+                    e6 = m6.find(b"`", ci6 + 1)
+                    if e6 < 0:
+                        break
+                    ci6 = e6
+                elif q6 in (b")", b"}"):
+                    cl6 = ci6
+                    break
+                elif q6 in (b";", b"\n"):
+                    break
+                ci6 += 1
+            if cl6 > 0:
+                t6 = src[cs + len(win):cl6]
+                # The last stage's own fd1 binding decides — stage
+                # text after the final `|` (the forwarder reads the
+                # inner pipe).
+                last6 = 0
+                for s6, e6, k6 in _sub_cmd_seps(t6):
+                    if k6 == b"|":
+                        last6 = e6
+                lfd = _seg_head_args(t6[last6:], {})[2]
+                if lfd is not None and lfd.get(1) == _FD_ERR:
+                    return False   # defer to the emitted-word gate
         return not _pipe_to_exec(src, cs + len(win))
     if p >= 0 and _group_fd1_prov(src, p) is None:
         # A `)`/`}` at pos-1 that _group_fd1_prov accepts is a real
