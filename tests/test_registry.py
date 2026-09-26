@@ -13462,3 +13462,52 @@ def test_script_dep_round70_flock_strtold_sudo_close_from_filter(tmp_path):
             b"xargs split --filter=cat scripts/x.sh | sh",
             b"xargs split --filter='head -n 1' scripts/x.sh | sh"):
         assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round71_redirect_sudo_digits_flock_bounds(tmp_path):
+    """Round-71 review — Devin on #132/#16/#1961: a wrapped command's
+    `> /dev/null` (or `&>`/file) divert leaves the downstream pipe
+    EMPTY — `xargs cat x >/dev/null | sh` runs nothing (the wrapped
+    emit path called _pipe_to_exec without checking the enclosing
+    segment's fd1; _stdout_redirected closes the hole for every head).
+    `sudo -C` operand length can exceed Python's int-conversion cap —
+    significant-digit compare keeps a 5000-zero pad valid and marks a
+    5000-digit value the strtonum ERANGE abort (INT_MAX boundary
+    verified live). `flock -w` accepts any magnitude below 2^63 —
+    `9.21e18` and `9223372036854775000` still run the command while
+    `9223372036854775807` and `0x1p1024` (OverflowError at
+    float.fromhex) abort "cannot set up timer" (all verified live).
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo X\n")
+    for line in (
+            b"xargs split -n 1/1 scripts/x.sh > /dev/null | sh",
+            b"xargs split --filter=cat scripts/x.sh > /dev/null | sh",
+            b"xargs cat scripts/x.sh > /dev/null | sh",
+            b"xargs head -n 1 scripts/x.sh > /dev/null | sh",
+            b"flock /tmp/L cat scripts/x.sh > /dev/null | sh",
+            b"split --filter='cat scripts/x.sh' - > /dev/null | sh",
+            b"sudo -C " + b"9" * 5000 + b" sh scripts/x.sh",
+            b"sudo -C 2147483648 sh scripts/x.sh",
+            b"sudo -C 99999999999 sh scripts/x.sh",
+            b"sudo -C 000 sh scripts/x.sh",
+            b"flock -w 0x1p1024 /tmp/L sh scripts/x.sh",
+            b"flock -w 9223372036854775807 /tmp/L sh scripts/x.sh",
+            b"flock -w 9223372036854775808 /tmp/L sh scripts/x.sh",
+            b"flock -w 1e19 /tmp/L sh scripts/x.sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b"xargs split -n 1/1 scripts/x.sh | sh",
+            b"xargs split --filter=cat scripts/x.sh | sh",
+            b"xargs cat scripts/x.sh | sh",
+            b"xargs split -n 1/1 scripts/x.sh 2>/dev/null | sh",
+            b"sudo -C " + b"0" * 5000 + b"3 sh scripts/x.sh",
+            b"sudo -C 2147483647 sh scripts/x.sh",
+            b"sudo -C 03 sh scripts/x.sh",
+            b"flock -w 9.21e18 /tmp/L sh scripts/x.sh",
+            b"flock -w 9.2e18 /tmp/L sh scripts/x.sh",
+            b"flock -w 9223372036854775000 /tmp/L sh scripts/x.sh",
+            b"flock -w 0x1p62 /tmp/L sh scripts/x.sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line

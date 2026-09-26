@@ -1282,16 +1282,19 @@ def _flock_bad_value(opt: bytes, val: bytes) -> bool:
             num = (float.fromhex(text.decode())
                    if re.match(rb"[+-]?0[xX]", text)
                    else float(text.decode()))
-        except ValueError:
+        except (ValueError, OverflowError):
+            # `0x1p1024` overflows float.fromhex to OverflowError —
+            # the timer can't arm, so the command never runs (Devin
+            # on #16/#1961, round-71 review — verified live).
             return True
         if num == 0.0:
             return False            # `-0`/`+0` arm an instant timer
-        # A NEGATIVE-nonzero duration (`-1`, `-.5`) or a magnitude
-        # past the deadline arithmetic (~INT64_MAX seconds; `1e999`
-        # parses to inf, `9223372036854775807` overflows `now + w`)
-        # aborts "cannot set up timer" — the wrapped command never
-        # runs (round-70, verified live).
-        return num < 0.0 or num > 9.2e18
+        # The deadline `now + w` has to fit int64 — a magnitude that
+        # rounds to 2^63 overflows it, and so does anything larger
+        # (`9223372036854775807` aborts "cannot set up timer" while
+        # `9223372036854775000` and `9.21e18` still run the command —
+        # Devin on #132/#16, round-71 review — verified live).
+        return num < 0.0 or num >= 9.223372036854776e18
     if opt in (b"-E", b"--conflict-exit-code"):
         num = re.fullmatch(rb"([+-]?)([0-9]+)", val)
         if num is None:
@@ -2957,12 +2960,17 @@ def _wrapper_bad_value(key: bytes, opt: bytes, val: bytes) -> bool:
         if opt in (b"-n", b"--classdata"):
             return re.fullmatch(rb"[+-]?[0-9]+", val) is None
     if key == b"sudo" and opt in (b"-C", b"--close-from"):
-        # `-C`/`--close-from` must be a number ≥3 — `-C 2`, `-C0`,
-        # `-C x`, `--close-from=2` abort "must be a number >= 3"
-        # before the command runs (sudo 1.9.9 — Devin on #132,
-        # round-70 review — verified live).
-        return (re.fullmatch(rb"[0-9]+", val) is None
-                or int(val) < 3)
+        # `-C`/`--close-from` must be a number in 3..INT_MAX — `-C 2`,
+        # `-C0`, `-C x`, `--close-from=2` abort "must be a number >= 3"
+        # and `2147483648`+ hits strtonum ERANGE, before the command
+        # runs; leading-zero pads still parse (sudo 1.9.9 — Devin +
+        # CodeRabbit on #132/#1961/#16, round-70/71 review — verified
+        # live). Significant-digit count, not int(val): a >4300-digit
+        # operand would raise ValueError and crash the scan.
+        if re.fullmatch(rb"[0-9]+", val) is None:
+            return True
+        sig = val.lstrip(b"0") or b"0"
+        return len(sig) > 10 or int(sig) < 3 or int(sig) > 2147483647
     return False
 
 
@@ -7670,6 +7678,16 @@ def _pipe_to_exec(src: bytes, pos: int) -> bool:
             prov = r0
             if prov == "own":
                 flow_src = None
+        if _stdout_redirected(src[s0:pos]):
+            # A `>`/`&>` on the feeding segment diverts its fd1
+            # whatever the head — `xargs cat x >/dev/null | sh` and
+            # `xargs split -n 1/1 x >/dev/null | sh` feed sh an empty
+            # pipe (the per-head prov call above only runs for
+            # cat/split/csplit, so wrapper heads like xargs/flock/
+            # sudo skipped this check — Devin on #132, round-71
+            # review — verified live).
+            prov = "own"
+            flow_src = None
     out = None           # aggregate fd1 inside an open compound
     depth = 0            # open compound/group statements
     drained = False      # a prior `;`-sibling read the shared stdin to EOF
