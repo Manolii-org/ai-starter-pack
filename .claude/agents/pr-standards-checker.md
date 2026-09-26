@@ -67,12 +67,14 @@ re-running this check on subsequent watch-pr rounds for the same commit:
 ```bash
 mkdir -p .git/.pr-comments-cache
 _HEAD_SHA=$(git rev-parse HEAD)
+_INPUTS_SHA=$(printf '%s' "$(git show origin/<base>:.ai/pr-standards.yaml 2>/dev/null || printf 'untracked')" | sha256sum | cut -d' ' -f1)
+_META_SHA=$(printf '%s' "${PR_TITLE}${PR_BODY}" | sha256sum | cut -d' ' -f1)
 _CACHE=".git/.pr-comments-cache/standards-pr${PR_NUMBER}-${_HEAD_SHA}.json"
 # write JSON with violations array and timestamp
 ```
 
-Write as JSON: `{"sha": "<HEAD_SHA>", "ts": "<ISO8601>", "violations": [...], "passed": [...], "unverified": [...]}`.
-Cache is intentionally in `.git/` (not committed) so it resets on fresh clone. pr-resolve reads this same filename before dispatching — do not deviate from it.
+Write as JSON: `{"sha": "<HEAD_SHA>", "inputs_sha": "<_INPUTS_SHA>", "meta_sha": "<_META_SHA>", "ts": "<ISO8601>", "violations": [...], "passed": [...], "unverified": [...]}`.
+Cache is intentionally in `.git/` (not committed) so it resets on fresh clone. pr-resolve reads this same filename before dispatching and reuses it only when `inputs_sha` and `meta_sha` match the current values — a base-branch manifest change or title/body edit at the same HEAD must re-run the check. Do not deviate from the filename or field names.
 
 ## Constraints
 

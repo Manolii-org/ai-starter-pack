@@ -121,25 +121,27 @@ jobs:
               "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
               "Accept": "application/vnd.github+json",
           }
-          # Idempotent at same SHA: paginate all comments for the marker.
+          # Marker text alone isn't proof — only a comment posted by the
+          # assessment workflow identity counts (a PR author cannot forge it).
+          # An `edited` rerun at the same SHA may change the verdict, so PATCH
+          # the existing comment rather than skipping.
           page = 1
+          existing = None
           while True:
               req = urllib.request.Request(
                   f"https://api.github.com/repos/{repo}/issues/{pr}/comments?per_page=100&page={page}",
                   headers=headers,
               )
               comments = json.loads(urllib.request.urlopen(req, timeout=30).read())
-              # Marker text alone isn't proof — the idempotency claim only
-              # counts when the comment was posted by the assessment workflow
-              # identity, which a PR author cannot forge.
-              if any(
-                  marker in (c.get("body") or "")
-                  and (c.get("user") or {}).get("login") == "github-actions[bot]"
-                  for c in comments
-              ):
-                  print(f"verdict already posted for {sha[:8]} — skipping")
-                  sys.exit(0)
-              if len(comments) < 100:
+              existing = next(
+                  (
+                      c for c in comments
+                      if marker in (c.get("body") or "")
+                      and (c.get("user") or {}).get("login") == "github-actions[bot]"
+                  ),
+                  None,
+              )
+              if existing or len(comments) < 100:
                   break
               page += 1
           blast = danger.get("blast_radius", "unknown")
@@ -148,11 +150,19 @@ jobs:
           if reason:
               line += f" — {reason}"
           body = f"{marker}\n## PR Assessment\n{line}\n\nAssessment depth: none (mechanical change)."
+          if existing and (existing.get("body") or "") == body:
+              print(f"verdict unchanged for {sha[:8]} — skipping")
+              sys.exit(0)
+          endpoint = (
+              f"https://api.github.com/repos/{repo}/issues/comments/{existing['id']}"
+              if existing
+              else f"https://api.github.com/repos/{repo}/issues/{pr}/comments"
+          )
           req = urllib.request.Request(
-              f"https://api.github.com/repos/{repo}/issues/{pr}/comments",
+              endpoint,
               data=json.dumps({"body": body}).encode(),
               headers={**headers, "Content-Type": "application/json"},
-              method="POST",
+              method="PATCH" if existing else "POST",
           )
           urllib.request.urlopen(req, timeout=30)
           EOF

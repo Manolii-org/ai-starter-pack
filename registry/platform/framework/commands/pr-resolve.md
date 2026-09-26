@@ -24,10 +24,13 @@ Use GitHub MCP `pull_request_read` (preferred) or `scripts/ci/check-pr-comments.
 - **Unresolved review comments** → use `pull_request_read` with
   `get_review_comments` to fetch threads.
 - **Standards violations** → first read
-  `.git/.pr-comments-cache/standards-pr<PR_NUMBER>-<HEAD_SHA>.json`; if it exists
-  and parses, reuse it. Only dispatch the `pr-standards-checker` agent against
-  the current diff when the cache is absent or stale; treat reported violations
-  as findings alongside CI failures.
+  `.git/.pr-comments-cache/standards-pr<PR_NUMBER>-<HEAD_SHA>.json`; reuse it only
+  if it parses AND its `inputs_sha` equals `sha256(git show origin/<base>:.ai/pr-standards.yaml)`
+  AND `meta_sha` equals `sha256(title+body)` — a manifest change on the base
+  branch or a title/body edit invalidates the cache at the same HEAD. Dispatch
+  the `pr-standards-checker` agent against the current diff when the cache is
+  absent, unparsable, or stale; treat reported violations as findings alongside
+  CI failures.
 
 ### 3. Triage each finding before acting
 
