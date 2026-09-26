@@ -221,13 +221,13 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           python3 - "$DANGER" "$PR_NUM" <<'EOF'
-          import json, os, sys, urllib.request
+          import json, os, re, sys, urllib.request
 
           danger = json.loads(sys.argv[1] or "{}")
           door = danger.get("door")
-          if door not in ("one-way", "two-way"):
-              print("no classified verdict — skipping post")
-              sys.exit(0)
+          classified = door in ("one-way", "two-way")
+          # An unclassified verdict still posts — omitting it would hide a
+          # classifier failure behind an apparently-clean assessment.
           repo = os.environ["GITHUB_REPOSITORY"]
           pr = sys.argv[2]
           sha = os.environ["HEAD_SHA"]
@@ -260,10 +260,16 @@ jobs:
                   break
               page += 1
           blast = danger.get("blast_radius", "unknown")
-          reason = str(danger.get("danger_reason", "")).replace("\n", " ").strip()
-          line = f"**Merge danger:** {door} door · blast radius: {blast}"
-          if reason:
-              line += f" — {reason}"
+          # danger_reason is shaped by untrusted diff content — escape Markdown
+          # metacharacters so it cannot inject formatting into the comment.
+          reason = str(danger.get("danger_reason", "")).replace("\n", " ").strip()[:300]
+          reason = re.sub(r"([\\`*_\[\]()<>#|~!])", r"\\\1", reason).replace("@", "@\u200b")
+          if classified:
+              line = f"**Merge danger:** {door} door · blast radius: {blast}"
+              if reason:
+                  line += f" — {reason}"
+          else:
+              line = "**Merge danger:** unknown (unclassified)"
           body = f"{marker}\n## PR Assessment\n{line}\n\nAssessment depth: none (mechanical change)."
           if existing and (existing.get("body") or "") == body:
               print(f"verdict unchanged for {sha[:8]} — skipping")
@@ -678,6 +684,9 @@ jobs:
           MERGE_DANGER: ${{ needs.classify.outputs.merge_danger }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
+          # Base SHA feeds the dedup digest — a base update changes the diff
+          # being judged, so it must produce a fresh verdict, not suppress one.
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           mkdir -p .ai/judge-log
           python3 scripts/run-judge.py \

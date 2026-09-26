@@ -31,6 +31,9 @@ _ANTHROPIC_API_VERSION = "2023-06-01"
 # can never crowd another category past the inventory cap.
 _DANGER_CATEGORIES = [
     ("migration", re.compile(r"migrations?/|\.sql", re.I)),
+    # Schema contracts are one-way in the rubric; ranked before sensitive
+    # categories — buckets isolate it, so it can never crowd auth paths.
+    ("schema", re.compile(r"schema", re.I)),
     ("workflow", re.compile(r"\.github/workflows", re.I)),
     ("dockerfile", re.compile(r"dockerfile", re.I)),
     ("terraform", re.compile(r"terraform", re.I)),
@@ -38,7 +41,6 @@ _DANGER_CATEGORIES = [
     ("lockfile", re.compile(r"package-lock|pnpm-lock|yarn\.lock", re.I)),
     ("auth", re.compile(r"auth|secret|credential|token", re.I)),
     ("package", re.compile(r"package\.json", re.I)),
-    ("schema", re.compile(r"schema", re.I)),
     ("shell", re.compile(r"\.sh$|\.bash$", re.I)),
     ("other", re.compile(r".")),
 ]
@@ -192,21 +194,31 @@ def main() -> None:
     # and renames.
     changed_paths = sorted(
         {
-            m.group(1)[2:].strip('"')
+            side[2:].strip('"')
             for m in re.finditer(
-                r'^diff --git (?:a/\S*|"a/[^"]*") (b/\S*|"b/[^"]*")$', diff, re.M
+                r'^diff --git (a/\S*|"a/[^"]*") (b/\S*|"b/[^"]*")$', diff, re.M
             )
+            # Both header sides: deletions and rename sources carry the risk —
+            # a dropped migration must stay visible under its old path.
+            for side in m.groups()
         }
     )
+    def _categories(p: str) -> list[int]:
+        return [
+            i for i, (_, rx) in enumerate(_DANGER_CATEGORIES) if rx.search(p)
+        ]
+
     def _category(p: str) -> int:
-        for i, (_, rx) in enumerate(_DANGER_CATEGORIES):
-            if rx.search(p):
-                return i
-        return len(_DANGER_CATEGORIES) - 1
+        return min(_categories(p))
 
     buckets: dict[int, list[str]] = {i: [] for i in range(len(_DANGER_CATEGORIES))}
     for p in sorted(changed_paths):
-        buckets[_category(p)].append(p)
+        # Multi-match: a path joins EVERY category bucket it matches, so an
+        # overlapping name (schemas/auth/x.py, schema-check.yml) keeps the
+        # reservation of each matched category — a flood in one can never
+        # starve the path out of all of them.
+        for i in _categories(p):
+            buckets[i].append(p)
     # Reserved slots are protected: a flood in one category can only fill the
     # 500 - reserved remainder, never evict another category's guarantees.
     reserved = {p for b in buckets.values() for p in b[:_CATEGORY_RESERVE]}

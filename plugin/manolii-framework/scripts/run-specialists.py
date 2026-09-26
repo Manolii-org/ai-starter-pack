@@ -163,10 +163,12 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
         # excerpt can't be mistaken for under-delivery.
         paths = sorted(
             {
-                m.group(1)[2:].strip('"')
+                side[2:].strip('"')
                 for m in re.finditer(
-                    r'^diff --git (?:a/\S*|"a/[^"]*") (b/\S*|"b/[^"]*")$', diff, re.M
+                    r'^diff --git (a/\S*|"a/[^"]*") (b/\S*|"b/[^"]*")$', diff, re.M
                 )
+                # Both header sides — deletions and rename sources stay visible.
+                for side in m.groups()
             }
         )
         # Danger-relevant paths first so high-risk files never fall off the cap.

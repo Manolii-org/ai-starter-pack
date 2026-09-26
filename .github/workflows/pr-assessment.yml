@@ -324,6 +324,9 @@ jobs:
           MERGE_DANGER: ${{ needs.classify.outputs.merge_danger }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
+          # Base SHA feeds the dedup digest — a base update changes the diff
+          # being judged, so it must produce a fresh verdict, not suppress one.
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           mkdir -p .ai/judge-log
           python3 scripts/run-judge.py \
