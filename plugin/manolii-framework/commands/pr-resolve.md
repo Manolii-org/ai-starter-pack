@@ -23,6 +23,8 @@ Use GitHub MCP `pull_request_read` (preferred) or `scripts/ci/check-pr-comments.
   on a stale check run from a previous commit — verify the check SHA matches HEAD.
 - **Unresolved review comments** → use `pull_request_read` with
   `get_review_comments` to fetch threads.
+- **Standards violations** → dispatch the `pr-standards-checker` agent against
+  the current diff; treat reported violations as findings alongside CI failures.
 
 ### 3. Triage each finding before acting
 

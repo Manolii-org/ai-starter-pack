@@ -563,12 +563,22 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
             return
 
         try:
+            body_lines = [
+                REVIEW_MARKER,
+                "## PR Assessment",
+            ]
+            door = self.merge_danger.get("door")
+            if door in ("one-way", "two-way"):
+                blast = self.merge_danger.get("blast_radius", "unknown")
+                line = f"**Merge danger:** {door} door · blast radius: {blast}"
+                reason = str(self.merge_danger.get("danger_reason", "")).replace("\n", " ").strip()
+                if reason:
+                    line += f" — {reason}"
+                body_lines.append(line)
+                body_lines.append("")
+            body_lines.append("No actionable findings produced by specialist agents.")
             request_body = {
-                "body": (
-                    f"{REVIEW_MARKER}\n"
-                    "## PR Assessment\n"
-                    "No actionable findings produced by specialist agents."
-                ),
+                "body": "\n".join(body_lines),
                 "event": "COMMENT",
             }
 

@@ -95,6 +95,38 @@ jobs:
           echo "merge_danger=$MERGE_DANGER" >> $GITHUB_OUTPUT
           echo "Classification: depth=$DEPTH skills=$SKILLS agents=$AGENTS danger=$MERGE_DANGER"
 
+      # depth=none skips judge entirely — post the merge-danger verdict
+      # directly so the door/blast signal still reaches the PR.
+      - name: Post merge danger (depth=none)
+        if: steps.classify.outputs.depth == 'none' && github.event.pull_request.number
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DANGER: ${{ steps.classify.outputs.merge_danger }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+        run: |
+          python3 - "$DANGER" "$PR_NUM" <<'EOF'
+          import json, os, sys, urllib.request
+
+          danger = json.loads(sys.argv[1] or "{}")
+          door = danger.get("door")
+          if door not in ("one-way", "two-way"):
+              print("no classified verdict — skipping post")
+              sys.exit(0)
+          blast = danger.get("blast_radius", "unknown")
+          reason = str(danger.get("danger_reason", "")).replace("\n", " ").strip()
+          line = f"**Merge danger:** {door} door · blast radius: {blast}"
+          if reason:
+              line += f" — {reason}"
+          body = f"<!-- pr-assessment-v1 -->\n## PR Assessment\n{line}\n\nAssessment depth: none (mechanical change)."
+          req = urllib.request.Request(
+              f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/issues/{sys.argv[2]}/comments",
+              data=json.dumps({"body": body}).encode(),
+              headers={"Authorization": f"Bearer {os.environ['GH_TOKEN']}", "Accept": "application/vnd.github+json"},
+              method="POST",
+          )
+          urllib.request.urlopen(req, timeout=30)
+          EOF
+
   sast:
     name: SAST (Semgrep + Bandit)
     runs-on: ubuntu-latest
@@ -169,6 +201,8 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           SKILLS: ${{ needs.classify.outputs.invoke_skills }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           mkdir -p .ai/candidates
           git diff origin/${{ github.base_ref }}...HEAD > /tmp/pr.diff
