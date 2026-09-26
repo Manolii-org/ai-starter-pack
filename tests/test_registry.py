@@ -14253,3 +14253,59 @@ def test_script_dep_round85_fd2_fwd_edges(tmp_path):
             # verified live: RAN_X.
             b'(cat scripts/x.sh | nl -b n >&2) |& sh'):
         assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round86_numbered_emit_and_fds(tmp_path):
+    """Round-86: provable emit bytes through `cat -n`/`nl`/`pr -n`,
+    glued `pr -h` operands, inert bare-assign words, `<&-`/`<&N`
+    closer ops, `/dev/stdout`/`/dev/fd/N` fd aliases — all verified
+    live (Devin on #133/#1431/#1963/#17)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    (pdir / "scripts" / "sep.sh").write_bytes(
+        b"echo a; sh scripts/x.sh\n")
+    for line in (
+            # `$(…)` on an assign RHS runs its body on the stream
+            # before the stage is done — `cat x | X="$(sh)"` executes
+            # the capture (Devin on #17/#1431 — verified live).
+            b'cat scripts/x.sh | X="$(sh)"',
+            b'cat scripts/x.sh | X="$(sh scripts/x.sh)"',
+            # A `;`/`&`/`|` tail survives the `N\t` prefix — the
+            # emitted line's separators still run (verified live:
+            # `1\ta;sh x` executes the post-`;` command).
+            b'echo "a; sh scripts/x.sh" | cat -n | sh',
+            b'echo "a; sh scripts/x.sh" | nl -ba | sh',
+            b'cat scripts/sep.sh | cat -n | sh',
+            b'(echo "a; sh scripts/x.sh" | cat >&2) |& cat -n | sh',
+            # `pr -hname` is `-h` + glued operand — only `-n`
+            # numbers; `-h` text passes through unnumbered
+            # (verified live: RAN_X).
+            b'echo "a; sh scripts/x.sh" | pr -hname | sh',
+            b'cat scripts/x.sh | pr -hname | sh',
+            # `/dev/stdout`/`/dev/fd/1` are fd-1 aliases — `2>`
+            # there dups fd2 to fd1 (verified live: RAN_X).
+            b'(cat scripts/x.sh >&2) 2>/dev/stdout | sh',
+            b'(cat scripts/x.sh >&2) 2>/dev/fd/1 | sh'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # Single-quoted/capture assigns are inert — `$(cat)`
+            # drains the stream into the capture, `sh` sees EOF.
+            b"cat scripts/x.sh | X='$(sh)' | sh",
+            b'cat scripts/x.sh | X="$(cat)" | sh',
+            b'cat scripts/x.sh | X=1 | sh',
+            # Numbered sep-free streams die on the `N\t` prefix —
+            # verified live: `1: not found`.
+            b'echo first | cat -n | sh',
+            b'cat scripts/x.sh | cat -n | sh',
+            b'(echo bash scripts/x.sh | cat >&2) |& cat -n | sh',
+            b'(echo bash scripts/x.sh | cat >&2) |& nl | sh',
+            b'cat scripts/x.sh | pr -n | sh',
+            # `1<&-` closes fd1 — `cat: Bad file descriptor`, the
+            # pipe stays empty (Devin on #133 — verified live).
+            b'(cat scripts/x.sh) 1<&- | sh',
+            # `1<&2` dups fd1 onto real stderr — `cat` writes off
+            # the pipe (verified live).
+            b'(cat scripts/x.sh) 1<&2 |& sh'):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
