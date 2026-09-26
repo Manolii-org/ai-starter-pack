@@ -106,7 +106,7 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           python3 - "$DANGER" "$PR_NUM" <<'EOF'
-          import json, os, sys, urllib.request
+          import json, os, re, sys, urllib.request
 
           danger = json.loads(sys.argv[1] or "{}")
           door = danger.get("door")
@@ -145,7 +145,10 @@ jobs:
                   break
               page += 1
           blast = danger.get("blast_radius", "unknown")
-          reason = str(danger.get("danger_reason", "")).replace("\n", " ").strip()
+          # danger_reason is shaped by untrusted diff content — escape Markdown
+          # metacharacters so it cannot inject formatting into the comment.
+          reason = str(danger.get("danger_reason", "")).replace("\n", " ").strip()[:300]
+          reason = re.sub(r"([\\`*_\[\]()<>#|~!])", r"\\\1", reason).replace("@", "@\u200b")
           line = f"**Merge danger:** {door} door · blast radius: {blast}"
           if reason:
               line += f" — {reason}"
