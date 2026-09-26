@@ -250,18 +250,21 @@ def main() -> None:
         # complete line, never the truncated half), then scan only the lines
         # after the split line so nothing is double-counted.
         all_lines = diff.split("\n")
+        # boundary = index of the LAST line whose start offset is < 50000 (the
+        # line the cutoff lands inside). A line starting exactly at 50000 is
+        # entirely tail content — it must be scanned, not treated as the split.
         pos = 0
-        split_idx = len(all_lines)
+        boundary = len(all_lines) - 1
         for i, ln in enumerate(all_lines):
-            if pos + len(ln) >= 50000:
-                split_idx = i
+            if pos >= 50000:
+                boundary = i - 1
                 break
             pos += len(ln) + 1
         cur_file = ""
-        for pline in all_lines[: split_idx + 1]:
+        for pline in all_lines[: boundary + 1]:
             if pline.startswith("diff --git "):
                 cur_file = re.sub(r"[<>`]", "", pline)[:200]
-        for line in all_lines[split_idx + 1 :]:
+        for line in all_lines[boundary + 1 :]:
             if line.startswith("diff --git "):
                 if cur_file:
                     tail_files.append((cur_file, cur_hunks))
