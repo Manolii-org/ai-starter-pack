@@ -7541,9 +7541,18 @@ def _emit_own_date(args) -> bytes | None:
     holds no `%` directives (`date '+sh x' | sh` runs `sh x` — Devin
     on #17/#1963, round-92 — verified live); a `%`-bearing format or
     an operand-taking option's value stays unprovable, and extra or
-    non-`+` operands make date error out (nothing on fd1)."""
-    _TAKES = (b"--date", b"--file", b"--reference", b"--set",
-              b"--iso-8601", b"--rfc-3339")
+    non-`+` operands make date error out (nothing on fd1). A second
+    output-format option conflicts with `+FORMAT` (`--rfc-3339=sec
+    '+x'` errors "multiple output formats" — Devin on #1431/#17,
+    round-93 — verified live); `--help`/`--version` exit before the
+    format runs; and `-d`/`--date`-class options make the emit
+    unprovable — a bad value errors to nothing while a good one
+    emits the format (`date -d tomorrow '+sh x'` runs `sh x`)."""
+    _TAKES = (b"--date", b"--file", b"--reference", b"--set")
+    _FMTOPT = (b"--iso-8601", b"--rfc-3339", b"--rfc-email")
+    term = False                     # --help/--version — early exit
+    valopt = False                   # value options — validity unprovable
+    fmtopt = False                   # a second output-format option
     ops = []
     i2 = 0
     end = len(args)
@@ -7553,19 +7562,42 @@ def _emit_own_date(args) -> bytes | None:
         if a == b"--":
             break
         if a.startswith(b"--"):
-            if b"=" not in a and a.split(b"=", 1)[0] in _TAKES:
-                i2 += 1              # consume the option's value arg
-            continue
+            base = a.split(b"=", 1)[0]
+            if (len(base) > 2
+                    and (b"--version".startswith(base)
+                         or b"--help".startswith(base))):
+                term = True          # unique abbrev of version/help
+                continue
+            if base in _TAKES:
+                valopt = True
+                if b"=" not in a:
+                    i2 += 1          # consume the option's value arg
+                continue
+            if base in _FMTOPT:
+                fmtopt = True
+                if b"=" not in a and base != b"--rfc-email":
+                    i2 += 1          # --iso-8601/--rfc-3339 take an arg
+                continue
+            continue                 # inert longs (--universal, --debug…)
         if a.startswith(b"-") and a != b"-":
             cl = a[1:]
             for ci2, c2 in enumerate(cl):
-                if c2 in b"dfrsI":
+                if c2 in b"dfrs":
+                    valopt = True
                     if ci2 == len(cl) - 1:
                         i2 += 1      # `-d VALUE` — value is next arg
                     break            # mid-cluster — tail is the value
+                if c2 in b"IR":
+                    fmtopt = True
+                    if c2 == 0x49:   # -I takes an optional glued arg
+                        break        #   — cluster ends here
             continue
         ops.append(a)
     ops.extend(args[i2:])            # operands after `--`
+    if term:
+        return b"0\n"                # version/help text — no script ref
+    if fmtopt:
+        return (b"" if ops else b"0\n")  # +FORMAT conflicts; alone prints a stamp
     if len(ops) > 1:
         return b""                   # extra operand — date errors
     if not ops:
@@ -7573,6 +7605,8 @@ def _emit_own_date(args) -> bytes | None:
     t = _word_text(ops[0])
     if t[:1] != b"+":
         return b""                   # non-format operand — date errors
+    if valopt:
+        return None                  # emit needs the value to parse — unprovable
     if b"%" in t:
         return None                  # directives interleave — unprovable
     return t[1:] + b"\n"
@@ -7632,10 +7666,13 @@ def _emit_stage_simple(stg: bytes, data, fd2on: bool):
     return out, b""
 
 
-def _emit_chain(part: bytes, data, fd2on: bool):
+def _emit_chain(part: bytes, data, fd2on: bool, raw: bool = False):
     """(fd1_out, fd2_out) of a `|`-chain on stdin `data`, else None.
     A stage's fd2 reaches the shared stream only when its OWN pipe is
-    `|&` (or, for the last stage, when the chain's pipe merges)."""
+    `|&` (or, for the last stage, when the chain's pipe merges). `raw`
+    asks for the faithful byte stream — real sibling writes glue
+    back-to-back — instead of `_join_emit`'s exec-shape newline join
+    (Devin on #133/#17/#1431/#1963, round-93)."""
     bounds = []
     amps = []
     last = 0
@@ -7668,7 +7705,7 @@ def _emit_chain(part: bytes, data, fd2on: bool):
             data = r[0]
             if fd2on:
                 fd2s.append(r[1])
-    return data, _join_emit(fd2s)
+    return data, (b"".join(fd2s) if raw else _join_emit(fd2s))
 
 
 def _join_emit(parts) -> bytes:
@@ -7684,9 +7721,13 @@ def _join_emit(parts) -> bytes:
     return out
 
 
-def _emit_compound(seg: bytes, fd2on: bool, data):
+def _emit_compound(seg: bytes, fd2on: bool, data, raw: bool = False):
     """Emitted bytes of a `(…)`/`{…}` compound stage — the concat of
-    its `;`/`&` siblings' fd1 (+fd2 when merged) — else None."""
+    its `;`/`&` siblings' fd1 (+fd2 when merged) — else None. `raw`
+    joins sibling writes byte-faithfully (`b"".join`) — the real pipe
+    glues pieces, so an invocation can assemble ACROSS a piece
+    boundary either direction (`sh `+`cripts/x.sh` vs `sh`+`cripts/`
+    — Devin on #133/#17/#1431/#1963, round-93 — verified live)."""
     subs = {a: b for a, b in _substitution_spans(seg)}
     msk = bytearray(seg)
     i = 0
@@ -7791,7 +7832,7 @@ def _emit_compound(seg: bytes, fd2on: bool, data):
             # the prior exit status for the next link.
             prev_kd = kd
             continue
-        r = _emit_chain(sib, data, g2on)
+        r = _emit_chain(sib, data, g2on, raw)
         if r is None:
             return None
         outs.append((r[0] if g1on else b"")
@@ -7808,17 +7849,17 @@ def _emit_compound(seg: bytes, fd2on: bool, data):
                     else None)
         prev_kd = kd
         prev_exit = _sib_exit_known(sib)
-    return _join_emit(outs)
+    return b"".join(outs) if raw else _join_emit(outs)
 
 
-def _emit_stage_bytes(seg: bytes, data, amp: bool):
+def _emit_stage_bytes(seg: bytes, data, amp: bool, raw: bool = False):
     """Bytes a stage lands on the NEXT pipe — its fd1 output plus fd2
     when `amp` (the stage's own `|&`). None = unprovable."""
     t = seg.lstrip()
     if t[:1] in (b"(", b"{"):
-        return _emit_compound(seg, amp, data)
+        return _emit_compound(seg, amp, data, raw)
     if any(k2 == b"|" for _s2, _e2, k2 in _sub_cmd_seps(seg)):
-        r = _emit_chain(seg, data, amp)
+        r = _emit_chain(seg, data, amp, raw)
         return None if r is None else r[0] + r[1]
     r = _emit_stage_simple(seg, data, amp)
     if r is None:
@@ -7902,8 +7943,11 @@ def _sib_exit_known(sib: bytes):
     """0/1 when a sibling's exit status is provable — `true`/`:`
     exits 0, `false` exits 1, a leading `!` inverts — used to skip
     provably-dead `&&`/`||` branches (`true || x`/`false && x` —
-    Devin on #17, round-92 — verified live); anything else is
-    unknown (None)."""
+    Devin on #17, round-92 — verified live). A file-target redirect
+    on the last `|` stage makes the exit unprovable — its open is
+    attempted BEFORE the command runs (`true </missing` exits
+    nonzero — Devin on #17/#1431/#1963, round-93 — verified live);
+    anything else is unknown (None)."""
     st = sib
     pos = 0
     for ss, se, k in _sub_cmd_seps(sib):
@@ -7914,7 +7958,10 @@ def _sib_exit_known(sib: bytes):
     if st[:1] == b"!":
         neg = True
         st = st[1:].lstrip()
-    key = _seg_head_args(st, {})[0]
+    key, _a9, sfd9, _h9 = _seg_head_args(st, {})
+    if sfd9 is not None and any(
+            v == _FD_FILE for v in sfd9.values()):
+        return None                  # file open can fail — exit unprovable
     if key in (b"true", b":"):
         return 1 if neg else 0
     if key == b"false":
@@ -7944,20 +7991,23 @@ def _sib_drain_complete(sib: bytes, data) -> bool:
     return data is not None and len(data) <= 65536
 
 
-def _emit_feed(src: bytes, pos: int, amp: bool, data=None):
+def _emit_feed(src: bytes, pos: int, amp: bool, data=None,
+               raw: bool = False):
     """Provable emit bytes of the segment feeding the `|`/`|&` at
     `pos` — a compound feed emits its siblings' concat; a plain feed
     strips leading openers (inner-compound stages) and chains
-    normally. None = unprovable."""
+    normally. None = unprovable. `raw` returns the byte-faithful
+    stream (no synthetic newlines) for emitted-ref scanning."""
     if not pos:
         return None
     cb = _feed_compound_span(src, pos)
     if cb is not None:
-        return _emit_compound(src[cb:pos], amp, data)
+        return _emit_compound(src[cb:pos], amp, data, raw)
     s0 = _command_start(src, pos - 1)
     if s0 is None:
         return None
-    return _emit_stage_bytes(src[s0:pos].lstrip(b" \t({"), data, amp)
+    return _emit_stage_bytes(src[s0:pos].lstrip(b" \t({"), data, amp,
+                             raw)
 
 
 def _all_assign_words(words: list, win: bytes) -> bool:
@@ -14082,19 +14132,24 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
     # round-92 — verified live). Scan every top-level `|`'s provable
     # emitted feed: when the emitted program reaching an exec head
     # itself invokes a scripts/ path, gate it bundled-or-declared
-    # exactly like a source ref. `_join_emit`'s inserted newline is
-    # only an exec-shape device — the real stream glues, so ref
-    # scanning treats newline as whitespace.
+    # exactly like a source ref. The scan uses `raw=True` — the
+    # byte-faithful stream with NO synthetic newlines — because
+    # `_join_emit`'s inserted newline is only an exec-shape device:
+    # the real pipe glues writes, so an invocation assembles across
+    # piece boundaries (`sh `+`cripts/x.sh` matches; `sh`+`cripts/x.sh`
+    # does not — Devin on #133/#17/#1431/#1963, round-93 — verified
+    # live). Real newlines stay real command boundaries.
     for _s2, _e2, _k2 in _sub_cmd_seps(scan):
         if (_k2 != b"|" or scan[_s2 - 1:_s2] == b"|"
                 or scan[_e2:_e2 + 1] == b"|"):
             continue
-        _eb = _emit_feed(scan, _s2, scan[_s2 + 1:_s2 + 2] == b"&")
+        _eb = _emit_feed(scan, _s2, scan[_s2 + 1:_s2 + 2] == b"&",
+                         raw=True)
         if _eb is None or b"scripts/" not in _eb:
             continue
         if not _pipe_to_exec(scan, _s2):
             continue
-        for _em in SCRIPT_REF.finditer(_eb.replace(b"\n", b" ")):
+        for _em in SCRIPT_REF.finditer(_eb):
             _rn = SCRIPT_NAME.search(_em.group(0))
             if _rn is None:
                 continue

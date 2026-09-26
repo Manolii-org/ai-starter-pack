@@ -14587,3 +14587,73 @@ def test_script_dep_round92_emitted_ref(tmp_path):
             b"(printf 'sh '; echo scripts/x.sh) | sh",
             b"echo 'x' | sh"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round93_raw_emit_and_redirects(tmp_path):
+    """Round-93: the emitted-ref scan runs on the byte-faithful
+    stream (no synthetic newlines) — an invocation assembles across
+    write boundaries either direction: `sh `+`cripts/x.sh` matches
+    (real glue `sh scripts/x.sh`), `sh`+`cripts/x.sh` does not
+    (glues `shscripts/x.sh` — Devin on #133/#1431/#17/#1963 —
+    verified live). A file-target redirect on the `&&`/`||`
+    sibling makes its exit unprovable — `true </missing` exits
+    nonzero so the `||` branch runs (verified live)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (
+            # Split-path assemble — pieces glue in the real stream.
+            b"(echo -n 'sh s'; echo cripts/x.sh) | sh",
+            b"(echo -n 'sh '; echo -n scripts/; echo x.sh) | sh",
+            # Redirect failure — `||` branch provably runs.
+            b"(true </missing || echo -n 'sh '; echo scripts/x.sh) | sh",
+            # Unprovable file redirects keep the sibling (over-block).
+            b"(true >/dev/null || echo -n 'sh '; echo scripts/x.sh) | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # Glued `shscripts/` — no `sh ` command word exists.
+            b"(echo -n sh; echo scripts/x.sh) | sh",
+            # Provable skip still skips.
+            b"(true || echo -n 'sh '; echo scripts/x.sh) | sh",
+            b"(false && echo -n 'sh '; echo scripts/x.sh) | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round93_date_option_classes(tmp_path):
+    """Round-93 (cont.): `date`'s emit model classifies options —
+    `--help`/`--version` exit early (dead text), a second output-
+    format option conflicts with `+FORMAT` (`--rfc-3339`/`--iso-8601`/
+    `-I`/`--rfc-email`/`-R` error "multiple output formats"), and a
+    value-taking option (`-d`/`--date`/`-f`/`-r`/`--set`/`--file`/
+    `--reference`) makes the emit unprovable (bad values error, good
+    ones print the format — verified live). None of these add an
+    emitted ref the source literal doesn't already gate."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    # Emit-model verdicts — the source side can't see these (no
+    # scripts/ literal), so behaviour shows only through the emit
+    # helper itself.
+    for args, want in (
+            ([b"--version"], b"0\n"),
+            ([b"--version", b"'+sh x'"], b"0\n"),
+            ([b"--help", b"'+sh x'"], b"0\n"),
+            ([b"--rfc-3339=seconds", b"'+sh x'"], b""),
+            ([b"-Iseconds", b"'+sh x'"], b""),
+            ([b"--rfc-email", b"'+sh x'"], b""),
+            ([b"-R", b"'+sh x'"], b""),
+            ([b"--rfc-3339=seconds"], b"0\n"),
+            ([b"--date=not-a-date", b"'+sh x'"], None),
+            ([b"-d", b"tomorrow", b"'+sh x'"], None),
+            ([b"-d", b"'+sh x'"], b"0\n"),
+            ([b"--set", b"'+sh x'"], b"0\n"),
+            ([b"+sh x"], b"sh x\n"),
+            ([], b"0\n")):
+        assert mod._emit_own_date(args) == want, args
+    # A provably-dead date sibling still glues its neighbours'
+    # writes — the emitted pieces assemble `sh scripts/x.sh`.
+    assert mod.script_dep_block(
+        pdir, b"(date --rfc-3339=s '+x'; echo -n 'sh s'; "
+              b"echo cripts/x.sh) | sh\n")
