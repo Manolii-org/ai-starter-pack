@@ -121,9 +121,9 @@ jobs:
               "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
               "Accept": "application/vnd.github+json",
           }
-          # Idempotent at same SHA: scan existing comments for the sha-tagged marker.
+          # Idempotent at same SHA: paginate all comments for the marker.
           page = 1
-          while page <= 5:
+          while True:
               req = urllib.request.Request(
                   f"https://api.github.com/repos/{repo}/issues/{pr}/comments?per_page=100&page={page}",
                   headers=headers,
