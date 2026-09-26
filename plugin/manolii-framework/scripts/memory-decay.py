@@ -64,20 +64,47 @@ def tokenize(text: str) -> set[str]:
     return {t for t in tokens if len(t) >= 3}
 
 
+_PATTERN_FIELDS = ("problem", "solution", "rule")
+
+
 def _comparable_text(row: dict) -> str:
     """Text used for dedup comparison across supported memory schemas.
 
-    facts use `content`; patterns (written by /learn) identify on
-    solution + rule only — the shared `problem` is context, not identity,
-    and letting it into the token set would merge two patterns that answer
-    the same question differently. A row with no comparable text returns
-    "" and must never be merged — two empty strings would read as identical.
+    facts use `content`; patterns (written by /learn) carry
+    problem/solution/rule. A row with no comparable text returns "" and
+    must never be merged — two empty strings would read as identical.
     """
     content = row.get("content")
     if isinstance(content, str) and content.strip():
         return content
-    parts = [row.get(k, "") for k in ("solution", "rule")]
+    parts = [row.get(k, "") for k in _PATTERN_FIELDS]
     return " ".join(p for p in parts if isinstance(p, str) and p.strip())
+
+
+def _is_pattern(row: dict) -> bool:
+    return isinstance(row.get("problem"), str) and row["problem"].strip() != ""
+
+
+def _rows_mergeable(a: dict, b: dict, threshold: float) -> bool:
+    """Whether two rows are close enough to consolidate.
+
+    Pattern rows must be similar on BOTH axes — `problem` (the context)
+    and `solution`+`rule` (the answer). Requiring only the answer side
+    drops distinct problem contexts; including `problem` in one pooled
+    token set lets a shared question dominate and merge different answers.
+    Non-pattern rows compare on _comparable_text as before.
+    """
+    text_a = _comparable_text(a)
+    text_b = _comparable_text(b)
+    if not text_a or not text_b:
+        return False
+    if not (_is_pattern(a) and _is_pattern(b)):
+        return text_a == text_b or jaccard(tokenize(text_a), tokenize(text_b)) >= threshold
+    if jaccard(tokenize(a["problem"]), tokenize(b["problem"])) < threshold:
+        return False
+    ans_a = " ".join(str(a.get(k, "")) for k in ("solution", "rule"))
+    ans_b = " ".join(str(b.get(k, "")) for k in ("solution", "rule"))
+    return jaccard(tokenize(ans_a), tokenize(ans_b)) >= threshold
 
 
 def jaccard(a: set[str], b: set[str]) -> float:
@@ -188,18 +215,10 @@ def consolidate(
                 continue
             cluster = [row_a]
             assigned.add(i)
-            content_a = _comparable_text(row_a)
-            tokens_a = tokenize(content_a)
-
             for j, row_b in enumerate(group):
                 if j <= i or j in assigned:
                     continue
-                content_b = _comparable_text(row_b)
-                tokens_b = tokenize(content_b)
-
-                if not content_a or not content_b:
-                    continue
-                if content_a == content_b or jaccard(tokens_a, tokens_b) >= threshold:
+                if _rows_mergeable(row_a, row_b, threshold):
                     cluster.append(row_b)
                     assigned.add(j)
 
