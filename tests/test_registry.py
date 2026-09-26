@@ -12915,8 +12915,7 @@ def test_script_dep_round63_filter_emit_head(tmp_path):
             # printed PATH text exec'd by the filter's own `|sh` is
             # the accepted emitted-path-exec gap — only content bytes
             # count
-            b"split --filter='echo scripts/x.sh | sh' /etc/hosts",
-            b"split --filter='echo sh scripts/x.sh | sh' /etc/hosts"):
+            b"split --filter='echo scripts/x.sh | sh' /etc/hosts"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
     for line in (
             b"split --filter='sh scripts/x.sh' /etc/hosts",
@@ -12924,6 +12923,10 @@ def test_script_dep_round63_filter_emit_head(tmp_path):
             b"split --filter='cat scripts/x.sh' - | sh",
             # a later command still execs past a printed match
             b"split --filter='echo x; sh scripts/x.sh' /etc/hosts",
+            # echo's emitted TEXT re-parses as an invocation for the
+            # inner `|sh` — `echo sh x | sh` runs `sh x` (Devin on
+            # #1959, round-65 review — verified live)
+            b"split --filter='echo sh scripts/x.sh | sh' /etc/hosts",
             # the filter's own `|sh` execs the emitted CONTENT bytes
             b"split --filter='cat scripts/x.sh | sh' /etc/hosts"):
         assert mod.script_dep_block(pdir, line + b"\n"), line
@@ -12971,4 +12974,81 @@ def test_script_dep_round64_filter_command_head(tmp_path):
             b"cat scripts/sep.sh | nl -b n | sh",
             b"nice -+5 sh scripts/x.sh",
             b"nice --5 sh scripts/x.sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round65_terminal_and_pipeline(tmp_path):
+    """Round-65 review regression — Codex/Devin on #130/#1393/#12/#1959,
+    all verified live (bash 5 / dash / coreutils / util-linux):
+    - Terminal interpreter modes inside a filter exit before the
+      program: `bash -n`/`--help`/`--version`, `python3 -V`/`-h`/
+      `--version`/`--help` never touch the operand.
+    - A reader/emitted match is bounded by its OWN pipeline tail:
+      `cat x | true; sh` dies at `true` (the `; sh` sibling never
+      sees the bytes); `cat x | sh` inside the filter still execs.
+    - Emit heads whose emitted TEXT is an invocation re-parse in the
+      tail (`echo sh x | sh`) and in an outer `|sh` downstream.
+    - A `<` stdin rebind is only read when the head has no non-feeder
+      file operand: `head /dev/null <x` never opens x.
+    - A redirect word never satisfies a required option operand:
+      `unshare --setuid >/dev/null sh` aborts at the option parse.
+    - Redirects don't leak into split's argv scan:
+      `split --filter=sh x > /tmp/out` still execs the chunks.
+    - Shell argv-positionals past `-s`, a `-c` operand, or `--` are
+      $0/argv, never read (`bash -s -- -c x`, `bash -c : x`,
+      `bash -- -c x`); `bash -- x` still runs x.
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo X\n")
+    (pdir / "scripts" / "sep.sh").write_bytes(b"true; echo RAN\n")
+    for line in (
+            b"split --filter='bash --help scripts/x.sh' /etc/hosts",
+            b"split --filter='bash -n scripts/x.sh' /etc/hosts",
+            b"split --filter='bash -n -c \"echo HI scripts/x.sh\"' /etc/hosts",
+            b"split --filter='python3 -V scripts/x.sh' /etc/hosts",
+            b"split --filter='python3 --version scripts/x.sh' /etc/hosts",
+            b"split --filter='cat scripts/x.sh | true; sh' /etc/hosts",
+            b"split --filter='cat scripts/x.sh | true' - | sh",
+            b"cat scripts/x.sh; sh",
+            b"cat scripts/x.sh | true | sh",
+            b"head /dev/null <scripts/x.sh | sh",
+            b"cat scripts/x.sh | unshare --setuid >/dev/null sh",
+            b"split --filter='echo scripts/x.sh' -",
+            b"split --filter='echo scripts/x.sh' - | sh",
+            b"bash -s -- -c scripts/x.sh",
+            b"bash -s scripts/x.sh",
+            b"bash -- -c scripts/x.sh",
+            b"bash -n scripts/x.sh",
+            b"bash --help scripts/x.sh",
+            b"bash --version scripts/x.sh",
+            b"python3 -V scripts/x.sh",
+            b"python3 -h scripts/x.sh",
+            b"python3 --help scripts/x.sh",
+            b"python3 -c 'import os' scripts/x.sh",
+            b"perl -e 'print 1' scripts/x.sh",
+            b"nl -bn /dev/null <scripts/x.sh | sh",
+            b"sort /dev/null <scripts/x.sh | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b"split --filter='true; echo sh scripts/x.sh | sh' /etc/hosts",
+            b"split --filter='echo sh scripts/x.sh' - | sh",
+            b"split --filter='echo sh scripts/x.sh | sh' /etc/hosts",
+            b"split --filter=sh scripts/x.sh > /tmp/out",
+            b"split --filter='cat scripts/x.sh | sh' /etc/hosts",
+            b"split --filter='cat scripts/x.sh' - | sh",
+            b"cat scripts/x.sh | sh",
+            b"cat <scripts/x.sh | sh",
+            b"cat - <scripts/x.sh | sh",
+            b"cat scripts/x.sh | tr a b | sh",
+            b"cat scripts/x.sh | unshare --setuid 0 sh",
+            b"bash -- scripts/x.sh",
+            # post-`-c`-operand argv words are still reference deps —
+            # same convention as `bash -c 'true' x` (round-56/62)
+            b"bash -c : scripts/x.sh",
+            b"python3 scripts/x.sh",
+            b"perl scripts/x.sh",
+            b"sh scripts/x.sh",
+            b"bash -c 'sh scripts/x.sh'"):
         assert mod.script_dep_block(pdir, line + b"\n"), line

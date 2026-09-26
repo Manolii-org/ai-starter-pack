@@ -1836,8 +1836,7 @@ def _operand_is_program(enc_words: list, wi: int,
         # the path — `cat scripts/x.sh` re-emits the bytes (the
         # pipeline scan marks them "script" provenance for `|sh`);
         # the literal-read gate treats it the same as bare `cat`.
-        aargs = [_word_text(enclosing[aw[0]:aw[1]])
-                 for aw in enc_words[hi + 1:]]
+        aargs = _argv_only(enc_words, enclosing, hi + 1)
         afilt, _afin, _atout, fidx = _split_scan(key, aargs)
         return (fidx is not None and wi - hi - 1 == fidx
                 and not _split_dead_input(_afin, enclosing)
@@ -3107,8 +3106,21 @@ def _effective_head(words: list, win: bytes) -> int | None:
                         pos_skip = 0
                     if cls == "describe":
                         return -1
-                    if (cls == "operand_next"
-                            and i + 1 < len(words)):
+                    if cls == "operand_next":
+                        if i + 1 >= len(words):
+                            i += 1
+                            continue
+                        _na, _np = _word_redirects(
+                            win[words[i + 1][0]:words[i + 1][1]],
+                            _fresh_fds())
+                        if not _na:
+                            # A redirect word is never the operand —
+                            # `unshare --setuid >/dev/null sh` leaves
+                            # --setuid with no arg: the option parse
+                            # fails and the wrapped command never
+                            # runs (Codex on #1393, round-65 review —
+                            # verified live).
+                            return -1
                         i += 2
                     else:
                         i += 1
@@ -3670,6 +3682,15 @@ _FILTER_READERS = frozenset(
 # -c true scripts/x.sh` runs `true`; the path is $0 — Codex on
 # #1959, round-60 review — verified live). Shells also take `-s`:
 # the program then comes from stdin and every later word is argv.
+_EXEC_PROG_FILE_FLAGS = {
+    # Program-file/module flags — the flag's operand IS the program
+    # (like a bare file operand), so later argv words stay reference
+    # deps the way they do after `python m.py` (`python -m M x` —
+    # same convention as post-program-file argv, round-65).
+    b"python": frozenset({b"-m"}), b"python3": frozenset({b"-m"}),
+    b"php": frozenset({b"-f"}),
+}
+
 _PROG_FLAG = {
     b"sh": b"c", b"bash": b"c", b"dash": b"c", b"zsh": b"c",
     b"ksh": b"c", b"ash": b"c",
@@ -3679,6 +3700,19 @@ _PROG_FLAG = {
 _PROG_FLAG_LONG = {b"node": frozenset({b"eval"})}
 _SH_PROG_HEADS = frozenset(
     {b"sh", b"bash", b"dash", b"zsh", b"ksh", b"ash"})
+# Terminal interpreter modes — the interpreter prints/exits or
+# syntax-checks without running anything. Shells: `-n` (noexec);
+# all: `--help`/`--version` — a dash-family shell errors on every
+# long option anyway, so listing help/version is harmless there.
+# python: `-V`/`-h` (`-v` is verbose and still runs — capital only).
+_INTERP_TERM_SHORT = {h: b"n" for h in _SH_PROG_HEADS}
+_INTERP_TERM_SHORT.update(
+    {b"python": b"Vh", b"python3": b"Vh"})
+_INTERP_TERM_LONG = {h: frozenset({b"help", b"version"})
+                     for h in _SH_PROG_HEADS}
+_INTERP_TERM_LONG.update(
+    {b"python": frozenset({b"help", b"version"}),
+     b"python3": frozenset({b"help", b"version"})})
 
 
 def _interp_program_end(head: bytes, filt: bytes, start: int,
@@ -3704,6 +3738,8 @@ def _interp_program_end(head: bytes, filt: bytes, start: int,
     longs = _PROG_FLAG_LONG.get(head, frozenset())
     sh = head in _SH_PROG_HEADS
     s_seen = False
+    term = False             # a terminal mode was seen — the
+                             # interpreter exits before any program
     n = len(filt)
     pos = start
     while pos < n and filt[pos:pos + 1] not in (b" ", b"\t"):
@@ -3745,11 +3781,11 @@ def _interp_program_end(head: bytes, filt: bytes, start: int,
                        not in (b" ", b"\t", b"\n", b"|", b"&",
                                b";", b"`")):
                     wend += 1
-            return mstart if s_seen else wend
+            return mstart if (s_seen or term) else wend
         if t[:1] != b"-":
             # First non-option word: the program — unless `-s` moved
             # it to stdin, in which case this word is argv.
-            return mstart if s_seen else wend
+            return mstart if (s_seen or term) else wend
         if t == b"--":
             # Post-`--` words are positional, never flags — the next
             # word is the program verbatim (`bash -- -c x` opens a
@@ -3770,9 +3806,16 @@ def _interp_program_end(head: bytes, filt: bytes, start: int,
                        not in (b" ", b"\t", b"\n", b"|", b"&",
                                b";", b"`")):
                     wend += 1
-            return mstart if s_seen else wend
+            return mstart if (s_seen or term) else wend
         if t.startswith(b"--"):
-            if t[2:].split(b"=", 1)[0] in longs:
+            lname = t[2:].split(b"=", 1)[0]
+            if lname in _INTERP_TERM_LONG.get(head, frozenset()):
+                # `--help`/`--version` print and exit before any
+                # program word is even consulted (`bash --help x`,
+                # `python3 --version x` — Codex on #130, round-65
+                # review — verified live).
+                return mstart
+            if lname in longs:
                 if b"=" in t:
                     return wend    # `--eval=CODE` — program inside
                 break              # next word is the program
@@ -3782,6 +3825,15 @@ def _interp_program_end(head: bytes, filt: bytes, start: int,
         prog_flag = False
         for j in range(1, len(t)):
             c = t[j:j + 1]
+            if c in _INTERP_TERM_SHORT.get(head, b""):
+                # A terminal mode letter — `bash -n`/`dash -n`
+                # syntax-check only, `python -V`/`-h` print and exit
+                # (`python -v` is VERBOSE and still runs — the
+                # capital is deliberate). The program word may still
+                # parse, but nothing it names executes (Codex on
+                # #130, round-65 review — verified live).
+                term = True
+                continue
             if sh and c in (b"o", b"O"):
                 # `-o`/`-O` bind a FOLLOWING word as the option-name
                 # operand — never glued — and the cluster's other
@@ -3804,7 +3856,8 @@ def _interp_program_end(head: bytes, filt: bytes, start: int,
                     prog_flag = True
                     continue
                 if j + 1 < len(t):
-                    return wend    # glued program inside the word
+                    return (mstart if term
+                            else wend)   # glued program inside the word
                 prog_flag = True
                 break              # next word is the program
         pos = wend
@@ -3833,14 +3886,14 @@ def _interp_program_end(head: bytes, filt: bytes, start: int,
             return None
         if filt[pos:pos + 1] in (b"'", b'"'):
             e = filt.find(filt[pos:pos + 1], pos + 1)
-            return e + 1 if e >= 0 else n
+            return mstart if term else (e + 1 if e >= 0 else n)
         wend = pos
         while (wend < n
                and filt[wend:wend + 1]
                not in (b" ", b"\t", b"\n", b"|", b"&", b";", b"`")):
             wend += 1
-        return wend
-    return mstart if s_seen else None
+        return mstart if term else wend
+    return mstart if (s_seen or term) else None
 
 
 def _filter_script_role(filt: bytes):
@@ -3866,7 +3919,8 @@ def _filter_script_role(filt: bytes):
     fw = filt.lstrip(b" \t\"'").split(None, 1)[0].rstrip(b"\"'")
     if fw.startswith((b"./scripts/", b"scripts/")):
         return "exec"
-    seps = [(s, e) for s, e, _k in _sub_cmd_seps(filt)]
+    seps = list(_sub_cmd_seps(filt))
+    n = len(filt)
     emit = False
     for m in SCRIPT_REF.finditer(filt):
         # The COMMAND containing the match decides the role — the
@@ -3875,26 +3929,37 @@ def _filter_script_role(filt: bytes):
         # `true; echo sh x` only PRINTS the path (Devin on #130,
         # round-64 review — verified live); `echo x; sh x` still
         # execs (Devin on #1393, round-64).
-        prev = [e for _s, e in seps if e <= m.start()]
+        prev = [e for _s, e, _k in seps if e <= m.start()]
         cw = filt[prev[-1]:].lstrip(b" \t\"'").split(
             None, 1)[0].rstrip(b"\"'") if prev else fw
-        if cw in _STDIN_EMIT_HEADS:
-            # The match is a printer's argv text — emitted, not run.
-            continue
         head = filt[m.start():].split(None, 1)[0].lstrip(b'"')
-        if head in _FILTER_READERS:
+        if cw in _STDIN_EMIT_HEADS or head in _FILTER_READERS:
+            # An emit/printer or reader head puts the match's bytes
+            # on the command's OWN pipeline — the tail after its
+            # first `|` decides where they land: `cat x | true`
+            # dies at the printer (the `; sh` sibling never sees
+            # them — Devin on #130/#12, round-65 review — verified
+            # live), `cat x | sh` runs them, and an emit head's
+            # emitted TEXT re-parses as a program for the tail
+            # (`echo sh x | sh` executes `sh x` — Devin on #1959,
+            # round-65 review — verified live). No `|` inside the
+            # containing pipeline sends the bytes to split's chunk
+            # output — plain "emit".
+            pend = next((s for s, _e, k in seps
+                         if s >= m.start() and k != b"|"), n)
+            tl = next((e for s, e, k in seps
+                       if k == b"|" and m.start() <= s < pend), None)
+            if tl is not None:
+                v = _sub_flow(filt[tl:pend])
+                if v == "exec":
+                    return "exec"
+                if v != "fwd":
+                    continue   # print-only/none tail — bytes die
             emit = True
             continue
         pe = _interp_program_end(head, filt, m.start(), m.start())
         if pe is not None and m.end() > pe:
             continue             # $0/argv — never read or executed
-        return "exec"
-    if emit and _sub_flow(filt) == "exec":
-        # A reader's emitted bytes may still reach an exec tail
-        # INSIDE the filter — `cat x | sh` runs x's content (Devin
-        # on #12, round-64 review — verified live). Ungated this
-        # would also catch `sh -s`'s chunk-stdin exec, which is no
-        # scripts/ dep (round-60/61 regression).
         return "exec"
     return "emit" if emit else None
 
@@ -4418,6 +4483,122 @@ def _sub_inner(src: bytes, a: int) -> bytes:
         if s == a:
             return src[a + 2:e - 1 if src[e - 1:e] == b")" else e]
     return b""
+
+
+def _interp_term_flags(enc_words: list, hi: int, wi: int,
+                       enclosing: bytes) -> bool:
+    """True when a TERMINAL interpreter mode precedes word `wi` among
+    head `hi`'s options — shell `-n`, `--help`/`--version`; python
+    `-V`/`-h`/`--version`/`--help`. The scan ends at `--`, `-`, or the
+    first non-option word (later words are argv)."""
+    key = _command_key(
+        enclosing[enc_words[hi][0]:enc_words[hi][1]])
+    shorts = _INTERP_TERM_SHORT.get(key, b"")
+    longs = _INTERP_TERM_LONG.get(key, frozenset())
+    for a, b in enc_words[hi + 1:wi]:
+        t = _word_text(enclosing[a:b])
+        if not t.startswith(b"-") or t in (b"-", b"--"):
+            break
+        if t.startswith(b"--"):
+            if t[2:].split(b"=", 1)[0] in longs:
+                return True
+            continue
+        if any(c in shorts for c in t[1:]):
+            return True
+    return False
+
+
+def _sh_positional_ok(words, hi, wi, src):
+    """False when the word at wi sits in interpreter argv that is never
+    executed or read: a terminal flag before the program (`-n`,
+    `--version`, `--help`), or argv after a flag-supplied program
+    (`-c <text>`, `-s` = stdin, or a post-`--` program name). Words
+    following a real program FILE stay deps — the file may read its
+    own argv (`bash scripts/a.sh scripts/x.sh`)."""
+    head = _command_key(src[words[hi][0]:words[hi][1]])
+    flag_prog = False      # program bound by -c/-s (later words = argv)
+    prog_file = False      # program-file operand already bound
+    dd = False             # past literal `--`
+    i = hi + 1
+    while i < wi:
+        a, pend = _word_redirects(
+            src[words[i][0]:words[i][1]], _fresh_fds())
+        if not a:
+            i += 2 if pend else 1
+            continue
+        w = _operand_text(a)
+        if prog_file or flag_prog:
+            break
+        if dd:
+            # First post-`--` word is the program FILE; a flag-shaped
+            # name there aborts on open (`bash -- -c x` — the file
+            # `-c` doesn't exist) so later words are dead argv.
+            prog_file = True
+            flag_prog = w.startswith(b"-") and w != b"-"
+            continue
+        if w == b"--":
+            dd = True
+        elif w.startswith(b"--") and len(w) > 2:
+            lname = w[2:].split(b"=", 1)[0]
+            if lname in _INTERP_TERM_LONG.get(head, frozenset()):
+                return False
+        elif w.startswith(b"-") and w != b"-":
+            cluster = w[1:]
+            eats = False
+            for cb in cluster:
+                c = bytes([cb])
+                if c in _INTERP_TERM_SHORT.get(head, b""):
+                    return False
+                if c == b"s":
+                    flag_prog = True
+                if c in (b"c", b"o", b"O"):
+                    eats = True
+            if eats and i + 1 == wi:
+                # Our word IS the flag's operand — `-c PROG` /
+                # `-o NAME` binds it, it isn't argv.
+                return True
+            i += 2 if eats else 1
+            continue
+        else:
+            prog_file = True
+        i += 1
+    return not flag_prog and not (
+        dd and prog_file and flag_prog)
+
+
+def _stdin_rebind_counts(key: bytes, args: list) -> bool:
+    """True when a reader head's `< f` stdin rebind is actually read —
+    only when NO positional file operand replaces stdin as input.
+    `head /dev/null <x` reads /dev/null and never opens fd0 (Devin on
+    #1393/#12/#1959, round-65 review — verified live), while `cat - <x`
+    reads x through its `-` operand and `cat <x` reads it outright.
+    None from _reader_operands is an abort before any read — excluded."""
+    files = _reader_operands(key, args)
+    return (files is not None
+            and (not files
+                 or any(_operand_feeds_stream(o) for o in files)))
+
+
+def _argv_only(words: list, src: bytes, start: int) -> list:
+    """Argv texts of `src[w]` for `words[start:]` with redirect words
+    and their separate targets dropped — `split --filter=sh f > /tmp/o`
+    scans [`--filter=sh`, `f`] only; a bare `>`'s target word is eaten
+    by the operator (Codex on #1959, round-65 review — verified live).
+    Glued forms (`2>/dev/null`, `-<x`) collapse to the operand side —
+    `-<x` still yields `-` (a stdin-feeder operand)."""
+    out = []
+    skip = False
+    for a, b in words[start:]:
+        raw = src[a:b]
+        if skip:
+            skip = False
+            continue
+        at, pend = _word_redirects(raw, _fresh_fds())
+        if not at:
+            skip = pend is not None
+            continue
+        out.append(at)
+    return out
 
 
 def _operand_feeds_stream(a: bytes) -> bool:
@@ -5356,7 +5537,8 @@ def _seg_prov(body: bytes, prov: str,
             # the script (`cat <scripts/x.sh` emits it — round-60
             # review).
             if (any(b"scripts/" in arg for arg in args)
-                    or b"scripts/" in (tgt0.get(0) or b"")):
+                    or (b"scripts/" in (tgt0.get(0) or b"")
+                        and _stdin_rebind_counts(key, args))):
                 prov = "script"
             elif not fd_in:
                 prov = "own"
@@ -5376,7 +5558,8 @@ def _seg_prov(body: bytes, prov: str,
                 prov = "own"
             elif (key not in (b"split", b"csplit")
                     and (any(b"scripts/" in arg for arg in args)
-                         or b"scripts/" in (tgt0.get(0) or b""))):
+                         or (b"scripts/" in (tgt0.get(0) or b"")
+                             and _stdin_rebind_counts(key, args)))):
                 # A `< scripts/f` rebind reads the script like a file
                 # operand — `nl <sep.sh | sh` still execs the post-`;`
                 # command past the line numbers (Devin on #1959,
@@ -5489,7 +5672,7 @@ def _seg_prov(body: bytes, prov: str,
                         frole = _filter_script_role(filt)
                         if frole == "exec":
                             v3 = "exec"
-                        elif frole == "emit" and v3 == "fwd":
+                        elif frole == "emit":
                             # The filter re-emits the script's own
                             # bytes (`cat`/`head`/`grep` heads) —
                             # provably script content joins the
@@ -5499,7 +5682,7 @@ def _seg_prov(body: bytes, prov: str,
                         return (None
                                 if prov in ("up", "script", "thru")
                                 else "own")
-                    if v3 == "none":
+                    if v3 == "none" and frole != "emit":
                         prov = "own"
                     # "fwd" — the filter re-emits the chunks onward.
             elif (key == b"xargs"
@@ -9853,9 +10036,8 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                                     # (`-exec split --filter=sh x \;`
                                     # runs x — Devin on #130,
                                     # round-47 — verified live).
-                                    aargs = [_word_text(
-                                        enclosing[aw[0]:aw[1]])
-                                        for aw in sub[ahi + 1:]]
+                                    aargs = _argv_only(
+                                        sub, enclosing, ahi + 1)
                                     afilt, afin, atout, _f = (
                                         _split_scan(akey, aargs))
                                     # `split IN PREFIX` — the word is
@@ -9904,8 +10086,8 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                                                     afilt))
                                             if role5 == "exec":
                                                 v5 = "exec"
-                                            elif (role5 == "emit"
-                                                    and v5 == "fwd"):
+                                            elif (role5
+                                                    == "emit"):
                                                 # reader head —
                                                 # the script's
                                                 # bytes reach the
@@ -10076,14 +10258,14 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                     # — verified live); only the INPUT positional (or
                     # a --filter value) can be a dep.
                     if wkey == b"split":
-                        sargs = [_operand_text(
-                                     enclosing[w2[0]:w2[1]])
-                                 for w2 in enc_words[whi + 1:]]
+                        sargs = _argv_only(enc_words, enclosing,
+                                           whi + 1)
                         _sf, sinp, _st, fidx = _split_scan(
                             wkey, sargs)
                         wraw = enclosing[w[0]:w[1]]
                         otxt = _operand_text(wraw)
-                        if (otxt != sinp
+                        if (sinp is not None
+                                and otxt != _operand_text(sinp)
                                 and not re.match(
                                     rb"[0-9]*[<>]", wraw)
                                 and not (wi0 > 0
@@ -10110,6 +10292,81 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                     if (wkey not in _STDIN_SINK_HEADS
                             and wkey not in _EXEC_OPERAND_FLAGS
                             and _stdin_exec_head(enclosing) == "sink"):
+                        return False
+                    if wkey in _SH_STDIN_HEADS and not _sh_positional_ok(
+                            enc_words, whi, wi0, enclosing):
+                        # Terminal flags (`-n`/`--version`/`--help`) or
+                        # argv past a flag-supplied program (`-s`,
+                        # `-c`'s operand, `--`) never read the word —
+                        # `bash -s -- -c x`, `bash -c : x` (Devin on
+                        # #1393, round-65 review — verified live).
+                        # Words after a program FILE stay deps — the
+                        # file may read its argv (`bash a.sh x.sh`).
+                        return False
+                    elif (wkey in _EXEC_OPERAND_FLAGS
+                            and wkey not in _SH_STDIN_HEADS):
+                        if _interp_term_flags(
+                                enc_words, whi, wi0, enclosing):
+                            return False
+                        if not _operand_is_program(
+                                enc_words, wi0, enclosing):
+                            # A program flag already consumed the
+                            # program word — later positionals are
+                            # argv ($0+), not read (`python -c 'P' x`
+                            # — same family as the shell `-s` argv
+                            # fix, round-65 review).
+                            pf3 = _EXEC_OPERAND_FLAGS[wkey]
+                            pc3 = {p3[1:] for p3 in pf3
+                                   if len(p3) == 2}
+                            j3 = whi + 1
+                            while j3 < wi0:
+                                a3, b3 = enc_words[j3]
+                                t3 = _word_text(enclosing[a3:b3])
+                                if (t3 in (b"-", b"--")
+                                        or not t3.startswith(b"-")):
+                                    j3 += 1
+                                    continue
+                                if t3.startswith(b"--"):
+                                    if (t3[2:].split(b"=", 1)[0]
+                                            in pf3):
+                                        if (b"=" not in t3
+                                                and j3 + 1 == wi0):
+                                            # `--eval`'s operand IS
+                                            # our word — the program
+                                            break
+                                        return False
+                                    j3 += 1
+                                    continue
+                                if t3 in pf3:
+                                    if j3 + 1 == wi0:
+                                        # `-c`/`-m` consume our word
+                                        # as the program operand
+                                        break
+                                    if (t3 in _EXEC_PROG_FILE_FLAGS
+                                            .get(wkey, frozenset())):
+                                        # `-m`/`-f` bind a program
+                                        # FILE — later argv words
+                                        # keep their reference dep
+                                        break
+                                    # program text bound earlier —
+                                    # our word is argv
+                                    return False
+                                if any(bytes([c3]) in pc3
+                                        for c3 in t3[1:]):
+                                    return False
+                                j3 += 1
+                    if (rdm is not None
+                            and rdm.group(1) in (b"", b"0")
+                            and (wkey in _FILTER_READERS
+                                 or wkey in _EMIT_PIPE_READERS)
+                            and not _stdin_rebind_counts(
+                                wkey,
+                                _argv_only(enc_words, enclosing,
+                                           whi + 1))):
+                        # `head /dev/null <scripts/x.sh` — a named
+                        # file operand replaces stdin; the `<` rebind
+                        # is opened but never read (Devin on
+                        # #1393/#12, round-65 review — verified live).
                         return False
                 return True
             # A glued non-`-d` short-option operand whose tail is a script
@@ -10142,7 +10399,14 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                 # `xargs -n 5 'bash x.sh'` looks up a binary literally
                 # named `bash x.sh` (ENOENT, never runs it).
                 wi0 = enc_words.index(w)
-                if _operand_is_program(enc_words, wi0, enclosing):
+                if (_operand_is_program(enc_words, wi0, enclosing)
+                        and not (whi is not None and whi >= 0
+                                 and _interp_term_flags(
+                                     enc_words, whi, wi0, enclosing))):
+                    # A terminal flag ahead of the program binding
+                    # means the `-c` text is checked, never run
+                    # (`bash -n -c 'echo HI x'` — round-65, verified
+                    # live).
                     return True
                 # Emit-text fallback — the head must ECHO the operand
                 # onward (`printf 'bash x' | sh`): stdin execs take a
@@ -10250,20 +10514,24 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                     enclosing[enc_words[whi][0]:enc_words[whi][1]])
                         if whi is not None and whi >= 0 else b"")
                 if wkey == b"split":
-                    aargs = [_word_text(enclosing[aw[0]:aw[1]])
-                             for aw in enc_words[whi + 1:]]
+                    aargs = _argv_only(enc_words, enclosing,
+                                       whi + 1)
                     afilt, _afin, _atout, fidx = _split_scan(
                         wkey, aargs)
                     if (fidx is not None
                             and wi0 - whi - 1 == fidx
                             and afilt not in (None, b"", b"-")
                             and _afin != b"/dev/null"
-                            and _filter_script_role(afilt) == "emit"
-                            and _sub_flow(afilt) == "fwd"):
+                            and _filter_script_role(afilt) == "emit"):
                         return _pipe_to_exec(
                             scan, cs + len(enclosing))
-            return bool(quoted) and _operand_is_program(
-                enc_words, enc_words.index(w), enclosing)
+            wi0 = enc_words.index(w)
+            whi = _effective_head(enc_words, enclosing)
+            return (bool(quoted)
+                    and _operand_is_program(enc_words, wi0, enclosing)
+                    and not (whi is not None and whi >= 0
+                             and _interp_term_flags(
+                                 enc_words, whi, wi0, enclosing)))
 
         for n in SCRIPT_NAME.finditer(window):
             if literal(m.start() + n.start()):
