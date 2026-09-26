@@ -244,7 +244,12 @@ def main() -> None:
         # hunks in early tail files can't starve later ones out of the map.
         tail_files: list[tuple[str, list[str]]] = []
         cur_hunks: list[str] = []
+        # The cutoff can land mid-file: seed with the last `diff --git` header
+        # in the prefix so that file's tail hunks aren't orphaned.
         cur_file = ""
+        for pline in diff[:50000].splitlines():
+            if pline.startswith("diff --git "):
+                cur_file = re.sub(r"[<>`]", "", pline)[:200]
         for line in diff[50000:].splitlines():
             if line.startswith("diff --git "):
                 if cur_file:
