@@ -28,7 +28,8 @@ _ANTHROPIC_API_VERSION = "2023-06-01"
 # migration or workflow edit can never fall off the cap on huge PRs.
 _DANGER_PATH_RE = re.compile(
     r"(migrations?/|\.sql|schema|\.github/workflows|auth|secret|credential|"
-    r"token|dockerfile|terraform|deploy|package\.json|package-lock|pnpm-lock|yarn\.lock)",
+    r"token|dockerfile|terraform|deploy|package\.json|package-lock|pnpm-lock|yarn\.lock|"
+    r"\.sh$|\.bash$)",
     re.I,
 )
 

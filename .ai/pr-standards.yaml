@@ -31,7 +31,10 @@ workflow_files:
     - "New workflows must include a concurrency group to cancel stale runs"
 
 testing:
-  location: "**/*.{test,spec}.{ts,tsx,js,py}, **/test_*.py, **/tests/**/*.py"
+  location:
+    - "**/*.{test,spec}.{ts,tsx,js,py}"
+    - "**/test_*.py"
+    - "**/tests/**/*.py"
   rules:
     - "No tautological tests: an assertion must not re-derive its expected value from the implementation under test (e.g. `expect(add(a,b)).toBe(a+b)`, `assert result == fn(input)` where the expected side calls the same code path)"
     - "Every assertion must pin a literal, a fixture, or a value computed independently of the code under test"
