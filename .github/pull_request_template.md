@@ -28,6 +28,14 @@ Fix agents: read this section before changing code; keep fixes scoped to the bud
 ## Test plan
 - [ ] <!-- Command/check -->
 
+## Merge danger
+
+<!-- Fill this in yourself first — if you disagree with the classifier's assessment, that disagreement is signal, not a formatting bug. -->
+
+- Door: <!-- one-way | two-way -->
+- Blast radius: <!-- small | medium | large -->
+- Why: <!-- one line — name the concrete mechanism (e.g. "migration rewrites sessions table", "flips default flag", "adds new endpoint") -->
+
 ## Risks / rollback
 
 <!-- Known risks and rollback steps -->

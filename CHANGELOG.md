@@ -4,6 +4,20 @@
 
 ### Added
 
+- **merge danger on PR assessment** — pr-classifier now emits optional
+  `door` (`one-way`/`two-way`), `blast_radius` (`small`/`medium`/`large`),
+  and `danger_reason` fields; the judge renders them as a `**Merge danger:**`
+  line in the posted review. `unknown` means unclassified — never rendered
+  as a safe verdict. The PR template gains a matching author-filled
+  `## Merge danger` section so disagreement with the classifier is visible.
+- **pr-standards-checker agent** — validates a PR diff against the repo-owned
+  `.ai/pr-standards.yaml` manifest (seeded as a starter file; customize per
+  repo). Includes a `testing` section that flags tautological tests
+  (assertions that re-derive the expected value from the code under test).
+- **scope-adherence under-delivery check** — the skill is now bidirectional:
+  it also flags concrete promises in the PR title/description that the diff
+  does not deliver (the spec axis), not just scope creep.
+
 - **coverage-ratchet-reusable** — shared coverage gate: runs a suite, extracts
   a float metric, and compares against an in-repo baseline file. Absent
   baseline = measure-and-report (exits 0); below baseline = fail (enforce)
