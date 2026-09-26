@@ -72,18 +72,23 @@ _HEAD_SHA=$(git rev-parse HEAD)
 # `gh api` is REST — `gh pr view` uses GraphQL which agent web sessions cannot reach.
 _BASE_BRANCH=$(gh api repos/:owner/:repo/pulls/${PR_NUMBER} --jq '.base.ref' 2>/dev/null)
 _LIVE_BASE_SHA=$(gh api repos/:owner/:repo/pulls/${PR_NUMBER} --jq '.base.sha' 2>/dev/null)
-_BASE_SHA=$(git rev-parse "origin/${_BASE_BRANCH}" 2>/dev/null || echo missing)
-# Stale-ref guard: origin/<base> must equal the live .base.sha — a moved base
-# must invalidate the digest even when the manifest bytes happen to match.
-[ "$_BASE_SHA" = "$_LIVE_BASE_SHA" ] || _BASE_SHA=missing
-_INPUTS_SHA=$(printf '%s\0%s' "$_BASE_SHA" "$(git show "origin/${_BASE_BRANCH}:.ai/pr-standards.yaml" 2>/dev/null || printf 'untracked')" | sha256sum | cut -d' ' -f1)
+_LOCAL_BASE_SHA=$(git rev-parse "origin/${_BASE_BRANCH}" 2>/dev/null || echo missing)
+# Fail closed: cache write/reuse requires the local ref to PROVABLY match the
+# live base. A sentinel digest would collide across base moves — on mismatch or
+# lookup failure, `git fetch origin ${_BASE_BRANCH}`, recompute, and if it still
+# differs do NOT write or reuse the cache (rerun the check uncached).
+if [ -z "$_LIVE_BASE_SHA" ] || [ "$_LOCAL_BASE_SHA" != "$_LIVE_BASE_SHA" ]; then
+  _INPUTS_SHA=skip
+else
+  _INPUTS_SHA=$(printf '%s\0%s' "$_LOCAL_BASE_SHA" "$(git show "origin/${_BASE_BRANCH}:.ai/pr-standards.yaml" 2>/dev/null || printf 'untracked')" | sha256sum | cut -d' ' -f1)
+fi
 _META_SHA=$(gh api repos/:owner/:repo/pulls/${PR_NUMBER} --jq '.title + "\u0000" + .body' 2>/dev/null | sha256sum | cut -d' ' -f1)
 _CACHE=".git/.pr-comments-cache/standards-pr${PR_NUMBER}-${_HEAD_SHA}.json"
 # write JSON with violations array and timestamp
 ```
 
 Write as JSON: `{"sha": "<HEAD_SHA>", "inputs_sha": "<_INPUTS_SHA>", "meta_sha": "<_META_SHA>", "ts": "<ISO8601>", "violations": [...], "passed": [...], "unverified": [...]}`.
-Cache is intentionally in `.git/` (not committed) so it resets on fresh clone. pr-resolve reads this same filename before dispatching and reuses it only when it recomputes the same `inputs_sha` and `meta_sha`. Digest contract (identical commands both sides): `inputs_sha` = sha256 of `base-ref-sha` + NUL + raw base-manifest bytes (or `untracked` when absent on base) — folding in `origin/<base>`'s ref SHA also covers merge-base diff/commit-list drift when the base moves. `meta_sha` = sha256 of `title + NUL + body` fetched live via `gh api` REST. Fail closed: if either `gh api` call fails (empty output), do NOT write or reuse the cache — rerun the check.
+Cache is intentionally in `.git/` (not committed) so it resets on fresh clone. pr-resolve reads this same filename before dispatching and reuses it only when it recomputes the same `inputs_sha` and `meta_sha`. Digest contract (identical commands both sides): `inputs_sha` = sha256 of `base-ref-sha` + NUL + raw base-manifest bytes (or `untracked` when absent on base) — folding in `origin/<base>`'s ref SHA also covers merge-base diff/commit-list drift when the base moves. `meta_sha` = sha256 of `title + NUL + body` fetched live via `gh api` REST. Fail closed: write the cache only when `_INPUTS_SHA` is not `skip` — a stale ref or a failed `gh api` lookup (empty output) means no write and no reuse; rerun the check uncached.
 
 ## Constraints
 
