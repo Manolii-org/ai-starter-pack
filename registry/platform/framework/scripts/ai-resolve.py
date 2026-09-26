@@ -108,6 +108,23 @@ SCRIPT_REF = re.compile(
     rb"scripts/(?:[A-Za-z0-9_.-]+/)"
     rb"*(?:[A-Za-z0-9_.-]+\.[A-Za-z0-9_-]+|[A-Za-z0-9_-]+)"
     rb"(?![\w.])"
+    # `sudo` — only its shell-mode tail invokes program text: `-s`/
+    # `--shell`/`-i`/`--login` run the tail as ONE `$SHELL -c` string,
+    # so `sudo -s 'sh x.sh'` and `sudo -s x.sh` execute it (Devin on
+    # #130/#1393, round-66 review — verified live via the shell's
+    # argv: `-c 'sh scripts/x.sh'`). The flag word must appear inside
+    # sudo's own option run — words before it may be sudo operands,
+    # but a `--` ends options and turns the rest into literal argv
+    # (`sudo -- -s x` execs `-s`, ENOENT — verified live). Non-shell
+    # sudo tails keep their inner-keyword handling (`sudo sh x` →
+    # dep, `sudo x.sh` → literal argv[0]).
+    rb"|(?<![\w-])sudo[ \t]+"
+    rb"(?:(?!--[ \t])(?:\"[^\n\"]*\"|'[^\n']*'|[^\s|&;`]+)[ \t]+)*"
+    rb"(?:--shell|--login|-[^\s|&;`'\n-]*[si][^\s|&;`'\n-]*)[ \t]+"
+    rb"(?:\"[^\n\"]*\"|'[^\n']*'|[^\n|&;`])*?"
+    rb"scripts/(?:[A-Za-z0-9_.-]+/)"
+    rb"*(?:[A-Za-z0-9_.-]+\.[A-Za-z0-9_-]+|[A-Za-z0-9_-]+)"
+    rb"(?![\w.])"
     # An interpreter held in a variable — `$PYTHON scripts/setup.py`,
     # `${NODE} scripts/x.js`, `"$PYTHON" scripts/x.py` (the double quotes
     # still expand) — runs the script just as a literal interpreter word
@@ -1092,6 +1109,78 @@ def _wrapper_opt_skip(key: bytes, t: bytes):
     return 1
 
 
+def _xargs_bad_opt(args: list, i: int) -> bool:
+    """True when the xargs option at args[i] aborts on its operand —
+    an out-of-range/non-numeric value or a missing word exits before
+    the utility runs (round-66 — verified live: `-n sh`/`-n 0`/
+    `-n -1`/`-s bad`/`-L bad`/`-lbad`/`--max-lines=bad`/`-P -1`/`-d
+    xy` all reject; `-n +2`, `-P 0`, `-d ,`, `-d '\\n'` run). `-n`/`-s`/
+    `-L`/`-l` and `--max-args`/`--max-chars`/`--max-lines` need a
+    positive count; `-P`/`--max-procs` allows 0; `-d`/`--delimiter`
+    needs a single character or a `\\` escape."""
+    a = args[i]
+    if a.startswith(b"--"):
+        name = a.split(b"=", 1)[0]
+        if name in _WRAPPER_LONG[b"xargs"]:
+            opt = name
+        else:
+            cands = [o for o in _WRAPPER_LONG[b"xargs"]
+                     if o.startswith(name)]
+            if len(cands) != 1:
+                return False            # ambiguity exits upstream
+            opt = cands[0]
+        if opt in _WRAPPER_REQ_LONG[b"xargs"]:
+            if b"=" in a:
+                val = a.split(b"=", 1)[1]
+            elif i + 1 < len(args):
+                val = args[i + 1]
+            else:
+                return True             # missing operand aborts
+        elif opt in _WRAPPER_OPTARG_LONG[b"xargs"]:
+            if b"=" not in a:
+                return False            # separate word stays positional
+            val = a.split(b"=", 1)[1]
+        else:
+            return False                # bare flag — no operand
+        return _xargs_bad_value(opt, val)
+    if a == b"-" or not a.startswith(b"-"):
+        return False
+    j = 1
+    while j < len(a):
+        c = a[j:j + 1]
+        if c in _WRAPPER_REQ_SHORT[b"xargs"]:
+            if j + 1 < len(a):
+                val = a[j + 1:]
+            elif i + 1 < len(args):
+                val = args[i + 1]
+            else:
+                return True             # missing operand aborts
+            return _xargs_bad_value(b"-" + c, val)
+        if c in _WRAPPER_OPT_SHORT[b"xargs"]:
+            if j + 1 == len(a):
+                return False            # separate word is positional
+            return _xargs_bad_value(b"-" + c, a[j + 1:])
+        if c not in _WRAPPER_FLAG_SHORT[b"xargs"]:
+            return False                # unknown letter exits upstream
+        j += 1
+    return False
+
+
+def _xargs_bad_value(opt: bytes, val: bytes) -> bool:
+    """The operand check itself — `opt` is the resolved option name."""
+    if opt in (b"-n", b"--max-args", b"-s", b"--max-chars",
+               b"-L", b"--max-lines", b"-l"):
+        num = re.fullmatch(rb"([+-]?)([0-9]+)", val)
+        return (num is None or num.group(1) == b"-"
+                or int(num.group(2)) < 1)
+    if opt in (b"-P", b"--max-procs"):
+        num = re.fullmatch(rb"([+-]?)([0-9]+)", val)
+        return num is None or num.group(1) == b"-"
+    if opt in (b"-d", b"--delimiter"):
+        return len(val) != 1 and not val.startswith(b"\\")
+    return False
+
+
 def _find_newer_op(t: bytes) -> bool:
     """`-newerXY REFERENCE` — a predicate named by two letters
     ({a,B,c,m} for the file's own stamp x {a,B,c,m,t} for the
@@ -1434,6 +1523,7 @@ def _argv_wrap_start(enc_words: list, hi: int, enclosing: bytes):
     # `flock FILE CMD…` — the FIRST positional is the lockfile; the
     # command argv begins one word later (Codex on #128, round-25).
     pos_skip = 1 if key == b"flock" else 0
+    args_x = None
     ended = False
     j = hi + 1
     while j < len(enc_words):
@@ -1469,6 +1559,20 @@ def _argv_wrap_start(enc_words: list, hi: int, enclosing: bytes):
                 skip = _wrapper_opt_skip(key, t)
                 if skip is None:
                     return None
+                if key == b"xargs":
+                    # A malformed xargs option OPERAND also aborts
+                    # before the utility — `-n`/`--max-args` <1 or
+                    # non-numeric, `-P`/`--max-procs` <0, `-d`/
+                    # `--delimiter` multi-char (Devin on #130, round-66
+                    # review — verified live).
+                    if args_x is None:
+                        args_x = [
+                            _word_text(
+                                enclosing[enc_words[k][0]:
+                                          enc_words[k][1]])
+                            for k in range(hi + 1, len(enc_words))]
+                    if _xargs_bad_opt(args_x, j - hi - 1):
+                        return None
                 j += skip
                 continue
             elif t in terminal:
@@ -1556,6 +1660,8 @@ def _xargs_argfile(args: list):
                 if len(cands) != 1:
                     return _XARGS_EXIT   # exits — nothing is read
                 resolved = cands[0]
+            if _xargs_bad_opt(args, i):
+                return _XARGS_EXIT       # bad operand exits pre-read
             if resolved == b"--arg-file":
                 seen = True
                 if b"=" in a:
@@ -1589,6 +1695,8 @@ def _xargs_argfile(args: list):
             # ANYWHERE binds the argfile — `-0a/dev/null` reads
             # /dev/null (CodeRabbit on #130, round-46 review —
             # verified live).
+            if _xargs_bad_opt(args, i):
+                return _XARGS_EXIT       # bad operand exits pre-read
             j = 1
             while j < len(a):
                 c = a[j:j + 1]
@@ -1648,7 +1756,7 @@ def _xargs_utility(args: list) -> list:
                 # round-45 review, verified live); an ambiguous or
                 # unknown option exits before the utility runs.
                 skip = _wrapper_opt_skip(b"xargs", a)
-                if skip is None:
+                if skip is None or _xargs_bad_opt(args, i):
                     return []
                 i += skip
                 continue
@@ -1750,7 +1858,14 @@ def _operand_is_program(enc_words: list, wi: int,
             continue
         break
     hi = _effective_head(enc_words, enclosing)
-    if hi is None or hi < 0 or wi <= hi:
+    if hi is None or hi < 0:
+        return False
+    if wi == hi and _sudo_shell_tail(enc_words, enclosing, hi):
+        # A `sudo -s`/`--shell`/`-i`/`--login` tail head IS a program
+        # slot — sudo passes the tail to `$SHELL -c` as one string
+        # (round-66 — verified live).
+        return True
+    if wi <= hi:
         return False
     key = _command_key(enclosing[enc_words[hi][0]:enc_words[hi][1]])
     if key == b"eval":
@@ -1838,7 +1953,9 @@ def _operand_is_program(enc_words: list, wi: int,
         # the literal-read gate treats it the same as bare `cat`.
         aargs = _argv_only(enc_words, enclosing, hi + 1)
         afilt, _afin, _atout, fidx = _split_scan(key, aargs)
-        return (fidx is not None and wi - hi - 1 == fidx
+        return (fidx is not None
+                and _argv_index(enc_words, enclosing, hi + 1, wi)
+                == fidx
                 and not _split_dead_input(_afin, enclosing)
                 and _filter_script_role(afilt) == "exec")
     if key in _ARGV_PROGRAM_WRAPPERS:
@@ -3713,6 +3830,19 @@ _INTERP_TERM_LONG = {h: frozenset({b"help", b"version"})
 _INTERP_TERM_LONG.update(
     {b"python": frozenset({b"help", b"version"}),
      b"python3": frozenset({b"help", b"version"})})
+# Interpreter options whose operand is a SEPARATE word — the value is
+# not an option slot, so a terminal flag after it still terminates
+# (`python3 -X dev -V`/`python3 -W default -h` print and exit without
+# running the program — Devin on #130, round-66 review, verified
+# live). Only exact flag words bind the next word; glued forms
+# (`-Xdev`, `-Wdefault`, `--check-hash-based-pycs=always`) carry the
+# value in-word. `-c`/`-m`/a program FILE end option parsing entirely
+# — words after them are argv, never flags (`python3 -c 'x' -V` runs
+# the program — verified live).
+_INTERP_OPT_OPERAND = {
+    b"python": frozenset({b"-X", b"-W", b"--check-hash-based-pycs"}),
+    b"python3": frozenset({b"-X", b"-W", b"--check-hash-based-pycs"}),
+}
 
 
 def _interp_program_end(head: bytes, filt: bytes, start: int,
@@ -4495,10 +4625,18 @@ def _interp_term_flags(enc_words: list, hi: int, wi: int,
         enclosing[enc_words[hi][0]:enc_words[hi][1]])
     shorts = _INTERP_TERM_SHORT.get(key, b"")
     longs = _INTERP_TERM_LONG.get(key, frozenset())
+    opt_ops = _INTERP_OPT_OPERAND.get(key, frozenset())
+    pend = False
     for a, b in enc_words[hi + 1:wi]:
+        if pend:
+            pend = False              # an option's operand word —
+            continue                  # never a flag itself
         t = _word_text(enclosing[a:b])
         if not t.startswith(b"-") or t in (b"-", b"--"):
             break
+        if t in opt_ops:
+            pend = True
+            continue
         if t.startswith(b"--"):
             if t[2:].split(b"=", 1)[0] in longs:
                 return True
@@ -4519,6 +4657,9 @@ def _sh_positional_ok(words, hi, wi, src):
     flag_prog = False      # program bound by -c/-s (later words = argv)
     prog_file = False      # program-file operand already bound
     dd = False             # past literal `--`
+    opt_pend = False       # `-X`/`-W`-style operand word — never the
+                           # program file (`python3 -X dev -V x.py`
+                           # still hits `-V` — round-66, verified live)
     i = hi + 1
     while i < wi:
         a, pend = _word_redirects(
@@ -4527,6 +4668,14 @@ def _sh_positional_ok(words, hi, wi, src):
             i += 2 if pend else 1
             continue
         w = _operand_text(a)
+        if opt_pend:
+            opt_pend = False
+            i += 1
+            continue
+        if w in _INTERP_OPT_OPERAND.get(head, frozenset()):
+            opt_pend = True
+            i += 1
+            continue
         if prog_file or flag_prog:
             break
         if dd:
@@ -4599,6 +4748,100 @@ def _argv_only(words: list, src: bytes, start: int) -> list:
             continue
         out.append(at)
     return out
+
+
+def _argv_index(words: list, src: bytes, start: int, wi: int):
+    """`wi`'s slot in `_argv_only(words, src, start)` — None when the
+    word is a redirect operator or its target (never an argv member).
+    Redirect words shift word-vs-argv indices — `split > o
+    --filter='sh x' f` has the filter operand at word 3 but argv slot
+    0 (round-66 review — verified live)."""
+    pos = 0
+    skip = False
+    for wi2 in range(start, len(words)):
+        if skip:
+            skip = False
+            if wi2 == wi:
+                return None
+            continue
+        at, pend = _word_redirects(src[words[wi2][0]:words[wi2][1]],
+                                   _fresh_fds())
+        if not at:
+            if wi2 == wi:
+                return None
+            skip = pend is not None
+            continue
+        if wi2 == wi:
+            return pos
+        pos += 1
+    return None
+
+
+_SUDO_SHELL_FLAGS = frozenset({b"-s", b"--shell", b"-i", b"--login"})
+# sudo short letters that bind an operand — in a cluster they swallow
+# the REST of the word (`-us` is `-u s`, not shell mode).
+_SUDO_OPERAND_LETTERS = frozenset(b"ughrtDRpUT")
+
+
+def _tail_owner(words: list, win: bytes, head: int):
+    """Key of the argv-wrapper word owning `words[head]`'s tail — the
+    last `_EXEC_WRAPPERS` word before it — or None."""
+    i = head - 1
+    while i >= 0:
+        key = _command_key(win[words[i][0]:words[i][1]])
+        if key in _EXEC_WRAPPERS:
+            return key
+        i -= 1
+    return None
+
+
+def _sudo_shell_tail(words: list, win: bytes, head: int) -> bool:
+    """True when `words[head]` is the tail head of a `sudo -s`/
+    `--shell`/`-i`/`--login` invocation — sudo runs the tail as ONE
+    `$SHELL -c` program string, so the tail head word is program text
+    even though it IS the effective head (round-66 — verified live:
+    the shell's argv is `-c 'sh scripts/x.sh'`; bare `sudo` and
+    operand-only runs like `-u root` keep the literal-name tail).
+    Walks back over the tail to the wrapper that owns it, so
+    `sudo nice -s x` (nice's `-s`, an abort) is not shell mode."""
+    if _tail_owner(words, win, head) != b"sudo":
+        return False
+    i = head - 1
+    while i >= 0 and \
+            _command_key(win[words[i][0]:words[i][1]]) != b"sudo":
+        i -= 1
+    j = i + 1
+    while j < head:
+        t = _word_text(win[words[j][0]:words[j][1]])
+        if _ASSIGN_WORD.match(t):
+            j += 1
+            continue
+        if t == b"--":
+            # End of options — everything after is literal argv
+            # (`sudo -- -s x` tries to exec a program named `-s`).
+            break
+        if not t.startswith(b"-"):
+            j += 1
+            continue
+        if t in _SUDO_SHELL_FLAGS:
+            return True
+        cls = _wrapper_opt_class(b"sudo", t)
+        if cls == "operand_next":
+            j += 2
+            continue
+        if cls == "operand_glued" or cls == "describe":
+            j += 1
+            continue
+        # A plain short cluster — `-Hs`, `-ns`, `-si` carry the shell
+        # flag; an operand letter swallows the rest (`-us` = -u "s").
+        if len(t) > 2 and not t.startswith(b"--"):
+            for cb in t[1:]:
+                if cb in _SUDO_OPERAND_LETTERS:
+                    break
+                if cb in (115, 105):       # s / i
+                    return True
+        j += 1
+    return False
 
 
 def _operand_feeds_stream(a: bytes) -> bool:
@@ -8640,10 +8883,16 @@ def _command_literal(src: bytes, pos: int,
         # live). The LAST-bound filter word decides (an earlier
         # `--filter` is dead); a READER head inside it only re-emits
         # the bytes, which the word-level emit gate handles.
-        aargs = [_word_text(win[aw[0]:aw[1]]) for aw in words[1:]]
+        # Redirect operators and their targets are NOT argv — a bare
+        # `> out` pair poisoned the scan into an invalid-operand abort
+        # (`split --filter='sh x' in > out` runs the filter — Devin on
+        # #1393, round-66 review — verified live).
+        aargs = _argv_only(words, win, 1)
         _af, _ai, _at, fidx = _split_scan(key, aargs)
-        if (fidx is not None
-                and words[1 + fidx][0] <= pos < words[1 + fidx][1]):
+        wpos = next((k for k, (wa, wb) in enumerate(words)
+                     if wa <= pos < wb), None)
+        if (fidx is not None and wpos is not None
+                and _argv_index(words, win, 1, wpos) == fidx):
             # The filter fires only when a chunk exists — an input
             # yielding none (`split --filter='sh x' </dev/null` —
             # Devin on #1959, round-52 review, verified live) leaves
@@ -9990,6 +10239,15 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                     wkey = _command_key(
                         enclosing[enc_words[whi][0]:
                                   enc_words[whi][1]])
+                    if (wi0 == whi
+                            and _sudo_shell_tail(enc_words, enclosing,
+                                                 whi)):
+                        # A `sudo -s`/`--shell`/`-i`/`--login` tail is
+                        # ONE `$SHELL -c` program string — the head
+                        # word's text is a command (`sudo -s 'sh
+                        # x.sh'` execs x.sh — Devin on #130/#1393,
+                        # round-66 review, verified live).
+                        return True
                     if wkey in _ARGV_PROGRAM_WRAPPERS:
                         if wkey == b"find":
                             span = _find_action_span(
@@ -10116,6 +10374,23 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                                             cs + len(enclosing)))
                             if (akey in _SH_STDIN_HEADS
                                     or akey in _EXEC_OPERAND_FLAGS):
+                                # A terminal mode or inert positional
+                                # inside the action never reaches the
+                                # word — `-exec bash -n x.sh \;`
+                                # parses without running, `-exec sh
+                                # -s x.sh \;` reads stdin not the
+                                # argv, `-exec python3 -V x.py \;`
+                                # prints the version (Devin on #1959,
+                                # round-66 review — verified live).
+                                if _interp_term_flags(
+                                        sub, ahi, wi0 - s1,
+                                        enclosing):
+                                    return False
+                                if (akey in _SH_STDIN_HEADS
+                                        and not _sh_positional_ok(
+                                            sub, ahi, wi0 - s1,
+                                            enclosing)):
+                                    return False
                                 if _operand_is_program(
                                         sub, wi0 - s1, enclosing):
                                     return True
@@ -10195,8 +10470,37 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                                 # live). Recurse so the wrapped head's
                                 # role decides (`flock L sh -c P`
                                 # still runs P).
+                                sub2 = enc_words[ws:]
+                                wh2 = _effective_head(sub2, enclosing)
+                                if (wh2 is not None and wh2 >= 0
+                                        and wi0 - ws > wh2):
+                                    # An inert mode on the wrapped
+                                    # interpreter never runs the
+                                    # word — `flock L bash -n x.sh`
+                                    # parses, `xargs sh -s x.sh`
+                                    # reads stdin, `xargs python3 -V
+                                    # x.py` prints the version (Devin
+                                    # on #1959, round-66 review —
+                                    # verified live).
+                                    hk0 = _command_key(
+                                        enclosing[sub2[wh2][0]:
+                                                  sub2[wh2][1]])
+                                    if (hk0 in _SH_STDIN_HEADS
+                                            or hk0
+                                            in _EXEC_OPERAND_FLAGS):
+                                        if _interp_term_flags(
+                                                sub2, wh2, wi0 - ws,
+                                                enclosing):
+                                            return False
+                                        if (hk0 in _SH_STDIN_HEADS
+                                                and not
+                                                _sh_positional_ok(
+                                                    sub2, wh2,
+                                                    wi0 - ws,
+                                                    enclosing)):
+                                            return False
                                 if _operand_is_program(
-                                        enc_words[ws:], wi0 - ws,
+                                        sub2, wi0 - ws,
                                         enclosing):
                                     return True
                                 # An interpreter's positional script
@@ -10217,8 +10521,6 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                                 # command itself (exec'd); before it,
                                 # the inner wrapper's own argv
                                 # (`env VAR=1 x`) is not the command.
-                                sub2 = enc_words[ws:]
-                                wh2 = _effective_head(sub2, enclosing)
                                 if wh2 is None or wh2 < 0:
                                     return False
                                 if wi0 - ws <= wh2:
@@ -10275,7 +10577,9 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                                                  enc_words[wi0 - 1][0]:
                                                  enc_words[wi0 - 1][1]]))
                                 and not (fidx is not None
-                                         and wi0 - whi - 1 == fidx)):
+                                         and _argv_index(
+                                             enc_words, enclosing,
+                                             whi + 1, wi0) == fidx)):
                             return False
                     # An emit/transform head that aborts on its flags
                     # or ends the stream emits none of the operand's
@@ -10519,7 +10823,8 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                     afilt, _afin, _atout, fidx = _split_scan(
                         wkey, aargs)
                     if (fidx is not None
-                            and wi0 - whi - 1 == fidx
+                            and _argv_index(enc_words, enclosing,
+                                            whi + 1, wi0) == fidx
                             and afilt not in (None, b"", b"-")
                             and _afin != b"/dev/null"
                             and _filter_script_role(afilt) == "emit"):

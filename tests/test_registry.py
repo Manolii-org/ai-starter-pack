@@ -13052,3 +13052,104 @@ def test_script_dep_round65_terminal_and_pipeline(tmp_path):
             b"sh scripts/x.sh",
             b"bash -c 'sh scripts/x.sh'"):
         assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round66_sudo_shell_xargs_abort_interp(tmp_path):
+    """Review round 66 — verified against live bash/coreutils:
+
+    - `sudo -s`/`--shell`/`-i`/`--login` run the tail as ONE `$SHELL
+      -c` program string — the tail head word is program text
+      (`sudo -s 'sh x.sh'` execs x.sh; `sudo -s 'echo x.sh'` follows
+      the `bash -c 'echo x'` over-include convention). Bare `sudo
+      x.sh` stays a literal argv[0] name, `sudo -- -s x` execs `-s`
+      (ENOENT), `-u` swallows an operand letter in a cluster
+      (`sudo -us` = -u "s", not shell mode).
+    - A malformed xargs option operand aborts before the utility:
+      `-n`/`-s`/`-l`/`--max-args` <1 or non-numeric, `-P`/`--max-procs`
+      <0, `-d`/`--delimiter` multi-char (`xargs -n 0 sh x` runs
+      nothing); `-P 0`, `-n +2`, `-d ,` are valid.
+    - Interpreter option-operands bind their own word — `python3 -X
+      dev -V` still prints the version (`-X`/`-W`/
+      `--check-hash-based-pycs` consume a separate operand word);
+      `-c` ends option parsing at its operand.
+    - Inert interpreter modes inside find -exec / flock / xargs tails
+      never run the word (`-exec bash -n x` parses, `-exec sh -s x`
+      reads stdin, `-exec python3 -V x` prints the version).
+    - Redirect words no longer leak into split's filter/input argv
+      scan (`split --filter='cat x' in > /tmp/o` reads the file
+      operand — emitted-to-file bytes are a dep only when the filter
+      itself execs).
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo X\n")
+    for line in (
+            b"sudo scripts/x.sh",
+            b"sudo -- scripts/x.sh",
+            b"sudo -- -s scripts/x.sh",
+            b"sudo -u root scripts/x.sh",
+            b"sudo rm scripts/x.sh",
+            b"sudo rm scripts/x.sh | sh",
+            b"sudo scripts/x.sh | sh",
+            b"sudo 'sh scripts/x.sh'",
+            b"sudo -us 'sh scripts/x.sh'",
+            b"echo hi | xargs -n 0 sh scripts/x.sh",
+            b"echo hi | xargs -n -1 sh scripts/x.sh",
+            b"echo hi | xargs -n bad sh scripts/x.sh",
+            b"echo hi | xargs --max-args=bad sh scripts/x.sh",
+            b"echo hi | xargs -P -1 sh scripts/x.sh",
+            b"echo hi | xargs -d xy sh scripts/x.sh",
+            b"echo hi | xargs -s 0 sh scripts/x.sh",
+            b"echo hi | xargs -n scripts/x.sh sh y",
+            b"find . -exec bash -n scripts/x.sh \\;",
+            b"find . -exec sh -n scripts/x.sh \\;",
+            b"find . -exec python3 -V scripts/x.py \\;",
+            b"find . -exec bash --version scripts/x.sh \\;",
+            b"find . -exec bash --help scripts/x.sh \\;",
+            b"find . -exec sh -s scripts/x.sh \\;",
+            b"find . -exec sh -c 'true' scripts/x.sh \\;",
+            b"flock /tmp/l bash -n scripts/x.sh",
+            b"flock /tmp/l sh -s scripts/x.sh",
+            b"flock /tmp/l python3 -V scripts/x.py",
+            b"echo hi | xargs bash -n scripts/x.sh",
+            b"echo hi | xargs sh -s scripts/x.sh",
+            b"python3 -X dev -V scripts/x.py",
+            b"python3 -W default -V scripts/x.py",
+            b"python3 -c 'print(1)' -V",
+            b"split --filter='cat scripts/x.sh' in > /tmp/o",
+            b"split --filter='cat scripts/x.sh' in > /tmp/o | sh",
+            b"split --filter='sh scripts/x.sh' -n 1/1 in",
+            b"split -n 1/1 scripts/x.sh out"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b"sudo -s 'sh scripts/x.sh'",
+            b"sudo --shell 'sh scripts/x.sh'",
+            b"sudo -i 'sh scripts/x.sh'",
+            b"sudo --login 'sh scripts/x.sh'",
+            b"sudo -s scripts/x.sh",
+            b"sudo -si 'sh scripts/x.sh'",
+            b"sudo -s 'echo scripts/x.sh'",
+            b"sudo -u root -s 'sh scripts/x.sh'",
+            b"nice sudo -s 'sh scripts/x.sh'",
+            b"sudo -n -s scripts/x.sh",
+            b"sudo cat scripts/x.sh",
+            b"sudo sh scripts/x.sh",
+            b"sudo cat scripts/x.sh | sh",
+            b"echo hi | xargs -n +2 sh scripts/x.sh",
+            b"echo hi | xargs -P 0 sh scripts/x.sh",
+            b"echo hi | xargs -n 2 sh scripts/x.sh",
+            b"echo hi | xargs -d , sh scripts/x.sh",
+            b"echo hi | xargs sh scripts/x.sh",
+            b"echo hi | xargs bash scripts/x.sh",
+            b"find . -exec bash -c 'sh scripts/x.sh' \\;",
+            b"find . -exec bash scripts/x.sh \\;",
+            b"flock /tmp/l bash scripts/x.sh",
+            b"flock /tmp/l sh -c 'sh scripts/x.sh'",
+            b"python3 -X dev scripts/x.py",
+            b"python3 -W default scripts/x.py",
+            b"split --filter='sh scripts/x.sh' in > /tmp/o",
+            b"bash -c : scripts/x.sh",
+            b"bash scripts/x.sh",
+            b"cat scripts/x.sh | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
