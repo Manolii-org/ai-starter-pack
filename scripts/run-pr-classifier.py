@@ -244,13 +244,24 @@ def main() -> None:
         # hunks in early tail files can't starve later ones out of the map.
         tail_files: list[tuple[str, list[str]]] = []
         cur_hunks: list[str] = []
-        # The cutoff can land mid-file: seed with the last `diff --git` header
-        # in the prefix so that file's tail hunks aren't orphaned.
+        # The 50k cutoff can land mid-line — even inside a `diff --git` header.
+        # Work on whole lines from the full diff: seed cur_file with the last
+        # header among lines whose text begins before the cutoff (using the
+        # complete line, never the truncated half), then scan only the lines
+        # after the split line so nothing is double-counted.
+        all_lines = diff.split("\n")
+        pos = 0
+        split_idx = len(all_lines)
+        for i, ln in enumerate(all_lines):
+            if pos + len(ln) >= 50000:
+                split_idx = i
+                break
+            pos += len(ln) + 1
         cur_file = ""
-        for pline in diff[:50000].splitlines():
+        for pline in all_lines[: split_idx + 1]:
             if pline.startswith("diff --git "):
                 cur_file = re.sub(r"[<>`]", "", pline)[:200]
-        for line in diff[50000:].splitlines():
+        for line in all_lines[split_idx + 1 :]:
             if line.startswith("diff --git "):
                 if cur_file:
                     tail_files.append((cur_file, cur_hunks))
