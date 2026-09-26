@@ -13653,3 +13653,77 @@ def test_script_dep_round74_brace_words_split_ncount_sudo_c_heredoc(tmp_path):
             b"sudo -C -3 sh scripts/x.sh",
             b"sudo -C x sh scripts/x.sh"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round75_elide_closed_cluster_strtold_hdoc(tmp_path):
+    """Round-75 review — Devin + CodeRabbit on #132/#1428/#1961/#16:
+    `split -e`/`--elide-empty-files` drops empty chunks, so the `-n N`
+    filter exemption only holds when the option is absent (`-n 2 -e
+    /dev/null` yields ZERO chunks — verified live). A CLOSED stdin
+    (`<&-`) aborts EBADF before any chunk — the exemption covers only
+    a readable-empty input, and `- </dev/null` still fires N times
+    (readable empty ≠ closed). sudo option clusters bind the LAST
+    operand letter's value — `-HC2` is `-H` + `-C 2`, which aborts
+    "-C must be >= 3" (verified live). `flock -w` strtold underflow:
+    a nonzero literal below LDBL_MIN=2^-16382 is ERANGE unless it's
+    an exactly-representable denormal (`1e-9999`/`0x1p-16446`/
+    `1e-4932`/`-1e-9999` abort "invalid timeout"; `1e-4931` and the
+    min-denormal `0x1p-16445` run — float64 can't see the boundary,
+    verified live). Heredoc bodies of argv-program heads are inert —
+    `sh -c : <<E` execs `:` and never reads the body, while the
+    exec-body scan's depth must restore on delimiter pop so body
+    syntax can't leak a phantom group past `E` (verified live).
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo X\n")
+    for line in (
+            b"split -n 2 --filter='cat scripts/x.sh' /dev/null | sh",
+            b"split -n 2 --filter='cat scripts/x.sh' F | sh",
+            b"split -n 2 --filter='sh scripts/x.sh' -",
+            b"split -n 2 --filter='sh scripts/x.sh' - </dev/null",
+            b"sudo -HC3 sh scripts/x.sh",
+            b"sudo -C 3 sh scripts/x.sh",
+            b"sudo -H sh scripts/x.sh",
+            b"flock -w 1e-4931 f sh scripts/x.sh",
+            b"flock -w 0x1p-16445 f sh scripts/x.sh",
+            b"flock -w 0e-9999 f sh scripts/x.sh",
+            b"flock -w 1.5 f sh scripts/x.sh",
+            b"sh <<E\n(\nE\ncat scripts/x.sh | sh",
+            b"sh -c : <<E\n(\nE\ncat scripts/x.sh | sh",
+            b"xargs split --filter='cat scripts/x.sh' <f | sh",
+            b"find . -type f -exec split -n 2 --filter='cat scripts/x.sh'"
+            b" /dev/null \\; | sh",
+            b"find . -type f -exec split --filter='cat scripts/x.sh' F"
+            b" \\; | sh",
+            b"find . -type f -exec split -n 2 --filter='sh scripts/x.sh'"
+            b" /dev/null \\;"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b"split -n 2 --filter='cat scripts/x.sh' -e /dev/null | sh",
+            b"split -n 2 --elide-empty-files"
+            b" --filter='cat scripts/x.sh' /dev/null | sh",
+            b"split -en 2 --filter='cat scripts/x.sh' /dev/null | sh",
+            b"split -n 2 --filter='cat scripts/x.sh' - <&- | sh",
+            b"split -n 2 --filter='sh scripts/x.sh' - <&-",
+            b"sudo -HC2 sh scripts/x.sh",
+            b"sudo -nC2 sh scripts/x.sh",
+            b"sudo -HC 2 sh scripts/x.sh",
+            b"sudo -C 2 sh scripts/x.sh",
+            b"flock -w 1e-9999 f sh scripts/x.sh",
+            b"flock -w 1e-4932 f sh scripts/x.sh",
+            b"flock -w -1e-9999 f sh scripts/x.sh",
+            b"flock -w 0x1p-16446 f sh scripts/x.sh",
+            b"sh -c : <<E\n(\nE\ncat scripts/x.sh | wc; sh",
+            b"sh -c 'true' <<E\n(\nE\ncat scripts/x.sh | wc; sh",
+            b"sh <<E\n(\nE\ncat scripts/x.sh | wc; sh",
+            b"python -X dev s.py <<E\nx\nE\ncat scripts/x.sh | wc; sh",
+            b"find . -type f -exec split --filter='cat scripts/x.sh'"
+            b" /dev/null \\; | sh",
+            b"find . -type f -exec split -n 2 --filter='sh scripts/x.sh'"
+            b" - <&- \\;",
+            b"find . -type f -exec split -n 2 --filter='cat scripts/x.sh'"
+            b" -e /dev/null \\; | sh",
+            b"split --filter='cat scripts/x.sh' /dev/null | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
