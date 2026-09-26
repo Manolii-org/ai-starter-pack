@@ -13727,3 +13727,48 @@ def test_script_dep_round75_elide_closed_cluster_strtold_hdoc(tmp_path):
             b" -e /dev/null \\; | sh",
             b"split --filter='cat scripts/x.sh' /dev/null | sh"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round76_group_fd1_flock_exp_filter_glued(tmp_path):
+    """Round-76 review — Devin on #132/#1428/#1961/#16: a `>`/`&>` on
+    the LAST sibling of a `( )`/`{ }` compound diverts only that
+    command — earlier siblings share the group's fd1, so `(cat x;
+    cat x >f) | sh` still writes the script into the pipe (a `>`
+    AFTER the closer covers the whole group — verified live).
+    `flock -w` exponent bound: `1e±10^8`/`0x1p±99999` literals made
+    `_strtold_fraction` build a hundred-million-digit bigint — the
+    exact fraction is only computed on the float-underflow path and
+    out-of-range exponents short-circuit (verified live — strtold
+    ERANGEs both directions). And `split --filter=CMD` glued onto
+    the option word is program text — `--filter=scripts/x.sh`
+    executes the script when a chunk materialises (`-n 2` on
+    `/dev/null`, or any live input — verified live).
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo X\n")
+    for line in (
+            b"(cat scripts/x.sh; cat scripts/x.sh >f) | sh",
+            b"{ cat scripts/x.sh; cat scripts/x.sh >f; } | sh",
+            b"(cat scripts/x.sh >f; cat scripts/x.sh) | sh",
+            b"split -n 2 --filter=scripts/x.sh /dev/null",
+            b"split --filter=scripts/x.sh F",
+            b"xargs split --filter=scripts/x.sh f",
+            b"find . -exec split --filter=scripts/x.sh F \\;",
+            b"split --filter='cat scripts/x.sh' F | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b"(cat scripts/x.sh; cat scripts/x.sh >f) | wc; sh",
+            b"(cat scripts/x.sh; cat scripts/x.sh >f) >g | sh",
+            b"(echo hi; cat scripts/x.sh >f) | sh",
+            b"cat scripts/x.sh >f | sh",
+            b"xargs cat scripts/x.sh >/dev/null | sh",
+            b"flock -w 1e10000000 f sh scripts/x.sh",
+            b"flock -w 1e-100000000 f sh scripts/x.sh",
+            b"flock -w 0x1p99999 f sh scripts/x.sh",
+            b"flock -w 0x1p-99999 f sh scripts/x.sh",
+            b"split --filter=scripts/x.sh /dev/null",
+            b"find . -exec split -n 2 --filter=scripts/x.sh - <&- \\;",
+            b"split --filter=cat F | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line

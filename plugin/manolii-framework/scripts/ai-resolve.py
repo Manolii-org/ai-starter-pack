@@ -1297,14 +1297,20 @@ def _flock_bad_value(opt: bytes, val: bytes) -> bool:
         # underflows to 0.0 around 5e-324, far above ~3.36e-4932.
         # Only exactly-representable denormals escape ERANGE in the
         # subnormal range: v = m·2^-16445 with integer 1 ≤ m < 2^63.
-        mag = _strtold_fraction(text)
-        if mag is not None:
-            amag = abs(mag)
-            if 0 < amag < Fraction(2) ** -16382:
-                den = amag * (Fraction(2) ** 16445)
-                if den.denominator != 1 or den >= 2 ** 63:
-                    return True         # ERANGE — "invalid timeout"
+        # The exact Fraction is needed only when float64 underflowed —
+        # a nonzero-finite `num` is already above the LDBL min-denormal,
+        # and an `inf` is handled by the deadline bound below without
+        # building one (a `1e-100000000` literal would otherwise stall
+        # the scan on a huge denominator — Devin on #1428/#132/#16,
+        # round-76 review — verified live).
         if num == 0.0:
+            mag = _strtold_fraction(text)
+            if mag is not None:
+                amag = abs(mag)
+                if 0 < amag < Fraction(2) ** -16382:
+                    den = amag * (Fraction(2) ** 16445)
+                    if den.denominator != 1 or den >= 2 ** 63:
+                        return True     # ERANGE — "invalid timeout"
             return False            # `-0`/`+0` arm an instant timer
         # The deadline `now + w` has to fit int64 — a magnitude that
         # rounds to 2^63 overflows it, and so does anything larger
@@ -4048,8 +4054,29 @@ def _strtold_fraction(text: bytes):
             f = (Fraction(int(digits, 16))
                  / (16 ** len(m.group(2) or "")))
             if m.group(3):
-                f *= Fraction(2) ** int(m.group(3))
+                pe = int(m.group(3))
+                # |2^±20000| is outside the 80-bit range — a bound
+                # sentinel keeps the caller's range check honest
+                # without materialising a million-digit bigint from
+                # `0x1p-999999999` (Devin on #1428/#132/#16, round-76
+                # review — verified live).
+                if pe < -20000:
+                    return Fraction(2) ** -17000
+                if pe > 20000:
+                    return Fraction(2) ** 17000
+                f *= Fraction(2) ** pe
         else:
+            e_ = re.search(r"[eE]([+-]?[0-9]+)$", t2)
+            if e_ is not None:
+                de = int(e_.group(1))
+                # Same bound for decimal exponents — `1e-100000000`
+                # would otherwise build a hundred-million-digit
+                # denominator (Devin on #1428/#132/#16, round-76
+                # review — verified live).
+                if de < -20000:
+                    return Fraction(2) ** -17000
+                if de > 20000:
+                    return Fraction(2) ** 17000
             f = Fraction(t2)
     except (ValueError, OverflowError, ZeroDivisionError):
         return None
@@ -7767,6 +7794,69 @@ def _stdin_exec_head(win: bytes, stream_src=None) -> str:
     return "exec"
 
 
+def _group_fd1_prov(src: bytes, s0: int, pos: int, od_tails):
+    """fd1 provenance of a compound feeding stage, or None.
+
+    `;`/`&` siblings inside `( )`/`{ }` share the group's stdout — a
+    `>`/`&>` on the LAST sibling diverts only that command, so
+    `(cat x; cat x >f) | sh` still writes the script into the pipe
+    (Devin on #16/#1961/#132, round-76 review — verified live).
+    Returns (prov, operand_src) aggregated over the compound's
+    siblings, or None when the stage is a single simple command or
+    the divert applies to the whole group (a `>`/`&>` AFTER the
+    closer — `(cat x; cat y) >f | sh` still feeds sh nothing)."""
+    if not s0:
+        return None
+    dd0 = _open_depth(src, s0, od_tails)
+    if not dd0:
+        return None
+    op = cl = None
+    i = s0 - 1
+    while i >= 0:
+        if (src[i:i + 1] in (b"(", b"{")
+                and _open_depth(src, i, od_tails) == dd0 - 1):
+            op = i
+            break
+        i -= 1
+    if op is None:
+        return None
+    i = s0
+    while i < pos:
+        if (src[i:i + 1] in (b")", b"}")
+                and _open_depth(src, i + 1, od_tails) == dd0 - 1):
+            cl = i
+            break
+        i += 1
+    if cl is None:
+        cl = pos
+    if _stdout_redirected(src[cl:pos]):
+        return None            # a divert after the closer covers all
+    spans = []
+    cur = op + 1
+    for ss, se, kind in _sub_cmd_seps(src[op + 1:cl]):
+        if kind in (b";", b"\n", b"&"):
+            spans.append((cur, op + 1 + ss))
+            cur = op + 1 + se
+    spans.append((cur, cl))
+    if len(spans) < 2:
+        return None
+    prov = "own"
+    out_src = None
+    for ga, gb in spans:
+        seg = src[ga:gb]
+        if not seg.strip() or _stdout_redirected(seg):
+            continue
+        if out_src is None:
+            _k2, _a2, _f2, _h2 = _seg_head_args(seg, {})
+            out_src = next(
+                (_operand_text(a3) for a3 in _a2 if b"scripts/" in a3),
+                None)
+        p_ = _seg_prov(seg, "up", None, _line_ifs(src, ga))
+        if p_ is not None and p_ != "own":
+            prov = p_
+    return prov, out_src
+
+
 def _pipe_to_exec(src: bytes, pos: int, od_tails=frozenset()) -> bool:
     """True when an unquoted `|` (or `|&`) at `pos` starts a pipeline
     whose contents reach a command that executes stdin.
@@ -7831,6 +7921,12 @@ def _pipe_to_exec(src: bytes, pos: int, od_tails=frozenset()) -> bool:
             # (Devin on #16, round-72 review — verified live).
             prov = "own"
             flow_src = None
+            gprov = _group_fd1_prov(src, s0, pos, od_tails)
+            if gprov is not None:
+                # A divert on the LAST sibling of a compound leaves
+                # the others' emissions on the shared fd1 (Devin on
+                # #16/#1961/#132, round-76 review — verified live).
+                prov, flow_src = gprov
     out = None           # aggregate fd1 inside an open compound
     # The feeding segment may END mid-compound — `(cat x; true) | sh`
     # calls the walk from the `;` inside the `(`, and a `;`/`&` there
@@ -11669,9 +11765,10 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
             if ((raw[:1] in (b"'", b'"') and len(raw) > 2
                     and re.search(rb"\s", raw[1:-1]))
                     or (raw.startswith(b"--filter=")
-                        and _qv[:1] in (b"'", b'"')
-                        and len(_qv) > 2
-                        and re.search(rb"\s", _qv[1:-1]))):
+                        and ((len(_qv) > 2
+                              and _qv[:1] in (b"'", b'"')
+                              and re.search(rb"\s", _qv[1:-1]))
+                             or b"scripts/" in _qv))):
                 # A quoted MULTI-word operand is program text — either
                 # the head interprets it (`sh -c 'x;bash y'` splits `;`
                 # inside), or it is EMITTED text a downstream exec
@@ -11707,6 +11804,8 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                 # literal program name (`xargs bash 'x safe'` — Devin
                 # on #128, round-22 review).
                 ekey = wkey
+                abase = (whi + 1
+                         if whi is not None and whi >= 0 else wi0)
                 if wkey in _ARGV_PROGRAM_WRAPPERS:
                     if wkey == b"find":
                         # `find` runs EVERY -exec/-ok action — the
@@ -11724,41 +11823,44 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                         ekey = _command_key(
                             enclosing[enc_words[ws][0]:
                                       enc_words[ws][1]])
-                    if ekey == b"split":
-                        # A `--filter=CMD` operand IS program text
-                        # split runs per chunk — its head emits the
-                        # operand's bytes through split's own stdout,
-                        # so `find -exec split --filter='cat x' F \;
-                        # | sh` / `xargs split --filter='cat x' | sh`
-                        # pipe the script onward (round-75 — verified
-                        # live). Dead input still suppresses unless a
-                        # one-part `-n N` materialises empty chunks,
-                        # and a CLOSED stdin (`<&-`) kills even that.
-                        eargs = _argv_only(enc_words, enclosing,
-                                           ws + 1)
-                        efilt, efin, _et, efidx, enct = _split_scan(
-                            ekey, eargs)
-                        if (efidx is not None
-                                and _argv_index(
-                                    enc_words, enclosing,
-                                    ws + 1, wi0) == efidx
-                                and efilt not in (None, b"", b"-")
-                                and ((enct
-                                      and not _split_closed_input(
-                                          efin, enclosing))
-                                     or not _split_dead_input(
-                                         efin, enclosing))):
-                            erole = _filter_script_role(efilt)
-                            if erole == "exec":
-                                return True
-                            if (erole == "emit"
-                                    and not _stdout_redirected(
-                                        enclosing)
-                                    and _pipe_to_exec(
-                                        scan,
-                                        cs + len(enclosing))):
-                                return True
-                        ekey = b""
+                        abase = ws + 1
+                if ekey == b"split":
+                    # A `--filter=CMD` operand IS program text split
+                    # runs per chunk — its head emits the operand's
+                    # bytes through split's own stdout, so `find -exec
+                    # split --filter='cat x' F \; | sh` / `xargs split
+                    # --filter='cat x' | sh` pipe the script onward
+                    # (round-75 — verified live), and the GLUED
+                    # `--filter=scripts/x.sh` form executes the script
+                    # directly when a chunk materialises (Devin on
+                    # #132, round-76 — verified live). Dead input
+                    # still suppresses unless a one-part `-n N`
+                    # materialises empty chunks, and a CLOSED stdin
+                    # (`<&-`) kills even that.
+                    eargs = _argv_only(enc_words, enclosing, abase)
+                    efilt, efin, _et, efidx, enct = _split_scan(
+                        ekey, eargs)
+                    if (efidx is not None
+                            and _argv_index(
+                                enc_words, enclosing,
+                                abase, wi0) == efidx
+                            and efilt not in (None, b"", b"-")
+                            and ((enct
+                                  and not _split_closed_input(
+                                      efin, enclosing))
+                                 or not _split_dead_input(
+                                     efin, enclosing))):
+                        erole = _filter_script_role(efilt)
+                        if erole == "exec":
+                            return True
+                        if (erole == "emit"
+                                and not _stdout_redirected(
+                                    enclosing)
+                                and _pipe_to_exec(
+                                    scan,
+                                    cs + len(enclosing))):
+                            return True
+                    ekey = b""
                 # Only a head that echoes its operand onward makes a
                 # quoted operand emitted text — EVERY other head treats
                 # it literally: `sed -e p 'bash x'` names an INPUT
