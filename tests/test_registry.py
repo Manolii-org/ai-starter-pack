@@ -13877,3 +13877,47 @@ def test_script_dep_round78_strtold_mantissa_digits(tmp_path):
             b"flock -w 0e-20001 f sh scripts/x.sh",
             b"flock -w 0.000e+99999 f sh scripts/x.sh"):
         assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round79_quoted_group_parens(tmp_path):
+    """Quoted/escaped/backtick parens are operand text, not group
+    delimiters — the closer-matcher and pipe-scan must skip them
+    (`(cat x >&2; echo "(") |&` — Devin on #133/#1963, round-79 —
+    verified live)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (
+            b'(cat scripts/x.sh >&2; echo "(") |& sh',
+            b'(cat scripts/x.sh >&2; echo ")") |& sh',
+            b"(cat scripts/x.sh >&2; echo '(') |& sh",
+            b'(cat scripts/x.sh >&2; echo a\\(b) |& sh',
+            b'(cat scripts/x.sh >&2; echo "\\(") |& sh',
+            b'(cat scripts/x.sh >&2; echo `echo (`) |& sh',
+            b'((cat scripts/x.sh >&2; t); echo "(") |& sh',
+            b'(cat scripts/x.sh; echo "(") | sh'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # `|` (not `|&`) — stderr still dies on real stderr.
+            b'(cat scripts/x.sh >&2; echo "(") | sh',
+            b'(cat scripts/x.sh >&2; echo a\\(b) | sh'):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round79_stderr_divert_order(tmp_path):
+    """`>&2 2>/dev/null` keeps fd1 bound to the pipe (fd2's OLD
+    target); `2>/dev/null >&2` points fd1 at /dev/null — redirect
+    order is alias order (Devin on #1963, round-79 — verified live)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (
+            b"(echo bash scripts/x.sh >&2 2>/dev/null; true) |& sh",
+            b"(cat scripts/x.sh >&2 2>/dev/null; true) |& sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b"(echo bash scripts/x.sh 2>/dev/null >&2; true) |& sh",
+            b"(cat scripts/x.sh 2>/dev/null >&2; true) |& sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line

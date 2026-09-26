@@ -7824,10 +7824,33 @@ def _group_fd1_prov(src: bytes, pos: int, amp: bool = False):
     if i < 0 or src[i:i + 1] not in (b")", b"}"):
         return None
     cl = i
+    # Quoted/escaped parens are operand text, not delimiters — the
+    # backward scan must not count them (`(cat x >&2; echo "(") |&` —
+    # Devin on #133, round-79 — verified live).
+    msk = bytearray(src)
+    for a2, b2 in _quoted_spans(src):
+        msk[a2:b2] = b" " * (b2 - a2)
+    i = 0
+    while i < len(src):
+        if src[i:i + 1] == b"\\":
+            msk[i:i + 2] = b"  "
+            i += 2
+            continue
+        if src[i:i + 1] == b"`":
+            j = i + 1
+            while j < len(src) and src[j:j + 1] != b"`":
+                if src[j:j + 1] == b"\\":
+                    j += 1
+                j += 1
+            msk[i:j + 1] = b" " * (j + 1 - i)
+            i = j + 1
+            continue
+        i += 1
+    i = cl
     depth = 0
     op = None
     while i >= 0:
-        c = src[i:i + 1]
+        c = msk[i:i + 1]
         if c in (b")", b"}"):
             depth += 1
         elif c in (b"(", b"{"):
@@ -7900,8 +7923,12 @@ def _group_pipe(src: bytes, start: int) -> int:
             if c == b"'":
                 in_s = False
         elif in_d:
-            if c == b'"':
+            if c == b"\\":
+                i += 1
+            elif c == b'"':
                 in_d = False
+        elif c == b"\\":
+            esc = True
         elif c == b"'":
             in_s = True
         elif c == b'"':
