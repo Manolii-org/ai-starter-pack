@@ -559,7 +559,7 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
                 "Accept": "application/vnd.github.v3+json",
                 "Content-Type": "application/json",
             },
-            method="POST",
+            method="PUT",  # dismissals endpoint is PUT-only; POST is rejected
         )
         try:
             with urllib.request.urlopen(req, timeout=10):

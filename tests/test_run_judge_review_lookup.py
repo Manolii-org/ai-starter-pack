@@ -214,6 +214,7 @@ def test_clean_reassessment_dismisses_prior_request_changes(judge, monkeypatch):
         if req.get_method() == "GET":
             return _FakeResponse(json.dumps([blocking]).encode())
         if req.full_url.endswith("/dismissals"):
+            assert req.get_method() == "PUT", "GitHub dismissals require PUT"
             calls["dismissals"].append(req.full_url)
             return _FakeResponse(b"{}")
         calls["posts"] += 1
