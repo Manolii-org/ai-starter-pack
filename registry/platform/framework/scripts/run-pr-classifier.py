@@ -237,14 +237,43 @@ def main() -> None:
     diff_block = diff[:50000]
     if truncated:
         # Tail coverage: paths alone can't reveal a contract change hiding in a
-        # generically-named file past the cutoff, so append each tail file's
-        # `diff --git` header and `@@` hunk-context lines (angle brackets
-        # stripped — the content is untrusted and must not forge tag bounds).
-        hunk_notes: list[str] = []
+        # generically-named file past the cutoff, so append a per-file hunk map —
+        # EVERY tail file contributes its `diff --git` header plus up to two `@@`
+        # hunk-context lines (angle brackets stripped — the content is untrusted
+        # and must not forge tag bounds). Fair allocation per file: a flood of
+        # hunks in early tail files can't starve later ones out of the map.
+        tail_files: list[tuple[str, list[str]]] = []
+        cur_hunks: list[str] = []
+        cur_file = ""
         for line in diff[50000:].splitlines():
-            if line.startswith("diff --git ") or line.startswith("@@"):
-                hunk_notes.append(re.sub(r"[<>`]", "", line)[:200])
-        sampled = "\n".join(hunk_notes)[:8000]
+            if line.startswith("diff --git "):
+                if cur_file:
+                    tail_files.append((cur_file, cur_hunks))
+                cur_file = re.sub(r"[<>`]", "", line)[:200]
+                cur_hunks = []
+            elif line.startswith("@@") and cur_file:
+                cur_hunks.append(re.sub(r"[<>`]", "", line)[:200])
+        if cur_file:
+            tail_files.append((cur_file, cur_hunks))
+        map_lines: list[str] = []
+        budget = 8000
+        omitted_files = 0
+        omitted_hunks = 0
+        for fname, hunks in tail_files:
+            entry = fname + "\n" + "\n".join(hunks[:2])
+            if budget - len(entry) < 0:
+                omitted_files += 1
+                omitted_hunks += len(hunks)
+                continue
+            map_lines.append(entry)
+            budget -= len(entry)
+            omitted_hunks += max(0, len(hunks) - 2)
+        sampled = "\n".join(map_lines)
+        if omitted_files or omitted_hunks:
+            sampled += (
+                f"\n[+{omitted_files} files and {omitted_hunks} hunk contexts "
+                "omitted from this map]"
+            )
         if sampled:
             diff_block += (
                 "\n[diff truncated — classify danger from the complete path list "

@@ -335,4 +335,5 @@ jobs:
           python3 scripts/run-judge.py \
             --candidates-dir .ai/candidates/ \
             --pr-number "$PR_NUMBER" \
-            --repo "$REPO"
+            --repo "$REPO" \
+            --sha "${{ github.event.pull_request.head.sha }}"
