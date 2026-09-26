@@ -242,7 +242,7 @@ def main():
         proxy_line = (
             "OSS proxy: enabled — for internal/public data prefer tier-1-fast (boilerplate/format), "
             "tier-2-agentic (long chains), tier-4-extract (grep/lint) to reduce cost 5–30×. "
-            "Keep anthropic_only data on Claude tiers only."
+            "restricted data gets no AI; keep restricted_us_oss_ok on Claude tiers or declared guardrailed aliases."
         )
     else:
         proxy_line = (

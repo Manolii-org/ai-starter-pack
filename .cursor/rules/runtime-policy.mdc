@@ -1,0 +1,23 @@
+---
+description: "Cross-tool runtime policy baseline for Cursor agents"
+alwaysApply: true
+---
+
+# Runtime Policy Baseline
+
+Apply the shared policy contract in `docs/ai-runtime-policy.md` for all tasks.
+
+## Required checks
+
+1. Follow security and prompt-injection constraints from `.claude/persistent-instructions.md`.
+2. Follow model-routing guardrails in `.claude/model-routing.json`.
+3. Before ending a session with an open branch PR, run:
+   - `gh pr view --json number,title,url,reviewDecision,mergeStateStatus,statusCheckRollup`
+4. For GitHub API fallback use curl timeouts:
+   - `--max-time 30 --connect-timeout 10`
+
+## Background agents
+
+- Background agents run in remote environments.
+- Prefer `.cursor/environment.json` for install/startup commands and required
+  secrets provisioning.

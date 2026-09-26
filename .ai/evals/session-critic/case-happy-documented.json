@@ -1,0 +1,7 @@
+{
+  "id": "case-happy-documented",
+  "tags": ["happy_path"],
+  "artifact": "\"\"\"Utility functions for data processing.\"\"\"\n\nimport json\nfrom typing import Dict, List\n\ndef parse_config(config_str: str) -> Dict:\n    \"\"\"Parse JSON config string.\n    \n    Args:\n        config_str: JSON string to parse\n        \n    Returns:\n        Parsed configuration dictionary\n        \n    Raises:\n        ValueError: If JSON is invalid\n    \"\"\"\n    return json.loads(config_str)\n\ndef filter_items(items: List[Dict], key: str, value) -> List[Dict]:\n    \"\"\"Filter items by key-value pair.\"\"\"\n    return [item for item in items if item.get(key) == value]",
+  "expect": "PASS",
+  "description": "Well-documented Python module"
+}

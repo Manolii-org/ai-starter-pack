@@ -21,7 +21,8 @@ name: PR Assessment
 # to ubuntu or leave without fly-labeled runners.
 #
 # Requires:
-#   ANTHROPIC_API_KEY — for Claude API calls (or LITELLM_PROXY_URL + LLM_API_KEY)
+#   LLM_API_KEY or LITELLM_MASTER_KEY or ANTHROPIC_API_KEY — for API calls
+#   LITELLM_PROXY_URL or ANTHROPIC_BASE_URL — set when routing via a LiteLLM proxy
 #   GH_TOKEN (GITHUB_TOKEN) — for judge to post review comments
 #
 # To disable for a PR: add label "skip-ai-review" or prefix title with "chore(sync):"
@@ -70,7 +71,8 @@ jobs:
       - name: Run pr-classifier
         id: classify
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY || secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
@@ -337,7 +339,8 @@ jobs:
 
       - name: Run specialist skills
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY || secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
           SKILLS: ${{ needs.classify.outputs.invoke_skills }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
@@ -374,7 +377,8 @@ jobs:
 
       - name: Run broad agents
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY || secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
           AGENTS: ${{ needs.classify.outputs.invoke_agents }}
         run: |
           mkdir -p .ai/candidates
@@ -409,7 +413,8 @@ jobs:
 
       - name: Run judge
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY || secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}

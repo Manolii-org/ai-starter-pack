@@ -68,7 +68,7 @@ Runs the Model Change Protocol defined in [`docs/model-change-protocol.md`](../.
 9. **Apply the rollout mode** for the declared sensitivity ceiling:
    - `public` / `internal` -> direct promotion + 24h rollback monitor at 5% error rate OR cost >+20%.
    - `restricted_us_oss_ok` -> shadow eval if telemetry is available; 3-day window. Manual operator review required.
-   - `restricted` / `anthropic_only` -> 10% canary for 24h, then 50/50 shadow for 7 days, then operator-approved promotion.
+   - `restricted_us_oss_ok` -> 10% canary for 24h, then 50/50 shadow for 7 days, then operator-approved promotion.
 10. **Emit the PR template** with the 15-item answers, the schema patch, the rollout plan, the rollback command, and a calendar reminder for the 30-day review.
 
 ## Outputs

@@ -38,11 +38,12 @@ instance:
   # fly sections are printed as a manual checklist (not locally verifiable).
   required_secrets:
     github:
-      - ANTHROPIC_API_KEY
 {% if oss_routing %}
       - DOPPLER_SERVICE_TOKEN_LITELLM
       - FLY_API_TOKEN
-      - LITELLM_MASTER_KEY
+      - LITELLM_MASTER_KEY   # proxy auth; ANTHROPIC_API_KEY not required on this plane
+{% else %}
+      - ANTHROPIC_API_KEY
 {% endif %}
     doppler:
       project: "{{ doppler_project }}"

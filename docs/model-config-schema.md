@@ -24,7 +24,7 @@ This schema centralises those decisions on each model entry and on each tier def
       "provider": "anthropic | openai | fireworks | together | groq | google | other",
       "weight_origin": "Anthropic | OpenAI | Google | Meta | NVIDIA | DeepSeek | Other",
       "hosting_region": "US | EU | CN | other",
-      "data_sensitivity_max": "public | internal | restricted_us_oss_ok | restricted | anthropic_only",
+      "data_sensitivity_max": "public | internal | restricted_us_oss_ok | restricted",
 
       "advisor_required": true,
       "advisor_model": "<model-id of fail-closed reviewer>",

@@ -303,7 +303,6 @@ SENSITIVITY_ORDER = {
     "internal": 1,
     "restricted_us_oss_ok": 2,
     "restricted": 3,
-    "anthropic_only": 4,
 }
 
 
@@ -368,10 +367,10 @@ def _model_sensitivity_max(model_name: str | None, cfg: dict) -> str | None:
     tier = cfg.get("tier_definitions", {}).get(model_name)
     if isinstance(tier, dict):
         if tier.get("provider") == "anthropic":
-            return "anthropic_only"
+            return "restricted_us_oss_ok"
         return tier.get("data_sensitivity_max", "internal")
     if model_name in ANTHROPIC_MODELS:
-        return "anthropic_only"
+        return "restricted_us_oss_ok"
     return None
 
 

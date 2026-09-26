@@ -5,7 +5,7 @@ description: "Deep adversarial critic for plans, research conclusions, and reaso
 type: agent
 model: sonnet
 data_sensitivity: internal
-max_tokens: 400
+max_tokens: 8000
 requires_mcp: []
 required_entities: []
 safety_tier: green
@@ -15,7 +15,7 @@ tags:
   - accuracy
   - reasoning
   - adversarial
-eval_cases: null  # TODO: add eval cases
+eval_cases: session-critic/
 supersedes: []
 deprecation: null
 ---
@@ -63,3 +63,5 @@ HIGH = blocks or invalidates the work. MED = should address before shipping. LOW
 If all four sections are clean: emit exactly `PASS — no significant issues found.`
 
 No "I reviewed...", no "Overall...", no preamble. Max 300 words. Bullets and labels only.
+
+End every response with exactly one line `VERDICT=PASS|FAIL|ESCALATE` (FAIL = fixable HIGH; ESCALATE = design/human; PASS only if all four sections none). Lazy PASS is a failure.

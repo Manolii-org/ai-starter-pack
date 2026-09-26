@@ -85,3 +85,24 @@ poller.
 - Product staging hostnames or Vercel project IDs
 - Product-only migration-preview locks
 - Product recovery / auth path lists
+
+Prefer GitHub `deployment_status` (or equivalent Ready on the preview URL)
+before installing a local app stack / `pnpm dev` for PR browser jobs. Readonly
+jobs must not `needs` a lock-holding job. Do not put product hostnames or
+mutex **names** (for example `e2e-preview`) in this pack file.
+
+`cancel-in-progress:` splits by role. SHA-bound verifiers — workflows that
+test a commit (CI gates, assessments) — keep `cancel-in-progress: true`:
+results on a superseded SHA are worthless and queued verifications replace
+each other anyway. Consumers/watchers — `workflow_run` and event-driven
+responders (autofix, fleet wake, review relays, notifiers) — use
+`cancel-in-progress: false`. Killing a consumer mid-flight loses real work
+(posted fixes, relayed comments, arm/revoke state) and the trigger that
+killed it re-fires the whole fan-out anyway. The default single-slot queue
+already bounds pile-up: at most one pending run per group, and a newer event
+replaces the pending one, so bursts collapse into one pass over the latest
+state. This also fixes the self-cancel class of bug: an autofix push raises
+`pull_request:synchronize`, which must not kill the run that pushed it.
+Group keys stay PR/branch-scoped; a repo-wide group on `pull_request_target`
+leaves a cancelled check attached to that PR's head and destabilises
+`mergeable_state`.

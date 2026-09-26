@@ -3,9 +3,8 @@ name: security-deep-dive
 version: 1.2.0
 description: "Broad agent: triages SAST findings against actual code flow to produce true-positive likelihood scores. Only findings >= 0.7 are promoted to the judge."
 type: agent
-model: claude-sonnet-4-6
-tier: anthropic_only
-data_sensitivity: restricted
+model: sonnet
+data_sensitivity: restricted_us_oss_ok
 max_tokens: 2000
 safety_tier: green
 requires_mcp: []
@@ -26,7 +25,7 @@ Broad Stage 2 agent. Triggered by `pr-classifier` when `.ai/sast-findings.json` 
 | Install | Model | Cost per 1M tokens (in/out) |
 |---|---|---|
 | Claude-only | claude-sonnet-4-6 (Anthropic direct) | $3.00 / $15.00 |
-| Claude + OSS | N/A — security-sensitive SAST triage stays on Anthropic infrastructure | — |
+| Claude + OSS | sonnet (proxy-guardrailed DeepSeek V4 Pro, restricted_us_oss_ok) | via LiteLLM |
 
 ## Tools
 

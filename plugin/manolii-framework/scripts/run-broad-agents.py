@@ -93,11 +93,37 @@ def parse_agent_file(agent_path: Path) -> AgentConfig:
     )
 
 
+_ANTHROPIC_HOST = "api.anthropic.com"
+
+
+def _proxy_base() -> Optional[str]:
+    """Non-Anthropic proxy base when configured, else None."""
+    base = (
+        os.environ.get("LITELLM_PROXY_URL")
+        or os.environ.get("ANTHROPIC_BASE_URL")
+        or ""
+    ).rstrip("/")
+    if not base:
+        return None
+    import urllib.parse as _up
+
+    if (_up.urlparse(base).hostname or "").lower().rstrip(".") == _ANTHROPIC_HOST:
+        return None
+    return base
+
+
 def get_api_key() -> Optional[str]:
-    """Get API key from env."""
-    key = os.getenv("ANTHROPIC_API_KEY")
+    """Transport token: proxy accepts LLM_API_KEY/LITELLM_MASTER_KEY; direct uses ANTHROPIC_API_KEY."""
+    if _proxy_base():
+        key = (
+            os.getenv("LLM_API_KEY")
+            or os.getenv("LITELLM_MASTER_KEY")
+            or os.getenv("ANTHROPIC_API_KEY")
+        )
+    else:
+        key = os.getenv("ANTHROPIC_API_KEY")
     if not key:
-        logger.warning("ANTHROPIC_API_KEY not set; skipping agent invocations")
+        logger.warning("no API credential set; skipping agent invocations")
         return None
     return key
 
@@ -130,14 +156,19 @@ def invoke_agent(
     # Use proxy alias from frontmatter directly (haiku / sonnet map to OSS models).
     model = MODEL_ALIASES.get(agent_config.model, agent_config.model)
 
-    # Restricted/anthropic_only broad agents must stay on direct Anthropic even
-    # when the workflow sets ANTHROPIC_BASE_URL to the LiteLLM proxy for OSS agents.
-    if agent_config.data_sensitivity == "restricted" or agent_config.tier == "anthropic_only":
-        base_url = "https://api.anthropic.com"
-        if model in {"haiku", "sonnet"}:
-            model = "claude-sonnet-4-6"
-    else:
-        base_url = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
+    # data_sensitivity=restricted is governance no-AI — never dispatch to any model.
+    if agent_config.data_sensitivity == "restricted":
+        logger.warning(
+            f"{agent_config.name}: data_sensitivity=restricted (no-AI) — skipping invocation"
+        )
+        return None
+    # Route through the LiteLLM proxy when configured (Bearer auth); otherwise
+    # direct Anthropic (x-api-key). The retired anthropic_only tier has no
+    # callers left — its agents were remapped to restricted_us_oss_ok.
+    proxy = _proxy_base()
+    base_url = proxy or "https://api.anthropic.com"
+    if proxy and model in {"claude-haiku-4-5-20251001", "claude-sonnet-4-6"}:
+        model = {"claude-haiku-4-5-20251001": "haiku", "claude-sonnet-4-6": "sonnet"}[model]
     api_url = f"{base_url}/v1/messages"
 
     payload = {
@@ -164,10 +195,13 @@ def invoke_agent(
     }
 
     headers = {
-        "x-api-key": api_key,
         "anthropic-version": "2023-06-01",
         "content-type": "application/json",
     }
+    if proxy:
+        headers["Authorization"] = f"Bearer {api_key.removeprefix('Bearer ')}"
+    else:
+        headers["x-api-key"] = api_key
 
     try:
         req = Request(

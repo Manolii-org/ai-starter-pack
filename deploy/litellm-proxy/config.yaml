@@ -31,7 +31,7 @@
 model_list:
 
   # ═══════════════════════════════════════════════════════════════════════════
-  # TIER 0: Claude — anthropic_only data, nuanced writing, orchestration
+  # TIER 0: Claude — restricted_us_oss_ok-preferred data, nuanced writing, orchestration
   # ═══════════════════════════════════════════════════════════════════════════
 
   - model_name: claude-opus-4-6
@@ -47,7 +47,7 @@ model_list:
   # OSS heavy tier — SWE-Bench Pro 58.4 > Opus 4.6 at 57.3.
   # RESTRICTED: code-patch, agentic-loop, math-reasoning, bulk-extract ONLY.
   # EXCLUDED from: prose, code-review, ADRs, orchestration, client-facing, vision.
-  # data_clearance: internal + public (NOT anthropic_only).
+  # data_clearance: internal + public (NOT restricted_us_oss_ok).
   - model_name: tier-0-oss-heavy
     litellm_params:
       model: fireworks_ai/accounts/fireworks/models/kimi-k2p6

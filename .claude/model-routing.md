@@ -70,11 +70,11 @@ Every agent/task must have a `data_sensitivity` label. This determines which tie
 
 | Classification | Description | Allowed tiers |
 |---------------|-------------|---------------|
-| `anthropic_only` | Client code, PII, emails, contact records | `tier-0-opus`, `tier-0-sonnet` only |
+| `restricted` | Governance no-AI — human/manual processing only | none — never dispatch a model |
 | `internal` | Own codebase, deploy scripts, agent prompts | All tiers |
 | `public` | Open-source code, boilerplate, linting tasks | All tiers |
 
-> **Important:** `anthropic_only` ≠ governance `RESTRICTED`. `RESTRICTED` means no AI processing at all. `anthropic_only` means AI-processed but exclusively via Anthropic-hosted models (SOC2, no training on API data, US jurisdiction).
+> **Important:** the former `anthropic_only` tier is retired — AI-processed, Anthropic-preferred workloads are now `restricted_us_oss_ok` (Anthropic tiers or declared US-OSS guardrailed aliases). `restricted` means no AI processing at all.
 
 ### `tier-0-oss-heavy` — Restricted Use
 

@@ -51,3 +51,24 @@ security:
   rules:
     - "No hardcoded credentials, API keys, or tokens in any committed file"
     - "PII (names, emails, phone numbers) must not appear in committed .ai/ files"
+
+modularity:
+  # Pocock 'deep modules' axis: prefer few-deep-modules over many shallow
+  # ones; the scope-adherence skill already flags single-call-site
+  # abstractions — these rules cover the rest of the vocabulary.
+  location:
+    - "scripts/**"
+    - "src/**"
+    - "lib/**"
+    - "plugins/**"
+  rules:
+    - "Prefer deep modules: a module's interface should be much smaller than its implementation"
+    - "A new wrapper whose interface mirrors a single callee is a shallow module — inline it or justify the seam in the PR"
+    - "Test seams are agreed interfaces, not per-change inventions — new seams introduced for testability must be named in the PR body or plan"
+
+spec_adherence:
+  # Second review axis: standards conformance is checked above; this section
+  # checks the diff against the originating spec/issue linked in the PR body.
+  rules:
+    - "Non-trivial PRs must link the originating issue, plan, or spec in the body"
+    - "Flag diff content that does not trace to the linked spec (scope growth) and spec requirements with no corresponding change"

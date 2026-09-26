@@ -158,9 +158,9 @@ Before every PR: follow `docs/pre-pr-quality-gate.md`. Six checks: diff self-rev
 - `review-internal` — full code review for own-repo PRs (haiku)
 - `architecture-impact` — downstream caller count + breaking change risk (sonnet)
 - `ci-fixer` — CI failure diagnosis, propose-only (sonnet)
-- `security-deep-dive` — SAST triage with true-positive scoring (claude-sonnet-4-6)
+- `security-deep-dive` — SAST triage with true-positive scoring (sonnet)
 - `systems-consistency` — cross-file deployment invariants (sonnet)
-- `judge` — 3-gate filter, only agent that posts to GitHub (sonnet)
+- `judge` — 4-gate filter, only agent that posts to GitHub (sonnet)
 - `orchestrator` — multi-step DAG coordinator (sonnet)
 
 **Available:**
@@ -168,7 +168,7 @@ Before every PR: follow `docs/pre-pr-quality-gate.md`. Six checks: diff self-rev
 - `deployment-verifier` — post-deploy health checks
 - `incident-diagnostician` — production error triage
 - `main-thread-executor` — Sonnet executor with quick-critic / work-critic sub-agent dispatch for quality gating (the native `advisor()` tool is disabled)
-- `codex-adversarial` — cross-provider adversarial review via OpenAI Codex
+- `codex-adversarial` — governed adversarial review via the LiteLLM `sonnet` route
 - `context-loader` — deep project memory synthesis from local .ai/memory/
 - `infra` — infrastructure deploys, secrets health, worker management
 - `prompt-hardener` — eval loop → winning prompt variant promotion → GitHub PR

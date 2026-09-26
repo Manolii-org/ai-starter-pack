@@ -1,0 +1,7 @@
+{
+  "id": "case-edge-empty",
+  "tags": ["edge_case"],
+  "artifact": "",
+  "expect": "skip",
+  "description": "Empty artifact should be skipped"
+}

@@ -6,9 +6,9 @@ description: >
   Sonnet executor with optional Opus advisor on escalation triggers.
   Handles Claude Code CLI/Desktop/Web sessions.
 type: agent
-model: claude-sonnet-4-6
-tier: anthropic_only
-data_sensitivity: anthropic_only
+model: sonnet
+tier: heavy-main
+data_sensitivity: restricted_us_oss_ok
 requires_mcp: []
 required_entities: []
 safety_tier: green

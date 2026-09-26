@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Lint agent YAML frontmatter for model-routing data-classification violations.
 
-RULE: An agent with data_sensitivity 'restricted' or 'anthropic_only' MUST NOT
-declare a model that routes through a non-Anthropic provider (OSS tier alias or
-proxy-intercepted model ID).
+RULE 1 — Data classification (restricted / restricted_us_oss_ok):
+  An agent with data_sensitivity 'restricted' is a governance no-AI label and
+  MUST NOT declare a runnable model at all. An agent with 'restricted_us_oss_ok'
+  must declare a model/alias whose data_sensitivity_max covers that tier
+  (US-origin OSS or an Anthropic tier).
 
 The LiteLLM proxy intercepts certain model IDs (including claude-haiku-4-5-20251001
 and its 'haiku' short alias) and silently routes them to OSS providers. An agent
-with restricted or anthropic_only data classification that declares such a model
+with restricted_us_oss_ok data classification that declares such a model
 would leak client/PII data to a third-party provider without any runtime warning.
 
 SOURCE OF TRUTH: .claude/model-routing.json
@@ -50,7 +52,8 @@ ROUTING_CONFIG_PATH = next(
 AGENTS_DIR = REPO_ROOT / ".claude" / "agents"
 
 # Sensitivity levels that require Anthropic-only routing.
-REQUIRES_ANTHROPIC_ONLY = {"restricted", "anthropic_only"}
+REQUIRES_NO_AI = {"restricted"}
+REQUIRES_US_OR_ANTHROPIC = {"restricted_us_oss_ok"}
 
 
 def build_anthropic_native_set(config):
@@ -177,7 +180,21 @@ def lint_agent_file(path, oss_routed, anthropic_native, verbose=False):
     if not model or not data_sensitivity:
         return []
 
-    if data_sensitivity not in REQUIRES_ANTHROPIC_ONLY:
+    if data_sensitivity in REQUIRES_NO_AI:
+        # Governance no-AI tier: declaring any runnable model is a violation.
+        violations.append({
+            "file": str(path),
+            "agent": fm.get("name", path.stem),
+            "model": model,
+            "data_sensitivity": data_sensitivity,
+            "resolves_to": "n/a",
+            "data_sensitivity_max": "none",
+            "source": "no_ai_tier",
+            "warning": "data_sensitivity 'restricted' is governance no-AI; remove the model field.",
+        })
+        return violations
+
+    if data_sensitivity not in REQUIRES_US_OR_ANTHROPIC:
         return []
 
     if model in anthropic_native:
@@ -185,6 +202,8 @@ def lint_agent_file(path, oss_routed, anthropic_native, verbose=False):
 
     if model in oss_routed:
         meta = oss_routed[model]
+        if meta.get("data_sensitivity_max") == "restricted_us_oss_ok":
+            return []  # declared eligible US-OSS / guardrailed alias
         violations.append({
             "file": str(path),
             "agent": fm.get("name", path.stem),
@@ -196,7 +215,7 @@ def lint_agent_file(path, oss_routed, anthropic_native, verbose=False):
             "warning": meta.get("warning", ""),
         })
     else:
-        # Unknown model + restricted data sensitivity → fail closed.
+        # Unknown model + restricted_us_oss_ok data sensitivity → fail closed.
         # We cannot prove Anthropic routing for an unregistered identifier.
         violations.append({
             "file": str(path),
@@ -215,7 +234,7 @@ def lint_agent_file(path, oss_routed, anthropic_native, verbose=False):
             print(
                 f"  WARN  {path.name}: model '{model}' is not registered in "
                 f"tier_aliases or proxy_intercepted_models — treating as violation "
-                f"(fail-closed for restricted/anthropic_only agents)"
+                f"(fail-closed for restricted_us_oss_ok agents)"
             )
 
     return violations
@@ -487,7 +506,7 @@ def main():
     anthropic_native = build_anthropic_native_set(config)
 
     if args.list_oss:
-        print("OSS-routed model identifiers (NOT safe for restricted/anthropic_only data):\n")
+        print("OSS-routed model identifiers (NOT safe for restricted data; restricted_us_oss_ok requires a guardrailed/declared alias):\n")
         for model_id, meta in sorted(oss_routed.items()):
             print(f"  {model_id:<38}  →  {meta['resolves_to']}")
             print(f"  {'':38}     source: {meta['source']},  max: {meta['data_sensitivity_max']}")
@@ -511,7 +530,7 @@ def main():
             print()
         print("WHY THIS MATTERS:")
         print(
-            "  Agents with data_sensitivity 'restricted' or 'anthropic_only' handle\n"
+            "  Agents with data_sensitivity 'restricted' declare no model; 'restricted_us_oss_ok' agents handle\n"
             "  client code, PII, or other Anthropic-only data.\n"
             "  OSS tier aliases and proxy-intercepted model IDs route through third-party\n"
             "  providers (Fireworks, Together AI, Groq) — data would leave Anthropic\n"

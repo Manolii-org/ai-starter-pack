@@ -3,7 +3,7 @@
 > **Framework, not mandate.** This matrix applies **only if your setup includes OSS model routing** (check `.ai/setup-complete` for `oss_routing=true`). It provides guidance for task-class eligibility when cost and capability trade-offs favour non-Anthropic models. Reframe table headings and examples for your org's naming and policy.
 
 **Tier:** `restricted_us_oss_ok` (engagement-policy capability — if enabled)
-**Policy gate:** Your contract or internal policy permits US-origin OSS models; stricter policies (e.g. `anthropic_only`) override.
+**Policy gate:** Your contract or internal policy permits US-origin OSS models; stricter policies (`restricted` — governance no-AI) override.
 **Weight provenance rule:** US-origin weights only — exclude non-domestic-origin models even when hosted on US infrastructure.
 
 > **Two orthogonal gates apply:**

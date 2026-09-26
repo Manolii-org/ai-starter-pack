@@ -51,6 +51,9 @@ Read `.ai/pr-standards.yaml` and validate the current PR diff against each appli
 - commit_format: ✓
 - security: ✓ (no hardcoded credentials found)
 
+### Unverified (required metadata unavailable — not evaluated, never counted as passed)
+- <rule>: <what input was missing>
+
 ### Skipped (no changed files in scope)
 - workflow_files
 - memory_files

@@ -16,6 +16,7 @@ import pathlib
 import re
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
@@ -23,6 +24,35 @@ CLASSIFIER_AGENT = REPO_ROOT / ".claude/agents/pr-classifier.md"
 
 _ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 _ANTHROPIC_API_VERSION = "2023-06-01"
+_ANTHROPIC_HOST = "api.anthropic.com"
+
+
+def _endpoint() -> tuple[str, str, bool]:
+    """Resolve (api_key, url, proxied).
+
+    Transport token: ANTHROPIC_API_KEY when calling Anthropic directly. When
+    LITELLM_PROXY_URL or ANTHROPIC_BASE_URL points at a non-Anthropic host the
+    request goes through that proxy and the key may come from LLM_API_KEY,
+    LITELLM_MASTER_KEY, or ANTHROPIC_API_KEY — no sk-ant credential required.
+    """
+    base = (os.environ.get("LITELLM_PROXY_URL") or os.environ.get("ANTHROPIC_BASE_URL") or "").rstrip("/")
+    proxied = bool(base) and (urllib.parse.urlparse(base).hostname or "").lower().rstrip(".") != _ANTHROPIC_HOST
+    if proxied:
+        key = (
+            os.environ.get("LLM_API_KEY")
+            or os.environ.get("LITELLM_MASTER_KEY")
+            or os.environ.get("ANTHROPIC_API_KEY")
+        )
+        return key or "", base + "/v1/messages", True
+    return os.environ.get("ANTHROPIC_API_KEY", ""), _ANTHROPIC_API_URL, False
+
+
+# Dated claude-* IDs only exist on Anthropic's API; a LiteLLM-style proxy serves
+# tier aliases instead. Only applied when proxied.
+_PROXY_MODEL_MAP = {
+    "claude-haiku-4-5-20251001": "haiku",
+    "claude-sonnet-4-6": "sonnet",
+}
 
 # Paths carrying outsized merge risk — surfaced first in the inventory so a
 # migration or workflow edit can never fall off the cap on huge PRs.
@@ -98,10 +128,12 @@ def _load_agent(agent_path: pathlib.Path) -> tuple[dict, str]:
 
 
 def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int) -> str:
-    """Call Anthropic Messages API directly via urllib (no SDK dependency)."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    """Call the Messages API via urllib (Anthropic direct or LiteLLM proxy)."""
+    api_key, api_url, proxied = _endpoint()
     if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY not set")
+        raise RuntimeError("no API credential set")
+    if proxied:
+        model = _PROXY_MODEL_MAP.get(model, model)
 
     payload = json.dumps({
         "model": model,
@@ -110,15 +142,19 @@ def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int
         "messages": [{"role": "user", "content": user_message}],
     }).encode("utf-8")
 
+    headers = {
+        "anthropic-version": _ANTHROPIC_API_VERSION,
+        "anthropic-beta": "prompt-caching-2024-07-31",
+        "Content-Type": "application/json",
+    }
+    if proxied:
+        headers["Authorization"] = f"Bearer {api_key.removeprefix('Bearer ')}"
+    else:
+        headers["x-api-key"] = api_key
     req = urllib.request.Request(
-        _ANTHROPIC_API_URL,
+        api_url,
         data=payload,
-        headers={
-            "x-api-key": api_key,
-            "anthropic-version": _ANTHROPIC_API_VERSION,
-            "anthropic-beta": "prompt-caching-2024-07-31",
-            "Content-Type": "application/json",
-        },
+        headers=headers,
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=60) as resp:  # nosec B310
@@ -167,9 +203,9 @@ def main() -> None:
 
     # No API key (fork PR, or a consumer who hasn't configured the secret):
     # skip gracefully with the fallback manifest instead of failing CI.
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    api_key, _, _ = _endpoint()
     if not api_key:
-        print("[classifier] ANTHROPIC_API_KEY not set — fallback manifest, skipping classification", file=sys.stderr)
+        print("[classifier] no API credential set — fallback manifest, skipping classification", file=sys.stderr)
         out.write_text(json.dumps(_FALLBACK_MANIFEST, indent=2) + "\n", encoding="utf-8")
         return
 
