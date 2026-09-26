@@ -12866,6 +12866,8 @@ def test_script_dep_round63_nice_strict_table(tmp_path):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
     for line in (
             b"nice -5 sh scripts/x.sh",
+            b"nice -+5 sh scripts/x.sh",
+            b"nice --5 sh scripts/x.sh",
             b"nice -n 2 sh scripts/x.sh",
             b"nice -n2 sh scripts/x.sh",
             b"nice --adjustment=2 sh scripts/x.sh",
@@ -12907,12 +12909,66 @@ def test_script_dep_round63_filter_emit_head(tmp_path):
     (pdir / "scripts" / "x.sh").write_bytes(b"echo X\n")
     for line in (
             b"split --filter='echo sh scripts/x.sh' /etc/hosts",
-            b"split --filter='echo scripts/x.sh | sh' /etc/hosts",
+            b"split --filter='true; echo sh scripts/x.sh' /etc/hosts",
             b"split --filter='printf %s scripts/x.sh' /etc/hosts",
-            b"split --filter='yes sh scripts/x.sh' /etc/hosts"):
+            b"split --filter='yes sh scripts/x.sh' /etc/hosts",
+            # printed PATH text exec'd by the filter's own `|sh` is
+            # the accepted emitted-path-exec gap — only content bytes
+            # count
+            b"split --filter='echo scripts/x.sh | sh' /etc/hosts",
+            b"split --filter='echo sh scripts/x.sh | sh' /etc/hosts"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
     for line in (
             b"split --filter='sh scripts/x.sh' /etc/hosts",
             b"split --filter='bash scripts/x.sh' -",
-            b"split --filter='cat scripts/x.sh' - | sh"):
+            b"split --filter='cat scripts/x.sh' - | sh",
+            # a later command still execs past a printed match
+            b"split --filter='echo x; sh scripts/x.sh' /etc/hosts",
+            # the filter's own `|sh` execs the emitted CONTENT bytes
+            b"split --filter='cat scripts/x.sh | sh' /etc/hosts"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round64_filter_command_head(tmp_path):
+    """Round-64 review regression — Devin #1393/#130/#12/#1959
+    findings, all verified live (bash 5 / coreutils 8.32 /
+    util-linux 2.37):
+    - A scripts/ match's role comes from the COMMAND containing it,
+      not the filter's first word: `true; echo sh x` only PRINTS the
+      path (Devin on #130) while `echo x; sh x` still execs a later
+      command past the printed match (Devin on #1393).
+    - A filter's own pipe tail execs emitted content bytes:
+      `cat x | sh` inside --filter runs x (Devin on #12).
+    - A bare numbered reader (`nl`/`pr -n`/`cat -n` with NO operand)
+      defaults to stdin — a sep-carrying scripts/ stream still execs
+      the post-`;` command downstream (Devin on #1959).
+    - `nice -+N`/`--N` are valid SIGNED legacy adjustments — the
+      command still runs (Devin on #1393); `-+x`/`-2x` still abort.
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo X\n")
+    (pdir / "scripts" / "sep.sh").write_bytes(b"true; echo RAN\n")
+    for line in (
+            b"split --filter='true; echo sh scripts/x.sh' /etc/hosts",
+            b"split --filter='echo sh scripts/x.sh' /etc/hosts",
+            # printed PATH text exec'd by an inner `|sh` is the
+            # accepted emitted-path-exec gap — only content bytes count
+            b"split --filter='echo scripts/x.sh | sh' /etc/hosts",
+            b"cat scripts/x.sh | nl | sh",
+            b"cat scripts/x.sh | pr -n | sh",
+            b"cat scripts/x.sh | cat -n | sh",
+            b"nice -+x sh scripts/x.sh",
+            b"nice -2x sh scripts/x.sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b"split --filter='echo x; sh scripts/x.sh' /etc/hosts",
+            b"split --filter='cat scripts/x.sh | sh' /etc/hosts",
+            b"cat scripts/sep.sh | nl | sh",
+            b"cat scripts/sep.sh | pr -n | sh",
+            b"cat scripts/sep.sh | cat -n | sh",
+            b"cat scripts/sep.sh | nl -b n | sh",
+            b"nice -+5 sh scripts/x.sh",
+            b"nice --5 sh scripts/x.sh"):
         assert mod.script_dep_block(pdir, line + b"\n"), line

@@ -2513,6 +2513,11 @@ def _wrapper_opt_class(key: bytes, t: bytes):
             # still aborts "doesn't allow an argument" (`taskset
             # --cpu=0` — Devin on #1959, round-61 — verified live).
             return "describe"
+    if (key == b"nice" and len(t) > 2 and t[1] in (43, 45)
+            and t[2:].isdigit()):
+        # `nice -+N`/`- -N` signed legacy adjustment — still runs the
+        # command (Devin on #1393, round-64 review — verified live).
+        return "operand_glued"
     if key == b"nice" and len(t) > 1 and t[1:].isdigit():
         # util-linux `nice -N` is the legacy glued ADJUSTMENT — `nice
         # -5 sh` still runs sh; it isn't an unknown option (Codex on
@@ -3846,8 +3851,10 @@ def _filter_script_role(filt: bytes):
     pure-reader head re-emits the file's BYTES to the chunk stream
     (`cat`/`head`/`grep` — the script's own content reaches `|sh`),
     or None. Emitted-path heads (`echo scripts/x.sh` — emits the
-    path STRING a downstream `|sh` would then run) are the
-    accepted emitted-path-exec gap and return None. A scripts/
+    path STRING; a downstream `|sh` OUTSIDE the filter would then
+    run it) are the accepted emitted-path-exec gap and return None
+    — an exec tail INSIDE the filter (`echo x | sh`) is "exec".
+    A scripts/
     path past an interpreter's program flag is argv, not the
     program (`bash -c true scripts/x.sh` — Codex on #1959,
     round-60 review — verified live)."""
@@ -3859,26 +3866,37 @@ def _filter_script_role(filt: bytes):
     fw = filt.lstrip(b" \t\"'").split(None, 1)[0].rstrip(b"\"'")
     if fw.startswith((b"./scripts/", b"scripts/")):
         return "exec"
-    m = SCRIPT_REF.search(filt)
-    if m is None:
-        return None
-    if (fw in _STDIN_EMIT_HEADS
-            and not any(e <= m.start()
-                        for _s, e, _k in _sub_cmd_seps(filt))):
-        # A printer head only EMITS the path text — `echo sh x.sh`
-        # prints `sh x.sh` for downstream, it never runs x.sh
-        # (Devin on #1959, round-63 review — verified live). The
-        # emitted-path-exec gap covers what a `|sh` would do with
-        # it. Past a command boundary or `$(` the match is its own
-        # command, not the printer's argv — `echo x; sh x` runs x.
-        return None
-    head = filt[m.start():].split(None, 1)[0].lstrip(b'"')
-    if head in _FILTER_READERS:
-        return "emit"
-    pe = _interp_program_end(head, filt, m.start(), m.start())
-    if pe is not None and m.end() > pe:
-        return None              # $0/argv — never read or executed
-    return "exec"
+    seps = [(s, e) for s, e, _k in _sub_cmd_seps(filt)]
+    emit = False
+    for m in SCRIPT_REF.finditer(filt):
+        # The COMMAND containing the match decides the role — the
+        # first word after the last top-level boundary (any kind —
+        # a `|` tail's first word is still a fresh command head).
+        # `true; echo sh x` only PRINTS the path (Devin on #130,
+        # round-64 review — verified live); `echo x; sh x` still
+        # execs (Devin on #1393, round-64).
+        prev = [e for _s, e in seps if e <= m.start()]
+        cw = filt[prev[-1]:].lstrip(b" \t\"'").split(
+            None, 1)[0].rstrip(b"\"'") if prev else fw
+        if cw in _STDIN_EMIT_HEADS:
+            # The match is a printer's argv text — emitted, not run.
+            continue
+        head = filt[m.start():].split(None, 1)[0].lstrip(b'"')
+        if head in _FILTER_READERS:
+            emit = True
+            continue
+        pe = _interp_program_end(head, filt, m.start(), m.start())
+        if pe is not None and m.end() > pe:
+            continue             # $0/argv — never read or executed
+        return "exec"
+    if emit and _sub_flow(filt) == "exec":
+        # A reader's emitted bytes may still reach an exec tail
+        # INSIDE the filter — `cat x | sh` runs x's content (Devin
+        # on #12, round-64 review — verified live). Ungated this
+        # would also catch `sh -s`'s chunk-stdin exec, which is no
+        # scripts/ dep (round-60/61 regression).
+        return "exec"
+    return "emit" if emit else None
 
 
 def _split_scan(key: bytes, args: list, seekable_stdin: bool = False):
@@ -4431,7 +4449,8 @@ def _numbered_execs(data: bytes) -> bool:
     return False
 
 
-def _numbered_flows(ops: list, stream_src=None) -> bool:
+def _numbered_flows(ops: list, stream_src=None,
+                    redir_tgt: bytes | None = None) -> bool:
     """True when a NUMBERED reader's emitted bytes still carry an
     executable command: the `N<TAB>` prefix neuters only each line's
     FIRST command (`1: not found`), while text after a top-level
@@ -4448,7 +4467,13 @@ def _numbered_flows(ops: list, stream_src=None) -> bool:
     flows."""
     if _RESOLVE_ROOT is None:
         return True
-    for a in ops:
+    # No file operand at all means the reader defaults to stdin —
+    # `cat sep.sh | nl | sh` still runs the post-`;` command on the
+    # numbered stream (Devin on #1959, round-64 review — verified
+    # live). A `-`/feed-stream operand hits the same path, and a `<`
+    # input redirect rebinds that stdin to its file target
+    # (`cat --number <sep.sh | sh` reads sep.sh, round-64 review).
+    for a in ops or [redir_tgt or b"-"]:
         if _operand_feeds_stream(a):
             if stream_src is None:
                 return True
@@ -5350,7 +5375,13 @@ def _seg_prov(body: bytes, prov: str,
                 # — Codex on #1393, round-52 review, verified live).
                 prov = "own"
             elif (key not in (b"split", b"csplit")
-                    and any(b"scripts/" in arg for arg in args)):
+                    and (any(b"scripts/" in arg for arg in args)
+                         or b"scripts/" in (tgt0.get(0) or b""))):
+                # A `< scripts/f` rebind reads the script like a file
+                # operand — `nl <sep.sh | sh` still execs the post-`;`
+                # command past the line numbers (Devin on #1959,
+                # round-64 review — verified live). A numbered sep-
+                # free source already sank in _stdin_exec_head.
                 prov = "script"
             elif key in (b"split", b"csplit"):
                 # split/csplit write chunks to FILES — the input
@@ -6362,6 +6393,9 @@ def _stdin_exec_head(win: bytes, stream_src=None) -> str:
             # pipe — `cat x | echo "$(cat)" | sh` executes x.
             return "other"
         return "sink"
+    _tgts0: dict = {}
+    _seg_head_args(win, _tgts0)
+    _rd0 = _tgts0.get(0)
     if key == b"cat":
         # `cat FILE` replaces the upstream stream — its bytes never
         # reach a later exec (`cat x | cat /dev/null | sh` runs
@@ -6391,7 +6425,7 @@ def _stdin_exec_head(win: bytes, stream_src=None) -> str:
             elif (a.startswith(b"-") and a != b"-"
                     and any(c in b"nb" for c in a[1:])):
                 numbered = True
-        if numbered and not _numbered_flows(ops, stream_src):
+        if numbered and not _numbered_flows(ops, stream_src, _rd0):
             return "sink"
         if ops and not any(
                 _operand_feeds_stream(a2) or b"scripts/" in a2
@@ -6430,7 +6464,7 @@ def _stdin_exec_head(win: bytes, stream_src=None) -> str:
             elif len(a) > 2 and a[:2] == b"-b":
                 body = a[2:]
             i2 += 1
-        if body != b"n" and not _numbered_flows(ops, stream_src):
+        if body != b"n" and not _numbered_flows(ops, stream_src, _rd0):
             return "sink"
     if key == b"pr":
         # `pr` emits the stream verbatim (paged) — its commands still
@@ -6459,7 +6493,7 @@ def _stdin_exec_head(win: bytes, stream_src=None) -> str:
                         break
                     if c in b"DhlNowWeisS":
                         break
-        if numbered and not _numbered_flows(ops, stream_src):
+        if numbered and not _numbered_flows(ops, stream_src, _rd0):
             return "sink"
     if key in (b"grep", b"egrep", b"fgrep", b"zgrep"):
         # `grep -q`/`--quiet`/`--silent` emits NO bytes — the pipe ends
