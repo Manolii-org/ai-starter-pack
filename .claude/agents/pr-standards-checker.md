@@ -89,7 +89,7 @@ _CACHE=".git/.pr-comments-cache/standards-pr${PR_NUMBER}-${_HEAD_SHA}.json"
 # write JSON with violations array and timestamp
 ```
 
-Write as JSON: `{"sha": "<HEAD_SHA>", "inputs_sha": "<_INPUTS_SHA>", "meta_sha": "<_META_SHA>", "ts": "<ISO8601>", "violations": [...], "passed": [...], "unverified": [...]}`.
+Write as JSON: `{"sha": "<HEAD_SHA>", "inputs_sha": "<_INPUTS_SHA>", "meta_sha": "<_META_SHA>", "ts": "<ISO8601>", "status": "ok"|"skipped_no_manifest", "violations": [...], "passed": [...], "unverified": [...]}` — `status` is required so a cached `skipped_no_manifest` never reads back as a clean pass.
 Cache is intentionally in `.git/` (not committed) so it resets on fresh clone. pr-resolve reads this same filename before dispatching and reuses it only when it recomputes the same `inputs_sha` and `meta_sha`. Digest contract (identical commands both sides): `inputs_sha` = sha256 of `base-ref-sha` + NUL + raw base-manifest bytes (or `untracked` when absent on base) — folding in `origin/<base>`'s ref SHA also covers merge-base diff/commit-list drift when the base moves. `meta_sha` = sha256 of `title + NUL + body` fetched live via `gh api` REST. Fail closed: write the cache only when `_INPUTS_SHA` is not `skip` — a stale ref or a failed `gh api` lookup (empty output) means no write and no reuse; rerun the check uncached.
 
 ## Constraints
