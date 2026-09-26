@@ -7519,6 +7519,8 @@ def _emit_own(stg: bytes) -> bytes | None:
             if (any(True for _ in _sub_cmd_seps(t))
                     or b"$" in t or b"`" in t or b"\\" in t):
                 return None          # literal sep/sub — unprovable
+        if key == b"date":
+            return _emit_own_date(args)
         if key in _EMIT_SCALAR:
             # A scalar head's output is provably not a command word
             # — model it as a bare number, dead under exec
@@ -7531,6 +7533,49 @@ def _emit_own(stg: bytes) -> bytes | None:
     if _reader_operands(key, args):
         return None                  # file-emit — unprovable
     return None
+
+
+def _emit_own_date(args) -> bytes | None:
+    """`date`'s own output — bare `date` prints a (dead) timestamp;
+    a `+FORMAT` operand prints the format's literal text when it
+    holds no `%` directives (`date '+sh x' | sh` runs `sh x` — Devin
+    on #17/#1963, round-92 — verified live); a `%`-bearing format or
+    an operand-taking option's value stays unprovable, and extra or
+    non-`+` operands make date error out (nothing on fd1)."""
+    _TAKES = (b"--date", b"--file", b"--reference", b"--set",
+              b"--iso-8601", b"--rfc-3339")
+    ops = []
+    i2 = 0
+    end = len(args)
+    while i2 < end:
+        a = args[i2]
+        i2 += 1
+        if a == b"--":
+            break
+        if a.startswith(b"--"):
+            if b"=" not in a and a.split(b"=", 1)[0] in _TAKES:
+                i2 += 1              # consume the option's value arg
+            continue
+        if a.startswith(b"-") and a != b"-":
+            cl = a[1:]
+            for ci2, c2 in enumerate(cl):
+                if c2 in b"dfrsI":
+                    if ci2 == len(cl) - 1:
+                        i2 += 1      # `-d VALUE` — value is next arg
+                    break            # mid-cluster — tail is the value
+            continue
+        ops.append(a)
+    ops.extend(args[i2:])            # operands after `--`
+    if len(ops) > 1:
+        return b""                   # extra operand — date errors
+    if not ops:
+        return b"0\n"
+    t = _word_text(ops[0])
+    if t[:1] != b"+":
+        return b""                   # non-format operand — date errors
+    if b"%" in t:
+        return None                  # directives interleave — unprovable
+    return t[1:] + b"\n"
 
 
 def _emit_stage_simple(stg: bytes, data, fd2on: bool):
@@ -7731,8 +7776,21 @@ def _emit_compound(seg: bytes, fd2on: bool, data):
             bounds.append((last, op + 1 + ss3, kd))
             last = op + 1 + se3
     bounds.append((last, cl, None))
+    prev_kd = None
+    prev_exit = None
     for sa3, sb3, kd in bounds:
         sib = seg[sa3:sb3]
+        if prev_exit is not None and (
+                (prev_kd == b"&&" and prev_exit != 0)
+                or (prev_kd == b"||" and prev_exit == 0)):
+            # `true || sib` / `false && sib` provably skips the
+            # conditional branch — it emits nothing AND does not
+            # read the shared stdin (so a later sibling still gets
+            # the full stream — `true || cat; cat` — Devin on #17,
+            # round-92 — verified live). The skipped branch keeps
+            # the prior exit status for the next link.
+            prev_kd = kd
+            continue
         r = _emit_chain(sib, data, g2on)
         if r is None:
             return None
@@ -7748,6 +7806,8 @@ def _emit_compound(seg: bytes, fd2on: bool, data):
             data = (None if kd == b"&"
                     else b"" if _sib_drain_complete(sib, data)
                     else None)
+        prev_kd = kd
+        prev_exit = _sib_exit_known(sib)
     return _join_emit(outs)
 
 
@@ -7835,6 +7895,30 @@ def _feed_compound_span(src: bytes, pos: int):
             depth -= 1
             if depth == 0:
                 return k
+    return None
+
+
+def _sib_exit_known(sib: bytes):
+    """0/1 when a sibling's exit status is provable — `true`/`:`
+    exits 0, `false` exits 1, a leading `!` inverts — used to skip
+    provably-dead `&&`/`||` branches (`true || x`/`false && x` —
+    Devin on #17, round-92 — verified live); anything else is
+    unknown (None)."""
+    st = sib
+    pos = 0
+    for ss, se, k in _sub_cmd_seps(sib):
+        if k == b"|":
+            pos = se
+    st = st[pos:].lstrip()
+    neg = False
+    if st[:1] == b"!":
+        neg = True
+        st = st[1:].lstrip()
+    key = _seg_head_args(st, {})[0]
+    if key in (b"true", b":"):
+        return 1 if neg else 0
+    if key == b"false":
+        return 0 if neg else 1
     return None
 
 

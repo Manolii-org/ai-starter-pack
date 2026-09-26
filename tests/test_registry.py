@@ -14513,3 +14513,46 @@ def test_script_dep_round91_sibling_emit_model(tmp_path):
             b'(cat scripts/x.sh >&2; echo a\\(b) | sh',
             b"cat scripts/x.sh | wc -l | sh"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round92_date_format_conditional_emit(tmp_path):
+    """Round-92: `date '+FORMAT'` emits its literal format text (a
+    `+sh x` format runs the script — under-block fix), and `&&`/`||`
+    branches behind a provable exit skip — no emission, no stdin
+    drain (`true || cat; cat` still reads the full stream — Devin on
+    #17/#1963 — verified live)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (
+            # `+FORMAT` prints the literal format — `sh x` runs
+            # (verified live: EXECUTED).
+            b"date '+sh scripts/x.sh' | sh",
+            b"date -u '+sh scripts/x.sh' | sh",
+            # Provably-live conditional branches still emit.
+            b"(true && echo 'sh scripts/x.sh') | sh",
+            b"(false || echo 'sh scripts/x.sh') | sh",
+            # A skipped `||`/`&&` cat doesn't drain — the next
+            # sibling still reads the whole stream (verified live).
+            b"cat scripts/x.sh | (true || cat; cat) | sh",
+            b"cat scripts/x.sh | (false && cat; cat) | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # `true || sib` / `false && sib` provably skip — nothing
+            # emitted (verified live: dead).
+            b"(true || echo 'sh scripts/x.sh') | sh",
+            b"(false && echo 'sh scripts/x.sh') | sh",
+            b"cat scripts/x.sh | (true || cat; true) | sh",
+            b"cat scripts/x.sh | (false && cat; true) | sh",
+            # Skipped-branch stdin stays for later siblings, but a
+            # DRAINED stdin stays drained (`cat >/dev/null` exits 0,
+            # `||` skips, third cat sees EOF).
+            b"cat scripts/x.sh | (true; cat >/dev/null || cat; cat) | sh",
+            # Numbered skip-path content still dies.
+            b"cat scripts/x.sh | (true || cat; cat -n) | sh",
+            # `date` format with `%` directives stays unprovable but
+            # a bare-digit format is dead; `-d`'s value is consumed.
+            b"date '+123' | sh",
+            b"date -d '+sh scripts/x.sh' | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
