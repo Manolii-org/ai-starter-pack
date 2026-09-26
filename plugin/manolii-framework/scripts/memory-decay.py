@@ -67,14 +67,16 @@ def tokenize(text: str) -> set[str]:
 def _comparable_text(row: dict) -> str:
     """Text used for dedup comparison across supported memory schemas.
 
-    facts use `content`; patterns (written by /learn) use
-    problem/solution/rule. A row with no comparable text returns "" and must
-    never be merged — two empty strings would read as identical.
+    facts use `content`; patterns (written by /learn) identify on
+    solution + rule only — the shared `problem` is context, not identity,
+    and letting it into the token set would merge two patterns that answer
+    the same question differently. A row with no comparable text returns
+    "" and must never be merged — two empty strings would read as identical.
     """
     content = row.get("content")
     if isinstance(content, str) and content.strip():
         return content
-    parts = [row.get(k, "") for k in ("problem", "solution", "rule")]
+    parts = [row.get(k, "") for k in ("solution", "rule")]
     return " ".join(p for p in parts if isinstance(p, str) and p.strip())
 
 
