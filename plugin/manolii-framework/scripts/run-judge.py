@@ -12,6 +12,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -31,6 +32,21 @@ logger = logging.getLogger(__name__)
 
 # Hidden marker stamped into every posted review, used for idempotency.
 REVIEW_MARKER = "<!-- pr-assessment-v1 -->"
+
+_MD_UNSAFE_CHARS = re.compile(r"([\\`*_\[\]()<>#|~!])")
+
+
+def _markdown_safe(text: str) -> str:
+    """Neutralise Markdown syntax and @mentions in PR-derived text.
+
+    danger_reason is shaped by untrusted diff content; unescaped Markdown can
+    alter the displayed assessment or ping unintended users.
+    """
+    text = _MD_UNSAFE_CHARS.sub(r"\\\1", text)
+    return text.replace("@", "@\u200b")
+
+
+MAX_REASON_LEN = 300
 # The judge posts through the Actions GITHUB_TOKEN, so its reviews are authored by
 # github-actions[bot] — an identity a PR author cannot forge, unlike the marker text.
 # Both must match before a review counts as "the judge already spoke for this SHA".
@@ -94,7 +110,38 @@ class Judge:
         self.sha = sha
         self.repo = os.getenv("GITHUB_REPOSITORY", "")
         self.token = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")
+        self.merge_danger = self._load_merge_danger()
+        # An `edited` rerun at the same HEAD must publish a fresh verdict: dedup
+        # keys on commit + metadata digest so a title/body edit re-posts. The
+        # base SHA is part of the key: a base update changes the merge diff the
+        # judge evaluated, so the old verdict must not suppress the fresh one.
+        # The classified door/blast verdict is keyed too — a rerun that recovers
+        # from `unknown` to a real verdict must overwrite, not be suppressed.
+        meta_src = (
+            os.getenv("PR_TITLE", "")
+            + "\0"
+            + os.getenv("PR_BODY", "")
+            + "\0"
+            + os.getenv("PR_BASE_SHA", "")
+            + "\0"
+            + str(self.merge_danger.get("door", ""))
+            + "\0"
+            + str(self.merge_danger.get("blast_radius", ""))
+        )
+        self.meta_digest = hashlib.sha256(meta_src.encode()).hexdigest()[:12]
         self.judge_log_dir = Path(".ai/judge-log")
+
+    @staticmethod
+    def _load_merge_danger() -> dict:
+        """Read the classifier's merge-danger verdict from the classify job output.
+
+        'unknown'/absent means unclassified — never rendered as a safe verdict.
+        """
+        try:
+            data = json.loads(os.getenv("MERGE_DANGER", "{}") or "{}")
+        except json.JSONDecodeError:
+            return {}
+        return data if isinstance(data, dict) else {}
 
     def load_candidates(self) -> list[Finding]:
         """Load all findings from .ai/candidates/*.json (skip manifest.json)."""
@@ -290,16 +337,35 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
             )
             return False
 
-        # Check for existing review at same SHA (idempotency)
-        if self._review_exists_at_sha():
+        # Dedup is outcome-keyed: a prior CLEAN verdict must not suppress a
+        # rerun that now has findings (e.g. a specialist timed out first time).
+        if self._review_exists_at_sha("findings"):
             logger.info(f"Review already posted at {self.sha[:8]}; skipping")
             return True
 
         # Format review body
         body_lines = [
             REVIEW_MARKER,
+            f"<!-- meta:{self.meta_digest}:findings -->",
             "## PR Assessment Review",
         ]
+
+        door = self.merge_danger.get("door")
+        if door in ("one-way", "two-way"):
+            blast = self.merge_danger.get("blast_radius", "unknown")
+            line = f"**Merge danger:** {door} door · blast radius: {blast}"
+            reason = _markdown_safe(
+                str(self.merge_danger.get("danger_reason", "")).replace("\n", " ").strip()[:MAX_REASON_LEN]
+            )
+            if reason:
+                line += f" — {reason}"
+        else:
+            # An unclassified verdict must still surface — omitting the line
+            # would make a classifier failure indistinguishable from a clean
+            # low-risk assessment.
+            line = "**Merge danger:** unknown (unclassified)"
+        body_lines.append(line)
+        body_lines.append("")
 
         errors = [f for f in surviving if f["severity"] == "ERROR"]
         warnings = [f for f in surviving if f["severity"] == "WARNING"]
@@ -312,14 +378,17 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
             key=lambda f: (f["severity"] == "WARNING", f["file"], f["line"] or 0),
         ):
             severity = finding["severity"]
-            file_ref = f"{finding['file']}"
+            file_ref = f"{_markdown_safe(str(finding['file']))}"
             if finding["line"]:
                 file_ref += f":{finding['line']}"
 
+            # Finding fields are specialist prose shaped by untrusted diff
+            # content — escape Markdown so crafted text can't forge sections,
+            # links, or @mentions in the posted review.
             body_lines.append(f"### [{severity}] {file_ref}")
-            body_lines.append(f"**Issue:** {finding['message']}")
-            body_lines.append(f"**Fix:** {finding['fix']}")
-            body_lines.append(f"**Source:** {finding['source']}")
+            body_lines.append(f"**Issue:** {_markdown_safe(str(finding['message']))}")
+            body_lines.append(f"**Fix:** {_markdown_safe(str(finding['fix']))}")
+            body_lines.append(f"**Source:** {_markdown_safe(str(finding['source']))}")
             body_lines.append("")
 
         review_body = "\n".join(body_lines)
@@ -358,7 +427,7 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
             logger.error(f"Failed to post review: {e}")
             return False
 
-    def _review_exists_at_sha(self) -> bool:
+    def _review_exists_at_sha(self, kind: str) -> bool:
         """Check if a review by the judge with the marker already exists at this SHA.
 
         Requires BOTH the marker AND the judge's author identity. The marker is public
@@ -375,6 +444,7 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
         if not self.token or not self.repo:
             return False
 
+        latest_digest_matches = None
         for page in range(1, _MAX_REVIEW_PAGES + 1):
             try:
                 url = (
@@ -404,18 +474,98 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
 
             for review in reviews:
                 author = (review.get("user") or {}).get("login")
+                body = review.get("body") or ""
                 if (
                     review.get("commit_id") == self.sha
                     and author == JUDGE_REVIEW_AUTHOR
-                    and REVIEW_MARKER in (review.get("body") or "")
+                    and REVIEW_MARKER in body
+                    # A DISMISSED verdict is dead: judged→none→judged at the
+                    # same SHA would otherwise find the dismissed review and
+                    # suppress the replacement assessment.
+                    and review.get("state") != "DISMISSED"
                 ):
-                    return True
+                    # Reviews are returned oldest-first; only the LATEST judge
+                    # review at this commit decides dedup. The tracker must live
+                    # across pages — returning True on a page-1 match would let
+                    # a stale digest suppress a newer contradicting verdict that
+                    # sits on a later page (A→B→A across the page boundary).
+                    latest_digest_matches = f"<!-- meta:{self.meta_digest}:{kind} -->" in body
 
             if len(reviews) < _REVIEWS_PER_PAGE:
-                return False
+                return bool(latest_digest_matches)
 
         logger.error(f"Hit the {_MAX_REVIEW_PAGES}-page cap scanning reviews")
         return False
+
+    def _dismiss_stale_judge_reviews(self) -> None:
+        """Dismiss prior judge reviews at this SHA left in a blocking state.
+
+        Only CHANGES_REQUESTED is actionable — GitHub 422s on COMMENTED, and a
+        clean reassessment does not contradict an APPROVED. Best-effort: a
+        dismissal failure logs and never blocks the clean comment.
+        """
+        for page in range(1, _MAX_REVIEW_PAGES + 1):
+            try:
+                url = (
+                    f"https://api.github.com/repos/{self.repo}/pulls/"
+                    f"{self.pr_number}/reviews"
+                    f"?per_page={_REVIEWS_PER_PAGE}&page={page}"
+                )
+                req = urllib.request.Request(
+                    url,
+                    headers={
+                        "Authorization": f"Bearer {self.token}",
+                        "Accept": "application/vnd.github.v3+json",
+                    },
+                    method="GET",
+                )
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    reviews = json.loads(response.read().decode("utf-8"))
+            except Exception as e:
+                logger.error(f"Failed to scan reviews for dismissal (page {page}): {e}")
+                return
+
+            if not isinstance(reviews, list):
+                logger.error("Unexpected reviews response shape — skipping dismissals")
+                return
+
+            for review in reviews:
+                author = (review.get("user") or {}).get("login")
+                body = review.get("body") or ""
+                if (
+                    review.get("commit_id") == self.sha
+                    and author == JUDGE_REVIEW_AUTHOR
+                    and REVIEW_MARKER in body
+                    and review.get("state") == "CHANGES_REQUESTED"
+                    and review.get("id")
+                ):
+                    self._dismiss_review(review["id"])
+
+            if len(reviews) < _REVIEWS_PER_PAGE:
+                return
+
+    def _dismiss_review(self, review_id: int) -> None:
+        url = (
+            f"https://api.github.com/repos/{self.repo}/pulls/"
+            f"{self.pr_number}/reviews/{review_id}/dismissals"
+        )
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(
+                {"message": "Superseded by a clean reassessment at the same commit."}
+            ).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {self.token}",
+                "Accept": "application/vnd.github.v3+json",
+                "Content-Type": "application/json",
+            },
+            method="PUT",  # dismissals endpoint is PUT-only; POST is rejected
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10):
+                logger.info(f"Dismissed stale judge review {review_id}")
+        except Exception as e:
+            logger.warning(f"Dismissal of review {review_id} failed ({e}); continuing")
 
     def write_log_entry(
         self,
@@ -535,17 +685,35 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
             logger.info("No findings; skipping GitHub post (no token/repo)")
             return
 
-        if self._review_exists_at_sha():
+        if self._review_exists_at_sha("clean"):
             logger.info("No-findings comment already posted for this SHA — skipping")
+            # The clean verdict is confirmed present — safe to retire any stale
+            # blocking review left over from a same-commit findings run.
+            self._dismiss_stale_judge_reviews()
             return
 
         try:
+            body_lines = [
+                REVIEW_MARKER,
+                f"<!-- meta:{self.meta_digest}:clean -->",
+                "## PR Assessment",
+            ]
+            door = self.merge_danger.get("door")
+            if door in ("one-way", "two-way"):
+                blast = self.merge_danger.get("blast_radius", "unknown")
+                line = f"**Merge danger:** {door} door · blast radius: {blast}"
+                reason = _markdown_safe(
+                    str(self.merge_danger.get("danger_reason", "")).replace("\n", " ").strip()[:MAX_REASON_LEN]
+                )
+                if reason:
+                    line += f" — {reason}"
+            else:
+                line = "**Merge danger:** unknown (unclassified)"
+            body_lines.append(line)
+            body_lines.append("")
+            body_lines.append("No actionable findings produced by specialist agents.")
             request_body = {
-                "body": (
-                    f"{REVIEW_MARKER}\n"
-                    "## PR Assessment\n"
-                    "No actionable findings produced by specialist agents."
-                ),
+                "body": "\n".join(body_lines),
                 "event": "COMMENT",
             }
 
@@ -567,6 +735,13 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
             with urllib.request.urlopen(req, timeout=30):
                 logger.info("No-findings comment posted")
 
+            # A same-commit rerun that reports clean does not supersede an
+            # earlier judge REQUEST_CHANGES — a COMMENT sits alongside it and
+            # the PR keeps the blocking verdict. Dismiss it only after the
+            # replacement clean review is confirmed posted, so a failed POST
+            # never leaves the PR with no verdict at all.
+            self._dismiss_stale_judge_reviews()
+
         except Exception as e:
             logger.warning(f"Failed to post no-findings comment: {e}")
 
@@ -582,7 +757,8 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
                     f"{REVIEW_MARKER}\n"
                     "## PR Assessment\n"
                     "⚠️ Assessment system encountered an error. "
-                    "Manual review recommended."
+                    "Manual review recommended.\n\n"
+                    "**Merge danger:** unknown (assessment error)"
                 ),
                 "event": "COMMENT",
             }

@@ -18,6 +18,7 @@ the fixes:
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import sys
@@ -41,6 +42,13 @@ def _load_judge_module():
 rj = _load_judge_module()
 
 SHA = "1f9133dd479dad162586b0c43cf59656a613173d"
+
+# The fixture sets no PR_TITLE/PR_BODY/PR_BASE_SHA and merge_danger is empty, so
+# the judge's meta_digest is the hash of the empty six-field tuple. Embed this
+# marker in reviews that represent a verdict for the current metadata; omit it to
+# model a stale or marker-only review.
+JUDGE_META = hashlib.sha256("\0\0\0\0".encode()).hexdigest()[:12]
+MARKED = f"{rj.REVIEW_MARKER}\n<!-- meta:{JUDGE_META}:findings -->"
 
 
 class _FakeResponse:
@@ -83,9 +91,9 @@ def judge(monkeypatch):
 def test_finds_the_verdict_stranded_on_page_two(judge, monkeypatch):
     """The #3397 bug: unpaginated, page 2 is never fetched and a duplicate is posted."""
     page_one = [_review(rj.REVIEW_MARKER, commit_id="other")] * rj._REVIEWS_PER_PAGE
-    page_two = [_review(rj.REVIEW_MARKER + "\n## PR Assessment Review")]
+    page_two = [_review(MARKED + "\n## PR Assessment Review")]
     monkeypatch.setattr(rj.urllib.request, "urlopen", _paged([page_one, page_two]))
-    assert judge._review_exists_at_sha() is True, "page 2 was never fetched"
+    assert judge._review_exists_at_sha("findings") is True, "page 2 was never fetched"
 
 
 def test_ignores_a_review_forged_by_another_author(judge, monkeypatch):
@@ -96,20 +104,49 @@ def test_ignores_a_review_forged_by_another_author(judge, monkeypatch):
     """
     forged = [_review(rj.REVIEW_MARKER, author="some-collaborator")]
     monkeypatch.setattr(rj.urllib.request, "urlopen", _paged([forged]))
-    assert judge._review_exists_at_sha() is False, "a non-judge review was accepted"
+    assert judge._review_exists_at_sha("findings") is False, "a non-judge review was accepted"
 
 
 def test_still_matches_a_genuine_judge_review(judge, monkeypatch):
     """The author filter must not break the idempotency it is guarding."""
+    page = [_review(MARKED + "\n## PR Assessment Review")]
+    monkeypatch.setattr(rj.urllib.request, "urlopen", _paged([page]))
+    assert judge._review_exists_at_sha("findings") is True
+
+
+def test_marker_only_review_does_not_suppress(judge, monkeypatch):
+    """A pre-meta-marker review carries no metadata digest, so it cannot prove the
+    assessment is current — the judge must repost rather than stay silent."""
     page = [_review(rj.REVIEW_MARKER + "\n## PR Assessment Review")]
     monkeypatch.setattr(rj.urllib.request, "urlopen", _paged([page]))
-    assert judge._review_exists_at_sha() is True
+    assert judge._review_exists_at_sha("findings") is False
+
+
+def test_latest_review_decides_aba(judge, monkeypatch):
+    """A→B→A: metadata returns to A after B was assessed. The old A review must not
+    suppress a fresh verdict — only the LATEST judge review's digest counts."""
+    old_a = _review(MARKED + "\n## PR Assessment Review")
+    newer_b = _review(f"{rj.REVIEW_MARKER}\n<!-- meta:otherdigest1 -->")
+    monkeypatch.setattr(rj.urllib.request, "urlopen", _paged([[old_a, newer_b]]))
+    assert judge._review_exists_at_sha("findings") is False, "stale A review suppressed the re-run"
+
+
+def test_latest_review_decides_aba_across_pages(judge, monkeypatch):
+    """Same A→B→A but the stale A match sits on page 1 and the newer B verdict on
+    page 2 — an early return on the page-1 match would suppress the re-run."""
+    page_one = (
+        [_review(rj.REVIEW_MARKER, commit_id="other")] * (rj._REVIEWS_PER_PAGE - 1)
+        + [_review(MARKED + "\n## PR Assessment Review")]
+    )
+    page_two = [_review(f"{rj.REVIEW_MARKER}\n<!-- meta:otherdigest1 -->")]
+    monkeypatch.setattr(rj.urllib.request, "urlopen", _paged([page_one, page_two]))
+    assert judge._review_exists_at_sha("findings") is False, "cross-page stale digest suppressed the re-run"
 
 
 def test_ignores_a_review_on_a_different_sha(judge, monkeypatch):
     page = [_review(rj.REVIEW_MARKER, commit_id="deadbeef")]
     monkeypatch.setattr(rj.urllib.request, "urlopen", _paged([page]))
-    assert judge._review_exists_at_sha() is False
+    assert judge._review_exists_at_sha("findings") is False
 
 
 def test_api_error_fails_open(judge, monkeypatch):
@@ -119,7 +156,7 @@ def test_api_error_fails_open(judge, monkeypatch):
         raise OSError("network down")
 
     monkeypatch.setattr(rj.urllib.request, "urlopen", boom)
-    assert judge._review_exists_at_sha() is False
+    assert judge._review_exists_at_sha("findings") is False
 
 
 def test_malformed_response_fails_open(judge, monkeypatch):
@@ -129,7 +166,7 @@ def test_malformed_response_fails_open(judge, monkeypatch):
         return _FakeResponse(json.dumps({"message": "Not Found"}).encode())
 
     monkeypatch.setattr(rj.urllib.request, "urlopen", not_a_list)
-    assert judge._review_exists_at_sha() is False
+    assert judge._review_exists_at_sha("findings") is False
 
 
 def test_page_cap_is_bounded(judge, monkeypatch):
@@ -143,11 +180,90 @@ def test_page_cap_is_bounded(judge, monkeypatch):
         return _FakeResponse(json.dumps(page).encode())
 
     monkeypatch.setattr(rj.urllib.request, "urlopen", always_full)
-    assert judge._review_exists_at_sha() is False
+    assert judge._review_exists_at_sha("findings") is False
     assert calls["n"] == rj._MAX_REVIEW_PAGES, (
         f"expected the walk to stop at the {rj._MAX_REVIEW_PAGES}-page cap, "
         f"got {calls['n']} requests"
     )
+
+
+def _review_full(
+    body: str,
+    commit_id: str = SHA,
+    author: str = rj.JUDGE_REVIEW_AUTHOR,
+    state: str = "COMMENTED",
+    review_id: int = 7001,
+) -> dict:
+    r = _review(body, commit_id=commit_id, author=author)
+    r["state"] = state
+    r["id"] = review_id
+    return r
+
+
+def test_clean_reassessment_dismisses_prior_request_changes(judge, monkeypatch):
+    """A clean rerun at the same SHA must retire the blocking verdict — a
+    COMMENT cannot supersede a REQUEST_CHANGES left active on the PR."""
+    calls = {"dismissals": [], "posts": 0}
+
+    blocking = _review_full(
+        f"{rj.REVIEW_MARKER}\n<!-- meta:olderdigest:findings -->",
+        state="CHANGES_REQUESTED",
+    )
+
+    def fake_urlopen(req, timeout=None):
+        if req.get_method() == "GET":
+            return _FakeResponse(json.dumps([blocking]).encode())
+        if req.full_url.endswith("/dismissals"):
+            assert req.get_method() == "PUT", "GitHub dismissals require PUT"
+            calls["dismissals"].append(req.full_url)
+            return _FakeResponse(b"{}")
+        calls["posts"] += 1
+        return _FakeResponse(b"{}")
+
+    monkeypatch.setattr(rj.urllib.request, "urlopen", fake_urlopen)
+    judge._post_no_findings_comment()
+    assert calls["posts"] == 1, "clean comment was not posted"
+    assert len(calls["dismissals"]) == 1, "blocking review was not dismissed"
+    assert "7001" in calls["dismissals"][0]
+
+
+def test_clean_post_survives_dismissal_failure(judge, monkeypatch):
+    """Dismissal is best-effort: a 422/404 on the dismissal endpoint must not
+    block the clean comment itself."""
+    blocking = _review_full(rj.REVIEW_MARKER, state="CHANGES_REQUESTED")
+
+    def fake_urlopen(req, timeout=None):
+        if req.get_method() == "GET":
+            return _FakeResponse(json.dumps([blocking]).encode())
+        if req.full_url.endswith("/dismissals"):
+            raise OSError("dismissal denied")
+        return _FakeResponse(b"{}")
+
+    monkeypatch.setattr(rj.urllib.request, "urlopen", fake_urlopen)
+    judge._post_no_findings_comment()  # must not raise
+
+
+def test_commented_or_approved_reviews_are_not_dismissed(judge, monkeypatch):
+    """GitHub 422s on dismissing COMMENTED reviews, and a clean result does not
+    contradict an APPROVED — neither must be touched."""
+    calls = {"dismissals": 0}
+    page = [
+        _review_full(rj.REVIEW_MARKER, state="COMMENTED", review_id=1),
+        _review_full(rj.REVIEW_MARKER, state="APPROVED", review_id=2),
+        _review_full(rj.REVIEW_MARKER, state="DISMISSED", review_id=3),
+        _review_full(rj.REVIEW_MARKER, state="CHANGES_REQUESTED", author="other-bot", review_id=4),
+    ]
+
+    def fake_urlopen(req, timeout=None):
+        if req.get_method() == "GET":
+            return _FakeResponse(json.dumps(page).encode())
+        if req.full_url.endswith("/dismissals"):
+            calls["dismissals"] += 1
+        return _FakeResponse(b"{}")
+
+    monkeypatch.setattr(rj.urllib.request, "urlopen", fake_urlopen)
+    judge._post_no_findings_comment()
+    assert calls["dismissals"] == 0
 
 
 def test_marker_text_appears_exactly_once_in_the_source():
