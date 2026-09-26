@@ -14449,3 +14449,67 @@ def test_script_dep_round90_sib_stdin_backtick_nl_pbre_spaced_alias(tmp_path):
             # A `)` group close whose fd1 is diverted feeds nothing.
             b'cat scripts/x.sh | (cat; true) > /dev/null | sh'):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round91_sibling_emit_model(tmp_path):
+    """Round-91: emit model tracks per-sibling stream bytes — a `cat|true`
+    drain leaves provable EOF, `&&`/`||` are sibling boundaries, numbered
+    script content dies while raw script lines still run, `nl -s`/`pr -n`
+    separators revive a `N;cmd` tail, and an inner `sh` inside backticks
+    inherits the shared stdin (Devin on #133/#17/#1431/#1963 — all
+    verified live)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (
+            # `&&`/`||` siblings still re-read shared stdin — the
+            # conditional branch runs the reader (verified live:
+            # EXECUTED).
+            b"cat scripts/x.sh | (true && cat) | sh",
+            b"cat scripts/x.sh | (false || cat) | sh",
+            b"cat scripts/x.sh | (true && cat scripts/x.sh) | sh",
+            # `nl -s ';'`/`pr -n';'` turn the numbering prefix into a
+            # separator — `N;cmd` executes the tail (verified live).
+            b"cat scripts/x.sh | nl -s ';' | sh",
+            b"cat scripts/x.sh | nl -s';' | sh",
+            b"cat scripts/x.sh | nl --number-separator=';' | sh",
+            b"cat scripts/x.sh | pr -t -n';' | sh",
+            # An inner `sh` inside a backtick assignment inherits the
+            # shared stdin (fd2-observable — verified live).
+            b"cat scripts/x.sh | X=`true; sh` | wc -l",
+            b"cat scripts/x.sh | X=`cat | sh` | wc -l",
+            # Sequential siblings each re-read the stream — `cat`
+            # emits the script bytes raw (verified live).
+            b"cat scripts/x.sh | (cat; cat) | sh",
+            b"cat scripts/x.sh | (cat | cat; cat) | sh",
+            b"cat scripts/x.sh | (true; cat) | sh",
+            b"cat scripts/x.sh | (cat; cat -n) | sh",
+            # A sibling that emits a `scripts/` invocation revives
+            # even beside numbered content.
+            b"cat scripts/x.sh | (cat -n; echo 'sh scripts/x.sh') | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # `cat|true`: cat drains ≤ one read (<64KB) then SIGPIPEs
+            # on `true` — the second cat sees provable EOF and the
+            # group emits nothing (verified live: dead).
+            b"cat scripts/x.sh | (cat | true; cat) | sh",
+            # `cat -n` numbers the script's content; `echo OK` is
+            # sibling-generated text — `OK` never runs the script
+            # (verified live: dead).
+            b"cat scripts/x.sh | (cat -n; echo OK) | sh",
+            b"cat scripts/x.sh | (cat -n; cat) | sh",
+            # A `;`-drained sibling leaves EOF — nothing emitted.
+            b"cat scripts/x.sh | (cat >/dev/null; cat) | sh",
+            # Numbered file content dies on `N\t` alone.
+            b"cat scripts/x.sh | nl | sh",
+            b"cat scripts/x.sh | nl -s ':' | sh",
+            # `cmd >&2 |&` binds fd1 to real stderr first — `|&`'s
+            # fd2→fd1 dup lands on stderr, not the pipe.
+            b"cat scripts/x.sh >&2 |& sh",
+            # A bare `(`/digit scalar line is a syntax error / not a
+            # command — provably dead emitted text.
+            b'(cat scripts/x.sh >&2; echo "(") | sh',
+            b'(cat scripts/x.sh >&2; echo a\\(b) | sh',
+            b"cat scripts/x.sh | wc -l | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
