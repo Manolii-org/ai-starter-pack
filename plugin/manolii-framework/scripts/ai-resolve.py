@@ -1197,13 +1197,80 @@ def _xargs_bad_value(opt: bytes, val: bytes) -> bool:
                 or (num.group(1) == b"-" and num.group(2).strip(b"0")))
     if opt in (b"-d", b"--delimiter"):
         # One literal char, or a GNU escape set: `\[abfnrtv\\]`,
-        # `\0`..`\377` octal (1-3 digits), `\x..` hex (1-2) —
+        # `\0`..`\377` octal (1-3 digits), `\x..` hex (0-2 — a bare
+        # `\x` IS accepted: the hex prefix alone names no digits and
+        # util-linux treats the empty sequence as valid —
+        # verified live on util-linux xargs, round-69) —
         # `\q`, `ab`, `\8`, `\e`, `\xZZ` abort ("Invalid escape
-        # sequence" — verified live on util-linux xargs, round-68).
+        # sequence" — verified live, round-68).
         return (len(val) != 1
                 and re.fullmatch(
-                    rb"\\(?:[abfnrtv\\]|[0-7]{1,3}|x[0-9a-fA-F]{1,2})",
+                    rb"\\(?:[abfnrtv\\]|[0-7]{1,3}|x[0-9a-fA-F]{0,2})",
                     val) is None)
+    return False
+
+
+def _flock_bad_opt(args: list, i: int) -> bool:
+    """True when the flock option at args[i] aborts on its operand —
+    `-w`/`--timeout` needs a strtod-parseable number (`0.5`, `.5`,
+    `+2`, `1e2` run; `nope`, `5x` abort "invalid timeout value"), and
+    `-E`/`--conflict-exit-code` an integer in 0-255 (`x`, `5.5`,
+    `300`, `-1` all abort — verified live, round-69). A missing
+    operand word aborts the same way (`flock -w` at end)."""
+    a = args[i]
+    if a.startswith(b"--"):
+        name = a.split(b"=", 1)[0]
+        if name in _WRAPPER_LONG[b"flock"]:
+            opt = name
+        else:
+            cands = [o for o in _WRAPPER_LONG[b"flock"]
+                     if o.startswith(name)]
+            if len(cands) != 1:
+                return False            # ambiguity exits upstream
+            opt = cands[0]
+        if opt in _WRAPPER_REQ_LONG[b"flock"]:
+            if b"=" in a:
+                val = a.split(b"=", 1)[1]
+            elif i + 1 < len(args):
+                val = args[i + 1]
+            else:
+                return True             # missing operand aborts
+            return _flock_bad_value(opt, val)
+        return False                    # bare flag — no operand
+    if a == b"-" or not a.startswith(b"-"):
+        return False
+    j = 1
+    while j < len(a):
+        c = a[j:j + 1]
+        if c in _WRAPPER_REQ_SHORT[b"flock"]:
+            if j + 1 < len(a):
+                val = a[j + 1:]
+            elif i + 1 < len(args):
+                val = args[i + 1]
+            else:
+                return True             # missing operand aborts
+            return _flock_bad_value(b"-" + c, val)
+        j += 1
+    return False
+
+
+def _flock_bad_value(opt: bytes, val: bytes) -> bool:
+    """The operand check itself — `opt` is the resolved option name.
+    `-c`/`--command` binds a command string, which is never 'bad'."""
+    if opt in (b"-w", b"--timeout"):
+        return re.fullmatch(
+            rb"[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?",
+            val) is None
+    if opt in (b"-E", b"--conflict-exit-code"):
+        num = re.fullmatch(rb"([+-]?)([0-9]+)", val)
+        if num is None:
+            return True
+        d = num.group(2).lstrip(b"0")
+        # 0-255 — a >3-digit nonzero span always exceeds the range,
+        # so `int()` only ever sees short digit strings.
+        return (len(d) > 3
+                or (num.group(1) == b"-" and d != b"")
+                or (d != b"" and int(d) > 255))
     return False
 
 
@@ -1598,6 +1665,20 @@ def _argv_wrap_start(enc_words: list, hi: int, enclosing: bytes):
                                           enc_words[k][1]])
                             for k in range(hi + 1, len(enc_words))]
                     if _xargs_bad_opt(args_x, j - hi - 1):
+                        return None
+                if key == b"flock":
+                    # A malformed flock option OPERAND likewise aborts
+                    # before the wrapped argv — `-w`/`--timeout` needs a
+                    # strtod-parseable number and `-E`/
+                    # `--conflict-exit-code` an integer 0-255 (Devin on
+                    # #130, round-69 review — verified live).
+                    if args_x is None:
+                        args_x = [
+                            _word_text(
+                                enclosing[enc_words[k][0]:
+                                          enc_words[k][1]])
+                            for k in range(hi + 1, len(enc_words))]
+                    if _flock_bad_opt(args_x, j - hi - 1):
                         return None
                 j += skip
                 continue
@@ -2481,10 +2562,11 @@ _WRAPPER_OPT_OPERAND = {
                        b"--chdir", b"--unset", b"--split-string",
                        b"--argv0"}),
     b"sudo": frozenset({b"-u", b"-g", b"-h", b"-r", b"-t", b"-D", b"-R",
-                        b"-p", b"-U", b"-T",
+                        b"-p", b"-U", b"-T", b"-C",
                         b"--user", b"--group", b"--host", b"--role",
                         b"--type", b"--chdir", b"--chroot", b"--prompt",
-                        b"--other-user", b"--command-timeout"}),
+                        b"--other-user", b"--command-timeout",
+                        b"--close-from"}),
     b"stdbuf": frozenset({b"-i", b"-o", b"-e",
                           b"--input", b"--output", b"--error"}),
     b"exec": frozenset({b"-a"}),
@@ -2653,6 +2735,25 @@ _WRAPPER_FLAGS = {
     # "unrecognized option" abort (Codex on #1393, round-62 —
     # verified live).
     b"ionice": frozenset({b"-t", b"--ignore"}),
+    # sudo 1.9 — every operational flag is boolean (the `-l`/`-v`/
+    # `-e`/`-V` describe modes and the operand options live in their
+    # own tables; `--preserve-env=LIST` is the only optional-arg
+    # form). Any other option aborts "invalid option" BEFORE the
+    # command runs — `sudo -sx x` never reaches x (Codex on #130,
+    # round-69 review — verified live).
+    b"sudo": frozenset({b"-A", b"--askpass",
+                        b"-b", b"--background",
+                        b"-B", b"--bell",
+                        b"-E",
+                        b"-H", b"--set-home",
+                        b"-i", b"--login",
+                        b"-K", b"--remove-timestamp",
+                        b"-k", b"--reset-timestamp",
+                        b"-L",
+                        b"-n", b"--non-interactive",
+                        b"-P", b"--preserve-groups",
+                        b"-S", b"--stdin",
+                        b"-s", b"--shell"}),
 }
 # Wrapper flags whose argument is OPTIONAL and attached-only —
 # `unshare --mount` (unshares mounts), `--mount=/tmp/m` (binds the
@@ -2667,6 +2768,10 @@ _WRAPPER_OPTARG_FLAGS = {
                            b"--mount-proc",
                            b"-m", b"-u", b"-i", b"-n", b"-p",
                            b"-U", b"-C", b"-T"}),
+    # `sudo --preserve-env=LIST` binds an attached env list; bare
+    # `--preserve-env`/`-E` is a plain flag (sudo 1.9 — verified
+    # live, round-69).
+    b"sudo": frozenset({b"--preserve-env"}),
 }
 
 
@@ -10797,6 +10902,59 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                                             return False
                                         j2 += 1
                                     return True
+                                # Mirror the unwrapped sink verdict
+                                # on the WRAPPED head — `flock L head
+                                # -n 0 x` and `xargs head -n 0 x` emit
+                                # nothing, so the operand's bytes never
+                                # reach a stream (Devin on #130,
+                                # round-69 review — verified live).
+                                if (hkey not in _STDIN_SINK_HEADS
+                                        and hkey not in
+                                        _EXEC_OPERAND_FLAGS
+                                        and hkey not in
+                                        _SH_STDIN_HEADS
+                                        and _stdin_exec_head(
+                                            enclosing[
+                                                enc_words[ws][0]:])
+                                        == "sink"):
+                                    return False
+                                if hkey == b"split":
+                                    # The wrapped split's INPUT
+                                    # positional counts only when the
+                                    # chunks stream to stdout (`-n
+                                    # K/N`/`l/N` forms or `--filter`);
+                                    # a PREFIX or plain run writes
+                                    # chunk files — `xargs split x`,
+                                    # `flock L split /dev/null x`
+                                    # never feed a pipe (Devin on
+                                    # #130/#1393, round-69 review —
+                                    # verified live). The word binding
+                                    # `--filter` IS executed.
+                                    sargs = _argv_only(
+                                        sub2, enclosing, wh2 + 1)
+                                    _sf, sinp, st, fidx = _split_scan(
+                                        b"split", sargs)
+                                    wraw = enclosing[w[0]:w[1]]
+                                    otxt = _operand_text(wraw)
+                                    if (fidx is not None
+                                            and _argv_index(
+                                                sub2, enclosing,
+                                                wh2 + 1, wi0 - ws)
+                                            == fidx):
+                                        return True
+                                    if (sinp is None
+                                            or otxt
+                                            != _operand_text(sinp)):
+                                        return False
+                                    if _sf is not None:
+                                        # `--filter` runs its CMD on
+                                        # each chunk — the input's
+                                        # bytes execute outright.
+                                        return True
+                                    if not st:
+                                        return False
+                                    return _pipe_to_exec(
+                                        scan, cs + len(enclosing))
                                 if (hkey in _NONEXEC_HEADS
                                         and not any(
                                             a <= epos < b

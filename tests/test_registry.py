@@ -13299,3 +13299,76 @@ def test_script_dep_round68_empty_operands_and_wrapped_readers(tmp_path):
             b"sudo grep p scripts/x.sh",
             b"sudo cat scripts/x.sh | sh"):
         assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round69_wrapper_operands_and_wrapped_readers(tmp_path):
+    """Round-69 review fixes — all verified against live bash/util-linux:
+
+    - `sudo` cluster letters are validated: `sudo -sx sh x` aborts
+      "invalid option -- 'x'" before the command, while every real
+      no-arg letter (`-K`, `-n`, `-s`, `-E`, …) still reaches it.
+      `-C`/`--close-from` joins the operand options.
+    - `flock -w`/`--timeout` needs a strtod number (`0.5`, `.5`, `+2`,
+      `1e2` run; `nope`, `5x` abort "invalid timeout value") and
+      `-E`/`--conflict-exit-code` an integer 0-255 (`x`, `5.5`, `300`,
+      `-1` abort) — all before the wrapped argv.
+    - `xargs -d '\\x'` — a bare `\\x` IS a valid GNU escape (the hex
+      prefix alone names zero digits; util-linux runs the utility).
+    - A WRAPPED reader in sink mode emits none of the operand's bytes:
+      `flock L head -n 0 x | sh` and `xargs head -n 0 x | sh` feed sh
+      nothing (verified live).
+    - Wrapped `split` writes chunk FILES, not stdout — `xargs split x
+      | sh` never feeds the pipe, and `flock L split /dev/null x`
+      treats x as the output PREFIX, never reading it. `-n K/N`/`l/N`
+      chunk-select streams to stdout and `--filter=CMD` executes CMD
+      on each chunk — both still count (verified live).
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo X\n")
+    for line in (
+            b"sudo -sx sh scripts/x.sh",
+            b"sudo -x sh scripts/x.sh",
+            b"sudo --bogus sh scripts/x.sh",
+            b"sudo -l sh scripts/x.sh",
+            b"flock -w nope /tmp/L sh scripts/x.sh",
+            b"flock -w 5x /tmp/L sh scripts/x.sh",
+            b"flock --timeout=nope /tmp/L sh scripts/x.sh",
+            b"flock -E x /tmp/L sh scripts/x.sh",
+            b"flock -E 5.5 /tmp/L sh scripts/x.sh",
+            b"flock -E 300 /tmp/L sh scripts/x.sh",
+            b"flock -E -1 /tmp/L sh scripts/x.sh",
+            b"flock --conflict-exit-code=x /tmp/L sh scripts/x.sh",
+            b"flock -w /tmp/L sh scripts/x.sh",
+            b"flock /tmp/L head -n 0 scripts/x.sh | sh",
+            b"flock /tmp/L head -c 0 scripts/x.sh | sh",
+            b"xargs head -n 0 scripts/x.sh | sh",
+            b"xargs split scripts/x.sh | sh",
+            b"flock /tmp/L split /dev/null scripts/x.sh | sh",
+            b"sudo -sx scripts/x.sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b"sudo -s sh scripts/x.sh",
+            b"sudo -Kns sh scripts/x.sh",
+            b"sudo -E sh scripts/x.sh",
+            b"sudo -u root sh scripts/x.sh",
+            b"sudo -C 3 sh scripts/x.sh",
+            b"sudo --close-from=3 sh scripts/x.sh",
+            b"sudo --preserve-env=A sh scripts/x.sh",
+            b"sudo -h myhost sh scripts/x.sh",
+            b"flock -w 0.5 /tmp/L sh scripts/x.sh",
+            b"flock -w .5 /tmp/L sh scripts/x.sh",
+            b"flock -w 1e2 /tmp/L sh scripts/x.sh",
+            b"flock -w -1 /tmp/L sh scripts/x.sh",
+            b"flock -E 5 /tmp/L sh scripts/x.sh",
+            b"flock -E 0 /tmp/L sh scripts/x.sh",
+            b"flock --timeout=2 /tmp/L sh scripts/x.sh",
+            b"xargs -d '\\x' sh scripts/x.sh",
+            b"xargs cat scripts/x.sh | sh",
+            b"flock /tmp/L cat scripts/x.sh | sh",
+            b"xargs split -n 1/1 scripts/x.sh | sh",
+            b"xargs split -n r/1/1 scripts/x.sh | sh",
+            b"xargs split --filter=sh scripts/x.sh",
+            b"xargs split --filter=sh scripts/x.sh | wc"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
