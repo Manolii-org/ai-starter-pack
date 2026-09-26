@@ -2100,11 +2100,12 @@ def _operand_is_program(enc_words: list, wi: int,
         # pipeline scan marks them "script" provenance for `|sh`);
         # the literal-read gate treats it the same as bare `cat`.
         aargs = _argv_only(enc_words, enclosing, hi + 1)
-        afilt, _afin, _atout, fidx = _split_scan(key, aargs)
+        afilt, _afin, _atout, fidx, anct = _split_scan(key, aargs)
         return (fidx is not None
                 and _argv_index(enc_words, enclosing, hi + 1, wi)
                 == fidx
-                and not _split_dead_input(_afin, enclosing)
+                and (anct
+                     or not _split_dead_input(_afin, enclosing))
                 and _filter_script_role(afilt) == "exec")
     if key in _ARGV_PROGRAM_WRAPPERS:
         # The program operand belongs to the command the wrapper execs —
@@ -2974,9 +2975,15 @@ def _wrapper_bad_value(key: bytes, opt: bytes, val: bytes) -> bool:
         # CodeRabbit on #132/#1961/#16, round-70/71 review — verified
         # live). Significant-digit count, not int(val): a >4300-digit
         # operand would raise ValueError and crash the scan.
-        if re.fullmatch(rb"[0-9]+", val) is None:
+        # strtol accepts leading whitespace and a sign: `-C ' 3'` and
+        # `-C +3` both run (CodeRabbit on #1961, round-74 review —
+        # verified live); `-3` still fails the <3 bound below.
+        v2 = val.lstrip()
+        if v2[:1] == b"+":
+            v2 = v2[1:]
+        if re.fullmatch(rb"[0-9]+", v2) is None:
             return True
-        sig = val.lstrip(b"0") or b"0"
+        sig = v2.lstrip(b"0") or b"0"
         return len(sig) > 10 or int(sig) < 3 or int(sig) > 2147483647
     return False
 
@@ -4496,7 +4503,7 @@ def _split_scan(key: bytes, args: list, seekable_stdin: bool = False):
     Union-of-versions keeps the running case — the fail-closed
     direction. `seekable_stdin` is retained for callers."""
     if key != b"split":
-        return None, None, False, None
+        return None, None, False, None, None
     filt = inp = None
     fidx = None                 # args index of the word whose value
                                 # bound `filt` (the LAST --filter)
@@ -4510,6 +4517,9 @@ def _split_scan(key: bytes, args: list, seekable_stdin: bool = False):
                                 # against the FINAL suffix length
     nslash = False              # a K/N chunk-select form — refuses
                                 # `--filter`
+    ncount = False              # a ONE-PART -n count (N/l/N/r/N) —
+                                # always materialises N chunks, even
+                                # on empty input
     i = 0
     while i < len(args):
         a = args[i]
@@ -4526,10 +4536,10 @@ def _split_scan(key: bytes, args: list, seekable_stdin: bool = False):
             else:
                 cands = [o for o in _SPLIT_LONG if o.startswith(base)]
                 if len(cands) != 1:
-                    return None, None, False, None
+                    return None, None, False, None, None
                 resolved = cands[0]
             if resolved in (b"--help", b"--version"):
-                return None, None, False, None       # terminal mode
+                return None, None, False, None, None       # terminal mode
             if resolved not in _SPLIT_REQ_LONG:
                 # Flags never consume the next word; a `=` on a true
                 # flag aborts "doesn't allow an argument" while the
@@ -4546,7 +4556,7 @@ def _split_scan(key: bytes, args: list, seekable_stdin: bool = False):
                         else:
                             hsuf = v
                 elif b"=" in a:
-                    return None, None, False, None
+                    return None, None, False, None, None
                 i += 1
                 continue
             if b"=" in a:
@@ -4555,13 +4565,13 @@ def _split_scan(key: bytes, args: list, seekable_stdin: bool = False):
                 v = args[i + 1]
                 i += 1
             else:
-                return None, None, False, None       # "requires an argument"
+                return None, None, False, None, None       # "requires an argument"
             if resolved == b"--filter":
                 filt = v
                 fidx = i
             else:
                 if not _split_arg_ok(resolved, v):
-                    return None, None, False, None
+                    return None, None, False, None, None
                 if resolved == b"--suffix-length":
                     # zero-padded is legal — `-a <5000 zeros>1` runs;
                     # significant digits are already validated. The
@@ -4577,6 +4587,7 @@ def _split_scan(key: bytes, args: list, seekable_stdin: bool = False):
                     # `l/2`+filter runs on a file, `r/2`+filter
                     # streams a pipe — round-45).
                     nslash = len(np_) == 2
+                    ncount = len(np_) != 2
             i += 1
             continue
         if len(a) > 1 and a[:1] == b"-" and a != b"-":
@@ -4603,6 +4614,7 @@ def _split_scan(key: bytes, args: list, seekable_stdin: bool = False):
                         if len(np_) > 1 and np_[0] in (b"l", b"r"):
                             np_ = np_[1:]
                         nslash = len(np_) == 2
+                        ncount = len(np_) != 2
                     break
                 if c in _SPLIT_FLAG_SHORT:
                     j += 1
@@ -4610,7 +4622,7 @@ def _split_scan(key: bytes, args: list, seekable_stdin: bool = False):
                 abort = True            # unknown letter → abort
                 break
             if abort:
-                return None, None, False, None
+                return None, None, False, None, None
             i += 1
             continue
         if inp is None:
@@ -4618,7 +4630,7 @@ def _split_scan(key: bytes, args: list, seekable_stdin: bool = False):
         npos += 1
         i += 1
     if npos > 2:
-        return None, None, False, None       # "extra operand" abort
+        return None, None, False, None, None       # "extra operand" abort
     # A suffix-start is valid iff its significant digits fit the
     # suffix length — zero-padding is legal (`=01` runs — verified
     # live) while one more digit aborts "start value is too large for
@@ -4633,7 +4645,7 @@ def _split_scan(key: bytes, args: list, seekable_stdin: bool = False):
                      and (suflen == 0
                           or len(nsuf.lstrip(b"0") or b"0")
                           <= suflen))):
-        return None, None, False, None       # invalid start for
+        return None, None, False, None, None       # invalid start for
                                 # numerical suffix (`=bad`, `=100` at
                                 # -a2 — Devin/Codex round-50, verified
                                 # live)
@@ -4642,11 +4654,11 @@ def _split_scan(key: bytes, args: list, seekable_stdin: bool = False):
                      and (suflen == 0
                           or len(hsuf.lstrip(b"0") or b"0")
                           <= suflen))):
-        return None, None, False, None       # invalid start for
+        return None, None, False, None, None       # invalid start for
                                 # hexadecimal suffix — same bound
                                 # (verified live)
     if nslash and filt is not None:
-        return None, None, False, None       # `--filter` never sees a
+        return None, None, False, None, None       # `--filter` never sees a
                                 # chunk selected to stdout
     # An unseekable stdin does NOT reject `-n`: coreutils ≥9.x buffers
     # pipe input to a temp file, so `split -n 1/1` and `-n l/1/1`
@@ -4654,7 +4666,7 @@ def _split_scan(key: bytes, args: list, seekable_stdin: bool = False):
     # round-51 review — verified live on coreutils 9.4; 8.32 still
     # aborts "cannot determine file size" — modelling the running
     # case is the union-of-versions, fail-closed direction).
-    return filt, inp, nslash, fidx
+    return filt, inp, nslash, fidx, ncount
 
 
 def _stdin_path_operand(t: bytes) -> bool:
@@ -6254,7 +6266,7 @@ def _seg_prov(body: bytes, prov: str,
                 dead0 = (sfd is not None
                          and sfd.get(0, _FD_IN)
                          not in (_FD_IN, _FD_FILE))
-                filt, finput, tout, fidx3 = _split_scan(
+                filt, finput, tout, fidx3, _nc3 = _split_scan(
                     key, args, seekable_stdin=seek0)
                 # split's INPUT: a named operand wins regardless of a
                 # `< f` rebind (`split -n r/1/1 F </dev/null` still
@@ -7635,7 +7647,7 @@ def _stdin_exec_head(win: bytes, stream_src=None) -> str:
     return "exec"
 
 
-def _pipe_to_exec(src: bytes, pos: int) -> bool:
+def _pipe_to_exec(src: bytes, pos: int, od_tails=frozenset()) -> bool:
     """True when an unquoted `|` (or `|&`) at `pos` starts a pipeline
     whose contents reach a command that executes stdin.
 
@@ -7705,7 +7717,7 @@ def _pipe_to_exec(src: bytes, pos: int) -> bool:
     # is a sibling split, not a statement end. Seed depth with the
     # compounds still open at pos or those siblings look terminal
     # (Devin on #16, round-72 review — verified live).
-    depth = _open_depth(src, pos)
+    depth = _open_depth(src, pos, od_tails)
     drained = False      # a prior `;`-sibling read the shared stdin to EOF
     pipe_lead = True     # the boundary before the next seg was `|`
     j = pos
@@ -7813,7 +7825,7 @@ def _pipe_to_exec(src: bytes, pos: int) -> bool:
 _SEG_CLOSERS = frozenset({b"fi", b"done", b"esac", b"})"})
 
 
-def _open_depth(src: bytes, pos: int) -> int:
+def _open_depth(src: bytes, pos: int, od_tails=frozenset()) -> int:
     """Unclosed compound/group depth at `pos` — `( cat; ` leaves a `(`
     open that _pipe_to_exec's forward depth counter never saw. Mirrors
     the walk's accounting: cond openers and `(`/`{` open, `)`/`}` and
@@ -7833,20 +7845,24 @@ def _open_depth(src: bytes, pos: int) -> int:
       _heredoc_spans)."""
     d = 0
     j = 0
-    hd: list = []   # queued [delim, strip_tabs, body_start] heredocs
+    hd: list = []   # queued [delim, strip_tabs, body_start, exec]
     while j < pos:
         if hd and j >= hd[0][2]:
-            # Inside a pending heredoc body: the whole line is inert
-            # text unless it IS the delimiter line.
+            # Inside a pending heredoc body: a literal body is inert
+            # text unless it IS the delimiter line. An _HD_EXEC body
+            # is program text (`sh <<E` runs it) — fall through so
+            # its grouping depth counts, matching the same construct
+            # at top level (Devin on #16, round-74 review).
             eol = src.find(b"\n", j)
             ln = src[j:eol] if eol >= 0 else src[j:pos]
             chk = ln.lstrip(b"\t") if hd[0][1] else ln
-            if chk == hd[0][0]:
-                hd.pop(0)
-                if hd and eol >= 0:
-                    hd[0][2] = eol + 1
-            j = eol + 1 if eol >= 0 else pos
-            continue
+            if chk == hd[0][0] or not hd[0][3]:
+                if chk == hd[0][0]:
+                    hd.pop(0)
+                    if hd and eol >= 0:
+                        hd[0][2] = eol + 1
+                j = eol + 1 if eol >= 0 else pos
+                continue
         win = _cmd_window(src, j)
         if not win:
             if src[j:j + 1] == b"#":
@@ -7874,7 +7890,18 @@ def _open_depth(src: bytes, pos: int) -> int:
         for delim, strip, _q, _p in _heredoc_ops(seg):
             eol = src.find(b"\n", j + len(win))
             if eol >= 0:
-                hd.append([delim, strip, eol + 1])
+                hkey = (_command_key(seg[ws[0][0]:ws[0][1]])
+                        if ws else b"")
+                tail = j + len(win)
+                # `od_tails` breaks the _open_depth ↔ _pipe_to_exec
+                # cycle: a tail already being classified is treated
+                # as literal here, matching _heredoc_spans' bias.
+                hd.append([delim, strip, eol + 1,
+                           not (hkey in _NONEXEC_HEADS
+                                and (tail in od_tails
+                                     or not _pipe_to_exec(
+                                         src, tail,
+                                         od_tails | {tail})))])
         j += len(win)
     return d
 
@@ -7937,12 +7964,27 @@ def _group_depth(seg: bytes) -> int:
             in_d = not in_d
         elif in_d:
             pass           # a `` ` `` body's parens are opaque text
-        elif c in (0x28, 0x7B):
-            d += 1
-        elif c in (0x29, 0x7D):
-            d -= 1
+        elif c in (0x28, 0x7B) or c in (0x29, 0x7D):
+            # `(`/`)` are operators anywhere; `{`/`}` are grouping
+            # words only as a WHOLE word — `foo{` prints literally
+            # and `a{1,2}` is brace expansion (Devin on #132,
+            # round-74 review — verified live).
+            if c in (0x28, 0x29) or _brace_word(seg, i):
+                d += 1 if c in (0x28, 0x7B) else -1
         i += 1
     return d
+
+
+_GROUP_BOUND = b" \t\n;&|()<>"
+
+
+def _brace_word(seg: bytes, i: int) -> bool:
+    """`{`/`}` at i groups only as a whole word — bounded by a word
+    boundary on both sides. `{ cat; }` counts; `{cat`/`a{`/`{a,b}`
+    are literal or brace expansion."""
+    if i > 0 and seg[i - 1] not in _GROUP_BOUND:
+        return False
+    return i + 1 >= len(seg) or seg[i + 1] in _GROUP_BOUND
 
 
 _HEREDOC_DELIM = re.compile(rb"['\"]?([A-Za-z0-9_.-]+)['\"]?")
@@ -9437,7 +9479,7 @@ def _command_literal(src: bytes, pos: int,
         # (`split --filter='sh x' in > out` runs the filter — Devin on
         # #1393, round-66 review — verified live).
         aargs = _argv_only(words, win, 1)
-        _af, _ai, _at, fidx = _split_scan(key, aargs)
+        _af, _ai, _at, fidx, anc = _split_scan(key, aargs)
         wpos = next((k for k, (wa, wb) in enumerate(words)
                      if wa <= pos < wb), None)
         if (fidx is not None and wpos is not None
@@ -9446,7 +9488,10 @@ def _command_literal(src: bytes, pos: int,
             # yielding none (`split --filter='sh x' </dev/null` —
             # Devin on #1959, round-52 review, verified live) leaves
             # the operand as inert text.
-            return _split_dead_input(_ai, win)
+            # `-n N`/`l/N`/`r/N` always materialises N chunks — the
+            # filter runs even on an empty input (verified live:
+            # `split -n 2 --filter=sh /dev/null` fires twice).
+            return _split_dead_input(_ai, win) and not anc
     if output_exec:
         # The command's output is code — unless its own fd1 is diverted,
         # in which case its bytes never join the captured stream that
@@ -10845,7 +10890,7 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                                     # round-47 — verified live).
                                     aargs = _argv_only(
                                         sub, enclosing, ahi + 1)
-                                    afilt, afin, atout, _f = (
+                                    afilt, afin, atout, _f, _anc = (
                                         _split_scan(akey, aargs))
                                     # `split IN PREFIX` — the word is
                                     # exec'd only as the INPUT operand
@@ -11132,8 +11177,8 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                                     # `--filter` IS executed.
                                     sargs = _argv_only(
                                         sub2, enclosing, wh2 + 1)
-                                    _sf, sinp, st, fidx = _split_scan(
-                                        b"split", sargs)
+                                    _sf, sinp, st, fidx, nct = (
+                                        _split_scan(b"split", sargs))
                                     wraw = enclosing[w[0]:w[1]]
                                     otxt = _operand_text(wraw)
                                     if (fidx is not None
@@ -11149,10 +11194,14 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                                         # #132, round-73 review —
                                         # verified live; mirrors the
                                         # unwrapped gate).
-                                        return not _split_dead_input(
-                                            _operand_text(sinp)
-                                            if sinp is not None
-                                            else None, enclosing)
+                                        return (nct or not
+                                                _split_dead_input(
+                                                    _operand_text(
+                                                        sinp)
+                                                    if sinp
+                                                    is not None
+                                                    else None,
+                                                    enclosing))
                                     if (sinp is None
                                             or otxt
                                             != _operand_text(sinp)):
@@ -11232,7 +11281,7 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                     if wkey == b"split":
                         sargs = _argv_only(enc_words, enclosing,
                                            whi + 1)
-                        _sf, sinp, _st, fidx = _split_scan(
+                        _sf, sinp, _st, fidx, _nct = _split_scan(
                             wkey, sargs)
                         wraw = enclosing[w[0]:w[1]]
                         otxt = _operand_text(wraw)
@@ -11553,13 +11602,13 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                 if wkey == b"split":
                     aargs = _argv_only(enc_words, enclosing,
                                        whi + 1)
-                    afilt, _afin, _atout, fidx = _split_scan(
+                    afilt, _afin, _atout, fidx, anct = _split_scan(
                         wkey, aargs)
                     if (fidx is not None
                             and _argv_index(enc_words, enclosing,
                                             whi + 1, wi0) == fidx
                             and afilt not in (None, b"", b"-")
-                            and _afin != b"/dev/null"
+                            and (anct or _afin != b"/dev/null")
                             and _filter_script_role(afilt) == "emit"):
                         return _pipe_to_exec(
                             scan, cs + len(enclosing))

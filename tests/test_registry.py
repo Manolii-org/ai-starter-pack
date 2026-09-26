@@ -13601,3 +13601,55 @@ def test_script_dep_round73_open_depth_comments_elif_heredoc(tmp_path):
             b"cat <<EOF\n(\ncat scripts/x.sh | true; sh",
             b"xargs split --filter scripts/x.sh /dev/null"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round74_brace_words_split_ncount_sudo_c_heredoc(tmp_path):
+    """Round-74 review — Devin + CodeRabbit on #132/#16/#1428/#1961:
+    `{`/`}` only group as whole words — `foo{` prints literally and
+    `a{1,2}` is brace expansion, so `_group_depth` gates braces on
+    word boundaries (parens stay counted anywhere — they're operators).
+    `split -n N`/`l/N`/`r/N` materialise N chunks even on empty input —
+    `--filter` fires on `/dev/null` (verified live: `-n 2`/`l/2`/`r/2`
+    each run the filter N times; only the two-part `-n K/N` select
+    emits nothing), so the dead-input gate exempts one-part `-n` modes
+    on both the wrapped and unwrapped filter gates. `sudo -C` accepts
+    strtol semantics — leading whitespace and `+` parse (`-C +3` runs,
+    `-C +2`/`-C -3` abort — verified live). And an _HD_EXEC heredoc's
+    body lines are program text: `sh <<E` runs them, so their `(`/if
+    depth must count for `;`-sibling handling just like the same
+    construct at top level (literal `cat <<E` bodies stay inert).
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo X\n")
+    for line in (
+            b"{ cat scripts/x.sh | cat; } | sh",
+            b"sudo -C +3 sh scripts/x.sh",
+            b'sudo -C " 3" sh scripts/x.sh',
+            b"split -n 2 --filter scripts/x.sh /dev/null out.",
+            b"split -n l/2 --filter scripts/x.sh /dev/null out.",
+            b"split -n r/2 --filter scripts/x.sh /dev/null out.",
+            b"split -n 2 --filter scripts/x.sh - out. < /dev/null",
+            b"xargs split -n 2 --filter scripts/x.sh /dev/null",
+            b"sh <<E\n( cat scripts/x.sh | cat; sh )\nE",
+            b"cat <<E | sh\n( cat scripts/x.sh | cat; sh )\nE",
+            b"sh <<E\n( cat scripts/x.sh | cat; sh ",
+            b"if false; then { cat scripts/x.sh | cat; }; fi | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b"echo foo{; cat scripts/x.sh | true; sh",
+            b"echo {x; cat scripts/x.sh | true; sh",
+            b"echo a{1,2}; cat scripts/x.sh | true; sh",
+            b"echo foo}; cat scripts/x.sh | true; sh",
+            b"cat <<E\n( cat scripts/x.sh | cat; sh )\nE"
+            b"\ncat scripts/x.sh | true; sh",
+            b"cat <<E\n(\nE\ncat scripts/x.sh | true; sh",
+            b"split -n 1/2 --filter scripts/x.sh /dev/null out.",
+            b"split --filter scripts/x.sh /dev/null out.",
+            b"xargs split --filter scripts/x.sh /dev/null",
+            b"xargs split -n 1/2 --filter scripts/x.sh /dev/null",
+            b"sudo -C +2 sh scripts/x.sh",
+            b"sudo -C -3 sh scripts/x.sh",
+            b"sudo -C x sh scripts/x.sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
