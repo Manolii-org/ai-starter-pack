@@ -114,11 +114,16 @@ def _proxy_base() -> Optional[str]:
     ).rstrip("/")
     if not base:
         return None
-    import urllib.parse as _up
+    if (urlparse(base).hostname or "").lower().rstrip(".") == _ANTHROPIC_HOST:
+        return None
+    return base
 
 
 class _NoRedirectHandler(HTTPRedirectHandler):
     """Refuse redirects: a 3xx would re-send Authorization/x-api-key to the target."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
 
 
 def _urlopen_https(req: Request, *, timeout: int, host: str):
@@ -127,11 +132,6 @@ def _urlopen_https(req: Request, *, timeout: int, host: str):
     if parsed.scheme != "https" or parsed.hostname != host:
         raise ValueError("refusing non-HTTPS or unexpected request host")
     return build_opener(_NoRedirectHandler()).open(req, timeout=timeout)  # nosec B310
-
-
-    if (_up.urlparse(base).hostname or "").lower().rstrip(".") == _ANTHROPIC_HOST:
-        return None
-    return base
 
 
 def get_api_key() -> Optional[str]:

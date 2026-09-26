@@ -34,6 +34,9 @@ _ANTHROPIC_HOST = "api.anthropic.com"
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Refuse redirects: a 3xx would re-send Authorization/x-api-key to the target."""
 
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
 
 def _urlopen_https(req: urllib.request.Request, *, timeout: int, host: str):
     """Open one trusted HTTPS origin without following redirects."""

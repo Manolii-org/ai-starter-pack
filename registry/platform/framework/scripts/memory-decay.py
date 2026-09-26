@@ -64,6 +64,20 @@ def tokenize(text: str) -> set[str]:
     return {t for t in tokens if len(t) >= 3}
 
 
+def _comparable_text(row: dict) -> str:
+    """Text used for dedup comparison across supported memory schemas.
+
+    facts use `content`; patterns (written by /learn) use
+    problem/solution/rule. A row with no comparable text returns "" and must
+    never be merged — two empty strings would read as identical.
+    """
+    content = row.get("content")
+    if isinstance(content, str) and content.strip():
+        return content
+    parts = [row.get(k, "") for k in ("problem", "solution", "rule")]
+    return " ".join(p for p in parts if isinstance(p, str) and p.strip())
+
+
 def jaccard(a: set[str], b: set[str]) -> float:
     """Compute Jaccard similarity: |intersection| / |union|."""
     if not a and not b:
@@ -172,15 +186,17 @@ def consolidate(
                 continue
             cluster = [row_a]
             assigned.add(i)
-            content_a = row_a.get("content", "")
+            content_a = _comparable_text(row_a)
             tokens_a = tokenize(content_a)
 
             for j, row_b in enumerate(group):
                 if j <= i or j in assigned:
                     continue
-                content_b = row_b.get("content", "")
+                content_b = _comparable_text(row_b)
                 tokens_b = tokenize(content_b)
 
+                if not content_a or not content_b:
+                    continue
                 if content_a == content_b or jaccard(tokens_a, tokens_b) >= threshold:
                     cluster.append(row_b)
                     assigned.add(j)
