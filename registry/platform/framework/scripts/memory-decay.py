@@ -100,10 +100,20 @@ def _rows_mergeable(a: dict, b: dict, threshold: float) -> bool:
         return False
     if not (_is_pattern(a) and _is_pattern(b)):
         return text_a == text_b or jaccard(tokenize(text_a), tokenize(text_b)) >= threshold
-    if jaccard(tokenize(a["problem"]), tokenize(b["problem"])) < threshold:
+    prob_a, prob_b = tokenize(a["problem"]), tokenize(b["problem"])
+    if not prob_a or not prob_b:
+        # Problems too short to tokenize — compare raw text instead of
+        # letting jaccard(∅, ∅) report a perfect match.
+        if a["problem"].strip() != b["problem"].strip():
+            return False
+    elif jaccard(prob_a, prob_b) < threshold:
         return False
-    ans_a = " ".join(str(a.get(k, "")) for k in ("solution", "rule"))
-    ans_b = " ".join(str(b.get(k, "")) for k in ("solution", "rule"))
+    ans_a = " ".join(str(a.get(k, "")) for k in ("solution", "rule")).strip()
+    ans_b = " ".join(str(b.get(k, "")) for k in ("solution", "rule")).strip()
+    # An unanswered pattern has no answer to establish equivalence with —
+    # jaccard(∅, ∅) would return 1.0 and merge them on problem alone.
+    if not ans_a or not ans_b:
+        return False
     return jaccard(tokenize(ans_a), tokenize(ans_b)) >= threshold
 
 
