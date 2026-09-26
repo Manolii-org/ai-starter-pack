@@ -18,6 +18,7 @@ the fixes:
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import sys
@@ -41,6 +42,12 @@ def _load_judge_module():
 rj = _load_judge_module()
 
 SHA = "1f9133dd479dad162586b0c43cf59656a613173d"
+
+# The fixture sets no PR_TITLE/PR_BODY, so the judge's meta_digest is the hash of
+# the empty title+body pair. Embed this marker in reviews that represent a
+# verdict for the current metadata; omit it to model a stale or marker-only review.
+JUDGE_META = hashlib.sha256("\0".encode()).hexdigest()[:12]
+MARKED = f"{rj.REVIEW_MARKER}\n<!-- meta:{JUDGE_META} -->"
 
 
 class _FakeResponse:
@@ -83,7 +90,7 @@ def judge(monkeypatch):
 def test_finds_the_verdict_stranded_on_page_two(judge, monkeypatch):
     """The #3397 bug: unpaginated, page 2 is never fetched and a duplicate is posted."""
     page_one = [_review(rj.REVIEW_MARKER, commit_id="other")] * rj._REVIEWS_PER_PAGE
-    page_two = [_review(rj.REVIEW_MARKER + "\n## PR Assessment Review")]
+    page_two = [_review(MARKED + "\n## PR Assessment Review")]
     monkeypatch.setattr(rj.urllib.request, "urlopen", _paged([page_one, page_two]))
     assert judge._review_exists_at_sha() is True, "page 2 was never fetched"
 
@@ -101,9 +108,26 @@ def test_ignores_a_review_forged_by_another_author(judge, monkeypatch):
 
 def test_still_matches_a_genuine_judge_review(judge, monkeypatch):
     """The author filter must not break the idempotency it is guarding."""
-    page = [_review(rj.REVIEW_MARKER + "\n## PR Assessment Review")]
+    page = [_review(MARKED + "\n## PR Assessment Review")]
     monkeypatch.setattr(rj.urllib.request, "urlopen", _paged([page]))
     assert judge._review_exists_at_sha() is True
+
+
+def test_marker_only_review_does_not_suppress(judge, monkeypatch):
+    """A pre-meta-marker review carries no metadata digest, so it cannot prove the
+    assessment is current — the judge must repost rather than stay silent."""
+    page = [_review(rj.REVIEW_MARKER + "\n## PR Assessment Review")]
+    monkeypatch.setattr(rj.urllib.request, "urlopen", _paged([page]))
+    assert judge._review_exists_at_sha() is False
+
+
+def test_latest_review_decides_aba(judge, monkeypatch):
+    """A→B→A: metadata returns to A after B was assessed. The old A review must not
+    suppress a fresh verdict — only the LATEST judge review's digest counts."""
+    old_a = _review(MARKED + "\n## PR Assessment Review")
+    newer_b = _review(f"{rj.REVIEW_MARKER}\n<!-- meta:otherdigest1 -->")
+    monkeypatch.setattr(rj.urllib.request, "urlopen", _paged([[old_a, newer_b]]))
+    assert judge._review_exists_at_sha() is False, "stale A review suppressed the re-run"
 
 
 def test_ignores_a_review_on_a_different_sha(judge, monkeypatch):
