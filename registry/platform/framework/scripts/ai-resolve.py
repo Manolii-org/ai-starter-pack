@@ -1258,9 +1258,40 @@ def _flock_bad_value(opt: bytes, val: bytes) -> bool:
     """The operand check itself — `opt` is the resolved option name.
     `-c`/`--command` binds a command string, which is never 'bad'."""
     if opt in (b"-w", b"--timeout"):
-        return re.fullmatch(
-            rb"[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?",
-            val) is None
+        # util-linux runs the operand through its strtold wrapper —
+        # LEADING whitespace, decimal and `0x` hex floats, and the
+        # `inf`/`infinity`/`nan` literals all parse (` 1`, `0x1p2`
+        # reach the wrapped command), while trailing junk aborts
+        # "invalid timeout value" (`5x`, `1 `, `0x`, `1e` — Devin +
+        # CodeRabbit on #132, round-70 review — verified live).
+        if re.fullmatch(
+                rb"\s*[+-]?(?:"
+                rb"(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?"
+                rb"|0[xX](?:[0-9a-fA-F]+\.?[0-9a-fA-F]*|\."
+                rb"[0-9a-fA-F]+)(?:[pP][+-]?[0-9]+)?"
+                rb"|[iI][nN][fF](?:[iI][nN][iI][tT][yY])?"
+                rb"|[nN][aA][nN](?:\([A-Za-z0-9_]*\))?)",
+                val) is None:
+            return True             # "invalid timeout value"
+        text = val.lstrip()
+        if re.match(rb"[+-]?[iI][nN][fF]|[+-]?[nN][aA][nN]", text):
+            # `inf`/`nan` parse but can't arm a timer — "cannot set
+            # up timer" abort (verified live).
+            return True
+        try:
+            num = (float.fromhex(text.decode())
+                   if re.match(rb"[+-]?0[xX]", text)
+                   else float(text.decode()))
+        except ValueError:
+            return True
+        if num == 0.0:
+            return False            # `-0`/`+0` arm an instant timer
+        # A NEGATIVE-nonzero duration (`-1`, `-.5`) or a magnitude
+        # past the deadline arithmetic (~INT64_MAX seconds; `1e999`
+        # parses to inf, `9223372036854775807` overflows `now + w`)
+        # aborts "cannot set up timer" — the wrapped command never
+        # runs (round-70, verified live).
+        return num < 0.0 or num > 9.2e18
     if opt in (b"-E", b"--conflict-exit-code"):
         num = re.fullmatch(rb"([+-]?)([0-9]+)", val)
         if num is None:
@@ -2650,7 +2681,14 @@ _WRAPPER_DESCRIBE = {b"command": frozenset({b"-v", b"-V"}),
                     b"sudo": frozenset({b"-l", b"--list",
                                         b"-v", b"--validate",
                                         b"-e", b"--edit",
-                                        b"-V", b"--version"}),
+                                        b"-V", b"--version",
+                                        # `-K`/`--remove-timestamp`
+                                        # is terminal: a usage
+                                        # error before any command
+                                        # (sudo 1.9.9 — verified
+                                        # live, round-70).
+                                        b"-K",
+                                        b"--remove-timestamp"}),
                     b"exec": frozenset({b"--help"}),
                     b"setsid": frozenset({b"-h", b"--help",
                                           b"-V", b"--version"}),
@@ -2747,9 +2785,15 @@ _WRAPPER_FLAGS = {
                         b"-E",
                         b"-H", b"--set-home",
                         b"-i", b"--login",
-                        b"-K", b"--remove-timestamp",
+                        # `-K`/`--remove-timestamp` is a TERMINAL
+                        # mode like `-v` — `sudo -K sh x` prints
+                        # usage and runs nothing (sudo 1.9.9 — Devin
+                        # on #132, round-70 review — verified live).
+                        # `-L` is not a sudo option at all in 1.9.9
+                        # — "invalid option" abort (verified live).
+                        # `-k` (reset the timestamp) still RUNS the
+                        # command — stays a flag.
                         b"-k", b"--reset-timestamp",
-                        b"-L",
                         b"-n", b"--non-interactive",
                         b"-P", b"--preserve-groups",
                         b"-S", b"--stdin",
@@ -2912,6 +2956,13 @@ def _wrapper_bad_value(key: bytes, opt: bytes, val: bytes) -> bool:
                                b"none")
         if opt in (b"-n", b"--classdata"):
             return re.fullmatch(rb"[+-]?[0-9]+", val) is None
+    if key == b"sudo" and opt in (b"-C", b"--close-from"):
+        # `-C`/`--close-from` must be a number ≥3 — `-C 2`, `-C0`,
+        # `-C x`, `--close-from=2` abort "must be a number >= 3"
+        # before the command runs (sudo 1.9.9 — Devin on #132,
+        # round-70 review — verified live).
+        return (re.fullmatch(rb"[0-9]+", val) is None
+                or int(val) < 3)
     return False
 
 
@@ -5124,7 +5175,9 @@ def _argv_index(words: list, src: bytes, start: int, wi: int):
 _SUDO_SHELL_FLAGS = frozenset({b"-s", b"--shell", b"-i", b"--login"})
 # sudo short letters that bind an operand — in a cluster they swallow
 # the REST of the word (`-us` is `-u s`, not shell mode).
-_SUDO_OPERAND_LETTERS = frozenset(b"ughrtDRpUT")
+# (`-C`/`--close-from` binds one too — `-Cs` is `-C s`, not shell
+# mode — CodeRabbit on #1961, round-70 review).
+_SUDO_OPERAND_LETTERS = frozenset(b"ughrtDRpUTC")
 
 
 def _tail_owner(words: list, win: bytes, head: int):
@@ -10947,10 +11000,46 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                                             != _operand_text(sinp)):
                                         return False
                                     if _sf is not None:
-                                        # `--filter` runs its CMD on
-                                        # each chunk — the input's
-                                        # bytes execute outright.
-                                        return True
+                                        # `--filter` feeds each
+                                        # chunk to CMD's stdin —
+                                        # classify what CMD does
+                                        # with them like the
+                                        # unwrapped scan: `sh` (and
+                                        # `cat | sh`, `$(…)` heads)
+                                        # EXECUTE the bytes, a
+                                        # forwarder (`cat`, `head
+                                        # -n 1`) re-emits them to
+                                        # split's stdout where the
+                                        # downstream pipe decides,
+                                        # and `true`/`wc`/`cat >
+                                        # chunk` drop or store them
+                                        # (Devin + CodeRabbit on
+                                        # #132/#1428/#1961/#16,
+                                        # round-70 review — verified
+                                        # live).
+                                        fparts = _sf.split(None, 1)
+                                        ftok = (fparts[0]
+                                                if fparts else b"")
+                                        v3 = ("exec" if (b"$" in ftok
+                                                         or b"`"
+                                                         in ftok)
+                                              else _sub_flow(_sf))
+                                        if not ftok:
+                                            v3 = "none"
+                                        if v3 != "exec":
+                                            frole = \
+                                                _filter_script_role(
+                                                    _sf)
+                                            if frole == "exec":
+                                                v3 = "exec"
+                                            elif frole == "emit":
+                                                v3 = "fwd"
+                                        if v3 == "exec":
+                                            return True
+                                        if v3 != "fwd":
+                                            return False
+                                        return _pipe_to_exec(
+                                            scan, cs + len(enclosing))
                                     if not st:
                                         return False
                                     return _pipe_to_exec(

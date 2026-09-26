@@ -13346,11 +13346,14 @@ def test_script_dep_round69_wrapper_operands_and_wrapped_readers(tmp_path):
             b"xargs head -n 0 scripts/x.sh | sh",
             b"xargs split scripts/x.sh | sh",
             b"flock /tmp/L split /dev/null scripts/x.sh | sh",
-            b"sudo -sx scripts/x.sh"):
+            b"sudo -sx scripts/x.sh",
+            # Round-70 verified `-K` terminal and `-w -1` a
+            # timer-setup abort — the command never runs.
+            b"sudo -Kns sh scripts/x.sh",
+            b"flock -w -1 /tmp/L sh scripts/x.sh"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
     for line in (
             b"sudo -s sh scripts/x.sh",
-            b"sudo -Kns sh scripts/x.sh",
             b"sudo -E sh scripts/x.sh",
             b"sudo -u root sh scripts/x.sh",
             b"sudo -C 3 sh scripts/x.sh",
@@ -13360,7 +13363,6 @@ def test_script_dep_round69_wrapper_operands_and_wrapped_readers(tmp_path):
             b"flock -w 0.5 /tmp/L sh scripts/x.sh",
             b"flock -w .5 /tmp/L sh scripts/x.sh",
             b"flock -w 1e2 /tmp/L sh scripts/x.sh",
-            b"flock -w -1 /tmp/L sh scripts/x.sh",
             b"flock -E 5 /tmp/L sh scripts/x.sh",
             b"flock -E 0 /tmp/L sh scripts/x.sh",
             b"flock --timeout=2 /tmp/L sh scripts/x.sh",
@@ -13371,4 +13373,92 @@ def test_script_dep_round69_wrapper_operands_and_wrapped_readers(tmp_path):
             b"xargs split -n r/1/1 scripts/x.sh | sh",
             b"xargs split --filter=sh scripts/x.sh",
             b"xargs split --filter=sh scripts/x.sh | wc"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round70_flock_strtold_sudo_close_from_filter(tmp_path):
+    """Round-70 review fixes — all verified against live
+    bash/sudo-1.9.9/util-linux:
+
+    - `flock -w`/`--timeout` follows the strtold grammar: leading
+      whitespace, decimal and `0x` hex floats, and `inf`/`infinity`/
+      `nan` literals all PARSE (` 1`, `0x1p2` run the command) while
+      trailing junk aborts "invalid timeout value" (`5x`, `1 `,
+      `0x`, `1e`). A parseable value still aborts the timer when it
+      is `inf`/`nan`, a negative nonzero (`-1`, `-.5`), or past the
+      deadline arithmetic (`1e999`, `9223372036854775807`) — "cannot
+      set up timer" (exit 71).
+    - `sudo -C`/`--close-from` requires a number ≥3 — `-C 2`, `-C0`,
+      `-C x`, `--close-from=2` abort "must be a number >= 3".
+    - `sudo -K`/`--remove-timestamp` is a TERMINAL timestamp mode
+      (usage error before any command, like `-v`); `-L` is not a
+      sudo option in 1.9.9 ("invalid option" abort). `-k` still
+      runs.
+    - `_SUDO_OPERAND_LETTERS` gains `C` — `-Cs` is `-C s` (bad
+      operand abort), not shell mode.
+    - A WRAPPED `split --filter` no longer counts the input
+      positional outright: the filter gets the chunk's bytes on its
+      stdin — `sh`/`cat | sh`/`$(…)` heads execute them, `cat`/`head
+      -n 1` re-emit them to split's stdout (the downstream pipe
+      decides), and `true`/`wc`/`cat > chunk` drop or store them —
+      the input never runs (verified live).
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo X\n")
+    for line in (
+            b"flock -w '1 ' /tmp/L sh scripts/x.sh",
+            b"flock -w '1.5x' /tmp/L sh scripts/x.sh",
+            b"flock -w 0x /tmp/L sh scripts/x.sh",
+            b"flock -w 0xg /tmp/L sh scripts/x.sh",
+            b"flock -w 1e /tmp/L sh scripts/x.sh",
+            b"flock -w e5 /tmp/L sh scripts/x.sh",
+            b"flock -w . /tmp/L sh scripts/x.sh",
+            b"flock -w inf /tmp/L sh scripts/x.sh",
+            b"flock -w INFINITY /tmp/L sh scripts/x.sh",
+            b"flock -w nan /tmp/L sh scripts/x.sh",
+            b"flock -w 'nan(abc)' /tmp/L sh scripts/x.sh",
+            b"flock -w -inf /tmp/L sh scripts/x.sh",
+            b"flock -w 1e999 /tmp/L sh scripts/x.sh",
+            b"flock -w 1e308 /tmp/L sh scripts/x.sh",
+            b"flock -w 9223372036854775807 /tmp/L sh scripts/x.sh",
+            b"flock -w -.5 /tmp/L sh scripts/x.sh",
+            b"sudo -C 2 sh scripts/x.sh",
+            b"sudo -C0 sh scripts/x.sh",
+            b"sudo -C x sh scripts/x.sh",
+            b"sudo --close-from=2 sh scripts/x.sh",
+            b"sudo --close-from x sh scripts/x.sh",
+            b"sudo -K sh scripts/x.sh",
+            b"sudo --remove-timestamp sh scripts/x.sh",
+            b"sudo -L sh scripts/x.sh",
+            b"sudo -Cs sh scripts/x.sh",
+            b"xargs split --filter='cat > /tmp/r70chunk' scripts/x.sh",
+            b"xargs split --filter='cat > /tmp/r70chunk' scripts/x.sh"
+            b" | sh",
+            b"xargs split --filter=true scripts/x.sh",
+            b"xargs split --filter=true scripts/x.sh | sh",
+            b"xargs split --filter=wc scripts/x.sh | sh",
+            b"xargs split --filter=' ' scripts/x.sh | sh",
+            b"xargs split --filter='cat' scripts/x.sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b"flock -w ' 1' /tmp/L sh scripts/x.sh",
+            b"flock -w 0x1p2 /tmp/L sh scripts/x.sh",
+            b"flock -w 0x5 /tmp/L sh scripts/x.sh",
+            b"flock -w 0x1.8p1 /tmp/L sh scripts/x.sh",
+            b"flock -w 0x1p-2 /tmp/L sh scripts/x.sh",
+            b"flock -w -0 /tmp/L sh scripts/x.sh",
+            b"flock -w +0 /tmp/L sh scripts/x.sh",
+            b"flock -w 1e18 /tmp/L sh scripts/x.sh",
+            b"flock -w 9223372036854 /tmp/L sh scripts/x.sh",
+            b"sudo -k sh scripts/x.sh",
+            b"sudo -C 3 sh scripts/x.sh",
+            b"sudo --close-from=3 sh scripts/x.sh",
+            b"sudo -s sh scripts/x.sh",
+            b"xargs split --filter=sh scripts/x.sh",
+            b"xargs split --filter='cat | sh' scripts/x.sh",
+            b"xargs split --filter='$(printf sh)' scripts/x.sh",
+            b"xargs split --filter=cat scripts/x.sh | sh",
+            b"xargs split --filter='head -n 1' scripts/x.sh | sh"):
         assert mod.script_dep_block(pdir, line + b"\n"), line
