@@ -13826,3 +13826,54 @@ def test_script_dep_round77_strtold_zero_mantissa(tmp_path):
             b"flock -w 1e-9999 f sh scripts/x.sh",
             b"flock -w 0x1p-99999 f sh scripts/x.sh"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round78_group_emit_pipe(tmp_path):
+    """A group sibling EMITTING a command text (`echo bash x`) is
+    dep-carrying through the group pipe just like the non-group
+    `echo bash x | sh` stream — the emitted-word gate decides
+    bare-vs-invocation downstream (Devin on #1431/#1963/#17,
+    round-78 — verified live)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    (pdir / "scripts" / "y.sh").write_bytes(b"x")
+    for line in (
+            b"(echo bash scripts/x.sh; true) | sh",
+            b"(echo bash scripts/x.sh >&2; true) |& sh",
+            b"{ echo bash scripts/x.sh; cat scripts/y.sh >f; } | sh",
+            # `)` followed by `;` closed an inner sibling — the
+            # outer statement keeps scanning for the group pipe.
+            b"((cat scripts/x.sh >&2; true); true) |& sh",
+            b"((cat scripts/x.sh; t); t) | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # Bare emitted path stays out of scope (round-16
+            # convention), group or not.
+            b"(echo scripts/x.sh; true) | sh",
+            b"(echo scripts/x.sh >&2; true) |& sh",
+            # `)` `;` ended the group — the pipe belongs to `t`.
+            b"(cat scripts/x.sh); t | sh",
+            b"(cat scripts/x.sh >&2); t |& sh",
+            b"echo scripts/x.sh; (t) | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round78_strtold_mantissa_digits(tmp_path):
+    """`float(mant)` underflows nonzero mantissas past binary64's
+    range — `0.`+400 zeros+`1` is nonzero so flock rejects `1e-4540`
+    as ERANGE and the -c never runs (CodeRabbit/Devin on
+    #1963/#133/#1431/#17, round-78 — verified live)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    tiny = "0." + "0" * 400 + "1e-4540"
+    assert not mod.script_dep_block(
+        pdir, f"flock -w {tiny} f sh scripts/x.sh\n".encode())
+    # Mantissa-zero spellings still execute regardless of exponent.
+    for line in (
+            b"flock -w 0e-20001 f sh scripts/x.sh",
+            b"flock -w 0.000e+99999 f sh scripts/x.sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line

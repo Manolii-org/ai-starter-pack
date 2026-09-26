@@ -4070,7 +4070,13 @@ def _strtold_fraction(text: bytes):
         else:
             e_ = re.search(r"[eE]([+-]?[0-9]+)$", t2)
             mant = (e_ is not None and t2[:e_.start()] or t2)
-            if not float(mant.rstrip(".")):
+            if not re.search(r"[1-9]", mant):
+                # A decimal mantissa is zero iff every digit is 0 —
+                # `float(mant)` would underflow to 0.0 for nonzero
+                # values below binary64's range (`0.`+400 zeros+`1`
+                # — CodeRabbit/Devin on #1963/#133/#1431/#17,
+                # round-78 review — flock rejects it as ERANGE,
+                # verified live).
                 return Fraction(0)    # `0e±N`/`0.0e±N` is zero
             if e_ is not None:
                 de = int(e_.group(1))
@@ -7923,6 +7929,12 @@ def _group_pipe(src: bytes, start: int) -> int:
             if src[j:j + 1] in (b")", b"}"):
                 i = j
                 continue            # inner closer — keep scanning
+            if src[j:j + 1] in (b";", b"&", b"\n"):
+                # The `)` closed an INNER sibling — the outer
+                # statement continues (`((cat x >&2; t); t) |&` —
+                # Devin on #133, round-78 — verified live).
+                i = j
+                continue
             return -1
         elif c == b"|" or (c == b"&" and src[i + 1:i + 2] == b"&"):
             break
@@ -7989,6 +8001,14 @@ def _pipe_to_exec(src: bytes, pos: int, od_tails=frozenset()) -> bool:
             # `>&2` still lands on the merged stream (Devin on
             # #132/#1428/#1961/#16, round-76/77 — verified live).
             prov, flow_src, _gop = gprov
+            if prov == "own" and flow_src is not None:
+                # A sibling EMITS text naming a script (`echo bash
+                # x`) — dep-carrying exactly like the non-group
+                # `echo bash x | sh` stream; the exec stage + the
+                # emitted-word gate decide bare-vs-invocation
+                # downstream (Devin on #1431/#1963/#17, round-78 —
+                # verified live).
+                prov = "up"
         elif _stdout_redirected(src[s0:pos].lstrip(b" \t({")):
             # A `>`/`&>` on the feeding segment diverts its fd1
             # whatever the head — `xargs cat x >/dev/null | sh` and
@@ -11874,18 +11894,25 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                             wa2, wb2 = cur, wb2
                     wseg = enclosing[wa2:wb2]
                     wfd = _seg_head_args(wseg, {})[2].get(1)
+                    # The word's window may end mid-compound — the
+                    # pipe that matters is the GROUP's, past `)`/`}`
+                    # (`(echo bash x >&2; t) |&` — Devin on #133,
+                    # round-78 — verified live).
+                    p2 = _group_pipe(scan, cs + len(enclosing))
                     if wfd not in (None, _FD_OUT):
-                        p2 = cs + len(enclosing)
                         gp = (_group_fd1_prov(
                             scan, p2,
                             scan[p2 + 1:p2 + 2] == b"&")
-                            if scan[p2:p2 + 1] == b"|" else None)
+                            if p2 >= 0
+                            and scan[p2 + 1:p2 + 2] == b"&" else None)
                         if (wfd != _FD_ERR
+                                or p2 < 0
                                 or scan[p2 + 1:p2 + 2] != b"&"
                                 or gp is None
                                 or gp[2] > cs + wa2):
                             return False
-                    return _pipe_to_exec(scan, cs + len(enclosing))
+                    return _pipe_to_exec(
+                        scan, p2 if p2 >= 0 else cs + len(enclosing))
                 return True
             # A glued non-`-d` short-option operand whose tail is a script
             # IS the invocation (`node -rscripts/preload.js`) — the same
