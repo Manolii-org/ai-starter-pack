@@ -13153,3 +13153,83 @@ def test_script_dep_round66_sudo_shell_xargs_abort_interp(tmp_path):
             b"bash scripts/x.sh",
             b"cat scripts/x.sh | sh"):
         assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round67_opt_operands_wrapper_values(tmp_path):
+    """Round-67 shell-semantics fixes — all verified live on bash/dash
+    and real util-linux/python tools:
+
+    - Shell `-o`/`-O` bind option NAMES, never program text — a name
+      that can't be one (`bash -o x.sh`, `dash -o ./f`) aborts the
+      whole command before any program (Codex on #130). Invented
+      identifier-shaped names stay over-blocked by design (the
+      union-of-versions direction).
+    - `-o` operands bind following words in cluster order; `-c`'s
+      operand is the first NON-OPTION word after option parsing — it
+      binds LAST even when `c` precedes `o` (`bash -co X n` gives
+      o→X (abort), c→n).
+    - `python3 -X`/`-W` consume a following operand word — any value
+      warns-or-runs (`python3 -X bogus x` still runs x); a missing
+      operand aborts. `--check-hash-based-pycs` aborts on values
+      outside {default,always,never} (glued or separate).
+    - `xargs -n <5000 digits>` still runs (the count saturates) —
+      the operand check must not call int() on unbounded digits.
+    - Wrapper operand VALUES that abort before the wrapped program:
+      `nice -n 5.5` ("invalid adjustment"), `ionice -c -5`
+      ("unknown scheduling class"), `ionice -n x` ("invalid class
+      data argument"). Values that parse but fail at the syscall
+      (`nice -n -5` unprivileged, `ionice -n -1`) still count.
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo X\n")
+    (pdir / "scripts" / "y.sh").write_bytes(b"echo Y\n")
+    (pdir / "scripts" / "x.py").write_bytes(b"print(1)\n")
+    for line in (
+            b"bash -o scripts/x.sh",
+            b"bash -O scripts/x.sh",
+            b"dash -o scripts/x.sh",
+            b"bash -o scripts/x.sh -c p",
+            b"bash -o ./scripts/x.sh scripts/y.sh",
+            b"bash -onounset scripts/x.sh",
+            b"bash -co scripts/x.sh nounset",
+            b"bash -oc scripts/x.sh nounset",
+            b"split -n 3 --filter=\"bash -o scripts/x.sh\" /tmp/d",
+            b"python3 -X scripts/x.py",
+            b"python3 --check-hash-based-pycs bogus scripts/x.py",
+            b"python3 --check-hash-based-pycs=bogus scripts/x.py",
+            b"python3 --check-hash-based-pycs scripts/x.py",
+            b"python3 -X dev -V scripts/x.py",
+            b"nice -n5.5 sh -c 'sh scripts/x.sh'",
+            b"nice -n 5.5 sh -c 'sh scripts/x.sh'",
+            b"nice --adjustment=5.5 sh -c 'sh scripts/x.sh'",
+            b"ionice -c -5 sh -c 'sh scripts/x.sh'",
+            b"ionice -c-5 sh -c 'sh scripts/x.sh'",
+            b"ionice -c2 -n x sh -c 'sh scripts/x.sh'",
+            b"xargs -n 000 sh < scripts/x.sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b"bash -o nounset scripts/x.sh",
+            b"bash -O extglob scripts/x.sh",
+            b"bash +o nounset scripts/x.sh",
+            b"dash -o nounset scripts/x.sh",
+            b"bash -o bogus scripts/x.sh",
+            b"bash -co nounset scripts/x.sh",
+            b"bash -oc nounset scripts/x.sh",
+            b"python3 -X dev scripts/x.py",
+            b"python3 -Xdev scripts/x.py",
+            b"python3 -W error scripts/x.py",
+            b"python3 -Wbogus scripts/x.py",
+            b"python3 -X pycache_prefix=/tmp/p scripts/x.py",
+            b"python3 --check-hash-based-pycs default scripts/x.py",
+            b"python3 --check-hash-based-pycs always scripts/x.py",
+            b"python3 -X dev -v scripts/x.py",
+            b"split -n 3 --filter=\"python3 -X dev scripts/x.py\" "
+            b"/tmp/d",
+            b"xargs -n " + b"9" * 5000 + b" sh < scripts/x.sh",
+            b"nice -n5 sh -c 'sh scripts/x.sh'",
+            b"nice -n -5 sh -c 'sh scripts/x.sh'",
+            b"ionice -c0 sh -c 'sh scripts/x.sh'",
+            b"ionice -c2 -n8 sh -c 'sh scripts/x.sh'"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line

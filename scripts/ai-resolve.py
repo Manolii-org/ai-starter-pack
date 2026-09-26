@@ -1171,8 +1171,14 @@ def _xargs_bad_value(opt: bytes, val: bytes) -> bool:
     if opt in (b"-n", b"--max-args", b"-s", b"--max-chars",
                b"-L", b"--max-lines", b"-l"):
         num = re.fullmatch(rb"([+-]?)([0-9]+)", val)
+        # `<1` without int(): the digits are pure [0-9]+, so the value
+        # is 0 exactly when they are all `0` — a digit-COUNT check
+        # skips Python's ~4300-digit int() limit, which would raise
+        # ValueError on `xargs -n <5000 digits>` (the count saturates
+        # and xargs still runs — Devin on #130, round-67 review —
+        # verified live).
         return (num is None or num.group(1) == b"-"
-                or int(num.group(2)) < 1)
+                or not num.group(2).strip(b"0"))
     if opt in (b"-P", b"--max-procs"):
         num = re.fullmatch(rb"([+-]?)([0-9]+)", val)
         return num is None or num.group(1) == b"-"
@@ -2027,8 +2033,13 @@ def _operand_is_program(enc_words: list, wi: int,
     s_seen = False        # a sh-family cluster held `s` — the
                           # program comes from stdin, positionals
                           # are argv
-    o_seen = 0            # shell `o`/`O` cluster letters — each binds
-                          # one following word BEFORE the `-c` operand
+    op_seq = []           # operand letters in argv order — shell `-o`/
+                          # `-O` bind option NAMES (never a program —
+                          # `bash -o x.sh` aborts "invalid option name"
+                          # before opening it, Codex on #130, round-67,
+                          # verified live), `-c` binds program TEXT —
+                          # each consumes one following word (`bash
+                          # -oc n P` gives o→n, c→P — round-62)
     got_prog = False      # sed/awk saw a -e/-f/--program flag — its
                           # positionals are INPUT FILES, not a script
     j = hi + 1
@@ -2048,13 +2059,36 @@ def _operand_is_program(enc_words: list, wi: int,
                 # — CodeRabbit on #128, round-23; `bash -oc n P`
                 # gives o→n, c→P — Codex on #130, round-62 review —
                 # verified live on bash and dash).
-                o_seen += sum(1 for k in range(1, len(t))
+                op_seq.extend(t[k:k + 1] for k in range(1, len(t))
                               if t[k:k + 1] in (b"o", b"O"))
+                # `-o` operands bind each following word in cluster
+                # order; `-c`'s operand is the first NON-OPTION word
+                # AFTER all option parsing — it binds last even when
+                # `c` precedes `o` in the cluster (`bash -co X n`
+                # gives o→X, c→n — round-67, verified live).
+                if b"c" in t[1:]:
+                    op_seq.append(b"c")
                 if b"s" in t[1:]:
                     s_seen = True     # `-s` — program from stdin;
                                       # positionals are argv
                 if b"c" in t[1:]:
                     sh_cmd = True
+            elif t in _INTERP_OPT_OPERAND.get(key, frozenset()):
+                # `-X`/`-W` consume a following operand word — any
+                # value warns-or-runs (`python3 -X bogus x` runs x);
+                # `--check-hash-based-pycs` aborts on a bad value —
+                # round-67, verified live.
+                if j + 1 >= len(enc_words):
+                    return False            # missing operand aborts
+                if j + 1 == wi:
+                    return False            # the operand itself
+                if t == _PYCS_OPT:
+                    v2 = _word_text(enclosing[
+                        enc_words[j + 1][0]:enc_words[j + 1][1]])
+                    if v2 not in _PYCS_VALUES:
+                        return False        # bad pycs value aborts
+                j += 2
+                continue
             elif t in pflags or t in flagops:
                 if j + 1 == wi:
                     return t in pflags
@@ -2141,6 +2175,22 @@ def _operand_is_program(enc_words: list, wi: int,
             j += 1
             continue
         positional += 1
+        if positional <= len(op_seq):
+            # Bound by the positional-th operand letter, in argv order
+            # (`-oc n P` gives o→n, c→P — round-62/67, verified live).
+            bound = op_seq[positional - 1]
+            if j == wi:
+                # `-c`'s operand is program TEXT; `-o`/`-O`'s is an
+                # option NAME — never a script (`bash -o x.sh` errors
+                # "invalid option name" — Codex on #130, round-67).
+                return bound == b"c"
+            if bound in (b"o", b"O") and not _OPT_NAME_WORD.match(t):
+                # An option name that can't be one aborts the command
+                # before the program (`bash -o ./x y`, `dash -o /f x`
+                # — verified live, round-67).
+                return False
+            j += 1
+            continue
         if j == wi:
             # sed/awk's first positional is its PROGRAM (`sed '1e x'`,
             # `awk 'BEGIN{system("x")}'`) — but only when no `-e`/`-f`/
@@ -2154,13 +2204,13 @@ def _operand_is_program(enc_words: list, wi: int,
             # literal filename whose scripts/ bytes are filename
             # fragments (`bash 'x.sh;safe'`, `sh 'bash x.sh'` both open
             # a different name — verified live).
-            return (((sh_cmd or (key in _SH_STDIN_HEADS and not s_seen
-                                 and not sh_cmd
-                                 and enclosing[
-                                     enc_words[wi][0]:
-                                     enc_words[wi][0] + 1]
-                                 not in (b"'", b'"')))
-                     and positional == o_seen + 1)
+            return (((key in _SH_STDIN_HEADS and not s_seen
+                      and not sh_cmd
+                      and enclosing[
+                          enc_words[wi][0]:
+                          enc_words[wi][0] + 1]
+                      not in (b"'", b'"'))
+                     and positional == len(op_seq) + 1)
                     or (key in (b"sed", b"awk", b"gawk", b"mawk", b"nawk")
                         and positional == 1 and not got_prog)
                     or (key == b"ssh" and positional > 1))
@@ -2704,6 +2754,42 @@ def _wrapper_opt_class(key: bytes, t: bytes):
     if strict and t not in flags and t not in oflags:
         return "describe"              # unknown single letter — aborts
     return None
+
+
+def _wrapper_opt_name(key: bytes, t: bytes) -> bytes:
+    """The resolved operand-option name for token `t` — exact or unique
+    long abbreviation, else the first two bytes (`-n`, `-c`)."""
+    if not t.startswith(b"--"):
+        return t[:2]
+    tn = t.split(b"=", 1)[0]
+    pool = _WRAPPER_OPT_OPERAND.get(key, frozenset())
+    if tn in pool:
+        return tn
+    cands = [o for o in pool if o.startswith(tn)]
+    return cands[0] if len(cands) == 1 else tn
+
+
+def _wrapper_bad_value(key: bytes, opt: bytes, val: bytes) -> bool:
+    """True when a wrapper option's operand VALUE makes the whole
+    command abort before the wrapped program runs — `nice -n 5.5`
+    ("invalid adjustment"), `nice --adjustment=5.5`, `ionice -c -5`
+    ("unknown scheduling class"), `ionice -n x` ("invalid class
+    data argument") — all verified live, round-67. Numeric operands
+    that PARSE but fail at the syscall (`nice -n -5` unprivileged,
+    `ionice -n -1`, `ionice -c 1`) still count as runs — the
+    resolver models reachability, not the kernel's verdict."""
+    if key == b"nice" and opt in (b"-n", b"--adjustment"):
+        return re.fullmatch(rb"[+-]?[0-9]+", val) is None
+    if key == b"ionice":
+        if opt in (b"-c", b"--class"):
+            return val not in (b"0", b"1", b"2", b"3",
+                               b"idle", b"best-effort", b"realtime",
+                               b"none")
+        if opt in (b"-n", b"--classdata"):
+            return re.fullmatch(rb"[+-]?[0-9]+", val) is None
+    return False
+
+
 # Heads whose output provably does NOT carry the input stream — a pipe
 # into one ends the chain without executing anything downstream: `cat x
 # | wc -l | sh` feeds sh a line count, not the script (Devin on #123).
@@ -3238,8 +3324,22 @@ def _effective_head(words: list, win: bytes) -> int | None:
                             # runs (Codex on #1393, round-65 review —
                             # verified live).
                             return -1
+                        if _wrapper_bad_value(
+                                key, _wrapper_opt_name(key, t),
+                                _operand_text(_na)):
+                            # A bad operand value aborts before the
+                            # wrapped program (`nice -n 5.5 sh`,
+                            # `ionice -c -5 sh` — round-67, verified
+                            # live).
+                            return -1
                         i += 2
                     else:
+                        if (cls == "operand_glued"
+                                and _wrapper_bad_value(
+                                    key, _wrapper_opt_name(key, t),
+                                    t.split(b"=", 1)[1]
+                                    if b"=" in t else t[2:])):
+                            return -1
                         i += 1
                     continue
                 if pos_skip:
@@ -3843,6 +3943,20 @@ _INTERP_OPT_OPERAND = {
     b"python": frozenset({b"-X", b"-W", b"--check-hash-based-pycs"}),
     b"python3": frozenset({b"-X", b"-W", b"--check-hash-based-pycs"}),
 }
+# `--check-hash-based-pycs` is the odd one out: a bad -X/-W value only
+# warns and the program still runs (`python3 -X bogus x` runs x —
+# verified live, round-67), while a bad pycs value exits with a usage
+# error before any program (`--check-hash-based-pycs bogus` — verified
+# live).
+_PYCS_OPT = b"--check-hash-based-pycs"
+_PYCS_VALUES = frozenset({b"default", b"always", b"never"})
+# Shell `-o`/`-O` operands are option/shopt NAMES — a word that cannot
+# be a name (`/`, `.`, `=`, empty, leading digit/uppercase) makes the
+# command abort "invalid option name" before any program (`bash -o
+# scripts/x.sh`, `dash -o /tmp/x.sh` — Codex on #130, round-67 review,
+# verified live). Identifier-shaped-but-unknown names stay
+# over-blocked (union of shells' name sets, fail-closed).
+_OPT_NAME_WORD = re.compile(rb"[a-z][a-z0-9_-]*\Z")
 
 
 def _interp_program_end(head: bytes, filt: bytes, start: int,
@@ -3945,11 +4059,58 @@ def _interp_program_end(head: bytes, filt: bytes, start: int,
                 # `python3 --version x` — Codex on #130, round-65
                 # review — verified live).
                 return mstart
+            if b"--" + lname in _INTERP_OPT_OPERAND.get(
+                    head, frozenset()):
+                # `--check-hash-based-pycs` binds an operand — glued
+                # `=value` or the next word — and a bad value exits
+                # with a usage error before any program (round-67 —
+                # verified live).
+                if b"=" in t:
+                    v = t.split(b"=", 1)[1]
+                    pos = wend
+                else:
+                    pos = wend
+                    while (pos < n
+                           and filt[pos:pos + 1] in (b" ", b"\t")):
+                        pos += 1
+                    if pos >= n:
+                        return mstart      # missing operand aborts
+                    ve = pos
+                    while (ve < n
+                           and filt[ve:ve + 1]
+                           not in (b" ", b"\t", b"\n", b"|", b"&",
+                                   b";", b"`")):
+                        ve += 1
+                    v = filt[pos:ve]
+                    pos = ve
+                if v not in _PYCS_VALUES:
+                    return mstart          # bad pycs value aborts
+                continue
             if lname in longs:
                 if b"=" in t:
                     return wend    # `--eval=CODE` — program inside
                 break              # next word is the program
             pos = wend
+            continue
+        if t in _INTERP_OPT_OPERAND.get(head, frozenset()):
+            # `-X`/`-W` bind a following operand word — any value
+            # warns-or-runs (`python3 -X bogus x` still runs x —
+            # verified live, round-67), so the operand is skipped
+            # without aborting; a missing operand aborts.
+            pos = wend
+            while pos < n and filt[pos:pos + 1] in (b" ", b"\t"):
+                pos += 1
+            if pos >= n:
+                return mstart
+            if filt[pos:pos + 1] in (b"'", b'"'):
+                e = filt.find(filt[pos:pos + 1], pos + 1)
+                pos = e + 1 if e >= 0 else n
+            else:
+                while (pos < n
+                       and filt[pos:pos + 1]
+                       not in (b" ", b"\t", b"\n", b"|", b"&",
+                               b";", b"`")):
+                    pos += 1
             continue
         o_ops = 0
         prog_flag = False
@@ -3993,20 +4154,32 @@ def _interp_program_end(head: bytes, filt: bytes, start: int,
         pos = wend
         for _ in range(o_ops):
             # Each `o`/`O` consumes one following word, bound in argv
-            # order BEFORE the program flag's word.
+            # order BEFORE the program flag's word — and an operand
+            # that can't be an option name aborts the shell before
+            # any program (`bash -o x.sh y` errors "invalid option
+            # name" — round-67, verified live on bash and dash).
             while pos < n and filt[pos:pos + 1] in (b" ", b"\t"):
                 pos += 1
             if pos >= n:
                 break
+            oend = pos
             if filt[pos:pos + 1] in (b"'", b'"'):
                 e = filt.find(filt[pos:pos + 1], pos + 1)
-                pos = e + 1 if e >= 0 else n
+                oend = e + 1 if e >= 0 else n
             else:
-                while (pos < n
-                       and filt[pos:pos + 1]
+                while (oend < n
+                       and filt[oend:oend + 1]
                        not in (b" ", b"\t", b"\n", b"|", b"&",
                                b";", b"`")):
-                    pos += 1
+                    oend += 1
+            ot = filt[pos:oend]
+            if (len(ot) > 2
+                    and ot[:1] in (b"'", b'"')
+                    and ot[-1:] == ot[:1]):
+                ot = ot[1:-1]
+            if not _OPT_NAME_WORD.match(ot):
+                return mstart          # invalid option name aborts
+            pos = oend
         if not prog_flag:
             continue
         # A program flag's operand is the NEXT word — find its end.
@@ -4669,11 +4842,19 @@ def _sh_positional_ok(words, hi, wi, src):
             continue
         w = _operand_text(a)
         if opt_pend:
+            # The operand word of `-X`/`-W`/`--check-hash-based-pycs`
+            # — consumed, never the program. A bad pycs value aborts
+            # the whole interpreter (`--check-hash-based-pycs bogus`
+            # exits with usage — round-67, verified live); bad -X/-W
+            # values only warn and still run.
+            pend_opt = opt_pend
             opt_pend = False
+            if pend_opt == _PYCS_OPT and w not in _PYCS_VALUES:
+                return False
             i += 1
             continue
         if w in _INTERP_OPT_OPERAND.get(head, frozenset()):
-            opt_pend = True
+            opt_pend = _PYCS_OPT if w == _PYCS_OPT else True
             i += 1
             continue
         if prog_file or flag_prog:
@@ -4691,28 +4872,50 @@ def _sh_positional_ok(words, hi, wi, src):
             lname = w[2:].split(b"=", 1)[0]
             if lname in _INTERP_TERM_LONG.get(head, frozenset()):
                 return False
+            if (b"--" + lname == _PYCS_OPT and b"=" in w
+                    and w.split(b"=", 1)[1] not in _PYCS_VALUES):
+                return False            # bad pycs value aborts
         elif w.startswith(b"-") and w != b"-":
             cluster = w[1:]
-            eats = False
+            ops = []                # operand letters in bind order —
+                                    # `-o`/`-O` each take the next word
+                                    # in cluster order; `-c`'s operand
+                                    # is the first non-option word —
+                                    # it binds LAST even when `c` leads
+                                    # (`bash -co X n` gives o→X, c→n —
+                                    # round-67, verified live)
             for cb in cluster:
                 c = bytes([cb])
                 if c in _INTERP_TERM_SHORT.get(head, b""):
                     return False
                 if c == b"s":
                     flag_prog = True
-                if c in (b"c", b"o", b"O"):
-                    eats = True
-            if eats and i + 1 == wi:
-                # Our word IS the flag's operand — `-c PROG` /
-                # `-o NAME` binds it, it isn't argv.
-                return True
-            i += 2 if eats else 1
+                if c in (b"o", b"O"):
+                    ops.append(c)
+            if b"c" in cluster:
+                ops.append(b"c")
+            for oi, oc in enumerate(ops):
+                owi = i + 1 + oi
+                if owi == wi:
+                    # The operand word — `-c`'s is program TEXT;
+                    # `-o`/`-O`'s is an option NAME, never a script
+                    # (`bash -o x.sh` errors "invalid option name"
+                    # before opening anything — Codex on #130,
+                    # round-67 review, verified live on bash/dash).
+                    return oc == b"c"
+                if owi >= len(words):
+                    return False    # missing operand aborts
+                t2 = _word_text(src[words[owi][0]:words[owi][1]])
+                if (oc in (b"o", b"O")
+                        and not _OPT_NAME_WORD.match(t2)):
+                    return False    # invalid option name aborts
+            i += 1 + len(ops)
             continue
         else:
             prog_file = True
         i += 1
-    return not flag_prog and not (
-        dd and prog_file and flag_prog)
+    return (not flag_prog and not opt_pend and not (
+        dd and prog_file and flag_prog))
 
 
 def _stdin_rebind_counts(key: bytes, args: list) -> bool:
@@ -10631,6 +10834,30 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                                     j3 += 1
                                     continue
                                 if t3.startswith(b"--"):
+                                    if (t3 == _PYCS_OPT
+                                            or t3.startswith(
+                                                _PYCS_OPT + b"=")):
+                                        # `--check-hash-based-pycs`
+                                        # binds an operand — glued or
+                                        # next word — and a bad value
+                                        # aborts before the program
+                                        # (round-67, verified live).
+                                        if b"=" in t3:
+                                            if (t3.split(b"=", 1)[1]
+                                                    not in _PYCS_VALUES):
+                                                return False
+                                            j3 += 1
+                                            continue
+                                        if j3 + 1 == wi0:
+                                            # our word IS its operand
+                                            return False
+                                        if (_word_text(enclosing[
+                                                enc_words[j3 + 1][0]:
+                                                enc_words[j3 + 1][1]])
+                                                not in _PYCS_VALUES):
+                                            return False
+                                        j3 += 2
+                                        continue
                                     if (t3[2:].split(b"=", 1)[0]
                                             in pf3):
                                         if (b"=" not in t3
@@ -10640,6 +10867,15 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                                             break
                                         return False
                                     j3 += 1
+                                    continue
+                                if t3 in _INTERP_OPT_OPERAND.get(
+                                        wkey, frozenset()):
+                                    # `-X`/`-W` consume a following
+                                    # operand word — it never runs
+                                    # (round-67, verified live).
+                                    if j3 + 1 == wi0:
+                                        return False
+                                    j3 += 2
                                     continue
                                 if t3 in pf3:
                                     if j3 + 1 == wi0:
