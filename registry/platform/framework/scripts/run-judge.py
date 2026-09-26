@@ -685,14 +685,11 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
             logger.info("No findings; skipping GitHub post (no token/repo)")
             return
 
-        # A same-commit rerun that reports clean does not supersede an earlier
-        # judge REQUEST_CHANGES — a COMMENT sits alongside it and the PR keeps
-        # the blocking verdict. Dismiss it (moves it to DISMISSED, which the
-        # dedup scan already ignores) before deciding whether to post.
-        self._dismiss_stale_judge_reviews()
-
         if self._review_exists_at_sha("clean"):
             logger.info("No-findings comment already posted for this SHA — skipping")
+            # The clean verdict is confirmed present — safe to retire any stale
+            # blocking review left over from a same-commit findings run.
+            self._dismiss_stale_judge_reviews()
             return
 
         try:
@@ -737,6 +734,13 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
 
             with urllib.request.urlopen(req, timeout=30):
                 logger.info("No-findings comment posted")
+
+            # A same-commit rerun that reports clean does not supersede an
+            # earlier judge REQUEST_CHANGES — a COMMENT sits alongside it and
+            # the PR keeps the blocking verdict. Dismiss it only after the
+            # replacement clean review is confirmed posted, so a failed POST
+            # never leaves the PR with no verdict at all.
+            self._dismiss_stale_judge_reviews()
 
         except Exception as e:
             logger.warning(f"Failed to post no-findings comment: {e}")
