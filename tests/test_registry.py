@@ -14023,3 +14023,64 @@ def test_script_dep_round81_group_scan_delimiters(tmp_path):
             b'(cat scripts/x.sh >&2; echo ${v:-"}"}) |& sh',
             b'(cat scripts/x.sh >&2; echo ${v:-${w}}) |& sh'):
         assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round82_post_closer_redirects(tmp_path):
+    """Redirects AFTER a `)`/`}` closer apply to the group in order;
+    a `|&` then rebinds fd2 onto fd1's final target. `(...) 2>/dev/null
+    |& sh` still merges stderr into the pipe (the fd2 kill applies
+    before `|&`), while `(...) >/dev/null |&` empties both — all
+    verified live (Devin on #133/#1431, round-82)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (
+            b'(cat scripts/x.sh >&2; true) 2>/dev/null |& sh',
+            b'(cat scripts/x.sh >&2; true) 2>&1 |& sh',
+            # fd2→file only: fd1 still feeds the plain pipe.
+            b'(cat scripts/x.sh; true) 2>/dev/null | sh',
+            b'{ cat scripts/x.sh >&2; true; } 2>/dev/null |& sh'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # fd2→file kills the `|&` merge; fd1 to file kills both.
+            b'(cat scripts/x.sh >&2; true) 2>/dev/null | sh',
+            b'(cat scripts/x.sh >&2; true) >/dev/null |& sh',
+            b'(cat scripts/x.sh >&2; true) &>/dev/null |& sh',
+            b'(cat scripts/x.sh >&2) 2>&1 >/dev/null | sh'):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round82_reader_fd1_divert(tmp_path):
+    """A pure reader's own `>`/`>&-` inside a pipeline group drops its
+    bytes from the merged stream — `(cat x >/dev/null | cat >&2) |&`
+    runs nothing (Devin on #1431, round-82 — verified live). A program
+    operand's dep is unaffected by its head's fd1: `split --filter=sh
+    x > /tmp/out` still runs x's chunks through sh."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (
+            b'(cat scripts/x.sh >/dev/null | cat >&2) |& sh',
+            b'(cat scripts/x.sh >&- | cat >&2) |& sh'):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b'split --filter=sh scripts/x.sh > /tmp/out',
+            b'(cat scripts/x.sh >&2 | cat >/dev/null) |& sh'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round82_brace_group_head(tmp_path):
+    """A bare `{` word splits off before the head (unlike `(`, which
+    glues on) — `{ echo bash x; } | sh` resolves the emitted stream
+    like its `( )` twin (verified live — executes `bash x`)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    (pdir / "scripts" / "y.sh").write_bytes(b"x")
+    for line in (
+            b'{ echo bash scripts/x.sh; } | sh',
+            b'{ echo bash scripts/x.sh; cat scripts/y.sh >f; } | sh'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
