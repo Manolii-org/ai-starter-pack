@@ -11877,11 +11877,11 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                     if wfd not in (None, _FD_OUT):
                         p2 = cs + len(enclosing)
                         gp = (_group_fd1_prov(
-                            src, p2,
-                            src[p2 + 1:p2 + 2] == b"&")
-                            if src[p2:p2 + 1] == b"|" else None)
+                            scan, p2,
+                            scan[p2 + 1:p2 + 2] == b"&")
+                            if scan[p2:p2 + 1] == b"|" else None)
                         if (wfd != _FD_ERR
-                                or src[p2 + 1:p2 + 2] != b"&"
+                                or scan[p2 + 1:p2 + 2] != b"&"
                                 or gp is None
                                 or gp[2] > cs + wa2):
                             return False
