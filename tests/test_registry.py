@@ -14381,3 +14381,71 @@ def test_script_dep_round87_emit_routing_and_transforms(tmp_path):
             # (Devin on #133 — verified live: dead).
             b'(echo "a; sh scripts/x.sh" >&2 |& cat -n) | sh'):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round90_sib_stdin_backtick_nl_pbre_spaced_alias(tmp_path):
+    """Round-90 review — Devin on #133/#1431/#17 (all verified live):
+    `;`/newline/`&&` siblings inside a compound re-read the SAME shared
+    stdin — a chain whose FIRST command drains it (`cat`, `wc`) leaves
+    EOF for the next sibling (`(cat >/dev/null; cat)` provably emits
+    nothing — dead), while a bare `&` races unprovably. Only the chain
+    head reads the shared stdin — later `|` stages read the upstream
+    fd1 (`( cat x | cat; sh )` — `cat x` drains nothing). Backtick
+    bodies are one word's substitution text, so `X=`cat | sh`` is a
+    single `NAME=` assign stage whose captured pipeline still executes
+    the stream (silent but real). `nl -bpBRE` numbers only matching
+    lines — unprovable, so the stream flows. And `2> /dev/stdout` /
+    `&> /dev/stdout` with a SPACED target still dups onto fd1's pipe
+    binding (verified live: RAN_X)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo X\n")
+    for line in (
+            # A non-draining first sibling leaves the shared stdin for
+            # the next — `cat` still forwards it (verified live: RAN_X).
+            b'echo "sh scripts/x.sh" | (cat; true) | sh',
+            b'cat scripts/x.sh | ( cat; true ) | sh',
+            b'echo "sh scripts/x.sh" | (true; cat) | sh',
+            # A bare `&` sibling races the reader — unprovable, so the
+            # stream conservatively flows (verified live).
+            b'echo "sh scripts/x.sh" | (cat >/dev/null & cat) | sh',
+            # The chain HEAD decides draining — `cat x` reads a FILE,
+            # so the `;` sibling still sees the stream (round-74
+            # heredoc variant, verified live: RAN_X).
+            b'sh <<E\n( cat scripts/x.sh | cat; sh )\nE',
+            # Backtick-captured pipeline still runs the stream —
+            # `cat | sh` inside `X=`…`` executes silently (Devin on
+            # #133 — verified live: EXECUTED).
+            b'cat scripts/x.sh | X=`cat | sh`',
+            # `nl -bpBRE` numbers only matching lines — the mode is
+            # unprovable, so the stream flows (Devin on #1431 —
+            # verified live: RAN_X).
+            b'echo "bash scripts/x.sh" | nl -bp"^safe" | sh',
+            # Spaced alias targets still dup onto fd1's binding —
+            # `2> /dev/stdout` keeps the emitted text on the pipe
+            # (Devin on #17 — verified live: RAN_X).
+            b'(echo "sh scripts/x.sh" >&2) 2> /dev/stdout | sh',
+            b'(echo "sh scripts/x.sh" >&2) &> /dev/stdout | sh',
+            # A `cat >&2` last sibling under a post-closer `2>&1`
+            # merge still hands the emitted text to the pipe
+            # (round-84 hold, verified live).
+            b'(echo bash scripts/x.sh | cat >&2) 2>&1 | sh'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # A `;`-drained sibling leaves provable EOF for the next —
+            # the group emits nothing downstream (Devin on #133 —
+            # verified live: dead).
+            b'echo "sh scripts/x.sh" | (cat >/dev/null; cat) | sh',
+            # `&&` drains sequentially like `;` — same EOF.
+            b'echo "sh scripts/x.sh" | (cat >/dev/null && cat) | sh',
+            # Backtick inside single quotes is literal text — no
+            # capture, no exec (verified live: dead).
+            b"cat scripts/x.sh | X='`cat | sh`' | sh",
+            # `nl -ba`/`-bt` number every (non-empty) line — the
+            # prefixed text can't run (verified live: `1` not found).
+            b'echo "bash scripts/x.sh" | nl -ba | sh',
+            b'echo "bash scripts/x.sh" | nl -bt | sh',
+            # A `)` group close whose fd1 is diverted feeds nothing.
+            b'cat scripts/x.sh | (cat; true) > /dev/null | sh'):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
