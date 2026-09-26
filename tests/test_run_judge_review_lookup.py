@@ -43,11 +43,11 @@ rj = _load_judge_module()
 
 SHA = "1f9133dd479dad162586b0c43cf59656a613173d"
 
-# The fixture sets no PR_TITLE/PR_BODY/PR_BASE_SHA, so the judge's meta_digest is
-# the hash of the empty title+body+base_sha triple. Embed this marker in reviews
-# that represent a verdict for the current metadata; omit it to model a stale or
-# marker-only review.
-JUDGE_META = hashlib.sha256("\0\0".encode()).hexdigest()[:12]
+# The fixture sets no PR_TITLE/PR_BODY/PR_BASE_SHA and merge_danger is empty, so
+# the judge's meta_digest is the hash of the empty five-field tuple. Embed this
+# marker in reviews that represent a verdict for the current metadata; omit it to
+# model a stale or marker-only review.
+JUDGE_META = hashlib.sha256("\0\0\0\0".encode()).hexdigest()[:12]
 MARKED = f"{rj.REVIEW_MARKER}\n<!-- meta:{JUDGE_META} -->"
 
 

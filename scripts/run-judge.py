@@ -110,19 +110,25 @@ class Judge:
         self.sha = sha
         self.repo = os.getenv("GITHUB_REPOSITORY", "")
         self.token = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")
+        self.merge_danger = self._load_merge_danger()
         # An `edited` rerun at the same HEAD must publish a fresh verdict: dedup
         # keys on commit + metadata digest so a title/body edit re-posts. The
         # base SHA is part of the key: a base update changes the merge diff the
         # judge evaluated, so the old verdict must not suppress the fresh one.
+        # The classified door/blast verdict is keyed too — a rerun that recovers
+        # from `unknown` to a real verdict must overwrite, not be suppressed.
         meta_src = (
             os.getenv("PR_TITLE", "")
             + "\0"
             + os.getenv("PR_BODY", "")
             + "\0"
             + os.getenv("PR_BASE_SHA", "")
+            + "\0"
+            + str(self.merge_danger.get("door", ""))
+            + "\0"
+            + str(self.merge_danger.get("blast_radius", ""))
         )
         self.meta_digest = hashlib.sha256(meta_src.encode()).hexdigest()[:12]
-        self.merge_danger = self._load_merge_danger()
         self.judge_log_dir = Path(".ai/judge-log")
 
     @staticmethod

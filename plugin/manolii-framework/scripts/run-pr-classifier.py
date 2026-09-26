@@ -236,7 +236,22 @@ def main() -> None:
     truncated = len(diff) > 50000
     diff_block = diff[:50000]
     if truncated:
-        diff_block += "\n[diff truncated — classify danger from the complete path list below]"
+        # Tail coverage: paths alone can't reveal a contract change hiding in a
+        # generically-named file past the cutoff, so append each tail file's
+        # `diff --git` header and `@@` hunk-context lines (angle brackets
+        # stripped — the content is untrusted and must not forge tag bounds).
+        hunk_notes: list[str] = []
+        for line in diff[50000:].splitlines():
+            if line.startswith("diff --git ") or line.startswith("@@"):
+                hunk_notes.append(re.sub(r"[<>`]", "", line)[:200])
+        sampled = "\n".join(hunk_notes)[:8000]
+        if sampled:
+            diff_block += (
+                "\n[diff truncated — classify danger from the complete path list "
+                "plus the tail hunk map below]\n<hunk_map>\n" + sampled + "\n</hunk_map>"
+            )
+        else:
+            diff_block += "\n[diff truncated — classify danger from the complete path list below]"
     # Neutralise the wrapper's own tag names inside untrusted content (diff,
     # path inventory, title/body) so crafted input cannot close the boundary.
     _WRAP_TAGS = ("untrusted_diff", "untrusted_pr_meta", "changed_paths")

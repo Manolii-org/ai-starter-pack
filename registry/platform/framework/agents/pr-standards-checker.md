@@ -24,7 +24,7 @@ Read `.ai/pr-standards.yaml` and validate the current PR diff against each appli
 
 - PR number (required)
 - Diff of changed files (fetch via `gh pr diff <number>` or from pr-resolve context)
-- PR metadata — title, body, and commit list (`gh pr view <n> --json title,body,commits`). Metadata need is per rule, not per section: rules that inspect commit messages or the linked spec (e.g. commit_format, spec_adherence) require it and are reported **unverified** when unavailable, never as passed; diff-evaluable rules (testing, test_coverage, security, modularity) still run from the diff alone
+- PR metadata — title, body, and commit list (`gh pr view <n> --json title,body,commits`; if it fails — `gh pr view` uses GraphQL, which agent web sessions cannot reach — fall back to REST: `gh api repos/{owner}/{repo}/pulls/<n>` for title/body and `gh api repos/{owner}/{repo}/pulls/<n>/commits` for the commit list, or the GitHub MCP equivalents). Metadata need is per rule, not per section: rules that inspect commit messages or the linked spec (e.g. commit_format, spec_adherence) require it and are reported **unverified** only when every supported source fails, never as passed; diff-evaluable rules (testing, test_coverage, security, modularity) still run from the diff alone
 
 ## Process
 

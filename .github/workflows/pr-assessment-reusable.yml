@@ -248,10 +248,13 @@ jobs:
                   headers=headers,
               )
               comments = json.loads(urllib.request.urlopen(req, timeout=30).read())
+              # startswith, not `in` — other workflows share the
+              # github-actions[bot] login; only a body LEADING with our marker
+              # is ours to PATCH.
               existing = next(
                   (
                       c for c in comments
-                      if marker in (c.get("body") or "")
+                      if (c.get("body") or "").startswith(marker)
                       and (c.get("user") or {}).get("login") == "github-actions[bot]"
                   ),
                   None,
