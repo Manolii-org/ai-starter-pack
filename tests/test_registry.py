@@ -14309,3 +14309,75 @@ def test_script_dep_round86_numbered_emit_and_fds(tmp_path):
             # the pipe (verified live).
             b'(cat scripts/x.sh) 1<&2 |& sh'):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round87_emit_routing_and_transforms(tmp_path):
+    """Round-87: emit-byte routing through `|&` stage pipes, post-closer
+    fd replay on compound feeds, `eval`/backtick/exec-ish assign bodies,
+    transforming forwarders (tr/sed/cat -n), spaced `>& N` dups, and
+    provable-emit own→up promotion guards — all verified live (Devin on
+    #133/#1431/#1963, CodeRabbit on #133)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (
+            # A stage `>&2`'d inside an inner `|&` chain routes its
+            # fd2 bytes onto the GROUP's fd2 — reaching the outer pipe
+            # when it merges (verified live: RAN_X under `|&` outer).
+            b'(echo "sh scripts/x.sh" >&2 |& cat -n) |& sh',
+            b'(echo "a; sh scripts/x.sh" >&2 | true) |& cat -n | sh',
+            # Post-closer `2>&1` binds group fd2 to the pipe BEFORE
+            # `>/dev/null` rebinds fd1 — fd2's bytes still flow
+            # (Devin on #1431 — verified live: RAN_X).
+            b'(echo "sh scripts/x.sh" >&2) 2>&1 >/dev/null | sh',
+            b'(echo "x; sh scripts/x.sh" >&2) 2>&1 | cat -n | sh',
+            # `eval`/`builtin`-style heads emit their evaluated output —
+            # `eval 'echo "a; sh x"'` prints the text (CodeRabbit on
+            # #133 — verified live).
+            b'eval \'echo "a; sh scripts/x.sh"\' | cat -n | sh',
+            # Backtick bodies inherit the stream like `$(` — `X=`sh``
+            # consumes it inside the capture (CodeRabbit on #133 —
+            # verified live: silent exit).
+            b'cat scripts/x.sh | X=`sh`',
+            # A `tr`/`sed` stage may map ANY character into a separator
+            # — the bytes can't be proven sep-free (CodeRabbit/Devin —
+            # verified live: RAN_X).
+            b'echo "q sh scripts/x.sh" | tr q ";" | cat -n | sh',
+            # `>& 1` with a space still dups fd2 onto fd1's pipe
+            # binding (Devin on #133 — verified live).
+            b'(echo "a; sh scripts/x.sh" >&2) 2>& 1 | cat -n | sh',
+            # A sibling's `>&2` redirect resolves BEFORE `|&`'s dup —
+            # the later `2>/dev/null` only rebinds fd2; fd1 already
+            # reached the pipe (verified live: RAN_X).
+            b'(echo "sh scripts/x.sh" >&2 2>/dev/null; true) |& sh'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # A `(cat -n; true)` compound KILLS the numbered stream —
+            # `1\t...` first commands all fail (Devin on #1431 —
+            # verified live: dead).
+            b'echo "sh scripts/x.sh" | (cat -n; true) | sh',
+            # A diverted chain stage drops the emit — stale `chain_emit`
+            # can't justify a later sibling (CodeRabbit on #133 —
+            # verified live: dead).
+            b'(echo "a;b" | cat >/dev/null | cat -n) | sh',
+            # `cat -n >/dev/null` emits nothing — an unprovable feed
+            # can't promote 'own' to 'up' (CodeRabbit on #133 —
+            # verified live: dead).
+            b'cat scripts/x.sh | cat -n >/dev/null | sh',
+            # `X=$(true)` reads nothing and emits nothing — the
+            # assign stage ends the stream (CodeRabbit on #133 —
+            # verified live: dead).
+            b'cat scripts/x.sh | X=$(true) | sh',
+            # `(...) >/dev/null` diverts the group's fd1 — nothing
+            # reaches the pipe (Devin on #1963 — verified live).
+            b'(echo "a; bash scripts/x.sh") >/dev/null | cat -n | sh',
+            # `tr ';' ':'` strips the only separator — unprovable
+            # bytes flow, but a modeled pass-through would keep the
+            # dead `;` (Devin on #133 — verified live: dead).
+            b'echo "a; sh scripts/x.sh" | tr ";" ":" | cat -n | sh',
+            # Inner `|&` under a plain `|` group: the `>&2` stage's
+            # fd2 dups onto group fd2 — real stderr, not the pipe
+            # (Devin on #133 — verified live: dead).
+            b'(echo "a; sh scripts/x.sh" >&2 |& cat -n) | sh'):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
