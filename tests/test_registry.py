@@ -14556,3 +14556,34 @@ def test_script_dep_round92_date_format_conditional_emit(tmp_path):
             b"date '+123' | sh",
             b"date -d '+sh scripts/x.sh' | sh"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round92_emitted_ref(tmp_path):
+    """Round-92 (cont.): sibling outputs glue in the real pipe —
+    `(echo -n 'sh '; echo scripts/x.sh) | sh` writes `sh ` then
+    `scripts/x.sh` into ONE stream and the script runs, though no
+    single source word holds keyword+path (Devin on #1431 —
+    verified live). The emitted-feed ref scan gates those
+    assembled invocations bundled-or-declared exactly like source
+    refs."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (
+            b"(echo -n 'sh '; echo scripts/x.sh) | sh",
+            b"(echo -n 'sh '; echo scripts/nonexistent.sh) | sh",
+            b"(echo -n 'cat '; echo scripts/x.sh) | sh",
+            b"cat scripts/x.sh | (echo -n 'sh '; cat) | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # A bare `scripts/` command word stays outside the ref
+            # model — same convention as source text (needs an exec
+            # bit the resolver can't prove).
+            b"echo scripts/x.sh | sh",
+            b"(echo scripts/x.sh; cat) | sh",
+            # printf emit is unprovable — the pass can't build a ref
+            # view and skips (over-block stays with the prov path).
+            b"(printf 'sh '; echo scripts/x.sh) | sh",
+            b"echo 'x' | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line

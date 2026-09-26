@@ -14074,6 +14074,39 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                     or name in declared
                     for name in declared_alts):
                 return True  # unbundled + undeclared — would ship broken
+    # Emitted sibling bytes can ASSEMBLE an invocation no single
+    # source word holds — `(echo -n 'sh '; echo scripts/x.sh) | sh`
+    # writes `sh ` then `scripts/x.sh` into ONE glued pipe stream and
+    # the shell runs the script, while the source carries no
+    # keyword-adjacent ref for SCRIPT_REF to match (Devin on #1431,
+    # round-92 — verified live). Scan every top-level `|`'s provable
+    # emitted feed: when the emitted program reaching an exec head
+    # itself invokes a scripts/ path, gate it bundled-or-declared
+    # exactly like a source ref. `_join_emit`'s inserted newline is
+    # only an exec-shape device — the real stream glues, so ref
+    # scanning treats newline as whitespace.
+    for _s2, _e2, _k2 in _sub_cmd_seps(scan):
+        if (_k2 != b"|" or scan[_s2 - 1:_s2] == b"|"
+                or scan[_e2:_e2 + 1] == b"|"):
+            continue
+        _eb = _emit_feed(scan, _s2, scan[_s2 + 1:_s2 + 2] == b"&")
+        if _eb is None or b"scripts/" not in _eb:
+            continue
+        if not _pipe_to_exec(scan, _s2):
+            continue
+        for _em in SCRIPT_REF.finditer(_eb.replace(b"\n", b" ")):
+            _rn = SCRIPT_NAME.search(_em.group(0))
+            if _rn is None:
+                continue
+            _p = _rn.group(1).decode("utf-8", errors="ignore")
+            if (_p in pinned_scripts
+                    if pinned_scripts is not None
+                    else (sdir / _p).is_file()):
+                return True
+            if not (f"scripts/{_p}" in declared
+                    or f"./scripts/{_p}" in declared
+                    or _p in declared):
+                return True
     return False
 
 
