@@ -67,6 +67,7 @@ class AgentConfig:
     data_sensitivity: str
     system_prompt: str
     instructions: str
+    client_policy_model: Optional[str] = None
 
 
 def parse_agent_file(agent_path: Path) -> AgentConfig:
@@ -99,6 +100,7 @@ def parse_agent_file(agent_path: Path) -> AgentConfig:
         data_sensitivity=data_sensitivity,
         system_prompt=system_prompt,
         instructions=instructions,
+        client_policy_model=frontmatter.get("client_policy_model"),
     )
 
 
@@ -188,6 +190,14 @@ def invoke_agent(
     # direct Anthropic (x-api-key). The retired anthropic_only tier has no
     # callers left — its agents were remapped to restricted_us_oss_ok.
     proxy = _proxy_base()
+    # Engagement carrying client_ai_policy escalates declared agents back to
+    # their Anthropic-direct model — the proxy/OSS route is bypassed entirely.
+    if agent_config.client_policy_model and os.environ.get("CLIENT_AI_POLICY"):
+        proxy = None
+        model = agent_config.client_policy_model
+        logger.info(
+            f"{agent_config.name}: CLIENT_AI_POLICY active — escalating to {model} (Anthropic-direct)"
+        )
     base_url = proxy or "https://api.anthropic.com"
     if proxy and model in {"claude-haiku-4-5-20251001", "claude-sonnet-4-6"}:
         model = {"claude-haiku-4-5-20251001": "haiku", "claude-sonnet-4-6": "sonnet"}[model]

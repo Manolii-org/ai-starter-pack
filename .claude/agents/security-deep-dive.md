@@ -5,7 +5,11 @@ description: "Broad agent: triages SAST findings against actual code flow to pro
 type: agent
 model: sonnet
 data_sensitivity: restricted_us_oss_ok
-# Demoted 2026-05-15 from claude-sonnet-4-6/restricted -> sonnet/restricted_us_oss_ok. SAST triage reads code, not PII. Engagement-policy gate escalates back to claude-sonnet-4-6 when active engagement carries client_ai_policy.
+# Demoted 2026-05-15 from claude-sonnet-4-6/restricted -> sonnet/restricted_us_oss_ok. SAST triage reads code, not PII.
+# Set CLIENT_AI_POLICY=1 in the environment when the active engagement's policy
+# forbids non-Anthropic models — run-broad-agents.py then bypasses the proxy and
+# dispatches client_policy_model on the direct Anthropic plane.
+client_policy_model: claude-sonnet-4-6
 max_tokens: 2000
 safety_tier: green
 requires_mcp: []

@@ -104,7 +104,7 @@ def _rows_mergeable(a: dict, b: dict, threshold: float) -> bool:
     if not prob_a or not prob_b:
         # Problems too short to tokenize — compare raw text instead of
         # letting jaccard(∅, ∅) report a perfect match.
-        if a["problem"].strip() != b["problem"].strip():
+        if a["problem"].strip().casefold() != b["problem"].strip().casefold():
             return False
     elif jaccard(prob_a, prob_b) < threshold:
         return False
