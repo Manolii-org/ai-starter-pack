@@ -8951,12 +8951,18 @@ def test_script_dep_cat_stdin_operands(tmp_path):
     pdir = tmp_path / "plug"
     (pdir / "scripts").mkdir(parents=True)
     (pdir / "scripts" / "x.sh").write_bytes(b"x")
-    for sub in (b"cat -", b"cat f -", b"cat - f", b"cat -n f -",
+    for sub in (b"cat -", b"cat f -", b"cat - f",
                 b"cat /dev/stdin", b"cat f /dev/stdin"):
         assert mod.script_dep_block(
             pdir, b'cat scripts/x.sh | echo "$(' + sub + b')" | sh\n'), sub
-    # A flag-only cat still reads stdin; a file-only cat does not.
-    assert mod.script_dep_block(
+    # `cat -n f -` numbers every line — the capture emits `   1\t…`
+    # and the downstream `sh` runs `1`, not the script (round-59 —
+    # verified live; supersedes this case's former flag-only reading).
+    assert not mod.script_dep_block(
+        pdir, b'cat scripts/x.sh | echo "$(cat -n f -)" | sh\n')
+    # Bare `cat -n` also numbers stdin — `$(…)` emits `   1\t…` and
+    # `sh` runs `1` (round-59 — verified live).
+    assert not mod.script_dep_block(
         pdir, b'cat scripts/x.sh | echo "$(cat -n)" | sh\n')
     assert not mod.script_dep_block(
         pdir, b'cat scripts/x.sh | echo "$(cat f)" | sh\n')
@@ -9896,7 +9902,6 @@ def test_pipe_to_exec_round25(tmp_path):
             b"find . -exec sh -c 'bash scripts/x.sh' \\;",
             b"find . -execdir sh -c 'bash scripts/x.sh' \\;",
             b"find . -ok sh -c 'bash scripts/x.sh' \\;",
-            b"find . -exec sh -c 'bash scripts/x.sh' +",
             b"find . -name x -exec sh -c 'bash scripts/x.sh' \\; -type f",
             # `flock L -c 'P'` binds P as the command string; `flock L
             # CMD…` runs the argv after the lockfile (Codex on #128)
@@ -9933,6 +9938,11 @@ def test_pipe_to_exec_round25(tmp_path):
             # unread and unrelated bytes are emitted (Devin on #128)
             b"cat scripts/x.sh | sort --files0-from /dev/null | sh",
             b"cat scripts/x.sh | sort --files0-from=/dev/null | sh",
+            # a bare `+` ends `-exec` only right after `{}` — `+` alone
+            # leaves the argv unterminated: find exits on the parse
+            # error (`missing argument to `-exec`') and nothing runs
+            # (round-49 — verified live on GNU find)
+            b"find . -exec sh -c 'bash scripts/x.sh' +",
             # the stdin-alias form drains the pipe as the list —
             # `; sh` then sees EOF (Devin on #128)
             b"cat scripts/x.sh | sh -c 'sort --files0-from=-; sh'",
@@ -10085,7 +10095,6 @@ def test_pipe_to_exec_round26(tmp_path):
             b"ionice -c3 sh -c 'bash scripts/x.sh'",
             b"taskset -c 0 sh -c 'bash scripts/x.sh'",
             b"taskset --cpu-list 0 sh -c 'bash scripts/x.sh'",
-            b"taskset -c0 sh -c 'bash scripts/x.sh'",
             b"taskset 0x1 sh -c 'bash scripts/x.sh'",
             # `&&` separates even before a redirect — `x &&>f cmd`
             # runs cmd with its output redirected (Devin on #128,
@@ -10097,6 +10106,10 @@ def test_pipe_to_exec_round26(tmp_path):
             # query-mode forms never exec a command
             b"taskset -p -c 0-3 1234",
             b"ionice -p 1234",
+            # util-linux `-c` binds ONLY a separate operand — `-c0`
+            # aborts "invalid option -- '0'" before the command
+            # (Codex on #1393, round-52 review — verified live)
+            b"taskset -c0 sh -c 'bash scripts/x.sh'",
             # an inert single action emits nothing executable
             b"find . -exec true \\; | sh"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
@@ -10530,7 +10543,6 @@ def test_pipe_to_exec_round34(tmp_path):
             # glued short option values carry their operand in-word —
             # the command word after still runs
             b"cat scripts/x.sh | prlimit -o1 sh",
-            b"cat scripts/x.sh | taskset -c0,1 sh",
             b"cat scripts/x.sh | nice -n5 sh",
             b"cat scripts/x.sh | sudo -uroot sh",
             b"cat scripts/x.sh | ionice -c1 sh",
@@ -10577,7 +10589,11 @@ def test_pipe_to_exec_round34(tmp_path):
             b'cat scripts/x.sh | sh -s"$X"<&foo',
             b'cat scripts/x.sh | sh -s<&foo',
             b"cat scripts/x.sh | sh -s\"$X\"<&'$FD'",
-            b'cat scripts/x.sh | sh -s<&\\$FD'):
+            b'cat scripts/x.sh | sh -s<&\\$FD',
+            # a glued `-cLIST` aborts "invalid option" on util-linux
+            # — the command never runs (Codex on #1393, round-52 —
+            # verified live)
+            b"cat scripts/x.sh | taskset -c0,1 sh"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
 
 
@@ -10599,6 +10615,7 @@ def test_pipe_to_exec_round35(tmp_path):
     (pdir / "scripts").mkdir()
     (pdir / "scripts" / "x.sh").write_bytes(b"echo HIT\n")
     (pdir / "scripts" / "y.sh").write_bytes(b"a:\n")
+    (pdir / "scripts" / "z.sh").write_bytes(b"a,,\n")
     for line in (
             # each enclosing capture level's emit check must recurse —
             # the inner `$(cat` reaches sh through two echo captures
@@ -10622,7 +10639,22 @@ def test_pipe_to_exec_round35(tmp_path):
             # `numeric` is --sort's argument; sort re-emits the pipe
             b"cat scripts/x.sh | sort --so numeric | sh",
             b"cat scripts/x.sh | sort --sort numeric | sh",
-            b"cat scripts/x.sh | sort --sor numeric | sh"):
+            b"cat scripts/x.sh | sort --sor numeric | sh",
+            # an EXACT long option resolves even under prefix overlap —
+            # `cat --show-ends` is valid though the --show-* family
+            # shares the prefix shape (Codex on #1393, round-39 review)
+            b"cat --show-ends scripts/x.sh | sort | sh",
+            # remaining real sort options still forward the stream
+            b"cat scripts/x.sh | sort --human-numeric-sort | sh",
+            b"cat scripts/x.sh | sort --ignore-nonprinting | sh",
+            # under `IFS=', '` `a:` has no delimiter — still one field
+            b"IFS=', '; date +$(cat scripts/y.sh) | sh",
+            # a dynamic `IFS=$(...)`/`IFS=$X` value can't be proven
+            # to split — it binds ONE unknown value at runtime
+            # (`IFS=$(echo ,)` leaves `echo HIT` one field — round-50,
+            # verified live), so it binds like an EMPTY IFS
+            b"IFS=$(echo ,); date +$(cat scripts/x.sh) | sh",
+            b"IFS=$UNKNOWN; date +$(cat scripts/x.sh) | sh"):
         assert mod.script_dep_block(pdir, line + b"\n"), line
     for line in (
             # `cat -n`/`cat -b` prepend a line number per numbered
@@ -10632,6 +10664,11 @@ def test_pipe_to_exec_round35(tmp_path):
             b"date +$(cat -b scripts/x.sh) | sh",
             b"date +$(cat --number scripts/x.sh) | sh",
             b"date +$(cat -vn scripts/x.sh) | sh",
+            # `cat --number` resolves as the exact long option even
+            # under the --number-nonblank prefix overlap, but its
+            # numbered output can't execute downstream anyway (Devin
+            # on #130, round-60 — verified live)
+            b"cat --number scripts/x.sh | sort | sh",
             # an ambiguous GNU long-option prefix aborts the command —
             # `--s` matches both --sort and --stable
             b"cat scripts/x.sh | sort --s numeric | sh",
@@ -10650,11 +10687,2615 @@ def test_pipe_to_exec_round35(tmp_path):
             # shell — the capture splits on the default IFS
             b"(IFS=); date +$(cat scripts/x.sh) | sh",
             b"x=$(IFS=); date +$(cat scripts/x.sh) | sh",
-            # a dynamic `IFS=$(...)` value can't be evaluated — the
-            # default split applies
-            b"IFS=$(echo ,); date +$(cat scripts/x.sh) | sh",
             # an all-whitespace IFS behaves like the default split
             b'IFS=" "; date +$(cat scripts/x.sh) | sh',
             # the plain 2-word capture still errors the same way
-            b"date +$(cat scripts/x.sh) | sh"):
+            b"date +$(cat scripts/x.sh) | sh",
+            # under `IFS=', '` adjacent commas each delimit a field —
+            # `a,,` is TWO fields, so date rejects the capture
+            b"IFS=', '; date +$(cat scripts/z.sh) | sh",
+            # terminal modes print and exit before the wrapped argv —
+            # `flock --help sh P` never runs P (Codex on #1393, r39)
+            b"flock /tmp/l --help sh scripts/x.sh",
+            b"flock /tmp/l --version sh scripts/x.sh",
+            b"find . --help -exec sh scripts/x.sh",
+            b"xargs --help sh scripts/x.sh"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round40(tmp_path):
+    """Round-40 review (Codex/Devin/CodeRabbit on #130/#1393/#1959/#12 —
+    every behavior verified against real GNU bash/find/xargs/flock):
+    * the wrapped-command word itself executes (`xargs ./x.sh`,
+      `flock L ./x.sh` — the word AT the wrap start is the command);
+    * `flock -c`/`--command` bind a command STRING that runs via the
+      shell (`flock L -c ./x.sh` → x.sh runs);
+    * a find terminal-mode word ANYWHERE in the expression exits
+      before actions (`find . -exec A \\; -help` prints usage), while
+      a predicate operand (`-name --help`) is a PATTERN, not a
+      terminal;
+    * IFS field-splitting uses only whitespace bytes PRESENT in IFS
+      (`IFS=', '` keeps `a\tb` one field) and a whitespace-only
+      capture yields ZERO fields."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_text("echo HIT\n")
+    (pdir / "scripts" / "wsonly.sh").write_text("  \n")
+    (pdir / "scripts" / "tab.sh").write_text("a\tb\n")
+    for line in (
+            # the word AT the wrap start is the wrapped command —
+            # `xargs ./scripts/x.sh` runs it (verified live)
+            b"xargs ./scripts/x.sh",
+            b"xargs -n2 ./scripts/x.sh",
+            b"flock /tmp/l ./scripts/x.sh",
+            # option-looking words AFTER the command word are the
+            # command's argv — `flock L ./x.sh --help` still runs
+            # x.sh (verified live)
+            b"flock /tmp/l ./scripts/x.sh --help",
+            b"xargs ./scripts/x.sh --help",
+            # `flock -c`/`--command` binds the operand as SHELL text —
+            # `flock L -c ./x.sh` runs it (verified live); the bare
+            # `flock -c scripts/x.sh` form stays a prose mention like
+            # every bare mid-command `scripts/` path (SCRIPT_REF)
+            b"flock /tmp/l -c ./scripts/x.sh",
+            b"flock /tmp/l -c 'sh scripts/x.sh'",
+            b"flock /tmp/l --command 'sh scripts/x.sh'",
+            # a predicate operand is not a terminal — `find . -name
+            # --help -exec ...` runs the action for matches (verified)
+            b"find . -name --help -exec sh scripts/x.sh \\;",
+            b"find . -path --version -exec sh scripts/x.sh \\;",
+            # a tab is not a delimiter under `IFS=', '` — `a\tb`
+            # emits ONE field (verified live)
+            b"IFS=', '; date +$(cat scripts/tab.sh) | sh",
+            # audit-synced real long options still forward the stream
+            b"cat scripts/x.sh | sed --unbuffered s/a/b/ | sh",
+            b"cat scripts/x.sh | strings --unicode=l | sh",
+            b"cat scripts/x.sh | tail --max-unchanged-stats=1 | sh",
+            b"cat scripts/x.sh | od --output-duplicates | sh",
+            b"cat scripts/x.sh | iconv --silent | sh",
+            b"cat scripts/x.sh | grep --null-data x | sh",
+            b"cat scripts/x.sh | awk --no-optimize '{print}' | sh",
+            b"IFS=': '; date +$(cat scripts/y.sh) | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # a terminal-mode word AFTER the action still exits
+            # before it runs — `find . -exec A \; -help` prints
+            # usage only (verified live)
+            b"find . -exec sh scripts/x.sh \\; -help",
+            b"find . -exec sh scripts/x.sh \\; --version",
+            b"find . -exec sh scripts/x.sh \\; -version",
+            # a predicate operand that IS `-exec` is not an action —
+            # `find . -name -exec sh x` errors on the stray `sh`
+            b"find . -name -exec sh scripts/x.sh \\;",
+            # a whitespace-only capture under mixed IFS yields ZERO
+            # fields — date gets only `+` and emits a newline
+            b"IFS=', '; date +$(cat scripts/wsonly.sh) | sh",
+            # the -c operand is program text — inside it the path is
+            # just an echo argument, never exec'd (verified live)
+            b"flock /tmp/l -c 'echo scripts/x.sh'",
+            # a bare mid-command path is a prose mention even under
+            # `-c` — SCRIPT_REF only counts exec contexts
+            b"flock /tmp/l -c scripts/x.sh",
+            # audit-synced NON-options still abort — the phantom
+            # hexdump names and `--numeric-storage` never existed
+            b"cat scripts/x.sh | hexdump --one-byte-hexadecimal | sh",
+            b"cat scripts/x.sh | sort --numeric-storage | sh",
+            b"cat scripts/x.sh | awk --character-set=x '{print}' | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round41(tmp_path):
+    """Round-41 review (Codex/Devin/CodeRabbit on #130/#1393/#1959/#12 —
+    every behavior verified against real GNU bash/find/flock/split):
+    * find operand primaries (`-fprint0`/`-atime`/`-newerXY`) consume
+      the next word, so `-fprint0 --help` writes a FILE named --help
+      and `-newerXt` is the only invalid XY form;
+    * `-quit` cuts the expression where it stands — actions BEFORE it
+      ran, words after are dead (`find . -quit -exec` runs nothing);
+    * util-linux flock binds command text only to an exact `-c`/
+      `--command` AFTER the lockfile — the attached `-cCMD`/
+      `--command=CMD` forms and other post-file dash words are
+      literal argv[0] names that fail to exec;
+    * a `scripts/` path inside a find action argv counts only where
+      the action's own command would exec it (`-exec sh x.sh` yes,
+      `-exec echo x.sh` just prints the name);
+    * `=value` on a flag-only GNU option aborts before reading
+      (`cat --number=1`), while option arguments in separate-word
+      form still feed the stream (`tail --max-unchanged-stats 1`,
+      `pr --pages 1`);
+    * split/csplit write chunks to FILES — nothing reaches stdout
+      without `--filter` (`split | sh` leaves sh at EOF)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_text("echo HIT\n")
+    for line in (
+            # operand primaries consume `--help` as their operand —
+            # the action still runs (verified live)
+            b"find . -fprint0 --help -exec sh scripts/x.sh \\;",
+            b"find . -atime --help -exec sh scripts/x.sh \\;",
+            b"find . -newermt REF -exec sh scripts/x.sh \\;",
+            b"find . -neweram REF -exec sh scripts/x.sh \\;",
+            # `-quit` only kills LATER words — earlier actions ran
+            b"find . -exec sh scripts/x.sh \\; -quit",
+            # an exact post-file `-c`/`--command` binds command text
+            b"flock /tmp/l -c 'sh scripts/x.sh'",
+            b"flock /tmp/l --command 'sh scripts/x.sh'",
+            b"flock /tmp/l -c 'bash scripts/x.sh' ; true",
+            # interpreter argv[0] in an action reads the script file
+            b"find . -exec sh scripts/x.sh \\;",
+            b"find . -exec bash scripts/x.sh \\;",
+            b"find . -exec python scripts/x.sh \\;",
+            # separate-word values of required-arg long options are
+            # consumed — the stream still forwards (verified live)
+            b"cat scripts/x.sh | tail --max-unchanged-stats 1 | sh",
+            b"cat scripts/x.sh | pr --pages 1 | sh",
+            b"cat scripts/x.sh | strings --unicode l | sh",
+            # `--filter` pipes each chunk to a command — it reaches
+            # stdout (verified live)
+            b"cat scripts/x.sh | split --filter='cat' - | sh",
+            # glued `=v` on an arg-taking option still forwards
+            b"cat scripts/x.sh | tail --pid=1 | sh",
+            b"cat scripts/x.sh | pr --pages=1 | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # `-quit` before the action kills it (verified live)
+            b"find . -quit -exec sh scripts/x.sh \\;",
+            # post-file attached `-c`/`--command=` are literal
+            # command names flock fails to exec (verified live)
+            b"flock /tmp/l -c'sh scripts/x.sh'",
+            b"flock /tmp/l --command='sh scripts/x.sh'",
+            # a non-`-c` post-file dash word is literal argv[0] —
+            # `flock L -w 1 -c P` execs `-w` and fails (verified)
+            b"flock /tmp/l -w 1 -c 'sh scripts/x.sh'",
+            # `-c` before the lockfile is an invalid option —
+            # flock aborts (verified live)
+            b"flock -c 'sh scripts/x.sh' /tmp/l",
+            # `-exec` argv[0] like `echo`/`cat` prints/reads the
+            # literal name — never execs it (verified live)
+            b"find . -exec echo scripts/x.sh \\;",
+            b"find . -exec cat scripts/x.sh \\;",
+            b"find . -exec wc -l scripts/x.sh \\;",
+            # `=v` on a flag-only GNU option aborts the command —
+            # `cat --number=1` errors before reading (verified)
+            b"cat scripts/x.sh | cat --number=1 | sh",
+            b"cat scripts/x.sh | sort --human-numeric-sort=bad | sh",
+            b"cat scripts/x.sh | strings --all=x | sh",
+            # split/csplit emit files (byte counts), never the
+            # input stream (verified live)
+            b"cat scripts/x.sh | split - | sh",
+            b"cat scripts/x.sh | split --separator , - | sh",
+            b"cat scripts/x.sh | split --unbuffered - | sh",
+            b"cat scripts/x.sh | csplit - 2 | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round42(tmp_path):
+    """Round-42 review (Devin/Codex/CodeRabbit on #130/#1393/#1959/#12 —
+    every behavior verified against real GNU bash/find/flock/split/strings/
+    gawk):
+    * `-quit` exits only when EVALUATED — later words still parse
+      (`-quit -help` prints usage) and a later `-o`/`-or`/`,` branch
+      revives the action (`find . -false -quit -o -exec` runs it);
+    * `-D` is a pre-path debug option (no operand; `find . -D x` errors
+      "unknown predicate"), while `-files0-from` is a global option
+      that consumes the NUL list filename (`-files0-from --help` reads
+      `--help` as the file);
+    * `-newerBm` is a valid form (B = birth stamp) and consumes its
+      reference operand like every other -newerXY;
+    * the find action's EFFECTIVE head decides — `env bash x`,
+      `timeout 5 bash x`, `sudo sh x` reach the interpreter behind the
+      wrapper, an unlisted head fails closed (`-exec tsx x`), and a
+      non-exec head emits the path so a `| sh` after the find still
+      runs it (`-exec cat x \\; | sh`);
+    * a positional AFTER an interpreter program flag is argv ($0…),
+      not the script — `sh -c : x.sh` runs `:`;
+    * flock post-lockfile dash words are literal argv[0] — `-n`/
+      `--help` fail ENOENT and nothing after them runs;
+    * `pr --indent` takes a required argument;
+    * `awk -e/--source` (program text) and `-E/--exec` (program file)
+      supply the program — later positionals are data files; `--trace`
+      is a gawk boolean;
+    * `strings` mode options validate their value — `--unicode bad`
+      aborts before reading;
+    * split's `--filter` resolves unique GNU prefixes (`--fil=cat`)
+      and the filter's own stdout decides the stream — `cat` forwards,
+      `true`/`false` emit nothing; the `-n` K/N stdout modes need a
+      seekable input and never forward the pipe."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_text("echo HIT\n")
+    for line in (
+            # `-quit` on a false/`-o` branch leaves the action live —
+            # `find . -false -quit -o -exec` runs it (verified live)
+            b"find . -false -quit -o -exec sh scripts/x.sh \\;",
+            # `-quit` after the action does not undo it (round-41)
+            b"find . -exec sh scripts/x.sh \\; -quit",
+            # `-quit -o -exec` — the model keeps dep (real quits first;
+            # over-block is the safe direction)
+            b"find . -quit -o -exec sh scripts/x.sh \\;",
+            # `-files0-from` consumes the list filename — `--help`
+            # is read as the file, not a terminal word (verified live)
+            b"find -files0-from --help -exec sh scripts/x.sh \\;",
+            # `-newerBm` consumes its reference like -newermt
+            b"find . -newerBm REF -exec sh scripts/x.sh \\;",
+            # wrapper heads unwrap to the interpreter (EXEC-RAN/
+            # TO-RAN verified live)
+            b"find . -exec env bash scripts/x.sh \\;",
+            b"find . -exec timeout 5 bash scripts/x.sh \\;",
+            b"find . -exec sudo sh scripts/x.sh \\;",
+            b"find . -exec nice sh scripts/x.sh \\;",
+            b"find . -exec env sh -c 'bash scripts/x.sh' \\;",
+            # an unlisted head may still interpret — fail closed
+            b"find . -exec tsx scripts/x.sh \\;",
+            b"find . -exec deno run scripts/x.sh \\;",
+            # a non-exec head emits the path — the find pipeline's
+            # own `| sh` still runs it (verified live)
+            b"find . -exec cat scripts/x.sh \\; | sh",
+            # interpreter argv[0] reads the script file (round-41)
+            b"find . -exec sh scripts/x.sh \\;",
+            b"find . -exec sh -c 'sh scripts/x.sh' \\;",
+            b"find . -exec python scripts/x.sh \\;",
+            # split's unique-prefix `--fil`/`--f` resolve to --filter —
+            # the filter's stdout forwards the chunks (verified live)
+            b"cat scripts/x.sh | split --fil=cat - | sh",
+            b"cat scripts/x.sh | split --f cat - | sh",
+            b"cat scripts/x.sh | split --filter='cat' - | sh",
+            # `pr --indent` takes a required argument — the stream
+            # still forwards (verified live)
+            b"cat scripts/x.sh | pr --indent 4 | sh",
+            # `-n 1/1` chunk-select streams a buffered pipe on
+            # coreutils ≥9.x — the input is copied to a temp file
+            # (Codex on #130/#1959, round-51 — verified live on 9.4;
+            # 8.32 aborts — union models the running case)
+            b"cat scripts/x.sh | split -n 1/1 - | sh",
+            # `--trace` is a boolean — the program positional still
+            # reads the pipe (over-block on gawk < 5.3)
+            b"cat scripts/x.sh | awk --trace '{print}' | sh",
+            # a valid strings mode value still forwards
+            b"cat scripts/x.sh | strings --unicode l | sh",
+            b"cat scripts/x.sh | strings -e l | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # `-quit` with no later `-o` kills the action (verified live)
+            b"find . -quit -exec sh scripts/x.sh \\;",
+            # `-quit` does not stop PARSING — a later `-help` still
+            # prints usage and exits (verified live)
+            b"find . -exec sh scripts/x.sh \\; -quit -help",
+            # `-D` takes no operand — `--help` is still a terminal
+            # word (`find . -D dbg --help` prints usage — verified)
+            b"find . -D dbg --help -exec sh scripts/x.sh \\;",
+            # post-lockfile dash words are literal argv[0] — flock
+            # fails ENOENT and nothing after runs (verified live)
+            b"flock /tmp/l -n sh scripts/x.sh",
+            b"flock /tmp/l --help sh scripts/x.sh",
+            # a positional AFTER the interpreter's program flag is
+            # argv ($0), not the script — `sh -c : x.sh` runs `:`
+            # (verified live)
+            b"find . -exec sh -c : scripts/x.sh \\;",
+            # non-exec heads print/read the literal name — no pipe to
+            # an exec head means nothing runs (verified live)
+            b"find . -exec cat scripts/x.sh \\;",
+            b"find . -exec echo scripts/x.sh \\;",
+            b"find . -exec awk '{print}' scripts/x.sh \\;",
+            # a silent filter emits nothing on stdout — `--filter=
+            # true`/`false` leave sh at EOF (verified live)
+            b"cat scripts/x.sh | split --filter=true - | sh",
+            b"cat scripts/x.sh | split --filter=false - | sh",
+            # `-n l/N` writes N chunk FILES — nothing reaches stdout
+            # (a K/N select streams the buffered pipe on coreutils
+            # ≥9.x — moved to the dep list, round-51)
+            b"cat scripts/x.sh | split -n l/1 - | sh",
+            # `strings` mode options validate their value — a bad
+            # mode aborts before any read (verified live)
+            b"cat scripts/x.sh | strings --unicode bad | sh",
+            b"cat scripts/x.sh | strings --unicode=bad | sh",
+            b"cat scripts/x.sh | strings -e bad | sh",
+            b"cat scripts/x.sh | strings -t q | sh",
+            # awk program flags supply the program — later operands
+            # are data files that replace the stream (verified live)
+            b"cat scripts/x.sh | awk --source '{print}' /dev/null | sh",
+            b"cat scripts/x.sh | awk --exec f /dev/null | sh",
+            b"cat scripts/x.sh | awk -e '{print}' /dev/null | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round43(tmp_path):
+    r"""Round-43: per-domain strings value sets, split filter's
+    last-wins + operand-aware scan + input-file provenance + shell-
+    list filters, required-arg missing operands, find `-context` and
+    reader-head downstream pipes, cat multi-file concat, awk
+    `--pretty-print` optional arg.
+
+    Verified live (bash/dash, coreutils 9.x, binutils 2.38, gawk 5.1):
+    * `strings -U/--unicode` accepts letters {d,s,i,l,e,x,h} plus the
+      names {default,invalid,locale,escape,hex,highlight,show} —
+      separately from `-e/--encoding` {s,S,l,L,b,B} and
+      `-t/--radix` {d,o,x}; `-s SEP`/`-T BFD` are required-arg shorts;
+    * `awk --pretty-print[=F]` is optional-arg — a separate word is
+      the program, not the file;
+    * a required option at argv end aborts ("option requires an
+      argument") — `pr --indent`/`tail --pid`/`strings -U` forward
+      nothing;
+    * split's `--filter` binds its LAST value, option operands are
+      consumed before `--filter` is recognized (`--lines --filter sh`
+      errors), the filter runs via `$SHELL -c` so `cat | sh`/`true; sh`
+      execute, and a positional INPUT replaces the upstream pipe;
+    * `find`'s `-context` is a one-operand predicate on SELinux builds
+      (over-block-safe elsewhere — non-SELinux aborts);
+    * a find action whose head is a PROGRAM_FIRST reader still pipes
+      its stdout onward — `-exec awk '{p}' x.sh \; | sh` runs x.sh's
+      bytes;
+    * `cat f1 f2` concatenates BEFORE field-splitting — `f1`=`a`,
+      `f2`=`b` emits `ab` as ONE field, not two."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_text("echo HIT\n")
+    # Two one-word files that merge into ONE field — `a`+`b` → `ab`
+    # (no trailing newline on `a`).
+    (pdir / "scripts" / "a.sh").write_bytes(b"a")
+    (pdir / "scripts" / "b.sh").write_bytes(b"b")
+    for line in (
+            # -U/--unicode take letters AND names (verified live)
+            b"cat scripts/x.sh | strings -U d | sh",
+            b"cat scripts/x.sh | strings -U x | sh",
+            b"cat scripts/x.sh | strings --unicode=hex | sh",
+            b"cat scripts/x.sh | strings --unicode default | sh",
+            b"cat scripts/x.sh | strings -Uhex | sh",
+            b"cat scripts/x.sh | strings -U default | sh",
+            # -s/-T required-arg shorts consume the operand (verified)
+            b"cat scripts/x.sh | strings -s , | sh",
+            b"cat scripts/x.sh | strings -T elf64-x86-64 | sh",
+            # --pretty-print is optional-arg — 'p' is still the
+            # program, `-` still the stdin file (verified live)
+            b"cat scripts/x.sh | awk --pretty-print '{print}' - | sh",
+            # split filters: a $SHELL -c LIST executes (verified live)
+            b"cat scripts/x.sh | split --filter='cat | sh' - | sh",
+            b"cat scripts/x.sh | split --filter='true; sh' - | sh",
+            # the LAST repeated --filter wins (verified live)
+            b"cat scripts/x.sh | split --filter=true --filter=sh - | sh",
+            # stdin input + forwarding filter still flows (verified)
+            b"cat scripts/x.sh | split --filter=cat - | sh",
+            b"cat scripts/x.sh | split --filter=sh -- - | sh",
+            # a scripts/ INPUT FILE's chunks reach the filter — `cat`
+            # re-emits them downstream (verified live)
+            b"split --filter=cat scripts/x.sh | sh",
+            b"split --filter=sh scripts/x.sh | sh",
+            # -context consumes `--help` as the CONTEXT operand —
+            # the action still runs (SELinux builds; over-block-safe)
+            b"find . ! -context --help -exec sh scripts/x.sh \\;",
+            # a reader-headed find action still pipes its stdout to
+            # a downstream exec head (verified live)
+            b"find . -exec awk '{print}' scripts/x.sh \\; | sh",
+            b"find . -exec sed -n p scripts/x.sh \\; | sh",
+            # cat concatenates files before IFS field-splitting —
+            # `a`+`b` is ONE field and still joins the format word
+            # (verified live)
+            b"IFS=,; date +$(cat scripts/a.sh scripts/b.sh) | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # fixed-domain rejects still abort before any read
+            b"cat scripts/x.sh | strings -U z | sh",
+            b"cat scripts/x.sh | strings --unicode=bad | sh",
+            # a required option at argv end aborts — nothing forwards
+            # (verified live: "option requires an argument")
+            b"cat scripts/x.sh | strings -U | sh",
+            b"cat scripts/x.sh | pr --indent | sh",
+            b"cat scripts/x.sh | tail --pid | sh",
+            b"cat scripts/x.sh | strings -s | sh",
+            # --pretty-print exiting mode never reads stdin — a `-`
+            # operand is still the input file, but gawk pretty-prints
+            # and exits; the model keeps dep anyway (over-block) —
+            # assert only the SEPARATE program word is not swallowed
+            # (verified live: '1' ran as program, wrote awkprof.out)
+            # => covered by the positive above.
+            # split: a required-arg option's operand swallows --filter
+            # (verified live: "invalid number of lines: '--filter'")
+            b"cat scripts/x.sh | split --lines --filter sh | sh",
+            b"cat scripts/x.sh | split -l --filter=sh - | sh",
+            # last --filter wins — here the last is `true` (verified)
+            b"cat scripts/x.sh | split --filter=sh --filter=true - | sh",
+            # a named INPUT replaces the upstream pipe — /dev/null's
+            # chunks reach the filter, not the script (verified live)
+            b"cat scripts/x.sh | split --filter=cat /dev/null | sh",
+            b"cat scripts/x.sh | split --filter=sh /dev/null | sh",
+            # an unknown/ambiguous option aborts — no filter at all
+            b"cat scripts/x.sh | split --bogus --filter=sh - | sh",
+            # no downstream pipe — the action's file is only printed
+            b"find . -exec awk '{print}' scripts/x.sh \\;"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round44(tmp_path):
+    r"""Round-44 review findings, all verified against live GNU tools:
+
+    * `split --unbuffered`/`-u` is a real flag — the scan must keep
+      the filter (Devin/Codex/CodeRabbit on #130/#1959/#12/#1393);
+    * obsolete `-NUM` line counts are valid split shorts (`-1000`
+      still runs the filter — CodeRabbit);
+    * `split --help`/`--version` exit BEFORE any filter runs,
+      regardless of position (Devin/Codex);
+    * invalid split operands abort before the filter: `--lines=xyz`,
+      `-a xyz`, `-t ''`/`xy`, bad CHUNKS; any `-n` aborts on a pipe
+      ("cannot determine file size") and `K/N` chunk-selects refuse
+      `--filter` outright (Devin);
+    * `xargs --he`/`flock --vers` resolve to terminal modes via GNU
+      unique prefix, and ambiguous/unknown options (`--ver`, `-Z`)
+      error out before the wrapped argv (Codex);
+    * `flock L -- sh x` execs the literal `--` — ENOENT, nothing
+      after it runs (Devin);
+    * `find . -quit -exec echo -o \; -exec sh x \;` still quits —
+      the `-o` inside echo's argv is not a find branch (Devin);
+    * `sh -lc : x.sh` binds the program inside the cluster — x.sh is
+      left as $0, never executed (Devin)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_text("echo HIT\n")
+    for line in (
+            # --unbuffered/-u keep the filter (verified live)
+            b"cat scripts/x.sh | split --unbuffered --filter=sh - | sh",
+            b"cat scripts/x.sh | split -u --filter=sh - | sh",
+            b"cat scripts/x.sh | split --un --filter=sh - | sh",
+            # obsolete -NUM line count (verified live)
+            b"cat scripts/x.sh | split -1000 --filter=sh - | sh",
+            # valid operands keep the filter (verified live)
+            b"cat scripts/x.sh | split -b 1K --filter=sh - | sh",
+            b"cat scripts/x.sh | split -b1KB --filter=sh - | sh",
+            b"cat scripts/x.sh | split -l 5 --filter=sh - | sh",
+            b"cat scripts/x.sh | split --numeric-suffixes --filter=sh - | sh",
+            # `-n 2` on a FILE input still runs the filter — a
+            # scripts/ input file's chunks reach sh (verified live)
+            b"split -n 2 --filter=sh scripts/x.sh | sh",
+            # `-n 2` + filter on a pipe: ≥9.x buffers the unseekable
+            # input and runs the filter on each chunk (round-51 union)
+            b"cat scripts/x.sh | split --filter=sh -n 2 - | sh",
+            # find: a REAL expr branch after -quit still revives the
+            # action (verified live)
+            b"find . -false -quit -o -exec sh scripts/x.sh \\;",
+            # xargs -E/--eof take their operand — here `sh` is the
+            # eof-string and `scripts/x.sh` the utility word itself,
+            # so the dep still fires through argv (verified live)
+            b"xargs -E sh scripts/x.sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # `-n` streams an unseekable pipe on ≥9.x — the filter
+            # runs on the buffered input (the `-n l/2`/`r/2 -n l/2`
+            # cases moved to the dep list — round-51 union)
+            # terminal split modes — never run the filter, either
+            # position (verified live)
+            b"cat scripts/x.sh | split --filter=sh --help | sh",
+            b"cat scripts/x.sh | split --help --filter=sh - | sh",
+            b"cat scripts/x.sh | split --filter=sh --version - | sh",
+            # invalid operands abort before the filter (verified live)
+            b"cat scripts/x.sh | split --filter=sh --lines=xyz - | sh",
+            b"cat scripts/x.sh | split --filter=sh -l xyz - | sh",
+            b"cat scripts/x.sh | split --filter=sh -a xyz - | sh",
+            b"cat scripts/x.sh | split --filter=sh -t xy - | sh",
+            b"cat scripts/x.sh | split --filter=sh -n x/y - | sh",
+            # K/N refuses --filter — abort (verified live)
+            b"cat scripts/x.sh | split --filter=sh -n 1/1 - | sh",
+            # a missing required operand aborts too (verified live:
+            # "option '--filter' requires an argument")
+            b"cat scripts/x.sh | split --filter=sh --filter | sh",
+            # a glued positional after --numeric-suffixes is INPUT —
+            # a missing file aborts before the filter (verified live)
+            b"cat scripts/x.sh | split --numeric-suffixes 5 --filter=sh - | sh",
+            # terminal prefixes and error exits kill the wrapped argv
+            # (verified live)
+            b"xargs --he sh scripts/x.sh",
+            b"flock --vers /dev/null sh scripts/x.sh",
+            b"xargs --ver sh scripts/x.sh",
+            b"xargs -Z sh scripts/x.sh",
+            # post-lockfile `--` is flock's literal argv[0] — ENOENT
+            # (verified live)
+            b"flock /dev/null -- sh scripts/x.sh",
+            # `-o` inside an action argv is not a find branch — -quit
+            # still kills the later action (verified live)
+            b"find . -quit -exec echo -o \\; -exec sh scripts/x.sh \\;",
+            # `-lc` binds the program inside the cluster — x.sh is $0
+            # (verified live)
+            b"find . -exec sh -lc : scripts/x.sh \\;",
+            b"find . -exec sh -cl : scripts/x.sh \\;"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round45(tmp_path):
+    """Review round-45 — split round-robin `-n` streaming, find's `{} +`
+    terminator guard, xargs `--arg-f` prefix argfiles, rejected wrapper
+    options, `split --separator='\\0'`, iconv `--usage`, and reader
+    numeric option values — each verified against live GNU tools:
+
+    * `split -n r/2 --filter=sh -` streams a pipe — and on coreutils
+      ≥9.x EVERY `-n` form does (the unseekable input is buffered to
+      a temp file — the round-51 union model keeps the running case;
+      `l/2`/`r/2 -n l/2` filter cases moved to the dep list);
+    * `+` ends a find `-exec` only as the `{} +` pair — a bare `+` is
+      passed to the command, and `-quit` stays dead when the `-o`
+      lives inside an action argv (Devin);
+    * `xargs --arg-f F` binds the argfile via GNU unique prefix —
+      _xargs_argfile/_xargs_utility share the prefix table (Devin);
+    * `xargs --parallel`/`--buffer-size` and `split --debug` are
+      rejected by the installed GNU tools — never reach argv (Devin);
+    * `flock -c X LOCK`/`--command X LOCK` abort — the command-string
+      options only parse AFTER the lockfile (Devin);
+    * `--separator='\\0'`/`-t '\\0'` is split's NUL escape — the
+      filter still runs (Codex);
+    * `iconv --usage` is a print-and-exit mode — the stream dies
+      unread (Codex);
+    * `tail --pid nope`/`pr --indent xyz` abort on non-digit
+      operands before reading (Codex)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_text("echo HIT\n")
+    for line in (
+            # round-robin streams a pipe — the filter runs the chunks
+            # (verified live)
+            b"cat scripts/x.sh | split -n r/2 --filter=sh - | sh",
+            # `-n` streams an unseekable pipe on ≥9.x — the filter
+            # runs on the buffered input; LAST -n wins either way
+            # (round-51 union, verified live on 9.4)
+            b"cat scripts/x.sh | split -n l/2 --filter=sh - | sh",
+            b"cat scripts/x.sh | split -n r/2 -n l/2 --filter=sh - | sh",
+            b"cat scripts/x.sh | split --number=r/2 --filter=sh - | sh",
+            # a bare `+` inside the action argv is data — the later
+            # action still runs (verified live)
+            b"find . -exec echo + --help \\; -exec sh scripts/x.sh \\;",
+            # `-e`/`-i`/`--eof` optional args leave the next word as
+            # the command — argfile still binds (verified live)
+            b"cat scripts/x.sh | xargs --arg-f scripts/x.sh cat | sh",
+            b"cat scripts/x.sh | xargs --arg-file scripts/x.sh cat | sh",
+            # NUL separator escape — the filter still runs (verified)
+            b"cat scripts/x.sh | split --separator='\\0' --lines=1 --filter=sh - | sh",
+            b"cat scripts/x.sh | split -t '\\0' --filter=sh - | sh",
+            # digit operands stay valid (verified live)
+            b"cat scripts/x.sh | tail --pid 9 | sh",
+            b"cat scripts/x.sh | pr --indent 4 | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # r/K/N is a chunk-select — refuses --filter outright
+            # (verified live; the `-n l/2`/`r/2 -n l/2` filter cases
+            # moved to the dep list under the ≥9.x union — round-51)
+            b"cat scripts/x.sh | split -n r/1/2 --filter=sh - | sh",
+            # `{}`-terminated action ends at `+` — `--help` is then a
+            # real terminal word (verified live)
+            b"find . -exec echo {} + --help \\; -exec sh scripts/x.sh \\;",
+            # `-quit` still wins when the `-o` lives inside an action
+            # argv (verified live)
+            b"find . -quit -exec echo + -o \\; -exec sh scripts/x.sh \\;",
+            # the argfile consumes the pipe's utility — xargs reads
+            # /dev/null, not the stream (verified live)
+            b"cat scripts/x.sh | xargs --arg-f /dev/null echo | sh",
+            # rejected options exit before argv (verified live)
+            b"xargs --parallel sh scripts/x.sh",
+            b"xargs --buffer-size=100 sh scripts/x.sh",
+            b"cat scripts/x.sh | split --debug --filter=sh - | sh",
+            # `-c`/`--command` before the lockfile abort (verified)
+            b"flock -c X /dev/null sh scripts/x.sh",
+            b"flock --command X /dev/null sh scripts/x.sh",
+            # print-and-exit modes never read the stream (verified)
+            b"cat scripts/x.sh | iconv --usage | sh",
+            b"cat scripts/x.sh | iconv --version | sh",
+            # non-digit option operands abort before reading
+            # (verified live)
+            b"cat scripts/x.sh | tail --pid nope | sh",
+            b"cat scripts/x.sh | tail --pid=nope | sh",
+            b"cat scripts/x.sh | pr --indent xyz | sh",
+            b"cat scripts/x.sh | pr -o xyz | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round46(tmp_path):
+    """Review round-46 — split zero/chunk-select counts, `-n K/N`
+    stdout streams, find's pre-path `-D`, signed reader numerics,
+    xargs `-E`/cluster `-a`/optional-arg `=` scan, and sort
+    `--files0-from` list indirection — each verified against live
+    GNU tools:
+
+    * `split -l 0`/`-b0`/`-C0`/`-n 0`/`-n r/0`/`-n 0/1`/`-n 2/1`
+      abort "invalid number …/chunk number" before any filter or
+      input; `-a0` stays legal (Devin/Codex);
+    * `split -n r/1/1` streams chunk 1 to stdout on a pipe; `1/1`
+      and `l/1/1` stream a FILE — only the two-part K/N forms emit
+      to stdout (CodeRabbit);
+    * `find -D --help` consumes `--help` as the debugopts operand
+      pre-path and still runs the action (Codex);
+    * `tail --pid=+1`/`pr --indent=+1` run — GNU accepts a leading
+      `+` but rejects `-1` (Devin);
+    * `xargs -E END` consumes END as the required eof-string —
+      `-e` alone is the optional form (CodeRabbit);
+    * `xargs -0a/dev/null` binds the argfile mid-cluster; a glued
+      `--eof=STOP`/`--replace=R` does not end the argfile scan —
+      last `-a` still wins (Devin + CodeRabbit);
+    * `sort --files0-from F` may name `-`/`/dev/stdin` inside F —
+      the stream is never proven dead (over-block; `/dev/null` is
+      the provably-empty exception) (Codex)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_text("echo HIT\n")
+    for line in (
+            # `-n K/N` prints the selected chunk to stdout — the
+            # input flows through like a reader's (verified live)
+            b"cat scripts/x.sh | split -n r/1/1 | sh",
+            b"cat scripts/x.sh | split -n r/1/1 - | sh",
+            b"cat scripts/x.sh | split --number=r/1/1 | sh",
+            b"split -n 1/1 scripts/x.sh | sh",
+            b"split -n l/1/1 scripts/x.sh | sh",
+            # `-a0` is legal — the filter still runs (verified live)
+            b"cat scripts/x.sh | split -a0 -l1 --filter=sh - | sh",
+            # `-D` consumes the next word pre-path — `--help` is the
+            # debugopts operand, not a terminal word (verified live)
+            b"find -D --help /dev/null -exec sh scripts/x.sh \\;",
+            # signed numeric operands stay valid (verified live)
+            b"cat scripts/x.sh | tail --pid=+1 | sh",
+            b"cat scripts/x.sh | tail --pid +1 | sh",
+            b"cat scripts/x.sh | pr --indent=+1 | sh",
+            # `-E` takes a required operand — END is not the utility
+            # and the live pipe feeds the argfile-replaced utility's
+            # stdin (verified live)
+            b"cat scripts/x.sh | xargs -E END -a /dev/null sh -c 'sh'",
+            b"cat scripts/x.sh | xargs -0E END -a /dev/null sh -c 'sh'",
+            # `-a` inside a short cluster binds the argfile —
+            # the utility inherits the live pipe (verified live)
+            b"cat scripts/x.sh | xargs -0a/dev/null sh -c 'sh'",
+            b"cat scripts/x.sh | sh -c 'xargs -0a/dev/null true; sh'",
+            # glued OPTIONAL-arg longs keep the argfile scan going —
+            # last `-a` wins = /dev/null, pipe stays live (verified)
+            b"cat scripts/x.sh | xargs -a - --eof=STOP -a /dev/null sh -c 'sh'",
+            b"cat scripts/x.sh | sh -c 'xargs -a - --eof=STOP -a /dev/null true; sh'",
+            # a regular list file may name /dev/stdin — the stream
+            # is never proven dead (Codex on #1393; over-block)
+            b"cat scripts/x.sh | sort --files0-from scripts/x.sh | sh",
+            b"cat scripts/x.sh | sort --files0-from=names.lst | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # zero/invalid split counts abort before any filter or
+            # read (verified live)
+            b"cat scripts/x.sh | split -l0 --filter=sh - | sh",
+            b"cat scripts/x.sh | split -l 0 --filter=sh - | sh",
+            b"cat scripts/x.sh | split --lines=0 --filter=sh - | sh",
+            b"cat scripts/x.sh | split -b0 --filter=sh - | sh",
+            b"cat scripts/x.sh | split -C0 --filter=sh - | sh",
+            b"cat scripts/x.sh | split -n 0 --filter=sh - | sh",
+            b"cat scripts/x.sh | split -n r/0 --filter=sh - | sh",
+            b"cat scripts/x.sh | split -n l/0 --filter=sh - | sh",
+            b"cat scripts/x.sh | split -n 0/0 --filter=sh - | sh",
+            b"cat scripts/x.sh | split -n 1/0 --filter=sh - | sh",
+            b"cat scripts/x.sh | split -n 0/1 --filter=sh - | sh",
+            b"cat scripts/x.sh | split -n 2/1 --filter=sh - | sh",
+            # a `-n` K/N stdout select combined with --filter aborts
+            # "does not process a chunk extracted to stdout" — the
+            # filter never runs (verified live)
+            b"cat scripts/x.sh | split -n r/1/1 --filter=sh - | sh",
+            b"split -n 1/1 --filter=sh scripts/x.sh | sh",
+            # negative numerics still abort (verified live)
+            b"cat scripts/x.sh | tail --pid=-1 | sh",
+            b"cat scripts/x.sh | pr --indent=-1 | sh",
+            # `/dev/null` is the provably-empty list — nothing is
+            # emitted (round-25 semantics kept)
+            b"cat scripts/x.sh | sort --files0-from /dev/null | sh",
+            b"cat scripts/x.sh | sort --files0-from=/dev/null | sh",
+            # the stdin-alias list form still drains the pipe as the
+            # list — `; sh` sees EOF (round-25 semantics kept)
+            b"cat scripts/x.sh | sh -c 'sort --files0-from=-; sh'"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round47(tmp_path):
+    """Review round-47 — each case verified against live GNU tools:
+
+    * `find -D help` (anywhere in the debugopts list) prints the -D
+      usage and exits BEFORE the expression — `-D exec,help` never
+      runs the action; `-D all` excludes help and runs. A terminal
+      word anywhere drops every action span.
+    * `split`'s input is classified independently of any `< f` stdin
+      rebind: a named operand still wins (`split -n r/1/1 F
+      </dev/null` streams F's chunk), and a redirect feeds the
+      filter (`split --filter=sh - <x` runs x's bytes through
+      $SHELL).
+    * `find -exec split x \\;` is NOT a dep — split writes chunk
+      FILES and find's stdout stays empty — while `--filter=CMD`
+      execs the operand's bytes and `-n K/N` emits a chunk (pipe
+      decides).
+    * `xargs -a - --help`/`--version`/a parse error exits BEFORE the
+      argfile or stdin is touched — the pipe stays unread for a
+      SIBLING command and the stage emits only usage text.
+    * A DYNAMIC `IFS=$v`/`IFS=$(…)` assignment REPLACES the tracked
+      IFS — an earlier literal cannot stay in effect.
+    * The SCRIPT_REF arg window is quote-aware — a QUOTED `|`/`&`/`;`
+      is operand text, so `--filter="cat | sh"` keeps a later
+      `scripts/` operand in reach.
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (
+            # a `< f` stdin rebind feeds split's filter — the script's
+            # bytes execute through $SHELL (was: fd_in discarded the
+            # classification entirely)
+            b"split --filter=sh - <scripts/x.sh",
+            b"split --filter=sh <scripts/x.sh",
+            b"split --filter=sh - < scripts/x.sh",
+            b"cat scripts/x.sh | split --filter=sh - <scripts/x.sh",
+            # a named operand still wins over the rebind — F's chunk
+            # streams to stdout (was: `not fd_in` short-circuited to
+            # "own" before the split branch ran)
+            b"split -n r/1/1 scripts/x.sh </dev/null | sh",
+            b"split -n 1/1 scripts/x.sh </dev/null | sh",
+            b"split -n l/1/1 scripts/x.sh </dev/null | sh",
+            # terminal xargs exits before the argfile/stdin is read —
+            # a SIBLING command still sees the pipe
+            b"cat scripts/x.sh | (xargs -a - --help; sh)",
+            b"cat scripts/x.sh | (xargs -a - --version; sh)",
+            b"cat scripts/x.sh | (xargs --help >/dev/null; sh)",
+            b"cat scripts/x.sh | (xargs -a /dev/null --help >/dev/null; sh)",
+            # a find `-exec split` filter execs the operand's bytes
+            b"find . -exec split --filter=sh scripts/x.sh \\;",
+            b"find . -exec split --filter=\"cat | sh\" scripts/x.sh \\;",
+            b"find . -exec split -n 1/1 scripts/x.sh \\; | sh",
+            # a quoted `|`/`;` inside an option operand is TEXT — the
+            # scripts/ path still counts as the filter's input
+            b"split --filter=\"cat | sh\" scripts/x.sh",
+            b"split --filter='cat | sh' scripts/x.sh",
+            b"split --filter=sh scripts/x.sh",
+            # kept semantics — the filter forwards/emits (round-46)
+            b"split --filter=cat scripts/x.sh | sh",
+            b"cat scripts/x.sh | split -n r/1/1 | sh",
+            # `-D all` excludes help — the action still runs
+            b"find -D all . -exec sh scripts/x.sh \\;"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # `-D help` is terminal — the action never runs
+            b"find -D help /dev/null -exec sh scripts/x.sh \\;",
+            b"find -D exec,help . -exec sh scripts/x.sh \\;",
+            b"find -D help -D all . -exec sh scripts/x.sh \\;",
+            # `-exec split x \\;` writes chunk FILES — find's stdout
+            # stays empty, a downstream exec sees nothing
+            b"find . -exec split scripts/x.sh \\; | sh",
+            b"find . -exec split -l1 scripts/x.sh \\; | sh",
+            # a swallowed/non-running filter execs nothing — the
+            # input was rebound to an empty file
+            b"split --filter=sh - </dev/null | sh",
+            b"cat scripts/x.sh | split --filter=sh - </dev/null | sh",
+            b"split -n r/1/1 - </dev/null | sh",
+            # terminal xargs emits only usage — the stream never
+            # reaches the next PIPE stage's stdin
+            b"cat scripts/x.sh | xargs --help | sh",
+            b"cat scripts/x.sh | xargs -a - --help | sh",
+            b"cat scripts/x.sh | xargs --version | sh",
+            # kept semantics — bare split writes chunk files (round-41)
+            b"split scripts/x.sh | sh",
+            b"cat scripts/x.sh | split -l1 | sh",
+            b"split --filter=true scripts/x.sh | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    # a dynamic `IFS=` REPLACES the tracked value — `IFS=','; IFS=$v`
+    # leaves IFS unproven (not the stale literal): it binds like an
+    # EMPTY IFS (`b""`), not the shell default (round-50)
+    assert mod._line_ifs(b"IFS=','; IFS=$v; date +x\n", 20) == b""
+    assert mod._line_ifs(b"IFS=','; IFS=$(cat f); date +x\n", 25) == b""
+    assert mod._line_ifs(b"IFS='x'; IFS=$v; date +x\n", 18) == b""
+    # a literal still binds — and a command-scoped prefix does not
+    assert mod._line_ifs(b"IFS=','; date +x\n", 8) == b","
+    assert mod._line_ifs(b"IFS=',' date +x\n", 18) is None
+
+
+def test_script_dep_round48(tmp_path):
+    """Round-48 review fixes (each verified live against bash/util-linux):
+    a `< file` stdin rebind is seekable so `split -n K/N` streams the
+    chunk instead of aborting; a substitution-bearing `--filter`
+    operand expands to an opaque command and must be treated as
+    executing its chunks; flock's pre-lockfile words go through the
+    shared validated GNU walk so unique-prefix terminal modes
+    (`--vers` → `--version`) and ambiguous prefixes (`--ve`) exit
+    before the command argv; `tail --max-unchanged-stats` shares the
+    non-negative-integer domain (`=bad` aborts before any read); and
+    query/describe modes (`ionice -p/-P/-u`, `taskset -p`, `chrt -p`,
+    `prlimit -p`, `setpriv --dump`, `sudo -l/-v/-e`, `command -v`)
+    never reach a trailing command — words after them are query
+    operands."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "pack"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_text("echo hi\n")
+    for line in (
+            # seekable stdin — `-n K/N` streams the rebound file's chunk
+            b"split -n 1/1 - <scripts/x.sh | sh",
+            b"split -n 1/1 <scripts/x.sh | sh",
+            b"split -n l/1/1 <scripts/x.sh | sh",
+            b"split -n r/1/1 <scripts/x.sh | sh",
+            b"cat /dev/null | split -n 1/1 - <scripts/x.sh | sh",
+            # the same redirect feeds `--filter` too
+            b"split --filter='$(printf sh)' - <scripts/x.sh | sh",
+            # an expanding filter operand resolves to an opaque
+            # command — `$(printf sh)` runs sh on every chunk
+            b"split --filter='$(printf sh)' scripts/x.sh",
+            b'split --filter="$(printf sh)" scripts/x.sh',
+            b"find . -exec split --filter='$(printf sh)' scripts/x.sh \\;",
+            # kept semantics — literal filter heads and exec-mode
+            # wrappers still count
+            b"split --filter=sh scripts/x.sh",
+            b"split --filter=cat scripts/x.sh | sh",
+            b"ionice -c 2 sh scripts/x.sh",
+            b"ionice -c2 -n 5 sh scripts/x.sh",
+            b"taskset 0x1 sh scripts/x.sh",
+            b"taskset -c 0 sh scripts/x.sh",
+            b"chrt -o 0 sh scripts/x.sh",
+            b"chrt -T 1 -P 2 -D 3 0 sh scripts/x.sh",
+            b"flock /tmp/l -c 'sh scripts/x.sh'",
+            b"flock -n /tmp/l sh -c 'sh scripts/x.sh'",
+            # `-n 1/1` streams a buffered pipe on ≥9.x (round-51 union)
+            b"cat scripts/x.sh | split -n 1/1 | sh",
+            b"flock --verb /tmp/l -c 'sh scripts/x.sh'",
+            b"flock -w5 /tmp/l -c 'sh scripts/x.sh'",
+            b"sudo sh scripts/x.sh",
+            b"sudo -n -u root sh scripts/x.sh",
+            b"command sh scripts/x.sh",
+            b"prlimit --cpu=1 sh scripts/x.sh",
+            b"cat scripts/x.sh | tail --max-unchanged-stats=2 | sh",
+            b"cat scripts/x.sh | tail --max-unchanged-stats=+2 | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # query/describe modes — the trailing words are PID/name
+            # operands, never a command
+            b"ionice -p 1 sh scripts/x.sh",
+            b"ionice -p1 sh scripts/x.sh",
+            b"ionice -P 1 sh scripts/x.sh",
+            b"ionice -u adrian sh scripts/x.sh",
+            b"ionice --pid 1 sh scripts/x.sh",
+            b"ionice --pid=1 sh scripts/x.sh",
+            b"ionice --process-group 1 sh scripts/x.sh",
+            b"ionice --user adrian sh scripts/x.sh",
+            b"taskset -p 1 sh scripts/x.sh",
+            b"taskset -p1 sh scripts/x.sh",
+            b"taskset --pid 1 sh scripts/x.sh",
+            b"chrt -p 1 sh scripts/x.sh",
+            b"chrt -p1 sh scripts/x.sh",
+            b"chrt --pid 1 sh scripts/x.sh",
+            b"prlimit -p 1 sh scripts/x.sh",
+            b"prlimit --pid 1 sh scripts/x.sh",
+            b"setpriv --dump sh scripts/x.sh",
+            b"command -v sh scripts/x.sh",
+            b"sudo -l sh scripts/x.sh",
+            b"sudo -v sh scripts/x.sh",
+            b"sudo -e sh scripts/x.sh",
+            # flock's pre-lockfile walk resolves GNU prefixes — a
+            # unique terminal prefix or an ambiguous one exits before
+            # the command argv
+            b"flock --vers /tmp/l -c 'sh scripts/x.sh'",
+            b"flock --ver /tmp/l -c 'sh scripts/x.sh'",
+            b"flock --ve /tmp/l -c 'sh scripts/x.sh'",
+            b"flock --version /tmp/l -c 'sh scripts/x.sh'",
+            b"flock --bogus /tmp/l -c 'sh scripts/x.sh'",
+            b"flock -V /tmp/l -c 'sh scripts/x.sh'",
+            # a bad numeric value aborts before any read
+            b"cat scripts/x.sh | tail --max-unchanged-stats=bad | sh",
+            b"cat scripts/x.sh | tail --max-unchanged-stats=-1 | sh",
+            # an empty input means no chunk — and a pipe
+            # input means the expanding filter never sees a script
+            b"split -n 1/1 - </dev/null | sh",
+            b"split --filter='$(printf sh)' - | sh",
+            # kept semantics — an empty/benign source execs nothing
+            b"split --filter=true scripts/x.sh | sh",
+            b"split -n r/1/1 - </dev/null | sh",
+            # `-c0` aborts "invalid option -- '0'" — util-linux `-c`
+            # binds only a separate operand (Codex on #1393,
+            # round-52 review — verified live)
+            b"taskset -c0 sh scripts/x.sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round49(tmp_path):
+    """Round-49 review fixes (each verified live against bash):
+    a `$`/backtick in a `--filter` COMMAND WORD expands to an opaque
+    head and must be treated as exec (`$(printf sh)` resolves to sh),
+    while an expansion in a LATER word is just an argument
+    (`true $HOME` drops the chunk bytes); the last-bound stdin file
+    record (`tgts[0]`) retires on `<<`-family, `<&`-rebind/close, `0>`,
+    and dynamic `<$F` targets — only a self-dup `<&0` keeps it; a
+    dead fd0 (`<&-`, `0>`, `<&1`) makes a `-`/absent split input die
+    EBADF before chunks or filters run; a `-exec` argv with no
+    `;`/`{} +` terminator is a parse error that kills EVERY action;
+    `split IN PREFIX` execs the word only as INPUT or inside the
+    filter — a second positional is the written output prefix;
+    `pr --pages`/`+N` aborts before any read on a bad page spec.
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts/x.sh").write_text("echo X\n")
+    (pdir / "scripts/y.sh").write_text("echo Y\n")
+
+    for line in (
+            # expansion in a LATER filter word is just an argument —
+            # `true $HOME` drops the bytes (Devin on #1393)
+            b"split --filter='true $HOME' scripts/x.sh | sh",
+            b"split --filter='echo $HOME' scripts/x.sh | sh",
+            # a literal-quoted $FD target does not expand — the pipe
+            # is consumed by the file bind, not exec'd (Codex on
+            # #1959 — `<'$FD'` keeps fd0 bound to a literal name)
+            b"cat scripts/x.sh | split --filter=sh - <'$FD'",
+            # stale last-bound record: `<<`-family rebinds fd0 to
+            # content; `<&-` closes it; `<&1` dupes the write-side
+            # fd — `split -n 1/1 -` dies before any chunk
+            b"split -n 1/1 - <scripts/x.sh <<<y | sh",
+            b"split -n 1/1 - <scripts/x.sh <<EOF | sh",
+            b"split -n 1/1 - <scripts/x.sh <&- | sh",
+            b"split -n 1/1 - <scripts/x.sh <&1 | sh",
+            b"split --filter=sh - <scripts/x.sh <&-",
+            # unterminated `-exec` argv is a find parse error —
+            # `missing argument to '-exec'` kills every action
+            b"find . -exec sh scripts/x.sh",
+            b"find . -exec sh scripts/x.sh ;",
+            b"find . -exec sh scripts/x.sh \\; -exec cat scripts/y.sh",
+            b"find . -exec sh scripts/x.sh +",
+            # `split IN PREFIX` — a second positional is the output
+            # prefix, written not read (Devin on #130)
+            b"find . -exec split --filter=sh /dev/null scripts/x.sh \\;",
+            (b"find . -exec split -n 1/1 /dev/null scripts/x.sh \\;"
+             b" | sh"),
+            # `pr --pages=bad`/`+bad` abort before the read (Codex on
+            # #130)
+            b"cat scripts/x.sh | pr --pages=bad | sh",
+            b"cat scripts/x.sh | pr +bad | sh",
+            b"cat scripts/x.sh | pr --pages | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+    for line in (
+            # the expansion is in the filter's COMMAND WORD — opaque
+            # head; `$(printf sh)` resolves to sh and execs chunks
+            b"split --filter='$(printf sh)' scripts/x.sh",
+            # dynamic `<$FD`/`<"$FD"` targets — name resolved at
+            # runtime; keep the pipe candidate (Codex on #1959)
+            b"cat scripts/x.sh | split --filter=sh - <\"$FD\"",
+            b"cat scripts/x.sh | split --filter=sh - <$FD",
+            # `sh $X` — an unset X collapses to bare `sh` (reads
+            # stdin, execs the chunks); a set X reads FILE X — the
+            # dynamic case stays fail-closed (verified live)
+            b"split --filter='sh $X' scripts/x.sh | sh",
+            # self-dup `<&0` leaves fd0 — and its filename — bound
+            b"split -n 1/1 - <scripts/x.sh <&0 | sh",
+            # literal `< file` record still feeds the chunk
+            b"split -n 1/1 - <scripts/x.sh | sh",
+            b"split -n 1/1 scripts/x.sh | sh",
+            # `-exec` terminated with `\\;`/`{} +` runs the argv
+            b"find . -exec sh scripts/x.sh \\;",
+            b"find . -exec sh scripts/x.sh {} +",
+            # the word IS the input operand — read by the chunker
+            b"find . -exec split --filter=sh scripts/x.sh \\;",
+            b"find . -exec split -n 1/1 scripts/x.sh out \\; | sh",
+            # a valid `pr --pages`/`+N` spec keeps the stream live
+            b"cat scripts/x.sh | pr --pages=1 | sh",
+            b"cat scripts/x.sh | pr --pages=1:9 | sh",
+            b"cat scripts/x.sh | pr +2 | sh",
+            b"cat scripts/x.sh | pr --pages 2 | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round50(tmp_path):
+    """Round-50 review fixes (each verified live against bash):
+    an unrecognised unshare option aborts before the program runs
+    (`unshare --bogus sh`); GNU unique prefixes of `--files0-from`
+    (`--files0-f`) bind the same list operand; a dynamic `IFS=$X`/
+    `IFS=$(…)` value can't be proven to split, so it binds like an
+    EMPTY IFS (one field); `--numeric-suffixes`/`--hex-suffixes`
+    values are validated against the FINAL suffix length; an
+    all-whitespace `--filter` has no command word; a third split
+    positional is an "extra operand" abort; `pr --pages=F:L` needs
+    L >= F; `flock -- L -c CMD` still binds CMD after `--`; and a
+    `scripts/` path inside `--filter` text executes the bundled
+    script (`sh scripts/x.sh`) or emits its bytes (`cat`).
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts/x.sh").write_text("echo X\n")
+    (pdir / "scripts/y.sh").write_text("echo Y\n")
+
+    for line in (
+            # unrecognised unshare options abort before the program
+            # runs (Codex on #1393)
+            b"unshare --bogus sh scripts/x.sh",
+            b"unshare -y sh scripts/x.sh",
+            # a `=` on a pure flag aborts "doesn't allow an argument"
+            b"unshare --map-root-user=x sh scripts/x.sh",
+            b"unshare --fork=x sh scripts/x.sh",
+            # split suffix-start values are validated — non-numeric,
+            # non-hex, and past the suffix-length bound all abort
+            b"cat scripts/x.sh | split --numeric-suffixes=bad"
+            b" --filter=sh -",
+            b"cat scripts/x.sh | split --numeric-suffixes=0x10"
+            b" --filter=sh -",
+            b"cat scripts/x.sh | split --numeric-suffixes=100"
+            b" --filter=sh -",
+            b"cat scripts/x.sh | split --hex-suffixes=xyz"
+            b" --filter=sh -",
+            b"cat scripts/x.sh | split --hex-suffixes=100"
+            b" --filter=sh -",
+            # a third positional is "extra operand" — the filter
+            # never runs
+            b"cat scripts/x.sh | split --filter=sh in1 in2 in3 | sh",
+            b"cat scripts/x.sh | split -- in1 in2 in3 | sh",
+            b"cat scripts/x.sh | split --filter=sh - p extra | sh",
+            # `pr --pages=F:L` with L < F aborts before any read
+            b"cat scripts/x.sh | pr --pages=1:0 | sh",
+            b"cat scripts/x.sh | pr --pages=2:1 | sh",
+            # a `-c`-shaped word directly after `--` is the lockfile
+            # — `sh` is argv[0] but nothing pipes in
+            b"flock -- -c sh",
+            # a literal `--` word post-lockfile is the dead argv[0]
+            b"cat scripts/x.sh | flock -- /tmp/l -- sh",
+            # an all-whitespace `--filter` has no command word — the
+            # $SHELL -c no-op drops the chunk bytes
+            b"cat scripts/x.sh | split --filter=' ' - | sh",
+            # two positionals are legal (INPUT + PREFIX) but in1 is
+            # not a scripts/ input — its chunks aren't script bytes
+            b"cat scripts/x.sh | split --filter=sh in1 in2 | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+    for line in (
+            # unique prefixes of --files0-from resolve to the same
+            # operand — the list file replaces stdin (Codex on
+            # #1393)
+            b"cat scripts/x.sh | sort --files0-f scripts/y.sh | sh",
+            b"cat scripts/x.sh | sort --files0- scripts/y.sh | sh",
+            b"cat scripts/x.sh | sort --files0 scripts/y.sh | sh",
+            # `flock -- L -c CMD` binds CMD even after the `--` that
+            # ended the pre-lockfile options (Devin on #130)
+            b"flock -- /tmp/l -c 'sh scripts/x.sh'",
+            # suffix values inside the bound still run the filter
+            b"cat scripts/x.sh | split --numeric-suffixes=5"
+            b" --filter=sh - | sh",
+            b"cat scripts/x.sh | split --hex-suffixes=ff"
+            b" --filter=sh - | sh",
+            b"cat scripts/x.sh | split --numeric-suffixes=100 -a4"
+            b" --filter=sh - | sh",
+            b"cat scripts/x.sh | split -a4 --numeric-suffixes=100"
+            b" --filter=sh - | sh",
+            # two positionals (INPUT + PREFIX) are legal — INPUT
+            # IS the scripts/ file, and its chunks reach the filter
+            b"cat scripts/x.sh | split --filter=sh scripts/x.sh p"
+            b" | sh",
+            # a scripts/ path in the filter text — interpreter head
+            # EXECUTES it (Devin on #1959)
+            b"split --filter='sh scripts/x.sh' -",
+            b"split --filter='bash scripts/x.sh' -",
+            b"split --filter='echo x; sh scripts/x.sh' -",
+            # a reader head re-emits the script's bytes to |sh
+            b"split --filter='cat scripts/x.sh' - | sh",
+            b"split --filter='head -1 scripts/x.sh' - | sh",
+            # valid page range keeps the stream live
+            b"cat scripts/x.sh | pr --pages=2:2 | sh",
+            # unshare's own options parse and still exec the program
+            b"unshare --mount sh scripts/x.sh",
+            b"unshare --mount=/tmp/m sh scripts/x.sh",
+            b"unshare -fm sh scripts/x.sh",
+            b"unshare -R /tmp sh scripts/x.sh",
+            b"unshare --kill-child=SIGTERM sh scripts/x.sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round51(tmp_path):
+    """Review round-51 fixes: `--` ends a wrapper's options (the next
+    word is argv[0]), a `split --filter=CMD` operand is program text
+    even with no downstream pipe, split's filter never fires on an
+    EMPTY /dev/null input, an unknown find predicate aborts before
+    traversal, sort refuses operands alongside --files0-from, only a
+    `-c` bound DIRECTLY after flock's lockfile binds command text,
+    and `-n` chunk-selects stream an unseekable pipe on coreutils
+    ≥9.x (union-of-versions, fail-closed).
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts/x.sh").write_text("echo X\n")
+    (pdir / "scripts/y.sh").write_text("echo Y\n")
+    (pdir / "scripts/f0").write_bytes(b"a\x00\n")
+
+    for line in (
+            # `--` terminates the wrapper's options — `unshare -- sh`
+            # runs sh (the strict option class read `--` as an
+            # abort — Devin on #1393)
+            b"unshare -- sh scripts/x.sh",
+            b"unshare --mount -- sh scripts/x.sh",
+            # a `--filter=CMD` operand is program text the filter's
+            # $SHELL -c runs even without a downstream pipe (Devin
+            # on #1393/#12, Codex on #1959)
+            b"split --filter='sh scripts/x.sh' input",
+            b"split --filter='sh scripts/x.sh' -",
+            b"split --filter='echo x; sh scripts/x.sh' input",
+            # coreutils ≥9.x buffers unseekable pipe input to a temp
+            # file, so `-n` chunk-selects STREAM the pipe (Codex on
+            # #130/#1959 — verified live on 9.4; 8.32 aborts —
+            # union models the running case)
+            b"cat scripts/x.sh | split -n 1/1 | sh",
+            b"cat scripts/x.sh | split -n l/1/1 | sh",
+            b"cat scripts/x.sh | split -n r/1/1 | sh",
+            # a `< file` rebind is seekable either way
+            b"cat /dev/null | split -n 1/1 - <scripts/x.sh | sh",
+            # a `-c` directly after the lockfile still binds command
+            # text; `flock L sh -c PROG` runs PROG
+            b"flock L -c 'sh scripts/x.sh'",
+            b"flock L sh -c 'cat scripts/x.sh'",
+            # the wrapped command's own argv[0] remains an exec
+            b"flock -- /tmp/l -c 'sh scripts/x.sh'",
+            # a wrapped emit head still forwards to |sh
+            b"flock L echo -c 'sh scripts/x.sh' | sh",
+            # a find action runs while only known primaries follow
+            b"find . -exec bash scripts/x.sh \\; -print",
+            b"find . -name '*.sh' -exec bash scripts/x.sh \\;"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+    for line in (
+            # the word after `--` is argv[0] — `unshare -- echo`
+            # just prints (Codex on #130)
+            b"unshare -- echo scripts/x.sh",
+            # an EMPTY input yields zero chunks — the filter never
+            # fires (Devin on #130: `--filter='echo RAN'` does not
+            # run on /dev/null)
+            b"split --filter='sh scripts/x.sh' /dev/null",
+            b"cat scripts/x.sh | split --filter='echo RAN' /dev/null"
+            b" | sh",
+            # sort refuses operands alongside --files0-from ("extra
+            # operand … cannot be combined" abort — Devin on #130)
+            b"sort --files0-from=scripts/f0 f | sh",
+            b"cat scripts/x.sh | sort --files0-from=f0 extra | sh",
+            # an unknown predicate aborts find BEFORE it traverses —
+            # no action runs (Devin on #130)
+            b"find . -exec bash scripts/x.sh \\; -bogus",
+            b"find . -exec sh scripts/x.sh \\; --bogus",
+            # `-c` inside the wrapped command's argv is argv DATA —
+            # `flock L echo -c 'sh x'` prints the string (Devin on
+            # #1959)
+            b"flock L echo -c 'sh scripts/x.sh'",
+            b"flock -- /tmp/l echo -c 'sh scripts/x.sh'",
+            # a wrapped emit head's output to a terminal is never
+            # exec'd — bare `xargs echo 'sh x'` prints, it does not
+            # run (Devin on #1959)
+            b"xargs echo 'sh scripts/x.sh'",
+            b"sudo echo 'sh scripts/x.sh'"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round52(tmp_path):
+    """Review round-52 fixes: wrapped-argv interpreter operands exec a
+    positional script file (`flock L sh x`, `xargs bash x`, `xargs
+    python3 x`), taskset's `-c`/`--cpu-list` bind ONLY as a separate
+    operand (`-c0`/`--cpu-list=0` abort), `sort -o`/`--output` diverts
+    the stream to a FILE, `--additional-suffix` rejects a `/` value,
+    `grep --binary-files` has a fixed {binary,text,without-match}
+    domain, `pr --pages=00` aborts like `--pages=0`, split's filter
+    never fires when fd0 is /dev/null, and `find -OLEVEL` binds only
+    in the option region before the first path (verified live).
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts/x.sh").write_text("echo X\n")
+    (pdir / "scripts/x.py").write_text("print(1)\n")
+
+    for line in (
+            # an interpreter head inside a wrapper's argv runs its
+            # positional script file (Codex on #130/#1959 + Devin on
+            # #130/#1393)
+            b"flock L sh scripts/x.sh",
+            b"flock L bash scripts/x.sh",
+            b"xargs sh scripts/x.sh",
+            b"xargs bash /tmp/scripts/x.sh",
+            b"xargs python3 scripts/x.py",
+            b"flock L python3 scripts/x.py",
+            # taskset's separate-operand forms still reach the command
+            b"taskset -c 0 sh scripts/x.sh",
+            b"taskset 0 sh scripts/x.sh",
+            b"taskset --cpu 0 sh scripts/x.sh",
+            # sort's fd-1 output aliases keep the stream on stdout
+            b"cat scripts/x.sh | sort --output=/dev/stdout | sh",
+            b"cat scripts/x.sh | sort -o/dev/stdout | sh",
+            # a plain suffix binds; a binary-files mode binds
+            b"split --additional-suffix=ok "
+            b"--filter='sh scripts/x.sh' -",
+            b"cat scripts/x.sh | grep --binary-files=binary "
+            b"scripts/x.sh | sh",
+            # pages=01 paginates and emits
+            b"cat scripts/x.sh | pr --pages=01 | sh",
+            # a LIVE fd0 feeds the filter
+            b"split --filter='sh scripts/x.sh' - </dev/stdin",
+            # `-OLEVEL` in the pre-path option region is valid GNU
+            b"find -O3 . -exec sh scripts/x.sh \\;",
+            # program text after sh -c still runs (wrapped + bare)
+            b"flock L -c 'sh scripts/x.sh'",
+            b"flock L sh -c 'cat scripts/x.sh'"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+    for line in (
+            # util-linux binds `-c`/`--cpu-list` ONLY separately —
+            # `-c0` exits "invalid option", `--cpu-list=0` "doesn't
+            # allow an argument" (Codex on #1393)
+            b"taskset -c0 sh scripts/x.sh",
+            b"taskset --cpu-list=0 sh scripts/x.sh",
+            # `-o`/`--output FILE` diverts the result — the pipe sees
+            # nothing; `-o -` writes a file literally named `-`
+            # (Codex + Devin on #1393)
+            b"cat scripts/x.sh | sort --out /tmp/o | sh",
+            b"cat scripts/x.sh | sort -o /tmp/o | sh",
+            b"cat scripts/x.sh | sort -o - | sh",
+            # a `/` in --additional-suffix aborts "invalid suffix …
+            # contains directory separator" (Codex on #130)
+            b"split --additional-suffix=/bad "
+            b"--filter='sh scripts/x.sh' -",
+            # `wat` is not a binary-files type — aborts "unknown
+            # binary-files type" (Codex on #130)
+            b"grep --binary-files=wat scripts/x.sh",
+            # `00` is a zero head — aborts "invalid page range" like
+            # `0` (Devin on #12)
+            b"cat scripts/x.sh | pr --pages=00 | sh",
+            # fd0 on /dev/null yields zero chunks — the filter never
+            # fires (Devin on #1959)
+            b"split --filter='sh scripts/x.sh' </dev/null",
+            b"split --filter='sh scripts/x.sh' - </dev/null",
+            # `-O*` inside the expression is an unknown predicate /
+            # bad decimal — find aborts before the action (Devin on
+            # #1959/#12)
+            b"find . -exec sh scripts/x.sh \\; -O3",
+            b"find . -exec sh scripts/x.sh \\; -O9",
+            b"find . -exec sh scripts/x.sh \\; -Oabc",
+            # after a program flag the positional is argv ($0), not
+            # the script (Devin on #1959, preserved)
+            b"flock L echo -c 'sh scripts/x.sh'",
+            b"flock L sh -c : scripts/x.sh",
+            b"flock L sh -c 'echo P' scripts/x.sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round53(tmp_path):
+    """Review round-53 fixes: sort's operand-taking long options consume
+    the NEXT argument even when it looks like an option (`sort -T
+    --output=/dev/null` parses --output… as the temp DIR, leaving stdout
+    live), find's global `-H`/`-L`/`-P`/`-debug` flags are legal only in
+    the pre-path option region while `-noignore_readdir_race` is a valid
+    expression option, an `env` link inside a wrapper's argv still
+    resolves to the interpreter behind it (`flock L env bash x`), and
+    split accepts a leading `+` on its numeric operands (`-l +1` runs
+    the filter; `-l +0` aborts — all verified live).
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts/x.sh").write_text("echo X\n")
+
+    for line in (
+            # `-T`/`--temporary-directory` (and friends) consume the
+            # next word as their operand — `--output=…` is then a temp
+            # dir, so the stream stays on stdout (Devin on #130)
+            b"cat scripts/x.sh | sort -T --output=/dev/null | sh",
+            b"cat scripts/x.sh | sort --temporary-directory "
+            b"--output=/dev/null | sh",
+            b"cat scripts/x.sh | sort --compress-program "
+            b"--output=/dev/null | sh",
+            # `-noignore_readdir_race` is a valid expression option —
+            # traversal still reaches the action (Codex on #130/#1959)
+            b"find . -noignore_readdir_race -exec sh scripts/x.sh \\;",
+            # the GLOBAL flags work before the first path
+            b"find -H . -exec sh scripts/x.sh \\;",
+            b"find -L -P -debug . -exec sh scripts/x.sh \\;",
+            # an `env` wrapper inside argv forwards to the command —
+            # the interpreter head still reads its script operand
+            # (Codex on #1393, verified live: NEST_RAN)
+            b"flock L env bash scripts/x.sh",
+            b"flock L env V=1 sh scripts/x.sh",
+            b"xargs env bash scripts/x.sh",
+            b"xargs env python3 scripts/x.sh",
+            # split numeric operands may carry a leading `+` — the
+            # filter still runs (Codex on #1959)
+            b"split --lines=+1 --filter='sh scripts/x.sh' -",
+            b"split -l +1 --filter='sh scripts/x.sh' -",
+            b"split -n +1 --filter='sh scripts/x.sh' -",
+            b"split -b +1K --filter='sh scripts/x.sh' -",
+            b"split -b +1KB --filter='sh scripts/x.sh' -",
+            b"split -a +1 --filter='sh scripts/x.sh' -"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+    for line in (
+            # `-H`/`-L`/`-P`/`-debug` inside the expression are unknown
+            # predicates — find aborts before any traversal (Devin on
+            # #12/#1959)
+            b"find . -H -exec sh scripts/x.sh \\;",
+            b"find . -L -exec sh scripts/x.sh \\;",
+            b"find . -P -exec sh scripts/x.sh \\;",
+            b"find . -debug -exec sh scripts/x.sh \\;",
+            # `env`'s own argv0 is a direct exec, not an interpreter
+            # read — same family as `env x`/`xargs x`/`nice x`/`flock L
+            # x`, none of which SCRIPT_REF sees (accepted gap)
+            b"flock L env scripts/x.sh",
+            b"env scripts/x.sh",
+            # after `bash -c P` the trailing word is $0, not a script
+            b"flock L env bash -c 'echo P' scripts/x.sh",
+            # `-l +0`/`-l +` abort (invalid line count); `-n +0/1` and
+            # the mixed-sign K/N forms error out on the stdout/filter
+            # conflict even though they parse (Codex on #1959)
+            b"split -l +0 --filter='sh scripts/x.sh' -",
+            b"split -l + --filter='sh scripts/x.sh' -",
+            b"split -n +0/1 --filter='sh scripts/x.sh' -",
+            b"split -n +1/1 --filter='sh scripts/x.sh' -",
+            b"split -n 1/+2 --filter='sh scripts/x.sh' -"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round54(tmp_path):
+    """Review round-54 fixes: an operand-taking sort option shadows a
+    later `--files0-from=` word (`sort -T --files0-from=/dev/null` reads
+    it as the temp DIR — stdout stays live), find's option region ends
+    at the first predicate as well as the first path (`find -name x -H`
+    is `unknown predicate`), a path after the expression aborts
+    (`find -noignore_readdir_race .` → `paths must precede
+    expression`), `-d` is the `-depth` alias, and setsid's option set is
+    fully enumerated so an unknown option exits before the wrapped
+    command (all verified live).
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts/x.sh").write_text("echo X\n")
+
+    for line in (
+            # `-T`/`--temporary-directory` consume the next word — the
+            # files0-from word is the DIR operand, stdin survives
+            # (Devin on #130)
+            b"cat scripts/x.sh | sort -T --files0-from=/dev/null | sh",
+            b"cat scripts/x.sh | sort --temporary-directory "
+            b"--files0-from=/dev/null | sh",
+            # `-d` is GNU's `-depth` alias — the action still runs
+            # (Codex on #130)
+            b"find . -d -exec sh scripts/x.sh \\;",
+            # global flags still legal before the first path
+            b"find -H . -exec sh scripts/x.sh \\;",
+            # setsid's real boolean flags still reach the command
+            b"cat scripts/x.sh | setsid -w sh",
+            b"cat scripts/x.sh | setsid --fork sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+    for line in (
+            # a predicate ends the option region — `-H`/`-L` after it
+            # are unknown predicates and find aborts (Devin on #130)
+            b"find -name x -H -exec sh scripts/x.sh \\;",
+            b"find -name x -L -exec sh scripts/x.sh \\;",
+            # a path after the expression aborts "paths must precede
+            # expression" before any action runs (Devin on #1959)
+            b"find -noignore_readdir_race . -exec sh scripts/x.sh \\;",
+            b"find -name x . -exec sh scripts/x.sh \\;",
+            b"find . -name x . -exec sh scripts/x.sh \\;",
+            # setsid with an unknown/terminal option exits before the
+            # wrapped command (Codex on #1393)
+            b"cat scripts/x.sh | setsid --bogus sh",
+            b"cat scripts/x.sh | setsid -x sh",
+            b"cat scripts/x.sh | setsid --fork=x sh",
+            b"cat scripts/x.sh | setsid --help sh",
+            # `--files0-from=/dev/null` as a REAL option still drains
+            # stdin to the list file
+            b"cat scripts/x.sh | sort --files0-from=/dev/null | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round55(tmp_path):
+    """Round-55 review findings (Codex on #1393, Devin on #130 —
+    all verified live):
+
+    - A shell redirection after the expression attaches to the find
+      command itself, never the expression — `find . -exec sh x \\;
+      >/dev/null` still runs the action. Round-54's positional-word
+      terminal treated `>f`/`2>f`/`<f` words as expression
+      positionals and dropped every action.
+    - A one/two-operand predicate with no remaining operand aborts
+      "missing argument" before traversal — `find … -exec sh x \\;
+      -size` retains no action.
+    - A backtick closer AT the scanned position is still inside the
+      pair's word (`x.sh`` `) — the enclosing command owns it, so
+      `split --filter=sh x`` ` executes the file.
+    - A glued short-option value is validated against the numeric
+      and page domains, not only the fixed-value domain — `pr -obad`
+      aborts "invalid line offset" before the stage forwards.
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts/x.sh").write_text("echo X\n")
+
+    for line in (
+            # redirects after the expression still run the action
+            # (Codex on #1393 — the >/dev/null form was the finding)
+            b"find . -exec sh scripts/x.sh \\; >/dev/null",
+            b"find . -exec sh scripts/x.sh \\; > /tmp/o",
+            b"find . -exec sh scripts/x.sh \\; 2>/dev/null | sh",
+            b"find . -exec sh scripts/x.sh \\; </dev/null",
+            b"find . -exec sh scripts/x.sh \\; 2>&1 | sh",
+            b"find . -exec sh scripts/x.sh \\; >&2",
+            b"find . -exec sh scripts/x.sh \\; <>f",
+            b"find . -exec sh scripts/x.sh \\; 0<f",
+            # heredoc/here-string forms attach too
+            b"find . -exec sh scripts/x.sh \\; <<EOF\nfoo\nEOF",
+            b"find . -exec sh scripts/x.sh \\; << EOF\nfoo\nEOF",
+            b"find . -exec sh scripts/x.sh \\; <<-EOF\nfoo\nEOF",
+            b"find . -exec sh scripts/x.sh \\; <<- EOF\nfoo\nEOF",
+            b"find . -exec sh scripts/x.sh \\; <<<w",
+            # a redirect in the option region leaves the expression
+            # intact
+            b"find -H >f . -exec sh scripts/x.sh \\;",
+            b"find . -exec sh scripts/x.sh \\; >f -name x",
+            b"find . -exec sh scripts/x.sh \\; >f -exec sh"
+            b" scripts/x.sh \\;",
+            # empty `` `` `` at a word's tail still resolves the
+            # operand to the prefixed name (Codex on #1393)
+            b"split --filter=sh scripts/x.sh``",
+            b"sh scripts/x.sh``",
+            b"cat scripts/x.sh`` | sh",
+            # a valid glued value still forwards
+            b"cat scripts/x.sh | pr -o5 | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+    for line in (
+            # a missing predicate operand aborts before any action
+            # (Devin on #130 — `-size` with no number)
+            b"find . -exec sh scripts/x.sh \\; -size",
+            b"find . -exec sh scripts/x.sh \\; -name",
+            b"find . -exec sh scripts/x.sh \\; -newer",
+            # a bare operator at argv end is a shell parse error
+            b"find . -exec sh scripts/x.sh \\; >",
+            # an invalid glued numeric/page value aborts before the
+            # stage forwards (Devin on #130)
+            b"cat scripts/x.sh | pr -obad | sh",
+            b"cat scripts/x.sh | pr --indent=bad | sh",
+            b"cat scripts/x.sh | pr -o bad | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round56(tmp_path):
+    """Round-56 review findings (Codex on #130/#1393/#1959, Devin on
+    #130/#1393/#1959/#12 — all verified live):
+
+    - `find -- . -exec …` — GNU's `--` ends the OPTION region only;
+      the expression still parses, so the action runs. Mid-expression
+      `find . --` is an unknown predicate and aborts.
+    - A QUOTED redirect word is a literal operand, not a shell
+      redirect — `find . -exec sh x \\; '>f'` aborts "paths must
+      precede expression".
+    - A heredoc's body begins on the line AFTER the `<<` word —
+      same-line words are still argv (`find . <<EOF -exec sh x \\;`
+      runs the action; `-help` on that line still prints usage).
+    - `split --hex-suffixes=A` aborts "invalid start value" — GNU
+      accepts lowercase hex digits only.
+    - `split -b 1bad` aborts "invalid number of bytes" — a SIZE is
+      digits plus one optional unit; `1K`/`1KB`/`1k`/`1b` are legal.
+    - `sort -o a -o b` aborts "multiple output files specified".
+    - `bash "missing | filename" scripts/x.sh` names the quoted word
+      as the script file — x.sh is $0, never executed.
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts/x.sh").write_text("echo X\n")
+
+    for line in (
+            # `--` ends only the option region — the action runs
+            b"find -- . -exec sh scripts/x.sh \\;",
+            b"find -- -exec sh scripts/x.sh \\;",
+            # heredoc argv still parses on the redirect's own line
+            b"find . <<EOF -exec sh scripts/x.sh \\;",
+            b"find . <<EOF -exec sh scripts/x.sh \\;\nbody\nEOF",
+            b"find . -exec sh scripts/x.sh \\; <<EOF\nbody\nEOF",
+            # lowercase hex start is legal
+            b"cat scripts/x.sh | split --hex-suffixes=a "
+            b"--filter=sh - | sh",
+            # legal GNU sizes
+            b"split -b 1K --filter=sh scripts/x.sh",
+            b"split -b 1KB --filter=sh scripts/x.sh",
+            b"split -b 1k --filter=sh scripts/x.sh",
+            b"split -b 1b --filter=sh scripts/x.sh",
+            # a single -o to an fd-1 alias keeps the stream
+            b"cat scripts/x.sh | sort -o /dev/stdout | sh",
+            # a scripts/ word in interpreter argv is still a bundled
+            # dependency — declared or not it must block
+            # (test_script_dep_block_second_arg semantics: the word
+            # is a reference, not only an exec position — Codex's
+            # operand-position claim is out of scope for the dep
+            # gate)
+            b"bash scripts/x.sh arg0",
+            b'bash "missing | filename" scripts/x.sh',
+            b"sh scripts scripts/x.sh",
+            b"bash -c 'true' scripts/x.sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+    for line in (
+            # `--` mid-expression is an unknown predicate — aborts
+            b"find . -- -exec sh scripts/x.sh \\;",
+            # a QUOTED redirect is a positional after the expression
+            b"find . -exec sh scripts/x.sh \\; '>f'",
+            b"find . -exec sh scripts/x.sh \\; '2>f'",
+            # `-help` on the redirect's own line still exits first
+            b"find . <<EOF -help",
+            # uppercase hex start value aborts split
+            b"cat scripts/x.sh | split --hex-suffixes=A "
+            b"--filter=sh - | sh",
+            # a malformed SIZE aborts before the filter runs
+            b"split -b 1bad --filter=sh scripts/x.sh",
+            b"split -b 0 --filter=sh scripts/x.sh",
+            # a second output spec aborts sort
+            b"cat scripts/x.sh | sort -o /dev/stdout -o /tmp/o | sh",
+            b"cat scripts/x.sh | sort -o /tmp/a -o /tmp/b | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+
+def test_script_dep_round57(tmp_path):
+    """Round-57 review findings (Devin/Codex on #130/#1393/#1959/#12 —
+    all verified live):
+
+    - A GNU SIZE's unit is OPTIONAL — `split -b 1` is a legal plain
+      count; `1KiB` is the binary unit (round-56 over-rejected both).
+    - GNU sort compares OUTFILE PATHS — `-o X -o X` is legal and
+      streams; only a different second path aborts "multiple output
+      files specified" (round-56 over-blocked).
+    - A shell redirect never reaches find's argv — `-H 2>/dev/null
+      -L` still binds both global flags (round-56 wrongly ended the
+      option region on the redirect word).
+    - `-D`/`-files0-from` mid-expression are unknown predicates and
+      abort (`find . -D help` → "unknown predicate `-D'").
+    - GNU non-negative numeric options cap at uintmax —
+      `tail --max-unchanged-stats=<2**64>` aborts "Value too large
+      for defined data type"; 2**64-1 runs.
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts/x.sh").write_text("echo X\n")
+
+    for line in (
+            # plain nonzero counts and binary units are legal
+            b"split -b 1 --filter=sh scripts/x.sh",
+            b"split --bytes=1 --filter=sh scripts/x.sh",
+            b"split -b 1KiB --filter=sh scripts/x.sh",
+            b"split --line-bytes=1 --filter=sh scripts/x.sh",
+            b"split -C1 --filter=sh scripts/x.sh",
+            # identical output specs keep the stdout stream
+            b"cat scripts/x.sh | sort -o /dev/stdout "
+            b"-o /dev/stdout | sh",
+            # a redirect between global flags still binds them
+            b"find -H 2>/dev/null -L . -exec sh scripts/x.sh \\;",
+            b"find -H >/dev/null -P . -exec sh scripts/x.sh \\;",
+            # uintmax boundary value runs
+            b"cat scripts/x.sh | tail "
+            b"--max-unchanged-stats=18446744073709551615 | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+    for line in (
+            # malformed SIZE still aborts before the filter runs
+            b"split -b 1bad --filter=sh scripts/x.sh",
+            b"split -b 1Ki --filter=sh scripts/x.sh",
+            b"split -b 0 --filter=sh scripts/x.sh",
+            # a second DIFFERENT output spec aborts
+            b"cat scripts/x.sh | sort -o /dev/stdout -o /tmp/o | sh",
+            b"cat scripts/x.sh | sort -o /tmp/a -o /tmp/b | sh",
+            # overflow past uintmax aborts before any read
+            b"cat scripts/x.sh | tail "
+            b"--max-unchanged-stats=18446744073709551616 | sh",
+            b"cat scripts/x.sh | tail "
+            b"--max-unchanged-stats=9999999999999999999999 | sh",
+            # mid-expression -D/-files0-from are unknown predicates
+            b"find . -D help -exec sh scripts/x.sh \\;",
+            b"find . -files0-from f -exec sh scripts/x.sh \\;"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round58(tmp_path):
+    """Round-58 review findings (Devin/Codex on #130/#1393/#1959/#12 —
+    all verified live on coreutils 8.32):
+
+    - A split SIZE may be zero-PADDED (`-b 01` runs; `00` aborts
+      "Numerical result out of range") and the computed bytes cap at
+      INTMAX — `...808`, `1ZiB`, and the coreutils>=9.5 `1R`/`1Q`
+      units all abort "Value too large" before the filter runs.
+    - `-l` lines count to UINTMAX; `-a` suffix length and `-n` chunk
+      components cap at INTMAX.
+    - `_num_ok` must not crash on >Python-4300-digit operands (a
+      digit-length guard precedes int()).
+    - `pr`'s operand-taking shorts are only `-D`/`-h`/`-l`/`-N`/`-o`/
+      `-w`/`-W` — `-r` (`--no-file-warnings`), `-d`/`-J`/`-T` are
+      flags and `-e`/`-i`/`-n`/`-s`/`-S` bind only glued; `nl -p` is
+      a flag too (`nl -p f` reads f as the file).
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts/x.sh").write_text("echo X\n")
+
+    for line in (
+            # zero-padded sizes and boundary values run the filter
+            b"split -b 01 --filter=sh scripts/x.sh",
+            b"split -b 01K --filter=sh scripts/x.sh",
+            b"split -b 9223372036854775807 --filter=sh scripts/x.sh",
+            b"split -l 18446744073709551615 --filter=sh scripts/x.sh",
+            b"split -a 9223372036854775807 --filter=sh scripts/x.sh",
+            # l/N writes EVERY chunk, so the filter still runs
+            b"split -n l/9223372036854775807 --filter=sh "
+            b"scripts/x.sh",
+            # flag-only pr shorts never consume the next word
+            b"cat scripts/x.sh | pr -r | sh",
+            b"cat scripts/x.sh | pr -d | sh",
+            b"cat scripts/x.sh | pr -J | sh",
+            # optional-arg shorts bind only glued — `,` is a file
+            b"cat scripts/x.sh | pr -s | sh",
+            # nl -p is --no-renumber, a flag — but nl still numbers
+            # body lines by default (round-59): moved to the False
+            # block below.
+            # zero-padded suffix starts fit the suffix length
+            b"split --numeric-suffixes=01 -l1 --filter=sh "
+            b"scripts/x.sh",
+            # -a 0 selects auto-length (runs); padded counts parse
+            b"split -a 0 --filter=sh scripts/x.sh",
+            b"split -a 0001 --filter=sh scripts/x.sh",
+            b"split -a " + b"0" * 5000 + b"1 --filter=sh scripts/x.sh",
+            b"cat scripts/x.sh | head -n 00001 | sh",
+            b"cat scripts/x.sh | pr -N 00001 | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+    for line in (
+            # `pr -n`/`nl` prefix line numbers — `sh` runs `1`, not
+            # the script (round-59 — verified live; supersedes the
+            # former flag-only readings above)
+            b"cat scripts/x.sh | pr -n | sh",
+            b"cat scripts/x.sh | nl -p | sh",
+            # zero values and intmax overflow abort before the filter
+            b"split -b 00 --filter=sh scripts/x.sh",
+            b"split -b 0K --filter=sh scripts/x.sh",
+            b"split -b 9223372036854775808 --filter=sh scripts/x.sh",
+            b"split -b 1ZiB --filter=sh scripts/x.sh",
+            b"split -b 1R --filter=sh scripts/x.sh",
+            b"split -b 1Q --filter=sh scripts/x.sh",
+            b"split -l 18446744073709551616 --filter=sh scripts/x.sh",
+            b"split -a 9223372036854775808 --filter=sh scripts/x.sh",
+            b"split -n 9223372036854775808/1 --filter=sh scripts/x.sh",
+            b"split -n 0 --filter=sh scripts/x.sh",
+            # a K/N chunk-select refuses --filter outright
+            b"split -n 1/9223372036854775807 --filter=sh "
+            b"scripts/x.sh",
+            # past Python's int() limit — must not crash, and aborts
+            b"cat scripts/x.sh | tail --max-unchanged-stats="
+            + b"9" * 5000 + b" | sh",
+            b"split -b " + b"9" * 5000 + b" --filter=sh scripts/x.sh",
+            # pr required-arg shorts at argv end abort
+            b"cat scripts/x.sh | pr -D | sh",
+            b"cat scripts/x.sh | pr -N | sh",
+            # pr numeric options reject non-numeric operands
+            b"cat scripts/x.sh | pr -N nope | sh",
+            b"cat scripts/x.sh | pr -N2x | sh",
+            b"cat scripts/x.sh | pr -l nope | sh",
+            b"cat scripts/x.sh | pr -w nope | sh",
+            b"cat scripts/x.sh | pr --columns=nope | sh",
+            b"cat scripts/x.sh | pr --first-line-number=nope | sh",
+            # a suffix start one digit past the suffix length aborts
+            b"split --numeric-suffixes=100 -a2 --filter=sh "
+            b"scripts/x.sh",
+            b"split --numeric-suffixes=" + b"9" * 5000
+            + b" --filter=sh scripts/x.sh",
+            b"split --hex-suffixes=" + b"f" * 5000
+            + b" --filter=sh scripts/x.sh",
+            # pr --pages components past uintmax abort "too large"
+            b"cat scripts/x.sh | pr --pages=18446744073709551616 | sh",
+            b"cat scripts/x.sh | pr --pages=1:18446744073709551616 "
+            b"| sh",
+            b"cat scripts/x.sh | pr --pages=" + b"9" * 5000 + b" | sh",
+            # chrt -m/--max prints the priority table — never execs
+            b"cat scripts/x.sh | chrt -m 1 sh scripts/x.sh",
+            b"cat scripts/x.sh | chrt --max sh scripts/x.sh",
+            # past uintmax even padded — 'invalid number' aborts
+            b"cat scripts/x.sh | head -n " + b"9" * 5000 + b" | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round59(tmp_path):
+    """Round-59 review regression — Devin #130/#1393/#12/#1959 + Codex
+    #1959 findings, all verified live on coreutils 8.32:
+    - GNU SIZE lowercase units `m`, `kB`, `kiB`, `mB`, `miB` parse;
+      `kb`/`g`/`gB`/`mb`/`gb` abort.
+    - pr numeric operands are C `int` and per-option domains differ:
+      `-N`/`--first-line-number` signed (INT_MIN..INT_MAX), `-o`/
+      `--indent` zero-or-more, `-l`/`-w`/`-W`/`--columns` positive.
+    - `pr --columns` aborts "page width too narrow" once each column
+      is under two chars — bound (width+1)/2, default width 72.
+    - `split -b` counts SIGNIFICANT digits — zero padding past 19
+      chars still parses.
+    - `split -a0` auto-computes suffix length — any numeric/hex
+      `--numeric-suffixes=`/`--hex-suffixes=` start fits.
+    - `cat -n`/-b/--number/--number-nonblank, `nl` (default/-b t) and
+      `pr -n`/`--number-lines` prefix line numbers — `sh` runs `N`,
+      not the script, so the dep must NOT fire. `nl -b n` pads with
+      spaces only — still executes.
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts/x.sh").write_text("echo X\n")
+
+    for line in (
+            # lowercase/multi-char GNU SIZE units that GNU accepts
+            b"cat scripts/x.sh | head -n 1m | sh",
+            b"cat scripts/x.sh | head -n 1mB | sh",
+            b"cat scripts/x.sh | head -n 1miB | sh",
+            b"cat scripts/x.sh | head -n 1kB | sh",
+            b"cat scripts/x.sh | head -n 1kiB | sh",
+            b"cat scripts/x.sh | head -c 1kiB | sh",
+            b"split -b 1m --filter=sh scripts/x.sh",
+            b"split -b 1kB --filter=sh scripts/x.sh",
+            b"split -b 1miB --filter=sh scripts/x.sh",
+            # -b significant digits — padding past 19 chars still runs
+            b"split -b 0000000000000000000001 --filter=sh "
+            b"scripts/x.sh",
+            # -a0 auto-length: any suffix start fits
+            b"split -a0 --numeric-suffixes=0 --filter=sh "
+            b"scripts/x.sh",
+            b"split -a0 --numeric-suffixes=999 --filter=sh "
+            b"scripts/x.sh",
+            b"split -a0 --hex-suffixes=fff --filter=sh "
+            b"scripts/x.sh",
+            # pr -N signed: -1, INT_MIN, INT_MAX all run
+            b"cat scripts/x.sh | pr -N -1 | sh",
+            b"cat scripts/x.sh | pr -N-1 | sh",
+            b"cat scripts/x.sh | pr -N -2147483648 | sh",
+            b"cat scripts/x.sh | pr -N 2147483647 | sh",
+            b"cat scripts/x.sh | pr --first-line-number=-1 | sh",
+            b"cat scripts/x.sh | pr --first-line-number=+5 | sh",
+            # pr -o accepts zero and +; -w/-l/-W up to INT_MAX run
+            b"cat scripts/x.sh | pr -o 0 | sh",
+            b"cat scripts/x.sh | pr -o +3 | sh",
+            b"cat scripts/x.sh | pr -o0 | sh",
+            b"cat scripts/x.sh | pr -l 2147483647 | sh",
+            b"cat scripts/x.sh | pr -l +5 | sh",
+            # --columns fits the page-width bound
+            b"cat scripts/x.sh | pr --columns 36 | sh",
+            b"cat scripts/x.sh | pr --columns +2 | sh",
+            b"cat scripts/x.sh | pr -w 100 --columns 50 | sh",
+            b"cat scripts/x.sh | pr --columns 50 -w 100 | sh",
+            # nl -b n forwards verbatim (space-padded still executes)
+            b"cat scripts/x.sh | nl -b n | sh",
+            b"cat scripts/x.sh | nl --body-numbering=n | sh",
+            b"cat scripts/x.sh | nl -bn | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+    for line in (
+            # unknown/unparseable units abort before the read
+            b"cat scripts/x.sh | head -n 1kb | sh",
+            b"cat scripts/x.sh | head -n 1g | sh",
+            b"cat scripts/x.sh | head -n 1gB | sh",
+            b"cat scripts/x.sh | head -n 1mb | sh",
+            b"cat scripts/x.sh | head -c 1giB | sh",
+            b"split -b 1g --filter=sh scripts/x.sh",
+            b"split -b 1kb --filter=sh scripts/x.sh",
+            # pr -N/-o bounds: int32 domain, -o rejects negatives
+            b"cat scripts/x.sh | pr -N -2147483649 | sh",
+            b"cat scripts/x.sh | pr -N 2147483648 | sh",
+            b"cat scripts/x.sh | pr -o -1 | sh",
+            b"cat scripts/x.sh | pr -o 2147483648 | sh",
+            # pr -l/-w/-W positive-only domain
+            b"cat scripts/x.sh | pr -l 0 | sh",
+            b"cat scripts/x.sh | pr -l -1 | sh",
+            b"cat scripts/x.sh | pr -w 0 | sh",
+            b"cat scripts/x.sh | pr -W 0 | sh",
+            b"cat scripts/x.sh | pr -l 2147483648 | sh",
+            # --columns past (width+1)/2 aborts "page width too narrow"
+            b"cat scripts/x.sh | pr --columns 37 | sh",
+            b"cat scripts/x.sh | pr --columns 0 | sh",
+            b"cat scripts/x.sh | pr --columns -1 | sh",
+            b"cat scripts/x.sh | pr --columns 100 | sh",
+            b"cat scripts/x.sh | pr -w 100 --columns 51 | sh",
+            b"cat scripts/x.sh | pr -w 7 --columns 5 | sh",
+            # numbering heads transform every content line — `sh`
+            # receives `     1\tCMD` and runs `1`, not the script
+            b"cat scripts/x.sh | cat -n | sh",
+            b"cat scripts/x.sh | cat --number | sh",
+            b"cat scripts/x.sh | cat -b | sh",
+            b"cat scripts/x.sh | cat --number-nonblank | sh",
+            b"cat scripts/x.sh | cat -An | sh",
+            b"cat scripts/x.sh | nl | sh",
+            b"cat scripts/x.sh | nl -b t | sh",
+            b"cat scripts/x.sh | nl --body-numbering=a | sh",
+            b"cat scripts/x.sh | pr -n | sh",
+            b"cat scripts/x.sh | pr -tn | sh",
+            b"cat scripts/x.sh | pr --number-lines | sh",
+            b"cat scripts/x.sh | pr --number-lines=: | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round60(tmp_path):
+    """Round-60 review regression — Devin #130/#1393/#12/#1959 + Codex
+    #1959 findings, all verified live on coreutils 8.32:
+    - A `cat` leading a pipe with `-n`/-b/--number/--number-nonblank
+      rewrites every output line — the numbered text can't run
+      downstream (`cat --number scripts/x.sh | sh` runs `1`, never
+      the script — Devin on #130).
+    - split's `/dev/stdin`/`/dev/fd/0`/`/proc/self/fd/0` INPUT operand
+      obeys the same dead-stdin check as `-`/absent — `split -l1
+      /dev/stdin --filter=X </dev/null` yields no chunks, the filter
+      never fires (Devin on #12).
+    - A `-exec` whose terminator is its FIRST argv word aborts the
+      whole find expression ("invalid argument `;' to `-exec`")
+      before any action runs — earlier spans die too (Devin on
+      #1959).
+    - A split `--filter` interpreter's program flag (`-c`/`-e`/`-m`/
+      `--eval`) makes a following scripts/ path argv ($0), not the
+      program (`bash -c true scripts/x.sh` — Codex on #1959); a
+      shell `-s` reads the program from stdin the same way. The
+      program word itself still execs (`bash -c 'sh x' y`).
+    - The int() conversions strip `+`/zero-padding — a 5000-digit
+      padded `-a`/`pr -w` operand parses without hitting Python's
+      4300-digit limit (Devin on #1393).
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo HIT\n")
+    pad = b"0" * 5000 + b"1"
+    for line in (
+            # verbatim cat still deps; numbered cat anywhere in the
+            # leading stage does not
+            b"cat scripts/x.sh | sh",
+            b"cat -E scripts/x.sh | sh",
+            b"cat /etc/hosts scripts/x.sh | sh",
+            b"cat <scripts/x.sh | sh",
+            # a live stdin makes the fd-0 alias operand dep the same
+            # way `-` does
+            b"split -l1 /dev/stdin --filter='sh scripts/x.sh' <scripts/x.sh",
+            b"split -l1 /dev/stdin --filter='sh scripts/x.sh'",
+            # a real -exec action still deps
+            b"find . -exec sh scripts/x.sh \\; | cat",
+            b"find . -exec sh x \\; -exec sh scripts/x.sh \\; | cat",
+            # the -c program text itself execs the script inside it
+            b"split --filter='bash -c \"sh scripts/x.sh\" foo' -l1 f",
+            b"split --filter='sh scripts/x.sh' -l1 f",
+            # padded numeric operands parse (no int() crash) and dep
+            b"split -a +" + pad + b" --filter='sh scripts/x.sh' f",
+            b"split -a " + pad + b" -l1 f --filter='sh scripts/x.sh'",
+            b"cat scripts/x.sh | pr --pages=+" + pad + b" | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # the flagged over-flag: numbering transforms the bytes
+            # before any downstream head sees them
+            b"cat --number scripts/x.sh | sh",
+            b"cat -n scripts/x.sh | sh",
+            b"cat -b scripts/x.sh | sh",
+            b"cat --number-nonblank scripts/x.sh | sh",
+            b"cat -An scripts/x.sh | sh",
+            b"cat --number /etc/hosts scripts/x.sh | sh",
+            b"cat --number <scripts/x.sh | sh",
+            b"cat --number scripts/x.sh | sort | sh",
+            # dead stdin through every fd-0 alias — no chunks, no
+            # filter
+            b"split -l1 /dev/stdin --filter='sh scripts/x.sh' </dev/null",
+            b"split -l1 /dev/fd/0 --filter='sh scripts/x.sh' </dev/null",
+            b"split -l1 /proc/self/fd/0 --filter='sh scripts/x.sh' </dev/null",
+            b"split -l1 /dev/stdin --filter='sh scripts/x.sh' <&-",
+            # `-exec`/`{} +`-empty argv or a missing terminator kills
+            # every action in the expression
+            b"find . -exec \\; | cat",
+            b"find . -exec echo A \\; -exec \\; | cat",
+            b"find . -exec \\; -exec sh scripts/x.sh \\; | cat",
+            b"find . -exec echo A \\; -exec | cat",
+            # a pure-reader filter head only emits the script's bytes
+            # to the chunk stream — chunk files, not an exec
+            b"split --filter='cat scripts/x.sh' -l1 f",
+            # the scripts/ path after a program flag is argv ($0),
+            # never read or executed
+            b"split --filter='bash -c true scripts/x.sh' -l1 f",
+            b"split --filter='sh -c true scripts/x.sh' -l1 f",
+            b"split --filter='sh -ec \"true\" scripts/x.sh' -l1 f",
+            b"split --filter='sh -s scripts/x.sh' -l1 f",
+            b"split --filter='python -c \"x\" scripts/x.py' -l1 f",
+            b"split --filter='perl -e \"x\" scripts/x.pl' -l1 f",
+            # a `pr` operand parse that would have crashed int() —
+            # GNU aborts "invalid line width" on the huge value
+            b"cat scripts/x.sh | pr -w " + pad + b" --columns 36 | sh",
+            b"cat scripts/x.sh | pr --pages=-" + pad + b" | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round61(tmp_path):
+    """Round-61 review regression — Devin #1393/#1959/#130 + Codex
+    #1393 findings, all verified live (bash 5 / dash / coreutils
+    8.32 / util-linux 2.37):
+    - A shell `-c` in a cluster takes the NEXT word as its program —
+      the chars after it are still flags (`bash -sc 'sh x'` runs x;
+      `-cs`, `-cx`, `-scx` too), and `-s` only moves the program to
+      stdin when NO `-c` appears (`sh -s x` -> x is argv; `sh -s -c
+      'sh x'` still runs x).
+    - `-` as a word is per-interpreter: shells read it as
+      end-of-options (`sh - x` runs x — bash AND dash) while
+      python/perl/ruby/node/lua read the PROGRAM from stdin.
+    - `cat -n`/`-b`/`--number` inside `date +$(…)` numbers the
+      captured bytes — a narrow IFS emits the NUMBERED field, `sh`
+      runs `1`, never the script (Devin on #130).
+    - `sed --binary`/`--zero-terminated` are real GNU options that
+      forward the stream (Codex on #1393).
+    - `taskset --cpu 0 CMD` uniquely abbreviates `--cpu-list` — the
+      mask already binds via the option, so `sh` is the command
+      (Devin on #1959); `taskset --cpu=0` still aborts.
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo HIT\n")
+    for line in (
+            # -c wins over -s in any cluster order — the program is
+            # always the next word
+            b"split --filter='bash -sc \"sh scripts/x.sh\" foo' -l1 f",
+            b"split --filter='bash -sc scripts/x.sh' -l1 f",
+            b"split --filter='bash -cs scripts/x.sh' -l1 f",
+            b"split --filter='sh -cx scripts/x.sh' -l1 f",
+            b"split --filter='sh -scx scripts/x.sh' -l1 f",
+            b"split --filter='sh -s -c \"sh scripts/x.sh\" f' -l1 f",
+            # `-` ends shell options — the next word is the program
+            b"split --filter='sh - scripts/x.sh' -l1 f",
+            b"split --filter='bash - scripts/x.sh' -l1 f",
+            # python's `-s` is a plain flag, not stdin-program
+            b"split --filter='python -s scripts/x.py' -l1 f",
+            # verbatim capture still deps
+            b"IFS=,; date +$(cat scripts/x.sh) | sh",
+            b"IFS=,; date +$(cat -E scripts/x.sh) | sh",
+            # sed's stream mode options forward the pipe
+            b"cat scripts/x.sh | sed '' --binary | sh",
+            b"cat scripts/x.sh | sed '' --zero-terminated | sh",
+            b"cat scripts/x.sh | sed --bin '' | sh",
+            # taskset cpu-list abbreviations bind the mask inline —
+            # sh is the wrapped command
+            b"cat scripts/x.sh | taskset --cpu 0 sh",
+            b"cat scripts/x.sh | taskset --cp 0 sh",
+            b"cat scripts/x.sh | taskset --cpu-list 0 sh",
+            b"cat scripts/x.sh | taskset -c 0 sh",
+            b"cat scripts/x.sh | taskset 0x1 sh",
+            # `-ok … ;` is the legal interactive action
+            b"find . -exec sh scripts/x.sh \\; -ok echo {} \\;",
+            b"find . -ok echo {} \\; -exec sh scripts/x.sh \\;",
+            b"find . -execdir sh scripts/x.sh \\; -exec echo {} +"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # -s moves the program to stdin only without -c
+            b"split --filter='sh -s scripts/x.sh' -l1 f",
+            b"split --filter='sh -es scripts/x.sh' -l1 f",
+            b"split --filter='sh -s -c \"true\" scripts/x.sh' -l1 f",
+            # `-` is the stdin program for non-shell interpreters —
+            # the scripts/ word is argv
+            b"split --filter='python - scripts/x.py' -l1 f",
+            b"split --filter='perl - scripts/x.pl' -l1 f",
+            b"split --filter='ruby - scripts/x.rb' -l1 f",
+            # numbered captures emit line-prefixed bytes — never the
+            # script
+            b"IFS=,; date +$(cat -n scripts/x.sh) | sh",
+            b"IFS=,; date +$(cat -b scripts/x.sh) | sh",
+            b"IFS=,; date +$(cat --number scripts/x.sh) | sh",
+            b"IFS=,; date +$(cat -An scripts/x.sh) | sh",
+            b"date +$(cat -n scripts/x.sh) | sh",
+            # `taskset --cpu=0` aborts "doesn't allow an argument";
+            # `-p` is the pid query mode
+            b"cat scripts/x.sh | taskset --cpu=0 sh",
+            b"cat scripts/x.sh | taskset -p 0 sh",
+            # `-ok`/`-okdir` accept only `;` — a `{} +` terminator is
+            # a "missing argument" parse abort BEFORE traversal, so
+            # no action in the expression runs (Devin on #12,
+            # round-61 — verified live on findutils 4.8)
+            b"find . -exec sh scripts/x.sh \\; -ok echo {} +",
+            b"find . -exec sh scripts/x.sh \\; -okdir echo {} +",
+            b"find . -ok echo {} + -exec sh scripts/x.sh \\;",
+            b"find . -exec sh scripts/x.sh \\; -ok echo"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round61_dash_c_cluster(tmp_path):
+    """`bash -ctrue x.sh`: chars after `-c` are still flags — the
+    NEXT word is the program (`bash -ctrue` parses -t/-r/-u/-e and
+    tries to exec x.sh — Devin on #1393, round-61 — verified live),
+    so a scripts/ operand in program position deps like any other
+    `sh x` invocation."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo HIT\n")
+    for line in (
+            b"split --filter='bash -ctrue scripts/x.sh' -l1 f",
+            b"split --filter='sh -ctrue scripts/x.sh' -l1 f",
+            b"split --filter='bash -cl scripts/x.sh' -l1 f"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round62_operand_sink_gate(tmp_path):
+    """An emit/transform head that aborts on its own flags or ends the
+    stream emits none of the operand's bytes — the dep must not fire
+    (verified live): `tail --pid nope`/`--follow=wat` exit "invalid
+    argument" before any read, `tail -n 0`/`head -n 0` emit nothing,
+    `cat -n` prefixes `N<TAB>` per line (`sh` runs `1`, not the
+    script), and `grep -q` emits no bytes at all. `cat -n` of a file
+    WITH separators still executes the post-separator command (the
+    round-62 `_numbered_flows` rule), while a `-`/stdin operand gets
+    the same prefix and is neutered (`cat -n f -` runs `1`, not the
+    piped script)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo SEPFREE\n")
+    (pdir / "scripts" / "sep.sh").write_bytes(b"true; echo RAN\n")
+    for line in (
+            # flag-abort / zero-limit emit heads feed nothing downstream
+            b"tail --pid nope scripts/x.sh | sh",
+            b"tail --pid=nope scripts/x.sh | sh",
+            b"tail --follow=wat scripts/x.sh | sh",
+            b"tail -n 0 scripts/x.sh | sh",
+            b"head -n 0 scripts/x.sh | sh",
+            # numbered operands feed `N` to sh, never the command
+            b"cat -n scripts/x.sh | sh",
+            b"cat -b scripts/x.sh | sh",
+            b"cat --number scripts/x.sh | sh",
+            # quiet grep emits nothing
+            b"grep -q p scripts/x.sh | sh",
+            # a `-`/stdin operand inside a numbering read is numbered
+            # and neutered too
+            b"cat scripts/x.sh | cat -n - | sh",
+            b"cat scripts/x.sh | cat -n f - | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # the live-head cases still dep
+            b"tail scripts/x.sh | sh",
+            b"tail -n 1 scripts/x.sh | sh",
+            b"tail -n +1 scripts/x.sh | sh",
+            b"tail -c +1 scripts/x.sh | sh",
+            b"tail --pid=1 scripts/x.sh | sh",
+            b"head scripts/x.sh | sh",
+            b"cat scripts/x.sh | sh",
+            b"grep p scripts/x.sh | sh",
+            # `cat -n` of a file WITH a top-level separator still
+            # executes the post-separator command
+            b"cat -n scripts/sep.sh | sh",
+            # sh-family program positions are untouched
+            b"sh scripts/x.sh",
+            b"bash scripts/x.sh",
+            b"sh -c scripts/x.sh",
+            b"bash -o nounset scripts/x.sh",
+            b"bash -o nounset -c scripts/x.sh",
+            # a scripts/ argv word is a reference dep even at $0
+            b"sh -c 'true' scripts/x.sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round62_quoted_positional(tmp_path):
+    """A bare positional of a sh-family head is the program FILE — but
+    only unquoted: a quoted name is one literal filename whose
+    scripts/ bytes are filename fragments (`bash 'x.sh;safe'` opens
+    the literal `x.sh;safe` name, `find -exec sh 'bash x.sh'` a file
+    named `bash x.sh` — verified live)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo X\n")
+    for line in (
+            b"bash 'scripts/x.sh;safe'",
+            b"bash 'scripts/x.sh safe'",
+            b"find . -exec sh 'bash scripts/x.sh' \\;",
+            b"flock /tmp/l.lock 'bash scripts/x.sh'"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b"bash 'scripts/x.sh'",
+            b"sh 'scripts/x.sh'"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round63_numbered_stream_operand(tmp_path):
+    """A `-`/feed-stream operand inside a numbering cat reads the
+    UPSTREAM stream — `cat x | cat -n -` emits `1\tX` (digits+tab
+    per line), which `|sh` cannot run (Devin on #1393, round-63
+    review — verified live). The provenance must thread through
+    `$(`-capture and emit-head gates too (`echo "$(cat -n -)"` —
+    the capture's stdout is numbered text, not dep bytes)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo X\n")
+    (pdir / "f").write_bytes(b"echo F\n")
+    for line in (
+            b"cat scripts/x.sh | cat -n - | sh",
+            b"cat scripts/x.sh | cat -n | sh",
+            b"cat scripts/x.sh | cat -n f - | sh",
+            b"cat scripts/x.sh | cat -n - f | sh",
+            b"cat scripts/x.sh | cat -n - | sh; echo S",
+            b"cat scripts/x.sh | echo \"$(cat -n f -)\" | sh",
+            b"cat scripts/x.sh | echo \"$(cat -n -)\" | sh",
+            b"cat scripts/x.sh | echo \"$(cat f)\" | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # bare `cat -` forwards verbatim — still a dep
+            b"cat scripts/x.sh | cat - | sh",
+            b"cat scripts/x.sh | cat - f | sh",
+            b"cat scripts/x.sh | head -n 1 - | sh",
+            b"cat scripts/x.sh | echo \"$(cat)\" | sh",
+            # non-numbered mixed operands still forward x verbatim
+            b"cat scripts/x.sh | echo \"$(cat f -)\" | sh",
+            b"cat scripts/x.sh | echo \"$(cat -)\" | sh",
+            # `-v` keeps the bytes runnable (show-nonprinting doesn't
+            # alter `echo X`)
+            b"cat scripts/x.sh | cat -v - | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round63_find_redirect_operand(tmp_path):
+    """`find . -name > out -exec sh x` never runs -exec: the redirect
+    words leave find's argv, so `-name` binds `-exec` itself as the
+    pattern and find aborts "paths must precede expression" before
+    reaching the action (Devin on #130, round-63 review — verified
+    live). Only a COMPLETE predicate + redirect + action still runs
+    the action."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo X\n")
+    for line in (
+            b"find . -name > out -exec sh scripts/x.sh \\;",
+            b"find . -type > out -exec sh scripts/x.sh \\;",
+            b"find . -newer > out -exec sh scripts/x.sh \\;",
+            b"find . -perm > out -exec sh scripts/x.sh \\;"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b"find . -exec sh scripts/x.sh \\;",
+            b"find . -name 'a*' > out -exec sh scripts/x.sh \\;",
+            b"find . -type f > out -exec sh scripts/x.sh \\;",
+            b"find . -newer a > out -exec sh scripts/x.sh \\;"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round63_nice_strict_table(tmp_path):
+    """util-linux `nice` aborts "unrecognized option" on any unknown
+    option — `nice --bogus x` never runs x (Codex on #1393, round-63
+    review — verified live) — but `nice -5` is the legacy glued
+    ADJUSTMENT, not an unknown option, and `-n`/`--adjustment` take
+    separate operands."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo X\n")
+    for line in (
+            b"nice --bogus sh scripts/x.sh",
+            b"nice --bogus=n sh scripts/x.sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b"nice -5 sh scripts/x.sh",
+            b"nice -+5 sh scripts/x.sh",
+            b"nice --5 sh scripts/x.sh",
+            b"nice -n 2 sh scripts/x.sh",
+            b"nice -n2 sh scripts/x.sh",
+            b"nice --adjustment=2 sh scripts/x.sh",
+            b"nice --adjustment 2 sh scripts/x.sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round63_split_output_prefix(tmp_path):
+    """`split -n 1/1 - pfx` treats `pfx` as the chunk output PREFIX —
+    it is never opened as input (Devin on #1959, round-63 review —
+    verified live). The INPUT positional and the --filter value are
+    the only dep words."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo X\n")
+    for line in (
+            b"split -n 1/1 - scripts/x.sh | sh",
+            b"split -n 2/4 - scripts/x.sh | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b"split -n 1/1 scripts/x.sh pfx | sh",
+            b"split -n 1/1 scripts/x.sh | sh",
+            b"split --filter='sh scripts/x.sh' /etc/hosts",
+            b"split --filter='./scripts/x.sh' /etc/hosts",
+            b"split --filter=./scripts/x.sh /etc/hosts"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round63_filter_emit_head(tmp_path):
+    """`split --filter='echo sh scripts/x.sh'` runs `echo` — the
+    filter PRINTS `sh scripts/x.sh` as chunk text, it never execs
+    x.sh (Devin on #1959, round-63 review — verified live). The
+    emit-head check applies to the filter's command word, not the
+    head word of the scripts/ reference inside it."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo X\n")
+    for line in (
+            b"split --filter='echo sh scripts/x.sh' /etc/hosts",
+            b"split --filter='true; echo sh scripts/x.sh' /etc/hosts",
+            b"split --filter='printf %s scripts/x.sh' /etc/hosts",
+            b"split --filter='yes sh scripts/x.sh' /etc/hosts",
+            # printed PATH text exec'd by the filter's own `|sh` is
+            # the accepted emitted-path-exec gap — only content bytes
+            # count
+            b"split --filter='echo scripts/x.sh | sh' /etc/hosts"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b"split --filter='sh scripts/x.sh' /etc/hosts",
+            b"split --filter='bash scripts/x.sh' -",
+            b"split --filter='cat scripts/x.sh' - | sh",
+            # a later command still execs past a printed match
+            b"split --filter='echo x; sh scripts/x.sh' /etc/hosts",
+            # echo's emitted TEXT re-parses as an invocation for the
+            # inner `|sh` — `echo sh x | sh` runs `sh x` (Devin on
+            # #1959, round-65 review — verified live)
+            b"split --filter='echo sh scripts/x.sh | sh' /etc/hosts",
+            # the filter's own `|sh` execs the emitted CONTENT bytes
+            b"split --filter='cat scripts/x.sh | sh' /etc/hosts"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round64_filter_command_head(tmp_path):
+    """Round-64 review regression — Devin #1393/#130/#12/#1959
+    findings, all verified live (bash 5 / coreutils 8.32 /
+    util-linux 2.37):
+    - A scripts/ match's role comes from the COMMAND containing it,
+      not the filter's first word: `true; echo sh x` only PRINTS the
+      path (Devin on #130) while `echo x; sh x` still execs a later
+      command past the printed match (Devin on #1393).
+    - A filter's own pipe tail execs emitted content bytes:
+      `cat x | sh` inside --filter runs x (Devin on #12).
+    - A bare numbered reader (`nl`/`pr -n`/`cat -n` with NO operand)
+      defaults to stdin — a sep-carrying scripts/ stream still execs
+      the post-`;` command downstream (Devin on #1959).
+    - `nice -+N`/`--N` are valid SIGNED legacy adjustments — the
+      command still runs (Devin on #1393); `-+x`/`-2x` still abort.
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo X\n")
+    (pdir / "scripts" / "sep.sh").write_bytes(b"true; echo RAN\n")
+    for line in (
+            b"split --filter='true; echo sh scripts/x.sh' /etc/hosts",
+            b"split --filter='echo sh scripts/x.sh' /etc/hosts",
+            # printed PATH text exec'd by an inner `|sh` is the
+            # accepted emitted-path-exec gap — only content bytes count
+            b"split --filter='echo scripts/x.sh | sh' /etc/hosts",
+            b"cat scripts/x.sh | nl | sh",
+            b"cat scripts/x.sh | pr -n | sh",
+            b"cat scripts/x.sh | cat -n | sh",
+            b"nice -+x sh scripts/x.sh",
+            b"nice -2x sh scripts/x.sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b"split --filter='echo x; sh scripts/x.sh' /etc/hosts",
+            b"split --filter='cat scripts/x.sh | sh' /etc/hosts",
+            b"cat scripts/sep.sh | nl | sh",
+            b"cat scripts/sep.sh | pr -n | sh",
+            b"cat scripts/sep.sh | cat -n | sh",
+            b"cat scripts/sep.sh | nl -b n | sh",
+            b"nice -+5 sh scripts/x.sh",
+            b"nice --5 sh scripts/x.sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round65_terminal_and_pipeline(tmp_path):
+    """Round-65 review regression — Codex/Devin on #130/#1393/#12/#1959,
+    all verified live (bash 5 / dash / coreutils / util-linux):
+    - Terminal interpreter modes inside a filter exit before the
+      program: `bash -n`/`--help`/`--version`, `python3 -V`/`-h`/
+      `--version`/`--help` never touch the operand.
+    - A reader/emitted match is bounded by its OWN pipeline tail:
+      `cat x | true; sh` dies at `true` (the `; sh` sibling never
+      sees the bytes); `cat x | sh` inside the filter still execs.
+    - Emit heads whose emitted TEXT is an invocation re-parse in the
+      tail (`echo sh x | sh`) and in an outer `|sh` downstream.
+    - A `<` stdin rebind is only read when the head has no non-feeder
+      file operand: `head /dev/null <x` never opens x.
+    - A redirect word never satisfies a required option operand:
+      `unshare --setuid >/dev/null sh` aborts at the option parse.
+    - Redirects don't leak into split's argv scan:
+      `split --filter=sh x > /tmp/out` still execs the chunks.
+    - Shell argv-positionals past `-s`, a `-c` operand, or `--` are
+      $0/argv, never read (`bash -s -- -c x`, `bash -c : x`,
+      `bash -- -c x`); `bash -- x` still runs x.
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo X\n")
+    (pdir / "scripts" / "sep.sh").write_bytes(b"true; echo RAN\n")
+    for line in (
+            b"split --filter='bash --help scripts/x.sh' /etc/hosts",
+            b"split --filter='bash -n scripts/x.sh' /etc/hosts",
+            b"split --filter='bash -n -c \"echo HI scripts/x.sh\"' /etc/hosts",
+            b"split --filter='python3 -V scripts/x.sh' /etc/hosts",
+            b"split --filter='python3 --version scripts/x.sh' /etc/hosts",
+            b"split --filter='cat scripts/x.sh | true; sh' /etc/hosts",
+            b"split --filter='cat scripts/x.sh | true' - | sh",
+            b"cat scripts/x.sh; sh",
+            b"cat scripts/x.sh | true | sh",
+            b"head /dev/null <scripts/x.sh | sh",
+            b"cat scripts/x.sh | unshare --setuid >/dev/null sh",
+            b"split --filter='echo scripts/x.sh' -",
+            b"split --filter='echo scripts/x.sh' - | sh",
+            b"bash -s -- -c scripts/x.sh",
+            b"bash -s scripts/x.sh",
+            b"bash -- -c scripts/x.sh",
+            b"bash -n scripts/x.sh",
+            b"bash --help scripts/x.sh",
+            b"bash --version scripts/x.sh",
+            b"python3 -V scripts/x.sh",
+            b"python3 -h scripts/x.sh",
+            b"python3 --help scripts/x.sh",
+            b"python3 -c 'import os' scripts/x.sh",
+            b"perl -e 'print 1' scripts/x.sh",
+            b"nl -bn /dev/null <scripts/x.sh | sh",
+            b"sort /dev/null <scripts/x.sh | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b"split --filter='true; echo sh scripts/x.sh | sh' /etc/hosts",
+            b"split --filter='echo sh scripts/x.sh' - | sh",
+            b"split --filter='echo sh scripts/x.sh | sh' /etc/hosts",
+            b"split --filter=sh scripts/x.sh > /tmp/out",
+            b"split --filter='cat scripts/x.sh | sh' /etc/hosts",
+            b"split --filter='cat scripts/x.sh' - | sh",
+            b"cat scripts/x.sh | sh",
+            b"cat <scripts/x.sh | sh",
+            b"cat - <scripts/x.sh | sh",
+            b"cat scripts/x.sh | tr a b | sh",
+            b"cat scripts/x.sh | unshare --setuid 0 sh",
+            b"bash -- scripts/x.sh",
+            # post-`-c`-operand argv words are still reference deps —
+            # same convention as `bash -c 'true' x` (round-56/62)
+            b"bash -c : scripts/x.sh",
+            b"python3 scripts/x.sh",
+            b"perl scripts/x.sh",
+            b"sh scripts/x.sh",
+            b"bash -c 'sh scripts/x.sh'"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round66_sudo_shell_xargs_abort_interp(tmp_path):
+    """Review round 66 — verified against live bash/coreutils:
+
+    - `sudo -s`/`--shell`/`-i`/`--login` run the tail as ONE `$SHELL
+      -c` program string — the tail head word is program text
+      (`sudo -s 'sh x.sh'` execs x.sh; `sudo -s 'echo x.sh'` follows
+      the `bash -c 'echo x'` over-include convention). Bare `sudo
+      x.sh` stays a literal argv[0] name, `sudo -- -s x` execs `-s`
+      (ENOENT), `-u` swallows an operand letter in a cluster
+      (`sudo -us` = -u "s", not shell mode).
+    - A malformed xargs option operand aborts before the utility:
+      `-n`/`-s`/`-l`/`--max-args` <1 or non-numeric, `-P`/`--max-procs`
+      <0, `-d`/`--delimiter` multi-char (`xargs -n 0 sh x` runs
+      nothing); `-P 0`, `-n +2`, `-d ,` are valid.
+    - Interpreter option-operands bind their own word — `python3 -X
+      dev -V` still prints the version (`-X`/`-W`/
+      `--check-hash-based-pycs` consume a separate operand word);
+      `-c` ends option parsing at its operand.
+    - Inert interpreter modes inside find -exec / flock / xargs tails
+      never run the word (`-exec bash -n x` parses, `-exec sh -s x`
+      reads stdin, `-exec python3 -V x` prints the version).
+    - Redirect words no longer leak into split's filter/input argv
+      scan (`split --filter='cat x' in > /tmp/o` reads the file
+      operand — emitted-to-file bytes are a dep only when the filter
+      itself execs).
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo X\n")
+    for line in (
+            b"sudo scripts/x.sh",
+            b"sudo -- scripts/x.sh",
+            b"sudo -- -s scripts/x.sh",
+            b"sudo -u root scripts/x.sh",
+            b"sudo rm scripts/x.sh",
+            b"sudo rm scripts/x.sh | sh",
+            b"sudo scripts/x.sh | sh",
+            b"sudo 'sh scripts/x.sh'",
+            b"sudo -us 'sh scripts/x.sh'",
+            b"echo hi | xargs -n 0 sh scripts/x.sh",
+            b"echo hi | xargs -n -1 sh scripts/x.sh",
+            b"echo hi | xargs -n bad sh scripts/x.sh",
+            b"echo hi | xargs --max-args=bad sh scripts/x.sh",
+            b"echo hi | xargs -P -1 sh scripts/x.sh",
+            b"echo hi | xargs -d xy sh scripts/x.sh",
+            b"echo hi | xargs -s 0 sh scripts/x.sh",
+            b"echo hi | xargs -n scripts/x.sh sh y",
+            b"find . -exec bash -n scripts/x.sh \\;",
+            b"find . -exec sh -n scripts/x.sh \\;",
+            b"find . -exec python3 -V scripts/x.py \\;",
+            b"find . -exec bash --version scripts/x.sh \\;",
+            b"find . -exec bash --help scripts/x.sh \\;",
+            b"find . -exec sh -s scripts/x.sh \\;",
+            b"find . -exec sh -c 'true' scripts/x.sh \\;",
+            b"flock /tmp/l bash -n scripts/x.sh",
+            b"flock /tmp/l sh -s scripts/x.sh",
+            b"flock /tmp/l python3 -V scripts/x.py",
+            b"echo hi | xargs bash -n scripts/x.sh",
+            b"echo hi | xargs sh -s scripts/x.sh",
+            b"python3 -X dev -V scripts/x.py",
+            b"python3 -W default -V scripts/x.py",
+            b"python3 -c 'print(1)' -V",
+            b"split --filter='cat scripts/x.sh' in > /tmp/o",
+            b"split --filter='cat scripts/x.sh' in > /tmp/o | sh",
+            b"split --filter='sh scripts/x.sh' -n 1/1 in",
+            b"split -n 1/1 scripts/x.sh out"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b"sudo -s 'sh scripts/x.sh'",
+            b"sudo --shell 'sh scripts/x.sh'",
+            b"sudo -i 'sh scripts/x.sh'",
+            b"sudo --login 'sh scripts/x.sh'",
+            b"sudo -s scripts/x.sh",
+            b"sudo -si 'sh scripts/x.sh'",
+            b"sudo -s 'echo scripts/x.sh'",
+            b"sudo -u root -s 'sh scripts/x.sh'",
+            b"nice sudo -s 'sh scripts/x.sh'",
+            b"sudo -n -s scripts/x.sh",
+            b"sudo cat scripts/x.sh",
+            b"sudo sh scripts/x.sh",
+            b"sudo cat scripts/x.sh | sh",
+            b"echo hi | xargs -n +2 sh scripts/x.sh",
+            b"echo hi | xargs -P 0 sh scripts/x.sh",
+            b"echo hi | xargs -n 2 sh scripts/x.sh",
+            b"echo hi | xargs -d , sh scripts/x.sh",
+            b"echo hi | xargs sh scripts/x.sh",
+            b"echo hi | xargs bash scripts/x.sh",
+            b"find . -exec bash -c 'sh scripts/x.sh' \\;",
+            b"find . -exec bash scripts/x.sh \\;",
+            b"flock /tmp/l bash scripts/x.sh",
+            b"flock /tmp/l sh -c 'sh scripts/x.sh'",
+            b"python3 -X dev scripts/x.py",
+            b"python3 -W default scripts/x.py",
+            b"split --filter='sh scripts/x.sh' in > /tmp/o",
+            b"bash -c : scripts/x.sh",
+            b"bash scripts/x.sh",
+            b"cat scripts/x.sh | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round67_opt_operands_wrapper_values(tmp_path):
+    """Round-67 shell-semantics fixes — all verified live on bash/dash
+    and real util-linux/python tools:
+
+    - Shell `-o`/`-O` bind option NAMES, never program text — a name
+      that can't be one (`bash -o x.sh`, `dash -o ./f`) aborts the
+      whole command before any program (Codex on #130). Invented
+      identifier-shaped names stay over-blocked by design (the
+      union-of-versions direction).
+    - `-o` operands bind following words in cluster order; `-c`'s
+      operand is the first NON-OPTION word after option parsing — it
+      binds LAST even when `c` precedes `o` (`bash -co X n` gives
+      o→X (abort), c→n).
+    - `python3 -X`/`-W` consume a following operand word — any value
+      warns-or-runs (`python3 -X bogus x` still runs x); a missing
+      operand aborts. `--check-hash-based-pycs` aborts on values
+      outside {default,always,never} (glued or separate).
+    - `xargs -n <5000 digits>` still runs (the count saturates) —
+      the operand check must not call int() on unbounded digits.
+    - Wrapper operand VALUES that abort before the wrapped program:
+      `nice -n 5.5` ("invalid adjustment"), `ionice -c -5`
+      ("unknown scheduling class"), `ionice -n x` ("invalid class
+      data argument"). Values that parse but fail at the syscall
+      (`nice -n -5` unprivileged, `ionice -n -1`) still count.
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo X\n")
+    (pdir / "scripts" / "y.sh").write_bytes(b"echo Y\n")
+    (pdir / "scripts" / "x.py").write_bytes(b"print(1)\n")
+    for line in (
+            b"bash -o scripts/x.sh",
+            b"bash -O scripts/x.sh",
+            b"dash -o scripts/x.sh",
+            b"bash -o scripts/x.sh -c p",
+            b"bash -o ./scripts/x.sh scripts/y.sh",
+            b"bash -onounset scripts/x.sh",
+            b"bash -co scripts/x.sh nounset",
+            b"bash -oc scripts/x.sh nounset",
+            b"split -n 3 --filter=\"bash -o scripts/x.sh\" /tmp/d",
+            b"python3 -X scripts/x.py",
+            b"python3 --check-hash-based-pycs bogus scripts/x.py",
+            b"python3 --check-hash-based-pycs=bogus scripts/x.py",
+            b"python3 --check-hash-based-pycs scripts/x.py",
+            b"python3 -X dev -V scripts/x.py",
+            b"nice -n5.5 sh -c 'sh scripts/x.sh'",
+            b"nice -n 5.5 sh -c 'sh scripts/x.sh'",
+            b"nice --adjustment=5.5 sh -c 'sh scripts/x.sh'",
+            b"ionice -c -5 sh -c 'sh scripts/x.sh'",
+            b"ionice -c-5 sh -c 'sh scripts/x.sh'",
+            b"ionice -c2 -n x sh -c 'sh scripts/x.sh'",
+            b"xargs -n 000 sh < scripts/x.sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b"bash -o nounset scripts/x.sh",
+            b"bash -O extglob scripts/x.sh",
+            b"bash +o nounset scripts/x.sh",
+            b"dash -o nounset scripts/x.sh",
+            b"bash -o bogus scripts/x.sh",
+            b"bash -co nounset scripts/x.sh",
+            b"bash -oc nounset scripts/x.sh",
+            b"python3 -X dev scripts/x.py",
+            b"python3 -Xdev scripts/x.py",
+            b"python3 -W error scripts/x.py",
+            b"python3 -Wbogus scripts/x.py",
+            b"python3 -X pycache_prefix=/tmp/p scripts/x.py",
+            b"python3 --check-hash-based-pycs default scripts/x.py",
+            b"python3 --check-hash-based-pycs always scripts/x.py",
+            b"python3 -X dev -v scripts/x.py",
+            b"split -n 3 --filter=\"python3 -X dev scripts/x.py\" "
+            b"/tmp/d",
+            b"xargs -n " + b"9" * 5000 + b" sh < scripts/x.sh",
+            b"nice -n5 sh -c 'sh scripts/x.sh'",
+            b"nice -n -5 sh -c 'sh scripts/x.sh'",
+            b"ionice -c0 sh -c 'sh scripts/x.sh'",
+            b"ionice -c2 -n8 sh -c 'sh scripts/x.sh'"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round68_empty_operands_and_wrapped_readers(tmp_path):
+    """Round-68 shell-semantics fixes — all verified live on
+    bash/GNU coreutils/util-linux:
+
+    - A quoted EMPTY operand is a real argv member — `cat f | sed -e ''
+      | sh` runs sed with an empty program over the pipe (GNU sed
+      accepts it and forwards stdin), and `grep -e ''` matches every
+      line. `_word_redirects` yields b"" for `''`/`""` AND for pure
+      redirect words, so the args collectors must distinguish a
+      genuine empty operand (empty unquoted canon) from a redirect
+      word (`>f`, `2>&1`) — Codex on #1393, verified live.
+    - `xargs -P -0` parses `-0` as the -P operand; `-0` is numerically
+      zero (max-procs 0 = unlimited) — the utility runs (verified:
+      `xargs -P -0 -n1 echo` prints). Negative nonzero stays bad.
+    - `xargs -d` takes ONE char or a GNU escape (`\\a` `\\n` `\\0`
+      `\\04` `\\123` `\\x4` `\\x41` `\\\\`) — `\\q`, `ab`, `\\8`,
+      `\\e`, `\\xZZ` abort (verified against util-linux xargs).
+    - `sudo echo -s x` prints `-s x` — `echo` ends sudo's option run,
+      so `-s` is echo's argument, not a sudo shell flag (verified
+      live: `sudo -n echo -s scripts/x.sh` prints). The whole tail
+      argv decides via the head.
+    - An argv-wrapped READER still emits: `xargs cat f | sh` runs
+      `cat f …` and pipes the bytes to sh (verified live), `flock L
+      cat f | sh` too — the wrapped head's emit matters, not just its
+      exec classification.
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo X\n")
+    for line in (
+            b"xargs -d '\\q' sh scripts/x.sh",
+            b"xargs -d 'ab' sh scripts/x.sh",
+            b"xargs -d '\\8' sh scripts/x.sh",
+            b"xargs -d '\\e' sh scripts/x.sh",
+            b"sudo echo -s scripts/x.sh",
+            b"sudo -u root echo -s scripts/x.sh",
+            b"sudo -- -s scripts/x.sh",
+            b"xargs cat scripts/x.sh",
+            b"flock /tmp/L cat scripts/x.sh",
+            b"xargs -P -1 sh scripts/x.sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b"xargs -d 'a' sh scripts/x.sh",
+            b"xargs -d '\\n' sh scripts/x.sh",
+            b"xargs -d '\\x41' sh scripts/x.sh",
+            b"xargs -d '\\x4' sh scripts/x.sh",
+            b"xargs -d '\\123' sh scripts/x.sh",
+            b"xargs -d '\\04' sh scripts/x.sh",
+            b"xargs -d '\\0' sh scripts/x.sh",
+            b"xargs -d '\\\\' sh scripts/x.sh",
+            b"xargs -P -0 sh scripts/x.sh",
+            b"xargs -P 0 sh scripts/x.sh",
+            b"cat scripts/x.sh | sed -e '' | sh",
+            b"cat scripts/x.sh | grep -e '' | sh",
+            b"printf 'i\\n' | xargs cat scripts/x.sh | sh",
+            b"flock /tmp/L cat scripts/x.sh | sh",
+            b"printf 'i\\n' | xargs head -n1 scripts/x.sh | sh",
+            b"sudo -s scripts/x.sh",
+            b"sudo -u root -s scripts/x.sh",
+            b"sudo cat scripts/x.sh",
+            b"sudo grep p scripts/x.sh",
+            b"sudo cat scripts/x.sh | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
