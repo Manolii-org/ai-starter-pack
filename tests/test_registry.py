@@ -13990,3 +13990,36 @@ def test_script_dep_round80_mask_prose_marks(tmp_path):
             b'(cat scripts/x.sh >&2; echo `echo "("`) |& sh',
             b'(cat scripts/x.sh >&2; (t)) |& sh'):
         assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round81_single_child_group(tmp_path):
+    """A ONE-sibling compound is still a group — `(cat x >&2) |& sh`
+    merges fd2 into the pipe exactly like a multi-sibling one (Devin
+    on #133, round-81 — verified live)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (
+            b'(cat scripts/x.sh >&2) |& sh',
+            b'(cat scripts/x.sh >&2; (true) | cat) |& sh',
+            b'(cat scripts/x.sh >&2; true && true) |& sh',
+            b'(cat scripts/x.sh >&2; true || true) |& sh'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round81_group_scan_delimiters(tmp_path):
+    """Delimiter confusion inside the group can no longer hide the
+    containing `)`/`}` closer: `\"` inside a quoted region and `}`
+    inside a quoted `${}` default are not real closers, and inner
+    `|`/`&&`/`||` separators do not end the group scan (Devin on
+    #1431/#17, round-81 — verified live)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (
+            b'(cat scripts/x.sh >&2; echo "a \\" ( b") |& sh',
+            b'(cat scripts/x.sh >&2; echo ${v:-"}"}) |& sh',
+            b'(cat scripts/x.sh >&2; echo ${v:-${w}}) |& sh'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line

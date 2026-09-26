@@ -7841,8 +7841,20 @@ def _group_fd1_prov(src: bytes, pos: int, amp: bool = False):
             i += 2
             continue
         if c in (b"'", b'"', b"`"):
-            e = src.find(c, i + 1)
-            if e < 0 or e >= cl:
+            # Find the matching closer — inside `"` and backtick a
+            # `\` escapes the next byte; inside `'` it is literal
+            # (POSIX), so `'` pairs with the next raw `'`
+            # (`echo "a \" ( b"` — Devin on #17, round-81 — verified
+            # live).
+            e = i + 1
+            while e < cl:
+                if c != b"'" and src[e:e + 1] == b"\\":
+                    e += 2
+                    continue
+                if src[e:e + 1] == c:
+                    break
+                e += 1
+            if e >= cl:
                 i += 1
                 continue
             msk[i:e] = b" " * (e - i)
@@ -7878,9 +7890,10 @@ def _group_fd1_prov(src: bytes, pos: int, amp: bool = False):
         if kind in (b";", b"\n", b"&"):
             spans.append((cur, op + 1 + ss))
             cur = op + 1 + se
+    # A ONE-sibling compound is still a group — `(cat x >&2) |& sh`
+    # merges its fd2 into the pipe exactly like a multi-sibling one
+    # (Devin on #133, round-81 — verified live).
     spans.append((cur, cl))
-    if len(spans) < 2:
-        return None
     prov = "own"
     out_src = None
     for ga, gb in spans:
@@ -7913,10 +7926,11 @@ def _group_fd1_prov(src: bytes, pos: int, amp: bool = False):
 def _group_pipe(src: bytes, start: int) -> int:
     """Index of the `|`/`|&` following the `)`/`}` closer of the
     compound that contains `start`, else -1. `;`/newline siblings
-    inside the compound are skipped; a `|`/`&&`/`||` before the
-    closer means `start` is not inside such a compound. Quote- and
-    backtick-aware (Devin on #132/#1428, round-77 — `(cat x >&2;
-    true) |& sh` merges the `>&2` sibling into the pipe)."""
+    and inner `|`/`&&`/`||` separators inside the compound are
+    skipped — the compound still ends at its `)`/`}` (Devin on
+    #133/#17, round-81). Quote- and backtick-aware (Devin on
+    #132/#1428, round-77 — `(cat x >&2; true) |& sh` merges the
+    `>&2` sibling into the pipe)."""
     i = start
     in_s = in_d = esc = False
     subs = {a: b for a, b in _substitution_spans(src)}
@@ -7952,8 +7966,36 @@ def _group_pipe(src: bytes, start: int) -> int:
                 break
             i = e
         elif c == b"{" and src[i - 1:i] == b"$":
-            e = src.find(b"}", i + 1)
-            if e < 0:
+            # Match the expansion's real `}` — a quoted `}` is value
+            # text, nested `${` count, and `\x` inside `"` is escaped
+            # (`echo ${x:-"}"}` — Devin on #1431/#17, round-81).
+            e = i + 1
+            bd = 1
+            sq = dq = False
+            while e < len(src):
+                q = src[e:e + 1]
+                if sq:
+                    if q == b"'":
+                        sq = False
+                elif dq:
+                    if q == b"\\":
+                        e += 1
+                    elif q == b'"':
+                        dq = False
+                elif q == b"\\":
+                    e += 1
+                elif q == b"'":
+                    sq = True
+                elif q == b'"':
+                    dq = True
+                elif q == b"{" and src[e - 1:e] == b"$":
+                    bd += 1
+                elif q == b"}":
+                    bd -= 1
+                    if bd == 0:
+                        break
+                e += 1
+            if e >= len(src):
                 break
             i = e            # ${...} expansion — its `}` is no closer
         elif c in (b"(", b"{") and src[i - 1:i] not in (
@@ -7982,8 +8024,12 @@ def _group_pipe(src: bytes, start: int) -> int:
                 i = j
                 continue
             return -1
-        elif c == b"|" or (c == b"&" and src[i + 1:i + 2] == b"&"):
-            break
+        # `|`/`&&`/`||` before the containing closer are INNER
+        # separators (an inner pipeline or conditional inside the
+        # group), not the group's own pipe — keep scanning
+        # (`(cat x >&2; (true) | cat) |&` — Devin on #133/#17,
+        # round-81 — verified live). Outside a group they lead nowhere:
+        # no unquoted `)`/`}` follows, so the loop still ends at -1.
         i += 1
     return -1
 
@@ -9959,6 +10005,13 @@ def _command_literal(src: bytes, pos: int,
     # whose opener precedes `cs` counts — `_group_pipe` returns -1
     # for a compound that opens after the word's command.
     p = _group_pipe(src, cs + len(win))
+    if _pipe_pos(src, cs + len(win)) >= 0:
+        # The word's own `;`-sibling continues via an INNER `|` —
+        # the word's fd1 feeds that inner pipeline and only its LAST
+        # stage's output reaches the group's outer pipe
+        # (`( cat x | python -m base64 ) | sh` hands sh encoded
+        # bytes, not the script — round-29 semantics).
+        return not _pipe_to_exec(src, cs + len(win))
     if p >= 0 and _group_fd1_prov(src, p, False) is None:
         # A `)`/`}` at pos-1 that _group_fd1_prov accepts is a real
         # command group; a `$(` substitution close is not.
@@ -11944,8 +11997,15 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                     # The word's window may end mid-compound — the
                     # pipe that matters is the GROUP's, past `)`/`}`
                     # (`(echo bash x >&2; t) |&` — Devin on #133,
-                    # round-78 — verified live).
+                    # round-78 — verified live). An inner `|` right
+                    # after the word's window means the sibling is a
+                    # pipeline — the word's fd1 ends inside the
+                    # compound and only the inner LAST stage's output
+                    # reaches the outer pipe (`( echo bash x | tr a b
+                    # ) | sh` runs transformed text — round-81).
                     p2 = _group_pipe(scan, cs + len(enclosing))
+                    if _pipe_pos(scan, cs + len(enclosing)) >= 0:
+                        p2 = -1
                     if wfd not in (None, _FD_OUT):
                         gp = (_group_fd1_prov(
                             scan, p2,
