@@ -316,6 +316,8 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
           MERGE_DANGER: ${{ needs.classify.outputs.merge_danger }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           mkdir -p .ai/judge-log
           python3 scripts/run-judge.py \

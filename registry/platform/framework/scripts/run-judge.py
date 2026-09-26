@@ -12,6 +12,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -94,6 +95,10 @@ class Judge:
         self.sha = sha
         self.repo = os.getenv("GITHUB_REPOSITORY", "")
         self.token = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")
+        # An `edited` rerun at the same HEAD must publish a fresh verdict: dedup
+        # keys on commit + metadata digest so a title/body edit re-posts.
+        meta_src = os.getenv("PR_TITLE", "") + "\0" + os.getenv("PR_BODY", "")
+        self.meta_digest = hashlib.sha256(meta_src.encode()).hexdigest()[:12]
         self.merge_danger = self._load_merge_danger()
         self.judge_log_dir = Path(".ai/judge-log")
 
@@ -311,6 +316,7 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
         # Format review body
         body_lines = [
             REVIEW_MARKER,
+            f"<!-- meta:{self.meta_digest} -->",
             "## PR Assessment Review",
         ]
 
@@ -427,10 +433,12 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
 
             for review in reviews:
                 author = (review.get("user") or {}).get("login")
+                body = review.get("body") or ""
                 if (
                     review.get("commit_id") == self.sha
                     and author == JUDGE_REVIEW_AUTHOR
-                    and REVIEW_MARKER in (review.get("body") or "")
+                    and REVIEW_MARKER in body
+                    and f"<!-- meta:{self.meta_digest} -->" in body
                 ):
                     return True
 

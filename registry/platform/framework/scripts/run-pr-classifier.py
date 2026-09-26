@@ -167,7 +167,16 @@ def main() -> None:
     # Bounded file inventory from the FULL diff — the model only sees the first
     # 50k chars, but door/blast classification must cover paths that land beyond
     # the cutoff (a migration after the truncation point is still one-way).
-    changed_paths = sorted(set(re.findall(r"^\+\+\+ b/(.+)$", diff, re.M)))
+    # Parse `diff --git` headers: `+++ b/` misses deletions (`+++ /dev/null`)
+    # and renames.
+    changed_paths = sorted(
+        {
+            m.group(1)[2:].strip('"')
+            for m in re.finditer(
+                r'^diff --git (?:a/\S*|"a/[^"]*") (b/\S*|"b/[^"]*")$', diff, re.M
+            )
+        }
+    )
     inventory = "\n".join(changed_paths[:500])
     if len(changed_paths) > 500:
         inventory += f"\n[+{len(changed_paths) - 500} more paths]"
