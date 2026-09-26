@@ -13772,3 +13772,57 @@ def test_script_dep_round76_group_fd1_flock_exp_filter_glued(tmp_path):
             b"find . -exec split -n 2 --filter=scripts/x.sh - <&- \\;",
             b"split --filter=cat F | sh"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round77_pipe_amp_stderr(tmp_path):
+    """`|&` merges a group's stderr into the pipe — a `>&2` sibling
+    inside `(…)`/`{…}` therefore still feeds the pipe, while a
+    NON-group `cmd >&2 |&` dies (fd1 binds to real stderr before `|&`
+    copies fd1's binding — verified live). Compound groups that open
+    AFTER the word's command are not its siblings (`cat x >&2;
+    (true) |&` — the `(true)` group's pipe is a different statement),
+    and `$(`/`<(`/`>(` closers are substitution spans, not command
+    groups (Devin/CodeRabbit on #132/#1428/#1961/#16, round-77)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (
+            b"(cat scripts/x.sh >&2; true) |& sh",
+            b"((cat scripts/x.sh >&2; true)) |& sh",
+            b"{ cat scripts/x.sh >&2; true; } |& sh",
+            b"(cat scripts/x.sh >f; cat scripts/x.sh >&2) |& sh",
+            b"(cat scripts/x.sh >&2; cat scripts/x.sh >f) |& sh",
+            b"(cat scripts/x.sh >&2; cat scripts/x.sh) |& sh",
+            b"(echo safe; cat scripts/x.sh >&2) |& sh",
+            # dep = the -c operand mentioning scripts/ regardless of
+            # the pipeline context (interpreter program operands).
+            b"xargs sh -c 'cat scripts/x.sh >&2' >/dev/null |& sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b"cat scripts/x.sh >&2 |& sh",
+            b"(cat scripts/x.sh >&2; true) >f |& sh",
+            b"cat scripts/x.sh >&2; (true) |& sh",
+            b"cat scripts/x.sh >&2; true |& sh",
+            b"cat scripts/x.sh >f; (true) |& sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round77_strtold_zero_mantissa(tmp_path):
+    """strtold accepts mantissa-zero float spellings — `0e-20001`,
+    `0.0e-99999`, `0x0p-20001` are all zero, so `flock -w <val>`
+    timeouts on them still EXECUTE the command (round-77)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (
+            b"flock -w 0e-20001 f sh scripts/x.sh",
+            b"flock -w 0.0e-99999 f sh scripts/x.sh",
+            b"flock -w 0x0p-20001 f sh scripts/x.sh",
+            b"flock -w 00e-99999 f sh scripts/x.sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b"flock -w 1e-9999 f sh scripts/x.sh",
+            b"flock -w 0x1p-99999 f sh scripts/x.sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
