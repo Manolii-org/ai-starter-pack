@@ -13233,3 +13233,69 @@ def test_script_dep_round67_opt_operands_wrapper_values(tmp_path):
             b"ionice -c0 sh -c 'sh scripts/x.sh'",
             b"ionice -c2 -n8 sh -c 'sh scripts/x.sh'"):
         assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round68_empty_operands_and_wrapped_readers(tmp_path):
+    """Round-68 shell-semantics fixes — all verified live on
+    bash/GNU coreutils/util-linux:
+
+    - A quoted EMPTY operand is a real argv member — `cat f | sed -e ''
+      | sh` runs sed with an empty program over the pipe (GNU sed
+      accepts it and forwards stdin), and `grep -e ''` matches every
+      line. `_word_redirects` yields b"" for `''`/`""` AND for pure
+      redirect words, so the args collectors must distinguish a
+      genuine empty operand (empty unquoted canon) from a redirect
+      word (`>f`, `2>&1`) — Codex on #1393, verified live.
+    - `xargs -P -0` parses `-0` as the -P operand; `-0` is numerically
+      zero (max-procs 0 = unlimited) — the utility runs (verified:
+      `xargs -P -0 -n1 echo` prints). Negative nonzero stays bad.
+    - `xargs -d` takes ONE char or a GNU escape (`\\a` `\\n` `\\0`
+      `\\04` `\\123` `\\x4` `\\x41` `\\\\`) — `\\q`, `ab`, `\\8`,
+      `\\e`, `\\xZZ` abort (verified against util-linux xargs).
+    - `sudo echo -s x` prints `-s x` — `echo` ends sudo's option run,
+      so `-s` is echo's argument, not a sudo shell flag (verified
+      live: `sudo -n echo -s scripts/x.sh` prints). The whole tail
+      argv decides via the head.
+    - An argv-wrapped READER still emits: `xargs cat f | sh` runs
+      `cat f …` and pipes the bytes to sh (verified live), `flock L
+      cat f | sh` too — the wrapped head's emit matters, not just its
+      exec classification.
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo X\n")
+    for line in (
+            b"xargs -d '\\q' sh scripts/x.sh",
+            b"xargs -d 'ab' sh scripts/x.sh",
+            b"xargs -d '\\8' sh scripts/x.sh",
+            b"xargs -d '\\e' sh scripts/x.sh",
+            b"sudo echo -s scripts/x.sh",
+            b"sudo -u root echo -s scripts/x.sh",
+            b"sudo -- -s scripts/x.sh",
+            b"xargs cat scripts/x.sh",
+            b"flock /tmp/L cat scripts/x.sh",
+            b"xargs -P -1 sh scripts/x.sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b"xargs -d 'a' sh scripts/x.sh",
+            b"xargs -d '\\n' sh scripts/x.sh",
+            b"xargs -d '\\x41' sh scripts/x.sh",
+            b"xargs -d '\\x4' sh scripts/x.sh",
+            b"xargs -d '\\123' sh scripts/x.sh",
+            b"xargs -d '\\04' sh scripts/x.sh",
+            b"xargs -d '\\0' sh scripts/x.sh",
+            b"xargs -d '\\\\' sh scripts/x.sh",
+            b"xargs -P -0 sh scripts/x.sh",
+            b"xargs -P 0 sh scripts/x.sh",
+            b"cat scripts/x.sh | sed -e '' | sh",
+            b"cat scripts/x.sh | grep -e '' | sh",
+            b"printf 'i\\n' | xargs cat scripts/x.sh | sh",
+            b"flock /tmp/L cat scripts/x.sh | sh",
+            b"printf 'i\\n' | xargs head -n1 scripts/x.sh | sh",
+            b"sudo -s scripts/x.sh",
+            b"sudo -u root -s scripts/x.sh",
+            b"sudo cat scripts/x.sh",
+            b"sudo grep p scripts/x.sh",
+            b"sudo cat scripts/x.sh | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line

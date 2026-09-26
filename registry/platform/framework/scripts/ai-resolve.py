@@ -687,6 +687,15 @@ _NONEXEC_HEADS = frozenset({
     # `--filter` exec is a downstream-flow question, like cat's `|`).
     b"split",
 })
+# Nonexec heads that OPEN their operand file — a bundled-file operand is
+# a dep regardless of the downstream stream (`sudo cat x` still reads
+# x). Emit-only heads (`echo`, `printf`, `ls`, `man`, `type`, `which`,
+# `help`) never read the file — their operand is a dep only when the
+# emitted bytes reach an interpreter.
+_NONEXEC_FILE_READERS = frozenset({
+    b"cat", b"diff", b"egrep", b"fgrep", b"file", b"grep", b"head",
+    b"less", b"more", b"stat", b"tail", b"wc",
+})
 
 
 def _operand_text(raw: bytes) -> bytes:
@@ -1181,9 +1190,20 @@ def _xargs_bad_value(opt: bytes, val: bytes) -> bool:
                 or not num.group(2).strip(b"0"))
     if opt in (b"-P", b"--max-procs"):
         num = re.fullmatch(rb"([+-]?)([0-9]+)", val)
-        return num is None or num.group(1) == b"-"
+        # `-0` is numerically zero — max-procs 0 = "as many as
+        # possible", the utility runs (`xargs -P -0` verified live);
+        # any other negative aborts.
+        return (num is None
+                or (num.group(1) == b"-" and num.group(2).strip(b"0")))
     if opt in (b"-d", b"--delimiter"):
-        return len(val) != 1 and not val.startswith(b"\\")
+        # One literal char, or a GNU escape set: `\[abfnrtv\\]`,
+        # `\0`..`\377` octal (1-3 digits), `\x..` hex (1-2) —
+        # `\q`, `ab`, `\8`, `\e`, `\xZZ` abort ("Invalid escape
+        # sequence" — verified live on util-linux xargs, round-68).
+        return (len(val) != 1
+                and re.fullmatch(
+                    rb"\\(?:[abfnrtv\\]|[0-7]{1,3}|x[0-9a-fA-F]{1,2})",
+                    val) is None)
     return False
 
 
@@ -3012,7 +3032,12 @@ def _passthrough_emit_herestring(skey: bytes, swin: bytes,
             pend = None
             continue
         at, pend = _word_redirects(raw, scratch)
-        if at:
+        # A quoted EMPTY operand is a real argv member (`sed -e ''`
+        # binds an empty program — verified live); a pure redirect
+        # word (`>f`, `2>&1`) has a non-empty unquoted canon, which is
+        # how `b""` from a redirect is told apart (Codex on #1393,
+        # round-68 review).
+        if at or _word_unquote(raw)[0] == b"":
             sargs.append(at)
     sops = _reader_operands(skey, sargs)
     return (sops is not None
@@ -3567,7 +3592,10 @@ def _seg_head_args(body: bytes, tgts: dict | None = None) -> tuple:
             _word_pending_target(scratch, fd, mode, raw, tgts)
             continue
         at, pend = _word_redirects(raw, scratch, tgts)
-        if at:
+        # `''`/`""` are real EMPTY argv operands (`sed -e ''` — Codex
+        # on #1393, round-68 review); `_word_redirects` also yields
+        # b"" for pure redirect words, which have a non-empty canon.
+        if at or _word_unquote(raw)[0] == b"":
             args.append(at)
     return key, args, scratch, words[hi][1]
 
@@ -4947,8 +4975,13 @@ def _argv_only(words: list, src: bytes, start: int) -> list:
             continue
         at, pend = _word_redirects(raw, _fresh_fds())
         if not at:
-            skip = pend is not None
-            continue
+            # `''`/`""` yield b"" but ARE argv members (`sed -e ''`,
+            # `grep -e ''` — Codex on #1393, round-68 review); a pure
+            # redirect word's canon is non-empty — that tells them
+            # apart.
+            if _word_unquote(raw)[0] != b"":
+                skip = pend is not None
+                continue
         out.append(at)
     return out
 
@@ -4970,10 +5003,13 @@ def _argv_index(words: list, src: bytes, start: int, wi: int):
         at, pend = _word_redirects(src[words[wi2][0]:words[wi2][1]],
                                    _fresh_fds())
         if not at:
-            if wi2 == wi:
-                return None
-            skip = pend is not None
-            continue
+            # Empty quoted operand — a real argv slot (same round-68
+            # `_argv_only` distinction).
+            if _word_unquote(src[words[wi2][0]:words[wi2][1]])[0] != b"":
+                if wi2 == wi:
+                    return None
+                skip = pend is not None
+                continue
         if wi2 == wi:
             return pos
         pos += 1
@@ -5024,8 +5060,13 @@ def _sudo_shell_tail(words: list, win: bytes, head: int) -> bool:
             # (`sudo -- -s x` tries to exec a program named `-s`).
             break
         if not t.startswith(b"-"):
-            j += 1
-            continue
+            # The first non-option word is the COMMAND — sudo's
+            # option run ends there, so `-s` after it belongs to the
+            # command's argv (`sudo echo -s x` prints `-s x` — Devin
+            # on #130, round-68 review — verified live). Operand words
+            # of sudo's own options are consumed by `operand_next`
+            # above, so a bare word here is never an operand.
+            break
         if t in _SUDO_SHELL_FLAGS:
             return True
         cls = _wrapper_opt_class(b"sudo", t)
@@ -7012,7 +7053,7 @@ def _stdin_exec_head(win: bytes, stream_src=None) -> str:
             arg_pending = None
             continue
         at, arg_pending = _word_redirects(raw, arg_scratch)
-        if at:
+        if at or _word_unquote(raw)[0] == b"":
             args.append(at)
     if key in _STDIN_SINK_HEADS:
         if key in _STDIN_EMIT_HEADS and _emit_forwards_stdin(
@@ -10756,6 +10797,27 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                                             return False
                                         j2 += 1
                                     return True
+                                if (hkey in _NONEXEC_HEADS
+                                        and not any(
+                                            a <= epos < b
+                                            for a, b in
+                                            _substitution_spans(
+                                                enclosing))
+                                        and not _in_expand(
+                                            enclosing, epos)):
+                                    # A wrapped reader's operand is
+                                    # EMITTED text — `xargs cat f |
+                                    # sh`, `flock L cat f | sh` run the
+                                    # file's bytes through the pipe
+                                    # (Codex on #1959, round-68 review
+                                    # — verified live). Inside a
+                                    # substitution body the bytes go
+                                    # to the capture, whose exec-ness
+                                    # was already decided.
+                                    return _pipe_to_exec(
+                                        scan, cs + len(enclosing))
+                                if hkey in _NONEXEC_HEADS:
+                                    return True
                                 return False
                     # split's SECOND positional is the output PREFIX
                     # — `split -n 1/1 - x` names chunks `xaa` and
@@ -10908,6 +10970,36 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                         # is opened but never read (Devin on
                         # #1393/#12, round-65 review — verified live).
                         return False
+                if wkey in _NONEXEC_FILE_READERS:
+                    # `cat`/`grep`/`wc` open the operand FILE — a
+                    # bundled read is a dep whether piped or not
+                    # (fail-closed; `sudo cat x` runs nothing extra
+                    # but still reads x).
+                    return True
+                if (wkey in _NONEXEC_HEADS
+                        and wkey != b"split"
+                        and not any(
+                            a <= epos < b
+                            for a, b in
+                            _substitution_spans(enclosing))
+                        and not _in_expand(enclosing, epos)
+                        and not (any(
+                            a <= cs < b
+                            for a, b in _substitution_spans(scan))
+                            or _in_expand(scan, cs))):
+                    # An operand of a non-executing, non-reading head
+                    # is emitted text — it runs only when the stream
+                    # reaches an interpreter. This is where a WRAPPED
+                    # nonexec head lands too: `sudo echo -s x` prints
+                    # `-s x` (the `-s` is echo's argument — sudo's
+                    # option run ended at `echo`), while `sudo echo
+                    # x | sh` emits it onward (Devin on #130, round-68
+                    # review — verified live). Inside a `$(`/`<(`/
+                    # backtick body the emitted bytes go to the
+                    # CAPTURE, whose outer exec-ness the literal gate
+                    # already decided — the operand stays a dep there.
+                    # `split` keeps its own filter analysis above.
+                    return _pipe_to_exec(scan, cs + len(enclosing))
                 return True
             # A glued non-`-d` short-option operand whose tail is a script
             # IS the invocation (`node -rscripts/preload.js`) — the same
