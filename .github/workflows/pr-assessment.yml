@@ -103,6 +103,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DANGER: ${{ steps.classify.outputs.merge_danger }}
           PR_NUM: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           python3 - "$DANGER" "$PR_NUM" <<'EOF'
           import json, os, sys, urllib.request
@@ -112,16 +113,38 @@ jobs:
           if door not in ("one-way", "two-way"):
               print("no classified verdict — skipping post")
               sys.exit(0)
+          repo = os.environ["GITHUB_REPOSITORY"]
+          pr = sys.argv[2]
+          sha = os.environ["HEAD_SHA"]
+          marker = f"<!-- pr-assessment-v1-sha-{sha[:12]} -->"
+          headers = {
+              "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+              "Accept": "application/vnd.github+json",
+          }
+          # Idempotent at same SHA: scan existing comments for the sha-tagged marker.
+          page = 1
+          while page <= 5:
+              req = urllib.request.Request(
+                  f"https://api.github.com/repos/{repo}/issues/{pr}/comments?per_page=100&page={page}",
+                  headers=headers,
+              )
+              comments = json.loads(urllib.request.urlopen(req, timeout=30).read())
+              if any(marker in (c.get("body") or "") for c in comments):
+                  print(f"verdict already posted for {sha[:8]} — skipping")
+                  sys.exit(0)
+              if len(comments) < 100:
+                  break
+              page += 1
           blast = danger.get("blast_radius", "unknown")
           reason = str(danger.get("danger_reason", "")).replace("\n", " ").strip()
           line = f"**Merge danger:** {door} door · blast radius: {blast}"
           if reason:
               line += f" — {reason}"
-          body = f"<!-- pr-assessment-v1 -->\n## PR Assessment\n{line}\n\nAssessment depth: none (mechanical change)."
+          body = f"{marker}\n## PR Assessment\n{line}\n\nAssessment depth: none (mechanical change)."
           req = urllib.request.Request(
-              f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/issues/{sys.argv[2]}/comments",
+              f"https://api.github.com/repos/{repo}/issues/{pr}/comments",
               data=json.dumps({"body": body}).encode(),
-              headers={"Authorization": f"Bearer {os.environ['GH_TOKEN']}", "Accept": "application/vnd.github+json"},
+              headers={**headers, "Content-Type": "application/json"},
               method="POST",
           )
           urllib.request.urlopen(req, timeout=30)
