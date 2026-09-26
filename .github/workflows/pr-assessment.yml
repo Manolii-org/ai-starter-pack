@@ -137,7 +137,10 @@ jobs:
                       rv.get("commit_id") == sha
                       and (rv.get("user") or {}).get("login") == "github-actions[bot]"
                       and "<!-- pr-assessment-v1 -->" in (rv.get("body") or "")
-                      and rv.get("state") in ("CHANGES_REQUESTED", "COMMENTED", "APPROVED")
+                      # GitHub only dismisses actionable verdicts — COMMENTED
+                      # reviews can't be dismissed and a 422 must not block the
+                      # depth-none verdict from posting.
+                      and rv.get("state") in ("CHANGES_REQUESTED", "APPROVED")
                   ):
                       dreq = urllib.request.Request(
                           f"https://api.github.com/repos/{repo}/pulls/{pr}/reviews/{rv['id']}/dismissals",
@@ -148,8 +151,11 @@ jobs:
                           headers={**headers, "Content-Type": "application/json"},
                           method="PUT",
                       )
-                      urllib.request.urlopen(dreq, timeout=30)
-                      print(f"dismissed stale judge review {rv['id']} ({rv['state']})")
+                      try:
+                          urllib.request.urlopen(dreq, timeout=30)
+                          print(f"dismissed stale judge review {rv['id']} ({rv['state']})")
+                      except Exception as exc:
+                          print(f"dismissal of review {rv['id']} failed ({exc}); continuing")
               if len(reviews) < 100:
                   break
               rpage += 1

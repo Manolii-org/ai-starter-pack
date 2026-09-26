@@ -253,12 +253,15 @@ def main() -> None:
     if truncated:
         # Tail coverage: paths alone can't reveal a contract change hiding in a
         # generically-named file past the cutoff, so append a per-file hunk map —
-        # EVERY tail file contributes its `diff --git` header plus up to two `@@`
-        # hunk-context lines (angle brackets stripped — the content is untrusted
-        # and must not forge tag bounds). Fair allocation per file: a flood of
-        # hunks in early tail files can't starve later ones out of the map.
-        tail_files: list[tuple[str, list[str]]] = []
+        # EVERY tail file contributes its `diff --git` header, up to two `@@`
+        # hunk-context lines, and up to two changed (+/-) lines — hunk headers
+        # alone can't reveal a contract change in a generically-named file.
+        # Angle brackets stripped — the content is untrusted and must not forge
+        # tag bounds. Fair allocation per file: a flood of hunks in early tail
+        # files can't starve later ones out of the map.
+        tail_files: list[tuple[str, list[str], list[str]]] = []
         cur_hunks: list[str] = []
+        cur_changed: list[str] = []
         # The 50k cutoff can land mid-line — even inside a `diff --git` header.
         # Work on whole lines from the full diff: seed cur_file with the last
         # header among lines whose text begins before the cutoff (using the
@@ -282,26 +285,36 @@ def main() -> None:
         for line in all_lines[boundary + 1 :]:
             if line.startswith("diff --git "):
                 if cur_file:
-                    tail_files.append((cur_file, cur_hunks))
+                    tail_files.append((cur_file, cur_hunks, cur_changed))
                 cur_file = re.sub(r"[<>`]", "", line)[:200]
                 cur_hunks = []
+                cur_changed = []
             elif line.startswith("@@") and cur_file:
                 cur_hunks.append(re.sub(r"[<>`]", "", line)[:200])
+            elif (
+                line[:1] in ("+", "-")
+                and not line.startswith(("+++", "---"))
+                and cur_file
+                and len(cur_changed) < 2
+            ):
+                # Bounded changed-line evidence so a contract edit hiding past
+                # the cutoff is visible to the danger rubric, not just the path.
+                cur_changed.append(re.sub(r"[<>`]", "", line)[:160])
         if cur_file:
-            tail_files.append((cur_file, cur_hunks))
+            tail_files.append((cur_file, cur_hunks, cur_changed))
         map_lines: list[str] = []
         budget = 8000
         omitted_files = 0
         omitted_hunks = 0
-        for fname, hunks in tail_files:
-            entry = fname + "\n" + "\n".join(hunks[:2])
+        for fname, hunks, changed in tail_files:
+            entry = fname + "\n" + "\n".join(hunks[:2] + changed[:2])
             if budget - len(entry) < 0:
                 omitted_files += 1
-                omitted_hunks += len(hunks)
+                omitted_hunks += len(hunks) + len(changed)
                 continue
             map_lines.append(entry)
             budget -= len(entry)
-            omitted_hunks += max(0, len(hunks) - 2)
+            omitted_hunks += max(0, len(hunks) - 2) + max(0, len(changed) - 2)
         sampled = "\n".join(map_lines)
         if omitted_files or omitted_hunks:
             sampled += (

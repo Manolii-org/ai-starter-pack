@@ -378,14 +378,17 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
             key=lambda f: (f["severity"] == "WARNING", f["file"], f["line"] or 0),
         ):
             severity = finding["severity"]
-            file_ref = f"{finding['file']}"
+            file_ref = f"{_markdown_safe(str(finding['file']))}"
             if finding["line"]:
                 file_ref += f":{finding['line']}"
 
+            # Finding fields are specialist prose shaped by untrusted diff
+            # content — escape Markdown so crafted text can't forge sections,
+            # links, or @mentions in the posted review.
             body_lines.append(f"### [{severity}] {file_ref}")
-            body_lines.append(f"**Issue:** {finding['message']}")
-            body_lines.append(f"**Fix:** {finding['fix']}")
-            body_lines.append(f"**Source:** {finding['source']}")
+            body_lines.append(f"**Issue:** {_markdown_safe(str(finding['message']))}")
+            body_lines.append(f"**Fix:** {_markdown_safe(str(finding['fix']))}")
+            body_lines.append(f"**Source:** {_markdown_safe(str(finding['source']))}")
             body_lines.append("")
 
         review_body = "\n".join(body_lines)
