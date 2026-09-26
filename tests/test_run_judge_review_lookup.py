@@ -187,6 +187,84 @@ def test_page_cap_is_bounded(judge, monkeypatch):
     )
 
 
+def _review_full(
+    body: str,
+    commit_id: str = SHA,
+    author: str = rj.JUDGE_REVIEW_AUTHOR,
+    state: str = "COMMENTED",
+    review_id: int = 7001,
+) -> dict:
+    r = _review(body, commit_id=commit_id, author=author)
+    r["state"] = state
+    r["id"] = review_id
+    return r
+
+
+def test_clean_reassessment_dismisses_prior_request_changes(judge, monkeypatch):
+    """A clean rerun at the same SHA must retire the blocking verdict — a
+    COMMENT cannot supersede a REQUEST_CHANGES left active on the PR."""
+    calls = {"dismissals": [], "posts": 0}
+
+    blocking = _review_full(
+        f"{rj.REVIEW_MARKER}\n<!-- meta:olderdigest:findings -->",
+        state="CHANGES_REQUESTED",
+    )
+
+    def fake_urlopen(req, timeout=None):
+        if req.get_method() == "GET":
+            return _FakeResponse(json.dumps([blocking]).encode())
+        if req.full_url.endswith("/dismissals"):
+            calls["dismissals"].append(req.full_url)
+            return _FakeResponse(b"{}")
+        calls["posts"] += 1
+        return _FakeResponse(b"{}")
+
+    monkeypatch.setattr(rj.urllib.request, "urlopen", fake_urlopen)
+    judge._post_no_findings_comment()
+    assert calls["posts"] == 1, "clean comment was not posted"
+    assert len(calls["dismissals"]) == 1, "blocking review was not dismissed"
+    assert "7001" in calls["dismissals"][0]
+
+
+def test_clean_post_survives_dismissal_failure(judge, monkeypatch):
+    """Dismissal is best-effort: a 422/404 on the dismissal endpoint must not
+    block the clean comment itself."""
+    blocking = _review_full(rj.REVIEW_MARKER, state="CHANGES_REQUESTED")
+
+    def fake_urlopen(req, timeout=None):
+        if req.get_method() == "GET":
+            return _FakeResponse(json.dumps([blocking]).encode())
+        if req.full_url.endswith("/dismissals"):
+            raise OSError("dismissal denied")
+        return _FakeResponse(b"{}")
+
+    monkeypatch.setattr(rj.urllib.request, "urlopen", fake_urlopen)
+    judge._post_no_findings_comment()  # must not raise
+
+
+def test_commented_or_approved_reviews_are_not_dismissed(judge, monkeypatch):
+    """GitHub 422s on dismissing COMMENTED reviews, and a clean result does not
+    contradict an APPROVED — neither must be touched."""
+    calls = {"dismissals": 0}
+    page = [
+        _review_full(rj.REVIEW_MARKER, state="COMMENTED", review_id=1),
+        _review_full(rj.REVIEW_MARKER, state="APPROVED", review_id=2),
+        _review_full(rj.REVIEW_MARKER, state="DISMISSED", review_id=3),
+        _review_full(rj.REVIEW_MARKER, state="CHANGES_REQUESTED", author="other-bot", review_id=4),
+    ]
+
+    def fake_urlopen(req, timeout=None):
+        if req.get_method() == "GET":
+            return _FakeResponse(json.dumps(page).encode())
+        if req.full_url.endswith("/dismissals"):
+            calls["dismissals"] += 1
+        return _FakeResponse(b"{}")
+
+    monkeypatch.setattr(rj.urllib.request, "urlopen", fake_urlopen)
+    judge._post_no_findings_comment()
+    assert calls["dismissals"] == 0
+
+
 def test_marker_text_appears_exactly_once_in_the_source():
     """Every posting path must build its body from REVIEW_MARKER, not a literal.
 

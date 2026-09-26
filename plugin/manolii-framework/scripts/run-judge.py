@@ -497,6 +497,76 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
         logger.error(f"Hit the {_MAX_REVIEW_PAGES}-page cap scanning reviews")
         return False
 
+    def _dismiss_stale_judge_reviews(self) -> None:
+        """Dismiss prior judge reviews at this SHA left in a blocking state.
+
+        Only CHANGES_REQUESTED is actionable — GitHub 422s on COMMENTED, and a
+        clean reassessment does not contradict an APPROVED. Best-effort: a
+        dismissal failure logs and never blocks the clean comment.
+        """
+        for page in range(1, _MAX_REVIEW_PAGES + 1):
+            try:
+                url = (
+                    f"https://api.github.com/repos/{self.repo}/pulls/"
+                    f"{self.pr_number}/reviews"
+                    f"?per_page={_REVIEWS_PER_PAGE}&page={page}"
+                )
+                req = urllib.request.Request(
+                    url,
+                    headers={
+                        "Authorization": f"Bearer {self.token}",
+                        "Accept": "application/vnd.github.v3+json",
+                    },
+                    method="GET",
+                )
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    reviews = json.loads(response.read().decode("utf-8"))
+            except Exception as e:
+                logger.error(f"Failed to scan reviews for dismissal (page {page}): {e}")
+                return
+
+            if not isinstance(reviews, list):
+                logger.error("Unexpected reviews response shape — skipping dismissals")
+                return
+
+            for review in reviews:
+                author = (review.get("user") or {}).get("login")
+                body = review.get("body") or ""
+                if (
+                    review.get("commit_id") == self.sha
+                    and author == JUDGE_REVIEW_AUTHOR
+                    and REVIEW_MARKER in body
+                    and review.get("state") == "CHANGES_REQUESTED"
+                    and review.get("id")
+                ):
+                    self._dismiss_review(review["id"])
+
+            if len(reviews) < _REVIEWS_PER_PAGE:
+                return
+
+    def _dismiss_review(self, review_id: int) -> None:
+        url = (
+            f"https://api.github.com/repos/{self.repo}/pulls/"
+            f"{self.pr_number}/reviews/{review_id}/dismissals"
+        )
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(
+                {"message": "Superseded by a clean reassessment at the same commit."}
+            ).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {self.token}",
+                "Accept": "application/vnd.github.v3+json",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10):
+                logger.info(f"Dismissed stale judge review {review_id}")
+        except Exception as e:
+            logger.warning(f"Dismissal of review {review_id} failed ({e}); continuing")
+
     def write_log_entry(
         self,
         finding_id: str,
@@ -614,6 +684,12 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
         if not self.token or not self.repo:
             logger.info("No findings; skipping GitHub post (no token/repo)")
             return
+
+        # A same-commit rerun that reports clean does not supersede an earlier
+        # judge REQUEST_CHANGES — a COMMENT sits alongside it and the PR keeps
+        # the blocking verdict. Dismiss it (moves it to DISMISSED, which the
+        # dedup scan already ignores) before deciding whether to post.
+        self._dismiss_stale_judge_reviews()
 
         if self._review_exists_at_sha("clean"):
             logger.info("No-findings comment already posted for this SHA — skipping")
