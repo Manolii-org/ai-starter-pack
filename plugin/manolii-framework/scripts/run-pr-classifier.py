@@ -182,9 +182,14 @@ def main() -> None:
         if depth == "broad" and not invoke_skills and not invoke_agents:
             depth = "narrow"
 
+        # Merge danger is atomic: emit a verdict only when all three fields are
+        # coherent — a door verdict with blast=unknown reads as a partial
+        # judgement and confuses reviewers.
         door = data.get("door") if data.get("door") in _VALID_DOORS else "unknown"
         blast = data.get("blast_radius") if data.get("blast_radius") in _VALID_BLAST else "unknown"
-        danger_reason = data.get("danger_reason", "") if (door != "unknown" or blast != "unknown") else ""
+        danger_reason = data.get("danger_reason", "")
+        if not (door != "unknown" and blast != "unknown" and str(danger_reason).strip()):
+            door, blast, danger_reason = "unknown", "unknown", ""
 
         manifest = {
             "invoke_skills": invoke_skills,

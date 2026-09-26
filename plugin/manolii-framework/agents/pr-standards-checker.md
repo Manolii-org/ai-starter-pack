@@ -23,11 +23,12 @@ Read `.ai/pr-standards.yaml` and validate the current PR diff against each appli
 
 - PR number (required)
 - Diff of changed files (fetch via `gh pr diff <number>` or from pr-resolve context)
+- PR metadata — title, body, and commit list (`gh pr view <n> --json title,body,commits`). Sections without `location` (commit_format, test_coverage, spec_adherence, security) depend on this metadata; report such rules as **unverified** when unavailable, never as passed
 
 ## Process
 
 1. Read `.ai/pr-standards.yaml`
-2. Fetch PR diff if not already in context
+2. Fetch PR diff and PR metadata if not already in context
 3. For each changed file, apply the relevant section rules from the standards manifest
 4. Collect violations with: file path, line number (if applicable), rule violated, severity
 5. Output structured report
