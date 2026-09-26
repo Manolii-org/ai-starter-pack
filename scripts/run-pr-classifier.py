@@ -26,19 +26,24 @@ _ANTHROPIC_API_VERSION = "2023-06-01"
 
 # Paths carrying outsized merge risk — surfaced first in the inventory so a
 # migration or workflow edit can never fall off the cap on huge PRs.
-_DANGER_PATH_RE = re.compile(
-    r"(migrations?/|\.sql|schema|\.github/workflows|auth|secret|credential|"
-    r"token|dockerfile|terraform|deploy|package\.json|package-lock|pnpm-lock|yarn\.lock|"
-    r"\.sh$|\.bash$)",
-    re.I,
-)
-# One-way-door surfaces outrank everything else — a flood of merely-dangerous
-# files (e.g. 500 shell scripts) must not push a migration past the cap.
-_ONE_WAY_PATH_RE = re.compile(
-    r"(migrations?/|\.sql|schema|\.github/workflows|dockerfile|terraform|"
-    r"deploy|package-lock|pnpm-lock|yarn\.lock)",
-    re.I,
-)
+# Danger categories, ordered irreversible → sensitive → loose. Each category
+# gets a guaranteed slot reservation so a flood in one (500 deploy/ files)
+# can never crowd another category past the inventory cap.
+_DANGER_CATEGORIES = [
+    ("migration", re.compile(r"migrations?/|\.sql", re.I)),
+    ("workflow", re.compile(r"\.github/workflows", re.I)),
+    ("dockerfile", re.compile(r"dockerfile", re.I)),
+    ("terraform", re.compile(r"terraform", re.I)),
+    ("deploy", re.compile(r"deploy", re.I)),
+    ("lockfile", re.compile(r"package-lock|pnpm-lock|yarn\.lock", re.I)),
+    ("auth", re.compile(r"auth|secret|credential|token", re.I)),
+    ("package", re.compile(r"package\.json", re.I)),
+    ("schema", re.compile(r"schema", re.I)),
+    ("shell", re.compile(r"\.sh$|\.bash$", re.I)),
+    ("other", re.compile(r".")),
+]
+_CATEGORY_RESERVE = 10
+
 
 # Fallback manifest when classifier fails — run everything.
 _FALLBACK_MANIFEST = {
@@ -193,23 +198,27 @@ def main() -> None:
             )
         }
     )
-    # Danger-relevant paths first so high-risk files never fall off the cap.
-    changed_paths = sorted(
-        changed_paths,
-        key=lambda p: (
-            0
-            if _ONE_WAY_PATH_RE.search(p)
-            else 1
-            if _DANGER_PATH_RE.search(p)
-            else 2,
-            p,
-        ),
-    )
-    inventory = "\n".join(changed_paths[:500])
-    if len(changed_paths) > 500:
+    def _category(p: str) -> int:
+        for i, (_, rx) in enumerate(_DANGER_CATEGORIES):
+            if rx.search(p):
+                return i
+        return len(_DANGER_CATEGORIES) - 1
+
+    buckets: dict[int, list[str]] = {i: [] for i in range(len(_DANGER_CATEGORIES))}
+    for p in sorted(changed_paths):
+        buckets[_category(p)].append(p)
+    # Reserved slots are protected: a flood in one category can only fill the
+    # 500 - reserved remainder, never evict another category's guarantees.
+    reserved = {p for b in buckets.values() for p in b[:_CATEGORY_RESERVE]}
+    fill = [p for p in changed_paths if p not in reserved]
+    inventory_paths = sorted(reserved, key=lambda p: (_category(p), p)) + sorted(
+        fill, key=lambda p: (_category(p), p)
+    )[: 500 - len(reserved)]
+    inventory = "\n".join(inventory_paths)
+    if len(changed_paths) > len(inventory_paths):
         inventory += (
-            f"\n[+{len(changed_paths) - 500} more paths — risk-sorted first; "
-            "unlisted paths are not enumerated]"
+            f"\n[+{len(changed_paths) - len(inventory_paths)} more paths — "
+            "per-tier reserved then risk-sorted; unlisted paths are not enumerated]"
         )
 
     truncated = len(diff) > 50000
