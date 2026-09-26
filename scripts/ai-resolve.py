@@ -1293,10 +1293,17 @@ def _flock_bad_value(opt: bytes, val: bytes) -> bool:
         # rounds to 2^63 overflows it, and so does anything larger
         # (`9223372036854775807` aborts "cannot set up timer" while
         # `9223372036854775000` and `9.21e18` still run the command —
-        # Devin on #132/#16, round-71 review — verified live).
-        return num < 0.0 or num >= 9.223372036854776e18
+        # Devin on #132/#16, round-71 review — verified live). The
+        # low edge is a one-microsecond floor: a timeout in
+        # [-1e-6, 0) rounds to an already-past deadline and the
+        # command still runs (`-0.000001` runs, `-0.0000010000001`
+        # and `-.5` abort — Devin on #132, round-72 review —
+        # verified live).
+        return num < -0.000001 or num >= 9.223372036854776e18
     if opt in (b"-E", b"--conflict-exit-code"):
-        num = re.fullmatch(rb"([+-]?)([0-9]+)", val)
+        # strtol skips leading whitespace — `-E ' 5'` runs (round-72
+        # review — verified live); trailing junk still aborts (`5 `).
+        num = re.fullmatch(rb"\s*([+-]?)([0-9]+)", val)
         if num is None:
             return True
         d = num.group(2).lstrip(b"0")
@@ -7678,18 +7685,27 @@ def _pipe_to_exec(src: bytes, pos: int) -> bool:
             prov = r0
             if prov == "own":
                 flow_src = None
-        if _stdout_redirected(src[s0:pos]):
+        if _stdout_redirected(src[s0:pos].lstrip(b" \t({")):
             # A `>`/`&>` on the feeding segment diverts its fd1
             # whatever the head — `xargs cat x >/dev/null | sh` and
             # `xargs split -n 1/1 x >/dev/null | sh` feed sh an empty
             # pipe (the per-head prov call above only runs for
             # cat/split/csplit, so wrapper heads like xargs/flock/
             # sudo skipped this check — Devin on #132, round-71
-            # review — verified live).
+            # review — verified live). Leading `(`/`{` openers still
+            # open at pos are stripped first — `(cat x > f; y) | sh`
+            # redirects cat's fd1 at group depth, which the depth-0
+            # scan inside _stdout_redirected would otherwise miss
+            # (Devin on #16, round-72 review — verified live).
             prov = "own"
             flow_src = None
     out = None           # aggregate fd1 inside an open compound
-    depth = 0            # open compound/group statements
+    # The feeding segment may END mid-compound — `(cat x; true) | sh`
+    # calls the walk from the `;` inside the `(`, and a `;`/`&` there
+    # is a sibling split, not a statement end. Seed depth with the
+    # compounds still open at pos or those siblings look terminal
+    # (Devin on #16, round-72 review — verified live).
+    depth = _open_depth(src, pos)
     drained = False      # a prior `;`-sibling read the shared stdin to EOF
     pipe_lead = True     # the boundary before the next seg was `|`
     j = pos
@@ -7762,6 +7778,12 @@ def _pipe_to_exec(src: bytes, pos: int) -> bool:
             depth = max(0, depth - 1)
             if depth == 0 and out is not None:
                 prov = out  # the compound's fd1 is its segments' sum
+            if depth == 0 and _stdout_redirected(seg):
+                # `done >/dev/null`/`fi >f`/`} >f` divert the whole
+                # compound's fd1 — nothing reaches the next pipe
+                # (Devin on #16, round-72 review — verified live).
+                prov = "own"
+                flow_src = None
         else:
             depth += gd
             if gd < 0 and depth <= 0 and out is not None:
@@ -7772,6 +7794,12 @@ def _pipe_to_exec(src: bytes, pos: int) -> bool:
                 if prov in ("up", "script"):
                     out = "up"
                 prov = out
+                if _tail_close_redirect(seg):
+                    # A `>` AFTER the close binds the whole group —
+                    # `(cat x; cat x) > /dev/null | sh` feeds sh an
+                    # empty pipe (round-72 review — verified live).
+                    prov = "own"
+                    flow_src = None
             depth = max(0, depth)
         if prov not in ("up", "script", "thru") and depth == 0:
             return False  # the stage replaced or diverted the stream
@@ -7780,6 +7808,60 @@ def _pipe_to_exec(src: bytes, pos: int) -> bool:
 
 
 _SEG_CLOSERS = frozenset({b"fi", b"done", b"esac", b"})"})
+
+
+def _open_depth(src: bytes, pos: int) -> int:
+    """Unclosed compound/group depth at `pos` — `( cat; ` leaves a `(`
+    open that _pipe_to_exec's forward depth counter never saw. Mirrors
+    the walk's accounting: cond openers and `(`/`{` open, `)`/`}` and
+    fi/done/esac close."""
+    d = 0
+    j = 0
+    while j < pos:
+        win = _cmd_window(src, j)
+        seg = src[j:j + len(win)]
+        ws = _shell_words(_mask_parens(seg))
+        first = (_word_text(seg[ws[0][0]:ws[0][1]]) if ws else None)
+        if first in _SEG_COND_OPENERS:
+            d += 1
+        elif first in _SEG_CLOSERS:
+            d = max(0, d - 1)
+        else:
+            d = max(0, d + _group_depth(seg))
+        j += max(len(win), 1)
+    return d
+
+
+def _tail_close_redirect(seg: bytes) -> bool:
+    """True when an fd1-divert redirect appears after the LAST unquoted
+    `)`/`}` in `seg` — `cat x) >/dev/null` binds the whole closed group,
+    not the last sibling."""
+    subs = {a: b for a, b in _substitution_spans(seg)}
+    in_s = in_d = esc = False
+    last = -1
+    i = 0
+    while i < len(seg):
+        if i in subs and not in_s:
+            i = subs[i]
+            continue
+        c = seg[i]
+        if esc:
+            esc = False
+        elif c == 0x5C and not in_s:
+            esc = True
+        elif in_s:
+            if c == 0x27:
+                in_s = False
+        elif c == 0x27:
+            in_s = True
+        elif c == 0x22:
+            in_d = not in_d
+        elif in_d:
+            pass
+        elif c in (0x29, 0x7D):
+            last = i
+        i += 1
+    return last >= 0 and _stdout_redirected(seg[last + 1:])
 
 
 def _group_depth(seg: bytes) -> int:

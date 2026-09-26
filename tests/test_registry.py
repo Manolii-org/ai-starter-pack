@@ -13511,3 +13511,51 @@ def test_script_dep_round71_redirect_sudo_digits_flock_bounds(tmp_path):
             b"flock -w 9223372036854775000 /tmp/L sh scripts/x.sh",
             b"flock -w 0x1p62 /tmp/L sh scripts/x.sh"):
         assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round72_compound_feed_flock_ws_negative(tmp_path):
+    """Round-72 review — Devin on #132/#16/#1428: a compound feeding
+    stage's `;`/`&` sibling split is INSIDE the group, so the pipe
+    walk must aggregate the siblings' fd1, not end the statement —
+    `(cat x; true >/dev/null) | sh` still runs the script while
+    `(cat x >/dev/null; true) | sh` feeds sh nothing, and a `>`
+    after the close (`(cat x; cat x) >/dev/null | sh`, `done >f`)
+    binds the WHOLE group. `flock -E` operand is strtol — leading
+    whitespace parses (`' 5'` runs, `'5 '` aborts). `flock -w`
+    negative bound is a 1-microsecond floor: `[-1e-6, 0)` rounds to
+    a past deadline and runs, anything more negative aborts (all
+    verified live).
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo X\n")
+    for line in (
+            b"(cat scripts/x.sh; true >/dev/null) | sh",
+            b"(cat scripts/x.sh; true) | sh",
+            b"((cat scripts/x.sh); true) | sh",
+            b"(cat scripts/x.sh & true) | sh",
+            b"(cat scripts/x.sh; cat scripts/x.sh >/dev/null) | sh",
+            b"(cat scripts/x.sh) | sh",
+            b"flock -E ' 5' /tmp/L sh scripts/x.sh",
+            b"flock --conflict-exit-code ' 200' /tmp/L sh scripts/x.sh",
+            b"flock -w -0.000001 /tmp/L sh scripts/x.sh",
+            b"flock -w -0.0000009999 /tmp/L sh scripts/x.sh",
+            b"flock -w ' 5' /tmp/L sh scripts/x.sh",
+            b"flock -w -0 /tmp/L sh scripts/x.sh",
+            b"xargs cat scripts/x.sh |& sh",
+            b"xargs sh -c 'cat scripts/x.sh >&2' >/dev/null |& sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b"(cat scripts/x.sh > /dev/null; true) | sh",
+            b"(cat scripts/x.sh; cat scripts/x.sh) >/dev/null | sh",
+            b"(cat scripts/x.sh) > /dev/null | sh",
+            b"(true; xargs cat scripts/x.sh >/dev/null) | sh",
+            b"flock -E '5 ' /tmp/L sh scripts/x.sh",
+            b"flock -E ' 256' /tmp/L sh scripts/x.sh",
+            b"flock -w -0.0000010000001 /tmp/L sh scripts/x.sh",
+            b"flock -w -.5 /tmp/L sh scripts/x.sh",
+            b"flock -w -0.0000015 /tmp/L sh scripts/x.sh",
+            b"xargs cat scripts/x.sh >/dev/null |& sh",
+            b"cat scripts/x.sh; true | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
