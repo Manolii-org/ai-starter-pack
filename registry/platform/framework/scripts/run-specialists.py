@@ -161,17 +161,27 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
     if len(diff) > 50000:
         # Truncated evidence: give skills the full path list so absence in the
         # excerpt can't be mistaken for under-delivery.
-        paths = sorted(
-            {
-                # ---/+++/rename lines: spaces in paths are unquoted in diffs —
-                # a `diff --git` regex would drop them. /dev/null side skipped.
+        # ---/+++/rename lines: spaces in paths are unquoted in diffs — a
+        # `diff --git` regex would drop them. /dev/null side skipped. Binary or
+        # mode-only changes have no marker lines, so fall back to the header's
+        # b/ side (rightmost " b/" keeps spaced paths intact).
+        _markers = re.compile(r"^(--- |\+\+\+ |rename from |rename to )(.+)$", re.M)
+        _pathset = set()
+        for _hdr, _sec in zip(
+            re.findall(r"^diff --git (.+)$", diff, re.M),
+            re.split(r"^diff --git .+$", diff, flags=re.M)[1:],
+        ):
+            _p = {
                 m.group(2).rstrip("\t").strip('"').removeprefix("a/").removeprefix("b/")
-                for m in re.finditer(
-                    r"^(--- |\+\+\+ |rename from |rename to )(.+)$", diff, re.M
-                )
+                for m in _markers.finditer(_sec)
                 if m.group(2).rstrip("\t") != "/dev/null"
             }
-        )
+            if not _p:
+                _b = _hdr.rsplit(" b/", 1)
+                if len(_b) == 2:
+                    _p.add(_b[1].strip('"'))
+            _pathset |= _p
+        paths = sorted(_pathset)
         # Danger-relevant paths first so high-risk files never fall off the cap.
         paths = sorted(paths, key=lambda p: (0 if _DANGER_PATH_RE.search(p) else 1, p))
         listed = paths[:500]

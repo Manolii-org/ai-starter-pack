@@ -291,6 +291,57 @@ jobs:
           urllib.request.urlopen(req, timeout=30)
           EOF
 
+      # An `edited` rerun at the same SHA can reclassify depth from `none` to a
+      # judged path — the judge then posts a fresh review while the depth-none
+      # verdict comment stays stale. Retire it so only one surface shows a
+      # verdict at a time.
+      - name: Retire stale merge danger (depth!=none)
+        if: steps.classify.outputs.depth != 'none' && steps.classify.outputs.depth != '' && github.event.pull_request.number
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 - "$PR_NUM" <<'EOF'
+          import json, os, sys, urllib.request
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          pr = sys.argv[1]
+          marker = f"<!-- pr-assessment-v1-sha-{os.environ['HEAD_SHA'][:12]} -->"
+          headers = {
+              "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+              "Accept": "application/vnd.github+json",
+          }
+          page = 1
+          while True:
+              req = urllib.request.Request(
+                  f"https://api.github.com/repos/{repo}/issues/{pr}/comments?per_page=100&page={page}",
+                  headers=headers,
+              )
+              comments = json.loads(urllib.request.urlopen(req, timeout=30).read())
+              stale = next(
+                  (
+                      c for c in comments
+                      if (c.get("body") or "").startswith(marker)
+                      and (c.get("user") or {}).get("login") == "github-actions[bot]"
+                  ),
+                  None,
+              )
+              if stale:
+                  urllib.request.urlopen(
+                      urllib.request.Request(
+                          f"https://api.github.com/repos/{repo}/issues/comments/{stale['id']}",
+                          headers=headers,
+                          method="DELETE",
+                      ),
+                      timeout=30,
+                  )
+                  print(f"retired stale depth=none verdict comment {stale['id']}")
+              if len(comments) < 100:
+                  break
+              page += 1
+          EOF
+
   sast:
     name: SAST (Semgrep + Bandit)
     runs-on: ${{ inputs.runs_on }}

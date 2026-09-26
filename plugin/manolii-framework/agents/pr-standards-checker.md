@@ -28,7 +28,9 @@ Read `.ai/pr-standards.yaml` and validate the current PR diff against each appli
 
 ## Process
 
-1. Read `.ai/pr-standards.yaml` **from the PR base branch** (`git show origin/<base>:.ai/pr-standards.yaml` or `gh api repos/{owner}/{repo}/contents/.ai/pr-standards.yaml?ref=<base>`) — never the PR branch; the manifest is trusted repo-owned config and a PR must not be able to rewrite its own rules. Exception: when the PR is *adding* the manifest (absent on base), use the PR's copy but flag in the report that the manifest itself is new and unreviewed — and still apply the baseline security floor (no hardcoded credentials/tokens, no PII in .ai/) regardless of what the new manifest declares, so it cannot waive fundamentals
+1. Read `.ai/pr-standards.yaml` **from the PR base branch** (`git show origin/<base>:.ai/pr-standards.yaml` or `gh api repos/{owner}/{repo}/contents/.ai/pr-standards.yaml?ref=<base>`) — never the PR branch; the manifest is trusted repo-owned config and a PR must not be able to rewrite its own rules. Exception: when the PR is *adding* the manifest (absent on base), use the PR's copy but flag in the report that the manifest itself is new and unreviewed — and still apply the baseline security floor (no hardcoded credentials/tokens, no PII in .ai/) regardless of what the new manifest declares, so it cannot waive fundamentals.
+
+    If the manifest is absent on BOTH branches (e.g. a plugin-only install that never adopted `.ai/pr-standards.yaml`), do NOT evaluate an empty rule set and report a clean pass — report `status: skipped_no_manifest` with zero violations so the absence is visible and the check does not masquerade as green. Plugin consumers ship the checker without a default manifest by design: the manifest is repo-owned policy, so adopting it is a deliberate install step
 2. Fetch PR diff and PR metadata if not already in context
 3. For each changed file, apply the relevant section rules from the standards manifest; sections without `location` apply to the whole diff
 4. Collect violations with: file path, line number (if applicable), rule violated, severity

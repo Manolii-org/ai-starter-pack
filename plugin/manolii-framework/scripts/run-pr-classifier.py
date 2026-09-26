@@ -192,19 +192,29 @@ def main() -> None:
     # the cutoff (a migration after the truncation point is still one-way).
     # Parse `diff --git` headers: `+++ b/` misses deletions (`+++ /dev/null`)
     # and renames.
-    changed_paths = sorted(
-        {
-            # --- a/, +++ b/, "rename from/to" lines: Git does NOT quote spaces,
-            # so `diff --git` regexes drop spaced paths; these lines never do.
-            # /dev/null is the absent side of an add/delete — skip it, keep the
-            # real path (a dropped migration still shows under its old name).
+    changed_paths = set()
+    # --- a/, +++ b/, "rename from/to" lines: Git does NOT quote spaces, so
+    # `diff --git` regexes drop spaced paths; these lines never do. /dev/null is
+    # the absent side of an add/delete — skip it, keep the real path (a dropped
+    # migration still shows under its old name).
+    _markers = re.compile(r"^(--- |\+\+\+ |rename from |rename to )(.+)$", re.M)
+    _headers = re.findall(r"^diff --git (.+)$", diff, re.M)
+    _sections = re.split(r"^diff --git .+$", diff, flags=re.M)[1:]
+    for _hdr, _sec in zip(_headers, _sections):
+        _paths = {
             m.group(2).rstrip("\t").strip('"').removeprefix("a/").removeprefix("b/")
-            for m in re.finditer(
-                r"^(--- |\+\+\+ |rename from |rename to )(.+)$", diff, re.M
-            )
+            for m in _markers.finditer(_sec)
             if m.group(2).rstrip("\t") != "/dev/null"
         }
-    )
+        if not _paths:
+            # Binary or mode-only change: no ---/+++ or rename lines — the only
+            # path record is the header. Take the RIGHTMOST " b/" split so an
+            # a-side containing spaces still parses to the b-side path.
+            _b = _hdr.rsplit(" b/", 1)
+            if len(_b) == 2:
+                _paths.add(_b[1].strip('"'))
+        changed_paths |= _paths
+    changed_paths = sorted(changed_paths)
     def _categories(p: str) -> list[int]:
         return [
             i for i, (_, rx) in enumerate(_DANGER_CATEGORIES) if rx.search(p)
