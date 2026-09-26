@@ -32,6 +32,21 @@ logger = logging.getLogger(__name__)
 
 # Hidden marker stamped into every posted review, used for idempotency.
 REVIEW_MARKER = "<!-- pr-assessment-v1 -->"
+
+_MD_UNSAFE_CHARS = re.compile(r"([\\`*_\[\]()<>#|~!])")
+
+
+def _markdown_safe(text: str) -> str:
+    """Neutralise Markdown syntax and @mentions in PR-derived text.
+
+    danger_reason is shaped by untrusted diff content; unescaped Markdown can
+    alter the displayed assessment or ping unintended users.
+    """
+    text = _MD_UNSAFE_CHARS.sub(r"\\\1", text)
+    return text.replace("@", "@\u200b")
+
+
+MAX_REASON_LEN = 300
 # The judge posts through the Actions GITHUB_TOKEN, so its reviews are authored by
 # github-actions[bot] — an identity a PR author cannot forge, unlike the marker text.
 # Both must match before a review counts as "the judge already spoke for this SHA".
@@ -324,7 +339,9 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
         if door in ("one-way", "two-way"):
             blast = self.merge_danger.get("blast_radius", "unknown")
             line = f"**Merge danger:** {door} door · blast radius: {blast}"
-            reason = str(self.merge_danger.get("danger_reason", "")).replace("\n", " ").strip()
+            reason = _markdown_safe(
+                str(self.merge_danger.get("danger_reason", "")).replace("\n", " ").strip()[:MAX_REASON_LEN]
+            )
             if reason:
                 line += f" — {reason}"
             body_lines.append(line)
@@ -431,6 +448,7 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
                 logger.error("Unexpected reviews response shape — skipping duplicate check")
                 return False
 
+            latest_digest_matches = None
             for review in reviews:
                 author = (review.get("user") or {}).get("login")
                 body = review.get("body") or ""
@@ -438,9 +456,14 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
                     review.get("commit_id") == self.sha
                     and author == JUDGE_REVIEW_AUTHOR
                     and REVIEW_MARKER in body
-                    and f"<!-- meta:{self.meta_digest} -->" in body
                 ):
-                    return True
+                    # Reviews are returned oldest-first; only the LATEST judge
+                    # review at this commit decides dedup. An older review with
+                    # a matching digest must not suppress a fresh verdict when
+                    # a different metadata state was assessed between (A→B→A).
+                    latest_digest_matches = f"<!-- meta:{self.meta_digest} -->" in body
+            if latest_digest_matches:
+                return True
 
             if len(reviews) < _REVIEWS_PER_PAGE:
                 return False
@@ -573,13 +596,16 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
         try:
             body_lines = [
                 REVIEW_MARKER,
+                f"<!-- meta:{self.meta_digest} -->",
                 "## PR Assessment",
             ]
             door = self.merge_danger.get("door")
             if door in ("one-way", "two-way"):
                 blast = self.merge_danger.get("blast_radius", "unknown")
                 line = f"**Merge danger:** {door} door · blast radius: {blast}"
-                reason = str(self.merge_danger.get("danger_reason", "")).replace("\n", " ").strip()
+                reason = _markdown_safe(
+                    str(self.merge_danger.get("danger_reason", "")).replace("\n", " ").strip()[:MAX_REASON_LEN]
+                )
                 if reason:
                     line += f" — {reason}"
                 body_lines.append(line)

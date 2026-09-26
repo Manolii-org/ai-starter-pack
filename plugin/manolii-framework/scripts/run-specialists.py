@@ -26,6 +26,14 @@ MANIFEST_FILE = REPO_ROOT / ".ai/candidates/manifest.json"
 
 _ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 _ANTHROPIC_API_VERSION = "2023-06-01"
+
+# Paths carrying outsized merge risk — surfaced first in truncated inventories
+# so a migration or workflow edit can never fall off the 500-path cap.
+_DANGER_PATH_RE = re.compile(
+    r"(migrations?/|\.sql|schema|\.github/workflows|auth|secret|credential|"
+    r"token|dockerfile|terraform|deploy|package\.json|package-lock|pnpm-lock|yarn\.lock)",
+    re.I,
+)
 _API_TIMEOUT = 90
 _MAX_WORKERS = 6
 
@@ -160,11 +168,21 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
                 )
             }
         )
+        # Danger-relevant paths first so high-risk files never fall off the cap.
+        paths = sorted(paths, key=lambda p: (0 if _DANGER_PATH_RE.search(p) else 1, p))
+        listed = paths[:500]
+        overflow = (
+            f"\n[+{len(paths) - 500} more paths — risk-sorted first; "
+            "unlisted paths are not enumerated]"
+            if len(paths) > 500
+            else ""
+        )
         evidence_note = (
             "\n[diff truncated — the excerpt shows only the first 50,000 chars; "
-            "the complete changed-path list below is authoritative for coverage. "
-            "Do not report under-delivery from absence in the excerpt alone.]\n"
-            f"<changed_paths>\n{chr(10).join(paths[:500])}\n</changed_paths>\n"
+            "the changed-path list below covers the full diff (risk-relevant "
+            "paths first). Do not report under-delivery from absence in the "
+            "excerpt alone.]\n"
+            f"<changed_paths>\n{_neutralize(chr(10).join(listed))}{overflow}\n</changed_paths>\n"
         )
     user_message = (
         "Analyze the following PR diff and return findings JSON.\n\n"
