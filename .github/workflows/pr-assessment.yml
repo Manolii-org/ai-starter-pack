@@ -71,7 +71,7 @@ jobs:
       - name: Run pr-classifier
         id: classify
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY || secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ (vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL) && (secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY) || secrets.ANTHROPIC_API_KEY }}
           ANTHROPIC_BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
@@ -339,7 +339,7 @@ jobs:
 
       - name: Run specialist skills
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY || secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ (vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL) && (secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY) || secrets.ANTHROPIC_API_KEY }}
           ANTHROPIC_BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
           SKILLS: ${{ needs.classify.outputs.invoke_skills }}
           PR_TITLE: ${{ github.event.pull_request.title }}
@@ -377,7 +377,7 @@ jobs:
 
       - name: Run broad agents
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY || secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ (vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL) && (secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY) || secrets.ANTHROPIC_API_KEY }}
           ANTHROPIC_BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
           AGENTS: ${{ needs.classify.outputs.invoke_agents }}
         run: |
@@ -413,7 +413,7 @@ jobs:
 
       - name: Run judge
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY || secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ (vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL) && (secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY) || secrets.ANTHROPIC_API_KEY }}
           ANTHROPIC_BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}

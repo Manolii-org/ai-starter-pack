@@ -73,7 +73,7 @@ def jaccard(a: set[str], b: set[str]) -> float:
     return intersection / union if union > 0 else 0.0
 
 
-def load_jsonl(path: str | Path) -> list[dict]:
+def load_jsonl(path: str | Path) -> tuple[list[dict], int]:
     """Load JSONL, skip blank/malformed lines. Log skips to stderr."""
     rows = []
     skipped = 0
@@ -99,7 +99,7 @@ def load_jsonl(path: str | Path) -> list[dict]:
         pass
     if skipped > 0:
         print(f"[memory-decay] skipped {skipped} malformed lines", file=sys.stderr)
-    return rows
+    return rows, skipped
 
 
 def save_jsonl(path: str | Path, rows: list[dict]) -> None:
@@ -228,6 +228,9 @@ def consolidate(
                     if parsed:
                         last_seen_candidates.append(parsed)
             if last_seen_candidates:
+                # Consolidation reaffirms the fact — count now as a sighting so the
+                # merged row does not immediately read as stale to the decay pass.
+                last_seen_candidates.append(now)
                 canonical["last_seen"] = max(last_seen_candidates).isoformat()
             else:
                 canonical["last_seen"] = now.isoformat()
@@ -268,7 +271,12 @@ def run(
     if now is None:
         now = datetime.now(timezone.utc)
 
-    rows = load_jsonl(file)
+    rows, skipped = load_jsonl(file)
+    if apply and skipped:
+        raise SystemExit(
+            f"[memory-decay] refusing --apply: {skipped} malformed line(s) in {file}; "
+            "repair or remove them first"
+        )
     initial_count = len(rows)
 
     merges = []

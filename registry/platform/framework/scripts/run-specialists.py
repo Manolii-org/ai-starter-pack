@@ -31,6 +31,20 @@ _ANTHROPIC_API_VERSION = "2023-06-01"
 _ANTHROPIC_HOST = "api.anthropic.com"
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse redirects: a 3xx would re-send Authorization/x-api-key to the target."""
+
+
+def _urlopen_https(req: urllib.request.Request, *, timeout: int, host: str):
+    """Open one trusted HTTPS origin without following redirects."""
+    parsed = urllib.parse.urlparse(req.full_url)
+    if parsed.scheme != "https" or parsed.hostname != host:
+        raise ValueError("refusing non-HTTPS or unexpected request host")
+    opener = urllib.request.build_opener(_NoRedirectHandler())
+    return opener.open(req, timeout=timeout)  # nosec B310
+
+
+
 def _endpoint() -> tuple[str, str, bool]:
     """Resolve (api_key, url, proxied).
 
@@ -133,7 +147,7 @@ def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=_API_TIMEOUT) as resp:  # nosec B310
+        with _urlopen_https(req, timeout=_API_TIMEOUT, host=urllib.parse.urlparse(api_url).hostname or "") as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         error_body = e.read().decode("utf-8", errors="replace")

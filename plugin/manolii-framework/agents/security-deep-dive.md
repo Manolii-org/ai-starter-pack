@@ -5,6 +5,7 @@ description: "Broad agent: triages SAST findings against actual code flow to pro
 type: agent
 model: sonnet
 data_sensitivity: restricted_us_oss_ok
+# Demoted 2026-05-15 from claude-sonnet-4-6/restricted -> sonnet/restricted_us_oss_ok. SAST triage reads code, not PII. Engagement-policy gate escalates back to claude-sonnet-4-6 when active engagement carries client_ai_policy.
 max_tokens: 2000
 safety_tier: green
 requires_mcp: []

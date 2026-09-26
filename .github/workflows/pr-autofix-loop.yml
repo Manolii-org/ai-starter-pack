@@ -216,9 +216,12 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           WR_NAME: ${{ steps.pr.outputs.trigger_workflow }}
           WR_URL: ${{ steps.pr.outputs.trigger_run_url }}
+          # Proxy-aware key selection above only applies when a proxy endpoint is
+          # configured; forward it so the LiteLLM key is never sent to Anthropic.
+          ANTHROPIC_BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
         uses: anthropics/claude-code-action@9db594c7a0e82298c121c18b7f08aa1579ce7341 # v1.0.185
         with:
-          anthropic_api_key: ${{ secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY || secrets.ANTHROPIC_API_KEY }}
+          anthropic_api_key: ${{ (vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL) && (secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY) || secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           direct_prompt: |
             You are an autonomous PR autofix agent. Make minimal targeted fixes.

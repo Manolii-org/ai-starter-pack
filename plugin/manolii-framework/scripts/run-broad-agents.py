@@ -23,7 +23,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 from urllib.error import URLError
-from urllib.request import Request, urlopen
+from urllib.parse import urlparse
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 import yaml
 
@@ -38,6 +39,14 @@ logger = logging.getLogger(__name__)
 MODEL_ALIASES = {
     "haiku": "haiku",
     "sonnet": "sonnet",
+}
+
+# Short frontmatter aliases are proxy-side names; on the direct Anthropic plane
+# they are not valid model IDs — map them back to dated IDs.
+DIRECT_MODEL_MAP = {
+    "haiku": "claude-haiku-4-5-20251001",
+    "sonnet": "claude-sonnet-4-6",
+    "opus": "claude-opus-4-7",
 }
 
 BROAD_AGENTS = [
@@ -107,6 +116,19 @@ def _proxy_base() -> Optional[str]:
         return None
     import urllib.parse as _up
 
+
+class _NoRedirectHandler(HTTPRedirectHandler):
+    """Refuse redirects: a 3xx would re-send Authorization/x-api-key to the target."""
+
+
+def _urlopen_https(req: Request, *, timeout: int, host: str):
+    """Open one trusted HTTPS origin without following redirects."""
+    parsed = urlparse(req.full_url)
+    if parsed.scheme != "https" or parsed.hostname != host:
+        raise ValueError("refusing non-HTTPS or unexpected request host")
+    return build_opener(_NoRedirectHandler()).open(req, timeout=timeout)  # nosec B310
+
+
     if (_up.urlparse(base).hostname or "").lower().rstrip(".") == _ANTHROPIC_HOST:
         return None
     return base
@@ -169,6 +191,8 @@ def invoke_agent(
     base_url = proxy or "https://api.anthropic.com"
     if proxy and model in {"claude-haiku-4-5-20251001", "claude-sonnet-4-6"}:
         model = {"claude-haiku-4-5-20251001": "haiku", "claude-sonnet-4-6": "sonnet"}[model]
+    if not proxy:
+        model = DIRECT_MODEL_MAP.get(model, model)
     api_url = f"{base_url}/v1/messages"
 
     payload = {
@@ -210,7 +234,7 @@ def invoke_agent(
             headers=headers,
             method="POST",
         )
-        with urlopen(req, timeout=TIMEOUT_SECS) as response:
+        with _urlopen_https(req, timeout=TIMEOUT_SECS, host=urlparse(api_url).hostname or "") as response:
             resp_data = json.loads(response.read().decode("utf-8"))
     except (URLError, json.JSONDecodeError, TimeoutError) as e:
         logger.error(f"Agent {agent_config.name} API error: {e}")
