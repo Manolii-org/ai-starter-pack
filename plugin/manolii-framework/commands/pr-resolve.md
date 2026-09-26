@@ -26,7 +26,7 @@ Use GitHub MCP `pull_request_read` (preferred) or `scripts/ci/check-pr-comments.
 - **Standards violations** → first read
   `.git/.pr-comments-cache/standards-pr<PR_NUMBER>-<HEAD_SHA>.json`; reuse it only
   if it parses AND its digests recompute identically (run VERBATIM):
-  `inputs_sha` = `printf '%s\0%s' "$(git rev-parse "origin/$(gh api repos/:owner/:repo/pulls/<N> --jq .base.ref)" 2>/dev/null || echo missing)" "$(git show "origin/<base>:.ai/pr-standards.yaml" 2>/dev/null || printf 'untracked')" | sha256sum | cut -d' ' -f1`;
+  `inputs_sha` = `printf '%s\0%s' "$(git rev-parse "origin/$(gh api repos/:owner/:repo/pulls/<N> --jq .base.ref)" 2>/dev/null || echo missing)" "$(git show "origin/<base>:.ai/pr-standards.yaml" 2>/dev/null || printf 'untracked')" | sha256sum | cut -d' ' -f1` — and only after confirming `git rev-parse "origin/<base>"` equals `gh api repos/:owner/:repo/pulls/<N> --jq .base.sha` (a stale local ref means the cache is never valid — fetch first);
   `meta_sha` = `gh api repos/:owner/:repo/pulls/<N> --jq '.title + "\u0000" + .body' | sha256sum | cut -d' ' -f1`
   — a manifest/base change or title/body edit invalidates the cache at the same
   HEAD. If either `gh api` call fails (empty output), the cache is never valid —

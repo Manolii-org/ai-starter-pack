@@ -71,7 +71,11 @@ _HEAD_SHA=$(git rev-parse HEAD)
 # Digest recipe — run VERBATIM on both sides (checker writes, pr-resolve reads).
 # `gh api` is REST — `gh pr view` uses GraphQL which agent web sessions cannot reach.
 _BASE_BRANCH=$(gh api repos/:owner/:repo/pulls/${PR_NUMBER} --jq '.base.ref' 2>/dev/null)
+_LIVE_BASE_SHA=$(gh api repos/:owner/:repo/pulls/${PR_NUMBER} --jq '.base.sha' 2>/dev/null)
 _BASE_SHA=$(git rev-parse "origin/${_BASE_BRANCH}" 2>/dev/null || echo missing)
+# Stale-ref guard: origin/<base> must equal the live .base.sha — a moved base
+# must invalidate the digest even when the manifest bytes happen to match.
+[ "$_BASE_SHA" = "$_LIVE_BASE_SHA" ] || _BASE_SHA=missing
 _INPUTS_SHA=$(printf '%s\0%s' "$_BASE_SHA" "$(git show "origin/${_BASE_BRANCH}:.ai/pr-standards.yaml" 2>/dev/null || printf 'untracked')" | sha256sum | cut -d' ' -f1)
 _META_SHA=$(gh api repos/:owner/:repo/pulls/${PR_NUMBER} --jq '.title + "\u0000" + .body' 2>/dev/null | sha256sum | cut -d' ' -f1)
 _CACHE=".git/.pr-comments-cache/standards-pr${PR_NUMBER}-${_HEAD_SHA}.json"

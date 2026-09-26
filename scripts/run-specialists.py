@@ -163,12 +163,13 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
         # excerpt can't be mistaken for under-delivery.
         paths = sorted(
             {
-                side[2:].strip('"')
+                # ---/+++/rename lines: spaces in paths are unquoted in diffs —
+                # a `diff --git` regex would drop them. /dev/null side skipped.
+                m.group(2).rstrip("\t").strip('"').removeprefix("a/").removeprefix("b/")
                 for m in re.finditer(
-                    r'^diff --git (a/\S*|"a/[^"]*") (b/\S*|"b/[^"]*")$', diff, re.M
+                    r"^(--- |\+\+\+ |rename from |rename to )(.+)$", diff, re.M
                 )
-                # Both header sides — deletions and rename sources stay visible.
-                for side in m.groups()
+                if m.group(2).rstrip("\t") != "/dev/null"
             }
         )
         # Danger-relevant paths first so high-risk files never fall off the cap.

@@ -127,8 +127,6 @@ class Judge:
             + str(self.merge_danger.get("door", ""))
             + "\0"
             + str(self.merge_danger.get("blast_radius", ""))
-            + "\0"
-            + str(self.merge_danger.get("danger_reason", ""))
         )
         self.meta_digest = hashlib.sha256(meta_src.encode()).hexdigest()[:12]
         self.judge_log_dir = Path(".ai/judge-log")

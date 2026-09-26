@@ -194,13 +194,15 @@ def main() -> None:
     # and renames.
     changed_paths = sorted(
         {
-            side[2:].strip('"')
+            # --- a/, +++ b/, "rename from/to" lines: Git does NOT quote spaces,
+            # so `diff --git` regexes drop spaced paths; these lines never do.
+            # /dev/null is the absent side of an add/delete — skip it, keep the
+            # real path (a dropped migration still shows under its old name).
+            m.group(2).rstrip("\t").strip('"').removeprefix("a/").removeprefix("b/")
             for m in re.finditer(
-                r'^diff --git (a/\S*|"a/[^"]*") (b/\S*|"b/[^"]*")$', diff, re.M
+                r"^(--- |\+\+\+ |rename from |rename to )(.+)$", diff, re.M
             )
-            # Both header sides: deletions and rename sources carry the risk —
-            # a dropped migration must stay visible under its old path.
-            for side in m.groups()
+            if m.group(2).rstrip("\t") != "/dev/null"
         }
     )
     def _categories(p: str) -> list[int]:
