@@ -13299,3 +13299,476 @@ def test_script_dep_round68_empty_operands_and_wrapped_readers(tmp_path):
             b"sudo grep p scripts/x.sh",
             b"sudo cat scripts/x.sh | sh"):
         assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round69_wrapper_operands_and_wrapped_readers(tmp_path):
+    """Round-69 review fixes — all verified against live bash/util-linux:
+
+    - `sudo` cluster letters are validated: `sudo -sx sh x` aborts
+      "invalid option -- 'x'" before the command, while every real
+      no-arg letter (`-K`, `-n`, `-s`, `-E`, …) still reaches it.
+      `-C`/`--close-from` joins the operand options.
+    - `flock -w`/`--timeout` needs a strtod number (`0.5`, `.5`, `+2`,
+      `1e2` run; `nope`, `5x` abort "invalid timeout value") and
+      `-E`/`--conflict-exit-code` an integer 0-255 (`x`, `5.5`, `300`,
+      `-1` abort) — all before the wrapped argv.
+    - `xargs -d '\\x'` — a bare `\\x` IS a valid GNU escape (the hex
+      prefix alone names zero digits; util-linux runs the utility).
+    - A WRAPPED reader in sink mode emits none of the operand's bytes:
+      `flock L head -n 0 x | sh` and `xargs head -n 0 x | sh` feed sh
+      nothing (verified live).
+    - Wrapped `split` writes chunk FILES, not stdout — `xargs split x
+      | sh` never feeds the pipe, and `flock L split /dev/null x`
+      treats x as the output PREFIX, never reading it. `-n K/N`/`l/N`
+      chunk-select streams to stdout and `--filter=CMD` executes CMD
+      on each chunk — both still count (verified live).
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo X\n")
+    for line in (
+            b"sudo -sx sh scripts/x.sh",
+            b"sudo -x sh scripts/x.sh",
+            b"sudo --bogus sh scripts/x.sh",
+            b"sudo -l sh scripts/x.sh",
+            b"flock -w nope /tmp/L sh scripts/x.sh",
+            b"flock -w 5x /tmp/L sh scripts/x.sh",
+            b"flock --timeout=nope /tmp/L sh scripts/x.sh",
+            b"flock -E x /tmp/L sh scripts/x.sh",
+            b"flock -E 5.5 /tmp/L sh scripts/x.sh",
+            b"flock -E 300 /tmp/L sh scripts/x.sh",
+            b"flock -E -1 /tmp/L sh scripts/x.sh",
+            b"flock --conflict-exit-code=x /tmp/L sh scripts/x.sh",
+            b"flock -w /tmp/L sh scripts/x.sh",
+            b"flock /tmp/L head -n 0 scripts/x.sh | sh",
+            b"flock /tmp/L head -c 0 scripts/x.sh | sh",
+            b"xargs head -n 0 scripts/x.sh | sh",
+            b"xargs split scripts/x.sh | sh",
+            b"flock /tmp/L split /dev/null scripts/x.sh | sh",
+            b"sudo -sx scripts/x.sh",
+            # Round-70 verified `-K` terminal and `-w -1` a
+            # timer-setup abort — the command never runs.
+            b"sudo -Kns sh scripts/x.sh",
+            b"flock -w -1 /tmp/L sh scripts/x.sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b"sudo -s sh scripts/x.sh",
+            b"sudo -E sh scripts/x.sh",
+            b"sudo -u root sh scripts/x.sh",
+            b"sudo -C 3 sh scripts/x.sh",
+            b"sudo --close-from=3 sh scripts/x.sh",
+            b"sudo --preserve-env=A sh scripts/x.sh",
+            b"sudo -h myhost sh scripts/x.sh",
+            b"flock -w 0.5 /tmp/L sh scripts/x.sh",
+            b"flock -w .5 /tmp/L sh scripts/x.sh",
+            b"flock -w 1e2 /tmp/L sh scripts/x.sh",
+            b"flock -E 5 /tmp/L sh scripts/x.sh",
+            b"flock -E 0 /tmp/L sh scripts/x.sh",
+            b"flock --timeout=2 /tmp/L sh scripts/x.sh",
+            b"xargs -d '\\x' sh scripts/x.sh",
+            b"xargs cat scripts/x.sh | sh",
+            b"flock /tmp/L cat scripts/x.sh | sh",
+            b"xargs split -n 1/1 scripts/x.sh | sh",
+            b"xargs split -n r/1/1 scripts/x.sh | sh",
+            b"xargs split --filter=sh scripts/x.sh",
+            b"xargs split --filter=sh scripts/x.sh | wc"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round70_flock_strtold_sudo_close_from_filter(tmp_path):
+    """Round-70 review fixes — all verified against live
+    bash/sudo-1.9.9/util-linux:
+
+    - `flock -w`/`--timeout` follows the strtold grammar: leading
+      whitespace, decimal and `0x` hex floats, and `inf`/`infinity`/
+      `nan` literals all PARSE (` 1`, `0x1p2` run the command) while
+      trailing junk aborts "invalid timeout value" (`5x`, `1 `,
+      `0x`, `1e`). A parseable value still aborts the timer when it
+      is `inf`/`nan`, a negative nonzero (`-1`, `-.5`), or past the
+      deadline arithmetic (`1e999`, `9223372036854775807`) — "cannot
+      set up timer" (exit 71).
+    - `sudo -C`/`--close-from` requires a number ≥3 — `-C 2`, `-C0`,
+      `-C x`, `--close-from=2` abort "must be a number >= 3".
+    - `sudo -K`/`--remove-timestamp` is a TERMINAL timestamp mode
+      (usage error before any command, like `-v`); `-L` is not a
+      sudo option in 1.9.9 ("invalid option" abort). `-k` still
+      runs.
+    - `_SUDO_OPERAND_LETTERS` gains `C` — `-Cs` is `-C s` (bad
+      operand abort), not shell mode.
+    - A WRAPPED `split --filter` no longer counts the input
+      positional outright: the filter gets the chunk's bytes on its
+      stdin — `sh`/`cat | sh`/`$(…)` heads execute them, `cat`/`head
+      -n 1` re-emit them to split's stdout (the downstream pipe
+      decides), and `true`/`wc`/`cat > chunk` drop or store them —
+      the input never runs (verified live).
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo X\n")
+    for line in (
+            b"flock -w '1 ' /tmp/L sh scripts/x.sh",
+            b"flock -w '1.5x' /tmp/L sh scripts/x.sh",
+            b"flock -w 0x /tmp/L sh scripts/x.sh",
+            b"flock -w 0xg /tmp/L sh scripts/x.sh",
+            b"flock -w 1e /tmp/L sh scripts/x.sh",
+            b"flock -w e5 /tmp/L sh scripts/x.sh",
+            b"flock -w . /tmp/L sh scripts/x.sh",
+            b"flock -w inf /tmp/L sh scripts/x.sh",
+            b"flock -w INFINITY /tmp/L sh scripts/x.sh",
+            b"flock -w nan /tmp/L sh scripts/x.sh",
+            b"flock -w 'nan(abc)' /tmp/L sh scripts/x.sh",
+            b"flock -w -inf /tmp/L sh scripts/x.sh",
+            b"flock -w 1e999 /tmp/L sh scripts/x.sh",
+            b"flock -w 1e308 /tmp/L sh scripts/x.sh",
+            b"flock -w 9223372036854775807 /tmp/L sh scripts/x.sh",
+            b"flock -w -.5 /tmp/L sh scripts/x.sh",
+            b"sudo -C 2 sh scripts/x.sh",
+            b"sudo -C0 sh scripts/x.sh",
+            b"sudo -C x sh scripts/x.sh",
+            b"sudo --close-from=2 sh scripts/x.sh",
+            b"sudo --close-from x sh scripts/x.sh",
+            b"sudo -K sh scripts/x.sh",
+            b"sudo --remove-timestamp sh scripts/x.sh",
+            b"sudo -L sh scripts/x.sh",
+            b"sudo -Cs sh scripts/x.sh",
+            b"xargs split --filter='cat > /tmp/r70chunk' scripts/x.sh",
+            b"xargs split --filter='cat > /tmp/r70chunk' scripts/x.sh"
+            b" | sh",
+            b"xargs split --filter=true scripts/x.sh",
+            b"xargs split --filter=true scripts/x.sh | sh",
+            b"xargs split --filter=wc scripts/x.sh | sh",
+            b"xargs split --filter=' ' scripts/x.sh | sh",
+            b"xargs split --filter='cat' scripts/x.sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b"flock -w ' 1' /tmp/L sh scripts/x.sh",
+            b"flock -w 0x1p2 /tmp/L sh scripts/x.sh",
+            b"flock -w 0x5 /tmp/L sh scripts/x.sh",
+            b"flock -w 0x1.8p1 /tmp/L sh scripts/x.sh",
+            b"flock -w 0x1p-2 /tmp/L sh scripts/x.sh",
+            b"flock -w -0 /tmp/L sh scripts/x.sh",
+            b"flock -w +0 /tmp/L sh scripts/x.sh",
+            b"flock -w 1e18 /tmp/L sh scripts/x.sh",
+            b"flock -w 9223372036854 /tmp/L sh scripts/x.sh",
+            b"sudo -k sh scripts/x.sh",
+            b"sudo -C 3 sh scripts/x.sh",
+            b"sudo --close-from=3 sh scripts/x.sh",
+            b"sudo -s sh scripts/x.sh",
+            b"xargs split --filter=sh scripts/x.sh",
+            b"xargs split --filter='cat | sh' scripts/x.sh",
+            b"xargs split --filter='$(printf sh)' scripts/x.sh",
+            b"xargs split --filter=cat scripts/x.sh | sh",
+            b"xargs split --filter='head -n 1' scripts/x.sh | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round71_redirect_sudo_digits_flock_bounds(tmp_path):
+    """Round-71 review — Devin on #132/#16/#1961: a wrapped command's
+    `> /dev/null` (or `&>`/file) divert leaves the downstream pipe
+    EMPTY — `xargs cat x >/dev/null | sh` runs nothing (the wrapped
+    emit path called _pipe_to_exec without checking the enclosing
+    segment's fd1; _stdout_redirected closes the hole for every head).
+    `sudo -C` operand length can exceed Python's int-conversion cap —
+    significant-digit compare keeps a 5000-zero pad valid and marks a
+    5000-digit value the strtonum ERANGE abort (INT_MAX boundary
+    verified live). `flock -w` accepts any magnitude below 2^63 —
+    `9.21e18` and `9223372036854775000` still run the command while
+    `9223372036854775807` and `0x1p1024` (OverflowError at
+    float.fromhex) abort "cannot set up timer" (all verified live).
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo X\n")
+    for line in (
+            b"xargs split -n 1/1 scripts/x.sh > /dev/null | sh",
+            b"xargs split --filter=cat scripts/x.sh > /dev/null | sh",
+            b"xargs cat scripts/x.sh > /dev/null | sh",
+            b"xargs head -n 1 scripts/x.sh > /dev/null | sh",
+            b"flock /tmp/L cat scripts/x.sh > /dev/null | sh",
+            b"split --filter='cat scripts/x.sh' - > /dev/null | sh",
+            b"sudo -C " + b"9" * 5000 + b" sh scripts/x.sh",
+            b"sudo -C 2147483648 sh scripts/x.sh",
+            b"sudo -C 99999999999 sh scripts/x.sh",
+            b"sudo -C 000 sh scripts/x.sh",
+            b"flock -w 0x1p1024 /tmp/L sh scripts/x.sh",
+            b"flock -w 9223372036854775807 /tmp/L sh scripts/x.sh",
+            b"flock -w 9223372036854775808 /tmp/L sh scripts/x.sh",
+            b"flock -w 1e19 /tmp/L sh scripts/x.sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b"xargs split -n 1/1 scripts/x.sh | sh",
+            b"xargs split --filter=cat scripts/x.sh | sh",
+            b"xargs cat scripts/x.sh | sh",
+            b"xargs split -n 1/1 scripts/x.sh 2>/dev/null | sh",
+            b"sudo -C " + b"0" * 5000 + b"3 sh scripts/x.sh",
+            b"sudo -C 2147483647 sh scripts/x.sh",
+            b"sudo -C 03 sh scripts/x.sh",
+            b"flock -w 9.21e18 /tmp/L sh scripts/x.sh",
+            b"flock -w 9.2e18 /tmp/L sh scripts/x.sh",
+            b"flock -w 9223372036854775000 /tmp/L sh scripts/x.sh",
+            b"flock -w 0x1p62 /tmp/L sh scripts/x.sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round72_compound_feed_flock_ws_negative(tmp_path):
+    """Round-72 review — Devin on #132/#16/#1428: a compound feeding
+    stage's `;`/`&` sibling split is INSIDE the group, so the pipe
+    walk must aggregate the siblings' fd1, not end the statement —
+    `(cat x; true >/dev/null) | sh` still runs the script while
+    `(cat x >/dev/null; true) | sh` feeds sh nothing, and a `>`
+    after the close (`(cat x; cat x) >/dev/null | sh`, `done >f`)
+    binds the WHOLE group. `flock -E` operand is strtol — leading
+    whitespace parses (`' 5'` runs, `'5 '` aborts). `flock -w`
+    negative bound is a 1-microsecond floor: `[-1e-6, 0)` rounds to
+    a past deadline and runs, anything more negative aborts (all
+    verified live).
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo X\n")
+    for line in (
+            b"(cat scripts/x.sh; true >/dev/null) | sh",
+            b"(cat scripts/x.sh; true) | sh",
+            b"((cat scripts/x.sh); true) | sh",
+            b"(cat scripts/x.sh & true) | sh",
+            b"(cat scripts/x.sh; cat scripts/x.sh >/dev/null) | sh",
+            b"(cat scripts/x.sh) | sh",
+            b"flock -E ' 5' /tmp/L sh scripts/x.sh",
+            b"flock --conflict-exit-code ' 200' /tmp/L sh scripts/x.sh",
+            b"flock -w -0.000001 /tmp/L sh scripts/x.sh",
+            b"flock -w -0.0000009999 /tmp/L sh scripts/x.sh",
+            b"flock -w ' 5' /tmp/L sh scripts/x.sh",
+            b"flock -w -0 /tmp/L sh scripts/x.sh",
+            b"xargs cat scripts/x.sh |& sh",
+            b"xargs sh -c 'cat scripts/x.sh >&2' >/dev/null |& sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b"(cat scripts/x.sh > /dev/null; true) | sh",
+            b"(cat scripts/x.sh; cat scripts/x.sh) >/dev/null | sh",
+            b"(cat scripts/x.sh) > /dev/null | sh",
+            b"(true; xargs cat scripts/x.sh >/dev/null) | sh",
+            b"flock -E '5 ' /tmp/L sh scripts/x.sh",
+            b"flock -E ' 256' /tmp/L sh scripts/x.sh",
+            b"flock -w -0.0000010000001 /tmp/L sh scripts/x.sh",
+            b"flock -w -.5 /tmp/L sh scripts/x.sh",
+            b"flock -w -0.0000015 /tmp/L sh scripts/x.sh",
+            b"xargs cat scripts/x.sh >/dev/null |& sh",
+            b"cat scripts/x.sh; true | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round73_open_depth_comments_elif_heredoc(tmp_path):
+    """Round-73 review — Devin + CodeRabbit on #16/#132/#1428/#1961:
+    `_open_depth` (and the forward walk) overcounted in three ways —
+    a `(` inside a comment's TAIL (`# (` — the window stops at the
+    word-start `#` but the comment text itself was re-scanned), an
+    `elif` opener (it re-opens a branch of the enclosing `if`, not a
+    new compound — `if..elif..fi` left a phantom level that kept the
+    `;` after `fi` inside the group), and heredoc BODY lines (`(`
+    inside `cat <<E`'s body is inert data — unterminated bodies never
+    engage, `<<-` strips tabs, a second queued heredoc waits for the
+    first delimiter). Also: `xargs split --filter x.sh /dev/null`
+    produced no chunks so the filter never ran — the wrapped-split
+    argv scan carried the input operand's trailing newline, so its
+    `/dev/null` missed the dead-input gate (all verified live).
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo X\n")
+    for line in (
+            b"# (\ncat scripts/x.sh | sh",
+            b"# comment\ncat scripts/x.sh | sh",
+            b"( cat scripts/x.sh | sh )",
+            b"if false; then :; elif true; then cat scripts/x.sh; fi | sh",
+            b"cat scripts/x.sh | if a; then cat; elif b; then cat; fi | sh",
+            b"cat <<EOF\n(\nEOF\n( cat scripts/x.sh | sh )",
+            b"xargs split --filter scripts/x.sh f"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b"# (\ncat scripts/x.sh | true; sh",
+            b"true; # (\ncat scripts/x.sh | true; sh",
+            b"if false; then :; elif true; then :; fi\ncat scripts/x.sh | true; sh",
+            b"cat scripts/x.sh | true; if a; then :; elif b; then :; fi; sh",
+            b"if a; then if b; then :; fi; fi\ncat scripts/x.sh | true; sh",
+            b"cat <<EOF\n(\nEOF\ncat scripts/x.sh | true; sh",
+            b"cat <<-EOF\n\t(\n\tEOF\ncat scripts/x.sh | true; sh",
+            b"cat <<A\n(\nA\ncat <<B\n)\nB\ncat scripts/x.sh | true; sh",
+            b"cat <<EOF\n(\ncat scripts/x.sh | true; sh",
+            b"xargs split --filter scripts/x.sh /dev/null"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round74_brace_words_split_ncount_sudo_c_heredoc(tmp_path):
+    """Round-74 review — Devin + CodeRabbit on #132/#16/#1428/#1961:
+    `{`/`}` only group as whole words — `foo{` prints literally and
+    `a{1,2}` is brace expansion, so `_group_depth` gates braces on
+    word boundaries (parens stay counted anywhere — they're operators).
+    `split -n N`/`l/N`/`r/N` materialise N chunks even on empty input —
+    `--filter` fires on `/dev/null` (verified live: `-n 2`/`l/2`/`r/2`
+    each run the filter N times; only the two-part `-n K/N` select
+    emits nothing), so the dead-input gate exempts one-part `-n` modes
+    on both the wrapped and unwrapped filter gates. `sudo -C` accepts
+    strtol semantics — leading whitespace and `+` parse (`-C +3` runs,
+    `-C +2`/`-C -3` abort — verified live). And an _HD_EXEC heredoc's
+    body lines are program text: `sh <<E` runs them, so their `(`/if
+    depth must count for `;`-sibling handling just like the same
+    construct at top level (literal `cat <<E` bodies stay inert).
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo X\n")
+    for line in (
+            b"{ cat scripts/x.sh | cat; } | sh",
+            b"sudo -C +3 sh scripts/x.sh",
+            b'sudo -C " 3" sh scripts/x.sh',
+            b"split -n 2 --filter scripts/x.sh /dev/null out.",
+            b"split -n l/2 --filter scripts/x.sh /dev/null out.",
+            b"split -n r/2 --filter scripts/x.sh /dev/null out.",
+            b"split -n 2 --filter scripts/x.sh - out. < /dev/null",
+            b"xargs split -n 2 --filter scripts/x.sh /dev/null",
+            b"sh <<E\n( cat scripts/x.sh | cat; sh )\nE",
+            b"cat <<E | sh\n( cat scripts/x.sh | cat; sh )\nE",
+            b"sh <<E\n( cat scripts/x.sh | cat; sh ",
+            b"if false; then { cat scripts/x.sh | cat; }; fi | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b"echo foo{; cat scripts/x.sh | true; sh",
+            b"echo {x; cat scripts/x.sh | true; sh",
+            b"echo a{1,2}; cat scripts/x.sh | true; sh",
+            b"echo foo}; cat scripts/x.sh | true; sh",
+            b"cat <<E\n( cat scripts/x.sh | cat; sh )\nE"
+            b"\ncat scripts/x.sh | true; sh",
+            b"cat <<E\n(\nE\ncat scripts/x.sh | true; sh",
+            b"split -n 1/2 --filter scripts/x.sh /dev/null out.",
+            b"split --filter scripts/x.sh /dev/null out.",
+            b"xargs split --filter scripts/x.sh /dev/null",
+            b"xargs split -n 1/2 --filter scripts/x.sh /dev/null",
+            b"sudo -C +2 sh scripts/x.sh",
+            b"sudo -C -3 sh scripts/x.sh",
+            b"sudo -C x sh scripts/x.sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round75_elide_closed_cluster_strtold_hdoc(tmp_path):
+    """Round-75 review — Devin + CodeRabbit on #132/#1428/#1961/#16:
+    `split -e`/`--elide-empty-files` drops empty chunks, so the `-n N`
+    filter exemption only holds when the option is absent (`-n 2 -e
+    /dev/null` yields ZERO chunks — verified live). A CLOSED stdin
+    (`<&-`) aborts EBADF before any chunk — the exemption covers only
+    a readable-empty input, and `- </dev/null` still fires N times
+    (readable empty ≠ closed). sudo option clusters bind the LAST
+    operand letter's value — `-HC2` is `-H` + `-C 2`, which aborts
+    "-C must be >= 3" (verified live). `flock -w` strtold underflow:
+    a nonzero literal below LDBL_MIN=2^-16382 is ERANGE unless it's
+    an exactly-representable denormal (`1e-9999`/`0x1p-16446`/
+    `1e-4932`/`-1e-9999` abort "invalid timeout"; `1e-4931` and the
+    min-denormal `0x1p-16445` run — float64 can't see the boundary,
+    verified live). Heredoc bodies of argv-program heads are inert —
+    `sh -c : <<E` execs `:` and never reads the body, while the
+    exec-body scan's depth must restore on delimiter pop so body
+    syntax can't leak a phantom group past `E` (verified live).
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo X\n")
+    for line in (
+            b"split -n 2 --filter='cat scripts/x.sh' /dev/null | sh",
+            b"split -n 2 --filter='cat scripts/x.sh' F | sh",
+            b"split -n 2 --filter='sh scripts/x.sh' -",
+            b"split -n 2 --filter='sh scripts/x.sh' - </dev/null",
+            b"sudo -HC3 sh scripts/x.sh",
+            b"sudo -C 3 sh scripts/x.sh",
+            b"sudo -H sh scripts/x.sh",
+            b"flock -w 1e-4931 f sh scripts/x.sh",
+            b"flock -w 0x1p-16445 f sh scripts/x.sh",
+            b"flock -w 0e-9999 f sh scripts/x.sh",
+            b"flock -w 1.5 f sh scripts/x.sh",
+            b"sh <<E\n(\nE\ncat scripts/x.sh | sh",
+            b"sh -c : <<E\n(\nE\ncat scripts/x.sh | sh",
+            b"xargs split --filter='cat scripts/x.sh' <f | sh",
+            b"find . -type f -exec split -n 2 --filter='cat scripts/x.sh'"
+            b" /dev/null \\; | sh",
+            b"find . -type f -exec split --filter='cat scripts/x.sh' F"
+            b" \\; | sh",
+            b"find . -type f -exec split -n 2 --filter='sh scripts/x.sh'"
+            b" /dev/null \\;"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b"split -n 2 --filter='cat scripts/x.sh' -e /dev/null | sh",
+            b"split -n 2 --elide-empty-files"
+            b" --filter='cat scripts/x.sh' /dev/null | sh",
+            b"split -en 2 --filter='cat scripts/x.sh' /dev/null | sh",
+            b"split -n 2 --filter='cat scripts/x.sh' - <&- | sh",
+            b"split -n 2 --filter='sh scripts/x.sh' - <&-",
+            b"sudo -HC2 sh scripts/x.sh",
+            b"sudo -nC2 sh scripts/x.sh",
+            b"sudo -HC 2 sh scripts/x.sh",
+            b"sudo -C 2 sh scripts/x.sh",
+            b"flock -w 1e-9999 f sh scripts/x.sh",
+            b"flock -w 1e-4932 f sh scripts/x.sh",
+            b"flock -w -1e-9999 f sh scripts/x.sh",
+            b"flock -w 0x1p-16446 f sh scripts/x.sh",
+            b"sh -c : <<E\n(\nE\ncat scripts/x.sh | wc; sh",
+            b"sh -c 'true' <<E\n(\nE\ncat scripts/x.sh | wc; sh",
+            b"sh <<E\n(\nE\ncat scripts/x.sh | wc; sh",
+            b"python -X dev s.py <<E\nx\nE\ncat scripts/x.sh | wc; sh",
+            b"find . -type f -exec split --filter='cat scripts/x.sh'"
+            b" /dev/null \\; | sh",
+            b"find . -type f -exec split -n 2 --filter='sh scripts/x.sh'"
+            b" - <&- \\;",
+            b"find . -type f -exec split -n 2 --filter='cat scripts/x.sh'"
+            b" -e /dev/null \\; | sh",
+            b"split --filter='cat scripts/x.sh' /dev/null | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round76_group_fd1_flock_exp_filter_glued(tmp_path):
+    """Round-76 review — Devin on #132/#1428/#1961/#16: a `>`/`&>` on
+    the LAST sibling of a `( )`/`{ }` compound diverts only that
+    command — earlier siblings share the group's fd1, so `(cat x;
+    cat x >f) | sh` still writes the script into the pipe (a `>`
+    AFTER the closer covers the whole group — verified live).
+    `flock -w` exponent bound: `1e±10^8`/`0x1p±99999` literals made
+    `_strtold_fraction` build a hundred-million-digit bigint — the
+    exact fraction is only computed on the float-underflow path and
+    out-of-range exponents short-circuit (verified live — strtold
+    ERANGEs both directions). And `split --filter=CMD` glued onto
+    the option word is program text — `--filter=scripts/x.sh`
+    executes the script when a chunk materialises (`-n 2` on
+    `/dev/null`, or any live input — verified live).
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo X\n")
+    for line in (
+            b"(cat scripts/x.sh; cat scripts/x.sh >f) | sh",
+            b"{ cat scripts/x.sh; cat scripts/x.sh >f; } | sh",
+            b"(cat scripts/x.sh >f; cat scripts/x.sh) | sh",
+            b"split -n 2 --filter=scripts/x.sh /dev/null",
+            b"split --filter=scripts/x.sh F",
+            b"xargs split --filter=scripts/x.sh f",
+            b"find . -exec split --filter=scripts/x.sh F \\;",
+            b"split --filter='cat scripts/x.sh' F | sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b"(cat scripts/x.sh; cat scripts/x.sh >f) | wc; sh",
+            b"(cat scripts/x.sh; cat scripts/x.sh >f) >g | sh",
+            b"(echo hi; cat scripts/x.sh >f) | sh",
+            b"cat scripts/x.sh >f | sh",
+            b"xargs cat scripts/x.sh >/dev/null | sh",
+            b"flock -w 1e10000000 f sh scripts/x.sh",
+            b"flock -w 1e-100000000 f sh scripts/x.sh",
+            b"flock -w 0x1p99999 f sh scripts/x.sh",
+            b"flock -w 0x1p-99999 f sh scripts/x.sh",
+            b"split --filter=scripts/x.sh /dev/null",
+            b"find . -exec split -n 2 --filter=scripts/x.sh - <&- \\;",
+            b"split --filter=cat F | sh"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line

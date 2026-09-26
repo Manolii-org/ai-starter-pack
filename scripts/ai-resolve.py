@@ -42,6 +42,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass, field
+from fractions import Fraction
 from pathlib import Path
 
 
@@ -1197,13 +1198,143 @@ def _xargs_bad_value(opt: bytes, val: bytes) -> bool:
                 or (num.group(1) == b"-" and num.group(2).strip(b"0")))
     if opt in (b"-d", b"--delimiter"):
         # One literal char, or a GNU escape set: `\[abfnrtv\\]`,
-        # `\0`..`\377` octal (1-3 digits), `\x..` hex (1-2) —
+        # `\0`..`\377` octal (1-3 digits), `\x..` hex (0-2 — a bare
+        # `\x` IS accepted: the hex prefix alone names no digits and
+        # util-linux treats the empty sequence as valid —
+        # verified live on util-linux xargs, round-69) —
         # `\q`, `ab`, `\8`, `\e`, `\xZZ` abort ("Invalid escape
-        # sequence" — verified live on util-linux xargs, round-68).
+        # sequence" — verified live, round-68).
         return (len(val) != 1
                 and re.fullmatch(
-                    rb"\\(?:[abfnrtv\\]|[0-7]{1,3}|x[0-9a-fA-F]{1,2})",
+                    rb"\\(?:[abfnrtv\\]|[0-7]{1,3}|x[0-9a-fA-F]{0,2})",
                     val) is None)
+    return False
+
+
+def _flock_bad_opt(args: list, i: int) -> bool:
+    """True when the flock option at args[i] aborts on its operand —
+    `-w`/`--timeout` needs a strtod-parseable number (`0.5`, `.5`,
+    `+2`, `1e2` run; `nope`, `5x` abort "invalid timeout value"), and
+    `-E`/`--conflict-exit-code` an integer in 0-255 (`x`, `5.5`,
+    `300`, `-1` all abort — verified live, round-69). A missing
+    operand word aborts the same way (`flock -w` at end)."""
+    a = args[i]
+    if a.startswith(b"--"):
+        name = a.split(b"=", 1)[0]
+        if name in _WRAPPER_LONG[b"flock"]:
+            opt = name
+        else:
+            cands = [o for o in _WRAPPER_LONG[b"flock"]
+                     if o.startswith(name)]
+            if len(cands) != 1:
+                return False            # ambiguity exits upstream
+            opt = cands[0]
+        if opt in _WRAPPER_REQ_LONG[b"flock"]:
+            if b"=" in a:
+                val = a.split(b"=", 1)[1]
+            elif i + 1 < len(args):
+                val = args[i + 1]
+            else:
+                return True             # missing operand aborts
+            return _flock_bad_value(opt, val)
+        return False                    # bare flag — no operand
+    if a == b"-" or not a.startswith(b"-"):
+        return False
+    j = 1
+    while j < len(a):
+        c = a[j:j + 1]
+        if c in _WRAPPER_REQ_SHORT[b"flock"]:
+            if j + 1 < len(a):
+                val = a[j + 1:]
+            elif i + 1 < len(args):
+                val = args[i + 1]
+            else:
+                return True             # missing operand aborts
+            return _flock_bad_value(b"-" + c, val)
+        j += 1
+    return False
+
+
+def _flock_bad_value(opt: bytes, val: bytes) -> bool:
+    """The operand check itself — `opt` is the resolved option name.
+    `-c`/`--command` binds a command string, which is never 'bad'."""
+    if opt in (b"-w", b"--timeout"):
+        # util-linux runs the operand through its strtold wrapper —
+        # LEADING whitespace, decimal and `0x` hex floats, and the
+        # `inf`/`infinity`/`nan` literals all parse (` 1`, `0x1p2`
+        # reach the wrapped command), while trailing junk aborts
+        # "invalid timeout value" (`5x`, `1 `, `0x`, `1e` — Devin +
+        # CodeRabbit on #132, round-70 review — verified live).
+        if re.fullmatch(
+                rb"\s*[+-]?(?:"
+                rb"(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?"
+                rb"|0[xX](?:[0-9a-fA-F]+\.?[0-9a-fA-F]*|\."
+                rb"[0-9a-fA-F]+)(?:[pP][+-]?[0-9]+)?"
+                rb"|[iI][nN][fF](?:[iI][nN][iI][tT][yY])?"
+                rb"|[nN][aA][nN](?:\([A-Za-z0-9_]*\))?)",
+                val) is None:
+            return True             # "invalid timeout value"
+        text = val.lstrip()
+        if re.match(rb"[+-]?[iI][nN][fF]|[+-]?[nN][aA][nN]", text):
+            # `inf`/`nan` parse but can't arm a timer — "cannot set
+            # up timer" abort (verified live).
+            return True
+        try:
+            num = (float.fromhex(text.decode())
+                   if re.match(rb"[+-]?0[xX]", text)
+                   else float(text.decode()))
+        except (ValueError, OverflowError):
+            # `0x1p1024` overflows float.fromhex to OverflowError —
+            # the timer can't arm, so the command never runs (Devin
+            # on #16/#1961, round-71 review — verified live).
+            return True
+        # strtold's OWN underflow check: a nonzero literal below the
+        # 80-bit long-double range is ERANGE — "invalid timeout" →
+        # abort — `1e-9999`/`0x1p-16446` die while `1e-4931`
+        # (≥LDBL_MIN=2^-16382) and `0x1p-16445` (the smallest EXACT
+        # denormal) still parse (Devin on #1428, round-75 review —
+        # verified live). float64 can't see this boundary: Python
+        # underflows to 0.0 around 5e-324, far above ~3.36e-4932.
+        # Only exactly-representable denormals escape ERANGE in the
+        # subnormal range: v = m·2^-16445 with integer 1 ≤ m < 2^63.
+        # The exact Fraction is needed only when float64 underflowed —
+        # a nonzero-finite `num` is already above the LDBL min-denormal,
+        # and an `inf` is handled by the deadline bound below without
+        # building one (a `1e-100000000` literal would otherwise stall
+        # the scan on a huge denominator — Devin on #1428/#132/#16,
+        # round-76 review — verified live).
+        if num == 0.0:
+            mag = _strtold_fraction(text)
+            if mag is not None:
+                amag = abs(mag)
+                if 0 < amag < Fraction(2) ** -16382:
+                    den = amag * (Fraction(2) ** 16445)
+                    if den.denominator != 1 or den >= 2 ** 63:
+                        return True     # ERANGE — "invalid timeout"
+            return False            # `-0`/`+0` arm an instant timer
+        # The deadline `now + w` has to fit int64 — a magnitude that
+        # rounds to 2^63 overflows it, and so does anything larger
+        # (`9223372036854775807` aborts "cannot set up timer" while
+        # `9223372036854775000` and `9.21e18` still run the command —
+        # Devin on #132/#16, round-71 review — verified live). The
+        # low edge is a one-microsecond floor: a timeout in
+        # [-1e-6, 0) rounds to an already-past deadline and the
+        # command still runs (`-0.000001` runs, `-0.0000010000001`
+        # and `-.5` abort — Devin on #132, round-72 review —
+        # verified live).
+        return num < -0.000001 or num >= 9.223372036854776e18
+    if opt in (b"-E", b"--conflict-exit-code"):
+        # strtol skips leading whitespace — `-E ' 5'` runs (round-72
+        # review — verified live); trailing junk still aborts (`5 `).
+        num = re.fullmatch(rb"\s*([+-]?)([0-9]+)", val)
+        if num is None:
+            return True
+        d = num.group(2).lstrip(b"0")
+        # 0-255 — a >3-digit nonzero span always exceeds the range,
+        # so `int()` only ever sees short digit strings.
+        return (len(d) > 3
+                or (num.group(1) == b"-" and d != b"")
+                or (d != b"" and int(d) > 255))
     return False
 
 
@@ -1599,6 +1730,20 @@ def _argv_wrap_start(enc_words: list, hi: int, enclosing: bytes):
                             for k in range(hi + 1, len(enc_words))]
                     if _xargs_bad_opt(args_x, j - hi - 1):
                         return None
+                if key == b"flock":
+                    # A malformed flock option OPERAND likewise aborts
+                    # before the wrapped argv — `-w`/`--timeout` needs a
+                    # strtod-parseable number and `-E`/
+                    # `--conflict-exit-code` an integer 0-255 (Devin on
+                    # #130, round-69 review — verified live).
+                    if args_x is None:
+                        args_x = [
+                            _word_text(
+                                enclosing[enc_words[k][0]:
+                                          enc_words[k][1]])
+                            for k in range(hi + 1, len(enc_words))]
+                    if _flock_bad_opt(args_x, j - hi - 1):
+                        return None
                 j += skip
                 continue
             elif t in terminal:
@@ -1978,11 +2123,13 @@ def _operand_is_program(enc_words: list, wi: int,
         # pipeline scan marks them "script" provenance for `|sh`);
         # the literal-read gate treats it the same as bare `cat`.
         aargs = _argv_only(enc_words, enclosing, hi + 1)
-        afilt, _afin, _atout, fidx = _split_scan(key, aargs)
+        afilt, _afin, _atout, fidx, anct = _split_scan(key, aargs)
         return (fidx is not None
                 and _argv_index(enc_words, enclosing, hi + 1, wi)
                 == fidx
-                and not _split_dead_input(_afin, enclosing)
+                and ((anct
+                      and not _split_closed_input(_afin, enclosing))
+                     or not _split_dead_input(_afin, enclosing))
                 and _filter_script_role(afilt) == "exec")
     if key in _ARGV_PROGRAM_WRAPPERS:
         # The program operand belongs to the command the wrapper execs —
@@ -2481,10 +2628,11 @@ _WRAPPER_OPT_OPERAND = {
                        b"--chdir", b"--unset", b"--split-string",
                        b"--argv0"}),
     b"sudo": frozenset({b"-u", b"-g", b"-h", b"-r", b"-t", b"-D", b"-R",
-                        b"-p", b"-U", b"-T",
+                        b"-p", b"-U", b"-T", b"-C",
                         b"--user", b"--group", b"--host", b"--role",
                         b"--type", b"--chdir", b"--chroot", b"--prompt",
-                        b"--other-user", b"--command-timeout"}),
+                        b"--other-user", b"--command-timeout",
+                        b"--close-from"}),
     b"stdbuf": frozenset({b"-i", b"-o", b"-e",
                           b"--input", b"--output", b"--error"}),
     b"exec": frozenset({b"-a"}),
@@ -2568,7 +2716,14 @@ _WRAPPER_DESCRIBE = {b"command": frozenset({b"-v", b"-V"}),
                     b"sudo": frozenset({b"-l", b"--list",
                                         b"-v", b"--validate",
                                         b"-e", b"--edit",
-                                        b"-V", b"--version"}),
+                                        b"-V", b"--version",
+                                        # `-K`/`--remove-timestamp`
+                                        # is terminal: a usage
+                                        # error before any command
+                                        # (sudo 1.9.9 — verified
+                                        # live, round-70).
+                                        b"-K",
+                                        b"--remove-timestamp"}),
                     b"exec": frozenset({b"--help"}),
                     b"setsid": frozenset({b"-h", b"--help",
                                           b"-V", b"--version"}),
@@ -2653,6 +2808,31 @@ _WRAPPER_FLAGS = {
     # "unrecognized option" abort (Codex on #1393, round-62 —
     # verified live).
     b"ionice": frozenset({b"-t", b"--ignore"}),
+    # sudo 1.9 — every operational flag is boolean (the `-l`/`-v`/
+    # `-e`/`-V` describe modes and the operand options live in their
+    # own tables; `--preserve-env=LIST` is the only optional-arg
+    # form). Any other option aborts "invalid option" BEFORE the
+    # command runs — `sudo -sx x` never reaches x (Codex on #130,
+    # round-69 review — verified live).
+    b"sudo": frozenset({b"-A", b"--askpass",
+                        b"-b", b"--background",
+                        b"-B", b"--bell",
+                        b"-E",
+                        b"-H", b"--set-home",
+                        b"-i", b"--login",
+                        # `-K`/`--remove-timestamp` is a TERMINAL
+                        # mode like `-v` — `sudo -K sh x` prints
+                        # usage and runs nothing (sudo 1.9.9 — Devin
+                        # on #132, round-70 review — verified live).
+                        # `-L` is not a sudo option at all in 1.9.9
+                        # — "invalid option" abort (verified live).
+                        # `-k` (reset the timestamp) still RUNS the
+                        # command — stays a flag.
+                        b"-k", b"--reset-timestamp",
+                        b"-n", b"--non-interactive",
+                        b"-P", b"--preserve-groups",
+                        b"-S", b"--stdin",
+                        b"-s", b"--shell"}),
 }
 # Wrapper flags whose argument is OPTIONAL and attached-only —
 # `unshare --mount` (unshares mounts), `--mount=/tmp/m` (binds the
@@ -2667,6 +2847,10 @@ _WRAPPER_OPTARG_FLAGS = {
                            b"--mount-proc",
                            b"-m", b"-u", b"-i", b"-n", b"-p",
                            b"-U", b"-C", b"-T"}),
+    # `sudo --preserve-env=LIST` binds an attached env list; bare
+    # `--preserve-env`/`-E` is a plain flag (sudo 1.9 — verified
+    # live, round-69).
+    b"sudo": frozenset({b"--preserve-env"}),
 }
 
 
@@ -2789,6 +2973,35 @@ def _wrapper_opt_name(key: bytes, t: bytes) -> bytes:
     return cands[0] if len(cands) == 1 else tn
 
 
+def _wrapper_opt_value(key: bytes, t: bytes):
+    """(opt_name, glued_value) for an operand-bearing option word —
+    the cluster-aware form of `_wrapper_opt_name(key, t)` + `t[2:]`:
+    a `-HC2` cluster binds `-C`'s operand to `2`, not `-H`'s to `C2`
+    (`sudo -HC2` aborts "-C must be >= 3" — Devin on #1428, round-75
+    review — verified live). `glued_value` None means the operand
+    binds the NEXT word. Returns (name, None) when no operand letter
+    is found — callers only reach this when _wrapper_opt_class says
+    an operand binds."""
+    if len(t) > 2 and not t.startswith(b"--"):
+        vals = _WRAPPER_OPT_OPERAND.get(key, frozenset())
+        flags = _WRAPPER_FLAGS.get(key, frozenset())
+        j = 1
+        while j < len(t):
+            c = b"-" + t[j:j + 1]
+            if c in vals:
+                return c, (t[j + 1:] if j + 1 < len(t) else None)
+            if c in flags:
+                j += 1
+                continue
+            # desc/oflags/unknown letters never reach a vals letter —
+            # the class scan already aborted or consumed the tail.
+            break
+        return _wrapper_opt_name(key, t), None
+    if t.startswith(b"--") and b"=" in t:
+        return _wrapper_opt_name(key, t), t.split(b"=", 1)[1]
+    return _wrapper_opt_name(key, t), None
+
+
 def _wrapper_bad_value(key: bytes, opt: bytes, val: bytes) -> bool:
     """True when a wrapper option's operand VALUE makes the whole
     command abort before the wrapped program runs — `nice -n 5.5`
@@ -2807,6 +3020,24 @@ def _wrapper_bad_value(key: bytes, opt: bytes, val: bytes) -> bool:
                                b"none")
         if opt in (b"-n", b"--classdata"):
             return re.fullmatch(rb"[+-]?[0-9]+", val) is None
+    if key == b"sudo" and opt in (b"-C", b"--close-from"):
+        # `-C`/`--close-from` must be a number in 3..INT_MAX — `-C 2`,
+        # `-C0`, `-C x`, `--close-from=2` abort "must be a number >= 3"
+        # and `2147483648`+ hits strtonum ERANGE, before the command
+        # runs; leading-zero pads still parse (sudo 1.9.9 — Devin +
+        # CodeRabbit on #132/#1961/#16, round-70/71 review — verified
+        # live). Significant-digit count, not int(val): a >4300-digit
+        # operand would raise ValueError and crash the scan.
+        # strtol accepts leading whitespace and a sign: `-C ' 3'` and
+        # `-C +3` both run (CodeRabbit on #1961, round-74 review —
+        # verified live); `-3` still fails the <3 bound below.
+        v2 = val.lstrip()
+        if v2[:1] == b"+":
+            v2 = v2[1:]
+        if re.fullmatch(rb"[0-9]+", v2) is None:
+            return True
+        sig = v2.lstrip(b"0") or b"0"
+        return len(sig) > 10 or int(sig) < 3 or int(sig) > 2147483647
     return False
 
 
@@ -3349,9 +3580,9 @@ def _effective_head(words: list, win: bytes) -> int | None:
                             # runs (Codex on #1393, round-65 review —
                             # verified live).
                             return -1
+                        nm2, _gv2 = _wrapper_opt_value(key, t)
                         if _wrapper_bad_value(
-                                key, _wrapper_opt_name(key, t),
-                                _operand_text(_na)):
+                                key, nm2, _operand_text(_na)):
                             # A bad operand value aborts before the
                             # wrapped program (`nice -n 5.5 sh`,
                             # `ionice -c -5 sh` — round-67, verified
@@ -3359,12 +3590,16 @@ def _effective_head(words: list, win: bytes) -> int | None:
                             return -1
                         i += 2
                     else:
-                        if (cls == "operand_glued"
-                                and _wrapper_bad_value(
-                                    key, _wrapper_opt_name(key, t),
-                                    t.split(b"=", 1)[1]
-                                    if b"=" in t else t[2:])):
-                            return -1
+                        if cls == "operand_glued":
+                            nm3, gv3 = _wrapper_opt_value(key, t)
+                            if (gv3 is None and b"=" in t):
+                                gv3 = t.split(b"=", 1)[1]
+                            if (gv3 is None
+                                    and not t.startswith(b"--")):
+                                gv3 = t[2:]
+                            if _wrapper_bad_value(
+                                    key, nm3, gv3 or b""):
+                                return -1
                         i += 1
                     continue
                 if pos_skip:
@@ -3767,11 +4002,87 @@ def _split_dead_input(afin, enclosing: bytes) -> bool:
     return tgts.get(0) == b"/dev/null"
 
 
+def _split_closed_input(afin, enclosing: bytes) -> bool:
+    """True when split's effective INPUT is a CLOSED stdin (`<&-`) —
+    `split -n 2 --filter=x - <&-` aborts "Bad file descriptor" before
+    any chunk materialises, so even one-part `-n` modes never run the
+    filter (Devin on #1961, round-75 review — verified live). A
+    READABLE-but-empty input (`/dev/null`) still yields N empty
+    chunks — the `-n` exemption applies only to that, not to a closed
+    fd."""
+    if afin is not None and afin[:1] == b"<":
+        afin = None
+    if afin not in (None, b"-") and _fd_alias_target(afin) != 0:
+        return False
+    tgts: dict = {}
+    _k, _a, sfd, _he = _seg_head_args(enclosing, tgts)
+    return (sfd is not None
+            and sfd.get(0, _FD_IN) not in (_FD_IN, _FD_FILE))
+
+
 # split's option map for the filter/input scan (round-43 audit of
 # `split --help`): required-arg longs consume the next word BEFORE it
 # can read as `--filter` (`split --lines --filter sh` aborts "invalid
 # number of lines: '--filter'" — Codex on #1959, round-43 — verified
 # live). `-f` is not a split short.
+def _strtold_fraction(text: bytes):
+    """Exact value of a strtold-shaped literal as a Fraction —
+    needed because the 80-bit long-double underflow boundary
+    (~3.36e-4932) is far below float64's own (~5e-324), so `1e-4931`
+    parses to 0.0 in Python yet is a normal ldbl in strtold (Devin
+    on #1428, round-75 review — verified live). Returns None when
+    the text isn't a plain decimal/hex-floating literal."""
+    try:
+        t = text.decode("ascii")
+    except UnicodeDecodeError:
+        return None
+    t = t.strip()
+    if not t:
+        return None
+    neg = t.startswith("-")
+    t2 = t.lstrip("+-")
+    try:
+        if t2[:2].lower() == "0x":
+            m = re.fullmatch(
+                r"0[xX]([0-9a-fA-F]*)(?:\.([0-9a-fA-F]*))?"
+                r"(?:[pP]([+-]?[0-9]+))?", t2)
+            if m is None:
+                return None
+            digits = (m.group(1) or "") + (m.group(2) or "")
+            if not digits:
+                return None
+            f = (Fraction(int(digits, 16))
+                 / (16 ** len(m.group(2) or "")))
+            if m.group(3):
+                pe = int(m.group(3))
+                # |2^±20000| is outside the 80-bit range — a bound
+                # sentinel keeps the caller's range check honest
+                # without materialising a million-digit bigint from
+                # `0x1p-999999999` (Devin on #1428/#132/#16, round-76
+                # review — verified live).
+                if pe < -20000:
+                    return Fraction(2) ** -17000
+                if pe > 20000:
+                    return Fraction(2) ** 17000
+                f *= Fraction(2) ** pe
+        else:
+            e_ = re.search(r"[eE]([+-]?[0-9]+)$", t2)
+            if e_ is not None:
+                de = int(e_.group(1))
+                # Same bound for decimal exponents — `1e-100000000`
+                # would otherwise build a hundred-million-digit
+                # denominator (Devin on #1428/#132/#16, round-76
+                # review — verified live).
+                if de < -20000:
+                    return Fraction(2) ** -17000
+                if de > 20000:
+                    return Fraction(2) ** 17000
+            f = Fraction(t2)
+    except (ValueError, OverflowError, ZeroDivisionError):
+        return None
+    return -f if neg else f
+
+
 _SPLIT_REQ_LONG = frozenset({
     b"--additional-suffix", b"--bytes", b"--filter", b"--line-bytes",
     b"--lines", b"--number", b"--separator", b"--suffix-length"})
@@ -4325,7 +4636,7 @@ def _split_scan(key: bytes, args: list, seekable_stdin: bool = False):
     Union-of-versions keeps the running case — the fail-closed
     direction. `seekable_stdin` is retained for callers."""
     if key != b"split":
-        return None, None, False, None
+        return None, None, False, None, None
     filt = inp = None
     fidx = None                 # args index of the word whose value
                                 # bound `filt` (the LAST --filter)
@@ -4339,6 +4650,14 @@ def _split_scan(key: bytes, args: list, seekable_stdin: bool = False):
                                 # against the FINAL suffix length
     nslash = False              # a K/N chunk-select form — refuses
                                 # `--filter`
+    ncount = False              # a ONE-PART -n count (N/l/N/r/N) —
+                                # always materialises N chunks, even
+                                # on empty input
+    elide = False               # `-e`/`--elide-empty-files` drops
+                                # empty chunks — the -n modes then
+                                # yield ZERO chunks on empty input
+                                # and the filter never runs (Devin
+                                # on #132, round-75 — verified live)
     i = 0
     while i < len(args):
         a = args[i]
@@ -4355,10 +4674,10 @@ def _split_scan(key: bytes, args: list, seekable_stdin: bool = False):
             else:
                 cands = [o for o in _SPLIT_LONG if o.startswith(base)]
                 if len(cands) != 1:
-                    return None, None, False, None
+                    return None, None, False, None, None
                 resolved = cands[0]
             if resolved in (b"--help", b"--version"):
-                return None, None, False, None       # terminal mode
+                return None, None, False, None, None       # terminal mode
             if resolved not in _SPLIT_REQ_LONG:
                 # Flags never consume the next word; a `=` on a true
                 # flag aborts "doesn't allow an argument" while the
@@ -4375,7 +4694,9 @@ def _split_scan(key: bytes, args: list, seekable_stdin: bool = False):
                         else:
                             hsuf = v
                 elif b"=" in a:
-                    return None, None, False, None
+                    return None, None, False, None, None
+                elif resolved == b"--elide-empty-files":
+                    elide = True
                 i += 1
                 continue
             if b"=" in a:
@@ -4384,13 +4705,13 @@ def _split_scan(key: bytes, args: list, seekable_stdin: bool = False):
                 v = args[i + 1]
                 i += 1
             else:
-                return None, None, False, None       # "requires an argument"
+                return None, None, False, None, None       # "requires an argument"
             if resolved == b"--filter":
                 filt = v
                 fidx = i
             else:
                 if not _split_arg_ok(resolved, v):
-                    return None, None, False, None
+                    return None, None, False, None, None
                 if resolved == b"--suffix-length":
                     # zero-padded is legal — `-a <5000 zeros>1` runs;
                     # significant digits are already validated. The
@@ -4406,6 +4727,7 @@ def _split_scan(key: bytes, args: list, seekable_stdin: bool = False):
                     # `l/2`+filter runs on a file, `r/2`+filter
                     # streams a pipe — round-45).
                     nslash = len(np_) == 2
+                    ncount = len(np_) != 2
             i += 1
             continue
         if len(a) > 1 and a[:1] == b"-" and a != b"-":
@@ -4432,14 +4754,17 @@ def _split_scan(key: bytes, args: list, seekable_stdin: bool = False):
                         if len(np_) > 1 and np_[0] in (b"l", b"r"):
                             np_ = np_[1:]
                         nslash = len(np_) == 2
+                        ncount = len(np_) != 2
                     break
                 if c in _SPLIT_FLAG_SHORT:
+                    if c == b"e":
+                        elide = True
                     j += 1
                     continue
                 abort = True            # unknown letter → abort
                 break
             if abort:
-                return None, None, False, None
+                return None, None, False, None, None
             i += 1
             continue
         if inp is None:
@@ -4447,7 +4772,7 @@ def _split_scan(key: bytes, args: list, seekable_stdin: bool = False):
         npos += 1
         i += 1
     if npos > 2:
-        return None, None, False, None       # "extra operand" abort
+        return None, None, False, None, None       # "extra operand" abort
     # A suffix-start is valid iff its significant digits fit the
     # suffix length — zero-padding is legal (`=01` runs — verified
     # live) while one more digit aborts "start value is too large for
@@ -4462,7 +4787,7 @@ def _split_scan(key: bytes, args: list, seekable_stdin: bool = False):
                      and (suflen == 0
                           or len(nsuf.lstrip(b"0") or b"0")
                           <= suflen))):
-        return None, None, False, None       # invalid start for
+        return None, None, False, None, None       # invalid start for
                                 # numerical suffix (`=bad`, `=100` at
                                 # -a2 — Devin/Codex round-50, verified
                                 # live)
@@ -4471,11 +4796,11 @@ def _split_scan(key: bytes, args: list, seekable_stdin: bool = False):
                      and (suflen == 0
                           or len(hsuf.lstrip(b"0") or b"0")
                           <= suflen))):
-        return None, None, False, None       # invalid start for
+        return None, None, False, None, None       # invalid start for
                                 # hexadecimal suffix — same bound
                                 # (verified live)
     if nslash and filt is not None:
-        return None, None, False, None       # `--filter` never sees a
+        return None, None, False, None, None       # `--filter` never sees a
                                 # chunk selected to stdout
     # An unseekable stdin does NOT reject `-n`: coreutils ≥9.x buffers
     # pipe input to a temp file, so `split -n 1/1` and `-n l/1/1`
@@ -4483,7 +4808,7 @@ def _split_scan(key: bytes, args: list, seekable_stdin: bool = False):
     # round-51 review — verified live on coreutils 9.4; 8.32 still
     # aborts "cannot determine file size" — modelling the running
     # case is the union-of-versions, fail-closed direction).
-    return filt, inp, nslash, fidx
+    return filt, inp, nslash, fidx, ncount and not elide
 
 
 def _stdin_path_operand(t: bytes) -> bool:
@@ -5019,7 +5344,9 @@ def _argv_index(words: list, src: bytes, start: int, wi: int):
 _SUDO_SHELL_FLAGS = frozenset({b"-s", b"--shell", b"-i", b"--login"})
 # sudo short letters that bind an operand — in a cluster they swallow
 # the REST of the word (`-us` is `-u s`, not shell mode).
-_SUDO_OPERAND_LETTERS = frozenset(b"ughrtDRpUT")
+# (`-C`/`--close-from` binds one too — `-Cs` is `-C s`, not shell
+# mode — CodeRabbit on #1961, round-70 review).
+_SUDO_OPERAND_LETTERS = frozenset(b"ughrtDRpUTC")
 
 
 def _tail_owner(words: list, win: bytes, head: int):
@@ -6081,7 +6408,7 @@ def _seg_prov(body: bytes, prov: str,
                 dead0 = (sfd is not None
                          and sfd.get(0, _FD_IN)
                          not in (_FD_IN, _FD_FILE))
-                filt, finput, tout, fidx3 = _split_scan(
+                filt, finput, tout, fidx3, _nc3 = _split_scan(
                     key, args, seekable_stdin=seek0)
                 # split's INPUT: a named operand wins regardless of a
                 # `< f` rebind (`split -n r/1/1 F </dev/null` still
@@ -6101,11 +6428,16 @@ def _seg_prov(body: bytes, prov: str,
                     # filter runs (Devin on #130/#12, round-49 review
                     # — verified live).
                     prov = "own"
-                elif src == b"/dev/null":
+                elif src == b"/dev/null" and not _nc3:
                     # An EMPTY input yields zero chunks — the filter
                     # never fires and a `-n K/N` select emits nothing
                     # (Devin on #130, round-51 review — verified live:
                     # `--filter='echo RAN'` never runs on /dev/null).
+                    # A one-part `-n N` still materialises N empty
+                    # chunks and RUNS the filter (round-75 — verified
+                    # live: `split -n 2 --filter='cat x' /dev/null`
+                    # emits x's bytes to the pipe), so the dead-input
+                    # gate lifts and the filter analysis below decides.
                     prov = "own"
                 elif tout and filt is None:
                     # `-n K/N`/`l/K/N`/`r/K/N` print the selected
@@ -7462,7 +7794,70 @@ def _stdin_exec_head(win: bytes, stream_src=None) -> str:
     return "exec"
 
 
-def _pipe_to_exec(src: bytes, pos: int) -> bool:
+def _group_fd1_prov(src: bytes, s0: int, pos: int, od_tails):
+    """fd1 provenance of a compound feeding stage, or None.
+
+    `;`/`&` siblings inside `( )`/`{ }` share the group's stdout — a
+    `>`/`&>` on the LAST sibling diverts only that command, so
+    `(cat x; cat x >f) | sh` still writes the script into the pipe
+    (Devin on #16/#1961/#132, round-76 review — verified live).
+    Returns (prov, operand_src) aggregated over the compound's
+    siblings, or None when the stage is a single simple command or
+    the divert applies to the whole group (a `>`/`&>` AFTER the
+    closer — `(cat x; cat y) >f | sh` still feeds sh nothing)."""
+    if not s0:
+        return None
+    dd0 = _open_depth(src, s0, od_tails)
+    if not dd0:
+        return None
+    op = cl = None
+    i = s0 - 1
+    while i >= 0:
+        if (src[i:i + 1] in (b"(", b"{")
+                and _open_depth(src, i, od_tails) == dd0 - 1):
+            op = i
+            break
+        i -= 1
+    if op is None:
+        return None
+    i = s0
+    while i < pos:
+        if (src[i:i + 1] in (b")", b"}")
+                and _open_depth(src, i + 1, od_tails) == dd0 - 1):
+            cl = i
+            break
+        i += 1
+    if cl is None:
+        cl = pos
+    if _stdout_redirected(src[cl:pos]):
+        return None            # a divert after the closer covers all
+    spans = []
+    cur = op + 1
+    for ss, se, kind in _sub_cmd_seps(src[op + 1:cl]):
+        if kind in (b";", b"\n", b"&"):
+            spans.append((cur, op + 1 + ss))
+            cur = op + 1 + se
+    spans.append((cur, cl))
+    if len(spans) < 2:
+        return None
+    prov = "own"
+    out_src = None
+    for ga, gb in spans:
+        seg = src[ga:gb]
+        if not seg.strip() or _stdout_redirected(seg):
+            continue
+        if out_src is None:
+            _k2, _a2, _f2, _h2 = _seg_head_args(seg, {})
+            out_src = next(
+                (_operand_text(a3) for a3 in _a2 if b"scripts/" in a3),
+                None)
+        p_ = _seg_prov(seg, "up", None, _line_ifs(src, ga))
+        if p_ is not None and p_ != "own":
+            prov = p_
+    return prov, out_src
+
+
+def _pipe_to_exec(src: bytes, pos: int, od_tails=frozenset()) -> bool:
     """True when an unquoted `|` (or `|&`) at `pos` starts a pipeline
     whose contents reach a command that executes stdin.
 
@@ -7512,8 +7907,33 @@ def _pipe_to_exec(src: bytes, pos: int) -> bool:
             prov = r0
             if prov == "own":
                 flow_src = None
+        if _stdout_redirected(src[s0:pos].lstrip(b" \t({")):
+            # A `>`/`&>` on the feeding segment diverts its fd1
+            # whatever the head — `xargs cat x >/dev/null | sh` and
+            # `xargs split -n 1/1 x >/dev/null | sh` feed sh an empty
+            # pipe (the per-head prov call above only runs for
+            # cat/split/csplit, so wrapper heads like xargs/flock/
+            # sudo skipped this check — Devin on #132, round-71
+            # review — verified live). Leading `(`/`{` openers still
+            # open at pos are stripped first — `(cat x > f; y) | sh`
+            # redirects cat's fd1 at group depth, which the depth-0
+            # scan inside _stdout_redirected would otherwise miss
+            # (Devin on #16, round-72 review — verified live).
+            prov = "own"
+            flow_src = None
+            gprov = _group_fd1_prov(src, s0, pos, od_tails)
+            if gprov is not None:
+                # A divert on the LAST sibling of a compound leaves
+                # the others' emissions on the shared fd1 (Devin on
+                # #16/#1961/#132, round-76 review — verified live).
+                prov, flow_src = gprov
     out = None           # aggregate fd1 inside an open compound
-    depth = 0            # open compound/group statements
+    # The feeding segment may END mid-compound — `(cat x; true) | sh`
+    # calls the walk from the `;` inside the `(`, and a `;`/`&` there
+    # is a sibling split, not a statement end. Seed depth with the
+    # compounds still open at pos or those siblings look terminal
+    # (Devin on #16, round-72 review — verified live).
+    depth = _open_depth(src, pos, od_tails)
     drained = False      # a prior `;`-sibling read the shared stdin to EOF
     pipe_lead = True     # the boundary before the next seg was `|`
     j = pos
@@ -7580,12 +8000,21 @@ def _pipe_to_exec(src: bytes, pos: int) -> bool:
             # This segment's first command read the compound's shared
             # stdin — later `;` siblings only get what's left.
             drained = True
-        if first in _SEG_COND_OPENERS:
+        if first in _SEG_COND_OPENERS and first != b"elif":
+            # `elif` re-opens a branch of the enclosing `if`, not a new
+            # compound — counting it leaves a phantom level after `fi`
+            # (Devin on #1428/#1961, round-73 review — verified live).
             depth += 1
         elif first in _SEG_CLOSERS:
             depth = max(0, depth - 1)
             if depth == 0 and out is not None:
                 prov = out  # the compound's fd1 is its segments' sum
+            if depth == 0 and _stdout_redirected(seg):
+                # `done >/dev/null`/`fi >f`/`} >f` divert the whole
+                # compound's fd1 — nothing reaches the next pipe
+                # (Devin on #16, round-72 review — verified live).
+                prov = "own"
+                flow_src = None
         else:
             depth += gd
             if gd < 0 and depth <= 0 and out is not None:
@@ -7596,6 +8025,12 @@ def _pipe_to_exec(src: bytes, pos: int) -> bool:
                 if prov in ("up", "script"):
                     out = "up"
                 prov = out
+                if _tail_close_redirect(seg):
+                    # A `>` AFTER the close binds the whole group —
+                    # `(cat x; cat x) > /dev/null | sh` feeds sh an
+                    # empty pipe (round-72 review — verified live).
+                    prov = "own"
+                    flow_src = None
             depth = max(0, depth)
         if prov not in ("up", "script", "thru") and depth == 0:
             return False  # the stage replaced or diverted the stream
@@ -7604,6 +8039,190 @@ def _pipe_to_exec(src: bytes, pos: int) -> bool:
 
 
 _SEG_CLOSERS = frozenset({b"fi", b"done", b"esac", b"})"})
+
+
+# Heredoc-bearing heads whose PROGRAM comes from argv rather than
+# stdin, beyond `_EXEC_OPERAND_FLAGS`: stream filters take their
+# program via `-e`/`--expression`/`-f` (`sed 'x' <<E` filters; the
+# body is data), and every listed head ALSO stops reading code from
+# stdin once a positional script operand appears (`sh s.sh <<E`
+# reads the FILE — the heredoc is the script's stdin).
+_HDOC_ARGV_PROG_FLAGS = {
+    b"sed": frozenset({b"-e", b"--expression", b"-f", b"--file"}),
+    b"gsed": frozenset({b"-e", b"--expression", b"-f", b"--file"}),
+    b"awk": frozenset({b"-e", b"--source", b"-f", b"--file"}),
+    b"gawk": frozenset({b"-e", b"--source", b"-f", b"--file"}),
+    b"mawk": frozenset({b"-e", b"--source", b"-f", b"--file"}),
+    b"nawk": frozenset({b"-e", b"--source", b"-f", b"--file"}),
+}
+
+
+def _hdoc_prog_from_argv(seg: bytes, hkey: bytes) -> bool:
+    """True when a heredoc-bearing head takes its program from argv —
+    an `-c`/`-e`/`--eval`-style flag (the head's `_EXEC_OPERAND_FLAGS`
+    or `_HDOC_ARGV_PROG_FLAGS` entry) or a positional operand — so the
+    heredoc body on stdin is never read as code. `sh -c : <<E` execs
+    `:` and the body is inert (Devin on #132, round-75 review —
+    verified live); `sh <<E`/`perl <<E` return False — the body IS
+    the program."""
+    pflags = _EXEC_OPERAND_FLAGS.get(hkey)
+    if pflags is None:
+        pflags = _HDOC_ARGV_PROG_FLAGS.get(hkey, frozenset())
+    vopts = _EXEC_VALUE_OPTS.get(hkey, frozenset())
+    ws = _shell_words(_mask_parens(seg))
+    k = 1
+    saw_dd = False
+    s_mode = False          # sh-family `-s` — positionals stay argv
+    while k < len(ws):
+        raw = seg[ws[k][0]:ws[k][1]]
+        at, pend = _word_redirects(raw, _fresh_fds())
+        if not at:
+            # A redirect is never a program operand: `<<E`/`>f`
+            # skip one word, a bare `>`/`2>` pair skips the target
+            # word too.
+            k += 2 if pend is not None else 1
+            continue
+        t = _word_text(raw)
+        if t == b"--":
+            saw_dd = True
+            k += 1
+            continue
+        if not saw_dd and t.startswith(b"-") and t != b"-":
+            if t in pflags:
+                return True
+            if t in vopts:
+                k += 2          # the next word is the option's value
+                continue
+            if hkey in _SH_STDIN_HEADS and t == b"-s":
+                s_mode = True   # program stays stdin — `sh -s x <<E`
+                                # runs the body with x as $0
+            k += 1
+            continue
+        if s_mode:
+            k += 1              # `-s` argv, not the program file
+            continue
+        return True             # a positional — the program operand
+    return False
+
+
+def _open_depth(src: bytes, pos: int, od_tails=frozenset()) -> int:
+    """Unclosed compound/group depth at `pos` — `( cat; ` leaves a `(`
+    open that _pipe_to_exec's forward depth counter never saw. Mirrors
+    the walk's accounting: cond openers and `(`/`{` open, `)`/`}` and
+    fi/done/esac close.
+
+    Two scan-time subtleties (Devin + CodeRabbit on #16/#1428/#1961,
+    round-73 review — verified live):
+    - `elif` belongs to its enclosing `if` — it does NOT open a new
+      level, so after `fi` closes the `if` an `elif` must not leave a
+      phantom depth behind.
+    - A `#` that opens a comment ends the command window but the
+      comment TEXT still needs skipping — `(` in `# (` is data.
+      Heredoc body lines are the same: `cat <<E` queues lines that
+      carry no syntax weight. The body ends at a line equal to the
+      delimiter (`<<-`/`<<~` allow leading tabs), after which the
+      NEXT queued heredoc's body begins (same ordering as
+      _heredoc_spans)."""
+    d = 0
+    j = 0
+    # queued [delim, strip_tabs, body_start, exec, saved_d] — saved_d
+    # is the depth the scan had when the operator was queued, restored
+    # when the entry pops so exec-body syntax can't leak past the
+    # delimiter (`sh <<E\n(\nE\ncat x | wc` leaves no phantom `(` —
+    # Devin on #1961/#16, round-75 review — verified live).
+    hd: list = []
+    while j < pos:
+        if hd and j >= hd[0][2]:
+            # Inside a pending heredoc body: a literal body is inert
+            # text unless it IS the delimiter line. An _HD_EXEC body
+            # is program text (`sh <<E` runs it) — fall through so
+            # its grouping depth counts, matching the same construct
+            # at top level (Devin on #16, round-74 review).
+            eol = src.find(b"\n", j)
+            ln = src[j:eol] if eol >= 0 else src[j:pos]
+            chk = ln.lstrip(b"\t") if hd[0][1] else ln
+            if chk == hd[0][0] or not hd[0][3]:
+                if chk == hd[0][0]:
+                    d = hd.pop(0)[4]
+                    if hd and eol >= 0:
+                        hd[0][2] = eol + 1
+                j = eol + 1 if eol >= 0 else pos
+                continue
+        win = _cmd_window(src, j)
+        if not win:
+            if src[j:j + 1] == b"#":
+                # Comment opener — skip the comment tail outright so
+                # its text never reads as syntax (`# (` opens no
+                # group). A `#` mid-word is literal and never lands
+                # here — it is inside the word's own window.
+                eol = src.find(b"\n", j)
+                j = eol + 1 if eol >= 0 else pos
+                continue
+            j += 1
+            continue
+        seg = src[j:j + len(win)]
+        ws = _shell_words(_mask_parens(seg))
+        first = (_word_text(seg[ws[0][0]:ws[0][1]]) if ws else None)
+        if first in _SEG_COND_OPENERS:
+            # `elif`/`else` chain branches of the compound that opened
+            # earlier — only the leading `if`/`while`/… adds a level.
+            if first != b"elif":
+                d += 1
+        elif first in _SEG_CLOSERS:
+            d = max(0, d - 1)
+        else:
+            d = max(0, d + _group_depth(seg))
+        for delim, strip, _q, _p in _heredoc_ops(seg):
+            eol = src.find(b"\n", j + len(win))
+            if eol >= 0:
+                hkey = (_command_key(seg[ws[0][0]:ws[0][1]])
+                        if ws else b"")
+                tail = j + len(win)
+                # `od_tails` breaks the _open_depth ↔ _pipe_to_exec
+                # cycle: a tail already being classified is treated
+                # as literal here, matching _heredoc_spans' bias.
+                hd.append([delim, strip, eol + 1,
+                           not (hkey in _NONEXEC_HEADS
+                                and (tail in od_tails
+                                     or not _pipe_to_exec(
+                                         src, tail,
+                                         od_tails | {tail})))
+                           and not _hdoc_prog_from_argv(seg, hkey),
+                           d])
+        j += len(win)
+    return d
+
+
+def _tail_close_redirect(seg: bytes) -> bool:
+    """True when an fd1-divert redirect appears after the LAST unquoted
+    `)`/`}` in `seg` — `cat x) >/dev/null` binds the whole closed group,
+    not the last sibling."""
+    subs = {a: b for a, b in _substitution_spans(seg)}
+    in_s = in_d = esc = False
+    last = -1
+    i = 0
+    while i < len(seg):
+        if i in subs and not in_s:
+            i = subs[i]
+            continue
+        c = seg[i]
+        if esc:
+            esc = False
+        elif c == 0x5C and not in_s:
+            esc = True
+        elif in_s:
+            if c == 0x27:
+                in_s = False
+        elif c == 0x27:
+            in_s = True
+        elif c == 0x22:
+            in_d = not in_d
+        elif in_d:
+            pass
+        elif c in (0x29, 0x7D):
+            last = i
+        i += 1
+    return last >= 0 and _stdout_redirected(seg[last + 1:])
 
 
 def _group_depth(seg: bytes) -> int:
@@ -7632,12 +8251,27 @@ def _group_depth(seg: bytes) -> int:
             in_d = not in_d
         elif in_d:
             pass           # a `` ` `` body's parens are opaque text
-        elif c in (0x28, 0x7B):
-            d += 1
-        elif c in (0x29, 0x7D):
-            d -= 1
+        elif c in (0x28, 0x7B) or c in (0x29, 0x7D):
+            # `(`/`)` are operators anywhere; `{`/`}` are grouping
+            # words only as a WHOLE word — `foo{` prints literally
+            # and `a{1,2}` is brace expansion (Devin on #132,
+            # round-74 review — verified live).
+            if c in (0x28, 0x29) or _brace_word(seg, i):
+                d += 1 if c in (0x28, 0x7B) else -1
         i += 1
     return d
+
+
+_GROUP_BOUND = b" \t\n;&|()<>"
+
+
+def _brace_word(seg: bytes, i: int) -> bool:
+    """`{`/`}` at i groups only as a whole word — bounded by a word
+    boundary on both sides. `{ cat; }` counts; `{cat`/`a{`/`{a,b}`
+    are literal or brace expansion."""
+    if i > 0 and seg[i - 1] not in _GROUP_BOUND:
+        return False
+    return i + 1 >= len(seg) or seg[i + 1] in _GROUP_BOUND
 
 
 _HEREDOC_DELIM = re.compile(rb"['\"]?([A-Za-z0-9_.-]+)['\"]?")
@@ -9132,7 +9766,7 @@ def _command_literal(src: bytes, pos: int,
         # (`split --filter='sh x' in > out` runs the filter — Devin on
         # #1393, round-66 review — verified live).
         aargs = _argv_only(words, win, 1)
-        _af, _ai, _at, fidx = _split_scan(key, aargs)
+        _af, _ai, _at, fidx, anc = _split_scan(key, aargs)
         wpos = next((k for k, (wa, wb) in enumerate(words)
                      if wa <= pos < wb), None)
         if (fidx is not None and wpos is not None
@@ -9141,7 +9775,12 @@ def _command_literal(src: bytes, pos: int,
             # yielding none (`split --filter='sh x' </dev/null` —
             # Devin on #1959, round-52 review, verified live) leaves
             # the operand as inert text.
-            return _split_dead_input(_ai, win)
+            # `-n N`/`l/N`/`r/N` always materialises N chunks — the
+            # filter runs even on an empty input (verified live:
+            # `split -n 2 --filter=sh /dev/null` fires twice).
+            return (_split_dead_input(_ai, win)
+                    and (not anc
+                         or _split_closed_input(_ai, win)))
     if output_exec:
         # The command's output is code — unless its own fd1 is diverted,
         # in which case its bytes never join the captured stream that
@@ -10540,7 +11179,7 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                                     # round-47 — verified live).
                                     aargs = _argv_only(
                                         sub, enclosing, ahi + 1)
-                                    afilt, afin, atout, _f = (
+                                    afilt, afin, atout, _f, _anc = (
                                         _split_scan(akey, aargs))
                                     # `split IN PREFIX` — the word is
                                     # exec'd only as the INPUT operand
@@ -10564,8 +11203,8 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                                     if (afilt is not None
                                             and afilt
                                             not in (b"", b"-")
-                                            and afin
-                                            != b"/dev/null"):
+                                            and (afin != b"/dev/null"
+                                                 or _anc)):
                                         fp5 = afilt.split(None, 1)
                                         ftok5 = (fp5[0]
                                                  if fp5 else b"")
@@ -10797,6 +11436,116 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                                             return False
                                         j2 += 1
                                     return True
+                                # Mirror the unwrapped sink verdict
+                                # on the WRAPPED head — `flock L head
+                                # -n 0 x` and `xargs head -n 0 x` emit
+                                # nothing, so the operand's bytes never
+                                # reach a stream (Devin on #130,
+                                # round-69 review — verified live).
+                                if (hkey not in _STDIN_SINK_HEADS
+                                        and hkey not in
+                                        _EXEC_OPERAND_FLAGS
+                                        and hkey not in
+                                        _SH_STDIN_HEADS
+                                        and _stdin_exec_head(
+                                            enclosing[
+                                                enc_words[ws][0]:])
+                                        == "sink"):
+                                    return False
+                                if hkey == b"split":
+                                    # The wrapped split's INPUT
+                                    # positional counts only when the
+                                    # chunks stream to stdout (`-n
+                                    # K/N`/`l/N` forms or `--filter`);
+                                    # a PREFIX or plain run writes
+                                    # chunk files — `xargs split x`,
+                                    # `flock L split /dev/null x`
+                                    # never feed a pipe (Devin on
+                                    # #130/#1393, round-69 review —
+                                    # verified live). The word binding
+                                    # `--filter` IS executed.
+                                    sargs = _argv_only(
+                                        sub2, enclosing, wh2 + 1)
+                                    _sf, sinp, st, fidx, nct = (
+                                        _split_scan(b"split", sargs))
+                                    wraw = enclosing[w[0]:w[1]]
+                                    otxt = _operand_text(wraw)
+                                    if (fidx is not None
+                                            and _argv_index(
+                                                sub2, enclosing,
+                                                wh2 + 1, wi0 - ws)
+                                            == fidx):
+                                        # The filter only runs on a
+                                        # live input — `xargs split
+                                        # --filter x.sh /dev/null`
+                                        # produces no chunks, so CMD
+                                        # never starts (Devin on
+                                        # #132, round-73 review —
+                                        # verified live; mirrors the
+                                        # unwrapped gate).
+                                        return (
+                                            nct and not
+                                            _split_closed_input(
+                                                _operand_text(sinp)
+                                                if sinp is not None
+                                                else None,
+                                                enclosing)
+                                            or not _split_dead_input(
+                                                _operand_text(
+                                                    sinp)
+                                                if sinp
+                                                is not None
+                                                else None,
+                                                enclosing))
+                                    if (sinp is None
+                                            or otxt
+                                            != _operand_text(sinp)):
+                                        return False
+                                    if _sf is not None:
+                                        # `--filter` feeds each
+                                        # chunk to CMD's stdin —
+                                        # classify what CMD does
+                                        # with them like the
+                                        # unwrapped scan: `sh` (and
+                                        # `cat | sh`, `$(…)` heads)
+                                        # EXECUTE the bytes, a
+                                        # forwarder (`cat`, `head
+                                        # -n 1`) re-emits them to
+                                        # split's stdout where the
+                                        # downstream pipe decides,
+                                        # and `true`/`wc`/`cat >
+                                        # chunk` drop or store them
+                                        # (Devin + CodeRabbit on
+                                        # #132/#1428/#1961/#16,
+                                        # round-70 review — verified
+                                        # live).
+                                        fparts = _sf.split(None, 1)
+                                        ftok = (fparts[0]
+                                                if fparts else b"")
+                                        v3 = ("exec" if (b"$" in ftok
+                                                         or b"`"
+                                                         in ftok)
+                                              else _sub_flow(_sf))
+                                        if not ftok:
+                                            v3 = "none"
+                                        if v3 != "exec":
+                                            frole = \
+                                                _filter_script_role(
+                                                    _sf)
+                                            if frole == "exec":
+                                                v3 = "exec"
+                                            elif frole == "emit":
+                                                v3 = "fwd"
+                                        if v3 == "exec":
+                                            return True
+                                        if v3 != "fwd":
+                                            return False
+                                        return _pipe_to_exec(
+                                            scan, cs + len(enclosing))
+                                    if not st:
+                                        return False
+                                    return _pipe_to_exec(
+                                        scan, cs + len(enclosing))
                                 if (hkey in _NONEXEC_HEADS
                                         and not any(
                                             a <= epos < b
@@ -10827,7 +11576,7 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                     if wkey == b"split":
                         sargs = _argv_only(enc_words, enclosing,
                                            whi + 1)
-                        _sf, sinp, _st, fidx = _split_scan(
+                        _sf, sinp, _st, fidx, _nct = _split_scan(
                             wkey, sargs)
                         wraw = enclosing[w[0]:w[1]]
                         otxt = _operand_text(wraw)
@@ -11012,8 +11761,14 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                     and not _is_wrap_argv0(
                         enc_words, enc_words.index(w), enclosing)):
                 return True
-            if (raw[:1] in (b"'", b'"') and len(raw) > 2
-                    and re.search(rb"\s", raw[1:-1])):
+            _qv = raw.split(b"=", 1)[1] if b"=" in raw else b""
+            if ((raw[:1] in (b"'", b'"') and len(raw) > 2
+                    and re.search(rb"\s", raw[1:-1]))
+                    or (raw.startswith(b"--filter=")
+                        and ((len(_qv) > 2
+                              and _qv[:1] in (b"'", b'"')
+                              and re.search(rb"\s", _qv[1:-1]))
+                             or b"scripts/" in _qv))):
                 # A quoted MULTI-word operand is program text — either
                 # the head interprets it (`sh -c 'x;bash y'` splits `;`
                 # inside), or it is EMITTED text a downstream exec
@@ -11049,6 +11804,8 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                 # literal program name (`xargs bash 'x safe'` — Devin
                 # on #128, round-22 review).
                 ekey = wkey
+                abase = (whi + 1
+                         if whi is not None and whi >= 0 else wi0)
                 if wkey in _ARGV_PROGRAM_WRAPPERS:
                     if wkey == b"find":
                         # `find` runs EVERY -exec/-ok action — the
@@ -11066,6 +11823,44 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                         ekey = _command_key(
                             enclosing[enc_words[ws][0]:
                                       enc_words[ws][1]])
+                        abase = ws + 1
+                if ekey == b"split":
+                    # A `--filter=CMD` operand IS program text split
+                    # runs per chunk — its head emits the operand's
+                    # bytes through split's own stdout, so `find -exec
+                    # split --filter='cat x' F \; | sh` / `xargs split
+                    # --filter='cat x' | sh` pipe the script onward
+                    # (round-75 — verified live), and the GLUED
+                    # `--filter=scripts/x.sh` form executes the script
+                    # directly when a chunk materialises (Devin on
+                    # #132, round-76 — verified live). Dead input
+                    # still suppresses unless a one-part `-n N`
+                    # materialises empty chunks, and a CLOSED stdin
+                    # (`<&-`) kills even that.
+                    eargs = _argv_only(enc_words, enclosing, abase)
+                    efilt, efin, _et, efidx, enct = _split_scan(
+                        ekey, eargs)
+                    if (efidx is not None
+                            and _argv_index(
+                                enc_words, enclosing,
+                                abase, wi0) == efidx
+                            and efilt not in (None, b"", b"-")
+                            and ((enct
+                                  and not _split_closed_input(
+                                      efin, enclosing))
+                                 or not _split_dead_input(
+                                     efin, enclosing))):
+                        erole = _filter_script_role(efilt)
+                        if erole == "exec":
+                            return True
+                        if (erole == "emit"
+                                and not _stdout_redirected(
+                                    enclosing)
+                                and _pipe_to_exec(
+                                    scan,
+                                    cs + len(enclosing))):
+                            return True
+                    ekey = b""
                 # Only a head that echoes its operand onward makes a
                 # quoted operand emitted text — EVERY other head treats
                 # it literally: `sed -e p 'bash x'` names an INPUT
@@ -11148,13 +11943,17 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                 if wkey == b"split":
                     aargs = _argv_only(enc_words, enclosing,
                                        whi + 1)
-                    afilt, _afin, _atout, fidx = _split_scan(
+                    afilt, _afin, _atout, fidx, anct = _split_scan(
                         wkey, aargs)
                     if (fidx is not None
                             and _argv_index(enc_words, enclosing,
                                             whi + 1, wi0) == fidx
                             and afilt not in (None, b"", b"-")
-                            and _afin != b"/dev/null"
+                            and ((anct
+                                  and not _split_closed_input(
+                                      _afin, enclosing))
+                                 or not _split_dead_input(
+                                     _afin, enclosing))
                             and _filter_script_role(afilt) == "emit"):
                         return _pipe_to_exec(
                             scan, cs + len(enclosing))
