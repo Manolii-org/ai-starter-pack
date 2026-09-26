@@ -13559,3 +13559,45 @@ def test_script_dep_round72_compound_feed_flock_ws_negative(tmp_path):
             b"xargs cat scripts/x.sh >/dev/null |& sh",
             b"cat scripts/x.sh; true | sh"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round73_open_depth_comments_elif_heredoc(tmp_path):
+    """Round-73 review — Devin + CodeRabbit on #16/#132/#1428/#1961:
+    `_open_depth` (and the forward walk) overcounted in three ways —
+    a `(` inside a comment's TAIL (`# (` — the window stops at the
+    word-start `#` but the comment text itself was re-scanned), an
+    `elif` opener (it re-opens a branch of the enclosing `if`, not a
+    new compound — `if..elif..fi` left a phantom level that kept the
+    `;` after `fi` inside the group), and heredoc BODY lines (`(`
+    inside `cat <<E`'s body is inert data — unterminated bodies never
+    engage, `<<-` strips tabs, a second queued heredoc waits for the
+    first delimiter). Also: `xargs split --filter x.sh /dev/null`
+    produced no chunks so the filter never ran — the wrapped-split
+    argv scan carried the input operand's trailing newline, so its
+    `/dev/null` missed the dead-input gate (all verified live).
+    """
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"echo X\n")
+    for line in (
+            b"# (\ncat scripts/x.sh | sh",
+            b"# comment\ncat scripts/x.sh | sh",
+            b"( cat scripts/x.sh | sh )",
+            b"if false; then :; elif true; then cat scripts/x.sh; fi | sh",
+            b"cat scripts/x.sh | if a; then cat; elif b; then cat; fi | sh",
+            b"cat <<EOF\n(\nEOF\n( cat scripts/x.sh | sh )",
+            b"xargs split --filter scripts/x.sh f"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b"# (\ncat scripts/x.sh | true; sh",
+            b"true; # (\ncat scripts/x.sh | true; sh",
+            b"if false; then :; elif true; then :; fi\ncat scripts/x.sh | true; sh",
+            b"cat scripts/x.sh | true; if a; then :; elif b; then :; fi; sh",
+            b"if a; then if b; then :; fi; fi\ncat scripts/x.sh | true; sh",
+            b"cat <<EOF\n(\nEOF\ncat scripts/x.sh | true; sh",
+            b"cat <<-EOF\n\t(\n\tEOF\ncat scripts/x.sh | true; sh",
+            b"cat <<A\n(\nA\ncat <<B\n)\nB\ncat scripts/x.sh | true; sh",
+            b"cat <<EOF\n(\ncat scripts/x.sh | true; sh",
+            b"xargs split --filter scripts/x.sh /dev/null"):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line

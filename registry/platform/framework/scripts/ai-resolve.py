@@ -7772,7 +7772,10 @@ def _pipe_to_exec(src: bytes, pos: int) -> bool:
             # This segment's first command read the compound's shared
             # stdin — later `;` siblings only get what's left.
             drained = True
-        if first in _SEG_COND_OPENERS:
+        if first in _SEG_COND_OPENERS and first != b"elif":
+            # `elif` re-opens a branch of the enclosing `if`, not a new
+            # compound — counting it leaves a phantom level after `fi`
+            # (Devin on #1428/#1961, round-73 review — verified live).
             depth += 1
         elif first in _SEG_CLOSERS:
             depth = max(0, depth - 1)
@@ -7814,21 +7817,65 @@ def _open_depth(src: bytes, pos: int) -> int:
     """Unclosed compound/group depth at `pos` — `( cat; ` leaves a `(`
     open that _pipe_to_exec's forward depth counter never saw. Mirrors
     the walk's accounting: cond openers and `(`/`{` open, `)`/`}` and
-    fi/done/esac close."""
+    fi/done/esac close.
+
+    Two scan-time subtleties (Devin + CodeRabbit on #16/#1428/#1961,
+    round-73 review — verified live):
+    - `elif` belongs to its enclosing `if` — it does NOT open a new
+      level, so after `fi` closes the `if` an `elif` must not leave a
+      phantom depth behind.
+    - A `#` that opens a comment ends the command window but the
+      comment TEXT still needs skipping — `(` in `# (` is data.
+      Heredoc body lines are the same: `cat <<E` queues lines that
+      carry no syntax weight. The body ends at a line equal to the
+      delimiter (`<<-`/`<<~` allow leading tabs), after which the
+      NEXT queued heredoc's body begins (same ordering as
+      _heredoc_spans)."""
     d = 0
     j = 0
+    hd: list = []   # queued [delim, strip_tabs, body_start] heredocs
     while j < pos:
+        if hd and j >= hd[0][2]:
+            # Inside a pending heredoc body: the whole line is inert
+            # text unless it IS the delimiter line.
+            eol = src.find(b"\n", j)
+            ln = src[j:eol] if eol >= 0 else src[j:pos]
+            chk = ln.lstrip(b"\t") if hd[0][1] else ln
+            if chk == hd[0][0]:
+                hd.pop(0)
+                if hd and eol >= 0:
+                    hd[0][2] = eol + 1
+            j = eol + 1 if eol >= 0 else pos
+            continue
         win = _cmd_window(src, j)
+        if not win:
+            if src[j:j + 1] == b"#":
+                # Comment opener — skip the comment tail outright so
+                # its text never reads as syntax (`# (` opens no
+                # group). A `#` mid-word is literal and never lands
+                # here — it is inside the word's own window.
+                eol = src.find(b"\n", j)
+                j = eol + 1 if eol >= 0 else pos
+                continue
+            j += 1
+            continue
         seg = src[j:j + len(win)]
         ws = _shell_words(_mask_parens(seg))
         first = (_word_text(seg[ws[0][0]:ws[0][1]]) if ws else None)
         if first in _SEG_COND_OPENERS:
-            d += 1
+            # `elif`/`else` chain branches of the compound that opened
+            # earlier — only the leading `if`/`while`/… adds a level.
+            if first != b"elif":
+                d += 1
         elif first in _SEG_CLOSERS:
             d = max(0, d - 1)
         else:
             d = max(0, d + _group_depth(seg))
-        j += max(len(win), 1)
+        for delim, strip, _q, _p in _heredoc_ops(seg):
+            eol = src.find(b"\n", j + len(win))
+            if eol >= 0:
+                hd.append([delim, strip, eol + 1])
+        j += len(win)
     return d
 
 
@@ -11094,7 +11141,18 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                                                 sub2, enclosing,
                                                 wh2 + 1, wi0 - ws)
                                             == fidx):
-                                        return True
+                                        # The filter only runs on a
+                                        # live input — `xargs split
+                                        # --filter x.sh /dev/null`
+                                        # produces no chunks, so CMD
+                                        # never starts (Devin on
+                                        # #132, round-73 review —
+                                        # verified live; mirrors the
+                                        # unwrapped gate).
+                                        return not _split_dead_input(
+                                            _operand_text(sinp)
+                                            if sinp is not None
+                                            else None, enclosing)
                                     if (sinp is None
                                             or otxt
                                             != _operand_text(sinp)):
