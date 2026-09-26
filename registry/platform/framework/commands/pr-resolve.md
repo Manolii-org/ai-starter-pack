@@ -28,10 +28,10 @@ Use GitHub MCP `pull_request_read` (preferred) or `scripts/ci/check-pr-comments.
   if it parses AND its digests recompute identically (run VERBATIM), and surface
   its `status` — `skipped_no_manifest` must render as a skip, not a clean pass:
   `inputs_sha` = `printf '%s\0%s' "$(git rev-parse "origin/$(gh api repos/:owner/:repo/pulls/<N> --jq .base.ref)" 2>/dev/null || echo missing)" "$(git show "origin/<base>:.ai/pr-standards.yaml" 2>/dev/null || printf 'untracked')" | sha256sum | cut -d' ' -f1` — and only after confirming `git rev-parse "origin/<base>"` equals `gh api repos/:owner/:repo/pulls/<N> --jq .base.sha` (a stale ref or empty lookup means the cache is never valid — `git fetch` first, else dispatch uncached);
-  `meta_sha` = `gh api repos/:owner/:repo/pulls/<N> --jq '.title + "\u0000" + .body' | sha256sum | cut -d' ' -f1`
+  `meta_sha` = `printf '%s' "$(gh api repos/:owner/:repo/pulls/<N> --jq '.title + "\u0000" + .body')" | sha256sum | cut -d' ' -f1` (identical recipe both sides — `$(...)` strips trailing newlines)
   — a manifest/base change or title/body edit invalidates the cache at the same
-  HEAD. If either `gh api` call fails (empty output), the cache is never valid —
-  dispatch anyway. Dispatch the `pr-standards-checker` agent against the current
+  HEAD. If either `gh api` call fails (empty output → digest `skip`), the cache
+  is never valid — dispatch anyway. Dispatch the `pr-standards-checker` agent against the current
   diff when the cache is absent, unparsable, or stale; treat reported violations
   as findings alongside CI failures.
 

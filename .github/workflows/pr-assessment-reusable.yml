@@ -236,6 +236,38 @@ jobs:
               "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
               "Accept": "application/vnd.github+json",
           }
+          # Reverse transition: an `edited` rerun can reclassify judged → none at
+          # the SAME SHA. A prior judge review (incl. REQUEST_CHANGES) at this
+          # commit is stale once depth=none fires — dismiss it so the comment is
+          # the only live verdict.
+          rpage = 1
+          while True:
+              req = urllib.request.Request(
+                  f"https://api.github.com/repos/{repo}/pulls/{pr}/reviews?per_page=100&page={rpage}",
+                  headers=headers,
+              )
+              reviews = json.loads(urllib.request.urlopen(req, timeout=30).read())
+              for rv in reviews:
+                  if (
+                      rv.get("commit_id") == sha
+                      and (rv.get("user") or {}).get("login") == "github-actions[bot]"
+                      and "<!-- pr-assessment-v1 -->" in (rv.get("body") or "")
+                      and rv.get("state") in ("CHANGES_REQUESTED", "COMMENTED", "APPROVED")
+                  ):
+                      dreq = urllib.request.Request(
+                          f"https://api.github.com/repos/{repo}/pulls/{pr}/reviews/{rv['id']}/dismissals",
+                          data=json.dumps({
+                              "message": "Superseded: PR reclassified as depth=none (mechanical change).",
+                              "event": "DISMISS",
+                          }).encode(),
+                          headers={**headers, "Content-Type": "application/json"},
+                          method="PUT",
+                      )
+                      urllib.request.urlopen(dreq, timeout=30)
+                      print(f"dismissed stale judge review {rv['id']} ({rv['state']})")
+              if len(reviews) < 100:
+                  break
+              rpage += 1
           # Marker text alone isn't proof — only a comment posted by the
           # assessment workflow identity counts (a PR author cannot forge it).
           # An `edited` rerun at the same SHA may change the verdict, so PATCH

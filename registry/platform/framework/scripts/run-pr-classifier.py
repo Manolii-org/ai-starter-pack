@@ -201,18 +201,21 @@ def main() -> None:
     _headers = re.findall(r"^diff --git (.+)$", diff, re.M)
     _sections = re.split(r"^diff --git .+$", diff, flags=re.M)[1:]
     for _hdr, _sec in zip(_headers, _sections):
+        # Header area only: marker-looking lines inside hunks are content, not
+        # paths — stop before the first @@ hunk or binary body.
+        _head = _sec.split("\n@@ ", 1)[0].split("\nBinary files ", 1)[0]
         _paths = {
             m.group(2).rstrip("\t").strip('"').removeprefix("a/").removeprefix("b/")
-            for m in _markers.finditer(_sec)
+            for m in _markers.finditer(_head)
             if m.group(2).rstrip("\t") != "/dev/null"
         }
         if not _paths:
-            # Binary or mode-only change: no ---/+++ or rename lines — the only
-            # path record is the header. Take the RIGHTMOST " b/" split so an
-            # a-side containing spaces still parses to the b-side path.
-            _b = _hdr.rsplit(" b/", 1)
-            if len(_b) == 2:
-                _paths.add(_b[1].strip('"'))
+            # Binary/mode-only: no marker lines — parse the header. The backref
+            # requires a- and b-side identical so " b/" inside a filename and
+            # Git-quoted headers both resolve correctly.
+            _hm = re.match(r'^"?a/(.*?)"?\s+"?b/\1"?$', _hdr)
+            if _hm:
+                _paths.add(_hm.group(1))
         changed_paths |= _paths
     changed_paths = sorted(changed_paths)
     def _categories(p: str) -> list[int]:

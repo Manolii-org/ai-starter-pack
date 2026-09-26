@@ -337,15 +337,16 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
             )
             return False
 
-        # Check for existing review at same SHA (idempotency)
-        if self._review_exists_at_sha():
+        # Dedup is outcome-keyed: a prior CLEAN verdict must not suppress a
+        # rerun that now has findings (e.g. a specialist timed out first time).
+        if self._review_exists_at_sha("findings"):
             logger.info(f"Review already posted at {self.sha[:8]}; skipping")
             return True
 
         # Format review body
         body_lines = [
             REVIEW_MARKER,
-            f"<!-- meta:{self.meta_digest} -->",
+            f"<!-- meta:{self.meta_digest}:findings -->",
             "## PR Assessment Review",
         ]
 
@@ -423,7 +424,7 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
             logger.error(f"Failed to post review: {e}")
             return False
 
-    def _review_exists_at_sha(self) -> bool:
+    def _review_exists_at_sha(self, kind: str) -> bool:
         """Check if a review by the judge with the marker already exists at this SHA.
 
         Requires BOTH the marker AND the judge's author identity. The marker is public
@@ -481,7 +482,7 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
                     # across pages — returning True on a page-1 match would let
                     # a stale digest suppress a newer contradicting verdict that
                     # sits on a later page (A→B→A across the page boundary).
-                    latest_digest_matches = f"<!-- meta:{self.meta_digest} -->" in body
+                    latest_digest_matches = f"<!-- meta:{self.meta_digest}:{kind} -->" in body
 
             if len(reviews) < _REVIEWS_PER_PAGE:
                 return bool(latest_digest_matches)
@@ -607,14 +608,14 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
             logger.info("No findings; skipping GitHub post (no token/repo)")
             return
 
-        if self._review_exists_at_sha():
+        if self._review_exists_at_sha("clean"):
             logger.info("No-findings comment already posted for this SHA — skipping")
             return
 
         try:
             body_lines = [
                 REVIEW_MARKER,
-                f"<!-- meta:{self.meta_digest} -->",
+                f"<!-- meta:{self.meta_digest}:clean -->",
                 "## PR Assessment",
             ]
             door = self.merge_danger.get("door")

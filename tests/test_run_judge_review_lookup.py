@@ -48,7 +48,7 @@ SHA = "1f9133dd479dad162586b0c43cf59656a613173d"
 # marker in reviews that represent a verdict for the current metadata; omit it to
 # model a stale or marker-only review.
 JUDGE_META = hashlib.sha256("\0\0\0\0".encode()).hexdigest()[:12]
-MARKED = f"{rj.REVIEW_MARKER}\n<!-- meta:{JUDGE_META} -->"
+MARKED = f"{rj.REVIEW_MARKER}\n<!-- meta:{JUDGE_META}:findings -->"
 
 
 class _FakeResponse:
@@ -93,7 +93,7 @@ def test_finds_the_verdict_stranded_on_page_two(judge, monkeypatch):
     page_one = [_review(rj.REVIEW_MARKER, commit_id="other")] * rj._REVIEWS_PER_PAGE
     page_two = [_review(MARKED + "\n## PR Assessment Review")]
     monkeypatch.setattr(rj.urllib.request, "urlopen", _paged([page_one, page_two]))
-    assert judge._review_exists_at_sha() is True, "page 2 was never fetched"
+    assert judge._review_exists_at_sha("findings") is True, "page 2 was never fetched"
 
 
 def test_ignores_a_review_forged_by_another_author(judge, monkeypatch):
@@ -104,14 +104,14 @@ def test_ignores_a_review_forged_by_another_author(judge, monkeypatch):
     """
     forged = [_review(rj.REVIEW_MARKER, author="some-collaborator")]
     monkeypatch.setattr(rj.urllib.request, "urlopen", _paged([forged]))
-    assert judge._review_exists_at_sha() is False, "a non-judge review was accepted"
+    assert judge._review_exists_at_sha("findings") is False, "a non-judge review was accepted"
 
 
 def test_still_matches_a_genuine_judge_review(judge, monkeypatch):
     """The author filter must not break the idempotency it is guarding."""
     page = [_review(MARKED + "\n## PR Assessment Review")]
     monkeypatch.setattr(rj.urllib.request, "urlopen", _paged([page]))
-    assert judge._review_exists_at_sha() is True
+    assert judge._review_exists_at_sha("findings") is True
 
 
 def test_marker_only_review_does_not_suppress(judge, monkeypatch):
@@ -119,7 +119,7 @@ def test_marker_only_review_does_not_suppress(judge, monkeypatch):
     assessment is current — the judge must repost rather than stay silent."""
     page = [_review(rj.REVIEW_MARKER + "\n## PR Assessment Review")]
     monkeypatch.setattr(rj.urllib.request, "urlopen", _paged([page]))
-    assert judge._review_exists_at_sha() is False
+    assert judge._review_exists_at_sha("findings") is False
 
 
 def test_latest_review_decides_aba(judge, monkeypatch):
@@ -128,7 +128,7 @@ def test_latest_review_decides_aba(judge, monkeypatch):
     old_a = _review(MARKED + "\n## PR Assessment Review")
     newer_b = _review(f"{rj.REVIEW_MARKER}\n<!-- meta:otherdigest1 -->")
     monkeypatch.setattr(rj.urllib.request, "urlopen", _paged([[old_a, newer_b]]))
-    assert judge._review_exists_at_sha() is False, "stale A review suppressed the re-run"
+    assert judge._review_exists_at_sha("findings") is False, "stale A review suppressed the re-run"
 
 
 def test_latest_review_decides_aba_across_pages(judge, monkeypatch):
@@ -140,13 +140,13 @@ def test_latest_review_decides_aba_across_pages(judge, monkeypatch):
     )
     page_two = [_review(f"{rj.REVIEW_MARKER}\n<!-- meta:otherdigest1 -->")]
     monkeypatch.setattr(rj.urllib.request, "urlopen", _paged([page_one, page_two]))
-    assert judge._review_exists_at_sha() is False, "cross-page stale digest suppressed the re-run"
+    assert judge._review_exists_at_sha("findings") is False, "cross-page stale digest suppressed the re-run"
 
 
 def test_ignores_a_review_on_a_different_sha(judge, monkeypatch):
     page = [_review(rj.REVIEW_MARKER, commit_id="deadbeef")]
     monkeypatch.setattr(rj.urllib.request, "urlopen", _paged([page]))
-    assert judge._review_exists_at_sha() is False
+    assert judge._review_exists_at_sha("findings") is False
 
 
 def test_api_error_fails_open(judge, monkeypatch):
@@ -156,7 +156,7 @@ def test_api_error_fails_open(judge, monkeypatch):
         raise OSError("network down")
 
     monkeypatch.setattr(rj.urllib.request, "urlopen", boom)
-    assert judge._review_exists_at_sha() is False
+    assert judge._review_exists_at_sha("findings") is False
 
 
 def test_malformed_response_fails_open(judge, monkeypatch):
@@ -166,7 +166,7 @@ def test_malformed_response_fails_open(judge, monkeypatch):
         return _FakeResponse(json.dumps({"message": "Not Found"}).encode())
 
     monkeypatch.setattr(rj.urllib.request, "urlopen", not_a_list)
-    assert judge._review_exists_at_sha() is False
+    assert judge._review_exists_at_sha("findings") is False
 
 
 def test_page_cap_is_bounded(judge, monkeypatch):
@@ -180,7 +180,7 @@ def test_page_cap_is_bounded(judge, monkeypatch):
         return _FakeResponse(json.dumps(page).encode())
 
     monkeypatch.setattr(rj.urllib.request, "urlopen", always_full)
-    assert judge._review_exists_at_sha() is False
+    assert judge._review_exists_at_sha("findings") is False
     assert calls["n"] == rj._MAX_REVIEW_PAGES, (
         f"expected the walk to stop at the {rj._MAX_REVIEW_PAGES}-page cap, "
         f"got {calls['n']} requests"

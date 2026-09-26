@@ -84,13 +84,15 @@ if [ -z "$_LIVE_BASE_SHA" ] || [ "$_LOCAL_BASE_SHA" != "$_LIVE_BASE_SHA" ]; then
 else
   _INPUTS_SHA=$(printf '%s\0%s' "$_LOCAL_BASE_SHA" "$(git show "origin/${_BASE_BRANCH}:.ai/pr-standards.yaml" 2>/dev/null || printf 'untracked')" | sha256sum | cut -d' ' -f1)
 fi
-_META_SHA=$(gh api repos/:owner/:repo/pulls/${PR_NUMBER} --jq '.title + "\u0000" + .body' 2>/dev/null | sha256sum | cut -d' ' -f1)
+_META_RAW=$(gh api repos/:owner/:repo/pulls/${PR_NUMBER} --jq '.title + "\u0000" + .body' 2>/dev/null)
+# sha256 of EMPTY output would collide across failed lookups — fail closed.
+if [ -z "$_META_RAW" ]; then _META_SHA=skip; else _META_SHA=$(printf '%s' "$_META_RAW" | sha256sum | cut -d' ' -f1); fi
 _CACHE=".git/.pr-comments-cache/standards-pr${PR_NUMBER}-${_HEAD_SHA}.json"
 # write JSON with violations array and timestamp
 ```
 
 Write as JSON: `{"sha": "<HEAD_SHA>", "inputs_sha": "<_INPUTS_SHA>", "meta_sha": "<_META_SHA>", "ts": "<ISO8601>", "status": "ok"|"skipped_no_manifest", "violations": [...], "passed": [...], "unverified": [...]}` — `status` is required so a cached `skipped_no_manifest` never reads back as a clean pass.
-Cache is intentionally in `.git/` (not committed) so it resets on fresh clone. pr-resolve reads this same filename before dispatching and reuses it only when it recomputes the same `inputs_sha` and `meta_sha`. Digest contract (identical commands both sides): `inputs_sha` = sha256 of `base-ref-sha` + NUL + raw base-manifest bytes (or `untracked` when absent on base) — folding in `origin/<base>`'s ref SHA also covers merge-base diff/commit-list drift when the base moves. `meta_sha` = sha256 of `title + NUL + body` fetched live via `gh api` REST. Fail closed: write the cache only when `_INPUTS_SHA` is not `skip` — a stale ref or a failed `gh api` lookup (empty output) means no write and no reuse; rerun the check uncached.
+Cache is intentionally in `.git/` (not committed) so it resets on fresh clone. pr-resolve reads this same filename before dispatching and reuses it only when it recomputes the same `inputs_sha` and `meta_sha`. Digest contract (identical commands both sides): `inputs_sha` = sha256 of `base-ref-sha` + NUL + raw base-manifest bytes (or `untracked` when absent on base) — folding in `origin/<base>`'s ref SHA also covers merge-base diff/commit-list drift when the base moves. `meta_sha` = `printf '%s' "$(gh api repos/:owner/:repo/pulls/${PR_NUMBER} --jq '.title + "\u0000" + .body')" | sha256sum` — `skip` when the lookup fails, never a digest of empty output. Fail closed: write the cache only when NEITHER digest is `skip` — a stale ref or a failed `gh api` lookup (empty output) means no write and no reuse; rerun the check uncached.
 
 ## Constraints
 
