@@ -14040,14 +14040,18 @@ def test_script_dep_round82_post_closer_redirects(tmp_path):
             b'(cat scripts/x.sh >&2; true) 2>&1 |& sh',
             # fd2→file only: fd1 still feeds the plain pipe.
             b'(cat scripts/x.sh; true) 2>/dev/null | sh',
-            b'{ cat scripts/x.sh >&2; true; } 2>/dev/null |& sh'):
+            b'{ cat scripts/x.sh >&2; true; } 2>/dev/null |& sh',
+            # `2>&1` binds fd2 onto fd1's pipe target BEFORE the
+            # `>/dev/null` diverts fd1 — x's `>&2` bytes still reach
+            # the pipe (expectation flipped from round-82's dead
+            # verdict: verified live, Devin on #133, round-83).
+            b'(cat scripts/x.sh >&2) 2>&1 >/dev/null | sh'):
         assert mod.script_dep_block(pdir, line + b"\n"), line
     for line in (
             # fd2→file kills the `|&` merge; fd1 to file kills both.
             b'(cat scripts/x.sh >&2; true) 2>/dev/null | sh',
             b'(cat scripts/x.sh >&2; true) >/dev/null |& sh',
-            b'(cat scripts/x.sh >&2; true) &>/dev/null |& sh',
-            b'(cat scripts/x.sh >&2) 2>&1 >/dev/null | sh'):
+            b'(cat scripts/x.sh >&2; true) &>/dev/null |& sh'):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
 
 
@@ -14084,3 +14088,81 @@ def test_script_dep_round82_brace_group_head(tmp_path):
             b'{ echo bash scripts/x.sh; } | sh',
             b'{ echo bash scripts/x.sh; cat scripts/y.sh >f; } | sh'):
         assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round83_fd2_pipe_binding(tmp_path):
+    """A group's fd2 reaches the pipe not just under `|&` but under a
+    plain `|` when a post-closer `2>&1` bound fd2 onto fd1's pipe
+    target (`(cat x >&2; true) 2>&1 | sh` runs x — Devin on
+    #133/#1431, round-83 — verified live). The `&` merge is a DUP of
+    fd1's final binding, applied after every post-closer redirect, so
+    `2>&1 >/dev/null` keeps fd2 on the pipe while `>/dev/null 2>&1`
+    dead-ends both."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (
+            b'(cat scripts/x.sh >&2; true) 2>&1 | sh',
+            b'(cat scripts/x.sh >&2; true) 2>&1 >/dev/null | sh',
+            b'(cat scripts/x.sh | cat >&2) 2>&1 | sh',
+            # A `$(` substitution inside a post-closer redirect target
+            # must not shadow the real group closer (CodeRabbit on
+            # #133, round-83).
+            b'(cat scripts/x.sh >&2) 2>$(mktemp) |& sh'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            # fd1→file first: `2>&1` then binds fd2 to the file too.
+            b'(cat scripts/x.sh >&2; true) >/dev/null 2>&1 | sh',
+            # Plain `|` never merges fd2.
+            b'(cat scripts/x.sh >&2; true) | sh',
+            b'(cat scripts/x.sh | cat >&2) | sh'):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round83_inner_pipeline_stages(tmp_path):
+    """A `;`-sibling that is itself a pipeline lands on the group's fds
+    through its LAST stage only: an earlier `>` diverts just that stage
+    (`true >/dev/null | cat x` still feeds x — CodeRabbit on #133,
+    round-83), and a sink last stage contributes nothing whatever an
+    earlier stage read (`cat x | wc -l`/`head -n 0` — Devin on #1431,
+    round-83). A mid-stage `>&2` lands on the group's stderr, which
+    reaches the pipe only when the group's fd2 does — all verified
+    live."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (
+            b'(true >/dev/null | cat scripts/x.sh) | sh',
+            b'(cat scripts/x.sh >&2 | cat >/dev/null) |& sh',
+            b'(cat scripts/x.sh | cat >&2) |& sh'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b'(cat scripts/x.sh | wc -l) |& sh',
+            b'(cat scripts/x.sh | head -n 0) |& sh',
+            b'(cat scripts/x.sh >/dev/null | cat >&2) |& sh'):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round83_emit_head_fd2(tmp_path):
+    """An emit-head's `>&2` inside a group whose fd2 reaches the pipe
+    still hands the emitted text to the downstream interpreter —
+    `(echo bash x >&2) |& sh` and the inner-pipeline `(echo bash x >&2
+    | cat >/dev/null) |& sh` both run `bash x` (Devin on #17/#1963/
+    #1431, round-83 — verified live). The word's OWN stage fd decides,
+    not the sibling's last."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (
+            b'(echo bash scripts/x.sh >&2) |& sh',
+            b'(echo bash scripts/x.sh >&2 | cat >/dev/null) |& sh',
+            b'(printf "bash %s\\n" scripts/x.sh >&2 | cat >/dev/null) '
+            b'|& sh',
+            b'(echo bash scripts/x.sh >&2) 2>&1 | sh'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    # Real stderr under a plain `|` — emitted text dies there.
+    assert not mod.script_dep_block(
+        pdir, b'(echo bash scripts/x.sh >&2) | sh\n')
