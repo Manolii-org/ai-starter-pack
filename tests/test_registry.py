@@ -13921,3 +13921,72 @@ def test_script_dep_round79_stderr_divert_order(tmp_path):
             b"(echo bash scripts/x.sh 2>/dev/null >&2; true) |& sh",
             b"(cat scripts/x.sh 2>/dev/null >&2; true) |& sh"):
         assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round80_quoted_backtick(tmp_path):
+    """A single-quoted backtick is literal text — the group mask must
+    not start a substitution scan there and swallow the real closer
+    (`(echo '`'; cat x >&2; true) |&` — Devin on #1431, round-80 —
+    verified live)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (
+            b"(echo '`'; cat scripts/x.sh >&2; true) |& sh",
+            b"(echo '`' '`'; cat scripts/x.sh >&2; true) |& sh",
+            b'(cat scripts/x.sh >&2; echo `echo "("`) |& sh',
+            b"(cat scripts/x.sh >&2; echo '`'; echo \")\") |& sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+    for line in (
+            b"(echo '`'; cat scripts/x.sh >&2; true) | sh",):
+        assert not mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round80_headless_group_sibling(tmp_path):
+    """A `|&` group sibling with no executable head (redirect-only,
+    describe-only `command -v`, assignment-only, bare `exec`) yields a
+    None fd map — it emits nothing, so it is skipped, not crash
+    (CodeRabbit on #133, round-80 — verified live)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (
+            b"( command -v jq >&2; cat scripts/x.sh ) |& sh",
+            b"( X=1 >&2; cat scripts/x.sh ) |& sh",
+            b"( exec >&2; cat scripts/x.sh ) |& sh",
+            b"( >log; cat scripts/x.sh ) |& sh"):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round80_group_pipe_nesting(tmp_path):
+    """`_group_pipe` skips `$(`/`<(`/`>(`/`${` bodies and counts nested
+    group depth — a `|` inside a substitution is the capture's pipe,
+    and an inner `(t)` does not end the containing group's scan
+    (CodeRabbit on #133, round-80 — verified live)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (
+            b'(cat scripts/x.sh >&2; (t)) |& sh',
+            b'bash -c "$(cat scripts/x.sh; echo $(date) | wc -l)"',
+            b'bash -c "$(cat scripts/x.sh; echo ${HOME} | wc -l)"'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line
+
+
+def test_script_dep_round80_mask_prose_marks(tmp_path):
+    """Unterminated quotes/backticks before the group are prose marks
+    (apostrophes, markdown fences), not quoted regions — the group
+    delimiters stay visible so the dep is still found (CodeRabbit on
+    #133, Devin on #1431/#17, round-80 — verified live)."""
+    mod = load_resolve_module()
+    pdir = tmp_path / "plug"
+    (pdir / "scripts").mkdir(parents=True)
+    (pdir / "scripts" / "x.sh").write_bytes(b"x")
+    for line in (
+            b'(cat scripts/x.sh >&2; echo a\\(b) |& sh',
+            b'(cat scripts/x.sh >&2; echo `echo "("`) |& sh',
+            b'(cat scripts/x.sh >&2; (t)) |& sh'):
+        assert mod.script_dep_block(pdir, line + b"\n"), line

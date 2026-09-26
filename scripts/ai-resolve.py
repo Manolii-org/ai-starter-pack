@@ -7824,26 +7824,29 @@ def _group_fd1_prov(src: bytes, pos: int, amp: bool = False):
     if i < 0 or src[i:i + 1] not in (b")", b"}"):
         return None
     cl = i
-    # Quoted/escaped parens are operand text, not delimiters — the
-    # backward scan must not count them (`(cat x >&2; echo "(") |&` —
-    # Devin on #133, round-79 — verified live).
+    # Quoted/escaped/backticked parens are operand text, not
+    # delimiters — the backward scan must not count them
+    # (`(cat x >&2; echo "(") |&` — Devin on #133, round-79 — verified
+    # live). Unlike `_quoted_spans` (which fails closed for exec
+    # detection), an UNTERMINATED quote/backtick before `cl` is prose —
+    # an apostrophe or a markdown fence — so it is left unmasked: here
+    # masking it would hide the group's real delimiters and drop real
+    # deps (`don't (cat x >&2; t) |&`, `echo '`'` — round-80).
     msk = bytearray(src)
-    for a2, b2 in _quoted_spans(src):
-        msk[a2:b2] = b" " * (b2 - a2)
     i = 0
-    while i < len(src):
-        if src[i:i + 1] == b"\\":
+    while i < cl:
+        c = src[i:i + 1]
+        if c == b"\\":
             msk[i:i + 2] = b"  "
             i += 2
             continue
-        if src[i:i + 1] == b"`":
-            j = i + 1
-            while j < len(src) and src[j:j + 1] != b"`":
-                if src[j:j + 1] == b"\\":
-                    j += 1
-                j += 1
-            msk[i:j + 1] = b" " * (j + 1 - i)
-            i = j + 1
+        if c in (b"'", b'"', b"`"):
+            e = src.find(c, i + 1)
+            if e < 0 or e >= cl:
+                i += 1
+                continue
+            msk[i:e] = b" " * (e - i)
+            i = e + 1
             continue
         i += 1
     i = cl
@@ -7885,8 +7888,9 @@ def _group_fd1_prov(src: bytes, pos: int, amp: bool = False):
         if not seg.strip():
             continue
         if _stdout_redirected(seg):
-            if not (amp
-                    and _seg_head_args(seg, {})[2].get(1) == _FD_ERR):
+            sfd_g = _seg_head_args(seg, {})[2]
+            if not (amp and sfd_g is not None
+                    and sfd_g.get(1) == _FD_ERR):
                 continue
             # `cmd >&2` inside a `|&` group still feeds the pipe —
             # `|&` merges stderr, so the divert lands on the merged
@@ -7915,7 +7919,16 @@ def _group_pipe(src: bytes, start: int) -> int:
     true) |& sh` merges the `>&2` sibling into the pipe)."""
     i = start
     in_s = in_d = esc = False
+    subs = {a: b for a, b in _substitution_spans(src)}
+    depth = 0
     while i < len(src):
+        if i in subs and not (in_s or in_d or esc):
+            # `$(`/`<(`/`>(` bodies end at their own `)` — neither an
+            # inner group closer nor the containing group's — and a
+            # `|` inside is the capture's pipe, not this group's
+            # (`$(cat x; echo $(d) | w)` — CodeRabbit on #133, r-80).
+            i = subs[i]
+            continue
         c = src[i:i + 1]
         if esc:
             esc = False
@@ -7938,16 +7951,22 @@ def _group_pipe(src: bytes, start: int) -> int:
             if e < 0:
                 break
             i = e
+        elif c == b"{" and src[i - 1:i] == b"$":
+            e = src.find(b"}", i + 1)
+            if e < 0:
+                break
+            i = e            # ${...} expansion — its `}` is no closer
         elif c in (b"(", b"{") and src[i - 1:i] not in (
                 b"$", b"<", b">"):
-            # A compound OPENING after `start` — the closer and `|`
-            # that follow belong to it, not to the command containing
-            # `start` (`cat x >&2; (true) |&` — the `(true)` group's
-            # pipe is not the earlier sibling's). `$(`/`<(`/`>(` are
-            # substitutions: their `)` flows through the inner-closer
-            # path below.
-            break
+            # A NESTED group after `start` — its closer and `|` are
+            # inside the containing compound, not in place of them
+            # (`(cat x >&2; (t)) |&` — CodeRabbit on #133, round-80).
+            depth += 1
         elif c in (b")", b"}"):
+            if depth:
+                depth -= 1
+                i += 1
+                continue
             j = i + 1
             while j < len(src) and src[j:j + 1] in b" \t":
                 j += 1
@@ -11920,7 +11939,8 @@ def _script_dep_block(plugin_dir: Path, src_bytes: bytes,
                         if cur <= epos:
                             wa2, wb2 = cur, wb2
                     wseg = enclosing[wa2:wb2]
-                    wfd = _seg_head_args(wseg, {})[2].get(1)
+                    wsfd = _seg_head_args(wseg, {})[2]
+                    wfd = wsfd.get(1) if wsfd is not None else None
                     # The word's window may end mid-compound — the
                     # pipe that matters is the GROUP's, past `)`/`}`
                     # (`(echo bash x >&2; t) |&` — Devin on #133,
