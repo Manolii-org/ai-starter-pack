@@ -106,6 +106,12 @@ RULE 10: IF diff modifies files in >2 distinct top-level directories
   AND the PR title/description indicates a narrow, single-concern change
   AND cross-directory changes are not explained by a clear dependency chain
   → invoke_skills: add "scope-adherence"
+
+RULE 10b: IF the PR title/description makes concrete, verifiable claims
+  (named endpoints, fixes, features — not marketing phrasing)
+  → invoke_skills: add "scope-adherence"
+  (its under-delivery check compares those claims against the diff and is
+  the only surface that catches a promised change with no matching code)
 ```
 
 ## Important
