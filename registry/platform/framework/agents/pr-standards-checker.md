@@ -67,14 +67,18 @@ re-running this check on subsequent watch-pr rounds for the same commit:
 ```bash
 mkdir -p .git/.pr-comments-cache
 _HEAD_SHA=$(git rev-parse HEAD)
-_INPUTS_SHA=$(printf '%s' "$(git show origin/<base>:.ai/pr-standards.yaml 2>/dev/null || printf 'untracked')" | sha256sum | cut -d' ' -f1)
-_META_SHA=$(printf '%s' "${PR_TITLE}${PR_BODY}" | sha256sum | cut -d' ' -f1)
+# Digest recipe — run VERBATIM on both sides (checker writes, pr-resolve reads).
+# `gh api` is REST — `gh pr view` uses GraphQL which agent web sessions cannot reach.
+_BASE_BRANCH=$(gh api repos/:owner/:repo/pulls/${PR_NUMBER} --jq '.base.ref' 2>/dev/null)
+_BASE_SHA=$(git rev-parse "origin/${_BASE_BRANCH}" 2>/dev/null || echo missing)
+_INPUTS_SHA=$(printf '%s\0%s' "$_BASE_SHA" "$(git show "origin/${_BASE_BRANCH}:.ai/pr-standards.yaml" 2>/dev/null || printf 'untracked')" | sha256sum | cut -d' ' -f1)
+_META_SHA=$(gh api repos/:owner/:repo/pulls/${PR_NUMBER} --jq '.title + "\u0000" + .body' 2>/dev/null | sha256sum | cut -d' ' -f1)
 _CACHE=".git/.pr-comments-cache/standards-pr${PR_NUMBER}-${_HEAD_SHA}.json"
 # write JSON with violations array and timestamp
 ```
 
 Write as JSON: `{"sha": "<HEAD_SHA>", "inputs_sha": "<_INPUTS_SHA>", "meta_sha": "<_META_SHA>", "ts": "<ISO8601>", "violations": [...], "passed": [...], "unverified": [...]}`.
-Cache is intentionally in `.git/` (not committed) so it resets on fresh clone. pr-resolve reads this same filename before dispatching and reuses it only when `inputs_sha` and `meta_sha` match the current values — a base-branch manifest change or title/body edit at the same HEAD must re-run the check. Do not deviate from the filename or field names.
+Cache is intentionally in `.git/` (not committed) so it resets on fresh clone. pr-resolve reads this same filename before dispatching and reuses it only when it recomputes the same `inputs_sha` and `meta_sha`. Digest contract (identical commands both sides): `inputs_sha` = sha256 of `base-ref-sha` + NUL + raw base-manifest bytes (or `untracked` when absent on base) — folding in `origin/<base>`'s ref SHA also covers merge-base diff/commit-list drift when the base moves. `meta_sha` = sha256 of `title + NUL + body` fetched live via `gh api` REST. Fail closed: if either `gh api` call fails (empty output), do NOT write or reuse the cache — rerun the check.
 
 ## Constraints
 

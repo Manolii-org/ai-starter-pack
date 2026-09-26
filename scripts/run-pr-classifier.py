@@ -176,14 +176,25 @@ def main() -> None:
     diff_block = diff[:50000]
     if truncated:
         diff_block += "\n[diff truncated — classify danger from the complete path list below]"
+    # Neutralise the wrapper's own tag names inside untrusted content (diff,
+    # path inventory, title/body) so crafted input cannot close the boundary.
+    _WRAP_TAGS = ("untrusted_diff", "untrusted_pr_meta", "changed_paths")
+    def _neutralize(text: str) -> str:
+        for _tag in _WRAP_TAGS:
+            text = text.replace(f"</{_tag}>", f"<\\/{_tag}>")
+            text = text.replace(f"<{_tag}>", f"<\\{_tag}>")
+        return text
+    diff_block = _neutralize(diff_block)
+    inventory = _neutralize(inventory)
 
     meta_block = ""
     if args.title or args.body:
         body = args.body[:4000] + ("\n[body truncated]" if len(args.body) > 4000 else "")
+        body = _neutralize(body)
         meta_block = (
             "\nPR metadata (UNTRUSTED — needed for rules that compare the diff "
             "against the stated scope):\n"
-            f"<untrusted_pr_meta>\nTitle: {args.title}\n\n{body}\n</untrusted_pr_meta>\n"
+            f"<untrusted_pr_meta>\nTitle: {_neutralize(args.title)}\n\n{body}\n</untrusted_pr_meta>\n"
         )
 
     user_message = (
