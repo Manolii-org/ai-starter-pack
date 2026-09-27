@@ -271,9 +271,12 @@ def cmd_checks(args, token):
     # Check runs likewise get one entry per attempt: a rerun creates a new
     # run, so collapse to the latest (highest id) per (name, app) — a retried
     # failure gone green must not keep the verdict red.
-    latest_runs: dict[tuple[str, str | None], dict] = {}
+    latest_runs: dict[tuple[str, str | None, int | None], dict] = {}
     for cr in check_runs:
-        run_key = (cr["name"], (cr.get("app") or {}).get("slug"))
+        # check_suite.id separates identically-named jobs from different
+        # workflows (retries share a suite; distinct workflows must keep
+        # their own latest run rather than masking each other's failure).
+        run_key = (cr["name"], (cr.get("app") or {}).get("slug"), (cr.get("check_suite") or {}).get("id"))
         if run_key not in latest_runs or cr["id"] > latest_runs[run_key]["id"]:
             latest_runs[run_key] = cr
     rows = []

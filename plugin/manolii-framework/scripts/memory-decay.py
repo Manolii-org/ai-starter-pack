@@ -388,7 +388,7 @@ def consolidate(
             canonical = max(
                 cluster,
                 key=lambda r: (
-                    len(tokenize(r.get("text", ""))),
+                    len(tokenize(_comparable_text(r))),
                     _confidence_value(r.get("confidence", 1.0)),
                     -_created_ts(r),
                 ),

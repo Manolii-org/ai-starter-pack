@@ -17,7 +17,7 @@ from email_capture.core import CaptureError, Profile, allocate, assert_messages,
 def main() -> int:
     profile = Profile.load()
     selected = backend(profile)
-    request = {"schema_version": "1.0", "entity": "manolii", "repository": "ai-starter-pack", "environment": "ci", "run_id": f"live-{profile.backend}"}
+    request = {"schema_version": "1.0", "entity": "pack-selftest", "repository": "ai-starter-pack", "environment": "ci", "run_id": f"live-{profile.backend}"}
     allocation = allocate(request, profile)
     message = EmailMessage()
     message["From"] = "synthetic-sender@capture.test"

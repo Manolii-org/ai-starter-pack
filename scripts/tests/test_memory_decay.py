@@ -68,7 +68,7 @@ class TestConsolidationAndDecay:
             md.run(str(f), apply=True, now=NOW)
             out = [json.loads(x) for x in f.read_text().splitlines() if x.strip()]
             assert len(out) == 3, "a+b merge -> 3 rows"
-            kept = [r for r in out if r["id"] == "a"][0]
+            kept = [r for r in out if r.get("reinforced")][0]
             assert kept["confidence"] == min(0.95, 0.8 + 0.05)
             assert set(kept["tags"]) == {"kl", "mcp"}
             assert kept["reinforced"] == 1
@@ -138,6 +138,26 @@ class TestConsolidationValueVeto:
         a = {"content": "the production service must use the primary database for query processing"}
         b = {"content": "the production service must use the replica database for query processing"}
         assert not md._rows_mergeable(a, b, 0.6)
+
+    def test_subset_merge_keeps_more_complete_claim(self):
+        # A high-confidence short fact must not win canonical selection over
+        # its lower-confidence superset — the longer row carries qualifiers
+        # (--apply) would otherwise drop silently.
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "facts.jsonl"
+            rows = [
+                {"id": "short", "type": "fact",
+                 "content": "deployment requires approval and security review",
+                 "confidence": 0.95, "created": NOW.isoformat()},
+                {"id": "long", "type": "fact",
+                 "content": "deployment requires approval and security review for production",
+                 "confidence": 0.5, "created": NOW.isoformat()},
+            ]
+            f.write_text("".join(json.dumps(r) + "\n" for r in rows))
+            md.run(str(f), apply=True, now=NOW)
+            out = [json.loads(x) for x in f.read_text().splitlines() if x.strip()]
+            assert len(out) == 1
+            assert out[0]["id"] == "long", "canonical must be the content-complete claim"
 
     def test_apply_decay_prefers_merged_confidence(self):
         from datetime import datetime, timezone

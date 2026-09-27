@@ -44,14 +44,14 @@ def _verified_allocation(reference: str, *, releasing: bool = False) -> dict:
         if isinstance(record, dict) and record.get("allocation_id") == allocation.get("allocation_id"):
             live = record
             break
-    if live is None:
-        if releasing:
-            # Release is idempotent: release_allocation removes the registry
-            # record only after its purge succeeds, so a missing record means
-            # an earlier release completed — the retry must not be denied.
-            return allocation
+    if live is None or live.get("recipient") != allocation.get("recipient") or live.get("scope") != allocation.get("scope"):
         raise CaptureError("AUTHORIZATION_DENIED", "allocation does not match a live registry record")
-    if live.get("recipient") != allocation.get("recipient") or live.get("scope") != allocation.get("scope"):
+    if live.get("released"):
+        # A released tombstone is verifiable proof the earlier release's
+        # purge completed — a retry is a no-op success, never a second purge
+        # of caller-supplied fields.
+        if releasing:
+            raise CaptureError("ALLOCATION_RETIRED", "allocation already released")
         raise CaptureError("AUTHORIZATION_DENIED", "allocation does not match a live registry record")
     # Release stays reachable on expired or pending_purge records — an expired
     # allocation still holds mail to purge, and pending_purge marks a release
@@ -110,7 +110,14 @@ def main(argv: list[str] | None = None) -> int:
             emit(assert_messages(read_json(arguments.messages), read_json(arguments.rules)))
         elif arguments.command == "release":
             _private_input_path(arguments.allocation)
-            release_allocation(selected_backend, _verified_allocation(arguments.allocation, releasing=True))
+            try:
+                verified = _verified_allocation(arguments.allocation, releasing=True)
+            except CaptureError as error:
+                if error.code == "ALLOCATION_RETIRED":
+                    emit(receipt("release", "passed", started, mode=profile.mode, cleanup_state="already_released"))
+                    return 0
+                raise
+            release_allocation(selected_backend, verified)
             emit(receipt("release", "passed", started, mode=profile.mode, cleanup_state="complete"))
         elif arguments.command == "capabilities":
             emit(selected_backend.capabilities())

@@ -24,6 +24,7 @@ ERRORS = {
     "CONFIG_INVALID", "CAPABILITY_UNSUPPORTED", "CAPTURE_INFRA_UNAVAILABLE",
     "MESSAGE_TIMEOUT", "MESSAGE_AMBIGUOUS", "MESSAGE_REPLAYED",
     "ASSERTION_FAILED", "CLEANUP_INCOMPLETE", "AUTHORIZATION_DENIED",
+    "ALLOCATION_RETIRED",
 }
 _SCOPE_KEYS = ("entity", "repository", "environment", "run_id")
 MAX_ATTACHMENTS = 20
@@ -796,8 +797,9 @@ def _co_owners_still_live(row: dict[str, Any], recipient: str) -> bool:
         if not isinstance(record, dict):
             continue
         # pending_purge records document an unfinished release — their owner
-        # is being retired, so they are not live co-owners.
-        if record.get("pending_purge"):
+        # is being retired, so they are not live co-owners. Released
+        # tombstones are fully retired: their mail is already purged.
+        if record.get("pending_purge") or record.get("released"):
             continue
         other = str(record.get("recipient", "")).lower()
         if other in others and float(record.get("expires_at", 0) or 0) > now:
@@ -982,6 +984,7 @@ def allocate(request: dict[str, Any], profile: Profile) -> dict[str, Any]:
             isinstance(existing, dict)
             and float(existing.get("expires_at", 0)) > time.time()
             and not existing.get("pending_purge")
+            and not existing.get("released")
         ):
             # A pending_purge record is mid-release: its mailbox is about to be
             # purged and its registry entry removed, so reusing it would hand the
@@ -1045,10 +1048,16 @@ def release_allocation(selected_backend: Backend, allocation: dict[str, Any]) ->
     co-owner check reads the releasing record as already-retired: two
     concurrent releases then deterministically leave deletion to whichever
     purge runs last, instead of both seeing the other's record live and
-    skipping deletion forever. The record is only removed after the purge
-    succeeds — a failed purge leaves a durable pending marker (excluded from
-    co-owner liveness) so a retried release can finish the cleanup instead
-    of orphaning the captured messages.
+    skipping deletion forever. A failed purge leaves the durable pending
+    marker (excluded from co-owner liveness) so a retried release can finish
+    the cleanup instead of orphaning the captured messages.
+
+    After a successful purge the record becomes a ``released`` tombstone
+    rather than disappearing: a retried ``release`` can then prove the purge
+    already completed (verifiable retired record), while an allocation_id
+    that never existed stays denied — and a forged payload cannot borrow an
+    unknown id to purge someone else's mailbox. The 30-day expiry sweep in
+    ``allocate`` reclaims tombstones.
     """
     with _registry_lock():
         records = _read_registry()
@@ -1062,8 +1071,14 @@ def release_allocation(selected_backend: Backend, allocation: dict[str, Any]) ->
     selected_backend.purge(allocation)
     with _registry_lock():
         records = _read_registry()
-        retained = {key: value for key, value in records.items() if value.get("allocation_id") != allocation.get("allocation_id")}
-        atomic_write_json(_registry_path(), retained)
+        for record in records.values():
+            if (
+                isinstance(record, dict)
+                and record.get("allocation_id") == allocation.get("allocation_id")
+            ):
+                record["released"] = True
+                record.pop("pending_purge", None)
+        atomic_write_json(_registry_path(), records)
 
 
 def await_messages(selected_backend: Backend, allocation: dict[str, Any], timeout: float = 30, count: int = 1, not_before: str | None = None) -> tuple[list[dict[str, Any]], str]:

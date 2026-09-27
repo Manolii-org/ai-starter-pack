@@ -36,6 +36,25 @@ class CaptureTests(unittest.TestCase):
         replacement = allocate(self.request, self.profile)
         self.assertNotEqual(self.allocation["allocation_id"], replacement["allocation_id"])
 
+    def test_release_retry_on_retired_allocation_is_idempotent(self):
+        from email_capture.cli import _verified_allocation
+        release_allocation(self.backend, self.allocation)
+        payload = json.dumps(self.allocation)
+        # Verifiable tombstone -> retired no-op for release, denied elsewhere.
+        with self.assertRaises(CaptureError) as caught:
+            _verified_allocation(payload, releasing=True)
+        self.assertEqual(caught.exception.code, "ALLOCATION_RETIRED")
+        with self.assertRaises(CaptureError) as caught:
+            _verified_allocation(payload)
+        self.assertEqual(caught.exception.code, "AUTHORIZATION_DENIED")
+
+    def test_release_rejects_unknown_allocation_id(self):
+        from email_capture.cli import _verified_allocation
+        forged = dict(self.allocation, allocation_id="never-allocated")
+        with self.assertRaises(CaptureError) as caught:
+            _verified_allocation(json.dumps(forged), releasing=True)
+        self.assertEqual(caught.exception.code, "AUTHORIZATION_DENIED")
+
     def test_concurrent_allocation_is_idempotent(self):
         with ThreadPoolExecutor(max_workers=8) as executor:
             allocations = list(executor.map(lambda _index: allocate(self.request, self.profile), range(32)))
