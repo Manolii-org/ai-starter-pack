@@ -193,9 +193,11 @@ The starter pack ships with a production-ready 8-tier LLM routing framework that
 | `tier-5-latency` | Groq LPU | ~800 tok/s | $0.05/$0.08/M | Real-time classification |
 
 **Data classification** — every agent declares `data_sensitivity`:
-- `anthropic_only` — client code, PII, emails → Claude tiers only
+- `restricted_us_oss_ok` — client code, PII, emails → guardrailed `sonnet` alias (highest AI-eligible tier)
+- `restricted` — governance no-AI → routed to NO model (lint fails closed)
 - `internal` — own codebase, scripts → all tiers allowed
 - `public` — open-source, boilerplate → all tiers allowed
+- (the retired `anthropic_only` tier migrated to `restricted_us_oss_ok` 2026-09-26; client-policy engagements needing Anthropic-direct set `CLIENT_AI_POLICY` + `client_policy_model`)
 
 **Claude Code routing** (no proxy needed): Claude Max subscription models (`haiku`/`sonnet`/`opus`) via the Agent tool. Tier suggestions are emitted on every prompt by the `UserPromptSubmit` hook via `classify-message.py`.
 
