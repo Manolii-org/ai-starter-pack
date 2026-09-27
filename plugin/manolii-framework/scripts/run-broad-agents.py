@@ -23,7 +23,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 from urllib.error import URLError
-from urllib.request import Request, urlopen
+from urllib.parse import urlparse
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 import yaml
 
@@ -38,6 +39,14 @@ logger = logging.getLogger(__name__)
 MODEL_ALIASES = {
     "haiku": "haiku",
     "sonnet": "sonnet",
+}
+
+# Short frontmatter aliases are proxy-side names; on the direct Anthropic plane
+# they are not valid model IDs — map them back to dated IDs.
+DIRECT_MODEL_MAP = {
+    "haiku": "claude-haiku-4-5-20251001",
+    "sonnet": "claude-sonnet-4-6",
+    "opus": "claude-opus-4-7",
 }
 
 BROAD_AGENTS = [
@@ -58,6 +67,8 @@ class AgentConfig:
     data_sensitivity: str
     system_prompt: str
     instructions: str
+    client_policy_model: Optional[str] = None
+    first_party: bool = False
 
 
 def parse_agent_file(agent_path: Path) -> AgentConfig:
@@ -90,14 +101,55 @@ def parse_agent_file(agent_path: Path) -> AgentConfig:
         data_sensitivity=data_sensitivity,
         system_prompt=system_prompt,
         instructions=instructions,
+        client_policy_model=frontmatter.get("client_policy_model"),
+        first_party=bool(frontmatter.get("first_party")),
     )
 
 
+_ANTHROPIC_HOST = "api.anthropic.com"
+
+
+def _proxy_base() -> Optional[str]:
+    """Non-Anthropic proxy base when configured, else None."""
+    base = (
+        os.environ.get("LITELLM_PROXY_URL")
+        or os.environ.get("ANTHROPIC_BASE_URL")
+        or ""
+    ).rstrip("/")
+    if not base:
+        return None
+    if (urlparse(base).hostname or "").lower().rstrip(".") == _ANTHROPIC_HOST:
+        return None
+    return base
+
+
+class _NoRedirectHandler(HTTPRedirectHandler):
+    """Refuse redirects: a 3xx would re-send Authorization/x-api-key to the target."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _urlopen_https(req: Request, *, timeout: int, host: str):
+    """Open one trusted HTTPS origin without following redirects."""
+    parsed = urlparse(req.full_url)
+    if parsed.scheme != "https" or parsed.hostname != host:
+        raise ValueError("refusing non-HTTPS or unexpected request host")
+    return build_opener(_NoRedirectHandler()).open(req, timeout=timeout)  # nosec B310
+
+
 def get_api_key() -> Optional[str]:
-    """Get API key from env."""
-    key = os.getenv("ANTHROPIC_API_KEY")
+    """Transport token: proxy accepts LLM_API_KEY/LITELLM_MASTER_KEY; direct uses ANTHROPIC_API_KEY."""
+    if _proxy_base():
+        key = (
+            os.getenv("LLM_API_KEY")
+            or os.getenv("LITELLM_MASTER_KEY")
+            or os.getenv("ANTHROPIC_API_KEY")
+        )
+    else:
+        key = os.getenv("ANTHROPIC_API_KEY")
     if not key:
-        logger.warning("ANTHROPIC_API_KEY not set; skipping agent invocations")
+        logger.warning("no API credential set; skipping agent invocations")
         return None
     return key
 
@@ -130,14 +182,84 @@ def invoke_agent(
     # Use proxy alias from frontmatter directly (haiku / sonnet map to OSS models).
     model = MODEL_ALIASES.get(agent_config.model, agent_config.model)
 
-    # Restricted/anthropic_only broad agents must stay on direct Anthropic even
-    # when the workflow sets ANTHROPIC_BASE_URL to the LiteLLM proxy for OSS agents.
-    if agent_config.data_sensitivity == "restricted" or agent_config.tier == "anthropic_only":
-        base_url = "https://api.anthropic.com"
-        if model in {"haiku", "sonnet"}:
-            model = "claude-sonnet-4-6"
-    else:
-        base_url = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
+    # data_sensitivity=restricted is governance no-AI — never dispatch to any model.
+    if agent_config.data_sensitivity == "restricted":
+        logger.warning(
+            f"{agent_config.name}: data_sensitivity=restricted (no-AI) — skipping invocation"
+        )
+        return None
+    # Route through the LiteLLM proxy when configured (Bearer auth); otherwise
+    # direct Anthropic (x-api-key). The retired anthropic_only tier has no
+    # callers left — its agents were remapped to restricted_us_oss_ok.
+    proxy = _proxy_base()
+    # True once this call is bound to the Anthropic-direct plane — a runtime
+    # failure must then degrade to the skipped first-party marker so the judge
+    # fails closed instead of adjudicating without the required direct leg.
+    direct_required = False
+    # first_party agents (security review per the eligibility matrix) always go
+    # Anthropic-direct — never the OSS proxy, regardless of declared model.
+    if agent_config.first_party:
+        direct_required = True
+        api_key = os.getenv("ANTHROPIC_DIRECT_API_KEY") or (
+            os.getenv("ANTHROPIC_API_KEY") if not proxy else None
+        )
+        if not api_key:
+            logger.warning(
+                f"{agent_config.name}: first_party agent needs "
+                "ANTHROPIC_DIRECT_API_KEY (the proxy credential cannot "
+                "authenticate Anthropic-direct); skipping"
+            )
+            # Marker contract shared with run-specialists.py: a skipped
+            # direct-only agent must leave a durable candidate file so the
+            # judge cannot post a clean verdict on incomplete coverage.
+            return {
+                "source": agent_config.name,
+                "findings": [],
+                "first_party": True,
+                "skipped": "no_direct_key",
+            }
+        proxy = None
+        model = agent_config.client_policy_model or DIRECT_MODEL_MAP.get(model, model)
+        logger.info(
+            f"{agent_config.name}: first_party — dispatching {model} (Anthropic-direct)"
+        )
+    # Engagement carrying client_ai_policy is Anthropic-direct for EVERY
+    # agent — the proxy/OSS route is bypassed entirely. Agents declaring
+    # client_policy_model pin that model; the rest dispatch on their declared
+    # model's Anthropic equivalent (DIRECT_MODEL_MAP below).
+    elif os.environ.get("CLIENT_AI_POLICY"):
+        direct_required = True
+        # The shared credential resolved before this point is the proxy token
+        # whenever a proxy is configured — api.anthropic.com would reject it
+        # (and it must never leave the boundary as x-api-key to that host).
+        # The direct plane requires a real Anthropic key.
+        api_key = os.getenv("ANTHROPIC_DIRECT_API_KEY") or (
+            os.getenv("ANTHROPIC_API_KEY") if not proxy else None
+        )
+        if not api_key:
+            logger.warning(
+                f"{agent_config.name}: CLIENT_AI_POLICY engagement needs "
+                "ANTHROPIC_DIRECT_API_KEY (the proxy credential cannot "
+                "authenticate Anthropic-direct); skipping"
+            )
+            # Same marker contract — a client-policy agent that could not run
+            # must not let the batch look cleanly reviewed.
+            return {
+                "source": agent_config.name,
+                "findings": [],
+                "first_party": True,
+                "skipped": "no_direct_key",
+            }
+        proxy = None
+        model = agent_config.client_policy_model or model
+        logger.info(
+            f"{agent_config.name}: CLIENT_AI_POLICY active — dispatching {model} (Anthropic-direct)"
+        )
+    base_url = proxy or "https://api.anthropic.com"
+    if proxy and model in {"claude-haiku-4-5-20251001", "claude-sonnet-4-6"}:
+        model = {"claude-haiku-4-5-20251001": "haiku", "claude-sonnet-4-6": "sonnet"}[model]
+    if not proxy:
+        model = DIRECT_MODEL_MAP.get(model, model)
     api_url = f"{base_url}/v1/messages"
 
     payload = {
@@ -164,10 +286,13 @@ def invoke_agent(
     }
 
     headers = {
-        "x-api-key": api_key,
         "anthropic-version": "2023-06-01",
         "content-type": "application/json",
     }
+    if proxy:
+        headers["Authorization"] = f"Bearer {api_key.removeprefix('Bearer ')}"
+    else:
+        headers["x-api-key"] = api_key
 
     try:
         req = Request(
@@ -176,10 +301,17 @@ def invoke_agent(
             headers=headers,
             method="POST",
         )
-        with urlopen(req, timeout=TIMEOUT_SECS) as response:
+        with _urlopen_https(req, timeout=TIMEOUT_SECS, host=urlparse(api_url).hostname or "") as response:
             resp_data = json.loads(response.read().decode("utf-8"))
-    except (URLError, json.JSONDecodeError, TimeoutError) as e:
+    except (URLError, json.JSONDecodeError, TimeoutError, ValueError) as e:
         logger.error(f"Agent {agent_config.name} API error: {e}")
+        if direct_required:
+            return {
+                "source": agent_config.name,
+                "findings": [],
+                "first_party": True,
+                "skipped": "api_error",
+            }
         return None
 
     try:
@@ -192,6 +324,13 @@ def invoke_agent(
         )
         if not content:
             logger.error(f"Agent {agent_config.name} empty response")
+            if direct_required:
+                return {
+                    "source": agent_config.name,
+                    "findings": [],
+                    "first_party": True,
+                    "skipped": "api_error",
+                }
             return None
 
         # Strip markdown fences
@@ -210,6 +349,12 @@ def invoke_agent(
             parsed = json.loads(m.group(0))
 
         # Normalise to {source, findings:[...]} contract expected by run-judge.py
+        if isinstance(parsed, dict) and "findings" in parsed and not isinstance(parsed["findings"], list):
+            # A non-list findings value (e.g. an object) would silently
+            # normalise to an empty result — a false clean for the check.
+            # Raise so the executor writes an api_error marker that preserves
+            # this agent's first-party status.
+            raise ValueError(f"Agent {agent_config.name} returned non-list findings: {type(parsed['findings'])}")
         if isinstance(parsed, list):
             raw_findings = parsed
         elif isinstance(parsed, dict) and "findings" in parsed:
@@ -223,9 +368,22 @@ def invoke_agent(
         _DEFAULTS = {"file": "", "line": None, "severity": "WARNING", "message": "", "fix": ""}
         normalised = [{**_DEFAULTS, **f} for f in raw_findings if isinstance(f, dict)]
 
-        return {"source": agent_config.name, "findings": normalised}
+        return {
+            "source": agent_config.name,
+            # An empty result must not mark the file first-party: the judge
+            # would demand a direct key for a batch with nothing to adjudicate.
+            "first_party": agent_config.first_party and bool(normalised),
+            "findings": normalised,
+        }
     except json.JSONDecodeError as e:
         logger.error(f"Agent {agent_config.name} JSON parse error: {e}")
+        if direct_required:
+            return {
+                "source": agent_config.name,
+                "findings": [],
+                "first_party": True,
+                "skipped": "api_error",
+            }
         return None
 
 
@@ -268,10 +426,35 @@ def run_broad_agents(
     changed_files = get_changed_files()
     user_message = build_user_message(diff, changed_files)
 
-    # Get API key
-    api_key = get_api_key()
-    if not api_key:
-        logger.info("[broad-agents] no API key, exiting")
+    # Get API key. A direct-only install (ANTHROPIC_DIRECT_API_KEY without a
+    # shared transport credential) must still run: every agent dispatches
+    # Anthropic-direct through it (the proxy is absent by definition), so the
+    # direct key is also the shared transport credential here. When a proxy IS
+    # configured but has no credential, the direct key must NOT stand in — a
+    # non-direct agent would send `Bearer <anthropic key>` to the proxy host,
+    # leaking a first-party credential outside the Anthropic boundary. That
+    # state proceeds with an empty shared key instead: first_party /
+    # CLIENT_AI_POLICY agents re-resolve their own direct credential inside
+    # invoke_agent, and the rest skip on their empty key.
+    api_key = get_api_key() or (
+        os.getenv("ANTHROPIC_DIRECT_API_KEY", "") if _proxy_base() is None else ""
+    )
+    if not api_key and not os.getenv("ANTHROPIC_DIRECT_API_KEY"):
+        # No credential at all: write one marker per requested agent so the
+        # judge records the missing coverage instead of a false-clean verdict.
+        logger.warning(
+            "[broad-agents] no API key — writing skip markers for all requested agents"
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for agent_name in invoke_list:
+            marker = {
+                "source": agent_name,
+                "findings": [],
+                "skipped": "no_credential",
+            }
+            (output_dir / f"{agent_name}.json").write_text(
+                json.dumps(marker, indent=2), encoding="utf-8"
+            )
         return 0
 
     # Load agent configs
@@ -300,31 +483,74 @@ def run_broad_agents(
     output_dir.mkdir(parents=True, exist_ok=True)
     results = {}
 
+    # Proxy configured but no proxy credential: non-direct agents would
+    # dispatch with `Bearer ` and fail silently (no file → judge sees clean).
+    # Skip them up front and write the same durable marker the judge's
+    # coverage accounting understands.
+    runnable = []
+    for agent in agents_to_run:
+        if (
+            not api_key
+            and not agent.first_party
+            and not os.environ.get("CLIENT_AI_POLICY")
+        ):
+            marker = {
+                "source": agent.name,
+                "findings": [],
+                "first_party": False,
+                "skipped": "no_proxy_credential",
+            }
+            (output_dir / f"{agent.name}.json").write_text(
+                json.dumps(marker, indent=2), encoding="utf-8"
+            )
+            results[agent.name] = marker
+            logger.warning(
+                f"{agent.name}: no shared credential for the configured proxy — skipping (marker written)"
+            )
+            continue
+        runnable.append(agent)
+
+    if not runnable:
+        logger.warning("[broad-agents] every agent skipped — no runnable credential")
+        return 0
+
     with ThreadPoolExecutor(max_workers=3) as executor:
         futures = {
             executor.submit(
                 invoke_agent, agent, api_key, user_message
-            ): agent.name
-            for agent in agents_to_run
+            ): agent
+            for agent in runnable
         }
 
         for future in as_completed(futures):
-            agent_name = futures[future]
+            agent = futures[future]
+            agent_name = agent.name
             try:
                 findings = future.result()
-                if findings:
-                    results[agent_name] = findings
-                    out_file = output_dir / f"{agent_name}.json"
-                    out_file.write_text(
-                        json.dumps(findings, indent=2),
-                        encoding="utf-8",
-                    )
-                    logger.info(f"Wrote {agent_name} findings to {out_file}")
             except Exception as e:
                 logger.error(f"Agent {agent_name} execution error: {e}")
+                findings = None
+            if not findings:
+                # No output at all — write the marker so the judge counts the
+                # missing coverage instead of posting a false-clean verdict.
+                # first_party is preserved: a failed security check still owes
+                # the batch its fail-closed direct adjudication.
+                findings = {
+                    "source": agent_name,
+                    "findings": [],
+                    "skipped": "api_error",
+                    "first_party": bool(agent.first_party or os.environ.get("CLIENT_AI_POLICY")),
+                }
+            results[agent_name] = findings
+            out_file = output_dir / f"{agent_name}.json"
+            out_file.write_text(
+                json.dumps(findings, indent=2),
+                encoding="utf-8",
+            )
+            logger.info(f"Wrote {agent_name} findings to {out_file}")
 
     if results:
-        logger.info(f"[broad-agents] completed {len(results)}/{len(agents_to_run)} agents")
+        logger.info(f"[broad-agents] completed {len(results)}/{len(agents_to_run)} agents (incl. skipped markers)")
         return 0
     else:
         logger.warning("[broad-agents] no findings generated")

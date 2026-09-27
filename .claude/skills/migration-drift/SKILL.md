@@ -150,10 +150,10 @@ echo "Exit code: $?"  # 0 = success, 1 = drift, 2 = error
 ## 8. Architecture Reference
 
 Full ADR-0029 rationale and enforcement surface:
-[manolii-knowledge-layer ADR-0029](https://github.com/manolii-org/manolii-knowledge-layer/blob/main/docs/decisions/ADR-0029-migration-drift-invariant.md)
+ADR-0029 (in the upstream source repo)
 
 Known-good implementations:
-- [manolii-knowledge-layer](https://github.com/manolii-org/manolii-knowledge-layer) — 3-entity setup (manolii, personal, impaktful)
+- *(Your project here)* — the upstream deployment runs a 3-entity setup (business, personal, product)
 
 ## 9. Troubleshooting
 

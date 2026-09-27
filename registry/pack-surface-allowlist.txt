@@ -2,8 +2,6 @@
 # grandfathered for the PACK-SURFACE scan (private slugs/infra ids).
 # New hits FAIL. Regenerate:
 #   python3 scripts/registry-lint.py --write-pack-allowlist
-.claude/skills/migration-drift/SKILL.md#00752d08
-.claude/skills/migration-drift/SKILL.md#ec4f6a43
 .coderabbit.yaml#8be7cf91
 .github/CODEOWNERS#0171fab3
 .github/CODEOWNERS#1471fd38
@@ -42,7 +40,6 @@ kernel/backup/PROVENANCE.md#473942c3
 kernel/backup/README.md#65549206
 kernel/backup/README.md#9b0cb1ac
 kernel/backup/README.md#eca827a6
-kernel/backup/manifest/examples/manolii.yaml#8db5b295
 litellm-product/README.md#bfee1649
 litellm-product/releases/0.4.2/release.json#faaa4f00
 litellm-product/releases/0.4.2/source/config/litellm-product-contract.json#66393959
@@ -53,8 +50,6 @@ litellm-product/releases/0.4.3/source/config/litellm-product-contract.json#66393
 litellm-product/releases/0.4.3/source/config/litellm-product-contract.json#f87c4ae6
 litellm-product/releases/0.4.3/source/config/litellm-product-source-manifest.json#fc695231
 plugin/manolii-framework/scripts/build-litellm-product-asset.py#1ee9c293
-plugin/manolii-framework/skills/migration-drift/SKILL.md#00752d08
-plugin/manolii-framework/skills/migration-drift/SKILL.md#ec4f6a43
 plugin/manolii-framework/telemetry/README.md#658b2280
 plugin/manolii-framework/telemetry/README.md#7bc54766
 prompts/05-promotion-reusables.md#0d9a76ca
@@ -64,8 +59,6 @@ prompts/05-promotion-reusables.md#8327aad6
 prompts/05-promotion-reusables.md#bad8f0e3
 prompts/05-promotion-reusables.md#d6979e0b
 registry/platform/framework/scripts/build-litellm-product-asset.py#1ee9c293
-registry/platform/framework/skills/migration-drift/SKILL.md#00752d08
-registry/platform/framework/skills/migration-drift/SKILL.md#ec4f6a43
 registry/platform/framework/telemetry/README.md#658b2280
 registry/platform/framework/telemetry/README.md#7bc54766
 renovate.json#f4154fb3
@@ -77,11 +70,6 @@ scripts/tests/test_no_withdrawn_tool_instructions.py#05c12324
 scripts/tests/test_no_withdrawn_tool_instructions.py#dffeb4b0
 telemetry/README.md#658b2280
 telemetry/README.md#7bc54766
-templates/supabase-migration-drift/.github/workflows/migration-drift.yml#ebdcaef4
-templates/supabase-migration-drift/README.md#35c2075a
-templates/supabase-migration-drift/README.md#3fb355d6
-templates/supabase-migration-drift/README.md#426408b3
-templates/supabase-migration-drift/README.md#90a5f45d
 tests/test_autofix_reusable_yaml.py#ab0e4575
 tests/test_renovate_config.py#e89e494d
 tests/test_run_judge_review_lookup.py#b3e54a7c

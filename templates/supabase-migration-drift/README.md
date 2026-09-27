@@ -8,7 +8,7 @@ Supabase projects have no built-in `schema_migrations` tracking table. When you 
 
 **This template solves that** by embedding `@assert-applied:` predicates in each migration and automatically verifying them against your target Supabase projects via the Management API.
 
-See [ADR-0029](https://github.com/manolii-org/manolii-knowledge-layer/blob/main/docs/decisions/ADR-0029-migration-drift-invariant.md) (in the source repo) for the full reasoning.
+See ADR-0029 `docs/decisions/ADR-0029-migration-drift-invariant.md` (in your source repo) for the full reasoning.
 
 ## Setup (3 Steps)
 
@@ -33,7 +33,7 @@ Create a repo variable `MIGRATION_DRIFT_PROJECTS` in your GitHub repository sett
 
 **Example:**
 ```
-prod:wccgdisnrbvstnnzppld,staging:xyz789
+prod:abcdefghijklmnopqrst,staging:xyz789
 ```
 
 Find your Supabase project refs in the Supabase console (Settings → General).
@@ -108,7 +108,7 @@ CREATE TABLE public.my_new_table (
 
 ## Known-Good Consumers
 
-- **[manolii-knowledge-layer](https://github.com/manolii-org/manolii-knowledge-layer)** — Source repo; 3-entity setup (manolii, personal, impaktful)
+- **[your-knowledge-layer](https://github.com/your-org/your-repo)** — Source repo; 3-entity setup (e.g. business, personal, product)
 - *(Your project here)* — Add yours after successful adoption
 
 ## Troubleshooting
@@ -139,7 +139,7 @@ Test the drift check locally before relying on CI:
 
 ```bash
 export SUPABASE_ACCESS_TOKEN="<your-pat>"
-export MIGRATION_DRIFT_PROJECTS="prod:wccgdisnrbvstnnzppld"
+export MIGRATION_DRIFT_PROJECTS="prod:abcdefghijklmnopqrst"
 
 python3 scripts/check-migration-drift-mgmt.py \
   --projects "$MIGRATION_DRIFT_PROJECTS" \
@@ -161,5 +161,5 @@ Exit codes:
 
 ## Further Reading
 
-- [ADR-0029: Migration drift as an ongoing invariant](https://github.com/manolii-org/manolii-knowledge-layer/blob/main/docs/decisions/ADR-0029-migration-drift-invariant.md) — Full architectural reasoning
-- [KL Migration Workflow](https://github.com/manolii-org/manolii-knowledge-layer/blob/main/.github/workflows/kl-migration-drift.yml) — Live production example
+- ADR-0029 `docs/decisions/ADR-0029-migration-drift-invariant.md` (in your source repo) — Full architectural reasoning
+- `.github/workflows/kl-migration-drift.yml` (in your source repo) — Live production example

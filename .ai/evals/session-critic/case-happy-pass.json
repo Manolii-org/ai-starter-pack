@@ -1,0 +1,7 @@
+{
+  "id": "case-happy-pass",
+  "tags": ["happy_path"],
+  "artifact": "def add(a, b):\n    \"\"\"Add two numbers.\"\"\"\n    return a + b\n\ndef test_add():\n    assert add(2, 3) == 5\n    assert add(-1, 1) == 0",
+  "expect": "PASS",
+  "description": "Correct Python function with tests"
+}

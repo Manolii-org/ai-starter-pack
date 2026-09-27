@@ -18,9 +18,9 @@ This document defines how AI agents interact with this repository.
 | **review-internal** | Repo files (read) | Code review for own-repo PRs — correctness + OWASP Top 10 (haiku) |
 | **architecture-impact** | Codebase (read) | Downstream caller count, god-node detection, breaking change risk (sonnet) |
 | **ci-fixer** | CI logs + diff (read-only) | CI failure diagnosis and scoped fix proposal — propose-only (sonnet) |
-| **security-deep-dive** | Codebase (read) | SAST finding triage with true-positive likelihood scoring (claude-sonnet-4-6) |
+| **security-deep-dive** | Codebase (read) | SAST finding triage with true-positive likelihood scoring (sonnet) |
 | **systems-consistency** | Deploy surface (read) | Cross-file deployment invariant checks (sonnet) |
-| **judge** | Candidates + GitHub | Final PR review filter — 3-gate, only agent that posts to GitHub (sonnet) |
+| **judge** | Candidates + GitHub | Final PR review filter — 4-gate, only agent that posts to GitHub (sonnet) |
 | **orchestrator** | Scoped per task | Multi-step DAG coordinator for parallel sub-agent tasks (sonnet) |
 
 ## Tool Routing

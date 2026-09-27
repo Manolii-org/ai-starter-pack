@@ -17,6 +17,13 @@ if echo "$STAGED" | grep -qE '(\.claude/agents/.*\.md|\.claude/model-routing\.js
     python3 "$(git rev-parse --show-toplevel)/scripts/lint-agent-routing.py"
 fi
 
+# Retired-tier guard: `anthropic_only` must never re-enter active policy
+# files. Runs whenever a scanned-surface file is staged.
+if echo "$STAGED" | grep -qE '(^|/)(CLAUDE\.md|AGENTS\.md)$|^docs/.*\.md|^\.ai/pr-standards\.yaml|^schemas/.*\.json|^\.cursor/rules/.*\.mdc|^\.claude/.*\.md|^\.github/workflows/.*\.yml'; then
+    echo "[pre-commit] Checking for retired anthropic_only references..."
+    python3 "$(git rev-parse --show-toplevel)/scripts/check-no-anthropic-only.py"
+fi
+
 # Rule 7 — subagent dispatch model= scan. Runs whenever any staged file could
 # hold an Agent(subagent_type=...) call. Uses --dispatch-only so a pre-existing
 # frontmatter violation cannot block a source-only commit.

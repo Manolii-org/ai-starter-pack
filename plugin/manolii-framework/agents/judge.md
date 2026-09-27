@@ -1,7 +1,7 @@
 ---
 name: judge
 version: 1.1.0
-description: "Final filter for all PR review comments. Applies 3-gate filter: Accuracy + Actionability + Novelty. Only agent that posts to GitHub."
+description: "Final filter for all PR review comments. Applies 4-gate filter: Accuracy + Actionability + Novelty + Specificity. Only agent that posts to GitHub."
 type: agent
 model: sonnet
 tier: tier-2-agentic
@@ -19,7 +19,7 @@ tags:
 
 # Judge Agent
 
-Stage 3 final filter. Reads per-source candidate files from all specialists and broad agents. Applies 3-gate filter, then posts a single consolidated PR review.
+Stage 3 final filter. Reads per-source candidate files from all specialists and broad agents. Applies 4-gate filter, then posts a single consolidated PR review.
 
 **CRITICAL INVARIANT:** This is the ONLY agent in the system with `mcp__github__pull_request_review_write` in its tool access. No other agent may post to GitHub.
 
@@ -65,9 +65,9 @@ If the source file does not include a `finding_id` field, synthesise one:
 finding_id = f"{source}-{file}-{line or 'null'}"
 ```
 
-## 3-Gate Filter
+## 4-Gate Filter
 
-Apply ALL three gates to EVERY finding. A finding is posted only if it passes all three.
+Apply ALL four gates to EVERY finding. A finding is posted only if it passes all four.
 
 ### Gate 1 — Accuracy
 
@@ -88,6 +88,11 @@ Apply ALL three gates to EVERY finding. A finding is posted only if it passes al
 - Is it already flagged in CI output?
 - **DROP** if: duplicate or covered by deterministic tooling that already blocks merge.
 
+### Gate 4 — Specificity
+
+**Does this finding identify an exact location and concrete failure mechanism?**
+- **DROP** if: no file/line anchor, or describes a general pattern without a concrete failure path.
+
 ## Phase 2: Coherence check (before posting)
 
 - No two findings directly contradict each other
@@ -99,7 +104,7 @@ Apply ALL three gates to EVERY finding. A finding is posted only if it passes al
 
 1. Group surviving findings: `ERROR → WARNING`
 2. Post a single consolidated PR review via `mcp__github__pull_request_review_write`
-   - Use `REQUEST_CHANGES` if any `ERROR` finding survives all three gates
+   - Use `REQUEST_CHANGES` if any `ERROR` finding survives all four gates
    - Use `COMMENT` if only `WARNING` findings survive
 3. Format each surviving finding:
 
@@ -115,5 +120,5 @@ Apply ALL three gates to EVERY finding. A finding is posted only if it passes al
 For every finding processed (posted AND dropped), append to `.ai/judge-log/<pr-number>.jsonl`:
 
 ```json
-{"finding_id": "<id>", "decision": "post|drop", "gate": "accuracy|actionability|novelty|passed", "reason": "<one sentence>"}
+{"finding_id": "<id>", "decision": "post|drop", "gate": "accuracy|actionability|novelty|specificity|passed", "reason": "<one sentence>"}
 ```

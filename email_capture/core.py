@@ -24,6 +24,7 @@ ERRORS = {
     "CONFIG_INVALID", "CAPABILITY_UNSUPPORTED", "CAPTURE_INFRA_UNAVAILABLE",
     "MESSAGE_TIMEOUT", "MESSAGE_AMBIGUOUS", "MESSAGE_REPLAYED",
     "ASSERTION_FAILED", "CLEANUP_INCOMPLETE", "AUTHORIZATION_DENIED",
+    "ALLOCATION_RETIRED",
 }
 _SCOPE_KEYS = ("entity", "repository", "environment", "run_id")
 MAX_ATTACHMENTS = 20
@@ -323,7 +324,7 @@ class HttpBackend:
         self.request_timeout = 10.0
         self._opener = urllib.request.build_opener(_NoRedirect())
 
-    def _request(self, path: str, method: str = "GET", payload: Any = None) -> Any:
+    def _request(self, path: str, method: str = "GET", payload: Any = None, *, allow_404: bool = False) -> Any:
         """Perform one bounded request and classify transport failures separately."""
         data = None if payload is None else json.dumps(payload).encode()
         headers = {"Content-Type": "application/json"} if data is not None else {}
@@ -339,6 +340,12 @@ class HttpBackend:
         except CaptureError:
             raise
         except urllib.error.HTTPError as error:
+            if error.code == 404 and method == "DELETE" and allow_404:
+                # Single-resource delete raced a concurrent release — the
+                # desired end state already holds. Collection-level deletes
+                # (e.g. Mailpit /api/v1/messages) must NOT take this path:
+                # a 404 there is an unsupported/failed endpoint, not a race.
+                return None
             raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", f"receiver HTTP {error.code}") from None
         except (OSError, urllib.error.URLError) as error:
             raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", type(error).__name__) from None
@@ -423,16 +430,36 @@ class HttpBackend:
     def purge(self, allocation: dict[str, Any]) -> None:
         """Delete only messages selected by the allocation recipient."""
         summaries = self._matching_summaries(allocation)
+        recipient = allocation["recipient"].lower()
         if self.profile.backend == "mailpit":
-            identifiers = [_message_id(row) for row in summaries]
+            # A message addressed to several active recipients is shared state:
+            # releasing one allocation must not destroy it for the others.
+            identifiers = []
+            for row in summaries:
+                requested_id = _message_id(row)
+                detail = self._request(
+                    f"/api/v1/message/{urllib.parse.quote(requested_id, safe='')}"
+                )
+                if not isinstance(detail, dict):
+                    raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "receiver detail has invalid shape")
+                _require_envelope_fields_well_formed(detail)
+                if not _co_owners_still_live(detail, recipient):
+                    identifiers.append(requested_id)
             if identifiers:
                 self._request("/api/v1/messages", "DELETE", {"IDs": identifiers})
             return
         mailbox = urllib.parse.quote(allocation["recipient"].split("@", 1)[0], safe="")
         for row in summaries:
+            if self.profile.backend == "maildev":
+                detail = self._request(f"/email/{urllib.parse.quote(_message_id(row), safe='')}")
+                if not isinstance(detail, dict):
+                    raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "receiver detail has invalid shape")
+                _require_envelope_fields_well_formed(detail)
+                if _co_owners_still_live(detail, recipient):
+                    continue
             identifier = urllib.parse.quote(_message_id(row), safe="")
             path = f"/email/{identifier}" if self.profile.backend == "maildev" else f"/api/v1/mailbox/{mailbox}/{identifier}"
-            self._request(path, "DELETE")
+            self._request(path, "DELETE", allow_404=True)
 
 
 class HostedHttpBackend:
@@ -449,7 +476,7 @@ class HostedHttpBackend:
             raise CaptureError("AUTHORIZATION_DENIED", "hosted token is missing or malformed")
         return token
 
-    def _request(self, path: str, method: str = "GET") -> Any:
+    def _request(self, path: str, method: str = "GET", *, allow_404: bool = False) -> Any:
         """Perform one bounded authenticated request without following redirects."""
         headers = {
             "Accept": "application/json",
@@ -473,6 +500,9 @@ class HostedHttpBackend:
                 pass
             except OSError:
                 pass
+            if error.code == 404 and method == "DELETE" and allow_404:
+                # Concurrent releases are idempotent on single-message deletes.
+                return None
             if error.code in {401, 403}:
                 raise CaptureError("AUTHORIZATION_DENIED", f"hosted HTTP {error.code}") from None
             raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", f"hosted HTTP {error.code}") from None
@@ -564,9 +594,9 @@ class HostedHttpBackend:
             _require_envelope_fields_well_formed(detail)
             if not _summary_contains_recipient(detail, recipient):
                 raise CaptureError("AUTHORIZATION_DENIED", "delete recipient is outside allocation")
-            if not _allocation_exclusively_owns(detail, recipient):
+            if _co_owners_still_live(detail, recipient):
                 continue
-            self._request(f"/messages/{identifier}", "DELETE")
+            self._request(f"/messages/{identifier}", "DELETE", allow_404=True)
 
 
 class MemoryBackend:
@@ -595,7 +625,15 @@ class MemoryBackend:
 
     def purge(self, allocation: dict[str, Any]) -> None:
         recipient = allocation["recipient"].lower()
-        atomic_write_json(self.path, [row for row in self._read() if not _summary_contains_recipient(row, recipient)])
+        atomic_write_json(
+            self.path,
+            [
+                row
+                for row in self._read()
+                if not _summary_contains_recipient(row, recipient)
+                or _co_owners_still_live(row, recipient)
+            ],
+        )
 
     def capabilities(self) -> dict[str, Any]:
         return {"schema_version": VERSION, "backend": "memory", "allocation_scope": "recipient", "cursor": "received_at_id", "mime": True, "attachments": True, "attachment_size": True, "purge_scope": "allocation"}
@@ -734,9 +772,39 @@ def _envelope_addresses(row: dict[str, Any]) -> list[str]:
     return unique
 
 
-def _allocation_exclusively_owns(row: dict[str, Any], recipient: str) -> bool:
-    addresses = _envelope_addresses(row)
-    return bool(addresses) and all(address == recipient for address in addresses)
+def _co_owners_still_live(row: dict[str, Any], recipient: str) -> bool:
+    """True while another address on this message holds a live allocation.
+
+    Purge uses this instead of exclusive-ownership: a shared message must
+    survive intermediate releases but be deleted when its last live owner
+    releases, otherwise the receiver leaks it forever. Fails closed — an
+    unreadable registry keeps the message rather than risking a co-owner's
+    capture.
+    """
+    others = {a for a in _envelope_addresses(row) if a != recipient}
+    if not others:
+        present, value = _recipient_field_value(row)
+        if present:
+            others = {a for a in _parsed_addresses(value) if a != recipient}
+    if not others:
+        return False
+    try:
+        records = _read_registry()
+    except CaptureError:
+        return True
+    now = time.time()
+    for record in records.values():
+        if not isinstance(record, dict):
+            continue
+        # pending_purge records document an unfinished release — their owner
+        # is being retired, so they are not live co-owners. Released
+        # tombstones are fully retired: their mail is already purged.
+        if record.get("pending_purge") or record.get("released"):
+            continue
+        other = str(record.get("recipient", "")).lower()
+        if other in others and float(record.get("expires_at", 0) or 0) > now:
+            return True
+    return False
 
 
 def _summary_contains_recipient(row: dict[str, Any], recipient: str) -> bool:
@@ -912,10 +980,36 @@ def allocate(request: dict[str, Any], profile: Profile) -> dict[str, Any]:
     with _registry_lock():
         records = _read_registry()
         existing = records.get(scope_hash)
-        if isinstance(existing, dict) and float(existing.get("expires_at", 0)) > time.time():
+        if (
+            isinstance(existing, dict)
+            and float(existing.get("expires_at", 0)) > time.time()
+            and not existing.get("pending_purge")
+            and not existing.get("released")
+        ):
+            # A pending_purge record is mid-release: its mailbox is about to be
+            # purged and its registry entry removed, so reusing it would hand the
+            # caller a recipient that dies under it. Fall through to a fresh
+            # allocation — the new allocation_id means the in-flight release
+            # cannot retire or purge this replacement.
             return existing
         now = time.time()
-        records = {key: value for key, value in records.items() if float(value.get("expires_at", 0)) > now}
+        # Expired records are retained as tombstones: their mailboxes may still
+        # hold messages a later `release` must be able to purge. Reuse is still
+        # excluded by the expires_at check above; tombstones are swept only
+        # after a 30-day horizon, by which time the backend has discarded the
+        # mailbox too.
+        records = {
+            key: value
+            for key, value in records.items()
+            if float(value.get("expires_at", 0)) + 30 * 86400 > now
+        }
+        # Re-key a displaced record under tombstone:{id} instead of dropping it:
+        # an expired or pending_purge predecessor still pins a mailbox its
+        # `release` must be able to purge, which requires `_verified_allocation`
+        # to find it by allocation_id — writing over scope_hash would strand it.
+        displaced = records.get(scope_hash)
+        if isinstance(displaced, dict) and displaced.get("allocation_id"):
+            records[f"tombstone:{displaced['allocation_id']}"] = displaced
         digest = secrets.token_hex(16)
         result = {
             "schema_version": VERSION,
@@ -931,13 +1025,60 @@ def allocate(request: dict[str, Any], profile: Profile) -> dict[str, Any]:
         return result
 
 
+def advance_registry_cursor(allocation_id: str, cursor: str) -> None:
+    """Persist the await watermark on the registry record — the registry, not
+    the caller's payload, is the authority on how far a mailbox has been read."""
+    with _registry_lock():
+        records = _read_registry()
+        proposed = _canonical_cursor(cursor)
+        for record in records.values():
+            if isinstance(record, dict) and record.get("allocation_id") == allocation_id:
+                # Never rewind: a slower concurrent await must not overwrite a
+                # newer watermark or its messages would be redelivered.
+                current = _canonical_cursor(record.get("cursor") or "0:")
+                if current == "0:" or proposed >= current:
+                    record["cursor"] = cursor
+        atomic_write_json(_registry_path(), records)
+
+
 def release_allocation(selected_backend: Backend, allocation: dict[str, Any]) -> None:
-    """Idempotently purge messages and retire the allocation registry entry."""
+    """Idempotently purge messages and retire the allocation registry entry.
+
+    The record is marked ``pending_purge`` BEFORE the purge so the purge's
+    co-owner check reads the releasing record as already-retired: two
+    concurrent releases then deterministically leave deletion to whichever
+    purge runs last, instead of both seeing the other's record live and
+    skipping deletion forever. A failed purge leaves the durable pending
+    marker (excluded from co-owner liveness) so a retried release can finish
+    the cleanup instead of orphaning the captured messages.
+
+    After a successful purge the record becomes a ``released`` tombstone
+    rather than disappearing: a retried ``release`` can then prove the purge
+    already completed (verifiable retired record), while an allocation_id
+    that never existed stays denied — and a forged payload cannot borrow an
+    unknown id to purge someone else's mailbox. The 30-day expiry sweep in
+    ``allocate`` reclaims tombstones.
+    """
+    with _registry_lock():
+        records = _read_registry()
+        for record in records.values():
+            if (
+                isinstance(record, dict)
+                and record.get("allocation_id") == allocation.get("allocation_id")
+            ):
+                record["pending_purge"] = True
+        atomic_write_json(_registry_path(), records)
     selected_backend.purge(allocation)
     with _registry_lock():
         records = _read_registry()
-        retained = {key: value for key, value in records.items() if value.get("allocation_id") != allocation.get("allocation_id")}
-        atomic_write_json(_registry_path(), retained)
+        for record in records.values():
+            if (
+                isinstance(record, dict)
+                and record.get("allocation_id") == allocation.get("allocation_id")
+            ):
+                record["released"] = True
+                record.pop("pending_purge", None)
+        atomic_write_json(_registry_path(), records)
 
 
 def await_messages(selected_backend: Backend, allocation: dict[str, Any], timeout: float = 30, count: int = 1, not_before: str | None = None) -> tuple[list[dict[str, Any]], str]:

@@ -32,18 +32,36 @@ for arg in "$@"; do
 done
 [ -n "$APP" ] || { echo "ERROR: --app is required" >&2; exit 1; }
 
-# app -> Doppler project holding the R2 credentials (same mapping as
-# backup-pgdump.yml export-neon-apps matrix r2_doppler_project)
-case "$APP" in
-  manolii-platform|manolii-finance|cryptotrading) R2_DOPPLER_PROJECT="manolii-knowledge-layer" ;;
-  lead-converter) R2_DOPPLER_PROJECT="personal-knowledge-layer" ;;
-  impaktful)      R2_DOPPLER_PROJECT="impaktful-knowledge-layer" ;;
-  *) echo "ERROR: unknown app '$APP' (not in the backup-pgdump.yml Neon matrix)" >&2; exit 1 ;;
-esac
+# app -> Doppler project holding the R2 credentials. Deployment config, not
+# script data: RESTORE_DRILL_APP_PROJECTS="app-a=project-a,app-b=project-b"
+# (must mirror the export matrix's r2_doppler_project column).
+if ! [[ "$APP" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+  echo "ERROR: --app must be lowercase alnum+dash" >&2; exit 1
+fi
+R2_DOPPLER_PROJECT=""
+IFS=',' read -ra _pairs <<< "${RESTORE_DRILL_APP_PROJECTS:-}"
+for _pair in "${_pairs[@]}"; do
+  if [ "${_pair%%=*}" = "$APP" ]; then
+    R2_DOPPLER_PROJECT="${_pair#*=}"; break
+  fi
+done
+
+# When the operator HAS declared a mapping, an unmapped app is a typo — fail
+# fast even in dry-run. With no mapping declared, dry-run proceeds on a
+# placeholder so test/CI previews work without deployment config.
+if [ -n "${RESTORE_DRILL_APP_PROJECTS:-}" ] && [ -z "$R2_DOPPLER_PROJECT" ]; then
+  echo "ERROR: no Doppler project mapped for app '$APP' — set RESTORE_DRILL_APP_PROJECTS=<app>=<project>,..." >&2
+  exit 1
+fi
 
 if [ "$DRY_RUN" = "true" ]; then
-  echo "[dry-run] Steps: fetch R2 creds (${R2_DOPPLER_PROJECT}) + Neon creds (master/prd) => create scratch branch => download latest pgdump/${APP}/ dump => decrypt => pg_restore => generic verification => write JSON => delete branch"
+  echo "[dry-run] Steps: fetch R2 creds (${R2_DOPPLER_PROJECT:-<app project>}) + Neon creds (master/prd) => create scratch branch => download latest pgdump/${APP}/ dump => decrypt => pg_restore => generic verification => write JSON => delete branch"
   exit 0
+fi
+
+if [ -z "$R2_DOPPLER_PROJECT" ]; then
+  echo "ERROR: no Doppler project mapped for app '$APP' — set RESTORE_DRILL_APP_PROJECTS=<app>=<project>,..." >&2
+  exit 1
 fi
 
 [ -n "${DOPPLER_TOKEN:-}" ] || { echo "ERROR: DOPPLER_TOKEN is required" >&2; exit 1; }
@@ -88,6 +106,13 @@ NEON_PROJECT_ID=$(jq -r '.RESTORE_DRILL_NEON_PROJECT_ID // empty' <<<"$MASTER_SE
 for var in NEON_API_KEY NEON_PROJECT_ID; do
   [ -n "${!var}" ] || { echo "ERROR: ${var} not found in Doppler master/prd" >&2; exit 1; }
 done
+
+backup_assert_self_hosted_backup_runner || exit 1
+
+backup_mask_secret "${BACKUP_CF_API_TOKEN}"
+backup_mask_secret "${BACKUP_CF_TOKEN_ID}"
+backup_mask_secret "${BACKUP_ENCRYPTION_KEY}"
+backup_mask_secret "${NEON_API_KEY}"
 
 echo "[3/7] Creating Neon restore-drill branch"
 BRANCH_NAME="restore-drill-app-${APP}-$(date +%s)"
@@ -137,10 +162,12 @@ if [ -z "$NEON_BRANCH_DSN" ]; then
     -H "Authorization: Bearer ${NEON_API_KEY}" | jq -r '.uri // empty') || true
 fi
 [ -n "$NEON_BRANCH_DSN" ] || { echo "ERROR: Could not resolve Neon branch DSN" >&2; exit 1; }
+backup_mask_secret "${NEON_BRANCH_DSN}"
 
 echo "[4/7] Looking for latest ${APP} dump in R2: ${BACKUP_R2_BUCKET}/pgdump/${APP}/"
 R2_ENDPOINT="https://${BACKUP_CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
 R2_SECRET="$(backup_r2_s3_secret_access_key "$BACKUP_CF_API_TOKEN")"
+backup_mask_secret "${R2_SECRET}"
 LATEST_KEY=$(AWS_ACCESS_KEY_ID="$BACKUP_CF_TOKEN_ID" AWS_SECRET_ACCESS_KEY="$R2_SECRET" \
   aws s3 ls --endpoint-url "$R2_ENDPOINT" "s3://${BACKUP_R2_BUCKET}/pgdump/${APP}/" \
   | grep -E "backup-${APP}-neon-.*\.(dump\.enc|dump)$" | sort | tail -1 | awk '{print $NF}' || true)

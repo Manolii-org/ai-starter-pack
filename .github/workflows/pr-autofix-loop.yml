@@ -209,6 +209,32 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Resolve Anthropic credential
+        id: cred
+        if: steps.ref.outputs.skip != 'true' && steps.pr.outputs.skip != 'true' && steps.budget.outputs.skip != 'true'
+        env:
+          BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
+          DIRECT_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PROXY_KEY: ${{ secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY }}
+        run: |
+          # Hostname comparison must match run-*.py::_endpoint — a proxy key
+          # must never reach api.anthropic.com (port/path/case variants).
+          host=$(python3 -c 'import os, urllib.parse; print((urllib.parse.urlparse(os.environ["BASE_URL"].rstrip("/")).hostname or "").rstrip("."))')
+          if [ -n "$BASE_URL" ] && [ "$host" != "api.anthropic.com" ]; then
+            KEY="$PROXY_KEY"
+            SOURCE=proxy
+          else
+            KEY="$DIRECT_KEY"
+            SOURCE=direct
+          fi
+          if [ -z "$KEY" ]; then
+            echo "::error::No Anthropic credential resolved — set ANTHROPIC_API_KEY or the proxy secret (LITELLM_MASTER_KEY/LLM_API_KEY)"
+            exit 1
+          fi
+          # Never emit the key itself — a masked value cannot survive
+          # GITHUB_OUTPUT, so downstream steps re-select the secret by name.
+          echo "key_source=$SOURCE" >> "$GITHUB_OUTPUT"
+
       - name: Run autofix with Claude Code
         if: steps.ref.outputs.skip != 'true' && steps.pr.outputs.skip != 'true' && steps.budget.outputs.skip != 'true'
         env:
@@ -216,9 +242,12 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           WR_NAME: ${{ steps.pr.outputs.trigger_workflow }}
           WR_URL: ${{ steps.pr.outputs.trigger_run_url }}
+          # Proxy-aware key selection above only applies when a proxy endpoint is
+          # configured; forward it so the LiteLLM key is never sent to Anthropic.
+          ANTHROPIC_BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
         uses: anthropics/claude-code-action@9db594c7a0e82298c121c18b7f08aa1579ce7341 # v1.0.185
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          anthropic_api_key: ${{ steps.cred.outputs.key_source == 'proxy' && (secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY) || secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           direct_prompt: |
             You are an autonomous PR autofix agent. Make minimal targeted fixes.

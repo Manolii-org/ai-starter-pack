@@ -247,11 +247,11 @@ def test_feature_flags_gate_optional_surfaces(default_render):
 @pytest.mark.parametrize(
     ("flags", "expected"),
     [
-        ({}, {"Hooks": 5, "Commands": 45, "Skills": 24, "Agents": 27,
-              "Scripts": 44, "Husky": 3, "CI": 34, "Docs": 18}),
+        ({}, {"Hooks": 5, "Commands": 50, "Skills": 30, "Agents": 27,
+              "Scripts": 48, "Husky": 3, "CI": 34, "Docs": 21}),
         ({flag: "true" for flag in FEATURE_FLAGS},
-         {"Hooks": 5, "Commands": 48, "Skills": 28, "Agents": 28,
-              "Scripts": 44, "Husky": 3, "CI": 34, "Docs": 20}),
+         {"Hooks": 5, "Commands": 53, "Skills": 34, "Agents": 28,
+              "Scripts": 48, "Husky": 3, "CI": 34, "Docs": 23}),
     ],
 )
 def test_rendered_readme_counts_match_rendered_tree(flags, expected):
@@ -503,7 +503,7 @@ def test_pack_components_flags(tmp_path):
 
     # GitHub secrets
     github_secrets = required_secrets.get("github", [])
-    expected_github = {"ANTHROPIC_API_KEY", "DOPPLER_SERVICE_TOKEN_LITELLM", "FLY_API_TOKEN", "LITELLM_MASTER_KEY"}
+    expected_github = {"DOPPLER_SERVICE_TOKEN_LITELLM", "FLY_API_TOKEN", "LITELLM_MASTER_KEY"}  # ANTHROPIC_API_KEY not required on the proxy plane
     assert set(github_secrets) == expected_github, (
         f"required_secrets.github: expected {expected_github}, got {set(github_secrets)}"
     )

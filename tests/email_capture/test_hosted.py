@@ -328,6 +328,9 @@ class HostedCaptureTests(unittest.TestCase):
             adapter.list({"recipient": HostedHandler.recipient})
 
     def test_purge_skips_shared_multi_recipient_messages(self):
+        # Shared messages survive while a co-recipient's allocation is live,
+        # then delete on last-owner release (expired/absent co-owner records
+        # no longer shield the message).
         adapter = HostedHttpBackend(Profile("hosted", "hosted", self.endpoint, "test"))
         shared = [HostedHandler.recipient, "other@capture.test"]
         HostedHandler.list_payload = {"messages": [{"id": "h1", "to": shared, "received_at": "2026-08-25T00:00:00Z"}]}
@@ -343,8 +346,15 @@ class HostedCaptureTests(unittest.TestCase):
             "headers": {},
             "attachments": [],
         }
-        adapter.purge({"recipient": HostedHandler.recipient})
-        self.assertEqual(HostedHandler.deleted, [])
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = Path(tmp) / "allocations.json"
+            os.environ["EMAIL_CAPTURE_ALLOCATION_REGISTRY"] = str(registry)
+            registry.write_text(json.dumps({"k": {"recipient": "other@capture.test", "expires_at": time.time() + 600}}))
+            adapter.purge({"recipient": HostedHandler.recipient})
+            self.assertEqual(HostedHandler.deleted, [])
+            registry.write_text(json.dumps({"k": {"recipient": "other@capture.test", "expires_at": time.time() - 1}}))
+            adapter.purge({"recipient": HostedHandler.recipient})
+            self.assertEqual(HostedHandler.deleted, ["/messages/h1"])
 
     def test_hosted_schema_rejects_production_and_empty_endpoint(self):
         schema = json.loads((Path(__file__).resolve().parents[2] / "schemas/email-capture/profile.schema.json").read_text())

@@ -18,6 +18,7 @@ import pathlib
 import re
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Optional
 
@@ -27,6 +28,66 @@ MANIFEST_FILE = REPO_ROOT / ".ai/candidates/manifest.json"
 
 _ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 _ANTHROPIC_API_VERSION = "2023-06-01"
+_ANTHROPIC_HOST = "api.anthropic.com"
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse redirects: a 3xx would re-send Authorization/x-api-key to the target."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _urlopen_https(req: urllib.request.Request, *, timeout: int, host: str):
+    """Open one trusted HTTPS origin without following redirects."""
+    parsed = urllib.parse.urlparse(req.full_url)
+    if parsed.scheme != "https" or parsed.hostname != host:
+        raise ValueError("refusing non-HTTPS or unexpected request host")
+    opener = urllib.request.build_opener(_NoRedirectHandler())
+    return opener.open(req, timeout=timeout)  # nosec B310
+
+
+
+def _endpoint(direct: bool = False) -> tuple[str, str, bool]:
+    """Resolve (api_key, url, proxied).
+
+    Transport token: ANTHROPIC_API_KEY when calling Anthropic directly. When
+    LITELLM_PROXY_URL or ANTHROPIC_BASE_URL points at a non-Anthropic host the
+    request goes through that proxy and the key may come from LLM_API_KEY,
+    LITELLM_MASTER_KEY, or ANTHROPIC_API_KEY — no sk-ant credential required.
+
+    direct=True forces the Anthropic endpoint regardless of proxy config — used
+    by `first_party` skills, where the eligibility matrix keeps the task class
+    (security review) on first-party models. A proxy credential must never be
+    sent there, so only a real Anthropic key authenticates.
+    """
+    proxy_base = (os.environ.get("LITELLM_PROXY_URL") or os.environ.get("ANTHROPIC_BASE_URL") or "").rstrip("/")
+    proxy_configured = bool(proxy_base) and (urllib.parse.urlparse(proxy_base).hostname or "").lower().rstrip(".") != _ANTHROPIC_HOST
+    if direct:
+        # Under a configured proxy ANTHROPIC_API_KEY holds the LiteLLM
+        # credential — it must never be sent to api.anthropic.com. Only the
+        # dedicated direct key authenticates first-party calls there.
+        key = os.environ.get("ANTHROPIC_DIRECT_API_KEY") or (
+            os.environ.get("ANTHROPIC_API_KEY", "") if not proxy_configured else ""
+        )
+        return key, _ANTHROPIC_API_URL, False
+    if proxy_configured:
+        key = (
+            os.environ.get("LLM_API_KEY")
+            or os.environ.get("LITELLM_MASTER_KEY")
+            or os.environ.get("ANTHROPIC_API_KEY")
+        )
+        return key or "", proxy_base + "/v1/messages", True
+    key = os.environ.get("ANTHROPIC_DIRECT_API_KEY") or os.environ.get("ANTHROPIC_API_KEY", "")
+    return key, _ANTHROPIC_API_URL, False
+
+
+# Dated claude-* IDs only exist on Anthropic's API; a LiteLLM-style proxy serves
+# tier aliases instead. Only applied when proxied.
+_PROXY_MODEL_MAP = {
+    "claude-haiku-4-5-20251001": "haiku",
+    "claude-sonnet-4-6": "sonnet",
+}
 
 # Paths carrying outsized merge risk — surfaced first in truncated inventories
 # so a migration or workflow edit can never fall off the 500-path cap.
@@ -65,11 +126,19 @@ def _load_skill(skill_name: str) -> tuple[dict, str]:
     return frontmatter, system_prompt
 
 
-def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int) -> str:
-    """Call Anthropic Messages API directly via urllib (no SDK dependency)."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int, *, first_party: bool = False) -> str:
+    """Call the Messages API via urllib (Anthropic direct or LiteLLM proxy)."""
+    api_key, api_url, proxied = _endpoint(direct=first_party)
     if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY not set")
+        if first_party:
+            raise RuntimeError(
+                "first_party skill needs ANTHROPIC_DIRECT_API_KEY (or "
+                "ANTHROPIC_API_KEY with no proxy) — the proxy credential "
+                "cannot authenticate Anthropic-direct"
+            )
+        raise RuntimeError("no API credential set")
+    if proxied:
+        model = _PROXY_MODEL_MAP.get(model, model)
 
     payload = json.dumps({
         "model": model,
@@ -84,20 +153,24 @@ def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int
         "messages": [{"role": "user", "content": user_message}],
     }).encode("utf-8")
 
+    headers = {
+        "anthropic-version": _ANTHROPIC_API_VERSION,
+        "anthropic-beta": "prompt-caching-2024-07-31",
+        "Content-Type": "application/json",
+    }
+    if proxied:
+        headers["Authorization"] = f"Bearer {api_key.removeprefix('Bearer ')}"
+    else:
+        headers["x-api-key"] = api_key
     req = urllib.request.Request(
-        _ANTHROPIC_API_URL,
+        api_url,
         data=payload,
-        headers={
-            "x-api-key": api_key,
-            "anthropic-version": _ANTHROPIC_API_VERSION,
-            "anthropic-beta": "prompt-caching-2024-07-31",
-            "Content-Type": "application/json",
-        },
+        headers=headers,
         method="POST",
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=_API_TIMEOUT) as resp:  # nosec B310
+        with _urlopen_https(req, timeout=_API_TIMEOUT, host=urllib.parse.urlparse(api_url).hostname or "") as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         error_body = e.read().decode("utf-8", errors="replace")
@@ -119,6 +192,35 @@ def _parse_findings(raw: str) -> dict:
     return json.loads(text)
 
 
+def _load_skill_is_first_party(skill_name: str) -> bool:
+    """Best-effort first_party read on a skill that failed to load.
+
+    A skill the classifier invoked but that cannot be parsed still represents
+    missing coverage — fail closed by treating it as first-party when the raw
+    frontmatter cannot be read or does not answer the question.
+    """
+    try:
+        text = (SKILLS_DIR / skill_name / "SKILL.md").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return True
+    match = re.search(r"^first_party:\s*(\S+)", text, re.M)
+    return match.group(1).lower() == "true" if match else True
+
+
+def _write_skip_marker(skill_name: str, output_dir: pathlib.Path, reason: str) -> None:
+    """Durable first-party skip marker — lets the judge fail closed instead of
+    adjudicating the rest of the batch without the required direct leg."""
+    output_file = output_dir / f"{skill_name}.json"
+    output_file.write_text(
+        json.dumps(
+            {"source": skill_name, "findings": [],
+             "first_party": True, "skipped": reason},
+            indent=2,
+        ) + "\n",
+        encoding="utf-8",
+    )
+
+
 def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple[str, Optional[str]]:
     """
     Invoke a single specialist skill.
@@ -129,11 +231,39 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
     try:
         frontmatter, system_prompt = _load_skill(skill_name)
     except Exception as exc:
+        # A skill that cannot load is missing coverage — emit the marker so
+        # the judge cannot post a clean verdict on a partial batch.
+        if _load_skill_is_first_party(skill_name) or os.environ.get("CLIENT_AI_POLICY"):
+            _write_skip_marker(skill_name, output_dir, "load_error")
+        else:
+            _write_skipped_marker(skill_name, output_dir, "load_error")
         return skill_name, f"Failed to load skill: {exc}"
 
     model_alias = frontmatter.get("model", "haiku")
     model = _MODEL_MAP.get(model_alias, model_alias)
     max_tokens = frontmatter.get("max_tokens", 800)
+    # first_party: the eligibility matrix keeps security review on Anthropic
+    # even when OSS routing is enabled — the proxy route is bypassed entirely.
+    # CLIENT_AI_POLICY engagements extend that to EVERY specialist: no PR
+    # content may cross the OSS/proxy plane at all.
+    first_party = bool(frontmatter.get("first_party")) or bool(os.environ.get("CLIENT_AI_POLICY"))
+
+    if first_party and not _endpoint(direct=True)[0]:
+        # Write a marker, not nothing: a first-party skill that cannot run
+        # must surface as a first-party candidate so the judge fails closed
+        # into the advisory path instead of silently adjudicating the rest
+        # of the batch on the proxy plane.
+        _write_skip_marker(skill_name, output_dir, "no_direct_key")
+        print(f"[{skill_name}] first_party skill needs ANTHROPIC_DIRECT_API_KEY — marker written to {output_dir / (skill_name + '.json')}")
+        return skill_name, "skipped: no direct Anthropic credential"
+
+    if not first_party and not _endpoint()[0]:
+        # Proxy configured but no shared credential (e.g. direct-only install):
+        # the API call would raise immediately — record the marker up front so
+        # the judge counts the missing coverage rather than a false clean.
+        _write_skipped_marker(skill_name, output_dir, "no_proxy_credential")
+        print(f"[{skill_name}] no shared credential for the configured proxy — marker written")
+        return skill_name, "skipped: no shared proxy credential"
 
     # Neutralise the wrapper's own tag names inside untrusted content (diff,
     # title/body) so crafted input cannot close the boundary.
@@ -220,14 +350,38 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
     )
 
     try:
-        raw = _call_api(system_prompt, user_message, model, max_tokens)
+        raw = _call_api(system_prompt, user_message, model, max_tokens, first_party=first_party)
         data = _parse_findings(raw)
 
-        # Validate structure
+        # Validate structure. A first-party skill returning a malformed
+        # payload still owes the judge a skip marker — returning silently would
+        # let the batch look cleanly reviewed while the direct check never ran.
         if not isinstance(data, dict):
+            if first_party:
+                _write_skip_marker(skill_name, output_dir, "api_error")
+            else:
+                _write_skipped_marker(skill_name, output_dir, "api_error")
             return skill_name, f"Response is not a JSON object: {type(data)}"
         if "source" not in data or "findings" not in data:
+            if first_party:
+                _write_skip_marker(skill_name, output_dir, "api_error")
+            else:
+                _write_skipped_marker(skill_name, output_dir, "api_error")
             return skill_name, "Response missing 'source' or 'findings' fields"
+        if not isinstance(data["findings"], list) or not all(
+            isinstance(f, dict) for f in data["findings"]
+        ):
+            if first_party:
+                _write_skip_marker(skill_name, output_dir, "api_error")
+            else:
+                _write_skipped_marker(skill_name, output_dir, "api_error")
+            return skill_name, f"'findings' is not a list of objects: {type(data['findings'])}"
+
+        if first_party and data.get("findings"):
+            # Marks the candidate set for run-judge: first-party findings must
+            # be adjudicated on a first-party model, not the OSS proxy. Empty
+            # results stay unmarked so they never force a direct key.
+            data["first_party"] = True
 
         # Write findings to file
         output_file = output_dir / f"{skill_name}.json"
@@ -237,18 +391,40 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
         return skill_name, None
 
     except json.JSONDecodeError as exc:
+        if first_party:
+            _write_skip_marker(skill_name, output_dir, "api_error")
+        else:
+            _write_skipped_marker(skill_name, output_dir, "api_error")
         return skill_name, f"Failed to parse response as JSON: {exc}"
     except Exception as exc:
+        if first_party:
+            _write_skip_marker(skill_name, output_dir, "api_error")
+        else:
+            _write_skipped_marker(skill_name, output_dir, "api_error")
         return skill_name, f"API call failed: {exc}"
 
 
-def main() -> None:
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        print("[specialists] ANTHROPIC_API_KEY not set — skipping specialist run")
-        sys.exit(0)
+def _write_skipped_marker(skill_name: str, output_dir: pathlib.Path, reason: str) -> None:
+    """Non-first-party skip marker — records that a requested specialist never
+    ran so the judge cannot post a clean verdict on an unreviewed diff."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / f"{skill_name}.json").write_text(
+        json.dumps(
+            {"source": skill_name, "findings": [], "skipped": reason},
+            indent=2,
+        ) + "\n",
+        encoding="utf-8",
+    )
 
-    # Parse CLI args
+
+def main() -> None:
+    # A direct-only install (ANTHROPIC_DIRECT_API_KEY but no shared transport
+    # credential) must still start: first-party skills dispatch through it,
+    # the rest return their skip/error marker.
+    api_key, _, _ = _endpoint()
+
+    # Parse CLI args — before the credential gate so a no-credential run can
+    # still write a skip marker for every requested skill.
     skills_arg = None
     diff_file = None
     output_dir = pathlib.Path(".ai/candidates")
@@ -300,6 +476,15 @@ def main() -> None:
 
     if not invoke_skills:
         print("[specialists] nothing to run")
+        sys.exit(0)
+
+    # No credential at all (fork PR, unconfigured consumer): still write one
+    # skip marker per requested skill so the judge sees the missing coverage
+    # and posts the advisory instead of a false-clean verdict.
+    if not api_key and not os.environ.get("ANTHROPIC_DIRECT_API_KEY"):
+        print("[specialists] no API credential set — writing skip markers for all requested skills")
+        for skill in invoke_skills:
+            _write_skipped_marker(skill, output_dir, "no_credential")
         sys.exit(0)
 
     print(f"[specialists] invoking {len(invoke_skills)} skills: {', '.join(invoke_skills)}")

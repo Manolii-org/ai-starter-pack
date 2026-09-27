@@ -103,17 +103,15 @@ Every changed line must trace directly to the user's request. If you cannot expl
 - Use AbortSignal.timeout() for all external HTTP calls in serverless environments
 - Fix root causes, not symptoms — every fix needs a "Root cause:" line in the commit or PR
 
-## Advisor Call Timing (Concrete Rule)
+## Session Critic Timing (Concrete Rule)
 
-Call advisor **before the first Edit or Write tool call** on any task that:
+Dispatch a critic agent **before the first Edit or Write** on any task that:
 - Touches more than 2 files, OR
 - Has an approach that isn't explicitly stated in the task brief or user message
 
-In CI/autonomous mode, "task brief" is the prompt — no user is present; the stated approach in the prompt is sufficient.
+Use `Agent(subagent_type="work-critic", model="sonnet", ...)` (or `quick-critic` with `model="haiku"` for routine checks) — always pin `model=`; an omitted model inherits the parent tier. The pack ships these critic agents under `.claude/agents/`; see `/verify-work`.
 
-Do NOT call advisor for tasks on the executor template's skip list: single-file edits, trivial reads, straightforward debugging, simple tool orchestration.
-
-This replaces the fuzzy "before substantive work" criterion with a concrete, enforceable trigger.
+Skip the critic for: single-file edits, trivial reads, straightforward debugging, simple tool orchestration.
 
 ## Pre-PR Quality Gate (Required)
 
@@ -199,18 +197,19 @@ Every \`Agent\` tool call MUST include an explicit \`model\` parameter. Never re
 | Search, grep, file reads, format, boilerplate | \`"haiku"\` | default, generate, insight-miner |
 | OSS-routed analysis and codebase walkthrough | \`"haiku"\` | deep-analyse |
 | Sonnet-OSS — CI, PR pipeline, compliance | \`"sonnet"\` | orchestrator, ci-fixer, judge |
-| Restricted/client data — Anthropic-pinned | \`"claude-sonnet-4-6"\` | review, security-deep-dive |
+| Restricted data — governance no-AI | \`null\` (do not dispatch) | — |
+| Client material | explicitly classified, policy-eligible path | no default agent |
 | **Main thread only — NEVER a sub-agent model** | \`"opus"\` | — |
 
 > **Never pass \`model="opus"\` to a named sub-agent.** Named agents are configured as \`claude-sonnet-4-6\` or haiku. Passing opus overrides their configured tier and inflates cost 5–16×. The hook's \`heavy → model: opus\` suggestion is for the **main thread only** — sub-agents use their configured tier regardless of the main-thread tier.
 
 **Decision order:**
-1. Restricted/client data (\`data_sensitivity: restricted\` or client code) → \`"claude-sonnet-4-6"\`.
+1. Restricted data (\`data_sensitivity: restricted\`) → no model and no dispatch. Client material → an explicitly classified, policy-eligible path; never infer a model from sensitivity alone.
 2. Haiku-tier agent or mechanical sub-task (search, grep, format, file read) → \`"haiku"\`.
 3. Sonnet-OSS agent (orchestrator, ci-fixer, judge) → \`"sonnet"\`.
 4. Main thread synthesis/planning only → \`"opus"\` (not a sub-agent call).
 
-**Why this matters:** Without an explicit \`model\` parameter, Claude Code defaults to the parent session model (Opus). On a session running Opus, every sub-agent — including simple file searches — runs at Opus cost. \`CLAUDE_CODE_SUBAGENT_MODEL=haiku\` (set in \`settings.json\` env) provides a floor for built-in agents (Explore, general-purpose), but custom agents and explicit \`model:\` overrides take precedence.
+**Why this matters:** Without an explicit \`model\` parameter, Claude Code defaults to the parent session model (Opus). On a session running Opus, every sub-agent — including simple file searches — runs at Opus cost. **Do not set** \`CLAUDE_CODE_SUBAGENT_MODEL\` globally — it overrides Agent \`model=\` and frontmatter (Rule 0 risk). Pass explicit \`model="haiku"\` on Explore/locator dispatches instead.
 
 ### Agent Model Defaults (frontmatter)
 
@@ -219,9 +218,9 @@ Every \`Agent\` tool call MUST include an explicit \`model\` parameter. Never re
 | \`default\`, \`generate\`, \`infra\`, \`qa\` | \`haiku\` | \`internal\` |
 | \`insight-miner\`, \`review-internal\`, \`memory-protocol\` | \`haiku\` | \`internal\` |
 | \`deep-analyse\`, \`test-hardener\` | \`haiku\` | \`internal\` |
-| \`review\`, \`security-deep-dive\` | \`claude-sonnet-4-6\` | \`restricted\` |
+| \`security-deep-dive\` | use its declared frontmatter only when policy-eligible | never \`restricted\` |
 
-Restricted agents are Anthropic-pinned — never pass \`model: "haiku"\` for agents with \`data_sensitivity: restricted\`.
+\`restricted\` is governance no-AI: never dispatch it to any named agent or substitute a model. Resolve client work through explicit policy metadata, not sensitivity alone.
 
 **Keyword heuristics (for the hook's main-thread tier only):** Escalate on "architect/design/plan/migration/security". De-escalate on "list/count/find/search/rename/format".
 
@@ -267,7 +266,7 @@ Key rules:
 - For reports >1500 words: write skeleton first, then each section (~500-700 words) to numbered temp files (\`-s01.md\`, \`-s02.md\`), assemble into final file, then \`rm\` temp files
 - Use \`haiku\` for Explore in Phase 1 — has fallback support if proxy is down
 - Use \`generate\` agent (haiku → your OSS model) for bulk generation — faster and cheaper, \`data_sensitivity: internal\` only
-- Use \`claude-sonnet-4-6\` directly for reports touching restricted or client data
+- Do not dispatch reports with \`data_sensitivity: restricted\`; for client material, select an explicitly classified, policy-eligible path
 - The two-phase dispatch isolates stream stalls inside the generate sub-agent's own stream; the parent stream only idles for agent dispatch
 
 ## Agent Memory Sharing

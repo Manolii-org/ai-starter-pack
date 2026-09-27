@@ -5,7 +5,7 @@ When Claude Code dispatches Agent(model="sonnet"), the proxy routes to DeepSeek 
 (Fireworks, PRC-origin weights on US infra; load-balanced with Together AI). This callback
 reviews every primary response using Llama 3.3 70B Versatile (Groq, Meta US-origin) before
 returning it to the caller. Reviewer is OSS (not Anthropic) — the sonnet alias is
-restricted_us_oss_ok clearance, so content is never restricted/anthropic_only and does not
+restricted_us_oss_ok clearance, so content is never restricted-tier and does not
 require Anthropic review for the steady-state path.
 
 FAIL-CLOSED: any advisor call failure (API error, timeout, network) causes the
@@ -45,7 +45,7 @@ _INTERCEPT_MODEL = "sonnet"
 
 # Reviewer model — Llama 3.3 70B Versatile via Groq (Meta US-origin).
 # OSS review is sufficient: sonnet alias is restricted_us_oss_ok clearance, so content
-# is never restricted/anthropic_only. Eliminates Anthropic API cost for every sonnet call.
+# is never restricted-tier. Eliminates Anthropic API cost for every sonnet call.
 # Switched 2026-05-15 from together_ai/meta-llama/Llama-3.3-70B-Instruct-Turbo: Together
 # ran out of credits 2026-05-14, second Together outage in three weeks (Gemma 4 31B
 # serverless revocation 2026-04-25 caused the prior advisor migration). Groq is a third

@@ -67,6 +67,32 @@ backup_pg_dumpall_globals() {
   pg_dumpall --globals-only --no-password -d "$db_url" -f "$outfile" 2>/dev/null || return 1
 }
 
+
+# Mask a secret for GitHub Actions logs (no-op outside Actions). Emits one
+# ::add-mask:: line per non-empty line so multiline values cannot leak via
+# subsequent echo/curl debug output.
+backup_mask_secret() {
+  local value="${1:-}"
+  [ -n "$value" ] || return 0
+  [ "${GITHUB_ACTIONS:-}" = "true" ] || return 0
+  local line
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] && printf '::add-mask::%s\n' "$line"
+  done <<< "$value"
+}
+
+# Fail closed when BACKUP_RUNNER was mis-set to github-hosted (IPv6 footgun).
+# Supabase direct hosts are IPv6-only; ubuntu-latest cannot reach them.
+# No-op outside Actions so local operator runs still work.
+backup_assert_self_hosted_backup_runner() {
+  [ "${GITHUB_ACTIONS:-}" = "true" ] || return 0
+  if [ "${RUNNER_ENVIRONMENT:-}" = "github-hosted" ]; then
+    echo "ERROR: backup/restore jobs require self-hosted backup runners (IPv6)." >&2
+    echo "vars.BACKUP_RUNNER is routing to github-hosted — set to [\"self-hosted\",\"backup\"]." >&2
+    return 1
+  fi
+}
+
 backup_verify_dump() {
   local outfile="$1"
   if ! pg_restore --list "$outfile" >/dev/null 2>&1; then

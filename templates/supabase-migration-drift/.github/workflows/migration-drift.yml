@@ -3,7 +3,7 @@ name: Migration drift check
 # Live-drift guardrail that verifies every merged migration carrying an
 # `@assert-applied` header is actually applied on all target Supabase projects.
 #
-# Intended for: bcp-core, manolii-platform, Ensombl, and any project using
+# Intended for: your-repo, your-platform, your-product, and any project using
 # Supabase for schema management.
 #
 # WHY THIS EXISTS
@@ -31,7 +31,7 @@ name: Migration drift check
 #
 #   Static hygiene on PRs (collision numbers / @assert-applied header present /
 #   legacy tree frozen) belongs in a SEPARATE workflow that runs against the
-#   diff and needs no secrets — see manolii-org/manolii-knowledge-layer's
+#   diff and needs no secrets — see your-org/your-repo's
 #   .github/workflows/migration-hygiene.yml for one example.
 #
 #   Live drift is a POST-MERGE + SCHEDULE concern only. Consumers wanting a
@@ -46,7 +46,7 @@ name: Migration drift check
 # SETUP REQUIRED
 #   1. Set a repo variable `MIGRATION_DRIFT_PROJECTS` with the format:
 #      entity:supabase_ref,entity:supabase_ref,...
-#      Example: prod:wccgdisnrbvstnnzppld,staging:xyz789
+#      Example: prod:abcdefghijklmnopqrst,staging:xyz789
 #   2. Set a repo secret `SUPABASE_ACCESS_TOKEN` with a Supabase PAT
 #      (from your Doppler project or created in Supabase console)
 

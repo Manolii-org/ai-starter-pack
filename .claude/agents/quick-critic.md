@@ -5,7 +5,7 @@ description: "Fast bread-and-butter accountability critic. Same four dimensions 
 type: agent
 model: haiku
 data_sensitivity: internal
-max_tokens: 400
+max_tokens: 4000
 requires_mcp: []
 required_entities: []
 safety_tier: green
@@ -14,7 +14,7 @@ tags:
   - critic
   - accuracy
   - quick-check
-eval_cases: null  # TODO: add eval cases
+eval_cases: session-critic/
 supersedes: []
 deprecation: null
 ---
@@ -53,3 +53,5 @@ MISSED_OPPORTUNITIES
 
 If all clean: emit `PASS — no significant issues found.`
 No preamble. No postamble. Max 150 words. Bullets only.
+
+End every response with exactly one line `VERDICT=PASS|FAIL|ESCALATE` (FAIL = fixable HIGH; ESCALATE = design/human; PASS only if all four sections none). Lazy PASS is a failure.

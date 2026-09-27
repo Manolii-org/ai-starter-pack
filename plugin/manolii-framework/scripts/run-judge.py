@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Stage 3 final filter for PR assessment. Reads candidate JSON files from all
-specialist agents, applies 3-gate filter (Accuracy + Actionability + Novelty),
+specialist agents, applies 4-gate filter (Accuracy + Actionability + Novelty +
+Specificity),
 and posts a consolidated PR review to GitHub.
 
 Usage:
@@ -19,6 +20,7 @@ import os
 import re
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime
 from pathlib import Path
@@ -32,6 +34,91 @@ logger = logging.getLogger(__name__)
 
 # Hidden marker stamped into every posted review, used for idempotency.
 REVIEW_MARKER = "<!-- pr-assessment-v1 -->"
+
+_ANTHROPIC_API_VERSION = "2023-06-01"
+_ANTHROPIC_HOST = "api.anthropic.com"
+
+
+def _endpoint(direct: bool = False) -> tuple[str, str, bool]:
+    """Resolve (api_key, url, proxied).
+
+    Transport token: ANTHROPIC_API_KEY when calling Anthropic directly. When
+    LITELLM_PROXY_URL or ANTHROPIC_BASE_URL points at a non-Anthropic host the
+    request goes through that proxy and the key may come from LLM_API_KEY,
+    LITELLM_MASTER_KEY, or ANTHROPIC_API_KEY — no sk-ant credential required.
+
+    direct=True forces the Anthropic endpoint regardless of proxy config —
+    used when adjudicating first_party findings (security review stays on a
+    first-party model per docs/us-oss-eligibility-matrix.md). Under a
+    configured proxy only ANTHROPIC_DIRECT_API_KEY authenticates there; the
+    LiteLLM credential in ANTHROPIC_API_KEY must never cross the boundary.
+    """
+    base = (os.environ.get("LITELLM_PROXY_URL") or os.environ.get("ANTHROPIC_BASE_URL") or "").rstrip("/")
+    proxied = bool(base) and (urllib.parse.urlparse(base).hostname or "").lower().rstrip(".") != _ANTHROPIC_HOST
+    if direct:
+        key = os.environ.get("ANTHROPIC_DIRECT_API_KEY") or (
+            os.environ.get("ANTHROPIC_API_KEY", "") if not proxied else ""
+        )
+        return key, _ANTHROPIC_API_URL, False
+    if proxied:
+        key = (
+            os.environ.get("LLM_API_KEY")
+            or os.environ.get("LITELLM_MASTER_KEY")
+            or os.environ.get("ANTHROPIC_API_KEY")
+        )
+        return key or "", base + "/v1/messages", True
+    return os.environ.get("ANTHROPIC_API_KEY", ""), _ANTHROPIC_API_URL, False
+
+
+_ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
+
+# Dated claude-* IDs only exist on Anthropic's API; a LiteLLM-style proxy serves
+# tier aliases instead. Only applied when proxied.
+_PROXY_MODEL_MAP = {
+    "claude-haiku-4-5-20251001": "haiku",
+    "claude-sonnet-4-6": "sonnet",
+}
+
+# Categorical confidence emitted by older/simpler producers, mapped onto the
+# canonical numeric scale. Unknown strings raise — a misspelling must not
+# silently read as a mid-confidence finding.
+_LEGACY_CONFIDENCE = {"low": 0.25, "medium": 0.5, "high": 0.9}
+
+
+def _normalise_confidence(value) -> float:
+    """Accept canonical numeric confidence and legacy categorical producers.
+
+    A malformed confidence from one producer must not drop the rest of its
+    findings — warn and default to 0.5 rather than raising.
+    """
+    if isinstance(value, str) and value.lower() in _LEGACY_CONFIDENCE:
+        return _LEGACY_CONFIDENCE[value.lower()]
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        logger.warning(f"Unparseable confidence {value!r}; defaulting to 0.5")
+        return 0.5
+    if not 0.0 <= confidence <= 1.0:
+        logger.warning(f"Out-of-range confidence {confidence}; defaulting to 0.5")
+        return 0.5
+    return confidence
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse redirects so authorization headers never cross origins."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _urlopen_https(req: urllib.request.Request, *, timeout: int, host: str):
+    """Open one trusted HTTPS origin without following redirects."""
+    parsed = urllib.parse.urlparse(req.full_url)
+    if parsed.scheme != "https" or parsed.hostname != host:
+        raise ValueError("refusing non-HTTPS or unexpected request host")
+    opener = urllib.request.build_opener(_NoRedirectHandler())
+    return opener.open(req, timeout=timeout)  # nosec B310
+
 
 _MD_UNSAFE_CHARS = re.compile(r"([\\`*_\[\]()<>#|~!])")
 
@@ -67,7 +154,7 @@ class Finding:
         severity: str,
         message: str,
         fix: str,
-        confidence: str = "medium",
+        confidence: float | str = 0.8,
         finding_id: Optional[str] = None,
     ):
         self.source = source
@@ -76,12 +163,10 @@ class Finding:
         self.severity = severity
         self.message = message
         self.fix = fix
-        self.confidence = confidence
-        # Synthesize ID if not provided
-        self.finding_id = (
-            finding_id
-            or f"{source}-{file}-{line or 'null'}"
-        )
+        self.confidence = _normalise_confidence(confidence)
+        # Synthesize a stable ID when the producer did not supply one.
+        identity = f"{source}|{file}|{line}|{message}"
+        self.finding_id = finding_id or hashlib.sha256(identity.encode()).hexdigest()[:12]
 
     def to_dict(self) -> dict:
         return {
@@ -111,6 +196,9 @@ class Judge:
         self.repo = os.getenv("GITHUB_REPOSITORY", "")
         self.token = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")
         self.merge_danger = self._load_merge_danger()
+        self._has_first_party_candidates = False
+        self._skipped_first_party: list[str] = []
+        self._skipped_other: list[str] = []
         # An `edited` rerun at the same HEAD must publish a fresh verdict: dedup
         # keys on commit + metadata digest so a title/body edit re-posts. The
         # base SHA is part of the key: a base update changes the merge diff the
@@ -161,6 +249,20 @@ class Judge:
 
                 source = data.get("source", candidate_file.stem)
                 candidate_findings = data.get("findings", [])
+                if data.get("first_party") and candidate_findings:
+                    # Only actual first-party findings force the direct key:
+                    # a `skipped` marker carries nothing restricted, so it
+                    # belongs on the advisory list (disclosed missing coverage)
+                    # rather than vetoing adjudication of proxy-eligible
+                    # findings from the rest of the batch.
+                    self._has_first_party_candidates = True
+                if data.get("first_party") and data.get("skipped"):
+                    self._skipped_first_party.append(source)
+                elif data.get("skipped"):
+                    # Non-first-party skip (e.g. broad agent with no proxy
+                    # credential) — not fail-closed, but still a coverage gap
+                    # the review must disclose.
+                    self._skipped_other.append(source)
 
                 for raw_finding in candidate_findings:
                     finding = Finding(
@@ -228,8 +330,9 @@ class Judge:
     def get_judge_system_prompt(self) -> str:
         """Return the judge agent's system prompt."""
         return """You are the final gatekeeper for PR assessment findings. Your job is to apply
-three filters: Accuracy (is the claim verifiable?), Actionability (is there a concrete fix?),
-and Novelty (is this a duplicate or already caught by CI?).
+four filters: Accuracy (is the claim verifiable?), Actionability (is there a concrete fix?),
+Novelty (is this a duplicate or already caught by CI?), and Specificity (does the finding
+identify an exact location and concrete failure mechanism?).
 
 You will receive a JSON array of findings from multiple specialist agents and tools.
 For each finding, decide whether to keep it (post to GitHub) or drop it.
@@ -244,18 +347,34 @@ Return a JSON object with exactly this structure:
   "review_action": "REQUEST_CHANGES|COMMENT"
 }
 
-Apply all three gates strictly. Only include findings in "surviving" that pass all gates.
+Apply all four gates strictly. Only include findings in "surviving" that pass all gates.
 If any ERROR survives, set review_action to "REQUEST_CHANGES"; otherwise "COMMENT".
 """
 
     def invoke_judge_agent(self, findings: list[Finding]) -> Optional[dict]:
         """
-        Invoke the judge agent via Claude API.
+        Invoke the judge agent via the Messages API (Anthropic direct or
+        LiteLLM proxy, per _endpoint()).
         Returns parsed judge response or None on failure.
         """
-        api_key = os.getenv("ANTHROPIC_API_KEY")
+        # A candidate set carrying first_party findings must be adjudicated
+        # on a first-party model — the OSS proxy would let an OSS backend drop
+        # a true security finding before it is ever posted. With no direct
+        # credential configured the judge fails closed rather than adjudicating
+        # that set on the wrong plane.
+        # CLIENT_AI_POLICY engagements keep the adjudication itself direct —
+        # candidate findings carry PR content regardless of first_party flags.
+        first_party = self._has_first_party_candidates or bool(os.environ.get("CLIENT_AI_POLICY"))
+        api_key, api_url, proxied = _endpoint(direct=first_party)
+        if first_party and not api_key:
+            logger.error(
+                "first-party findings present but no direct Anthropic "
+                "credential (ANTHROPIC_DIRECT_API_KEY) — refusing to "
+                "adjudicate security candidates via the OSS proxy"
+            )
+            return None
         if not api_key:
-            logger.error("ANTHROPIC_API_KEY not set; cannot invoke judge agent")
+            logger.error("no API credential set; cannot invoke judge agent")
             return None
 
         # Build the user message with findings in untrusted_candidates tags
@@ -263,18 +382,21 @@ If any ERROR survives, set review_action to "REQUEST_CHANGES"; otherwise "COMMEN
             [f.to_dict() for f in findings],
             indent=2,
         )
-        user_message = f"""Apply the 3-gate filter to these findings and return your decision.
+        user_message = f"""Apply the 4-gate filter to these findings and return your decision.
 
 <untrusted_candidates>
 {findings_json}
 </untrusted_candidates>
 
-Remember: pass all three gates or drop the finding. Return only valid JSON, no markdown fences."""
+Remember: pass all four gates or drop the finding. Return only valid JSON, no markdown fences."""
 
-        # Call Claude API
+        # Call the Messages API (direct Anthropic or governed proxy).
         try:
+            model = "claude-sonnet-4-6"
+            if proxied:
+                model = _PROXY_MODEL_MAP.get(model, model)
             request_body = {
-                "model": "claude-sonnet-4-6",
+                "model": model,
                 "max_tokens": 4000,
                 "system": self.get_judge_system_prompt(),
                 "messages": [
@@ -282,19 +404,27 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
                 ],
             }
 
+            headers = {
+                "anthropic-version": _ANTHROPIC_API_VERSION,
+                "content-type": "application/json",
+            }
+            if proxied:
+                headers["Authorization"] = f"Bearer {api_key.removeprefix('Bearer ')}"
+            else:
+                headers["x-api-key"] = api_key
             req = urllib.request.Request(
-                "https://api.anthropic.com/v1/messages",
+                api_url,
                 data=json.dumps(request_body).encode("utf-8"),
-                headers={
-                    "x-api-key": api_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
+                headers=headers,
                 method="POST",
             )
 
             logger.info("Invoking judge agent...")
-            with urllib.request.urlopen(req, timeout=120) as response:
+            with _urlopen_https(
+                req,
+                timeout=120,
+                host=urllib.parse.urlparse(api_url).hostname or "",
+            ) as response:
                 result = json.loads(response.read().decode("utf-8"))
 
             # Reasoning models (e.g. DeepSeek via a proxy alias) prepend a
@@ -318,7 +448,7 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
             judge_result = json.loads(json_text.strip())
             return judge_result
 
-        except urllib.error.URLError as e:
+        except (urllib.error.URLError, ValueError, TimeoutError) as e:
             logger.error(f"Judge API call failed: {e}")
             return None
         except (json.JSONDecodeError, KeyError, IndexError) as e:
@@ -366,6 +496,17 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
             line = "**Merge danger:** unknown (unclassified)"
         body_lines.append(line)
         body_lines.append("")
+        skipped_all = sorted(set(self._skipped_first_party) | set(self._skipped_other))
+        if skipped_all:
+            # Findings survived the gates but some checks never ran — the
+            # review must disclose the coverage gap, not read as a complete
+            # assessment.
+            skipped = ", ".join(_markdown_safe(s) for s in skipped_all)
+            body_lines.append(
+                f"**Incomplete coverage:** some review checks did not "
+                f"run (skipped: {skipped})."
+            )
+            body_lines.append("")
 
         errors = [f for f in surviving if f["severity"] == "ERROR"]
         warnings = [f for f in surviving if f["severity"] == "WARNING"]
@@ -417,7 +558,7 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
             )
 
             logger.info(f"Posting review to {url}...")
-            with urllib.request.urlopen(req, timeout=30) as response:
+            with _urlopen_https(req, timeout=30, host="api.github.com") as response:
                 result = json.loads(response.read().decode("utf-8"))
                 review_id = result.get("id", "unknown")
                 logger.info(f"Review posted successfully (ID: {review_id})")
@@ -461,7 +602,7 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
                     method="GET",
                 )
 
-                with urllib.request.urlopen(req, timeout=10) as response:
+                with _urlopen_https(req, timeout=10, host="api.github.com") as response:
                     reviews = json.loads(response.read().decode("utf-8"))
             except Exception as e:
                 # Fail open, as before: a lookup failure must not block the verdict.
@@ -519,7 +660,7 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
                     },
                     method="GET",
                 )
-                with urllib.request.urlopen(req, timeout=10) as response:
+                with _urlopen_https(req, timeout=10, host="api.github.com") as response:
                     reviews = json.loads(response.read().decode("utf-8"))
             except Exception as e:
                 logger.error(f"Failed to scan reviews for dismissal (page {page}): {e}")
@@ -562,7 +703,7 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
             method="PUT",  # dismissals endpoint is PUT-only; POST is rejected
         )
         try:
-            with urllib.request.urlopen(req, timeout=10):
+            with _urlopen_https(req, timeout=10, host="api.github.com"):
                 logger.info(f"Dismissed stale judge review {review_id}")
         except Exception as e:
             logger.warning(f"Dismissal of review {review_id} failed ({e}); continuing")
@@ -606,8 +747,8 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
         logger.info(f"Loaded {len(findings)} findings from candidates")
 
         if not findings:
-            logger.info("No findings to process; posting advisory comment")
-            self._post_no_findings_comment()
+            logger.info("No findings to process; posting verdict comment")
+            self._post_clean_or_skip_advisory()
             return 0
 
         # Apply specificity gate (programmatic backstop)
@@ -616,15 +757,15 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
 
         if not findings:
             logger.info("All findings dropped by specificity gate")
-            self._post_no_findings_comment()
+            self._post_clean_or_skip_advisory()
             return 0
 
-        # Invoke judge agent for 3-gate filter
+        # Invoke judge agent for 4-gate filter
         judge_result = self.invoke_judge_agent(findings)
 
         if not judge_result:
             logger.error("Judge agent invocation failed")
-            self._post_advisory_warning()
+            self._post_advisory_warning(self._skipped_coverage_detail())
             return 0
 
         # Validate and sanitise judge output before use
@@ -659,7 +800,7 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
                     finding.finding_id,
                     "post",
                     "passed",
-                    "Passed all 3 gates",
+                    "Passed all 4 gates",
                 )
             else:
                 self.write_log_entry(
@@ -675,7 +816,7 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
                 logger.warning("Failed to post review to GitHub")
         else:
             logger.info("No findings survived filters; skipping GitHub post")
-            self._post_no_findings_comment()
+            self._post_clean_or_skip_advisory()
 
         return 0
 
@@ -732,7 +873,7 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
                 method="POST",
             )
 
-            with urllib.request.urlopen(req, timeout=30):
+            with _urlopen_https(req, timeout=30, host="api.github.com"):
                 logger.info("No-findings comment posted")
 
             # A same-commit rerun that reports clean does not supersede an
@@ -745,8 +886,33 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
         except Exception as e:
             logger.warning(f"Failed to post no-findings comment: {e}")
 
-    def _post_advisory_warning(self) -> None:
-        """Post an advisory WARNING when judge fails."""
+    def _skipped_coverage_detail(self) -> str:
+        parts: list[str] = []
+        if self._skipped_first_party:
+            sources = ", ".join(sorted(set(self._skipped_first_party)))
+            parts.append(f"First-party security checks did not run (skipped: {sources})")
+        if self._skipped_other:
+            sources = ", ".join(sorted(set(self._skipped_other)))
+            parts.append(f"Other review checks did not run (skipped: {sources})")
+        return ". ".join(parts) + ("." if parts else "")
+
+    def _post_clean_or_skip_advisory(self) -> None:
+        """Post the clean verdict — unless a first-party specialist was skipped.
+
+        A skipped marker means a security specialist never ran, so 'no
+        findings' is not a real verdict: fail closed into the advisory.
+        """
+        if self._skipped_first_party or self._skipped_other:
+            sources = ", ".join(
+                sorted(set(self._skipped_first_party) | set(self._skipped_other))
+            )
+            logger.warning(f"review checks skipped (missing credential): {sources}")
+            self._post_advisory_warning(self._skipped_coverage_detail())
+            return
+        self._post_no_findings_comment()
+
+    def _post_advisory_warning(self, detail: str = "") -> None:
+        """Post an advisory WARNING when judge fails or coverage is incomplete."""
         if not self.token or not self.repo:
             logger.info("Judge failed; no token/repo for advisory post")
             return
@@ -756,7 +922,7 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
                 "body": (
                     f"{REVIEW_MARKER}\n"
                     "## PR Assessment\n"
-                    "⚠️ Assessment system encountered an error. "
+                    f"⚠️ Assessment system encountered an error.{f' {detail}' if detail else ''} "
                     "Manual review recommended.\n\n"
                     "**Merge danger:** unknown (assessment error)"
                 ),
@@ -778,7 +944,7 @@ Remember: pass all three gates or drop the finding. Return only valid JSON, no m
                 method="POST",
             )
 
-            with urllib.request.urlopen(req, timeout=30):
+            with _urlopen_https(req, timeout=30, host="api.github.com"):
                 logger.info("Advisory warning posted")
 
         except Exception as e:
@@ -809,7 +975,7 @@ def main() -> int:
     parser.add_argument(
         "--sha",
         default=os.environ.get("GITHUB_SHA", ""),
-        help="Head SHA for duplicate-review detection (defaults to GITHUB_SHA env; required)",
+        help="PR head SHA for duplicate-review detection — GITHUB_SHA on a pull_request event is the synthetic merge commit, while reviews bind to the head SHA (defaults to GITHUB_SHA env; required)",
     )
 
     args = parser.parse_args()

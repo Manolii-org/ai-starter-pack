@@ -1,8 +1,43 @@
 {
   "version": "1.0",
   "updated": "2026-05-24",
-  "comment": "Canonical token-shape regex set. Provider API-key patterns are universal and client-deployable; internal/organization-specific entries have been removed.",
+  "comment": "Canonical token-shape regex set expanded with Azure managed identity, private-key blocks, Discord, HuggingFace, and optional provider patterns.",
   "patterns": [
+    {
+      "name": "doppler_service",
+      "regex": "dp\\.st\\.(?:[a-z0-9_-]+\\.)?[A-Za-z0-9_-]{40,}",
+      "class": "DOPPLER_SERVICE_TOKEN",
+      "min_length": 45,
+      "notes": "Doppler service token: dp.st.<env>.<random>. Real tokens ~53 chars. CRITICAL: previous pattern doppler_[a-z]{2,4}_... was WRONG and let through dp.st.* tokens."
+    },
+    {
+      "name": "doppler_personal",
+      "regex": "dp\\.pt\\.[A-Za-z0-9_-]{40,}",
+      "class": "DOPPLER_PERSONAL_TOKEN",
+      "min_length": 43,
+      "notes": "Doppler personal token: dp.pt.<random>."
+    },
+    {
+      "name": "doppler_sa",
+      "regex": "dp\\.sa\\.[A-Za-z0-9_-]{40,}",
+      "class": "DOPPLER_SA_TOKEN",
+      "min_length": 43,
+      "notes": "Doppler service-account token."
+    },
+    {
+      "name": "doppler_cli",
+      "regex": "dp\\.ct\\.[A-Za-z0-9_-]{40,}",
+      "class": "DOPPLER_CLI_TOKEN",
+      "min_length": 43,
+      "notes": "Doppler CLI token."
+    },
+    {
+      "name": "doppler_scim",
+      "regex": "dp\\.scim\\.[A-Za-z0-9_-]{40,}",
+      "class": "DOPPLER_SCIM_TOKEN",
+      "min_length": 45,
+      "notes": "Doppler SCIM provisioning token."
+    },
     {
       "name": "github_classic",
       "regex": "ghp_[A-Za-z0-9]{36,251}",
@@ -78,7 +113,7 @@
       "regex": "FlyV1\\s+[A-Za-z0-9_=-]{40,}",
       "class": "FLY_API_TOKEN",
       "min_length": 46,
-      "notes": "Fly.io v1 macaroon — note literal 'FlyV1 ' prefix WITH space."
+      "notes": "Fly.io v1 macaroon \u2014 note literal 'FlyV1 ' prefix WITH space."
     },
     {
       "name": "fly_fm2",
@@ -141,7 +176,7 @@
       "regex": "eyJ[A-Za-z0-9_-]{20,}\\.eyJ[A-Za-z0-9_-]{40,}\\.[A-Za-z0-9_=/+-]{20,}",
       "class": "JWT_TOKEN",
       "min_length": 100,
-      "notes": "JWT shape (header.payload.signature) — matches service-role keys, OAuth ID tokens."
+      "notes": "JWT shape (header.payload.signature) \u2014 matches Supabase service-role keys, OAuth ID tokens."
     },
     {
       "name": "vercel",
@@ -239,28 +274,28 @@
       "regex": "machine\\s+[a-zA-Z0-9._-]{4,}\\s+(?:login\\s+\\S+\\s+)?(?:account\\s+\\S+\\s+)?password\\s+\\S{8,}",
       "class": "NETRC_CREDENTIAL_ENTRY",
       "min_length": 35,
-      "notes": "Netrc machine/password line — indicates a direct ~/.netrc read leaked to stdout."
+      "notes": "Netrc machine/password line \u2014 indicates a direct ~/.netrc read leaked to stdout. Token values are additionally caught by provider-specific patterns (github_classic, doppler_*). Incidents: 2026-05-17 python3-import, 2026-05-19 cat-netrc (fp=f673bb4c). Prevention: pre-tool-use.py \u00a7GUARD:netrc-read."
     },
     {
       "name": "azure_managed_identity_secret",
       "regex": "(?:client_secret|azure_secret|managed_identity)[=:\\s]+[A-Za-z0-9~._-]{34,40}",
       "class": "AZURE_MANAGED_IDENTITY_SECRET",
       "min_length": 48,
-      "notes": "Azure/managed-identity style secret assignment; includes context key in match."
+      "notes": "Azure/managed-identity style secret assignment; includes context key in match because redactor only uses m.group(0)."
     },
     {
       "name": "private_key_pkcs8",
       "regex": "-----BEGIN PRIVATE KEY-----[\\s\\S]*?-----END PRIVATE KEY-----",
       "class": "PRIVATE_KEY_PKCS8",
-      "min_length": 200,
+      "min_length": 60,
       "notes": "PKCS#8 private key block; multiline non-greedy match across newlines."
     },
     {
       "name": "private_key_typed",
-      "regex": "-----BEGIN (?:(?:RSA |EC |OPENSSH |PGP )PRIVATE KEY|PGP PRIVATE KEY BLOCK)-----[\\s\\S]*?-----END (?:(?:RSA |EC |OPENSSH |PGP )PRIVATE KEY|PGP PRIVATE KEY BLOCK)-----",
+      "regex": "-----BEGIN (?:(?:RSA |EC |OPENSSH |PGP |ENCRYPTED )PRIVATE KEY|PGP PRIVATE KEY BLOCK)-----[\\s\\S]*?-----END (?:(?:RSA |EC |OPENSSH |PGP |ENCRYPTED )PRIVATE KEY|PGP PRIVATE KEY BLOCK)-----",
       "class": "PRIVATE_KEY_BLOCK",
       "min_length": 200,
-      "notes": "Typed private key block formats (RSA/EC/OPENSSH/PGP) including OpenPGP ASCII armor."
+      "notes": "Typed private key block formats (RSA/EC/OPENSSH/PGP/ENCRYPTED) including standard OpenPGP ASCII armor headers (PGP PRIVATE KEY BLOCK)."
     },
     {
       "name": "private_key_putty_ppk",
@@ -274,7 +309,7 @@
       "regex": "[MN][A-Za-z\\d_-]{23}\\.[\\w-]{6}\\.[\\w-]{27}",
       "class": "DISCORD_BOT_TOKEN",
       "min_length": 59,
-      "notes": "Discord legacy bot token format."
+      "notes": "Discord legacy bot token format. Highest false-positive risk among additions; validated against local safe corpus."
     },
     {
       "name": "discord_bot_new",
@@ -302,7 +337,7 @@
       "regex": "cf_[A-Za-z0-9_-]{30,}",
       "class": "CLOUDFLARE_API_TOKEN",
       "min_length": 33,
-      "notes": "Cloudflare API token with cf_ prefix."
+      "notes": "Cloudflare API token with cf_ prefix (high-confidence subset; avoids generic 40-char matcher)."
     },
     {
       "name": "twilio_account_sid",
@@ -316,7 +351,7 @@
       "regex": "twilio_(?:token|auth)[=:\\s]+[a-f0-9]{32}",
       "class": "TWILIO_AUTH_TOKEN",
       "min_length": 44,
-      "notes": "Twilio auth token in assignment-style contexts."
+      "notes": "Twilio auth token in assignment-style contexts to reduce 32-hex false positives."
     },
     {
       "name": "npm_token",
@@ -346,5 +381,10 @@
     "^[a-f0-9]{40}$",
     "^[a-f0-9]{64}$",
     "^https?://(?!hooks\\.slack\\.com)"
+  ],
+  "consumers": [
+    "scripts/redact_token_shapes.py",
+    "scripts/secret_redaction_scan.py",
+    "scripts/pre-tool-use.py"
   ]
 }

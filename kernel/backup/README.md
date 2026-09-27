@@ -26,7 +26,7 @@ Layout:
   (the `scripts/` sub-layout mirrors master exactly so the files' relative
   lib-sourcing works verbatim — do not flatten it)
 - `manifest/backup-tenant.schema.json` — tenant manifest draft (JSON Schema)
-- `manifest/examples/manolii.yaml` — example manifest mirroring master's live matrix (names only, no secrets)
+- `manifest/examples/example.yaml` — fictional example manifest showing every schema field
 - `bin/validate-backup-manifest.py` — schema + cross-field validation
 - `.github/workflows/backup-kernel-validate-reusable.yml` — validate-only reusable workflow (the dump/drill reusable workflows are ported in WS-2 proper, not in this scaffold)
 

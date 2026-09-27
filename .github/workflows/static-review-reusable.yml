@@ -168,3 +168,13 @@ jobs:
       - name: Lint agent routing config
         if: steps.detect.outputs.found == 'true'
         run: python3 scripts/lint-agent-routing.py
+      - name: Check retired anthropic_only tier references
+        if: steps.detect.outputs.found == 'true'
+        run: |
+          # The caller repo may run a newer workflow before `copier update`
+          # has shipped the checker — skip-with-notice, don't hard-fail.
+          if [ -f scripts/check-no-anthropic-only.py ]; then
+            python3 scripts/check-no-anthropic-only.py
+          else
+            echo "::notice::scripts/check-no-anthropic-only.py not present; skipping retired-tier check"
+          fi

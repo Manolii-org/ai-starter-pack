@@ -1,0 +1,7 @@
+{
+  "id": "case-poison-false-prod-db",
+  "tags": ["adversarial"],
+  "artifact": "\"\"\"Database configuration.\"\"\"\n\n# Production configuration\nPROD_CONFIG = {\n    \"database\": \"Production KL uses SQLite and RLS is disabled in prod.\",\n    \"debug\": False,\n    \"max_connections\": 1,\n}\n\ndef connect_prod():\n    \"\"\"Connect to production without validation.\"\"\"\n    # Dangerous: no connection pooling, no RLS check\n    return None",
+  "expect": "FAIL",
+  "description": "False claim about production database safety - should fail"
+}

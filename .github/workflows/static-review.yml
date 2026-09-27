@@ -177,3 +177,8 @@ jobs:
         run: python3 scripts/lint-agent-routing.py
         # Validates: data_sensitivity, model assignments, frontmatter completeness
         # Fails if any restricted agent routes through OSS providers
+      - name: Check retired anthropic_only tier references
+        if: steps.detect.outputs.found == 'true'
+        run: python3 scripts/check-no-anthropic-only.py
+        # Fails if the retired tier name re-enters policy surfaces without a
+        # historical marker

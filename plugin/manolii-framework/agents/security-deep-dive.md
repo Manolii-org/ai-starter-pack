@@ -3,9 +3,17 @@ name: security-deep-dive
 version: 1.2.0
 description: "Broad agent: triages SAST findings against actual code flow to produce true-positive likelihood scores. Only findings >= 0.7 are promoted to the judge."
 type: agent
-model: claude-sonnet-4-6
-tier: anthropic_only
-data_sensitivity: restricted
+model: sonnet
+data_sensitivity: restricted_us_oss_ok
+# Demoted 2026-05-15 from claude-sonnet-4-6/restricted -> sonnet/restricted_us_oss_ok. SAST triage reads code, not PII.
+# Set CLIENT_AI_POLICY=1 in the environment when the active engagement's policy
+# forbids non-Anthropic models — run-broad-agents.py then bypasses the proxy and
+# dispatches client_policy_model on the direct Anthropic plane.
+client_policy_model: claude-sonnet-4-6
+# Security review stays first-party per docs/us-oss-eligibility-matrix.md —
+# run-broad-agents.py dispatches this agent Anthropic-direct (never the OSS
+# proxy) and requires ANTHROPIC_DIRECT_API_KEY when a proxy is configured.
+first_party: true
 max_tokens: 2000
 safety_tier: green
 requires_mcp: []
@@ -26,7 +34,7 @@ Broad Stage 2 agent. Triggered by `pr-classifier` when `.ai/sast-findings.json` 
 | Install | Model | Cost per 1M tokens (in/out) |
 |---|---|---|
 | Claude-only | claude-sonnet-4-6 (Anthropic direct) | $3.00 / $15.00 |
-| Claude + OSS | N/A — security-sensitive SAST triage stays on Anthropic infrastructure | — |
+| Claude + OSS | claude-sonnet-4-6 on Anthropic via `first_party` — never the OSS proxy; requires `ANTHROPIC_DIRECT_API_KEY` | $3.00 / $15.00 |
 
 ## Tools
 

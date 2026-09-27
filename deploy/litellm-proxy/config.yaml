@@ -31,7 +31,7 @@
 model_list:
 
   # ═══════════════════════════════════════════════════════════════════════════
-  # TIER 0: Claude — anthropic_only data, nuanced writing, orchestration
+  # TIER 0: Claude — restricted_us_oss_ok-preferred data, nuanced writing, orchestration
   # ═══════════════════════════════════════════════════════════════════════════
 
   - model_name: claude-opus-4-6
@@ -47,7 +47,7 @@ model_list:
   # OSS heavy tier — SWE-Bench Pro 58.4 > Opus 4.6 at 57.3.
   # RESTRICTED: code-patch, agentic-loop, math-reasoning, bulk-extract ONLY.
   # EXCLUDED from: prose, code-review, ADRs, orchestration, client-facing, vision.
-  # data_clearance: internal + public (NOT anthropic_only).
+  # data_clearance: internal + public (NOT restricted_us_oss_ok).
   - model_name: tier-0-oss-heavy
     litellm_params:
       model: fireworks_ai/accounts/fireworks/models/kimi-k2p6
@@ -206,6 +206,11 @@ model_list:
     litellm_params:
       model: fireworks_ai/accounts/fireworks/models/gpt-oss-120b
       api_key: os.environ/FIREWORKS_API_KEY
+  # Short alias — Claude Code and the scripts/run-*.py proxy maps send `haiku`.
+  - model_name: haiku
+    litellm_params:
+      model: fireworks_ai/accounts/fireworks/models/gpt-oss-120b
+      api_key: os.environ/FIREWORKS_API_KEY
   # Haiku fallback — real Anthropic Haiku (distinct model_name to avoid load-balancing)
   - model_name: claude-haiku-4-5-20251001-anthropic
     litellm_params:
@@ -246,6 +251,9 @@ litellm_settings:
   # Claude tiers do NOT automatically fall back to OSS — explicitly route if needed.
   fallbacks:
     - claude-haiku-4-5-20251001: [claude-haiku-4-5-20251001-anthropic]
+    # The `haiku` short alias (scripts/run-*.py, Claude Code) needs the same
+    # Anthropic-direct safety net the dated ID has.
+    - haiku: [claude-haiku-4-5-20251001-anthropic]
     - sonnet: [sonnet-us-fallback-gptoss120b, sonnet-us-fallback-llama8b]
     - tier-0-oss-heavy: [tier-0-oss-heavy-fallback-together, tier-0-oss-heavy-fallback-glm]
     - tier-1-fast: [tier-1-fast-fallback-together, tier-1-fast-fallback-groq]

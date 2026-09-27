@@ -1,0 +1,17 @@
+[
+  {
+    "id": "mock-pass",
+    "artifact": "def hello():\n    return 'world'",
+    "expect": "PASS"
+  },
+  {
+    "id": "mock-fail",
+    "artifact": "except: pass",
+    "expect": "FAIL"
+  },
+  {
+    "id": "mock-empty",
+    "artifact": "",
+    "expect": "skip"
+  }
+]

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # restore-drill.sh — Safe restore-to-branch drill for backup verification.
-# Usage: restore-drill.sh --entity {manolii|personal|impaktful} [--dry-run] [--help]
+# Usage: restore-drill.sh --entity <name> [--dry-run] [--help]
+# Entity→Doppler-project mapping is deployment config, not script data:
+#   RESTORE_DRILL_ENTITY_PROJECTS="entity-a=project-a,entity-b=project-b"
 #
 # Required env vars:
 #   DOPPLER_TOKEN   — Workspace-level Doppler token (same as DOPPLER_PERSONAL in CI)
@@ -24,10 +26,10 @@ NEON_API_KEY=""
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") --entity {manolii|personal|impaktful} [--dry-run] [--help]
+Usage: $(basename "$0") --entity <name> [--dry-run] [--help]
 
 Options:
-  --entity    Required. One of: manolii, personal, impaktful
+  --entity    Required. Dump label — also the R2 prefix (pgdump/<entity>/)
   --dry-run   Show what would happen without creating or deleting resources
   --help      Show this message and exit 0
 
@@ -50,17 +52,36 @@ if [ -z "$ENTITY" ]; then
   exit 1
 fi
 
-case "$ENTITY" in
-  manolii)   DOPPLER_PROJECT="manolii-knowledge-layer" ;;
-  personal)  DOPPLER_PROJECT="personal-knowledge-layer" ;;
-  impaktful) DOPPLER_PROJECT="impaktful-knowledge-layer" ;;
-  *)         echo "ERROR: Invalid entity '${ENTITY}'. Must be one of: manolii, personal, impaktful" >&2; exit 1 ;;
-esac
+# The entity is a free-form dump label (R2 prefix + report name); its Doppler
+# project is operator config — keep org mappings out of the shared script.
+if ! [[ "$ENTITY" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+  echo "ERROR: --entity must be lowercase alnum+dash" >&2; exit 1
+fi
+DOPPLER_PROJECT=""
+IFS=',' read -ra _pairs <<< "${RESTORE_DRILL_ENTITY_PROJECTS:-}"
+for _pair in "${_pairs[@]}"; do
+  if [ "${_pair%%=*}" = "$ENTITY" ]; then
+    DOPPLER_PROJECT="${_pair#*=}"; break
+  fi
+done
+
+# When the operator HAS declared a mapping, an unmapped entity is a typo —
+# fail fast even in dry-run. With no mapping declared, dry-run proceeds on a
+# placeholder so test/CI previews work without deployment config.
+if [ -n "${RESTORE_DRILL_ENTITY_PROJECTS:-}" ] && [ -z "$DOPPLER_PROJECT" ]; then
+  echo "ERROR: no Doppler project mapped for entity '${ENTITY}' — set RESTORE_DRILL_ENTITY_PROJECTS=<entity>=<project>,..." >&2
+  exit 1
+fi
 
 if [ "$DRY_RUN" = "true" ]; then
-  echo "[dry-run] Would drill restore for entity: ${ENTITY} (Doppler project: ${DOPPLER_PROJECT})"
-  echo "[dry-run] Steps: fetch R2 creds (${DOPPLER_PROJECT}) + Neon creds (master/prd) => create Neon branch => download latest R2 dump => decrypt => pg_restore => row counts => write JSON => delete branch"
+  echo "[dry-run] Would drill restore for entity: ${ENTITY} (Doppler project: ${DOPPLER_PROJECT:-unset — set RESTORE_DRILL_ENTITY_PROJECTS})"
+  echo "[dry-run] Steps: fetch R2 creds (${DOPPLER_PROJECT:-<entity project>}) + Neon creds (master/prd) => create Neon branch => download latest R2 dump => decrypt => pg_restore => row counts => write JSON => delete branch"
   exit 0
+fi
+
+if [ -z "$DOPPLER_PROJECT" ]; then
+  echo "ERROR: no Doppler project mapped for entity '${ENTITY}' — set RESTORE_DRILL_ENTITY_PROJECTS=<entity>=<project>,..." >&2
+  exit 1
 fi
 
 [ -n "${DOPPLER_TOKEN:-}" ] || { echo "ERROR: DOPPLER_TOKEN env var is required" >&2; exit 1; }
@@ -129,6 +150,14 @@ for var in NEON_API_KEY NEON_PROJECT_ID; do
   [ -n "${!var}" ] || { echo "ERROR: ${var} not found in Doppler master/prd — add RESTORE_DRILL_NEON_PROJECT_ID" >&2; exit 1; }
 done
 
+backup_assert_self_hosted_backup_runner || exit 1
+
+# Mask Doppler-fetched secrets (GHA secrets.* are auto-masked; these are not).
+backup_mask_secret "${BACKUP_CF_API_TOKEN}"
+backup_mask_secret "${BACKUP_CF_TOKEN_ID}"
+backup_mask_secret "${BACKUP_ENCRYPTION_KEY}"
+backup_mask_secret "${NEON_API_KEY}"
+
 # Step 3 — Create disposable Neon branch
 echo "[3/9] Creating Neon restore-drill branch"
 BRANCH_NAME="restore-drill-${ENTITY}-$(date +%s)"
@@ -193,12 +222,14 @@ if [ -z "$NEON_BRANCH_DSN" ]; then
     | jq -r '.uri // empty') || true
 fi
 [ -n "$NEON_BRANCH_DSN" ] || { echo "ERROR: Could not resolve Neon branch DSN — set RESTORE_DRILL_NEON_ROLE and RESTORE_DRILL_NEON_DB in master/prd if non-default" >&2; exit 1; }
+backup_mask_secret "${NEON_BRANCH_DSN}"
 
 # Step 4 — Find and download only the latest dump from R2
 R2_ENDPOINT="https://${BACKUP_CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
 # R2's S3 API requires AWS_SECRET_ACCESS_KEY = sha256(CF API token), NOT the raw token
 # (raw token -> HTTP 403 SignatureDoesNotMatch). Same derivation as backup-pgdump.yml.
 R2_SECRET="$(backup_r2_s3_secret_access_key "$BACKUP_CF_API_TOKEN")"
+backup_mask_secret "${R2_SECRET}"
 # Dumps are written under pgdump/<entity>/ (current); fall back to the legacy <entity>/ prefix.
 LATEST_KEY=""
 R2_PREFIX=""
@@ -363,7 +394,16 @@ fi
 echo "[8/9] Verifying row counts"
 declare -A ROW_COUNTS
 VERIFY_FAIL=false
-for table in public.pending_actions public.standing_orders public.project_facts; do
+# Table set is operator config, not script data — a tenant whose restored
+# schema legitimately lacks a table fails the COUNT outright otherwise.
+# RESTORE_DRILL_VERIFY_TABLES="public.t1 public.t2 ..." overrides the default.
+RESTORE_DRILL_VERIFY_TABLES="${RESTORE_DRILL_VERIFY_TABLES:-public.pending_actions public.standing_orders public.project_facts public.notes public.knowledge_base public.source_packets public.project_source_registry public.work_items public.scope_baselines}"
+for table in ${RESTORE_DRILL_VERIFY_TABLES}; do
+  if [[ ! "$table" =~ ^[a-z0-9_]+(\.[a-z0-9_]+)?$ ]]; then
+    echo "ERROR: invalid table name in RESTORE_DRILL_VERIFY_TABLES: '${table}'" >&2
+    VERIFY_FAIL=true
+    continue
+  fi
   # 2026-06-25 drill (run 28138863132) failed here with "ERROR rows" for every
   # table and the psql error text discarded, making a transient Neon-branch
   # connection drop indistinguishable from a missing table. Surface stderr and
@@ -384,6 +424,31 @@ for table in public.pending_actions public.standing_orders public.project_facts;
   ROW_COUNTS["$table"]="$COUNT"
   echo "  ${table}: ${COUNT} rows"
   [ "$COUNT" = "ERROR" ] && VERIFY_FAIL=true
+  if [ "$COUNT" != "ERROR" ]; then
+    case "$COUNT" in
+      ''|*[!0-9]*) echo "ERROR: ${table} row count non-numeric: '${COUNT}'" >&2; VERIFY_FAIL=true ;;
+      0)
+        # Some tables legitimately stay empty on some entities (e.g. OM tables
+        # unused on personal/impaktful — live COUNT=0 2026-09-16, restore-drill
+        # 33465681032 failed on exactly this). Operator config, not script data:
+        # RESTORE_DRILL_ALLOW_EMPTY_TABLES="entity=table,entity=table,..."
+        # (table is the qualified name like public.work_items). Unlisted
+        # entity/table pairs stay fail-closed so a schema-only dump cannot pass.
+        _allow_empty=false
+        IFS=',' read -ra _allow_pairs <<< "${RESTORE_DRILL_ALLOW_EMPTY_TABLES:-}"
+        for _allow_pair in "${_allow_pairs[@]}"; do
+          if [ "${_allow_pair%%=*}" = "$ENTITY" ] && [ "${_allow_pair#*=}" = "$table" ]; then
+            _allow_empty=true; break
+          fi
+        done
+        if [ "$_allow_empty" = "true" ]; then
+          echo "  WARN: ${table} restored with 0 rows (allowed by RESTORE_DRILL_ALLOW_EMPTY_TABLES)"
+        else
+          echo "ERROR: ${table} restored with 0 rows" >&2; VERIFY_FAIL=true
+        fi
+        ;;
+    esac
+  fi
 done
 
 [ "$VERIFY_FAIL" = "false" ] || { echo "ERROR: Row count verification failed for one or more tables" >&2; exit 1; }
@@ -395,27 +460,28 @@ TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 RESULT_FILE="${RESULT_DIR}/${ENTITY}-pgdump-$(date -u +%Y%m%dT%H%M%SZ).json"
 
 echo "[9/9] Writing drill result to ${RESULT_FILE}"
+# Build row_counts JSON from associative array (maintainable: no per-table --argjson)
+RC_JSON="{}"
+for _t in "${!ROW_COUNTS[@]}"; do
+  _v="${ROW_COUNTS[$_t]}"
+  _jv=$([ "$_v" = "ERROR" ] && echo 'null' || echo "$_v")
+  RC_JSON=$(printf '%s' "$RC_JSON" | jq --arg t "$_t" --argjson v "$_jv" '. + {($t): $v}')
+done
+# Append activity_log (fetched separately outside the main loop)
+RC_JSON=$(printf '%s' "$RC_JSON" | jq --argjson v "$([ -z "$AL_ROWS" ] && echo 'null' || echo "$AL_ROWS")" '. + {"public.activity_log": $v}')
 jq -n \
   --arg entity "$ENTITY" \
   --arg timestamp "$TIMESTAMP" \
   --arg status "SUCCESS" \
   --argjson rto "$RTO_SECONDS" \
-  --argjson pa "$([ "${ROW_COUNTS[public.pending_actions]}" = "ERROR" ] && echo 'null' || echo "${ROW_COUNTS[public.pending_actions]}")" \
-  --argjson so "$([ "${ROW_COUNTS[public.standing_orders]}" = "ERROR" ] && echo 'null' || echo "${ROW_COUNTS[public.standing_orders]}")" \
-  --argjson pf "$([ "${ROW_COUNTS[public.project_facts]}" = "ERROR" ] && echo 'null' || echo "${ROW_COUNTS[public.project_facts]}")" \
-  --argjson al "$([ -z "$AL_ROWS" ] && echo 'null' || echo "$AL_ROWS")" \
+  --argjson rc "$RC_JSON" \
   --arg al_status "$AL_STATUS" \
   '{
     entity: $entity,
     timestamp: $timestamp,
     status: $status,
     rto_seconds: $rto,
-    row_counts: {
-      "public.pending_actions": $pa,
-      "public.standing_orders": $so,
-      "public.project_facts":   $pf,
-      "public.activity_log":    $al
-    },
+    row_counts: $rc,
     activity_log_split_status: $al_status
   }' > "$RESULT_FILE" || { echo "ERROR: Failed to write drill result JSON" >&2; exit 1; }
 

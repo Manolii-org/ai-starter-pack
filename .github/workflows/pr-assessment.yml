@@ -21,7 +21,8 @@ name: PR Assessment
 # to ubuntu or leave without fly-labeled runners.
 #
 # Requires:
-#   ANTHROPIC_API_KEY — for Claude API calls (or LITELLM_PROXY_URL + LLM_API_KEY)
+#   LLM_API_KEY or LITELLM_MASTER_KEY or ANTHROPIC_API_KEY — for API calls
+#   LITELLM_PROXY_URL or ANTHROPIC_BASE_URL — set when routing via a LiteLLM proxy
 #   GH_TOKEN (GITHUB_TOKEN) — for judge to post review comments
 #
 # To disable for a PR: add label "skip-ai-review" or prefix title with "chore(sync):"
@@ -71,6 +72,16 @@ jobs:
         id: classify
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # The runners parse ANTHROPIC_BASE_URL's hostname and pick the
+          # credential themselves — export every name, never coalesce here
+          # (string matching the URL misroutes on ports/paths/lookalikes).
+          LITELLM_MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY || secrets.LITELLM_MASTER_KEY }}
+          ANTHROPIC_BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
+          CLIENT_AI_POLICY: ${{ vars.CLIENT_AI_POLICY }}
+          # CLIENT_AI_POLICY routes the classifier Anthropic-direct too — the
+          # proxy credential cannot authenticate api.anthropic.com.
+          ANTHROPIC_DIRECT_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
@@ -338,6 +349,17 @@ jobs:
       - name: Run specialist skills
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # The runners parse ANTHROPIC_BASE_URL's hostname and pick the
+          # credential themselves — export every name, never coalesce here
+          # (string matching the URL misroutes on ports/paths/lookalikes).
+          LITELLM_MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY || secrets.LITELLM_MASTER_KEY }}
+          ANTHROPIC_BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
+          # first_party specialist skills run Anthropic-direct; without this
+          # key they skip-with-warning under proxy mode.
+          ANTHROPIC_DIRECT_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # CLIENT_AI_POLICY engagements route EVERY specialist direct.
+          CLIENT_AI_POLICY: ${{ vars.CLIENT_AI_POLICY }}
           SKILLS: ${{ needs.classify.outputs.invoke_skills }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
@@ -375,6 +397,17 @@ jobs:
       - name: Run broad agents
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # The runners parse ANTHROPIC_BASE_URL's hostname and pick the
+          # credential themselves — export every name, never coalesce here
+          # (string matching the URL misroutes on ports/paths/lookalikes).
+          LITELLM_MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY || secrets.LITELLM_MASTER_KEY }}
+          ANTHROPIC_BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
+          # Engagement policy gate: when set, agents declaring
+          # client_policy_model escalate Anthropic-direct and need a real key
+          # (the transport slot above carries the proxy token in proxy mode).
+          CLIENT_AI_POLICY: ${{ vars.CLIENT_AI_POLICY }}
+          ANTHROPIC_DIRECT_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           AGENTS: ${{ needs.classify.outputs.invoke_agents }}
         run: |
           mkdir -p .ai/candidates
@@ -410,6 +443,15 @@ jobs:
       - name: Run judge
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # The runners parse ANTHROPIC_BASE_URL's hostname and pick the
+          # credential themselves — export every name, never coalesce here
+          # (string matching the URL misroutes on ports/paths/lookalikes).
+          LITELLM_MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY || secrets.LITELLM_MASTER_KEY }}
+          ANTHROPIC_BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
+          # Judge adjudicates first_party candidates Anthropic-direct.
+          ANTHROPIC_DIRECT_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLIENT_AI_POLICY: ${{ vars.CLIENT_AI_POLICY }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}

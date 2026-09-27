@@ -168,6 +168,8 @@ _exclude:
   # whether a checkout is the pack or a consumer; every filename signal
   # tried was defeated by a legitimate consumer shape (see the module).
   - tests/test_pack_plugin_parity.py
+  # Same shape: asserts on plugin/ build artifacts that never render.
+  - tests/test_watch_pr_subscribe_split.py
   # Build artifacts / caches
   - .ruff_cache
   - .ruff_cache/**
@@ -219,6 +221,23 @@ _exclude:
   # instances whose instance-owned CLAUDE.md predates the anchored sections).
   # Consumers adopt via their own caller of claude-md-contract-reusable.yml.
   - .github/workflows/claude-md-contract.yml
+  # Template-internal master content — present only in the master's
+  # distribution copy (templates/ai-starter-pack/), declared TEMPLATE_ONLY in
+  # scripts/check-pack-mirror-drift.py. Excluded so a render of the template
+  # produces the same tree (and README component counts) as a pack render.
+  # All no-ops in this repo, where none of these paths exist.
+  - .claude/hooks/pre-tool.py
+  - .claude/hooks/stop.sh
+  - .github/workflows/fleet-scale-wake.yml
+  - scripts/fleet-scale-wake.py
+  - scripts/lint_scheduled_workflows.py
+  - scripts/pr-preview-url.py
+  - scripts/tests/test_stop_durability.sh
+  - docs/auto-merge-zero-cr.md
+  - docs/fly-heavy-job.yml
+  - docs/pipeline-integrity.md
+  - deploy/litellm-proxy/advisor-capacity-ops.yaml
+  - config/feature-train-policy.yaml
   # Feature-dependent files. Empty rendered entries are ignored by Copier;
   # each exclusion is active only while its corresponding flag is disabled.
   - "{% if not oss_routing %}docs/us-oss-eligibility-matrix.md{% endif %}"

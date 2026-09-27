@@ -20,22 +20,22 @@ Instead of raw Bash expansions, use safe helpers from `scripts/safe_env.sh`:
 
 | Helper | Purpose | Output |
 |---|---|---|
-| `safe_summary VAR_NAME` | Safe diagnostic | `"VAR: set (len=N)"` or `"VAR: unset"` |
-| `is_set VAR_NAME` | Presence check | `set` / `unset` |
-| `safe_prefix VAR_NAME [chars]` | First N chars, hard-capped at 8 chars regardless of N | `sk.…[REDACTED:len=45]` |
+| `safe_summary VAR_NAME` | Safe diagnostic | `present prefix=abcdef length=45` or `absent` |
+| `is_set VAR_NAME` | Presence check | `yes` / `no` |
+| `safe_prefix VAR_NAME [chars]` | First N chars, hard-capped at 8 and never more than len-4 | `sk.…` |
 | `safe_length VAR_NAME` | Numeric length | `45` |
 
 **Rules:**
-- `safe_prefix` NEVER returns more than 8 characters, regardless of request
-- `safe_summary` reports only presence and length (`set (len=N)` / `unset`) — it never returns any part of the value
+- `safe_prefix` NEVER returns more than 8 characters (or more than len-4), regardless of request
+- `safe_summary` reports only presence, a short head (<=6 chars), and length (`present prefix=… length=N` / `present length=N` / `absent`) — it never returns the whole value
 - Always source first: `source scripts/safe_env.sh && safe_summary TOKEN`
 
 **Examples:**
 ```bash
 # Safe
 source scripts/safe_env.sh
-safe_summary API_KEY           # Output: API_KEY: set (len=45)
-is_set DATABASE_URL            # Output: set
+safe_summary API_KEY           # Output: present prefix=sk_pro length=45
+is_set DATABASE_URL            # Output: yes
 
 # Unsafe — BLOCKED
 echo "${API_KEY:-default}"     # BLOCKED: :- expands to value
