@@ -189,6 +189,16 @@ def _normalise_prs(raw: Any) -> list[dict[str, Any]]:
     return prs
 
 
+class _NoRedirectHandler(request.HTTPRedirectHandler):
+    """Refuse redirects so the Authorization header never leaves api.github.com."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_GITHUB_OPENER = request.build_opener(_NoRedirectHandler())
+
+
 def _github_api_open_prs(slug: str, branch: str, token: str) -> list[dict[str, Any]]:
     owner, _repo = slug.split("/", 1)
     query = parse.urlencode(
@@ -204,7 +214,7 @@ def _github_api_open_prs(slug: str, branch: str, token: str) -> list[dict[str, A
         },
     )
     try:
-        with request.urlopen(api_request, timeout=HTTP_TIMEOUT_SECONDS) as response:  # nosec B310 — hardcoded GitHub API URL
+        with _GITHUB_OPENER.open(api_request, timeout=HTTP_TIMEOUT_SECONDS) as response:  # nosec B310 — hardcoded GitHub API URL
             payload = json.loads(response.read().decode("utf-8"))
     except error.HTTPError as exc:
         raise LookupError(f"GitHub API returned HTTP {exc.code}") from exc

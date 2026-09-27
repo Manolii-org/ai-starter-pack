@@ -339,6 +339,9 @@ class HttpBackend:
         except CaptureError:
             raise
         except urllib.error.HTTPError as error:
+            if error.code == 404 and method == "DELETE":
+                # Already deleted — concurrent releases are idempotent.
+                return None
             raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", f"receiver HTTP {error.code}") from None
         except (OSError, urllib.error.URLError) as error:
             raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", type(error).__name__) from None
@@ -969,7 +972,16 @@ def allocate(request: dict[str, Any], profile: Profile) -> dict[str, Any]:
     with _registry_lock():
         records = _read_registry()
         existing = records.get(scope_hash)
-        if isinstance(existing, dict) and float(existing.get("expires_at", 0)) > time.time():
+        if (
+            isinstance(existing, dict)
+            and float(existing.get("expires_at", 0)) > time.time()
+            and not existing.get("pending_purge")
+        ):
+            # A pending_purge record is mid-release: its mailbox is about to be
+            # purged and its registry entry removed, so reusing it would hand the
+            # caller a recipient that dies under it. Fall through to a fresh
+            # allocation — the new allocation_id means the in-flight release
+            # cannot retire or purge this replacement.
             return existing
         now = time.time()
         records = {key: value for key, value in records.items() if float(value.get("expires_at", 0)) > now}

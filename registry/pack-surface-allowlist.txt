@@ -42,7 +42,6 @@ kernel/backup/PROVENANCE.md#473942c3
 kernel/backup/README.md#65549206
 kernel/backup/README.md#9b0cb1ac
 kernel/backup/README.md#eca827a6
-kernel/backup/manifest/examples/manolii.yaml#8db5b295
 litellm-product/README.md#bfee1649
 litellm-product/releases/0.4.2/release.json#faaa4f00
 litellm-product/releases/0.4.2/source/config/litellm-product-contract.json#66393959

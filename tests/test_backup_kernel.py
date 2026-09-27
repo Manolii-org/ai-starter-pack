@@ -16,7 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 KERNEL = ROOT / "kernel" / "backup"
 VALIDATOR = KERNEL / "bin" / "validate-backup-manifest.py"
-EXAMPLE = KERNEL / "manifest" / "examples" / "manolii.yaml"
+EXAMPLE = KERNEL / "manifest" / "examples" / "example.yaml"
 
 
 def _run_validator(*paths: Path) -> subprocess.CompletedProcess:
@@ -48,7 +48,7 @@ def test_validator_rejects_secret_shaped_values(tmp_path):
     bad = tmp_path / "bad.yaml"
     bad.write_text(
         EXAMPLE.read_text(encoding="utf-8").replace(
-            "custody_note: \"pending D5\"",
+            "custody_note: \"document where recovery keys live for your org\"",
             "custody_note: \"postgresql://user:hunter2@db.example.com/x\"",
         ),
         encoding="utf-8",

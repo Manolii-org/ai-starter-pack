@@ -204,7 +204,15 @@ def invoke_agent(
                 "ANTHROPIC_DIRECT_API_KEY (the proxy credential cannot "
                 "authenticate Anthropic-direct); skipping"
             )
-            return None
+            # Marker contract shared with run-specialists.py: a skipped
+            # direct-only agent must leave a durable candidate file so the
+            # judge cannot post a clean verdict on incomplete coverage.
+            return {
+                "source": agent_config.name,
+                "findings": [],
+                "first_party": True,
+                "skipped": "no_direct_key",
+            }
         proxy = None
         model = agent_config.client_policy_model or DIRECT_MODEL_MAP.get(model, model)
         logger.info(
@@ -228,7 +236,14 @@ def invoke_agent(
                 "ANTHROPIC_DIRECT_API_KEY (the proxy credential cannot "
                 "authenticate Anthropic-direct); skipping"
             )
-            return None
+            # Same marker contract — a client-policy agent that could not run
+            # must not let the batch look cleanly reviewed.
+            return {
+                "source": agent_config.name,
+                "findings": [],
+                "first_party": True,
+                "skipped": "no_direct_key",
+            }
         proxy = None
         model = agent_config.client_policy_model or model
         logger.info(

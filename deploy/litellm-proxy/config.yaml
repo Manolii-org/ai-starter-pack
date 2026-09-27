@@ -206,6 +206,11 @@ model_list:
     litellm_params:
       model: fireworks_ai/accounts/fireworks/models/gpt-oss-120b
       api_key: os.environ/FIREWORKS_API_KEY
+  # Short alias — Claude Code and the scripts/run-*.py proxy maps send `haiku`.
+  - model_name: haiku
+    litellm_params:
+      model: fireworks_ai/accounts/fireworks/models/gpt-oss-120b
+      api_key: os.environ/FIREWORKS_API_KEY
   # Haiku fallback — real Anthropic Haiku (distinct model_name to avoid load-balancing)
   - model_name: claude-haiku-4-5-20251001-anthropic
     litellm_params:
