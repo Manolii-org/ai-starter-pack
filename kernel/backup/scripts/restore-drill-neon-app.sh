@@ -45,14 +45,23 @@ for _pair in "${_pairs[@]}"; do
     R2_DOPPLER_PROJECT="${_pair#*=}"; break
   fi
 done
-if [ -z "$R2_DOPPLER_PROJECT" ]; then
+
+# When the operator HAS declared a mapping, an unmapped app is a typo — fail
+# fast even in dry-run. With no mapping declared, dry-run proceeds on a
+# placeholder so test/CI previews work without deployment config.
+if [ -n "${RESTORE_DRILL_APP_PROJECTS:-}" ] && [ -z "$R2_DOPPLER_PROJECT" ]; then
   echo "ERROR: no Doppler project mapped for app '$APP' — set RESTORE_DRILL_APP_PROJECTS=<app>=<project>,..." >&2
   exit 1
 fi
 
 if [ "$DRY_RUN" = "true" ]; then
-  echo "[dry-run] Steps: fetch R2 creds (${R2_DOPPLER_PROJECT}) + Neon creds (master/prd) => create scratch branch => download latest pgdump/${APP}/ dump => decrypt => pg_restore => generic verification => write JSON => delete branch"
+  echo "[dry-run] Steps: fetch R2 creds (${R2_DOPPLER_PROJECT:-<app project>}) + Neon creds (master/prd) => create scratch branch => download latest pgdump/${APP}/ dump => decrypt => pg_restore => generic verification => write JSON => delete branch"
   exit 0
+fi
+
+if [ -z "$R2_DOPPLER_PROJECT" ]; then
+  echo "ERROR: no Doppler project mapped for app '$APP' — set RESTORE_DRILL_APP_PROJECTS=<app>=<project>,..." >&2
+  exit 1
 fi
 
 [ -n "${DOPPLER_TOKEN:-}" ] || { echo "ERROR: DOPPLER_TOKEN is required" >&2; exit 1; }

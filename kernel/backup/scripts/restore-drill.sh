@@ -64,15 +64,24 @@ for _pair in "${_pairs[@]}"; do
     DOPPLER_PROJECT="${_pair#*=}"; break
   fi
 done
-if [ -z "$DOPPLER_PROJECT" ]; then
+
+# When the operator HAS declared a mapping, an unmapped entity is a typo —
+# fail fast even in dry-run. With no mapping declared, dry-run proceeds on a
+# placeholder so test/CI previews work without deployment config.
+if [ -n "${RESTORE_DRILL_ENTITY_PROJECTS:-}" ] && [ -z "$DOPPLER_PROJECT" ]; then
   echo "ERROR: no Doppler project mapped for entity '${ENTITY}' — set RESTORE_DRILL_ENTITY_PROJECTS=<entity>=<project>,..." >&2
   exit 1
 fi
 
 if [ "$DRY_RUN" = "true" ]; then
-  echo "[dry-run] Would drill restore for entity: ${ENTITY} (Doppler project: ${DOPPLER_PROJECT})"
-  echo "[dry-run] Steps: fetch R2 creds (${DOPPLER_PROJECT}) + Neon creds (master/prd) => create Neon branch => download latest R2 dump => decrypt => pg_restore => row counts => write JSON => delete branch"
+  echo "[dry-run] Would drill restore for entity: ${ENTITY} (Doppler project: ${DOPPLER_PROJECT:-unset — set RESTORE_DRILL_ENTITY_PROJECTS})"
+  echo "[dry-run] Steps: fetch R2 creds (${DOPPLER_PROJECT:-<entity project>}) + Neon creds (master/prd) => create Neon branch => download latest R2 dump => decrypt => pg_restore => row counts => write JSON => delete branch"
   exit 0
+fi
+
+if [ -z "$DOPPLER_PROJECT" ]; then
+  echo "ERROR: no Doppler project mapped for entity '${ENTITY}' — set RESTORE_DRILL_ENTITY_PROJECTS=<entity>=<project>,..." >&2
+  exit 1
 fi
 
 [ -n "${DOPPLER_TOKEN:-}" ] || { echo "ERROR: DOPPLER_TOKEN env var is required" >&2; exit 1; }
@@ -412,20 +421,21 @@ for table in public.pending_actions public.standing_orders public.project_facts 
     case "$COUNT" in
       ''|*[!0-9]*) echo "ERROR: ${table} row count non-numeric: '${COUNT}'" >&2; VERIFY_FAIL=true ;;
       0)
-        # OM tables exist on every KL entity but are unused on personal/impaktful
-        # (live COUNT=0 2026-09-16). Manolii is populated (registry/work_items/
-        # scope_baselines > 0) — keep fail-closed there so a schema-only dump
-        # cannot pass. Restore-drill 33465681032 failed personal+impaktful after
-        # a successful restore because these three were empty in source too.
-        if [ "$ENTITY" = "personal" ] || [ "$ENTITY" = "impaktful" ]; then
-          case "$table" in
-            public.project_source_registry|public.work_items|public.scope_baselines)
-              echo "  WARN: ${table} restored with 0 rows (allowed — unused on ${ENTITY})"
-              ;;
-            *)
-              echo "ERROR: ${table} restored with 0 rows" >&2; VERIFY_FAIL=true
-              ;;
-          esac
+        # Some tables legitimately stay empty on some entities (e.g. OM tables
+        # unused on personal/impaktful — live COUNT=0 2026-09-16, restore-drill
+        # 33465681032 failed on exactly this). Operator config, not script data:
+        # RESTORE_DRILL_ALLOW_EMPTY_TABLES="entity:table,entity:table,..."
+        # (table is the qualified name like public.work_items). Unlisted
+        # entity/table pairs stay fail-closed so a schema-only dump cannot pass.
+        _allow_empty=false
+        IFS=',' read -ra _allow_pairs <<< "${RESTORE_DRILL_ALLOW_EMPTY_TABLES:-}"
+        for _allow_pair in "${_allow_pairs[@]}"; do
+          if [ "${_allow_pair%%=*}" = "$ENTITY" ] && [ "${_allow_pair#*=}" = "$table" ]; then
+            _allow_empty=true; break
+          fi
+        done
+        if [ "$_allow_empty" = "true" ]; then
+          echo "  WARN: ${table} restored with 0 rows (allowed by RESTORE_DRILL_ALLOW_EMPTY_TABLES)"
         else
           echo "ERROR: ${table} restored with 0 rows" >&2; VERIFY_FAIL=true
         fi
