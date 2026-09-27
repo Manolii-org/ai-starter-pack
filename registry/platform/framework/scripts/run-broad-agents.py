@@ -192,9 +192,14 @@ def invoke_agent(
     # direct Anthropic (x-api-key). The retired anthropic_only tier has no
     # callers left — its agents were remapped to restricted_us_oss_ok.
     proxy = _proxy_base()
+    # True once this call is bound to the Anthropic-direct plane — a runtime
+    # failure must then degrade to the skipped first-party marker so the judge
+    # fails closed instead of adjudicating without the required direct leg.
+    direct_required = False
     # first_party agents (security review per the eligibility matrix) always go
     # Anthropic-direct — never the OSS proxy, regardless of declared model.
     if agent_config.first_party:
+        direct_required = True
         api_key = os.getenv("ANTHROPIC_DIRECT_API_KEY") or (
             os.getenv("ANTHROPIC_API_KEY") if not proxy else None
         )
@@ -223,6 +228,7 @@ def invoke_agent(
     # client_policy_model pin that model; the rest dispatch on their declared
     # model's Anthropic equivalent (DIRECT_MODEL_MAP below).
     elif os.environ.get("CLIENT_AI_POLICY"):
+        direct_required = True
         # The shared credential resolved before this point is the proxy token
         # whenever a proxy is configured — api.anthropic.com would reject it
         # (and it must never leave the boundary as x-api-key to that host).
@@ -299,6 +305,13 @@ def invoke_agent(
             resp_data = json.loads(response.read().decode("utf-8"))
     except (URLError, json.JSONDecodeError, TimeoutError, ValueError) as e:
         logger.error(f"Agent {agent_config.name} API error: {e}")
+        if direct_required:
+            return {
+                "source": agent_config.name,
+                "findings": [],
+                "first_party": True,
+                "skipped": "api_error",
+            }
         return None
 
     try:
@@ -311,6 +324,13 @@ def invoke_agent(
         )
         if not content:
             logger.error(f"Agent {agent_config.name} empty response")
+            if direct_required:
+                return {
+                    "source": agent_config.name,
+                    "findings": [],
+                    "first_party": True,
+                    "skipped": "api_error",
+                }
             return None
 
         # Strip markdown fences
@@ -351,6 +371,13 @@ def invoke_agent(
         }
     except json.JSONDecodeError as e:
         logger.error(f"Agent {agent_config.name} JSON parse error: {e}")
+        if direct_required:
+            return {
+                "source": agent_config.name,
+                "findings": [],
+                "first_party": True,
+                "skipped": "api_error",
+            }
         return None
 
 
@@ -393,9 +420,11 @@ def run_broad_agents(
     changed_files = get_changed_files()
     user_message = build_user_message(diff, changed_files)
 
-    # Get API key
+    # Get API key. A direct-only install (ANTHROPIC_DIRECT_API_KEY without a
+    # shared transport credential) must still run: first_party agents dispatch
+    # through it, others emit the skip marker.
     api_key = get_api_key()
-    if not api_key:
+    if not api_key and not os.getenv("ANTHROPIC_DIRECT_API_KEY"):
         logger.info("[broad-agents] no API key, exiting")
         return 0
 

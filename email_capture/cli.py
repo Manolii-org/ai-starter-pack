@@ -6,7 +6,7 @@ import json
 import time
 from pathlib import Path
 
-from .core import CaptureError, Profile, allocate, assert_messages, atomic_write_json, await_messages, backend, receipt, release_allocation
+from .core import CaptureError, Profile, _read_registry, allocate, assert_messages, atomic_write_json, await_messages, backend, receipt, release_allocation
 
 
 def read_json(value: str) -> dict | list:
@@ -27,6 +27,31 @@ def _private_input_path(reference: str) -> Path | None:
     if path.is_symlink() or path.stat().st_mode & 0o077:
         raise CaptureError("AUTHORIZATION_DENIED", "allocation file must be mode 0600 and not a symlink")
     return path
+
+
+def _verified_allocation(reference: str, *, releasing: bool = False) -> dict:
+    """Read an --allocation payload and require an exact live registry record.
+
+    A caller holding the capture token could otherwise name another
+    allocation's recipient and read or purge its mail — the registry is the
+    authority on which allocations exist and what they look like.
+    """
+    allocation = read_json(reference)
+    if not isinstance(allocation, dict):
+        raise CaptureError("CONFIG_INVALID", "allocation must be a JSON object")
+    live = None
+    for record in _read_registry().values():
+        if isinstance(record, dict) and record.get("allocation_id") == allocation.get("allocation_id"):
+            live = record
+            break
+    if live is None or live.get("recipient") != allocation.get("recipient") or live.get("scope") != allocation.get("scope"):
+        raise CaptureError("AUTHORIZATION_DENIED", "allocation does not match a live registry record")
+    # Release stays reachable on expired or pending_purge records — an expired
+    # allocation still holds mail to purge, and pending_purge marks a release
+    # that must be retried, not a live claim on the mailbox.
+    if not releasing and (float(live.get("expires_at", 0)) <= time.time() or live.get("pending_purge")):
+        raise CaptureError("AUTHORIZATION_DENIED", "allocation does not match a live registry record")
+    return allocation
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -62,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
             emit(receipt("allocate", "passed", started, mode=profile.mode))
         elif arguments.command == "await":
             allocation_path = _private_input_path(arguments.allocation)
-            allocation = read_json(arguments.allocation)
+            allocation = _verified_allocation(arguments.allocation)
             messages, cursor = await_messages(selected_backend, allocation, arguments.timeout, arguments.count, arguments.not_before)
             atomic_write_json(Path(arguments.output), messages)
             if allocation_path:
@@ -72,7 +97,7 @@ def main(argv: list[str] | None = None) -> int:
             emit(assert_messages(read_json(arguments.messages), read_json(arguments.rules)))
         elif arguments.command == "release":
             _private_input_path(arguments.allocation)
-            release_allocation(selected_backend, read_json(arguments.allocation))
+            release_allocation(selected_backend, _verified_allocation(arguments.allocation, releasing=True))
             emit(receipt("release", "passed", started, mode=profile.mode, cleanup_state="complete"))
         elif arguments.command == "capabilities":
             emit(selected_backend.capabilities())

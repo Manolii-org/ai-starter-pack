@@ -149,7 +149,7 @@ def api_get(path: str, token: str | None, params: dict | None = None, raw: bool 
                 # Never echo the redirect URL itself: blob-storage links carry a
                 # signed token in the query string.
                 raise SystemExit(
-                    f"gh-ci: refusing non-https redirect from {url} (scheme={target.scheme!r}, host={target.netloc!r})"
+                    f"gh-ci: refusing non-https redirect (scheme={target.scheme!r}, host={target.netloc!r})"
                 )
             # Bound the redirect target: GitHub hands back same-host API links
             # (repo renames) and — only on Actions endpoints — log/artifact

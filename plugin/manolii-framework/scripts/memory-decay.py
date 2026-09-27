@@ -118,8 +118,18 @@ _NEGATION_TOKENS = {
 }
 
 
+_NEGATION_WORD_RE = re.compile(
+    r"\b(?:" + "|".join(sorted(_NEGATION_TOKENS | {"no", "nor", "neither", "isn't", "won't", "can't", "don't", "doesn't", "didn't", "aren't", "wasn't", "weren't", "shouldn't", "couldn't", "mustn't"})) + r")\b"
+)
+
+
+def _negations(text: str) -> set[str]:
+    """Negation words from the RAW text — tokenize() drops 2-char words like 'no'."""
+    return {m.group(0) for m in _NEGATION_WORD_RE.finditer(text.lower())}
+
+
 def _same_polarity(text_a: str, text_b: str) -> bool:
-    return (tokenize(text_a) & _NEGATION_TOKENS) == (tokenize(text_b) & _NEGATION_TOKENS)
+    return _negations(text_a) == _negations(text_b)
 
 
 # Digit-bearing tokens (ports, versions, sizes, IDs) carry values: rows
@@ -284,7 +294,7 @@ def apply_decay(
                 row["last_seen"] = row["date"]
         ts = row.get("last_seen") or row.get("created") or row.get("date")
         days = _days_since(ts, now)
-        base = _confidence_value(row.get("confidence", 1.0))
+        base = _confidence_value(row.get("merged_confidence", row.get("confidence", 1.0)))
         row["adjusted_confidence"] = round(decay_confidence(base, days, rate, floor), 3)
     return rows
 

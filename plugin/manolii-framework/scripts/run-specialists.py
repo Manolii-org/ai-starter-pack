@@ -192,6 +192,20 @@ def _parse_findings(raw: str) -> dict:
     return json.loads(text)
 
 
+def _write_skip_marker(skill_name: str, output_dir: pathlib.Path, reason: str) -> None:
+    """Durable first-party skip marker — lets the judge fail closed instead of
+    adjudicating the rest of the batch without the required direct leg."""
+    output_file = output_dir / f"{skill_name}.json"
+    output_file.write_text(
+        json.dumps(
+            {"source": skill_name, "findings": [],
+             "first_party": True, "skipped": reason},
+            indent=2,
+        ) + "\n",
+        encoding="utf-8",
+    )
+
+
 def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple[str, Optional[str]]:
     """
     Invoke a single specialist skill.
@@ -216,16 +230,8 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
         # must surface as a first-party candidate so the judge fails closed
         # into the advisory path instead of silently adjudicating the rest
         # of the batch on the proxy plane.
-        output_file = output_dir / f"{skill_name}.json"
-        output_file.write_text(
-            json.dumps(
-                {"source": skill_name, "findings": [],
-                 "first_party": True, "skipped": "no_direct_key"},
-                indent=2,
-            ) + "\n",
-            encoding="utf-8",
-        )
-        print(f"[{skill_name}] first_party skill needs ANTHROPIC_DIRECT_API_KEY — marker written to {output_file}")
+        _write_skip_marker(skill_name, output_dir, "no_direct_key")
+        print(f"[{skill_name}] first_party skill needs ANTHROPIC_DIRECT_API_KEY — marker written to {output_dir / (skill_name + '.json')}")
         return skill_name, "skipped: no direct Anthropic credential"
 
     # Neutralise the wrapper's own tag names inside untrusted content (diff,
@@ -336,8 +342,12 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
         return skill_name, None
 
     except json.JSONDecodeError as exc:
+        if first_party:
+            _write_skip_marker(skill_name, output_dir, "api_error")
         return skill_name, f"Failed to parse response as JSON: {exc}"
     except Exception as exc:
+        if first_party:
+            _write_skip_marker(skill_name, output_dir, "api_error")
         return skill_name, f"API call failed: {exc}"
 
 
