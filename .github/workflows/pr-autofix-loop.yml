@@ -209,6 +209,23 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Resolve Anthropic credential
+        id: cred
+        env:
+          BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
+          DIRECT_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PROXY_KEY: ${{ secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY }}
+        run: |
+          # Hostname comparison must match run-*.py::_endpoint — a proxy key
+          # must never reach api.anthropic.com (port/path/case variants).
+          host=$(printf '%s' "$BASE_URL" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://([^/@]+@)?([^/:]+).*#\2#' | tr '[:upper:]' '[:lower:]')
+          host=${host%.}
+          if [ -n "$BASE_URL" ] && [ "$host" != "api.anthropic.com" ]; then
+            echo "key=$PROXY_KEY" >> "$GITHUB_OUTPUT"
+          else
+            echo "key=$DIRECT_KEY" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Run autofix with Claude Code
         if: steps.ref.outputs.skip != 'true' && steps.pr.outputs.skip != 'true' && steps.budget.outputs.skip != 'true'
         env:
@@ -221,7 +238,7 @@ jobs:
           ANTHROPIC_BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
         uses: anthropics/claude-code-action@9db594c7a0e82298c121c18b7f08aa1579ce7341 # v1.0.185
         with:
-          anthropic_api_key: ${{ (vars.LITELLM_PROXY_URL || (vars.ANTHROPIC_BASE_URL && vars.ANTHROPIC_BASE_URL != 'https://api.anthropic.com' && vars.ANTHROPIC_BASE_URL != 'https://api.anthropic.com/')) && (secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY) || secrets.ANTHROPIC_API_KEY }}
+          anthropic_api_key: ${{ steps.cred.outputs.key }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           direct_prompt: |
             You are an autonomous PR autofix agent. Make minimal targeted fixes.
