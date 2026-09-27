@@ -85,9 +85,18 @@ jobs:
         contains(github.event.comment.body, 'has been sunset')) &&
       !(github.actor == 'chatgpt-codex-connector[bot]' &&
         !contains(github.event.comment.body, ' Badge') && !contains(github.event.review.body, ' Badge') &&
+        !contains(github.event.comment.body, 'P0:') && !contains(github.event.comment.body, 'P1:') &&
+        !contains(github.event.comment.body, 'P2:') && !contains(github.event.comment.body, 'P3:') &&
+        !contains(github.event.review.body, 'P0:') && !contains(github.event.review.body, 'P1:') &&
+        !contains(github.event.review.body, 'P2:') && !contains(github.event.review.body, 'P3:') &&
         ((contains(github.event.comment.body, 'usage limit') && contains(github.event.comment.body, 'reached your')) ||
          (contains(github.event.review.body, 'usage limit') && contains(github.event.review.body, 'reached your')))) &&
       !(github.actor == 'devin-ai-integration[bot]' &&
+        !contains(github.event.comment.body, ' Badge') && !contains(github.event.review.body, ' Badge') &&
+        !contains(github.event.comment.body, 'P0:') && !contains(github.event.comment.body, 'P1:') &&
+        !contains(github.event.comment.body, 'P2:') && !contains(github.event.comment.body, 'P3:') &&
+        !contains(github.event.review.body, 'P0:') && !contains(github.event.review.body, 'P1:') &&
+        !contains(github.event.review.body, 'P2:') && !contains(github.event.review.body, 'P3:') &&
         (contains(github.event.comment.body, 'Newer findings are available') ||
          contains(github.event.review.body, 'Newer findings are available'))) &&
       !(github.actor == 'devin-ai-integration[bot]' &&
