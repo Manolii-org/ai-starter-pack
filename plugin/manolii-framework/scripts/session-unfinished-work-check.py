@@ -112,6 +112,15 @@ def _current_branch() -> str:
     return _git(["rev-parse", "--abbrev-ref", "HEAD"])
 
 
+def _working_tree_changes() -> int:
+    """Uncommitted work count (staged, unstaged, untracked)."""
+    try:
+        porcelain = _git(["status", "--porcelain"], check=False)
+    except LookupError:
+        return 0
+    return sum(1 for line in porcelain.splitlines() if line.strip())
+
+
 def _unique_commit_count(base: str) -> int:
     errors: list[Exception] = []
     for ref in (f"origin/{base}", base):
@@ -350,6 +359,14 @@ def assess(*, skip_remote: bool = False) -> dict[str, Any]:
     # Non-wait task gaps (open task, no PR) still apply on the early-return
     # paths below — a zero-commit branch with an open task is not "done".
     task_gaps = [f for f in early_gaps if "RESUME CI wait" not in f]
+
+    # Uncommitted working-tree changes are unfinished work on every branch —
+    # checked before the early returns so a dirty tree on main or a zero-commit
+    # branch is never reported clean.
+    uncommitted = _working_tree_changes()
+    assessment["uncommitted_changes"] = uncommitted
+    if uncommitted:
+        task_gaps.append(f"{uncommitted} uncommitted working-tree change(s) — commit or stash before finishing")
 
     if branch in {"main", "master", base}:
         if task_gaps:

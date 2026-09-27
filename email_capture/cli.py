@@ -53,6 +53,7 @@ def _verified_allocation(reference: str, *, releasing: bool = False) -> dict:
         if releasing:
             raise CaptureError("ALLOCATION_RETIRED", "allocation already released")
         raise CaptureError("AUTHORIZATION_DENIED", "allocation does not match a live registry record")
+    allocation = live
     # Release stays reachable on expired or pending_purge records — an expired
     # allocation still holds mail to purge, and pending_purge marks a release
     # that must be retried, not a live claim on the mailbox.

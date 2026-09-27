@@ -27,7 +27,6 @@ platform/framework/scripts/ai-resolve.py#9e24a13c
 platform/framework/scripts/ai-resolve.py#66f72fef
 platform/framework/scripts/build-litellm-product-asset.py#1ee9c293
 platform/framework/scripts/classify-message.py#6b57f930
-platform/framework/scripts/email_capture/live_conformance.py#bedcb3a2
 platform/framework/scripts/instruction-load-audit.py#c1282725
 platform/framework/scripts/pack-drift-check.py#07435060
 platform/framework/scripts/pack-drift-check.py#0f6df7dd

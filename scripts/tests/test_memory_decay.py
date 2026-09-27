@@ -179,6 +179,19 @@ class TestKeeperPatternSchema:
         b = {"pattern": "verify retries", "context": "database writes"}
         assert not md._rows_mergeable(a, b, 0.6)
 
+    def test_keeper_context_substitution_never_merges(self):
+        # High-overlap contexts differing in one content token (production vs
+        # staging) describe different situations — the shared answer must not
+        # merge them.
+        a = {"pattern": "retry failed connections", "context": "production database connection failures"}
+        b = {"pattern": "retry failed connections", "context": "staging database connection failures"}
+        assert not md._rows_mergeable(a, b, 0.6)
+
+    def test_keeper_context_subset_still_merges(self):
+        a = {"pattern": "retry failed connections", "context": "database failures"}
+        b = {"pattern": "retry failed connections", "context": "database failures under"}
+        assert md._rows_mergeable(a, b, 0.6)
+
     def test_cross_schema_patterns_do_not_merge(self):
         learn = {"problem": "network calls", "solution": "verify retries", "rule": "always"}
         keeper = {"pattern": "verify retries", "context": "network calls"}

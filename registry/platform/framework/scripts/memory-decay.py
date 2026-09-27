@@ -189,6 +189,11 @@ def _rows_mergeable(a: dict, b: dict, threshold: float) -> bool:
             return False
     elif jaccard(ctx_a, ctx_b) < threshold:
         return False
+    elif not (ctx_a <= ctx_b or ctx_b <= ctx_a):
+        # Same substitution rule as answer text: contexts differing in a
+        # content token on both sides ("production" vs "staging" database)
+        # describe different situations — the shared answer does not merge them.
+        return False
     ans_a, ans_b = axes_a[1].strip(), axes_b[1].strip()
     # An unanswered pattern has no answer to establish equivalence with —
     # jaccard(∅, ∅) would return 1.0 and merge them on context alone.
