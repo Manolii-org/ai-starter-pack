@@ -114,10 +114,7 @@ def _current_branch() -> str:
 
 def _working_tree_changes() -> int:
     """Uncommitted work count (staged, unstaged, untracked)."""
-    try:
-        porcelain = _git(["status", "--porcelain"], check=False)
-    except LookupError:
-        return 0
+    porcelain = _git(["status", "--porcelain"])
     return sum(1 for line in porcelain.splitlines() if line.strip())
 
 
