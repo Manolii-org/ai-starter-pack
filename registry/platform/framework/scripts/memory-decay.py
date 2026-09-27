@@ -226,9 +226,14 @@ def apply_decay(
 ) -> list[dict]:
     """Apply decay: set last_seen default, add adjusted_confidence field."""
     for row in rows:
-        if "last_seen" not in row and "created" in row:
-            row["last_seen"] = row["created"]
-        ts = row.get("last_seen") or row.get("created")
+        # memory-keeper facts carry `date` rather than created/last_seen
+        # (its documented schema) — fall back to it or they never age.
+        if "last_seen" not in row:
+            if "created" in row:
+                row["last_seen"] = row["created"]
+            elif "date" in row:
+                row["last_seen"] = row["date"]
+        ts = row.get("last_seen") or row.get("created") or row.get("date")
         days = _days_since(ts, now)
         base = _confidence_value(row.get("confidence", 1.0))
         row["adjusted_confidence"] = round(decay_confidence(base, days, rate, floor), 3)
@@ -291,12 +296,12 @@ def consolidate(
             # created safely: a missing/malformed value sorts as "latest"
             # (float inf) so it is never preferred as the tie-break earliest.
             def _created_ts(r: dict) -> float:
-                dt = _parse_ts(r.get("created"))
+                dt = _parse_ts(r.get("created") or r.get("date"))
                 return dt.timestamp() if dt else float("inf")
 
             canonical = max(
                 cluster,
-                key=lambda r: (float(r.get("confidence", 1.0)), -_created_ts(r)),
+                key=lambda r: (_confidence_value(r.get("confidence", 1.0)), -_created_ts(r)),
             )
 
             # Merge fields
@@ -310,7 +315,7 @@ def consolidate(
                 canonical["tags"] = sorted(tags)
 
             # Confidence: min(0.95, max_conf + 0.05 * (cluster_size - 1))
-            max_conf = max(float(r.get("confidence", 1.0)) for r in cluster)
+            max_conf = max(_confidence_value(r.get("confidence", 1.0)) for r in cluster)
             canonical["confidence"] = min(0.95, max_conf + 0.05 * (len(cluster) - 1))
 
             # last_seen = most recent actual member sighting. A merge is
@@ -318,7 +323,7 @@ def consolidate(
             # decay clock on exactly the stale entries consolidation handles.
             last_seen_candidates = []
             for row in cluster:
-                ts = row.get("last_seen") or row.get("created")
+                ts = row.get("last_seen") or row.get("created") or row.get("date")
                 if ts:
                     parsed = _parse_ts(ts)
                     if parsed:

@@ -41,13 +41,13 @@ import urllib.request
 
 API = "https://api.github.com"
 
-# Redirect targets GitHub may legitimately hand back: same-host API moves and
-# log/artifact downloads on GitHub properties or the Azure blob store backing
-# Actions logs. Anything else is refused before the follow.
+# Redirect targets a CI-log fetch may legitimately land on: the Actions
+# results host and the Azure blob store backing log/artifact downloads.
+# Deliberately narrow — generic *.github.com / *.githubusercontent.com
+# subdomains serve user-controlled content that must not be trusted as CI
+# output; same-host api.github.com redirects (repo renames) are allowed
+# separately below.
 _REDIRECT_HOST_SUFFIXES = (
-    ".github.com",
-    ".githubusercontent.com",
-    ".githubassets.com",
     ".actions.githubusercontent.com",
     ".blob.core.windows.net",
 )

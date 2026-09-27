@@ -7,6 +7,7 @@ disable-model-invocation: true  # slash/CI-invoked checklist — removed from mo
 model: haiku
 advisor_model: claude-sonnet-4-6
 data_sensitivity: internal
+first_party: true  # eligibility matrix: security review stays on Anthropic even under OSS routing
 max_tokens: 800
 safety_tier: green
 requires_mcp: []
