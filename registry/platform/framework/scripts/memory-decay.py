@@ -66,23 +66,42 @@ def tokenize(text: str) -> set[str]:
 
 _PATTERN_FIELDS = ("problem", "solution", "rule")
 
+# memory-keeper's documented fact schema writes `entry`, not `content`.
+_FACT_TEXT_FIELDS = ("content", "entry")
+
 
 def _comparable_text(row: dict) -> str:
     """Text used for dedup comparison across supported memory schemas.
 
-    facts use `content`; patterns (written by /learn) carry
-    problem/solution/rule. A row with no comparable text returns "" and
-    must never be merged — two empty strings would read as identical.
+    facts use `content` (or the memory-keeper legacy `entry`); patterns
+    (written by /learn) carry problem/solution/rule. A row with no
+    comparable text returns "" and must never be merged — two empty
+    strings would read as identical.
     """
-    content = row.get("content")
-    if isinstance(content, str) and content.strip():
-        return content
+    for field in _FACT_TEXT_FIELDS:
+        content = row.get(field)
+        if isinstance(content, str) and content.strip():
+            return content
     parts = [row.get(k, "") for k in _PATTERN_FIELDS]
     return " ".join(p for p in parts if isinstance(p, str) and p.strip())
 
 
 def _is_pattern(row: dict) -> bool:
     return isinstance(row.get("problem"), str) and row["problem"].strip() != ""
+
+
+# Negation tokens: a Jaccard overlap that differs only by negation
+# ("flag is enabled" vs "flag is not enabled") must never consolidate —
+# the retained row would silently assert the opposite of the dropped one.
+_NEGATION_TOKENS = {
+    "not", "never", "cannot", "cant", "wont", "dont", "doesnt",
+    "didnt", "isnt", "arent", "wasnt", "werent", "shouldnt", "couldnt",
+    "mustnt", "without", "disable", "disabled", "disallow",
+}
+
+
+def _same_polarity(text_a: str, text_b: str) -> bool:
+    return (tokenize(text_a) & _NEGATION_TOKENS) == (tokenize(text_b) & _NEGATION_TOKENS)
 
 
 def _rows_mergeable(a: dict, b: dict, threshold: float) -> bool:
@@ -97,6 +116,8 @@ def _rows_mergeable(a: dict, b: dict, threshold: float) -> bool:
     text_a = _comparable_text(a)
     text_b = _comparable_text(b)
     if not text_a or not text_b:
+        return False
+    if not _same_polarity(text_a, text_b):
         return False
     if not (_is_pattern(a) and _is_pattern(b)):
         return text_a == text_b or jaccard(tokenize(text_a), tokenize(text_b)) >= threshold
@@ -174,6 +195,32 @@ def save_jsonl(path: str | Path, rows: list[dict]) -> None:
         raise
 
 
+_CATEGORICAL_CONFIDENCE = {"high": 0.9, "medium": 0.6, "low": 0.3}
+
+
+def _confidence_value(raw) -> float:
+    """Numeric confidence for decay.
+
+    memory-keeper writes categorical values ("high"/"medium"/"low") per its
+    documented schema; plain rows may carry floats or numeric strings.
+    Unrecognized values fall back to 1.0 rather than crashing the dry-run.
+    """
+    if isinstance(raw, bool):
+        return 1.0
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    if isinstance(raw, str):
+        lowered = raw.strip().casefold()
+        if lowered in _CATEGORICAL_CONFIDENCE:
+            return _CATEGORICAL_CONFIDENCE[lowered]
+        try:
+            return float(lowered)
+        except ValueError:
+            pass
+    print(f"[memory-decay] unrecognized confidence {raw!r} — treating as 1.0", file=sys.stderr)
+    return 1.0
+
+
 def apply_decay(
     rows: list[dict], now: datetime, rate: float = 0.1, floor: float = 0.1
 ) -> list[dict]:
@@ -183,7 +230,7 @@ def apply_decay(
             row["last_seen"] = row["created"]
         ts = row.get("last_seen") or row.get("created")
         days = _days_since(ts, now)
-        base = float(row.get("confidence", 1.0))
+        base = _confidence_value(row.get("confidence", 1.0))
         row["adjusted_confidence"] = round(decay_confidence(base, days, rate, floor), 3)
     return rows
 

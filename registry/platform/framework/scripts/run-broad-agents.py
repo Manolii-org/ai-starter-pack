@@ -190,9 +190,11 @@ def invoke_agent(
     # direct Anthropic (x-api-key). The retired anthropic_only tier has no
     # callers left — its agents were remapped to restricted_us_oss_ok.
     proxy = _proxy_base()
-    # Engagement carrying client_ai_policy escalates declared agents back to
-    # their Anthropic-direct model — the proxy/OSS route is bypassed entirely.
-    if agent_config.client_policy_model and os.environ.get("CLIENT_AI_POLICY"):
+    # Engagement carrying client_ai_policy is Anthropic-direct for EVERY
+    # agent — the proxy/OSS route is bypassed entirely. Agents declaring
+    # client_policy_model pin that model; the rest dispatch on their declared
+    # model's Anthropic equivalent (DIRECT_MODEL_MAP below).
+    if os.environ.get("CLIENT_AI_POLICY"):
         # The shared credential resolved before this point is the proxy token
         # whenever a proxy is configured — api.anthropic.com would reject it
         # (and it must never leave the boundary as x-api-key to that host).
@@ -202,15 +204,15 @@ def invoke_agent(
         )
         if not api_key:
             logger.warning(
-                f"{agent_config.name}: CLIENT_AI_POLICY escalation needs "
+                f"{agent_config.name}: CLIENT_AI_POLICY engagement needs "
                 "ANTHROPIC_DIRECT_API_KEY (the proxy credential cannot "
                 "authenticate Anthropic-direct); skipping"
             )
             return None
         proxy = None
-        model = agent_config.client_policy_model
+        model = agent_config.client_policy_model or model
         logger.info(
-            f"{agent_config.name}: CLIENT_AI_POLICY active — escalating to {model} (Anthropic-direct)"
+            f"{agent_config.name}: CLIENT_AI_POLICY active — dispatching {model} (Anthropic-direct)"
         )
     base_url = proxy or "https://api.anthropic.com"
     if proxy and model in {"claude-haiku-4-5-20251001", "claude-sonnet-4-6"}:

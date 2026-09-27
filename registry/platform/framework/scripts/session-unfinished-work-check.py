@@ -134,22 +134,34 @@ def _remote_has_branch(branch: str) -> bool:
     raise LookupError(message)
 
 
+_REPO_SEGMENT = re.compile(r"[A-Za-z0-9_.-]+")
+
+
 def _repo_slug() -> str | None:
     remote_url = _git(["config", "--get", "remote.origin.url"])
-    if "github.com" not in remote_url:
-        return None
 
     if "github.com:" in remote_url:
+        # scp-style: git@github.com:owner/repo(.git)
         path = remote_url.split("github.com:", 1)[1]
     else:
         parsed = parse.urlparse(remote_url)
+        # Hostname must be exactly github.com — a substring match would accept
+        # attacker-suffixed hosts like github.com.evil.example.
+        if parsed.hostname != "github.com":
+            return None
         path = parsed.path.lstrip("/")
 
     path = path.removesuffix(".git").strip("/")
     parts = path.split("/")
     if len(parts) < 2 or not parts[0] or not parts[1]:
         return None
-    return f"{parts[0]}/{parts[1]}"
+    owner, repo = parts[0], parts[1]
+    # Interpolated verbatim into the api.github.com request path — reject
+    # anything outside GitHub's name grammar so a crafted remote cannot smuggle
+    # a path traversal or query into the authenticated request.
+    if not _REPO_SEGMENT.fullmatch(owner) or not _REPO_SEGMENT.fullmatch(repo):
+        return None
+    return f"{owner}/{repo}"
 
 
 def _normalise_prs(raw: Any) -> list[dict[str, Any]]:
