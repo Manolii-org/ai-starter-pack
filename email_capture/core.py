@@ -786,6 +786,10 @@ def _co_owners_still_live(row: dict[str, Any], recipient: str) -> bool:
     for record in records.values():
         if not isinstance(record, dict):
             continue
+        # pending_purge records document an unfinished release — their owner
+        # is being retired, so they are not live co-owners.
+        if record.get("pending_purge"):
+            continue
         other = str(record.get("recipient", "")).lower()
         if other in others and float(record.get("expires_at", 0) or 0) > now:
             return True
@@ -987,16 +991,29 @@ def allocate(request: dict[str, Any], profile: Profile) -> dict[str, Any]:
 def release_allocation(selected_backend: Backend, allocation: dict[str, Any]) -> None:
     """Idempotently purge messages and retire the allocation registry entry.
 
-    The record retires BEFORE the purge so the purge's co-owner check reads
-    the post-release registry: two concurrent releases then deterministically
-    leave deletion to whichever purge runs last, instead of both seeing the
-    other's record live and skipping deletion forever.
+    The record is marked ``pending_purge`` BEFORE the purge so the purge's
+    co-owner check reads the releasing record as already-retired: two
+    concurrent releases then deterministically leave deletion to whichever
+    purge runs last, instead of both seeing the other's record live and
+    skipping deletion forever. The record is only removed after the purge
+    succeeds — a failed purge leaves a durable pending marker (excluded from
+    co-owner liveness) so a retried release can finish the cleanup instead
+    of orphaning the captured messages.
     """
+    with _registry_lock():
+        records = _read_registry()
+        for record in records.values():
+            if (
+                isinstance(record, dict)
+                and record.get("allocation_id") == allocation.get("allocation_id")
+            ):
+                record["pending_purge"] = True
+        atomic_write_json(_registry_path(), records)
+    selected_backend.purge(allocation)
     with _registry_lock():
         records = _read_registry()
         retained = {key: value for key, value in records.items() if value.get("allocation_id") != allocation.get("allocation_id")}
         atomic_write_json(_registry_path(), retained)
-    selected_backend.purge(allocation)
 
 
 def await_messages(selected_backend: Backend, allocation: dict[str, Any], timeout: float = 30, count: int = 1, not_before: str | None = None) -> tuple[list[dict[str, Any]], str]:

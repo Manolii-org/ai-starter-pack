@@ -197,6 +197,7 @@ class Judge:
         self.token = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")
         self.merge_danger = self._load_merge_danger()
         self._has_first_party_candidates = False
+        self._skipped_first_party: list[str] = []
         # An `edited` rerun at the same HEAD must publish a fresh verdict: dedup
         # keys on commit + metadata digest so a title/body edit re-posts. The
         # base SHA is part of the key: a base update changes the merge diff the
@@ -255,6 +256,8 @@ class Judge:
                     # counts: its absence must surface via the fail-closed
                     # advisory path, never pass silently.
                     self._has_first_party_candidates = True
+                if data.get("first_party") and data.get("skipped"):
+                    self._skipped_first_party.append(source)
 
                 for raw_finding in candidate_findings:
                     finding = Finding(
@@ -726,8 +729,8 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
         logger.info(f"Loaded {len(findings)} findings from candidates")
 
         if not findings:
-            logger.info("No findings to process; posting advisory comment")
-            self._post_no_findings_comment()
+            logger.info("No findings to process; posting verdict comment")
+            self._post_clean_or_skip_advisory()
             return 0
 
         # Apply specificity gate (programmatic backstop)
@@ -736,7 +739,7 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
 
         if not findings:
             logger.info("All findings dropped by specificity gate")
-            self._post_no_findings_comment()
+            self._post_clean_or_skip_advisory()
             return 0
 
         # Invoke judge agent for 4-gate filter
@@ -795,7 +798,7 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
                 logger.warning("Failed to post review to GitHub")
         else:
             logger.info("No findings survived filters; skipping GitHub post")
-            self._post_no_findings_comment()
+            self._post_clean_or_skip_advisory()
 
         return 0
 
@@ -865,8 +868,25 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
         except Exception as e:
             logger.warning(f"Failed to post no-findings comment: {e}")
 
-    def _post_advisory_warning(self) -> None:
-        """Post an advisory WARNING when judge fails."""
+    def _post_clean_or_skip_advisory(self) -> None:
+        """Post the clean verdict — unless a first-party specialist was skipped.
+
+        A skipped marker means a security specialist never ran, so 'no
+        findings' is not a real verdict: fail closed into the advisory.
+        """
+        if self._skipped_first_party:
+            sources = ", ".join(sorted(set(self._skipped_first_party)))
+            logger.warning(
+                f"first-party specialists skipped (no direct credential): {sources}"
+            )
+            self._post_advisory_warning(
+                f"First-party security checks did not run (skipped: {sources})."
+            )
+            return
+        self._post_no_findings_comment()
+
+    def _post_advisory_warning(self, detail: str = "") -> None:
+        """Post an advisory WARNING when judge fails or coverage is incomplete."""
         if not self.token or not self.repo:
             logger.info("Judge failed; no token/repo for advisory post")
             return
@@ -876,7 +896,7 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
                 "body": (
                     f"{REVIEW_MARKER}\n"
                     "## PR Assessment\n"
-                    "⚠️ Assessment system encountered an error. "
+                    f"⚠️ Assessment system encountered an error.{f' {detail}' if detail else ''} "
                     "Manual review recommended.\n\n"
                     "**Merge danger:** unknown (assessment error)"
                 ),

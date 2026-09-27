@@ -358,6 +358,11 @@ def assess(*, skip_remote: bool = False) -> dict[str, Any]:
     findings: list[str] = []
     remote_present = False if skip_remote else _remote_has_branch(branch)
     assessment["remote_present"] = remote_present
+    # Distinguish a deliberately skipped remote lookup from a confirmed absent
+    # remote — only the former may pass with unpushed unique commits.
+    assessment["remote_lookup"] = (
+        "skipped" if skip_remote else ("present" if remote_present else "absent")
+    )
 
     open_prs: list[dict[str, Any]] = []
     if remote_present:
@@ -380,6 +385,12 @@ def assess(*, skip_remote: bool = False) -> dict[str, Any]:
                     "ManagePullRequest ready-for-review after the quality gate "
                     "so Codex monitor + auto-merge can run"
                 )
+    elif not skip_remote:
+        findings.append(
+            "local branch has unique commits but no pushed remote branch; "
+            "push the branch and open a PR via ManagePullRequest create_pr "
+            "before ending turn"
+        )
 
     findings.extend(task_gaps)
     assessment["findings"] = findings
