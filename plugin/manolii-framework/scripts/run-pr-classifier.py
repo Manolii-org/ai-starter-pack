@@ -60,7 +60,7 @@ def _proxy_transport_key() -> str:
         or os.environ.get("ANTHROPIC_API_KEY")
         or ""
     )
-    if key.removeprefix("Bearer ").startswith("sk-ant-"):
+    if key.strip().removeprefix("Bearer ").strip().startswith("sk-ant-"):
         return ""
     return key
 

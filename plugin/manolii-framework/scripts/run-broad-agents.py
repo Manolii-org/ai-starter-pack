@@ -150,7 +150,7 @@ def get_api_key() -> Optional[str]:
         # A genuine sk-ant-* key is a first-party credential and must never
         # leave for a non-Anthropic host — legacy configs keep the proxy key
         # under ANTHROPIC_API_KEY, which is not sk-ant-shaped.
-        if key.removeprefix("Bearer ").startswith("sk-ant-"):
+        if key.strip().removeprefix("Bearer ").strip().startswith("sk-ant-"):
             key = ""
     else:
         key = os.getenv("ANTHROPIC_API_KEY")
