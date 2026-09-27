@@ -255,6 +255,14 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
         print(f"[{skill_name}] first_party skill needs ANTHROPIC_DIRECT_API_KEY — marker written to {output_dir / (skill_name + '.json')}")
         return skill_name, "skipped: no direct Anthropic credential"
 
+    if not first_party and not _endpoint()[0]:
+        # Proxy configured but no shared credential (e.g. direct-only install):
+        # the API call would raise immediately — record the marker up front so
+        # the judge counts the missing coverage rather than a false clean.
+        _write_skipped_marker(skill_name, output_dir, "no_proxy_credential")
+        print(f"[{skill_name}] no shared credential for the configured proxy — marker written")
+        return skill_name, "skipped: no shared proxy credential"
+
     # Neutralise the wrapper's own tag names inside untrusted content (diff,
     # title/body) so crafted input cannot close the boundary.
     _WRAP_TAGS = ("untrusted_diff", "untrusted_pr_meta", "changed_paths")
@@ -349,10 +357,14 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
         if not isinstance(data, dict):
             if first_party:
                 _write_skip_marker(skill_name, output_dir, "api_error")
+            else:
+                _write_skipped_marker(skill_name, output_dir, "api_error")
             return skill_name, f"Response is not a JSON object: {type(data)}"
         if "source" not in data or "findings" not in data:
             if first_party:
                 _write_skip_marker(skill_name, output_dir, "api_error")
+            else:
+                _write_skipped_marker(skill_name, output_dir, "api_error")
             return skill_name, "Response missing 'source' or 'findings' fields"
 
         if first_party and data.get("findings"):
@@ -371,10 +383,14 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
     except json.JSONDecodeError as exc:
         if first_party:
             _write_skip_marker(skill_name, output_dir, "api_error")
+        else:
+            _write_skipped_marker(skill_name, output_dir, "api_error")
         return skill_name, f"Failed to parse response as JSON: {exc}"
     except Exception as exc:
         if first_party:
             _write_skip_marker(skill_name, output_dir, "api_error")
+        else:
+            _write_skipped_marker(skill_name, output_dir, "api_error")
         return skill_name, f"API call failed: {exc}"
 
 

@@ -520,16 +520,24 @@ def run_broad_agents(
             agent_name = futures[future]
             try:
                 findings = future.result()
-                if findings:
-                    results[agent_name] = findings
-                    out_file = output_dir / f"{agent_name}.json"
-                    out_file.write_text(
-                        json.dumps(findings, indent=2),
-                        encoding="utf-8",
-                    )
-                    logger.info(f"Wrote {agent_name} findings to {out_file}")
             except Exception as e:
                 logger.error(f"Agent {agent_name} execution error: {e}")
+                findings = None
+            if not findings:
+                # No output at all — write the marker so the judge counts the
+                # missing coverage instead of posting a false-clean verdict.
+                findings = {
+                    "source": agent_name,
+                    "findings": [],
+                    "skipped": "api_error",
+                }
+            results[agent_name] = findings
+            out_file = output_dir / f"{agent_name}.json"
+            out_file.write_text(
+                json.dumps(findings, indent=2),
+                encoding="utf-8",
+            )
+            logger.info(f"Wrote {agent_name} findings to {out_file}")
 
     if results:
         logger.info(f"[broad-agents] completed {len(results)}/{len(agents_to_run)} agents (incl. skipped markers)")

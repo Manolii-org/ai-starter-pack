@@ -394,9 +394,16 @@ fi
 echo "[8/9] Verifying row counts"
 declare -A ROW_COUNTS
 VERIFY_FAIL=false
-for table in public.pending_actions public.standing_orders public.project_facts \
-             public.notes public.knowledge_base public.source_packets \
-             public.project_source_registry public.work_items public.scope_baselines; do
+# Table set is operator config, not script data — a tenant whose restored
+# schema legitimately lacks a table fails the COUNT outright otherwise.
+# RESTORE_DRILL_VERIFY_TABLES="public.t1 public.t2 ..." overrides the default.
+RESTORE_DRILL_VERIFY_TABLES="${RESTORE_DRILL_VERIFY_TABLES:-public.pending_actions public.standing_orders public.project_facts public.notes public.knowledge_base public.source_packets public.project_source_registry public.work_items public.scope_baselines}"
+for table in ${RESTORE_DRILL_VERIFY_TABLES}; do
+  if [[ ! "$table" =~ ^[a-z0-9_]+(\.[a-z0-9_]+)?$ ]]; then
+    echo "ERROR: invalid table name in RESTORE_DRILL_VERIFY_TABLES: '${table}'" >&2
+    VERIFY_FAIL=true
+    continue
+  fi
   # 2026-06-25 drill (run 28138863132) failed here with "ERROR rows" for every
   # table and the psql error text discarded, making a transient Neon-branch
   # connection drop indistinguishable from a missing table. Surface stderr and
@@ -424,7 +431,7 @@ for table in public.pending_actions public.standing_orders public.project_facts 
         # Some tables legitimately stay empty on some entities (e.g. OM tables
         # unused on personal/impaktful — live COUNT=0 2026-09-16, restore-drill
         # 33465681032 failed on exactly this). Operator config, not script data:
-        # RESTORE_DRILL_ALLOW_EMPTY_TABLES="entity:table,entity:table,..."
+        # RESTORE_DRILL_ALLOW_EMPTY_TABLES="entity=table,entity=table,..."
         # (table is the qualified name like public.work_items). Unlisted
         # entity/table pairs stay fail-closed so a schema-only dump cannot pass.
         _allow_empty=false
