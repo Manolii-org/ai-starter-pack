@@ -71,7 +71,7 @@ jobs:
       - name: Run pr-classifier
         id: classify
         env:
-          ANTHROPIC_API_KEY: ${{ (vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL) && (secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY) || secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ (vars.LITELLM_PROXY_URL || (vars.ANTHROPIC_BASE_URL && !contains(vars.ANTHROPIC_BASE_URL, 'api.anthropic.com'))) && (secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY) || secrets.ANTHROPIC_API_KEY }}
           ANTHROPIC_BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
           CLIENT_AI_POLICY: ${{ vars.CLIENT_AI_POLICY }}
           # CLIENT_AI_POLICY routes the classifier Anthropic-direct too — the
@@ -343,7 +343,7 @@ jobs:
 
       - name: Run specialist skills
         env:
-          ANTHROPIC_API_KEY: ${{ (vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL) && (secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY) || secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ (vars.LITELLM_PROXY_URL || (vars.ANTHROPIC_BASE_URL && !contains(vars.ANTHROPIC_BASE_URL, 'api.anthropic.com'))) && (secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY) || secrets.ANTHROPIC_API_KEY }}
           ANTHROPIC_BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
           # first_party specialist skills run Anthropic-direct; without this
           # key they skip-with-warning under proxy mode.
@@ -386,7 +386,7 @@ jobs:
 
       - name: Run broad agents
         env:
-          ANTHROPIC_API_KEY: ${{ (vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL) && (secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY) || secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ (vars.LITELLM_PROXY_URL || (vars.ANTHROPIC_BASE_URL && !contains(vars.ANTHROPIC_BASE_URL, 'api.anthropic.com'))) && (secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY) || secrets.ANTHROPIC_API_KEY }}
           ANTHROPIC_BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
           # Engagement policy gate: when set, agents declaring
           # client_policy_model escalate Anthropic-direct and need a real key
@@ -427,7 +427,7 @@ jobs:
 
       - name: Run judge
         env:
-          ANTHROPIC_API_KEY: ${{ (vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL) && (secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY) || secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ (vars.LITELLM_PROXY_URL || (vars.ANTHROPIC_BASE_URL && !contains(vars.ANTHROPIC_BASE_URL, 'api.anthropic.com'))) && (secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY) || secrets.ANTHROPIC_API_KEY }}
           ANTHROPIC_BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
           # Judge adjudicates first_party candidates Anthropic-direct.
           ANTHROPIC_DIRECT_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

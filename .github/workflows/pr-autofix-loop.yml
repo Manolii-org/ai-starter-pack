@@ -221,7 +221,7 @@ jobs:
           ANTHROPIC_BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
         uses: anthropics/claude-code-action@9db594c7a0e82298c121c18b7f08aa1579ce7341 # v1.0.185
         with:
-          anthropic_api_key: ${{ (vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL) && (secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY) || secrets.ANTHROPIC_API_KEY }}
+          anthropic_api_key: ${{ (vars.LITELLM_PROXY_URL || (vars.ANTHROPIC_BASE_URL && !contains(vars.ANTHROPIC_BASE_URL, 'api.anthropic.com'))) && (secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY) || secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           direct_prompt: |
             You are an autonomous PR autofix agent. Make minimal targeted fixes.
