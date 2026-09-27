@@ -18,7 +18,15 @@ from typing import Any
 from urllib import error, parse, request
 
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+_env_root = os.environ.get("CLAUDE_PROJECT_DIR")
+if _env_root:
+    REPO_ROOT = Path(_env_root).resolve()
+elif (Path(__file__).resolve().parent.parent / ".git").exists():
+    REPO_ROOT = Path(__file__).resolve().parent.parent
+else:
+    # Installed-plugin invocation: __file__ resolves into the plugin cache, not
+    # the project the caller is working in — use the invocation cwd.
+    REPO_ROOT = Path.cwd()
 ACTIVE_TASK_PATH = REPO_ROOT / ".ai" / "sessions" / "active-task.json"
 DEFAULT_WRITE_PATH = REPO_ROOT / ".ai" / "unfinished-work.md"
 

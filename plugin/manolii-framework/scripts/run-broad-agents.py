@@ -327,7 +327,11 @@ def invoke_agent(
         _DEFAULTS = {"file": "", "line": None, "severity": "WARNING", "message": "", "fix": ""}
         normalised = [{**_DEFAULTS, **f} for f in raw_findings if isinstance(f, dict)]
 
-        return {"source": agent_config.name, "findings": normalised}
+        return {
+            "source": agent_config.name,
+            "first_party": agent_config.first_party,
+            "findings": normalised,
+        }
     except json.JSONDecodeError as e:
         logger.error(f"Agent {agent_config.name} JSON parse error: {e}")
         return None

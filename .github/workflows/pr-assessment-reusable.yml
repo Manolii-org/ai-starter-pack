@@ -442,6 +442,10 @@ jobs:
       ANTHROPIC_API_KEY: ${{ inputs.provider_mode == 'proxy' && secrets.LITELLM_MASTER_KEY || secrets.ANTHROPIC_API_KEY }}
       ANTHROPIC_BASE_URL: ${{ inputs.provider_mode == 'proxy' && inputs.litellm_proxy_url || '' }}
       ANTHROPIC_MODEL: ${{ inputs.model }}
+      # first_party specialist skills (shell-security, sast-scan,
+      # security-boundary-test) run Anthropic-direct on this key; without it
+      # they skip-with-warning in proxy mode.
+      ANTHROPIC_DIRECT_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
     steps:
       - name: Validate provider secrets
         env:
@@ -682,6 +686,9 @@ jobs:
       ANTHROPIC_API_KEY: ${{ inputs.provider_mode == 'proxy' && secrets.LITELLM_MASTER_KEY || secrets.ANTHROPIC_API_KEY }}
       ANTHROPIC_BASE_URL: ${{ inputs.provider_mode == 'proxy' && inputs.litellm_proxy_url || '' }}
       ANTHROPIC_MODEL: ${{ inputs.model }}
+      # Judge adjudicates first_party candidates Anthropic-direct (run-judge.py
+      # _endpoint(direct=True)); without this key those findings go unjudged.
+      ANTHROPIC_DIRECT_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
     steps:
       - name: Validate provider secrets
         env:

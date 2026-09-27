@@ -423,13 +423,33 @@ class HttpBackend:
     def purge(self, allocation: dict[str, Any]) -> None:
         """Delete only messages selected by the allocation recipient."""
         summaries = self._matching_summaries(allocation)
+        recipient = allocation["recipient"].lower()
         if self.profile.backend == "mailpit":
-            identifiers = [_message_id(row) for row in summaries]
+            # A message addressed to several active recipients is shared state:
+            # releasing one allocation must not destroy it for the others.
+            identifiers = []
+            for row in summaries:
+                requested_id = _message_id(row)
+                detail = self._request(
+                    f"/api/v1/message/{urllib.parse.quote(requested_id, safe='')}"
+                )
+                if not isinstance(detail, dict):
+                    raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "receiver detail has invalid shape")
+                _require_envelope_fields_well_formed(detail)
+                if _allocation_exclusively_owns(detail, recipient):
+                    identifiers.append(requested_id)
             if identifiers:
                 self._request("/api/v1/messages", "DELETE", {"IDs": identifiers})
             return
         mailbox = urllib.parse.quote(allocation["recipient"].split("@", 1)[0], safe="")
         for row in summaries:
+            if self.profile.backend == "maildev":
+                detail = self._request(f"/email/{urllib.parse.quote(_message_id(row), safe='')}")
+                if not isinstance(detail, dict):
+                    raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "receiver detail has invalid shape")
+                _require_envelope_fields_well_formed(detail)
+                if not _allocation_exclusively_owns(detail, recipient):
+                    continue
             identifier = urllib.parse.quote(_message_id(row), safe="")
             path = f"/email/{identifier}" if self.profile.backend == "maildev" else f"/api/v1/mailbox/{mailbox}/{identifier}"
             self._request(path, "DELETE")
