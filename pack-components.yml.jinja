@@ -42,6 +42,7 @@ instance:
       - DOPPLER_SERVICE_TOKEN_LITELLM
       - FLY_API_TOKEN
       - LITELLM_MASTER_KEY   # proxy auth; ANTHROPIC_API_KEY not required on this plane
+                             # Optional ANTHROPIC_DIRECT_API_KEY enables first-party security checks; without it they skip with a visible advisory.
 {% else %}
       - ANTHROPIC_API_KEY
 {% endif %}
