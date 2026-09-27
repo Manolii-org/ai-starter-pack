@@ -21,8 +21,8 @@ eval_cases live under `.ai/evals/session-critic/`.
 Expected input: optional `--deep` flag for work-critic (default: quick-critic).
 
 Required behavior:
-1. Dispatch `Agent(subagent_type="quick-critic")` on the diff (`git diff HEAD`)
-2. For `--deep`: dispatch `Agent(subagent_type="work-critic")` on the same diff
-3. For default: use the quick-critic dispatch
+1. Run `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/run-session-critic.py" --tier quick --mode advisory --git-diff HEAD`
+2. For `--deep`: run `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/run-session-critic.py" --tier deep --mode advisory --git-diff HEAD`
+3. For default: run `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/run-session-critic.py" --tier quick --mode advisory --git-diff HEAD`
 4. Return findings with specific file paths and line numbers; do not apply fixes unless explicitly asked.
 5. Do not commit, push, or make assumptions about intent beyond the visible diff/plan.

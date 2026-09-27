@@ -260,7 +260,7 @@ def invoke_agent(
         )
         with _urlopen_https(req, timeout=TIMEOUT_SECS, host=urlparse(api_url).hostname or "") as response:
             resp_data = json.loads(response.read().decode("utf-8"))
-    except (URLError, json.JSONDecodeError, TimeoutError) as e:
+    except (URLError, json.JSONDecodeError, TimeoutError, ValueError) as e:
         logger.error(f"Agent {agent_config.name} API error: {e}")
         return None
 

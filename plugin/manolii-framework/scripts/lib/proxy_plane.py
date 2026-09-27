@@ -37,7 +37,9 @@ def _anthropic_base_url() -> str:
 def _base_is_non_anthropic_proxy(base: str) -> bool:
     if not base:
         return False
-    return "anthropic.com" not in base.lower()
+    from urllib.parse import urlparse
+    host = (urlparse(base).hostname or "").lower().rstrip(".")
+    return host != "api.anthropic.com"
 
 
 def client_proxy_active() -> bool:
@@ -48,8 +50,8 @@ def client_proxy_active() -> bool:
     accounting must follow the actual transport, not the intended flag.
     """
     base = _anthropic_base_url()
-    if _base_is_non_anthropic_proxy(base):
-        return True
+    if base:
+        return _base_is_non_anthropic_proxy(base)
     flag = (os.environ.get("CLAUDE_CLIENT_USE_PROXY") or "").strip()
     return flag == "1"
 

@@ -930,10 +930,10 @@
       ],
       "allowed_tiers": [],
       "allowed_providers": [],
-      "_migrated_from": "restricted_us_oss_ok (retired 2026-09-26): client-code/PII workloads moved to restricted_us_oss_ok via guardrailed aliases; 'restricted' now means no AI at all."
+      "_note": "anthropic_only (retired 2026-09-26): its agents moved to restricted_us_oss_ok via guardrailed aliases; 'restricted' now means governance no-AI — no model is routed."
     },
     "restricted_us_oss_ok": {
-      "description": "Non-client, non-PII data where engagement contract permits US-origin OSS inference. PRC-origin weights excluded regardless of hosting provider.",
+      "description": "Highest AI-eligible tier: client-code/PII and sensitive data where the engagement contract permits US-origin OSS inference. PRC-origin weights excluded regardless of hosting provider.",
       "examples": [
         "document extraction for engagement with us_weights_ok policy",
         "structured data transform on internal schema",
@@ -2041,7 +2041,7 @@
       "resolves_to": "fireworks:accounts/fireworks/models/deepseek-v4-pro",
       "data_sensitivity_max": "restricted_us_oss_ok",
       "proxy_live_since": "2026-04-20",
-      "warning": "Short alias for claude-sonnet-4-6. When proxy intercept activates: sonnet sub-agent calls route to DeepSeek V4 Pro (Fireworks, PRC-origin weights on US infra). Repointed 2026-06-17 off together:google/gemma-4-31b-it (Together revoked Gemma 4 31B serverless, HTTP 400). Eligible at restricted_us_oss_ok ONLY because the advisor guardrail is MANDATORY and FAIL-CLOSED (cf. Rule 3). Use for restricted_us_oss_ok work only; do NOT assign to restricted or restricted_us_oss_ok agents — use claude-sonnet-4-6 for those.",
+      "warning": "Short alias for claude-sonnet-4-6. When proxy intercept activates: sonnet sub-agent calls route to DeepSeek V4 Pro (Fireworks, PRC-origin weights on US infra). Repointed 2026-06-17 off together:google/gemma-4-31b-it (Together revoked Gemma 4 31B serverless, HTTP 400). Eligible at restricted_us_oss_ok ONLY because the advisor guardrail is MANDATORY and FAIL-CLOSED (cf. Rule 3). Use for restricted_us_oss_ok agents only; `restricted` is governance no-AI (no model at all); for Anthropic-direct-required work use `claude-sonnet-4-6` with the proxy off.",
       "advisor_guardrail": {
         "mode": "post_call",
         "fail_closed": true,
@@ -2101,7 +2101,7 @@
       "resolves_to": "fireworks:kimi-k2p6 (dual-key load balanced)",
       "data_sensitivity_max": "internal",
       "proxy_live_since": "2026-04-20",
-      "warning": "PRC-origin (Moonshot AI / Kimi). ONLY for data_sensitivity: internal agents. Do NOT assign to restricted_us_oss_ok, restricted, or restricted_us_oss_ok agents.",
+      "warning": "PRC-origin (Moonshot AI / Kimi). ONLY for data_sensitivity: internal agents. Do NOT assign to restricted_us_oss_ok or restricted agents.",
       "fallback_chain": {
         "primary": {
           "provider": "fireworks",

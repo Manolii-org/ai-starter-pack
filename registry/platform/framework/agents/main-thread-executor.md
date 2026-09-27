@@ -20,7 +20,7 @@ tags:
 
 # Main-Thread Executor
 
-**Current model:** `claude-sonnet-4-6` (executor) with `claude-opus-4-7` advisor on escalation triggers.
+**Current model:** `sonnet` (executor; the guardrailed proxy alias at `restricted_us_oss_ok`) with `claude-opus-4-7` advisor on escalation triggers.
 
 **Tier:** `heavy-main` — Sonnet executor + Opus advisor via `advisor_pairing` in `.claude/model-routing.json`.
 
@@ -30,7 +30,7 @@ tags:
 | Install | Model | Cost per 1M tokens (in/out) |
 |---|---|---|
 | Claude-only | claude-sonnet-4-6 (Anthropic direct) | $3.00 / $15.00 |
-| Claude + OSS | N/A — main-thread executor requires Anthropic infrastructure | — |
+| Claude + OSS | `sonnet` (proxy alias → guardrailed OSS route) | see `.claude/model-routing.json` |
 
 ## Tier Routing (Main Thread Only)
 

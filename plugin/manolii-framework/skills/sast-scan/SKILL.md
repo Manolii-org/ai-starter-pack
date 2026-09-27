@@ -103,6 +103,12 @@ results = data.get("results", [])
 # SECURITY: secret/credential hits must NOT be forwarded to the proxy-backed
 # deep-dive (see prose below). Exclude them from the hand-off file.
 SECRET_RE = re.compile(r"secret|credential|api[-_]?key|private[-_]?key|password|token", re.I)
+def is_secret_finding(r):
+    # A credential can surface under a generic rule id — classify on the
+    # matched message/metadata, not just check_id.
+    return SECRET_RE.search(r["check_id"]) or SECRET_RE.search(
+        r.get("extra", {}).get("message", "")
+    ) or SECRET_RE.search(r.get("extra", {}).get("metadata", {}).get("cwe", "") if isinstance(r.get("extra", {}).get("metadata"), dict) else "")
 out = [{
     "finding_id": f"{r['path']}:{r['start']['line']}:{r['check_id']}",
     "rule": r["check_id"],
@@ -110,10 +116,10 @@ out = [{
     "line": r["start"]["line"],
     "message": r.get("extra", {}).get("message", ""),
     "severity": r.get("extra", {}).get("severity", "MEDIUM"),
-} for r in results if not SECRET_RE.search(r["check_id"])]
+} for r in results if not is_secret_finding(r)]
 json.dump(out, open(".ai/sast-findings.json", "w"), indent=2)
 # Secret-rule hits go to the OPERATOR only — file:line + rule, never the value:
-secret_hits = [f"{r['path']}:{r['start']['line']} {r['check_id']}" for r in results if SECRET_RE.search(r["check_id"])]
+secret_hits = [f"{r['path']}:{r['start']['line']} {r['check_id']}" for r in results if is_secret_finding(r)]
 if secret_hits:
     print("SECRET-RULE HITS (operator review only — NOT sent to deep-dive):\n" + "\n".join(secret_hits))
 PY
