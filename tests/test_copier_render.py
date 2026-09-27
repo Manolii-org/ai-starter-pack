@@ -247,10 +247,10 @@ def test_feature_flags_gate_optional_surfaces(default_render):
 @pytest.mark.parametrize(
     ("flags", "expected"),
     [
-        ({}, {"Hooks": 5, "Commands": 51, "Skills": 30, "Agents": 27,
+        ({}, {"Hooks": 5, "Commands": 50, "Skills": 30, "Agents": 27,
               "Scripts": 48, "Husky": 3, "CI": 34, "Docs": 21}),
         ({flag: "true" for flag in FEATURE_FLAGS},
-         {"Hooks": 5, "Commands": 54, "Skills": 34, "Agents": 28,
+         {"Hooks": 5, "Commands": 53, "Skills": 34, "Agents": 28,
               "Scripts": 48, "Husky": 3, "CI": 34, "Docs": 23}),
     ],
 )

@@ -37,7 +37,7 @@ option later.
 ## Model, consensus gate, and tools
 
 - Use the declared guardrailed `sonnet` path for the final sanitized diagnosis comment; `restricted` inputs remain no-AI.
-- Before the final comment, workflows run `scripts/guarded-consensus-review.py` unless `vars.CONSENSUS_REVIEW_ENABLED` is false. The gate asks three reviewers for JSON `{verdict: approve|reject|defer, confidence, reason}`:
+- Before the final comment, ecosystem workflows that ship `scripts/guarded-consensus-review.py` run it unless `vars.CONSENSUS_REVIEW_ENABLED` is false (the script is orchestrator-internal — not part of this pack). The gate asks three reviewers for JSON `{verdict: approve|reject|defer, confidence, reason}`:
   1. `sonnet` through the fail-closed advisor guardrail (`data_sensitivity=restricted_us_oss_ok`); never dispatch `restricted` data.
   2. `claude-haiku-4-5-20251001` via LiteLLM on a sanitized internal packet (`data_sensitivity=internal`, matching its `data_sensitivity_max`).
   3. `sonnet` via LiteLLM by default (`data_sensitivity=restricted_us_oss_ok`), which MUST keep the fail-closed advisor guardrail in `.claude/model-routing.json` and `deploy/litellm-proxy/sonnet_advisor_guardrail.py`.

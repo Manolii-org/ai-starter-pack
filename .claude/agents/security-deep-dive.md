@@ -10,6 +10,10 @@ data_sensitivity: restricted_us_oss_ok
 # forbids non-Anthropic models — run-broad-agents.py then bypasses the proxy and
 # dispatches client_policy_model on the direct Anthropic plane.
 client_policy_model: claude-sonnet-4-6
+# Security review stays first-party per docs/us-oss-eligibility-matrix.md —
+# run-broad-agents.py dispatches this agent Anthropic-direct (never the OSS
+# proxy) and requires ANTHROPIC_DIRECT_API_KEY when a proxy is configured.
+first_party: true
 max_tokens: 2000
 safety_tier: green
 requires_mcp: []

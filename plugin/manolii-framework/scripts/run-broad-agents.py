@@ -68,6 +68,7 @@ class AgentConfig:
     system_prompt: str
     instructions: str
     client_policy_model: Optional[str] = None
+    first_party: bool = False
 
 
 def parse_agent_file(agent_path: Path) -> AgentConfig:
@@ -101,6 +102,7 @@ def parse_agent_file(agent_path: Path) -> AgentConfig:
         system_prompt=system_prompt,
         instructions=instructions,
         client_policy_model=frontmatter.get("client_policy_model"),
+        first_party=bool(frontmatter.get("first_party")),
     )
 
 
@@ -190,11 +192,29 @@ def invoke_agent(
     # direct Anthropic (x-api-key). The retired anthropic_only tier has no
     # callers left — its agents were remapped to restricted_us_oss_ok.
     proxy = _proxy_base()
+    # first_party agents (security review per the eligibility matrix) always go
+    # Anthropic-direct — never the OSS proxy, regardless of declared model.
+    if agent_config.first_party:
+        api_key = os.getenv("ANTHROPIC_DIRECT_API_KEY") or (
+            os.getenv("ANTHROPIC_API_KEY") if not proxy else None
+        )
+        if not api_key:
+            logger.warning(
+                f"{agent_config.name}: first_party agent needs "
+                "ANTHROPIC_DIRECT_API_KEY (the proxy credential cannot "
+                "authenticate Anthropic-direct); skipping"
+            )
+            return None
+        proxy = None
+        model = agent_config.client_policy_model or DIRECT_MODEL_MAP.get(model, model)
+        logger.info(
+            f"{agent_config.name}: first_party — dispatching {model} (Anthropic-direct)"
+        )
     # Engagement carrying client_ai_policy is Anthropic-direct for EVERY
     # agent — the proxy/OSS route is bypassed entirely. Agents declaring
     # client_policy_model pin that model; the rest dispatch on their declared
     # model's Anthropic equivalent (DIRECT_MODEL_MAP below).
-    if os.environ.get("CLIENT_AI_POLICY"):
+    elif os.environ.get("CLIENT_AI_POLICY"):
         # The shared credential resolved before this point is the proxy token
         # whenever a proxy is configured — api.anthropic.com would reject it
         # (and it must never leave the boundary as x-api-key to that host).

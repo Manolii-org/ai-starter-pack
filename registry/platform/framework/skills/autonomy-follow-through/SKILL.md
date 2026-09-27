@@ -78,11 +78,11 @@ Each round:
 |-------|---------|--------|
 | `done` | Every Merge-When-Safe rule below is true, including qualifying review and veto gates | Merge (auto-merge preferred) |
 | `blocked_on_human` | Waiting for review / decision | Notify once, escalate |
-| `blocked_on_infra` | Shared infra (PAT / missing config / session proxy / Retry-After / Fly 502) or unmatched transient | Record/attach via `scripts/infra_incident.py` (`infra-incident` label). Dependents stay listed; retries suppressed while the incident is open. One cheap GET probe; agents attach evidence and do not close. `infra_backoff_minutes` applies only when no matching open incident exists. Code/test failures are not this state — they remain visible via required checks. Do not `min(Retry-After, 30)` in hosted jobs. |
+| `blocked_on_infra` | Shared infra (PAT / missing config / session proxy / Retry-After / Fly 502) or unmatched transient | Record/attach via the repo's infra-incident recorder (`infra-incident` label; ecosystems that ship `scripts/infra_incident.py` use it). Dependents stay listed; retries suppressed while the incident is open. One cheap GET probe; agents attach evidence and do not close. `infra_backoff_minutes` applies only when no matching open incident exists. Code/test failures are not this state — they remain visible via required checks. Do not `min(Retry-After, 30)` in hosted jobs. |
 | `superseded` | New PR opened for same scope, **or** a Codex L4 seed (`codex/audit-*` / `codex/mesh-*`) still has `changed_files=0` after one wake (or a connector summary with no commit) once an implementing session-prefix PR exists (`cursor/` or `claude/`, never `codex/`) | Close the seed; link the Act PR |
 | `gave_up` | `max_rearms` exhausted without a recoverable infra path or a specific human decision to request | Escalate with evidence; Red and other human-decision gates use `blocked_on_human` instead |
 
-**No-delta rule:** 2 consecutive wakes with zero new changes → auto-terminal (state=`blocked_on_human`, reason="no progress detected"). Do **not** apply this to an empty Codex L4 seed: after **one** wake with `changed_files=0`, implement on a session prefix (`cursor/` or `claude/`, never `codex/`) per `docs/runbooks/daily-leftover-act.md` and terminate the seed `superseded`. A native `chatgpt-codex-connector` summary is not an implementation. Kickoff has no empty-seed closer.
+**No-delta rule:** 2 consecutive wakes with zero new changes → auto-terminal (state=`blocked_on_human`, reason="no progress detected"). Do **not** apply this to an empty Codex L4 seed: after **one** wake with `changed_files=0`, implement on a session prefix (`cursor/` or `claude/`, never `codex/`) per the orchestrator repo's `docs/runbooks/daily-leftover-act.md` and terminate the seed `superseded`. A native `chatgpt-codex-connector` summary is not an implementation. Kickoff has no empty-seed closer.
 
 **Named required check:** Combined commit `status.state=success` is not CI green. A required check (e.g. a repo's anchor job) must be check-run `completed`/`success` on the **current head SHA**. `action_required` with zero jobs is not green.
 
@@ -153,7 +153,7 @@ Enforce all budgets; escalate on exhaust.
 
 ## Explicit Design Notes
 
-This skill is the **SSOT for stop/escalate logic** across autonomy kickoff flows. `/watch-pr` defers to these terminal rules when invoked inside orchestrated autonomy. No looping outside these bounds; no silent retries. Leftover Daily 1/2 Act vs Codex L4 split: `docs/runbooks/daily-leftover-act.md`. Shared G3 incidents: `scripts/infra_incident.py`.
+This skill is the **SSOT for stop/escalate logic** across autonomy kickoff flows. `/watch-pr` defers to these terminal rules when invoked inside orchestrated autonomy. No looping outside these bounds; no silent retries. Leftover Daily 1/2 Act vs Codex L4 split and shared G3 incident recording (`infra-incident` label) live in the orchestrator repo's `docs/runbooks/` + `scripts/` — treat them as upstream references when they are not shipped here.
 
 ## Status Report
 

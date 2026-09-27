@@ -221,6 +221,17 @@ def _confidence_value(raw) -> float:
     return 1.0
 
 
+_CONFIDENCE_LABELS = [(0.8, "high"), (0.45, "medium"), (0.0, "low")]
+
+
+def _confidence_label(value: float) -> str:
+    """Map a merged numeric score back to the fact schema's categorical scale."""
+    for cutoff, label in _CONFIDENCE_LABELS:
+        if value >= cutoff:
+            return label
+    return "low"
+
+
 def apply_decay(
     rows: list[dict], now: datetime, rate: float = 0.1, floor: float = 0.1
 ) -> list[dict]:
@@ -250,12 +261,15 @@ def consolidate(
     if now is None:
         now = datetime.now(timezone.utc)
 
-    # Group by (entity_scope, type)
-    groups: dict[tuple[str, str], list[dict]] = {}
+    # Group by (entity_scope, type, category). memory-keeper facts carry
+    # `category` instead of entity_scope/type — including it keeps a
+    # 'deployment' fact and an 'incident' fact with similar text from merging
+    # into one another.
+    groups: dict[tuple[str, str, str], list[dict]] = {}
     for row in rows:
         scope = row.get("entity_scope", "unknown")
         type_ = row.get("type", "unknown")
-        key = (scope, type_)
+        key = (scope, type_, str(row.get("category", "unknown")))
         if key not in groups:
             groups[key] = []
         groups[key].append(row)
@@ -263,7 +277,7 @@ def consolidate(
     consolidated = []
     merges = []
 
-    for (scope, type_), group in groups.items():
+    for (scope, type_, _category), group in groups.items():
         if len(group) <= 1:
             consolidated.extend(group)
             continue
@@ -314,9 +328,17 @@ def consolidate(
             if tags:
                 canonical["tags"] = sorted(tags)
 
-            # Confidence: min(0.95, max_conf + 0.05 * (cluster_size - 1))
+            # Confidence: min(0.95, max_conf + 0.05 * (cluster_size - 1)).
+            # When members used the categorical fact schema the merged value
+            # is written back as a category label (the schema field stays a
+            # label); the precise numeric score lands in merged_confidence.
             max_conf = max(_confidence_value(r.get("confidence", 1.0)) for r in cluster)
-            canonical["confidence"] = min(0.95, max_conf + 0.05 * (len(cluster) - 1))
+            merged_conf = min(0.95, max_conf + 0.05 * (len(cluster) - 1))
+            if all(isinstance(r.get("confidence"), str) for r in cluster):
+                canonical["confidence"] = _confidence_label(merged_conf)
+                canonical["merged_confidence"] = round(merged_conf, 3)
+            else:
+                canonical["confidence"] = merged_conf
 
             # last_seen = most recent actual member sighting. A merge is
             # bookkeeping, not an observation — stamping `now` would reset the
@@ -478,6 +500,9 @@ Default: dry-run (report only). Pass --apply to write changes.
     )
 
     args = parser.parse_args(argv)
+
+    if not 0.0 <= args.threshold <= 1.0:
+        parser.error(f"--threshold must be within [0, 1], got {args.threshold}")
 
     # Determine which modes to run
     do_decay = not args.consolidate_only

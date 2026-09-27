@@ -39,16 +39,27 @@ _ANTHROPIC_API_VERSION = "2023-06-01"
 _ANTHROPIC_HOST = "api.anthropic.com"
 
 
-def _endpoint() -> tuple[str, str, bool]:
+def _endpoint(direct: bool = False) -> tuple[str, str, bool]:
     """Resolve (api_key, url, proxied).
 
     Transport token: ANTHROPIC_API_KEY when calling Anthropic directly. When
     LITELLM_PROXY_URL or ANTHROPIC_BASE_URL points at a non-Anthropic host the
     request goes through that proxy and the key may come from LLM_API_KEY,
     LITELLM_MASTER_KEY, or ANTHROPIC_API_KEY — no sk-ant credential required.
+
+    direct=True forces the Anthropic endpoint regardless of proxy config —
+    used when adjudicating first_party findings (security review stays on a
+    first-party model per docs/us-oss-eligibility-matrix.md). Under a
+    configured proxy only ANTHROPIC_DIRECT_API_KEY authenticates there; the
+    LiteLLM credential in ANTHROPIC_API_KEY must never cross the boundary.
     """
     base = (os.environ.get("LITELLM_PROXY_URL") or os.environ.get("ANTHROPIC_BASE_URL") or "").rstrip("/")
     proxied = bool(base) and (urllib.parse.urlparse(base).hostname or "").lower().rstrip(".") != _ANTHROPIC_HOST
+    if direct:
+        key = os.environ.get("ANTHROPIC_DIRECT_API_KEY") or (
+            os.environ.get("ANTHROPIC_API_KEY", "") if not proxied else ""
+        )
+        return key, _ANTHROPIC_API_URL, False
     if proxied:
         key = (
             os.environ.get("LLM_API_KEY")
@@ -185,6 +196,7 @@ class Judge:
         self.repo = os.getenv("GITHUB_REPOSITORY", "")
         self.token = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")
         self.merge_danger = self._load_merge_danger()
+        self._has_first_party_candidates = False
         # An `edited` rerun at the same HEAD must publish a fresh verdict: dedup
         # keys on commit + metadata digest so a title/body edit re-posts. The
         # base SHA is part of the key: a base update changes the merge diff the
@@ -235,6 +247,8 @@ class Judge:
 
                 source = data.get("source", candidate_file.stem)
                 candidate_findings = data.get("findings", [])
+                if data.get("first_party"):
+                    self._has_first_party_candidates = True
 
                 for raw_finding in candidate_findings:
                     finding = Finding(
@@ -329,7 +343,20 @@ If any ERROR survives, set review_action to "REQUEST_CHANGES"; otherwise "COMMEN
         LiteLLM proxy, per _endpoint()).
         Returns parsed judge response or None on failure.
         """
-        api_key, api_url, proxied = _endpoint()
+        # A candidate set carrying first_party findings must be adjudicated
+        # on a first-party model — the OSS proxy would let an OSS backend drop
+        # a true security finding before it is ever posted. With no direct
+        # credential configured the judge fails closed rather than adjudicating
+        # that set on the wrong plane.
+        first_party = self._has_first_party_candidates
+        api_key, api_url, proxied = _endpoint(direct=first_party)
+        if first_party and not api_key:
+            logger.error(
+                "first-party findings present but no direct Anthropic "
+                "credential (ANTHROPIC_DIRECT_API_KEY) — refusing to "
+                "adjudicate security candidates via the OSS proxy"
+            )
+            return None
         if not api_key:
             logger.error("no API credential set; cannot invoke judge agent")
             return None

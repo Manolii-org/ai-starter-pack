@@ -48,9 +48,9 @@ skill is the author-time gate that prevents that class.
 4. **Record the verification.** Update the row's `last_verified` in the same
    branch. Add `API-Verified: <id>@<YYYY-MM-DD>` to the PR body.
 5. **Test the wire.** Provider-integration code requires a mock-provider test
-   in the same commit (enforced: `provider-integration` gate in
-   `scripts/run-pre-commit-specialists.py`; canonical pattern
-   `scripts/tests/test_heartbeat.py`).
+   in the same commit (the `provider-integration` gate lives in the
+   orchestrator repo's `scripts/run-pre-commit-specialists.py` — not shipped
+   in this pack).
 
 ## When this applies
 
@@ -61,8 +61,8 @@ OpenAI/Anthropic SDK request shapes.
 
 ## Enforcement
 
-- Advisory pre-commit warning (`provider-api-freshness` in
-  `scripts/run-pre-commit-specialists.py`) from 2026-07-16.
+- Advisory pre-commit warning (`provider-api-freshness`, enforced by the
+  orchestrator repo's `scripts/run-pre-commit-specialists.py`) from 2026-07-16.
 - Flips to blocking 2026-07-30 (operator decision, telemetry-hardening plan).
 - Do NOT bypass by copying a stale `last_verified` forward — the date asserts
   "a human/agent read the live doc on this date."

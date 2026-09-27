@@ -48,6 +48,4 @@ Empty Codex L4 seeds (`changed_files=0` after one wake) are `superseded` after a
 ## See Also
 
 - `.claude/skills/autonomy-follow-through/SKILL.md` — full specification
-- `docs/runbooks/daily-leftover-act.md` — leftover Act vs Codex L4; named required checks; G3 `infra-incident` records (`scripts/infra_incident.py`)
-- `config/autonomy-executor-policy.yaml` — budget and policy config
-- `/watch-pr` — standalone PR monitoring (defers to this skill in orchestrated flows)
+- Orchestrator-repo surfaces referenced by the skill but not shipped in this pack: `docs/runbooks/daily-leftover-act.md`, `config/autonomy-executor-policy.yaml`, `scripts/infra_incident.py`, `/watch-pr`

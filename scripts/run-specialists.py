@@ -61,15 +61,23 @@ def _endpoint(direct: bool = False) -> tuple[str, str, bool]:
     (security review) on first-party models. A proxy credential must never be
     sent there, so only a real Anthropic key authenticates.
     """
-    base = "" if direct else (os.environ.get("LITELLM_PROXY_URL") or os.environ.get("ANTHROPIC_BASE_URL") or "").rstrip("/")
-    proxied = bool(base) and (urllib.parse.urlparse(base).hostname or "").lower().rstrip(".") != _ANTHROPIC_HOST
-    if proxied:
+    proxy_base = (os.environ.get("LITELLM_PROXY_URL") or os.environ.get("ANTHROPIC_BASE_URL") or "").rstrip("/")
+    proxy_configured = bool(proxy_base) and (urllib.parse.urlparse(proxy_base).hostname or "").lower().rstrip(".") != _ANTHROPIC_HOST
+    if direct:
+        # Under a configured proxy ANTHROPIC_API_KEY holds the LiteLLM
+        # credential — it must never be sent to api.anthropic.com. Only the
+        # dedicated direct key authenticates first-party calls there.
+        key = os.environ.get("ANTHROPIC_DIRECT_API_KEY") or (
+            os.environ.get("ANTHROPIC_API_KEY", "") if not proxy_configured else ""
+        )
+        return key, _ANTHROPIC_API_URL, False
+    if proxy_configured:
         key = (
             os.environ.get("LLM_API_KEY")
             or os.environ.get("LITELLM_MASTER_KEY")
             or os.environ.get("ANTHROPIC_API_KEY")
         )
-        return key or "", base + "/v1/messages", True
+        return key or "", proxy_base + "/v1/messages", True
     key = os.environ.get("ANTHROPIC_DIRECT_API_KEY") or os.environ.get("ANTHROPIC_API_KEY", "")
     return key, _ANTHROPIC_API_URL, False
 
@@ -296,6 +304,11 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
             return skill_name, f"Response is not a JSON object: {type(data)}"
         if "source" not in data or "findings" not in data:
             return skill_name, "Response missing 'source' or 'findings' fields"
+
+        if first_party:
+            # Marks the candidate set for run-judge: first-party findings must
+            # be adjudicated on a first-party model, not the OSS proxy.
+            data["first_party"] = True
 
         # Write findings to file
         output_file = output_dir / f"{skill_name}.json"

@@ -7,7 +7,7 @@ Production-grade AI-assisted development from day one. {{ATTRIBUTION_LINE}}
 | Component | Files | Purpose |
 |-----------|-------|---------|
 | **Hooks** | `.claude/hooks/` (5 files) | Full session lifecycle: credential loading, prompt tracking, edit monitoring, compaction, stop, response-hygiene + injection scanning |
-| **Commands** | `.claude/commands/` ({{ 51 + (3 if browserbase else 0) }} files) | Slash commands: `/wrap-up`, `/tdd`, `/doctor`, `/watch-pr`, `/sprint-fan-out`, `/investigate`, `/retro`, `/freeze`, `/guard`, `/design-shotgun`, etc. |
+| **Commands** | `.claude/commands/` ({{ 50 + (3 if browserbase else 0) }} files) | Slash commands: `/wrap-up`, `/tdd`, `/doctor`, `/watch-pr`, `/sprint-fan-out`, `/investigate`, `/retro`, `/freeze`, `/guard`, `/design-shotgun`, etc. |
 | **Skills** | `.claude/skills/` ({{ 30 + (4 if kl_integration else 0) }} dirs) | Persistent context: conventions, security, database, TDD, OSS compat, analytics, curator, governance (assess-model, completeness-check, phase-gate) + 7 PR assessment specialists |
 | **Agents** | `.claude/agents/` ({{ 27 + (1 if codex_adversarial else 0) }} files) | Parallel workers: PR assessment pipeline, security review, CI fixer, architecture impact, main-thread-executor, prompt-hardener, test-hardener, critics, `secrets-handler` (credential router), `memory-keeper`, and more |
 | **PR Assessment** | `.github/workflows/pr-assessment.yml` | AI-driven 5-stage review pipeline: pr-classifier → SAST → specialists → broad agents → judge |
