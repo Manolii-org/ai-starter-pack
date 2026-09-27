@@ -192,6 +192,21 @@ def _parse_findings(raw: str) -> dict:
     return json.loads(text)
 
 
+def _load_skill_is_first_party(skill_name: str) -> bool:
+    """Best-effort first_party read on a skill that failed to load.
+
+    A skill the classifier invoked but that cannot be parsed still represents
+    missing coverage — fail closed by treating it as first-party when the raw
+    frontmatter cannot be read or does not answer the question.
+    """
+    try:
+        text = (SKILLS_DIR / skill_name / "SKILL.md").read_text(encoding="utf-8")
+    except OSError:
+        return True
+    match = re.search(r"^first_party:\s*(\S+)", text, re.M)
+    return match.group(1).lower() == "true" if match else True
+
+
 def _write_skip_marker(skill_name: str, output_dir: pathlib.Path, reason: str) -> None:
     """Durable first-party skip marker — lets the judge fail closed instead of
     adjudicating the rest of the batch without the required direct leg."""
@@ -216,6 +231,10 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
     try:
         frontmatter, system_prompt = _load_skill(skill_name)
     except Exception as exc:
+        # A skill that cannot load is missing coverage — emit the marker so
+        # the judge cannot post a clean verdict on a partial batch.
+        if _load_skill_is_first_party(skill_name) or os.environ.get("CLIENT_AI_POLICY"):
+            _write_skip_marker(skill_name, output_dir, "load_error")
         return skill_name, f"Failed to load skill: {exc}"
 
     model_alias = frontmatter.get("model", "haiku")
@@ -223,7 +242,9 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
     max_tokens = frontmatter.get("max_tokens", 800)
     # first_party: the eligibility matrix keeps security review on Anthropic
     # even when OSS routing is enabled — the proxy route is bypassed entirely.
-    first_party = bool(frontmatter.get("first_party"))
+    # CLIENT_AI_POLICY engagements extend that to EVERY specialist: no PR
+    # content may cross the OSS/proxy plane at all.
+    first_party = bool(frontmatter.get("first_party")) or bool(os.environ.get("CLIENT_AI_POLICY"))
 
     if first_party and not _endpoint(direct=True)[0]:
         # Write a marker, not nothing: a first-party skill that cannot run
@@ -352,8 +373,11 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
 
 
 def main() -> None:
+    # A direct-only install (ANTHROPIC_DIRECT_API_KEY but no shared transport
+    # credential) must still start: first-party skills dispatch through it,
+    # the rest return their skip/error marker.
     api_key, _, _ = _endpoint()
-    if not api_key:
+    if not api_key and not os.environ.get("ANTHROPIC_DIRECT_API_KEY"):
         print("[specialists] no API credential set — skipping specialist run")
         sys.exit(0)
 

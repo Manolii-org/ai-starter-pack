@@ -990,7 +990,16 @@ def allocate(request: dict[str, Any], profile: Profile) -> dict[str, Any]:
             # cannot retire or purge this replacement.
             return existing
         now = time.time()
-        records = {key: value for key, value in records.items() if float(value.get("expires_at", 0)) > now}
+        # Expired records are retained as tombstones: their mailboxes may still
+        # hold messages a later `release` must be able to purge. Reuse is still
+        # excluded by the expires_at check above; tombstones are swept only
+        # after a 30-day horizon, by which time the backend has discarded the
+        # mailbox too.
+        records = {
+            key: value
+            for key, value in records.items()
+            if float(value.get("expires_at", 0)) + 30 * 86400 > now
+        }
         digest = secrets.token_hex(16)
         result = {
             "schema_version": VERSION,
@@ -1004,6 +1013,17 @@ def allocate(request: dict[str, Any], profile: Profile) -> dict[str, Any]:
         records[scope_hash] = result
         atomic_write_json(_registry_path(), records)
         return result
+
+
+def advance_registry_cursor(allocation_id: str, cursor: str) -> None:
+    """Persist the await watermark on the registry record — the registry, not
+    the caller's payload, is the authority on how far a mailbox has been read."""
+    with _registry_lock():
+        records = _read_registry()
+        for record in records.values():
+            if isinstance(record, dict) and record.get("allocation_id") == allocation_id:
+                record["cursor"] = cursor
+        atomic_write_json(_registry_path(), records)
 
 
 def release_allocation(selected_backend: Backend, allocation: dict[str, Any]) -> None:

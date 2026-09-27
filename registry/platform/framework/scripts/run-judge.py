@@ -357,7 +357,9 @@ If any ERROR survives, set review_action to "REQUEST_CHANGES"; otherwise "COMMEN
         # a true security finding before it is ever posted. With no direct
         # credential configured the judge fails closed rather than adjudicating
         # that set on the wrong plane.
-        first_party = self._has_first_party_candidates
+        # CLIENT_AI_POLICY engagements keep the adjudication itself direct —
+        # candidate findings carry PR content regardless of first_party flags.
+        first_party = self._has_first_party_candidates or bool(os.environ.get("CLIENT_AI_POLICY"))
         api_key, api_url, proxied = _endpoint(direct=first_party)
         if first_party and not api_key:
             logger.error(

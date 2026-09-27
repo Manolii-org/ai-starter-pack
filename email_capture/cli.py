@@ -6,7 +6,7 @@ import json
 import time
 from pathlib import Path
 
-from .core import CaptureError, Profile, _read_registry, allocate, assert_messages, atomic_write_json, await_messages, backend, receipt, release_allocation
+from .core import CaptureError, Profile, _read_registry, advance_registry_cursor, allocate, assert_messages, atomic_write_json, await_messages, backend, receipt, release_allocation
 
 
 def read_json(value: str) -> dict | list:
@@ -51,6 +51,9 @@ def _verified_allocation(reference: str, *, releasing: bool = False) -> dict:
     # that must be retried, not a live claim on the mailbox.
     if not releasing and (float(live.get("expires_at", 0)) <= time.time() or live.get("pending_purge")):
         raise CaptureError("AUTHORIZATION_DENIED", "allocation does not match a live registry record")
+    # The payload cursor is advisory at best and forgeable at worst — replay
+    # position comes from the registry record, not the caller's copy.
+    allocation["cursor"] = live.get("cursor", "0:")
     return allocation
 
 
@@ -90,6 +93,7 @@ def main(argv: list[str] | None = None) -> int:
             allocation = _verified_allocation(arguments.allocation)
             messages, cursor = await_messages(selected_backend, allocation, arguments.timeout, arguments.count, arguments.not_before)
             atomic_write_json(Path(arguments.output), messages)
+            advance_registry_cursor(str(allocation.get("allocation_id", "")), cursor)
             if allocation_path:
                 atomic_write_json(allocation_path, allocation)
             emit(receipt("await", "passed", started, mode=profile.mode, message_count=len(messages), cursor=cursor))

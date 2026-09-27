@@ -54,6 +54,13 @@ def _endpoint() -> tuple[str, str, bool]:
     """
     base = (os.environ.get("LITELLM_PROXY_URL") or os.environ.get("ANTHROPIC_BASE_URL") or "").rstrip("/")
     proxied = bool(base) and (urllib.parse.urlparse(base).hostname or "").lower().rstrip(".") != _ANTHROPIC_HOST
+    # CLIENT_AI_POLICY engagements keep every pipeline call Anthropic-direct —
+    # including the classifier, which reads the full PR diff.
+    if os.environ.get("CLIENT_AI_POLICY"):
+        key = os.environ.get("ANTHROPIC_DIRECT_API_KEY") or (
+            os.environ.get("ANTHROPIC_API_KEY", "") if not proxied else ""
+        )
+        return key, _ANTHROPIC_API_URL, False
     if proxied:
         key = (
             os.environ.get("LLM_API_KEY")

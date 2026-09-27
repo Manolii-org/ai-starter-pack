@@ -421,10 +421,11 @@ def run_broad_agents(
     user_message = build_user_message(diff, changed_files)
 
     # Get API key. A direct-only install (ANTHROPIC_DIRECT_API_KEY without a
-    # shared transport credential) must still run: first_party agents dispatch
-    # through it, others emit the skip marker.
-    api_key = get_api_key()
-    if not api_key and not os.getenv("ANTHROPIC_DIRECT_API_KEY"):
+    # shared transport credential) must still run: every agent dispatches
+    # Anthropic-direct through it (the proxy is absent by definition), so the
+    # direct key is also the shared transport credential here.
+    api_key = get_api_key() or os.getenv("ANTHROPIC_DIRECT_API_KEY", "")
+    if not api_key:
         logger.info("[broad-agents] no API key, exiting")
         return 0
 
