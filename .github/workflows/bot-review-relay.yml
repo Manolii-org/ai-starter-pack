@@ -87,8 +87,9 @@ jobs:
         !contains(github.event.comment.body, ' Badge') && !contains(github.event.review.body, ' Badge') &&
         ((contains(github.event.comment.body, 'usage limit') && contains(github.event.comment.body, 'reached your')) ||
          (contains(github.event.review.body, 'usage limit') && contains(github.event.review.body, 'reached your')))) &&
-      !contains(github.event.comment.body, 'Newer findings are available') &&
-      !contains(github.event.review.body, 'Newer findings are available') &&
+      !(github.actor == 'devin-ai-integration[bot]' &&
+        (contains(github.event.comment.body, 'Newer findings are available') ||
+         contains(github.event.review.body, 'Newer findings are available'))) &&
       !(github.actor == 'devin-ai-integration[bot]' &&
         (contains(github.event.comment.body, 'Devin Review') || contains(github.event.review.body, 'Devin Review')) &&
         !contains(github.event.comment.body, 'P0:') && !contains(github.event.comment.body, 'P1:') &&
