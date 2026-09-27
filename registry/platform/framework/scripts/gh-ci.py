@@ -221,6 +221,8 @@ def detect_repo(explicit: str | None) -> str:
     names the launch repo while the agent may be in a sibling checkout.
     """
     if explicit:
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", explicit):
+            raise SystemExit(f"invalid --repo value: {explicit!r} (expected owner/name)")
         return explicit
     try:
         url = subprocess.run(

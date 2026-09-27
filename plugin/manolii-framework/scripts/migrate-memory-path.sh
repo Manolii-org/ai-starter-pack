@@ -56,7 +56,7 @@ if [[ -L "$CLAUDE_MEM" ]]; then
     # blindly replacing the symlink would orphan whatever memory lives
     # there (e.g. .claude/memory -> ../old-memory with fact.jsonl inside).
     # Refuse the automatic heal and let the operator merge the tree.
-    # Codex P2 2026-07-19 (Lead-Converter#250 line 59): the earlier guard
+    # Codex P2 2026-07-19 (internal-repo review line 59): the earlier guard
     # ONLY handled directory targets. A symlink to an unrelated regular
     # file (e.g. .claude/memory -> /shared/legacy-facts.jsonl) fell
     # through to `ln -sfn` and silently orphaned that file for existing

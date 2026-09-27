@@ -51,7 +51,7 @@ else
     # some minimal Alpine): use Python's Popen + wait(timeout) so Stop is
     # still bounded. rc=124 mirrors coreutils' timeout convention.
     #
-    # Codex P2 2026-07-19 (Lead-Converter#250 line 57): DO NOT use
+    # Codex P2 2026-07-19 (internal-repo review line 57): DO NOT use
     # subprocess.run(..., timeout=8) — its timeout path calls
     # process.kill() (SIGKILL), which bypasses mode_stop()'s SIGTERM
     # handler. The handler is what rolls back a durable mtime
@@ -101,7 +101,7 @@ fi
 # would block Stop. Entity resolution is left to the collector's
 # _resolve_entity() (env → .ai/config/retrospective.json → default), so
 # repos that configure `entity` only in the JSON config file (Codex P2
-# Lead-Converter line 85 2026-07-19) still get their kl-only worker
+# internal-repo line 85 2026-07-19) still get their kl-only worker
 # scheduled. Missing-cred case still fails-closed on MCP_API_KEY.
 if [ "$rc" -eq 0 ] && [ -n "${MCP_API_KEY:-}" ]; then
     _KL_ARGS=(--mode kl-only)

@@ -371,7 +371,7 @@ def consolidate(
             # is written back as a category label (the schema field stays a
             # label); the precise numeric score lands in merged_confidence.
             max_conf = max(_confidence_value(r.get("confidence", 1.0)) for r in cluster)
-            merged_conf = min(0.95, max_conf + 0.05 * (len(cluster) - 1))
+            merged_conf = max(max_conf, min(0.95, max_conf + 0.05 * (len(cluster) - 1)))
             if all(isinstance(r.get("confidence"), str) for r in cluster):
                 canonical["confidence"] = _confidence_label(merged_conf)
                 canonical["merged_confidence"] = round(merged_conf, 3)

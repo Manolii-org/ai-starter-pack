@@ -51,7 +51,7 @@ STAGING_DIR = REPO_ROOT / ".ai" / "retrospective-staging"
 SESSION_LOGS_DIR = REPO_ROOT / ".ai" / "session-logs"
 RETROSPECTIVES_DIR = REPO_ROOT / ".ai" / "memory" / "retrospectives"
 RETRO_JSONL = RETROSPECTIVES_DIR / "session-retrospectives.jsonl"
-# Codex P2 2026-07-19 (Lead-Converter line 990): stale-claim lease. When a
+# Codex P2 2026-07-19 (internal-repo line 990): stale-claim lease. When a
 # background kl-only worker crashes between claim and confirmed upload, the
 # next worker must be able to reclaim the snapshot after this many seconds.
 # Set generously above the wrapper's 8s timeout so a slow-but-live network
@@ -60,7 +60,7 @@ KL_CLAIM_TTL_SEC = 60.0
 MTIME_SENTINEL = RETROSPECTIVES_DIR / ".last-capture-mtime"
 _RETRO_LOCK = RETROSPECTIVES_DIR / ".retrospectives.lock"
 
-# Codex P2 2026-07-19 (Lead-Converter#250 line 1512): the wrapper's 8s SIGTERM
+# Codex P2 2026-07-19 (internal-repo review line 1512): the wrapper's 8s SIGTERM
 # can interrupt _write_local_record() AFTER it has exclusively created the
 # snapshot file but BEFORE the JSONL append (or during a partial write). The
 # normal try/except cleanup in _write_local_record does NOT run when the
@@ -70,7 +70,7 @@ _RETRO_LOCK = RETROSPECTIVES_DIR / ".retrospectives.lock"
 # bytes before it exits. Both fields reset to None on successful commit.
 _INFLIGHT_SNAP: Optional[Path] = None
 _INFLIGHT_JSONL_PRESIZE: Optional[int] = None
-# Codex P2 2026-07-19 (Lead-Converter#250 line 1850): the previous scheme
+# Codex P2 2026-07-19 (internal-repo review line 1850): the previous scheme
 # flipped `_stop_committed[0]=True` inside mode_stop() only AFTER
 # _write_local_record returned. A SIGTERM that landed between the durable
 # snapshot+JSONL commit and that assignment still saw False, so the handler
@@ -324,7 +324,7 @@ def _kl_url() -> Optional[str]:
         validated = _validate_mcp_url(val, ".mcp.json:knowledge-layer.url")
         if validated is None:
             return None
-        # Codex P2 2026-07-19 (Lead-Converter line 293): `.mcp.json` is a
+        # Codex P2 2026-07-19 (internal-repo line 293): `.mcp.json` is a
         # source-controlled file that Claude Code already trusts to spawn
         # every configured MCP server. An attacker with write access to it
         # can already run arbitrary code via the OTHER server entries — so
@@ -616,7 +616,7 @@ def plain_text_note(branch: str, signals: dict, dscore: int, fclass: str, diff_s
 
 def _write_local_record(record: dict) -> Path:
     global _INFLIGHT_SNAP, _INFLIGHT_JSONL_PRESIZE, _LOCAL_RECORD_COMMITTED
-    # Codex P2 2026-07-19 (Lead-Converter#250 line 1850): reset the committed
+    # Codex P2 2026-07-19 (internal-repo review line 1850): reset the committed
     # flag at entry so a prior in-process capture's state can't shadow a fresh
     # signal-handler decision. The flag flips True at the tail-end, after
     # snapshot+JSONL both durable.
@@ -665,7 +665,7 @@ def _write_local_record(record: dict) -> Path:
         )
         try:
             fd = os.open(str(candidate), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-            # Codex P2 2026-07-19 (Lead-Converter#250 line 703): publish
+            # Codex P2 2026-07-19 (internal-repo review line 703): publish
             # the in-flight snapshot IMMEDIATELY on exclusive-create
             # success, BEFORE writing the payload. Between os.open()
             # returning and the earlier post-write assignment there was
@@ -784,7 +784,7 @@ def _write_local_record(record: dict) -> Path:
         _INFLIGHT_SNAP = None
         _INFLIGHT_JSONL_PRESIZE = None
         raise
-    # Codex P2 2026-07-19 (Lead-Converter#250 line 1850): flip the module-level
+    # Codex P2 2026-07-19 (internal-repo review line 1850): flip the module-level
     # committed flag BEFORE clearing inflight state, so the SIGTERM handler in
     # mode_stop sees "durable, do not roll back" atomically with the JSONL
     # append that just returned. Previously the flag lived on the mode_stop
@@ -1325,7 +1325,7 @@ def mode_kl_only(session_id: str = "") -> None:
     #
     # Codex P2 2026-07-19 (line 994): ATOMIC CLAIM under a lock so two
     # concurrent kl-only workers can't select the same oldest snapshot.
-    # Codex P2 2026-07-19 (Lead-Converter line 990): use a LEASE, not a
+    # Codex P2 2026-07-19 (internal-repo line 990): use a LEASE, not a
     # premature kl_written flip. The claim marker is `kl_in_flight_at:
     # <iso-ts>`; `kl_written` is only set AFTER the network confirms.
     # A crash between claim and confirmation leaves a fresh lease behind;
@@ -1578,13 +1578,13 @@ def mode_kl_only(session_id: str = "") -> None:
         # would put session-retrospectives.last_* facts in the wrong tenant.
         kl_assert_fact(snap_entity, "session-retrospectives", f"last_dysfunction_score.{safe_branch}", str(dscore))
         kl_assert_fact(snap_entity, "session-retrospectives", f"last_failure_class.{safe_branch}", fclass)
-        # Codex P2 2026-07-19 (Lead-Converter line 990): NOW that the upload
+        # Codex P2 2026-07-19 (internal-repo line 990): NOW that the upload
         # has confirmed, commit the delivered state — set kl_written=True and
         # clear the in-flight lease. Doing this only after network confirms
         # means a crash/SIGKILL during upload leaves a stale lease (recoverable
         # after KL_CLAIM_TTL_SEC), not a permanent "delivered" flag on
         # something that was never actually delivered.
-        # Codex P2 2026-07-19 (Lead-Converter line 1196): track whether the
+        # Codex P2 2026-07-19 (internal-repo line 1196): track whether the
         # snapshot commit is durable. Only emit the kl-flushed completion
         # event AFTER the snapshot transition is on disk — otherwise a
         # transient FS error would leave kl_written=false with an active
@@ -1602,7 +1602,7 @@ def mode_kl_only(session_id: str = "") -> None:
                     except Exception:
                         current = None
                     if isinstance(current, dict):
-                        # Codex P2 2026-07-19 (Lead-Converter line 1200):
+                        # Codex P2 2026-07-19 (internal-repo line 1200):
                         # our lease may have expired and been re-claimed by
                         # another worker. Only commit when the on-disk lease
                         # is still ours (or the snapshot is already flushed
@@ -1644,7 +1644,7 @@ def mode_kl_only(session_id: str = "") -> None:
                 file=sys.stderr,
             )
     else:
-        # Codex P2 2026-07-19 line 994 / Lead-Converter line 990: network
+        # Codex P2 2026-07-19 line 994 / internal-repo line 990: network
         # call failed after we took the lease. Clear kl_in_flight_at so the
         # next retry (or a sibling worker after KL_CLAIM_TTL_SEC would have
         # expired anyway) can pick it up immediately. Do NOT touch other
@@ -1658,7 +1658,7 @@ def mode_kl_only(session_id: str = "") -> None:
                     except Exception:
                         current = None
                     if isinstance(current, dict):
-                        # Codex P2 2026-07-19 (Lead-Converter line 1200):
+                        # Codex P2 2026-07-19 (internal-repo line 1200):
                         # only clear the lease if it is still OUR lease.
                         # A stale worker (whose TTL expired and was
                         # re-claimed by another live worker) must NOT
@@ -1869,13 +1869,13 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False,
     _prev_sigterm = None
     if path is not None and reserved_gate_mtime is not None and not (force or dry_run):
         def _release_and_exit(signum, frame):  # noqa: ARG001
-            # Codex P2 2026-07-19 (Lead-Converter#250 line 1850): also honour
+            # Codex P2 2026-07-19 (internal-repo review line 1850): also honour
             # the module-level committed flag. _write_local_record flips it
             # True atomically with the durable snapshot+JSONL commit — before
             # this outer local (_stop_committed[0]) can be set — so a SIGTERM
             # in that narrow window must NOT roll back the mtime reservation.
             if not _stop_committed[0] and not _LOCAL_RECORD_COMMITTED:
-                # Codex P2 2026-07-19 (Lead-Converter#250 line 1512): if
+                # Codex P2 2026-07-19 (internal-repo review line 1512): if
                 # _write_local_record was mid-flight (snapshot exclusively
                 # created but JSONL not yet appended), unlink the orphan
                 # snapshot and truncate any partial JSONL bytes back to
@@ -2109,7 +2109,7 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False,
                 print("[session-retro] stop-kl: dry-run — skipping snapshot/JSONL mutation", file=sys.stderr)
                 return
             record["kl_written"] = True
-            # Codex P2 2026-07-19 (Lead-Converter#250 line 1892): mirror the
+            # Codex P2 2026-07-19 (internal-repo review line 1892): mirror the
             # round-K persist-before-flush-event invariant on the DIRECT
             # stop path. Previously a failed snap.write_text was only
             # logged and we still appended the kl-flushed event, so a

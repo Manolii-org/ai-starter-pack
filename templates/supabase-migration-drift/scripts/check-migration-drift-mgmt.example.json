@@ -2,32 +2,32 @@
   "_comment": "Example projects configuration for check-migration-drift-mgmt.py",
   "_format": "This file shows the logical structure of MIGRATION_DRIFT_PROJECTS. In GitHub Actions, the variable is stored as a simple string: entity:ref,entity:ref,...",
   "_reference_format": "entity:supabase_ref,entity:supabase_ref,...",
-  "example_string": "prod:wccgdisnrbvstnnzppld,staging:xyz789,dev:local-test-ref",
+  "example_string": "prod:abcdefghijklmnopqrst,staging:xyz789,dev:local-test-ref",
   "example_expanded": {
-    "description": "Three-entity setup common to Manolii ecosystem (manolii, personal, impaktful) — customize for your project",
+    "description": "Three-entity setup common to a multi-entity deployment (e.g. business, personal, product) — customize for your project",
     "entities": {
-      "manolii": {
-        "supabase_ref": "wccgdisnrbvstnnzppld",
+      "business": {
+        "supabase_ref": "abcdefghijklmnopqrst",
         "provider": "Microsoft 365",
-        "doppler_project": "manolii-knowledge-layer",
+        "doppler_project": "your-knowledge-layer",
         "notes": "Business data"
       },
       "personal": {
-        "supabase_ref": "uymtocwztytehuofpwqw",
+        "supabase_ref": "bcdefghijklmnopqrs",
         "provider": "Google Workspace",
-        "doppler_project": "personal-knowledge-layer",
+        "doppler_project": "your-personal-kl",
         "notes": "Personal data"
       },
-      "impaktful": {
-        "supabase_ref": "lugpenutvjrengstzjwx",
+      "product": {
+        "supabase_ref": "cdefghijklmnopqrst",
         "provider": "Google Workspace",
-        "doppler_project": "impaktful-knowledge-layer",
+        "doppler_project": "your-startup-kl",
         "notes": "Startup data"
       }
     }
   },
-  "for_bcp_core": "prod:bcp_core_ref,staging:bcp_staging_ref",
-  "for_manolii_platform": "prod:platform_ref,dev:platform_dev_ref",
-  "for_ensombl": "prod:ensombl_ref",
+  "for_your_app": "prod:your_app_ref,staging:your_staging_ref",
+  "for_your_platform": "prod:your_platform_ref,dev:your_platform_dev_ref",
+  "for_your_site": "prod:your_site_ref",
   "for_your_project": "prod:<your_ref>,staging:<your_staging_ref>"
 }

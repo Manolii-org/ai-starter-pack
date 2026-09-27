@@ -323,7 +323,7 @@ class HttpBackend:
         self.request_timeout = 10.0
         self._opener = urllib.request.build_opener(_NoRedirect())
 
-    def _request(self, path: str, method: str = "GET", payload: Any = None) -> Any:
+    def _request(self, path: str, method: str = "GET", payload: Any = None, *, allow_404: bool = False) -> Any:
         """Perform one bounded request and classify transport failures separately."""
         data = None if payload is None else json.dumps(payload).encode()
         headers = {"Content-Type": "application/json"} if data is not None else {}
@@ -339,8 +339,11 @@ class HttpBackend:
         except CaptureError:
             raise
         except urllib.error.HTTPError as error:
-            if error.code == 404 and method == "DELETE":
-                # Already deleted — concurrent releases are idempotent.
+            if error.code == 404 and method == "DELETE" and allow_404:
+                # Single-resource delete raced a concurrent release — the
+                # desired end state already holds. Collection-level deletes
+                # (e.g. Mailpit /api/v1/messages) must NOT take this path:
+                # a 404 there is an unsupported/failed endpoint, not a race.
                 return None
             raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", f"receiver HTTP {error.code}") from None
         except (OSError, urllib.error.URLError) as error:
@@ -455,7 +458,7 @@ class HttpBackend:
                     continue
             identifier = urllib.parse.quote(_message_id(row), safe="")
             path = f"/email/{identifier}" if self.profile.backend == "maildev" else f"/api/v1/mailbox/{mailbox}/{identifier}"
-            self._request(path, "DELETE")
+            self._request(path, "DELETE", allow_404=True)
 
 
 class HostedHttpBackend:
@@ -472,7 +475,7 @@ class HostedHttpBackend:
             raise CaptureError("AUTHORIZATION_DENIED", "hosted token is missing or malformed")
         return token
 
-    def _request(self, path: str, method: str = "GET") -> Any:
+    def _request(self, path: str, method: str = "GET", *, allow_404: bool = False) -> Any:
         """Perform one bounded authenticated request without following redirects."""
         headers = {
             "Accept": "application/json",
@@ -496,6 +499,9 @@ class HostedHttpBackend:
                 pass
             except OSError:
                 pass
+            if error.code == 404 and method == "DELETE" and allow_404:
+                # Concurrent releases are idempotent on single-message deletes.
+                return None
             if error.code in {401, 403}:
                 raise CaptureError("AUTHORIZATION_DENIED", f"hosted HTTP {error.code}") from None
             raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", f"hosted HTTP {error.code}") from None
@@ -589,7 +595,7 @@ class HostedHttpBackend:
                 raise CaptureError("AUTHORIZATION_DENIED", "delete recipient is outside allocation")
             if _co_owners_still_live(detail, recipient):
                 continue
-            self._request(f"/messages/{identifier}", "DELETE")
+            self._request(f"/messages/{identifier}", "DELETE", allow_404=True)
 
 
 class MemoryBackend:

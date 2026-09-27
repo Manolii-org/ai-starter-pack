@@ -8,7 +8,7 @@ without Doppler CLI by using the Management API at:
 
     POST https://api.supabase.com/v1/projects/<ref>/database/query
 
-Intended consumers: bcp-core, manolii-platform, Ensombl, and any project
+Intended consumers: your-repo, your-platform, your-product, and any project
 needing guaranteed migration-drift detection (ADR-0029).
 
 Auth: a Bearer PAT in SUPABASE_ACCESS_TOKEN (set via Doppler or GitHub Actions secret).
@@ -19,7 +19,7 @@ in the format: entity:ref,entity:ref,... (e.g., 'prod:abc123def456,staging:xyz78
 Example usage:
     SUPABASE_ACCESS_TOKEN=... \\
     python3 scripts/check-migration-drift-mgmt.py \\
-        --projects prod:wccgdisnrbvstnnzppld,staging:xyz789 \\
+        --projects prod:abcdefghijklmnopqrst,staging:xyz789 \\
         --migrations-dir supabase/migrations \\
         --json --out reports/drift-latest/
 
@@ -227,7 +227,7 @@ def predicate_true(ref: str, token: str, predicate: str) -> bool:
     with LIKE '%…%' body inspection, index existence with schema filter,
     CHECK constraint definition string matching, etc.). A parameterised
     template surface cannot express these — see the KL sibling script
-    `manolii-knowledge-layer/scripts/check-migration-drift.py` for the
+    `your-knowledge-layer/scripts/check-migration-drift.py` for the
     same contract in the psql-backed variant.
 
     Guardrails that make this safe in practice:

@@ -710,7 +710,7 @@ def test_mtime_sentinel_accepts_legacy_singleton_shape(project, monkeypatch):
 
 
 def test_mcp_json_url_accepted_by_default(project, monkeypatch):
-    """Codex P2 2026-07-19 (Lead-Converter line 293): a checked-in `.mcp.json`
+    """Codex P2 2026-07-19 (internal-repo line 293): a checked-in `.mcp.json`
     knowledge-layer URL must be trusted by default. Gating it behind an
     undocumented KL_MCP_URL_TRUSTED_HOSTS silently disabled every KL
     upload in every repo that opted in the intended way (file + MCP_API_KEY).
@@ -1340,7 +1340,7 @@ def test_kl_only_atomic_claim_prevents_duplicate_upload(project, monkeypatch):
 
 
 def test_kl_only_rollback_clears_lease_on_failure(project, monkeypatch):
-    """Codex P2 2026-07-19 (Lead-Converter line 990): when the KL network
+    """Codex P2 2026-07-19 (internal-repo line 990): when the KL network
     call fails after the lease claim, `kl_in_flight_at` must be cleared and
     `kl_written` must NOT be True so the next retry (or a sibling worker)
     can pick the snapshot up immediately."""
@@ -1366,13 +1366,13 @@ def test_kl_only_rollback_clears_lease_on_failure(project, monkeypatch):
     mod.mode_kl_only(session_id="SID")
     after = json.loads(snap.read_text())
     assert after.get("kl_written") is not True, \
-        "network failure must NOT leave kl_written=True (Codex Lead-Converter line 990)"
+        "network failure must NOT leave kl_written=True (Codex internal-repo line 990)"
     assert "kl_in_flight_at" not in after, \
         "failure path must clear the in-flight lease so the next retry can claim"
 
 
 def test_kl_only_stale_lease_is_reclaimed_after_ttl(project, monkeypatch):
-    """Codex P2 2026-07-19 (Lead-Converter line 990): if a worker crashes
+    """Codex P2 2026-07-19 (internal-repo line 990): if a worker crashes
     between claim and confirmation, the lease timestamp expires after
     KL_CLAIM_TTL_SEC and a new worker can reclaim the snapshot. Otherwise
     the retrospective would be stuck forever."""
@@ -1434,7 +1434,7 @@ def test_kl_only_fresh_lease_blocks_concurrent_claim(project, monkeypatch):
 
 
 def test_kl_only_stale_rollback_preserves_newer_workers_lease(project, monkeypatch):
-    """Codex P2 2026-07-19 (Lead-Converter line 1200) + CodeRabbit 2026-07-19
+    """Codex P2 2026-07-19 (internal-repo line 1200) + CodeRabbit 2026-07-19
     (impaktful#1695 line 1443): drive mode_kl_only end-to-end so the production
     ownership check is actually exercised — not mirrored. Worker A claims a
     snapshot (which starts with an EXPIRED lease so mode_kl_only will treat it
@@ -1647,7 +1647,7 @@ def test_kl_only_jsonl_fallback_skips_kl_flushed_event_rows(project, monkeypatch
 
 
 def test_latest_session_log_uses_mtime_not_lexical_sort(project, monkeypatch):
-    """Codex P2 2026-07-19 (Lead-Converter line 720): session-log filenames
+    """Codex P2 2026-07-19 (internal-repo line 720): session-log filenames
     contain UUIDs, so reverse-lexical sort can pick an older, unrelated
     log. The helper must pick by mtime instead."""
     mod = _load_module(project)
