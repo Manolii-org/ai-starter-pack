@@ -14,15 +14,17 @@ eval_cases: session-critic/
 
 # /verify-work
 
-Use `.claude/skills/verify-work.md`. Do not dispatch `quick-critic`/`work-critic` via `Agent()` on the default plane.
-
-eval_cases live under `.ai/evals/session-critic/`.
+Dispatch a critic agent on the current work. The pack ships `quick-critic`
+(haiku — routine checks) and `work-critic` (sonnet — adversarial, for
+high-stakes diffs and plans) under `.claude/agents/`; eval cases live under
+`.ai/evals/session-critic/`.
 
 Expected input: optional `--deep` flag for work-critic (default: quick-critic).
 
 Required behavior:
-1. Run `python3 scripts/run-session-critic.py --tier quick --mode advisory --git-diff HEAD`
-2. For `--deep`: run `python3 scripts/run-session-critic.py --tier deep --mode advisory --git-diff HEAD`
-3. For default: run `python3 scripts/run-session-critic.py --tier quick --mode advisory --git-diff HEAD`
-4. Return findings with specific file paths and line numbers; do not apply fixes unless explicitly asked.
+
+1. Gather the target: `git diff HEAD` (or the staged diff / plan under review).
+2. Default: `Agent(subagent_type="quick-critic", description="Verify current work", prompt="<the diff/plan>")`.
+3. For `--deep`: `Agent(subagent_type="work-critic", description="Deep work-critic review", prompt="<the diff/plan>")`.
+4. Return findings verbatim with specific file paths and line numbers; do not apply fixes unless explicitly asked.
 5. Do not commit, push, or make assumptions about intent beyond the visible diff/plan.

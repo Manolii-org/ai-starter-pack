@@ -48,15 +48,20 @@ def _urlopen_https(req: urllib.request.Request, *, timeout: int, host: str):
 
 
 
-def _endpoint() -> tuple[str, str, bool]:
+def _endpoint(direct: bool = False) -> tuple[str, str, bool]:
     """Resolve (api_key, url, proxied).
 
     Transport token: ANTHROPIC_API_KEY when calling Anthropic directly. When
     LITELLM_PROXY_URL or ANTHROPIC_BASE_URL points at a non-Anthropic host the
     request goes through that proxy and the key may come from LLM_API_KEY,
     LITELLM_MASTER_KEY, or ANTHROPIC_API_KEY — no sk-ant credential required.
+
+    direct=True forces the Anthropic endpoint regardless of proxy config — used
+    by `first_party` skills, where the eligibility matrix keeps the task class
+    (security review) on first-party models. A proxy credential must never be
+    sent there, so only a real Anthropic key authenticates.
     """
-    base = (os.environ.get("LITELLM_PROXY_URL") or os.environ.get("ANTHROPIC_BASE_URL") or "").rstrip("/")
+    base = "" if direct else (os.environ.get("LITELLM_PROXY_URL") or os.environ.get("ANTHROPIC_BASE_URL") or "").rstrip("/")
     proxied = bool(base) and (urllib.parse.urlparse(base).hostname or "").lower().rstrip(".") != _ANTHROPIC_HOST
     if proxied:
         key = (
@@ -65,7 +70,8 @@ def _endpoint() -> tuple[str, str, bool]:
             or os.environ.get("ANTHROPIC_API_KEY")
         )
         return key or "", base + "/v1/messages", True
-    return os.environ.get("ANTHROPIC_API_KEY", ""), _ANTHROPIC_API_URL, False
+    key = os.environ.get("ANTHROPIC_DIRECT_API_KEY") or os.environ.get("ANTHROPIC_API_KEY", "")
+    return key, _ANTHROPIC_API_URL, False
 
 
 # Dated claude-* IDs only exist on Anthropic's API; a LiteLLM-style proxy serves
@@ -112,10 +118,16 @@ def _load_skill(skill_name: str) -> tuple[dict, str]:
     return frontmatter, system_prompt
 
 
-def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int) -> str:
+def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int, *, first_party: bool = False) -> str:
     """Call the Messages API via urllib (Anthropic direct or LiteLLM proxy)."""
-    api_key, api_url, proxied = _endpoint()
+    api_key, api_url, proxied = _endpoint(direct=first_party)
     if not api_key:
+        if first_party:
+            raise RuntimeError(
+                "first_party skill needs ANTHROPIC_DIRECT_API_KEY (or "
+                "ANTHROPIC_API_KEY with no proxy) — the proxy credential "
+                "cannot authenticate Anthropic-direct"
+            )
         raise RuntimeError("no API credential set")
     if proxied:
         model = _PROXY_MODEL_MAP.get(model, model)
@@ -187,6 +199,9 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
     model_alias = frontmatter.get("model", "haiku")
     model = _MODEL_MAP.get(model_alias, model_alias)
     max_tokens = frontmatter.get("max_tokens", 800)
+    # first_party: the eligibility matrix keeps security review on Anthropic
+    # even when OSS routing is enabled — the proxy route is bypassed entirely.
+    first_party = bool(frontmatter.get("first_party"))
 
     # Neutralise the wrapper's own tag names inside untrusted content (diff,
     # title/body) so crafted input cannot close the boundary.
@@ -273,7 +288,7 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
     )
 
     try:
-        raw = _call_api(system_prompt, user_message, model, max_tokens)
+        raw = _call_api(system_prompt, user_message, model, max_tokens, first_party=first_party)
         data = _parse_findings(raw)
 
         # Validate structure
