@@ -268,8 +268,16 @@ def cmd_checks(args, token):
         for st in api_get_all(f"/repos/{args.repo}/commits/{sha}/statuses", token, "__list__")
         if not (st["context"] in seen_contexts or seen_contexts.add(st["context"]))
     ]
-    rows = []
+    # Check runs likewise get one entry per attempt: a rerun creates a new
+    # run, so collapse to the latest (highest id) per (name, app) — a retried
+    # failure gone green must not keep the verdict red.
+    latest_runs: dict[tuple[str, str | None], dict] = {}
     for cr in check_runs:
+        run_key = (cr["name"], (cr.get("app") or {}).get("slug"))
+        if run_key not in latest_runs or cr["id"] > latest_runs[run_key]["id"]:
+            latest_runs[run_key] = cr
+    rows = []
+    for cr in latest_runs.values():
         rows.append(
             {
                 "name": cr["name"],

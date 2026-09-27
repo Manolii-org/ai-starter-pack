@@ -380,9 +380,18 @@ def consolidate(
                 dt = _parse_ts(r.get("created") or r.get("date"))
                 return dt.timestamp() if dt else float("inf")
 
+            # Canonical = most content-complete claim first (largest token
+            # set), then highest confidence, then earliest created. Subset
+            # merges are allowed because the longer claim carries strictly
+            # more information — picking the shorter one on confidence alone
+            # would silently drop its qualifiers.
             canonical = max(
                 cluster,
-                key=lambda r: (_confidence_value(r.get("confidence", 1.0)), -_created_ts(r)),
+                key=lambda r: (
+                    len(tokenize(r.get("text", ""))),
+                    _confidence_value(r.get("confidence", 1.0)),
+                    -_created_ts(r),
+                ),
             )
 
             # Merge fields

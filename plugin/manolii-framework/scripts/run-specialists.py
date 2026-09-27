@@ -235,6 +235,8 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
         # the judge cannot post a clean verdict on a partial batch.
         if _load_skill_is_first_party(skill_name) or os.environ.get("CLIENT_AI_POLICY"):
             _write_skip_marker(skill_name, output_dir, "load_error")
+        else:
+            _write_skipped_marker(skill_name, output_dir, "load_error")
         return skill_name, f"Failed to load skill: {exc}"
 
     model_alias = frontmatter.get("model", "haiku")

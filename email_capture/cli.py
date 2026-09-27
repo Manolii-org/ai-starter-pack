@@ -44,7 +44,14 @@ def _verified_allocation(reference: str, *, releasing: bool = False) -> dict:
         if isinstance(record, dict) and record.get("allocation_id") == allocation.get("allocation_id"):
             live = record
             break
-    if live is None or live.get("recipient") != allocation.get("recipient") or live.get("scope") != allocation.get("scope"):
+    if live is None:
+        if releasing:
+            # Release is idempotent: release_allocation removes the registry
+            # record only after its purge succeeds, so a missing record means
+            # an earlier release completed — the retry must not be denied.
+            return allocation
+        raise CaptureError("AUTHORIZATION_DENIED", "allocation does not match a live registry record")
+    if live.get("recipient") != allocation.get("recipient") or live.get("scope") != allocation.get("scope"):
         raise CaptureError("AUTHORIZATION_DENIED", "allocation does not match a live registry record")
     # Release stays reachable on expired or pending_purge records — an expired
     # allocation still holds mail to purge, and pending_purge marks a release
