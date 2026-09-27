@@ -160,7 +160,7 @@ def parse_frontmatter(content):
     return fields
 
 
-def lint_agent_file(path, oss_routed, anthropic_native, verbose=False):
+def lint_agent_file(path, oss_routed, anthropic_native, verbose=False, known_sensitivities=None):
     """Check one agent file. Returns a list of violation dicts (empty = pass)."""
     path = Path(path)  # Normalise to Path for consistent .name / .stem access
     violations = []
@@ -179,6 +179,25 @@ def lint_agent_file(path, oss_routed, anthropic_native, verbose=False):
 
     if not model or not data_sensitivity:
         return []
+
+    if known_sensitivities is not None and data_sensitivity not in known_sensitivities:
+        # Unknown / retired sensitivity label (e.g. anthropic_only): the hook
+        # would silently fall back to the lowest tier — fail closed here so a
+        # stale agent cannot pass lint while effectively unguarded.
+        violations.append({
+            "file": str(path),
+            "agent": fm.get("name", path.stem),
+            "model": model,
+            "data_sensitivity": data_sensitivity,
+            "resolves_to": "n/a",
+            "data_sensitivity_max": "unknown",
+            "source": "unknown_sensitivity",
+            "warning": (
+                f"data_sensitivity '{data_sensitivity}' is not a declared "
+                "classification in data_classification — failing closed."
+            ),
+        })
+        return violations
 
     if data_sensitivity in REQUIRES_NO_AI:
         # Governance no-AI tier: declaring any runnable model is a violation.
@@ -519,7 +538,10 @@ def main():
 
     all_violations = []
     for path in agent_files:
-        vios = lint_agent_file(path, oss_routed, anthropic_native, verbose=args.verbose)
+        vios = lint_agent_file(
+            path, oss_routed, anthropic_native, verbose=args.verbose,
+            known_sensitivities=set(config.get("data_classification", {}).keys()),
+        )
         all_violations.extend(vios)
 
     if all_violations:

@@ -43,9 +43,12 @@ first push.
      else diff the last commit (`git diff HEAD~1 HEAD`).
    - If `$ARGUMENTS` is a commit / ref / range: diff that.
 2. If the diff is empty, report "nothing to audit" and exit.
-3. Dispatch a `general-purpose` subagent (NOT `codex-adversarial` —
-   that agent is gated on `PR_ASSESSMENT_CODEX_ENABLED=1` for CI cost
-   control and would exit immediately here). Attach the diff and give
+3. Dispatch a `general-purpose` subagent with `model="sonnet"` (NOT
+   `codex-adversarial` — that agent is gated on
+   `PR_ASSESSMENT_CODEX_ENABLED=1` for CI cost control and would exit
+   immediately here; an omitted `model=` would inherit the parent tier —
+   Opus on most sessions — for a routine bounded review). Attach the diff
+   and give
    the subagent the following brief verbatim:
 
     ```

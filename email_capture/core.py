@@ -985,12 +985,18 @@ def allocate(request: dict[str, Any], profile: Profile) -> dict[str, Any]:
 
 
 def release_allocation(selected_backend: Backend, allocation: dict[str, Any]) -> None:
-    """Idempotently purge messages and retire the allocation registry entry."""
-    selected_backend.purge(allocation)
+    """Idempotently purge messages and retire the allocation registry entry.
+
+    The record retires BEFORE the purge so the purge's co-owner check reads
+    the post-release registry: two concurrent releases then deterministically
+    leave deletion to whichever purge runs last, instead of both seeing the
+    other's record live and skipping deletion forever.
+    """
     with _registry_lock():
         records = _read_registry()
         retained = {key: value for key, value in records.items() if value.get("allocation_id") != allocation.get("allocation_id")}
         atomic_write_json(_registry_path(), retained)
+    selected_backend.purge(allocation)
 
 
 def await_messages(selected_backend: Backend, allocation: dict[str, Any], timeout: float = 30, count: int = 1, not_before: str | None = None) -> tuple[list[dict[str, Any]], str]:

@@ -69,25 +69,43 @@ _PATTERN_FIELDS = ("problem", "solution", "rule")
 # memory-keeper's documented fact schema writes `entry`, not `content`.
 _FACT_TEXT_FIELDS = ("content", "entry")
 
+# memory-keeper's pattern schema: `pattern` + `context` + `example` —
+# distinct from the /learn problem/solution/rule shape.
+_KEEPER_PATTERN_FIELDS = ("pattern", "context", "example")
+
 
 def _comparable_text(row: dict) -> str:
     """Text used for dedup comparison across supported memory schemas.
 
     facts use `content` (or the memory-keeper legacy `entry`); patterns
-    (written by /learn) carry problem/solution/rule. A row with no
-    comparable text returns "" and must never be merged — two empty
-    strings would read as identical.
+    (written by /learn) carry problem/solution/rule; memory-keeper
+    patterns carry pattern/context/example. A row with no comparable
+    text returns "" and must never be merged — two empty strings would
+    read as identical.
     """
     for field in _FACT_TEXT_FIELDS:
         content = row.get(field)
         if isinstance(content, str) and content.strip():
             return content
-    parts = [row.get(k, "") for k in _PATTERN_FIELDS]
+    parts = [row.get(k, "") for k in _PATTERN_FIELDS + _KEEPER_PATTERN_FIELDS]
     return " ".join(p for p in parts if isinstance(p, str) and p.strip())
 
 
-def _is_pattern(row: dict) -> bool:
-    return isinstance(row.get("problem"), str) and row["problem"].strip() != ""
+def _pattern_axes(row: dict) -> tuple[str, str, str] | None:
+    """(context_text, answer_text, schema) for pattern-shaped rows, else None.
+
+    /learn patterns compare `problem` (context) against `solution`+`rule`
+    (answer); memory-keeper patterns compare `context` against
+    `pattern`+`example`. The context axis keeps distinct problem contexts
+    from merging; an empty answer axis can never establish equivalence.
+    """
+    if isinstance(row.get("problem"), str) and row["problem"].strip() != "":
+        answer = " ".join(str(row.get(k, "")) for k in ("solution", "rule"))
+        return (row.get("problem", ""), answer, "learn")
+    if isinstance(row.get("pattern"), str) and row["pattern"].strip() != "":
+        answer = " ".join(str(row.get(k, "")) for k in ("pattern", "example"))
+        return (row.get("context", ""), answer, "keeper")
+    return None
 
 
 # Negation tokens: a Jaccard overlap that differs only by negation
@@ -104,35 +122,53 @@ def _same_polarity(text_a: str, text_b: str) -> bool:
     return (tokenize(text_a) & _NEGATION_TOKENS) == (tokenize(text_b) & _NEGATION_TOKENS)
 
 
+# Digit-bearing tokens (ports, versions, sizes, IDs) carry values: rows
+# whose value tokens differ assert different values — "port 3000" vs
+# "port 4000" are not duplicates no matter how lexically similar.
+_VALUE_TOKEN_RE = re.compile(r"[\w.-]+")
+
+
+def _value_tokens(text: str) -> set[str]:
+    return {t for t in _VALUE_TOKEN_RE.findall(text.casefold()) if any(c.isdigit() for c in t)}
+
+
 def _rows_mergeable(a: dict, b: dict, threshold: float) -> bool:
     """Whether two rows are close enough to consolidate.
 
-    Pattern rows must be similar on BOTH axes — `problem` (the context)
-    and `solution`+`rule` (the answer). Requiring only the answer side
-    drops distinct problem contexts; including `problem` in one pooled
-    token set lets a shared question dominate and merge different answers.
+    Pattern rows must be similar on BOTH axes — the context side
+    (`problem` for /learn, `context` for memory-keeper) and the answer
+    side (`solution`+`rule` / `pattern`+`example`). Requiring only the
+    answer side drops distinct contexts; pooling the context lets a
+    shared question dominate and merge different answers.
     Non-pattern rows compare on _comparable_text as before.
     """
     text_a = _comparable_text(a)
     text_b = _comparable_text(b)
     if not text_a or not text_b:
         return False
+    if _value_tokens(text_a) != _value_tokens(text_b):
+        return False
     if not _same_polarity(text_a, text_b):
         return False
-    if not (_is_pattern(a) and _is_pattern(b)):
+    axes_a = _pattern_axes(a)
+    axes_b = _pattern_axes(b)
+    if axes_a is None and axes_b is None:
         return text_a == text_b or jaccard(tokenize(text_a), tokenize(text_b)) >= threshold
-    prob_a, prob_b = tokenize(a["problem"]), tokenize(b["problem"])
-    if not prob_a or not prob_b:
-        # Problems too short to tokenize — compare raw text instead of
-        # letting jaccard(∅, ∅) report a perfect match.
-        if a["problem"].strip().casefold() != b["problem"].strip().casefold():
-            return False
-    elif jaccard(prob_a, prob_b) < threshold:
+    if axes_a is None or axes_b is None or axes_a[2] != axes_b[2]:
+        # A pattern vs a fact row, or two different pattern schemas, is
+        # never a safe merge — shared vocabulary doesn't mean same claim.
         return False
-    ans_a = " ".join(str(a.get(k, "")) for k in ("solution", "rule")).strip()
-    ans_b = " ".join(str(b.get(k, "")) for k in ("solution", "rule")).strip()
+    ctx_a, ctx_b = tokenize(axes_a[0]), tokenize(axes_b[0])
+    if not ctx_a or not ctx_b:
+        # Context too short to tokenize — compare raw text instead of
+        # letting jaccard(∅, ∅) report a perfect match.
+        if axes_a[0].strip().casefold() != axes_b[0].strip().casefold():
+            return False
+    elif jaccard(ctx_a, ctx_b) < threshold:
+        return False
+    ans_a, ans_b = axes_a[1].strip(), axes_b[1].strip()
     # An unanswered pattern has no answer to establish equivalence with —
-    # jaccard(∅, ∅) would return 1.0 and merge them on problem alone.
+    # jaccard(∅, ∅) would return 1.0 and merge them on context alone.
     if not ans_a or not ans_b:
         return False
     return jaccard(tokenize(ans_a), tokenize(ans_b)) >= threshold

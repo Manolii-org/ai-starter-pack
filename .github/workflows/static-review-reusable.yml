@@ -168,3 +168,6 @@ jobs:
       - name: Lint agent routing config
         if: steps.detect.outputs.found == 'true'
         run: python3 scripts/lint-agent-routing.py
+      - name: Check retired anthropic_only tier references
+        if: steps.detect.outputs.found == 'true'
+        run: python3 scripts/check-no-anthropic-only.py

@@ -211,6 +211,23 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
     # even when OSS routing is enabled — the proxy route is bypassed entirely.
     first_party = bool(frontmatter.get("first_party"))
 
+    if first_party and not _endpoint(direct=True)[0]:
+        # Write a marker, not nothing: a first-party skill that cannot run
+        # must surface as a first-party candidate so the judge fails closed
+        # into the advisory path instead of silently adjudicating the rest
+        # of the batch on the proxy plane.
+        output_file = output_dir / f"{skill_name}.json"
+        output_file.write_text(
+            json.dumps(
+                {"source": skill_name, "findings": [],
+                 "first_party": True, "skipped": "no_direct_key"},
+                indent=2,
+            ) + "\n",
+            encoding="utf-8",
+        )
+        print(f"[{skill_name}] first_party skill needs ANTHROPIC_DIRECT_API_KEY — marker written to {output_file}")
+        return skill_name, "skipped: no direct Anthropic credential"
+
     # Neutralise the wrapper's own tag names inside untrusted content (diff,
     # title/body) so crafted input cannot close the boundary.
     _WRAP_TAGS = ("untrusted_diff", "untrusted_pr_meta", "changed_paths")
