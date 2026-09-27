@@ -140,18 +140,27 @@ def _urlopen_https(req: Request, *, timeout: int, host: str):
 
 def get_api_key() -> Optional[str]:
     """Transport token: proxy accepts LLM_API_KEY/LITELLM_MASTER_KEY; direct uses ANTHROPIC_API_KEY."""
+    key: Optional[str] = None
     if _proxy_base():
-        key = (
-            os.getenv("LLM_API_KEY")
-            or os.getenv("LITELLM_MASTER_KEY")
-            or os.getenv("ANTHROPIC_API_KEY")
-            or ""
-        )
         # A genuine sk-ant-* key is a first-party credential and must never
         # leave for a non-Anthropic host — legacy configs keep the proxy key
-        # under ANTHROPIC_API_KEY, which is not sk-ant-shaped.
-        if key.strip().removeprefix("Bearer ").strip().startswith("sk-ant-"):
-            key = ""
+        # under ANTHROPIC_API_KEY, which is not sk-ant-shaped. Skip candidates
+        # that fail the check so a lower-priority proxy token still works.
+        for candidate in (
+            os.getenv("LLM_API_KEY"),
+            os.getenv("LITELLM_MASTER_KEY"),
+            os.getenv("ANTHROPIC_API_KEY"),
+        ):
+            if not candidate:
+                continue
+            normalized = candidate.strip()
+            # The auth-scheme token is case-insensitive (RFC 7235).
+            if normalized.lower().startswith("bearer "):
+                normalized = normalized[7:].strip()
+            if normalized.startswith("sk-ant-"):
+                continue
+            key = normalized
+            break
     else:
         key = os.getenv("ANTHROPIC_API_KEY")
     if not key:

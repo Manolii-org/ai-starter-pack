@@ -49,15 +49,21 @@ def _proxy_transport_key() -> str:
     the resolved value has that shape, fail closed with "" so callers take
     their unconfigured path instead of leaking it.
     """
-    key = (
-        os.environ.get("LLM_API_KEY")
-        or os.environ.get("LITELLM_MASTER_KEY")
-        or os.environ.get("ANTHROPIC_API_KEY")
-        or ""
-    )
-    if key.strip().removeprefix("Bearer ").strip().startswith("sk-ant-"):
-        return ""
-    return key
+    for candidate in (
+        os.environ.get("LLM_API_KEY"),
+        os.environ.get("LITELLM_MASTER_KEY"),
+        os.environ.get("ANTHROPIC_API_KEY"),
+    ):
+        if not candidate:
+            continue
+        key = candidate.strip()
+        # The auth-scheme token is case-insensitive (RFC 7235).
+        if key.lower().startswith("bearer "):
+            key = key[7:].strip()
+        if key.startswith("sk-ant-"):
+            continue
+        return key
+    return ""
 
 
 def _endpoint(direct: bool = False) -> tuple[str, str, bool]:
