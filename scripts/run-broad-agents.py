@@ -423,9 +423,17 @@ def run_broad_agents(
     # Get API key. A direct-only install (ANTHROPIC_DIRECT_API_KEY without a
     # shared transport credential) must still run: every agent dispatches
     # Anthropic-direct through it (the proxy is absent by definition), so the
-    # direct key is also the shared transport credential here.
-    api_key = get_api_key() or os.getenv("ANTHROPIC_DIRECT_API_KEY", "")
-    if not api_key:
+    # direct key is also the shared transport credential here. When a proxy IS
+    # configured but has no credential, the direct key must NOT stand in — a
+    # non-direct agent would send `Bearer <anthropic key>` to the proxy host,
+    # leaking a first-party credential outside the Anthropic boundary. That
+    # state proceeds with an empty shared key instead: first_party /
+    # CLIENT_AI_POLICY agents re-resolve their own direct credential inside
+    # invoke_agent, and the rest skip on their empty key.
+    api_key = get_api_key() or (
+        os.getenv("ANTHROPIC_DIRECT_API_KEY", "") if _proxy_base() is None else ""
+    )
+    if not api_key and not os.getenv("ANTHROPIC_DIRECT_API_KEY"):
         logger.info("[broad-agents] no API key, exiting")
         return 0
 

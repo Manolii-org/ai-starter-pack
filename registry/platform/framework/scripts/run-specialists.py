@@ -201,7 +201,7 @@ def _load_skill_is_first_party(skill_name: str) -> bool:
     """
     try:
         text = (SKILLS_DIR / skill_name / "SKILL.md").read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return True
     match = re.search(r"^first_party:\s*(\S+)", text, re.M)
     return match.group(1).lower() == "true" if match else True
@@ -343,10 +343,16 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
         raw = _call_api(system_prompt, user_message, model, max_tokens, first_party=first_party)
         data = _parse_findings(raw)
 
-        # Validate structure
+        # Validate structure. A first-party skill returning a malformed
+        # payload still owes the judge a skip marker — returning silently would
+        # let the batch look cleanly reviewed while the direct check never ran.
         if not isinstance(data, dict):
+            if first_party:
+                _write_skip_marker(skill_name, output_dir, "api_error")
             return skill_name, f"Response is not a JSON object: {type(data)}"
         if "source" not in data or "findings" not in data:
+            if first_party:
+                _write_skip_marker(skill_name, output_dir, "api_error")
             return skill_name, "Response missing 'source' or 'findings' fields"
 
         if first_party and data.get("findings"):

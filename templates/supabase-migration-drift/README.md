@@ -8,7 +8,7 @@ Supabase projects have no built-in `schema_migrations` tracking table. When you 
 
 **This template solves that** by embedding `@assert-applied:` predicates in each migration and automatically verifying them against your target Supabase projects via the Management API.
 
-See [ADR-0029](https://github.com/your-org/your-repo/blob/main/docs/decisions/ADR-0029-migration-drift-invariant.md) (in the source repo) for the full reasoning.
+See ADR-0029 `docs/decisions/ADR-0029-migration-drift-invariant.md` (in your source repo) for the full reasoning.
 
 ## Setup (3 Steps)
 
@@ -161,5 +161,5 @@ Exit codes:
 
 ## Further Reading
 
-- [ADR-0029: Migration drift as an ongoing invariant](https://github.com/your-org/your-repo/blob/main/docs/decisions/ADR-0029-migration-drift-invariant.md) — Full architectural reasoning
-- [KL Migration Workflow](https://github.com/your-org/your-repo/blob/main/.github/workflows/kl-migration-drift.yml) — Live production example
+- ADR-0029 `docs/decisions/ADR-0029-migration-drift-invariant.md` (in your source repo) — Full architectural reasoning
+- `.github/workflows/kl-migration-drift.yml` (in your source repo) — Live production example

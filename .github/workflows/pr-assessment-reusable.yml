@@ -444,8 +444,9 @@ jobs:
       ANTHROPIC_MODEL: ${{ inputs.model }}
       # first_party specialist skills (shell-security, sast-scan,
       # security-boundary-test) run Anthropic-direct on this key; without it
-      # they skip-with-warning in proxy mode.
+      # they skip-with-warning in proxy mode. CLIENT_AI_POLICY routes all direct.
       ANTHROPIC_DIRECT_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      CLIENT_AI_POLICY: ${{ vars.CLIENT_AI_POLICY }}
     steps:
       - name: Validate provider secrets
         env:
@@ -689,6 +690,7 @@ jobs:
       # Judge adjudicates first_party candidates Anthropic-direct (run-judge.py
       # _endpoint(direct=True)); without this key those findings go unjudged.
       ANTHROPIC_DIRECT_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      CLIENT_AI_POLICY: ${{ vars.CLIENT_AI_POLICY }}
     steps:
       - name: Validate provider secrets
         env:

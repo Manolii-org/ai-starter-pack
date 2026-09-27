@@ -1000,6 +1000,13 @@ def allocate(request: dict[str, Any], profile: Profile) -> dict[str, Any]:
             for key, value in records.items()
             if float(value.get("expires_at", 0)) + 30 * 86400 > now
         }
+        # Re-key a displaced record under tombstone:{id} instead of dropping it:
+        # an expired or pending_purge predecessor still pins a mailbox its
+        # `release` must be able to purge, which requires `_verified_allocation`
+        # to find it by allocation_id — writing over scope_hash would strand it.
+        displaced = records.get(scope_hash)
+        if isinstance(displaced, dict) and displaced.get("allocation_id"):
+            records[f"tombstone:{displaced['allocation_id']}"] = displaced
         digest = secrets.token_hex(16)
         result = {
             "schema_version": VERSION,

@@ -251,6 +251,9 @@ litellm_settings:
   # Claude tiers do NOT automatically fall back to OSS — explicitly route if needed.
   fallbacks:
     - claude-haiku-4-5-20251001: [claude-haiku-4-5-20251001-anthropic]
+    # The `haiku` short alias (scripts/run-*.py, Claude Code) needs the same
+    # Anthropic-direct safety net the dated ID has.
+    - haiku: [claude-haiku-4-5-20251001-anthropic]
     - sonnet: [sonnet-us-fallback-gptoss120b, sonnet-us-fallback-llama8b]
     - tier-0-oss-heavy: [tier-0-oss-heavy-fallback-together, tier-0-oss-heavy-fallback-glm]
     - tier-1-fast: [tier-1-fast-fallback-together, tier-1-fast-fallback-groq]

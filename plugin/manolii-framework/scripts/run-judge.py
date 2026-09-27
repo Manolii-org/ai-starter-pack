@@ -491,6 +491,18 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
             line = "**Merge danger:** unknown (unclassified)"
         body_lines.append(line)
         body_lines.append("")
+        if self._skipped_first_party:
+            # Findings survived the gates but a first-party specialist never
+            # ran — the review must disclose the coverage gap, not read as a
+            # complete assessment.
+            skipped = ", ".join(
+                _markdown_safe(s) for s in sorted(set(self._skipped_first_party))
+            )
+            body_lines.append(
+                f"**Incomplete coverage:** first-party security checks did not "
+                f"run (skipped: {skipped})."
+            )
+            body_lines.append("")
 
         errors = [f for f in surviving if f["severity"] == "ERROR"]
         warnings = [f for f in surviving if f["severity"] == "WARNING"]
@@ -749,7 +761,7 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
 
         if not judge_result:
             logger.error("Judge agent invocation failed")
-            self._post_advisory_warning()
+            self._post_advisory_warning(self._skipped_coverage_detail())
             return 0
 
         # Validate and sanitise judge output before use
@@ -870,6 +882,12 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
         except Exception as e:
             logger.warning(f"Failed to post no-findings comment: {e}")
 
+    def _skipped_coverage_detail(self) -> str:
+        if not self._skipped_first_party:
+            return ""
+        sources = ", ".join(sorted(set(self._skipped_first_party)))
+        return f"First-party security checks did not run (skipped: {sources})."
+
     def _post_clean_or_skip_advisory(self) -> None:
         """Post the clean verdict — unless a first-party specialist was skipped.
 
@@ -881,9 +899,7 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
             logger.warning(
                 f"first-party specialists skipped (no direct credential): {sources}"
             )
-            self._post_advisory_warning(
-                f"First-party security checks did not run (skipped: {sources})."
-            )
+            self._post_advisory_warning(self._skipped_coverage_detail())
             return
         self._post_no_findings_comment()
 

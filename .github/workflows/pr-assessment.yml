@@ -73,6 +73,7 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ (vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL) && (secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY) || secrets.ANTHROPIC_API_KEY }}
           ANTHROPIC_BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
+          CLIENT_AI_POLICY: ${{ vars.CLIENT_AI_POLICY }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
@@ -344,6 +345,8 @@ jobs:
           # first_party specialist skills run Anthropic-direct; without this
           # key they skip-with-warning under proxy mode.
           ANTHROPIC_DIRECT_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # CLIENT_AI_POLICY engagements route EVERY specialist direct.
+          CLIENT_AI_POLICY: ${{ vars.CLIENT_AI_POLICY }}
           SKILLS: ${{ needs.classify.outputs.invoke_skills }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
@@ -425,6 +428,7 @@ jobs:
           ANTHROPIC_BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
           # Judge adjudicates first_party candidates Anthropic-direct.
           ANTHROPIC_DIRECT_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLIENT_AI_POLICY: ${{ vars.CLIENT_AI_POLICY }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
