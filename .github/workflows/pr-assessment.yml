@@ -428,7 +428,7 @@ jobs:
       ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
           && fromJSON(vars.CI_RUNNER_OVERRIDE || '["self-hosted","fly"]')
           || 'ubuntu-latest' }}
-    needs: [classify, specialists, broad-agents]
+    needs: [classify, sast, specialists, broad-agents]
     if: always() && needs.classify.result == 'success' && needs.classify.outputs.depth != 'none'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -436,7 +436,12 @@ jobs:
       - name: Fail when an upstream assessment stage failed
         # A specialists/broad-agents job that fails before uploading its
         # candidates artifact must not let the judge post a clean verdict.
-        if: needs.specialists.result == 'failure' || needs.specialists.result == 'cancelled' || needs['broad-agents'].result == 'failure' || needs['broad-agents'].result == 'cancelled'
+        if: |
+          needs.sast.result == 'failure' || needs.sast.result == 'cancelled' ||
+          needs.specialists.result == 'failure' || needs.specialists.result == 'cancelled' ||
+          (needs.specialists.result == 'skipped' && needs.classify.outputs.invoke_skills != '') ||
+          needs['broad-agents'].result == 'failure' || needs['broad-agents'].result == 'cancelled' ||
+          (needs['broad-agents'].result == 'skipped' && needs.classify.outputs.depth == 'broad')
         run: |
           echo "::error::upstream review stage failed — refusing to judge missing candidates"
           exit 1
