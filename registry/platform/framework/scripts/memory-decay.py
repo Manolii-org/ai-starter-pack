@@ -208,13 +208,15 @@ def _confidence_value(raw) -> float:
     if isinstance(raw, bool):
         return 1.0
     if isinstance(raw, (int, float)):
-        return float(raw)
+        # Persisted scores are on a 0–1 scale; clamp out-of-range input rather
+        # than letting it propagate into adjusted_confidence.
+        return min(1.0, max(0.0, float(raw)))
     if isinstance(raw, str):
         lowered = raw.strip().casefold()
         if lowered in _CATEGORICAL_CONFIDENCE:
             return _CATEGORICAL_CONFIDENCE[lowered]
         try:
-            return float(lowered)
+            return min(1.0, max(0.0, float(lowered)))
         except ValueError:
             pass
     print(f"[memory-decay] unrecognized confidence {raw!r} — treating as 1.0", file=sys.stderr)

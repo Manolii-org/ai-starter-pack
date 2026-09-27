@@ -305,9 +305,10 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
         if "source" not in data or "findings" not in data:
             return skill_name, "Response missing 'source' or 'findings' fields"
 
-        if first_party:
+        if first_party and data.get("findings"):
             # Marks the candidate set for run-judge: first-party findings must
-            # be adjudicated on a first-party model, not the OSS proxy.
+            # be adjudicated on a first-party model, not the OSS proxy. Empty
+            # results stay unmarked so they never force a direct key.
             data["first_party"] = True
 
         # Write findings to file

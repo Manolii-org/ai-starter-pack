@@ -34,7 +34,7 @@ Broad Stage 2 agent. Triggered by `pr-classifier` when `.ai/sast-findings.json` 
 | Install | Model | Cost per 1M tokens (in/out) |
 |---|---|---|
 | Claude-only | claude-sonnet-4-6 (Anthropic direct) | $3.00 / $15.00 |
-| Claude + OSS | sonnet (proxy-guardrailed DeepSeek V4 Pro, restricted_us_oss_ok) | via LiteLLM |
+| Claude + OSS | claude-sonnet-4-6 on Anthropic via `first_party` — never the OSS proxy; requires `ANTHROPIC_DIRECT_API_KEY` | $3.00 / $15.00 |
 
 ## Tools
 

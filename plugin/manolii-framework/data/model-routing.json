@@ -933,11 +933,11 @@
       "_note": "anthropic_only (retired 2026-09-26): its agents moved to restricted_us_oss_ok via guardrailed aliases; 'restricted' now means governance no-AI — no model is routed."
     },
     "restricted_us_oss_ok": {
-      "description": "Highest AI-eligible tier: client-code/PII and sensitive data where the engagement contract permits US-origin OSS inference. PRC-origin weights excluded regardless of hosting provider.",
+      "description": "Highest AI-eligible tier: client-code/PII and sensitive data where the engagement contract permits US-origin OSS inference. PRC-origin weights excluded regardless of hosting provider — except the single guardrailed exception below.",
       "examples": [
         "document extraction for engagement with us_weights_ok policy",
+        "client repo diff review under a US-infra OSS contract",
         "structured data transform on internal schema",
-        "single-shot generation tasks with no client PII",
         "classification and summarisation on internal docs"
       ],
       "allowed_tiers": [
@@ -957,7 +957,8 @@
         "MiniMax AI (China)",
         "DeepSeek AI (China)",
         "Alibaba/Qwen (China)"
-      ]
+      ],
+      "_guardrail_exception": "proxy_intercepted_models.sonnet (DeepSeek V4 Pro, PRC weights on Fireworks US infra) is the documented exception to excluded_weight_origins: permitted at this tier ONLY because deploy/litellm-proxy/sonnet_advisor_guardrail.py is mandatory and fail-closed. `Agent(model=\"sonnet\")` dispatches keep this eligibility; direct tier entries and other PRC routes remain excluded."
     },
     "internal": {
       "description": "Own business logic, architecture, non-client code, generic patterns",

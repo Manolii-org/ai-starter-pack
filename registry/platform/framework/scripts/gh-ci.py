@@ -227,7 +227,7 @@ def detect_repo(explicit: str | None) -> str:
             ["git", "remote", "get-url", "origin"], capture_output=True, text=True, check=True,
             timeout=30,
         ).stdout.strip()
-    except (OSError, subprocess.CalledProcessError):
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         url = ""
     m = re.search(r"github\.com[:/]([^/]+)/([^/\s]+?)(?:\.git)?$", url)
     if m:

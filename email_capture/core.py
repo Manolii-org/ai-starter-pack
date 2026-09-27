@@ -436,7 +436,7 @@ class HttpBackend:
                 if not isinstance(detail, dict):
                     raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "receiver detail has invalid shape")
                 _require_envelope_fields_well_formed(detail)
-                if _allocation_exclusively_owns(detail, recipient):
+                if not _co_owners_still_live(detail, recipient):
                     identifiers.append(requested_id)
             if identifiers:
                 self._request("/api/v1/messages", "DELETE", {"IDs": identifiers})
@@ -448,7 +448,7 @@ class HttpBackend:
                 if not isinstance(detail, dict):
                     raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "receiver detail has invalid shape")
                 _require_envelope_fields_well_formed(detail)
-                if not _allocation_exclusively_owns(detail, recipient):
+                if _co_owners_still_live(detail, recipient):
                     continue
             identifier = urllib.parse.quote(_message_id(row), safe="")
             path = f"/email/{identifier}" if self.profile.backend == "maildev" else f"/api/v1/mailbox/{mailbox}/{identifier}"
@@ -584,7 +584,7 @@ class HostedHttpBackend:
             _require_envelope_fields_well_formed(detail)
             if not _summary_contains_recipient(detail, recipient):
                 raise CaptureError("AUTHORIZATION_DENIED", "delete recipient is outside allocation")
-            if not _allocation_exclusively_owns(detail, recipient):
+            if _co_owners_still_live(detail, recipient):
                 continue
             self._request(f"/messages/{identifier}", "DELETE")
 
@@ -615,7 +615,15 @@ class MemoryBackend:
 
     def purge(self, allocation: dict[str, Any]) -> None:
         recipient = allocation["recipient"].lower()
-        atomic_write_json(self.path, [row for row in self._read() if not _summary_contains_recipient(row, recipient)])
+        atomic_write_json(
+            self.path,
+            [
+                row
+                for row in self._read()
+                if not _summary_contains_recipient(row, recipient)
+                or _co_owners_still_live(row, recipient)
+            ],
+        )
 
     def capabilities(self) -> dict[str, Any]:
         return {"schema_version": VERSION, "backend": "memory", "allocation_scope": "recipient", "cursor": "received_at_id", "mime": True, "attachments": True, "attachment_size": True, "purge_scope": "allocation"}
@@ -754,9 +762,34 @@ def _envelope_addresses(row: dict[str, Any]) -> list[str]:
     return unique
 
 
-def _allocation_exclusively_owns(row: dict[str, Any], recipient: str) -> bool:
-    addresses = _envelope_addresses(row)
-    return bool(addresses) and all(address == recipient for address in addresses)
+def _co_owners_still_live(row: dict[str, Any], recipient: str) -> bool:
+    """True while another address on this message holds a live allocation.
+
+    Purge uses this instead of exclusive-ownership: a shared message must
+    survive intermediate releases but be deleted when its last live owner
+    releases, otherwise the receiver leaks it forever. Fails closed — an
+    unreadable registry keeps the message rather than risking a co-owner's
+    capture.
+    """
+    others = {a for a in _envelope_addresses(row) if a != recipient}
+    if not others:
+        present, value = _recipient_field_value(row)
+        if present:
+            others = {a for a in _parsed_addresses(value) if a != recipient}
+    if not others:
+        return False
+    try:
+        records = _read_registry()
+    except CaptureError:
+        return True
+    now = time.time()
+    for record in records.values():
+        if not isinstance(record, dict):
+            continue
+        other = str(record.get("recipient", "")).lower()
+        if other in others and float(record.get("expires_at", 0) or 0) > now:
+            return True
+    return False
 
 
 def _summary_contains_recipient(row: dict[str, Any], recipient: str) -> bool:

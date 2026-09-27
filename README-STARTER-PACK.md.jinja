@@ -188,12 +188,12 @@ The starter pack ships with a production-ready 8-tier LLM routing framework that
 | `tier-1-fast` | Fireworks/GPT-OSS 120B | US-origin OpenAI OSS | $0.80/$3.20/M | Boilerplate, single-step, format |
 | `tier-2-agentic` | Together/Kimi K2.6 | 76.8%+ SWE-bench | $0.50/$2.80/M | Long tool chains, 262K context |
 | `tier-3-tool` | OpenRouter/Gemma 4 31B | strong function-calling | ~$0.10/$0.30/M | Tool-heavy agents |
-| `sonnet` (alias) | Together/Gemma 4 31B | US-origin, advisor-guarded | ~$0.10/$0.30/M | `Agent(model="sonnet")` — restricted_us_oss_ok |
+| `sonnet` (alias) | Fireworks/DeepSeek V4 Pro | PRC weights on US infra, advisor-guarded (fail-closed) | ~$0.30/$1.20/M | `Agent(model="sonnet")` — restricted_us_oss_ok |
 | `tier-4-extract` | Groq/Llama 3.1 8B | LPU ~800 tok/s | $0.05/$0.08/M | Grep, count, extract, lint |
 | `tier-5-latency` | Groq LPU | ~800 tok/s | $0.05/$0.08/M | Real-time classification |
 
 **Data classification** — every agent declares `data_sensitivity`:
-- `restricted_us_oss_ok` — client code, PII, emails → guardrailed `sonnet` alias (highest AI-eligible tier)
+- `restricted_us_oss_ok` — client code, PII, emails → `tier-0-*` Anthropic or `tier-3-tool-us`; the `sonnet` alias is allowed only via its mandatory fail-closed advisor guardrail (highest AI-eligible tier)
 - `restricted` — governance no-AI → routed to NO model (lint fails closed)
 - `internal` — own codebase, scripts → all tiers allowed
 - `public` — open-source, boilerplate → all tiers allowed

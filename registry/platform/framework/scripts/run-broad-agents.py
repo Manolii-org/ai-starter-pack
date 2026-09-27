@@ -329,7 +329,9 @@ def invoke_agent(
 
         return {
             "source": agent_config.name,
-            "first_party": agent_config.first_party,
+            # An empty result must not mark the file first-party: the judge
+            # would demand a direct key for a batch with nothing to adjudicate.
+            "first_party": agent_config.first_party and bool(normalised),
             "findings": normalised,
         }
     except json.JSONDecodeError as e:
