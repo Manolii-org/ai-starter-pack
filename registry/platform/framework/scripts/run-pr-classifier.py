@@ -44,13 +44,39 @@ def _urlopen_https(req: urllib.request.Request, *, timeout: int, host: str):
 
 
 
+def _proxy_transport_key() -> str:
+    """Credential for a non-Anthropic endpoint.
+
+    The proxy key may live under LLM_API_KEY, LITELLM_MASTER_KEY, or
+    ANTHROPIC_API_KEY (legacy configs store the LiteLLM key under that name —
+    no sk-ant credential is required). A genuine sk-ant-* key, though, is a
+    first-party credential and must never be sent to a third-party host: if
+    the resolved value has that shape, fail closed with "" so callers take
+    their unconfigured path instead of leaking it.
+    """
+    for candidate in (
+        os.environ.get("LLM_API_KEY"),
+        os.environ.get("LITELLM_MASTER_KEY"),
+        os.environ.get("ANTHROPIC_API_KEY"),
+    ):
+        if not candidate:
+            continue
+        key = candidate.strip()
+        # The auth-scheme token is case-insensitive (RFC 7235).
+        if key.lower() == "bearer" or key.lower().startswith("bearer "):
+            key = key[7:].strip()
+        if not key or key.lower().startswith("sk-ant-"):
+            continue
+        return key
+    return ""
+
+
 def _endpoint() -> tuple[str, str, bool]:
     """Resolve (api_key, url, proxied).
 
     Transport token: ANTHROPIC_API_KEY when calling Anthropic directly. When
     LITELLM_PROXY_URL or ANTHROPIC_BASE_URL points at a non-Anthropic host the
-    request goes through that proxy and the key may come from LLM_API_KEY,
-    LITELLM_MASTER_KEY, or ANTHROPIC_API_KEY — no sk-ant credential required.
+    request goes through that proxy with _proxy_transport_key().
     """
     base = (os.environ.get("LITELLM_PROXY_URL") or os.environ.get("ANTHROPIC_BASE_URL") or "").rstrip("/")
     proxied = bool(base) and (urllib.parse.urlparse(base).hostname or "").lower().rstrip(".") != _ANTHROPIC_HOST
@@ -62,12 +88,7 @@ def _endpoint() -> tuple[str, str, bool]:
         )
         return key, _ANTHROPIC_API_URL, False
     if proxied:
-        key = (
-            os.environ.get("LLM_API_KEY")
-            or os.environ.get("LITELLM_MASTER_KEY")
-            or os.environ.get("ANTHROPIC_API_KEY")
-        )
-        return key or "", base + "/v1/messages", True
+        return _proxy_transport_key(), base + "/v1/messages", True
     return os.environ.get("ANTHROPIC_API_KEY", ""), _ANTHROPIC_API_URL, False
 
 
