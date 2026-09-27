@@ -83,6 +83,21 @@ jobs:
       !contains(github.event.comment.body, 'BUGBOT_FREE_TIER_DISABLED_UPSELL') &&
       !(github.actor == 'gemini-code-assist[bot]' &&
         contains(github.event.comment.body, 'has been sunset')) &&
+      !(contains(github.event.comment.body, 'usage limit') &&
+        contains(github.event.comment.body, 'reached your')) &&
+      !(contains(github.event.review.body, 'usage limit') &&
+        contains(github.event.review.body, 'reached your')) &&
+      !contains(github.event.comment.body, 'Newer findings are available') &&
+      !contains(github.event.review.body, 'Newer findings are available') &&
+      !(github.actor == 'devin-ai-integration[bot]' &&
+        (contains(github.event.comment.body, 'No issues found') || contains(github.event.comment.body, 'No Issues Found') ||
+         contains(github.event.comment.body, 'no issues found') || contains(github.event.comment.body, 'no actionable findings') ||
+         contains(github.event.review.body, 'No issues found') || contains(github.event.review.body, 'No Issues Found') ||
+         contains(github.event.review.body, 'no issues found') || contains(github.event.review.body, 'no actionable findings'))) &&
+      (github.event_name != 'issue_comment' ||
+        (!contains(github.event.issue.title, 're-vendor') && !contains(github.event.issue.title, 'review round'))) &&
+      (github.event_name == 'issue_comment' ||
+        (!contains(github.event.pull_request.title, 're-vendor') && !contains(github.event.pull_request.title, 'review round'))) &&
       (github.event_name != 'issue_comment' || (
         github.event.issue.pull_request != null &&
         github.event.issue.state == 'open' &&
