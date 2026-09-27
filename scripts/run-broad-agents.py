@@ -155,9 +155,9 @@ def get_api_key() -> Optional[str]:
                 continue
             normalized = candidate.strip()
             # The auth-scheme token is case-insensitive (RFC 7235).
-            if normalized.lower().startswith("bearer "):
+            if normalized.lower() == "bearer" or normalized.lower().startswith("bearer "):
                 normalized = normalized[7:].strip()
-            if normalized.startswith("sk-ant-"):
+            if not normalized or normalized.startswith("sk-ant-"):
                 continue
             key = normalized
             break

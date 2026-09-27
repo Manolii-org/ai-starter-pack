@@ -58,9 +58,9 @@ def _proxy_transport_key() -> str:
             continue
         key = candidate.strip()
         # The auth-scheme token is case-insensitive (RFC 7235).
-        if key.lower().startswith("bearer "):
+        if key.lower() == "bearer" or key.lower().startswith("bearer "):
             key = key[7:].strip()
-        if key.startswith("sk-ant-"):
+        if not key or key.startswith("sk-ant-"):
             continue
         return key
     return ""
