@@ -163,7 +163,14 @@ def _rows_mergeable(a: dict, b: dict, threshold: float) -> bool:
     axes_a = _pattern_axes(a)
     axes_b = _pattern_axes(b)
     if axes_a is None and axes_b is None:
-        return text_a == text_b or jaccard(tokenize(text_a), tokenize(text_b)) >= threshold
+        if text_a == text_b:
+            return True
+        toks_a, toks_b = tokenize(text_a), tokenize(text_b)
+        if sorted(toks_a) == sorted(toks_b):
+            # Identical token multiset in a different order — a reversed
+            # relationship ("A uses B" vs "B uses A"), not a paraphrase.
+            return False
+        return jaccard(toks_a, toks_b) >= threshold
     if axes_a is None or axes_b is None or axes_a[2] != axes_b[2]:
         # A pattern vs a fact row, or two different pattern schemas, is
         # never a safe merge — shared vocabulary doesn't mean same claim.

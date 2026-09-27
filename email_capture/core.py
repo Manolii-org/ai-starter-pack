@@ -1027,9 +1027,14 @@ def advance_registry_cursor(allocation_id: str, cursor: str) -> None:
     the caller's payload, is the authority on how far a mailbox has been read."""
     with _registry_lock():
         records = _read_registry()
+        proposed = _canonical_cursor(cursor)
         for record in records.values():
             if isinstance(record, dict) and record.get("allocation_id") == allocation_id:
-                record["cursor"] = cursor
+                # Never rewind: a slower concurrent await must not overwrite a
+                # newer watermark or its messages would be redelivered.
+                current = _canonical_cursor(record.get("cursor") or "0:")
+                if current == "0:" or proposed >= current:
+                    record["cursor"] = cursor
         atomic_write_json(_registry_path(), records)
 
 

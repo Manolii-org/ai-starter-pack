@@ -463,12 +463,43 @@ def run_broad_agents(
     output_dir.mkdir(parents=True, exist_ok=True)
     results = {}
 
+    # Proxy configured but no proxy credential: non-direct agents would
+    # dispatch with `Bearer ` and fail silently (no file → judge sees clean).
+    # Skip them up front and write the same durable marker the judge's
+    # coverage accounting understands.
+    runnable = []
+    for agent in agents_to_run:
+        if (
+            not api_key
+            and not agent.first_party
+            and not os.environ.get("CLIENT_AI_POLICY")
+        ):
+            marker = {
+                "source": agent.name,
+                "findings": [],
+                "first_party": False,
+                "skipped": "no_proxy_credential",
+            }
+            (output_dir / f"{agent.name}.json").write_text(
+                json.dumps(marker, indent=2), encoding="utf-8"
+            )
+            results[agent.name] = marker
+            logger.warning(
+                f"{agent.name}: no shared credential for the configured proxy — skipping (marker written)"
+            )
+            continue
+        runnable.append(agent)
+
+    if not runnable:
+        logger.warning("[broad-agents] every agent skipped — no runnable credential")
+        return 0
+
     with ThreadPoolExecutor(max_workers=3) as executor:
         futures = {
             executor.submit(
                 invoke_agent, agent, api_key, user_message
             ): agent.name
-            for agent in agents_to_run
+            for agent in runnable
         }
 
         for future in as_completed(futures):
@@ -487,7 +518,7 @@ def run_broad_agents(
                 logger.error(f"Agent {agent_name} execution error: {e}")
 
     if results:
-        logger.info(f"[broad-agents] completed {len(results)}/{len(agents_to_run)} agents")
+        logger.info(f"[broad-agents] completed {len(results)}/{len(agents_to_run)} agents (incl. skipped markers)")
         return 0
     else:
         logger.warning("[broad-agents] no findings generated")

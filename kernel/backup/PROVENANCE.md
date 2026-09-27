@@ -8,7 +8,7 @@ to `kernel/backup/`).
 
 | Kernel path | Master path | SHA-256 |
 |---|---|---|
-| scripts/lib/backup-db-lib.sh | scripts/lib/backup-db-lib.sh | b3946c0d4109168d562f93847802fad38a8b41e0298f39f3471b7e90b8b7bcae |
+| scripts/lib/backup-db-lib.sh | scripts/lib/backup-db-lib.sh | f3d492672a6605fd23188110386509bce44fb6fd054235ecc1949bde953d2327 |
 | scripts/backup-pg-dump.sh | scripts/backup-pg-dump.sh | f5b89698acb6e77ac10ac28723dd8c7ca52bb28148f1b3a4900f7097508de4ab |
 | scripts/restore-drill.sh | scripts/restore-drill.sh | d0a31079633b0bfeb204270af980be511077012e9f2bf40038a7e2eb84aa4b60 |
 | scripts/restore-drill-neon-app.sh | scripts/restore-drill-neon-app.sh | 984bdbb99539c38df668f89c884a8d59097017b2a4b45039d0dd3d192c345b8d |

@@ -127,6 +127,12 @@ class TestConsolidationValueVeto:
         b = {"content": "email is no longer enabled for production"}
         assert not md._rows_mergeable(a, b, 0.6)
 
+    def test_reversed_relationship_never_merges(self):
+        # same tokens, swapped subject/object — a different claim, not a dup
+        a = {"content": "staging uses production database"}
+        b = {"content": "production uses staging database"}
+        assert not md._rows_mergeable(a, b, 0.6)
+
     def test_apply_decay_prefers_merged_confidence(self):
         from datetime import datetime, timezone
         row = {"content": "fact", "confidence": "medium", "merged_confidence": 0.65,

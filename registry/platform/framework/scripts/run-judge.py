@@ -198,6 +198,7 @@ class Judge:
         self.merge_danger = self._load_merge_danger()
         self._has_first_party_candidates = False
         self._skipped_first_party: list[str] = []
+        self._skipped_other: list[str] = []
         # An `edited` rerun at the same HEAD must publish a fresh verdict: dedup
         # keys on commit + metadata digest so a title/body edit re-posts. The
         # base SHA is part of the key: a base update changes the merge diff the
@@ -258,6 +259,11 @@ class Judge:
                     self._has_first_party_candidates = True
                 if data.get("first_party") and data.get("skipped"):
                     self._skipped_first_party.append(source)
+                elif data.get("skipped"):
+                    # Non-first-party skip (e.g. broad agent with no proxy
+                    # credential) — not fail-closed, but still a coverage gap
+                    # the review must disclose.
+                    self._skipped_other.append(source)
 
                 for raw_finding in candidate_findings:
                     finding = Finding(
@@ -491,15 +497,14 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
             line = "**Merge danger:** unknown (unclassified)"
         body_lines.append(line)
         body_lines.append("")
-        if self._skipped_first_party:
-            # Findings survived the gates but a first-party specialist never
-            # ran — the review must disclose the coverage gap, not read as a
-            # complete assessment.
-            skipped = ", ".join(
-                _markdown_safe(s) for s in sorted(set(self._skipped_first_party))
-            )
+        skipped_all = sorted(set(self._skipped_first_party) | set(self._skipped_other))
+        if skipped_all:
+            # Findings survived the gates but some checks never ran — the
+            # review must disclose the coverage gap, not read as a complete
+            # assessment.
+            skipped = ", ".join(_markdown_safe(s) for s in skipped_all)
             body_lines.append(
-                f"**Incomplete coverage:** first-party security checks did not "
+                f"**Incomplete coverage:** some review checks did not "
                 f"run (skipped: {skipped})."
             )
             body_lines.append("")
@@ -883,10 +888,14 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
             logger.warning(f"Failed to post no-findings comment: {e}")
 
     def _skipped_coverage_detail(self) -> str:
-        if not self._skipped_first_party:
-            return ""
-        sources = ", ".join(sorted(set(self._skipped_first_party)))
-        return f"First-party security checks did not run (skipped: {sources})."
+        parts: list[str] = []
+        if self._skipped_first_party:
+            sources = ", ".join(sorted(set(self._skipped_first_party)))
+            parts.append(f"First-party security checks did not run (skipped: {sources})")
+        if self._skipped_other:
+            sources = ", ".join(sorted(set(self._skipped_other)))
+            parts.append(f"Other review checks did not run (skipped: {sources})")
+        return ". ".join(parts) + ("." if parts else "")
 
     def _post_clean_or_skip_advisory(self) -> None:
         """Post the clean verdict — unless a first-party specialist was skipped.
@@ -894,11 +903,11 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
         A skipped marker means a security specialist never ran, so 'no
         findings' is not a real verdict: fail closed into the advisory.
         """
-        if self._skipped_first_party:
-            sources = ", ".join(sorted(set(self._skipped_first_party)))
-            logger.warning(
-                f"first-party specialists skipped (no direct credential): {sources}"
+        if self._skipped_first_party or self._skipped_other:
+            sources = ", ".join(
+                sorted(set(self._skipped_first_party) | set(self._skipped_other))
             )
+            logger.warning(f"review checks skipped (missing credential): {sources}")
             self._post_advisory_warning(self._skipped_coverage_detail())
             return
         self._post_no_findings_comment()
