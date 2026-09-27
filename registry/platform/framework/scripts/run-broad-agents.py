@@ -434,7 +434,21 @@ def run_broad_agents(
         os.getenv("ANTHROPIC_DIRECT_API_KEY", "") if _proxy_base() is None else ""
     )
     if not api_key and not os.getenv("ANTHROPIC_DIRECT_API_KEY"):
-        logger.info("[broad-agents] no API key, exiting")
+        # No credential at all: write one marker per requested agent so the
+        # judge records the missing coverage instead of a false-clean verdict.
+        logger.warning(
+            "[broad-agents] no API key — writing skip markers for all requested agents"
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for agent_name in invoke_list:
+            marker = {
+                "source": agent_name,
+                "findings": [],
+                "skipped": "no_credential",
+            }
+            (output_dir / f"{agent_name}.json").write_text(
+                json.dumps(marker, indent=2), encoding="utf-8"
+            )
         return 0
 
     # Load agent configs

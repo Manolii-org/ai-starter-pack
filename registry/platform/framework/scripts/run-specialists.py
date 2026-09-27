@@ -378,16 +378,27 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
         return skill_name, f"API call failed: {exc}"
 
 
+def _write_skipped_marker(skill_name: str, output_dir: pathlib.Path, reason: str) -> None:
+    """Non-first-party skip marker — records that a requested specialist never
+    ran so the judge cannot post a clean verdict on an unreviewed diff."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / f"{skill_name}.json").write_text(
+        json.dumps(
+            {"source": skill_name, "findings": [], "skipped": reason},
+            indent=2,
+        ) + "\n",
+        encoding="utf-8",
+    )
+
+
 def main() -> None:
     # A direct-only install (ANTHROPIC_DIRECT_API_KEY but no shared transport
     # credential) must still start: first-party skills dispatch through it,
     # the rest return their skip/error marker.
     api_key, _, _ = _endpoint()
-    if not api_key and not os.environ.get("ANTHROPIC_DIRECT_API_KEY"):
-        print("[specialists] no API credential set — skipping specialist run")
-        sys.exit(0)
 
-    # Parse CLI args
+    # Parse CLI args — before the credential gate so a no-credential run can
+    # still write a skip marker for every requested skill.
     skills_arg = None
     diff_file = None
     output_dir = pathlib.Path(".ai/candidates")
@@ -439,6 +450,15 @@ def main() -> None:
 
     if not invoke_skills:
         print("[specialists] nothing to run")
+        sys.exit(0)
+
+    # No credential at all (fork PR, unconfigured consumer): still write one
+    # skip marker per requested skill so the judge sees the missing coverage
+    # and posts the advisory instead of a false-clean verdict.
+    if not api_key and not os.environ.get("ANTHROPIC_DIRECT_API_KEY"):
+        print("[specialists] no API credential set — writing skip markers for all requested skills")
+        for skill in invoke_skills:
+            _write_skipped_marker(skill, output_dir, "no_credential")
         sys.exit(0)
 
     print(f"[specialists] invoking {len(invoke_skills)} skills: {', '.join(invoke_skills)}")
