@@ -329,13 +329,22 @@ def assess(*, skip_remote: bool = False) -> dict[str, Any]:
         assessment["findings"] = wait_hints
         assessment["ok"] = False
         return assessment
+    # Non-wait task gaps (open task, no PR) still apply on the early-return
+    # paths below — a zero-commit branch with an open task is not "done".
+    task_gaps = [f for f in early_gaps if "RESUME CI wait" not in f]
 
     if branch in {"main", "master", base}:
+        if task_gaps:
+            assessment["findings"] = task_gaps
+            assessment["ok"] = False
         return assessment
 
     unique_commits = _unique_commit_count(base)
     assessment["unique_commits"] = unique_commits
     if unique_commits <= 0:
+        if task_gaps:
+            assessment["findings"] = task_gaps
+            assessment["ok"] = False
         return assessment
 
     findings: list[str] = []
@@ -364,7 +373,7 @@ def assess(*, skip_remote: bool = False) -> dict[str, Any]:
                     "so Codex monitor + auto-merge can run"
                 )
 
-    findings.extend(_active_task_gaps(branch))
+    findings.extend(task_gaps)
     assessment["findings"] = findings
     assessment["ok"] = not findings
     return assessment

@@ -152,14 +152,19 @@ def api_get(path: str, token: str | None, params: dict | None = None, raw: bool 
                     f"gh-ci: refusing non-https redirect from {url} (scheme={target.scheme!r}, host={target.netloc!r})"
                 )
             # Bound the redirect target: GitHub hands back same-host API links
-            # (repo renames) and log/artifact downloads on its own properties or
-            # the Azure blob store Actions uses. Anything else is not a
-            # destination this tool should fetch — a compromised or confused
-            # endpoint must not be able to send the agent after arbitrary hosts.
+            # (repo renames) and — only on Actions endpoints — log/artifact
+            # downloads on its own properties or the Azure blob store Actions
+            # uses. Anything else is not a destination this tool should fetch —
+            # a compromised or confused endpoint must not be able to send the
+            # agent after arbitrary hosts, and blob content only substitutes
+            # real CI output on the paths that return it.
             target_host = (target.hostname or "").lower()
+            cross_host_ok = "/actions/" in url and any(
+                target_host.endswith(s) for s in _REDIRECT_HOST_SUFFIXES
+            )
             if not (
                 target_host == urllib.parse.urlsplit(API).hostname
-                or any(target_host.endswith(s) for s in _REDIRECT_HOST_SUFFIXES)
+                or cross_host_ok
             ):
                 raise SystemExit(
                     f"gh-ci: refusing redirect to non-GitHub host {target.netloc!r} (from {url})"
