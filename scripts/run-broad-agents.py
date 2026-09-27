@@ -18,11 +18,12 @@ import logging
 import os
 import re
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
@@ -57,6 +58,8 @@ BROAD_AGENTS = [
 
 MAX_DIFF_CHARS = int(os.environ.get("BROAD_AGENTS_MAX_DIFF_CHARS", "40000"))
 TIMEOUT_SECS = 120
+MAX_RETRIES = 4
+RETRIABLE_STATUS = {429, 500, 502, 503, 504}
 
 
 @dataclass
@@ -309,19 +312,50 @@ def invoke_agent(
     else:
         headers["x-api-key"] = api_key
 
-    try:
-        req = Request(
-            api_url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers=headers,
-            method="POST",
-        )
-        with _urlopen_https(req, timeout=TIMEOUT_SECS, host=urlparse(api_url).hostname or "") as response:
-            resp_data = json.loads(response.read().decode("utf-8"))
-    # OSError covers URLError plus the response-phase failures urlopen does
-    # not convert (RemoteDisconnected, ConnectionResetError, TimeoutError).
-    except (OSError, json.JSONDecodeError, ValueError) as e:
-        logger.error(f"Agent {agent_config.name} API error: {e}")
+    # Transient upstream errors (rate limits, 5xx, network resets) retry with
+    # exponential backoff; a terminal failure takes the skip-marker path so the
+    # judge still sees the agent as assessed-but-unavailable.
+    resp_data = None
+    for attempt in range(MAX_RETRIES):
+        try:
+            req = Request(
+                api_url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers=headers,
+                method="POST",
+            )
+            with _urlopen_https(req, timeout=TIMEOUT_SECS, host=urlparse(api_url).hostname or "") as response:
+                resp_data = json.loads(response.read().decode("utf-8"))
+            break
+        except HTTPError as e:
+            if e.code in RETRIABLE_STATUS and attempt < MAX_RETRIES - 1:
+                sleep_secs = 2 ** attempt
+                logger.warning(
+                    f"Agent {agent_config.name} HTTP {e.code} on attempt "
+                    f"{attempt + 1}/{MAX_RETRIES}; retrying in {sleep_secs}s"
+                )
+                time.sleep(sleep_secs)
+                continue
+            logger.error(f"Agent {agent_config.name} API error: {e}")
+            break
+        # OSError covers URLError plus the response-phase failures urlopen does
+        # not convert (RemoteDisconnected, ConnectionResetError, TimeoutError).
+        except OSError as e:
+            if attempt < MAX_RETRIES - 1:
+                sleep_secs = 2 ** attempt
+                logger.warning(
+                    f"Agent {agent_config.name} network error on attempt "
+                    f"{attempt + 1}/{MAX_RETRIES}; retrying in {sleep_secs}s "
+                    f"(error: {e})"
+                )
+                time.sleep(sleep_secs)
+                continue
+            logger.error(f"Agent {agent_config.name} API error: {e}")
+            break
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.error(f"Agent {agent_config.name} response JSON error: {e}")
+            break
+    if resp_data is None:
         if direct_required:
             return {
                 "source": agent_config.name,

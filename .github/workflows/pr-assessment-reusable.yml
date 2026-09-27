@@ -779,6 +779,14 @@ jobs:
           # artifact globs) and by the caller's own tooling.
           rm -rf .pack-hydrate
 
+      - name: Fail when an upstream assessment stage failed
+        # A specialists/broad-agents job that fails before uploading its
+        # candidates artifact must not let the judge post a clean verdict.
+        if: needs.specialists.result == 'failure' || needs.specialists.result == 'cancelled' || needs['broad-agents'].result == 'failure' || needs['broad-agents'].result == 'cancelled'
+        run: |
+          echo "::error::upstream review stage failed — refusing to judge missing candidates"
+          exit 1
+
       - name: Download all candidates
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
