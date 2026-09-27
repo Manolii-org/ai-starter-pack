@@ -58,7 +58,7 @@ if ! [[ "$ENTITY" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
   echo "ERROR: --entity must be lowercase alnum+dash" >&2; exit 1
 fi
 DOPPLER_PROJECT=""
-IFS=',' read -ra _pairs <<< "${RESTORE_DRILL_ENTITY_PROJECTS:-}"
+IFS=',' read -ra _pairs <<< "${RESTORE_DRILL_ENTITY_PROJECTS//[[:space:]]/}"
 for _pair in "${_pairs[@]}"; do
   if [ "${_pair%%=*}" = "$ENTITY" ]; then
     DOPPLER_PROJECT="${_pair#*=}"; break
@@ -398,6 +398,10 @@ VERIFY_FAIL=false
 # schema legitimately lacks a table fails the COUNT outright otherwise.
 # RESTORE_DRILL_VERIFY_TABLES="public.t1 public.t2 ..." overrides the default.
 RESTORE_DRILL_VERIFY_TABLES="${RESTORE_DRILL_VERIFY_TABLES:-public.pending_actions public.standing_orders public.project_facts public.notes public.knowledge_base public.source_packets public.project_source_registry public.work_items public.scope_baselines}"
+if [ -z "${RESTORE_DRILL_VERIFY_TABLES//[[:space:]]/}" ]; then
+  echo "ERROR: RESTORE_DRILL_VERIFY_TABLES is set but contains no table names" >&2
+  VERIFY_FAIL=true
+fi
 for table in ${RESTORE_DRILL_VERIFY_TABLES}; do
   if [[ ! "$table" =~ ^[a-z0-9_]+(\.[a-z0-9_]+)?$ ]]; then
     echo "ERROR: invalid table name in RESTORE_DRILL_VERIFY_TABLES: '${table}'" >&2
@@ -435,7 +439,7 @@ for table in ${RESTORE_DRILL_VERIFY_TABLES}; do
         # (table is the qualified name like public.work_items). Unlisted
         # entity/table pairs stay fail-closed so a schema-only dump cannot pass.
         _allow_empty=false
-        IFS=',' read -ra _allow_pairs <<< "${RESTORE_DRILL_ALLOW_EMPTY_TABLES:-}"
+        IFS=',' read -ra _allow_pairs <<< "${RESTORE_DRILL_ALLOW_EMPTY_TABLES//[[:space:]]/}"
         for _allow_pair in "${_allow_pairs[@]}"; do
           if [ "${_allow_pair%%=*}" = "$ENTITY" ] && [ "${_allow_pair#*=}" = "$table" ]; then
             _allow_empty=true; break

@@ -145,7 +145,13 @@ def get_api_key() -> Optional[str]:
             os.getenv("LLM_API_KEY")
             or os.getenv("LITELLM_MASTER_KEY")
             or os.getenv("ANTHROPIC_API_KEY")
+            or ""
         )
+        # A genuine sk-ant-* key is a first-party credential and must never
+        # leave for a non-Anthropic host — legacy configs keep the proxy key
+        # under ANTHROPIC_API_KEY, which is not sk-ant-shaped.
+        if key.removeprefix("Bearer ").startswith("sk-ant-"):
+            key = ""
     else:
         key = os.getenv("ANTHROPIC_API_KEY")
     if not key:
@@ -303,7 +309,9 @@ def invoke_agent(
         )
         with _urlopen_https(req, timeout=TIMEOUT_SECS, host=urlparse(api_url).hostname or "") as response:
             resp_data = json.loads(response.read().decode("utf-8"))
-    except (URLError, json.JSONDecodeError, TimeoutError, ValueError) as e:
+    # OSError covers URLError plus the response-phase failures urlopen does
+    # not convert (RemoteDisconnected, ConnectionResetError, TimeoutError).
+    except (OSError, json.JSONDecodeError, ValueError) as e:
         logger.error(f"Agent {agent_config.name} API error: {e}")
         if direct_required:
             return {

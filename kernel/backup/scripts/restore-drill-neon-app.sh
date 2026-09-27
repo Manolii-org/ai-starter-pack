@@ -39,7 +39,7 @@ if ! [[ "$APP" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
   echo "ERROR: --app must be lowercase alnum+dash" >&2; exit 1
 fi
 R2_DOPPLER_PROJECT=""
-IFS=',' read -ra _pairs <<< "${RESTORE_DRILL_APP_PROJECTS:-}"
+IFS=',' read -ra _pairs <<< "${RESTORE_DRILL_APP_PROJECTS//[[:space:]]/}"
 for _pair in "${_pairs[@]}"; do
   if [ "${_pair%%=*}" = "$APP" ]; then
     R2_DOPPLER_PROJECT="${_pair#*=}"; break

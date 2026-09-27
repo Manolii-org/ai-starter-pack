@@ -39,13 +39,33 @@ _ANTHROPIC_API_VERSION = "2023-06-01"
 _ANTHROPIC_HOST = "api.anthropic.com"
 
 
+def _proxy_transport_key() -> str:
+    """Credential for a non-Anthropic endpoint.
+
+    The proxy key may live under LLM_API_KEY, LITELLM_MASTER_KEY, or
+    ANTHROPIC_API_KEY (legacy configs store the LiteLLM key under that name —
+    no sk-ant credential is required). A genuine sk-ant-* key, though, is a
+    first-party credential and must never be sent to a third-party host: if
+    the resolved value has that shape, fail closed with "" so callers take
+    their unconfigured path instead of leaking it.
+    """
+    key = (
+        os.environ.get("LLM_API_KEY")
+        or os.environ.get("LITELLM_MASTER_KEY")
+        or os.environ.get("ANTHROPIC_API_KEY")
+        or ""
+    )
+    if key.removeprefix("Bearer ").startswith("sk-ant-"):
+        return ""
+    return key
+
+
 def _endpoint(direct: bool = False) -> tuple[str, str, bool]:
     """Resolve (api_key, url, proxied).
 
     Transport token: ANTHROPIC_API_KEY when calling Anthropic directly. When
     LITELLM_PROXY_URL or ANTHROPIC_BASE_URL points at a non-Anthropic host the
-    request goes through that proxy and the key may come from LLM_API_KEY,
-    LITELLM_MASTER_KEY, or ANTHROPIC_API_KEY — no sk-ant credential required.
+    request goes through that proxy with _proxy_transport_key().
 
     direct=True forces the Anthropic endpoint regardless of proxy config —
     used when adjudicating first_party findings (security review stays on a
@@ -61,12 +81,7 @@ def _endpoint(direct: bool = False) -> tuple[str, str, bool]:
         )
         return key, _ANTHROPIC_API_URL, False
     if proxied:
-        key = (
-            os.environ.get("LLM_API_KEY")
-            or os.environ.get("LITELLM_MASTER_KEY")
-            or os.environ.get("ANTHROPIC_API_KEY")
-        )
-        return key or "", base + "/v1/messages", True
+        return _proxy_transport_key(), base + "/v1/messages", True
     return os.environ.get("ANTHROPIC_API_KEY", ""), _ANTHROPIC_API_URL, False
 
 
@@ -448,7 +463,11 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
             judge_result = json.loads(json_text.strip())
             return judge_result
 
-        except (urllib.error.URLError, ValueError, TimeoutError) as e:
+        # OSError, not urllib.error.URLError — urlopen converts only
+        # request-phase failures; getresponse() failures (RemoteDisconnected,
+        # ConnectionResetError, bare TimeoutError) propagate raw and would
+        # kill the judge instead of taking the advisory-warning path.
+        except (OSError, ValueError) as e:
             logger.error(f"Judge API call failed: {e}")
             return None
         except (json.JSONDecodeError, KeyError, IndexError) as e:
@@ -564,7 +583,9 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
                 logger.info(f"Review posted successfully (ID: {review_id})")
                 return True
 
-        except urllib.error.URLError as e:
+        # OSError: same response-phase rationale as the API call above — a
+        # proxy that accepts then drops the connection raises raw OSError.
+        except OSError as e:
             logger.error(f"Failed to post review: {e}")
             return False
 
