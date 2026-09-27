@@ -218,11 +218,7 @@ jobs:
         run: |
           # Hostname comparison must match run-*.py::_endpoint — a proxy key
           # must never reach api.anthropic.com (port/path/case variants).
-          host=$(python3 - <<'PY'
-import os, urllib.parse
-print((urllib.parse.urlparse(os.environ["BASE_URL"].rstrip("/")).hostname or "").rstrip("."))
-PY
-)
+          host=$(python3 -c 'import os, urllib.parse; print((urllib.parse.urlparse(os.environ["BASE_URL"].rstrip("/")).hostname or "").rstrip("."))')
           if [ -n "$BASE_URL" ] && [ "$host" != "api.anthropic.com" ]; then
             echo "key=$PROXY_KEY" >> "$GITHUB_OUTPUT"
           else
