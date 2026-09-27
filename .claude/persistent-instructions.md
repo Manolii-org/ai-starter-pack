@@ -105,11 +105,11 @@ Every changed line must trace directly to the user's request. If you cannot expl
 
 ## Session Critic Timing (Concrete Rule)
 
-Dispatch `Agent(subagent_type="quick-critic")` — or `scripts/run-session-critic.py --tier auto --mode advisory` where your repo ships the harness — **before the first Edit or Write** on any task that:
+Run `scripts/run-session-critic.py --tier auto --mode advisory` — critics are always dispatched via the harness script, never `Agent()` calls — **before the first Edit or Write** on any task that:
 - Touches more than 2 files, OR
 - Has an approach that isn't explicitly stated in the task brief or user message
 
-Do **not** call `advisor()` for this gate — critics are dispatched as sub-agents, not advisor calls.
+Do **not** call `advisor()` for this gate, and do **not** dispatch `quick-critic`/`work-critic` via `Agent()` — critics run through `scripts/run-session-critic.py` only.
 
 Skip the critic for: single-file edits, trivial reads, straightforward debugging, simple tool orchestration.
 

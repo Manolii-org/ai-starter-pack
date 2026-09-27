@@ -40,6 +40,17 @@ import urllib.parse
 import urllib.request
 
 API = "https://api.github.com"
+
+# Redirect targets GitHub may legitimately hand back: same-host API moves and
+# log/artifact downloads on GitHub properties or the Azure blob store backing
+# Actions logs. Anything else is refused before the follow.
+_REDIRECT_HOST_SUFFIXES = (
+    ".github.com",
+    ".githubusercontent.com",
+    ".githubassets.com",
+    ".actions.githubusercontent.com",
+    ".blob.core.windows.net",
+)
 USER_AGENT = "gh-ci.py (ai-starter-pack)"
 CA_BUNDLE_CANDIDATES = (
     os.environ.get("SSL_CERT_FILE"),
@@ -140,6 +151,19 @@ def api_get(path: str, token: str | None, params: dict | None = None, raw: bool 
                 raise SystemExit(
                     f"gh-ci: refusing non-https redirect from {url} (scheme={target.scheme!r}, host={target.netloc!r})"
                 )
+            # Bound the redirect target: GitHub hands back same-host API links
+            # (repo renames) and log/artifact downloads on its own properties or
+            # the Azure blob store Actions uses. Anything else is not a
+            # destination this tool should fetch — a compromised or confused
+            # endpoint must not be able to send the agent after arbitrary hosts.
+            target_host = (target.hostname or "").lower()
+            if not (
+                target_host == urllib.parse.urlsplit(API).hostname
+                or any(target_host.endswith(s) for s in _REDIRECT_HOST_SUFFIXES)
+            ):
+                raise SystemExit(
+                    f"gh-ci: refusing redirect to non-GitHub host {target.netloc!r} (from {url})"
+                )
             # A same-host API redirect (renamed/transferred repo) still needs the
             # token; a cross-host one (job logs → blob storage) rejects a
             # forwarded Authorization header with 401, so send it only to
@@ -195,7 +219,8 @@ def detect_repo(explicit: str | None) -> str:
         return explicit
     try:
         url = subprocess.run(
-            ["git", "remote", "get-url", "origin"], capture_output=True, text=True, check=True
+            ["git", "remote", "get-url", "origin"], capture_output=True, text=True, check=True,
+            timeout=30,
         ).stdout.strip()
     except (OSError, subprocess.CalledProcessError):
         url = ""

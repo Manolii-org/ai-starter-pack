@@ -654,6 +654,11 @@ jobs:
         env:
           AGENTS: ${{ needs.classify.outputs.invoke_agents }}
           BASE_REF: ${{ github.base_ref }}
+          # Engagement policy gate: agents declaring client_policy_model
+          # escalate Anthropic-direct; the direct plane key is never the
+          # coalesced transport slot (proxy token in proxy mode).
+          CLIENT_AI_POLICY: ${{ vars.CLIENT_AI_POLICY }}
+          ANTHROPIC_DIRECT_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           mkdir -p .ai/candidates
           git diff "origin/${BASE_REF}...HEAD" > /tmp/pr.diff

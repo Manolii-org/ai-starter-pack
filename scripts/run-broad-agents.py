@@ -193,6 +193,20 @@ def invoke_agent(
     # Engagement carrying client_ai_policy escalates declared agents back to
     # their Anthropic-direct model — the proxy/OSS route is bypassed entirely.
     if agent_config.client_policy_model and os.environ.get("CLIENT_AI_POLICY"):
+        # The shared credential resolved before this point is the proxy token
+        # whenever a proxy is configured — api.anthropic.com would reject it
+        # (and it must never leave the boundary as x-api-key to that host).
+        # The direct plane requires a real Anthropic key.
+        api_key = os.getenv("ANTHROPIC_DIRECT_API_KEY") or (
+            os.getenv("ANTHROPIC_API_KEY") if not proxy else None
+        )
+        if not api_key:
+            logger.warning(
+                f"{agent_config.name}: CLIENT_AI_POLICY escalation needs "
+                "ANTHROPIC_DIRECT_API_KEY (the proxy credential cannot "
+                "authenticate Anthropic-direct); skipping"
+            )
+            return None
         proxy = None
         model = agent_config.client_policy_model
         logger.info(
@@ -246,7 +260,7 @@ def invoke_agent(
         )
         with _urlopen_https(req, timeout=TIMEOUT_SECS, host=urlparse(api_url).hostname or "") as response:
             resp_data = json.loads(response.read().decode("utf-8"))
-    except (URLError, json.JSONDecodeError, TimeoutError) as e:
+    except (URLError, json.JSONDecodeError, TimeoutError, ValueError) as e:
         logger.error(f"Agent {agent_config.name} API error: {e}")
         return None
 

@@ -128,7 +128,9 @@ safe_env_report() {
         # Even an identifier-shaped value echoes as a label (Devin Review
         # SEC on #5852) — so only the name of a variable that is actually
         # set may print; unset/invalid args report by position.
-        if [[ -v $v ]]; then
+        # `-v` evaluates indexed-variable syntax arithmetically — a crafted
+        # name like 'x[$(cmd)]' would execute. Validate before probing.
+        if _safe_env__valid_name "$v" && [[ -v $v ]]; then
             printf '%-40s %s\n' "$v" "$(safe_summary "$v")"
         else
             printf 'arg%-37s %s\n' "$i" "absent-or-invalid"

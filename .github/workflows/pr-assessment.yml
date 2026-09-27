@@ -379,6 +379,11 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ (vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL) && (secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY) || secrets.ANTHROPIC_API_KEY }}
           ANTHROPIC_BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
+          # Engagement policy gate: when set, agents declaring
+          # client_policy_model escalate Anthropic-direct and need a real key
+          # (the transport slot above carries the proxy token in proxy mode).
+          CLIENT_AI_POLICY: ${{ vars.CLIENT_AI_POLICY }}
+          ANTHROPIC_DIRECT_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           AGENTS: ${{ needs.classify.outputs.invoke_agents }}
         run: |
           mkdir -p .ai/candidates

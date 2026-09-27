@@ -75,8 +75,8 @@ If the skill is unavailable, work through the 15 items below by hand and produce
    | Sensitivity ceiling | Mode | Eval window | Approval |
    |---|---|---|---|
    | `public` / `internal` | Direct promotion + rollback monitor | 24h auto-rollback at error rate >5% OR cost >+20% | Self-merge; monitor active |
-   | `restricted_us_oss_ok` or similar | Shadow eval (if telemetry available) | 3 days; manual review of results | Manual operator review required |
-   | `restricted_us_oss_ok` | 10% canary then 50/50 shadow | 24h canary + 7-day shadow | Operator approval at canary→shadow and shadow→full |
+   | `restricted_us_oss_ok` | Shadow eval against incumbent | 3 days; 50/50 sample; daily outcome-diff posted | Manual operator review of diff report |
+   | `restricted` | Governance no-AI — do not route any model | n/a | n/a |
 
    Shadow modes require working telemetry; if telemetry is unavailable, shadow eval is **not** valid evidence and the change MUST be downgraded to manual review only.
 

@@ -3,7 +3,7 @@ name: diagnose-pr
 version: 1.0.0
 description: Diagnose guarded-path PR CI failures without pushing commits. Use when CI fails on a PR whose changed files match .ai/guards.json, or when an autofix loop detects a forbidden guarded-path touch.
 type: skill
-model: claude-sonnet-4-6
+model: sonnet
 data_sensitivity: restricted_us_oss_ok
 max_tokens: 1200
 safety_tier: amber

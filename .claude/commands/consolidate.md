@@ -29,14 +29,15 @@ memory entries. Intended as a periodic (≈weekly) maintenance pass over
 - **Consolidate** — within each `(entity_scope, type)` group, merges entries
   with exact or Jaccard-≥0.6 content overlap into the highest-confidence
   canonical entry: unions `tags`, reinforces `confidence` (+0.05 per duplicate,
-  cap 0.95), bumps `reinforced`, refreshes `last_seen`, drops the duplicates.
+  cap 0.95), bumps `reinforced`, keeps the most recent member `last_seen`
+  (a merge is bookkeeping, not a sighting), drops the duplicates.
 
 ## Steps
 
 ### Step 1 — Dry-run (always first)
 
 ```bash
-python3 scripts/memory-decay.py            # facts.jsonl, report only
+python3 scripts/memory-decay.py --file "${CLAUDE_PROJECT_DIR:-$PWD}/.ai/memory/facts.jsonl"  # project memory, report only
 ```
 
 Review the stderr summary and the listed merges. Nothing is written.
@@ -44,7 +45,7 @@ Review the stderr summary and the listed merges. Nothing is written.
 ### Step 2 — Apply (after reviewing the dry-run)
 
 ```bash
-python3 scripts/memory-decay.py --apply
+python3 scripts/memory-decay.py --file "${CLAUDE_PROJECT_DIR:-$PWD}/.ai/memory/facts.jsonl" --apply
 ```
 
 Useful flags: `--decay-only`, `--consolidate-only`, `--threshold 0.6`,

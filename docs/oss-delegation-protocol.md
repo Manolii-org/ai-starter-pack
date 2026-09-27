@@ -20,7 +20,7 @@ Agent(subagent_type="generate", model="tier-0-oss-heavy",
 ```
 Use `tier-1-fast` for routine edits. Use `tier-0-oss-heavy` for complex multi-file patches, schema changes, or refactors. Main thread reviews the returned diff summary only.
 
-**Data exception:** If any file contains `data_sensitivity: restricted`, use `model="sonnet"`.
+**Data exception:** If any file contains `data_sensitivity: restricted`, route to NO model — `restricted` is the governance no-AI tier; the work stays manual. `restricted_us_oss_ok` data may use `model="sonnet"`.
 
 ## Rule 2 — OSS executor + review-internal gate for boundary tasks
 
@@ -91,4 +91,5 @@ Named agents already configured for this: `test-hardener`, `review-internal`. Fo
 | Implement + test loop | generate | tier-2-agentic | Large context for long loops |
 | Extraction / grep / search | generate | tier-4-extract | Fast, precise |
 | PR test writing | test-hardener | tier-0-oss-heavy | Already configured |
-| Client data / restricted | any | sonnet or higher | Anthropic-only routing |
+| Client data / `restricted_us_oss_ok` | any | sonnet or higher | Guardrailed-OSS routing |
+| `restricted` (governance no-AI) | none — human execution | null | Routes to NO model |

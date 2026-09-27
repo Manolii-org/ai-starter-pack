@@ -75,12 +75,21 @@ _LEGACY_CONFIDENCE = {"low": 0.25, "medium": 0.5, "high": 0.9}
 
 
 def _normalise_confidence(value) -> float:
-    """Accept canonical numeric confidence and legacy categorical producers."""
+    """Accept canonical numeric confidence and legacy categorical producers.
+
+    A malformed confidence from one producer must not drop the rest of its
+    findings — warn and default to 0.5 rather than raising.
+    """
     if isinstance(value, str) and value.lower() in _LEGACY_CONFIDENCE:
         return _LEGACY_CONFIDENCE[value.lower()]
-    confidence = float(value)
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        logger.warning(f"Unparseable confidence {value!r}; defaulting to 0.5")
+        return 0.5
     if not 0.0 <= confidence <= 1.0:
-        raise ValueError("confidence must be between 0 and 1")
+        logger.warning(f"Out-of-range confidence {confidence}; defaulting to 0.5")
+        return 0.5
     return confidence
 
 
@@ -396,7 +405,7 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
             judge_result = json.loads(json_text.strip())
             return judge_result
 
-        except urllib.error.URLError as e:
+        except (urllib.error.URLError, ValueError, TimeoutError) as e:
             logger.error(f"Judge API call failed: {e}")
             return None
         except (json.JSONDecodeError, KeyError, IndexError) as e:

@@ -266,7 +266,9 @@ def consolidate(
             max_conf = max(float(r.get("confidence", 1.0)) for r in cluster)
             canonical["confidence"] = min(0.95, max_conf + 0.05 * (len(cluster) - 1))
 
-            # last_seen = max of members' last_seen/created OR now
+            # last_seen = most recent actual member sighting. A merge is
+            # bookkeeping, not an observation — stamping `now` would reset the
+            # decay clock on exactly the stale entries consolidation handles.
             last_seen_candidates = []
             for row in cluster:
                 ts = row.get("last_seen") or row.get("created")
@@ -275,9 +277,6 @@ def consolidate(
                     if parsed:
                         last_seen_candidates.append(parsed)
             if last_seen_candidates:
-                # Consolidation reaffirms the fact — count now as a sighting so the
-                # merged row does not immediately read as stale to the decay pass.
-                last_seen_candidates.append(now)
                 canonical["last_seen"] = max(last_seen_candidates).isoformat()
             else:
                 canonical["last_seen"] = now.isoformat()
@@ -374,8 +373,18 @@ Default: dry-run (report only). Pass --apply to write changes.
         """,
     )
 
-    # Compute default file path
-    repo_root = Path(__file__).resolve().parent.parent
+    # Compute default file path. Under a plugin install the script lives in
+    # the plugin dir, so resolve the target project first: CLAUDE_PROJECT_DIR
+    # when set, else cwd when it looks like a project root, else the
+    # script's own repo root (in-tree invocation).
+    project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+    cwd = Path.cwd()
+    if project_dir:
+        repo_root = Path(project_dir).resolve()
+    elif (cwd / ".ai" / "memory").is_dir() or (cwd / ".git").exists():
+        repo_root = cwd
+    else:
+        repo_root = Path(__file__).resolve().parent.parent
     default_file = repo_root / ".ai" / "memory" / "facts.jsonl"
 
     parser.add_argument("--file", type=str, default=str(default_file))
