@@ -15,5 +15,6 @@ reviews:
       - "chore: sync capability tooling from master"
       - "chore(deps):"
       - "fix(deps):"
-      - "chore(registry): re-vendor"
-      - "review round"
+      - "re-vendor"
+      - "(review round"
+      - "-review round"
