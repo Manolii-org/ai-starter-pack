@@ -366,6 +366,14 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
             else:
                 _write_skipped_marker(skill_name, output_dir, "api_error")
             return skill_name, "Response missing 'source' or 'findings' fields"
+        if not isinstance(data["findings"], list) or not all(
+            isinstance(f, dict) for f in data["findings"]
+        ):
+            if first_party:
+                _write_skip_marker(skill_name, output_dir, "api_error")
+            else:
+                _write_skipped_marker(skill_name, output_dir, "api_error")
+            return skill_name, f"'findings' is not a list of objects: {type(data['findings'])}"
 
         if first_party and data.get("findings"):
             # Marks the candidate set for run-judge: first-party findings must

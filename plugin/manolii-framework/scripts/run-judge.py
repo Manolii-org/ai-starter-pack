@@ -249,13 +249,12 @@ class Judge:
 
                 source = data.get("source", candidate_file.stem)
                 candidate_findings = data.get("findings", [])
-                if data.get("first_party") and (candidate_findings or data.get("skipped")):
-                    # An empty first-party file contributes nothing to
-                    # adjudicate — it must not force a direct key for the
-                    # rest of the batch. A `skipped` marker (specialist
-                    # could not run without a direct credential) still
-                    # counts: its absence must surface via the fail-closed
-                    # advisory path, never pass silently.
+                if data.get("first_party") and candidate_findings:
+                    # Only actual first-party findings force the direct key:
+                    # a `skipped` marker carries nothing restricted, so it
+                    # belongs on the advisory list (disclosed missing coverage)
+                    # rather than vetoing adjudication of proxy-eligible
+                    # findings from the rest of the batch.
                     self._has_first_party_candidates = True
                 if data.get("first_party") and data.get("skipped"):
                     self._skipped_first_party.append(source)

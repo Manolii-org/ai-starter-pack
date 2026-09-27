@@ -194,7 +194,13 @@ def _rows_mergeable(a: dict, b: dict, threshold: float) -> bool:
     # jaccard(∅, ∅) would return 1.0 and merge them on context alone.
     if not ans_a or not ans_b:
         return False
-    return jaccard(tokenize(ans_a), tokenize(ans_b)) >= threshold
+    set_a, set_b = tokenize(ans_a), tokenize(ans_b)
+    if not (set_a <= set_b or set_b <= set_a):
+        # Same substitution rule as non-pattern rows: answers differing in a
+        # content token on both sides ("primary" vs "replica" database) assert
+        # different advice — high overlap alone is not equivalence.
+        return False
+    return jaccard(set_a, set_b) >= threshold
 
 
 def jaccard(a: set[str], b: set[str]) -> float:

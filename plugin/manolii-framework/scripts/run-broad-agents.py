@@ -349,6 +349,12 @@ def invoke_agent(
             parsed = json.loads(m.group(0))
 
         # Normalise to {source, findings:[...]} contract expected by run-judge.py
+        if isinstance(parsed, dict) and "findings" in parsed and not isinstance(parsed["findings"], list):
+            # A non-list findings value (e.g. an object) would silently
+            # normalise to an empty result — a false clean for the check.
+            # Raise so the executor writes an api_error marker that preserves
+            # this agent's first-party status.
+            raise ValueError(f"Agent {agent_config.name} returned non-list findings: {type(parsed['findings'])}")
         if isinstance(parsed, list):
             raw_findings = parsed
         elif isinstance(parsed, dict) and "findings" in parsed:
@@ -512,12 +518,13 @@ def run_broad_agents(
         futures = {
             executor.submit(
                 invoke_agent, agent, api_key, user_message
-            ): agent.name
+            ): agent
             for agent in runnable
         }
 
         for future in as_completed(futures):
-            agent_name = futures[future]
+            agent = futures[future]
+            agent_name = agent.name
             try:
                 findings = future.result()
             except Exception as e:
@@ -526,10 +533,13 @@ def run_broad_agents(
             if not findings:
                 # No output at all — write the marker so the judge counts the
                 # missing coverage instead of posting a false-clean verdict.
+                # first_party is preserved: a failed security check still owes
+                # the batch its fail-closed direct adjudication.
                 findings = {
                     "source": agent_name,
                     "findings": [],
                     "skipped": "api_error",
+                    "first_party": bool(agent.first_party or os.environ.get("CLIENT_AI_POLICY")),
                 }
             results[agent_name] = findings
             out_file = output_dir / f"{agent_name}.json"
