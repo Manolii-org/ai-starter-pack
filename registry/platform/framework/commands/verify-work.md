@@ -24,7 +24,8 @@ Expected input: optional `--deep` flag for work-critic (default: quick-critic).
 Required behavior:
 
 1. Gather the target: `git diff HEAD` (or the staged diff / plan under review).
-2. Default: `Agent(subagent_type="quick-critic", description="Verify current work", prompt="<the diff/plan>")`.
-3. For `--deep`: `Agent(subagent_type="work-critic", description="Deep work-critic review", prompt="<the diff/plan>")`.
+2. Default: `Agent(subagent_type="quick-critic", model="haiku", description="Verify current work", prompt="<the diff/plan>")`.
+3. For `--deep`: `Agent(subagent_type="work-critic", model="sonnet", description="Deep work-critic review", prompt="<the diff/plan>")`.
+   Always pass `model=` explicitly — an omitted model inherits the parent tier.
 4. Return findings verbatim with specific file paths and line numbers; do not apply fixes unless explicitly asked.
 5. Do not commit, push, or make assumptions about intent beyond the visible diff/plan.

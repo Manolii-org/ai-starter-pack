@@ -503,6 +503,10 @@ Default: dry-run (report only). Pass --apply to write changes.
 
     if not 0.0 <= args.threshold <= 1.0:
         parser.error(f"--threshold must be within [0, 1], got {args.threshold}")
+    if not 0.0 <= args.rate <= 1.0:
+        parser.error(f"--rate must be within [0, 1], got {args.rate}")
+    if not 0.0 <= args.floor <= 1.0:
+        parser.error(f"--floor must be within [0, 1], got {args.floor}")
 
     # Determine which modes to run
     do_decay = not args.consolidate_only

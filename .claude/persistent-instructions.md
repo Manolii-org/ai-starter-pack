@@ -109,7 +109,7 @@ Dispatch a critic agent **before the first Edit or Write** on any task that:
 - Touches more than 2 files, OR
 - Has an approach that isn't explicitly stated in the task brief or user message
 
-Use `Agent(subagent_type="work-critic", ...)` (or `quick-critic` for routine checks) — the pack ships these critic agents under `.claude/agents/`; see `/verify-work`.
+Use `Agent(subagent_type="work-critic", model="sonnet", ...)` (or `quick-critic` with `model="haiku"` for routine checks) — always pin `model=`; an omitted model inherits the parent tier. The pack ships these critic agents under `.claude/agents/`; see `/verify-work`.
 
 Skip the critic for: single-file edits, trivial reads, straightforward debugging, simple tool orchestration.
 
