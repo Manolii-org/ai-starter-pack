@@ -133,6 +133,12 @@ class TestConsolidationValueVeto:
         b = {"content": "production uses staging database"}
         assert not md._rows_mergeable(a, b, 0.6)
 
+    def test_value_substitution_never_merges(self):
+        # one swapped non-numeric token — jaccard is high but the claims differ
+        a = {"content": "the production service must use the primary database for query processing"}
+        b = {"content": "the production service must use the replica database for query processing"}
+        assert not md._rows_mergeable(a, b, 0.6)
+
     def test_apply_decay_prefers_merged_confidence(self):
         from datetime import datetime, timezone
         row = {"content": "fact", "confidence": "medium", "merged_confidence": 0.65,

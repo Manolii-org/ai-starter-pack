@@ -51,10 +51,12 @@ def _verified_allocation(reference: str, *, releasing: bool = False) -> dict:
     # that must be retried, not a live claim on the mailbox.
     if not releasing and (float(live.get("expires_at", 0)) <= time.time() or live.get("pending_purge")):
         raise CaptureError("AUTHORIZATION_DENIED", "allocation does not match a live registry record")
-    # The payload cursor is advisory at best and forgeable at worst — replay
-    # position comes from the registry record, not the caller's copy.
-    allocation["cursor"] = live.get("cursor", "0:")
-    return allocation
+    # Backends trust every field on the returned object (recipient, cursor,
+    # allocation_id) — return the registry record itself so caller-controlled
+    # extras on the submitted payload cannot ride along on a verified identity.
+    # The registry's cursor is also authoritative: a forged payload cursor
+    # would otherwise rewind or skip replay position.
+    return live
 
 
 def main(argv: list[str] | None = None) -> int:

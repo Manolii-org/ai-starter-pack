@@ -74,6 +74,9 @@ jobs:
           ANTHROPIC_API_KEY: ${{ (vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL) && (secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY) || secrets.ANTHROPIC_API_KEY }}
           ANTHROPIC_BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
           CLIENT_AI_POLICY: ${{ vars.CLIENT_AI_POLICY }}
+          # CLIENT_AI_POLICY routes the classifier Anthropic-direct too — the
+          # proxy credential cannot authenticate api.anthropic.com.
+          ANTHROPIC_DIRECT_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |

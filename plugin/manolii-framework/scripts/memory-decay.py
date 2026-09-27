@@ -170,6 +170,12 @@ def _rows_mergeable(a: dict, b: dict, threshold: float) -> bool:
             # Identical token multiset in a different order — a reversed
             # relationship ("A uses B" vs "B uses A"), not a paraphrase.
             return False
+        set_a, set_b = set(toks_a), set(toks_b)
+        if not (set_a <= set_b or set_b <= set_a):
+            # Neither claim contains the other: an in-place token substitution
+            # ("primary database" → "replica database") can reach jaccard
+            # threshold yet assert a different fact — never auto-merge.
+            return False
         return jaccard(toks_a, toks_b) >= threshold
     if axes_a is None or axes_b is None or axes_a[2] != axes_b[2]:
         # A pattern vs a fact row, or two different pattern schemas, is
