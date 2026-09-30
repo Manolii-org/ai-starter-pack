@@ -161,33 +161,36 @@ def list_runs_for_day(client: Client, repo: str, wf_id: int, day: str, event: st
         page += 1
 
 
-def list_push_runs_for_day(client: Client, repo: str, day: str):
-    """All push runs for the whole repo on `day`, (runs, truncated).
+def list_push_events(client: Client, repo: str, since: str):
+    """PushEvents for `repo` back to `since` (UTC day), (events, truncated).
 
-    Uses the repo-level runs endpoint so the R6 denominator is a repository
-    push census independent of the --workflows filter — a filtered selection
-    would miss pushes that only trigger other workflows (or none)."""
-    runs = []
+    The runs endpoint cannot see a push that triggers zero workflows — the
+    Events API is the only feed that enumerates the pushes themselves, and
+    it is independent of the --workflows filter. GitHub caps the public feed
+    at ~300 events; hitting it marks the census incomplete rather than
+    silently undercounting."""
+    events = []
     page = 1
-    while True:
-        url = (f"{API}/repos/{repo}/actions/runs"
-               f"?created={day}..{day}&per_page=100&page={page}&event=push")
-        d = client.get(url, cache_key=f"pushruns-{repo}-{day}-{page}")
-        batch = d.get("workflow_runs", [])
-        runs.extend(batch)
+    while page <= 10:
+        batch = client.get(f"{API}/repos/{repo}/events?per_page=100&page={page}",
+                           cache_key=f"events-{repo}-{page}")
+        events.extend(e for e in batch if e.get("type") == "PushEvent")
         if len(batch) < 100:
-            return runs, False
-        if len(runs) >= 1000:
-            log(f"  WARNING: {repo} {day}: push census hit 1000-result cap; pushes_by_day undercounts")
-            return runs, True
+            return events, False
+        if (batch[-1].get("created_at") or "")[:10] < since:
+            return events, False
         page += 1
+    log(f"  WARNING: {repo}: push census hit the ~300-event feed cap; pushes_by_day undercounts")
+    return events, True
 
 
 def list_jobs(client: Client, repo: str, run_id: int):
     jobs = []
     page = 1
     while True:
-        d = client.get(f"{API}/repos/{repo}/actions/runs/{run_id}/jobs?per_page=100&filter=latest&page={page}",
+        # filter=all: rerun attempts each consume billed runner time; latest
+        # alone would drop every earlier attempt's minutes from the numerator.
+        d = client.get(f"{API}/repos/{repo}/actions/runs/{run_id}/jobs?per_page=100&filter=all&page={page}",
                        cache_key=f"jobs-{repo}-{run_id}-{page}")
         batch = d.get("jobs", [])
         jobs.extend(batch)
@@ -333,12 +336,14 @@ def main() -> int:
                              "durations": sorted(v["durations"]), "waits": sorted(v["waits"])}
                           for k, v in sorted(job_names.items(), key=lambda kv: -kv[1]["billed_min"])},
             }
-        push_census_truncated = False
-        for day in daterange(args.since, args.until):
-            push_runs, p_trunc = list_push_runs_for_day(client, repo, day)
-            push_census_truncated = push_census_truncated or p_trunc
-            for r in push_runs:
-                push_shas.setdefault(day, set()).add((r.get("head_branch"), r.get("head_sha")))
+        push_events, push_census_truncated = list_push_events(client, repo, args.since)
+        for e in push_events:
+            day = (e.get("created_at") or "")[:10]
+            if day < args.since or day > args.until:
+                continue
+            payload = e.get("payload") or {}
+            ref = payload.get("ref") or ""
+            push_shas.setdefault(day, set()).add((ref.split("/")[-1], payload.get("head")))
         repo_sum["pushes_by_day"] = {d: len(s) for d, s in sorted(push_shas.items())}
         if push_census_truncated:
             repo_sum["push_census_incomplete"] = True
