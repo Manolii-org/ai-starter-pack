@@ -62,6 +62,10 @@ on:
         type: string
         default: 'npm test -- --coverage'
         description: Test command. Must be non-empty; empty fails the job.
+      test_timeout_minutes:
+        type: number
+        default: 15
+        description: Job-level timeout for the Test job; raise for integration or e2e test_command values.
       build_command:
         type: string
         default: 'npm run build'
@@ -379,7 +383,7 @@ jobs:
     if: needs.install.result == 'success' && inputs.skip_test == false
     needs: [install]
     runs-on: ${{ inputs.runs_on }}
-    timeout-minutes: 15
+    timeout-minutes: ${{ inputs.test_timeout_minutes }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:

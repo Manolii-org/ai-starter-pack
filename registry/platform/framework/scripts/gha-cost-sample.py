@@ -126,11 +126,13 @@ def daterange(since: str, until: str):
 
 
 def list_workflows(client: Client, repo: str):
+    # never cached — a workflow added between runs must enter the census; the
+    # inventory is one page call and not worth a stale-read
     out = []
     page = 1
     while True:
         d = client.get(f"{API}/repos/{repo}/actions/workflows?per_page=100&page={page}",
-                       cache_key=f"wf-{repo}-{page}")
+                       use_cache=False)
         out.extend(d.get("workflows", []))
         if len(out) >= d.get("total_count", 0) or not d.get("workflows"):
             break
@@ -151,13 +153,12 @@ def list_runs_for_day(client: Client, repo: str, wf_id: int, day: str, event: st
     while True:
         url = (f"{API}/repos/{repo}/actions/workflows/{wf_id}/runs"
                f"?created={day}..{day}&per_page=100&page={page}{ev}")
-        # days within the last 2 are still mutable (runs created, queued runs
-        # completing) — a cached page would hide newer activity; older days
-        # are settled and stay cheap to re-sample
-        recent = day >= (dt.datetime.now(dt.timezone.utc).date() -
-                         dt.timedelta(days=2)).isoformat()
+        # never cached — a rerun mutates the page for the run's original
+        # created day (run_attempt bumps) no matter how old it is, and the
+        # jobs-fetch keys on run_attempt, so a stale page drops retried
+        # minutes; queued runs completing are the same class
         d = client.get(url, cache_key=f"runs-{repo}-{wf_id}-{day}-{page}{ev}",
-                       use_cache=not recent)
+                       use_cache=False)
         batch = d.get("workflow_runs", [])
         runs.extend(batch)
         total = d.get("total_count", 0)
