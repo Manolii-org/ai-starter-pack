@@ -161,6 +161,28 @@ def list_runs_for_day(client: Client, repo: str, wf_id: int, day: str, event: st
         page += 1
 
 
+def list_push_runs_for_day(client: Client, repo: str, day: str):
+    """All push runs for the whole repo on `day`, (runs, truncated).
+
+    Uses the repo-level runs endpoint so the R6 denominator is a repository
+    push census independent of the --workflows filter — a filtered selection
+    would miss pushes that only trigger other workflows (or none)."""
+    runs = []
+    page = 1
+    while True:
+        url = (f"{API}/repos/{repo}/actions/runs"
+               f"?created={day}..{day}&per_page=100&page={page}&event=push")
+        d = client.get(url, cache_key=f"pushruns-{repo}-{day}-{page}")
+        batch = d.get("workflow_runs", [])
+        runs.extend(batch)
+        if len(batch) < 100:
+            return runs, False
+        if len(runs) >= 1000:
+            log(f"  WARNING: {repo} {day}: push census hit 1000-result cap; pushes_by_day undercounts")
+            return runs, True
+        page += 1
+
+
 def list_jobs(client: Client, repo: str, run_id: int):
     jobs = []
     page = 1
@@ -275,10 +297,6 @@ def main() -> int:
             agg = {}
             job_names = {}
             n_billed = 0
-            for r in runs:
-                if r.get("event") == "push":
-                    day = r["created_at"][:10]
-                    push_shas.setdefault(day, set()).add((r.get("head_branch"), r.get("head_sha")))
             for r in fetch:
                 if r.get("status") != "completed" or r.get("conclusion") == "skipped":
                     continue
@@ -315,7 +333,15 @@ def main() -> int:
                              "durations": sorted(v["durations"]), "waits": sorted(v["waits"])}
                           for k, v in sorted(job_names.items(), key=lambda kv: -kv[1]["billed_min"])},
             }
+        push_census_truncated = False
+        for day in daterange(args.since, args.until):
+            push_runs, p_trunc = list_push_runs_for_day(client, repo, day)
+            push_census_truncated = push_census_truncated or p_trunc
+            for r in push_runs:
+                push_shas.setdefault(day, set()).add((r.get("head_branch"), r.get("head_sha")))
         repo_sum["pushes_by_day"] = {d: len(s) for d, s in sorted(push_shas.items())}
+        if push_census_truncated:
+            repo_sum["push_census_incomplete"] = True
         tot_cost = sum(w["est_cost_usd"] for w in repo_sum["workflows"].values())
         tot_min = {}
         for w in repo_sum["workflows"].values():
