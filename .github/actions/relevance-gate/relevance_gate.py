@@ -106,7 +106,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--files", default="")
     args = p.parse_args(argv)
 
-    globs = _split_globs(args.paths) + _split_globs(args.always_globs)
+    path_globs = _split_globs(args.paths)
+    globs = path_globs + _split_globs(args.always_globs)
     scope = "full"
     matched: list[str] = []
     changed: list[str] | None = None
@@ -136,7 +137,9 @@ def main(argv: list[str] | None = None) -> int:
         else:
             reason = f"non-PR event ({event or 'unknown'})"
 
-    if not globs:
+    if not path_globs:
+        # the required-glob list itself is empty/unknown; always-globs only
+        # ADDS protection and can never substitute for it — fail open
         changed = None
         reason = "no relevance globs configured"
     if changed is not None and any("\n" in f or "\r" in f for f in changed):

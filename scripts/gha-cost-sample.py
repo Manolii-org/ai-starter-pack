@@ -189,7 +189,13 @@ def list_push_events(client: Client, repo: str, since: str):
             # reaching the cap without covering `since` means older pushes
             # were dropped — flag the census incomplete instead of a silent
             # undercount.
-            truncated = full_pages >= 3
+            # the feed only retains ~90 days of events; if `since` predates
+            # retention the census can never cover the window even though the
+            # feed looks naturally short (a quiet repo is indistinguishable
+            # from expired history) — flag it rather than undercount
+            retention_floor = (dt.datetime.now(dt.timezone.utc).date() -
+                               dt.timedelta(days=89)).isoformat()
+            truncated = full_pages >= 3 or since < retention_floor
             if truncated:
                 log(f"  WARNING: {repo}: event feed ended at ~300 events before {since}; pushes_by_day undercounts")
             return events, truncated
@@ -256,6 +262,8 @@ def main() -> int:
     ap.add_argument("--json-out", default="", help="write full summary JSON here")
     ap.add_argument("--log-file", default="", help="append progress log lines to this file")
     args = ap.parse_args()
+    if args.sample < 0 or args.jobs_for_top < 0:
+        ap.error("--sample and --jobs-for-top must be >= 0")
     global LOG_FILE
     LOG_FILE = args.log_file or None
 
@@ -309,7 +317,7 @@ def main() -> int:
                 continue
             fetch = runs
             sampled = False
-            if wid not in exact_ids and args.sample and len(runs) > args.sample:
+            if wid not in exact_ids and args.sample > 0 and len(runs) > args.sample:
                 ordered = sorted(runs, key=lambda r: r["id"])
                 step = len(ordered) / args.sample
                 fetch = [ordered[int(i * step)] for i in range(args.sample)]
