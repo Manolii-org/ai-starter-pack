@@ -13,6 +13,13 @@ on:
     paths: ["**"]
 
 # Least privilege: the gate only builds and diffs the plugin artifact.
+
+# R4: PR-scoped lane — newer pushes cancel stale runs on the same ref;
+# main-line keys stay SHA-unique so queued runs never cancel each other.
+concurrency:
+  group: plugin-eval-gate-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 

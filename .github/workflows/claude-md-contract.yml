@@ -18,6 +18,13 @@ on:
       - 'scripts/check-claude-md-contract.py'
       - '.github/workflows/claude-md-contract*.yml'
 
+
+# R4: PR-scoped lane — newer pushes cancel stale runs on the same ref;
+# main-line keys stay SHA-unique so queued runs never cancel each other.
+concurrency:
+  group: claude-md-contract-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
