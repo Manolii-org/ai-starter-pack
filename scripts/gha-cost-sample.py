@@ -34,6 +34,7 @@ import urllib.request
 API = "https://api.github.com"
 RATES = {
     "linux": 0.006,
+    "windows": 0.012,  # 2x Linux per GitHub hosted multiplier
     "slim": 0.002,
     "arm": 0.005,
     "macos": 0.062,
@@ -136,7 +137,12 @@ def list_workflows(client: Client, repo: str):
 
 
 def list_runs_for_day(client: Client, repo: str, wf_id: int, day: str, event: str | None = None):
-    """All runs of workflow wf_id created on `day` (UTC). Paginates to cap."""
+    """All runs of workflow wf_id created on `day` (UTC), plus a truncated flag.
+
+    Returns (runs, truncated): the GitHub runs listing caps at 1000 results
+    per query — a day over that returns a truncated list with truncated=True
+    so callers can mark the aggregation incomplete instead of presenting
+    it as a full census."""
     runs = []
     page = 1
     ev = f"&event={event}" if event else ""
@@ -148,12 +154,11 @@ def list_runs_for_day(client: Client, repo: str, wf_id: int, day: str, event: st
         runs.extend(batch)
         total = d.get("total_count", 0)
         if len(batch) < 100:
-            break
+            return runs, False
         if len(runs) >= 1000:
             log(f"  WARNING: {repo} wf {wf_id} {day}: hit 1000-result cap at total_count={total}; day needs finer split")
-            break
+            return runs, True
         page += 1
-    return runs
 
 
 def list_jobs(client: Client, repo: str, run_id: int):
@@ -180,7 +185,9 @@ def classify(labels: list[str]) -> str:
         return "arm"
     if any("slim" in l for l in labs):
         return "slim"
-    if any(l.startswith("ubuntu") or "windows" in l or "linux" in l for l in labs):
+    if any("windows" in l for l in labs):
+        return "windows"
+    if any(l.startswith("ubuntu") or "linux" in l for l in labs):
         return "linux"
     return "unknown"
 
@@ -202,7 +209,7 @@ def main() -> int:
     ap.add_argument("--since", required=True, help="first UTC day YYYY-MM-DD (inclusive)")
     ap.add_argument("--until", required=True, help="last UTC day YYYY-MM-DD (inclusive)")
     ap.add_argument("--workflows", default="", help="comma list of workflow filenames/names to include (default: all)")
-    ap.add_argument("--sample", type=int, default=0, help="if >0, fetch jobs for at most N runs per workflow (stratified: first N sorted by id); 0 = exact (all runs)")
+    ap.add_argument("--sample", type=int, default=0, help="if >0, fetch jobs for N runs per workflow picked evenly across the ID-sorted list; 0 = exact (all runs)")
     ap.add_argument("--jobs-for-top", type=int, default=0, help="exact job fetch only for top N workflows by run count; others get --sample")
     ap.add_argument("--jobs-workflows", default="", help="comma list of workflow filenames that get exact job fetch (all others get --sample)")
     ap.add_argument("--out-dir", required=True)
@@ -231,12 +238,18 @@ def main() -> int:
             workflows = [w for w in workflows if w["path"].split("/")[-1] in wf_filter or w["name"] in wf_filter]
         # pass 1: run listings (metadata only)
         wf_runs: dict[int, list[dict]] = {}
+        capped_wfs: set[int] = set()
         for wf in workflows:
             runs = []
+            truncated = False
             for day in daterange(args.since, args.until):
-                runs.extend(list_runs_for_day(client, repo, wf["id"], day))
+                day_runs, day_truncated = list_runs_for_day(client, repo, wf["id"], day)
+                runs.extend(day_runs)
+                truncated = truncated or day_truncated
             if runs:
                 wf_runs[wf["id"]] = runs
+                if truncated:
+                    capped_wfs.add(wf["id"])
             log(f"   {wf['name']:45s} {wf['path'].split('/')[-1]:40s} {len(runs):5d} runs")
         # pass 2: jobs
         jw_filter = {w.strip() for w in args.jobs_workflows.split(",") if w.strip()}
@@ -254,8 +267,10 @@ def main() -> int:
                 continue
             fetch = runs
             sampled = False
-            if wid not in exact_ids and args.sample:
-                fetch = sorted(runs, key=lambda r: r["id"])[: args.sample]
+            if wid not in exact_ids and args.sample and len(runs) > args.sample:
+                ordered = sorted(runs, key=lambda r: r["id"])
+                step = len(ordered) / args.sample
+                fetch = [ordered[int(i * step)] for i in range(args.sample)]
                 sampled = True
             agg = {}
             job_names = {}
@@ -292,6 +307,7 @@ def main() -> int:
             repo_sum["workflows"][wf["path"].split("/")[-1]] = {
                 "name": wf["name"], "runs_total": len(runs), "runs_costed": len(fetch),
                 "completed_runs": n_billed, "sampled": sampled, "scale": round(scale, 3),
+                "incomplete": wid in capped_wfs,
                 "billed_min": {k: round(v, 1) for k, v in sorted(agg.items())},
                 "billed_min_scaled": {k: round(v * scale, 1) for k, v in sorted(agg.items())},
                 "est_cost_usd": round(cost * scale, 2),
@@ -306,6 +322,7 @@ def main() -> int:
             for k, v in w["billed_min_scaled"].items():
                 tot_min[k] = tot_min.get(k, 0) + v
         repo_sum["totals"] = {"est_cost_usd": round(tot_cost, 2),
+                              "incomplete_workflows": sorted(capped_wfs),
                               "billed_min_scaled": {k: round(v, 1) for k, v in sorted(tot_min.items())}}
         summary["repos"][repo] = repo_sum
     summary["api_calls"] = client.calls
@@ -318,11 +335,12 @@ def main() -> int:
         print(f"{'workflow':44s} {'runs':>6s} {'costed':>6s} {'linux':>8s} {'slim':>8s} {'self-h':>8s} {'$est':>8s}")
         for fn, w in sorted(rs["workflows"].items(), key=lambda kv: -kv[1]["est_cost_usd"]):
             bm = w["billed_min_scaled"]
-            flag = "~" if w["sampled"] else " "
+            flag = "!" if w["incomplete"] else ("~" if w["sampled"] else " ")
             print(f"{flag}{fn:43s} {w['runs_total']:>6d} {w['runs_costed']:>6d} "
                   f"{bm.get('linux',0):>8,.0f} {bm.get('slim',0):>8,.0f} {bm.get('self-hosted',0):>8,.0f} "
                   f"{w['est_cost_usd']:>8.2f}")
-        print(f"TOTAL ${rs['totals']['est_cost_usd']:.2f}  pushes/day: {rs['pushes_by_day']}")
+        inc = "  [INCOMPLETE: day listings capped at 1000 — undercounts]" if rs["totals"].get("incomplete_workflows") else ""
+        print(f"TOTAL ${rs['totals']['est_cost_usd']:.2f}  pushes/day: {rs['pushes_by_day']}{inc}")
     return 0
 
 

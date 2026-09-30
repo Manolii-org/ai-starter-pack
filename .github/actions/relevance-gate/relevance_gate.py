@@ -6,10 +6,11 @@ Contract:
   * Output `scope` is ALWAYS one of: full | reduced.
   * EVERY failure path emits scope=full (the heavy job runs). The gate may
     only ever *reduce* work when the changed-file set is fully known.
-  * pull_request: enumerate PR files via REST (cap 3000, fail-closed).
-  * push/merge_group/dispatch/schedule: scope=full unconditionally — the
-    action itself is expected to be gated `if: event == pull_request`, but
-    if it runs anyway it must not emit reduced.
+  * pull_request: enumerate PR files via REST (files-cap, fail-closed).
+  * Every non-PR context (push, merge_group, dispatch, schedule):
+    scope=full unconditionally — the caller is expected to gate with
+    `if: event == pull_request`, but if it runs anyway it must not
+    emit reduced.
   * RELEVANCE_FORCE_FULL (repo variable) forces scope=full — kill switch.
   * --files a,b,c bypasses enumeration entirely (tests / local runs).
 """
@@ -19,13 +20,16 @@ import argparse
 import fnmatch
 import json
 import os
+import secrets
 import sys
 import urllib.error
-import urllib.parse
 import urllib.request
 
 API = "https://api.github.com"
 TIMEOUT = 30
+# GitHub caps pulls/{n}/files at 3000 entries; an empty next page cannot
+# distinguish "exactly 3000 changed" from truncation, so reaching it fails open.
+GH_PR_FILES_LIMIT = 3000
 
 
 def _split_globs(raw: str) -> list[str]:
@@ -71,24 +75,12 @@ def pr_files(owner_repo: str, number: int, token: str, cap: int) -> list[str] | 
         if not payload:
             return files
         files.extend(str(item.get("filename", "")) for item in payload)
+        if len(files) > cap or len(files) >= GH_PR_FILES_LIMIT:
+            return None
         if len(payload) < 100:
             return files
         page += 1
     return None  # over the cap — fail closed
-
-
-def push_files(owner_repo: str, base: str, head: str, token: str, cap: int) -> list[str] | None:
-    if not base or base.startswith("0000000"):
-        return None
-    url = f"{API}/repos/{owner_repo}/compare/{urllib.parse.quote(base)}...{urllib.parse.quote(head)}"
-    status, payload = _get(url, token)
-    if status != 200 or not isinstance(payload, dict):
-        return None
-    files = payload.get("files") or []
-    names = [str(f.get("filename", "")) for f in files]
-    if len(names) > cap or payload.get("total_commits", 0) > 250:
-        return None
-    return names
 
 
 def classify(files: list[str], globs: list[str]) -> tuple[str, list[str]]:
@@ -99,8 +91,9 @@ def classify(files: list[str], globs: list[str]) -> tuple[str, list[str]]:
 def emit(name: str, value: str) -> None:
     gh_out = os.environ.get("GITHUB_OUTPUT")
     if gh_out:
+        delim = f"EOF_{secrets.token_hex(16)}"
         with open(gh_out, "a", encoding="utf-8") as fh:
-            fh.write(f"{name}={value}\n")
+            fh.write(f"{name}<<{delim}\n{value}\n{delim}\n")
     else:
         print(f"{name}={value}")
 
@@ -131,22 +124,19 @@ def main(argv: list[str] | None = None) -> int:
         if event == "pull_request":
             num = os.environ.get("PR_NUMBER", "")
             if repo and token and num:
-                changed = pr_files(repo, int(num), token, args.files_cap)
-                reason = "pr files" if changed is not None else "pr enum failed"
+                try:
+                    changed = pr_files(repo, int(num), token, args.files_cap)
+                    reason = "pr files" if changed is not None else "pr enum failed"
+                except ValueError:
+                    reason = "invalid pr number"
             else:
                 reason = "missing repo/token/number"
-        elif event == "push" and repo and token:
-            changed = push_files(
-                repo,
-                os.environ.get("PUSH_BASE", ""),
-                os.environ.get("PUSH_HEAD", ""),
-                token,
-                args.files_cap,
-            )
-            reason = "push compare" if changed is not None else "push compare failed"
         else:
             reason = f"non-PR event ({event or 'unknown'})"
 
+    if changed is not None and any("\n" in f or "\r" in f for f in changed):
+        changed = None
+        reason += " (newline filename — fail open)"
     if changed is not None:
         scope, matched = classify(changed, globs)
     emit("scope", scope)

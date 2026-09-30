@@ -56,13 +56,16 @@ runs:
         PR_NUMBER: ${{ inputs.pr-number || github.event.pull_request.number }}
         BASE_SHA: ${{ github.event.pull_request.base.sha }}
         HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        PUSH_BASE: ${{ github.event.before }}
-        PUSH_HEAD: ${{ github.sha }}
         RELEVANCE_FORCE_FULL: ${{ vars.RELEVANCE_FORCE_FULL }}
+        ACTION_PATH: ${{ github.action_path }}
+        INPUT_PATHS: ${{ inputs.paths }}
+        INPUT_ALWAYS_GLOBS: ${{ inputs.always-globs }}
+        INPUT_FILES_CAP: ${{ inputs.files-cap }}
+        INPUT_FILES: ${{ inputs.files }}
       run: >-
-        python3 "${{ github.action_path }}/relevance_gate.py"
-        --paths "${{ inputs.paths }}"
-        --always-globs "${{ inputs.always-globs }}"
-        --files-cap "${{ inputs.files-cap }}"
-        --files "${{ inputs.files }}"
+        python3 "$ACTION_PATH/relevance_gate.py"
+        --paths "$INPUT_PATHS"
+        --always-globs "$INPUT_ALWAYS_GLOBS"
+        --files-cap "$INPUT_FILES_CAP"
+        --files "$INPUT_FILES"
       shell: bash

@@ -132,9 +132,12 @@ fail that suite.
   job reports `Success` for the required context. See
   `.github/actions/relevance-gate/` for the reusable component and its
   contract tests.
-- **R4 — every job has `timeout-minutes`; every PR-scoped workflow has
-  `concurrency` + `cancel-in-progress: true`.** Main-line groups stay
-  SHA-unique so queued merge runs never cancel each other.
+- **R4 — every job has `timeout-minutes`; every PR-scoped verifier lane has
+  `concurrency` + `cancel-in-progress: true`.** Cancel-on-new applies to
+  SHA-bound verifiers only — lanes that mutate state (autofix, sync,
+  consumers of prior runs) keep `cancel-in-progress: false` per the
+  consumer exception above. Main-line groups stay SHA-unique so queued
+  merge runs never cancel each other.
 - **R5 — runner choice via existing variables only.** `CI_RUNNER_OVERRIDE`
   (global drain), `LIGHT_RUNNER`, `QUALITY_BASE_RUNNER`, `AUTO_MERGE_RUNNER`,
   and quality-base `runner`/`coverage_runner` inputs are the complete set —
