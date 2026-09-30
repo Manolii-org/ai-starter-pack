@@ -134,6 +134,9 @@ def main(argv: list[str] | None = None) -> int:
         else:
             reason = f"non-PR event ({event or 'unknown'})"
 
+    if not globs:
+        changed = None
+        reason = "no relevance globs configured"
     if changed is not None and any("\n" in f or "\r" in f for f in changed):
         changed = None
         reason += " (newline filename — fail open)"
