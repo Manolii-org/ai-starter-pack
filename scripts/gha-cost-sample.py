@@ -63,7 +63,9 @@ class Client:
         os.makedirs(out_dir, exist_ok=True)
 
     def _cache_path(self, key: str) -> str:
-        safe = key.replace("/", "_").replace("?", "_").replace("&", "_").replace("=", "_").replace(":", "_")
+        # reversible encoding — colliding repos like a/b_c vs a_b/c must not
+        # share cache entries
+        safe = urllib.parse.quote(key, safe="")
         return os.path.join(self.out_dir, safe + ".json")
 
     def get(self, url: str, cache_key: str | None = None, use_cache: bool = True):
@@ -211,14 +213,17 @@ def list_push_events(client: Client, repo: str, since: str):
     return events, True
 
 
-def list_jobs(client: Client, repo: str, run_id: int):
+def list_jobs(client: Client, repo: str, run_id: int, attempt: int = 1, mutable: bool = False):
     jobs = []
     page = 1
     while True:
         # filter=all: rerun attempts each consume billed runner time; latest
         # alone would drop every earlier attempt's minutes from the numerator.
+        # attempt in the cache key: a retried run gets a fresh fetch instead of
+        # the previous attempt's stale page; mutable runs bypass the cache.
         d = client.get(f"{API}/repos/{repo}/actions/runs/{run_id}/jobs?per_page=100&filter=all&page={page}",
-                       cache_key=f"jobs-{repo}-{run_id}-{page}")
+                       cache_key=f"jobs-{repo}-{run_id}-a{attempt}-{page}",
+                       use_cache=not mutable)
         batch = d.get("jobs", [])
         jobs.extend(batch)
         if len(batch) < 100 or len(jobs) >= d.get("total_count", 0):
@@ -336,7 +341,13 @@ def main() -> int:
                     continue
                 n_billed += 1
                 run_created = r.get("created_at", "")
-                for job in list_jobs(client, repo, r["id"]):
+                mutable = (r.get("status") != "completed" or
+                           (r.get("created_at") or "")[:10] >=
+                           (dt.datetime.now(dt.timezone.utc).date() -
+                            dt.timedelta(days=2)).isoformat())
+                for job in list_jobs(client, repo, r["id"],
+                                     attempt=int(r.get("run_attempt") or 1),
+                                     mutable=mutable):
                     cls = classify(job.get("labels") or [])
                     bm = job_billed_min(job)
                     if bm == 0:
