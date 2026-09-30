@@ -7,6 +7,11 @@ description: >-
   real gate still runs. Pair with the contract below — a skipped job reports
   "Success" for a required check, so the required name must sit on the job
   this action feeds.
+
+  Caller permissions: the PR-files endpoint needs `pull-requests: read` on the
+  CALLING job's permissions block. With the common least-privilege
+  `permissions: { contents: read }` the API returns 403 and the gate falls
+  back to scope=full on every PR — safe, but the reduced path never engages.
 author: manolii
 inputs:
   paths:

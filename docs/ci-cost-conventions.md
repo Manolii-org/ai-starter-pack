@@ -129,7 +129,10 @@ fail that suite.
   job carries `always() && (<non-PR events> || detect failed/cancelled ||
   scope != 'reduced')` — uncertainty always runs the real gate (fail-open).
   The required check name belongs to the *gated* job itself, and a skipped
-  job reports `Success` for the required context. See
+  job reports `Success` for the required context. The detect job needs
+  `permissions: { pull-requests: read }` — under a least-privilege
+  `contents: read`-only job the PR-files API 403s and the gate falls back
+  to scope=full on every PR. See
   `.github/actions/relevance-gate/` for the reusable component and its
   contract tests.
 - **R4 — every job has `timeout-minutes`; every PR-scoped verifier lane has
