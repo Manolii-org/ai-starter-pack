@@ -106,3 +106,41 @@ state. This also fixes the self-cancel class of bug: an autofix push raises
 Group keys stay PR/branch-scoped; a repo-wide group on `pull_request_target`
 leaves a cancelled check attached to that PR's head and destabilises
 `mergeable_state`.
+
+
+## Cost policy (R1–R6, adopted 2026-09-30)
+
+House rules for hosted-minute spend, verified against the
+`ci-cost-framework-verification-2026-09-30` report. Each rule has a guard in
+`scripts/tests/test_gha_fly_cost_guards.py (master repo)`; new workflows that break a rule
+fail that suite.
+
+- **R1 — no sub-30-second solo jobs.** A job whose typical run is under ~30s
+  still bills a full minute; fold micro-jobs into a shared aggregator job,
+  unless the job is a required check by name (GitHub reports check names per
+  job) or needs privilege isolation (different `permissions:` scope).
+- **R2 — heavy advisory checks never per-push on hosted.** Any job ≥~2 min or
+  ≥$0.01/run that is not a required check runs on the Fly pool via the
+  fork-safe selector, on a settle-time (workflow_run/debounce), or nightly —
+  never inline on every `pull_request`.
+- **R3 — required checks are never path-filtered.** `on.pull_request.paths`
+  on a required workflow leaves the check 'Expected' forever. Relevance
+  gating is job-level instead: a slim detect job emits a scope, the gated
+  job carries `always() && (<non-PR events> || detect failed/cancelled ||
+  scope != 'reduced')` — uncertainty always runs the real gate (fail-open).
+  The required check name belongs to the *gated* job itself, and a skipped
+  job reports `Success` for the required context. See
+  `.github/actions/relevance-gate/` for the reusable component and its
+  contract tests.
+- **R4 — every job has `timeout-minutes`; every PR-scoped workflow has
+  `concurrency` + `cancel-in-progress: true`.** Main-line groups stay
+  SHA-unique so queued merge runs never cancel each other.
+- **R5 — runner choice via existing variables only.** `CI_RUNNER_OVERRIDE`
+  (global drain), `LIGHT_RUNNER`, `QUALITY_BASE_RUNNER`, `AUTO_MERGE_RUNNER`,
+  and quality-base `runner`/`coverage_runner` inputs are the complete set —
+  do not invent new variable names for lane selection.
+- **R6 — cost-per-push is the KPI.** Claimed savings only after ≥7 days and
+  ≥150 pushes of matched telemetry (run-census sampler
+  `scripts/gha-cost-sample.py` cross-checked against the billing API in
+  `scripts/gha-billing-assert.py` (master repo)); estimates in design docs
+  are not claims.

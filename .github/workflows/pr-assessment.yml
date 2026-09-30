@@ -44,6 +44,7 @@ jobs:
   classify:
     name: Classify PR
     runs-on: >-
+    timeout-minutes: 10
       ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
           && fromJSON(vars.CI_RUNNER_OVERRIDE || '["self-hosted","fly"]')
           || 'ubuntu-latest' }}
@@ -279,6 +280,7 @@ jobs:
   sast:
     name: SAST (Semgrep + Bandit)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: [classify]
     if: needs.classify.result == 'success' && needs.classify.outputs.depth != 'none'
     steps:
@@ -331,6 +333,7 @@ jobs:
   specialists:
     name: Specialist Skills
     runs-on: >-
+    timeout-minutes: 15
       ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
           && fromJSON(vars.CI_RUNNER_OVERRIDE || '["self-hosted","fly"]')
           || 'ubuntu-latest' }}
@@ -379,6 +382,7 @@ jobs:
   broad-agents:
     name: Broad Agents
     runs-on: >-
+    timeout-minutes: 20
       ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
           && fromJSON(vars.CI_RUNNER_OVERRIDE || '["self-hosted","fly"]')
           || 'ubuntu-latest' }}
@@ -425,6 +429,7 @@ jobs:
   judge:
     name: Judge
     runs-on: >-
+    timeout-minutes: 30
       ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
           && fromJSON(vars.CI_RUNNER_OVERRIDE || '["self-hosted","fly"]')
           || 'ubuntu-latest' }}
