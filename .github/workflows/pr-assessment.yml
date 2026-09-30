@@ -47,6 +47,7 @@ jobs:
       ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
           && fromJSON(vars.CI_RUNNER_OVERRIDE || '["self-hosted","fly"]')
           || 'ubuntu-latest' }}
+    timeout-minutes: 10
     if: |
       github.event.pull_request.draft != true &&
       !contains(github.event.pull_request.labels.*.name, 'skip-ai-review') &&
@@ -279,6 +280,7 @@ jobs:
   sast:
     name: SAST (Semgrep + Bandit)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: [classify]
     if: needs.classify.result == 'success' && needs.classify.outputs.depth != 'none'
     steps:
@@ -334,6 +336,7 @@ jobs:
       ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
           && fromJSON(vars.CI_RUNNER_OVERRIDE || '["self-hosted","fly"]')
           || 'ubuntu-latest' }}
+    timeout-minutes: 15
     needs: [classify, sast]
     if: needs.classify.result == 'success' && needs.classify.outputs.invoke_skills != ''
     steps:
@@ -382,6 +385,7 @@ jobs:
       ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
           && fromJSON(vars.CI_RUNNER_OVERRIDE || '["self-hosted","fly"]')
           || 'ubuntu-latest' }}
+    timeout-minutes: 20
     needs: [classify, sast]
     if: needs.classify.result == 'success' && needs.classify.outputs.depth == 'broad'
     steps:
@@ -428,6 +432,7 @@ jobs:
       ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
           && fromJSON(vars.CI_RUNNER_OVERRIDE || '["self-hosted","fly"]')
           || 'ubuntu-latest' }}
+    timeout-minutes: 30
     needs: [classify, sast, specialists, broad-agents]
     if: always() && needs.classify.result == 'success' && needs.classify.outputs.depth != 'none'
     steps:

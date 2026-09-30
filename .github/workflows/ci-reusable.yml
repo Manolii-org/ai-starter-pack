@@ -62,10 +62,18 @@ on:
         type: string
         default: 'npm test -- --coverage'
         description: Test command. Must be non-empty; empty fails the job.
+      test_timeout_minutes:
+        type: number
+        default: 15
+        description: Job-level timeout for the Test job; raise for integration or e2e test_command values.
       build_command:
         type: string
         default: 'npm run build'
         description: Build command. Must be non-empty; empty fails the job.
+      build_timeout_minutes:
+        type: number
+        default: 15
+        description: Job-level timeout for the Build job; raise for heavier build_command values.
       audit_command:
         type: string
         default: ''
@@ -108,6 +116,7 @@ jobs:
   detect:
     name: Detect Project
     runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 5
     outputs:
       has_pkg: ${{ steps.detect.outputs.has_pkg }}
     steps:
@@ -142,6 +151,7 @@ jobs:
     name: Install Dependencies
     if: needs.detect.outputs.has_pkg == 'true'
     runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 10
     needs: [detect]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -192,6 +202,7 @@ jobs:
     if: needs.install.result == 'success' && inputs.skip_security_audit == false
     needs: [install]
     runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -258,6 +269,7 @@ jobs:
     if: needs.install.result == 'success' && inputs.skip_lint == false
     needs: [install]
     runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -316,6 +328,7 @@ jobs:
     if: needs.install.result == 'success' && inputs.skip_typecheck == false
     needs: [install]
     runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -374,6 +387,7 @@ jobs:
     if: needs.install.result == 'success' && inputs.skip_test == false
     needs: [install]
     runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: ${{ inputs.test_timeout_minutes }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -442,6 +456,7 @@ jobs:
       && needs.install.result == 'success'
     needs: [install, security-audit, lint, typecheck, test]
     runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: ${{ inputs.build_timeout_minutes }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:

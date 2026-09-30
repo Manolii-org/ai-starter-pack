@@ -66,6 +66,7 @@ jobs:
   classify:
     name: Classify PR
     runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 10
     # Skip mechanical sync PRs by HEAD BRANCH, not just title — the sync
     # tooling titles PRs "chore: sync …" (no parenthesis), so the title-only
     # guard never matched and the full pipeline ran on every sync PR.
@@ -387,6 +388,7 @@ jobs:
   sast:
     name: SAST (Semgrep + Bandit)
     runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 15
     needs: [classify]
     if: needs.classify.result == 'success' && needs.classify.outputs.depth != 'none'
     steps:
@@ -439,6 +441,7 @@ jobs:
   specialists:
     name: Specialist Skills
     runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 15
     needs: [classify, sast]
     if: needs.classify.result == 'success' && needs.classify.outputs.invoke_skills != ''
     # Provider env — all steps inherit; empty ANTHROPIC_BASE_URL is a no-op for anthropic mode.
@@ -562,6 +565,7 @@ jobs:
   broad-agents:
     name: Broad Agents
     runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 20
     needs: [classify, sast]
     if: needs.classify.result == 'success' && needs.classify.outputs.depth == 'broad'
     # Provider env — all steps inherit; empty ANTHROPIC_BASE_URL is a no-op for anthropic mode.
@@ -684,6 +688,7 @@ jobs:
   judge:
     name: Judge
     runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 30
     needs: [classify, sast, specialists, broad-agents]
     if: always() && needs.classify.result == 'success' && needs.classify.outputs.depth != 'none'
     # Provider env — all steps inherit; empty ANTHROPIC_BASE_URL is a no-op for anthropic mode.

@@ -15,6 +15,13 @@ on:
       - 'scripts/email_capture/**'
       - 'tests/email_capture/**'
       - '.github/workflows/email-capture-*.yml'
+
+# R4: PR-scoped lane — newer pushes cancel stale runs on the same ref;
+# main-line keys stay SHA-unique so queued runs never cancel each other.
+concurrency:
+  group: email-capture-live-conformance-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 jobs:

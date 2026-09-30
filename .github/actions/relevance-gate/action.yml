@@ -1,0 +1,76 @@
+name: relevance-gate
+description: >-
+  Job-level relevance gate for expensive required/advisory checks (policy R3).
+  Emits scope=full|reduced so the downstream job can `if:` itself out on
+  irrelevant PRs. ALWAYS fails open: any enumeration error, missing data,
+  truncation over the files cap, or a non-PR context emits scope=full so the
+  real gate still runs. Pair with the contract below — a skipped job reports
+  "Success" for a required check, so the required name must sit on the job
+  this action feeds.
+
+  Caller permissions: the PR-files endpoint needs `pull-requests: read` on the
+  CALLING job's permissions block. With the common least-privilege
+  `permissions: { contents: read }` the API returns 403 and the gate falls
+  back to scope=full on every PR — safe, but the reduced path never engages.
+author: manolii
+inputs:
+  paths:
+    description: >-
+      Newline- or comma-separated glob list of "relevant" pathspecs
+      (fnmatch). A changed file matching ANY pattern forces scope=full.
+      Example: "supabase/**\nscripts/ci/classify_*.py"
+    required: true
+  always-globs:
+    description: >-
+      Additional globs that always force scope=full on PRs (e.g. the
+      workflow file itself, this action, shared library entrypoints).
+    required: false
+    default: ""
+  pr-number:
+    description: Pull request number (defaults to the event payload).
+    required: false
+    default: ""
+  files-cap:
+    description: Fail-closed ceiling on PR file enumeration.
+    required: false
+    default: "3000"
+  files:
+    description: >-
+      Testing hook: explicit comma-separated changed-file list; bypasses
+      all API/git enumeration.
+    required: false
+    default: ""
+outputs:
+  scope:
+    description: "full (run the heavy job) or reduced (safe to skip)"
+    value: ${{ steps.gate.outputs.scope }}
+  matched:
+    description: Comma-separated matched relevant paths (diagnostic)
+    value: ${{ steps.gate.outputs.matched }}
+  changed_count:
+    description: Number of changed files evaluated
+    value: ${{ steps.gate.outputs.changed_count }}
+runs:
+  using: composite
+  steps:
+    - name: Compute scope (fail-closed to full)
+      id: gate
+      env:
+        EVENT_NAME: ${{ github.event_name }}
+        GITHUB_TOKEN: ${{ github.token }}
+        PR_NUMBER: ${{ inputs.pr-number || github.event.pull_request.number }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        RELEVANCE_FORCE_FULL: ${{ vars.RELEVANCE_FORCE_FULL }}
+        ACTION_PATH: ${{ github.action_path }}
+        INPUT_PATHS: ${{ inputs.paths }}
+        INPUT_ALWAYS_GLOBS: ${{ inputs.always-globs }}
+        INPUT_FILES_CAP: ${{ inputs.files-cap }}
+        INPUT_FILES: ${{ inputs.files }}
+      run: >-
+        python3 "$ACTION_PATH/relevance_gate.py"
+        --paths "$INPUT_PATHS"
+        --always-globs "$INPUT_ALWAYS_GLOBS"
+        --files-cap "$INPUT_FILES_CAP"
+        --files "$INPUT_FILES"
+      shell: bash
