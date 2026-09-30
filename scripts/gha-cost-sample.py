@@ -149,7 +149,13 @@ def list_runs_for_day(client: Client, repo: str, wf_id: int, day: str, event: st
     while True:
         url = (f"{API}/repos/{repo}/actions/workflows/{wf_id}/runs"
                f"?created={day}..{day}&per_page=100&page={page}{ev}")
-        d = client.get(url, cache_key=f"runs-{repo}-{wf_id}-{day}-{page}{ev}")
+        # days within the last 2 are still mutable (runs created, queued runs
+        # completing) — a cached page would hide newer activity; older days
+        # are settled and stay cheap to re-sample
+        recent = day >= (dt.datetime.now(dt.timezone.utc).date() -
+                         dt.timedelta(days=2)).isoformat()
+        d = client.get(url, cache_key=f"runs-{repo}-{wf_id}-{day}-{page}{ev}",
+                       use_cache=not recent)
         batch = d.get("workflow_runs", [])
         runs.extend(batch)
         total = d.get("total_count", 0)
@@ -366,12 +372,9 @@ def main() -> int:
             day = (e.get("created_at") or "")[:10]
             if day < args.since or day > args.until:
                 continue
-            payload = e.get("payload") or {}
-            ref = payload.get("ref") or ""
-            # keep the whole branch name, not the leaf: release/v1 vs hotfix/v1
-            # are distinct pushes even when they share a head SHA on a day
-            branch = ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref
-            push_shas.setdefault(day, set()).add((branch, payload.get("head")))
+            # dedup by event id: every PushEvent is a push — a reset-and-repush
+            # to a previously-seen head (or a null head) still counts
+            push_shas.setdefault(day, set()).add(e.get("id"))
         repo_sum["pushes_by_day"] = {d: len(s) for d, s in sorted(push_shas.items())}
         if push_census_truncated:
             repo_sum["push_census_incomplete"] = True
