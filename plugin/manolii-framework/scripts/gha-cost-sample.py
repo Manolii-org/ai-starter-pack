@@ -170,15 +170,28 @@ def list_push_events(client: Client, repo: str, since: str):
     at ~300 events; hitting it marks the census incomplete rather than
     silently undercounting."""
     events = []
+    oldest_seen = None
+    full_pages = 0
     page = 1
     while page <= 10:
         batch = client.get(f"{API}/repos/{repo}/events?per_page=100&page={page}",
                            cache_key=f"events-{repo}-{page}")
         events.extend(e for e in batch if e.get("type") == "PushEvent")
+        if batch:
+            oldest_seen = (batch[-1].get("created_at") or "")[:10]
+        if oldest_seen is not None and oldest_seen < since:
+            return events, False  # feed reached past the window — census covers `since`
         if len(batch) < 100:
-            return events, False
-        if (batch[-1].get("created_at") or "")[:10] < since:
-            return events, False
+            # Retained feed exhausted. <3 full pages means repo history is
+            # shorter than the ~300-event retention cap, so nothing was cut;
+            # reaching the cap without covering `since` means older pushes
+            # were dropped — flag the census incomplete instead of a silent
+            # undercount.
+            truncated = full_pages >= 3
+            if truncated:
+                log(f"  WARNING: {repo}: event feed ended at ~300 events before {since}; pushes_by_day undercounts")
+            return events, truncated
+        full_pages += 1
         page += 1
     log(f"  WARNING: {repo}: push census hit the ~300-event feed cap; pushes_by_day undercounts")
     return events, True
