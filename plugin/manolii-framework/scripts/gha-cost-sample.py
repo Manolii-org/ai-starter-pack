@@ -276,6 +276,8 @@ def main() -> int:
     args = ap.parse_args()
     if args.sample < 0 or args.jobs_for_top < 0:
         ap.error("--sample and --jobs-for-top must be >= 0")
+    if args.until < args.since:
+        ap.error(f"--until ({args.until}) is before --since ({args.since})")
     global LOG_FILE
     LOG_FILE = args.log_file or None
 

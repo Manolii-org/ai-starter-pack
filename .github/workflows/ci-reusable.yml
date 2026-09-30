@@ -70,6 +70,10 @@ on:
         type: string
         default: 'npm run build'
         description: Build command. Must be non-empty; empty fails the job.
+      build_timeout_minutes:
+        type: number
+        default: 15
+        description: Job-level timeout for the Build job; raise for heavier build_command values.
       audit_command:
         type: string
         default: ''
@@ -452,7 +456,7 @@ jobs:
       && needs.install.result == 'success'
     needs: [install, security-audit, lint, typecheck, test]
     runs-on: ${{ inputs.runs_on }}
-    timeout-minutes: 15
+    timeout-minutes: ${{ inputs.build_timeout_minutes }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
