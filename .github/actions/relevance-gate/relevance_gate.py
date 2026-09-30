@@ -112,13 +112,15 @@ def main(argv: list[str] | None = None) -> int:
     changed: list[str] | None = None
     reason = "unset"
 
+    event = os.environ.get("EVENT_NAME", "")
     if os.environ.get("RELEVANCE_FORCE_FULL", "").lower() in ("1", "true", "yes"):
         reason = "force-full kill switch"
+    elif event and event != "pull_request":
+        reason = f"non-PR event ({event})"
     elif args.files.strip():
         changed = [f for f in args.files.split(",") if f.strip()]
         reason = "explicit files"
     else:
-        event = os.environ.get("EVENT_NAME", "")
         repo = os.environ.get("GITHUB_REPOSITORY", "")
         token = os.environ.get("GITHUB_TOKEN", "")
         if event == "pull_request":
