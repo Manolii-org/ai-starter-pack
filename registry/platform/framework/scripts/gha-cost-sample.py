@@ -174,8 +174,10 @@ def list_push_events(client: Client, repo: str, since: str):
     full_pages = 0
     page = 1
     while page <= 10:
+        # use_cache=False: the events feed is a sliding window — a cached page
+        # from a previous sampler run would hide newer pushes and undercount.
         batch = client.get(f"{API}/repos/{repo}/events?per_page=100&page={page}",
-                           cache_key=f"events-{repo}-{page}")
+                           cache_key=f"events-{repo}-{page}", use_cache=False)
         events.extend(e for e in batch if e.get("type") == "PushEvent")
         if batch:
             oldest_seen = (batch[-1].get("created_at") or "")[:10]
@@ -295,7 +297,9 @@ def main() -> int:
         if jw_filter:
             exact_ids = {wf["id"] for wf in workflows if wf["path"].split("/")[-1] in jw_filter or wf["name"] in jw_filter}
         else:
-            exact_ids = {wid for wid, _ in (order[: args.jobs_for_top] if args.jobs_for_top else order)}
+            exact_ids = {wid for wid, _ in order[: args.jobs_for_top]}
+            # jobs_for_top=0 -> empty exact set, so --sample applies to every
+            # workflow; with no --sample all runs are fetched as before.
         repo_sum = {"workflows": {}, "pushes_by_day": {}, "totals": {}}
         push_shas: dict[str, set] = {}
         for wf in workflows:
@@ -356,7 +360,10 @@ def main() -> int:
                 continue
             payload = e.get("payload") or {}
             ref = payload.get("ref") or ""
-            push_shas.setdefault(day, set()).add((ref.split("/")[-1], payload.get("head")))
+            # keep the whole branch name, not the leaf: release/v1 vs hotfix/v1
+            # are distinct pushes even when they share a head SHA on a day
+            branch = ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref
+            push_shas.setdefault(day, set()).add((branch, payload.get("head")))
         repo_sum["pushes_by_day"] = {d: len(s) for d, s in sorted(push_shas.items())}
         if push_census_truncated:
             repo_sum["push_census_incomplete"] = True
