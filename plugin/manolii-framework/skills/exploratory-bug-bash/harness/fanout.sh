@@ -3,7 +3,7 @@
 # Charter line: slug|target|agent|charter. "Sign in as session <name>" in the
 # charter selects the saved session.
 set -u
-cd "$(dirname "$0")"
+cd "$(dirname "$0")" || exit 1
 mkdir -p "$2"
 while IFS='|' read -r slug target agent charter; do
   case "$slug" in ''|'#'*) continue ;; esac
