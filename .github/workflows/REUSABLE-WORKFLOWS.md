@@ -603,8 +603,10 @@ should not add this caller.
 ## bot-review-relay
 
 Portable relay for github-actions[bot] review comments from a master copy or external
-source. Like `pr-autofix-loop-reusable.yml`, stays on **`ubuntu-latest`** (hosted
-control-plane). See `docs/fly-runner-setup.md`.
+source. Hosted control-plane like `pr-autofix-loop-reusable.yml`, but defaults to
+**`ubuntu-slim`** — the relay's jobs are seconds-long API calls, so they take the
+slim 1-CPU image's ~3x cheaper floor instead of ubuntu-latest's (billing-floor
+sweep). See `docs/fly-runner-setup.md`.
 
 Relayed comments are accepted by Autofix when they start with `**[@` — the pack
 handles the integration. Do **not** install the master `auto-address-review.yml`
