@@ -405,7 +405,7 @@ def summarize_test_run(
     }
 
 
-_PW_BLOCK_RX = re.compile(r"^  (\d+)\) (.+?)\s*─{3,}", re.M)
+_PW_BLOCK_RX = re.compile(r"^  (\d+)\) (\S[^\n]*? › [^\n]*?)(?:[ \t]+─+)?[ \t]*$", re.M)
 _PW_COUNT_RX = re.compile(
     r"^  (\d+) (failed|flaky|interrupted|did not run|skipped|passed)\b", re.M
 )
@@ -443,22 +443,32 @@ def parse_playwright_text_output(text: str) -> list[dict]:
         headers = list(_PW_BLOCK_RX.finditer(body))
     counts = list(_PW_COUNT_RX.finditer(body))
     failed_titles: Optional[set[str]] = None
+    summary_titles: list[str] = []
     if counts:
         failed_titles = set()
         for i, m in enumerate(counts):
-            if m.group(2) not in ("failed", "interrupted"):
-                continue
             end = counts[i + 1].start() if i + 1 < len(counts) else len(body)
             for line in body[m.end():end].splitlines():
                 title = re.sub(r"\s*─+.*$", "", line).strip()
-                if title:
+                if not title:
+                    continue
+                summary_titles.append(title)
+                if m.group(2) in ("failed", "interrupted"):
                     failed_titles.add(title)
+        # Longest first: a failure inside test.step() appends " › <step>" to
+        # the block header but not to the summary title.
+        summary_titles.sort(key=len, reverse=True)
     out: dict[str, dict] = {}
     summary_start = counts[0].start() if counts else len(body)
     for i, m in enumerate(headers):
         title = m.group(2).strip()
-        if failed_titles is not None and title not in failed_titles:
-            continue
+        if failed_titles is not None:
+            title = next(
+                (t for t in summary_titles if title == t or title.startswith(t + " › ")),
+                title,
+            )
+            if title not in failed_titles:
+                continue
         end = headers[i + 1].start() if i + 1 < len(headers) else summary_start
         block = body[m.end():max(end, m.end())]
         attempts = _PW_RETRY_RX.split(block)

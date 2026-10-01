@@ -351,6 +351,48 @@ def test_text_output_github_reporter_mixed_stdout_not_double_counted():
     assert len(parse_playwright_text_output(mixed)) == 2
 
 
+_LONG = "a very long test title that keeps going and going so that the header exceeds the one hundred column padding limit for sure"
+_STEP_AND_LONG_OUTPUT = f"""
+  1) [chromium] \u203a cr.spec.ts:2:5 \u203a {_LONG} 
+
+    Error: expect(received).toBe(expected) // Object.is equality
+
+    Expected: 2
+    Received: 1
+
+  2) [chromium] \u203a cr.spec.ts:5:5 \u203a fails inside a step \u203a login \u2500\u2500\u2500\u2500\u2500\u2500
+
+    Error: expect(received).toBe(expected) // Object.is equality
+
+    Expected: 2
+    Received: 1
+
+    Retry #1 \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+    Error: expect(received).toBe(expected) // Object.is equality
+
+  2 failed
+    [chromium] \u203a cr.spec.ts:2:5 \u203a {_LONG} 
+    [chromium] \u203a cr.spec.ts:5:5 \u203a fails inside a step \u2500\u2500\u2500\u2500\u2500\u2500
+"""
+
+
+def test_text_output_unpadded_header_and_step_suffix():
+    rows = parse_playwright_text_output(_STEP_AND_LONG_OUTPUT)
+    assert [(r["title"], r["class"]) for r in rows] == [
+        (_LONG, "product"),
+        ("fails inside a step", "product"),
+    ]
+
+
+def test_text_output_step_suffix_of_flaky_test_excluded():
+    flaky = _STEP_AND_LONG_OUTPUT.replace("  2 failed", "  1 failed").replace(
+        "    [chromium] \u203a cr.spec.ts:5:5 \u203a fails inside a step",
+        "  1 flaky\n    [chromium] \u203a cr.spec.ts:5:5 \u203a fails inside a step",
+    )
+    assert [r["title"] for r in parse_playwright_text_output(flaky)] == [_LONG]
+
+
 def test_missing_browser_binary_is_environment():
     assert classify_test_failure_text(
         "Error: browserType.launch: Executable doesn't exist at /x/chrome"
