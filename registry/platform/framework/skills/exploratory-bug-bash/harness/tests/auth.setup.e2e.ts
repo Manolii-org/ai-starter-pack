@@ -16,6 +16,7 @@ async function tokenHash(email: string): Promise<string> {
     method: 'POST',
     headers: { apikey: KEY, Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ type: 'magiclink', email }),
+    signal: AbortSignal.timeout(15000),
   });
   if (!res.ok) throw new Error(`generate_link ${res.status}`);
   const body = (await res.json()) as { hashed_token?: string; properties?: { hashed_token?: string } };
