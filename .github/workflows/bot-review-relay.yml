@@ -124,8 +124,10 @@ jobs:
       ))
     timeout-minutes: 15
     # Hosted by default — CodeRabbit floods this workflow; Fly queue starvation
-    # blocked Autofix Preflight (2026-08-04). Failover still honours CI_RUNNER_OVERRIDE.
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_OVERRIDE || '["ubuntu-latest"]') }}
+    # blocked Autofix Preflight (2026-08-04). ubuntu-slim keeps it hosted (single
+    # github-script step, no Docker) at a third of the ubuntu-latest price under
+    # the per-job minute floor. Failover still honours CI_RUNNER_OVERRIDE.
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_OVERRIDE || '["ubuntu-slim"]') }}
     steps:
       - name: Relay bot review comment
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
