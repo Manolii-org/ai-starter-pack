@@ -109,10 +109,12 @@ a fleet-aware caller). Labels registered by the fleet image are `self-hosted`
 + `fly` (no extra `linux` required).
 
 Keep Autofix control-plane jobs on `ubuntu-latest` (their Claude Code Action
-legs run up to ~20 min — past the ubuntu-slim 15-min cap). auto-merge /
-bot-review-relay control-plane jobs are short enough for `ubuntu-slim`
-(billing-floor sweep) — slim is a GitHub-hosted label, so the not-Fly
-invariant is preserved.
+legs run up to ~20 min — past the ubuntu-slim 15-min cap). Of the other
+control-plane lanes, only the seconds-long legs take `ubuntu-slim`
+(billing-floor sweep): `bot-review-relay` and the auto-merge `arm` leg.
+The bulk kill-switch revoker stays on `ubuntu-latest` — its 30-min timeout
+exceeds the slim cap; moving it would truncate bulk disables. Slim is a
+GitHub-hosted label, so the not-Fly invariant is preserved either way.
 Pack Autofix also enforces `max_successful_fixes` (default 1) and the dual-ownership
 XOR with master `auto-address-review.yml` — see `docs/autofix-cost-alarms.md` and
 `scripts/lint-autofix-xor.py`.
