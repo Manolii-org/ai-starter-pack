@@ -234,11 +234,25 @@ class ShadowTransportError(ShadowError):
     pass
 
 
+class _RejectRedirects(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect: it would forward the Authorization header."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(_RejectRedirects)
+
+
+def open_no_redirect(request: urllib.request.Request, timeout: float) -> Any:
+    return _NO_REDIRECT_OPENER.open(request, timeout=timeout)
+
+
 def evaluate(
     state: str,
     env: Mapping[str, str],
     *,
-    opener: Callable[..., Any] = urllib.request.urlopen,
+    opener: Callable[..., Any] = open_no_redirect,
 ) -> dict[str, float]:
     base = (env.get("TYPESAFE_BASE_URL", "") or DEFAULT_BASE_URL).strip().rstrip("/")
     if not base.startswith("https://"):
@@ -299,7 +313,7 @@ def run_shadow(
     pr_number: int,
     head_sha: str,
     env: Mapping[str, str],
-    opener: Callable[..., Any] = urllib.request.urlopen,
+    opener: Callable[..., Any] = open_no_redirect,
     clock: Callable[[], float] = time.monotonic,
 ) -> tuple[str | None, list[dict[str, Any]]]:
     reason = refusal_reason(env)

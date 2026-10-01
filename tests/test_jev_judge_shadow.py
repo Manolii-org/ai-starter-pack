@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import http.server
 import importlib.util
 import io
 import json
+import os
+import subprocess
+import threading
 import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -145,8 +150,7 @@ def test_classification_and_payload_free_receipts(tmp_path):
     blob = json.dumps(receipts)
     assert SECRET_MESSAGE not in blob and KEY not in blob and "src.py" not in blob
     assert all(
-        r["pinned_model"] == "jev-1.13.0" and r["entity"] == "example"
-        for r in receipts
+        r["pinned_model"] == "jev-1.13.0" and r["entity"] == "example" for r in receipts
     )
     state = json.loads(sent[0].data)["state"]
     assert "hunter2hunter2" not in state and "[REDACTED]" in state
@@ -256,11 +260,16 @@ def test_workflow_shadow_is_opt_in_fail_open_and_uses_pack_copy():
     checkout = steps["Check out pack Jev shadow runner"]
     run = steps["Jev judge shadow (observe-only)"]
     upload = steps["Upload Jev judge shadow receipts"]
-    assert "inputs.jev_judge_shadow == 'on'" in checkout["if"]
-    assert "vars.JEV_ENABLED_JUDGE_FINDING_SHADOW == 'true'" in checkout["if"]
     assert checkout["with"]["repository"] == "Manolii-org/ai-starter-pack"
     assert checkout["with"]["persist-credentials"] is False
-    assert all(s.get("continue-on-error") is True for s in (checkout, run, upload))
+    gate = steps["Gate Jev shadow pack ref"]
+    assert "inputs.jev_judge_shadow == 'on'" in gate["if"]
+    assert "vars.JEV_ENABLED_JUDGE_FINDING_SHADOW == 'true'" in gate["if"]
+    assert "steps.jev_gate.outputs.ok == 'true'" in checkout["if"]
+    assert checkout["with"]["ref"] == "refs/tags/${{ inputs.pack_ref }}"
+    assert all(
+        s.get("continue-on-error") is True for s in (gate, checkout, run, upload)
+    )
     assert ".pack-jev/scripts/jev_judge_shadow.py" in run["run"]
     key_expr = run["env"]["TYPESAFE_API_KEY"]
     assert "inputs.jev_judge_shadow == 'on'" in key_expr
@@ -271,3 +280,67 @@ def test_workflow_shadow_defaults_off():
     inputs = yaml.safe_load(REUSABLE.read_text())[True]["workflow_call"]["inputs"]
     assert inputs["jev_judge_shadow"]["default"] == "off"
     assert inputs["jev_entity"]["default"] == ""
+
+
+@pytest.mark.parametrize(
+    ("ref", "ok"),
+    [
+        ("v1", True),
+        ("v1.4", True),
+        ("v1.4.2", True),
+        ("main", False),
+        ("refs/pull/7/head", False),
+        ("v1.4.2-rc1", False),
+        ("v1\nok=true", False),
+        ("3c0dd6704bfa9d08ccd01c0d803e6e2b9dd97b21", False),
+        ("", False),
+    ],
+)
+def test_workflow_gate_accepts_only_release_tags(tmp_path, ref, ok):
+    gate = _judge_steps()["Gate Jev shadow pack ref"]
+    out = tmp_path / "out"
+    out.write_text("")
+    subprocess.run(
+        ["bash", "-e", "-c", gate["run"]],
+        env={"PACK_REF": ref, "GITHUB_OUTPUT": str(out), "PATH": os.environ["PATH"]},
+        check=True,
+        capture_output=True,
+    )
+    assert ("ok=true" in out.read_text()) is ok
+
+
+def test_no_redirect_opener_never_forwards_key():
+    hits: list[str] = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            hits.append(self.path)
+            if self.path == "/start":
+                self.send_response(302)
+                self.send_header("Location", "/leak")
+            else:
+                self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.handle_request, daemon=True)
+    thread.start()
+    try:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{server.server_port}/start",
+            data=b"{}",
+            headers={"Authorization": "Bearer sentinel"},
+            method="POST",
+        )
+        with pytest.raises(urllib.error.HTTPError) as caught:
+            shadow.open_no_redirect(request, timeout=5)
+        caught.value.close()
+        assert caught.value.code == 302
+    finally:
+        thread.join(5)
+        server.server_close()
+    assert hits == ["/start"]

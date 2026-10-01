@@ -830,14 +830,30 @@ jobs:
       # Runs the pack's own copy of the shadow at pack_ref (never a PR-modifiable
       # caller copy, since this step holds the TypeSafe key). Fail-open: it
       # cannot change Judge's review or this job's result.
+      # The checkout holds no secret, but the next step runs what it fetched
+      # with the key, so only maintainer-created release tags are accepted
+      # (never a branch, SHA or PR ref a contributor could point it at).
+      - name: Gate Jev shadow pack ref
+        id: jev_gate
+        if: ${{ !cancelled() && inputs.jev_judge_shadow == 'on' && vars.JEV_ENABLED_JUDGE_FINDING_SHADOW == 'true' }}
+        continue-on-error: true
+        env:
+          PACK_REF: ${{ inputs.pack_ref }}
+        run: |
+          if [[ "$PACK_REF" =~ ^v[0-9]+(\.[0-9]+){0,2}$ ]]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Jev shadow skipped: pack_ref is not a release tag (vN, vN.N or vN.N.N)."
+          fi
+
       - name: Check out pack Jev shadow runner
         id: jev_checkout
-        if: ${{ !cancelled() && inputs.jev_judge_shadow == 'on' && vars.JEV_ENABLED_JUDGE_FINDING_SHADOW == 'true' }}
+        if: ${{ !cancelled() && steps.jev_gate.outputs.ok == 'true' }}
         continue-on-error: true
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           repository: Manolii-org/ai-starter-pack
-          ref: ${{ inputs.pack_ref }}
+          ref: refs/tags/${{ inputs.pack_ref }}
           path: .pack-jev
           persist-credentials: false
           sparse-checkout: scripts/jev_judge_shadow.py

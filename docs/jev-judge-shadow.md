@@ -14,8 +14,10 @@ stay authoritative.
 After `Run judge`, the `judge` job:
 
 1. Sparse-checks out the pack's own `scripts/jev_judge_shadow.py` at
-   `pack_ref`. Callers can't substitute their own copy, because this step
-   holds the TypeSafe key.
+   `refs/tags/<pack_ref>`. Callers can't substitute their own copy, because
+   the next step runs it with the TypeSafe key. `pack_ref` must be a release
+   tag (`vN`, `vN.N` or `vN.N.N`); a branch, SHA or PR ref skips the shadow.
+   The runner refuses HTTP redirects so the key is never forwarded.
 2. Reads the candidates and Judge's decision log (`.ai/judge-log/`).
 3. Sends one System One request per judged finding (cap: 25 findings,
    60 s overall). Each request carries the finding, its fix, its location,
