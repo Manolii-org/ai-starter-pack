@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Security
+
+- **Jev judge shadow hardening**: the secret-bearing runner checkout now only
+  accepts a release-tag `pack_ref` (`vN`, `vN.N`, `vN.N.N`) and checks out
+  `refs/tags/<pack_ref>`, so a caller can't point it at contributor-controlled
+  code; any other ref skips the shadow. The runner also refuses HTTP redirects
+  so the TypeSafe `Authorization` header is never forwarded.
+
 ### Added
 
 - **Jev judge shadow (opt-in, observe-only)**: `pr-assessment-reusable` gains
