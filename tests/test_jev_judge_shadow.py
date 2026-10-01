@@ -29,10 +29,10 @@ KEY = "test-key-value-not-real"
 def _env(**over: str) -> dict[str, str]:
     env = {
         "JEV_ENABLED_JUDGE_FINDING_SHADOW": "1",
-        "JEV_SHADOW_ENTITY": "impaktful",
+        "JEV_SHADOW_ENTITY": "example",
         "TYPESAFE_API_KEY": KEY,
-        "GITHUB_REPOSITORY_OWNER": "Impaktful-Platform",
-        "GITHUB_REPOSITORY": "Impaktful-Platform/impaktful_3.0",
+        "GITHUB_REPOSITORY_OWNER": "example-org",
+        "GITHUB_REPOSITORY": "example-org/example-repo",
     }
     env.update(over)
     return env
@@ -145,7 +145,7 @@ def test_classification_and_payload_free_receipts(tmp_path):
     blob = json.dumps(receipts)
     assert SECRET_MESSAGE not in blob and KEY not in blob and "src.py" not in blob
     assert all(
-        r["pinned_model"] == "jev-1.13.0" and r["entity"] == "impaktful"
+        r["pinned_model"] == "jev-1.13.0" and r["entity"] == "example"
         for r in receipts
     )
     state = json.loads(sent[0].data)["state"]
