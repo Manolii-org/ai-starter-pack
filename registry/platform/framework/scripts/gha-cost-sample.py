@@ -185,8 +185,17 @@ def list_push_events(client: Client, repo: str, since: str):
     while page <= 10:
         # use_cache=False: the events feed is a sliding window — a cached page
         # from a previous sampler run would hide newer pushes and undercount.
-        batch = client.get(f"{API}/repos/{repo}/events?per_page=100&page={page}",
-                           cache_key=f"events-{repo}-{page}", use_cache=False)
+        try:
+            batch = client.get(f"{API}/repos/{repo}/events?per_page=100&page={page}",
+                               cache_key=f"events-{repo}-{page}", use_cache=False)
+        except RuntimeError as e:
+            # GitHub's events feed 422s past its ~300-event pagination cap on
+            # busy repos — degrade to a truncated push census rather than
+            # crashing the whole repo enumeration.
+            if "HTTP 422" in str(e):
+                log(f"  WARNING: {repo}: push-events feed refused page {page} (pagination cap); pushes_by_day undercounts")
+                return events, True
+            raise
         events.extend(e for e in batch if e.get("type") == "PushEvent")
         if batch:
             oldest_seen = (batch[-1].get("created_at") or "")[:10]
