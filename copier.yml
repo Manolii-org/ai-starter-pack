@@ -152,6 +152,10 @@ _exclude:
   - .brand/**
   - scripts/render-pack.py
   - scripts/build-plugin.py
+  # Pack-only: the reusable workflow checks it out from the pack at pack_ref
+  # (never a caller copy, since it holds the TypeSafe key).
+  - scripts/jev_judge_shadow.py
+  - tests/test_jev_judge_shadow.py
   # Template-repo-only test (needs copier.yml + .brand; also carries brand
   # literals in assertions that would trip the unbranded brand-leak scan)
   - tests/test_copier_render.py
