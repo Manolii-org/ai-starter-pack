@@ -411,6 +411,15 @@ _PW_COUNT_RX = re.compile(
 )
 _PW_RETRY_RX = re.compile(r"^\s+Retry #\d+\s*─{3,}", re.M)
 _PW_TITLE_RX = re.compile(r"^(?:\[(?P<project>[^\]]+)\] › )?(?P<file>[^›:]+?)(?::\d+:\d+)? › (?P<rest>.+)$")
+_GH_ANNOTATION_RX = re.compile(r"^::(?:error|notice)(?: .*?)?::(.*)$", re.M)
+
+
+def _decode_github_annotations(body: str) -> str:
+    """Join `::error` / `::notice` workflow-command messages, %-decoded."""
+    return "\n".join(
+        m.group(1).replace("%0D", "\r").replace("%0A", "\n").replace("%25", "%")
+        for m in _GH_ANNOTATION_RX.finditer(body)
+    )
 
 
 def parse_playwright_text_output(text: str) -> list[dict]:
@@ -420,11 +429,18 @@ def parse_playwright_text_output(text: str) -> list[dict]:
     blocks every built-in terminal reporter prints, the final attempt of
     each block (after the last `Retry #N`), and the end-of-run
     `N failed` / `N flaky` lists so flaky tests are not counted as failures.
+    When only the `github` reporter's `::error` / `::notice` annotations
+    survive, their decoded messages are parsed the same way (the last
+    annotation per test is its final attempt).
     """
     body = strip_ansi(text)
     headers = list(_PW_BLOCK_RX.finditer(body))
     if not headers:
-        return []
+        decoded = _decode_github_annotations(body)
+        if not decoded or not _PW_BLOCK_RX.search(decoded):
+            return []
+        body = decoded
+        headers = list(_PW_BLOCK_RX.finditer(body))
     counts = list(_PW_COUNT_RX.finditer(body))
     failed_titles: Optional[set[str]] = None
     if counts:
@@ -437,7 +453,7 @@ def parse_playwright_text_output(text: str) -> list[dict]:
                 title = re.sub(r"\s*─+.*$", "", line).strip()
                 if title:
                     failed_titles.add(title)
-    out: list[dict] = []
+    out: dict[str, dict] = {}
     summary_start = counts[0].start() if counts else len(body)
     for i, m in enumerate(headers):
         title = m.group(2).strip()
@@ -451,7 +467,7 @@ def parse_playwright_text_output(text: str) -> list[dict]:
         project = (tm.group("project") or "") if tm else ""
         file = tm.group("file").strip() if tm else ""
         setup = is_setup_location(project=project, file=file)
-        out.append({
+        out[title] = {
             "title": tm.group("rest").strip() if tm else title,
             "file": file,
             "project": project,
@@ -459,5 +475,5 @@ def parse_playwright_text_output(text: str) -> list[dict]:
             "setup": setup,
             "class": classify_test_failure_text(final, setup=setup),
             "message": final.strip(),
-        })
-    return out
+        }
+    return list(out.values())

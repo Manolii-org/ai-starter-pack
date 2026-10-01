@@ -1,6 +1,7 @@
 """Unit tests for scripts/lib/failure_class.py — classifier priority & fix #7."""
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -316,6 +317,38 @@ def test_text_output_without_summary_counts_every_block():
     head = _LIST_OUTPUT.split("  2 failed")[0]
     assert len(parse_playwright_text_output(head)) == 3
     assert parse_playwright_text_output("no failures here") == []
+
+
+def _as_github_annotations(output: str) -> str:
+    def enc(msg: str) -> str:
+        return msg.replace("%", "%25").replace("\n", "%0A")
+
+    blocks = re.split(r"(?m)^(?=  \d+\) )|^(?=  \d+ failed)", output.strip("\n"))
+    lines = []
+    for block in filter(None, blocks):
+        if re.match(r"  \d+ failed", block):
+            lines.append("::notice title=Playwright Run Summary::" + enc(block))
+            continue
+        title = block.splitlines()[0]
+        for attempt in re.split(r"(?m)^(?=\s+Retry #\d+)", block):
+            body = attempt if attempt.startswith("  ") and ")" in attempt[:6] else title + "\n" + attempt
+            lines.append(f"::error file=x.spec.ts,title={title.strip()},line=2,col=1::" + enc(body))
+    return "\n".join(lines) + "\n"
+
+
+def test_text_output_github_annotations_only():
+    annotated = _as_github_annotations(_LIST_OUTPUT)
+    assert not re.search(r"(?m)^  \d+\) ", annotated)
+    rows = parse_playwright_text_output(annotated)
+    assert [(r["project"], r["title"], r["class"]) for r in rows] == [
+        ("chromium", "asserts", "product"),
+        ("setup", "sign in", "environment"),
+    ]
+
+
+def test_text_output_github_reporter_mixed_stdout_not_double_counted():
+    mixed = _LIST_OUTPUT + _as_github_annotations(_LIST_OUTPUT)
+    assert len(parse_playwright_text_output(mixed)) == 2
 
 
 def test_missing_browser_binary_is_environment():
