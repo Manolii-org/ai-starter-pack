@@ -26,9 +26,12 @@ on:
       runs_on: { type: string, default: ubuntu-latest }
       pack_ref: { type: string, default: v1, description: 'Ref of Manolii-org/ai-starter-pack to hydrate missing runtime files from. Defaults to the moving major alias; callers on an immutable reusable pin should pass the same tag. Fetched only when the caller is missing at least one file.' }
       trusted_sync_author_id: { type: number, default: 215220684, description: 'GitHub numeric user id allowed to skip assessment on automated/sync-* PRs (mechanical sync bot). Set 0 to disable the skip entirely.' }
+      jev_judge_shadow: { type: string, default: 'off', description: "Observe-only Jev (TypeSafe) shadow of the Judge's four gates. Only the literal 'on' enables it, and the repo variable JEV_ENABLED_JUDGE_FINDING_SHADOW must also be 'true' (any other value, including '0', is the kill switch). Never changes the verdict. See docs/jev-judge-shadow.md." }
+      jev_entity: { type: string, default: '', description: "Billing entity that owns JEV_TYPESAFE_API_KEY (e.g. manolii, buro, impaktful). Required when jev_judge_shadow is 'on'; recorded in receipts." }
     secrets:
       ANTHROPIC_API_KEY: { required: false, description: 'Required when provider_mode=anthropic.' }
       LITELLM_MASTER_KEY: { required: false, description: 'Required when provider_mode=proxy.' }
+      JEV_TYPESAFE_API_KEY: { required: false, description: "Entity-scoped TypeSafe key for jev_judge_shadow (e.g. TYPESAFE_API_KEY_IMPAKTFUL). Never a shared or cross-entity key." }
 
 
 permissions:
@@ -822,3 +825,48 @@ jobs:
             --pr-number "$PR_NUMBER" \
             --repo "$REPO" \
             --sha "${{ github.event.pull_request.head.sha }}"
+
+      # ── Jev judge shadow (observe-only, opt-in) ─────────────────────────
+      # Runs the pack's own copy of the shadow at pack_ref (never a PR-modifiable
+      # caller copy, since this step holds the TypeSafe key). Fail-open: it
+      # cannot change Judge's review or this job's result.
+      - name: Check out pack Jev shadow runner
+        id: jev_checkout
+        if: ${{ !cancelled() && inputs.jev_judge_shadow == 'on' && vars.JEV_ENABLED_JUDGE_FINDING_SHADOW == 'true' }}
+        continue-on-error: true
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: Manolii-org/ai-starter-pack
+          ref: ${{ inputs.pack_ref }}
+          path: .pack-jev
+          persist-credentials: false
+          sparse-checkout: scripts/jev_judge_shadow.py
+          sparse-checkout-cone-mode: false
+
+      - name: Jev judge shadow (observe-only)
+        if: ${{ !cancelled() && steps.jev_checkout.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 3
+        env:
+          JEV_ENABLED_JUDGE_FINDING_SHADOW: ${{ vars.JEV_ENABLED_JUDGE_FINDING_SHADOW == 'true' && '1' || '0' }}
+          JEV_SHADOW_ENTITY: ${{ inputs.jev_entity }}
+          TYPESAFE_API_KEY: ${{ inputs.jev_judge_shadow == 'on' && vars.JEV_ENABLED_JUDGE_FINDING_SHADOW == 'true' && secrets.JEV_TYPESAFE_API_KEY || '' }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 .pack-jev/scripts/jev_judge_shadow.py \
+            --candidates-dir .ai/candidates/ \
+            --judge-log-dir .ai/judge-log/ \
+            --pr-number "$PR_NUMBER" \
+            --sha "$HEAD_SHA" \
+            --output judge-jev-shadow.jsonl || true
+          rm -rf .pack-jev
+
+      - name: Upload Jev judge shadow receipts
+        if: ${{ !cancelled() && steps.jev_checkout.outcome == 'success' && hashFiles('judge-jev-shadow.jsonl') != '' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: judge-jev-shadow
+          path: judge-jev-shadow.jsonl
+          retention-days: 14

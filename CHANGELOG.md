@@ -4,6 +4,16 @@
 
 ### Added
 
+- **Jev judge shadow (opt-in, observe-only)**: `pr-assessment-reusable` gains
+  the `jev_judge_shadow` (`'off'`/`'on'`) and `jev_entity` inputs plus an optional
+  entity-scoped `JEV_TYPESAFE_API_KEY`.
+  - When the caller passes `'on'` and the repo variable
+    `JEV_ENABLED_JUDGE_FINDING_SHADOW` is `'true'`, the Judge job re-asks its
+    four gates of pinned `jev-1.13.0`.
+  - It uploads payload-free `judge-jev-shadow` receipts.
+  - It never changes the verdict, and it is fail-open.
+  - It is refused under `CLIENT_AI_POLICY` and for the `cpdcheck` owner.
+  - See `docs/jev-judge-shadow.md`.
 - **merge danger on PR assessment** — pr-classifier now emits optional
   `door` (`one-way`/`two-way`), `blast_radius` (`small`/`medium`/`large`),
   and `danger_reason` fields; the judge renders them as a `**Merge danger:**`
