@@ -28,6 +28,15 @@ name: E2E Playwright Gate (Reusable)
 # are absent). `test_env` is for NON-secret env only (PLAYWRIGHT_BASE_URL,
 # feature flags) — dotenv-style KEY=VALUE lines merged into the job env.
 #
+# Failure classification (advisory, v1.20.0+): after the run, the pack's
+# classify-playwright-failures action (checked out at `pack_ref`) tags
+# the run product / test-defect / environment / external-dependency /
+# unclassified from any JSON report under `classify_results`, else from the
+# captured reporter stdout. It writes a step-summary table and
+# test-results/test-failure-class.json and exposes `test_failure_class`,
+# `autofix_eligible`, `retryable` workflow outputs. It never changes the
+# job conclusion; gate on the job as before.
+#
 # Security: caller-controlled strings reach the shell as argv words via
 # arrays/expansion (never re-parsed as shell source); secrets belong in
 # `secrets:` — never in playwright_args_json or test_env.
@@ -114,6 +123,34 @@ on:
           Job-level timeout ceiling; must exceed timeout_minutes by >=60m of
           headroom for checkout/install/browser-install/artifact upload
           (GitHub expressions cannot compute sums, so callers raise both).
+      pack_ref:
+        type: string
+        required: false
+        default: v1
+        description: >-
+          Ref of Manolii-org/ai-starter-pack to load the failure classifier
+          from. Callers on an immutable pin should pass the same tag — the
+          pack cannot discover its own ref.
+      classify_results:
+        type: string
+        required: false
+        default: "test-results/"
+        description: >-
+          Newline-separated Playwright JSON report files/dirs (relative to
+          `workdir`) for the advisory failure classifier. When none is found
+          the classifier falls back to the run's captured stdout.
+    outputs:
+      test_failure_class:
+        description: >-
+          Advisory run class: none | product | test-defect | environment |
+          external-dependency | unclassified (scripts/lib/failure_class.py).
+        value: ${{ jobs.e2e.outputs.test_failure_class }}
+      autofix_eligible:
+        description: "'true' when the class is product or test-defect."
+        value: ${{ jobs.e2e.outputs.autofix_eligible }}
+      retryable:
+        description: "'true' when the class is external-dependency."
+        value: ${{ jobs.e2e.outputs.retryable }}
     secrets:
       E2E_TEST_USER_EMAIL:
         required: false
@@ -125,6 +162,10 @@ on:
 jobs:
   e2e:
     runs-on: ${{ inputs.runs_on }}
+    outputs:
+      test_failure_class: ${{ steps.classify.outputs.test_failure_class }}
+      autofix_eligible: ${{ steps.classify.outputs.autofix_eligible }}
+      retryable: ${{ steps.classify.outputs.retryable }}
     env:
       # pass caller-controlled values through env, not shell source — values
       # are never re-parsed for shell metacharacters
@@ -220,8 +261,60 @@ jobs:
               m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", line)
               if m:
                   env[m.group(1)] = m.group(2)
-          subprocess.run(["npx", "playwright", "test", *args], env=env, check=True)
+          log_path = os.path.join(os.environ["RUNNER_TEMP"], "playwright-output.log")
+          with open(log_path, "w", encoding="utf-8") as log:
+              proc = subprocess.Popen(["npx", "playwright", "test", *args], env=env,
+                                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                      text=True, errors="replace")
+              for line in proc.stdout:
+                  sys.stdout.write(line)
+                  log.write(line)
+          sys.exit(proc.wait())
           '
+
+      # Advisory: never changes the job conclusion (continue-on-error + the
+      # action itself exits 0). A pack_ref without the action just skips it.
+      - name: Checkout pack failure classifier
+        if: ${{ always() }}
+        continue-on-error: true
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: Manolii-org/ai-starter-pack
+          ref: ${{ inputs.pack_ref }}
+          path: .manolii-pack-classifier
+          persist-credentials: false
+          sparse-checkout: |
+            .github/actions/classify-playwright-failures
+            scripts/lib/failure_class.py
+          sparse-checkout-cone-mode: false
+
+      - name: Resolve classifier inputs
+        if: ${{ always() }}
+        id: classify_inputs
+        continue-on-error: true
+        shell: bash
+        env:
+          CLASSIFY_RESULTS_IN: ${{ inputs.classify_results }}
+        run: |
+          {
+            echo 'results<<EOF'
+            while IFS= read -r raw; do
+              [ -n "$raw" ] || continue
+              case "$raw" in /*) echo "$raw" ;; *) echo "$WORKDIR/$raw" ;; esac
+            done <<< "$CLASSIFY_RESULTS_IN"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Classify Playwright failures
+        if: ${{ always() }}
+        id: classify
+        continue-on-error: true
+        uses: ./.manolii-pack-classifier/.github/actions/classify-playwright-failures
+        with:
+          results: ${{ steps.classify_inputs.outputs.results }}
+          test-logs: ${{ runner.temp }}/playwright-output.log
+          job-status: ${{ job.status }}
+          json-path: ${{ inputs.workdir }}/test-results/test-failure-class.json
 
       - name: Upload e2e artifacts
         if: ${{ always() }}

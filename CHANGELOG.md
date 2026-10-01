@@ -12,6 +12,14 @@
 
 ### Added
 
+- **Playwright failure classification (advisory)**: `failure_class.py` gains a
+  separate `test_failure_class` vocabulary — `product`, `test-defect`,
+  `environment`, `external-dependency`, `unclassified` (the last three shared
+  with the session taxonomy) — plus Playwright JSON-report and stdout
+  parsers. New composite action `classify-playwright-failures`, and
+  `e2e-playwright-reusable` now runs it after every suite and exposes
+  `test_failure_class` / `autofix_eligible` / `retryable` workflow outputs.
+  Never changes a job conclusion. See `REUSABLE-WORKFLOWS.md`.
 - **Jev judge shadow (opt-in, observe-only)**: `pr-assessment-reusable` gains
   the `jev_judge_shadow` (`'off'`/`'on'`) and `jev_entity` inputs plus an optional
   entity-scoped `JEV_TYPESAFE_API_KEY`.

@@ -1,0 +1,75 @@
+name: classify-playwright-failures
+description: >-
+  Advisory: classify a Playwright run's failures as product / test-defect /
+  environment / external-dependency / unclassified (the pack
+  test_failure_class vocabulary in scripts/lib/failure_class.py). Reads
+  JSON-reporter files under `results` plus optional pre-test logs, writes a
+  step-summary table, a JSON record and outputs. Never fails the job — wire
+  it with `if: always()` after the test step and keep the gate on the test
+  step itself.
+author: manolii
+inputs:
+  results:
+    description: >-
+      Newline-separated Playwright JSON report files or directories (scanned
+      recursively for *.json with a top-level `suites` array).
+    required: false
+    default: "test-results"
+  logs:
+    description: >-
+      Newline-separated plain-text log files from pre-test steps (health
+      checks, webServer start). Only environment / external-dependency
+      lines count.
+    required: false
+    default: ""
+  test-logs:
+    description: >-
+      Newline-separated files holding the Playwright run's own stdout
+      (list/line/dot/github reporter). Used only when no JSON report is
+      found under `results`.
+    required: false
+    default: ""
+  job-status:
+    description: Pass `${{ job.status }}`; a red job with no evidence reports `unclassified` instead of `none`.
+    required: false
+    default: ""
+  json-path:
+    description: Where to write the JSON record (empty = don't write).
+    required: false
+    default: ""
+  title:
+    description: Step-summary heading.
+    required: false
+    default: "Playwright failure classification"
+outputs:
+  test_failure_class:
+    description: "none | product | test-defect | environment | external-dependency | unclassified"
+    value: ${{ steps.classify.outputs.test_failure_class }}
+  autofix_eligible:
+    description: "true when the run class is product or test-defect"
+    value: ${{ steps.classify.outputs.autofix_eligible }}
+  retryable:
+    description: "true when the run class is external-dependency"
+    value: ${{ steps.classify.outputs.retryable }}
+  failed_tests:
+    description: Number of final (non-flaky) failures, including global-setup errors
+    value: ${{ steps.classify.outputs.failed_tests }}
+runs:
+  using: composite
+  steps:
+    - name: Classify Playwright failures
+      id: classify
+      shell: bash
+      env:
+        IN_RESULTS: ${{ inputs.results }}
+        IN_LOGS: ${{ inputs.logs }}
+        IN_TEST_LOGS: ${{ inputs.test-logs }}
+        IN_JOB_STATUS: ${{ inputs.job-status }}
+        IN_JSON: ${{ inputs.json-path }}
+        IN_TITLE: ${{ inputs.title }}
+      run: |
+        python3 "$GITHUB_ACTION_PATH/classify.py" \
+          --results "$IN_RESULTS" --log "$IN_LOGS" --test-log "$IN_TEST_LOGS" --job-status "$IN_JOB_STATUS" \
+          --json "$IN_JSON" --title "$IN_TITLE" \
+          --summary "$GITHUB_STEP_SUMMARY" --github-output "$GITHUB_OUTPUT" \
+          || echo "::warning::failure classification errored (advisory; job conclusion unchanged)"
