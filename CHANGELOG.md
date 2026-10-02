@@ -20,6 +20,12 @@
   `e2e-playwright-reusable` now runs it after every suite and exposes
   `test_failure_class` / `autofix_eligible` / `retryable` workflow outputs.
   Never changes a job conclusion. See `REUSABLE-WORKFLOWS.md`.
+- **`exploratory-bug-bash` skill (advisory)**: charter-driven AI exploratory
+  testing via pinned `tester-army/e2e` through LiteLLM, with planted-bug
+  calibration; a candidate counts only once a deterministic test reproduces
+  it. `fanout.sh` exits nonzero when any charter hits a harness error (exit
+  `>1`; `run.py` exits `2` on missing env) while exit `1` (candidate) stays
+  advisory; `BB_ACCOUNTS` must map every charter session.
 - **Jev judge shadow (opt-in, observe-only)**: `pr-assessment-reusable` gains
   the `jev_judge_shadow` (`'off'`/`'on'`) and `jev_entity` inputs plus an optional
   entity-scoped `JEV_TYPESAFE_API_KEY`.

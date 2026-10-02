@@ -67,6 +67,8 @@ repo (its pins conflict with app Playwright versions), then `npm ci`.
 | `BB_JUDGE_MODEL` | Default `candidate-luna-critic`. Keep actor ≠ judge. |
 | `BB_APP_URL` | Target base URL (default `http://localhost:3000`). |
 | `BB_APP_CONTEXT` | One paragraph: what the app is, what is stubbed locally, and what is **not** a bug. |
+| `BB_ACCOUNTS` | JSON map of session name → synthetic account email, e.g. `{"bb-alice":"alice@example.test"}`. Must cover every `Sign in as session <name>` in the charters file; `auth.setup.e2e.ts` creates sessions only for these entries (default `{}` creates none). |
+| `BB_SUPABASE_URL` / `BB_SUPABASE_SECRET_KEY` | Isolated stack's auth URL + key for the magic-link exchange in `auth.setup.e2e.ts` (Supabase example). |
 | `E2E_TELEMETRY_DISABLED=1` | Always (set by `run.py`). |
 
 Model changes go through the `assess-model` protocol; reuse existing routes.
@@ -92,6 +94,11 @@ charter is specific enough.
    Recall = planted bugs reported / planted. Below 50 % → fix charters or
    budgets before running real charters. Record recall in the report.
 3. **Explore** the unmodified build: `./fanout.sh charters.txt .e2e/out/real 4`.
+   `exits.txt` records each charter's exit code: `0` clean, `1` candidate
+   reported, anything else a harness error (missing env exits `2`) — rerun
+   those charters (same outdir; each rerun replaces that charter's code)
+   before triage. `fanout.sh` exits nonzero if any charter in the invocation
+   errored.
 4. **Triage** each candidate in `summary.md` into exactly one bucket:
    - `confirmed` — reproduced by a deterministic Playwright/unit test that fails
      on base and passes with the fix. Only this bucket is a bug.
