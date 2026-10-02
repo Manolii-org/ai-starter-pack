@@ -201,9 +201,9 @@ def _completed(r):
         return False
     if not isinstance(exits, dict):
         _die(f"invalid charter_exits on row at {when!r}: not an object")
-    extra = set(exits) - {"0", "1", "other"}
-    if extra:
-        _die(f"invalid charter_exits on row at {when!r}: unrecognized buckets {sorted(extra)!r}")
+    if set(exits) != {"0", "1", "other"}:
+        _die(f"invalid charter_exits on row at {when!r}: buckets must be exactly "
+             f"['0', '1', 'other'], got {sorted(exits)!r}")
     vals = {}
     for k in ("0", "1", "other"):
         v = exits.get(k, 0)
