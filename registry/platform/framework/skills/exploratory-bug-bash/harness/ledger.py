@@ -13,6 +13,11 @@ e2e/bug-bash/ledger/runs.jsonl): durable, reviewable, never only chat.
 
 `stop-rule` exits 10 when the last N kind=weekly rows all recorded zero
 confirmed bugs (lane should pause), 0 otherwise, 2 on usage/parse errors.
+
+A `kind=reset` row marks a charter/model change after a pause: stop-rule
+only counts weekly rows appended after the most recent reset row, so the
+resumed lane gets a fresh N-run window instead of inheriting the pre-change
+empties.
 """
 import argparse
 import json
@@ -88,7 +93,9 @@ def _rows(path):
 
 
 def cmd_stop_rule(ns):
-    weekly = [r for r in _rows(ns.ledger) if r.get("kind") == "weekly"]
+    rows = _rows(ns.ledger)
+    last_reset = max((i for i, r in enumerate(rows) if r.get("kind") == "reset"), default=-1)
+    weekly = [r for r in rows[last_reset + 1:] if r.get("kind") == "weekly"]
     tail = weekly[-ns.n:]
     if len(tail) < ns.n:
         print(f"stop-rule: only {len(tail)}/{ns.n} weekly runs recorded — lane stays ON")
@@ -107,7 +114,7 @@ def main():
 
     a = sub.add_parser("append", help="append one run row")
     a.add_argument("ledger")
-    a.add_argument("--kind", required=True, choices=("weekly", "calibration"))
+    a.add_argument("--kind", required=True, choices=("weekly", "calibration", "reset"))
     a.add_argument("--target", required=True)
     a.add_argument("--app-sha", default=None)
     a.add_argument("--run-at", default=None, help="UTC ISO timestamp; default now")

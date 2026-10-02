@@ -34,7 +34,7 @@ Each patch must be:
 ## Recall
 
 `recall = planted bugs the run reports as candidates / planted total`.
-Below 50% (and below 2/3 for a 3-patch set) → fix charters or budgets before
+Below 2/3 for every set size → fix charters or budgets before
 trusting real runs. Re-run calibration when the actor or judge model changes,
 when the `e2e` pin bumps, or after ~90 days — whichever is first.
 

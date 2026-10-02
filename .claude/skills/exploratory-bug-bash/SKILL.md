@@ -140,7 +140,9 @@ stack), the lane needs five committed artifacts beyond the harness:
 5. **Stop rule** — `harness/ledger.py stop-rule` exits `10` when the last 3
    weekly runs produced zero confirmed bugs; the lane pauses (trigger
    disabled, ledger note) until charters or models change. Three empty weeks
-   is the agreed cost ceiling.
+   is the agreed cost ceiling. After a charter/model change, append a
+   `kind=reset` row — the stop-rule window only counts weekly runs after the
+   latest reset, so the resumed lane gets a fresh 3-run window.
 
 ## Do not
 
