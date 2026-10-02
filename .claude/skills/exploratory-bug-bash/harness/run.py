@@ -10,7 +10,8 @@ env.setdefault("BB_LITELLM_URL", env.get("LITELLM_PROXY_URL", ""))
 env.setdefault("BB_LITELLM_KEY", env.get("LLM_API_KEY", ""))
 missing = [k for k in ("BB_LITELLM_URL", "BB_LITELLM_KEY") if not env.get(k)]
 if missing:
-    sys.exit(f"missing env: {', '.join(missing)}")
+    print(f"missing env: {', '.join(missing)}", file=sys.stderr)
+    sys.exit(2)
 env["E2E_TELEMETRY_DISABLED"] = "1"
 env.pop("CI", None)
 sys.exit(subprocess.call(["npx", "e2e", *sys.argv[1:]], env=env, cwd=Path(__file__).parent))
