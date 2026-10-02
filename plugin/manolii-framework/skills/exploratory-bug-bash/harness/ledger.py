@@ -259,6 +259,7 @@ def cmd_stop_rule(ns):
         return 0
     confirmed = []
     for r in tail:
+        _run_age_days(r, "weekly")  # dies on missing/unparseable/future run_at
         candidates = r.get("candidates")
         if candidates is None:
             candidates = {}
