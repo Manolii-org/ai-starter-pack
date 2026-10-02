@@ -77,6 +77,12 @@ def _parse_candidates(spec):
     return out
 
 
+def _nonempty_target(v):
+    if not v or not v.strip():
+        _die("--target must be a non-empty string")
+    return v.strip()
+
+
 def _parse_prs(spec):
     if not spec:
         return []
@@ -305,7 +311,7 @@ def main():
     a = sub.add_parser("append", help="append one run row")
     a.add_argument("ledger")
     a.add_argument("--kind", required=True, choices=("weekly", "calibration", "reset"))
-    a.add_argument("--target", required=True)
+    a.add_argument("--target", required=True, type=_nonempty_target)
     a.add_argument("--app-sha", default=None)
     a.add_argument("--run-at", default=None, help="UTC ISO timestamp; default now")
     a.add_argument("--charters", type=int, default=None)
@@ -326,13 +332,13 @@ def main():
 
     s = sub.add_parser("stop-rule", help="evaluate the pause rule")
     s.add_argument("ledger")
-    s.add_argument("--target", required=True, help="only weekly rows for this target count")
+    s.add_argument("--target", required=True, type=_nonempty_target, help="only weekly rows for this target count")
     s.add_argument("-n", type=int, default=3, help="consecutive empty weekly runs to pause on (default 3)")
     s.set_defaults(fn=cmd_stop_rule)
 
     c = sub.add_parser("calibration-check", help="gate real charters on the latest calibration recall")
     c.add_argument("ledger")
-    c.add_argument("--target", required=True, help="only calibration rows for this target authorize runs")
+    c.add_argument("--target", required=True, type=_nonempty_target, help="only calibration rows for this target authorize runs")
     c.add_argument("--expect-fingerprint", default=None,
                    help="required fingerprint on the latest calibration row; a row without one fails")
     c.set_defaults(fn=cmd_calibration_check)
