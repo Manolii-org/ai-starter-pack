@@ -101,9 +101,18 @@ def cmd_append(ns):
     charters = _int_or_none(ns.charters)
     if charters is not None and charters < 1:
         _die(f"--charters must be >= 1, got {charters}")
+    candidates = _parse_candidates(ns.candidates)
+    if ns.kind == "calibration":
+        total_candidates = sum(candidates.values())
+        if total_candidates < found:
+            _die(f"calibration row reports {found} planted bugs found but only "
+                 f"{total_candidates} total candidates — pass --candidates covering found")
     for label, v in (("--exit0", ns.exit0), ("--exit1", ns.exit1), ("--exit-other", ns.exit_other)):
         if not isinstance(v, int) or v < 0:
             _die(f"{label} must be a non-negative integer, got {v}")
+    for label, v in (("--model-calls", ns.model_calls), ("--tokens", ns.tokens), ("--wall-minutes", ns.wall_minutes)):
+        if v is not None and v < 0:
+            _die(f"{label} must be non-negative, got {v}")
     row = {
         "run_at": ns.run_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%MZ"),
         "kind": ns.kind,
@@ -115,7 +124,7 @@ def cmd_append(ns):
         "planted_found": found,
         "recall": (None if planted in (None, 0) or found is None
                    else round(found / planted, 3)),
-        "candidates": _parse_candidates(ns.candidates),
+        "candidates": candidates,
         "confirmed_prs": _parse_prs(ns.confirmed_prs),
         "fingerprint": (ns.fingerprint.strip() or None) if ns.fingerprint else None,
         "model_calls": _int_or_none(ns.model_calls),
