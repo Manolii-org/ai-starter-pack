@@ -225,17 +225,24 @@ def _completed(r):
 CALIBRATION_MAX_AGE_DAYS = 90
 
 
-def _run_age_days(r, label):
+def _run_ts(r, label):
+    """Parse the row's run_at as a UTC datetime (the run's execution time).
+    Dies on missing/malformed values — a row that cannot be placed on the
+    timeline cannot demonstrate window membership."""
     when = r.get("run_at")
     if not isinstance(when, str):
         _die(f"{label} row lacks a parseable run_at timestamp")
     try:
-        ts = datetime.strptime(when, "%Y-%m-%dT%H:%MZ").replace(tzinfo=timezone.utc)
+        return datetime.strptime(when, "%Y-%m-%dT%H:%MZ").replace(tzinfo=timezone.utc)
     except ValueError:
         _die(f"{label} row has unparseable run_at {when!r}")
+
+
+def _run_age_days(r, label):
+    ts = _run_ts(r, label)
     age = (datetime.now(timezone.utc) - ts).days
     if age < 0:
-        _die(f"{label} row at {when!r} is future-dated")
+        _die(f"{label} row at {r.get('run_at')!r} is future-dated")
     return age
 
 
@@ -253,9 +260,16 @@ def cmd_stop_rule(ns):
     # Excluded rows keep the lane ON, the safe direction.
     weekly = [r for r in rows[last_reset + 1:]
               if r.get("kind") == "weekly" and r.get("target") == ns.target and _completed(r)]
-    tail = weekly[-ns.n:]
+    # Window is by execution time, not append order, and one completed pass
+    # per ISO week counts once: extra completed rows in the same week are
+    # retries/dupes of that week's outcome (keep the latest).
+    by_week = {}
+    for r in weekly:
+        ts = _run_ts(r, "weekly")
+        by_week[(ts.isocalendar().year, ts.isocalendar().week)] = (ts, r)
+    tail = [r for ts, r in sorted(by_week.values())[-ns.n:]]
     if len(tail) < ns.n:
-        print(f"stop-rule: only {len(tail)}/{ns.n} weekly runs recorded for target {ns.target} — lane stays ON")
+        print(f"stop-rule: only {len(tail)}/{ns.n} distinct completed weeks recorded for target {ns.target} — lane stays ON")
         return 0
     confirmed = []
     for r in tail:
