@@ -119,8 +119,17 @@ def cmd_append(ns):
     for label, v in (("--model-calls", ns.model_calls), ("--tokens", ns.tokens), ("--wall-minutes", ns.wall_minutes)):
         if v is not None and v < 0:
             _die(f"{label} must be non-negative, got {v}")
+    run_at = None
+    if ns.run_at:
+        try:
+            dt = datetime.fromisoformat(ns.run_at.replace("Z", "+00:00"))
+        except ValueError:
+            _die(f"--run-at {ns.run_at!r} is not a parseable ISO 8601 timestamp")
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        run_at = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
     row = {
-        "run_at": ns.run_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%MZ"),
+        "run_at": run_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%MZ"),
         "kind": ns.kind,
         "target": ns.target,
         "app_sha": ns.app_sha,

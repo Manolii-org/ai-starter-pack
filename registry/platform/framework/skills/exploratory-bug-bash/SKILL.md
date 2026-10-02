@@ -138,7 +138,9 @@ stack), the lane needs five committed artifacts beyond the harness:
 4. **A scheduled runner** — e.g. a weekly Devin automation or CI
    `workflow_dispatch`-capable schedule that brings the isolated stack up,
    runs calibration, then runs
-   `harness/ledger.py calibration-check <runs.jsonl> --target <t>` — only
+   `harness/ledger.py calibration-check <runs.jsonl> --target <t>
+   --expect-fingerprint <fp>` (compute `<fp>` from the recipe in
+   `harness/calibration.md`) — only
    when it exits 0 does the run proceed to real charters; exit 11 pauses
    them (fix charters first). Then triage, append the ledger row, and post
    the summary. Advisory end-to-end: `continue-on-error` semantics, never a
