@@ -47,7 +47,7 @@ before the reset stays excluded.
 import argparse
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 BUCKETS = ("confirmed", "fixture", "design_intent", "judge_error", "unconfirmed")
 
@@ -142,6 +142,11 @@ def cmd_append(ns):
             _die(f"--run-at {ns.run_at!r} is not a parseable ISO 8601 timestamp")
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
+        # 60s tolerance for cross-machine clock skew; a genuinely future
+        # run_at would poison every timestamp-ordered read below and the
+        # append-only ledger cannot retract it.
+        if dt.astimezone(timezone.utc) > datetime.now(timezone.utc) + timedelta(seconds=60):
+            _die(f"--run-at {ns.run_at!r} is in the future")
         run_at = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
     row = {
         "run_at": run_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%MZ"),
