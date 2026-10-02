@@ -16,8 +16,9 @@ charter reached a verdict) all recorded zero confirmed bugs (lane should
 pause), 0 otherwise, 2 on usage/parse errors.
 
 `calibration-check` gates real charters on the calibration run: exits 0 when
-the latest calibration row since the last reset has recall >= 2/3, 11 when
-uncalibrated (no calibration row) or recall is below threshold, 2 on
+the latest calibration row since the last reset is fully charter-accounted,
+has >= 3 planted bugs, is no older than ~90 days, and scored recall >= 2/3;
+11 when uncalibrated/incomplete/stale or recall is below threshold; 2 on
 usage/parse errors. Schedulers must run it before exploring the unmodified
 build so a failing calibration cannot quietly spend the weekly budget.
 
@@ -128,45 +129,60 @@ def _rows(path):
     return rows
 
 
+def _completed(r):
+    """True when every charter of the row reached a verdict: exit0+exit1 ==
+    charters and zero `other` exits. Rows recorded without full charter
+    accounting (aggregation failure, partial coverage, missing/invalid
+    fields) return False — they cannot demonstrate coverage."""
+    when = r.get("run_at")
+    exits = r.get("charter_exits")
+    if exits is None:
+        return False
+    if not isinstance(exits, dict):
+        _die(f"invalid charter_exits on row at {when!r}: not an object")
+    vals = {}
+    for k in ("0", "1", "other"):
+        v = exits.get(k, 0)
+        if isinstance(v, (bool, float)):
+            _die(f"invalid charter_exits[{k!r}] {v!r} on row at {when!r}")
+        try:
+            v = int(v)
+        except (TypeError, ValueError):
+            _die(f"invalid charter_exits[{k!r}] {v!r} on row at {when!r}")
+        if v < 0:
+            _die(f"negative charter_exits[{k!r}] on row at {when!r}")
+        vals[k] = v
+    done = vals["0"] + vals["1"]
+    if done == 0 or vals["other"]:
+        return False
+    charters = r.get("charters")
+    if charters is None:
+        return False
+    if isinstance(charters, bool) or not isinstance(charters, int) or charters < 1:
+        _die(f"invalid charters {charters!r} on row at {when!r}")
+    return done == charters
+
+
+CALIBRATION_MAX_AGE_DAYS = 90
+
+
+def _run_age_days(r, label):
+    when = r.get("run_at")
+    if not isinstance(when, str):
+        _die(f"{label} row lacks a parseable run_at timestamp")
+    try:
+        ts = datetime.strptime(when, "%Y-%m-%dT%H:%MZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        _die(f"{label} row has unparseable run_at {when!r}")
+    return (datetime.now(timezone.utc) - ts).days
+
+
 def cmd_stop_rule(ns):
     if ns.n < 1:
         _die("stop-rule requires -n >= 1")
     rows = _rows(ns.ledger)
     last_reset = max((i for i, r in enumerate(rows) if r.get("kind") == "reset"), default=-1)
-    # A run counts toward the pause window only when every charter reached a
-    # verdict: exit0+exit1 == charters and zero `other` exits. Rows recorded
-    # without full charter accounting (aggregation failure, partial coverage,
-    # missing/invalid fields) are excluded — they cannot demonstrate coverage,
-    # and excluding them keeps the lane ON, the safe direction.
-    def _completed(r):
-        when = r.get("run_at")
-        exits = r.get("charter_exits")
-        if exits is None:
-            return False
-        if not isinstance(exits, dict):
-            _die(f"invalid charter_exits on weekly row at {when!r}: not an object")
-        vals = {}
-        for k in ("0", "1", "other"):
-            v = exits.get(k, 0)
-            if isinstance(v, (bool, float)):
-                _die(f"invalid charter_exits[{k!r}] {v!r} on weekly row at {when!r}")
-            try:
-                v = int(v)
-            except (TypeError, ValueError):
-                _die(f"invalid charter_exits[{k!r}] {v!r} on weekly row at {when!r}")
-            if v < 0:
-                _die(f"negative charter_exits[{k!r}] on weekly row at {when!r}")
-            vals[k] = v
-        done = vals["0"] + vals["1"]
-        if done == 0 or vals["other"]:
-            return False
-        charters = r.get("charters")
-        if charters is None:
-            return False
-        if isinstance(charters, bool) or not isinstance(charters, int) or charters < 1:
-            _die(f"invalid charters {charters!r} on weekly row at {when!r}")
-        return done == charters
-
+    # Excluded rows keep the lane ON, the safe direction.
     weekly = [r for r in rows[last_reset + 1:]
               if r.get("kind") == "weekly" and _completed(r)]
     tail = weekly[-ns.n:]
@@ -209,6 +225,13 @@ def cmd_calibration_check(ns):
         return 11
     if found > planted:
         _die(f"calibration row at {when!r} has found {found} > planted {planted}")
+    if not _completed(r):
+        print("calibration-check: calibration run did not complete every charter — do NOT run real charters")
+        return 11
+    age = _run_age_days(r, "calibration")
+    if age > CALIBRATION_MAX_AGE_DAYS:
+        print(f"calibration-check: calibration is {age}d old (> {CALIBRATION_MAX_AGE_DAYS}d) — recalibrate first")
+        return 11
     # Integer form of found/planted >= 2/3 to avoid float rounding at the edge.
     if found * 3 >= planted * 2:
         print(f"calibration-check: recall {found}/{planted} >= 2/3 — real charters may run")
