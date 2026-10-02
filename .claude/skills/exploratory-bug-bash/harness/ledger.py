@@ -263,6 +263,10 @@ def _reset_ts(rows, target):
     for r in rows:
         if r.get("kind") == "reset" and r.get("target") == target:
             t = _run_ts(r, "reset")
+            # A persisted future-dated reset (committed by hand or imported)
+            # bypasses the append-time check; same skew allowance applies.
+            if t > datetime.now(timezone.utc) + timedelta(seconds=60):
+                _die(f"reset row at {r.get('run_at')!r} is future-dated")
             if ts is None or t > ts:
                 ts = t
     return ts
