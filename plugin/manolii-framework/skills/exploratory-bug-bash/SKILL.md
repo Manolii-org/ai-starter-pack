@@ -88,7 +88,7 @@ charter is specific enough.
    `skeptic` (counts/dates/names), `fuzzer` (input matrices), `stateful`
    (reload/back/forward), `default` (first-time user).
 2. **Calibrate (mandatory before trusting a run, and after every model or e2e
-   bump).** In a separate worktree plant 2–4 small, realistic bugs on the
+   bump).** In a separate worktree plant 3–4 small, realistic bugs on the
    charter paths (off-by-one count, relaxed validation, dropped field on save),
    start that build on its own port, and run the same charters against it.
    Recall = planted bugs reported / planted. Below 2/3 → fix charters or

@@ -67,8 +67,11 @@ def cmd_append(ns):
     for label, v in (("--planted", planted), ("--planted-found", found)):
         if v is not None and v < 0:
             _die(f"{label} must be non-negative, got {v}")
-    if ns.kind == "calibration" and (planted is None or planted < 1):
-        _die("calibration rows require --planted >= 1")
+    if ns.kind == "calibration":
+        if planted is None or planted < 1:
+            _die("calibration rows require --planted >= 1")
+        if found is None:
+            _die("calibration rows require --planted-found")
     if found is not None and planted is not None and found > planted:
         _die(f"--planted-found {found} exceeds --planted {planted}")
     if found is not None and planted is None:
@@ -101,7 +104,7 @@ def _rows(path):
     rows = []
     try:
         with open(path, encoding="utf-8") as fh:
-            for i, line in enumerate(fh, 1):
+            for i, line in enumerate(fh, 1):  # UnicodeDecodeError caught below
                 line = line.strip()
                 if not line:
                     continue
@@ -114,6 +117,8 @@ def _rows(path):
                 rows.append(row)
     except FileNotFoundError:
         _die(f"ledger {path} not found")
+    except UnicodeDecodeError:
+        _die(f"ledger {path} is not valid UTF-8")
     return rows
 
 
