@@ -94,9 +94,12 @@ def _rows(path):
                 if not line:
                     continue
                 try:
-                    rows.append(json.loads(line))
+                    row = json.loads(line)
                 except json.JSONDecodeError:
                     _die(f"malformed JSONL at {path}:{i}")
+                if not isinstance(row, dict):
+                    _die(f"malformed JSONL at {path}:{i}: row is not an object")
+                rows.append(row)
     except FileNotFoundError:
         _die(f"ledger {path} not found")
     return rows
