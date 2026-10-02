@@ -297,6 +297,9 @@ def cmd_stop_rule(ns):
             candidates = {}
         if not isinstance(candidates, dict):
             _die(f"weekly row at {r.get('run_at')!r} has a non-object candidates value")
+        extra = set(candidates) - set(BUCKETS)
+        if extra:
+            _die(f"weekly row at {r.get('run_at')!r} has unrecognized candidates buckets {sorted(extra)!r}")
         for b in BUCKETS:
             v = candidates.get(b)
             if isinstance(v, bool) or not isinstance(v, int) or v < 0:
@@ -343,6 +346,9 @@ def cmd_calibration_check(ns):
     cands = r.get("candidates")
     if not isinstance(cands, dict):
         cands = {}
+    extra = set(cands) - set(BUCKETS)
+    if extra:
+        _die(f"calibration row at {when!r} has unrecognized candidates buckets {sorted(extra)!r}")
     total_candidates = sum(v for k, v in cands.items()
                            if k in BUCKETS and isinstance(v, int)
                            and not isinstance(v, bool) and v >= 0)
