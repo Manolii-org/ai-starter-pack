@@ -83,12 +83,18 @@ def cmd_append(ns):
         _die(f"--planted-found {found} exceeds --planted {planted}")
     if found is not None and planted is None:
         _die("--planted-found requires --planted")
+    charters = _int_or_none(ns.charters)
+    if charters is not None and charters < 1:
+        _die(f"--charters must be >= 1, got {charters}")
+    for label, v in (("--exit0", ns.exit0), ("--exit1", ns.exit1), ("--exit-other", ns.exit_other)):
+        if not isinstance(v, int) or v < 0:
+            _die(f"{label} must be a non-negative integer, got {v}")
     row = {
         "run_at": ns.run_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%MZ"),
         "kind": ns.kind,
         "target": ns.target,
         "app_sha": ns.app_sha,
-        "charters": _int_or_none(ns.charters),
+        "charters": charters,
         "charter_exits": {"0": ns.exit0, "1": ns.exit1, "other": ns.exit_other},
         "planted": planted,
         "planted_found": found,
@@ -174,7 +180,10 @@ def _run_age_days(r, label):
         ts = datetime.strptime(when, "%Y-%m-%dT%H:%MZ").replace(tzinfo=timezone.utc)
     except ValueError:
         _die(f"{label} row has unparseable run_at {when!r}")
-    return (datetime.now(timezone.utc) - ts).days
+    age = (datetime.now(timezone.utc) - ts).days
+    if age < 0:
+        _die(f"{label} row at {when!r} is future-dated")
+    return age
 
 
 def cmd_stop_rule(ns):
