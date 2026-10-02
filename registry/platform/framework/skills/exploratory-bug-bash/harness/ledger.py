@@ -131,6 +131,9 @@ def cmd_append(ns):
         if total_candidates < found:
             _die(f"calibration row reports {found} planted bugs found but only "
                  f"{total_candidates} total candidates — pass --candidates covering found")
+        if found and ns.exit1 < 1:
+            _die(f"calibration row reports {found} planted bugs found but "
+                 "--exit1 is 0 — findings need a candidate-producing charter exit")
     for label, v in (("--exit0", ns.exit0), ("--exit1", ns.exit1), ("--exit-other", ns.exit_other)):
         if not isinstance(v, int) or v < 0:
             _die(f"{label} must be a non-negative integer, got {v}")
@@ -198,6 +201,15 @@ def _rows(path):
     return rows
 
 
+def _exit1(r):
+    """Count of candidate-producing charter exits recorded on the row."""
+    exits = r.get("charter_exits")
+    if not isinstance(exits, dict):
+        return 0
+    v = exits.get("1", 0)
+    return v if isinstance(v, int) and not isinstance(v, bool) else 0
+
+
 def _completed(r):
     """True when every charter of the row reached a verdict: exit0+exit1 ==
     charters and zero `other` exits. Rows recorded without full charter
@@ -261,34 +273,35 @@ def _run_age_days(r, label):
     return max(delta.days, 0)
 
 
-def _reset_marker(rows, target):
-    """(index, run_at) of the last reset recorded for `target`, or None.
-    A row post-dates the reset when it was appended after the reset row AND
-    its run_at is at least the reset's — minute precision means the reset
-    and its recalibration legitimately share a timestamp."""
-    marker = None
-    for i, r in enumerate(rows):
+def _reset_ts(rows, target):
+    """run_at of the reset with the greatest execution timestamp for
+    `target`, or None. The boundary is execution-time only: a reset record
+    appended late must not discard rows whose run_at post-dates it, and
+    `>=` keeps the same-minute reset→recalibrate cycle."""
+    ts = None
+    for r in rows:
         if r.get("kind") == "reset" and r.get("target") == target:
             t = _run_ts(r, "reset")
             # A persisted future-dated reset (committed by hand or imported)
             # bypasses the append-time check; same skew allowance applies.
             if t > datetime.now(timezone.utc) + timedelta(seconds=60):
                 _die(f"reset row at {r.get('run_at')!r} is future-dated")
-            marker = (i, t)
-    return marker
+            if ts is None or t > ts:
+                ts = t
+    return ts
 
 
 def cmd_stop_rule(ns):
     if ns.n < 1:
         _die("stop-rule requires -n >= 1")
     rows = _rows(ns.ledger)
-    reset = _reset_marker(rows, ns.target)
+    reset_ts = _reset_ts(rows, ns.target)
     # Excluded rows keep the lane ON, the safe direction.
     weekly = []
-    for i, r in enumerate(rows):
+    for r in rows:
         if r.get("kind") != "weekly" or r.get("target") != ns.target or not _completed(r):
             continue
-        if reset is not None and (i <= reset[0] or _run_ts(r, "weekly") < reset[1]):
+        if reset_ts is not None and _run_ts(r, "weekly") < reset_ts:
             continue
         weekly.append(r)
     # Window is by execution time, not append order, and one completed pass
@@ -322,6 +335,10 @@ def cmd_stop_rule(ns):
             v = candidates.get(b)
             if isinstance(v, bool) or not isinstance(v, int) or v < 0:
                 _die(f"weekly row at {r.get('run_at')!r} lacks a valid candidates.{b} count")
+        triaged = sum(candidates[b] for b in BUCKETS)
+        if triaged < _exit1(r):
+            _die(f"weekly row at {r.get('run_at')!r} reports {_exit1(r)} candidate "
+                 f"exit(s) but only {triaged} triaged — imported accounting is inconsistent")
         confirmed.append(candidates["confirmed"])
     if sum(confirmed) == 0:
         print(f"stop-rule: {ns.n} consecutive weekly runs with 0 confirmed bugs — PAUSE the lane")
@@ -332,12 +349,12 @@ def cmd_stop_rule(ns):
 
 def cmd_calibration_check(ns):
     rows = _rows(ns.ledger)
-    reset = _reset_marker(rows, ns.target)
+    reset_ts = _reset_ts(rows, ns.target)
     cal = []
-    for i, r in enumerate(rows):
+    for r in rows:
         if r.get("kind") != "calibration" or r.get("target") != ns.target:
             continue
-        if reset is not None and (i <= reset[0] or _run_ts(r, "calibration") < reset[1]):
+        if reset_ts is not None and _run_ts(r, "calibration") < reset_ts:
             continue
         cal.append(r)
     if not cal:
@@ -364,6 +381,9 @@ def cmd_calibration_check(ns):
         return 11
     if found > planted:
         _die(f"calibration row at {when!r} has found {found} > planted {planted}")
+    if found > 0 and _exit1(r) < 1:
+        _die(f"calibration row at {when!r} reports {found} planted found but "
+             "charter_exits['1']==0 — findings need a candidate-producing exit")
     cands = r.get("candidates")
     if not isinstance(cands, dict):
         cands = {}
