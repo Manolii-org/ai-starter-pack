@@ -15,6 +15,12 @@ e2e/bug-bash/ledger/runs.jsonl): durable, reviewable, never only chat.
 charter reached a verdict) all recorded zero confirmed bugs (lane should
 pause), 0 otherwise, 2 on usage/parse errors.
 
+`calibration-check` gates real charters on the calibration run: exits 0 when
+the latest calibration row since the last reset has recall >= 2/3, 11 when
+uncalibrated (no calibration row) or recall is below threshold, 2 on
+usage/parse errors. Schedulers must run it before exploring the unmodified
+build so a failing calibration cannot quietly spend the weekly budget.
+
 A `kind=reset` row marks a charter/model change after a pause: stop-rule
 only counts weekly rows appended after the most recent reset row, so the
 resumed lane gets a fresh N-run window instead of inheriting the pre-change
@@ -185,6 +191,31 @@ def cmd_stop_rule(ns):
     return 0
 
 
+def cmd_calibration_check(ns):
+    rows = _rows(ns.ledger)
+    last_reset = max((i for i, r in enumerate(rows) if r.get("kind") == "reset"), default=-1)
+    cal = [r for r in rows[last_reset + 1:] if r.get("kind") == "calibration"]
+    if not cal:
+        print("calibration-check: no calibration row since last reset — do NOT run real charters")
+        return 11
+    r = cal[-1]
+    when = r.get("run_at")
+    planted, found = r.get("planted"), r.get("planted_found")
+    for field, v in (("planted", planted), ("planted_found", found)):
+        if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+            _die(f"calibration row at {when!r} has invalid {field} {v!r}")
+    if planted < 1:
+        _die(f"calibration row at {when!r} has planted {planted} < 1")
+    if found > planted:
+        _die(f"calibration row at {when!r} has found {found} > planted {planted}")
+    # Integer form of found/planted >= 2/3 to avoid float rounding at the edge.
+    if found * 3 >= planted * 2:
+        print(f"calibration-check: recall {found}/{planted} >= 2/3 — real charters may run")
+        return 0
+    print(f"calibration-check: recall {found}/{planted} < 2/3 — do NOT run real charters")
+    return 11
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -213,6 +244,10 @@ def main():
     s.add_argument("ledger")
     s.add_argument("-n", type=int, default=3, help="consecutive empty weekly runs to pause on (default 3)")
     s.set_defaults(fn=cmd_stop_rule)
+
+    c = sub.add_parser("calibration-check", help="gate real charters on the latest calibration recall")
+    c.add_argument("ledger")
+    c.set_defaults(fn=cmd_calibration_check)
 
     ns = p.parse_args()
     sys.exit(ns.fn(ns))

@@ -92,7 +92,10 @@ charter is specific enough.
    charter paths (off-by-one count, relaxed validation, dropped field on save),
    start that build on its own port, and run the same charters against it.
    Recall = planted bugs reported / planted. Below 2/3 → fix charters or
-   budgets before running real charters. Record recall in the report.
+   budgets before running real charters. Record recall in the report — or in
+   the ledger for recurring runs: `harness/ledger.py calibration-check` is
+   the deterministic gate a scheduler runs before any real charters (exit 0
+   = calibrated, 11 = uncalibrated or recall < 2/3).
 3. **Explore** the unmodified build: `./fanout.sh charters.txt .e2e/out/real 4`.
    `exits.txt` records each charter's exit code: `0` clean, `1` candidate
    reported, anything else a harness error (missing env exits `2`) — rerun
@@ -134,7 +137,9 @@ stack), the lane needs five committed artifacts beyond the harness:
    comment may mirror the row but the ledger file is the record.
 4. **A scheduled runner** — e.g. a weekly Devin automation or CI
    `workflow_dispatch`-capable schedule that brings the isolated stack up,
-   runs calibration-then-explore, triages, appends the ledger row, and posts
+   runs calibration, then runs `harness/ledger.py calibration-check` — only
+   when it exits 0 does the run proceed to real charters; exit 11 pauses
+   them (fix charters first). Then triage, append the ledger row, and post
    the summary. Advisory end-to-end: `continue-on-error` semantics, never a
    required check.
 5. **Stop rule** — `harness/ledger.py stop-rule` exits `10` when the last 3
