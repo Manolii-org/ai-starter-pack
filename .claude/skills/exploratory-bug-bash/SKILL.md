@@ -111,8 +111,36 @@ charter is specific enough.
 5. **Land confirmed bugs** as a normal fix PR with the regression test. The
    deterministic test, not the explorer, is what guards it from then on.
 6. **Report**: charters run, recall, candidates per bucket, confirmed bug PRs,
-   model calls/tokens, wall time. Stop the lane if two consecutive runs
-   produce no `confirmed` bug.
+   model calls/tokens, wall time.
+
+## Operationalising as a weekly advisory lane
+
+For a recurring cadence (one bounded pass per week against an isolated
+stack), the lane needs five committed artifacts beyond the harness:
+
+1. **Calibration set** — ≥3 planted-bug `.patch` files committed to the APP
+   repo (see `harness/calibration.md`), applied only in a scratch worktree on
+   a dedicated port. Must include a count/total bug, a validation bug, and a
+   dropped-field-on-save bug. Re-run whenever the actor/judge model or `e2e`
+   pin changes, or after ~90 days; recall < 2/3 pauses real runs until
+   charters are fixed.
+2. **Charters with explicit invariants** — one goal per line naming the check,
+   not just the area: "the card count equals the detail count after each
+   toggle" not "check counts". Invariants are what the judge verifies; a
+   broken invariant is the candidate.
+3. **Durable run ledger** — one JSONL row per run committed to the app repo
+   (see `harness/ledger.py append`), carrying charters, exits, recall,
+   candidates per bucket, confirmed PRs, and cost. Append-only; a GitHub issue
+   comment may mirror the row but the ledger file is the record.
+4. **A scheduled runner** — e.g. a weekly Devin automation or CI
+   `workflow_dispatch`-capable schedule that brings the isolated stack up,
+   runs calibration-then-explore, triages, appends the ledger row, and posts
+   the summary. Advisory end-to-end: `continue-on-error` semantics, never a
+   required check.
+5. **Stop rule** — `harness/ledger.py stop-rule` exits `10` when the last 3
+   weekly runs produced zero confirmed bugs; the lane pauses (trigger
+   disabled, ledger note) until charters or models change. Three empty weeks
+   is the agreed cost ceiling.
 
 ## Do not
 
