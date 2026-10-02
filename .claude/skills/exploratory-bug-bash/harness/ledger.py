@@ -17,15 +17,30 @@ pause), 0 otherwise, 2 on usage/parse errors.
 
 `calibration-check` gates real charters on the calibration run: exits 0 when
 the latest calibration row since the last reset is fully charter-accounted,
-has >= 3 planted bugs, is no older than ~90 days, and scored recall >= 2/3;
-11 when uncalibrated/incomplete/stale or recall is below threshold; 2 on
-usage/parse errors. Schedulers must run it before exploring the unmodified
-build so a failing calibration cannot quietly spend the weekly budget.
+has >= 3 planted bugs, is no older than ~90 days, scored recall >= 2/3, and
+(when `--expect-fingerprint` is given) carries the same runtime fingerprint;
+11 when uncalibrated/incomplete/stale/mismatched or recall is below
+threshold; 2 on usage/parse errors. Schedulers must run it before exploring
+the unmodified build so a failing calibration cannot quietly spend the
+weekly budget.
 
-A `kind=reset` row marks a charter/model change after a pause: stop-rule
-only counts weekly rows appended after the most recent reset row, so the
-resumed lane gets a fresh N-run window instead of inheriting the pre-change
-empties.
+Both consumers take `--target` and only see rows recorded for that target,
+so one shared ledger can serve several apps/environments without an empty
+run for one target pausing another (one ledger per target is still the
+recommended layout).
+
+`--fingerprint` (append) records the runtime fingerprint the run was
+calibrated under — recommended recipe: a sha256 over the actor/judge model
+names, the harness ledger.py + fanout.sh bytes, the charters file, and the
+e2e driver config. `--expect-fingerprint` (calibration-check) then refuses
+to authorize charters with a calibration produced by a different model,
+harness, or charter set; a row recorded without a fingerprint fails the
+check whenever the flag is passed.
+
+A `kind=reset` row marks a charter/model change after a pause: consumers
+only count rows appended after the most recent reset row *for the same
+target*, so the resumed lane gets a fresh N-run window instead of
+inheriting the pre-change empties.
 """
 import argparse
 import json
@@ -102,6 +117,7 @@ def cmd_append(ns):
                    else round(found / planted, 3)),
         "candidates": _parse_candidates(ns.candidates),
         "confirmed_prs": _parse_prs(ns.confirmed_prs),
+        "fingerprint": (ns.fingerprint.strip() or None) if ns.fingerprint else None,
         "model_calls": _int_or_none(ns.model_calls),
         "tokens": _int_or_none(ns.tokens),
         "wall_minutes": _int_or_none(ns.wall_minutes),
@@ -186,17 +202,23 @@ def _run_age_days(r, label):
     return age
 
 
+def _last_reset_index(rows, target):
+    """Index of the most recent reset row recorded for `target`."""
+    return max((i for i, r in enumerate(rows)
+                if r.get("kind") == "reset" and r.get("target") == target), default=-1)
+
+
 def cmd_stop_rule(ns):
     if ns.n < 1:
         _die("stop-rule requires -n >= 1")
     rows = _rows(ns.ledger)
-    last_reset = max((i for i, r in enumerate(rows) if r.get("kind") == "reset"), default=-1)
+    last_reset = _last_reset_index(rows, ns.target)
     # Excluded rows keep the lane ON, the safe direction.
     weekly = [r for r in rows[last_reset + 1:]
-              if r.get("kind") == "weekly" and _completed(r)]
+              if r.get("kind") == "weekly" and r.get("target") == ns.target and _completed(r)]
     tail = weekly[-ns.n:]
     if len(tail) < ns.n:
-        print(f"stop-rule: only {len(tail)}/{ns.n} weekly runs recorded — lane stays ON")
+        print(f"stop-rule: only {len(tail)}/{ns.n} weekly runs recorded for target {ns.target} — lane stays ON")
         return 0
     confirmed = []
     for r in tail:
@@ -218,8 +240,9 @@ def cmd_stop_rule(ns):
 
 def cmd_calibration_check(ns):
     rows = _rows(ns.ledger)
-    last_reset = max((i for i, r in enumerate(rows) if r.get("kind") == "reset"), default=-1)
-    cal = [r for r in rows[last_reset + 1:] if r.get("kind") == "calibration"]
+    last_reset = _last_reset_index(rows, ns.target)
+    cal = [r for r in rows[last_reset + 1:]
+           if r.get("kind") == "calibration" and r.get("target") == ns.target]
     if not cal:
         print("calibration-check: no calibration row since last reset — do NOT run real charters")
         return 11
@@ -237,6 +260,12 @@ def cmd_calibration_check(ns):
     if not _completed(r):
         print("calibration-check: calibration run did not complete every charter — do NOT run real charters")
         return 11
+    if ns.expect_fingerprint is not None:
+        stored = r.get("fingerprint")
+        if stored != ns.expect_fingerprint:
+            print("calibration-check: calibration fingerprint "
+                  f"{stored!r} != active {ns.expect_fingerprint!r} — recalibrate for this model/harness/charter set")
+            return 11
     age = _run_age_days(r, "calibration")
     if age > CALIBRATION_MAX_AGE_DAYS:
         print(f"calibration-check: calibration is {age}d old (> {CALIBRATION_MAX_AGE_DAYS}d) — recalibrate first")
@@ -267,6 +296,8 @@ def main():
     a.add_argument("--planted-found", type=int, default=None)
     a.add_argument("--candidates", default="", help="confirmed:N,fixture:N,design_intent:N,judge_error:N,unconfirmed:N")
     a.add_argument("--confirmed-prs", default="", help="comma-separated PR URLs")
+    a.add_argument("--fingerprint", default=None,
+                   help="runtime fingerprint (model names + harness/charter/config hashes) this run was calibrated under")
     a.add_argument("--model-calls", type=int, default=None)
     a.add_argument("--tokens", type=int, default=None)
     a.add_argument("--wall-minutes", type=int, default=None)
@@ -275,11 +306,15 @@ def main():
 
     s = sub.add_parser("stop-rule", help="evaluate the pause rule")
     s.add_argument("ledger")
+    s.add_argument("--target", required=True, help="only weekly rows for this target count")
     s.add_argument("-n", type=int, default=3, help="consecutive empty weekly runs to pause on (default 3)")
     s.set_defaults(fn=cmd_stop_rule)
 
     c = sub.add_parser("calibration-check", help="gate real charters on the latest calibration recall")
     c.add_argument("ledger")
+    c.add_argument("--target", required=True, help="only calibration rows for this target authorize runs")
+    c.add_argument("--expect-fingerprint", default=None,
+                   help="required fingerprint on the latest calibration row; a row without one fails")
     c.set_defaults(fn=cmd_calibration_check)
 
     ns = p.parse_args()

@@ -38,5 +38,15 @@ Below 2/3 for every set size → fix charters or budgets before
 trusting real runs. Re-run calibration when the actor or judge model changes,
 when the `e2e` pin bumps, or after ~90 days — whichever is first.
 
+## Fingerprint binding
+
+Append the calibration row with `--fingerprint <fp>` and gate real runs with
+`calibration-check --target <t> --expect-fingerprint <fp>` so a calibration
+produced by a different model/harness/charter set can't authorize this week's
+budget. Recipe: a sha256 over the `BB_ACTOR_MODEL`/`BB_JUDGE_MODEL` values,
+`ledger.py`, `fanout.sh`, `e2e.config.ts`, and the charters file bytes — same
+recipe at append and check time, recomputed each run. A row appended without
+a fingerprint fails the check once the flag is in use.
+
 A candidate that appears in BOTH calibration and real runs is pre-existing:
 triage it as a real finding, not as recall evidence.
