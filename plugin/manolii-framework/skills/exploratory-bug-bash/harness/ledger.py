@@ -269,8 +269,9 @@ def cmd_calibration_check(ns):
     cands = r.get("candidates")
     if not isinstance(cands, dict):
         cands = {}
-    total_candidates = sum(v for v in cands.values()
-                           if isinstance(v, int) and not isinstance(v, bool))
+    total_candidates = sum(v for k, v in cands.items()
+                           if k in BUCKETS and isinstance(v, int)
+                           and not isinstance(v, bool) and v >= 0)
     if total_candidates < found:
         print("calibration-check: calibration row reports "
               f"{found} planted bugs found but only {total_candidates} total "
