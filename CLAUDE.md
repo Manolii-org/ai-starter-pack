@@ -142,6 +142,7 @@ Before every PR: follow `docs/pre-pr-quality-gate.md`. Six checks: diff self-rev
 - `test-driven-development` — TDD workflow
 - `verification-before-completion` — task completion gates
 - `browser-qa` — browser-based QA testing
+- `exploratory-bug-bash` — advisory AI exploratory testing (tester-army/e2e) with planted-bug calibration; findings confirmed only by a deterministic test
 - `python-error-handling` — Python diff review: bare-except, version compat, argparse
 - `analytics` — weekly telemetry aggregation: tool usage, error rates, activity
 - `curator` — skill lifecycle management: stale detection, overlap analysis

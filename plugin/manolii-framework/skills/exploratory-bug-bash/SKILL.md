@@ -1,0 +1,116 @@
+---
+name: exploratory-bug-bash
+version: 1.0.0
+description: "Advisory AI exploratory testing (tester-army/e2e `explore`) against an isolated stack: LiteLLM actor/judge routing, bounded budgets, planted-bug calibration, and deterministic Playwright reproduction before any finding is confirmed."
+type: skill
+disable-model-invocation: true  # explicit /bug-bash or scheduled-session use only; never auto-invoked
+data_sensitivity: internal
+safety_tier: amber
+requires_mcp: []
+required_entities: []
+tools:
+  - Read
+  - Bash
+  - Write
+tags:
+  - testing
+  - exploratory
+  - browser
+intent_phrases:
+  - "run a bug bash"
+  - "exploratory test the app"
+  - "find bugs nobody wrote a test for"
+---
+
+# Skill: Exploratory Bug Bash
+
+Deterministic Playwright suites only catch failures someone already imagined.
+This lane lets a vision agent explore the app against written charters and
+report **candidates**. A candidate becomes a finding only after it is
+reproduced by a deterministic Playwright test that fails on the base commit.
+
+**Advisory only.** Never a required check, never in a merge gate, never
+blocks a deploy. `e2e explore` exit code `1` means "candidate reported", not
+"product defect".
+
+## Preconditions (stop if any is false)
+
+1. An **isolated** target: local stack or a disposable preview with its own
+   database. Never shared staging, UAT or production — exploration mutates data
+   (posts, groups, settings) and the agent has no domain allowlist.
+2. **Synthetic accounts** only, signed in without typing passwords (magic-link
+   token exchange, API-issued cookie or saved storage state). Password fills
+   taint screenshots and the agent's evidence.
+3. LiteLLM proxy URL + key available in the environment (never printed).
+4. Node `>=22.12`.
+
+## Harness
+
+Copy `harness/` from this skill into a scratch directory **outside** the app
+repo (its pins conflict with app Playwright versions), then `npm ci`.
+
+| File | Purpose |
+|---|---|
+| `package.json` | Exact pins: `e2e@0.15.1`, `@e2e-dev/web@0.11.1`, `playwright@1.63.0`. e2e is pre-1.0 — bump deliberately, re-calibrate after. |
+| `e2e.config.ts` | LiteLLM OpenAI-compatible provider; separate actor (vision) and judge routes; personas `default`/`skeptic`/`fuzzer`/`stateful`; budgets. |
+| `tests/auth.setup.e2e.ts` | Magic-link session setup per synthetic account (Supabase example; adapt). |
+| `run.py` | Binds env in-process and runs `npx e2e …` with telemetry off and `CI` unset. |
+| `fanout.sh` | Runs a charter file in parallel, one output dir + log + exit line per charter. |
+| `charters.example.txt` | `slug|target|agent|charter` format. |
+
+### Environment contract
+
+| Var | Meaning |
+|---|---|
+| `BB_LITELLM_URL` / `BB_LITELLM_KEY` | LiteLLM proxy base + key (map from `LITELLM_PROXY_URL` / `LLM_API_KEY`). |
+| `BB_ACTOR_MODEL` | Default `candidate-luna-vision` (must accept images). |
+| `BB_JUDGE_MODEL` | Default `candidate-luna-critic`. Keep actor ≠ judge. |
+| `BB_APP_URL` | Target base URL (default `http://localhost:3000`). |
+| `BB_APP_CONTEXT` | One paragraph: what the app is, what is stubbed locally, and what is **not** a bug. |
+| `E2E_TELEMETRY_DISABLED=1` | Always (set by `run.py`). |
+
+Model changes go through the `assess-model` protocol; reuse existing routes.
+
+### Budgets (defaults that produced signal in Phase 0)
+
+`--max-steps 6`, `maxModelCalls 40`, `--timeout 600000`, `workers 1` per
+charter, fan-out parallelism 4, `retries 0`, `--video` +
+`--reporter list,markdown`. One charter ≈ 8–75 model calls and 0.07–2M
+tokens (mostly cached). Do not raise `--max-steps` before checking that the
+charter is specific enough.
+
+## Procedure
+
+1. **Write charters** — one user goal per line, naming the account session,
+   the start URL and what to cross-check. Pick a persona per charter:
+   `skeptic` (counts/dates/names), `fuzzer` (input matrices), `stateful`
+   (reload/back/forward), `default` (first-time user).
+2. **Calibrate (mandatory before trusting a run, and after every model or e2e
+   bump).** In a separate worktree plant 2–4 small, realistic bugs on the
+   charter paths (off-by-one count, relaxed validation, dropped field on save),
+   start that build on its own port, and run the same charters against it.
+   Recall = planted bugs reported / planted. Below 50 % → fix charters or
+   budgets before running real charters. Record recall in the report.
+3. **Explore** the unmodified build: `./fanout.sh charters.txt .e2e/out/real 4`.
+4. **Triage** each candidate in `summary.md` into exactly one bucket:
+   - `confirmed` — reproduced by a deterministic Playwright/unit test that fails
+     on base and passes with the fix. Only this bucket is a bug.
+   - `fixture` — caused by thin/missing seed data (verify in the DB).
+   - `design-intent` — behaviour may be deliberate; ask the owner.
+   - `judge-error` — screen evidence contradicts the claim (e.g. Save was
+     disabled).
+   - `unconfirmed` — could not reproduce within the time box.
+   Same title in planted and real runs → it is pre-existing, not planted.
+5. **Land confirmed bugs** as a normal fix PR with the regression test. The
+   deterministic test, not the explorer, is what guards it from then on.
+6. **Report**: charters run, recall, candidates per bucket, confirmed bug PRs,
+   model calls/tokens, wall time. Stop the lane if two consecutive runs
+   produce no `confirmed` bug.
+
+## Do not
+
+- Put `e2e explore` (or any LLM step) in a required check or merge gate.
+- Point it at shared staging/UAT/prod or real accounts.
+- Treat exit `1`, a screenshot, or the judge's severity as proof.
+- Commit `.e2e/` artifacts (screenshots/videos may contain data).
+- Print `BB_LITELLM_KEY` or service-role keys; `run.py` binds them in-process.

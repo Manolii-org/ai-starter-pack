@@ -1,0 +1,4 @@
+# slug|target|agent|charter
+feed|web|skeptic|Sign in as session bb-alice. Starting at /home, read the feed, react to and comment on two posts; cross-check every count, author name, and timestamp against the post detail and the author profile
+settings|web|fuzzer|Sign in as session bb-priya. Starting at /settings, edit each free-text profile field with: empty, a 600-character value, unicode emoji, leading spaces, and <b>tags</b>; save and reload after each; report validation that is missing or wrong
+groups|web|stateful|Sign in as session bb-sarah. Starting at /groups, create a group, edit its details, post in it, then leave and rejoin; report state that is lost, stale, or duplicated
