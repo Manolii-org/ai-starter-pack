@@ -74,8 +74,8 @@ def cmd_append(ns):
         if v is not None and v < 0:
             _die(f"{label} must be non-negative, got {v}")
     if ns.kind == "calibration":
-        if planted is None or planted < 1:
-            _die("calibration rows require --planted >= 1")
+        if planted is None or planted < 3:
+            _die("calibration rows require --planted >= 3")
         if found is None:
             _die("calibration rows require --planted-found")
     if found is not None and planted is not None and found > planted:
@@ -148,7 +148,7 @@ def cmd_stop_rule(ns):
         vals = {}
         for k in ("0", "1", "other"):
             v = exits.get(k, 0)
-            if isinstance(v, bool):
+            if isinstance(v, (bool, float)):
                 _die(f"invalid charter_exits[{k!r}] {v!r} on weekly row at {when!r}")
             try:
                 v = int(v)
@@ -204,8 +204,9 @@ def cmd_calibration_check(ns):
     for field, v in (("planted", planted), ("planted_found", found)):
         if isinstance(v, bool) or not isinstance(v, int) or v < 0:
             _die(f"calibration row at {when!r} has invalid {field} {v!r}")
-    if planted < 1:
-        _die(f"calibration row at {when!r} has planted {planted} < 1")
+    if planted < 3:
+        print(f"calibration-check: planted {planted} < 3 — do NOT run real charters")
+        return 11
     if found > planted:
         _die(f"calibration row at {when!r} has found {found} > planted {planted}")
     # Integer form of found/planted >= 2/3 to avoid float rounding at the edge.
