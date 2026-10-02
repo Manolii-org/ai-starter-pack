@@ -199,6 +199,9 @@ def _completed(r):
         return False
     if not isinstance(exits, dict):
         _die(f"invalid charter_exits on row at {when!r}: not an object")
+    extra = set(exits) - {"0", "1", "other"}
+    if extra:
+        _die(f"invalid charter_exits on row at {when!r}: unrecognized buckets {sorted(extra)!r}")
     vals = {}
     for k in ("0", "1", "other"):
         v = exits.get(k, 0)
@@ -306,7 +309,15 @@ def cmd_calibration_check(ns):
         return 11
     # Gate applies to the latest calibration by execution time, not append
     # order — a backfilled older row must not mask a newer failing result.
-    r = max(cal, key=lambda r: _run_ts(r, "calibration"))
+    # run_at is minute-precision, so >= makes equal-timestamp ties resolve to
+    # the later-appended row (the retry's verdict).
+    r = cal[0]
+    best = _run_ts(r, "calibration")
+    for row in cal[1:]:
+        ts = _run_ts(row, "calibration")
+        if ts >= best:
+            best = ts
+            r = row
     when = r.get("run_at")
     planted, found = r.get("planted"), r.get("planted_found")
     for field, v in (("planted", planted), ("planted_found", found)):

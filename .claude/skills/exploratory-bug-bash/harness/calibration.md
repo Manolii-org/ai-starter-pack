@@ -44,6 +44,8 @@ Append the calibration row with `--fingerprint <fp>` and gate real runs with
 `calibration-check --target <t> --expect-fingerprint <fp>` so a calibration
 produced by a different model/harness/charter set can't authorize this week's
 budget. Recipe: a sha256 over the `BB_ACTOR_MODEL`/`BB_JUDGE_MODEL` values,
+the effective `BB_APP_CONTEXT` value (it defines what is not a bug — a change
+there alters runtime behaviour and must invalidate the calibration),
 `ledger.py`, `fanout.sh`, `run.py`, `e2e.config.ts`,
 `tests/auth.setup.e2e.ts`, the charters file bytes, a
 deterministically sorted manifest of every committed calibration `.patch`
