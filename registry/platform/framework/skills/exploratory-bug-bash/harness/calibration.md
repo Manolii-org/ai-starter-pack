@@ -44,8 +44,11 @@ Append the calibration row with `--fingerprint <fp>` and gate real runs with
 `calibration-check --target <t> --expect-fingerprint <fp>` so a calibration
 produced by a different model/harness/charter set can't authorize this week's
 budget. Recipe: a sha256 over the `BB_ACTOR_MODEL`/`BB_JUDGE_MODEL` values,
-`ledger.py`, `fanout.sh`, `e2e.config.ts`, the charters file bytes, and the
-harness scratch copy's own `package.json` + `package-lock.json` (the pins
+`ledger.py`, `fanout.sh`, `e2e.config.ts`, the charters file bytes, a
+deterministically sorted manifest of every committed calibration `.patch`
+path and its content hash (a patch change must invalidate the calibration
+it defines), and the harness scratch copy's own `package.json` +
+`package-lock.json` (the pins
 the e2e-bump calibration rule talks about — `npm ci` resolves them there,
 not in the app repo) — same recipe at append and check time, recomputed
 each run. A row appended without

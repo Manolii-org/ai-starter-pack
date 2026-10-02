@@ -60,10 +60,12 @@ def _int_or_none(v):
 
 
 def _parse_candidates(spec):
+    """Returns (counts, provided_keys): counts is zero-filled for all BUCKETS;
+    provided_keys is the set of buckets the spec actually named."""
     out = {k: 0 for k in BUCKETS}
-    if not spec:
-        return out
     seen = set()
+    if not spec:
+        return out, seen
     for part in spec.split(","):
         key, _, val = part.partition(":")
         key = key.strip().replace("-", "_")
@@ -78,7 +80,7 @@ def _parse_candidates(spec):
             _die(f"invalid candidate count {val!r} for bucket {key!r}")
         if out[key] < 0:
             _die(f"negative candidate count {val!r} for bucket {key!r}")
-    return out
+    return out, seen
 
 
 def _nonempty_target(v):
@@ -114,7 +116,11 @@ def cmd_append(ns):
     if ns.kind == "weekly" and ns.candidates is None:
         _die("weekly rows require explicit --candidates accounting "
              "(pass all-zero buckets when triage genuinely found nothing)")
-    candidates = _parse_candidates(ns.candidates)
+    candidates, provided = _parse_candidates(ns.candidates)
+    if ns.kind == "weekly" and provided != set(BUCKETS):
+        missing = ", ".join(k for k in BUCKETS if k not in provided)
+        _die(f"weekly rows require --candidates covering every bucket "
+             f"(missing: {missing}) — pass explicit 0 for buckets triage found none of")
     if ns.kind == "calibration":
         total_candidates = sum(candidates.values())
         if total_candidates < found:
