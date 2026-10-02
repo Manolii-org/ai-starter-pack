@@ -266,7 +266,9 @@ def cmd_stop_rule(ns):
     by_week = {}
     for r in weekly:
         ts = _run_ts(r, "weekly")
-        by_week[(ts.isocalendar().year, ts.isocalendar().week)] = (ts, r)
+        wk = (ts.isocalendar().year, ts.isocalendar().week)
+        if wk not in by_week or ts > by_week[wk][0]:
+            by_week[wk] = (ts, r)
     tail = [r for ts, r in sorted(by_week.values())[-ns.n:]]
     if len(tail) < ns.n:
         print(f"stop-rule: only {len(tail)}/{ns.n} distinct completed weeks recorded for target {ns.target} — lane stays ON")
