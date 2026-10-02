@@ -123,6 +123,9 @@ def cmd_append(ns):
         missing = ", ".join(k for k in BUCKETS if k not in provided)
         _die(f"weekly rows require --candidates covering every bucket "
              f"(missing: {missing}) — pass explicit 0 for buckets triage found none of")
+    if ns.kind == "weekly" and sum(candidates.values()) < ns.exit1:
+        _die(f"weekly row reports {ns.exit1} candidate exit(s) but only "
+             f"{sum(candidates.values())} triaged — every candidate must land in a bucket")
     if ns.kind == "calibration":
         total_candidates = sum(candidates.values())
         if total_candidates < found:
@@ -250,38 +253,44 @@ def _run_ts(r, label):
 
 def _run_age_days(r, label):
     ts = _run_ts(r, label)
-    age = (datetime.now(timezone.utc) - ts).days
-    if age < 0:
+    delta = datetime.now(timezone.utc) - ts
+    # Same 60s skew allowance as append: a writer clock slightly ahead can
+    # store a minute timestamp that is marginally in the future here.
+    if delta < -timedelta(seconds=60):
         _die(f"{label} row at {r.get('run_at')!r} is future-dated")
-    return age
+    return max(delta.days, 0)
 
 
-def _reset_ts(rows, target):
-    """run_at of the most recent reset recorded for `target`, or None.
-    Only rows executed strictly after this timestamp post-date the reset."""
-    ts = None
-    for r in rows:
+def _reset_marker(rows, target):
+    """(index, run_at) of the last reset recorded for `target`, or None.
+    A row post-dates the reset when it was appended after the reset row AND
+    its run_at is at least the reset's — minute precision means the reset
+    and its recalibration legitimately share a timestamp."""
+    marker = None
+    for i, r in enumerate(rows):
         if r.get("kind") == "reset" and r.get("target") == target:
             t = _run_ts(r, "reset")
             # A persisted future-dated reset (committed by hand or imported)
             # bypasses the append-time check; same skew allowance applies.
             if t > datetime.now(timezone.utc) + timedelta(seconds=60):
                 _die(f"reset row at {r.get('run_at')!r} is future-dated")
-            if ts is None or t > ts:
-                ts = t
-    return ts
+            marker = (i, t)
+    return marker
 
 
 def cmd_stop_rule(ns):
     if ns.n < 1:
         _die("stop-rule requires -n >= 1")
     rows = _rows(ns.ledger)
-    reset_ts = _reset_ts(rows, ns.target)
+    reset = _reset_marker(rows, ns.target)
     # Excluded rows keep the lane ON, the safe direction.
-    weekly = [r for r in rows
-              if r.get("kind") == "weekly" and r.get("target") == ns.target and _completed(r)]
-    if reset_ts is not None:
-        weekly = [r for r in weekly if _run_ts(r, "weekly") > reset_ts]
+    weekly = []
+    for i, r in enumerate(rows):
+        if r.get("kind") != "weekly" or r.get("target") != ns.target or not _completed(r):
+            continue
+        if reset is not None and (i <= reset[0] or _run_ts(r, "weekly") < reset[1]):
+            continue
+        weekly.append(r)
     # Window is by execution time, not append order, and one completed pass
     # per ISO week counts once: extra completed rows in the same week are
     # retries/dupes of that week's outcome (keep the latest).
@@ -323,11 +332,14 @@ def cmd_stop_rule(ns):
 
 def cmd_calibration_check(ns):
     rows = _rows(ns.ledger)
-    reset_ts = _reset_ts(rows, ns.target)
-    cal = [r for r in rows
-           if r.get("kind") == "calibration" and r.get("target") == ns.target]
-    if reset_ts is not None:
-        cal = [r for r in cal if _run_ts(r, "calibration") > reset_ts]
+    reset = _reset_marker(rows, ns.target)
+    cal = []
+    for i, r in enumerate(rows):
+        if r.get("kind") != "calibration" or r.get("target") != ns.target:
+            continue
+        if reset is not None and (i <= reset[0] or _run_ts(r, "calibration") < reset[1]):
+            continue
+        cal.append(r)
     if not cal:
         print("calibration-check: no calibration row since last reset — do NOT run real charters")
         return 11
