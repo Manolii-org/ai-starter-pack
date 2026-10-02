@@ -96,7 +96,8 @@ charter is specific enough.
 3. **Explore** the unmodified build: `./fanout.sh charters.txt .e2e/out/real 4`.
    `exits.txt` records each charter's exit code: `0` clean, `1` candidate
    reported, anything else a harness error (missing env exits `2`) — rerun
-   those charters before triage. `fanout.sh` exits nonzero if any charter
+   those charters (same outdir; each rerun replaces that charter's code)
+   before triage. `fanout.sh` exits nonzero if any charter in the invocation
    errored.
 4. **Triage** each candidate in `summary.md` into exactly one bucket:
    - `confirmed` — reproduced by a deterministic Playwright/unit test that fails
