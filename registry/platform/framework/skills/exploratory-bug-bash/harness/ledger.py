@@ -38,9 +38,11 @@ harness, or charter set; a row recorded without a fingerprint fails the
 check whenever the flag is passed.
 
 A `kind=reset` row marks a charter/model change after a pause: consumers
-only count rows appended after the most recent reset row *for the same
-target*, so the resumed lane gets a fresh N-run window instead of
-inheriting the pre-change empties.
+only count rows executed (run_at) after the most recent reset *for the
+same target*, so the resumed lane gets a fresh N-run window instead of
+inheriting the pre-change empties. The boundary is by execution time,
+not append order — a delayed aggregation appending a run that executed
+before the reset stays excluded.
 """
 import argparse
 import json
@@ -249,20 +251,28 @@ def _run_age_days(r, label):
     return age
 
 
-def _last_reset_index(rows, target):
-    """Index of the most recent reset row recorded for `target`."""
-    return max((i for i, r in enumerate(rows)
-                if r.get("kind") == "reset" and r.get("target") == target), default=-1)
+def _reset_ts(rows, target):
+    """run_at of the most recent reset recorded for `target`, or None.
+    Only rows executed strictly after this timestamp post-date the reset."""
+    ts = None
+    for r in rows:
+        if r.get("kind") == "reset" and r.get("target") == target:
+            t = _run_ts(r, "reset")
+            if ts is None or t > ts:
+                ts = t
+    return ts
 
 
 def cmd_stop_rule(ns):
     if ns.n < 1:
         _die("stop-rule requires -n >= 1")
     rows = _rows(ns.ledger)
-    last_reset = _last_reset_index(rows, ns.target)
+    reset_ts = _reset_ts(rows, ns.target)
     # Excluded rows keep the lane ON, the safe direction.
-    weekly = [r for r in rows[last_reset + 1:]
+    weekly = [r for r in rows
               if r.get("kind") == "weekly" and r.get("target") == ns.target and _completed(r)]
+    if reset_ts is not None:
+        weekly = [r for r in weekly if _run_ts(r, "weekly") > reset_ts]
     # Window is by execution time, not append order, and one completed pass
     # per ISO week counts once: extra completed rows in the same week are
     # retries/dupes of that week's outcome (keep the latest).
@@ -301,9 +311,11 @@ def cmd_stop_rule(ns):
 
 def cmd_calibration_check(ns):
     rows = _rows(ns.ledger)
-    last_reset = _last_reset_index(rows, ns.target)
-    cal = [r for r in rows[last_reset + 1:]
+    reset_ts = _reset_ts(rows, ns.target)
+    cal = [r for r in rows
            if r.get("kind") == "calibration" and r.get("target") == ns.target]
+    if reset_ts is not None:
+        cal = [r for r in cal if _run_ts(r, "calibration") > reset_ts]
     if not cal:
         print("calibration-check: no calibration row since last reset — do NOT run real charters")
         return 11
