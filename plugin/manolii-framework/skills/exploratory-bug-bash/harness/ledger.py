@@ -111,11 +111,16 @@ def cmd_stop_rule(ns):
     rows = _rows(ns.ledger)
     last_reset = max((i for i, r in enumerate(rows) if r.get("kind") == "reset"), default=-1)
     # Rows with charter_exits.other > 0 are incomplete runs (setup/auth/crash
-    # errors that must be rerun before triage) — they never count toward the
-    # pause window.
+    # errors that must be rerun before triage); rows where no charter produced a
+    # verdict (e.g. appended after an aggregation failure) aren't runs at all —
+    # neither counts toward the pause window.
+    def _completed(r):
+        exits = r.get("charter_exits") or {}
+        done = int(exits.get("0") or 0) + int(exits.get("1") or 0)
+        return done > 0 and not int(exits.get("other") or 0)
+
     weekly = [r for r in rows[last_reset + 1:]
-              if r.get("kind") == "weekly"
-              and not int((r.get("charter_exits") or {}).get("other") or 0)]
+              if r.get("kind") == "weekly" and _completed(r)]
     tail = weekly[-ns.n:]
     if len(tail) < ns.n:
         print(f"stop-rule: only {len(tail)}/{ns.n} weekly runs recorded — lane stays ON")
