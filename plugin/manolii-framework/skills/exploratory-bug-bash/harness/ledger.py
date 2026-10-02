@@ -63,11 +63,15 @@ def _parse_candidates(spec):
     out = {k: 0 for k in BUCKETS}
     if not spec:
         return out
+    seen = set()
     for part in spec.split(","):
         key, _, val = part.partition(":")
         key = key.strip().replace("-", "_")
         if key not in out:
             _die(f"unknown candidate bucket {key!r} (one of {', '.join(BUCKETS)})")
+        if key in seen:
+            _die(f"duplicate candidate bucket {key!r} — an ambiguous aggregation cannot be recorded")
+        seen.add(key)
         try:
             out[key] = int(val)
         except ValueError:
@@ -107,6 +111,9 @@ def cmd_append(ns):
     charters = _int_or_none(ns.charters)
     if charters is not None and charters < 1:
         _die(f"--charters must be >= 1, got {charters}")
+    if ns.kind == "weekly" and ns.candidates is None:
+        _die("weekly rows require explicit --candidates accounting "
+             "(pass all-zero buckets when triage genuinely found nothing)")
     candidates = _parse_candidates(ns.candidates)
     if ns.kind == "calibration":
         total_candidates = sum(candidates.values())
@@ -296,10 +303,13 @@ def cmd_calibration_check(ns):
         print("calibration-check: calibration run did not complete every charter — do NOT run real charters")
         return 11
     if ns.expect_fingerprint is not None:
+        expected = ns.expect_fingerprint.strip() or None
+        if expected is None:
+            _die("--expect-fingerprint was given an empty value")
         stored = r.get("fingerprint")
-        if stored != ns.expect_fingerprint:
+        if stored != expected:
             print("calibration-check: calibration fingerprint "
-                  f"{stored!r} != active {ns.expect_fingerprint!r} — recalibrate for this model/harness/charter set")
+                  f"{stored!r} != active {expected!r} — recalibrate for this model/harness/charter set")
             return 11
     age = _run_age_days(r, "calibration")
     if age > CALIBRATION_MAX_AGE_DAYS:
@@ -329,7 +339,7 @@ def main():
     a.add_argument("--exit-other", type=int, default=0)
     a.add_argument("--planted", type=int, default=None)
     a.add_argument("--planted-found", type=int, default=None)
-    a.add_argument("--candidates", default="", help="confirmed:N,fixture:N,design_intent:N,judge_error:N,unconfirmed:N")
+    a.add_argument("--candidates", help="confirmed:N,fixture:N,design_intent:N,judge_error:N,unconfirmed:N")
     a.add_argument("--confirmed-prs", default="", help="comma-separated PR URLs")
     a.add_argument("--fingerprint", default=None,
                    help="runtime fingerprint (model names + harness/charter/config hashes) this run was calibrated under")

@@ -142,12 +142,15 @@ stack), the lane needs five committed artifacts beyond the harness:
    --expect-fingerprint <fp>` (compute `<fp>` from the recipe in
    `harness/calibration.md`) — only
    when it exits 0 does the run proceed to real charters; exit 11 pauses
-   them (fix charters first). Then triage, append the ledger row, and post
+   them — inspect the gate's message and resolve the cause it reports
+   (missing/stale/incomplete calibration, recall < 2/3, fingerprint
+   mismatch), not always the charters. Then triage, append the ledger row, and post
    the summary. Advisory end-to-end: `continue-on-error` semantics, never a
    required check.
 5. **Stop rule** — `harness/ledger.py stop-rule <runs.jsonl> --target <t>`
    exits `10` when the last 3
-   weekly runs produced zero confirmed bugs; the lane pauses (trigger
+   **completed** weekly runs (every charter accounted for) produced zero
+   confirmed bugs; the lane pauses (trigger
    disabled, ledger note) until charters or models change. Three empty weeks
    is the agreed cost ceiling. After a charter/model change, append a
    `kind=reset` row — the stop-rule window only counts weekly runs after the

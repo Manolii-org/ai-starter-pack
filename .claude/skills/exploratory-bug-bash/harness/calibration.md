@@ -45,9 +45,10 @@ Append the calibration row with `--fingerprint <fp>` and gate real runs with
 produced by a different model/harness/charter set can't authorize this week's
 budget. Recipe: a sha256 over the `BB_ACTOR_MODEL`/`BB_JUDGE_MODEL` values,
 `ledger.py`, `fanout.sh`, `e2e.config.ts`, the charters file bytes, and the
-app's `e2e/package.json` + `e2e/pnpm-lock.yaml` (the pins the e2e-bump
-calibration rule talks about) — same recipe at append and check time,
-recomputed each run. A row appended without
+harness scratch copy's own `package.json` + `package-lock.json` (the pins
+the e2e-bump calibration rule talks about — `npm ci` resolves them there,
+not in the app repo) — same recipe at append and check time, recomputed
+each run. A row appended without
 a fingerprint fails the check once the flag is in use.
 
 A candidate that appears in BOTH calibration and real runs is pre-existing:
