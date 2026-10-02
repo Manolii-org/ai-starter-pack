@@ -264,10 +264,11 @@ def cmd_stop_rule(ns):
             candidates = {}
         if not isinstance(candidates, dict):
             _die(f"weekly row at {r.get('run_at')!r} has a non-object candidates value")
-        count = candidates.get("confirmed")
-        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
-            _die(f"weekly row at {r.get('run_at')!r} lacks a valid candidates.confirmed count")
-        confirmed.append(count)
+        for b in BUCKETS:
+            v = candidates.get(b)
+            if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+                _die(f"weekly row at {r.get('run_at')!r} lacks a valid candidates.{b} count")
+        confirmed.append(candidates["confirmed"])
     if sum(confirmed) == 0:
         print(f"stop-rule: {ns.n} consecutive weekly runs with 0 confirmed bugs — PAUSE the lane")
         return 10
