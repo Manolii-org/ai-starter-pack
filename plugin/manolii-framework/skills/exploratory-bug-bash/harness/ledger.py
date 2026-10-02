@@ -62,6 +62,17 @@ def _parse_prs(spec):
 
 
 def cmd_append(ns):
+    planted = _int_or_none(ns.planted)
+    found = _int_or_none(ns.planted_found)
+    for label, v in (("--planted", planted), ("--planted-found", found)):
+        if v is not None and v < 0:
+            _die(f"{label} must be non-negative, got {v}")
+    if ns.kind == "calibration" and (planted is None or planted < 1):
+        _die("calibration rows require --planted >= 1")
+    if found is not None and planted is not None and found > planted:
+        _die(f"--planted-found {found} exceeds --planted {planted}")
+    if found is not None and planted is None:
+        _die("--planted-found requires --planted")
     row = {
         "run_at": ns.run_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%MZ"),
         "kind": ns.kind,
@@ -69,10 +80,10 @@ def cmd_append(ns):
         "app_sha": ns.app_sha,
         "charters": _int_or_none(ns.charters),
         "charter_exits": {"0": ns.exit0, "1": ns.exit1, "other": ns.exit_other},
-        "planted": _int_or_none(ns.planted),
-        "planted_found": _int_or_none(ns.planted_found),
-        "recall": (None if _int_or_none(ns.planted) in (None, 0) or ns.planted_found is None
-                   else round(ns.planted_found / ns.planted, 3)),
+        "planted": planted,
+        "planted_found": found,
+        "recall": (None if planted in (None, 0) or found is None
+                   else round(found / planted, 3)),
         "candidates": _parse_candidates(ns.candidates),
         "confirmed_prs": _parse_prs(ns.confirmed_prs),
         "model_calls": _int_or_none(ns.model_calls),
@@ -153,8 +164,13 @@ def cmd_stop_rule(ns):
         return 0
     confirmed = []
     for r in tail:
-        count = (r.get("candidates") or {}).get("confirmed")
-        if not isinstance(count, int) or count < 0:
+        candidates = r.get("candidates")
+        if candidates is None:
+            candidates = {}
+        if not isinstance(candidates, dict):
+            _die(f"weekly row at {r.get('run_at')!r} has a non-object candidates value")
+        count = candidates.get("confirmed")
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
             _die(f"weekly row at {r.get('run_at')!r} lacks a valid candidates.confirmed count")
         confirmed.append(count)
     if sum(confirmed) == 0:
