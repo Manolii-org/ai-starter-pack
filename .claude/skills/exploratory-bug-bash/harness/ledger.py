@@ -267,7 +267,10 @@ def cmd_stop_rule(ns):
     for r in weekly:
         ts = _run_ts(r, "weekly")
         wk = (ts.isocalendar().year, ts.isocalendar().week)
-        if wk not in by_week or ts > by_week[wk][0]:
+        # >= breaks same-minute ties toward the later-appended row: run_at is
+        # minute-precision, so the later retry in a shared minute is the
+        # week's true latest outcome.
+        if wk not in by_week or ts >= by_week[wk][0]:
             by_week[wk] = (ts, r)
     tail = [r for ts, r in sorted(by_week.values())[-ns.n:]]
     if len(tail) < ns.n:
