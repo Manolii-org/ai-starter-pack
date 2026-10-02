@@ -115,6 +115,13 @@ def cmd_append(ns):
     charters = _int_or_none(ns.charters)
     if charters is not None and charters < 1:
         _die(f"--charters must be >= 1, got {charters}")
+    if ns.kind == "weekly" and charters is None:
+        _die("weekly rows require --charters >= 1 — a row without charter totals "
+             "is excluded from the stop window and would hide empty weeks")
+    if ns.kind == "weekly" and (ns.exit0 + ns.exit1 != charters or ns.exit_other):
+        _die(f"weekly rows require complete charter accounting "
+             f"(exit0+exit1 == charters, no other exits); got "
+             f"{ns.exit0}+{ns.exit1}+{ns.exit_other} on --charters {charters}")
     if ns.kind == "weekly" and ns.candidates is None:
         _die("weekly rows require explicit --candidates accounting "
              "(pass all-zero buckets when triage genuinely found nothing)")
