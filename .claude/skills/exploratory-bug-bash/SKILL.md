@@ -91,7 +91,7 @@ charter is specific enough.
    bump).** In a separate worktree plant 2–4 small, realistic bugs on the
    charter paths (off-by-one count, relaxed validation, dropped field on save),
    start that build on its own port, and run the same charters against it.
-   Recall = planted bugs reported / planted. Below 50 % → fix charters or
+   Recall = planted bugs reported / planted. Below 2/3 → fix charters or
    budgets before running real charters. Record recall in the report.
 3. **Explore** the unmodified build: `./fanout.sh charters.txt .e2e/out/real 4`.
    `exits.txt` records each charter's exit code: `0` clean, `1` candidate

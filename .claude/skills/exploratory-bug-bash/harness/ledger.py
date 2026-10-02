@@ -27,6 +27,11 @@ from datetime import datetime, timezone
 BUCKETS = ("confirmed", "fixture", "design_intent", "judge_error", "unconfirmed")
 
 
+def _die(msg):
+    print(f"error: {msg}", file=sys.stderr)
+    sys.exit(2)
+
+
 def _int_or_none(v):
     return None if v in (None, "") else int(v)
 
@@ -39,8 +44,11 @@ def _parse_candidates(spec):
         key, _, val = part.partition(":")
         key = key.strip().replace("-", "_")
         if key not in out:
-            raise SystemExit(f"error: unknown candidate bucket {key!r} (one of {', '.join(BUCKETS)})")
-        out[key] = int(val)
+            _die(f"unknown candidate bucket {key!r} (one of {', '.join(BUCKETS)})")
+        try:
+            out[key] = int(val)
+        except ValueError:
+            _die(f"invalid candidate count {val!r} for bucket {key!r}")
     return out
 
 
@@ -86,16 +94,23 @@ def _rows(path):
                 try:
                     rows.append(json.loads(line))
                 except json.JSONDecodeError:
-                    raise SystemExit(f"error: malformed JSONL at {path}:{i}")
+                    _die(f"malformed JSONL at {path}:{i}")
     except FileNotFoundError:
-        raise SystemExit(f"error: ledger {path} not found")
+        _die(f"ledger {path} not found")
     return rows
 
 
 def cmd_stop_rule(ns):
+    if ns.n < 1:
+        _die("stop-rule requires -n >= 1")
     rows = _rows(ns.ledger)
     last_reset = max((i for i, r in enumerate(rows) if r.get("kind") == "reset"), default=-1)
-    weekly = [r for r in rows[last_reset + 1:] if r.get("kind") == "weekly"]
+    # Rows with charter_exits.other > 0 are incomplete runs (setup/auth/crash
+    # errors that must be rerun before triage) — they never count toward the
+    # pause window.
+    weekly = [r for r in rows[last_reset + 1:]
+              if r.get("kind") == "weekly"
+              and not int((r.get("charter_exits") or {}).get("other") or 0)]
     tail = weekly[-ns.n:]
     if len(tail) < ns.n:
         print(f"stop-rule: only {len(tail)}/{ns.n} weekly runs recorded — lane stays ON")
