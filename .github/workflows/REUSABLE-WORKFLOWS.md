@@ -668,6 +668,42 @@ context inside `with:`); `test_env` carries NON-secret env only.
 `artifact_paths` are relative to `workdir`. Full input list in the file
 header.
 
+Failure classification (v1.20.0+, advisory): every run ends with a
+`test_failure_class` — `none`, `product`, `test-defect`, `environment`,
+`external-dependency` or `unclassified` — in the step summary,
+`test-results/test-failure-class.json` and the workflow outputs
+`test_failure_class` / `autofix_eligible` / `retryable`. It reads JSON
+reports under `classify_results` (default `test-results/`; add
+`['json', { outputFile: 'test-results/results.json' }]` to the config's CI
+reporters for per-test precision) and otherwise parses the captured reporter
+stdout. The classifier is loaded from the pack at `pack_ref` (default `v1`;
+keep identical to your `uses:` pin). It never changes the job conclusion. Downstream automation should
+retry `retryable == 'true'`, hand `autofix_eligible == 'true'` to code
+fixers, and escalate `environment` to whoever owns the secret/seed/config.
+
+## classify-playwright-failures action (v1.20.0+)
+
+The same classifier as a composite action for repos that run Playwright
+inline rather than through the reusable. Wire it `if: always()` after the
+test step; it always exits 0.
+
+```yaml
+      - name: Classify Playwright failures
+        if: ${{ always() }}
+        uses: Manolii-org/ai-starter-pack/.github/actions/classify-playwright-failures@<sha> # vX.Y.Z
+        with:
+          results: test-results            # JSON-reporter files/dirs
+          test-logs: ${{ runner.temp }}/pw.log   # optional: tee'd stdout fallback
+          logs: ${{ runner.temp }}/pre-test.log  # optional: health-check / setup evidence
+          job-status: ${{ job.status }}
+```
+
+Vocabulary and rules live in `scripts/lib/failure_class.py`
+(`TEST_FAILURE_CLASSES`, `classify_test_failure_text`); `environment`,
+`external-dependency` and `unclassified` mean the same as in the session
+`failure_class` taxonomy. Unmatched evidence stays `unclassified` — the
+classifier never guesses.
+
 ## coverage-ratchet (v1.19.0+)
 
 Reusable coverage gate: runs the suite, extracts a float metric, compares

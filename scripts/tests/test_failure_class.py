@@ -1,6 +1,7 @@
 """Unit tests for scripts/lib/failure_class.py — classifier priority & fix #7."""
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -127,3 +128,272 @@ def test_classify_from_text_priority():
     assert classify_from_text("timed out talking to vercel") == "external-dependency"
     assert classify_from_text("hook fired PreToolUse tool call") == "tooling"
     assert classify_from_text("") == DEFAULT_FAILURE_CLASS
+
+
+
+# --- test-run failure classes -------------------------------------------------
+
+from failure_class import (  # noqa: E402
+    NO_TEST_FAILURE,
+    TEST_FAILURE_CLASSES,
+    classify_playwright_report,
+    classify_test_failure_text,
+    is_setup_location,
+    normalize_test_failure_class,
+    parse_playwright_text_output,
+    summarize_test_run,
+)
+
+
+def test_test_failure_classes_reuse_session_vocabulary():
+    shared = set(TEST_FAILURE_CLASSES) & set(FAILURE_CLASSES)
+    assert shared == {"environment", "external-dependency", "unclassified"}
+    assert normalize_test_failure_class("PRODUCT") == "product"
+    assert normalize_test_failure_class("tooling") == DEFAULT_FAILURE_CLASS
+
+
+def test_assertion_failure_is_product():
+    msg = "Error: expect(received).toBe(expected)\n\nExpected: 200\nReceived: 500"
+    assert classify_test_failure_text(msg) == "product"
+    assert classify_test_failure_text(
+        "\x1b[31mError: expect(locator).toBeVisible() failed\x1b[39m"
+    ) == "product"
+
+
+def test_selector_and_code_errors_are_test_defects():
+    assert classify_test_failure_text(
+        "Error: expect(locator).toBeVisible() failed\nstrict mode violation: "
+        "getByRole('button') resolved to 2 elements"
+    ) == "test-defect"
+    assert classify_test_failure_text("ReferenceError: foo is not defined") == "test-defect"
+
+
+def test_missing_config_and_credentials_are_environment():
+    assert classify_test_failure_text("E2E_TEST_USER_EMAIL is not set") == "environment"
+    assert classify_test_failure_text("Error: missing env var SUPABASE_URL") == "environment"
+    assert classify_test_failure_text("Invalid login credentials") == "environment"
+
+
+def test_setup_403_is_environment_but_test_403_is_not():
+    assert classify_test_failure_text("Request failed: 403 Forbidden", setup=True) == "environment"
+    assert classify_test_failure_text("Request failed: 403 Forbidden") == DEFAULT_FAILURE_CLASS
+
+
+def test_network_and_health_failures_are_external():
+    assert classify_test_failure_text(
+        "page.goto: net::ERR_CONNECTION_REFUSED at http://localhost:3000/"
+    ) == "external-dependency"
+    assert classify_test_failure_text("App failed to become healthy") == "external-dependency"
+    assert classify_test_failure_text("Error: 503 Service Unavailable") == "external-dependency"
+
+
+def test_bare_timeout_stays_unclassified():
+    assert classify_test_failure_text("Test timeout of 30000ms exceeded.") == DEFAULT_FAILURE_CLASS
+    assert classify_test_failure_text("") == DEFAULT_FAILURE_CLASS
+
+
+def test_setup_location_detection():
+    assert is_setup_location(project="setup")
+    assert is_setup_location(file="e2e/global-setup.ts")
+    assert is_setup_location(file="tests/auth.setup.ts")
+    assert not is_setup_location(project="chromium", file="tests/setup-wizard.spec.ts")
+
+
+def _report():
+    def test(status, expected="passed", errors=(), retries=1, project="chromium"):
+        results = [{"status": "failed"}] * (retries - 1) + [
+            {"status": status, "errors": [{"message": m} for m in errors]}
+        ]
+        return {"expectedStatus": expected, "projectName": project, "results": results}
+
+    return {
+        "errors": [],
+        "suites": [{
+            "title": "home.spec.ts",
+            "file": "home.spec.ts",
+            "specs": [
+                {"title": "renders", "tests": [test("passed")]},
+                {"title": "flaky", "tests": [test("passed", retries=2)]},
+                {"title": "skipped", "tests": [test("skipped")]},
+                {"title": "expected fail", "tests": [test("failed", expected="failed")]},
+                {"title": "asserts", "tests": [test("failed", errors=["expect(x).toBe(y)"])]},
+            ],
+            "suites": [{
+                "title": "nested",
+                "specs": [{"title": "times out", "tests": [test("timedOut")]}],
+            }],
+        }],
+    }
+
+
+def test_playwright_report_counts_final_failures_only():
+    out = classify_playwright_report(_report())
+    assert out["tests"] == 6
+    assert out["flaky"] == 1
+    assert [(f["title"], f["class"]) for f in out["failures"]] == [
+        ("asserts", "product"),
+        ("nested › times out", DEFAULT_FAILURE_CLASS),
+    ]
+    assert out["failures"][1]["file"] == "home.spec.ts"
+
+
+def test_playwright_top_level_errors_are_setup_phase():
+    out = classify_playwright_report(
+        {"errors": [{"message": "Error: 401 Unauthorized while signing in"}], "suites": []}
+    )
+    assert out["failures"][0]["setup"] is True
+    assert out["failures"][0]["class"] == "environment"
+
+
+def test_run_precedence_infra_over_code():
+    run = summarize_test_run([{"class": "product"}, {"class": "external-dependency"}])
+    assert run["test_failure_class"] == "external-dependency"
+    assert run["retryable"] is True and run["autofix_eligible"] is False
+    assert run["counts"]["product"] == 1
+
+
+def test_run_product_is_autofix_eligible():
+    run = summarize_test_run([{"class": "product"}, {"class": "test-defect"}])
+    assert run["test_failure_class"] == "test-defect"
+    assert run["autofix_eligible"] is True
+
+
+def test_run_pre_test_log_evidence_and_noise():
+    run = summarize_test_run([], log_texts=["booting\nApp failed to become healthy\n"], job_failed=True)
+    assert run["test_failure_class"] == "external-dependency"
+    noisy = summarize_test_run([{"class": "product"}], log_texts=["expect(x) noise\nReferenceError"])
+    assert noisy["test_failure_class"] == "product"
+
+
+def test_run_green_and_unexplained_red():
+    assert summarize_test_run([])["test_failure_class"] == NO_TEST_FAILURE
+    assert summarize_test_run([], job_failed=True)["test_failure_class"] == DEFAULT_FAILURE_CLASS
+
+
+
+_LIST_OUTPUT = """
+Running 4 tests using 1 worker
+
+  \u2718  1 [chromium] \u203a fmt.spec.ts:2:5 \u203a asserts (562ms)
+
+  1) [chromium] \u203a fmt.spec.ts:2:5 \u203a asserts \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+    Error: page.goto: net::ERR_CONNECTION_REFUSED at http://localhost:3000/
+
+    Retry #1 \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+    Error: expect(locator).toHaveText(expected) failed
+
+    Expected: "bye"
+    Received: "hi"
+
+  2) [setup] \u203a auth.setup.ts:3:5 \u203a sign in \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+    Error: 401 Unauthorized
+
+  3) [chromium] \u203a fmt.spec.ts:4:5 \u203a flaky \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+    Error: expect(received).toBe(expected) // Object.is equality
+
+  2 failed
+    [chromium] \u203a fmt.spec.ts:2:5 \u203a asserts \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    [setup] \u203a auth.setup.ts:3:5 \u203a sign in \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  1 flaky
+    [chromium] \u203a fmt.spec.ts:4:5 \u203a flaky \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  1 passed (6.2s)
+"""
+
+
+def test_text_output_final_attempt_and_flaky_excluded():
+    rows = parse_playwright_text_output(_LIST_OUTPUT)
+    assert [(r["project"], r["file"], r["title"], r["class"]) for r in rows] == [
+        ("chromium", "fmt.spec.ts", "asserts", "product"),
+        ("setup", "auth.setup.ts", "sign in", "environment"),
+    ]
+    assert rows[1]["setup"] is True
+
+
+def test_text_output_without_summary_counts_every_block():
+    head = _LIST_OUTPUT.split("  2 failed")[0]
+    assert len(parse_playwright_text_output(head)) == 3
+    assert parse_playwright_text_output("no failures here") == []
+
+
+def _as_github_annotations(output: str) -> str:
+    def enc(msg: str) -> str:
+        return msg.replace("%", "%25").replace("\n", "%0A")
+
+    blocks = re.split(r"(?m)^(?=  \d+\) )|^(?=  \d+ failed)", output.strip("\n"))
+    lines = []
+    for block in filter(None, blocks):
+        if re.match(r"  \d+ failed", block):
+            lines.append("::notice title=Playwright Run Summary::" + enc(block))
+            continue
+        title = block.splitlines()[0]
+        for attempt in re.split(r"(?m)^(?=\s+Retry #\d+)", block):
+            body = attempt if attempt.startswith("  ") and ")" in attempt[:6] else title + "\n" + attempt
+            lines.append(f"::error file=x.spec.ts,title={title.strip()},line=2,col=1::" + enc(body))
+    return "\n".join(lines) + "\n"
+
+
+def test_text_output_github_annotations_only():
+    annotated = _as_github_annotations(_LIST_OUTPUT)
+    assert not re.search(r"(?m)^  \d+\) ", annotated)
+    rows = parse_playwright_text_output(annotated)
+    assert [(r["project"], r["title"], r["class"]) for r in rows] == [
+        ("chromium", "asserts", "product"),
+        ("setup", "sign in", "environment"),
+    ]
+
+
+def test_text_output_github_reporter_mixed_stdout_not_double_counted():
+    mixed = _LIST_OUTPUT + _as_github_annotations(_LIST_OUTPUT)
+    assert len(parse_playwright_text_output(mixed)) == 2
+
+
+_LONG = "a very long test title that keeps going and going so that the header exceeds the one hundred column padding limit for sure"
+_STEP_AND_LONG_OUTPUT = f"""
+  1) [chromium] \u203a cr.spec.ts:2:5 \u203a {_LONG} 
+
+    Error: expect(received).toBe(expected) // Object.is equality
+
+    Expected: 2
+    Received: 1
+
+  2) [chromium] \u203a cr.spec.ts:5:5 \u203a fails inside a step \u203a login \u2500\u2500\u2500\u2500\u2500\u2500
+
+    Error: expect(received).toBe(expected) // Object.is equality
+
+    Expected: 2
+    Received: 1
+
+    Retry #1 \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+    Error: expect(received).toBe(expected) // Object.is equality
+
+  2 failed
+    [chromium] \u203a cr.spec.ts:2:5 \u203a {_LONG} 
+    [chromium] \u203a cr.spec.ts:5:5 \u203a fails inside a step \u2500\u2500\u2500\u2500\u2500\u2500
+"""
+
+
+def test_text_output_unpadded_header_and_step_suffix():
+    rows = parse_playwright_text_output(_STEP_AND_LONG_OUTPUT)
+    assert [(r["title"], r["class"]) for r in rows] == [
+        (_LONG, "product"),
+        ("fails inside a step", "product"),
+    ]
+
+
+def test_text_output_step_suffix_of_flaky_test_excluded():
+    flaky = _STEP_AND_LONG_OUTPUT.replace("  2 failed", "  1 failed").replace(
+        "    [chromium] \u203a cr.spec.ts:5:5 \u203a fails inside a step",
+        "  1 flaky\n    [chromium] \u203a cr.spec.ts:5:5 \u203a fails inside a step",
+    )
+    assert [r["title"] for r in parse_playwright_text_output(flaky)] == [_LONG]
+
+
+def test_missing_browser_binary_is_environment():
+    assert classify_test_failure_text(
+        "Error: browserType.launch: Executable doesn't exist at /x/chrome"
+    ) == "environment"
