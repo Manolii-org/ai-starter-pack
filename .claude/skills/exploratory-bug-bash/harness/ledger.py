@@ -49,6 +49,8 @@ def _parse_candidates(spec):
             out[key] = int(val)
         except ValueError:
             _die(f"invalid candidate count {val!r} for bucket {key!r}")
+        if out[key] < 0:
+            _die(f"negative candidate count {val!r} for bucket {key!r}")
     return out
 
 
@@ -115,7 +117,12 @@ def cmd_stop_rule(ns):
     if len(tail) < ns.n:
         print(f"stop-rule: only {len(tail)}/{ns.n} weekly runs recorded — lane stays ON")
         return 0
-    confirmed = [int((r.get("candidates") or {}).get("confirmed") or 0) for r in tail]
+    confirmed = []
+    for r in tail:
+        count = (r.get("candidates") or {}).get("confirmed")
+        if not isinstance(count, int) or count < 0:
+            _die(f"weekly row at {r.get('run_at')!r} lacks a valid candidates.confirmed count")
+        confirmed.append(count)
     if sum(confirmed) == 0:
         print(f"stop-rule: {ns.n} consecutive weekly runs with 0 confirmed bugs — PAUSE the lane")
         return 10
