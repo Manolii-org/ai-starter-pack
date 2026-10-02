@@ -137,12 +137,14 @@ stack), the lane needs five committed artifacts beyond the harness:
    comment may mirror the row but the ledger file is the record.
 4. **A scheduled runner** — e.g. a weekly Devin automation or CI
    `workflow_dispatch`-capable schedule that brings the isolated stack up,
-   runs calibration, then runs `harness/ledger.py calibration-check` — only
+   runs calibration, then runs
+   `harness/ledger.py calibration-check <runs.jsonl> --target <t>` — only
    when it exits 0 does the run proceed to real charters; exit 11 pauses
    them (fix charters first). Then triage, append the ledger row, and post
    the summary. Advisory end-to-end: `continue-on-error` semantics, never a
    required check.
-5. **Stop rule** — `harness/ledger.py stop-rule` exits `10` when the last 3
+5. **Stop rule** — `harness/ledger.py stop-rule <runs.jsonl> --target <t>`
+   exits `10` when the last 3
    weekly runs produced zero confirmed bugs; the lane pauses (trigger
    disabled, ledger note) until charters or models change. Three empty weeks
    is the agreed cost ceiling. After a charter/model change, append a

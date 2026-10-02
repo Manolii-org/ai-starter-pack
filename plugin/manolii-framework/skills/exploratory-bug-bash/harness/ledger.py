@@ -9,7 +9,7 @@ e2e/bug-bash/ledger/runs.jsonl): durable, reviewable, never only chat.
       --candidates confirmed:1,fixture:0,design_intent:0,judge_error:0,unconfirmed:2 \
       --confirmed-prs https://github.com/org/repo/pull/123 \
       --model-calls 120 --tokens 3100000 --wall-minutes 42 --notes "text"
-  ledger.py stop-rule <runs.jsonl> [-n 3]
+  ledger.py stop-rule <runs.jsonl> --target bcp-core-local [-n 3]
 
 `stop-rule` exits 10 when the last N fully-completed kind=weekly rows (every
 charter reached a verdict) all recorded zero confirmed bugs (lane should
@@ -266,6 +266,16 @@ def cmd_calibration_check(ns):
         return 11
     if found > planted:
         _die(f"calibration row at {when!r} has found {found} > planted {planted}")
+    cands = r.get("candidates")
+    if not isinstance(cands, dict):
+        cands = {}
+    total_candidates = sum(v for v in cands.values()
+                           if isinstance(v, int) and not isinstance(v, bool))
+    if total_candidates < found:
+        print("calibration-check: calibration row reports "
+              f"{found} planted bugs found but only {total_candidates} total "
+              "candidates — no candidate evidence")
+        return 11
     if not _completed(r):
         print("calibration-check: calibration run did not complete every charter — do NOT run real charters")
         return 11
