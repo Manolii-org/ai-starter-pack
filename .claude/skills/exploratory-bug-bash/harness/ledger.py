@@ -11,8 +11,9 @@ e2e/bug-bash/ledger/runs.jsonl): durable, reviewable, never only chat.
       --model-calls 120 --tokens 3100000 --wall-minutes 42 --notes "text"
   ledger.py stop-rule <runs.jsonl> [-n 3]
 
-`stop-rule` exits 10 when the last N kind=weekly rows all recorded zero
-confirmed bugs (lane should pause), 0 otherwise, 2 on usage/parse errors.
+`stop-rule` exits 10 when the last N fully-completed kind=weekly rows (every
+charter reached a verdict) all recorded zero confirmed bugs (lane should
+pause), 0 otherwise, 2 on usage/parse errors.
 
 A `kind=reset` row marks a charter/model change after a pause: stop-rule
 only counts weekly rows appended after the most recent reset row, so the
@@ -110,14 +111,39 @@ def cmd_stop_rule(ns):
         _die("stop-rule requires -n >= 1")
     rows = _rows(ns.ledger)
     last_reset = max((i for i, r in enumerate(rows) if r.get("kind") == "reset"), default=-1)
-    # Rows with charter_exits.other > 0 are incomplete runs (setup/auth/crash
-    # errors that must be rerun before triage); rows where no charter produced a
-    # verdict (e.g. appended after an aggregation failure) aren't runs at all —
-    # neither counts toward the pause window.
+    # A run counts toward the pause window only when every charter reached a
+    # verdict: exit0+exit1 == charters and zero `other` exits. Rows recorded
+    # without full charter accounting (aggregation failure, partial coverage,
+    # missing/invalid fields) are excluded — they cannot demonstrate coverage,
+    # and excluding them keeps the lane ON, the safe direction.
     def _completed(r):
-        exits = r.get("charter_exits") or {}
-        done = int(exits.get("0") or 0) + int(exits.get("1") or 0)
-        return done > 0 and not int(exits.get("other") or 0)
+        when = r.get("run_at")
+        exits = r.get("charter_exits")
+        if exits is None:
+            return False
+        if not isinstance(exits, dict):
+            _die(f"invalid charter_exits on weekly row at {when!r}: not an object")
+        vals = {}
+        for k in ("0", "1", "other"):
+            v = exits.get(k, 0)
+            if isinstance(v, bool):
+                _die(f"invalid charter_exits[{k!r}] {v!r} on weekly row at {when!r}")
+            try:
+                v = int(v)
+            except (TypeError, ValueError):
+                _die(f"invalid charter_exits[{k!r}] {v!r} on weekly row at {when!r}")
+            if v < 0:
+                _die(f"negative charter_exits[{k!r}] on weekly row at {when!r}")
+            vals[k] = v
+        done = vals["0"] + vals["1"]
+        if done == 0 or vals["other"]:
+            return False
+        charters = r.get("charters")
+        if charters is None:
+            return False
+        if isinstance(charters, bool) or not isinstance(charters, int) or charters < 1:
+            _die(f"invalid charters {charters!r} on weekly row at {when!r}")
+        return done == charters
 
     weekly = [r for r in rows[last_reset + 1:]
               if r.get("kind") == "weekly" and _completed(r)]
