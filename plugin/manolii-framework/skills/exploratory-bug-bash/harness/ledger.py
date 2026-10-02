@@ -301,7 +301,9 @@ def cmd_calibration_check(ns):
     if not cal:
         print("calibration-check: no calibration row since last reset — do NOT run real charters")
         return 11
-    r = cal[-1]
+    # Gate applies to the latest calibration by execution time, not append
+    # order — a backfilled older row must not mask a newer failing result.
+    r = max(cal, key=lambda r: _run_ts(r, "calibration"))
     when = r.get("run_at")
     planted, found = r.get("planted"), r.get("planted_found")
     for field, v in (("planted", planted), ("planted_found", found)):
