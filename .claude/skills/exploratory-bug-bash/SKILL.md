@@ -133,8 +133,10 @@ stack), the lane needs five committed artifacts beyond the harness:
    broken invariant is the candidate.
 3. **Durable run ledger** — one JSONL row per run committed to the app repo
    (see `harness/ledger.py append`), carrying charters, exits, recall,
-   candidates per bucket, confirmed PRs, and cost. Append-only; a GitHub issue
-   comment may mirror the row but the ledger file is the record.
+   candidates per bucket, confirmed PRs, and cost. `--run-at` is required and
+   records the run's execution time — never the append time of a delayed
+   aggregation. Append-only; a GitHub issue comment may mirror the row but
+   the ledger file is the record.
 4. **A scheduled runner** — e.g. a weekly Devin automation or CI
    `workflow_dispatch`-capable schedule that brings the isolated stack up,
    runs calibration, then runs

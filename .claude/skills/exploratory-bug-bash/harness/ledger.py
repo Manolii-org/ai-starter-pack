@@ -147,6 +147,10 @@ def cmd_append(ns):
     for label, v in (("--model-calls", ns.model_calls), ("--tokens", ns.tokens), ("--wall-minutes", ns.wall_minutes)):
         if v is not None and v < 0:
             _die(f"{label} must be non-negative, got {v}")
+    if ns.kind in ("weekly", "calibration") and not ns.run_at:
+        _die(f"{ns.kind} rows require --run-at with the run's execution "
+             "timestamp — defaulting to append time misorders delayed "
+             "aggregation against resets")
     run_at = None
     if ns.run_at:
         try:
@@ -234,11 +238,7 @@ def _completed(r):
     vals = {}
     for k in ("0", "1", "other"):
         v = exits.get(k, 0)
-        if isinstance(v, (bool, float)):
-            _die(f"invalid charter_exits[{k!r}] {v!r} on row at {when!r}")
-        try:
-            v = int(v)
-        except (TypeError, ValueError):
+        if isinstance(v, bool) or not isinstance(v, int):
             _die(f"invalid charter_exits[{k!r}] {v!r} on row at {when!r}")
         if v < 0:
             _die(f"negative charter_exits[{k!r}] on row at {when!r}")
@@ -280,35 +280,49 @@ def _run_age_days(r, label):
     return max(delta.days, 0)
 
 
-def _reset_ts(rows, target):
-    """run_at of the reset with the greatest execution timestamp for
-    `target`, or None. The boundary is execution-time only: a reset record
-    appended late must not discard rows whose run_at post-dates it, and
-    `>=` keeps the same-minute reset→recalibrate cycle."""
-    ts = None
-    for r in rows:
-        if r.get("kind") == "reset" and r.get("target") == target:
-            t = _run_ts(r, "reset")
-            # A persisted future-dated reset (committed by hand or imported)
-            # bypasses the append-time check; same skew allowance applies.
-            if t > datetime.now(timezone.utc) + timedelta(seconds=60):
-                _die(f"reset row at {r.get('run_at')!r} is future-dated")
-            if ts is None or t > ts:
-                ts = t
-    return ts
+def _reset_boundary(rows, target):
+    """(run_at, append index) of the reset row bounding post-reset reads
+    for `target`, or None. Execution time wins: the reset with the greatest
+    run_at bounds; ties on the minute-precision timestamp resolve to the
+    latest-appended reset so a reset appended after a same-minute row
+    still supersedes it."""
+    bound = None  # (ts, idx)
+    for i, r in enumerate(rows):
+        if r.get("kind") != "reset" or r.get("target") != target:
+            continue
+        t = _run_ts(r, "reset")
+        # A persisted future-dated reset (committed by hand or imported)
+        # bypasses the append-time check; same skew allowance applies.
+        if t > datetime.now(timezone.utc) + timedelta(seconds=60):
+            _die(f"reset row at {r.get('run_at')!r} is future-dated")
+        if bound is None or t >= bound[0]:
+            bound = (t, i)
+    return bound
+
+
+def _post_reset(r, idx, boundary, label):
+    """True when the row executes after the reset boundary: strictly later
+    run_at, or a same-minute run_at appended after the boundary row. Append
+    position is the only signal distinguishing pre/post within a shared
+    minute."""
+    if boundary is None:
+        return True
+    reset_ts, reset_idx = boundary
+    ts = _run_ts(r, label)
+    return ts > reset_ts or (ts == reset_ts and idx > reset_idx)
 
 
 def cmd_stop_rule(ns):
     if ns.n < 1:
         _die("stop-rule requires -n >= 1")
     rows = _rows(ns.ledger)
-    reset_ts = _reset_ts(rows, ns.target)
+    boundary = _reset_boundary(rows, ns.target)
     # Excluded rows keep the lane ON, the safe direction.
     weekly = []
-    for r in rows:
+    for i, r in enumerate(rows):
         if r.get("kind") != "weekly" or r.get("target") != ns.target or not _completed(r):
             continue
-        if reset_ts is not None and _run_ts(r, "weekly") < reset_ts:
+        if not _post_reset(r, i, boundary, "weekly"):
             continue
         weekly.append(r)
     # Window is by execution time, not append order, and one completed pass
@@ -356,12 +370,12 @@ def cmd_stop_rule(ns):
 
 def cmd_calibration_check(ns):
     rows = _rows(ns.ledger)
-    reset_ts = _reset_ts(rows, ns.target)
+    boundary = _reset_boundary(rows, ns.target)
     cal = []
-    for r in rows:
+    for i, r in enumerate(rows):
         if r.get("kind") != "calibration" or r.get("target") != ns.target:
             continue
-        if reset_ts is not None and _run_ts(r, "calibration") < reset_ts:
+        if not _post_reset(r, i, boundary, "calibration"):
             continue
         cal.append(r)
     if not cal:
