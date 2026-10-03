@@ -139,14 +139,17 @@ stack), the lane needs five committed artifacts beyond the harness:
    the ledger file is the record.
 4. **A scheduled runner** — e.g. a weekly Devin automation or CI
    `workflow_dispatch`-capable schedule that brings the isolated stack up,
-   runs calibration, then runs
+   then gates unconditionally on
    `harness/ledger.py calibration-check <runs.jsonl> --target <t>
    --expect-fingerprint <fp>` (compute `<fp>` from the recipe in
-   `harness/calibration.md`) — only
-   when it exits 0 does the run proceed to real charters; exit 11 pauses
-   them — inspect the gate's message and resolve the cause it reports
-   (missing/stale/incomplete calibration, recall < 2/3, fingerprint
-   mismatch), not always the charters. Then triage, append the ledger row, and post
+   `harness/calibration.md`). The check reads only the JSONL, so a first
+   run (or any fingerprint change) exits 11 until calibration has actually
+   been persisted: exit 11 means run calibration first, triage its result,
+   append the calibration row (carrying the fingerprint), and re-run the
+   check. Only exit 0 proceeds to real charters — resolve the cause the
+   gate reports (missing/stale/incomplete calibration, recall < 2/3,
+   fingerprint mismatch), not always the charters. Then triage, append the
+   weekly ledger row, and post
    the summary. Advisory end-to-end: `continue-on-error` semantics, never a
    required check.
 5. **Stop rule** — `harness/ledger.py stop-rule <runs.jsonl> --target <t>`
