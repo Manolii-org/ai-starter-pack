@@ -157,6 +157,13 @@ jobs:
           # `git log` (same assertion: subject starts with [autofix]).
           HEAD_SHA=$(timeout 20 gh api "repos/${{ github.repository }}/pulls/${PR_NUM}" --jq '.head.sha' 2>/dev/null || echo '')
           echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          if [[ -z "$HEAD_SHA" ]]; then
+            # Fail closed: an empty SHA would fall back to movable head_ref in
+            # the autofix checkout — unvalidated commit. Skip instead.
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Could not resolve PR head SHA; skipping"
+            exit 0
+          fi
           LAST_MSG=''
           if [[ -n "$HEAD_SHA" ]]; then
             LAST_MSG=$(timeout 20 gh api "repos/${{ github.repository }}/commits/${HEAD_SHA}" \
@@ -191,8 +198,11 @@ jobs:
             fi
           fi
 
-          LABELS=$(gh pr view "$PR_NUM" --json labels --jq '[.labels[].name]' 2>/dev/null || echo '[]')
-          if echo "$LABELS" | grep -q "skip-ai-review"; then
+          # --repo required: this step runs with no checkout, so gh would
+          # resolve the repo from cwd and fail. Failure must fail closed —
+          # a label list we can't read might contain skip-ai-review.
+          LABELS=$(timeout 20 gh pr view "$PR_NUM" --repo "${{ github.repository }}" --json labels --jq '[.labels[].name]' 2>/dev/null || echo 'FAIL')
+          if [[ "$LABELS" == "FAIL" ]] || echo "$LABELS" | grep -q "skip-ai-review"; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
@@ -252,6 +262,12 @@ jobs:
           # so checking it out could run autofix on a commit the loop-break and
           # budget gates never examined (review finding on #148).
           ref: ${{ needs.preflight.outputs.head_sha || needs.preflight.outputs.head_ref }}
+
+      # A raw-SHA checkout leaves HEAD detached — the agent's `git push` to the
+      # PR branch would fail with "not currently on a branch". Re-attach a
+      # local branch named after the PR head at the validated SHA.
+      - name: Attach PR branch at validated SHA
+        run: git checkout -B "${{ needs.preflight.outputs.head_ref }}"
 
       - name: Resolve Anthropic credential
         id: cred
