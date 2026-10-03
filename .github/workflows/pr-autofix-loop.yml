@@ -156,9 +156,10 @@ jobs:
           # checkout — read the head commit message via the API instead of
           # `git log` (same assertion: subject starts with [autofix]).
           PR_HEAD=$(timeout 20 gh api "repos/${{ github.repository }}/pulls/${PR_NUM}" \
-            --jq '.head | {sha: .sha, fork: .repo.fork}' 2>/dev/null || echo '{}')
+            --jq '. as $pr | $pr.head | {sha: .sha, same_repo: (if .repo == null then "missing" elif (.repo.id == $pr.base.repo.id) then "true" else "false" end)}' \
+            2>/dev/null || echo '{}')
           HEAD_SHA=$(echo "$PR_HEAD" | jq -r '.sha // empty')
-          HEAD_FORK=$(echo "$PR_HEAD" | jq -r '.fork // empty')
+          SAME_REPO=$(echo "$PR_HEAD" | jq -r '.same_repo // empty')
           echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
           if [[ -z "$HEAD_SHA" ]]; then
             # Fail closed: an empty SHA would fall back to movable head_ref in
@@ -167,12 +168,14 @@ jobs:
             echo "Could not resolve PR head SHA; skipping"
             exit 0
           fi
-          if [[ "$HEAD_FORK" == "true" ]]; then
-            # Fork head is attacker-controlled code; the autofix checkout runs
-            # with write perms and agent credentials. workflow_run already
-            # rejects forks via WR_FORK; issue_comment/pull_request need this.
+          if [[ "$SAME_REPO" != "true" ]]; then
+            # Compare repo IDs, not .fork (pr-autofix-loop-reusable.yml): a
+            # forked deployment repo has fork=true on its own PRs, and a
+            # deleted head has repo=null — both must fail closed. A cross-repo
+            # head is attacker-controlled code under write perms + agent creds
+            # on issue_comment/pull_request triggers.
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "Fork PR head — refusing privileged autofix checkout"
+            echo "Cross-repo/unverifiable PR head (same_repo=$SAME_REPO) — refusing privileged autofix checkout"
             exit 0
           fi
           LAST_MSG=''
