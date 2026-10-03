@@ -142,6 +142,9 @@ def cmd_append(ns):
         if found and ns.exit1 < 1:
             _die(f"calibration row reports {found} planted bugs found but "
                  "--exit1 is 0 — findings need a candidate-producing charter exit")
+        if total_candidates < ns.exit1:
+            _die(f"calibration row reports {ns.exit1} candidate exit(s) but only "
+                 f"{total_candidates} triaged — every candidate must land in a bucket")
     for label, v in (("--exit0", ns.exit0), ("--exit1", ns.exit1), ("--exit-other", ns.exit_other)):
         if not isinstance(v, int) or v < 0:
             _die(f"{label} must be a non-negative integer, got {v}")
@@ -415,13 +418,19 @@ def cmd_calibration_check(ns):
     extra = set(cands) - set(BUCKETS)
     if extra:
         _die(f"calibration row at {when!r} has unrecognized candidates buckets {sorted(extra)!r}")
-    total_candidates = sum(v for k, v in cands.items()
-                           if k in BUCKETS and isinstance(v, int)
-                           and not isinstance(v, bool) and v >= 0)
+    for k, v in cands.items():
+        if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+            _die(f"calibration row at {when!r} has invalid candidates.{k} {v!r}")
+    total_candidates = sum(cands.values())
     if total_candidates < found:
         print("calibration-check: calibration row reports "
               f"{found} planted bugs found but only {total_candidates} total "
               "candidates — no candidate evidence")
+        return 11
+    if total_candidates < _exit1(r):
+        print("calibration-check: calibration row reports "
+              f"{_exit1(r)} candidate exit(s) but only {total_candidates} triaged "
+              "— every candidate must land in a bucket")
         return 11
     if not _completed(r):
         print("calibration-check: calibration run did not complete every charter — do NOT run real charters")
