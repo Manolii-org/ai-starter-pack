@@ -70,6 +70,21 @@ claude_hooks:
   help: Wire Claude Code InstructionsLoaded observability. Codex and Cursor do not emit this host event.
   default: true
 
+# ── Cost profile ────────────────────────────────────────────────────────────
+cost_profile:
+  type: str
+  help: |
+    'standard' ships every CI caller. 'lean' drops the two callers measured as
+    pure spend at small scale: mutation-testing-diff (observe-only, always-green
+    in production — 164 runs/wk in bcp-core, L-3 finding) and monitor-litellm
+    (every-3h LiteLLM health poll; dead spend when the instance has no proxy).
+    Both remain in the pack and can be re-added by deleting them from a
+    consumer's _exclude after `copier update --data cost_profile=standard`.
+  choices:
+    - standard
+    - lean
+  default: standard
+
 # ── Instance identity (provenance — pack-components.yml, ADR-0023 Decision 4) ─
 instance_name:
   type: str
@@ -255,6 +270,8 @@ _exclude:
   - "{% if not browserbase %}.claude/commands/nav-replay.md{% endif %}"
   - "{% if not codex_adversarial %}.claude/agents/codex-adversarial.md{% endif %}"
   - "{% if not mesh_telemetry %}mesh-contract.yaml.template{% endif %}"
+  - "{% if cost_profile == 'lean' %}.github/workflows/mutation-testing-diff.yml{% endif %}"
+  - "{% if cost_profile == 'lean' %}.github/workflows/monitor-litellm.yml{% endif %}"
   - "*.zip"
 
 # Instance-owned files: written on first copy, never overwritten by
