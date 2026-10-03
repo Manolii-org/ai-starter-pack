@@ -76,7 +76,7 @@ cost_profile:
   help: |
     'standard' ships every CI caller. 'lean' drops the two callers measured as
     pure spend at small scale: mutation-testing-diff (observe-only, always-green
-    in production — 164 runs/wk in bcp-core, L-3 finding) and monitor-litellm
+    in production — 164 runs/wk in a live consumer, L-3 finding) and monitor-litellm
     (every-3h LiteLLM health poll; dead spend when the instance has no proxy).
     Both remain in the pack and can be re-added by deleting them from a
     consumer's _exclude after `copier update --data cost_profile=standard`.
