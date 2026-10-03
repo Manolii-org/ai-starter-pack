@@ -164,9 +164,9 @@ def cmd_append(ns):
         # append-only ledger cannot retract it.
         if dt.astimezone(timezone.utc) > datetime.now(timezone.utc) + timedelta(seconds=60):
             _die(f"--run-at {ns.run_at!r} is in the future")
-        run_at = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
+        run_at = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     row = {
-        "run_at": run_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%MZ"),
+        "run_at": run_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "kind": ns.kind,
         "target": ns.target,
         "app_sha": ns.app_sha,
@@ -264,10 +264,12 @@ def _run_ts(r, label):
     when = r.get("run_at")
     if not isinstance(when, str):
         _die(f"{label} row lacks a parseable run_at timestamp")
-    try:
-        return datetime.strptime(when, "%Y-%m-%dT%H:%MZ").replace(tzinfo=timezone.utc)
-    except ValueError:
-        _die(f"{label} row has unparseable run_at {when!r}")
+    for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%MZ"):
+        try:
+            return datetime.strptime(when, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    _die(f"{label} row has unparseable run_at {when!r}")
 
 
 def _run_age_days(r, label):
@@ -283,9 +285,9 @@ def _run_age_days(r, label):
 def _reset_boundary(rows, target):
     """(run_at, append index) of the reset row bounding post-reset reads
     for `target`, or None. Execution time wins: the reset with the greatest
-    run_at bounds; ties on the minute-precision timestamp resolve to the
-    latest-appended reset so a reset appended after a same-minute row
-    still supersedes it."""
+    run_at bounds; exact-timestamp ties resolve to the latest-appended
+    reset so a reset appended after a same-second (or legacy minute-
+    precision) row still supersedes it."""
     bound = None  # (ts, idx)
     for i, r in enumerate(rows):
         if r.get("kind") != "reset" or r.get("target") != target:
@@ -302,9 +304,9 @@ def _reset_boundary(rows, target):
 
 def _post_reset(r, idx, boundary, label):
     """True when the row executes after the reset boundary: strictly later
-    run_at, or a same-minute run_at appended after the boundary row. Append
-    position is the only signal distinguishing pre/post within a shared
-    minute."""
+    run_at, or an equal-timestamp run_at appended after the boundary row.
+    Append position breaks only same-second (or legacy minute-precision)
+    collisions — sub-minute ordering rides on run_at itself."""
     if boundary is None:
         return True
     reset_ts, reset_idx = boundary
@@ -332,8 +334,8 @@ def cmd_stop_rule(ns):
     for r in weekly:
         ts = _run_ts(r, "weekly")
         wk = (ts.isocalendar().year, ts.isocalendar().week)
-        # >= breaks same-minute ties toward the later-appended row: run_at is
-        # minute-precision, so the later retry in a shared minute is the
+        # >= breaks equal-timestamp ties toward the later-appended row —
+        # the later retry in a shared second (or legacy minute) is the
         # week's true latest outcome.
         if wk not in by_week or ts >= by_week[wk][0]:
             by_week[wk] = (ts, r)
@@ -383,8 +385,8 @@ def cmd_calibration_check(ns):
         return 11
     # Gate applies to the latest calibration by execution time, not append
     # order — a backfilled older row must not mask a newer failing result.
-    # run_at is minute-precision, so >= makes equal-timestamp ties resolve to
-    # the later-appended row (the retry's verdict).
+    # >= makes equal-timestamp ties resolve to the later-appended row (the
+    # retry's verdict) — needed for same-second and legacy minute rows.
     r = cal[0]
     best = _run_ts(r, "calibration")
     for row in cal[1:]:
