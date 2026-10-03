@@ -153,6 +153,9 @@ def cmd_append(ns):
              "aggregation against resets")
     run_at = None
     if ns.run_at:
+        if "T" not in ns.run_at and " " not in ns.run_at:
+            _die(f"--run-at {ns.run_at!r} lacks a time component — a bare date "
+                 "would be stored as midnight, not the run's execution time")
         try:
             dt = datetime.fromisoformat(ns.run_at.replace("Z", "+00:00"))
         except ValueError:
@@ -164,7 +167,7 @@ def cmd_append(ns):
         # append-only ledger cannot retract it.
         if dt.astimezone(timezone.utc) > datetime.now(timezone.utc) + timedelta(seconds=60):
             _die(f"--run-at {ns.run_at!r} is in the future")
-        run_at = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        run_at = dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
     row = {
         "run_at": run_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "kind": ns.kind,
@@ -264,7 +267,7 @@ def _run_ts(r, label):
     when = r.get("run_at")
     if not isinstance(when, str):
         _die(f"{label} row lacks a parseable run_at timestamp")
-    for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%MZ"):
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%MZ"):
         try:
             return datetime.strptime(when, fmt).replace(tzinfo=timezone.utc)
         except ValueError:
