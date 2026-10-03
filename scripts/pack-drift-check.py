@@ -286,6 +286,11 @@ CONDITIONAL_NAME_RE = re.compile(r'^\{%\s*if\s+(\w+)\s*%\}(.+)\{%\s*endif\s*%\}(
 CONDITIONAL_EXCLUDE_RE = re.compile(
     r'^\{%\s*if\s+not\s+(\w+)\s*%\}(.+)\{%\s*endif\s*%\}$'
 )
+# Choice-gated excludes: "{% if cost_profile == 'lean' %}<path>{% endif %}".
+# Validates against declared question names (any type) + literal path existence.
+CONDITIONAL_EXCLUDE_EQ_RE = re.compile(
+    r'^\{%\s*if\s+(\w+)\s*==\s*[\'"](\w+)[\'"]\s*%\}(.+)\{%\s*endif\s*%\}$'
+)
 
 
 def copier_bool_flags(pack_root: Path) -> set[str] | None:
@@ -305,6 +310,25 @@ def copier_bool_flags(pack_root: Path) -> set[str] | None:
         name for name, spec in config.items()
         if isinstance(name, str) and not name.startswith('_')
         and isinstance(spec, dict) and spec.get('type') == 'bool'
+    }
+
+
+def copier_question_names(pack_root: Path) -> set[str] | None:
+    """All question names from copier.yml, any type (None if unreadable)."""
+    copier_path = pack_root / 'copier.yml'
+    if not copier_path.exists() or yaml is None:
+        return None
+    try:
+        with open(copier_path, 'r', encoding='utf-8') as f:
+            config = yaml.safe_load(f)
+    except Exception:
+        return None
+    if not isinstance(config, dict):
+        return None
+    return {
+        name for name, spec in config.items()
+        if isinstance(name, str) and not name.startswith('_')
+        and isinstance(spec, dict)
     }
 
 
@@ -334,6 +358,20 @@ def check_feature_excludes(pack_root: Path) -> list[CheckResult]:
         if not isinstance(entry, str) or '{%' not in entry:
             continue
         match = CONDITIONAL_EXCLUDE_RE.match(entry)
+        eq_match = CONDITIONAL_EXCLUDE_EQ_RE.match(entry)
+        if eq_match and not match:
+            conditional_exclude_count += 1
+            qname, _value, rel = eq_match.groups()
+            questions = copier_question_names(pack_root)
+            if questions is not None and qname not in questions:
+                results.append(CheckResult(
+                    'FAIL', 'FEATURE-EXCLUDES',
+                    f'copier.yml _exclude uses unknown question "{qname}"'))
+            if not (pack_root / rel).exists():
+                results.append(CheckResult(
+                    'FAIL', 'FEATURE-EXCLUDES',
+                    f'copier.yml _exclude target does not exist: {rel}'))
+            continue
         if not match:
             results.append(CheckResult(
                 'FAIL', 'FEATURE-EXCLUDES',
