@@ -8,6 +8,7 @@ e2e/bug-bash/ledger/runs.jsonl): durable, reviewable, never only chat.
       --app-sha <sha> --charters 3 --exit0 2 --exit1 1 --exit-other 0 \
       --candidates confirmed:1,fixture:0,design_intent:0,judge_error:0,unconfirmed:2 \
       --confirmed-prs https://github.com/org/repo/pull/123 \
+      --run-at 2026-10-02T10:00:00Z \
       --model-calls 120 --tokens 3100000 --wall-minutes 42 --notes "text"
   ledger.py stop-rule <runs.jsonl> --target bcp-core-local [-n 3]
 
@@ -147,29 +148,27 @@ def cmd_append(ns):
     for label, v in (("--model-calls", ns.model_calls), ("--tokens", ns.tokens), ("--wall-minutes", ns.wall_minutes)):
         if v is not None and v < 0:
             _die(f"{label} must be non-negative, got {v}")
-    if not ns.run_at:
-        _die(f"{ns.kind} rows require --run-at with the event's execution "
-             "timestamp — defaulting to append time misorders delayed "
-             "aggregation against resets")
-    run_at = None
-    if ns.run_at:
-        if "T" not in ns.run_at and " " not in ns.run_at:
-            _die(f"--run-at {ns.run_at!r} lacks a time component — a bare date "
-                 "would be stored as midnight, not the run's execution time")
-        try:
-            dt = datetime.fromisoformat(ns.run_at.replace("Z", "+00:00"))
-        except ValueError:
-            _die(f"--run-at {ns.run_at!r} is not a parseable ISO 8601 timestamp")
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        # 60s tolerance for cross-machine clock skew; a genuinely future
-        # run_at would poison every timestamp-ordered read below and the
-        # append-only ledger cannot retract it.
-        if dt.astimezone(timezone.utc) > datetime.now(timezone.utc) + timedelta(seconds=60):
-            _die(f"--run-at {ns.run_at!r} is in the future")
-        run_at = dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    # --run-at is argparse-required for every kind: it records the event's
+    # execution timestamp — defaulting to append time would misorder delayed
+    # aggregation against resets.
+    if "T" not in ns.run_at and " " not in ns.run_at:
+        _die(f"--run-at {ns.run_at!r} lacks a time component — a bare date "
+             "would be stored as midnight, not the run's execution time")
+    try:
+        dt = datetime.fromisoformat(ns.run_at.replace("Z", "+00:00"))
+    except ValueError:
+        _die(f"--run-at {ns.run_at!r} is not a parseable ISO 8601 timestamp")
+    if dt.tzinfo is None:
+        _die(f"--run-at {ns.run_at!r} lacks a timezone — give UTC (…Z) or "
+             "an explicit offset (…+HH:MM); a naive local time would be "
+             "silently misordered against real UTC rows")
+    # 60s tolerance for cross-machine clock skew; a genuinely future
+    # run_at would poison every timestamp-ordered read below and the
+    # append-only ledger cannot retract it.
+    if dt.astimezone(timezone.utc) > datetime.now(timezone.utc) + timedelta(seconds=60):
+        _die(f"--run-at {ns.run_at!r} is in the future")
     row = {
-        "run_at": run_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "run_at": dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
         "kind": ns.kind,
         "target": ns.target,
         "app_sha": ns.app_sha,
@@ -457,7 +456,8 @@ def main():
     a.add_argument("--kind", required=True, choices=("weekly", "calibration", "reset"))
     a.add_argument("--target", required=True, type=_nonempty_target)
     a.add_argument("--app-sha", default=None)
-    a.add_argument("--run-at", default=None, help="UTC ISO timestamp; default now")
+    a.add_argument("--run-at", default=None, required=True,
+                   help="execution timestamp, ISO 8601 with timezone (…Z or ±HH:MM); required")
     a.add_argument("--charters", type=int, default=None)
     a.add_argument("--exit0", type=int, default=0)
     a.add_argument("--exit1", type=int, default=0)
