@@ -11,6 +11,10 @@ name: PR Autofix Loop
 # - Per-PR cap: skips after max_successful_fixes (standalone default 1).
 # For proxy mode, delegate to reusable form with provider_mode inputs.
 # See docs/pr-autofix-loop-policy.md.
+#
+# Runner split (2026-10-03): preflight runs on slim so every skipped/early-out
+# invocation bills slim-min instead of linux-min (~3x cheaper). Only runs that
+# actually dispatch the agent pay for ubuntu-latest.
 
 on:
   issue_comment:
@@ -33,12 +37,12 @@ permissions:
   issues: write
 
 jobs:
-  autofix:
-    name: Autofix PR
-    # Hosted: autonomous autofix (inspect CI, edit, test, commit, push) can
-    # legitimately exceed slim's hard 15-min job cap — not a light leg.
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+  preflight:
+    name: Autofix Preflight
+    # Light leg: pure gh/git-API checks, no checkout, comfortably under slim's
+    # 15-min cap. Slim by default (same opt-in pattern as ci.yml light jobs).
+    runs-on: ${{ fromJSON(vars.LIGHT_RUNNER || '["ubuntu-slim"]') }}
+    timeout-minutes: 10
     # Human collaborator reviews/comments, OR relayed bot review (**[@), OR CI workflow_run failure.
     # Do NOT blanket-exclude github-actions[bot] — that is the relay author.
     if: |
@@ -76,6 +80,13 @@ jobs:
       ) &&
       github.actor != 'dependabot[bot]' &&
       github.actor != 'renovate[bot]'
+    outputs:
+      skip: ${{ steps.gate.outputs.skip }}
+      pr_number: ${{ steps.ref.outputs.pr_number }}
+      head_ref: ${{ steps.ref.outputs.head_ref }}
+      head_sha: ${{ steps.pr.outputs.head_sha }}
+      trigger_workflow: ${{ steps.pr.outputs.trigger_workflow }}
+      trigger_run_url: ${{ steps.pr.outputs.trigger_run_url }}
     steps:
       - name: Resolve PR number and head ref
         id: ref
@@ -124,14 +135,6 @@ jobs:
           echo "pr_number=$PR_NUM" >> "$GITHUB_OUTPUT"
           echo "head_ref=$HEAD_REF" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        if: steps.ref.outputs.skip != 'true'
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
-          ref: ${{ steps.ref.outputs.head_ref }}
-
       - name: Determine skip conditions
         id: pr
         if: steps.ref.outputs.skip != 'true'
@@ -149,8 +152,37 @@ jobs:
           echo "trigger_workflow=$WR_NAME" >> "$GITHUB_OUTPUT"
           echo "trigger_run_url=$WR_URL" >> "$GITHUB_OUTPUT"
 
-          # Loop break: prior autofix commit still HEAD
-          LAST_MSG=$(git log -1 --pretty=%s 2>/dev/null || echo '')
+          # Loop break: prior autofix commit still HEAD. Preflight has no
+          # checkout — read the head commit message via the API instead of
+          # `git log` (same assertion: subject starts with [autofix]).
+          PR_HEAD=$(timeout 20 gh api "repos/${{ github.repository }}/pulls/${PR_NUM}" \
+            --jq '. as $pr | $pr.head | {sha: .sha, same_repo: (if .repo == null then "missing" elif (.repo.id == $pr.base.repo.id) then "true" else "false" end)}' \
+            2>/dev/null || echo '{}')
+          HEAD_SHA=$(echo "$PR_HEAD" | jq -r '.sha // empty')
+          SAME_REPO=$(echo "$PR_HEAD" | jq -r '.same_repo // empty')
+          echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          if [[ -z "$HEAD_SHA" ]]; then
+            # Fail closed: an empty SHA would fall back to movable head_ref in
+            # the autofix checkout — unvalidated commit. Skip instead.
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Could not resolve PR head SHA; skipping"
+            exit 0
+          fi
+          if [[ "$SAME_REPO" != "true" ]]; then
+            # Compare repo IDs, not .fork (pr-autofix-loop-reusable.yml): a
+            # forked deployment repo has fork=true on its own PRs, and a
+            # deleted head has repo=null — both must fail closed. A cross-repo
+            # head is attacker-controlled code under write perms + agent creds
+            # on issue_comment/pull_request triggers.
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Cross-repo/unverifiable PR head (same_repo=$SAME_REPO) — refusing privileged autofix checkout"
+            exit 0
+          fi
+          LAST_MSG=''
+          if [[ -n "$HEAD_SHA" ]]; then
+            LAST_MSG=$(timeout 20 gh api "repos/${{ github.repository }}/commits/${HEAD_SHA}" \
+              --jq '.commit.message | split("\n")[0]' 2>/dev/null || echo '')
+          fi
           if [[ "$LAST_MSG" == \[autofix\]* ]]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "Latest commit is [autofix]; skipping to avoid loop"
@@ -180,13 +212,15 @@ jobs:
             fi
           fi
 
-          LABELS=$(gh pr view "$PR_NUM" --json labels --jq '[.labels[].name]' 2>/dev/null || echo '[]')
-          if echo "$LABELS" | grep -q "skip-ai-review"; then
+          # --repo required: this step runs with no checkout, so gh would
+          # resolve the repo from cwd and fail. Failure must fail closed —
+          # a label list we can't read might contain skip-ai-review.
+          LABELS=$(timeout 20 gh pr view "$PR_NUM" --repo "${{ github.repository }}" --json labels --jq '[.labels[].name]' 2>/dev/null || echo 'FAIL')
+          if [[ "$LABELS" == "FAIL" ]] || echo "$LABELS" | grep -q "skip-ai-review"; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
-
 
       - name: Enforce per-PR successful-fix budget
         id: budget
@@ -210,9 +244,47 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Gate — combine skip decisions
+        id: gate
+        env:
+          REF_SKIP: ${{ steps.ref.outputs.skip }}
+          PR_SKIP: ${{ steps.pr.outputs.skip }}
+          BUDGET_SKIP: ${{ steps.budget.outputs.skip }}
+        run: |
+          set -euo pipefail
+          if [[ "$REF_SKIP" == "true" || "$PR_SKIP" == "true" || "$BUDGET_SKIP" == "true" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  autofix:
+    name: Autofix PR
+    needs: preflight
+    if: needs.preflight.outputs.skip != 'true'
+    # Heavy leg: autonomous autofix (inspect CI, edit, test, commit, push) can
+    # legitimately exceed slim's hard 15-min job cap — stays on ubuntu-latest.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+          # Pin to the SHA preflight validated — head_ref is a movable branch,
+          # so checking it out could run autofix on a commit the loop-break and
+          # budget gates never examined (review finding on #148).
+          ref: ${{ needs.preflight.outputs.head_sha || needs.preflight.outputs.head_ref }}
+
+      # A raw-SHA checkout leaves HEAD detached — the agent's `git push` to the
+      # PR branch would fail with "not currently on a branch". Re-attach a
+      # local branch named after the PR head at the validated SHA.
+      - name: Attach PR branch at validated SHA
+        run: git checkout -B "${{ needs.preflight.outputs.head_ref }}"
+
       - name: Resolve Anthropic credential
         id: cred
-        if: steps.ref.outputs.skip != 'true' && steps.pr.outputs.skip != 'true' && steps.budget.outputs.skip != 'true'
         env:
           BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
           DIRECT_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -237,12 +309,11 @@ jobs:
           echo "key_source=$SOURCE" >> "$GITHUB_OUTPUT"
 
       - name: Run autofix with Claude Code
-        if: steps.ref.outputs.skip != 'true' && steps.pr.outputs.skip != 'true' && steps.budget.outputs.skip != 'true'
         env:
           REVIEW_BODY: ${{ github.event.review.body || github.event.comment.body || 'No body' }}
           EVENT_NAME: ${{ github.event_name }}
-          WR_NAME: ${{ steps.pr.outputs.trigger_workflow }}
-          WR_URL: ${{ steps.pr.outputs.trigger_run_url }}
+          WR_NAME: ${{ needs.preflight.outputs.trigger_workflow }}
+          WR_URL: ${{ needs.preflight.outputs.trigger_run_url }}
           # Proxy-aware key selection above only applies when a proxy endpoint is
           # configured; forward it so the LiteLLM key is never sent to Anthropic.
           ANTHROPIC_BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
@@ -259,13 +330,13 @@ jobs:
             Failed workflow (if CI): ${{ env.WR_NAME }}
             Failed run URL (if CI): ${{ env.WR_URL }}
             Review/relay body: "${{ env.REVIEW_BODY }}"
-            PR number: ${{ steps.pr.outputs.number }}
+            PR number: ${{ needs.preflight.outputs.pr_number }}
 
             Instructions:
-            1. Run `gh pr diff ${{ steps.pr.outputs.number }}` to see the PR changes
+            1. Run `gh pr diff ${{ needs.preflight.outputs.pr_number }}` to see the PR changes
             2. If this is a CI failure, inspect the failed run logs via `gh run view` / `gh api`
-            3. Otherwise read review comments: `gh api repos/${{ github.repository }}/pulls/${{ steps.pr.outputs.number }}/comments`
-            4. Run `gh pr view ${{ steps.pr.outputs.number }} --json body` and honour "Context for Fix Agent" / SCOPE_BUDGET
+            3. Otherwise read review comments: `gh api repos/${{ github.repository }}/pulls/${{ needs.preflight.outputs.pr_number }}/comments`
+            4. Run `gh pr view ${{ needs.preflight.outputs.pr_number }} --json body` and honour "Context for Fix Agent" / SCOPE_BUDGET
             5. Make the minimal fix for each actionable finding
             6. If architectural / ambiguous, post `gh pr comment` and STOP — do not guess
             7. Commit with message "[autofix] <what was fixed>" and push to the PR branch
