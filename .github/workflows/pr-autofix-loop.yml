@@ -84,6 +84,7 @@ jobs:
       skip: ${{ steps.gate.outputs.skip }}
       pr_number: ${{ steps.ref.outputs.pr_number }}
       head_ref: ${{ steps.ref.outputs.head_ref }}
+      head_sha: ${{ steps.pr.outputs.head_sha }}
       trigger_workflow: ${{ steps.pr.outputs.trigger_workflow }}
       trigger_run_url: ${{ steps.pr.outputs.trigger_run_url }}
     steps:
@@ -154,10 +155,11 @@ jobs:
           # Loop break: prior autofix commit still HEAD. Preflight has no
           # checkout — read the head commit message via the API instead of
           # `git log` (same assertion: subject starts with [autofix]).
-          HEAD_SHA=$(gh api "repos/${{ github.repository }}/pulls/${PR_NUM}" --jq '.head.sha' 2>/dev/null || echo '')
+          HEAD_SHA=$(timeout 20 gh api "repos/${{ github.repository }}/pulls/${PR_NUM}" --jq '.head.sha' 2>/dev/null || echo '')
+          echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
           LAST_MSG=''
           if [[ -n "$HEAD_SHA" ]]; then
-            LAST_MSG=$(gh api "repos/${{ github.repository }}/commits/${HEAD_SHA}" \
+            LAST_MSG=$(timeout 20 gh api "repos/${{ github.repository }}/commits/${HEAD_SHA}" \
               --jq '.commit.message | split("\n")[0]' 2>/dev/null || echo '')
           fi
           if [[ "$LAST_MSG" == \[autofix\]* ]]; then
@@ -246,7 +248,10 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
-          ref: ${{ needs.preflight.outputs.head_ref }}
+          # Pin to the SHA preflight validated — head_ref is a movable branch,
+          # so checking it out could run autofix on a commit the loop-break and
+          # budget gates never examined (review finding on #148).
+          ref: ${{ needs.preflight.outputs.head_sha || needs.preflight.outputs.head_ref }}
 
       - name: Resolve Anthropic credential
         id: cred
