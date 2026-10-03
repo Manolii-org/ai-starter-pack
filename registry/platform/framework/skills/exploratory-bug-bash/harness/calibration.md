@@ -1,0 +1,65 @@
+# Calibration set recipe
+
+A committed set of planted-bug patches proves the lane still sees what it
+claims to see. Without it, "the explorer found nothing" is unmeasurable.
+
+## What a set needs
+
+**At least 3 patches**, covering at minimum:
+
+1. **A count/total bug** — a displayed number that diverges from the truth it
+   claims to show (increment/decrement off-by-one, doubled tally, count that
+   ignores one member of the set). The lane's value concentrates here:
+   aggregates are where nobody writes assertions.
+2. **A validation bug** — a guard clause removed or loosened so invalid input
+   persists silently (max length unenforced, format check dropped, required
+   field made optional on the save path).
+3. **A state/persistence bug** — a field dropped from the save payload, a
+   reverted optimistic update, stale data after navigation — real behavior
+   that only shows up across a save+reload round trip.
+
+Each patch must be:
+
+- **Small and realistic** — a plausible human mistake on a charter path, not a
+  theatrical breakage. If the judge can't plausibly attribute it to real code,
+  recall overestimates.
+- **A git-apply-able `.patch` against the app's current main** — regenerate
+  hunks when the target lines move; a stale patch is a broken calibration, not
+  a passing one.
+- **On the charter paths** — a planted bug in code no charter exercises
+  contributes 0 to measured recall.
+- **Applied in a disposable worktree on its own port**, never merged, never
+  aimed at shared staging. Revert by removing the worktree.
+
+## Recall
+
+`recall = planted bugs the run reports as candidates / planted total`.
+Below 2/3 for every set size → fix charters or budgets before
+trusting real runs. Re-run calibration when the actor or judge model changes,
+when the `e2e` pin bumps, or after ~90 days — whichever is first.
+
+## Fingerprint binding
+
+Append the calibration row with `--fingerprint <fp>` and gate real runs with
+`calibration-check --target <t> --expect-fingerprint <fp>` so a calibration
+produced by a different model/harness/charter set can't authorize this week's
+budget. Recipe: a sha256 over the `BB_ACTOR_MODEL`/`BB_JUDGE_MODEL` values,
+the effective `BB_APP_CONTEXT` value (it defines what is not a bug — a change
+there alters runtime behaviour and must invalidate the calibration),
+`ledger.py`, `fanout.sh`, `run.py`, `e2e.config.ts`,
+`tests/auth.setup.e2e.ts`, a digest of the effective `BB_ACCOUNTS` map
+(sorted `session→email` entries hashed — the accounts a calibration ran
+under determine which roles and seeded data the charters exercise, so a
+different account set must invalidate it; only the digest lands in `<fp>`,
+never the emails), the charters file bytes, a
+deterministically sorted manifest of every committed calibration `.patch`
+path and its content hash (a patch change must invalidate the calibration
+it defines), and the harness scratch copy's own `package.json` +
+`package-lock.json` (the pins
+the e2e-bump calibration rule talks about — `npm ci` resolves them there,
+not in the app repo) — same recipe at append and check time, recomputed
+each run. A row appended without
+a fingerprint fails the check once the flag is in use.
+
+A candidate that appears in BOTH calibration and real runs is pre-existing:
+triage it as a real finding, not as recall evidence.
