@@ -155,13 +155,24 @@ jobs:
           # Loop break: prior autofix commit still HEAD. Preflight has no
           # checkout — read the head commit message via the API instead of
           # `git log` (same assertion: subject starts with [autofix]).
-          HEAD_SHA=$(timeout 20 gh api "repos/${{ github.repository }}/pulls/${PR_NUM}" --jq '.head.sha' 2>/dev/null || echo '')
+          PR_HEAD=$(timeout 20 gh api "repos/${{ github.repository }}/pulls/${PR_NUM}" \
+            --jq '.head | {sha: .sha, fork: .repo.fork}' 2>/dev/null || echo '{}')
+          HEAD_SHA=$(echo "$PR_HEAD" | jq -r '.sha // empty')
+          HEAD_FORK=$(echo "$PR_HEAD" | jq -r '.fork // empty')
           echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
           if [[ -z "$HEAD_SHA" ]]; then
             # Fail closed: an empty SHA would fall back to movable head_ref in
             # the autofix checkout — unvalidated commit. Skip instead.
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "Could not resolve PR head SHA; skipping"
+            exit 0
+          fi
+          if [[ "$HEAD_FORK" == "true" ]]; then
+            # Fork head is attacker-controlled code; the autofix checkout runs
+            # with write perms and agent credentials. workflow_run already
+            # rejects forks via WR_FORK; issue_comment/pull_request need this.
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Fork PR head — refusing privileged autofix checkout"
             exit 0
           fi
           LAST_MSG=''
