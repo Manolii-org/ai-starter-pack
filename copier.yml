@@ -78,8 +78,9 @@ cost_profile:
     pure spend at small scale: mutation-testing-diff (observe-only, always-green
     in production — 164 runs/wk in a live consumer, L-3 finding) and monitor-litellm
     (every-3h LiteLLM health poll; dead spend when the instance has no proxy).
-    Both remain in the pack and can be re-added by deleting them from a
-    consumer's _exclude after `copier update --data cost_profile=standard`.
+    Both remain in the pack; restore them in a rendered consumer by re-running
+    `copier update --data cost_profile=standard` (the update adds the files —
+    _exclude lives in template config, not in the rendered instance).
   choices:
     - standard
     - lean
