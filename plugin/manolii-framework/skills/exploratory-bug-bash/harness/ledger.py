@@ -147,8 +147,8 @@ def cmd_append(ns):
     for label, v in (("--model-calls", ns.model_calls), ("--tokens", ns.tokens), ("--wall-minutes", ns.wall_minutes)):
         if v is not None and v < 0:
             _die(f"{label} must be non-negative, got {v}")
-    if ns.kind in ("weekly", "calibration") and not ns.run_at:
-        _die(f"{ns.kind} rows require --run-at with the run's execution "
+    if not ns.run_at:
+        _die(f"{ns.kind} rows require --run-at with the event's execution "
              "timestamp — defaulting to append time misorders delayed "
              "aggregation against resets")
     run_at = None
