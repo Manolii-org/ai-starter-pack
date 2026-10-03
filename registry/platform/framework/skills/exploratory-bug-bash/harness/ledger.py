@@ -32,8 +32,11 @@ recommended layout).
 
 `--fingerprint` (append) records the runtime fingerprint the run was
 calibrated under — recommended recipe: a sha256 over the actor/judge model
-names, the harness ledger.py + fanout.sh bytes, the charters file, and the
-e2e driver config. `--expect-fingerprint` (calibration-check) then refuses
+names, the harness ledger.py + fanout.sh bytes, the charters file, the e2e
+driver config, and a digest of the effective account map (the accounts a
+calibration ran under determine which roles and seeded data the charters
+exercised — a different set must not silently authorize the same run).
+`--expect-fingerprint` (calibration-check) then refuses
 to authorize charters with a calibration produced by a different model,
 harness, or charter set; a row recorded without a fingerprint fails the
 check whenever the flag is passed. The recipe deliberately excludes the app
@@ -179,7 +182,7 @@ def cmd_append(ns):
         "run_at": dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
         "kind": ns.kind,
         "target": ns.target,
-        "app_sha": ns.app_sha,
+        "app_sha": (ns.app_sha.strip() or None) if ns.app_sha else None,
         "charters": charters,
         "charter_exits": {"0": ns.exit0, "1": ns.exit1, "other": ns.exit_other},
         "planted": planted,

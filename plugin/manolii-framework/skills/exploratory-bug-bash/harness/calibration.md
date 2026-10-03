@@ -47,7 +47,11 @@ budget. Recipe: a sha256 over the `BB_ACTOR_MODEL`/`BB_JUDGE_MODEL` values,
 the effective `BB_APP_CONTEXT` value (it defines what is not a bug — a change
 there alters runtime behaviour and must invalidate the calibration),
 `ledger.py`, `fanout.sh`, `run.py`, `e2e.config.ts`,
-`tests/auth.setup.e2e.ts`, the charters file bytes, a
+`tests/auth.setup.e2e.ts`, a digest of the effective `BB_ACCOUNTS` map
+(sorted `session→email` entries hashed — the accounts a calibration ran
+under determine which roles and seeded data the charters exercise, so a
+different account set must invalidate it; only the digest lands in `<fp>`,
+never the emails), the charters file bytes, a
 deterministically sorted manifest of every committed calibration `.patch`
 path and its content hash (a patch change must invalidate the calibration
 it defines), and the harness scratch copy's own `package.json` +
