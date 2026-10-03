@@ -36,7 +36,12 @@ names, the harness ledger.py + fanout.sh bytes, the charters file, and the
 e2e driver config. `--expect-fingerprint` (calibration-check) then refuses
 to authorize charters with a calibration produced by a different model,
 harness, or charter set; a row recorded without a fingerprint fails the
-check whenever the flag is passed.
+check whenever the flag is passed. The recipe deliberately excludes the app
+revision — the app is expected to drift inside the 90-day window. A runner
+that wants strict recalibration-on-app-change passes `--expect-app-sha`
+(calibration-check), which compares the calibration row's recorded
+`app_sha`; a row calibrated on (or recorded without) a different revision
+fails.
 
 A `kind=reset` row marks a charter/model change after a pause: consumers
 only count rows executed (run_at) after the most recent reset *for the
@@ -277,14 +282,17 @@ def _run_ts(r, label):
     _die(f"{label} row has unparseable run_at {when!r}")
 
 
-def _run_age_days(r, label):
+def _run_age(r, label):
+    """Elapsed timedelta since the row's run_at. Whole days are not enough —
+    callers comparing against a day bound must see the full duration or a
+    90d23h-old row floors to 90 and passes a >90 expiry."""
     ts = _run_ts(r, label)
     delta = datetime.now(timezone.utc) - ts
     # Same 60s skew allowance as append: a writer clock slightly ahead can
     # store a minute timestamp that is marginally in the future here.
     if delta < -timedelta(seconds=60):
         _die(f"{label} row at {r.get('run_at')!r} is future-dated")
-    return max(delta.days, 0)
+    return max(delta, timedelta(0))
 
 
 def _reset_boundary(rows, target):
@@ -350,7 +358,7 @@ def cmd_stop_rule(ns):
         return 0
     confirmed = []
     for r in tail:
-        _run_age_days(r, "weekly")  # dies on missing/unparseable/future run_at
+        _run_age(r, "weekly")  # dies on missing/unparseable/future run_at
         candidates = r.get("candidates")
         if candidates is None:
             candidates = {}
@@ -444,9 +452,19 @@ def cmd_calibration_check(ns):
             print("calibration-check: calibration fingerprint "
                   f"{stored!r} != active {expected!r} — recalibrate for this model/harness/charter set")
             return 11
-    age = _run_age_days(r, "calibration")
-    if age > CALIBRATION_MAX_AGE_DAYS:
-        print(f"calibration-check: calibration is {age}d old (> {CALIBRATION_MAX_AGE_DAYS}d) — recalibrate first")
+    if ns.expect_app_sha is not None:
+        expected = ns.expect_app_sha.strip() or None
+        if expected is None:
+            _die("--expect-app-sha was given an empty value")
+        stored = r.get("app_sha")
+        if stored != expected:
+            print("calibration-check: calibration app_sha "
+                  f"{stored!r} != current {expected!r} — recalibrate on this app revision")
+            return 11
+    age = _run_age(r, "calibration")
+    if age > timedelta(days=CALIBRATION_MAX_AGE_DAYS):
+        days = age.total_seconds() / 86400
+        print(f"calibration-check: calibration is {days:.1f}d old (> {CALIBRATION_MAX_AGE_DAYS}d) — recalibrate first")
         return 11
     # Integer form of found/planted >= 2/3 to avoid float rounding at the edge.
     if found * 3 >= planted * 2:
@@ -494,6 +512,8 @@ def main():
     c.add_argument("--target", required=True, type=_nonempty_target, help="only calibration rows for this target authorize runs")
     c.add_argument("--expect-fingerprint", default=None,
                    help="required fingerprint on the latest calibration row; a row without one fails")
+    c.add_argument("--expect-app-sha", default=None,
+                   help="required app_sha on the latest calibration row; a row calibrated on a different revision fails")
     c.set_defaults(fn=cmd_calibration_check)
 
     ns = p.parse_args()
