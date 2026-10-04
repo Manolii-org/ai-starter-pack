@@ -408,6 +408,14 @@ def _parse_manifest(raw: str) -> dict:
         # loose brace fragment ({oops, { } doesn't swallow siblings.
         if any(ms < start and end <= me for ms, me in malformed_spans):
             continue
+        # A block whose opener sits inside a quoted string is prose, not a
+        # JSON container — `analysis "draft {…}` leaves the whole tail inside
+        # an unterminated string, so a complete manifest there is quoted
+        # output text, not the answer. Same fragment treatment as a stray
+        # brace: ineligible itself, siblings stay eligible.
+        if start in string_positions:
+            malformed_spans.append((start, start + 1))
+            continue
         try:
             candidate = json.loads(block)
         except json.JSONDecodeError:

@@ -17,6 +17,7 @@ import os
 import pathlib
 import re
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -190,12 +191,24 @@ def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int
         method="POST",
     )
 
-    try:
-        with _urlopen_https(req, timeout=_API_TIMEOUT, host=urllib.parse.urlparse(api_url).hostname or "") as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"API error {e.code}: {error_body}")
+    # The fail-closed sonnet-advisor guardrail rejects with a 400 whose body
+    # instructs a retry — that one rejection is transient (a provider blip
+    # behind the advisor); every other status is terminal. One re-attempt,
+    # matching the retired ProxyClient contract.
+    data = None
+    for attempt in range(2):
+        try:
+            with _urlopen_https(req, timeout=_API_TIMEOUT, host=urllib.parse.urlparse(api_url).hostname or "") as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            break
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode("utf-8", errors="replace")
+            if attempt == 0 and e.code == 400 and "advisor rejected" in error_body.lower():
+                time.sleep(2)
+                continue
+            raise RuntimeError(f"API error {e.code}: {error_body}")
+    if data is None:
+        raise RuntimeError("API call produced no response")
 
     for block in data.get("content", []):
         if block.get("type") == "text":

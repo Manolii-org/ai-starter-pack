@@ -328,7 +328,14 @@ def invoke_agent(
                 resp_data = json.loads(response.read().decode("utf-8"))
             break
         except HTTPError as e:
-            if e.code in RETRIABLE_STATUS and attempt < MAX_RETRIES - 1:
+            err_body = e.read().decode("utf-8", errors="replace")[:2000]
+            # The fail-closed sonnet-advisor guardrail rejects with a 400 whose
+            # body instructs a retry — that one rejection is transient (a
+            # provider blip behind the advisor); every other 400 is terminal.
+            retriable = e.code in RETRIABLE_STATUS or (
+                e.code == 400 and "advisor rejected" in err_body.lower()
+            )
+            if retriable and attempt < MAX_RETRIES - 1:
                 sleep_secs = 2 ** attempt
                 logger.warning(
                     f"Agent {agent_config.name} HTTP {e.code} on attempt "
@@ -423,7 +430,11 @@ def invoke_agent(
             "source": agent_config.name,
             # An empty result must not mark the file first-party: the judge
             # would demand a direct key for a batch with nothing to adjudicate.
-            "first_party": agent_config.first_party and bool(normalised),
+            # direct_required covers BOTH direct lanes — static first_party
+            # frontmatter and CLIENT_AI_POLICY — so policy-driven findings keep
+            # the judge off the OSS proxy even when the flag never reaches the
+            # judge job's env.
+            "first_party": direct_required and bool(normalised),
             "findings": normalised,
         }
     except json.JSONDecodeError as e:
