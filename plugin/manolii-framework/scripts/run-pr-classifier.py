@@ -274,13 +274,24 @@ def _parse_manifest(raw: str) -> dict:
         except json.JSONDecodeError as exc:
             last_err = exc
             continue
-        if (
+        if not (
             isinstance(candidate, dict)
             and _REQUIRED_MANIFEST_KEYS <= candidate.keys()
             and isinstance(candidate.get("depth"), str)
             and candidate["depth"] in _VALID_DEPTHS
         ):
-            best = candidate
+            continue
+        skills = candidate.get("invoke_skills")
+        agents = candidate.get("invoke_agents")
+        # Contract (pr-classifier.md RULE 8 + Stage-2 gating): depth:"none" is
+        # only legitimate with empty invocation lists, and broad agents only
+        # fire at depth:"broad". A self-contradictory manifest is malformed —
+        # reject it rather than silently skipping requested checks.
+        if candidate["depth"] == "none" and (skills or agents):
+            continue
+        if agents and candidate["depth"] == "narrow":
+            candidate["depth"] = "broad"
+        best = candidate
     if best is not None:
         return best
     if last_err is not None:
