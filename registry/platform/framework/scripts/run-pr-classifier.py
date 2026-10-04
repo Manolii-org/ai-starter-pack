@@ -310,16 +310,25 @@ def _parse_manifest(raw: str) -> dict:
             continue
         if any(cs < start and end <= ce for cs, ce in clean_spans):
             continue
-        # Blocks strictly inside a malformed span are payload of broken output,
-        # never the answer — a manifest-shaped object inside an unclosed wrapper
-        # (e.g. {"analysis": {…depth:"none"…}) must not stand in as the
-        # response; free-standing later manifests still recover.
+        # Blocks strictly inside a malformed WRAPPER span are payload of broken
+        # output, never the answer — a manifest-shaped object inside an unclosed
+        # {"key": ... wrapper (e.g. {"analysis": {…depth:"none"…}) must not
+        # stand in as the response. Free-standing manifests still recover: a
+        # loose brace fragment ({oops, { } doesn't swallow siblings.
         if any(ms < start and end <= me for ms, me in malformed_spans):
             continue
         try:
             candidate = json.loads(block)
         except json.JSONDecodeError:
-            malformed_spans.append((start, end))
+            # Unclosed `{` yields a span to EOF. If the block began like a real
+            # object (`{"`), it's a wrapper — everything after is inside it. A
+            # non-`{"` opening ({oops, a stray `{` in prose) is just a brace
+            # fragment: shrink its span to the brace itself so a later
+            # free-standing manifest stays eligible.
+            if end == len(text) and text[start + 1 :].lstrip()[:1] != '"':
+                malformed_spans.append((start, start + 1))
+            else:
+                malformed_spans.append((start, end))
             # A malformed object AFTER a manifest-shaped one invalidates the
             # response — the earlier object was a reasoning example, not the answer.
             if last_shaped is not None and start >= last_shaped[2]:
