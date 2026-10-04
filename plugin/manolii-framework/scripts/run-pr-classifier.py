@@ -213,15 +213,11 @@ def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int
 # Keys the classifier manifest may carry — a candidate object must intersect
 # this set to count as a manifest (thinking models can emit valid JSON examples
 # or brace fragments in their reasoning before/around the real output).
-_MANIFEST_KEYS = {
-    "invoke_skills",
-    "invoke_agents",
-    "depth",
-    "reason",
-    "door",
-    "blast_radius",
-    "danger_reason",
-}
+# A candidate only counts as a manifest when it carries the routing fields the
+# classifier always emits — a partial echo in reasoning (e.g. {"depth":"narrow"})
+# must not be mistaken for a routing decision.
+_REQUIRED_MANIFEST_KEYS = {"invoke_skills", "invoke_agents"}
+_VALID_DEPTHS = {"narrow", "broad"}
 
 
 def _iter_json_objects(text: str):
@@ -278,7 +274,11 @@ def _parse_manifest(raw: str) -> dict:
         except json.JSONDecodeError as exc:
             last_err = exc
             continue
-        if isinstance(candidate, dict) and _MANIFEST_KEYS & candidate.keys():
+        if (
+            isinstance(candidate, dict)
+            and _REQUIRED_MANIFEST_KEYS <= candidate.keys()
+            and candidate.get("depth") in _VALID_DEPTHS
+        ):
             best = candidate
     if best is not None:
         return best
