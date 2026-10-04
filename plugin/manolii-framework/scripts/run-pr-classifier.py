@@ -315,7 +315,7 @@ def _parse_manifest(raw: str) -> dict:
     err_after_shaped = False
     malformed_spans = []
     clean_spans = []
-    invalidating_array_spans = []
+    invalidating_spans = []
     # Array containers get the same payload treatment as clean dicts: objects
     # inside a parsed [...] list are payload, never a top-level manifest or
     # partial-manifest attempt — but a parsed list carrying manifest-hint keys
@@ -335,7 +335,7 @@ def _parse_manifest(raw: str) -> dict:
             if isinstance(parsed_array, list):
                 clean_spans.append((astart, aend))
                 if any(_contains_hint(item) for item in parsed_array):
-                    invalidating_array_spans.append((astart, aend))
+                    invalidating_spans.append((astart, aend))
                 continue
         except json.JSONDecodeError:
             pass
@@ -352,7 +352,7 @@ def _parse_manifest(raw: str) -> dict:
             malformed_spans.append((astart, astart + 1))
             continue
         malformed_spans.append((astart, aend))
-        invalidating_array_spans.append((astart, aend))
+        invalidating_spans.append((astart, aend))
     for start, end, block, closed in _iter_balanced(text, "{", "}"):
         # Blocks strictly nested inside the selected manifest's span are payload
         # data (e.g. an embedded example), never the answer — skip them. Blocks
@@ -409,8 +409,15 @@ def _parse_manifest(raw: str) -> dict:
                 err_after_shaped = True
         elif isinstance(candidate, dict):
             # Successfully parsed non-manifest object — record its span so its
-            # descendants are treated as payload, not sibling candidates.
+            # descendants are treated as payload, not sibling candidates. A
+            # dict carrying manifest-hint keys at any depth is ALSO a manifest
+            # attempt in an envelope ({"wrapper":{"depth":"broad"}}): after
+            # the answer it invalidates the same way a hinted top-level array
+            # does — a stale reasoning envelope must not leave an earlier
+            # depth:none example as the decision.
             clean_spans.append((start, end))
+            if _contains_hint(candidate):
+                invalidating_spans.append((start, end))
     # The last manifest-shaped object is the model's answer — earlier ones are
     # reasoning examples. It must satisfy the complete manifest contract; a
     # malformed or partial one invalidates the response (broad fallback) rather
@@ -418,7 +425,7 @@ def _parse_manifest(raw: str) -> dict:
     if last_shaped is None or err_after_shaped or any(
         a >= last_shaped[2]
         and not any(cs < a and ae <= ce for cs, ce in clean_spans)
-        for a, ae in invalidating_array_spans
+        for a, ae in invalidating_spans
     ):
         raise ValueError("no complete JSON manifest found in classifier output")
     last_shaped = last_shaped[0]
