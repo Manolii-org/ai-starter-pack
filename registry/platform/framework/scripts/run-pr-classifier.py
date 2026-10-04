@@ -263,13 +263,16 @@ def _parse_manifest(raw: str) -> dict:
     the real manifest is emitted after any reasoning, format examples, and
     brace fragments."""
     text = raw.strip()
-    # Strip markdown fence lines but keep everything else: a thinking backend can
+    # Strip markdown fence tokens but keep everything else: a thinking backend can
     # emit a fenced reasoning/example block BEFORE the real manifest — discarding
     # the tail after the first closing fence would leave the example as the answer.
+    # Tokens are stripped, not whole lines, so a manifest sharing a line with a
+    # fence marker survives.
     if "```" in text:
-        text = "\n".join(ln for ln in text.splitlines() if not ln.strip().startswith("```"))
+        text = re.sub(r"```[A-Za-z0-9_-]*", "", text)
     last_shaped = None
     err_after_shaped = False
+    malformed_spans = []
     for start, end, block in _iter_json_objects(text):
         # Blocks strictly nested inside the selected manifest's span are payload
         # data (e.g. an embedded example), never the answer — skip them.
@@ -278,6 +281,7 @@ def _parse_manifest(raw: str) -> dict:
         try:
             candidate = json.loads(block)
         except json.JSONDecodeError:
+            malformed_spans.append((start, end))
             # A malformed object AFTER a manifest-shaped one invalidates the
             # response — the earlier object was a reasoning example, not the answer.
             if last_shaped is not None and start > last_shaped[2]:
@@ -285,7 +289,10 @@ def _parse_manifest(raw: str) -> dict:
             continue
         if isinstance(candidate, dict) and _REQUIRED_MANIFEST_KEYS <= candidate.keys():
             last_shaped = (candidate, start, end)
-            err_after_shaped = False
+            # A manifest nested inside a malformed trailer is payload of a broken
+            # wrapper — it may be the recovered answer but never clears the error.
+            if not any(ms < start and end <= me for ms, me in malformed_spans):
+                err_after_shaped = False
     # The last manifest-shaped object is the model's answer — earlier ones are
     # reasoning examples. It must satisfy the complete manifest contract; a
     # malformed or partial one invalidates the response (broad fallback) rather
