@@ -263,12 +263,13 @@ def _parse_manifest(raw: str) -> dict:
     the real manifest is emitted after any reasoning, format examples, and
     brace fragments."""
     text = raw.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        end = next((i for i, ln in enumerate(lines[1:], 1) if ln.startswith("```")), len(lines))
-        text = "\n".join(lines[1:end])
+    # Strip markdown fence lines but keep everything else: a thinking backend can
+    # emit a fenced reasoning/example block BEFORE the real manifest — discarding
+    # the tail after the first closing fence would leave the example as the answer.
+    if "```" in text:
+        text = "\n".join(ln for ln in text.splitlines() if not ln.strip().startswith("```"))
     last_shaped = None
-    last_err = None
+    err_after_shaped = False
     for start, end, block in _iter_json_objects(text):
         # Blocks strictly nested inside the selected manifest's span are payload
         # data (e.g. an embedded example), never the answer — skip them.
@@ -276,19 +277,21 @@ def _parse_manifest(raw: str) -> dict:
             continue
         try:
             candidate = json.loads(block)
-        except json.JSONDecodeError as exc:
-            last_err = exc
+        except json.JSONDecodeError:
+            # A malformed object AFTER a manifest-shaped one invalidates the
+            # response — the earlier object was a reasoning example, not the answer.
+            if last_shaped is not None and start > last_shaped[2]:
+                err_after_shaped = True
             continue
         if isinstance(candidate, dict) and _REQUIRED_MANIFEST_KEYS <= candidate.keys():
             last_shaped = (candidate, start, end)
+            err_after_shaped = False
     # The last manifest-shaped object is the model's answer — earlier ones are
     # reasoning examples. It must satisfy the complete manifest contract; a
     # malformed or partial one invalidates the response (broad fallback) rather
     # than silently retaining an earlier example.
-    if last_shaped is None:
-        if last_err is not None:
-            raise last_err
-        raise ValueError("no JSON object found in classifier output")
+    if last_shaped is None or err_after_shaped:
+        raise ValueError("no complete JSON manifest found in classifier output")
     last_shaped = last_shaped[0]
     skills = last_shaped.get("invoke_skills")
     agents = last_shaped.get("invoke_agents")
