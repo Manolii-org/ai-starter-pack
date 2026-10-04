@@ -218,6 +218,12 @@ def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int
 # classifier always emits — a partial echo in reasoning (e.g. {"depth":"narrow"})
 # must not be mistaken for a routing decision.
 _REQUIRED_MANIFEST_KEYS = {"invoke_skills", "invoke_agents"}
+# Every key a manifest may carry — a parsed object intersecting this set but
+# missing the required pair is a partial/broken manifest attempt, not data.
+_MANIFEST_HINT_KEYS = {
+    "invoke_skills", "invoke_agents", "skip_skills", "depth", "reason",
+    "door", "blast_radius", "danger_reason",
+}
 _VALID_DEPTHS = {"narrow", "broad", "none"}
 
 
@@ -293,6 +299,13 @@ def _parse_manifest(raw: str) -> dict:
             # wrapper — it may be the recovered answer but never clears the error.
             if not any(ms < start and end <= me for ms, me in malformed_spans):
                 err_after_shaped = False
+        elif isinstance(candidate, dict) and _MANIFEST_HINT_KEYS & candidate.keys():
+            # A parsed object carrying manifest keys but not the required pair is a
+            # partial manifest attempt — after the answer it invalidates like a
+            # decode error (a stale example must not stand in as the response).
+            malformed_spans.append((start, end))
+            if last_shaped is not None and start >= last_shaped[2]:
+                err_after_shaped = True
     # The last manifest-shaped object is the model's answer — earlier ones are
     # reasoning examples. It must satisfy the complete manifest contract; a
     # malformed or partial one invalidates the response (broad fallback) rather
