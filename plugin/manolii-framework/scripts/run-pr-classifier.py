@@ -284,7 +284,7 @@ def _parse_manifest(raw: str) -> dict:
             malformed_spans.append((start, end))
             # A malformed object AFTER a manifest-shaped one invalidates the
             # response — the earlier object was a reasoning example, not the answer.
-            if last_shaped is not None and start > last_shaped[2]:
+            if last_shaped is not None and start >= last_shaped[2]:
                 err_after_shaped = True
             continue
         if isinstance(candidate, dict) and _REQUIRED_MANIFEST_KEYS <= candidate.keys():
