@@ -341,16 +341,25 @@ jobs:
           || 'ubuntu-latest' }}
     timeout-minutes: 15
     needs: [classify, sast]
-    # always(): sast is skipped on empty-diff, but the manifest's metadata lane
-    # (scope-adherence) must still run — skipped need ≠ skipped job then.
-    if: always() && needs.classify.result == 'success' && needs.classify.outputs.invoke_skills != ''
+    # !cancelled(): sast is skipped on empty-diff, but the manifest's metadata
+    # lane (scope-adherence) must still run. Gate on sast success OR the
+    # designed empty-diff case — a failed sast makes the judge refuse anyway,
+    # so running model calls on it is pure waste.
+    if: >-
+      !cancelled()
+      && needs.classify.result == 'success'
+      && needs.classify.outputs.invoke_skills != ''
+      && (needs.sast.result == 'success' || needs.classify.outputs.diff_files == '0')
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        if: needs.sast.result == 'success'
+        # Only the designed empty-diff skip bypasses the download; a sast
+        # FAILURE keeps the old behavior (missing artifact fails this job) so
+        # the coverage gap stays visible instead of posting a clean verdict.
+        if: needs.sast.result != 'skipped'
         with:
           name: sast-findings
           path: .ai/
@@ -393,14 +402,17 @@ jobs:
           || 'ubuntu-latest' }}
     timeout-minutes: 20
     needs: [classify, sast]
-    if: always() && needs.classify.result == 'success' && needs.classify.outputs.depth == 'broad'
+    # No always() here: empty-diff manifests are always narrow, so broad agents
+    # never have a metadata-lane reason to outrun a skipped/failed sast — the
+    # judge would reject the verdict anyway after burning up to 3 model calls.
+    if: needs.classify.result == 'success' && needs.classify.outputs.depth == 'broad'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        if: needs.sast.result == 'success'
+        if: needs.sast.result != 'skipped'
         with:
           name: sast-findings
           path: .ai/

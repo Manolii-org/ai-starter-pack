@@ -486,7 +486,11 @@ def main() -> None:
     if diff_file.exists():
         diff = diff_file.read_text(encoding="utf-8", errors="replace")
     else:
-        diff = ""
+        # A missing diff artifact is not an empty diff — routing the metadata
+        # lane on it would fabricate coverage. Fail closed; the classify job
+        # already exits 1 on the same condition upstream.
+        print(f"[specialists] diff file missing: {diff_file}", file=sys.stderr)
+        sys.exit(1)
 
     print(f"[specialists] diff lines={diff.count(chr(10))}")
 

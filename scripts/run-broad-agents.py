@@ -183,13 +183,25 @@ def get_changed_files() -> list[str]:
     return [f.strip() for f in changed.split("\n") if f.strip()]
 
 
+_WRAP_TAGS = ("untrusted_diff", "untrusted_pr_meta", "changed_paths")
+
+
+def _neutralize(text: str) -> str:
+    """Defang wrapper tag names inside untrusted content (same as run-specialists)."""
+    for tag in _WRAP_TAGS:
+        text = text.replace(f"<{tag}>", f"<{tag} >").replace(f"</{tag}>", f"</{tag} >")
+    return text
+
+
 def build_user_message(diff: str, changed_files: list[str]) -> str:
     """Build user message with untrusted diff and changed files."""
+    diff = _neutralize(diff)
     if changed_files:
         # File paths are PR-author-controlled — keep them inside the
         # untrusted boundary (changed_paths convention, same as
-        # run-specialists.py) rather than as plain trailing text.
-        files_str = "\n".join(f"  - {f}" for f in changed_files)
+        # run-specialists.py) rather than as plain trailing text, and
+        # neutralize them so a crafted path can't close the boundary.
+        files_str = "\n".join(f"  - {_neutralize(f)}" for f in changed_files)
         diff = f"{diff}\n<changed_paths>\n{files_str}\n</changed_paths>"
     return f"<untrusted_diff>\n{diff}\n</untrusted_diff>"
 
