@@ -284,6 +284,16 @@ def _iter_balanced(text: str, opener: str, closer: str):
         pos = start + 1
 
 
+def _contains_hint(obj) -> bool:
+    if isinstance(obj, dict):
+        return bool(_MANIFEST_HINT_KEYS & obj.keys()) or any(
+            _contains_hint(v) for v in obj.values()
+        )
+    if isinstance(obj, list):
+        return any(_contains_hint(v) for v in obj)
+    return False
+
+
 def _parse_manifest(raw: str) -> dict:
     """Strip markdown fences and return the last manifest-shaped JSON object —
     the real manifest is emitted after any reasoning, format examples, and
@@ -308,10 +318,10 @@ def _parse_manifest(raw: str) -> dict:
     invalidating_array_spans = []
     # Array containers get the same payload treatment as clean dicts: objects
     # inside a parsed [...] list are payload, never a top-level manifest or
-    # partial-manifest attempt — but a parsed list whose members include a
-    # dict intersecting the manifest key set is itself a manifest attempt in a
-    # container: it invalidates when it follows the answer (a stale depth:none
-    # example must not survive a trailing [{"depth":"broad"}]). A failed [...]
+    # partial-manifest attempt — but a parsed list carrying manifest-hint keys
+    # at any depth is itself a manifest attempt in a container: it invalidates
+    # when it follows the answer (a stale depth:none example must not survive
+    # a trailing [{"depth":"broad"}] or [{"wrapper":{"depth":"broad"}}]). A failed [...]
     # span that began like JSON (`{`, `[`, `"`, `-`, a digit, or a
     # true/false/null literal) is a broken wrapper — same ineligibility and
     # invalidation. Anything else ([internal], a stray `[` in prose) is
@@ -324,10 +334,7 @@ def _parse_manifest(raw: str) -> dict:
             parsed_array = json.loads(ablock)
             if isinstance(parsed_array, list):
                 clean_spans.append((astart, aend))
-                if any(
-                    isinstance(item, dict) and _MANIFEST_HINT_KEYS & item.keys()
-                    for item in parsed_array
-                ):
+                if any(_contains_hint(item) for item in parsed_array):
                     invalidating_array_spans.append((astart, aend))
                 continue
         except json.JSONDecodeError:
