@@ -222,9 +222,9 @@ _VALID_DEPTHS = {"narrow", "broad", "none"}
 
 
 def _iter_json_objects(text: str):
-    """Yield successive balanced {...} candidates in the output — thinking-model
-    backends can prepend/append prose (including brace fragments) that a strict
-    json.loads rejects as 'Extra data'."""
+    """Yield (start, end, block) for successive balanced {...} candidates in the
+    output — thinking-model backends can prepend/append prose (including brace
+    fragments) that a strict json.loads rejects as 'Extra data'."""
     pos = 0
     while True:
         start = text.find("{", pos)
@@ -252,7 +252,7 @@ def _iter_json_objects(text: str):
                 if depth == 0:
                     end = i + 1
                     break
-        yield text[start:end]
+        yield start, end, text[start:end]
         # Advance past the opening brace, not the block end, so a valid object
         # nested inside a malformed outer candidate is still discovered.
         pos = start + 1
@@ -269,14 +269,18 @@ def _parse_manifest(raw: str) -> dict:
         text = "\n".join(lines[1:end])
     last_shaped = None
     last_err = None
-    for block in _iter_json_objects(text):
+    for start, end, block in _iter_json_objects(text):
+        # Blocks strictly nested inside the selected manifest's span are payload
+        # data (e.g. an embedded example), never the answer — skip them.
+        if last_shaped is not None and last_shaped[1] < start and end <= last_shaped[2]:
+            continue
         try:
             candidate = json.loads(block)
         except json.JSONDecodeError as exc:
             last_err = exc
             continue
         if isinstance(candidate, dict) and _REQUIRED_MANIFEST_KEYS <= candidate.keys():
-            last_shaped = candidate
+            last_shaped = (candidate, start, end)
     # The last manifest-shaped object is the model's answer — earlier ones are
     # reasoning examples. It must satisfy the complete manifest contract; a
     # malformed or partial one invalidates the response (broad fallback) rather
@@ -285,11 +289,14 @@ def _parse_manifest(raw: str) -> dict:
         if last_err is not None:
             raise last_err
         raise ValueError("no JSON object found in classifier output")
+    last_shaped = last_shaped[0]
     skills = last_shaped.get("invoke_skills")
     agents = last_shaped.get("invoke_agents")
     if not (
         isinstance(skills, list)
         and isinstance(agents, list)
+        and all(isinstance(s, str) and s in _VALID_SKILLS for s in skills)
+        and all(isinstance(a, str) and a in _VALID_AGENTS for a in agents)
         and isinstance(last_shaped.get("skip_skills"), list)
         and isinstance(last_shaped.get("reason"), str)
         and isinstance(last_shaped.get("depth"), str)
