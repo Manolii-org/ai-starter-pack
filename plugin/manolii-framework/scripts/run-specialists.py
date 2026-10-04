@@ -486,10 +486,6 @@ def main() -> None:
     else:
         diff = ""
 
-    if not diff:
-        print("[specialists] No diff found — skipping specialist run")
-        sys.exit(0)
-
     print(f"[specialists] diff lines={diff.count(chr(10))}")
 
     # Resolve skills list
@@ -507,6 +503,24 @@ def main() -> None:
             except Exception as exc:
                 print(f"[specialists] Failed to load manifest: {exc}", file=sys.stderr)
                 invoke_skills = []
+
+    if not diff:
+        # An empty diff is real input only for lanes that compare claims to
+        # code — scope-adherence (Rule 10b): a title/body promise with no
+        # matching change is exactly its catch, so an exit before this point
+        # would silently drop the one lane the classifier routed. Every other
+        # requested lane has nothing to check: per-skill skip markers, not a
+        # silent miss, so the judge surfaces the coverage gap instead of a
+        # false-clean verdict.
+        runnable = [s for s in invoke_skills if s == "scope-adherence"]
+        for s in invoke_skills:
+            if s not in runnable:
+                _write_skipped_marker(s, output_dir, "empty_diff")
+        if not runnable:
+            print("[specialists] No diff found — skipping specialist run")
+            sys.exit(0)
+        print(f"[specialists] empty diff — running metadata-checkable lanes only: {', '.join(runnable)}")
+        invoke_skills = runnable
 
     if not invoke_skills:
         print("[specialists] nothing to run")

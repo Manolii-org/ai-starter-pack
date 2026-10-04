@@ -57,7 +57,10 @@ BROAD_AGENTS = [
 ]
 
 MAX_DIFF_CHARS = int(os.environ.get("BROAD_AGENTS_MAX_DIFF_CHARS", "40000"))
-TIMEOUT_SECS = 120
+# 240s covers a primary call plus its fail-closed advisor round trip on the
+# proxy — 120s was too tight for advisor-backed security-deep-dive-sized
+# payloads (buromaster#25) and aborts mid-advisor into api_error markers.
+TIMEOUT_SECS = 240
 MAX_RETRIES = 4
 RETRIABLE_STATUS = {429, 500, 502, 503, 504}
 
