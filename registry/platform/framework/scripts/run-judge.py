@@ -838,6 +838,12 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
         review_action = judge_result.get("review_action", "COMMENT")
         if review_action not in ("COMMENT", "APPROVE", "REQUEST_CHANGES"):
             review_action = "COMMENT"
+        if review_action == "APPROVE" and self._candidate_load_errors:
+            # An APPROVE would satisfy the auto-merge verdict on partial
+            # coverage — the unparseable candidates may have carried the
+            # blocking finding. Force COMMENT; REQUEST_CHANGES is already the
+            # stricter path (CodeRabbit major on ai-starter-pack#150).
+            review_action = "COMMENT"
 
         logger.info(
             f"Judge result: {len(surviving)} surviving, "
