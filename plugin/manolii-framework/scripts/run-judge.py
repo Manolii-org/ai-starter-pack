@@ -221,6 +221,10 @@ class Judge:
         self._skipped_first_party: list[str] = []
         self._candidate_load_errors = 0
         self._skipped_other: list[str] = []
+        # Floor for keep-newest dismissal: the review this run posts. The list
+        # endpoint can lag the POST, leaving the just-superseded review as the
+        # apparent newest — and it would survive its own dismissal scan.
+        self._posted_review_id: int | None = None
         # An `edited` rerun at the same HEAD must publish a fresh verdict: dedup
         # keys on commit + metadata digest so a title/body edit re-posts. The
         # base SHA is part of the key: a base update changes the merge diff the
@@ -606,6 +610,9 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
             with _urlopen_https(req, timeout=30, host="api.github.com") as response:
                 result = json.loads(response.read().decode("utf-8"))
                 review_id = result.get("id", "unknown")
+                self._posted_review_id = (
+                    review_id if isinstance(review_id, int) else None
+                )
                 logger.info(f"Review posted successfully (ID: {review_id})")
                 return True
 
@@ -697,7 +704,9 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
         verdict must retire a stale CHANGES_REQUESTED. Best-effort: a
         dismissal failure logs and never blocks the verdict.
         """
-        latest_id = None  # newest judge review at this SHA = the live verdict
+        # The just-posted review is the live verdict even when the list
+        # endpoint has not yet caught up to the POST (Codex P1 on #150).
+        latest_id = self._posted_review_id
         stale_ids: list[int] = []
         for page in range(1, _MAX_REVIEW_PAGES + 1):
             try:
@@ -818,10 +827,16 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
                     f"Candidates directory missing: {self.candidates_dir} — "
                     "posting advisory, not a clean verdict"
                 )
-                self._post_advisory_warning(
+                if self._post_advisory_warning(
                     "Assessment artifacts unavailable (.ai/candidates missing) — "
                     "no specialist review evidence; clean verdict withheld."
-                )
+                ):
+                    # The advisory supersedes any earlier same-SHA verdict — a
+                    # stale APPROVE earned on evidence now known absent must not
+                    # keep satisfying auto-merge (CodeRabbit major on #150).
+                    self._dismiss_stale_judge_reviews(
+                        ("CHANGES_REQUESTED", "APPROVED")
+                    )
                 return 0
             logger.info("No findings to process; posting verdict comment")
             self._post_clean_or_skip_advisory()
@@ -966,7 +981,10 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
                 method="POST",
             )
 
-            with _urlopen_https(req, timeout=30, host="api.github.com"):
+            with _urlopen_https(req, timeout=30, host="api.github.com") as response:
+                self._posted_review_id = json.loads(
+                    response.read().decode("utf-8")
+                ).get("id")
                 logger.info("No-findings comment posted")
 
             # A same-commit rerun that reports clean does not supersede an
@@ -1003,26 +1021,37 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
                 f"{self._candidate_load_errors} candidate file(s) failed to "
                 "parse — posting advisory, not a clean verdict"
             )
-            self._post_advisory_warning(
+            if self._post_advisory_warning(
                 "Assessment artifacts unparseable (.ai/candidates) — "
                 "incomplete specialist review evidence; clean verdict "
                 "withheld."
-            )
+            ):
+                self._dismiss_stale_judge_reviews(
+                    ("CHANGES_REQUESTED", "APPROVED")
+                )
             return
         if self._skipped_first_party or self._skipped_other:
             sources = ", ".join(
                 sorted(set(self._skipped_first_party) | set(self._skipped_other))
             )
             logger.warning(f"review checks skipped (missing credential): {sources}")
-            self._post_advisory_warning(self._skipped_coverage_detail())
+            if self._post_advisory_warning(self._skipped_coverage_detail()):
+                self._dismiss_stale_judge_reviews(
+                    ("CHANGES_REQUESTED", "APPROVED")
+                )
             return
         self._post_no_findings_comment()
 
-    def _post_advisory_warning(self, detail: str = "") -> None:
-        """Post an advisory WARNING when judge fails or coverage is incomplete."""
+    def _post_advisory_warning(self, detail: str = "") -> bool:
+        """Post an advisory WARNING when judge fails or coverage is incomplete.
+
+        Returns True only once the advisory is confirmed posted — a caller
+        superseding a prior verdict must gate dismissal on that, otherwise a
+        failed post leaves the PR with no live verdict (CodeRabbit on #150).
+        """
         if not self.token or not self.repo:
             logger.info("Judge failed; no token/repo for advisory post")
-            return
+            return False
 
         try:
             request_body = {
@@ -1051,11 +1080,16 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
                 method="POST",
             )
 
-            with _urlopen_https(req, timeout=30, host="api.github.com"):
+            with _urlopen_https(req, timeout=30, host="api.github.com") as response:
+                self._posted_review_id = json.loads(
+                    response.read().decode("utf-8")
+                ).get("id")
                 logger.info("Advisory warning posted")
+            return True
 
         except Exception as e:
             logger.warning(f"Failed to post advisory warning: {e}")
+            return False
 
 
 def main() -> int:

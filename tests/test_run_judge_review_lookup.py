@@ -218,7 +218,10 @@ def test_clean_reassessment_dismisses_prior_request_changes(judge, monkeypatch):
             calls["dismissals"].append(req.full_url)
             return _FakeResponse(b"{}")
         calls["posts"] += 1
-        return _FakeResponse(b"{}")
+        # Real POST /reviews returns the created review — its id is the live
+        # verdict the keep-newest dismissal must preserve even when the list
+        # endpoint (below) has not yet caught up (Codex P1 on #150).
+        return _FakeResponse(b'{"id": 7002}')
 
     monkeypatch.setattr(rj, "_urlopen_https", fake_urlopen)
     judge._post_no_findings_comment()
