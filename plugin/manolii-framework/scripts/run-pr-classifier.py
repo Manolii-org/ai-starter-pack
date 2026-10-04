@@ -336,7 +336,7 @@ def _parse_manifest(raw: str) -> dict:
         if not atail[:1] or (
             atail[:1] not in '{["-'
             and not atail[:1].isdigit()
-            and re.match(r"true|false|null", atail) is None
+            and re.match(r"(?:true|false|null)(?=[,\]}]|$)", atail) is None
         ):
             malformed_spans.append((astart, astart + 1))
             continue
@@ -716,6 +716,15 @@ def main() -> None:
         print(f"[classifier] skills={invoke_skills} agents={invoke_agents} depth={manifest['depth']}")
         print(f"[classifier] merge_danger: door={door} blast_radius={blast}")
     except Exception as exc:
+        # A failed direct call or malformed response under CLIENT_AI_POLICY
+        # must fail closed like the withheld-key path: the broad fallback
+        # schedules runners that may send the diff to the refused proxy.
+        if os.environ.get("CLIENT_AI_POLICY"):
+            print(
+                f"[classifier] Failed ({exc}) under CLIENT_AI_POLICY — failing closed",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         print(f"[classifier] Failed ({exc}), using fallback manifest")
         manifest = _FALLBACK_MANIFEST
 
