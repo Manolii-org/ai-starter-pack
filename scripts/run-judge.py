@@ -496,14 +496,22 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
 
         # Dedup is outcome-keyed: a prior CLEAN verdict must not suppress a
         # rerun that now has findings (e.g. a specialist timed out first time).
-        if self._review_exists_at_sha("findings"):
+        # The key also carries the effective action and candidate-load state — a
+        # prior same-commit APPROVE (or a full-coverage verdict) must not
+        # suppress a rerun whose coverage regressed, or the stale approval stays
+        # live on partial evidence (Codex P1 + CodeRabbit major on
+        # ai-starter-pack#150).
+        findings_kind = f"findings-{review_action.lower()}"
+        if self._candidate_load_errors:
+            findings_kind += "-partial"
+        if self._review_exists_at_sha(findings_kind):
             logger.info(f"Review already posted at {self.sha[:8]}; skipping")
             return True
 
         # Format review body
         body_lines = [
             REVIEW_MARKER,
-            f"<!-- meta:{self.meta_digest}:findings -->",
+            f"<!-- meta:{self.meta_digest}:{findings_kind} -->",
             "## PR Assessment Review",
         ]
 
@@ -732,7 +740,7 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
         req = urllib.request.Request(
             url,
             data=json.dumps(
-                {"message": "Superseded by a clean reassessment at the same commit."}
+                {"message": "Superseded by a newer reassessment at the same commit."}
             ).encode("utf-8"),
             headers={
                 "Authorization": f"Bearer {self.token}",
@@ -874,6 +882,12 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
         if surviving:
             if not self.post_review_to_github(surviving, review_action):
                 logger.warning("Failed to post review to GitHub")
+            elif review_action != "REQUEST_CHANGES":
+                # A same-SHA rerun whose verdict flipped CHANGES_REQUESTED →
+                # nonblocking must retire the stale block: judge_fallback
+                # honours ANY matching CHANGES_REQUESTED on the SHA (Codex P2
+                # on buromaster#261). Best-effort — failures only log.
+                self._dismiss_stale_judge_reviews()
         else:
             logger.info("No findings survived filters; skipping GitHub post")
             self._post_clean_or_skip_advisory()
