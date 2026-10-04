@@ -285,6 +285,14 @@ jobs:
       - name: Attach PR branch at validated SHA
         run: git checkout -B "${{ needs.preflight.outputs.head_ref }}"
 
+      - name: Warn when elevated push token is absent
+        env:
+          AUTOFIX_PUSH_TOKEN: ${{ secrets.MN_GH_AUTOMATION_TOKEN }}
+        run: |
+          if [ -z "$AUTOFIX_PUSH_TOKEN" ]; then
+            echo "::warning::MN_GH_AUTOMATION_TOKEN not provisioned; autofix pushes fall back to GITHUB_TOKEN and will not trigger pull_request re-assessment"
+          fi
+
       - name: Resolve Anthropic credential
         id: cred
         env:
