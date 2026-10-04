@@ -134,7 +134,7 @@ jobs:
             # gh resolves the repository from cwd's git remotes, and this job
             # has no checkout, so the call would fail and HEAD_REF stayed
             # empty — aborting the heavy job on `git checkout -B ""` later.
-            HEAD_REF=$(gh pr view "$PR_NUM" --repo "$REPOSITORY" --json headRefName --jq '.headRefName' 2>/dev/null || echo '')
+            HEAD_REF=$(timeout -k 5 30 gh pr view "$PR_NUM" --repo "$REPOSITORY" --json headRefName --jq '.headRefName' 2>/dev/null || echo '')
           fi
           if [[ -z "$HEAD_REF" ]]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
