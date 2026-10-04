@@ -267,7 +267,7 @@ def _parse_manifest(raw: str) -> dict:
         lines = text.splitlines()
         end = next((i for i, ln in enumerate(lines[1:], 1) if ln.startswith("```")), len(lines))
         text = "\n".join(lines[1:end])
-    best = None
+    last_shaped = None
     last_err = None
     for block in _iter_json_objects(text):
         try:
@@ -275,31 +275,37 @@ def _parse_manifest(raw: str) -> dict:
         except json.JSONDecodeError as exc:
             last_err = exc
             continue
-        if not (
-            isinstance(candidate, dict)
-            and _REQUIRED_MANIFEST_KEYS <= candidate.keys()
-            and isinstance(candidate.get("depth"), str)
-            and candidate["depth"] in _VALID_DEPTHS
-            and isinstance(candidate.get("invoke_skills"), list)
-            and isinstance(candidate.get("invoke_agents"), list)
-        ):
-            continue
-        skills = candidate.get("invoke_skills")
-        agents = candidate.get("invoke_agents")
+        if isinstance(candidate, dict) and _REQUIRED_MANIFEST_KEYS <= candidate.keys():
+            last_shaped = candidate
+    # The last manifest-shaped object is the model's answer — earlier ones are
+    # reasoning examples. It must satisfy the complete manifest contract; a
+    # malformed or partial one invalidates the response (broad fallback) rather
+    # than silently retaining an earlier example.
+    if last_shaped is None:
+        if last_err is not None:
+            raise last_err
+        raise ValueError("no JSON object found in classifier output")
+    skills = last_shaped.get("invoke_skills")
+    agents = last_shaped.get("invoke_agents")
+    if not (
+        isinstance(skills, list)
+        and isinstance(agents, list)
+        and isinstance(last_shaped.get("skip_skills"), list)
+        and isinstance(last_shaped.get("reason"), str)
+        and isinstance(last_shaped.get("depth"), str)
+        and last_shaped["depth"] in _VALID_DEPTHS
         # Contract (pr-classifier.md RULE 8 + Stage-2 gating): depth:"none" is
-        # only legitimate with empty invocation lists, and broad agents only
-        # fire at depth:"broad". A self-contradictory manifest is malformed —
-        # reject it rather than silently skipping requested checks.
-        if candidate["depth"] == "none" and (skills or agents):
-            continue
-        if agents and candidate["depth"] == "narrow":
-            candidate["depth"] = "broad"
-        best = candidate
-    if best is not None:
-        return best
-    if last_err is not None:
-        raise last_err
-    raise ValueError("no JSON object found in classifier output")
+        # only legitimate with empty invocation lists.
+        and not (last_shaped["depth"] == "none" and (skills or agents))
+    ):
+        raise ValueError(
+            "manifest-shaped object violates the classifier contract: "
+            + json.dumps({k: type(v).__name__ for k, v in last_shaped.items()})
+        )
+    # Broad agents only fire at depth:"broad" — upgrade the contradiction.
+    if agents and last_shaped["depth"] == "narrow":
+        last_shaped["depth"] = "broad"
+    return last_shaped
 
 
 def main() -> None:
