@@ -242,19 +242,25 @@ _MANIFEST_HINT_KEYS = {
 _VALID_DEPTHS = {"narrow", "broad", "none"}
 
 
-def _iter_json_objects(text: str):
-    """Yield (start, end, block) for successive balanced {...} candidates in the
-    output — thinking-model backends can prepend/append prose (including brace
-    fragments) that a strict json.loads rejects as 'Extra data'."""
+def _iter_balanced(text: str, opener: str, closer: str):
+    """Yield (start, end, block, closed) for successive balanced opener..closer
+    spans in the output — thinking-model backends can prepend/append prose
+    (including bracket/brace fragments) that a strict json.loads rejects as
+    'Extra data'. pos advances past the opener, not the span end, so valid
+    objects nested inside a malformed outer candidate are still discovered.
+    closed=False marks an unclosed span that yielded to EOF (end == len(text)
+    and depth never returned to 0); a balanced span ending exactly at EOF is
+    closed=True — distinguishable only via this flag, not by position."""
     pos = 0
     while True:
-        start = text.find("{", pos)
+        start = text.find(opener, pos)
         if start == -1:
             return
         depth = 0
         in_str = False
         esc = False
         end = len(text)
+        closed = False
         for i in range(start, len(text)):
             ch = text[i]
             if in_str:
@@ -266,16 +272,15 @@ def _iter_json_objects(text: str):
                     in_str = False
             elif ch == '"':
                 in_str = True
-            elif ch == "{":
+            elif ch == opener:
                 depth += 1
-            elif ch == "}":
+            elif ch == closer:
                 depth -= 1
                 if depth == 0:
                     end = i + 1
+                    closed = True
                     break
-        yield start, end, text[start:end]
-        # Advance past the opening brace, not the block end, so a valid object
-        # nested inside a malformed outer candidate is still discovered.
+        yield start, end, text[start:end], closed
         pos = start + 1
 
 
@@ -300,7 +305,21 @@ def _parse_manifest(raw: str) -> dict:
     err_after_shaped = False
     malformed_spans = []
     clean_spans = []
-    for start, end, block in _iter_json_objects(text):
+    malformed_array_starts = []
+    # Array containers get the same payload treatment as clean dicts: objects
+    # inside a parsed [...] list are payload, never a top-level manifest or
+    # partial-manifest attempt. A malformed [...] span is a broken wrapper —
+    # its contents are ineligible and it invalidates when it follows the answer.
+    for astart, aend, ablock, _aclosed in _iter_balanced(text, "[", "]"):
+        try:
+            if isinstance(json.loads(ablock), list):
+                clean_spans.append((astart, aend))
+                continue
+        except json.JSONDecodeError:
+            pass
+        malformed_spans.append((astart, aend))
+        malformed_array_starts.append(astart)
+    for start, end, block, closed in _iter_balanced(text, "{", "}"):
         # Blocks strictly nested inside the selected manifest's span are payload
         # data (e.g. an embedded example), never the answer — skip them. Blocks
         # nested inside any successfully parsed non-manifest object are likewise
@@ -320,13 +339,18 @@ def _parse_manifest(raw: str) -> dict:
         try:
             candidate = json.loads(block)
         except json.JSONDecodeError:
-            # Unclosed `{` yields a span to EOF. If the block began like a real
-            # object (`{"`), it's a wrapper — everything after is inside it. A
-            # non-`{"` opening ({oops, a stray `{` in prose) is just a brace
-            # fragment: shrink its span to the brace itself so a later
-            # free-standing manifest stays eligible.
-            if end == len(text) and text[start + 1 :].lstrip()[:1] != '"':
-                malformed_spans.append((start, start + 1))
+            if not closed:
+                # Unclosed span to EOF. A block that began like a real object
+                # (`{"` or a bare `key:` attempt such as {analysis:) is a
+                # wrapper — everything after is inside it. Anything else
+                # ({oops, a stray `{` in prose) is a brace fragment: shrink its
+                # span to the brace itself so a later free-standing manifest
+                # stays eligible.
+                tail = text[start + 1 :].lstrip()
+                if tail[:1] != '"' and re.match(r"[A-Za-z_][^{}\n]*:", tail) is None:
+                    malformed_spans.append((start, start + 1))
+                else:
+                    malformed_spans.append((start, end))
             else:
                 malformed_spans.append((start, end))
             # A malformed object AFTER a manifest-shaped one invalidates the
@@ -352,7 +376,9 @@ def _parse_manifest(raw: str) -> dict:
     # reasoning examples. It must satisfy the complete manifest contract; a
     # malformed or partial one invalidates the response (broad fallback) rather
     # than silently retaining an earlier example.
-    if last_shaped is None or err_after_shaped:
+    if last_shaped is None or err_after_shaped or any(
+        a >= last_shaped[2] for a in malformed_array_starts
+    ):
         raise ValueError("no complete JSON manifest found in classifier output")
     last_shaped = last_shaped[0]
     skills = last_shaped.get("invoke_skills")
@@ -407,11 +433,29 @@ def main() -> None:
         return
 
     # No API key (fork PR, or a consumer who hasn't configured the secret):
-    # skip gracefully with the fallback manifest instead of failing CI.
+    # skip gracefully with the fallback manifest instead of failing CI. A
+    # CLIENT_AI_POLICY refusal is NOT "unconfigured": _endpoint() deliberately
+    # withheld the credential, and the broad fallback would start specialist /
+    # broad jobs that send this same diff to the proxy the classifier refused —
+    # fail closed with a no-op manifest (CI green, nothing leaves the runner).
     api_key, _, _ = _endpoint()
     if not api_key:
-        print("[classifier] no API credential set — fallback manifest, skipping classification", file=sys.stderr)
-        out.write_text(json.dumps(_FALLBACK_MANIFEST, indent=2) + "\n", encoding="utf-8")
+        if os.environ.get("CLIENT_AI_POLICY"):
+            manifest = dict(
+                _EMPTY_DIFF_MANIFEST,
+                reason="client AI policy: no direct credential — review skipped",
+            )
+            print(
+                "[classifier] CLIENT_AI_POLICY set, no direct credential — no-op manifest",
+                file=sys.stderr,
+            )
+        else:
+            manifest = _FALLBACK_MANIFEST
+            print(
+                "[classifier] no API credential set — fallback manifest, skipping classification",
+                file=sys.stderr,
+            )
+        out.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
         return
 
     try:
