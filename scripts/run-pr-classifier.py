@@ -210,14 +210,43 @@ def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int
     return ""
 
 
+def _extract_json_object(text: str) -> str:
+    """Return the first balanced {...} block — thinking-model backends can
+    prepend/append prose that a strict json.loads rejects as 'Extra data'."""
+    start = text.find("{")
+    if start == -1:
+        return ""
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return text[start:]
+
+
 def _parse_manifest(raw: str) -> dict:
-    """Strip markdown fences and parse JSON manifest."""
+    """Strip markdown fences and parse the first JSON object in the output."""
     text = raw.strip()
     if text.startswith("```"):
         lines = text.splitlines()
         end = next((i for i, ln in enumerate(lines[1:], 1) if ln.startswith("```")), len(lines))
         text = "\n".join(lines[1:end])
-    return json.loads(text)
+    return json.loads(_extract_json_object(text))
 
 
 def main() -> None:
