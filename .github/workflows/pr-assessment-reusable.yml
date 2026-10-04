@@ -197,7 +197,7 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
-          mkdir -p .ai/candidates
+          rm -rf .ai/candidates && mkdir -p .ai/candidates
           # Run pr-classifier agent via Claude API
           python3 scripts/run-pr-classifier.py \
             --diff /tmp/pr.diff \
@@ -553,7 +553,7 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
-          mkdir -p .ai/candidates
+          rm -rf .ai/candidates && mkdir -p .ai/candidates
           git diff "origin/${BASE_REF}...HEAD" > /tmp/pr.diff
           python3 scripts/run-specialists.py \
             --skills "$SKILLS" \
@@ -676,7 +676,7 @@ jobs:
           CLIENT_AI_POLICY: ${{ vars.CLIENT_AI_POLICY }}
           ANTHROPIC_DIRECT_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          mkdir -p .ai/candidates
+          rm -rf .ai/candidates && mkdir -p .ai/candidates
           git diff "origin/${BASE_REF}...HEAD" > /tmp/pr.diff
           python3 scripts/run-broad-agents.py \
             --agents "$AGENTS" \
@@ -799,6 +799,13 @@ jobs:
         run: |
           echo "::error::upstream review stage failed — refusing to judge missing candidates"
           exit 1
+
+      - name: Drop committed candidates before download
+        # A PR-committed .ai/candidates/*.json would otherwise mix into the
+        # judged set — including a forged first_party flag that forces a
+        # credential this job does not have (Codex P2 on buromaster#261).
+        # The dir is generation-scratch; the artifact download repopulates it.
+        run: rm -rf .ai/candidates
 
       - name: Download all candidates
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4

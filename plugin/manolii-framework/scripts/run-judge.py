@@ -685,13 +685,20 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
         logger.error(f"Hit the {_MAX_REVIEW_PAGES}-page cap scanning reviews")
         return False
 
-    def _dismiss_stale_judge_reviews(self) -> None:
-        """Dismiss prior judge reviews at this SHA left in a blocking state.
+    def _dismiss_stale_judge_reviews(self, states=("CHANGES_REQUESTED",)) -> None:
+        """Dismiss prior judge reviews at this SHA superseded by the verdict
+        just posted.
 
-        Only CHANGES_REQUESTED is actionable — GitHub 422s on COMMENTED, and a
-        clean reassessment does not contradict an APPROVED. Best-effort: a
-        dismissal failure logs and never blocks the clean comment.
+        Only CHANGES_REQUESTED and APPROVED are actionable — GitHub 422s on
+        COMMENTED. The NEWEST judge review at this SHA is always kept: it is
+        the live verdict (the review this run just posted, or the existing one
+        dedup confirmed). Everything older in `states` is superseded — a
+        coverage-regressed COMMENT must retire a stale APPROVE, and a clean
+        verdict must retire a stale CHANGES_REQUESTED. Best-effort: a
+        dismissal failure logs and never blocks the verdict.
         """
+        latest_id = None  # newest judge review at this SHA = the live verdict
+        stale_ids: list[int] = []
         for page in range(1, _MAX_REVIEW_PAGES + 1):
             try:
                 url = (
@@ -720,17 +727,24 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
             for review in reviews:
                 author = (review.get("user") or {}).get("login")
                 body = review.get("body") or ""
-                if (
+                if not (
                     review.get("commit_id") == self.sha
                     and author == JUDGE_REVIEW_AUTHOR
                     and REVIEW_MARKER in body
-                    and review.get("state") == "CHANGES_REQUESTED"
                     and review.get("id")
                 ):
-                    self._dismiss_review(review["id"])
+                    continue
+                if latest_id is None or review["id"] > latest_id:
+                    latest_id = review["id"]
+                if review.get("state") in states:
+                    stale_ids.append(review["id"])
 
             if len(reviews) < _REVIEWS_PER_PAGE:
-                return
+                break
+
+        for rid in stale_ids:
+            if rid != latest_id:
+                self._dismiss_review(rid)
 
     def _dismiss_review(self, review_id: int) -> None:
         url = (
@@ -882,12 +896,17 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
         if surviving:
             if not self.post_review_to_github(surviving, review_action):
                 logger.warning("Failed to post review to GitHub")
-            elif review_action != "REQUEST_CHANGES":
-                # A same-SHA rerun whose verdict flipped CHANGES_REQUESTED →
-                # nonblocking must retire the stale block: judge_fallback
-                # honours ANY matching CHANGES_REQUESTED on the SHA (Codex P2
-                # on buromaster#261). Best-effort — failures only log.
-                self._dismiss_stale_judge_reviews()
+            else:
+                # A same-SHA rerun whose verdict superseded an earlier one must
+                # retire the stale verdict: judge_fallback honours ANY matching
+                # CHANGES_REQUESTED, and a coverage-regressed COMMENT must not
+                # leave a stale APPROVE standing on incomplete evidence (Codex
+                # P2 on buromaster#261, Codex P1 on ai-starter-pack#150).
+                # Best-effort — failures only log; the newest judge review at
+                # this SHA is always kept.
+                self._dismiss_stale_judge_reviews(
+                    ("CHANGES_REQUESTED", "APPROVED")
+                )
         else:
             logger.info("No findings survived filters; skipping GitHub post")
             self._post_clean_or_skip_advisory()
