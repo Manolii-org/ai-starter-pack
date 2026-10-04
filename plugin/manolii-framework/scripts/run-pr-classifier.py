@@ -305,28 +305,43 @@ def _parse_manifest(raw: str) -> dict:
     err_after_shaped = False
     malformed_spans = []
     clean_spans = []
-    malformed_array_starts = []
+    invalidating_array_spans = []
     # Array containers get the same payload treatment as clean dicts: objects
     # inside a parsed [...] list are payload, never a top-level manifest or
-    # partial-manifest attempt. A failed [...] span that began like JSON
-    # (`{`, `[`, `"`, `-`, or a digit) is a broken wrapper — its contents are
-    # ineligible and it invalidates when it follows the answer. Anything else
-    # ([internal], a stray `[` in prose) is punctuation, not an array attempt:
-    # shrink its span to the bracket itself so siblings stay eligible and it
-    # can never invalidate the answer.
+    # partial-manifest attempt — but a parsed list whose members include a
+    # dict intersecting the manifest key set is itself a manifest attempt in a
+    # container: it invalidates when it follows the answer (a stale depth:none
+    # example must not survive a trailing [{"depth":"broad"}]). A failed [...]
+    # span that began like JSON (`{`, `[`, `"`, `-`, a digit, or a
+    # true/false/null literal) is a broken wrapper — same ineligibility and
+    # invalidation. Anything else ([internal], a stray `[` in prose) is
+    # punctuation, not an array attempt: shrink its span to the bracket itself
+    # so siblings stay eligible and it can never invalidate the answer.
+    # Invalidation applies only to TOP-LEVEL arrays — one nested inside a
+    # parsed container is payload like any other member.
     for astart, aend, ablock, _aclosed in _iter_balanced(text, "[", "]"):
         try:
-            if isinstance(json.loads(ablock), list):
+            parsed_array = json.loads(ablock)
+            if isinstance(parsed_array, list):
                 clean_spans.append((astart, aend))
+                if any(
+                    isinstance(item, dict) and _MANIFEST_HINT_KEYS & item.keys()
+                    for item in parsed_array
+                ):
+                    invalidating_array_spans.append((astart, aend))
                 continue
         except json.JSONDecodeError:
             pass
         atail = text[astart + 1 :].lstrip()
-        if not atail[:1] or (atail[:1] not in '{["-' and not atail[:1].isdigit()):
+        if not atail[:1] or (
+            atail[:1] not in '{["-'
+            and not atail[:1].isdigit()
+            and re.match(r"true|false|null", atail) is None
+        ):
             malformed_spans.append((astart, astart + 1))
             continue
         malformed_spans.append((astart, aend))
-        malformed_array_starts.append(astart)
+        invalidating_array_spans.append((astart, aend))
     for start, end, block, closed in _iter_balanced(text, "{", "}"):
         # Blocks strictly nested inside the selected manifest's span are payload
         # data (e.g. an embedded example), never the answer — skip them. Blocks
@@ -385,7 +400,9 @@ def _parse_manifest(raw: str) -> dict:
     # malformed or partial one invalidates the response (broad fallback) rather
     # than silently retaining an earlier example.
     if last_shaped is None or err_after_shaped or any(
-        a >= last_shaped[2] for a in malformed_array_starts
+        a >= last_shaped[2]
+        and not any(cs < a and ae <= ce for cs, ce in clean_spans)
+        for a, ae in invalidating_array_spans
     ):
         raise ValueError("no complete JSON manifest found in classifier output")
     last_shaped = last_shaped[0]
@@ -427,7 +444,13 @@ def main() -> None:
         sys.exit(1)
 
     diff_file = pathlib.Path(args.diff)
-    diff = diff_file.read_text(encoding="utf-8", errors="replace") if diff_file.exists() else ""
+    # A missing diff artifact is NOT an empty diff — it means the upstream
+    # stage never wrote it, and there is no evidence the PR is empty. Fail
+    # rather than write depth:none and skip the whole review pipeline.
+    if not diff_file.exists():
+        print(f"[classifier] diff file not found: {diff_file}", file=sys.stderr)
+        sys.exit(1)
+    diff = diff_file.read_text(encoding="utf-8", errors="replace")
     print(f"[classifier] diff lines={diff.count(chr(10))}")
 
     out = pathlib.Path(args.output)
@@ -440,14 +463,22 @@ def main() -> None:
         out.write_text(json.dumps(_EMPTY_DIFF_MANIFEST, indent=2) + "\n", encoding="utf-8")
         return
 
-    # No API key (fork PR, a consumer who hasn't configured the secret, OR a
-    # CLIENT_AI_POLICY refusal where _endpoint() withheld the credential):
-    # the broad fallback is correct in every case — downstream runners enforce
-    # the same contract (first_party under CLIENT_AI_POLICY → no_direct_key
-    # skipped markers), so nothing sends the diff to the refused proxy and the
-    # judge posts the missing-coverage advisory instead of a silent no-op.
+    # No API key (fork PR or a consumer who hasn't configured the secret):
+    # skip gracefully with the broad fallback instead of failing CI. A
+    # CLIENT_AI_POLICY refusal is different: _endpoint() deliberately withheld
+    # the credential, and not every consumer's runners enforce the policy
+    # themselves — a broad fallback could route the diff to the refused
+    # proxy, while a silent depth:none no-op loses coverage invisibly. Fail
+    # the classify job: non-invoking and visibly missing-coverage.
     api_key, _, _ = _endpoint()
     if not api_key:
+        if os.environ.get("CLIENT_AI_POLICY"):
+            print(
+                "[classifier] CLIENT_AI_POLICY set, no direct credential — "
+                "failing closed rather than routing to the proxy",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         print("[classifier] no API credential set — fallback manifest, skipping classification", file=sys.stderr)
         out.write_text(json.dumps(_FALLBACK_MANIFEST, indent=2) + "\n", encoding="utf-8")
         return
