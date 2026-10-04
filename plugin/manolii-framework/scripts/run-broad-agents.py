@@ -185,13 +185,13 @@ def get_changed_files() -> list[str]:
 
 def build_user_message(diff: str, changed_files: list[str]) -> str:
     """Build user message with untrusted diff and changed files."""
-    msg = f"<untrusted_diff>\n{diff}\n</untrusted_diff>"
-
     if changed_files:
+        # File paths are PR-author-controlled — keep them inside the
+        # untrusted boundary (changed_paths convention, same as
+        # run-specialists.py) rather than as plain trailing text.
         files_str = "\n".join(f"  - {f}" for f in changed_files)
-        msg += f"\n\nChanged files:\n{files_str}"
-
-    return msg
+        diff = f"{diff}\n<changed_paths>\n{files_str}\n</changed_paths>"
+    return f"<untrusted_diff>\n{diff}\n</untrusted_diff>"
 
 
 def invoke_agent(

@@ -341,13 +341,16 @@ jobs:
           || 'ubuntu-latest' }}
     timeout-minutes: 15
     needs: [classify, sast]
-    if: needs.classify.result == 'success' && needs.classify.outputs.invoke_skills != ''
+    # always(): sast is skipped on empty-diff, but the manifest's metadata lane
+    # (scope-adherence) must still run — skipped need ≠ skipped job then.
+    if: always() && needs.classify.result == 'success' && needs.classify.outputs.invoke_skills != ''
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: needs.sast.result == 'success'
         with:
           name: sast-findings
           path: .ai/
@@ -390,13 +393,14 @@ jobs:
           || 'ubuntu-latest' }}
     timeout-minutes: 20
     needs: [classify, sast]
-    if: needs.classify.result == 'success' && needs.classify.outputs.depth == 'broad'
+    if: always() && needs.classify.result == 'success' && needs.classify.outputs.depth == 'broad'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: needs.sast.result == 'success'
         with:
           name: sast-findings
           path: .ai/

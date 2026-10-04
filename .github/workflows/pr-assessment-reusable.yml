@@ -449,7 +449,9 @@ jobs:
     runs-on: ${{ inputs.runs_on }}
     timeout-minutes: 15
     needs: [classify, sast]
-    if: needs.classify.result == 'success' && needs.classify.outputs.invoke_skills != ''
+    # always(): sast is skipped on empty-diff, but the manifest's metadata lane
+    # (scope-adherence) must still run — skipped need ≠ skipped job then.
+    if: always() && needs.classify.result == 'success' && needs.classify.outputs.invoke_skills != ''
     # Provider env — all steps inherit; empty ANTHROPIC_BASE_URL is a no-op for anthropic mode.
     env:
       ANTHROPIC_API_KEY: ${{ inputs.provider_mode == 'proxy' && secrets.LITELLM_MASTER_KEY || secrets.ANTHROPIC_API_KEY }}
@@ -545,6 +547,7 @@ jobs:
           rm -rf .pack-hydrate
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: needs.sast.result == 'success'
         with:
           name: sast-findings
           path: .ai/
@@ -573,7 +576,7 @@ jobs:
     runs-on: ${{ inputs.runs_on }}
     timeout-minutes: 20
     needs: [classify, sast]
-    if: needs.classify.result == 'success' && needs.classify.outputs.depth == 'broad'
+    if: always() && needs.classify.result == 'success' && needs.classify.outputs.depth == 'broad'
     # Provider env — all steps inherit; empty ANTHROPIC_BASE_URL is a no-op for anthropic mode.
     env:
       ANTHROPIC_API_KEY: ${{ inputs.provider_mode == 'proxy' && secrets.LITELLM_MASTER_KEY || secrets.ANTHROPIC_API_KEY }}
@@ -665,6 +668,7 @@ jobs:
           rm -rf .pack-hydrate
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: needs.sast.result == 'success'
         with:
           name: sast-findings
           path: .ai/
