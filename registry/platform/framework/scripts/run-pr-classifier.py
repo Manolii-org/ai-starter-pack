@@ -124,16 +124,17 @@ _CATEGORY_RESERVE = 10
 
 
 # Fallback manifest when classifier fails — run everything.
-# Empty diff (metadata-only change / empty commit): nothing to classify, so
-# route nothing — the broad fallback would spend SAST + model calls on zero
-# changed lines. The no-API-key path keeps _FALLBACK_MANIFEST (fail-safe when
+# Empty diff (metadata-only change / empty commit): no manifest worth an API
+# call — the broad fallback would spend SAST + model calls on zero changed
+# lines — but a concrete title/body claim still owes one scope-adherence lane
+# (Rule 10b). The no-API-key path keeps _FALLBACK_MANIFEST (fail-safe when
 # classification is impossible).
 _EMPTY_DIFF_MANIFEST = {
-    "invoke_skills": [],
+    "invoke_skills": ["scope-adherence"],
     "invoke_agents": [],
     "skip_skills": [],
-    "depth": "none",
-    "reason": "empty diff: nothing to classify",
+    "depth": "narrow",
+    "reason": "empty diff: route metadata claims through scope review",
     "door": "unknown",
     "blast_radius": "unknown",
     "danger_reason": "",
@@ -239,6 +240,12 @@ _MANIFEST_HINT_KEYS = {
     "invoke_skills", "invoke_agents", "skip_skills", "depth", "reason",
     "door", "blast_radius", "danger_reason",
 }
+# Routing-shaped hint keys — `reason` excluded: it is a generic metadata key,
+# so {"metadata":{"reason":"ok"}} or [{"reason":"x"}] after the answer is a
+# diagnostic trailer, not a routing attempt. Envelope/array invalidation uses
+# this narrower set; a top-level {"reason":...} object still counts as a
+# partial manifest via _MANIFEST_HINT_KEYS.
+_MANIFEST_ROUTING_KEYS = _MANIFEST_HINT_KEYS - {"reason"}
 _VALID_DEPTHS = {"narrow", "broad", "none"}
 
 
@@ -284,13 +291,18 @@ def _iter_balanced(text: str, opener: str, closer: str):
         pos = start + 1
 
 
-def _contains_hint(obj) -> bool:
+def _contains_hint(obj, keys=_MANIFEST_ROUTING_KEYS) -> bool:
+    """Recursive hint-key check for parsed CONTAINERS (top-level arrays and
+    non-manifest dict envelopes). Defaults to _MANIFEST_ROUTING_KEYS so
+    generic metadata like {"metadata":{"reason":"ok"}} is payload, while a
+    nested object that actually looks like routing (depth/door/invoke_* etc.)
+    still marks the container a manifest attempt."""
     if isinstance(obj, dict):
-        return bool(_MANIFEST_HINT_KEYS & obj.keys()) or any(
-            _contains_hint(v) for v in obj.values()
+        return bool(keys & obj.keys()) or any(
+            _contains_hint(v, keys) for v in obj.values()
         )
     if isinstance(obj, list):
-        return any(_contains_hint(v) for v in obj)
+        return any(_contains_hint(v, keys) for v in obj)
     return False
 
 
@@ -459,11 +471,13 @@ def _parse_manifest(raw: str) -> dict:
         elif isinstance(candidate, dict):
             # Successfully parsed non-manifest object — record its span so its
             # descendants are treated as payload, not sibling candidates. A
-            # dict carrying manifest-hint keys at any depth is ALSO a manifest
+            # dict carrying ROUTING-shaped keys at any depth is ALSO a manifest
             # attempt in an envelope ({"wrapper":{"depth":"broad"}}): after
             # the answer it invalidates the same way a hinted top-level array
             # does — a stale reasoning envelope must not leave an earlier
-            # depth:none example as the decision.
+            # depth:none example as the decision. Generic metadata keys do not
+            # qualify: {"metadata":{"reason":"ok"}} is a diagnostic trailer,
+            # not routing, per _MANIFEST_ROUTING_KEYS.
             clean_spans.append((start, end))
             if _contains_hint(candidate):
                 invalidating_spans.append((start, end))
@@ -529,9 +543,10 @@ def main() -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
 
     # Empty diff (metadata-only change / empty commit): nothing to classify —
-    # emit the fallback manifest and skip the API call rather than waste tokens.
+    # emit the scope-adherence-only manifest and skip the API call rather than
+    # waste tokens; a concrete title/body claim still gets one review lane.
     if not diff.strip():
-        print("[classifier] empty diff — no-op manifest, skipping API call")
+        print("[classifier] empty diff — scope-adherence lane, skipping API call")
         out.write_text(json.dumps(_EMPTY_DIFF_MANIFEST, indent=2) + "\n", encoding="utf-8")
         return
 
