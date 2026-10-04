@@ -210,14 +210,81 @@ def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int
     return ""
 
 
+# Keys the classifier manifest may carry — a candidate object must intersect
+# this set to count as a manifest (thinking models can emit valid JSON examples
+# or brace fragments in their reasoning before/around the real output).
+_MANIFEST_KEYS = {
+    "invoke_skills",
+    "invoke_agents",
+    "depth",
+    "reason",
+    "door",
+    "blast_radius",
+    "danger_reason",
+}
+
+
+def _iter_json_objects(text: str):
+    """Yield successive balanced {...} candidates in the output — thinking-model
+    backends can prepend/append prose (including brace fragments) that a strict
+    json.loads rejects as 'Extra data'."""
+    pos = 0
+    while True:
+        start = text.find("{", pos)
+        if start == -1:
+            return
+        depth = 0
+        in_str = False
+        esc = False
+        end = len(text)
+        for i in range(start, len(text)):
+            ch = text[i]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+            elif ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        yield text[start:end]
+        # Advance past the opening brace, not the block end, so a valid object
+        # nested inside a malformed outer candidate is still discovered.
+        pos = start + 1
+
+
 def _parse_manifest(raw: str) -> dict:
-    """Strip markdown fences and parse JSON manifest."""
+    """Strip markdown fences and return the last manifest-shaped JSON object —
+    the real manifest is emitted after any reasoning, format examples, and
+    brace fragments."""
     text = raw.strip()
     if text.startswith("```"):
         lines = text.splitlines()
         end = next((i for i, ln in enumerate(lines[1:], 1) if ln.startswith("```")), len(lines))
         text = "\n".join(lines[1:end])
-    return json.loads(text)
+    best = None
+    last_err = None
+    for block in _iter_json_objects(text):
+        try:
+            candidate = json.loads(block)
+        except json.JSONDecodeError as exc:
+            last_err = exc
+            continue
+        if isinstance(candidate, dict) and _MANIFEST_KEYS & candidate.keys():
+            best = candidate
+    if best is not None:
+        return best
+    if last_err is not None:
+        raise last_err
+    raise ValueError("no JSON object found in classifier output")
 
 
 def main() -> None:
