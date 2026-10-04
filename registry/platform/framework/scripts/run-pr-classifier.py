@@ -340,10 +340,14 @@ def _parse_manifest(raw: str) -> dict:
         except json.JSONDecodeError:
             pass
         atail = text[astart + 1 :].lstrip()
-        if not atail[:1] or (
-            atail[:1] not in '{["-'
-            and not atail[:1].isdigit()
-            and re.match(r"(?:true|false|null)(?=[,\]}]|$)", atail) is None
+        if (
+            text[astart - 1 : astart] == '"'
+            or not atail[:1]
+            or (
+                atail[:1] not in '{["-'
+                and not atail[:1].isdigit()
+                and re.match(r"(?:true|false|null)(?=[,\]}]|$)", atail) is None
+            )
         ):
             malformed_spans.append((astart, astart + 1))
             continue
@@ -377,7 +381,12 @@ def _parse_manifest(raw: str) -> dict:
                 # span to the brace itself so a later free-standing manifest
                 # stays eligible.
                 tail = text[start + 1 :].lstrip()
-                if tail[:1] != '"' and re.match(r"[A-Za-z_][^{}\n]*:", tail) is None:
+                # A brace immediately inside a quoted string ("{...) is prose
+                # punctuation, not a JSON wrapper — same fragment treatment as
+                # a stray {oops, so a later free-standing manifest recovers.
+                if text[start - 1 : start] == '"' or (
+                    tail[:1] != '"' and re.match(r"[A-Za-z_][^{}\n]*:", tail) is None
+                ):
                     malformed_spans.append((start, start + 1))
                 else:
                     malformed_spans.append((start, end))
@@ -756,6 +765,15 @@ def main() -> None:
 
     out = pathlib.Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
+    # CLIENT_AI_POLICY: on older consumer generations the downstream runners
+    # route every invoked lane to the proxy without consulting the flag, so a
+    # non-empty manifest would send the client diff to the refused host after
+    # classification succeeded on the direct credential. Emit no invocations
+    # under policy — nothing runs on any generation and the judge's
+    # missing-candidates path discloses the gap.
+    if os.environ.get("CLIENT_AI_POLICY"):
+        manifest["invoke_skills"] = []
+        manifest["invoke_agents"] = []
     out.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     print(f"[classifier] Manifest written to {out}")
 
