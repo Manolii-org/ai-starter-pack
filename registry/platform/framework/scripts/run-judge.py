@@ -219,7 +219,12 @@ class Judge:
         self.merge_danger = self._load_merge_danger()
         self._has_first_party_candidates = False
         self._skipped_first_party: list[str] = []
+        self._candidate_load_errors = 0
         self._skipped_other: list[str] = []
+        # Floor for keep-newest dismissal: the review this run posts. The list
+        # endpoint can lag the POST, leaving the just-superseded review as the
+        # apparent newest — and it would survive its own dismissal scan.
+        self._posted_review_id: int | None = None
         # An `edited` rerun at the same HEAD must publish a fresh verdict: dedup
         # keys on commit + metadata digest so a title/body edit re-posts. The
         # base SHA is part of the key: a base update changes the merge diff the
@@ -256,7 +261,7 @@ class Judge:
         """Load all findings from .ai/candidates/*.json (skip manifest.json)."""
         findings: list[Finding] = []
 
-        if not self.candidates_dir.exists():
+        if not self.candidates_dir.is_dir():
             logger.warning(f"Candidates directory not found: {self.candidates_dir}")
             return findings
 
@@ -303,6 +308,7 @@ class Judge:
 
             except Exception as e:
                 logger.error(f"Failed to load {candidate_file}: {e}")
+                self._candidate_load_errors += 1
 
         return findings
 
@@ -494,14 +500,22 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
 
         # Dedup is outcome-keyed: a prior CLEAN verdict must not suppress a
         # rerun that now has findings (e.g. a specialist timed out first time).
-        if self._review_exists_at_sha("findings"):
+        # The key also carries the effective action and candidate-load state — a
+        # prior same-commit APPROVE (or a full-coverage verdict) must not
+        # suppress a rerun whose coverage regressed, or the stale approval stays
+        # live on partial evidence (Codex P1 + CodeRabbit major on
+        # ai-starter-pack#150).
+        findings_kind = f"findings-{review_action.lower()}"
+        if self._candidate_load_errors:
+            findings_kind += "-partial"
+        if self._review_exists_at_sha(findings_kind):
             logger.info(f"Review already posted at {self.sha[:8]}; skipping")
             return True
 
         # Format review body
         body_lines = [
             REVIEW_MARKER,
-            f"<!-- meta:{self.meta_digest}:findings -->",
+            f"<!-- meta:{self.meta_digest}:{findings_kind} -->",
             "## PR Assessment Review",
         ]
 
@@ -530,6 +544,16 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
             body_lines.append(
                 f"**Incomplete coverage:** some review checks did not "
                 f"run (skipped: {skipped})."
+            )
+            body_lines.append("")
+        if self._candidate_load_errors:
+            # Partially-corrupt batch with surviving findings still needs the
+            # disclosure — otherwise an APPROVE reads as complete coverage
+            # (upstream CodeRabbit finding on ai-starter-pack#150).
+            body_lines.append(
+                f"**Incomplete coverage:** {self._candidate_load_errors} "
+                "candidate artifact(s) failed to load; surviving findings "
+                "may understate the assessment."
             )
             body_lines.append("")
 
@@ -586,6 +610,9 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
             with _urlopen_https(req, timeout=30, host="api.github.com") as response:
                 result = json.loads(response.read().decode("utf-8"))
                 review_id = result.get("id", "unknown")
+                self._posted_review_id = (
+                    review_id if isinstance(review_id, int) else None
+                )
                 logger.info(f"Review posted successfully (ID: {review_id})")
                 return True
 
@@ -665,13 +692,22 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
         logger.error(f"Hit the {_MAX_REVIEW_PAGES}-page cap scanning reviews")
         return False
 
-    def _dismiss_stale_judge_reviews(self) -> None:
-        """Dismiss prior judge reviews at this SHA left in a blocking state.
+    def _dismiss_stale_judge_reviews(self, states=("CHANGES_REQUESTED",)) -> None:
+        """Dismiss prior judge reviews at this SHA superseded by the verdict
+        just posted.
 
-        Only CHANGES_REQUESTED is actionable — GitHub 422s on COMMENTED, and a
-        clean reassessment does not contradict an APPROVED. Best-effort: a
-        dismissal failure logs and never blocks the clean comment.
+        Only CHANGES_REQUESTED and APPROVED are actionable — GitHub 422s on
+        COMMENTED. The NEWEST judge review at this SHA is always kept: it is
+        the live verdict (the review this run just posted, or the existing one
+        dedup confirmed). Everything older in `states` is superseded — a
+        coverage-regressed COMMENT must retire a stale APPROVE, and a clean
+        verdict must retire a stale CHANGES_REQUESTED. Best-effort: a
+        dismissal failure logs and never blocks the verdict.
         """
+        # The just-posted review is the live verdict even when the list
+        # endpoint has not yet caught up to the POST (Codex P1 on #150).
+        latest_id = self._posted_review_id
+        stale_ids: list[int] = []
         for page in range(1, _MAX_REVIEW_PAGES + 1):
             try:
                 url = (
@@ -700,17 +736,24 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
             for review in reviews:
                 author = (review.get("user") or {}).get("login")
                 body = review.get("body") or ""
-                if (
+                if not (
                     review.get("commit_id") == self.sha
                     and author == JUDGE_REVIEW_AUTHOR
                     and REVIEW_MARKER in body
-                    and review.get("state") == "CHANGES_REQUESTED"
                     and review.get("id")
                 ):
-                    self._dismiss_review(review["id"])
+                    continue
+                if latest_id is None or review["id"] > latest_id:
+                    latest_id = review["id"]
+                if review.get("state") in states:
+                    stale_ids.append(review["id"])
 
             if len(reviews) < _REVIEWS_PER_PAGE:
-                return
+                break
+
+        for rid in stale_ids:
+            if rid != latest_id:
+                self._dismiss_review(rid)
 
     def _dismiss_review(self, review_id: int) -> None:
         url = (
@@ -720,7 +763,7 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
         req = urllib.request.Request(
             url,
             data=json.dumps(
-                {"message": "Superseded by a clean reassessment at the same commit."}
+                {"message": "Superseded by a newer reassessment at the same commit."}
             ).encode("utf-8"),
             headers={
                 "Authorization": f"Bearer {self.token}",
@@ -774,6 +817,27 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
         logger.info(f"Loaded {len(findings)} findings from candidates")
 
         if not findings:
+            if not self.candidates_dir.is_dir():
+                # Missing artifacts ≠ verified-empty: the assessment pipeline
+                # never ran, so a clean verdict here could satisfy auto-merge on
+                # zero evidence (upstream review finding: Codex P1). A path
+                # that exists but is not a directory is the same case — its
+                # *.json glob yields zero artifacts with no load error.
+                logger.warning(
+                    f"Candidates directory missing: {self.candidates_dir} — "
+                    "posting advisory, not a clean verdict"
+                )
+                if self._post_advisory_warning(
+                    "Assessment artifacts unavailable (.ai/candidates missing) — "
+                    "no specialist review evidence; clean verdict withheld."
+                ):
+                    # The advisory supersedes any earlier same-SHA verdict — a
+                    # stale APPROVE earned on evidence now known absent must not
+                    # keep satisfying auto-merge (CodeRabbit major on #150).
+                    self._dismiss_stale_judge_reviews(
+                        ("CHANGES_REQUESTED", "APPROVED")
+                    )
+                return 0
             logger.info("No findings to process; posting verdict comment")
             self._post_clean_or_skip_advisory()
             return 0
@@ -811,6 +875,12 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
         review_action = judge_result.get("review_action", "COMMENT")
         if review_action not in ("COMMENT", "APPROVE", "REQUEST_CHANGES"):
             review_action = "COMMENT"
+        if review_action == "APPROVE" and self._candidate_load_errors:
+            # An APPROVE would satisfy the auto-merge verdict on partial
+            # coverage — the unparseable candidates may have carried the
+            # blocking finding. Force COMMENT; REQUEST_CHANGES is already the
+            # stricter path (CodeRabbit major on ai-starter-pack#150).
+            review_action = "COMMENT"
 
         logger.info(
             f"Judge result: {len(surviving)} surviving, "
@@ -841,6 +911,17 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
         if surviving:
             if not self.post_review_to_github(surviving, review_action):
                 logger.warning("Failed to post review to GitHub")
+            else:
+                # A same-SHA rerun whose verdict superseded an earlier one must
+                # retire the stale verdict: judge_fallback honours ANY matching
+                # CHANGES_REQUESTED, and a coverage-regressed COMMENT must not
+                # leave a stale APPROVE standing on incomplete evidence (Codex
+                # P2 on buromaster#261, Codex P1 on ai-starter-pack#150).
+                # Best-effort — failures only log; the newest judge review at
+                # this SHA is always kept.
+                self._dismiss_stale_judge_reviews(
+                    ("CHANGES_REQUESTED", "APPROVED")
+                )
         else:
             logger.info("No findings survived filters; skipping GitHub post")
             self._post_clean_or_skip_advisory()
@@ -900,7 +981,10 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
                 method="POST",
             )
 
-            with _urlopen_https(req, timeout=30, host="api.github.com"):
+            with _urlopen_https(req, timeout=30, host="api.github.com") as response:
+                self._posted_review_id = json.loads(
+                    response.read().decode("utf-8")
+                ).get("id")
                 logger.info("No-findings comment posted")
 
             # A same-commit rerun that reports clean does not supersede an
@@ -929,20 +1013,45 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
         A skipped marker means a security specialist never ran, so 'no
         findings' is not a real verdict: fail closed into the advisory.
         """
+        if self._candidate_load_errors:
+            # Unparseable artifacts ≠ clean: a partially-corrupt batch (one bad
+            # file + all surviving findings later dropped) must not satisfy the
+            # auto-merge verdict either (upstream Codex P1 follow-up).
+            logger.warning(
+                f"{self._candidate_load_errors} candidate file(s) failed to "
+                "parse — posting advisory, not a clean verdict"
+            )
+            if self._post_advisory_warning(
+                "Assessment artifacts unparseable (.ai/candidates) — "
+                "incomplete specialist review evidence; clean verdict "
+                "withheld."
+            ):
+                self._dismiss_stale_judge_reviews(
+                    ("CHANGES_REQUESTED", "APPROVED")
+                )
+            return
         if self._skipped_first_party or self._skipped_other:
             sources = ", ".join(
                 sorted(set(self._skipped_first_party) | set(self._skipped_other))
             )
             logger.warning(f"review checks skipped (missing credential): {sources}")
-            self._post_advisory_warning(self._skipped_coverage_detail())
+            if self._post_advisory_warning(self._skipped_coverage_detail()):
+                self._dismiss_stale_judge_reviews(
+                    ("CHANGES_REQUESTED", "APPROVED")
+                )
             return
         self._post_no_findings_comment()
 
-    def _post_advisory_warning(self, detail: str = "") -> None:
-        """Post an advisory WARNING when judge fails or coverage is incomplete."""
+    def _post_advisory_warning(self, detail: str = "") -> bool:
+        """Post an advisory WARNING when judge fails or coverage is incomplete.
+
+        Returns True only once the advisory is confirmed posted — a caller
+        superseding a prior verdict must gate dismissal on that, otherwise a
+        failed post leaves the PR with no live verdict (CodeRabbit on #150).
+        """
         if not self.token or not self.repo:
             logger.info("Judge failed; no token/repo for advisory post")
-            return
+            return False
 
         try:
             request_body = {
@@ -971,11 +1080,16 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
                 method="POST",
             )
 
-            with _urlopen_https(req, timeout=30, host="api.github.com"):
+            with _urlopen_https(req, timeout=30, host="api.github.com") as response:
+                self._posted_review_id = json.loads(
+                    response.read().decode("utf-8")
+                ).get("id")
                 logger.info("Advisory warning posted")
+            return True
 
         except Exception as e:
             logger.warning(f"Failed to post advisory warning: {e}")
+            return False
 
 
 def main() -> int:
