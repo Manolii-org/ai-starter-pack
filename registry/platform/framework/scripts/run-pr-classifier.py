@@ -272,17 +272,28 @@ def _parse_manifest(raw: str) -> dict:
     # Strip markdown fence tokens but keep everything else: a thinking backend can
     # emit a fenced reasoning/example block BEFORE the real manifest — discarding
     # the tail after the first closing fence would leave the example as the answer.
-    # Tokens are stripped, not whole lines, so a manifest sharing a line with a
-    # fence marker survives.
+    # Fences are line-level tokens: strip only at a line start or end so a run of
+    # backticks inside a JSON string value (e.g. "depth":"none```") is never
+    # normalized into a valid value before the contract check sees it.
     if "```" in text:
-        text = re.sub(r"```[A-Za-z0-9_-]*", "", text)
+        text = re.sub(
+            r"(?m)^[ \t]*```[A-Za-z0-9_-]*|```[A-Za-z0-9_-]*[ \t]*$",
+            "",
+            text,
+        )
     last_shaped = None
     err_after_shaped = False
     malformed_spans = []
+    clean_spans = []
     for start, end, block in _iter_json_objects(text):
         # Blocks strictly nested inside the selected manifest's span are payload
-        # data (e.g. an embedded example), never the answer — skip them.
+        # data (e.g. an embedded example), never the answer — skip them. Blocks
+        # nested inside any successfully parsed non-manifest object are likewise
+        # that object's payload: a hinted dict inside {"metadata": {...}} is not
+        # a top-level manifest attempt.
         if last_shaped is not None and last_shaped[1] < start and end <= last_shaped[2]:
+            continue
+        if any(cs < start and end <= ce for cs, ce in clean_spans):
             continue
         try:
             candidate = json.loads(block)
@@ -306,6 +317,10 @@ def _parse_manifest(raw: str) -> dict:
             malformed_spans.append((start, end))
             if last_shaped is not None and start >= last_shaped[2]:
                 err_after_shaped = True
+        elif isinstance(candidate, dict):
+            # Successfully parsed non-manifest object — record its span so its
+            # descendants are treated as payload, not sibling candidates.
+            clean_spans.append((start, end))
     # The last manifest-shaped object is the model's answer — earlier ones are
     # reasoning examples. It must satisfy the complete manifest contract; a
     # malformed or partial one invalidates the response (broad fallback) rather
