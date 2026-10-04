@@ -779,7 +779,7 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
             if not self.candidates_dir.is_dir():
                 # Missing artifacts ≠ verified-empty: the assessment pipeline
                 # never ran, so a clean verdict here could satisfy auto-merge on
-                # zero evidence (Codex P1 on Manolii-org/master#6018). A path
+                # zero evidence (upstream review finding: Codex P1). A path
                 # that exists but is not a directory is the same case — its
                 # *.json glob yields zero artifacts with no load error.
                 logger.warning(
@@ -949,7 +949,7 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
         if self._candidate_load_errors:
             # Unparseable artifacts ≠ clean: a partially-corrupt batch (one bad
             # file + all surviving findings later dropped) must not satisfy the
-            # auto-merge verdict either (Codex P1 follow-up on #6018).
+            # auto-merge verdict either (upstream Codex P1 follow-up).
             logger.warning(
                 f"{self._candidate_load_errors} candidate file(s) failed to "
                 "parse — posting advisory, not a clean verdict"
