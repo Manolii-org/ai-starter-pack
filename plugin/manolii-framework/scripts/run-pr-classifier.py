@@ -294,6 +294,39 @@ def _contains_hint(obj) -> bool:
     return False
 
 
+def _string_ranges(text: str) -> list:
+    """(start, end) spans of double-quoted strings in *text*.
+
+    Raw-text scan: a `"` toggles in/out of a JSON-style string and `\\` escapes
+    the next character while inside one; an unterminated quote runs to EOF (the
+    model emitted a stray quote — its contents are prose). Delimiters inside a
+    string range are quoted punctuation, never container openers — but a `"`
+    immediately BEFORE an opener can equally be the CLOSING quote of adjacent
+    prose (`"label"[` is a broken wrapper, `"["` is string content), so the
+    membership check must track string state, not the previous character.
+    """
+    ranges = []
+    in_string = False
+    str_start = 0
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if in_string and ch == "\\":
+            i += 2
+            continue
+        if ch == '"':
+            if in_string:
+                ranges.append((str_start, i + 1))
+                in_string = False
+            else:
+                str_start = i
+                in_string = True
+        i += 1
+    if in_string:
+        ranges.append((str_start, len(text)))
+    return ranges
+
+
 def _parse_manifest(raw: str) -> dict:
     """Strip markdown fences and return the last manifest-shaped JSON object —
     the real manifest is emitted after any reasoning, format examples, and
@@ -311,6 +344,11 @@ def _parse_manifest(raw: str) -> dict:
             "",
             text,
         )
+    # Positions inside double-quoted strings: a delimiter there is prose
+    # punctuation, not a container opener (see _string_ranges).
+    string_positions = set()
+    for _ss, _se in _string_ranges(text):
+        string_positions.update(range(_ss, _se))
     last_shaped = None
     err_after_shaped = False
     malformed_spans = []
@@ -341,7 +379,7 @@ def _parse_manifest(raw: str) -> dict:
             pass
         atail = text[astart + 1 :].lstrip()
         if (
-            text[astart - 1 : astart] == '"'
+            astart in string_positions
             or not atail[:1]
             or (
                 atail[:1] not in '{["-'
@@ -381,10 +419,13 @@ def _parse_manifest(raw: str) -> dict:
                 # span to the brace itself so a later free-standing manifest
                 # stays eligible.
                 tail = text[start + 1 :].lstrip()
-                # A brace immediately inside a quoted string ("{...) is prose
-                # punctuation, not a JSON wrapper — same fragment treatment as
-                # a stray {oops, so a later free-standing manifest recovers.
-                if text[start - 1 : start] == '"' or (
+                # A brace inside a quoted string is prose punctuation, not a
+                # JSON wrapper — same fragment treatment as a stray {oops, so
+                # a later free-standing manifest recovers. A `"` immediately
+                # before it may be the CLOSING quote of adjacent prose
+                # ({"label"{...} is a broken wrapper), so membership in the
+                # string ranges — not the previous character — decides.
+                if start in string_positions or (
                     tail[:1] != '"' and re.match(r"[A-Za-z_][^{}\n]*:", tail) is None
                 ):
                     malformed_spans.append((start, start + 1))
@@ -772,15 +813,12 @@ def main() -> None:
 
     out = pathlib.Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
-    # CLIENT_AI_POLICY: on older consumer generations the downstream runners
-    # route every invoked lane to the proxy without consulting the flag, so a
-    # non-empty manifest would send the client diff to the refused host after
-    # classification succeeded on the direct credential. Emit no invocations
-    # under policy — nothing runs on any generation and the judge's
-    # missing-candidates path discloses the gap.
-    if os.environ.get("CLIENT_AI_POLICY"):
-        manifest["invoke_skills"] = []
-        manifest["invoke_agents"] = []
+    # CLIENT_AI_POLICY enforcement lives in the downstream runners: they map
+    # the flag onto first_party routing (direct endpoint or a skip marker),
+    # so the manifest's invoke lists are emitted unchanged. Clamping them here
+    # would silently zero out every direct review lane — the classifier's own
+    # fail-closed exits above already cover the cases where classification
+    # itself could not run on the direct credential.
     out.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     print(f"[classifier] Manifest written to {out}")
 
