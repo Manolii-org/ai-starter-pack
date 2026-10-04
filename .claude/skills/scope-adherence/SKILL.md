@@ -38,6 +38,8 @@ In files directly related to the stated task: are there formatting-only changes 
 ### 4. Under-delivery (spec axis)
 Scope adherence is bidirectional — the diff must not only stay inside the stated scope but also cover it. For each concrete claim in the PR title/description ("adds endpoint X", "fixes retry for Y", "adds validation to Z"): is there a corresponding change in the diff? Flag each stated outcome with no matching diff change — a description that promises more than the diff delivers usually means the implementer agent ran out of context mid-task, and the PR review is where that should surface. Skip vague marketing phrasing; only check concrete, verifiable claims.
 
+An **empty diff is the extreme case**: zero changed files means every concrete title/body claim is undelivered by definition — flag each one rather than returning no findings.
+
 ## Output
 
 Write findings to `.ai/candidates/scope-adherence.json`:

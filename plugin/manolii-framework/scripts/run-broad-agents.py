@@ -57,7 +57,10 @@ BROAD_AGENTS = [
 ]
 
 MAX_DIFF_CHARS = int(os.environ.get("BROAD_AGENTS_MAX_DIFF_CHARS", "40000"))
-TIMEOUT_SECS = 120
+# 240s covers a primary call plus its fail-closed advisor round trip on the
+# proxy — 120s was too tight for advisor-backed security-deep-dive-sized
+# payloads (buromaster#25) and aborts mid-advisor into api_error markers.
+TIMEOUT_SECS = 240
 MAX_RETRIES = 4
 RETRIABLE_STATUS = {429, 500, 502, 503, 504}
 
@@ -180,15 +183,27 @@ def get_changed_files() -> list[str]:
     return [f.strip() for f in changed.split("\n") if f.strip()]
 
 
+_WRAP_TAGS = ("untrusted_diff", "untrusted_pr_meta", "changed_paths")
+
+
+def _neutralize(text: str) -> str:
+    """Defang wrapper tag names inside untrusted content (same as run-specialists)."""
+    for tag in _WRAP_TAGS:
+        text = text.replace(f"<{tag}>", f"<{tag} >").replace(f"</{tag}>", f"</{tag} >")
+    return text
+
+
 def build_user_message(diff: str, changed_files: list[str]) -> str:
     """Build user message with untrusted diff and changed files."""
-    msg = f"<untrusted_diff>\n{diff}\n</untrusted_diff>"
-
+    diff = _neutralize(diff)
     if changed_files:
-        files_str = "\n".join(f"  - {f}" for f in changed_files)
-        msg += f"\n\nChanged files:\n{files_str}"
-
-    return msg
+        # File paths are PR-author-controlled — keep them inside the
+        # untrusted boundary (changed_paths convention, same as
+        # run-specialists.py) rather than as plain trailing text, and
+        # neutralize them so a crafted path can't close the boundary.
+        files_str = "\n".join(f"  - {_neutralize(f)}" for f in changed_files)
+        diff = f"{diff}\n<changed_paths>\n{files_str}\n</changed_paths>"
+    return f"<untrusted_diff>\n{diff}\n</untrusted_diff>"
 
 
 def invoke_agent(
@@ -328,7 +343,14 @@ def invoke_agent(
                 resp_data = json.loads(response.read().decode("utf-8"))
             break
         except HTTPError as e:
-            if e.code in RETRIABLE_STATUS and attempt < MAX_RETRIES - 1:
+            err_body = e.read().decode("utf-8", errors="replace")[:2000]
+            # The fail-closed sonnet-advisor guardrail rejects with a 400 whose
+            # body instructs a retry — that one rejection is transient (a
+            # provider blip behind the advisor); every other 400 is terminal.
+            retriable = e.code in RETRIABLE_STATUS or (
+                e.code == 400 and "advisor rejected" in err_body.lower()
+            )
+            if retriable and attempt < MAX_RETRIES - 1:
                 sleep_secs = 2 ** attempt
                 logger.warning(
                     f"Agent {agent_config.name} HTTP {e.code} on attempt "
@@ -423,7 +445,11 @@ def invoke_agent(
             "source": agent_config.name,
             # An empty result must not mark the file first-party: the judge
             # would demand a direct key for a batch with nothing to adjudicate.
-            "first_party": agent_config.first_party and bool(normalised),
+            # direct_required covers BOTH direct lanes — static first_party
+            # frontmatter and CLIENT_AI_POLICY — so policy-driven findings keep
+            # the judge off the OSS proxy even when the flag never reaches the
+            # judge job's env.
+            "first_party": direct_required and bool(normalised),
             "findings": normalised,
         }
     except json.JSONDecodeError as e:
