@@ -219,6 +219,7 @@ class Judge:
         self.merge_danger = self._load_merge_danger()
         self._has_first_party_candidates = False
         self._skipped_first_party: list[str] = []
+        self._candidate_load_errors = 0
         self._skipped_other: list[str] = []
         # An `edited` rerun at the same HEAD must publish a fresh verdict: dedup
         # keys on commit + metadata digest so a title/body edit re-posts. The
@@ -256,7 +257,7 @@ class Judge:
         """Load all findings from .ai/candidates/*.json (skip manifest.json)."""
         findings: list[Finding] = []
 
-        if not self.candidates_dir.exists():
+        if not self.candidates_dir.is_dir():
             logger.warning(f"Candidates directory not found: {self.candidates_dir}")
             return findings
 
@@ -303,6 +304,7 @@ class Judge:
 
             except Exception as e:
                 logger.error(f"Failed to load {candidate_file}: {e}")
+                self._candidate_load_errors += 1
 
         return findings
 
@@ -774,6 +776,21 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
         logger.info(f"Loaded {len(findings)} findings from candidates")
 
         if not findings:
+            if not self.candidates_dir.is_dir():
+                # Missing artifacts ≠ verified-empty: the assessment pipeline
+                # never ran, so a clean verdict here could satisfy auto-merge on
+                # zero evidence (Codex P1 on Manolii-org/master#6018). A path
+                # that exists but is not a directory is the same case — its
+                # *.json glob yields zero artifacts with no load error.
+                logger.warning(
+                    f"Candidates directory missing: {self.candidates_dir} — "
+                    "posting advisory, not a clean verdict"
+                )
+                self._post_advisory_warning(
+                    "Assessment artifacts unavailable (.ai/candidates missing) — "
+                    "no specialist review evidence; clean verdict withheld."
+                )
+                return 0
             logger.info("No findings to process; posting verdict comment")
             self._post_clean_or_skip_advisory()
             return 0
@@ -929,6 +946,20 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
         A skipped marker means a security specialist never ran, so 'no
         findings' is not a real verdict: fail closed into the advisory.
         """
+        if self._candidate_load_errors:
+            # Unparseable artifacts ≠ clean: a partially-corrupt batch (one bad
+            # file + all surviving findings later dropped) must not satisfy the
+            # auto-merge verdict either (Codex P1 follow-up on #6018).
+            logger.warning(
+                f"{self._candidate_load_errors} candidate file(s) failed to "
+                "parse — posting advisory, not a clean verdict"
+            )
+            self._post_advisory_warning(
+                "Assessment artifacts unparseable (.ai/candidates) — "
+                "incomplete specialist review evidence; clean verdict "
+                "withheld."
+            )
+            return
         if self._skipped_first_party or self._skipped_other:
             sources = ", ".join(
                 sorted(set(self._skipped_first_party) | set(self._skipped_other))
