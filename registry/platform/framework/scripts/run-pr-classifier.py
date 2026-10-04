@@ -488,6 +488,25 @@ def main() -> None:
             sys.exit(1)
         print("[classifier] no API credential set — fallback manifest, skipping classification", file=sys.stderr)
         out.write_text(json.dumps(_FALLBACK_MANIFEST, indent=2) + "\n", encoding="utf-8")
+        # Disclose the gap downstream: when every stage lacks credentials the
+        # runners exit before writing findings and the judge would read the
+        # surviving candidates dir (a lone runner manifest is not a finding)
+        # as clean. A `skipped` marker forces the coverage-gap advisory instead.
+        candidates = pathlib.Path(".ai/candidates")
+        candidates.mkdir(parents=True, exist_ok=True)
+        (candidates / "_classifier-skip.json").write_text(
+            json.dumps(
+                {
+                    "source": "classifier",
+                    "skipped": True,
+                    "reason": "no API credential — classification skipped",
+                    "findings": [],
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         return
 
     try:
