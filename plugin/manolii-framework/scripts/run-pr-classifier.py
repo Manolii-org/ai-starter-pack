@@ -124,6 +124,21 @@ _CATEGORY_RESERVE = 10
 
 
 # Fallback manifest when classifier fails — run everything.
+# Empty diff (metadata-only change / empty commit): nothing to classify, so
+# route nothing — the broad fallback would spend SAST + model calls on zero
+# changed lines. The no-API-key path keeps _FALLBACK_MANIFEST (fail-safe when
+# classification is impossible).
+_EMPTY_DIFF_MANIFEST = {
+    "invoke_skills": [],
+    "invoke_agents": [],
+    "skip_skills": [],
+    "depth": "none",
+    "reason": "empty diff: nothing to classify",
+    "door": "unknown",
+    "blast_radius": "unknown",
+    "danger_reason": "",
+}
+
 _FALLBACK_MANIFEST = {
     "invoke_skills": [
         "shell-security",
@@ -295,6 +310,12 @@ def _parse_manifest(raw: str) -> dict:
             continue
         if any(cs < start and end <= ce for cs, ce in clean_spans):
             continue
+        # Blocks strictly inside a malformed span are payload of broken output,
+        # never the answer — a manifest-shaped object inside an unclosed wrapper
+        # (e.g. {"analysis": {…depth:"none"…}) must not stand in as the
+        # response; free-standing later manifests still recover.
+        if any(ms < start and end <= me for ms, me in malformed_spans):
+            continue
         try:
             candidate = json.loads(block)
         except json.JSONDecodeError:
@@ -306,10 +327,7 @@ def _parse_manifest(raw: str) -> dict:
             continue
         if isinstance(candidate, dict) and _REQUIRED_MANIFEST_KEYS <= candidate.keys():
             last_shaped = (candidate, start, end)
-            # A manifest nested inside a malformed trailer is payload of a broken
-            # wrapper — it may be the recovered answer but never clears the error.
-            if not any(ms < start and end <= me for ms, me in malformed_spans):
-                err_after_shaped = False
+            err_after_shaped = False
         elif isinstance(candidate, dict) and _MANIFEST_HINT_KEYS & candidate.keys():
             # A parsed object carrying manifest keys but not the required pair is a
             # partial manifest attempt — after the answer it invalidates like a
@@ -375,8 +393,8 @@ def main() -> None:
     # Empty diff (metadata-only change / empty commit): nothing to classify —
     # emit the fallback manifest and skip the API call rather than waste tokens.
     if not diff.strip():
-        print("[classifier] empty diff — fallback manifest, skipping API call")
-        out.write_text(json.dumps(_FALLBACK_MANIFEST, indent=2) + "\n", encoding="utf-8")
+        print("[classifier] empty diff — no-op manifest, skipping API call")
+        out.write_text(json.dumps(_EMPTY_DIFF_MANIFEST, indent=2) + "\n", encoding="utf-8")
         return
 
     # No API key (fork PR, or a consumer who hasn't configured the secret):
@@ -418,8 +436,18 @@ def main() -> None:
         # Header area only: marker-looking lines inside hunks are content, not
         # paths — stop before the first @@ hunk or binary body.
         _head = _sec.split("\n@@ ", 1)[0].split("\nBinary files ", 1)[0]
+        # Prefix strip must be marker-aware: `---`/ `+++` sides carry the
+        # synthetic a//b/ prefixes, `rename from/to` carry the real path — a
+        # blind chained removeprefix mangles genuine a/- or b/-rooted paths.
+        def _marker_path(marker: str, raw: str) -> str:
+            path = raw.rstrip("\t").strip('"')
+            if marker.startswith("---"):
+                return path.removeprefix("a/")
+            if marker.startswith("+++"):
+                return path.removeprefix("b/")
+            return path
         _paths = {
-            m.group(2).rstrip("\t").strip('"').removeprefix("a/").removeprefix("b/")
+            _marker_path(m.group(1), m.group(2))
             for m in _markers.finditer(_head)
             if m.group(2).rstrip("\t") != "/dev/null"
         }
