@@ -15,6 +15,7 @@ import os
 import pathlib
 import re
 import sys
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -279,6 +280,8 @@ def _parse_manifest(raw: str) -> dict:
             and _REQUIRED_MANIFEST_KEYS <= candidate.keys()
             and isinstance(candidate.get("depth"), str)
             and candidate["depth"] in _VALID_DEPTHS
+            and isinstance(candidate.get("invoke_skills"), list)
+            and isinstance(candidate.get("invoke_agents"), list)
         ):
             continue
         skills = candidate.get("invoke_skills")
@@ -301,10 +304,10 @@ def _parse_manifest(raw: str) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Stage 0: classify PR diff.")
-    parser.add_argument("--diff", default="/tmp/pr.diff", help="Path to PR diff file")
+    parser.add_argument("--diff", default=os.path.join(tempfile.gettempdir(), "pr.diff"), help="Path to PR diff file")
     parser.add_argument("--title", default="", help="PR title")
     parser.add_argument("--body", default="", help="PR body")
-    parser.add_argument("--output", default="/tmp/classifier-output.json", help="Output manifest path")
+    parser.add_argument("--output", default=os.path.join(tempfile.gettempdir(), "classifier-output.json"), help="Output manifest path")
     args = parser.parse_args()
 
     if not CLASSIFIER_AGENT.exists():
