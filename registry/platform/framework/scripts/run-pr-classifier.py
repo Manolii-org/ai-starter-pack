@@ -308,8 +308,12 @@ def _parse_manifest(raw: str) -> dict:
     malformed_array_starts = []
     # Array containers get the same payload treatment as clean dicts: objects
     # inside a parsed [...] list are payload, never a top-level manifest or
-    # partial-manifest attempt. A malformed [...] span is a broken wrapper —
-    # its contents are ineligible and it invalidates when it follows the answer.
+    # partial-manifest attempt. A failed [...] span that began like JSON
+    # (`{`, `[`, `"`, `-`, or a digit) is a broken wrapper — its contents are
+    # ineligible and it invalidates when it follows the answer. Anything else
+    # ([internal], a stray `[` in prose) is punctuation, not an array attempt:
+    # shrink its span to the bracket itself so siblings stay eligible and it
+    # can never invalidate the answer.
     for astart, aend, ablock, _aclosed in _iter_balanced(text, "[", "]"):
         try:
             if isinstance(json.loads(ablock), list):
@@ -317,6 +321,10 @@ def _parse_manifest(raw: str) -> dict:
                 continue
         except json.JSONDecodeError:
             pass
+        atail = text[astart + 1 :].lstrip()
+        if not atail[:1] or (atail[:1] not in '{["-' and not atail[:1].isdigit()):
+            malformed_spans.append((astart, astart + 1))
+            continue
         malformed_spans.append((astart, aend))
         malformed_array_starts.append(astart)
     for start, end, block, closed in _iter_balanced(text, "{", "}"):
@@ -432,30 +440,16 @@ def main() -> None:
         out.write_text(json.dumps(_EMPTY_DIFF_MANIFEST, indent=2) + "\n", encoding="utf-8")
         return
 
-    # No API key (fork PR, or a consumer who hasn't configured the secret):
-    # skip gracefully with the fallback manifest instead of failing CI. A
-    # CLIENT_AI_POLICY refusal is NOT "unconfigured": _endpoint() deliberately
-    # withheld the credential, and the broad fallback would start specialist /
-    # broad jobs that send this same diff to the proxy the classifier refused —
-    # fail closed with a no-op manifest (CI green, nothing leaves the runner).
+    # No API key (fork PR, a consumer who hasn't configured the secret, OR a
+    # CLIENT_AI_POLICY refusal where _endpoint() withheld the credential):
+    # the broad fallback is correct in every case — downstream runners enforce
+    # the same contract (first_party under CLIENT_AI_POLICY → no_direct_key
+    # skipped markers), so nothing sends the diff to the refused proxy and the
+    # judge posts the missing-coverage advisory instead of a silent no-op.
     api_key, _, _ = _endpoint()
     if not api_key:
-        if os.environ.get("CLIENT_AI_POLICY"):
-            manifest = dict(
-                _EMPTY_DIFF_MANIFEST,
-                reason="client AI policy: no direct credential — review skipped",
-            )
-            print(
-                "[classifier] CLIENT_AI_POLICY set, no direct credential — no-op manifest",
-                file=sys.stderr,
-            )
-        else:
-            manifest = _FALLBACK_MANIFEST
-            print(
-                "[classifier] no API credential set — fallback manifest, skipping classification",
-                file=sys.stderr,
-            )
-        out.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        print("[classifier] no API credential set — fallback manifest, skipping classification", file=sys.stderr)
+        out.write_text(json.dumps(_FALLBACK_MANIFEST, indent=2) + "\n", encoding="utf-8")
         return
 
     try:
