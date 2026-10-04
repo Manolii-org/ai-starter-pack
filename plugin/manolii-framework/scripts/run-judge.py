@@ -534,6 +534,16 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
                 f"run (skipped: {skipped})."
             )
             body_lines.append("")
+        if self._candidate_load_errors:
+            # Partially-corrupt batch with surviving findings still needs the
+            # disclosure — otherwise an APPROVE reads as complete coverage
+            # (upstream CodeRabbit finding on ai-starter-pack#150).
+            body_lines.append(
+                f"**Incomplete coverage:** {self._candidate_load_errors} "
+                "candidate artifact(s) failed to load; surviving findings "
+                "may understate the assessment."
+            )
+            body_lines.append("")
 
         errors = [f for f in surviving if f["severity"] == "ERROR"]
         warnings = [f for f in surviving if f["severity"] == "WARNING"]
