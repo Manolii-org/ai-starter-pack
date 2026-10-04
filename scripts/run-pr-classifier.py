@@ -380,6 +380,13 @@ def _parse_manifest(raw: str) -> dict:
     # Invalidation applies only to TOP-LEVEL arrays — one nested inside a
     # parsed container is payload like any other member.
     for astart, aend, ablock, _aclosed in _iter_balanced(text, "[", "]"):
+        # A bracket inside a quoted string is prose punctuation, not a JSON
+        # opener — `"[{...}]"` in trailing prose must not parse and invalidate
+        # the answer. Check before json.loads, same fragment treatment as
+        # objects: ineligible itself, siblings stay eligible.
+        if astart in string_positions:
+            malformed_spans.append((astart, astart + 1))
+            continue
         try:
             parsed_array = json.loads(ablock)
             if isinstance(parsed_array, list):
@@ -391,8 +398,7 @@ def _parse_manifest(raw: str) -> dict:
             pass
         atail = text[astart + 1 :].lstrip()
         if (
-            astart in string_positions
-            or not atail[:1]
+            not atail[:1]
             or (
                 atail[:1] not in '{["-'
                 and not atail[:1].isdigit()

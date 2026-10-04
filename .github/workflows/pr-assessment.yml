@@ -57,6 +57,7 @@ jobs:
       invoke_agents: ${{ steps.classify.outputs.invoke_agents }}
       depth: ${{ steps.classify.outputs.depth }}
       merge_danger: ${{ steps.classify.outputs.merge_danger }}
+      diff_files: ${{ steps.diff.outputs.files }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -282,7 +283,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: [classify]
-    if: needs.classify.result == 'success' && needs.classify.outputs.depth != 'none'
+    # diff_files == '0' = empty-diff manifest route (scope-adherence only) —
+    # a whole-repo Semgrep+Bandit pass on zero changed lines is pure spend.
+    if: needs.classify.result == 'success' && needs.classify.outputs.depth != 'none' && needs.classify.outputs.diff_files != '0'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:

@@ -88,6 +88,7 @@ jobs:
       invoke_agents: ${{ steps.classify.outputs.invoke_agents }}
       depth: ${{ steps.classify.outputs.depth }}
       merge_danger: ${{ steps.classify.outputs.merge_danger }}
+      diff_files: ${{ steps.diff.outputs.files }}
     # Provider env — all steps inherit; empty ANTHROPIC_BASE_URL is a no-op for anthropic mode.
     env:
       ANTHROPIC_API_KEY: ${{ inputs.provider_mode == 'proxy' && secrets.LITELLM_MASTER_KEY || secrets.ANTHROPIC_API_KEY }}
@@ -393,7 +394,9 @@ jobs:
     runs-on: ${{ inputs.runs_on }}
     timeout-minutes: 15
     needs: [classify]
-    if: needs.classify.result == 'success' && needs.classify.outputs.depth != 'none'
+    # diff_files == '0' = empty-diff manifest route (scope-adherence only) —
+    # a whole-repo Semgrep+Bandit pass on zero changed lines is pure spend.
+    if: needs.classify.result == 'success' && needs.classify.outputs.depth != 'none' && needs.classify.outputs.diff_files != '0'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
