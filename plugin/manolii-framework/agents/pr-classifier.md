@@ -6,7 +6,7 @@ type: agent
 model: haiku
 tier: tier-1-fast
 data_sensitivity: internal
-max_tokens: 600
+max_tokens: 8192
 safety_tier: green
 requires_mcp: []
 required_entities: []

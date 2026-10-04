@@ -15,6 +15,7 @@ import os
 import pathlib
 import re
 import sys
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -210,22 +211,126 @@ def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int
     return ""
 
 
+# Keys the classifier manifest may carry — a candidate object must intersect
+# this set to count as a manifest (thinking models can emit valid JSON examples
+# or brace fragments in their reasoning before/around the real output).
+# A candidate only counts as a manifest when it carries the routing fields the
+# classifier always emits — a partial echo in reasoning (e.g. {"depth":"narrow"})
+# must not be mistaken for a routing decision.
+_REQUIRED_MANIFEST_KEYS = {"invoke_skills", "invoke_agents"}
+_VALID_DEPTHS = {"narrow", "broad", "none"}
+
+
+def _iter_json_objects(text: str):
+    """Yield (start, end, block) for successive balanced {...} candidates in the
+    output — thinking-model backends can prepend/append prose (including brace
+    fragments) that a strict json.loads rejects as 'Extra data'."""
+    pos = 0
+    while True:
+        start = text.find("{", pos)
+        if start == -1:
+            return
+        depth = 0
+        in_str = False
+        esc = False
+        end = len(text)
+        for i in range(start, len(text)):
+            ch = text[i]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+            elif ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        yield start, end, text[start:end]
+        # Advance past the opening brace, not the block end, so a valid object
+        # nested inside a malformed outer candidate is still discovered.
+        pos = start + 1
+
+
 def _parse_manifest(raw: str) -> dict:
-    """Strip markdown fences and parse JSON manifest."""
+    """Strip markdown fences and return the last manifest-shaped JSON object —
+    the real manifest is emitted after any reasoning, format examples, and
+    brace fragments."""
     text = raw.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        end = next((i for i, ln in enumerate(lines[1:], 1) if ln.startswith("```")), len(lines))
-        text = "\n".join(lines[1:end])
-    return json.loads(text)
+    # Strip markdown fence tokens but keep everything else: a thinking backend can
+    # emit a fenced reasoning/example block BEFORE the real manifest — discarding
+    # the tail after the first closing fence would leave the example as the answer.
+    # Tokens are stripped, not whole lines, so a manifest sharing a line with a
+    # fence marker survives.
+    if "```" in text:
+        text = re.sub(r"```[A-Za-z0-9_-]*", "", text)
+    last_shaped = None
+    err_after_shaped = False
+    malformed_spans = []
+    for start, end, block in _iter_json_objects(text):
+        # Blocks strictly nested inside the selected manifest's span are payload
+        # data (e.g. an embedded example), never the answer — skip them.
+        if last_shaped is not None and last_shaped[1] < start and end <= last_shaped[2]:
+            continue
+        try:
+            candidate = json.loads(block)
+        except json.JSONDecodeError:
+            malformed_spans.append((start, end))
+            # A malformed object AFTER a manifest-shaped one invalidates the
+            # response — the earlier object was a reasoning example, not the answer.
+            if last_shaped is not None and start >= last_shaped[2]:
+                err_after_shaped = True
+            continue
+        if isinstance(candidate, dict) and _REQUIRED_MANIFEST_KEYS <= candidate.keys():
+            last_shaped = (candidate, start, end)
+            # A manifest nested inside a malformed trailer is payload of a broken
+            # wrapper — it may be the recovered answer but never clears the error.
+            if not any(ms < start and end <= me for ms, me in malformed_spans):
+                err_after_shaped = False
+    # The last manifest-shaped object is the model's answer — earlier ones are
+    # reasoning examples. It must satisfy the complete manifest contract; a
+    # malformed or partial one invalidates the response (broad fallback) rather
+    # than silently retaining an earlier example.
+    if last_shaped is None or err_after_shaped:
+        raise ValueError("no complete JSON manifest found in classifier output")
+    last_shaped = last_shaped[0]
+    skills = last_shaped.get("invoke_skills")
+    agents = last_shaped.get("invoke_agents")
+    if not (
+        isinstance(skills, list)
+        and isinstance(agents, list)
+        and all(isinstance(s, str) and s in _VALID_SKILLS for s in skills)
+        and all(isinstance(a, str) and a in _VALID_AGENTS for a in agents)
+        and isinstance(last_shaped.get("skip_skills"), list)
+        and isinstance(last_shaped.get("reason"), str)
+        and isinstance(last_shaped.get("depth"), str)
+        and last_shaped["depth"] in _VALID_DEPTHS
+        # Contract (pr-classifier.md RULE 8 + Stage-2 gating): depth:"none" is
+        # only legitimate with empty invocation lists.
+        and not (last_shaped["depth"] == "none" and (skills or agents))
+    ):
+        raise ValueError(
+            "manifest-shaped object violates the classifier contract: "
+            + json.dumps({k: type(v).__name__ for k, v in last_shaped.items()})
+        )
+    # Broad agents only fire at depth:"broad" — upgrade the contradiction.
+    if agents and last_shaped["depth"] == "narrow":
+        last_shaped["depth"] = "broad"
+    return last_shaped
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Stage 0: classify PR diff.")
-    parser.add_argument("--diff", default="/tmp/pr.diff", help="Path to PR diff file")
+    parser.add_argument("--diff", default=os.path.join(tempfile.gettempdir(), "pr.diff"), help="Path to PR diff file")
     parser.add_argument("--title", default="", help="PR title")
     parser.add_argument("--body", default="", help="PR body")
-    parser.add_argument("--output", default="/tmp/classifier-output.json", help="Output manifest path")
+    parser.add_argument("--output", default=os.path.join(tempfile.gettempdir(), "classifier-output.json"), help="Output manifest path")
     args = parser.parse_args()
 
     if not CLASSIFIER_AGENT.exists():
