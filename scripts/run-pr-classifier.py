@@ -217,7 +217,7 @@ def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int
 # classifier always emits — a partial echo in reasoning (e.g. {"depth":"narrow"})
 # must not be mistaken for a routing decision.
 _REQUIRED_MANIFEST_KEYS = {"invoke_skills", "invoke_agents"}
-_VALID_DEPTHS = {"narrow", "broad"}
+_VALID_DEPTHS = {"narrow", "broad", "none"}
 
 
 def _iter_json_objects(text: str):
@@ -277,7 +277,8 @@ def _parse_manifest(raw: str) -> dict:
         if (
             isinstance(candidate, dict)
             and _REQUIRED_MANIFEST_KEYS <= candidate.keys()
-            and candidate.get("depth") in _VALID_DEPTHS
+            and isinstance(candidate.get("depth"), str)
+            and candidate["depth"] in _VALID_DEPTHS
         ):
             best = candidate
     if best is not None:
