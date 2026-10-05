@@ -2,16 +2,15 @@
 
 ## Unreleased
 
-### Changed
+### Added
 
-- **`secret-scan-reusable` npm audit now omits dev dependencies by default.**
-  New `npm_audit_omit_dev` input (default `true`) runs
-  `npm audit --audit-level=high --omit=dev`. Rationale: dev-only advisories in
-  build/lint tooling chains frequently have no patched release (the affected
-  range covers every published version), which makes a required audit check
-  permanently red and unmergeable for every PR. Production-dependency
-  advisories still gate. Set `npm_audit_omit_dev: false` to restore the old
-  all-dependencies scope.
+- **`secret-scan-reusable` gains opt-in `npm_audit_omit_dev` input** (default
+  `false`). When `true`, the npm audit job scopes to production dependencies
+  (`--omit=dev` on npm >= 7, `--only=prod` on npm 6). Rationale: dev-only
+  advisories in build/lint tooling chains frequently have no patched release
+  (the affected range covers every published version), which makes a required
+  audit check permanently red and unmergeable for every PR. The default keeps
+  the v1 whole-tree audit contract; callers opt in per-repo.
 
 ### Security
 
