@@ -226,7 +226,7 @@ jobs:
 
           # Fail closed on opt-out labels: a failed lookup must not silently
           # bypass a PR's skip-ai-review label.
-          if ! LABELS=$(timeout -k 5 30 gh pr view "$PR_NUM" --json labels --jq '[.labels[].name]' 2>/dev/null); then
+          if ! LABELS=$(timeout -k 5 30 gh pr view "$PR_NUM" --repo "${{ github.repository }}" --json labels --jq '[.labels[].name]' 2>/dev/null); then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "label lookup failed — opt-out labels unverifiable; skipping"
             exit 0
@@ -263,7 +263,7 @@ jobs:
           if [[ "$COUNT" -ge "$MAX_FIXES" ]]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "::notice::Per-PR autofix budget reached ($COUNT >= $MAX_FIXES successful [autofix] commits); skipping"
-            timeout -k 5 30 gh pr comment "$PR_NUM" --body "<!-- pack-autofix:budget-exhausted --> [autofix-budget] Skipping further Autofix — this PR already has ${COUNT} successful [autofix] commit(s) (cap ${MAX_FIXES}). Remove an autofix commit or raise max_successful_fixes if a further pass is intentional." || true
+            timeout -k 5 30 gh pr comment "$PR_NUM" --repo "${{ github.repository }}" --body "<!-- pack-autofix:budget-exhausted --> [autofix-budget] Skipping further Autofix — this PR already has ${COUNT} successful [autofix] commit(s) (cap ${MAX_FIXES}). Remove an autofix commit or raise max_successful_fixes if a further pass is intentional." || true
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
