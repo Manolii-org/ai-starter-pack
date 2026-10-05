@@ -158,7 +158,7 @@ jobs:
             fi
           fi
           if [[ -z "$HEAD_REF" ]]; then
-            if ! HEAD_REF=$(timeout -k 5 30 gh pr view "$PR_NUM" --json headRefName --jq '.headRefName' 2>/dev/null) || [[ -z "$HEAD_REF" ]]; then
+            if ! HEAD_REF=$(timeout -k 5 30 gh pr view "$PR_NUM" --repo "$REPOSITORY" --json headRefName --jq '.headRefName' 2>/dev/null) || [[ -z "$HEAD_REF" ]]; then
               echo "skip=true" >> "$GITHUB_OUTPUT"
               echo "head-ref lookup failed/empty — cannot check out the PR branch; skipping"
               exit 0
