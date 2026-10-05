@@ -248,11 +248,12 @@ def test_cost_profile_lean_omits_measured_waste_callers(default_render):
     """cost_profile=lean drops the two callers measured as pure spend (L-3/L-7)
     while keeping the rest of the CI surface byte-identical to standard."""
     lean_only = {
-        ".github/workflows/mutation-testing-diff.yml",
         ".github/workflows/monitor-litellm.yml",
     }
     default_files = file_set(default_render)
-    assert lean_only <= default_files, "standard profile must still ship both callers"
+    assert lean_only <= default_files, "standard profile must still ship the caller"
+    assert ".github/workflows/mutation-testing-diff.yml" not in default_files, \
+        "mutation-testing-diff was retired estate-wide and must not ship"
     with tempfile.TemporaryDirectory() as tmpdir:
         dst = Path(tmpdir) / "lean"
         dst.mkdir()
@@ -266,13 +267,13 @@ def test_cost_profile_lean_omits_measured_waste_callers(default_render):
     ("flags", "expected"),
     [
         ({}, {"Hooks": 5, "Commands": 50, "Skills": 31, "Agents": 27,
-              "Scripts": 49, "Husky": 3, "CI": 34, "Docs": 22}),
+              "Scripts": 49, "Husky": 3, "CI": 31, "Docs": 22}),
         ({flag: "true" for flag in FEATURE_FLAGS},
          {"Hooks": 5, "Commands": 53, "Skills": 35, "Agents": 28,
-              "Scripts": 49, "Husky": 3, "CI": 34, "Docs": 24}),
+              "Scripts": 49, "Husky": 3, "CI": 31, "Docs": 24}),
         ({"cost_profile": "lean"},
          {"Hooks": 5, "Commands": 50, "Skills": 31, "Agents": 27,
-              "Scripts": 49, "Husky": 3, "CI": 32, "Docs": 22}),
+              "Scripts": 49, "Husky": 3, "CI": 30, "Docs": 22}),
     ],
 )
 def test_rendered_readme_counts_match_rendered_tree(flags, expected):

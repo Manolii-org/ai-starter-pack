@@ -67,10 +67,6 @@
   `cache_path`/`cache_key`, and `auto_commit_baseline` for default-branch
   pushes. Job is intentionally unnamed so required-check contracts bind to
   the `coverage` job id.
-- **tia-shadow-reusable** — observe-only test-impact shadow. Diffs the PR,
-  computes which test files should have run (`.ai/tia-map.json` or basename
-  heuristic), compares to the caller's `tia-ran-tests` manifest artifact,
-  and uploads a `tia-shadow-<head-sha>.json` journal. Never gates.
 - **restore-drill-reusable** — scheduled Azure SQL restore drill:
   `az sql db restore` (PITR) into a throwaway database, SELECT-only sanity
   queries, JSONL + report artifacts, then deletes the drill DB even on
@@ -84,6 +80,15 @@
   and `required_checks`, plus lane-level `required_checks` overrides, now
   validate in `check-deployment-contract.py` and
   `schemas/deployment-contract.schema.json`.
+
+### Removed
+
+- **tia-shadow-reusable** and **mutation-testing-diff-reusable** — retired
+  estate-wide 2026-10-05 (CI-cost audit: observe-only lanes burning runner
+  minutes with zero caught defects). The diff caller
+  `mutation-testing-diff.yml` is also removed; consumers that still
+  reference either workflow must drop those `uses:` blocks — no v1
+  callers remained at removal time.
 
 ### Changed
 
