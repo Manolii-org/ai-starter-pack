@@ -74,10 +74,10 @@ claude_hooks:
 cost_profile:
   type: str
   help: |
-    'standard' ships every CI caller. 'lean' drops the two callers measured as
-    pure spend at small scale: monitor-litellm (every-3h LiteLLM health poll;
-    dead spend when the instance has no proxy). mutation-testing-diff was
-    retired estate-wide 2026-10-05 — no longer shipped by either profile.
+    'standard' ships every CI caller. 'lean' omits monitor-litellm (the
+    every-3h LiteLLM health poll — dead spend when the instance has no proxy).
+    mutation-testing-diff was retired estate-wide 2026-10-05 — not shipped by
+    either profile.
     Restore monitor-litellm in a rendered consumer by re-running
     `copier update --data cost_profile=standard` (the update adds the files —
     _exclude lives in template config, not in the rendered instance).

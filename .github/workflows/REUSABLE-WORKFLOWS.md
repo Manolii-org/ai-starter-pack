@@ -116,7 +116,6 @@ env:
 | **ci-reusable** | `runs_on`, `node_version=24` | none |
 | **secret-scan-reusable** | `runs_on`, `node_version=22`, `python_version=3.12`, `require_gitleaks_license=false`, `npm_audit_omit_dev=false` | `GITLEAKS_LICENSE` (optional) |
 | **static-review-reusable** | `runs_on`, `node_version=24`, `python_version=3.14`, `paths_ignore` | none |
-| **mutation-testing-diff-reusable** | `runs_on`, `node_version=24`, `paths_ignore` | none |
 | **claude-md-contract-reusable** | `runs_on`, `python_version=3.12`, `require_contract=false` | none |
 | **pr-assessment-reusable** | `provider_mode=anthropic`, `litellm_proxy_url`, `model`, `runs_on`, `pack_ref=v1`, `trusted_sync_author_id`, `jev_judge_shadow=off`, `jev_entity` | `ANTHROPIC_API_KEY` (anthropic mode) or `LITELLM_MASTER_KEY` (proxy mode); optional entity-scoped `JEV_TYPESAFE_API_KEY` (see `docs/jev-judge-shadow.md`) |
 | **pr-autofix-loop-reusable** | `provider_mode=anthropic`, `litellm_proxy_url`, `model`, `runs_on=ubuntu-latest` (hosted control-plane — do not use shared Fly CI), `max_successful_fixes=1` | `ANTHROPIC_API_KEY` (anthropic) or `LITELLM_MASTER_KEY` (proxy); `GH_PAT` optional |
@@ -125,7 +124,6 @@ env:
 | **pre-production-tier-reusable** | `gates` (JSON, required), `budget_minutes=45`, `job_timeout_minutes=60`, `runs_on`, `max_parallel=4`, `environment`, `checkout_fetch_depth=0`, `open_issue_on_failure=false` | `GATE_SECRETS` (optional) |
 | **tier-gate-summary-reusable** | `gate_name` (required), `applies` (required), `tier=fast`, `command`, `skip_reason`, `setup_command`, `runs_on`, `working_directory`, `timeout_minutes=10`, `checkout_fetch_depth=0` | none |
 | **coverage-ratchet-reusable** | `runs_on`, `node_version`, `python_version`, `setup_command`, `install_command`, `coverage_command` (req), `metric_command` (req), `baseline_file`, `mode=enforce`, `auto_commit_baseline=false`, `cache_path`, `cache_key`, `timeout_minutes=30`, `job_timeout_minutes=65` (validated ≥ timeout+25, +35 with `setup_command`) | `GH_PAT` (optional, for baseline auto-commit) |
-| **tia-shadow-reusable** | `runs_on=ubuntu-slim`, `test_roots`, `timeout_minutes=5` | none |
 | **restore-drill-reusable** | `resource_group`, `sql_server`, `source_database` (req), `sanity_queries`, `db_auth=sql-auth`, `sqlcmd_version`, `timeout_minutes=45` | `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `DRILL_SQL_USER`, `DRILL_SQL_PASSWORD` |
 
 **Notes:**
@@ -731,36 +729,6 @@ jobs:
 baseline on default-branch pushes via a signed gh-api commit — requires a
 write-capable `GH_PAT` secret (the reusable's `permissions: contents: read`
 caps the caller token, so the option is rejected without GH_PAT).
-
-## tia-shadow (v1.19.0+)
-
-Observe-only test-impact shadow — never fails, never gates. Diffs the PR,
-computes which test files should have run (`.ai/tia-map.json` mappings or a
-basename heuristic under `test_roots`), compares to the caller's
-`tia-ran-tests` manifest artifact (one path per line, uploaded by the test
-job), and uploads a `tia-shadow-<head-sha>.json` journal (30d). Wire the
-journal to `needs:` the test job and give the CALLER job `if: ${{ always() }}`
-— the called job's own `always()` can't run when GitHub skips the caller after
-a test failure, which is exactly when the journal matters most. Collect weeks
-of journals before proposing enforcement.
-
-The reusable requests `actions: read` (artifact download), so the caller job's
-effective permissions must include it. A job-level `permissions:` block is only
-needed when the effective default doesn't already grant `actions: read` — if it
-is missing, GitHub rejects the whole workflow at startup (`startup_failure`,
-zero jobs run, required checks hang "waiting for status"):
-
-```yaml
-  tia-shadow:
-    needs: test
-    if: always()
-    uses: Manolii-org/ai-starter-pack/.github/workflows/tia-shadow-reusable.yml@<sha>
-    permissions:
-      contents: read
-      actions: read
-    with:
-      test_roots: 'app,components,lib'
-```
 
 ## restore-drill (v1.19.0+)
 
