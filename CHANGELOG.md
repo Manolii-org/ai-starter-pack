@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Added
+
+- **`secret-scan-reusable` gains opt-in `npm_audit_omit_dev` input** (default
+  `false`). When `true`, the npm audit job scopes to production dependencies
+  (`--omit=dev` on npm >= 7, `--only=prod` on npm 6). Rationale: dev-only
+  advisories in build/lint tooling chains frequently have no patched release
+  (the affected range covers every published version), which makes a required
+  audit check permanently red and unmergeable for every PR. The default keeps
+  the v1 whole-tree audit contract; callers opt in per-repo.
+
 ### Security
 
 - **Jev judge shadow hardening**: the secret-bearing runner checkout now only
