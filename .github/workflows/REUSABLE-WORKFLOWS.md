@@ -114,7 +114,7 @@ env:
 | Workflow | Inputs | Secrets |
 |----------|--------|---------|
 | **ci-reusable** | `runs_on`, `node_version=24` | none |
-| **secret-scan-reusable** | `runs_on`, `node_version=22`, `python_version=3.12`, `require_gitleaks_license=false` | `GITLEAKS_LICENSE` (optional) |
+| **secret-scan-reusable** | `runs_on`, `node_version=22`, `python_version=3.12`, `require_gitleaks_license=false`, `npm_audit_omit_dev=true` | `GITLEAKS_LICENSE` (optional) |
 | **static-review-reusable** | `runs_on`, `node_version=24`, `python_version=3.14`, `paths_ignore` | none |
 | **mutation-testing-diff-reusable** | `runs_on`, `node_version=24`, `paths_ignore` | none |
 | **claude-md-contract-reusable** | `runs_on`, `python_version=3.12`, `require_contract=false` | none |
