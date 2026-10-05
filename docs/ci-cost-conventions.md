@@ -37,7 +37,7 @@ Required fast-tier names and secret-scan stay unconditional on drafts.
 A `pull_request` workflow that installs Playwright browsers or runs
 `supabase start` (or an equivalent local stack) without `paths:` / internal
 detect-gating bills minutes on every docs-only push. Path-filter non-required
-jobs. Copier template model: `mutation-testing-diff.yml`
+jobs. Copier template model: `claude-md-contract.yml`
 (`on.pull_request.paths`). Internal detect without `on.paths`:
 `static-review.yml` `changed-files` job (`git diff --name-only` against the
 PR base). Do **not** cite `ci.yml` `detect` for this — it only tests whether

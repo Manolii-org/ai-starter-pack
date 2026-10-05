@@ -75,10 +75,10 @@ cost_profile:
   type: str
   help: |
     'standard' ships every CI caller. 'lean' drops the two callers measured as
-    pure spend at small scale: mutation-testing-diff (observe-only, always-green
-    in production — 164 runs/wk in a live consumer, L-3 finding) and monitor-litellm
-    (every-3h LiteLLM health poll; dead spend when the instance has no proxy).
-    Both remain in the pack; restore them in a rendered consumer by re-running
+    pure spend at small scale: monitor-litellm (every-3h LiteLLM health poll;
+    dead spend when the instance has no proxy). mutation-testing-diff was
+    retired estate-wide 2026-10-05 — no longer shipped by either profile.
+    Restore monitor-litellm in a rendered consumer by re-running
     `copier update --data cost_profile=standard` (the update adds the files —
     _exclude lives in template config, not in the rendered instance).
   choices:
@@ -271,7 +271,6 @@ _exclude:
   - "{% if not browserbase %}.claude/commands/nav-replay.md{% endif %}"
   - "{% if not codex_adversarial %}.claude/agents/codex-adversarial.md{% endif %}"
   - "{% if not mesh_telemetry %}mesh-contract.yaml.template{% endif %}"
-  - "{% if cost_profile == 'lean' %}.github/workflows/mutation-testing-diff.yml{% endif %}"
   - "{% if cost_profile == 'lean' %}.github/workflows/monitor-litellm.yml{% endif %}"
   - "*.zip"
 
