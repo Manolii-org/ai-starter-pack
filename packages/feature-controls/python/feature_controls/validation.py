@@ -101,12 +101,20 @@ def payload_of(bundle: ReleaseBundle, catalog: Catalog) -> dict[str, Any]:
             raise ValueError("invalid rules")
         for rule in native.get("rules", []):
             _validate_rule(rule, feature)
+            for field in ("hashVersion", "bucketVersion"):
+                if field in rule:
+                    rule[field] = int(rule[field])
     return payload
 
 def _validate_rule(rule: Any, feature: Feature) -> None:
     allowed = {"force", "coverage", "seed", "hashVersion", "key", "variations", "weights", "meta", "bucketVersion", "hashAttribute", "condition"}
     if type(rule) is not dict or set(rule) - allowed:
         raise ValueError("unsupported rule capability")
+    if "hashVersion" in rule and (type(rule["hashVersion"]) not in (int, float) or rule["hashVersion"] != 2):
+        raise ValueError("invalid hash version")
+    if "bucketVersion" in rule and (type(rule["bucketVersion"]) not in (int, float) or
+                                   not 0 <= rule["bucketVersion"] <= 9007199254740991 or int(rule["bucketVersion"]) != rule["bucketVersion"]):
+        raise ValueError("invalid bucket version")
     if "condition" in rule:
         _native_condition(rule["condition"])
     for name in ("seed", "key"):

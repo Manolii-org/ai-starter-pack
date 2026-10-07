@@ -90,6 +90,8 @@ export function payloadOf(bundle: ReleaseBundle, catalog: Catalog): Record<strin
     for (const rule of (native.rules ?? []) as Record<string, unknown>[]) {
       if (!rule || typeof rule !== "object") throw new Error("invalid rule");
       if (Object.keys(rule).some(k => !["force", "coverage", "seed", "hashVersion", "key", "variations", "weights", "meta", "bucketVersion", "hashAttribute", "condition"].includes(k))) throw new Error("unsupported rule capability");
+      if (Object.hasOwn(rule, "hashVersion") && rule.hashVersion !== 2) throw new Error("invalid hash version");
+      if (Object.hasOwn(rule, "bucketVersion") && (!Number.isSafeInteger(rule.bucketVersion) || (rule.bucketVersion as number) < 0)) throw new Error("invalid bucket version");
       if (rule.condition !== undefined) nativeCondition(rule.condition);
       if (rule.seed !== undefined) ascii(rule.seed);
       if (rule.key !== undefined) ascii(rule.key);

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { FeatureRuntime, approvalMessage, killMessage } from '@manolii/feature-controls';
 import { DecisionClient, decisionValue, validateSnapshot } from '@manolii/feature-controls/client';
-import { Assignments, Controls, Events, bundle, clone, eventFor, golden, kill, setup } from './helpers.mjs';
+import { Assignments, Controls, Events, bundle, clone, eventFor, golden, kill, numericBundle, numericStickyProbe, setup } from './helpers.mjs';
 
 test('shared golden hard-fence and typed baseline decisions', async () => {
   const runtime = await setup();
@@ -123,6 +123,40 @@ test('wire projection + dependency-light client baseline, scope, expiry and sess
 
 const vectors=JSON.parse(readFileSync(new URL('./hardening.json',import.meta.url)));
 const minimum={configuration_revision:0,kill_generation:0,time_highwater:0};
+const stickyNumerics=JSON.parse(readFileSync(new URL('./sticky-numerics.json',import.meta.url)));
+for(const [epoch,version] of stickyNumerics)test('actual-provider sticky numeric tokens '+epoch+'/'+version,async()=>{
+  if([epoch,version].some(token=>['true','false'].includes(token))) {
+    await assert.rejects(numericStickyProbe(epoch,version));return;
+  }
+  const row=await numericStickyProbe(epoch,version);
+  assert.notEqual(row.saved,row.natural);
+  assert.equal(row.preview,row.saved);assert.equal(row.preview_creates,0);
+  assert.deepEqual([row.live,row.status,row.reason],[row.saved,'resolved','experiment']);
+  assert.ok(row.calls.every(call=>call.key===row.saved&&call.sticky===true));
+  assert.ok(row.epochs.every(value=>value===Number(epoch)));assert.equal(row.payload_unchanged,true);assert.equal(row.integer_metadata,true);
+});
+test('semantic epoch changes preserve one actual-provider assignment identity',async()=>{
+  const assignments=new Assignments(),ids=[];
+  for(const token of ['1.0','1','1e0']) {
+    const {catalog,release}=numericBundle(token,token),runtime=new FeatureRuntime(catalog,{trust_policy:'local-test',assignments});
+    await runtime.activate(release,0,golden.now);await runtime.updateKills(kill(),'local-fixture',golden.now);
+    const d=await runtime.evaluate('experiment','web',golden.context,{now:golden.now});
+    assert.equal(d.status,'resolved');ids.push(d.assignment.assignment_id);
+  }
+  assert.equal(new Set(ids).size,1);assert.equal(assignments.writes,1);assert.equal(assignments.values.size,1);
+});
+test('owned native integer metadata normalizes without changing approved bytes',async()=>{
+  const release=bundle();release.payload_bytes=release.payload_bytes.replace('"hashVersion":2','"hashVersion":2.0');
+  release.payload_sha256=createHash('sha256').update(release.payload_bytes).digest('hex');
+  const controls=new Controls(),runtime=new FeatureRuntime(golden.catalog,{trust_policy:'local-test',controls,assignments:new Assignments()});
+  await runtime.activate(release,0,golden.now);await runtime.updateKills(kill(),'local-fixture',golden.now);
+  assert.equal((await runtime.evaluate('experiment','web',golden.context,{now:golden.now})).status,'resolved');
+  assert.deepEqual((await controls.read(golden.scope)).bundle,release);
+  for(const field of ['hashVersion','bucketVersion'])for(const token of [true,false,-1,1.5,'1',9007199254740992]) {
+    const payload=clone(golden.payload);payload.features.experiment.rules[0][field]=token;
+    await assert.rejects(new FeatureRuntime(golden.catalog,{trust_policy:'local-test'}).activate(bundle(payload),0,golden.now));
+  }
+});
 const wireScope={...golden.scope,application_id:golden.context.application_id,surface_id:'web',context_scope:golden.context.context_scope};
 async function custom(catalog, options={}) {
   const r=new FeatureRuntime(catalog,{trust_policy:'local-test',...options});
@@ -360,6 +394,59 @@ test('out-of-order prior-account responses cannot clear the bound account denial
   assert.deepEqual(client.watermark,floor);
   assert.equal(client.setSnapshot(a,'session-a',golden.now),true);
   client.clear();assert.equal(client.get('release',true,golden.now),true);assert.deepEqual(client.watermark,floor);
+});
+
+test('same-session snapshots cannot regress generated time or diverge at equal time and fences',async()=>{
+  const r=await setup(),ctx={...golden.context,groups:['leaf'],group_ancestors:{leaf:['branch'],branch:[]}};
+  const older=await r.snapshot(['release'],'web',ctx,{now:golden.now});
+  const newer=await r.snapshot(['release'],'web',{...ctx,excluded_groups:['branch']},{now:golden.now+1});
+  const divergent=await r.snapshot(['release'],'web',ctx,{now:golden.now+1});
+  assert.deepEqual([older.decisions.release.value,newer.decisions.release.status,divergent.decisions.release.value],[true,'denied',true]);
+  assert.deepEqual([older.configuration_revision,older.kill_generation],[newer.configuration_revision,newer.kill_generation]);
+  const client=new DecisionClient(wireScope,minimum);client.bindSession('account-1',golden.context.context_scope);
+  assert.equal(client.setSnapshot(newer,'account-1',golden.now+1),true);assert.equal(client.get('release',true,golden.now+1),false);
+  for(const response of [older,divergent]) {
+    assert.equal(client.setSnapshot(response,'account-1',golden.now+2),false);assert.equal(client.get('release',true,golden.now+2),false);
+  }
+  const permuted=Object.fromEntries(Object.entries(clone(newer)).reverse());
+  assert.equal(client.setSnapshot(permuted,'account-1',golden.now+2),true);
+  client.clear();assert.equal(client.setSnapshot(older,'account-1',golden.now+2),true);
+  await r.updateKills(kill(2),'local-fixture',golden.now+1);
+  const fenced=await r.snapshot(['release'],'web',ctx,{now:golden.now+1});
+  assert.equal(client.setSnapshot(fenced,'account-1',golden.now+2),true);assert.equal(client.get('release',false,golden.now+2),true);
+  client.bindSession('account-2',golden.context.context_scope);
+  assert.equal(client.setSnapshot(older,'account-2',golden.now+2),false);
+});
+
+test('omitted known denials stay restrictive until explicit per-key replacement or clear',async()=>{
+  const r=new FeatureRuntime(golden.catalog,{trust_policy:'local-test'});
+  await r.activate(bundle(),0,golden.now);await r.updateKills(kill(1,['release']),'local-fixture',golden.now);
+  const denied=await r.snapshot(['release'],'web',golden.context,{now:golden.now});
+  const empty=await r.snapshot([],'web',golden.context,{now:golden.now+1});
+  const other=await r.snapshot(['child'],'web',golden.context,{now:golden.now+2});
+  assert.deepEqual([denied.configuration_revision,denied.kill_generation],[empty.configuration_revision,empty.kill_generation]);
+  const client=new DecisionClient(wireScope,minimum);client.bindSession('account-1',golden.context.context_scope);
+  assert.equal(client.setSnapshot(denied,'account-1',golden.now),true);assert.equal(client.get('release',true,golden.now),false);
+  assert.deepEqual(Object.keys(empty.decisions),[]);assert.equal(client.setSnapshot(empty,'account-1',golden.now+1),true);
+  assert.equal(client.get('release',true,golden.now+1),false);
+  assert.equal(client.setSnapshot(other,'account-1',golden.now+2),true);assert.equal(client.get('release',true,golden.now+2),false);
+  await r.updateKills(kill(2),'local-fixture',golden.now+3);
+  const lifted=await r.snapshot(['release'],'web',golden.context,{now:golden.now+3});
+  assert.equal(client.setSnapshot(lifted,'account-1',golden.now+3),true);assert.equal(client.get('release',false,golden.now+3),true);
+  assert.equal(client.get('release',true,lifted.expires_at),true);
+  const second=new DecisionClient(wireScope,minimum);second.bindSession('account-1',golden.context.context_scope);
+  assert.equal(second.setSnapshot(denied,'account-1',golden.now),true);second.clear();
+  assert.equal(second.setSnapshot(empty,'account-1',golden.now+1),true);assert.equal(second.get('release',true,golden.now+1),true);
+  const wide=clone(empty);wide.generated_at=golden.now+2;
+  for(let i=0;i<64;i++)wide.decisions['k'+i]={...denied.decisions.release,value:false};
+  const narrow=clone(empty);narrow.generated_at=golden.now+3;narrow.decisions.release={...denied.decisions.release};
+  const bounded=new DecisionClient(wireScope,minimum);bounded.bindSession('account-1',golden.context.context_scope);
+  assert.equal(bounded.setSnapshot(wide,'account-1',golden.now+3),true);
+  const permuted=clone(wide);permuted.decisions=Object.fromEntries(Object.entries(permuted.decisions).reverse());
+  assert.equal(bounded.setSnapshot(permuted,'account-1',golden.now+3),true);
+  assert.equal(bounded.setSnapshot(narrow,'account-1',golden.now+3),false);assert.equal(bounded.get('k63',true,golden.now+3),false);
+  assert.equal(bounded.get('k63',true,wide.expires_at),false);
+  bounded.bindSession('account-2',golden.context.context_scope);assert.equal(bounded.get('k63',true,wide.expires_at),true);
 });
 
 test('known boolean denial dominates rejecting value predicates in both accessors',async()=>{

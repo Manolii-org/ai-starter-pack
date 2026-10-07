@@ -31,6 +31,9 @@ class Lifecycle:
                  local_disabled: list[str] | None = None, require_fresh_kills: bool = True):
         self._catalog = deepcopy(catalog)
         validate_catalog(self._catalog)
+        for feature in self._catalog["features"].values():
+            if "experiment" in feature:
+                feature["experiment"]["epoch"] = int(feature["experiment"]["epoch"])
         self.controls, self.verifier, self.trust_policy = controls, verifier, trust_policy
         if trust_policy == "local-test" and controls is not None and getattr(controls, "test_only", False) is not True:
             raise ValueError("local trust requires a test-only store")

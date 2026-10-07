@@ -12,6 +12,46 @@ export function bundle(payload = golden.payload, revision = 1, scope = golden.sc
 export function kill(generation = 1, disabled = [], expires_at = golden.expires_at, scope = golden.scope) {
   return { schema_version: 1, scope: clone(scope), generation, disabled, expires_at };
 }
+export function numericBundle(epoch, version) {
+  const catalog = clone(golden.catalog), payload = clone(golden.payload);
+  catalog.features.experiment.experiment.epoch = 'EPOCH_LITERAL';
+  payload.features.experiment.rules[0].bucketVersion = 'VERSION_LITERAL';
+  const catalogRaw = JSON.stringify(catalog).replace('"EPOCH_LITERAL"', epoch);
+  const release = bundle(payload);
+  release.payload_bytes = release.payload_bytes.replace('"VERSION_LITERAL"', version);
+  release.payload_sha256 = createHash('sha256').update(release.payload_bytes).digest('hex');
+  return { catalog: JSON.parse(catalogRaw), release };
+}
+export async function numericStickyProbe(epoch, version) {
+  const {catalog, release} = numericBundle(epoch, version);
+  const initialize = async assignments => {
+    const controls = new Controls(), runtime = new FeatureRuntime(catalog, {trust_policy:'local-test', controls, assignments});
+    await runtime.activate(release, 0, golden.now);await runtime.updateKills(kill(), 'local-fixture', golden.now);
+    const provider = runtime.provider.bind(runtime), calls = [];
+    runtime.provider = async (...args) => {
+      const result = await provider(...args);
+      calls.push({key:result.experimentResult?.key,sticky:result.experimentResult?.stickyBucketUsed});
+      return result;
+    };
+    return {runtime, calls, controls};
+  };
+  const fresh = await initialize();
+  await fresh.runtime.evaluate('experiment','web',golden.context,{now:golden.now,preview:true});
+  const saved = fresh.calls.at(-1).key === 'control' ? 'treatment' : 'control';
+  const reads = [], creates = [], assignment = {assignment_id:'persisted-choice',variant:saved};
+  const store = {durable:true,read:async key => {reads.push(clone(key));return clone(assignment);},
+    createIfAbsent:async (key, variant) => {creates.push({key:clone(key),variant});return clone(assignment);}};
+  const {runtime,calls,controls} = await initialize(store);
+  const preview = await runtime.evaluate('experiment','web',golden.context,{now:golden.now,preview:true});
+  const previewCreates = creates.length;
+  const live = await runtime.evaluate('experiment','web',golden.context,{now:golden.now});
+  return {epoch,version,saved,natural:fresh.calls.at(-1).key,preview:preview.value,preview_creates:previewCreates,
+    live:live.value,status:live.status,reason:live.reason,calls,
+    epochs:[...reads.map(k=>k.allocation_epoch),...creates.map(x=>x.key.allocation_epoch)],
+    payload_unchanged:JSON.stringify((await controls.read(golden.scope)).bundle)===JSON.stringify(release),
+    integer_metadata:reads.every(k=>Number.isSafeInteger(k.allocation_epoch))&&creates.every(x=>Number.isSafeInteger(x.key.allocation_epoch)),
+    payload_hash:release.payload_sha256};
+}
 export class Assignments {
   durable = true; values = new Map(); writes = 0;
   async read(key) { return clone(this.values.get(JSON.stringify(key)) ?? null); }

@@ -69,6 +69,7 @@ function projectedValue<T extends Json>(decision: ResolvedDecision, baseline: T,
 }
 export class DecisionClient {
   private current: Snapshot | null = null;
+  private retained = new Map<string, ResolvedDecision>();
   private session: string | null = null;
   private readonly expected: SnapshotScope;
   private observed: SnapshotWatermark;
@@ -89,13 +90,25 @@ export class DecisionClient {
     if (!validateSnapshot(snapshot, this.expected, now, this.observed)) return false;
     const candidate = copyJson(snapshot) as Snapshot;
     if (!validateSnapshot(candidate, this.expected, now, this.observed)) return false;
+    if (!this.supersedes(candidate)) return false;
+    const retained = new Map<string, ResolvedDecision>();
+    for (const [key, d] of [...this.retained, ...Object.entries(this.current?.decisions ?? {})])
+      if (d.status === "denied" && !Object.hasOwn(candidate.decisions, key)) retained.set(key, d);
+    if (retained.size + Object.keys(candidate.decisions).length > 64) return false;
     this.current = candidate;
+    this.retained = retained;
     this.observed = { configuration_revision: candidate.configuration_revision,
       kill_generation: candidate.kill_generation, time_highwater: now };
     return true;
   }
+  private supersedes(candidate: Snapshot): boolean {
+    const prior = this.current;
+    if (!prior || candidate.configuration_revision !== prior.configuration_revision ||
+        candidate.kill_generation !== prior.kill_generation) return true;
+    return candidate.generated_at > prior.generated_at || sameJson(candidate, prior);
+  }
   get<T extends Json>(key: string, baseline: T, now = Date.now(), accepts?: (value: Json) => value is T): T {
-    const previous = this.current && Object.hasOwn(this.current.decisions, key) ? this.current.decisions[key] : undefined;
+    const previous = this.current && Object.hasOwn(this.current.decisions, key) ? this.current.decisions[key] : this.retained.get(key);
     if (previous?.status === "denied") {
       const value = projectedValue(previous, baseline, accepts);
       if (time(now) && now >= this.observed.time_highwater) this.observed.time_highwater = now;
@@ -106,7 +119,14 @@ export class DecisionClient {
     this.observed.time_highwater = now;
     return value;
   }
-  clear(): void { this.current = null; }
+  clear(): void { this.current = null; this.retained = new Map(); }
+}
+function sameJson(a: unknown, b: unknown): boolean {
+  if (Array.isArray(a) || Array.isArray(b))
+    return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => sameJson(v, b[i]));
+  if (record(a) || record(b)) return record(a) && record(b) && Object.keys(a).length === Object.keys(b).length &&
+    Object.keys(a).every(k => Object.hasOwn(b, k) && sameJson(a[k], b[k]));
+  return a === b;
 }
 function copyJson(value: unknown): unknown {
   if (Array.isArray(value)) return value.map((v: unknown) => copyJson(v));

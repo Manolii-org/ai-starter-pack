@@ -16,6 +16,109 @@ from feature_controls import (
 ROOT = Path(__file__).resolve().parents[2]
 GOLDEN = json.loads(Path(__file__).with_name("golden.json").read_text())
 NOW = GOLDEN["now"]
+STICKY_NUMERICS = json.loads(Path(__file__).with_name("sticky-numerics.json").read_text())
+
+def numeric_bundle(epoch, version):
+    catalog, payload = deepcopy(GOLDEN["catalog"]), deepcopy(GOLDEN["payload"])
+    catalog["features"]["experiment"]["experiment"]["epoch"] = "EPOCH_LITERAL"
+    catalog = json.loads(json.dumps(catalog, separators=(",", ":")).replace('"EPOCH_LITERAL"', epoch))
+    payload["features"]["experiment"]["rules"][0]["bucketVersion"] = "VERSION_LITERAL"
+    release = bundle(payload)
+    release["payload_bytes"] = release["payload_bytes"].replace('"VERSION_LITERAL"', version)
+    release["payload_sha256"] = hashlib.sha256(release["payload_bytes"].encode()).hexdigest()
+    return catalog, release
+
+def numeric_sticky_probe(epoch, version):
+    catalog, release = numeric_bundle(epoch, version)
+    integers = []
+    def initialize(assignments=None):
+        controls = Controls()
+        runtime = FeatureRuntime(catalog, trust_policy="local-test", controls=controls, assignments=assignments)
+        runtime.activate(release, 0, NOW)
+        runtime.update_kills(kill(), "local-fixture", NOW)
+        integers.append(type(runtime.catalog["features"]["experiment"]["experiment"]["epoch"]) is int)
+        provider, calls = runtime._provider, []
+        def capture(*args):
+            rule = args[0]["features"]["experiment"]["rules"][0]
+            integers.append(type(rule["bucketVersion"]) is int)
+            result = provider(*args)
+            calls.append({"key": result.experimentResult.key, "sticky": result.experimentResult.stickyBucketUsed})
+            return result
+        runtime._provider = capture
+        return runtime, calls, controls
+    fresh, natural_calls, _ = initialize()
+    fresh.evaluate("experiment", "web", GOLDEN["context"], preview=True, now=NOW)
+    natural = natural_calls[-1]["key"]
+    saved = "treatment" if natural == "control" else "control"
+    reads, creates = [], []
+    class ExistingAssignments:
+        durable = True
+        def read(self, key):
+            integers.append(type(key["allocation_epoch"]) is int)
+            reads.append(deepcopy(key))
+            return {"assignment_id": "persisted-choice", "variant": saved}
+        def create_if_absent(self, key, variant):
+            integers.append(type(key["allocation_epoch"]) is int)
+            creates.append({"key": deepcopy(key), "variant": variant})
+            return {"assignment_id": "persisted-choice", "variant": saved}
+    runtime, calls, controls = initialize(ExistingAssignments())
+    preview = runtime.evaluate("experiment", "web", GOLDEN["context"], preview=True, now=NOW)
+    preview_creates = len(creates)
+    live = runtime.evaluate("experiment", "web", GOLDEN["context"], now=NOW)
+    assert catalog == numeric_bundle(epoch, version)[0]
+    return {"epoch": epoch, "version": version, "saved": saved, "natural": natural, "preview": preview["value"],
+            "preview_creates": preview_creates, "live": live["value"], "status": live["status"], "reason": live["reason"], "calls": calls,
+            "epochs": [key["allocation_epoch"] for key in reads] + [item["key"]["allocation_epoch"] for item in creates],
+            "payload_unchanged": controls.read(GOLDEN["scope"])["bundle"] == release,
+            "integer_metadata": all(integers), "payload_hash": release["payload_sha256"]}
+
+@pytest.mark.parametrize("epoch,version", STICKY_NUMERICS)
+def test_actual_provider_sticky_numeric_tokens(epoch, version):
+    if any(token in ("true", "false") for token in (epoch, version)):
+        with pytest.raises(ValueError):
+            numeric_sticky_probe(epoch, version)
+        return
+    row = numeric_sticky_probe(epoch, version)
+    assert row["saved"] != row["natural"]
+    assert row["preview"] == row["saved"] and row["preview_creates"] == 0
+    assert (row["live"], row["status"], row["reason"]) == (row["saved"], "resolved", "experiment")
+    assert all(call == {"key": row["saved"], "sticky": True} for call in row["calls"])
+    assert all(value == json.loads(epoch) for value in row["epochs"])
+    assert row["payload_unchanged"] and row["integer_metadata"]
+
+def test_semantic_epoch_representations_preserve_one_assignment_identity():
+    assignments, ids = Assignments(), []
+    for token in ("1.0", "1", "1e0"):
+        catalog, release = numeric_bundle(token, token)
+        runtime = FeatureRuntime(catalog, trust_policy="local-test", assignments=assignments)
+        runtime.activate(release, 0, NOW)
+        runtime.update_kills(kill(), "local-fixture", NOW)
+        d = runtime.evaluate("experiment", "web", GOLDEN["context"], now=NOW)
+        assert d["status"] == "resolved"
+        ids.append(d["assignment"]["assignment_id"])
+    assert len(set(ids)) == len(assignments.values) == assignments.writes == 1
+
+def test_owned_native_integer_metadata_normalizes_without_changing_approved_bytes():
+    release = bundle()
+    release["payload_bytes"] = release["payload_bytes"].replace('"hashVersion":2', '"hashVersion":2.0')
+    release["payload_sha256"] = hashlib.sha256(release["payload_bytes"].encode()).hexdigest()
+    controls = Controls()
+    runtime = FeatureRuntime(GOLDEN["catalog"], trust_policy="local-test", controls=controls, assignments=Assignments())
+    runtime.activate(release, 0, NOW)
+    runtime.update_kills(kill(), "local-fixture", NOW)
+    provider = runtime._provider
+    def capture(*args):
+        assert type(args[0]["features"]["experiment"]["rules"][0]["hashVersion"]) is int
+        return provider(*args)
+    runtime._provider = capture
+    assert runtime.evaluate("experiment", "web", GOLDEN["context"], now=NOW)["status"] == "resolved"
+    assert controls.read(GOLDEN["scope"])["bundle"] == release
+    for field in ("hashVersion", "bucketVersion"):
+        for token in (True, False, -1, 1.5, "1", 9007199254740992):
+            payload = deepcopy(GOLDEN["payload"])
+            payload["features"]["experiment"]["rules"][0][field] = token
+            with pytest.raises(ValueError):
+                FeatureRuntime(GOLDEN["catalog"], trust_policy="local-test").activate(bundle(payload), 0, NOW)
 
 def test_scope_context_surface_and_projection_fences():
     r = setup(assignments=Assignments())
@@ -236,6 +339,15 @@ def test_ascii_cross_language_parity_1000_and_approval_bytes():
         actual.append({"value": d["value"], "reason": d["reason"], "configuration_revision": d["configuration_revision"], "kill_generation": d["kill_generation"]})
     assert actual == expected["decisions"]
     assert approval_message(bundle()).decode() == expected["approval_bytes"]
+    actual_sticky = []
+    for epoch, version in STICKY_NUMERICS:
+        if any(token in ("true", "false") for token in (epoch, version)):
+            with pytest.raises(ValueError):
+                numeric_sticky_probe(epoch, version)
+            actual_sticky.append({"epoch": epoch, "version": version, "status": "rejected"})
+        else:
+            actual_sticky.append(numeric_sticky_probe(epoch, version))
+    assert actual_sticky == expected["sticky"]
 
 HARDENING = json.loads(Path(__file__).with_name("hardening.json").read_text())
 
