@@ -28,6 +28,21 @@ helper definitions are allowed. Contract source, package source and release
 metadata must be merged into one reviewed integration commit **before** a
 consumer pins it. A worker branch is not a release.
 
+### Copier landing dependency
+
+The distribution exclusions must land **before any core-containing pack ref is
+consumed through Copier**. The core change alone adds runtime packages/contracts
+and maintainer root ESLint configuration without those exclusions. Offer Copier
+consumers only a reviewed combined ref containing both core and distribution
+changes; native SDK artifact/install proof alone is not Copier propagation proof.
+
+Before exposing that ref, render a separate exported core tree with the
+distribution tooling/exclusions applied, without editing SDK source or merging
+branches. Verify actual public document counts, runtime/maintainer omissions,
+existing consumer lint/document bytes and nested harness positives. This is
+continuity validation of the existing Copier boundary, not another distribution
+engine. No core-only intermediate ref is consumer-eligible.
+
 Builds execute trusted committed npm build/prepare and Python backend code.
 Installation scripts are disabled during npm dependency installation; build
 processes receive a minimal environment, not ambient service credentials.
