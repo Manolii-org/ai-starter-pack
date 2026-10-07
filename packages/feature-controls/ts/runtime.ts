@@ -100,8 +100,11 @@ export class FeatureRuntime extends Lifecycle {
     validate("kill", kill);
     if (!sameScope(kill.scope, this.catalog.scope)) throw new Error("kill scope mismatch");
   }
-  private excluded(key: string, excluded: Set<string>): boolean {
-    return excluded.has(key) || this.catalog.features[key].ancestors.some(a => this.excluded(a, excluded));
+  private excluded(key: string, excluded: Set<string>, visited = new Set<string>()): boolean {
+    if (visited.has(key)) return false;
+    visited.add(key);
+    return excluded.has(key) || this.catalog.features[key].ancestors.some(a =>
+      !visited.has(a) && this.excluded(a, excluded, visited));
   }
   private async provider(payload: Record<string, unknown>, key: string, attributes: ReturnType<typeof attributesOf>, feature: Feature, assignment: Assignment | null) {
     const doc: StickyAssignmentsDocument | null = assignment && feature.experiment ? {

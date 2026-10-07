@@ -50,6 +50,30 @@ test('ancestor cycles and unknown ancestors reject catalog',()=>{
     assert.throws(()=>new FeatureRuntime(c,{trust_policy:'local-test'}));
   }
 });
+test('dense ancestor DAG traversal is bounded and preserves shared exclusions',async()=>{
+  const catalog=clone(golden.catalog),template=clone(catalog.features.child);
+  catalog.features={other:{...clone(template),ancestors:[]},leaf:{...clone(template),ancestors:['f15','f16']},...Object.fromEntries(Array.from({length:18},(_,i)=>[
+    `f${i}`,{...clone(template),ancestors:Array.from({length:i},(_,j)=>`f${j}`)}
+  ]))};
+  const evaluate=async(runtime,context=golden.context,key='f17')=>{
+    let calls=0;const excluded=runtime.excluded.bind(runtime);
+    runtime.excluded=(...args)=>{calls++;return excluded(...args);};
+    const decision=await runtime.evaluate(key,'web',context,{now:golden.now});
+    assert.ok(calls<=36,`exclusion traversal made ${calls} calls`);
+    return decision;
+  };
+  const plain=new FeatureRuntime(catalog,{trust_policy:'local-test'});
+  assert.equal((await evaluate(plain)).reason,'kills_expired');
+  const unrelated=new FeatureRuntime(catalog,{trust_policy:'local-test'});
+  assert.equal((await evaluate(unrelated,{...golden.context,excluded:['other']})).reason,'kills_expired');
+  const contextual=new FeatureRuntime(catalog,{trust_policy:'local-test'});
+  assert.equal((await evaluate(contextual,{...golden.context,excluded:['f0']},'leaf')).reason,'disabled_or_excluded');
+  const local=new FeatureRuntime(catalog,{trust_policy:'local-test',local_disabled:['f0']});
+  assert.equal((await evaluate(local,golden.context,'leaf')).reason,'disabled_or_excluded');
+  const killed=new FeatureRuntime(catalog,{trust_policy:'local-test'});
+  await killed.updateKills(kill(1,['f0']),'local-fixture',golden.now);
+  assert.equal((await evaluate(killed,golden.context,'leaf')).reason,'disabled_or_excluded');
+});
 test('independent monotonic kills survive new release sequence and scoped store',async()=>{
   const controls=new Controls();const runtime=await setup({controls});
   await runtime.updateKills(kill(2,['release']),'local-fixture',golden.now);

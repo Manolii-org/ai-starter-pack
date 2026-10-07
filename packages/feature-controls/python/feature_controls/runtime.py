@@ -160,8 +160,15 @@ class FeatureRuntime(Lifecycle):
         except (ValueError, TypeError, KeyError, RuntimeError, OSError):
             return fail("provider_or_assignment_unavailable")
 
-    def _excluded(self, key: str, excluded: set[str]) -> bool:
-        return key in excluded or any(self._excluded(a, excluded) for a in self._catalog["features"][key]["ancestors"])
+    def _excluded(self, key: str, excluded: set[str], visited: set[str] | None = None) -> bool:
+        visited = set() if visited is None else visited
+        if key in visited:
+            return False
+        visited.add(key)
+        return key in excluded or any(
+            ancestor not in visited and self._excluded(ancestor, excluded, visited)
+            for ancestor in self._catalog["features"][key]["ancestors"]
+        )
 
     @staticmethod
     def _provider(payload: dict[str, Any], key: str, attributes: dict[str, Any], feature: Feature, assignment: Assignment | None):

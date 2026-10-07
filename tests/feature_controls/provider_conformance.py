@@ -120,6 +120,43 @@ def test_owned_native_integer_metadata_normalizes_without_changing_approved_byte
             with pytest.raises(ValueError):
                 FeatureRuntime(GOLDEN["catalog"], trust_policy="local-test").activate(bundle(payload), 0, NOW)
 
+def test_dense_ancestor_dag_traversal_is_bounded_and_preserves_shared_exclusions():
+    catalog, template = deepcopy(GOLDEN["catalog"]), deepcopy(GOLDEN["catalog"]["features"]["child"])
+    catalog["features"] = {
+        "other": {**deepcopy(template), "ancestors": []},
+        "leaf": {**deepcopy(template), "ancestors": ["f15", "f16"]},
+        **{
+            f"f{i}": {**deepcopy(template), "ancestors": [f"f{j}" for j in range(i)]}
+            for i in range(18)
+        },
+    }
+
+    def evaluate(runtime, context=GOLDEN["context"], key="f17"):
+        calls = 0
+        excluded = runtime._excluded
+
+        def counted(key, exclusions, visited=None):
+            nonlocal calls
+            calls += 1
+            return excluded(key, exclusions) if visited is None else excluded(key, exclusions, visited)
+
+        runtime._excluded = counted
+        decision = runtime.evaluate(key, "web", context, now=NOW)
+        assert calls <= 36, calls
+        return decision
+
+    plain = FeatureRuntime(catalog, trust_policy="local-test")
+    assert evaluate(plain)["reason"] == "kills_expired"
+    unrelated = FeatureRuntime(catalog, trust_policy="local-test")
+    assert evaluate(unrelated, {**GOLDEN["context"], "excluded": ["other"]})["reason"] == "kills_expired"
+    contextual = FeatureRuntime(catalog, trust_policy="local-test")
+    assert evaluate(contextual, {**GOLDEN["context"], "excluded": ["f0"]}, "leaf")["reason"] == "disabled_or_excluded"
+    local = FeatureRuntime(catalog, trust_policy="local-test", local_disabled=["f0"])
+    assert evaluate(local, key="leaf")["reason"] == "disabled_or_excluded"
+    killed = FeatureRuntime(catalog, trust_policy="local-test")
+    killed.update_kills(kill(1, ["f0"]), "local-fixture", NOW)
+    assert evaluate(killed, key="leaf")["reason"] == "disabled_or_excluded"
+
 def test_scope_context_surface_and_projection_fences():
     r = setup(assignments=Assignments())
     for field in GOLDEN["scope"]:
