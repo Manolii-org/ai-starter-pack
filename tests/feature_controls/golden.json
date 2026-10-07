@@ -1,0 +1,163 @@
+{
+  "scope": {
+    "namespace": "demo",
+    "application": "example-app",
+    "environment": "test"
+  },
+  "catalog": {
+    "schema_version": 1,
+    "scope": {
+      "namespace": "demo",
+      "application": "example-app",
+      "environment": "test"
+    },
+    "revision": 1,
+    "features": {
+      "release": {
+        "value_type": "boolean",
+        "baseline": false,
+        "failure": "baseline",
+        "surfaces": [
+          "web",
+          "mobile"
+        ],
+        "ancestors": []
+      },
+      "experiment": {
+        "value_type": "string",
+        "baseline": "baseline",
+        "failure": "deny",
+        "surfaces": [
+          "web",
+          "mobile"
+        ],
+        "ancestors": [],
+        "experiment": {
+          "key": "demo-experiment",
+          "epoch": 0
+        }
+      },
+      "child": {
+        "value_type": "string",
+        "baseline": "baseline",
+        "failure": "deny",
+        "surfaces": [
+          "web",
+          "mobile"
+        ],
+        "ancestors": [
+          "release"
+        ]
+      }
+    }
+  },
+  "payload": {
+    "features": {
+      "release": {
+        "defaultValue": false,
+        "rules": [
+          {
+            "force": true
+          }
+        ]
+      },
+      "experiment": {
+        "defaultValue": "baseline",
+        "rules": [
+          {
+            "key": "demo-experiment",
+            "seed": "demo-seed",
+            "hashVersion": 2,
+            "variations": [
+              "control",
+              "treatment"
+            ],
+            "weights": [
+              0.5,
+              0.5
+            ],
+            "coverage": 1,
+            "bucketVersion": 0,
+            "meta": [
+              {
+                "key": "control"
+              },
+              {
+                "key": "treatment"
+              }
+            ]
+          }
+        ]
+      },
+      "child": {
+        "defaultValue": "baseline",
+        "rules": [
+          {
+            "force": "enabled"
+          }
+        ]
+      }
+    },
+    "experiments": [],
+    "savedGroups": {},
+    "contextualBandits": {}
+  },
+  "now": 1000,
+  "expires_at": 100000,
+  "context": {
+    "assignment_key": "unit-0",
+    "authorized": true,
+    "eligible": true,
+    "expires_at": 100000,
+    "excluded": []
+  },
+  "cases": [
+    {
+      "key": "release",
+      "surface": "web",
+      "expected_value": true,
+      "expected_reason": "released"
+    },
+    {
+      "key": "child",
+      "surface": "web",
+      "expected_value": "enabled",
+      "expected_reason": "released"
+    },
+    {
+      "key": "child",
+      "surface": "web",
+      "excluded": [
+        "release"
+      ],
+      "expected_value": "baseline",
+      "expected_reason": "disabled_or_excluded"
+    },
+    {
+      "key": "release",
+      "surface": "other",
+      "expected_value": false,
+      "expected_reason": "surface_ineligible"
+    },
+    {
+      "key": "release",
+      "surface": "web",
+      "eligible": false,
+      "expected_value": false,
+      "expected_reason": "ineligible"
+    },
+    {
+      "key": "release",
+      "surface": "web",
+      "authorized": false,
+      "expected_value": false,
+      "expected_reason": "unauthorized"
+    },
+    {
+      "key": "missing",
+      "surface": "web",
+      "expected_value": null,
+      "expected_reason": "unknown"
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+dist/
+python/*.egg-info/
+python/build/
+python/dist/
+python/.venv/
