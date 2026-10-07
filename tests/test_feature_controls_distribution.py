@@ -556,7 +556,8 @@ def test_renovate_sdk_policy_overrides_pin_automerge_only_for_sdk():
     assert "matchUpdateTypes" not in rule
 
 
-def test_copier_excludes_runtime_sources_and_does_not_overwrite_consumer_dependencies(tmp_path):
+@pytest.mark.parametrize("existing_consumer", [False, True])
+def test_copier_excludes_runtime_sources_and_preserves_consumer_dependencies_and_configs(tmp_path, existing_consumer):
     template, destination = tmp_path / "template", tmp_path / "consumer"
     template.mkdir()
     destination.mkdir()
@@ -575,10 +576,14 @@ def test_copier_excludes_runtime_sources_and_does_not_overwrite_consumer_depende
     write(template, ".claude/skills/example/harness/package.json", '{"name":"agent-harness"}')
     write(template, ".claude/skills/example/harness/eslint.config.mjs", "nested eslint config")
     write(template, ".claude/skills/example/harness/tsconfig.json", '{"compilerOptions":{}}')
-    before = {"package.json": '{"name":"consumer","dependencies":{"existing-lib":"1.0.0"}}\n',
-              "package-lock.json": '{"lockfileVersion":3}\n'}
-    for relative, content in before.items():
+    existing = {"package.json": '{"name":"consumer","dependencies":{"existing-lib":"1.0.0"}}\n',
+                "package-lock.json": '{"lockfileVersion":3}\n',
+                "eslint.config.mjs": "export default [{ rules: { semi: ['error', 'always'] } }];\r\n",
+                "apps/example/package.json": '{"name":"consumer-nested","private":true}\n'} if existing_consumer else {}
+    before = {}
+    for relative, content in existing.items():
         write(destination, relative, content)
+        before[relative] = (destination / relative).read_bytes()
     result = subprocess.run([sys.executable, "-m", "copier", "copy", "--defaults", "--overwrite", "--quiet",
                              str(template), str(destination)], capture_output=True, text=True, timeout=120, check=False)
     assert result.returncode == 0, result.stderr
@@ -586,10 +591,10 @@ def test_copier_excludes_runtime_sources_and_does_not_overwrite_consumer_depende
     assert (destination / ".claude/skills/example/harness/package.json").read_text() == '{"name":"agent-harness"}'
     assert (destination / ".claude/skills/example/harness/eslint.config.mjs").read_text() == "nested eslint config"
     assert (destination / ".claude/skills/example/harness/tsconfig.json").read_text() == '{"compilerOptions":{}}'
+    for relative, content in before.items():
+        assert (destination / relative).read_bytes() == content
     for relative in excluded:
-        if relative in before:
-            assert (destination / relative).read_text() == before[relative]
-        else:
+        if relative not in before:
             assert not (destination / relative).exists()
     assert {"/package.json", "/package-lock.json", "/eslint.config.mjs", "/tsconfig.json",
             "scripts/feature-controls-release.py"} <= set(
