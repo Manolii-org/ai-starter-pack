@@ -107,7 +107,9 @@ def latest_run(data: dict, repository: str, workflow: str, branch: str, sha: str
     run = runs[0]
     require(positive_int(run.get("id")) and positive_int(run.get("run_attempt"))
             and positive_int(run.get("workflow_id")), "Invalid workflow run identity")
-    require(run.get("path") == f".github/workflows/{workflow}", "Workflow path mismatch")
+    workflow_path = f".github/workflows/{workflow}"
+    require(run.get("path") in (workflow_path, f"{workflow_path}@{branch}"),
+            "Workflow path mismatch")
     require(run.get("head_branch") == branch and run.get("head_sha") == sha,
             "Latest run branch or exact SHA mismatch")
     require(run.get("event") == "push" and run.get("status") == "completed"

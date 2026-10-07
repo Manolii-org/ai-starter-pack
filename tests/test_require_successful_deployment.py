@@ -101,6 +101,20 @@ def test_success_current_attempt_and_only_fixed_unfiltered_endpoints(wire):
         connection.close.assert_called_once()
 
 
+@pytest.mark.parametrize("branch", ["staging", "main", "release/1.2"])
+@pytest.mark.parametrize("qualified", [False, True])
+def test_documented_workflow_paths_match_the_exact_branch(wire, branch, qualified):
+    value = run()
+    value["head_branch"] = branch
+    if qualified:
+        value["path"] += f"@{branch}"
+    jobs = job_page()
+    for item in jobs["jobs"]:
+        item["head_branch"] = branch
+    wire([run_page(value), jobs, run_page(value)])
+    assert verify(branch=branch) == {"run_id": "42", "html_url": HTML_URL}
+
+
 def test_branch_query_cannot_inject_filters(wire):
     value = run()
     value["head_branch"] = "release/ready&event=push#fragment"
@@ -158,7 +172,13 @@ def test_invalid_inputs_never_request_network(monkeypatch, field, value):
     ("id", True), ("id", "42"), ("id", 0),
     ("run_attempt", None), ("run_attempt", True), ("run_attempt", 0),
     ("workflow_id", "7"), ("workflow_id", 0),
-    ("path", ".github/workflows/other.yml"), ("path", None),
+    ("path", ".github/workflows/other.yml"), ("path", None), ("path", []),
+    ("path", ".github/workflows/deploy.yml@main"),
+    ("path", ".github/workflows/other.yml@staging"),
+    ("path", ".github/workflows/deploy.yml@refs/heads/staging"),
+    ("path", ".github/workflows/deploy.yml@" + SHA),
+    ("path", ".github/workflows/deploy.yml@staging@main"),
+    ("path", ".github/workflows/deploy.yml@staging\n"),
     ("head_branch", "main"), ("head_sha", "b" * 40),
     ("event", "workflow_dispatch"), ("event", "pull_request"),
     ("event", "schedule"), ("status", "in_progress"), ("status", "queued"),
