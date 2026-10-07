@@ -1,5 +1,9 @@
 # Feature-control runtime distribution
 
+Maintainer guide for the canonical `Manolii-org/ai-starter-pack` checkout, not a
+consumer installation guide. Copier excludes this document and the release/upgrade
+tools; run the commands below only from that canonical checkout.
+
 This is an opt-in runtime package lane, not an agent capability or Copier
 installation feature. Nothing here activates flags, provisions a provider,
 changes routing/security settings, deploys an application, opens consumer PRs,
@@ -14,7 +18,7 @@ are independent again. Supported component tags are
 Python prereleases use the equivalent PEP 440 spellings (`rc1`, `a1`, `b1`).
 Never move a component release tag or the global `v1` alias to upgrade the SDK.
 
-The canonical source is this repository. Root `package.json` is the npm Git
+The canonical source is `Manolii-org/ai-starter-pack`. Root `package.json` is the npm Git
 bridge, not a consumer template. Python installs from
 `packages/feature-controls/python`. Both static package versions must match
 the SDK version. The selected committed contract schema must declare
@@ -192,8 +196,9 @@ Renovate once npm/PyPI publication authority and package identity are establishe
 Do not add a second Git updater or activate packages through agent manifests.
 
 Copier excludes runtime source/contracts, maintainer scripts/tests/build output
-and the root npm bridge/lock/config. This operator document ships; consumers
-keep their own dependency files.
+and the root npm bridge/lock/config. This maintainer document is also excluded
+by its exact root path; consumer installation documentation remains separate.
+Consumers keep their own dependency files and any existing local document.
 
 No workflows are changed here. Minimal future human-reviewed CI:
 

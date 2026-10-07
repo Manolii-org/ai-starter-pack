@@ -568,17 +568,18 @@ def test_copier_excludes_runtime_sources_and_preserves_consumer_dependencies_and
         "contracts/feature-controls-bundle.schema.json",
         "scripts/feature-controls-release.py", "scripts/feature-controls-upgrade.py",
         "tests/test_feature_controls_distribution.py", "tests/feature_controls/test_runtime.py",
-        "build/runtime.js",
+        "build/runtime.js", "docs/feature-controls-distribution.md",
     ]
     for relative in excluded:
         write(template, relative, "must not ship")
-    write(template, "docs/feature-controls-distribution.md", "operator documentation")
+    write(template, "docs/feature-controls.md", "consumer installation documentation")
     write(template, ".claude/skills/example/harness/package.json", '{"name":"agent-harness"}')
     write(template, ".claude/skills/example/harness/eslint.config.mjs", "nested eslint config")
     write(template, ".claude/skills/example/harness/tsconfig.json", '{"compilerOptions":{}}')
     existing = {"package.json": '{"name":"consumer","dependencies":{"existing-lib":"1.0.0"}}\n',
                 "package-lock.json": '{"lockfileVersion":3}\n',
                 "eslint.config.mjs": "export default [{ rules: { semi: ['error', 'always'] } }];\r\n",
+                "docs/feature-controls-distribution.md": "Consumer-owned local guide\r\n",
                 "apps/example/package.json": '{"name":"consumer-nested","private":true}\n'} if existing_consumer else {}
     before = {}
     for relative, content in existing.items():
@@ -587,7 +588,7 @@ def test_copier_excludes_runtime_sources_and_preserves_consumer_dependencies_and
     result = subprocess.run([sys.executable, "-m", "copier", "copy", "--defaults", "--overwrite", "--quiet",
                              str(template), str(destination)], capture_output=True, text=True, timeout=120, check=False)
     assert result.returncode == 0, result.stderr
-    assert (destination / "docs/feature-controls-distribution.md").read_text() == "operator documentation"
+    assert (destination / "docs/feature-controls.md").read_text() == "consumer installation documentation"
     assert (destination / ".claude/skills/example/harness/package.json").read_text() == '{"name":"agent-harness"}'
     assert (destination / ".claude/skills/example/harness/eslint.config.mjs").read_text() == "nested eslint config"
     assert (destination / ".claude/skills/example/harness/tsconfig.json").read_text() == '{"compilerOptions":{}}'
@@ -597,5 +598,6 @@ def test_copier_excludes_runtime_sources_and_preserves_consumer_dependencies_and
         if relative not in before:
             assert not (destination / relative).exists()
     assert {"/package.json", "/package-lock.json", "/eslint.config.mjs", "/tsconfig.json",
+            "/docs/feature-controls-distribution.md",
             "scripts/feature-controls-release.py"} <= set(
         yaml.safe_load((ROOT / "copier.yml").read_text())["_exclude"])
