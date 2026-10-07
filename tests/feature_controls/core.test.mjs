@@ -313,6 +313,68 @@ test('JSON declaration cannot disguise an enabled boolean disabled value',()=>{
   assert.throws(()=>new FeatureRuntime(c));
 });
 
+test('out-of-order prior-account responses cannot clear the bound account denial',async()=>{
+  const r=new FeatureRuntime(golden.catalog,{trust_policy:'local-test'});
+  await r.activate(bundle(),0,golden.now);await r.updateKills(kill(1,['release']),'local-fixture',golden.now);
+  const a=await r.snapshot(['release'],'web',{...golden.context,context_scope:'context-a'},{now:golden.now});
+  const b=await r.snapshot(['release'],'web',{...golden.context,context_scope:'context-b'},{now:golden.now});
+  const client=new DecisionClient({...wireScope,context_scope:'context-a'},minimum);
+  client.bindSession('session-a','context-a');client.bindSession('session-b','context-b');
+  assert.equal(client.setSnapshot(b,'session-b',golden.now),true);
+  assert.equal(b.configuration_revision,1);assert.equal(b.kill_generation,1);
+  const floor=client.watermark;
+  for(const response of [a,null,b]) {
+    assert.equal(client.setSnapshot(response,'session-a',golden.now+1),false);
+    assert.deepEqual(client.watermark,floor);assert.equal(client.get('release',true,golden.now),false);
+  }
+  assert.equal(client.setSnapshot(a,'session-b',golden.now),false);
+  assert.equal(client.get('release',true,golden.now),false);
+  client.bindSession('session-a','context-a');assert.equal(client.get('release',true,golden.now),true);
+  assert.deepEqual(client.watermark,floor);
+  assert.equal(client.setSnapshot(a,'session-a',golden.now),true);
+  client.clear();assert.equal(client.get('release',true,golden.now),true);assert.deepEqual(client.watermark,floor);
+});
+
+test('known boolean denial dominates rejecting value predicates in both accessors',async()=>{
+  const r=new FeatureRuntime(golden.catalog,{trust_policy:'local-test'});
+  await r.activate(bundle(),0,golden.now);await r.updateKills(kill(1,['release']),'local-fixture',golden.now);
+  const wire=await r.snapshot(['release'],'web',golden.context,{now:golden.now});
+  for(const accepts of [value=>value===true,()=>false,()=>{throw new Error('predicate must not run');}]) {
+    assert.equal(decisionValue(wire,'release',true,wireScope,golden.now,minimum,accepts),false);
+    const client=new DecisionClient(wireScope,minimum);client.bindSession('session',golden.context.context_scope);
+    assert.equal(client.setSnapshot(wire,'session',golden.now),true);
+    for(const now of [golden.now,wire.expires_at,golden.now-1])assert.equal(client.get('release',true,now,accepts),false);
+  }
+});
+
+test('nonboolean denials reject incompatible access instead of enabling a baseline',async()=>{
+  const r=new FeatureRuntime(golden.catalog,{trust_policy:'local-test'});
+  await r.activate(bundle(),0,golden.now);await r.updateKills(kill(1,['release']),'local-fixture',golden.now);
+  const wire=await r.snapshot(['release'],'web',golden.context,{now:golden.now});
+  for(const [value,baseline,rejects] of [[0,1,v=>v===1],['off','on',v=>v==='on'],
+    [{enabled:false},{enabled:true},v=>v?.enabled===true],[[],['enabled'],v=>Array.isArray(v)&&v.length>0],
+    [null,1,v=>typeof v==='number']]) {
+    const denied=clone(wire);denied.decisions.release.value=value;
+    assert.equal(validateSnapshot(denied,wireScope,golden.now,minimum),true);
+    assert.throws(()=>decisionValue(denied,'release',baseline,wireScope,golden.now,minimum,rejects),/denied value/);
+    const client=new DecisionClient(wireScope,minimum);client.bindSession('session',golden.context.context_scope);
+    assert.equal(client.setSnapshot(denied,'session',golden.now),true);
+    for(const now of [golden.now,denied.expires_at,golden.now-1])
+      assert.throws(()=>client.get('release',baseline,now,rejects),/denied value/);
+    const accepts=v=>JSON.stringify(v)===JSON.stringify(value);
+    assert.deepEqual(decisionValue(denied,'release',baseline,wireScope,golden.now,minimum,accepts),value);
+    assert.deepEqual(client.get('release',baseline,denied.expires_at,accepts),value);
+    assert.deepEqual(client.get('release',baseline,golden.now-1,accepts),value);
+    if(value!==null&&typeof value==='object') {
+      assert.throws(()=>decisionValue(denied,'release',baseline,wireScope,golden.now,minimum),/denied value/);
+      const returned=client.get('release',baseline,denied.expires_at,accepts);
+      if(Array.isArray(returned))returned.push('enabled');else returned.enabled=true;
+      assert.deepEqual(client.get('release',baseline,denied.expires_at,accepts),value);
+      assert.deepEqual(client.get('release',baseline,denied.expires_at,v=>{if(Array.isArray(v))v.push('enabled');else v.enabled=true;return true;}),value);
+    }
+  }
+});
+
 test('explicit payload bytes preserve Unicode/fraction semantics without a generic JSON digest',async()=>{
   const spec=vectors.unicode_numeric,c=clone(golden.catalog);
   c.features={data:{value_type:'json',baseline:null,disabled_value:null,allowed_values:[null,spec.value],failure:'deny',surfaces:['web'],ancestors:[]}};

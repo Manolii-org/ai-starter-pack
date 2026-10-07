@@ -56,10 +56,15 @@ export function decisionValue<T extends Json>(snapshot: unknown, key: string, ba
   scope: SnapshotScope, now: number, minimum: SnapshotWatermark, accepts?: (value: Json) => value is T): T {
   if (!validateSnapshot(snapshot, scope, now, minimum) || !Object.hasOwn(snapshot.decisions, key)) return baseline;
   const decision = snapshot.decisions[key];
-  if (decision.expires_at <= now) return baseline;
-  const value = decision.value;
-  const valid = accepts ? accepts(value) : value === null ? baseline === null :
+  if (decision.expires_at <= now && decision.status !== "denied") return baseline;
+  return projectedValue(decision, baseline, accepts);
+}
+function projectedValue<T extends Json>(decision: ResolvedDecision, baseline: T, accepts?: (value: Json) => value is T): T {
+  const value = copyJson(decision.value) as Json;
+  if (decision.status === "denied" && value === false && typeof baseline === "boolean") return false as T;
+  const valid = accepts ? accepts(copyJson(value) as Json) : value === null ? baseline === null :
     ["boolean", "number", "string"].includes(typeof value) && typeof value === typeof baseline;
+  if (!valid && decision.status === "denied") throw new Error("denied value does not satisfy accessor type");
   return valid ? value as T : baseline;
 }
 export class DecisionClient {
@@ -80,7 +85,7 @@ export class DecisionClient {
     if (context_scope !== null) this.expected.context_scope = context_scope;
   }
   setSnapshot(snapshot: unknown, session: string, now = Date.now()): boolean {
-    if (session !== this.session) { this.clear(); return false; }
+    if (session !== this.session) return false;
     if (!validateSnapshot(snapshot, this.expected, now, this.observed)) return false;
     const candidate = copyJson(snapshot) as Snapshot;
     if (!validateSnapshot(candidate, this.expected, now, this.observed)) return false;
@@ -90,8 +95,12 @@ export class DecisionClient {
     return true;
   }
   get<T extends Json>(key: string, baseline: T, now = Date.now(), accepts?: (value: Json) => value is T): T {
-    const previous = this.current?.decisions[key];
-    if (typeof baseline === "boolean" && previous?.status === "denied" && previous.value === false) baseline = false as T;
+    const previous = this.current && Object.hasOwn(this.current.decisions, key) ? this.current.decisions[key] : undefined;
+    if (previous?.status === "denied") {
+      const value = projectedValue(previous, baseline, accepts);
+      if (time(now) && now >= this.observed.time_highwater) this.observed.time_highwater = now;
+      return value;
+    }
     if (!time(now) || now < this.observed.time_highwater) return baseline;
     const value = decisionValue(this.current, key, baseline, this.expected, now, this.observed, accepts);
     this.observed.time_highwater = now;
