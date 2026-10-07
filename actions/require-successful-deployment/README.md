@@ -36,6 +36,9 @@ run blocks the gate; an older matching success cannot satisfy it.
 All jobs are fetched from the run's current numbered attempt. More than 100
 jobs, incomplete responses, inconsistent job/run metadata, and missing,
 duplicate, skipped, or otherwise non-successful required jobs are rejected.
+The optional job `run_attempt` field must match when present; the request
+endpoint selects the exact attempt when it is absent. API workflow paths
+may be bare or qualified with the exact requested branch.
 The latest branch run is re-read after checking jobs to detect a superseding
 run or rerun. This is a bounded snapshot check, not a lock against future pushes.
 Only `run_id` and `html_url` are written to action outputs after all checks pass.

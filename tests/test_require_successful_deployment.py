@@ -218,7 +218,9 @@ def test_malformed_or_empty_runs(wire, payload):
 
 @pytest.mark.parametrize("field,value", [
     ("id", True), ("id", 0), ("run_id", 41), ("run_id", "42"),
-    ("run_attempt", 1), ("run_attempt", "2"), ("head_sha", "b" * 40),
+    ("run_attempt", 1), ("run_attempt", "2"), ("run_attempt", None),
+    ("run_attempt", True), ("run_attempt", 0), ("run_attempt", 2.0),
+    ("head_sha", "b" * 40),
     ("head_branch", "main"), ("run_url", "https://evil.test/run"),
     ("workflow_name", "Another workflow"), ("name", "deploy"),
     ("name", "Deploy (region)"), ("name", "Deploy\n"),
@@ -237,7 +239,7 @@ def test_required_job_adversaries(wire, field, value):
 
 
 @pytest.mark.parametrize("field", [
-    "id", "run_id", "run_attempt", "head_sha", "head_branch", "run_url", "workflow_name",
+    "id", "run_id", "head_sha", "head_branch", "run_url", "workflow_name",
     "name", "status", "conclusion",
 ])
 def test_missing_job_metadata(wire, field):
@@ -260,6 +262,16 @@ def test_incomplete_duplicate_or_oversized_jobs(wire, jobs):
     wire([run_page(), jobs])
     with pytest.raises(verifier.VerificationError):
         verify()
+
+
+@pytest.mark.parametrize("omit_from", ["Deploy", "Verify deployment", None])
+def test_attempt_scoped_jobs_allow_absent_optional_attempt_metadata(wire, omit_from):
+    jobs = job_page()
+    for item in jobs["jobs"]:
+        if omit_from is None or item["name"] == omit_from:
+            del item["run_attempt"]
+    wire([run_page(), jobs, run_page()])
+    assert verify() == {"run_id": "42", "html_url": HTML_URL}
 
 
 def test_metadata_of_unrequired_jobs_is_also_checked(wire):

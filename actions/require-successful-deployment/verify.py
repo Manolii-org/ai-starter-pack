@@ -139,9 +139,11 @@ def verify_jobs(data: dict, run: dict, names: list[str]) -> None:
         require(isinstance(job, dict) and positive_int(job.get("id")), "Invalid job identity")
         require(job["id"] not in ids, "Duplicate job identity")
         ids.add(job["id"])
-        require(positive_int(job.get("run_id")) and positive_int(job.get("run_attempt"))
+        require(positive_int(job.get("run_id"))
+                and ("run_attempt" not in job or (positive_int(job["run_attempt"])
+                     and job["run_attempt"] == run["run_attempt"]))
                 and all(key in job and job[key] == run[key] for key in
-                        ("head_sha", "head_branch", "run_attempt"))
+                        ("head_sha", "head_branch"))
                 and job["run_id"] == run["id"] and job.get("run_url") == run["url"]
                 and "workflow_name" in job and job["workflow_name"] == run["name"],
                 "Job metadata does not match the current run attempt")
