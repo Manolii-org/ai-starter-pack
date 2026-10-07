@@ -13,6 +13,10 @@ pip install "git+https://github.com/Manolii-org/ai-starter-pack.git@<FULL_COMMIT
 
 The root npm bridge exports `@manolii/feature-controls` and `@manolii/feature-controls/client`. Its explicit files allowlist contains compiled/source SDK, schema and this document (npm also includes mandatory metadata, README and license). Safe `prepare` only builds strict TypeScript. GrowthBook is pinned to JS `1.8.0` / Python `3.2.0`; package semver `0.0.0` is independent of wire version. There is no registry publication. A verified SHA-256 `npm pack` tarball is another handoff artifact, not a registry version. npm cannot install from a git subdirectory; committed consumers must not use local `file:` dependencies.
 
+### pnpm Git build permission
+
+pnpm 11 blocks Git dependency `prepare` by default: installation can succeed without building the exported JavaScript. Consumers must review and approve this package's build using a source-specific permission restricted to the exact Git repository and full commit SHA, using the build-permission configuration supported by their pinned pnpm major. Package-name approval alone is insufficient for Git sources; never enable lifecycle scripts globally. Verify both server and `/client` imports after installation. A separately verified prebuilt tarball does not require the Git `prepare` step; it is not registry publication. Consumer manifests and their version-specific permission settings remain consumer-owned.
+
 ## Server contract
 
 - `FeatureRuntime.evaluate(key, surface, context, options)` returns `resolved/baseline/denied`; `snapshot(keys, surface, context, options)` projects client-safe decisions. Python uses keyword `preview/now`.
