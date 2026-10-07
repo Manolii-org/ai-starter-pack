@@ -214,6 +214,39 @@ test('persisted time floor rejects expiry resurrection across runtime restart',a
   assert.equal((await controls.read(golden.scope)).time_highwater,golden.now+10);
   await assert.rejects(r.activate(bundle(golden.payload,2),1,golden.now+1),/clock rollback/);
 });
+for(const token of ['1000','1000.0','1e3'])for(const failure of ['baseline','deny'])test(`persisted integer floor ${token}/${failure} preserves active kill fences`,async()=>{
+  const catalog=clone(golden.catalog);Object.assign(catalog.features.release,{baseline:true,failure});
+  const controls=new Controls(),original=new FeatureRuntime(catalog,{controls,trust_policy:'local-test'});
+  await original.activate(bundle(),0,golden.now);await original.updateKills(kill(2,['release']),'local-fixture',golden.now);
+  const old=await controls.read(golden.scope),serialized=JSON.stringify(old);
+  assert.ok(serialized.includes('"time_highwater":1000'));
+  const state=JSON.parse(serialized.replace('"time_highwater":1000',`"time_highwater":${token}`));
+  assert.equal(await controls.compareAndSwap(golden.scope,old,state),true);
+  const restarted=new FeatureRuntime(catalog,{controls,trust_policy:'local-test'});
+  const d=await restarted.evaluate('release','web',golden.context,{now:golden.now});
+  assert.equal(d.value,false);assert.equal(d.status,'denied');assert.equal(d.reason,'disabled_or_excluded');
+  const snapshot=await restarted.snapshot(['release'],'web',golden.context,{now:golden.now});
+  assert.deepEqual([snapshot.configuration_revision,snapshot.kill_generation,snapshot.time_highwater],[1,2,1000]);
+  assert.equal(snapshot.decisions.release.value,false);assert.equal(snapshot.decisions.release.status,'denied');
+  assert.equal((await restarted.evaluate('release','web',golden.context,{now:golden.now+1})).value,false);
+  assert.equal((await controls.read(golden.scope)).time_highwater,golden.now+1);
+  assert.equal((await restarted.evaluate('release','web',golden.context,{now:golden.now})).reason,'controls_unavailable');
+  await assert.rejects(restarted.activate(bundle(golden.payload,2),1,golden.now));
+});
+test('invalid persisted floor representations reject before observing control fences',async()=>{
+  for(const failure of ['baseline','deny'])for(const token of ['true','false','1000.5','-1','9007199254740992','1e400']){
+    const catalog=clone(golden.catalog);Object.assign(catalog.features.release,{baseline:true,failure});
+    const controls=new Controls(),original=new FeatureRuntime(catalog,{controls,trust_policy:'local-test'});
+    await original.activate(bundle(),0,golden.now);await original.updateKills(kill(2,['release']),'local-fixture',golden.now);
+    const old=await controls.read(golden.scope),state=JSON.parse(JSON.stringify(old).replace('"time_highwater":1000',`"time_highwater":${token}`));
+    assert.equal(await controls.compareAndSwap(golden.scope,old,state),true);
+    const restarted=new FeatureRuntime(catalog,{controls,trust_policy:'local-test'});
+    assert.equal((await restarted.evaluate('release','web',golden.context,{now:golden.now})).reason,'controls_unavailable');
+    const snapshot=await restarted.snapshot(['release'],'web',golden.context,{now:golden.now});
+    assert.deepEqual([snapshot.configuration_revision,snapshot.kill_generation,snapshot.time_highwater],[0,0,0]);
+    assert.equal(snapshot.decisions.release.value,false);
+  }
+});
 test('captured snapshot is atomic even when store changes between awaits',async()=>{
   const controls=new Controls(),r=await setup({controls});
   const first=await controls.read(golden.scope),next={...clone(first),bundle:bundle(golden.payload,2),kill:kill(2,['release'])};

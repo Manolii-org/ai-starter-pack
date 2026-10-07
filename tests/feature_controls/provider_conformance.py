@@ -413,6 +413,62 @@ def test_time_floor_blocks_expiry_resurrection_after_restart():
     assert controls.read(GOLDEN["scope"])["time_highwater"] == NOW + 10
     with pytest.raises(ValueError): r.activate(bundle(revision=2), 1, NOW + 1)
 
+@pytest.mark.parametrize("token", ["1000", "1000.0", "1e3"])
+@pytest.mark.parametrize("failure", ["baseline", "deny"])
+def test_persisted_integer_floor_preserves_active_kill_fences(token, failure):
+    catalog = deepcopy(GOLDEN["catalog"])
+    catalog["features"]["release"].update(baseline=True, failure=failure)
+    controls = Controls()
+    original = FeatureRuntime(catalog, controls=controls, trust_policy="local-test")
+    original.activate(bundle(), 0, NOW)
+    original.update_kills(kill(2, ["release"]), "local-fixture", NOW)
+    old = controls.read(GOLDEN["scope"])
+    serialized = json.dumps(old, separators=(",", ":"))
+    assert '"time_highwater":1000' in serialized
+    state = json.loads(serialized.replace('"time_highwater":1000', f'"time_highwater":{token}'))
+    assert controls.compare_and_swap(GOLDEN["scope"], old, state)
+    restarted = FeatureRuntime(catalog, controls=controls, trust_policy="local-test")
+    d = restarted.evaluate("release", "web", GOLDEN["context"], now=NOW)
+    assert (d["value"], d["status"], d["reason"]) == (False, "denied", "disabled_or_excluded")
+    snapshot = restarted.snapshot(["release"], "web", GOLDEN["context"], now=NOW)
+    assert [snapshot["configuration_revision"], snapshot["kill_generation"], snapshot["time_highwater"]] == [1, 2, 1000]
+    assert snapshot["decisions"]["release"]["value"] is False
+    assert snapshot["decisions"]["release"]["status"] == "denied"
+    assert type(restarted._state()["time_highwater"]) is int
+    assert type(controls.read(GOLDEN["scope"])["time_highwater"]) is type(state["time_highwater"])
+    assert restarted.evaluate("release", "web", GOLDEN["context"], now=NOW + 1)["value"] is False
+    assert controls.read(GOLDEN["scope"])["time_highwater"] == NOW + 1
+    assert type(controls.read(GOLDEN["scope"])["time_highwater"]) is int
+    assert restarted.evaluate("release", "web", GOLDEN["context"], now=NOW)["reason"] == "controls_unavailable"
+    with pytest.raises(ValueError):
+        restarted.activate(bundle(revision=2), 1, NOW)
+
+def test_invalid_persisted_floor_representations_reject_before_observing_control_fences():
+    for failure in ("baseline", "deny"):
+        for token in ("true", "false", "1000.5", "-1", "9007199254740992", "1e400"):
+            catalog = deepcopy(GOLDEN["catalog"])
+            catalog["features"]["release"].update(baseline=True, failure=failure)
+            controls = Controls()
+            original = FeatureRuntime(catalog, controls=controls, trust_policy="local-test")
+            original.activate(bundle(), 0, NOW)
+            original.update_kills(kill(2, ["release"]), "local-fixture", NOW)
+            old = controls.read(GOLDEN["scope"])
+            state = json.loads(json.dumps(old, separators=(",", ":")).replace('"time_highwater":1000', f'"time_highwater":{token}'))
+            assert controls.compare_and_swap(GOLDEN["scope"], old, state)
+            restarted = FeatureRuntime(catalog, controls=controls, trust_policy="local-test")
+            assert restarted.evaluate("release", "web", GOLDEN["context"], now=NOW)["reason"] == "controls_unavailable"
+            snapshot = restarted.snapshot(["release"], "web", GOLDEN["context"], now=NOW)
+            assert [snapshot["configuration_revision"], snapshot["kill_generation"], snapshot["time_highwater"]] == [0, 0, 0]
+            assert snapshot["decisions"]["release"]["value"] is False
+
+def test_approval_api_clocks_remain_strict_native_integers():
+    runtime = setup()
+    for now in (float(NOW), NOW + 0.5, True, float("inf"), -1, 9007199254740992):
+        with pytest.raises(ValueError):
+            runtime.activate(bundle(revision=2), 1, now)
+        with pytest.raises(ValueError):
+            runtime.update_kills(kill(2), "local-fixture", now)
+
 def test_snapshot_uses_one_atomic_state_and_cap():
     controls = Controls()
     r = setup(controls=controls)

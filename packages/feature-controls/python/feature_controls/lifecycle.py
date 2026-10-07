@@ -68,6 +68,7 @@ class Lifecycle:
         if self.controls is not None and self.controls.durable is True:
             state = deepcopy(self.controls.read(self._catalog["scope"]))
             validate("control_state", state)
+            state["time_highwater"] = int(state["time_highwater"])
             if state["bundle"] and state["bundle"]["scope"] != self._catalog["scope"] or state["kill"] and state["kill"]["scope"] != self._catalog["scope"]:
                 raise ValueError("control scope mismatch")
             return state
