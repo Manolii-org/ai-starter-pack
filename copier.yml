@@ -172,6 +172,7 @@ _exclude:
   - /package.json
   - /package-lock.json
   - /npm-shrinkwrap.json
+  - /eslint.config.mjs
   - /tsconfig.json
   - /.npmignore
   - /build

@@ -164,6 +164,13 @@ def local_file(root: Path, relative: str) -> Path:
     return path
 
 
+def dependency_content(root: Path, relative: str, committed: bool = False) -> str:
+    content = local_file(root, relative).read_bytes().decode("utf-8")
+    if committed and content != RELEASE.run(["git", "show", f"HEAD:{relative}"], root):
+        raise ValueError("dependency file differs from consumer commit")
+    return content
+
+
 def checkout_identity(root: Path, consumer: dict) -> str:
     if Path(RELEASE.run(["git", "rev-parse", "--show-toplevel"], root).strip()).resolve() != root:
         raise ValueError("checkout must be its own Git root")
@@ -208,11 +215,11 @@ def replace_pin(content: str, pin: dict, wanted: str, checking: bool) -> tuple[s
     return "".join(lines), actual == wanted
 
 
-def check_npm_lock(root: Path, pin: dict, wanted: str, sha: str) -> bool:
+def check_npm_lock(root: Path, pin: dict, wanted: str, sha: str, committed: bool = False) -> bool:
     if not npm_pin_matches(wanted, sha):
         return False
     relative = (Path(pin["file"]).parent / "package-lock.json").as_posix()
-    lock = RELEASE.load_json(local_file(root, relative).read_text())
+    lock = RELEASE.load_json(dependency_content(root, relative, committed))
     packages = lock.get("packages", {})
     entry = packages.get("node_modules/" + pin["name"], {})
     resolved = entry.get("resolved")
@@ -235,7 +242,8 @@ def propose(inventory: dict, manifest: dict, workspace: Path, owner: str,
     if any(consumer["repository"].split("/")[0].lower() != owner.lower() for consumer in selected):
         raise ValueError("selected scope crosses the explicit GitHub owner boundary")
     report = {"manifest_version": 1, "source_revision": manifest["source_revision"],
-              "sdk_version": manifest["sdk_version"], "scope": {"owner": owner, "ecosystem": ecosystem, "environment": environment},
+              "sdk_version": manifest["sdk_version"], "wire_schema_version": manifest["schema_version"],
+              "scope": {"owner": owner, "ecosystem": ecosystem, "environment": environment},
               "mode": "check" if checking else "proposal", "consumers": []}
     roots = set()
     for consumer in selected:
@@ -250,16 +258,15 @@ def propose(inventory: dict, manifest: dict, workspace: Path, owner: str,
         roots.add(root)
         head = checkout_identity(root, consumer)
         item = {"repository": consumer["repository"], "base": consumer["base"], "base_revision": head,
-                "changes": [], "current": True, "follow_up": []}
+                "changes": [], "current": True, "follow_up": [], "pin_record": None}
         for pin in consumer["installed"]["pins"]:
             if pin["name"] != manifest["packages"][pin["manager"]]["name"]:
                 raise ValueError("consumer dependency name differs from release package")
-            path = local_file(root, pin["file"])
-            content = path.read_bytes().decode("utf-8")
+            content = dependency_content(root, pin["file"], committed=True)
             wanted = pin_for(pin["manager"], pin["name"], manifest["source_revision"])
             updated, current = replace_pin(content, pin, wanted, checking)
             if checking and pin["manager"] == "npm":
-                current = current and check_npm_lock(root, pin, wanted, manifest["source_revision"])
+                current = current and check_npm_lock(root, pin, wanted, manifest["source_revision"], committed=True)
             item["current"] = item["current"] and current
             if updated != content:
                 item["changes"].append({
@@ -269,6 +276,9 @@ def propose(inventory: dict, manifest: dict, workspace: Path, owner: str,
                 item["follow_up"].append("Regenerate dependency locks with the consumer package manager; run compatibility CI; review PR. No activation/deployment authorization.")
         if checkout_identity(root, consumer) != head:
             raise ValueError("consumer changed while proposal was being read")
+        if checking and item["current"]:
+            item["pin_record"] = {"sourceSHA": manifest["source_revision"], "sdkVersion": manifest["sdk_version"],
+                                  "wireSchemaVersion": manifest["schema_version"], "consumerSHA": head}
         report["consumers"].append(item)
     return report
 

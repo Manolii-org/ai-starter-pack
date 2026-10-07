@@ -18,7 +18,9 @@ The canonical source is this repository. Root `package.json` is the npm Git
 bridge, not a consumer template. Python installs from
 `packages/feature-controls/python`. Both static package versions must match
 the SDK version. The selected committed contract schema must declare
-`properties.schema_version.const`. Contract source, package source and release
+`properties.schema_version.const` either at the root or in its versioned `$defs`.
+All versioned definitions must have the same constant value and type; unversioned
+helper definitions are allowed. Contract source, package source and release
 metadata must be merged into one reviewed integration commit **before** a
 consumer pins it. A worker branch is not a release.
 
@@ -38,7 +40,7 @@ From a clean canonical checkout on the intended full commit SHA:
 SHA=$(git rev-parse HEAD)
 python3 scripts/feature-controls-release.py prepare \
   --source-sha "$SHA" --version 0.1.0 --tag feature-controls-v0.1.0 \
-  --schema contracts/feature-controls/bundle.schema.json \
+  --schema contracts/feature-controls/schema.json \
   --output /path/outside-checkout/feature-controls-0.1.0 \
   --allow-untagged
 python3 scripts/feature-controls-release.py verify \
@@ -167,6 +169,17 @@ Check mode never applies an update. Python requirements provide the exact
 direct package pin; separately lock provider/transitive dependencies and retain
 the owning application's compatibility checks. Source-SHA pinning alone is not
 proof of a reproducible transitive environment.
+
+The report includes target `source_revision`, `sdk_version` and
+`wire_schema_version`. Only a successful per-consumer `check` emits `pin_record`
+with `sourceSHA`, `sdkVersion`, `wireSchemaVersion` and `consumerSHA`; the last
+is the observed clean consumer commit whose declarations (and npm lock) match
+the verified release. Read dependency files must also match their committed
+blobs: ignored/untracked files and hidden worktree edits fail closed.
+Proposals and failed checks emit `pin_record: null`:
+their base commit is not a future adopted consumer commit. This is dependency
+declaration evidence, not proof of an installed runtime, compatible provider,
+deployment or activation. The inventory input schema is unchanged.
 
 ## Renovate and future CI
 

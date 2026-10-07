@@ -107,6 +107,41 @@ def test_prepare_manifest_is_independent_of_pack_version(prepared):
     RELEASE.verify_source(root, manifest, True)
 
 
+def test_prepare_verifies_aggregate_wire_schema_definitions(source, tmp_path, monkeypatch):
+    root, _ = source
+    write(root, SCHEMA, json.dumps({"$defs": {
+        "scope": {"type": "object"},
+        "bundle": {"properties": {"schema_version": {"const": 1}}},
+        "kill": {"properties": {"schema_version": {"const": 1}}},
+    }}))
+    sha = commit(root)
+    monkeypatch.setattr(RELEASE, "build_artifacts", fake_build)
+    output = tmp_path / "release"
+    manifest = RELEASE.prepare(root, output, sha, "0.1.0", "feature-controls-v0.1.0", SCHEMA, True)
+    assert manifest["schema_version"] == "1"
+    assert RELEASE.verify_artifacts(output) == manifest
+    RELEASE.verify_source(root, manifest, True)
+
+
+@pytest.mark.parametrize("schema,error", [
+    ({}, TypeError),
+    ({"$defs": []}, TypeError),
+    ({"$defs": {"bundle": True}}, TypeError),
+    ({"properties": {"schema_version": {"const": True}}}, TypeError),
+    ({"properties": {"schema_version": {"enum": [1]}}}, TypeError),
+    ({"$defs": {
+        "bundle": {"properties": {"schema_version": {"const": 1}}},
+        "kill": {"properties": {"schema_version": {"const": 2}}},
+    }}, ValueError),
+    ({"properties": {"schema_version": {"const": 1}}, "$defs": {
+        "bundle": {"properties": {"schema_version": {"const": "1"}}},
+    }}, ValueError),
+])
+def test_wire_schema_identity_rejects_missing_malformed_or_mixed_versions(schema, error):
+    with pytest.raises(error):
+        RELEASE.schema_version(schema)
+
+
 @pytest.mark.parametrize("mutation,reason", [
     ("dirty", "dirty"), ("sha", "HEAD"), ("tag", "component"), ("version", "version"),
     ("origin", "canonical"), ("missing-tag", "absent"), ("lightweight-tag", "annotated"),
@@ -338,6 +373,8 @@ def test_proposals_are_read_only_scoped_and_preserve_unrelated_dependencies(cons
     before = {name: (root / name).read_bytes() for name in ("package.json", "requirements.txt")}
     report = UPGRADE.propose(inventory, manifest, workspace, "example-org", "example", "staging")
     item = report["consumers"][0]
+    assert report["wire_schema_version"] == manifest["schema_version"]
+    assert item["pin_record"] is None
     assert item["base"] == "main"
     assert item["base_revision"] == git(root, "rev-parse", "HEAD")
     assert len(item["changes"]) == 2
@@ -356,6 +393,7 @@ def test_proposals_are_read_only_scoped_and_preserve_unrelated_dependencies(cons
     ("missing-file", "absent"), ("wrong-name", "release package"),
     ("duplicate", "duplicate"), ("pin-drift", "pin drift"), ("short-sha", "full SHA"),
     ("mutable-pin", "canonical Git"), ("unknown-file", "package.json"), ("symlink", "escapes"),
+    ("ignored-file", "command failed"), ("assume-unchanged", "consumer commit"),
 ])
 def test_upgrade_boundaries_fail_closed(consumer, prepared, mutation, reason):
     workspace, root, inventory = consumer
@@ -394,6 +432,14 @@ def test_upgrade_boundaries_fail_closed(consumer, prepared, mutation, reason):
         entry["installed"]["pins"][0]["pin"] = "github:Manolii-org/ai-starter-pack#main"
     elif mutation == "unknown-file":
         entry["installed"]["pins"][0]["file"] = "flags.json"
+    elif mutation == "ignored-file":
+        entry["installed"]["pins"][0]["file"] = "ignored/package.json"
+        write(root, "ignored/package.json", (root / "package.json").read_text())
+        write(root, ".gitignore", "ignored/\n")
+        commit(root)
+    elif mutation == "assume-unchanged":
+        git(root, "update-index", "--assume-unchanged", "requirements.txt")
+        write(root, "requirements.txt", (root / "requirements.txt").read_text() + "another-lib==2.0.0\n")
     else:
         outside = workspace / "another-package.json"
         outside.write_bytes((root / "package.json").read_bytes())
@@ -407,7 +453,8 @@ def test_upgrade_boundaries_fail_closed(consumer, prepared, mutation, reason):
 def test_check_reports_drift_then_accepts_exact_installed_pins_and_lock(consumer, prepared):
     workspace, root, inventory = consumer
     _, _, manifest = prepared
-    assert not UPGRADE.propose(inventory, manifest, workspace, "example-org", "example", "staging", True)["consumers"][0]["current"]
+    item = UPGRADE.propose(inventory, manifest, workspace, "example-org", "example", "staging", True)["consumers"][0]
+    assert not item["current"] and item["pin_record"] is None
     pins = inventory["consumers"][0]["installed"]["pins"]
     for pin in pins:
         path = root / pin["file"]
@@ -419,10 +466,21 @@ def test_check_reports_drift_then_accepts_exact_installed_pins_and_lock(consumer
         "": {"dependencies": {NPM_NAME: wanted}}, "node_modules/" + NPM_NAME: {"resolved": wanted},
     }}))
     commit(root)
-    assert UPGRADE.propose(inventory, manifest, workspace, "example-org", "example", "staging", True)["consumers"][0]["current"]
+    item = UPGRADE.propose(inventory, manifest, workspace, "example-org", "example", "staging", True)["consumers"][0]
+    assert item["current"]
+    assert item["pin_record"] == {"sourceSHA": manifest["source_revision"], "sdkVersion": manifest["sdk_version"],
+                                  "wireSchemaVersion": manifest["schema_version"], "consumerSHA": git(root, "rev-parse", "HEAD")}
     write(root, "package-lock.json", json.dumps({"packages": {}}))
     commit(root)
-    assert not UPGRADE.propose(inventory, manifest, workspace, "example-org", "example", "staging", True)["consumers"][0]["current"]
+    item = UPGRADE.propose(inventory, manifest, workspace, "example-org", "example", "staging", True)["consumers"][0]
+    assert not item["current"] and item["pin_record"] is None
+    git(root, "update-index", "--assume-unchanged", "package-lock.json")
+    write(root, "package-lock.json", json.dumps({"lockfileVersion": 3, "packages": {
+        "": {"dependencies": {NPM_NAME: wanted}}, "node_modules/" + NPM_NAME: {"resolved": wanted},
+    }}))
+    assert git(root, "status", "--porcelain") == ""
+    with pytest.raises(ValueError, match="consumer commit"):
+        UPGRADE.propose(inventory, manifest, workspace, "example-org", "example", "staging", True)
 
 
 def test_json_duplicate_keys_are_rejected():
@@ -504,7 +562,7 @@ def test_copier_excludes_runtime_sources_and_does_not_overwrite_consumer_depende
     destination.mkdir()
     shutil.copyfile(ROOT / "copier.yml", template / "copier.yml")
     excluded = [
-        "package.json", "package-lock.json", ".npmignore", "tsconfig.json",
+        "package.json", "package-lock.json", ".npmignore", "eslint.config.mjs", "tsconfig.json",
         "packages/feature-controls/typescript/package.json", "contracts/feature-controls/bundle.schema.json",
         "contracts/feature-controls-bundle.schema.json",
         "scripts/feature-controls-release.py", "scripts/feature-controls-upgrade.py",
@@ -515,6 +573,8 @@ def test_copier_excludes_runtime_sources_and_does_not_overwrite_consumer_depende
         write(template, relative, "must not ship")
     write(template, "docs/feature-controls-distribution.md", "operator documentation")
     write(template, ".claude/skills/example/harness/package.json", '{"name":"agent-harness"}')
+    write(template, ".claude/skills/example/harness/eslint.config.mjs", "nested eslint config")
+    write(template, ".claude/skills/example/harness/tsconfig.json", '{"compilerOptions":{}}')
     before = {"package.json": '{"name":"consumer","dependencies":{"existing-lib":"1.0.0"}}\n',
               "package-lock.json": '{"lockfileVersion":3}\n'}
     for relative, content in before.items():
@@ -524,10 +584,13 @@ def test_copier_excludes_runtime_sources_and_does_not_overwrite_consumer_depende
     assert result.returncode == 0, result.stderr
     assert (destination / "docs/feature-controls-distribution.md").read_text() == "operator documentation"
     assert (destination / ".claude/skills/example/harness/package.json").read_text() == '{"name":"agent-harness"}'
+    assert (destination / ".claude/skills/example/harness/eslint.config.mjs").read_text() == "nested eslint config"
+    assert (destination / ".claude/skills/example/harness/tsconfig.json").read_text() == '{"compilerOptions":{}}'
     for relative in excluded:
         if relative in before:
             assert (destination / relative).read_text() == before[relative]
         else:
             assert not (destination / relative).exists()
-    assert {"/package.json", "/package-lock.json", "scripts/feature-controls-release.py"} <= set(
+    assert {"/package.json", "/package-lock.json", "/eslint.config.mjs", "/tsconfig.json",
+            "scripts/feature-controls-release.py"} <= set(
         yaml.safe_load((ROOT / "copier.yml").read_text())["_exclude"])

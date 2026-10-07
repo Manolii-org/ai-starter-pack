@@ -72,12 +72,25 @@ def python_version(version: str) -> str:
 
 
 def schema_version(schema: dict) -> str:
-    properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
-    version = properties.get("schema_version", {}) if isinstance(properties, dict) else {}
-    value = version.get("const") if isinstance(version, dict) else None
-    if not isinstance(value, (str, int)) or isinstance(value, bool):
+    if not isinstance(schema, dict) or not isinstance(schema.get("$defs", {}), dict):
+        raise TypeError("contract and $defs must be objects")
+    versions = set()
+    for definition in [schema, *schema.get("$defs", {}).values()]:
+        if not isinstance(definition, dict) or not isinstance(definition.get("properties", {}), dict):
+            raise TypeError("contract definitions and properties must be objects")
+        properties = definition.get("properties", {})
+        if "schema_version" not in properties:
+            continue
+        version = properties["schema_version"]
+        value = version.get("const") if isinstance(version, dict) else None
+        if not isinstance(value, (str, int)) or isinstance(value, bool):
+            raise TypeError("contract requires properties.schema_version.const")
+        versions.add((type(value).__name__, value))
+    if not versions:
         raise TypeError("contract requires properties.schema_version.const")
-    return str(value)
+    if len(versions) != 1:
+        raise ValueError("contract has inconsistent wire schema versions")
+    return str(next(iter(versions))[1])
 
 
 def repository_slug(remote: str) -> str:
