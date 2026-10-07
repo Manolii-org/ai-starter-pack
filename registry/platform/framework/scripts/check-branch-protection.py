@@ -60,6 +60,35 @@ PUT_BOOL_KEYS = ("required_linear_history", "allow_force_pushes",
                  "lock_branch", "allow_fork_syncing")
 
 
+def check_identities(entries: list, provider_key: str) -> list[tuple[str, int | None]]:
+    """Keep provider bindings; null, -1 and malformed IDs are unbound."""
+    identities = []
+    if not isinstance(entries, list):
+        return identities
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("context"), str):
+            continue
+        provider = entry.get(provider_key)
+        if type(provider) is not int or provider <= 0:
+            provider = None
+        identities.append((entry["context"], provider))
+    return identities
+
+
+def current_checks(protection: dict) -> list[tuple[str, int | None]]:
+    """Effective legacy/ruleset identities without upgrading context-only data."""
+    rsc = protection.get("required_status_checks") or {}
+    if not isinstance(rsc, dict):
+        rsc = {}
+    checks = check_identities(rsc.get("checks") or [], "app_id")
+    checks += [(context, None) for context in legacy_contexts(protection)
+               if context not in {name for name, _ in checks}]
+    checks += check_identities(protection.get("_ruleset_checks") or [], "integration_id")
+    checks += [(context, None) for context in protection.get("_ruleset_contexts") or []
+               if isinstance(context, str) and context not in {name for name, _ in checks}]
+    return list(dict.fromkeys(checks))
+
+
 def legacy_contexts(protection: dict) -> list[str]:
     """Required check-run names from a legacy GET protection response only,
     tolerating both API shapes (`checks[].context` and `contexts[]`).
@@ -82,29 +111,30 @@ def current_contexts(protection: dict) -> list[str]:
     checks. A check satisfied only by a ruleset still counts as enforced —
     but fix_body must not copy it into a legacy PUT, so the two sources
     stay distinguishable via `_ruleset_contexts`."""
-    seen = legacy_contexts(protection)
-    for c in protection.get("_ruleset_contexts") or []:
-        if c not in seen:
-            seen.append(c)
-    return seen
+    return list(dict.fromkeys(context for context, _ in current_checks(protection)))
 
 
-def _ruleset_contexts(repo: str, ref: str) -> tuple[list[str], bool, str | None]:
-    """(contexts, ruleset_present, error) from repos/{repo}/rules/branches/{ref}.
+def _ruleset_checks(repo: str, ref: str) -> tuple[list[dict], bool, str | None]:
+    """(checks, ruleset_present, error) from repos/{repo}/rules/branches/{ref}.
     ruleset_present=True when the branch is governed by ANY ruleset — even one
     without a required-status-checks rule — since fix payloads need the
     'edit the ruleset, not legacy protection' caveat either way."""
     rules, rerr = _gh_json(f"repos/{repo}/rules/branches/{ref}?per_page=100")
     if rerr and rerr != "404":
         return [], False, rerr
-    ctxs: list[str] = []
+    if rules is not None and not isinstance(rules, list):
+        return [], False, "invalid branch rules response"
+    checks: list[dict] = []
     present = isinstance(rules, list) and bool(rules)
     for rule in rules or []:
+        if not isinstance(rule, dict):
+            return [], False, "invalid branch rule"
         if rule.get("type") == "required_status_checks":
             params = rule.get("parameters") or {}
-            ctxs += [c["context"] for c in params.get("required_status_checks") or []
-                     if isinstance(c, dict) and c.get("context")]
-    return ctxs, present, None
+            checks += [{"context": context, "integration_id": provider}
+                       for context, provider in check_identities(
+                           params.get("required_status_checks") or [], "integration_id")]
+    return checks, present, None
 
 
 def _gh_json(endpoint: str, timeout: int = 30) -> tuple[list | dict | None, str | None]:
@@ -112,20 +142,20 @@ def _gh_json(endpoint: str, timeout: int = 30) -> tuple[list | dict | None, str 
     (None, <err>) otherwise."""
     try:
         out = subprocess.run(["gh", "api", endpoint],
-                             capture_output=True, text=True, timeout=timeout)
+                             capture_output=True, text=True, timeout=timeout, check=False)
     except subprocess.TimeoutExpired:
         return None, f"gh api timed out ({timeout}s)"
     except OSError as exc:
-        return None, f"gh not runnable: {exc}"
+        return None, f"gh not runnable ({type(exc).__name__})"
     if out.returncode != 0:
         err = out.stderr.strip()[:160]
-        if "404" in err or "Not Found" in err:
+        if re.search(r"HTTP\s+404\b", err):
             return None, "404"
-        return None, err or f"exit {out.returncode}"
+        return None, f"gh api failed (exit {out.returncode})"
     try:
         return json.loads(out.stdout), None
-    except ValueError as exc:
-        return None, f"undecodable JSON: {exc}"
+    except ValueError:
+        return None, "undecodable JSON response"
 
 
 def fixture_name(repo: str, branch: str) -> str:
@@ -165,9 +195,11 @@ def fetch_protection(repo: str, branch: str,
         return None, f"gh api protection read failed for {repo}@{branch}: {err}"
     # Legacy protection and rulesets can coexist — always check both, so a
     # check enforced only by a ruleset isn't falsely reported missing.
-    rctx, rpresent, rerr = _ruleset_contexts(repo, ref)
+    rchecks, rpresent, rerr = _ruleset_checks(repo, ref)
+    rctx = list(dict.fromkeys(c["context"] for c in rchecks))
     if err is None and isinstance(body, dict):
         body["_ruleset_contexts"] = rctx
+        body["_ruleset_checks"] = rchecks
         if rpresent:
             body["_ruleset_managed"] = True
         if rerr:  # ruleset read failed but legacy exists — warn, don't fail
@@ -183,7 +215,8 @@ def fetch_protection(repo: str, branch: str,
         return {"required_status_checks": {"strict": False,
                 "checks": []},
                 "_ruleset_managed": True,
-                "_ruleset_contexts": rctx}, None
+                "_ruleset_contexts": rctx,
+                "_ruleset_checks": rchecks}, None
     exists, eerr = _gh_json(f"repos/{repo}/branches/{ref}")
     if eerr == "404" or (eerr is None and exists is None):
         # GitHub also 404s branches on repos the token cannot see — confirm
@@ -226,32 +259,37 @@ def _name_list(node) -> dict | None:
     }
 
 
-def fix_body(protection: dict | None, required: list[str]) -> dict:
+def fix_body(protection: dict | None, required: list[str],
+             required_app_id: int | None = None, required_approvals: int = 1) -> dict:
     """Build a complete PUT /protection body: existing settings preserved,
     required_status_checks.checks merged with the missing contexts appended.
 
-    protection=None (unprotected branch) yields a baseline body — 1 required
-    approval + conversation resolution + enforce_admins, never a bare checks-
-    only PUT that would leave merges review-free. The caller still warns the
-    human to review the payload before applying it."""
+    New protection defaults to one approval; callers can explicitly declare
+    checks-only integration branches. Existing review controls are preserved.
+    Provider-only drift must be handled at its original source, not via PUT."""
     body: dict = {}
     if protection:
         existing = (protection.get("required_status_checks") or {}).get("checks") or []
-        app_ids = {e.get("context"): e.get("app_id")
-                   for e in existing if isinstance(e, dict)}
         # Base the PUT on LEGACY contexts only — ruleset-enforced contexts
         # counted toward the audit union must not be copied into legacy
         # protection (they belong to the ruleset). `required` here is the
         # contract list; append only what's absent from the union.
         union = set(current_contexts(protection))
         checks = []
-        for c in legacy_contexts(protection):
+        entries = [e for e in existing if isinstance(e, dict)
+                   and isinstance(e.get("context"), str)]
+        entries += [{"context": c} for c in legacy_contexts(protection)
+                    if c not in {e["context"] for e in entries}]
+        for existing_check in entries:
+            c = existing_check["context"]
             entry: dict = {"context": c}
-            aid = app_ids.get(c)
-            if isinstance(aid, int):  # GET may omit app_id — a null one 422s
+            aid = existing_check.get("app_id")
+            if type(aid) is int:  # GET may omit app_id — a null one 422s
                 entry["app_id"] = aid
             checks.append(entry)
-        checks += [{"context": c} for c in required if c not in union]
+        checks += [{"context": c, **({"app_id": required_app_id}
+                                    if required_app_id is not None else {})}
+                   for c in required if c not in union]
         rsc = protection.get("required_status_checks") or {}
         body["required_status_checks"] = {
             "strict": bool(rsc.get("strict")), "checks": checks}
@@ -274,11 +312,13 @@ def fix_body(protection: dict | None, required: list[str]) -> dict:
         body = {
             "required_status_checks": {
                 "strict": False,
-                "checks": [{"context": c} for c in required],
+                "checks": [{"context": c, **({"app_id": required_app_id}
+                                            if required_app_id is not None else {})}
+                           for c in required],
             },
             "enforce_admins": True,
             "required_pull_request_reviews": {
-                "required_approving_review_count": 1,
+                "required_approving_review_count": required_approvals,
                 "dismiss_stale_reviews": True,
                 "require_code_owner_reviews": False,
                 "require_last_push_approval": False,
@@ -320,11 +360,19 @@ def main() -> int:
                     help="append a markdown report here (e.g. $GITHUB_STEP_SUMMARY)")
     ap.add_argument("--warn-only", action="store_true",
                     help="findings print as warnings; exit 0 regardless")
+    ap.add_argument("--required-app-id", type=int, default=None,
+                    help="require this provider binding as well as context names; "
+                         "GitHub Actions uses 15368")
+    ap.add_argument("--integration-branches", nargs="*", default=[],
+                    help="checks-only branches: emitted NEW protection uses zero "
+                         "approvals; existing review controls are always preserved")
     ap.add_argument("--fixtures", type=Path, default=None,
                     help="offline mode: read <owner>__<repo>__<sanitized-branch>-"
                          "<sha1[:8]>.json|.404 fixtures (the exact stem is "
                          "fixture_name(repo, branch)) instead of gh api")
     args = ap.parse_args()
+    if args.required_app_id is not None and args.required_app_id <= 0:
+        ap.error("--required-app-id must be positive")
 
     doc = load_contract(args.contract)
     findings: list[str] = []
@@ -362,9 +410,10 @@ def main() -> int:
                         slug = fixture_name(repo, branch)
                         fixes.append({"repo": repo, "branch": branch,
                                       "file": f"{slug}.json",
-                                      "body": fix_body(None, []),
-                                      "warnings": ["contract declares NO required checks — "
-                                                   "payload enables basic protection only"]})
+                                      "body": fix_body(None, [], required_approvals=(
+                                          0 if branch in args.integration_branches else 1)),
+                                      "warnings": [("contract declares NO required checks — "
+                                                    "payload enables basic protection only")]})
                 else:
                     # Surplus check applies here too — a stale required context
                     # on a 'no checks declared' lane blocks merges silently.
@@ -391,6 +440,10 @@ def main() -> int:
                 warnings.append(f"{where}: ruleset read failed: {rerr}")
             present = current_contexts(protection) if protection else []
             missing = [c for c in required if c not in present]
+            if args.required_app_id is not None:
+                identities = current_checks(protection) if protection else []
+                missing = [c for c in required
+                           if (c, args.required_app_id) not in identities]
             # Surplus live contexts (required by protection but undeclared in
             # the contract) escape a one-sided diff — a stale check CI never
             # emits can block merges forever. Flagged as a warning, not a
@@ -412,13 +465,18 @@ def main() -> int:
             findings.append(f"{where}: {why}: {', '.join(missing)}")
             report.append(f"| {repo} | {branch} | ❌ {why}: `{', '.join(missing)}` |")
             if args.emit_fixes:
+                binding_drift = [c for c in missing if c in present]
+                if binding_drift:
+                    warnings.append(f"{where}: provider binding drift; no legacy PUT "
+                                    "emitted — review the original protection/ruleset")
+                    continue
                 slug = fixture_name(repo, branch)
-                body = fix_body(protection, required)
+                body = fix_body(protection, required, args.required_app_id,
+                                0 if branch in args.integration_branches else 1)
                 warns = [] if protection else [
-                    "branch had no protection — payload sets the baseline: "
-                    "required_status_checks + enforce_admins + 1 required "
-                    "approval + stale-review dismissal + conversation "
-                    "resolution; review signatures/restrictions before applying"]
+                    ("branch had no protection — payload sets the baseline: "
+                     f"required checks + enforce_admins + {body['required_pull_request_reviews']['required_approving_review_count']} approvals "
+                     "+ conversation resolution; review signatures/restrictions before applying")]
                 if protection and (protection.get("required_signatures") or {}).get("enabled"):
                     warns.append("GET showed required_signatures enabled — PUT cannot "
                                  "carry it (separate endpoint); verify signing is still "
@@ -452,9 +510,9 @@ def main() -> int:
                       "```sh",
                       # URI-encode the branch (reads already do); the endpoint
                       # is single-quoted so metachars in branch names stay inert.
-                      f"gh api -X PUT 'repos/{f['repo']}/branches/"
+                      (f"gh api -X PUT 'repos/{f['repo']}/branches/"
                       f"{urllib.parse.quote(f['branch'], safe='')}/protection' "
-                      f"--input '{f['file']}'",
+                      f"--input '{f['file']}'"),
                       "```", ""]
             for w in f["warnings"]:
                 lines.append(f"> ⚠️ {w}\n")
