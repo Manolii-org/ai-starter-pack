@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { Ajv } from "ajv";
 import schema from "../../../contracts/feature-controls/schema.json" with { type: "json" };
-import type { Catalog, Feature, ReleaseBundle, Scope } from "./types.js";
+import type { Catalog, Feature, Json, ReleaseBundle, Scope } from "./types.js";
 const ajv = new Ajv({ strict: true, ownProperties: true });
 ajv.addSchema(schema);
 const validators = new Map<string, ReturnType<typeof ajv.compile>>();
@@ -16,7 +16,7 @@ export function ascii(value: unknown): asserts value is string {
 export function sameScope(a: Scope, b: Scope): boolean {
   return a.namespace === b.namespace && a.application === b.application && a.environment === b.environment;
 }
-export function matches(value: unknown, feature: Feature): boolean {
+export function matches(value: unknown, feature: Feature): value is Json {
   if (feature.value_type === "json") return value !== undefined && validJson(value);
   return typeof value === feature.value_type && (typeof value !== "number" || Number.isFinite(value));
 }
@@ -69,7 +69,11 @@ export function payloadOf(bundle: ReleaseBundle, catalog: Catalog): Record<strin
             !Array.isArray(rule.weights) || rule.weights.length !== rule.variations.length ||
             !rule.weights.every(w => typeof w === "number" && Number.isFinite(w) && w >= 0 && w <= 1) ||
             Math.abs(rule.weights.reduce((a: number, b: number) => a + b, 0) - 1) > 1e-9) throw new Error("invalid experiment");
-        const keys = rule.meta.map(m => { if (!m || typeof m !== "object" || Object.keys(m).length !== 1) throw new Error("invalid metadata"); ascii(m?.key); return m.key as string; });
+        const keys = rule.meta.map((m: unknown) => {
+          if (!m || typeof m !== "object" || Object.keys(m).length !== 1) throw new Error("invalid metadata");
+          const key = (m as Record<string, unknown>).key;
+          ascii(key); return key;
+        });
         if (new Set(keys).size !== keys.length || rule.disableStickyBucketing === true) throw new Error("invalid variation metadata");
       }
       if (rule.coverage !== undefined && (typeof rule.coverage !== "number" || !Number.isFinite(rule.coverage) || rule.coverage < 0 || rule.coverage > 1 || rule.hashVersion !== 2 || rule.seed === undefined)) throw new Error("invalid coverage");

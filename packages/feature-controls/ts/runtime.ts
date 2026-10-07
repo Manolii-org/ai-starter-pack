@@ -61,8 +61,9 @@ export class FeatureRuntime extends Lifecycle {
         result = await this.provider(payload, key, context.assignment_key, feature, assignment);
         if (!result.experimentResult?.stickyBucketUsed || result.experimentResult.key !== assignment.variant) return fail("assignment_conflict");
       }
-      if (!matches(result.value, feature)) return fail("invalid_value");
-      const decision: Decision = { ...base, value: result.value, status: "resolved",
+      const value: unknown = result.value;
+      if (!matches(value, feature)) return fail("invalid_value");
+      const decision: Decision = { ...base, value, status: "resolved",
         reason: options.preview ? "preview" : result.experimentResult?.inExperiment ? "experiment" : "released" };
       if (assignment && result.experimentResult?.inExperiment && !options.preview) {
         decision.assignment = assignment; decision.allocation_epoch = feature.experiment!.epoch;
@@ -92,7 +93,7 @@ export class FeatureRuntime extends Lifecycle {
   async snapshot(keys: string[], surface: string, context: Context, options: EvaluationOptions = {}): Promise<Snapshot> {
     if (keys.length > 1000) throw new Error("snapshot too large");
     const now = options.now ?? Date.now();
-    const decisions: Snapshot["decisions"] = Object.create(null);
+    const decisions = Object.create(null) as Snapshot["decisions"];
     let expires = Math.min(context.expires_at, now + 60000);
     for (const key of keys) {
       const d = await this.evaluate(key, surface, context, { ...options, now });

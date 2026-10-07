@@ -50,4 +50,4 @@ packages/feature-controls/python/.venv/bin/pip install -e packages/feature-contr
 packages/feature-controls/python/.venv/bin/python -m pytest -q tests/feature_controls/provider_conformance.py
 ```
 
-The Python SDK suite is invoked explicitly after its isolated dependency installation, rather than collected by dependency-light pack-only pytest. Existing generic root npm CI expects root ESLint and TypeScript configuration; those files are outside this core's write scope and remain integration blockers, not passed gates. Adapters normalize availability failures to `RuntimeError` or `OSError`; other unexpected exceptions propagate rather than being silently swallowed.
+The Python SDK suite is invoked explicitly after its isolated dependency installation, rather than collected by dependency-light pack-only pytest. Root TypeScript configuration extends the strict SDK compiler configuration; root ESLint applies type-aware rules to the SDK source. Adapters normalize availability failures to `RuntimeError` or `OSError`; other unexpected exceptions propagate rather than being silently swallowed.
