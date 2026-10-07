@@ -1,10 +1,24 @@
-from copy import deepcopy
 import uuid
+from copy import deepcopy
 from typing import Any
+
 from growthbook import GrowthBook, InMemoryStickyBucketService
+
 from .lifecycle import Lifecycle, clock
-from .types import Assignment, AssignmentKey, AssignmentStore, Catalog, Context, Decision, Event, EventSink, Feature, Snapshot
+from .types import (
+    Assignment,
+    AssignmentKey,
+    AssignmentStore,
+    Catalog,
+    Context,
+    Decision,
+    Event,
+    EventSink,
+    Feature,
+    Snapshot,
+)
 from .validation import ascii_id, matches, payload_of, validate
+
 
 class FeatureRuntime(Lifecycle):
     def __init__(self, catalog: Catalog, *, assignments: AssignmentStore | None = None,
@@ -37,7 +51,7 @@ class FeatureRuntime(Lifecycle):
             return fail("surface_ineligible")
         try:
             state = self._state()
-        except Exception:
+        except (ValueError, TypeError, KeyError, RuntimeError, OSError):
             return fail("controls_unavailable")
         kill = state["kill"]
         if kill:
@@ -99,7 +113,7 @@ class FeatureRuntime(Lifecycle):
                     return fail("decision_capacity")
                 self._issued[decision["decision_id"]] = deepcopy(decision)
             return decision
-        except Exception:
+        except (ValueError, TypeError, KeyError, RuntimeError, OSError):
             return fail("provider_or_assignment_unavailable")
 
     def _excluded(self, key: str, excluded: set[str]) -> bool:

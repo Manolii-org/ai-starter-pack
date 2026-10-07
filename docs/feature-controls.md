@@ -47,5 +47,7 @@ Run the verified local profiles:
 npm ci --ignore-scripts && npm test && npm run typecheck
 python -m venv packages/feature-controls/python/.venv
 packages/feature-controls/python/.venv/bin/pip install -e packages/feature-controls/python pytest==8.3.5
-packages/feature-controls/python/.venv/bin/python -m pytest -q tests/feature_controls/test_core.py
+packages/feature-controls/python/.venv/bin/python -m pytest -q tests/feature_controls/provider_conformance.py
 ```
+
+The Python SDK suite is invoked explicitly after its isolated dependency installation, rather than collected by dependency-light pack-only pytest. Existing generic root npm CI expects root ESLint and TypeScript configuration; those files are outside this core's write scope and remain integration blockers, not passed gates. Adapters normalize availability failures to `RuntimeError` or `OSError`; other unexpected exceptions propagate rather than being silently swallowed.

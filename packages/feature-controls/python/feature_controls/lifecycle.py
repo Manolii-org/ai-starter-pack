@@ -1,8 +1,17 @@
-from copy import deepcopy
 import json
 import time
-from .types import ApprovalVerifier, Catalog, ControlState, DurableControlStore, KillState, ReleaseBundle
+from copy import deepcopy
+
+from .types import (
+    ApprovalVerifier,
+    Catalog,
+    ControlState,
+    DurableControlStore,
+    KillState,
+    ReleaseBundle,
+)
 from .validation import approval_message, payload_of, validate, validate_catalog
+
 
 def clock(now: int | None) -> int:
     value = int(time.time() * 1000) if now is None else now

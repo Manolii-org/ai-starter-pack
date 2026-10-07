@@ -1,11 +1,12 @@
-from copy import deepcopy
 import hashlib
 import json
-from pathlib import Path
 import socket
 import subprocess
+from copy import deepcopy
+from pathlib import Path
+
 import pytest
-from feature_controls import FeatureRuntime, PROVIDER_SEMANTICS, approval_message
+from feature_controls import PROVIDER_SEMANTICS, FeatureRuntime, approval_message
 
 ROOT = Path(__file__).resolve().parents[2]
 GOLDEN = json.loads(Path(__file__).with_name("golden.json").read_text())

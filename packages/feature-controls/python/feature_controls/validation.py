@@ -4,7 +4,9 @@ import math
 import re
 from importlib.resources import files
 from typing import Any
+
 from jsonschema import Draft7Validator
+
 from .types import Catalog, Feature, ReleaseBundle
 
 _SCHEMA = json.loads(files(__package__).joinpath("schema.json").read_text())
