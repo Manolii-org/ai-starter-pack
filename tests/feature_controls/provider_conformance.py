@@ -6,11 +6,55 @@ from copy import deepcopy
 from pathlib import Path
 
 import pytest
-from feature_controls import PROVIDER_SEMANTICS, FeatureRuntime, approval_message
+from feature_controls import (
+    PROVIDER_SEMANTICS,
+    FeatureRuntime,
+    approval_message,
+    kill_message,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 GOLDEN = json.loads(Path(__file__).with_name("golden.json").read_text())
 NOW = GOLDEN["now"]
+
+def test_scope_context_surface_and_projection_fences():
+    r = setup(assignments=Assignments())
+    for field in GOLDEN["scope"]:
+        ctx = deepcopy(GOLDEN["context"])
+        ctx["scope"][field] = "other"
+        d = r.evaluate("release", "web", ctx, now=NOW)
+        assert d["status"] == "denied" and d["value"] is False
+    ctx = {**GOLDEN["context"], "surface_id": "mobile"}
+    assert r.evaluate("release", "web", ctx, now=NOW)["status"] == "denied"
+
+def test_disabled_boolean_baseline_cannot_reenable_client_control():
+    catalog = deepcopy(GOLDEN["catalog"])
+    catalog["features"]["release"]["baseline"] = True
+    catalog["features"]["release"]["disabled_value"] = True
+    with pytest.raises(ValueError):
+        FeatureRuntime(catalog, trust_policy="local-test")
+    catalog["features"]["release"]["disabled_value"] = False
+    r = FeatureRuntime(catalog, trust_policy="local-test")
+    r.activate(bundle(), 0, NOW)
+    r.update_kills(kill(disabled=["release"]), "local-fixture", NOW)
+    d = r.snapshot(["release"], "web", GOLDEN["context"], now=NOW)["decisions"]["release"]
+    assert d["status"] == "denied" and d["value"] is False
+
+def test_native_nested_group_targeting_and_ancestor_exclusion():
+    payload = deepcopy(GOLDEN["payload"])
+    payload["features"]["release"]["rules"][0]["condition"] = {"groups": {"$in": ["root"]}, "roles": {"$in": ["reader"]}, "tenant": {"$eq": "demo-tenant"}}
+    r = setup()
+    r.activate(bundle(payload, 2), 1, NOW)
+    ctx = {**GOLDEN["context"], "groups": ["leaf"], "roles": ["reader"], "group_ancestors": {"leaf": ["branch"], "branch": ["root"], "root": []}}
+    assert r.evaluate("release", "web", ctx, now=NOW)["value"] is True
+    assert r.evaluate("release", "web", {**ctx, "excluded_groups": ["root"]}, now=NOW)["value"] is False
+
+def test_value_schema_and_allowed_values_reject_invalid_baselines():
+    catalog = deepcopy(GOLDEN["catalog"])
+    feature = catalog["features"]["child"]
+    feature["allowed_values"] = ["enabled", "disabled"]
+    with pytest.raises(ValueError):
+        FeatureRuntime(catalog, trust_policy="local-test")
 
 def bundle(payload=None, revision=1, scope=None):
     raw = json.dumps(GOLDEN["payload"] if payload is None else payload, separators=(",", ":"), ensure_ascii=False)
@@ -38,6 +82,7 @@ class Assignments:
 
 class Events:
     durable = True
+    test_only = True
     def __init__(self):
         self.values = {}
     def append_if_absent(self, event):
@@ -53,7 +98,7 @@ class Controls:
     def __init__(self):
         self.values, self.writes = {}, 0
     def read(self, scope):
-        return deepcopy(self.values.get(json.dumps(scope, sort_keys=True), {"bundle": None, "kill": None}))
+        return deepcopy(self.values.get(json.dumps(scope, sort_keys=True), {"bundle": None, "kill": None, "time_highwater": 0}))
     def compare_and_swap(self, scope, expected, next_state):
         if self.read(scope) != expected:
             return False
@@ -68,11 +113,11 @@ def setup(**options):
     return r
 
 def event_for(d, kind="exposure", event_id="event-1"):
-    return {"schema_version": 1, "scope": d["scope"], "event_id": event_id, "kind": kind,
+    return {"schema_version": 1, "scope": d["scope"], "application_id": d["application_id"], "surface_id": d["surface_id"], "context_scope": d["context_scope"], "event_id": event_id, "kind": kind,
             "decision_id": d["decision_id"], "feature_key": d["feature_key"],
             "assignment_id": d["assignment"]["assignment_id"], "configuration_revision": d["configuration_revision"],
             "allocation_epoch": d["allocation_epoch"], "variant": d["assignment"]["variant"], "timestamp": NOW,
-            "evidence": {"source": "render" if kind == "exposure" else "business-transition", "unit_key": "render-unit"}}
+            "evidence": {"source": "render" if kind == "exposure" else "business-transition", "unit_key": d["unit_key"], **({"transition_key": event_id} if kind == "outcome" else {})}}
 
 @pytest.fixture(autouse=True)
 def offline(monkeypatch):
@@ -82,8 +127,8 @@ def offline(monkeypatch):
 
 @pytest.mark.parametrize("case", GOLDEN["cases"])
 def test_shared_golden(case):
-    context = {**GOLDEN["context"], **{k: case[k] for k in ("excluded", "eligible", "authorized") if k in case}}
-    d = setup().evaluate(case["key"], case["surface"], context, now=NOW)
+    context = {**GOLDEN["context"], "surface_id": case["surface_id"], **{k: case[k] for k in ("excluded", "eligible", "authorized") if k in case}}
+    d = setup().evaluate(case["key"], case["surface_id"], context, now=NOW)
     assert d["value"] == case["expected_value"]
     assert d["reason"] == case["expected_reason"]
 
@@ -134,11 +179,11 @@ def test_independent_kills_scopes_expiry_and_local_disable():
     r.activate(bundle(revision=2), 1, NOW)
     assert r.evaluate("child", "web", GOLDEN["context"], now=NOW)["reason"] == "disabled_or_excluded"
     with pytest.raises(ValueError): r.update_kills(kill(1), "local-fixture", NOW)
-    scope = {**GOLDEN["scope"], "application": "other"}
+    scope = {**GOLDEN["scope"], "environment_id": "other"}
     second = FeatureRuntime({**GOLDEN["catalog"], "scope": scope}, controls=controls, trust_policy="local-test")
     second.activate(bundle(scope=scope), 0, NOW)
     second.update_kills(kill(scope=scope), "local-fixture", NOW)
-    assert second.evaluate("child", "web", GOLDEN["context"], now=NOW)["value"] == "enabled"
+    assert second.evaluate("child", "web", {**GOLDEN["context"], "scope": scope}, now=NOW)["value"] == "enabled"
     r = setup(local_disabled=["release"])
     assert r.evaluate("child", "web", GOLDEN["context"], now=NOW)["status"] == "denied"
     r = setup()
@@ -176,9 +221,9 @@ def test_preview_sticky_and_separate_event_idempotence():
 
 def test_wire_projection_and_schema_copy():
     snapshot = setup().snapshot(["release", "missing"], "web", GOLDEN["context"], now=NOW)
-    assert set(snapshot) == {"schema_version", "application", "environment", "surface", "generated_at", "expires_at", "decisions"}
+    assert set(snapshot) == {*GOLDEN["scope"], "application_id", "context_scope", "configuration_revision", "kill_generation", "time_highwater", "schema_version", "surface_id", "generated_at", "expires_at", "decisions"}
     for d in snapshot["decisions"].values():
-        assert set(d) == {"value", "reason", "expires_at", "configuration_revision", "kill_generation"}
+        assert set(d) == {"value", "reason", "status", "expires_at", "configuration_revision", "kill_generation"}
     assert (ROOT / "contracts/feature-controls/schema.json").read_bytes() == (ROOT / "packages/feature-controls/python/feature_controls/schema.json").read_bytes()
 
 def test_ascii_cross_language_parity_1000_and_approval_bytes():
@@ -191,3 +236,213 @@ def test_ascii_cross_language_parity_1000_and_approval_bytes():
         actual.append({"value": d["value"], "reason": d["reason"], "configuration_revision": d["configuration_revision"], "kill_generation": d["kill_generation"]})
     assert actual == expected["decisions"]
     assert approval_message(bundle()).decode() == expected["approval_bytes"]
+
+HARDENING = json.loads(Path(__file__).with_name("hardening.json").read_text())
+
+def custom(catalog, **options):
+    r = FeatureRuntime(catalog, trust_policy="local-test", **options)
+    r.activate(bundle(), 0, NOW)
+    r.update_kills(kill(), "local-fixture", NOW)
+    return r
+
+def test_catalog_public_view_and_original_are_defensive():
+    c = deepcopy(GOLDEN["catalog"])
+    r = custom(c)
+    c["features"]["child"]["ancestors"] = []
+    r.catalog["features"]["child"]["ancestors"] = []
+    r.update_kills(kill(2, ["release"]), "local-fixture", NOW)
+    assert r.evaluate("child", "web", GOLDEN["context"], now=NOW)["status"] == "denied"
+
+def test_time_floor_blocks_expiry_resurrection_after_restart():
+    controls = Controls()
+    r = setup(controls=controls)
+    r.update_kills(kill(2, expires_at=NOW + 10), "local-fixture", NOW)
+    assert r.evaluate("release", "web", GOLDEN["context"], now=NOW + 10)["status"] == "denied"
+    restarted = FeatureRuntime(GOLDEN["catalog"], controls=controls, trust_policy="local-test")
+    for runtime in (r, restarted):
+        assert runtime.evaluate("release", "web", GOLDEN["context"], now=NOW + 1)["reason"] == "controls_unavailable"
+    assert controls.read(GOLDEN["scope"])["time_highwater"] == NOW + 10
+    with pytest.raises(ValueError): r.activate(bundle(revision=2), 1, NOW + 1)
+
+def test_snapshot_uses_one_atomic_state_and_cap():
+    controls = Controls()
+    r = setup(controls=controls)
+    first = controls.read(GOLDEN["scope"])
+    second = {**deepcopy(first), "bundle": bundle(revision=2), "kill": kill(2, ["release"])}
+    reads = []
+    def read(scope):
+        reads.append(scope)
+        return deepcopy(first if len(reads) == 1 else second)
+    controls.read = read
+    s = r.snapshot(["release", "child"], "web", GOLDEN["context"], now=NOW)
+    assert len(reads) == 1 and s["configuration_revision"] == s["kill_generation"] == 1
+    assert all(d["status"] == "resolved" and d["configuration_revision"] == d["kill_generation"] == 1 for d in s["decisions"].values())
+    assert r.evaluate("child", "web", GOLDEN["context"], now=NOW)["status"] == "denied"
+    with pytest.raises(ValueError): r.snapshot(["release"] * 65, "web", GOLDEN["context"], now=NOW)
+
+def test_context_is_captured_before_adapter_mutation():
+    controls = Controls()
+    r = setup(controls=controls, assignments=Assignments())
+    ctx = deepcopy(GOLDEN["context"])
+    read = controls.read
+    def mutate(scope):
+        ctx["assignment_key"] = "different-account"
+        ctx["application_id"] = "different-app"
+        return read(scope)
+    controls.read = mutate
+    assert r.evaluate("experiment", "web", ctx, now=NOW)["unit_key"] == GOLDEN["context"]["assignment_key"]
+
+def test_assignment_default_isolation_shared_continuity_distinct_boundaries():
+    c = deepcopy(GOLDEN["catalog"])
+    c["applications"] += ["second-app", "outside-app"]
+    assignments = Assignments()
+    r = custom(c, assignments=assignments)
+    ctx = GOLDEN["context"]
+    a = r.evaluate("experiment", "web", ctx, now=NOW)
+    b = r.evaluate("experiment", "web", {**ctx, "application_id": "second-app"}, now=NOW)
+    assert a["assignment"]["assignment_id"] != b["assignment"]["assignment_id"]
+    c["features"]["experiment"]["experiment"]["assignment_boundary"] = {"key": "shared-cohort", "applications": [ctx["application_id"], "second-app"]}
+    r = custom(c, assignments=assignments)
+    x = r.evaluate("experiment", "web", ctx, now=NOW)
+    y = r.evaluate("experiment", "web", {**ctx, "application_id": "second-app"}, now=NOW)
+    z = r.evaluate("experiment", "web", {**ctx, "application_id": "outside-app"}, now=NOW)
+    assert x["assignment"] == y["assignment"] and x["value"] == y["value"]
+    assert x["assignment"] != a["assignment"] and x["assignment"] != z["assignment"]
+    c["features"]["experiment"]["experiment"]["assignment_boundary"]["key"] = "distinct-cohort"
+    assert custom(c, assignments=assignments).evaluate("experiment", "web", ctx, now=NOW)["assignment"] != x["assignment"]
+    assert assignments.writes == 5
+
+@pytest.mark.parametrize("v", HARDENING["targeting"])
+def test_shared_targeting_vectors(v):
+    p = deepcopy(GOLDEN["payload"])
+    p["features"]["release"]["rules"][0]["condition"] = v["condition"]
+    r = setup()
+    r.activate(bundle(p, 2), 1, NOW)
+    ctx = {**GOLDEN["context"], "groups": ["leaf"], "roles": ["reader"], "group_ancestors": {"leaf": ["branch"], "branch": ["root"], "root": []}}
+    assert r.evaluate("release", "web", ctx, now=NOW)["value"] is v["expected"]
+    if v["expected"]:
+        for group in ("leaf", "branch", "root"):
+            assert r.evaluate("release", "web", {**ctx, "excluded_groups": [group]}, now=NOW)["status"] == "denied"
+
+@pytest.mark.parametrize("condition", HARDENING["invalid_conditions"])
+def test_shared_unsupported_native_conditions(condition):
+    p = deepcopy(GOLDEN["payload"])
+    p["features"]["release"]["rules"][0]["condition"] = condition
+    with pytest.raises(ValueError): setup().activate(bundle(p, 2), 1, NOW)
+
+def test_membership_rejects_missing_cycle_depth():
+    r = setup()
+    chain = {f"n{i}": [f"n{i+1}"] if i < 34 else [] for i in range(35)}
+    for graph in ({"leaf": ["missing"]}, {"leaf": ["root"], "root": ["leaf"]}, chain):
+        with pytest.raises(ValueError):
+            r.evaluate("release", "web", {**GOLDEN["context"], "groups": ["n0" if graph is chain else "leaf"], "group_ancestors": graph}, now=NOW)
+
+@pytest.mark.parametrize("v", HARDENING["values"])
+def test_shared_value_constraints_all_value_positions(v):
+    c = deepcopy(GOLDEN["catalog"])
+    c["features"]["release"].update(v["feature"])
+    invalid = deepcopy(c)
+    invalid["features"]["release"]["baseline"] = v["invalid"]
+    with pytest.raises(ValueError): FeatureRuntime(invalid)
+    for position in ("default", "force", "variation"):
+        catalog, p = deepcopy(c), deepcopy(GOLDEN["payload"])
+        p["features"]["release"] = {"defaultValue": v["feature"]["baseline"], "rules": [{"force": v["feature"]["baseline"]}]}
+        if position == "default": p["features"]["release"]["defaultValue"] = v["invalid"]
+        if position == "force": p["features"]["release"]["rules"][0]["force"] = v["invalid"]
+        if position == "variation":
+            catalog["features"]["release"]["experiment"] = deepcopy(catalog["features"]["experiment"]["experiment"])
+            p["features"]["release"]["rules"] = deepcopy(p["features"]["experiment"]["rules"])
+            p["features"]["release"]["rules"][0]["variations"] = [v["feature"]["baseline"], v["invalid"]]
+        with pytest.raises(ValueError): FeatureRuntime(catalog, trust_policy="local-test").activate(bundle(p), 0, NOW)
+
+def test_local_measurement_and_forged_attribution_fences():
+    with pytest.raises(ValueError): FeatureRuntime(GOLDEN["catalog"], events=Events())
+    events, assignments = Events(), Assignments()
+    r = setup(events=events, assignments=assignments)
+    d = r.evaluate("experiment", "web", GOLDEN["context"], now=NOW)
+    event = event_for(d)
+    for changes in ({"evidence": {**event["evidence"], "unit_key": "forged"}}, {"application_id": "other"}, {"surface_id": "other"}, {"context_scope": "other"}):
+        with pytest.raises(ValueError): r.record_event({**event, **changes}, NOW)
+    r.record_event(event, NOW)
+    outcome = event_for(d, "outcome", "transition-1")
+    outcome["evidence"]["transition_key"] = "unrelated"
+    with pytest.raises(ValueError): r.record_event(outcome, NOW)
+    with pytest.raises(ValueError): setup(events=events, assignments=assignments).record_event(event_for(d, "outcome", "transition-2"), NOW)
+
+@pytest.mark.parametrize("mode", ["absent", "expired", "invalid", "unavailable"])
+def test_known_kill_dominates_true_baseline_without_usable_bundle(mode):
+    c = deepcopy(GOLDEN["catalog"])
+    c["features"]["release"].update({"failure": "baseline", "baseline": True})
+    controls = Controls()
+    r = custom(c, controls=controls)
+    r.update_kills(kill(2, ["release"]), "local-fixture", NOW)
+    state = controls.read(GOLDEN["scope"])
+    if mode == "absent": state["bundle"] = None
+    if mode == "expired": state["bundle"]["expires_at"] = NOW
+    if mode == "invalid": state["bundle"]["payload_sha256"] = "0" * 64
+    controls.read = lambda scope: deepcopy(state)
+    def unavailable(*args, **kwargs):
+        raise AssertionError("provider must not be reached for a known kill")
+    r._provider = unavailable
+    d = r.evaluate("release", "web", GOLDEN["context"], now=NOW)
+    assert d["value"] is False and d["status"] == "denied"
+    s = r.snapshot(["release"], "web", GOLDEN["context"], now=NOW)
+    assert s["decisions"]["release"]["value"] is False
+    assert s["decisions"]["release"]["kill_generation"] == s["kill_generation"] == 2
+
+@pytest.mark.parametrize("bad", HARDENING["invalid_identifiers"])
+def test_ascii_identity_seed_namespace_rejections(bad):
+    r = setup()
+    p = deepcopy(GOLDEN["payload"])
+    p["features"]["experiment"]["rules"][0]["seed"] = bad
+    with pytest.raises(ValueError): r.activate(bundle(p, 2), 1, NOW)
+    with pytest.raises(ValueError): r.evaluate("release", "web", {**GOLDEN["context"], "assignment_key": bad}, now=NOW)
+    c = deepcopy(GOLDEN["catalog"])
+    c["scope"]["feature_namespace"] = bad
+    with pytest.raises(ValueError): FeatureRuntime(c)
+
+def test_shared_unsupported_value_schemas():
+    for schema in HARDENING["invalid_schemas"]:
+        c = deepcopy(GOLDEN["catalog"])
+        c["features"]["child"]["value_schema"] = schema
+        with pytest.raises(ValueError): FeatureRuntime(c)
+
+def test_json_declaration_cannot_disguise_enabled_boolean_disabled_value():
+    c = deepcopy(GOLDEN["catalog"])
+    c["features"]["release"].update({"value_type": "json", "baseline": True, "disabled_value": True})
+    with pytest.raises(ValueError): FeatureRuntime(c)
+
+def test_explicit_payload_bytes_preserve_unicode_fraction_semantics_without_generic_digest():
+    spec = HARDENING["unicode_numeric"]
+    c = deepcopy(GOLDEN["catalog"])
+    c["features"] = {"data": {"value_type": "json", "baseline": None, "disabled_value": None,
+                              "allowed_values": [None, spec["value"]], "failure": "deny",
+                              "surfaces": ["web"], "ancestors": []}}
+    b = bundle()
+    b["payload_bytes"] = spec["payload_bytes"]
+    b["payload_sha256"] = hashlib.sha256(b["payload_bytes"].encode()).hexdigest()
+    assert approval_message(b).decode() == spec["approval_message"]
+    integral = deepcopy(b)
+    for field in ("revision", "catalog_revision", "created_at", "expires_at"):
+        integral[field] = float(integral[field])
+    assert approval_message(integral).decode() == spec["approval_message"]
+    with pytest.raises(ValueError): approval_message({**b, "revision": 1.5})
+    assert kill_message(kill(1)) == kill_message({**kill(1), "generation": 1.0})
+    r = FeatureRuntime(c, trust_policy="local-test")
+    r.activate(b, 0, NOW)
+    r.update_kills(kill(1), "local-fixture", NOW)
+    d = r.evaluate("data", "web", GOLDEN["context"], now=NOW)
+    assert d["value"]["é"] == "café" and d["value"]["𝄞"] == "music"
+    assert d["value"]["one"] == 1 and d["value"]["tiny"] == 1e-7
+    bad = bundle()
+    bad["payload_bytes"] = spec["unsafe_payload_bytes"]
+    bad["payload_sha256"] = hashlib.sha256(bad["payload_bytes"].encode()).hexdigest()
+    unrestricted = deepcopy(c)
+    unrestricted["features"]["data"].pop("allowed_values")
+    with pytest.raises(ValueError): FeatureRuntime(unrestricted, trust_policy="local-test").activate(bad, 0, NOW)
+    unsafe = deepcopy(unrestricted)
+    unsafe["features"]["data"]["baseline"] = spec["unsafe_integer"]
+    with pytest.raises(ValueError): FeatureRuntime(unsafe)
+    unsafe_enum = deepcopy(c)
+    unsafe_enum["features"]["data"]["allowed_values"].append(spec["unsafe_integer"])
+    with pytest.raises(ValueError): FeatureRuntime(unsafe_enum)

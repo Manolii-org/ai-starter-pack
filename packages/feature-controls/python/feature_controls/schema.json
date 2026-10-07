@@ -5,23 +5,28 @@
     "scope": {
       "type": "object",
       "properties": {
-        "namespace": {
+        "feature_namespace": {
           "type": "string",
           "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
         },
-        "application": {
+        "environment_id": {
           "type": "string",
           "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
         },
-        "environment": {
+        "ecosystem_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        },
+        "deployment_id": {
           "type": "string",
           "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
         }
       },
       "required": [
-        "namespace",
-        "application",
-        "environment"
+        "deployment_id",
+        "ecosystem_id",
+        "feature_namespace",
+        "environment_id"
       ],
       "additionalProperties": false
     },
@@ -72,6 +77,30 @@
               "type": "integer",
               "minimum": 0,
               "maximum": 9007199254740991
+            },
+            "assignment_boundary": {
+              "type": "object",
+              "properties": {
+                "key": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+                },
+                "applications": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+                  },
+                  "minItems": 1,
+                  "maxItems": 128,
+                  "uniqueItems": true
+                }
+              },
+              "required": [
+                "key",
+                "applications"
+              ],
+              "additionalProperties": false
             }
           },
           "required": [
@@ -79,6 +108,28 @@
             "epoch"
           ],
           "additionalProperties": false
+        },
+        "disabled_value": {},
+        "allowed_values": {
+          "type": "array",
+          "items": {},
+          "minItems": 1,
+          "maxItems": 128,
+          "uniqueItems": true
+        },
+        "value_schema": {
+          "type": "object",
+          "maxProperties": 16
+        },
+        "applications": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+          },
+          "minItems": 1,
+          "maxItems": 128,
+          "uniqueItems": true
         }
       },
       "required": [
@@ -86,7 +137,8 @@
         "baseline",
         "failure",
         "surfaces",
-        "ancestors"
+        "ancestors",
+        "disabled_value"
       ],
       "additionalProperties": false
     },
@@ -115,13 +167,24 @@
           "additionalProperties": {
             "$ref": "#/$defs/feature"
           }
+        },
+        "applications": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+          },
+          "minItems": 1,
+          "maxItems": 128,
+          "uniqueItems": true
         }
       },
       "required": [
         "schema_version",
         "scope",
         "revision",
-        "features"
+        "features",
+        "applications"
       ],
       "additionalProperties": false
     },
@@ -211,6 +274,75 @@
           },
           "maxItems": 128,
           "uniqueItems": true
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "scope": {
+          "$ref": "#/$defs/scope"
+        },
+        "surface_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        },
+        "groups": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+          },
+          "maxItems": 128,
+          "uniqueItems": true
+        },
+        "roles": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+          },
+          "maxItems": 128,
+          "uniqueItems": true
+        },
+        "tenant_key": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        },
+        "excluded_groups": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+          },
+          "maxItems": 128,
+          "uniqueItems": true
+        },
+        "group_ancestors": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+          },
+          "maxProperties": 128,
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+            },
+            "maxItems": 128,
+            "uniqueItems": true
+          }
+        },
+        "application_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        },
+        "projection_source": {
+          "const": "trusted-server"
+        },
+        "context_scope": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
         }
       },
       "required": [
@@ -218,7 +350,18 @@
         "authorized",
         "eligible",
         "expires_at",
-        "excluded"
+        "excluded",
+        "schema_version",
+        "scope",
+        "surface_id",
+        "groups",
+        "roles",
+        "tenant_key",
+        "excluded_groups",
+        "group_ancestors",
+        "application_id",
+        "projection_source",
+        "context_scope"
       ],
       "additionalProperties": false
     },
@@ -323,6 +466,10 @@
             "unit_key": {
               "type": "string",
               "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+            },
+            "transition_key": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
             }
           },
           "required": [
@@ -330,6 +477,18 @@
             "unit_key"
           ],
           "additionalProperties": false
+        },
+        "application_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        },
+        "surface_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        },
+        "context_scope": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
         }
       },
       "required": [
@@ -344,7 +503,210 @@
         "allocation_epoch",
         "variant",
         "timestamp",
-        "evidence"
+        "evidence",
+        "application_id",
+        "surface_id",
+        "context_scope"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "outcome"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "evidence": {
+                "type": "object",
+                "required": [
+                  "transition_key"
+                ],
+                "properties": {
+                  "transition_key": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "resolved_decision": {
+      "type": "object",
+      "properties": {
+        "value": {},
+        "reason": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "status": {
+          "enum": [
+            "resolved",
+            "baseline",
+            "denied"
+          ]
+        },
+        "expires_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "configuration_revision": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kill_generation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "value",
+        "reason",
+        "status",
+        "expires_at",
+        "configuration_revision",
+        "kill_generation"
+      ],
+      "additionalProperties": false
+    },
+    "snapshot": {
+      "type": "object",
+      "properties": {
+        "feature_namespace": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        },
+        "application_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        },
+        "environment_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        },
+        "ecosystem_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        },
+        "deployment_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        },
+        "surface_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "generated_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "expires_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "decisions": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+          },
+          "maxProperties": 64,
+          "additionalProperties": {
+            "$ref": "#/$defs/resolved_decision"
+          }
+        },
+        "context_scope": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        },
+        "configuration_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "kill_generation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "time_highwater": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "deployment_id",
+        "ecosystem_id",
+        "feature_namespace",
+        "application_id",
+        "environment_id",
+        "surface_id",
+        "schema_version",
+        "generated_at",
+        "expires_at",
+        "decisions",
+        "context_scope",
+        "configuration_revision",
+        "kill_generation",
+        "time_highwater"
+      ],
+      "additionalProperties": false
+    },
+    "control_state": {
+      "type": "object",
+      "properties": {
+        "bundle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/bundle"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kill": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/kill"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "time_highwater": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "bundle",
+        "kill",
+        "time_highwater"
       ],
       "additionalProperties": false
     }

@@ -17,58 +17,93 @@ from .types import (
     Feature,
     Snapshot,
 )
-from .validation import ascii_id, matches, payload_of, validate
+from .validation import (
+    allocation_id,
+    ascii_id,
+    attributes_of,
+    boundary_of,
+    matches,
+    payload_of,
+    validate,
+)
 
+
+class ReadOnlyStickyFixture(InMemoryStickyBucketService):
+    def __init__(self, doc: dict[str, Any] | None):
+        super().__init__()
+        if doc:
+            self.docs[self.get_key(doc["attributeName"], doc["attributeValue"])] = deepcopy(doc)
+
+    def save_assignments(self, doc: dict[str, Any]) -> None:
+        pass
 
 class FeatureRuntime(Lifecycle):
     def __init__(self, catalog: Catalog, *, assignments: AssignmentStore | None = None,
                  events: EventSink | None = None, **kwargs: Any):
         super().__init__(catalog, **kwargs)
+        if events and (self.trust_policy != "local-test" or getattr(events, "test_only", False) is not True):
+            raise ValueError("measurement is local-test only")
         self.assignments, self.events = assignments, events
         self._issued: dict[str, Decision] = {}
         self._exposed: set[str] = set()
 
-    def evaluate(self, key: str, surface: str, context: Context, *, preview: bool = False, now: int | None = None) -> Decision:
+    def evaluate(self, key: str, surface_id: str, context: Context, *, preview: bool = False, now: int | None = None) -> Decision:
+        return self._evaluate(key, surface_id, deepcopy(context), preview=preview, now=now)
+
+    def _evaluate(self, key: str, surface_id: str, context: Context, *, preview: bool = False, now: int | None = None,
+                  capture: dict[str, Any] | None = None) -> Decision:
         now = clock(now)
         ascii_id(key)
-        ascii_id(surface)
+        ascii_id(surface_id)
         validate("context", context)
         ascii_id(context["assignment_key"])
-        feature = self.catalog["features"].get(key)
-        base: Decision = {"decision_id": str(uuid.uuid4()), "feature_key": key, "scope": deepcopy(self.catalog["scope"]),
-                          "surface": surface, "value": deepcopy(feature["baseline"] if feature else None), "reason": "unknown",
+        attributes = attributes_of(context)
+        feature = self._catalog["features"].get(key)
+        base: Decision = {"decision_id": str(uuid.uuid4()), "feature_key": key, "scope": deepcopy(self._catalog["scope"]),
+                          "application_id": context["application_id"], "context_scope": context["context_scope"], "surface_id": surface_id, "value": deepcopy(feature["disabled_value"] if feature else None), "reason": "unknown",
                           "status": "denied", "preview": preview, "expires_at": min(context["expires_at"], now + 60000),
                           "configuration_revision": None, "kill_generation": 0}
         if feature is None:
             return base
         def fail(reason: str) -> Decision:
-            return {**base, "reason": reason, "status": "baseline" if feature["failure"] == "baseline" else "denied"}
+            return {**base, "reason": reason, "value": deepcopy(feature["baseline"] if feature["failure"] == "baseline" else feature["disabled_value"]),
+                    "status": "baseline" if feature["failure"] == "baseline" else "denied"}
+        if context["scope"] != self._catalog["scope"] or context["surface_id"] != surface_id:
+            return {**base, "reason": "context_binding_mismatch"}
         if not context["authorized"]:
             return {**base, "reason": "unauthorized"}
+        if context["application_id"] not in feature.get("applications", self._catalog["applications"]):
+            return {**base, "reason": "application_ineligible"}
+        if set(context["excluded_groups"]) & set(attributes["groups"]):
+            return {**base, "reason": "group_excluded"}
         if context["expires_at"] <= now:
-            return fail("context_expired")
-        if surface not in feature["surfaces"]:
-            return fail("surface_ineligible")
+            return {**base, "reason": "context_expired"}
+        if surface_id not in feature["surfaces"]:
+            return {**base, "reason": "surface_ineligible"}
+        if self._excluded(key, self.local_disabled | set(context["excluded"])):
+            return {**base, "reason": "disabled_or_excluded"}
+        if capture and capture.get("unavailable"):
+            return {**base, "reason": "controls_unavailable"}
         try:
-            state = self._state()
+            state = capture["state"] if capture else self._observed_state(now, preview)
         except (ValueError, TypeError, KeyError, RuntimeError, OSError):
-            return fail("controls_unavailable")
+            return {**base, "reason": "controls_unavailable"}
         kill = state["kill"]
         if kill:
             try:
                 validate("kill", kill)
-                if kill["scope"] != self.catalog["scope"]:
+                if kill["scope"] != self._catalog["scope"]:
                     raise ValueError("kill scope mismatch")
             except ValueError:
-                return fail("invalid_kills")
+                return {**base, "reason": "invalid_kills"}
             base["kill_generation"] = kill["generation"]
         disabled = self.local_disabled | set(kill["disabled"] if kill else []) | set(context["excluded"])
         if self._excluded(key, disabled):
-            return fail("disabled_or_excluded")
+            return {**base, "reason": "disabled_or_excluded"}
         if self.require_fresh_kills and (kill is None or kill["expires_at"] <= now):
-            return fail("kills_expired")
+            return {**base, "reason": "kills_expired"}
         if not context["eligible"]:
-            return fail("ineligible")
+            return {**base, "reason": "ineligible"}
         bundle = state["bundle"]
         if bundle is None:
             return fail("bundle_unavailable")
@@ -76,26 +111,33 @@ class FeatureRuntime(Lifecycle):
         base["expires_at"] = min(base["expires_at"], bundle["expires_at"], kill["expires_at"] if kill else base["expires_at"])
         if bundle["expires_at"] <= now or bundle["created_at"] > now:
             return fail("bundle_expired")
+        if capture and capture.get("invalid_bundle"):
+            return fail("invalid_bundle")
         try:
-            payload = payload_of(bundle, self.catalog)
-            self._approved(bundle)
+            if capture and capture.get("payload") is not None:
+                payload = capture["payload"]
+            else:
+                payload = payload_of(bundle, self._catalog)
+                self._approved(bundle)
         except (ValueError, TypeError, KeyError):
             return fail("invalid_bundle")
         if "experiment" in feature and (self.assignments is None or self.assignments.durable is not True) and not preview:
             return fail("assignment_store_required")
         try:
+            assignment_boundary = boundary_of(feature, context)
+            attributes["id"] = allocation_id(context, assignment_boundary)
             assignment_key: AssignmentKey | None = None
             if "experiment" in feature:
                 exp = feature["experiment"]
-                assignment_key = {"scope": self.catalog["scope"], "experiment_key": exp["key"],
-                                  "allocation_epoch": exp["epoch"], "unit_key": context["assignment_key"]}
-            assignment = self.assignments.read(assignment_key) if assignment_key and self.assignments and self.assignments.durable else None
-            result = self._provider(payload, key, context["assignment_key"], feature, assignment)
+                assignment_key = {"scope": self._catalog["scope"], "assignment_boundary": assignment_boundary,
+                                  "experiment_key": exp["key"], "allocation_epoch": exp["epoch"], "unit_key": context["assignment_key"]}
+            assignment = self.assignments.read(deepcopy(assignment_key)) if assignment_key and self.assignments and self.assignments.durable else None
+            result = self._provider(payload, key, attributes, feature, assignment)
             if result.experimentResult and result.experimentResult.inExperiment and not preview and assignment_key and self.assignments:
-                assignment = self.assignments.create_if_absent(assignment_key, result.experimentResult.key)
+                assignment = self.assignments.create_if_absent(deepcopy(assignment_key), result.experimentResult.key)
                 ascii_id(assignment["assignment_id"])
                 ascii_id(assignment["variant"])
-                result = self._provider(payload, key, context["assignment_key"], feature, assignment)
+                result = self._provider(payload, key, attributes, feature, assignment)
                 if not result.experimentResult or not result.experimentResult.stickyBucketUsed or result.experimentResult.key != assignment["variant"]:
                     return fail("assignment_conflict")
             if not matches(result.value, feature):
@@ -105,6 +147,8 @@ class FeatureRuntime(Lifecycle):
             if assignment and result.experimentResult and result.experimentResult.inExperiment and not preview:
                 decision["assignment"] = assignment
                 decision["allocation_epoch"] = feature["experiment"]["epoch"]
+                decision["unit_key"] = context["assignment_key"]
+            if decision.get("assignment") and self.trust_policy == "local-test":
                 for decision_id, old in list(self._issued.items()):
                     if old["expires_at"] <= now:
                         del self._issued[decision_id]
@@ -117,38 +161,61 @@ class FeatureRuntime(Lifecycle):
             return fail("provider_or_assignment_unavailable")
 
     def _excluded(self, key: str, excluded: set[str]) -> bool:
-        return key in excluded or any(self._excluded(a, excluded) for a in self.catalog["features"][key]["ancestors"])
+        return key in excluded or any(self._excluded(a, excluded) for a in self._catalog["features"][key]["ancestors"])
 
     @staticmethod
-    def _provider(payload: dict[str, Any], key: str, unit: str, feature: Feature, assignment: Assignment | None):
-        store = InMemoryStickyBucketService() if "experiment" in feature else None
-        if store and assignment:
+    def _provider(payload: dict[str, Any], key: str, attributes: dict[str, Any], feature: Feature, assignment: Assignment | None):
+        doc = None
+        if assignment and "experiment" in feature:
             exp = feature["experiment"]
-            store.save_assignments({"attributeName": "id", "attributeValue": unit,
-                                    "assignments": {f"{exp['key']}__{exp['epoch']}": assignment["variant"]}})
-        gb = GrowthBook(attributes={"id": unit}, sticky_bucket_service=store)
+            doc = {"attributeName": "id", "attributeValue": attributes["id"],
+                   "assignments": {f"{exp['key']}__{exp['epoch']}": assignment["variant"]}}
+        store = ReadOnlyStickyFixture(doc) if "experiment" in feature else None
+        gb = GrowthBook(attributes=deepcopy(attributes), sticky_bucket_service=store)
         try:
             gb.set_payload(deepcopy(payload))
             return gb.eval_feature(key)
         finally:
             gb.destroy()
 
-    def snapshot(self, keys: list[str], surface: str, context: Context, *, preview: bool = False, now: int | None = None) -> Snapshot:
-        if len(keys) > 1000:
+    def snapshot(self, keys: list[str], surface_id: str, context: Context, *, preview: bool = False, now: int | None = None) -> Snapshot:
+        keys, context = list(keys), deepcopy(context)
+        validate("context", context)
+        ascii_id(surface_id)
+        if len(keys) > 64:
             raise ValueError("snapshot too large")
         now = clock(now)
         expires = min(context["expires_at"], now + 60000)
+        capture: dict[str, Any] = {"state": {"bundle": None, "kill": None, "time_highwater": 0}}
+        try:
+            capture["state"] = self._observed_state(now, preview)
+        except (ValueError, TypeError, KeyError, RuntimeError, OSError):
+            capture["unavailable"] = True
+        if capture["state"]["bundle"] and not capture.get("unavailable"):
+            try:
+                capture["payload"] = payload_of(capture["state"]["bundle"], self._catalog)
+                self._approved(capture["state"]["bundle"])
+            except (ValueError, TypeError, KeyError):
+                capture["invalid_bundle"] = True
         decisions = {}
         for key in keys:
-            decision = self.evaluate(key, surface, context, preview=preview, now=now)
+            decision = self._evaluate(key, surface_id, context, preview=preview, now=now, capture=capture)
             expires = min(expires, decision["expires_at"])
-            decisions[key] = {name: decision[name] for name in ("value", "reason", "expires_at", "configuration_revision", "kill_generation")}
+            decision["configuration_revision"] = capture["state"]["bundle"]["revision"] if capture["state"]["bundle"] else None
+            decision["kill_generation"] = capture["state"]["kill"]["generation"] if capture["state"]["kill"] else 0
+            decisions[key] = {name: decision[name] for name in ("value", "reason", "status", "expires_at", "configuration_revision", "kill_generation")}
         for decision in decisions.values():
             decision["expires_at"] = min(decision["expires_at"], expires)
-        return {"schema_version": 1, "application": self.catalog["scope"]["application"], "environment": self.catalog["scope"]["environment"],
-                "surface": surface, "generated_at": now, "expires_at": expires, "decisions": decisions}
+        return {"schema_version": 1, **self._catalog["scope"], "application_id": context["application_id"], "context_scope": context["context_scope"],
+                "configuration_revision": capture["state"]["bundle"]["revision"] if capture["state"]["bundle"] else 0,
+                "kill_generation": capture["state"]["kill"]["generation"] if capture["state"]["kill"] else 0,
+                "time_highwater": capture["state"]["time_highwater"],
+                "surface_id": surface_id, "generated_at": now, "expires_at": expires, "decisions": decisions}
 
     def record_event(self, event: Event, now: int | None = None) -> bool:
+        event = deepcopy(event)
+        if self.trust_policy != "local-test" or not self.events or self.events.test_only is not True:
+            raise ValueError("measurement is local-test only")
         validate("event", event)
         now = clock(now)
         if self.events is None or self.events.durable is not True:
@@ -156,11 +223,13 @@ class FeatureRuntime(Lifecycle):
         d = self._issued.get(event["decision_id"])
         if not d or d["preview"] or d["reason"] != "experiment" or not d.get("assignment") or d["expires_at"] <= now or \
                 event["scope"] != d["scope"] or not now - 60000 <= event["timestamp"] <= now or \
+                event["application_id"] != d["application_id"] or event["surface_id"] != d["surface_id"] or event["context_scope"] != d["context_scope"] or \
                 event["feature_key"] != d["feature_key"] or event["assignment_id"] != d["assignment"]["assignment_id"] or \
                 event["variant"] != d["assignment"]["variant"] or event["configuration_revision"] != d["configuration_revision"] or \
+                event["evidence"]["unit_key"] != d["unit_key"] or \
                 event["allocation_epoch"] != d["allocation_epoch"] or \
                 ((event["kind"] == "outcome") != (event["evidence"]["source"] == "business-transition")) or \
-                (event["kind"] == "outcome" and event["decision_id"] not in self._exposed):
+                (event["kind"] == "outcome" and (event["decision_id"] not in self._exposed or event["event_id"] != event["evidence"]["transition_key"])):
             raise ValueError("event attribution mismatch")
         added = self.events.append_if_absent(deepcopy(event))
         if event["kind"] == "exposure":

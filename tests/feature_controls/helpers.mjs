@@ -22,7 +22,7 @@ export class Assignments {
   }
 }
 export class Events {
-  durable = true; values = new Map();
+  durable = true; test_only = true; values = new Map();
   async appendIfAbsent(event) {
     if (this.values.has(event.event_id)) {
       if (JSON.stringify(this.values.get(event.event_id)) !== JSON.stringify(event)) throw new Error('event collision');
@@ -33,10 +33,10 @@ export class Events {
 }
 export class Controls {
   durable = true; test_only = true; values = new Map(); writes = 0;
-  async read(scope) { return clone(this.values.get(JSON.stringify(scope)) ?? {bundle:null,kill:null}); }
+  async read(scope) { return clone(this.values.get(JSON.stringify(scope)) ?? {bundle:null,kill:null,time_highwater:0}); }
   async compareAndSwap(scope, expected, next) {
     const key = JSON.stringify(scope);
-    if (JSON.stringify(await this.read(scope)) !== JSON.stringify(expected)) return false;
+    if (JSON.stringify(this.values.get(key) ?? {bundle:null,kill:null,time_highwater:0}) !== JSON.stringify(expected)) return false;
     this.values.set(key, clone(next)); this.writes++; return true;
   }
 }
@@ -47,9 +47,9 @@ export async function setup(options = {}) {
   return runtime;
 }
 export function eventFor(d, kind='exposure', event_id='event-1') {
-  return { schema_version:1, scope:d.scope, event_id, kind, decision_id:d.decision_id,
+  return { schema_version:1, scope:d.scope, application_id:d.application_id, surface_id:d.surface_id, context_scope:d.context_scope, event_id, kind, decision_id:d.decision_id,
     feature_key:d.feature_key, assignment_id:d.assignment.assignment_id,
     configuration_revision:d.configuration_revision, allocation_epoch:d.allocation_epoch,
     variant:d.assignment.variant, timestamp:golden.now,
-    evidence:{ source:kind==='exposure'?'render':'business-transition',unit_key:'render-unit' } };
+    evidence:{ source:kind==='exposure'?'render':'business-transition',unit_key:d.unit_key, ...(kind==='outcome'?{transition_key:event_id}:{}) } };
 }

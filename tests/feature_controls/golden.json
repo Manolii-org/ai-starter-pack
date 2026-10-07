@@ -1,15 +1,17 @@
 {
   "scope": {
-    "namespace": "demo",
-    "application": "example-app",
-    "environment": "test"
+    "feature_namespace": "demo",
+    "environment_id": "test",
+    "ecosystem_id": "demo-ecosystem",
+    "deployment_id": "demo-deployment"
   },
   "catalog": {
     "schema_version": 1,
     "scope": {
-      "namespace": "demo",
-      "application": "example-app",
-      "environment": "test"
+      "feature_namespace": "demo",
+      "environment_id": "test",
+      "ecosystem_id": "demo-ecosystem",
+      "deployment_id": "demo-deployment"
     },
     "revision": 1,
     "features": {
@@ -21,7 +23,8 @@
           "web",
           "mobile"
         ],
-        "ancestors": []
+        "ancestors": [],
+        "disabled_value": false
       },
       "experiment": {
         "value_type": "string",
@@ -35,7 +38,8 @@
         "experiment": {
           "key": "demo-experiment",
           "epoch": 0
-        }
+        },
+        "disabled_value": "disabled"
       },
       "child": {
         "value_type": "string",
@@ -47,9 +51,13 @@
         ],
         "ancestors": [
           "release"
-        ]
+        ],
+        "disabled_value": "disabled"
       }
-    }
+    },
+    "applications": [
+      "example-app"
+    ]
   },
   "payload": {
     "features": {
@@ -109,53 +117,69 @@
     "authorized": true,
     "eligible": true,
     "expires_at": 100000,
-    "excluded": []
+    "excluded": [],
+    "schema_version": 1,
+    "scope": {
+      "feature_namespace": "demo",
+      "environment_id": "test",
+      "ecosystem_id": "demo-ecosystem",
+      "deployment_id": "demo-deployment"
+    },
+    "surface_id": "web",
+    "groups": [],
+    "roles": [],
+    "tenant_key": "demo-tenant",
+    "excluded_groups": [],
+    "group_ancestors": {},
+    "application_id": "example-app",
+    "projection_source": "trusted-server",
+    "context_scope": "demo-context-v1"
   },
   "cases": [
     {
       "key": "release",
-      "surface": "web",
+      "surface_id": "web",
       "expected_value": true,
       "expected_reason": "released"
     },
     {
       "key": "child",
-      "surface": "web",
+      "surface_id": "web",
       "expected_value": "enabled",
       "expected_reason": "released"
     },
     {
       "key": "child",
-      "surface": "web",
+      "surface_id": "web",
       "excluded": [
         "release"
       ],
-      "expected_value": "baseline",
+      "expected_value": "disabled",
       "expected_reason": "disabled_or_excluded"
     },
     {
       "key": "release",
-      "surface": "other",
+      "surface_id": "other",
       "expected_value": false,
       "expected_reason": "surface_ineligible"
     },
     {
       "key": "release",
-      "surface": "web",
+      "surface_id": "web",
       "eligible": false,
       "expected_value": false,
       "expected_reason": "ineligible"
     },
     {
       "key": "release",
-      "surface": "web",
+      "surface_id": "web",
       "authorized": false,
       "expected_value": false,
       "expected_reason": "unauthorized"
     },
     {
       "key": "missing",
-      "surface": "web",
+      "surface_id": "web",
       "expected_value": null,
       "expected_reason": "unknown"
     }

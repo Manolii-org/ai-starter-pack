@@ -3,23 +3,38 @@ from typing import Any, Literal, Protocol, TypedDict
 PROVIDER_SEMANTICS = "growthbook:js-1.8.0:py-3.2.0:hash-2"
 
 class Scope(TypedDict):
-    namespace: str
-    application: str
-    environment: str
+    ecosystem_id: str
+    deployment_id: str
+    feature_namespace: str
+    environment_id: str
 
-class Experiment(TypedDict):
+class AssignmentBoundary(TypedDict):
+    mode: Literal["application", "shared"]
+    key: str
+
+class SharedBoundary(TypedDict):
+    key: str
+    applications: list[str]
+
+class Experiment(TypedDict, total=False):
     key: str
     epoch: int
+    assignment_boundary: SharedBoundary
 
 class Feature(TypedDict, total=False):
     value_type: Literal["boolean", "number", "string", "json"]
     baseline: Any
+    disabled_value: Any
+    allowed_values: list[Any]
+    value_schema: dict[str, Any]
     failure: Literal["baseline", "deny"]
     surfaces: list[str]
+    applications: list[str]
     ancestors: list[str]
     experiment: Experiment
 
 class Catalog(TypedDict):
+    applications: list[str]
     schema_version: Literal[1]
     scope: Scope
     revision: int
@@ -45,6 +60,17 @@ class KillState(TypedDict):
     disabled: list[str]
 
 class Context(TypedDict):
+    application_id: str
+    projection_source: Literal["trusted-server"]
+    context_scope: str
+    schema_version: Literal[1]
+    scope: Scope
+    surface_id: str
+    groups: list[str]
+    group_ancestors: dict[str, list[str]]
+    excluded_groups: list[str]
+    roles: list[str]
+    tenant_key: str
     assignment_key: str
     authorized: bool
     eligible: bool
@@ -52,6 +78,7 @@ class Context(TypedDict):
     excluded: list[str]
 
 class ControlState(TypedDict):
+    time_highwater: int
     bundle: ReleaseBundle | None
     kill: KillState | None
 
@@ -69,6 +96,7 @@ class Assignment(TypedDict):
     variant: str
 
 class AssignmentKey(TypedDict):
+    assignment_boundary: AssignmentBoundary
     scope: Scope
     experiment_key: str
     allocation_epoch: int
@@ -80,10 +108,13 @@ class AssignmentStore(Protocol):
     def create_if_absent(self, key: AssignmentKey, variant: str) -> Assignment: ...
 
 class Decision(TypedDict, total=False):
+    context_scope: str
+    application_id: str
+    unit_key: str
     decision_id: str
     feature_key: str
     scope: Scope
-    surface: str
+    surface_id: str
     value: Any
     reason: str
     expires_at: int
@@ -95,15 +126,25 @@ class Decision(TypedDict, total=False):
     allocation_epoch: int
 
 class Snapshot(TypedDict):
+    context_scope: str
+    configuration_revision: int
+    kill_generation: int
+    time_highwater: int
+    ecosystem_id: str
+    deployment_id: str
+    feature_namespace: str
     schema_version: Literal[1]
-    application: str
-    environment: str
-    surface: str
+    application_id: str
+    environment_id: str
+    surface_id: str
     generated_at: int
     expires_at: int
     decisions: dict[str, dict[str, Any]]
 
 class Event(TypedDict):
+    context_scope: str
+    application_id: str
+    surface_id: str
     schema_version: Literal[1]
     scope: Scope
     event_id: str
@@ -119,4 +160,5 @@ class Event(TypedDict):
 
 class EventSink(Protocol):
     durable: Literal[True]
+    test_only: Literal[True]
     def append_if_absent(self, event: Event) -> bool: ...

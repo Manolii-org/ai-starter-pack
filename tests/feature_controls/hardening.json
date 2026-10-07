@@ -1,0 +1,229 @@
+{
+  "values": [
+    {
+      "name": "enum",
+      "feature": {
+        "value_type": "string",
+        "baseline": "safe",
+        "disabled_value": "safe",
+        "allowed_values": [
+          "safe",
+          "on"
+        ]
+      },
+      "invalid": "unknown"
+    },
+    {
+      "name": "range",
+      "feature": {
+        "value_type": "number",
+        "baseline": 0,
+        "disabled_value": 0,
+        "value_schema": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 2
+        }
+      },
+      "invalid": 3
+    },
+    {
+      "name": "nested",
+      "feature": {
+        "value_type": "json",
+        "baseline": {
+          "settings": {
+            "enabled": false
+          }
+        },
+        "disabled_value": {
+          "settings": {
+            "enabled": false
+          }
+        },
+        "value_schema": {
+          "type": "object",
+          "properties": {
+            "settings": {
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "enabled"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "settings"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "invalid": {
+        "settings": {
+          "enabled": "true"
+        }
+      }
+    }
+  ],
+  "targeting": [
+    {
+      "condition": {
+        "groups": {
+          "$in": [
+            "root"
+          ]
+        }
+      },
+      "expected": true
+    },
+    {
+      "condition": {
+        "groups": {
+          "$nin": [
+            "root"
+          ]
+        }
+      },
+      "expected": false
+    },
+    {
+      "condition": {
+        "roles": {
+          "$in": [
+            "reader"
+          ]
+        }
+      },
+      "expected": true
+    },
+    {
+      "condition": {
+        "roles": {
+          "$nin": [
+            "reader"
+          ]
+        }
+      },
+      "expected": false
+    },
+    {
+      "condition": {
+        "tenant": {
+          "$eq": "demo-tenant"
+        }
+      },
+      "expected": true
+    },
+    {
+      "condition": {
+        "tenant": {
+          "$ne": "demo-tenant"
+        }
+      },
+      "expected": false
+    }
+  ],
+  "invalid_conditions": [
+    {
+      "groups": {
+        "$all": [
+          "root"
+        ]
+      }
+    },
+    {
+      "groups": {
+        "$in": [
+          "🚀"
+        ]
+      }
+    },
+    {
+      "roles": {
+        "$eq": "reader"
+      }
+    },
+    {
+      "tenant": {
+        "$in": [
+          "demo-tenant"
+        ]
+      }
+    },
+    {
+      "segment": {
+        "$eq": "opaque"
+      }
+    },
+    {
+      "$or": []
+    },
+    {
+      "groups": {
+        "$in": [
+          []
+        ]
+      }
+    }
+  ],
+  "invalid_schemas": [
+    {
+      "type": "object",
+      "additionalProperties": true
+    },
+    {
+      "type": "object",
+      "properties": {
+        "child": {
+          "$ref": "https://example.invalid/remote"
+        }
+      }
+    },
+    {
+      "type": "number",
+      "minimum": 3,
+      "maximum": 2
+    },
+    {
+      "type": "string",
+      "minimum": 0
+    },
+    {
+      "type": "string",
+      "minItems": 0
+    },
+    {
+      "type": "string",
+      "properties": {}
+    },
+    {
+      "type": "string",
+      "items": {
+        "type": "string"
+      }
+    }
+  ],
+  "invalid_identifiers": [
+    "sample\n",
+    "sample\r\n",
+    "sample\u0000",
+    "sample🚀"
+  ],
+  "unicode_numeric": {
+    "value": {
+      "é": "café",
+      "𝄞": "music",
+      "one": 1,
+      "tiny": 1e-7
+    },
+    "payload_bytes": "{\"features\":{\"data\":{\"defaultValue\":{\"é\":\"café\",\"𝄞\":\"music\",\"one\":1.0,\"tiny\":1e-7}}},\"experiments\":[],\"savedGroups\":{},\"contextualBandits\":{}}",
+    "unsafe_payload_bytes": "{\"features\":{\"data\":{\"defaultValue\":9007199254740993}},\"experiments\":[],\"savedGroups\":{},\"contextualBandits\":{}}",
+    "unsafe_integer": 9007199254740992,
+    "approval_message": "[\"feature-controls/release/v1\",\"demo-ecosystem\",\"demo-deployment\",\"test\",\"demo\",1,1,0,100000,\"growthbook:js-1.8.0:py-3.2.0:hash-2\",\"332131c928cf1a219926fec11139a0bd230afe60bba1d32acc501cdcbf8ab554\",\"local-fixture\"]"
+  }
+}
