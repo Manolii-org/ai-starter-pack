@@ -1,9 +1,10 @@
+import importlib.util
 import json
 import subprocess
 import sys
 from pathlib import Path
 
-import importlib.util
+import pytest
 
 SCRIPTS = Path(__file__).resolve().parent.parent
 _spec = importlib.util.spec_from_file_location(
@@ -176,3 +177,91 @@ def test_fix_body_omits_null_app_id() -> None:
     checks = body["required_status_checks"]["checks"]
     assert all("app_id" not in c or isinstance(c["app_id"], int) for c in checks)
     assert {c["context"] for c in checks} == {"guards", "scan"}
+
+
+@pytest.mark.parametrize("source", ["legacy", "ruleset", "context-only"])
+@pytest.mark.parametrize("provider", [15368, 1, None, -1, "15368", True])
+def test_cli_requires_exact_provider_binding(tmp_path: Path, source, provider) -> None:
+    contract = tmp_path / "c.yaml"
+    contract.write_text(
+        "schema_version: 1\nrepos:\n  - repo: Org/app\n"
+        "    protected_branches: [staging]\n"
+        "    required_checks: ['Promotion gate (UAT E2E)']\n"
+        "    lanes:\n      - branch: staging\n        environment: uat\n"
+        "        workflow: .github/workflows/deploy.yml\n        rollback_required: false\n")
+    fixtures = tmp_path / "fx"
+    fixtures.mkdir()
+    context = "Promotion gate (UAT E2E)"
+    if source == "legacy":
+        protection = {"required_status_checks": {
+            "checks": [{"context": context, "app_id": provider}]}}
+    elif source == "ruleset":
+        protection = {"_ruleset_managed": True,
+                      "_ruleset_contexts": [context],
+                      "_ruleset_checks": [{"context": context, "integration_id": provider}]}
+    else:
+        protection = {"required_status_checks": {"contexts": [context]}}
+    _fixture(fixtures, "Org/app", "staging", protection)
+    fixes = tmp_path / "fixes"
+    out = _run(contract, fixtures, "--required-app-id", "15368",
+               "--emit-fixes", str(fixes))
+    accepted = source != "context-only" and type(provider) is int and provider == 15368
+    assert out.returncode == (0 if accepted else 1)
+    if not accepted:
+        assert "no legacy PUT emitted" in out.stderr
+        assert not fixes.exists()
+
+
+@pytest.mark.parametrize("legacy_present", [True, False])
+def test_live_ruleset_parser_preserves_provider(monkeypatch, legacy_present) -> None:
+    def api(endpoint):
+        if endpoint.endswith("/protection"):
+            return ({"required_status_checks": {"checks": [
+                {"context": "legacy", "app_id": 7}]}}, None) if legacy_present else (None, "404")
+        return ([{"type": "required_status_checks", "parameters": {
+            "required_status_checks": [{"context": "smoke", "integration_id": 15368}]}}], None)
+    monkeypatch.setattr(cbp, "_gh_json", api)
+    body, err = cbp.fetch_protection("Org/app", "staging", type("Args", (), {"fixtures": None})())
+    assert err is None
+    assert ("smoke", 15368) in cbp.current_checks(body)
+    assert ("smoke", None) not in cbp.current_checks(body)
+    if legacy_present:
+        assert ("legacy", 7) in cbp.current_checks(body)
+
+
+def test_integration_fix_is_provider_bound_and_approval_free(tmp_path: Path) -> None:
+    contract = _write_contract(tmp_path)
+    fixtures = tmp_path / "fx"
+    fixtures.mkdir()
+    for branch in ["develop", "staging", "main"]:
+        _fixture(fixtures, "Org/app", branch, None)
+    fixes = tmp_path / "fixes"
+    out = _run(contract, fixtures, "--required-app-id", "15368",
+               "--integration-branches", "develop", "staging", "--emit-fixes", str(fixes))
+    assert out.returncode == 1
+    for branch in ["develop", "staging", "main"]:
+        body = json.loads((fixes / f"{cbp.fixture_name('Org/app', branch)}.json").read_text())
+        assert all(c["app_id"] == 15368 for c in body["required_status_checks"]["checks"])
+        assert body["required_pull_request_reviews"]["required_approving_review_count"] == (
+            1 if branch == "main" else 0)
+    existing = _prot(["guards"])
+    existing["required_pull_request_reviews"]["required_approving_review_count"] = 3
+    assert cbp.fix_body(existing, ["guards", "scan"], 15368, 0)[
+        "required_pull_request_reviews"]["required_approving_review_count"] == 3
+
+
+def test_fix_preserves_multiple_providers_and_ruleset_ownership() -> None:
+    body = cbp.fix_body({"required_status_checks": {"checks": [
+        {"context": "shared", "app_id": 7}, {"context": "shared", "app_id": 15368}]},
+        "_ruleset_checks": [{"context": "smoke", "integration_id": 15368}],
+        "_ruleset_contexts": ["smoke"]}, ["shared", "smoke", "new"], 15368)
+    assert body["required_status_checks"]["checks"] == [
+        {"context": "shared", "app_id": 7}, {"context": "shared", "app_id": 15368},
+        {"context": "new", "app_id": 15368}]
+
+
+def test_provider_command_errors_do_not_disclose_raw_data(monkeypatch) -> None:
+    monkeypatch.setattr(cbp.subprocess, "run", lambda *args, **kwargs: subprocess.CompletedProcess(
+        args, 7, "RAW_STDOUT_SENTINEL", "RAW_STDERR_SENTINEL"))
+    body, error = cbp._gh_json("repos/Org/app")
+    assert body is None and error == "gh api failed (exit 7)"
