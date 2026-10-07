@@ -44,6 +44,14 @@
       "matchPackageNames": ["Manolii-org/ai-starter-pack"],
       "labels": ["starter-pack", "dependencies"],
       "commitMessageTopic": "AI Starter Pack"
+    },
+    {
+      "description": "Feature-control SDK upgrades, including prereleases and Git source/pin/digest changes, always require a reviewed PR. Consumer overrides must preserve this policy.",
+      "matchPackageNames": ["@manolii/feature-controls", "manolii-feature-controls"],
+      "automerge": false,
+      "platformAutomerge": false,
+      "ignoreUnstable": true,
+      "dependencyDashboardApproval": true
     }
   ]
 }

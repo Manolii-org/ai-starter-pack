@@ -159,6 +159,23 @@ _exclude:
   # "github>Manolii-org/ai-starter-pack" — copying it into a rendered repo
   # would shadow the shared preset with a stale local snapshot.
   - default.json
+  # Runtime SDK installation belongs to consumer package managers, not Copier.
+  - packages/feature-controls
+  - packages/feature-controls/**
+  - /contracts
+  - /contracts/**
+  - tests/feature_controls
+  - tests/feature_controls/**
+  - tests/test_feature_controls_distribution.py
+  - scripts/feature-controls-release.py
+  - scripts/feature-controls-upgrade.py
+  - /package.json
+  - /package-lock.json
+  - /npm-shrinkwrap.json
+  - /tsconfig.json
+  - /.npmignore
+  - /build
+  - /build/**
   # Maintainer config: governs this source repository and must not overwrite a
   # consumer-owned Renovate configuration during copy/update.
   - renovate.json
