@@ -401,6 +401,60 @@ def test_ascii_identity_seed_namespace_rejections(bad):
     c["scope"]["feature_namespace"] = bad
     with pytest.raises(ValueError): FeatureRuntime(c)
 
+@pytest.mark.parametrize("error", [RuntimeError, OSError])
+@pytest.mark.parametrize("mode", ["killed", "baseline", "deny"])
+def test_verifier_availability_outage_preserves_kill_and_ordinary_fallbacks(error, mode):
+    catalog = deepcopy(GOLDEN["catalog"])
+    catalog["features"]["release"].update({"baseline": True, "failure": "deny" if mode == "deny" else "baseline"})
+    release, kills = bundle(), kill(disabled=["release"] if mode == "killed" else [])
+    class Verifier:
+        outage = False
+        calls = 0
+        def verify(self, message, ref, purpose):
+            self.calls += 1
+            if self.outage:
+                raise error("verifier unavailable")
+            return ref == "local-fixture" and message == (approval_message(release) if purpose == "release" else kill_message(kills))
+    verifier = Verifier()
+    runtime = FeatureRuntime(catalog, controls=Controls(), verifier=verifier)
+    runtime.activate(release, 0, NOW)
+    runtime.update_kills(kills, "local-fixture", NOW)
+    verifier.outage = True
+    def blocked(*args, **kwargs):
+        raise AssertionError("provider must not run with unavailable approval")
+    runtime._provider = blocked
+    expected = {"release": (False, "denied") if mode != "baseline" else (True, "baseline"), "child": ("disabled", "denied")}
+    reason = "disabled_or_excluded" if mode == "killed" else "invalid_bundle"
+    for key, (value, status) in expected.items():
+        decision = runtime.evaluate(key, "web", GOLDEN["context"], now=NOW)
+        assert (decision["value"], decision["status"], decision["reason"]) == (value, status, reason)
+    before = verifier.calls
+    snapshot = runtime.snapshot(list(expected), "web", GOLDEN["context"], now=NOW)
+    assert verifier.calls == before + 1
+    assert snapshot["configuration_revision"] == snapshot["kill_generation"] == 1
+    for key, (value, status) in expected.items():
+        decision = snapshot["decisions"][key]
+        assert (decision["value"], decision["status"], decision["reason"]) == (value, status, reason)
+        assert decision["configuration_revision"] == decision["kill_generation"] == 1
+
+@pytest.mark.parametrize("error", [AssertionError, AttributeError])
+def test_unexpected_verifier_programmer_errors_propagate(error):
+    class Verifier:
+        outage = False
+        def verify(self, message, ref, purpose):
+            if self.outage:
+                raise error("verifier programming defect")
+            return ref == "local-fixture" and message == (approval_message(bundle()) if purpose == "release" else kill_message(kill()))
+    verifier = Verifier()
+    runtime = FeatureRuntime(GOLDEN["catalog"], controls=Controls(), verifier=verifier)
+    runtime.activate(bundle(), 0, NOW)
+    runtime.update_kills(kill(), "local-fixture", NOW)
+    verifier.outage = True
+    with pytest.raises(error, match="verifier programming defect"):
+        runtime.evaluate("release", "web", GOLDEN["context"], now=NOW)
+    with pytest.raises(error, match="verifier programming defect"):
+        runtime.snapshot(["release"], "web", GOLDEN["context"], now=NOW)
+
 def test_shared_unsupported_value_schemas():
     for schema in HARDENING["invalid_schemas"]:
         c = deepcopy(GOLDEN["catalog"])

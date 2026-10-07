@@ -119,7 +119,7 @@ class FeatureRuntime(Lifecycle):
             else:
                 payload = payload_of(bundle, self._catalog)
                 self._approved(bundle)
-        except (ValueError, TypeError, KeyError):
+        except (ValueError, TypeError, KeyError, RuntimeError, OSError):
             return fail("invalid_bundle")
         if "experiment" in feature and (self.assignments is None or self.assignments.durable is not True) and not preview:
             return fail("assignment_store_required")
@@ -195,7 +195,7 @@ class FeatureRuntime(Lifecycle):
             try:
                 capture["payload"] = payload_of(capture["state"]["bundle"], self._catalog)
                 self._approved(capture["state"]["bundle"])
-            except (ValueError, TypeError, KeyError):
+            except (ValueError, TypeError, KeyError, RuntimeError, OSError):
                 capture["invalid_bundle"] = True
         decisions = {}
         for key in keys:

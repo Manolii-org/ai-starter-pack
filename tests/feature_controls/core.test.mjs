@@ -313,6 +313,33 @@ test('JSON declaration cannot disguise an enabled boolean disabled value',()=>{
   assert.throws(()=>new FeatureRuntime(c));
 });
 
+test('verifier outage preserves killed and ordinary baseline/deny decisions in evaluate and snapshot',async()=>{
+  for(const errorName of ['RuntimeError','OSError'])for(const mode of ['killed','baseline','deny']) {
+    const catalog=clone(golden.catalog);catalog.features.release.baseline=true;
+    catalog.features.release.failure=mode==='deny'?'deny':'baseline';
+    const release=bundle(),kills=kill(1,mode==='killed'?['release']:[]);
+    let outage=false,calls=0;
+    const runtime=new FeatureRuntime(catalog,{controls:new Controls(),verifier:{verify:async(message,ref,purpose)=>{
+      calls++;if(outage){const error=new Error('verifier unavailable');error.name=errorName;throw error;}
+      return ref==='local-fixture'&&Buffer.from(message).equals(Buffer.from(purpose==='release'?approvalMessage(release):killMessage(kills)));
+    }}});
+    await runtime.activate(release,0,golden.now);await runtime.updateKills(kills,'local-fixture',golden.now);outage=true;
+    runtime.provider=async()=>assert.fail('provider must not run with unavailable approval');
+    const expected={release:mode==='baseline'?[true,'baseline']:[false,'denied'],child:['disabled','denied']};
+    const reason=mode==='killed'?'disabled_or_excluded':'invalid_bundle';
+    for(const [key,[value,status]] of Object.entries(expected)) {
+      const decision=await runtime.evaluate(key,'web',golden.context,{now:golden.now});
+      assert.deepEqual([decision.value,decision.status,decision.reason],[value,status,reason]);
+    }
+    const before=calls,snapshot=await runtime.snapshot(Object.keys(expected),'web',golden.context,{now:golden.now});
+    assert.equal(calls,before+1);assert.equal(snapshot.configuration_revision,1);assert.equal(snapshot.kill_generation,1);
+    for(const [key,[value,status]] of Object.entries(expected)) {
+      const d=snapshot.decisions[key];assert.deepEqual([d.value,d.status,d.reason],[value,status,reason]);
+      assert.equal(d.configuration_revision,1);assert.equal(d.kill_generation,1);
+    }
+  }
+});
+
 test('out-of-order prior-account responses cannot clear the bound account denial',async()=>{
   const r=new FeatureRuntime(golden.catalog,{trust_policy:'local-test'});
   await r.activate(bundle(),0,golden.now);await r.updateKills(kill(1,['release']),'local-fixture',golden.now);
