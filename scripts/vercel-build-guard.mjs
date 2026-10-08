@@ -3,7 +3,7 @@
  * vercel-build-guard.mjs — canonical "Ignored Build Step" for the ecosystem.
  *
  * Canonical source: ai-starter-pack scripts/vercel-build-guard.mjs
- * (rendered into plugin/manolii-framework and registry/platform/framework).
+ * (rendered into the pack plugin bundle and registry/platform/framework).
  * Do not edit in consumer repos — change it at the source and let the sync flow.
  *
  * Wire into a project's vercel.json (per-commit, overrides the dashboard
