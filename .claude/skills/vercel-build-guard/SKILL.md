@@ -93,9 +93,15 @@ a ref class that opens PRs needing a preview:
    `.github/workflows` for `deployment_status` / preview-URL consumers.
 2. Decide the mode: prod-only → `git.deploymentEnabled`; filtered → guard
    script with `PREFIXES`/`EXTRA_SKIP`.
-3. PR the repo change (script + vercel.json).
-4. Patch the dashboard for immediate coverage or dead-config cleanup:
+3. Ensure **Automatically Expose System Environment Variables** is enabled in
+   the Vercel project (default on projects created after Nov 2020 — verify,
+   don't assume). The guard reads `VERCEL_GIT_COMMIT_REF`; without system
+   vars exposed it sees no ref and **builds everything** (fail-open). Confirm
+   by checking a guard run in the deployment's Ignored Build Step logs for a
+   non-empty ref — not `no commit ref — building`.
+4. PR the repo change (script + vercel.json).
+5. Patch the dashboard for immediate coverage or dead-config cleanup:
    `PATCH https://api.vercel.com/v9/projects/{id}?teamId={team}` with
    `{"commandForIgnoringBuildStep": "node -e \"...\""}` or `null`.
-5. Delete dead projects (no domains, no git link, zero successful builds) —
+6. Delete dead projects (no domains, no git link, zero successful builds) —
    project deletion also removes a stale failing deploy check on the repo.
