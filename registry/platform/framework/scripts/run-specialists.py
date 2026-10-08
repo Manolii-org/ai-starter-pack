@@ -120,6 +120,10 @@ _DANGER_PATH_RE = re.compile(
 )
 _API_TIMEOUT = 90
 _MAX_WORKERS = 6
+# Extra max_tokens headroom for proxied calls: OSS aliases reason in-band and
+# their `thinking` blocks share the max_tokens budget (the proxy ignores
+# thinking.budget_tokens — see _call_api). Sized at ~2x observed reasoning.
+_PROXY_THINKING_HEADROOM = 2048
 
 _MODEL_MAP = {
     "haiku": "claude-haiku-4-5-20251001",
@@ -162,19 +166,6 @@ def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int
     if proxied:
         model = _PROXY_MODEL_MAP.get(model, model)
 
-    payload = json.dumps({
-        "model": model,
-        "max_tokens": max_tokens,
-        "system": [
-            {
-                "type": "text",
-                "text": system_prompt,
-                "cache_control": {"type": "ephemeral"},
-            }
-        ],
-        "messages": [{"role": "user", "content": user_message}],
-    }).encode("utf-8")
-
     headers = {
         "anthropic-version": _ANTHROPIC_API_VERSION,
         "anthropic-beta": "prompt-caching-2024-07-31",
@@ -184,35 +175,66 @@ def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int
         headers["Authorization"] = f"Bearer {api_key.removeprefix('Bearer ')}"
     else:
         headers["x-api-key"] = api_key
-    req = urllib.request.Request(
-        api_url,
-        data=payload,
-        headers=headers,
-        method="POST",
-    )
 
-    # The fail-closed sonnet-advisor guardrail rejects with a 400 whose body
-    # instructs a retry — that one rejection is transient (a provider blip
-    # behind the advisor); every other status is terminal. One re-attempt,
-    # matching the retired ProxyClient contract.
+    # OSS models behind the LiteLLM proxy reason in-band: `thinking` blocks
+    # share the max_tokens budget, and the proxy accepts but does not enforce
+    # thinking.budget_tokens or thinking.disabled (verified 2026-10-08 — a
+    # ~1k-token chain-of-thought exhausts a specialist's declared 800 and
+    # returns stop_reason=max_tokens with an empty text block; every
+    # specialist failed that way). Proxied calls therefore get headroom on
+    # top of the declared answer budget, plus one doubled retry if the
+    # answer still comes back starved. Anthropic-direct keeps the declared
+    # budget verbatim.
+    budget = max_tokens + _PROXY_THINKING_HEADROOM if proxied else max_tokens
     data = None
-    for attempt in range(2):
-        try:
-            with _urlopen_https(req, timeout=_API_TIMEOUT, host=urllib.parse.urlparse(api_url).hostname or "") as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            break
-        except urllib.error.HTTPError as e:
-            error_body = e.read().decode("utf-8", errors="replace")
-            if attempt == 0 and e.code == 400 and "advisor rejected" in error_body.lower():
-                time.sleep(2)
-                continue
-            raise RuntimeError(f"API error {e.code}: {error_body}")
-    if data is None:
-        raise RuntimeError("API call produced no response")
+    for _budget_attempt in range(2):
+        payload = json.dumps({
+            "model": model,
+            "max_tokens": budget,
+            "system": [
+                {
+                    "type": "text",
+                    "text": system_prompt,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            "messages": [{"role": "user", "content": user_message}],
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            api_url,
+            data=payload,
+            headers=headers,
+            method="POST",
+        )
 
-    for block in data.get("content", []):
-        if block.get("type") == "text":
-            return block["text"]
+        # The fail-closed sonnet-advisor guardrail rejects with a 400 whose
+        # body instructs a retry — that one rejection is transient (a
+        # provider blip behind the advisor); every other status is terminal.
+        # One re-attempt, matching the retired ProxyClient contract.
+        data = None
+        for attempt in range(2):
+            try:
+                with _urlopen_https(req, timeout=_API_TIMEOUT, host=urllib.parse.urlparse(api_url).hostname or "") as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                break
+            except urllib.error.HTTPError as e:
+                error_body = e.read().decode("utf-8", errors="replace")
+                if attempt == 0 and e.code == 400 and "advisor rejected" in error_body.lower():
+                    time.sleep(2)
+                    continue
+                raise RuntimeError(f"API error {e.code}: {error_body}")
+        if data is None:
+            raise RuntimeError("API call produced no response")
+
+        text = ""
+        for block in data.get("content", []):
+            if block.get("type") == "text":
+                text = block["text"]
+                break
+        if text or data.get("stop_reason") != "max_tokens" or not proxied:
+            return text
+        # Thinking starved the answer: double the budget once and retry.
+        budget *= 2
     return ""
 
 

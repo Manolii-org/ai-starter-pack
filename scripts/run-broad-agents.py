@@ -63,6 +63,10 @@ MAX_DIFF_CHARS = int(os.environ.get("BROAD_AGENTS_MAX_DIFF_CHARS", "40000"))
 TIMEOUT_SECS = 240
 MAX_RETRIES = 4
 RETRIABLE_STATUS = {429, 500, 502, 503, 504}
+# Extra max_tokens for a starved-answer retry on the proxy: OSS aliases
+# reason in-band and `thinking` shares max_tokens (budget_tokens is ignored —
+# see the budgets comment in _invoke_agent). Sized at ~2x observed reasoning.
+_PROXY_THINKING_HEADROOM = 2048
 
 
 @dataclass
@@ -295,29 +299,6 @@ def invoke_agent(
         model = DIRECT_MODEL_MAP.get(model, model)
     api_url = f"{base_url}/v1/messages"
 
-    payload = {
-        "model": model,
-        # 2400 tokens ≈ 9.6K chars keeps the visible text inside the advisor
-        # guardrail's 10K-char review window (longer responses fail closed with
-        # 503). Reasoning tokens (thinking blocks) share this budget but are
-        # excluded from the reviewed text, so real findings output sits well
-        # under the window.
-        "max_tokens": 2400,
-        "system": [
-            {
-                "type": "text",
-                "text": agent_config.system_prompt,
-                "cache_control": {"type": "ephemeral"},
-            }
-        ],
-        "messages": [
-            {
-                "role": "user",
-                "content": f"{agent_config.instructions}\n\n{user_message}",
-            }
-        ],
-    }
-
     headers = {
         "anthropic-version": "2023-06-01",
         "content-type": "application/json",
@@ -327,57 +308,118 @@ def invoke_agent(
     else:
         headers["x-api-key"] = api_key
 
+    # Reasoning models behind the LiteLLM proxy share max_tokens with their
+    # `thinking` blocks and ignore thinking.budget_tokens/disabled (verified
+    # 2026-10-08): a long chain-of-thought can exhaust the answer budget and
+    # return stop_reason=max_tokens with an empty text block. The 2400-token
+    # ceiling is advisor-window sizing and stays — a starved answer gets one
+    # retry with headroom on top, where thinking is already proven long so
+    # the visible text still fits the review window.
+    budgets = (2400, 2400 + _PROXY_THINKING_HEADROOM) if proxy else (2400,)
+
     # Transient upstream errors (rate limits, 5xx, network resets) retry with
     # exponential backoff; a terminal failure takes the skip-marker path so the
     # judge still sees the agent as assessed-but-unavailable.
+    content = ""
     resp_data = None
-    for attempt in range(MAX_RETRIES):
-        try:
-            req = Request(
-                api_url,
-                data=json.dumps(payload).encode("utf-8"),
-                headers=headers,
-                method="POST",
-            )
-            with _urlopen_https(req, timeout=TIMEOUT_SECS, host=urlparse(api_url).hostname or "") as response:
-                resp_data = json.loads(response.read().decode("utf-8"))
-            break
-        except HTTPError as e:
-            err_body = e.read().decode("utf-8", errors="replace")[:2000]
-            # The fail-closed sonnet-advisor guardrail rejects with a 400 whose
-            # body instructs a retry — that one rejection is transient (a
-            # provider blip behind the advisor); every other 400 is terminal.
-            retriable = e.code in RETRIABLE_STATUS or (
-                e.code == 400 and "advisor rejected" in err_body.lower()
-            )
-            if retriable and attempt < MAX_RETRIES - 1:
-                sleep_secs = 2 ** attempt
-                logger.warning(
-                    f"Agent {agent_config.name} HTTP {e.code} on attempt "
-                    f"{attempt + 1}/{MAX_RETRIES}; retrying in {sleep_secs}s"
+    for budget in budgets:
+        payload = {
+            "model": model,
+            # 2400 tokens ≈ 9.6K chars keeps the visible text inside the
+            # advisor guardrail's 10K-char review window (longer responses
+            # fail closed with 503). Reasoning tokens (thinking blocks) share
+            # this budget but are excluded from the reviewed text, so real
+            # findings output sits well under the window.
+            "max_tokens": budget,
+            "system": [
+                {
+                    "type": "text",
+                    "text": agent_config.system_prompt,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": f"{agent_config.instructions}\n\n{user_message}",
+                }
+            ],
+        }
+        resp_data = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                req = Request(
+                    api_url,
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers=headers,
+                    method="POST",
                 )
-                time.sleep(sleep_secs)
-                continue
-            logger.error(f"Agent {agent_config.name} API error: {e}")
-            break
-        # OSError covers URLError plus the response-phase failures urlopen does
-        # not convert (RemoteDisconnected, ConnectionResetError, TimeoutError).
-        except OSError as e:
-            if attempt < MAX_RETRIES - 1:
-                sleep_secs = 2 ** attempt
-                logger.warning(
-                    f"Agent {agent_config.name} network error on attempt "
-                    f"{attempt + 1}/{MAX_RETRIES}; retrying in {sleep_secs}s "
-                    f"(error: {e})"
+                with _urlopen_https(req, timeout=TIMEOUT_SECS, host=urlparse(api_url).hostname or "") as response:
+                    resp_data = json.loads(response.read().decode("utf-8"))
+                break
+            except HTTPError as e:
+                err_body = e.read().decode("utf-8", errors="replace")[:2000]
+                # The fail-closed sonnet-advisor guardrail rejects with a 400
+                # whose body instructs a retry — that one rejection is
+                # transient (a provider blip behind the advisor); every other
+                # 400 is terminal.
+                retriable = e.code in RETRIABLE_STATUS or (
+                    e.code == 400 and "advisor rejected" in err_body.lower()
                 )
-                time.sleep(sleep_secs)
-                continue
-            logger.error(f"Agent {agent_config.name} API error: {e}")
+                if retriable and attempt < MAX_RETRIES - 1:
+                    sleep_secs = 2 ** attempt
+                    logger.warning(
+                        f"Agent {agent_config.name} HTTP {e.code} on attempt "
+                        f"{attempt + 1}/{MAX_RETRIES}; retrying in {sleep_secs}s"
+                    )
+                    time.sleep(sleep_secs)
+                    continue
+                logger.error(f"Agent {agent_config.name} API error: {e}")
+                break
+            # OSError covers URLError plus the response-phase failures urlopen
+            # does not convert (RemoteDisconnected, ConnectionResetError,
+            # TimeoutError).
+            except OSError as e:
+                if attempt < MAX_RETRIES - 1:
+                    sleep_secs = 2 ** attempt
+                    logger.warning(
+                        f"Agent {agent_config.name} network error on attempt "
+                        f"{attempt + 1}/{MAX_RETRIES}; retrying in {sleep_secs}s "
+                        f"(error: {e})"
+                    )
+                    time.sleep(sleep_secs)
+                    continue
+                logger.error(f"Agent {agent_config.name} API error: {e}")
+                break
+            except (json.JSONDecodeError, ValueError) as e:
+                logger.error(f"Agent {agent_config.name} response JSON error: {e}")
+                break
+        if resp_data is None:
+            if direct_required:
+                return {
+                    "source": agent_config.name,
+                    "findings": [],
+                    "first_party": True,
+                    "skipped": "api_error",
+                }
+            return None
+
+        # Reasoning models (DeepSeek V4 via the proxy) prepend a `thinking`
+        # block to the content array — select text blocks, not content[0].
+        blocks = resp_data.get("content") or []
+        content = "".join(
+            b.get("text", "") for b in blocks
+            if isinstance(b, dict) and b.get("type", "text") == "text"
+        )
+        if content:
             break
-        except (json.JSONDecodeError, ValueError) as e:
-            logger.error(f"Agent {agent_config.name} response JSON error: {e}")
-            break
-    if resp_data is None:
+        logger.warning(
+            f"Agent {agent_config.name} empty text at max_tokens={budget} "
+            f"(stop_reason={resp_data.get('stop_reason')})"
+        )
+
+    if not content:
+        logger.error(f"Agent {agent_config.name} empty response")
         if direct_required:
             return {
                 "source": agent_config.name,
@@ -388,24 +430,6 @@ def invoke_agent(
         return None
 
     try:
-        # Reasoning models (DeepSeek V4 via the proxy) prepend a `thinking`
-        # block to the content array — select text blocks, not content[0].
-        blocks = resp_data.get("content") or []
-        content = "".join(
-            b.get("text", "") for b in blocks
-            if isinstance(b, dict) and b.get("type", "text") == "text"
-        )
-        if not content:
-            logger.error(f"Agent {agent_config.name} empty response")
-            if direct_required:
-                return {
-                    "source": agent_config.name,
-                    "findings": [],
-                    "first_party": True,
-                    "skipped": "api_error",
-                }
-            return None
-
         # Strip markdown fences
         content = content.strip()
         content = re.sub(r"^```(?:json)?\n?", "", content)

@@ -100,6 +100,11 @@ _PROXY_MODEL_MAP = {
     "claude-sonnet-4-6": "sonnet",
 }
 
+# Extra max_tokens for a starved-answer retry on the proxy: OSS aliases
+# reason in-band and `thinking` shares max_tokens (the proxy ignores
+# thinking.budget_tokens — see the budgets comment in _call_judge).
+_PROXY_THINKING_HEADROOM = 2048
+
 # Categorical confidence emitted by older/simpler producers, mapped onto the
 # canonical numeric scale. Unknown strings raise — a misspelling must not
 # silently read as a mid-confidence finding.
@@ -422,14 +427,6 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
             model = "claude-sonnet-4-6"
             if proxied:
                 model = _PROXY_MODEL_MAP.get(model, model)
-            request_body = {
-                "model": model,
-                "max_tokens": 4000,
-                "system": self.get_judge_system_prompt(),
-                "messages": [
-                    {"role": "user", "content": user_message}
-                ],
-            }
 
             headers = {
                 "anthropic-version": _ANTHROPIC_API_VERSION,
@@ -439,28 +436,52 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
                 headers["Authorization"] = f"Bearer {api_key.removeprefix('Bearer ')}"
             else:
                 headers["x-api-key"] = api_key
-            req = urllib.request.Request(
-                api_url,
-                data=json.dumps(request_body).encode("utf-8"),
-                headers=headers,
-                method="POST",
-            )
 
-            logger.info("Invoking judge agent...")
-            with _urlopen_https(
-                req,
-                timeout=120,
-                host=urllib.parse.urlparse(api_url).hostname or "",
-            ) as response:
-                result = json.loads(response.read().decode("utf-8"))
+            # Reasoning models behind the LiteLLM proxy share max_tokens with
+            # their `thinking` blocks and ignore thinking.budget_tokens /
+            # disabled (verified 2026-10-08): a long chain-of-thought can
+            # exhaust the verdict budget and return stop_reason=max_tokens
+            # with no text block. A starved answer gets one retry with
+            # headroom on top; Anthropic-direct keeps the single 4000 budget.
+            budgets = (4000, 4000 + _PROXY_THINKING_HEADROOM) if proxied else (4000,)
+            response_text = ""
+            for budget in budgets:
+                request_body = {
+                    "model": model,
+                    "max_tokens": budget,
+                    "system": self.get_judge_system_prompt(),
+                    "messages": [
+                        {"role": "user", "content": user_message}
+                    ],
+                }
+                req = urllib.request.Request(
+                    api_url,
+                    data=json.dumps(request_body).encode("utf-8"),
+                    headers=headers,
+                    method="POST",
+                )
 
-            # Reasoning models (e.g. DeepSeek via a proxy alias) prepend a
-            # `thinking` block — select text-type blocks, not content[0].
-            response_text = "".join(
-                b.get("text", "")
-                for b in result.get("content", [])
-                if isinstance(b, dict) and b.get("type", "text") == "text"
-            )
+                logger.info("Invoking judge agent...")
+                with _urlopen_https(
+                    req,
+                    timeout=120,
+                    host=urllib.parse.urlparse(api_url).hostname or "",
+                ) as response:
+                    result = json.loads(response.read().decode("utf-8"))
+
+                # Reasoning models (e.g. DeepSeek via a proxy alias) prepend a
+                # `thinking` block — select text-type blocks, not content[0].
+                response_text = "".join(
+                    b.get("text", "")
+                    for b in result.get("content", [])
+                    if isinstance(b, dict) and b.get("type", "text") == "text"
+                )
+                if response_text:
+                    break
+                logger.warning(
+                    f"Judge returned no text blocks at max_tokens={budget} "
+                    f"(stop_reason={result.get('stop_reason')})"
+                )
             if not response_text:
                 raise KeyError("no text blocks in judge response content")
             logger.info(f"Judge response: {response_text[:200]}...")
