@@ -99,6 +99,9 @@ jobs:
         # without it, nine subprocess cases error before exercising the template.
         run: python3 -m pytest tests/ -q
 
+      - name: Required-check identity regressions
+        run: python3 -m pytest scripts/tests/test_check_branch_protection.py -q
+
       - name: Plugin hook + drift guards
         run: |
           # Codex P2 2026-08-22 (#71): these three guards were only documented for
