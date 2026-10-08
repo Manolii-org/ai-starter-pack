@@ -15,7 +15,27 @@ The root npm bridge exports `@manolii/feature-controls` and `@manolii/feature-co
 
 ### pnpm Git build permission
 
-pnpm 11 blocks Git dependency `prepare` by default: installation can succeed without building the exported JavaScript. Consumers must review and approve this package's build using a source-specific permission restricted to the exact Git repository and full commit SHA, using the build-permission configuration supported by their pinned pnpm major. Package-name approval alone is insufficient for Git sources; never enable lifecycle scripts globally. Verify both server and `/client` imports after installation. A separately verified prebuilt tarball does not require the Git `prepare` step; it is not registry publication. Consumer manifests and their version-specific permission settings remain consumer-owned.
+Git build permission is **pnpm-version-sensitive**, not a pnpm-major contract. The **strictest, preferred** source-specific contract below is verified on **11.17.0 and 11.28.5**. The dependency remains the full-SHA Git spec from above; the permission key uses the **resolved codeload tarball URL**, not the literal Git dependency spec and not package version 0.0.0.
+
+Verbatim isolated replay configuration in pnpm-workspace.yaml (candidate evidence, not an approved consumer pin):
+
+    strictDepBuilds: true
+    allowBuilds:
+      "@manolii/feature-controls@https://codeload.github.com/Manolii-org/ai-starter-pack/tar.gz/6eeb5df946d0fc8083226df729322b2287ca6275": true
+
+The dependency in that replay is git+https://github.com/Manolii-org/ai-starter-pack.git#6eeb5df946d0fc8083226df729322b2287ca6275. Only that source/commit is approved: a different-SHA permission key is denied. Keep the dependency SHA and resolved permission key consistent, and repeat a fresh-store install plus server and /client imports whenever either source or pnpm version changes. Without permission, Git preparation is rejected; with scripts explicitly disabled, installation can succeed but generated exports are absent.
+
+**11.5.2 is not compatible with this source-specific key:** its Git preparation matcher uses manifest name/version instead of the resolved source. The literal configuration above fails locally with ERR_PNPM_INVALID_VERSION_UNION; without approval it fails with ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED. Do not infer the first supporting version from these two passing versions. A consumer's own replay remains required.
+
+Where source keys are unsupported, the **portable fallback** is package name plus an **exact package version**, together with the full-SHA Git dependency and reviewed lockfile:
+
+    strictDepBuilds: true
+    allowBuilds:
+      "@manolii/feature-controls@0.0.0": true
+
+This fallback is verified on 11.5.2 with the same SHA-pinned dependency above; a wrong-version permission is denied. Use the package version declared by that exact SDK source, not an invented registry version. It is **not equivalent** to source-specific approval: pnpm permits build scripts for any source with that name/version, while the dependency declaration and lockfile carry source binding. Version 0.0.0 is shared by multiple candidate commits; it does not identify a source revision. Review the exact repository/SHA and all resolved occurrences of this package before granting permission. Re-review source/lockfile changes even when the package version is unchanged.
+
+Never use package-wide/global lifecycle permission, version ranges or unpinned sources. Keep strictDepBuilds enabled and verify a fresh install, exact Git SHA in the lockfile, and both imports under the consumer's pinned pnpm version. A reviewed toolchain change can retain stricter source-specific approval. A SHA-256-verified prebuilt tarball imports with scripts blocked in a separate local smoke; that does **not** validate Git preparation or authorize committed machine-local file dependencies, registry publication or consumer delivery. Consumer manifests, lockfiles and version-specific permissions remain consumer-owned.
 
 ## Server contract
 
