@@ -3,7 +3,7 @@ blocks share the max_tokens budget (the LiteLLM route accepts but ignores
 thinking.budget_tokens / thinking.disabled — verified live 2026-10-08). A
 ~1k-token chain-of-thought then exhausts a skill's declared 800-token budget
 and returns stop_reason=max_tokens with an empty text block — every
-specialist silently produced zero coverage (Buro-Built/bcp-core#1562).
+specialist lane silently produced zero coverage.
 
 _call_api must therefore add headroom on top of the declared answer budget
 for proxied calls and retry once at a doubled budget when the response comes
