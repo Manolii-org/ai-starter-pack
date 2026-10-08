@@ -13,8 +13,11 @@ import pytest
 SCRIPT = Path(__file__).resolve().parents[1] / "bin/bounded-command.py"
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux subreaper")
 OBSERVER = r'''
-import json, os, runpy, signal, sys
+import json, os, runpy, signal, sys, time
 log, phase, script, *args = sys.argv[1:]
+if phase.startswith("blocked_exec"):
+    blocked = {int(sig) for sig in phase.split(":")[1].split(",")}
+    signal.pthread_sigmask(signal.SIG_BLOCK, blocked | {signal.SIGUSR1})
 def record(row):
     with open(log, "a") as f: f.write(json.dumps(row) + "\n")
 fork, wait, install, read = os.fork, os.waitpid, signal.signal, os.read
@@ -36,9 +39,16 @@ def observed_install(sig, handler):
 def observed_read(*args):
     global sent
     data = read(*args)
-    if phase.startswith("exec") and data and not sent:
+    if phase.startswith(("exec", "blocked_exec")) and data and not sent:
         sent = True
-        os.kill(os.getpid(), int(phase.split(":")[1]))
+        record(["signal", time.monotonic()])
+        os.kill(os.getpid(), int(phase.split(":")[-1]))
+    if phase == "deadline" and data and not sent:
+        sent = True
+        time.sleep(1)
+    if phase == "native_failure" and data and not sent:
+        sent = True
+        with open(log + ".read", "w") as f: f.write("read")
     return data
 def observed_pending():
     result = pending()
@@ -160,7 +170,7 @@ def test_immutable_bytes(tmp_path, payload, expected, reason):
 @pytest.mark.parametrize("phase", ["early", "final"])
 @pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT])
 def test_setup_and_finalizer_signals(tmp_path, phase, sig):
-    result, report, native = run(tmp_path, "print('withheld')", phase=f"{phase}:{sig}")
+    result, report, native = run(tmp_path, "print('withheld')", phase=f"{phase}:{int(sig)}")
     assert result.returncode == 128 + sig
     assert report["reason"] == "signal"
     assert report["signal"] == sig
@@ -190,7 +200,7 @@ def test_direct_cli(tmp_path, blocking, status):
 @pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT])
 def test_signal_during_descendant_finalization(tmp_path, sig):
     pids = tmp_path / "pids"
-    result, report, native = run(tmp_path, FIXTURE, [pids, "double", 0], phase=f"cleanup:{sig}")
+    result, report, native = run(tmp_path, FIXTURE, [pids, "double", 0], phase=f"cleanup:{int(sig)}")
     assert result.returncode == 137
     assert report["native_parent"] == 0 and report["signal"] == sig
     assert -9 in native.values()
@@ -199,7 +209,7 @@ def test_signal_during_descendant_finalization(tmp_path, sig):
 
 @pytest.mark.parametrize("sig", [signal.SIGKILL, signal.SIGTERM])
 def test_actual_native_parent_signal(tmp_path, sig):
-    result, report, native = run(tmp_path, f"import os; os.kill(os.getpid(), {sig})")
+    result, report, native = run(tmp_path, f"import os; os.kill(os.getpid(), {int(sig)})")
     assert list(native.values()) == [-sig]
     assert result.returncode == report["native_parent"] == 128 + sig
 
@@ -207,7 +217,7 @@ def test_actual_native_parent_signal(tmp_path, sig):
 @pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT])
 def test_own_signal_with_live_tree(tmp_path, sig):
     pids = tmp_path / "pids"
-    result, report, native = run(tmp_path, FIXTURE, [pids, "live", 0], phase=f"exec:{sig}")
+    result, report, native = run(tmp_path, FIXTURE, [pids, "live", 0], phase=f"exec:{int(sig)}")
     assert result.returncode == 137 and report["signal"] == sig
     assert sorted(native.values()) == [-9, -9]
     for pid in pids.read_text().split(): assert not Path(f"/proc/{pid}").exists()
@@ -215,7 +225,7 @@ def test_own_signal_with_live_tree(tmp_path, sig):
 
 @pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT])
 def test_signal_after_commit_snapshot(tmp_path, sig):
-    result, report, native = run(tmp_path, "print('committed')", phase=f"commit:{sig}")
+    result, report, native = run(tmp_path, "print('committed')", phase=f"commit:{int(sig)}")
     assert result.returncode == 0 and result.stdout == b"committed\n"
     assert report["signal"] == 0 and list(native.values()) == [0]
 
@@ -224,3 +234,57 @@ def test_incomplete_cleanup_fault_injection(tmp_path):
     result, report, native = run(tmp_path, "print('withheld')", phase="budget_zero")
     assert result.returncode == 125 and report["reason"] == "cleanup_incomplete"
     assert list(native.values()) == [0]
+
+
+@pytest.mark.parametrize("payload", [b"\0", b"\xff"])
+def test_deadline_reason_survives_invalid_output(tmp_path, payload):
+    result, report, native = run(
+        tmp_path, f"import os; os.write(1, {payload!r})", timeout=".5", phase="deadline"
+    )
+    assert result.returncode == 124
+    assert report["reason"] == "deadline"
+    assert report["native_parent"] == 0
+    assert list(native.values()) == [0]
+
+
+@pytest.mark.parametrize("payload", [b"\0", b"\xff"])
+def test_native_failure_reason_survives_invalid_output(tmp_path, payload):
+    code = (
+        f"import os, sys, time; os.write(1, {payload!r}); "
+        "\nwhile not os.path.exists(sys.argv[1]): time.sleep(.001)"
+        "\nos._exit(17)"
+    )
+    result, report, native = run(
+        tmp_path, code, [tmp_path / "waits.read"], timeout="1", phase="native_failure"
+    )
+    assert result.returncode == 17
+    assert report["reason"] == "native_failure"
+    assert list(native.values()) == [17]
+
+
+@pytest.mark.parametrize("blocked", [
+    (signal.SIGTERM,), (signal.SIGINT,), (signal.SIGTERM, signal.SIGINT),
+])
+@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT])
+def test_inherited_stop_mask_is_cleared_before_execution(tmp_path, blocked, sig):
+    mask = tmp_path / "mask"
+    code = (
+        "import json, os, signal, sys, time; "
+        "blocked = signal.pthread_sigmask(signal.SIG_BLOCK, set()); "
+        "open(sys.argv[1], 'w').write(json.dumps(sorted(map(int, blocked)))); "
+        "os.write(1, b'running'); time.sleep(60)"
+    )
+    initial = ",".join(str(int(item)) for item in blocked)
+    result, report, native = run(
+        tmp_path, code, [mask], timeout="5", phase=f"blocked_exec:{initial}:{int(sig)}"
+    )
+    assert json.loads(mask.read_text()) == [int(signal.SIGUSR1)]
+    assert result.returncode == 137
+    assert report["reason"] == "signal" and report["signal"] == int(sig)
+    assert list(native.values()) == [-9]
+    sent = next(
+        json.loads(line)[1]
+        for line in (tmp_path / "waits").read_text().splitlines()
+        if json.loads(line)[0] == "signal"
+    )
+    assert time.monotonic() - sent < 2.5

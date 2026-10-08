@@ -6,7 +6,7 @@ No shell; command stdin/stderr go to `/dev/null`. Only stdlib and Linux `/proc`/
 Root cause: shell substitution removes raw NUL; process-group cleanup misses detached processes; lost waits hide child failure.
 Subreaper ownership precedes spawn; each cleanup kill/reap wave adopts `setsid`/double-fork descendants. All adopted children are awaited; command-reaped statuses are unobservable.
 
-Stdout: **4096 publishable bytes** in memory (+one overflow-probe byte), frozen after cleanup. One immutable buffer is checked for actual raw NUL and strict UTF-8.
+Stdout: **4096 publishable bytes** in memory (+one overflow-probe byte), frozen after cleanup. Successful execution's immutable buffer is checked for actual raw NUL and strict UTF-8; an earlier failure reason is preserved.
 Publication requires native success and complete cleanup. Not a JSON/schema validator: escaped `\u0000`, duplicate keys, exact enums/schema are callers' responsibility.
 Check exit status; never shell-normalize raw output.
 
@@ -16,6 +16,7 @@ Wrapper stderr is sanitized JSON only (never argv/environment/raw command output
 Native 124/137/143/17 stay distinct; a deadline killing the root usually selects native 137, **not** 124.
 
 TERM/INT handlers cover setup through finalization, requesting cleanup without raising through ownership setup.
+TERM/INT are unblocked after handler installation even when inherited blocked from a launcher; other inherited signal-mask bits are preserved.
 Cleanup: independent **2-second budget**, SIGKILL, no grace. Total: timeout + 2 seconds plus startup/scheduling/finalization.
 No zero exit/output on incomplete cleanup. Wrapper SIGKILL cannot be handled; uninterruptible kernel tasks may survive and cause failure.
 Not a hostile-process sandbox: nested subreapers, external supervisors or different PID namespaces can break ownership.

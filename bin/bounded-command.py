@@ -125,12 +125,13 @@ def execute(timeout, command):
                 except OSError:
                     reason = "runtime_failure"
     payload = bytes(data)
-    try:
-        payload.decode("utf-8", errors="strict")
-        if b"\0" in payload:
-            reason = "raw_nul"
-    except UnicodeDecodeError:
-        reason = "invalid_utf8"
+    if reason == "success":
+        try:
+            payload.decode("utf-8", errors="strict")
+            if b"\0" in payload:
+                reason = "raw_nul"
+        except UnicodeDecodeError:
+            reason = "invalid_utf8"
     return parent, descendants, reason, complete, payload
 
 
@@ -183,7 +184,7 @@ def main():
     previous = signal.pthread_sigmask(signal.SIG_BLOCK, STOP)
     for sig in STOP:
         signal.signal(sig, interrupted)
-    signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+    signal.pthread_sigmask(signal.SIG_SETMASK, previous - STOP)
     try:
         timeout = float(sys.argv[1])
         if not math.isfinite(timeout) or timeout <= 0 or len(sys.argv) < 3:
