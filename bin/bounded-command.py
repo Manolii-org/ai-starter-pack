@@ -39,20 +39,26 @@ def reap(root, parent, descendants, end):
 
 def cleanup(root, parent, descendants):
     end = time.monotonic() + CLEANUP_SECONDS
+    enumeration_ok = True
     while time.monotonic() < end:
         parent, complete = reap(root, parent, descendants, end)
         if complete:
-            return parent, True
+            return parent, enumeration_ok
         # Unreaped direct children cannot recycle PIDs. Killing each wave
         # adopts its children, including double-forked/new-session processes.
-        with open(f"/proc/self/task/{os.getpid()}/children") as children:
-            for pid in children.read(65536).rsplit(" ", 1)[0].split():
-                if time.monotonic() >= end:
-                    break
-                try:
-                    os.kill(int(pid), signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+        try:
+            with open(f"/proc/self/task/{os.getpid()}/children") as children:
+                pids = children.read(65536).rsplit(" ", 1)[0].split()
+        except OSError:
+            enumeration_ok = False
+            pids = [root] if root is not None and parent is None else []
+        for pid in pids:
+            if time.monotonic() >= end:
+                break
+            try:
+                os.kill(int(pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
         time.sleep(0.005)
     return parent, False
 
@@ -66,6 +72,9 @@ def execute(timeout, command):
         libc = ctypes.CDLL(None, use_errno=True)
         if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
             raise OSError
+        with open(f"/proc/self/task/{os.getpid()}/children") as children:
+            children.read(65536)
+        signal.signal(signal.SIGCHLD, signal.SIG_DFL)
         if received:
             reason = "signal"
         else:
@@ -76,6 +85,10 @@ def execute(timeout, command):
                 try:
                     for sig in STOP:
                         signal.signal(sig, signal.SIG_DFL)
+                    for name in ("SIGPIPE", "SIGXFZ", "SIGXFSZ"):
+                        sig = getattr(signal, name, None)
+                        if sig is not None and signal.getsignal(sig) == signal.SIG_IGN:
+                            signal.signal(sig, signal.SIG_DFL)
                     os.dup2(null_fd, 0)
                     os.dup2(write_fd, 1)
                     os.dup2(null_fd, 2)

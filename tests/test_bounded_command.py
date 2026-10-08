@@ -13,7 +13,7 @@ import pytest
 SCRIPT = Path(__file__).resolve().parents[1] / "bin/bounded-command.py"
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux subreaper")
 OBSERVER = r'''
-import json, os, runpy, signal, sys, time
+import atexit, builtins, json, os, runpy, signal, sys, time
 log, phase, script, *args = sys.argv[1:]
 if phase.startswith("blocked_exec"):
     blocked = {int(sig) for sig in phase.split(":")[1].split(",")}
@@ -21,16 +21,43 @@ if phase.startswith("blocked_exec"):
 def record(row):
     with open(log, "a") as f: f.write(json.dumps(row) + "\n")
 fork, wait, install, read = os.fork, os.waitpid, signal.signal, os.read
+original_open, original_exit = builtins.open, os._exit
+observer_pid = os.getpid()
+owned = set()
 pending = signal.sigpending
 sent = False
 def observed_fork():
     pid = fork()
-    if pid: record(["root", pid])
+    if pid:
+        owned.add(pid)
+        record(["root", pid])
     return pid
 def observed_wait(*args):
     pid, status = wait(*args)
-    if pid: record(["wait", pid, status])
+    if pid:
+        owned.discard(pid)
+        record(["wait", pid, status])
     return pid, status
+def observed_open(path, *args, **kwargs):
+    if str(path) == f"/proc/self/task/{os.getpid()}/children":
+        if phase.startswith("proc_setup") or (phase.startswith("proc_runtime") and owned):
+            raise OSError(int(phase.split(":")[1]), "injected proc failure")
+    return original_open(path, *args, **kwargs)
+def final_owned_cleanup():
+    for pid in owned:
+        try: os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError: pass
+    end = time.monotonic() + .5
+    while owned and time.monotonic() < end:
+        observed_wait(-1, os.WNOHANG)
+        time.sleep(.005)
+if phase.startswith("proc_"):
+    builtins.open = observed_open
+    atexit.register(final_owned_cleanup)
+    def observed_exit(status):
+        if os.getpid() == observer_pid: final_owned_cleanup()
+        original_exit(status)
+    os._exit = observed_exit
 def observed_install(sig, handler):
     result = install(sig, handler)
     if phase.startswith("early") and sig == signal.SIGINT:
@@ -119,7 +146,8 @@ def run(tmp_path, code, args=(), timeout=".4", phase="none"):
     for pid, status in mapped.items():
         if pid not in roots: counts[str(status)] = counts.get(str(status), 0) + 1
     assert report["native_descendants"] == counts
-    assert report["cleanup"] == ("incomplete" if phase == "budget_zero" else "complete")
+    incomplete = phase == "budget_zero" or phase.startswith("proc_runtime")
+    assert report["cleanup"] == ("incomplete" if incomplete else "complete")
     if result.returncode: assert result.stdout == b""
     for pid in native: assert not Path(f"/proc/{pid}").exists()
     return result, report, native
@@ -234,6 +262,66 @@ def test_incomplete_cleanup_fault_injection(tmp_path):
     result, report, native = run(tmp_path, "print('withheld')", phase="budget_zero")
     assert result.returncode == 125 and report["reason"] == "cleanup_incomplete"
     assert list(native.values()) == [0]
+
+
+@pytest.mark.parametrize("error", [2, 13])
+def test_unavailable_child_enumeration_prevents_spawn(tmp_path, error):
+    marker = tmp_path / "launched"
+    code = "import sys, time; open(sys.argv[1], 'w').write('launched'); time.sleep(60)"
+    result, report, native = run(tmp_path, code, [marker], phase=f"proc_setup:{error}")
+    assert result.returncode == 125 and report["reason"] == "setup_failure"
+    assert report["native_parent"] is None and native == {}
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("error", [2, 13])
+def test_lost_child_enumeration_kills_and_reaps_known_root(tmp_path, error):
+    result, report, native = run(
+        tmp_path, "import os,time; os.write(1,b'running'); time.sleep(60)",
+        phase=f"proc_runtime:{error}",
+    )
+    assert result.returncode == report["native_parent"] == 137
+    assert report["reason"] == "deadline"
+    assert list(native.values()) == [-9]
+
+
+@pytest.mark.parametrize("mode", ["root", "natural"])
+@pytest.mark.parametrize("status", [0, 17, 124, 137, 143])
+def test_inherited_ignored_sigchld_preserves_native_status(tmp_path, mode, status):
+    launcher = (
+        "import os,signal,sys; signal.signal(signal.SIGCHLD,signal.SIG_IGN); "
+        "signal.pthread_sigmask(signal.SIG_BLOCK,{signal.SIGCHLD,signal.SIGUSR1}); "
+        "os.execv(sys.executable,[sys.executable,*sys.argv[1:]])"
+    )
+    pids = tmp_path / "pids"
+    result = subprocess.run(
+        [sys.executable, "-c", launcher, str(SCRIPT), "1", sys.executable,
+         "-c", FIXTURE, str(pids), mode, str(status)],
+        capture_output=True, timeout=3.5, env={"PATH": os.defpath}, check=False,
+    )
+    report = json.loads(result.stderr)
+    assert result.returncode == report["selected"] == status
+    assert report["native_parent"] == (status if mode == "root" else 0)
+    assert report["native_descendants"] == ({str(status): 1} if mode == "natural" else {})
+    assert report["reason"] == ("native_failure" if status else "success")
+    assert report["cleanup"] == "complete"
+    assert result.stdout == (b"unpublished" if mode == "root" and status == 0 else b"")
+    for pid in pids.read_text().split(): assert not Path(f"/proc/{pid}").exists()
+
+
+@pytest.mark.parametrize("sig", [signal.SIGPIPE, signal.SIGXFSZ])
+def test_exec_restores_python_ignored_native_signals(sig):
+    command = ["/bin/sh", "-c", f"kill -{int(sig)} $$; exit 17"]
+    direct = subprocess.run(command, capture_output=True, timeout=3.5, check=False)
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "1", *command],
+        capture_output=True, timeout=3.5, env={"PATH": os.defpath}, check=False,
+    )
+    report = json.loads(result.stderr)
+    assert direct.returncode == -sig
+    assert result.returncode == report["native_parent"] == 128 + sig
+    assert report["reason"] == "native_failure" and report["cleanup"] == "complete"
+    assert result.stdout == b""
 
 
 @pytest.mark.parametrize("payload", [b"\0", b"\xff"])
