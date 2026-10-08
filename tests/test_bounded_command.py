@@ -1,0 +1,226 @@
+"""Native fork/exec/wait/signal tests; the observer records real kernel waits."""
+
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import pytest
+
+SCRIPT = Path(__file__).resolve().parents[1] / "bin/bounded-command.py"
+pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux subreaper")
+OBSERVER = r'''
+import json, os, runpy, signal, sys
+log, phase, script, *args = sys.argv[1:]
+def record(row):
+    with open(log, "a") as f: f.write(json.dumps(row) + "\n")
+fork, wait, install, read = os.fork, os.waitpid, signal.signal, os.read
+pending = signal.sigpending
+sent = False
+def observed_fork():
+    pid = fork()
+    if pid: record(["root", pid])
+    return pid
+def observed_wait(*args):
+    pid, status = wait(*args)
+    if pid: record(["wait", pid, status])
+    return pid, status
+def observed_install(sig, handler):
+    result = install(sig, handler)
+    if phase.startswith("early") and sig == signal.SIGINT:
+        os.kill(os.getpid(), int(phase.split(":")[1]))
+    return result
+def observed_read(*args):
+    global sent
+    data = read(*args)
+    if phase.startswith("exec") and data and not sent:
+        sent = True
+        os.kill(os.getpid(), int(phase.split(":")[1]))
+    return data
+def observed_pending():
+    result = pending()
+    if phase.startswith("commit"): os.kill(os.getpid(), int(phase.split(":")[1]))
+    return result
+def trace(frame, event, arg):
+    if phase == "budget_zero" and event == "call" and frame.f_code.co_name == "cleanup": frame.f_globals["CLEANUP_SECONDS"] = 0
+    if (phase.split(":")[0] in {"final", "cleanup"} and event == "call"
+            and frame.f_code.co_name == ("finish" if phase.startswith("final") else "cleanup")):
+        os.kill(os.getpid(), int(phase.split(":")[1]))
+    return trace
+os.fork, os.waitpid, signal.signal = observed_fork, observed_wait, observed_install
+os.read = observed_read
+signal.sigpending = observed_pending
+sys.settrace(trace)
+sys.argv = [script, *args]
+runpy.run_path(script, run_name="__main__")
+'''
+FIXTURE = r'''
+import os, signal, sys, time
+path, mode, status = sys.argv[1:]
+def mark():
+    with open(path, "a") as f: f.write(str(os.getpid()) + "\n")
+mark()
+if mode != "root":
+    child = os.fork()
+    if child == 0:
+        os.setsid()
+        mark()
+        if mode == "double":
+            if os.fork(): os._exit(0)
+            mark()
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        if mode == "natural":
+            time.sleep(.1)
+            os._exit(int(status))
+        time.sleep(60)
+        os._exit(0)
+    # Synchronise recording of detached descendants before root exit.
+    target = 3 if mode == "double" else 2
+    while len(open(path).read().split()) < target: time.sleep(.001)
+    if mode != "live": os._exit(0 if mode != "precedence" else int(status))
+if mode == "root":
+    os.write(1, b"unpublished")
+    os._exit(int(status))
+os.write(1, b"running")
+time.sleep(60)
+'''
+
+
+def run(tmp_path, code, args=(), timeout=".4", phase="none"):
+    log = tmp_path / "waits"
+    start = time.monotonic()
+    result = subprocess.run(
+        [sys.executable, "-c", OBSERVER, str(log), phase, str(SCRIPT),
+         timeout, sys.executable, "-c", code, *map(str, args)],
+        capture_output=True, timeout=float(timeout) + 2.5, env={"PATH": os.defpath}, check=False,
+    )
+    assert time.monotonic() - start < float(timeout) + 2.5
+    report = json.loads(result.stderr)
+    assert result.returncode == report["selected"]
+    rows = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+    roots = [row[1] for row in rows if row[0] == "root"]
+    native = {row[1]: os.waitstatus_to_exitcode(row[2]) for row in rows if row[0] == "wait"}
+    mapped = {pid: 128 - status if status < 0 else status for pid, status in native.items()}
+    assert report["native_parent"] == (mapped.get(roots[0]) if roots else None)
+    counts = {}
+    for pid, status in mapped.items():
+        if pid not in roots: counts[str(status)] = counts.get(str(status), 0) + 1
+    assert report["native_descendants"] == counts
+    assert report["cleanup"] == ("incomplete" if phase == "budget_zero" else "complete")
+    if result.returncode: assert result.stdout == b""
+    for pid in native: assert not Path(f"/proc/{pid}").exists()
+    return result, report, native
+
+
+@pytest.mark.parametrize("status", [17, 124, 137, 143])
+def test_native_parent_precedence(tmp_path, status):
+    pids = tmp_path / "pids"
+    result, report, native = run(tmp_path, FIXTURE, [pids, "root", status])
+    assert result.returncode == status
+    assert list(native.values()) == [status]
+    assert report["reason"] == "native_failure"
+
+
+@pytest.mark.parametrize("mode,status,expected", [
+    ("natural", 17, 17), ("natural", 0, 0), ("double", 0, 137),
+    ("orphan", 0, 137), ("precedence", 17, 17), ("live", 0, 137),
+])
+def test_detached_descendants(tmp_path, mode, status, expected):
+    pids = tmp_path / "pids"
+    result, report, native = run(tmp_path, FIXTURE, [pids, mode, status])
+    assert result.returncode == expected
+    assert report["native_parent"] == (137 if mode == "live" else 17 if mode == "precedence" else 0)
+    descendant = -9 if mode != "natural" else status
+    assert descendant in native.values()
+    assert len(native) == (3 if mode == "double" else 2)
+    for pid in pids.read_text().split(): assert not Path(f"/proc/{pid}").exists()
+
+
+@pytest.mark.parametrize("payload,expected,reason", [
+    (b"valid\n", 0, "success"), (b"x" * 4096, 0, "success"),
+    (b"real\0nul", 125, "raw_nul"), (b"\xff", 125, "invalid_utf8"),
+    (b"x" * 4097, 125, "stdout_limit"),
+    (b'{"v":"\\u0000","v":"other"}', 0, "success"),
+])
+def test_immutable_bytes(tmp_path, payload, expected, reason):
+    result, report, native = run(tmp_path, f"import os; os.write(1, {payload!r})")
+    if reason == "stdout_limit" and list(native.values()) == [-9]:
+        expected = 137  # Independently observed SIGKILL before native root exit.
+        assert report["native_parent"] == 137
+    else:
+        assert list(native.values()) == [0]
+    assert result.returncode == expected
+    assert report["reason"] == reason
+    if not expected: assert result.stdout == payload
+
+
+@pytest.mark.parametrize("phase", ["early", "final"])
+@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT])
+def test_setup_and_finalizer_signals(tmp_path, phase, sig):
+    result, report, native = run(tmp_path, "print('withheld')", phase=f"{phase}:{sig}")
+    assert result.returncode == 128 + sig
+    assert report["reason"] == "signal"
+    assert report["signal"] == sig
+    assert list(native.values()) == ([] if phase == "early" else [0])
+
+
+def test_stderr_discard_and_no_argv_diagnostics(tmp_path):
+    result, report, _ = run(tmp_path, "import os; os.write(2,b'RAW-DIAGNOSTIC'); os._exit(17)")
+    assert result.returncode == 17
+    assert b"RAW-DIAGNOSTIC" not in result.stderr
+    assert set(report) == {"reason", "native_parent", "native_descendants", "selected", "cleanup", "signal"}
+
+
+@pytest.mark.parametrize("blocking,status", [(True, 0), (False, 0), (True, 17), (False, 17)])
+def test_direct_cli(tmp_path, blocking, status):
+    with (tmp_path / "out").open("w+b") as out, (tmp_path / "err").open("w+b") as err:
+        for f in (out, err): os.set_blocking(f.fileno(), blocking)
+        result = subprocess.run([sys.executable, str(SCRIPT), "1", sys.executable,
+                                 "-c", f"import sys; print('ok'); sys.exit({status})"], stdout=out, stderr=err,
+                                timeout=3.5, env={"PATH": os.defpath}, check=False)
+        assert [os.get_blocking(f.fileno()) for f in (out, err)] == [blocking, blocking]
+    assert result.returncode == status
+    assert (tmp_path / "out").read_bytes() == (b"ok\n" if status == 0 else b"")
+    assert json.loads((tmp_path / "err").read_text())["native_parent"] == status
+
+
+@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT])
+def test_signal_during_descendant_finalization(tmp_path, sig):
+    pids = tmp_path / "pids"
+    result, report, native = run(tmp_path, FIXTURE, [pids, "double", 0], phase=f"cleanup:{sig}")
+    assert result.returncode == 137
+    assert report["native_parent"] == 0 and report["signal"] == sig
+    assert -9 in native.values()
+    for pid in pids.read_text().split(): assert not Path(f"/proc/{pid}").exists()
+
+
+@pytest.mark.parametrize("sig", [signal.SIGKILL, signal.SIGTERM])
+def test_actual_native_parent_signal(tmp_path, sig):
+    result, report, native = run(tmp_path, f"import os; os.kill(os.getpid(), {sig})")
+    assert list(native.values()) == [-sig]
+    assert result.returncode == report["native_parent"] == 128 + sig
+
+
+@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT])
+def test_own_signal_with_live_tree(tmp_path, sig):
+    pids = tmp_path / "pids"
+    result, report, native = run(tmp_path, FIXTURE, [pids, "live", 0], phase=f"exec:{sig}")
+    assert result.returncode == 137 and report["signal"] == sig
+    assert sorted(native.values()) == [-9, -9]
+    for pid in pids.read_text().split(): assert not Path(f"/proc/{pid}").exists()
+
+
+@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT])
+def test_signal_after_commit_snapshot(tmp_path, sig):
+    result, report, native = run(tmp_path, "print('committed')", phase=f"commit:{sig}")
+    assert result.returncode == 0 and result.stdout == b"committed\n"
+    assert report["signal"] == 0 and list(native.values()) == [0]
+
+
+def test_incomplete_cleanup_fault_injection(tmp_path):
+    result, report, native = run(tmp_path, "print('withheld')", phase="budget_zero")
+    assert result.returncode == 125 and report["reason"] == "cleanup_incomplete"
+    assert list(native.values()) == [0]
