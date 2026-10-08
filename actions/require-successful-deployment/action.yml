@@ -1,0 +1,36 @@
+name: Require successful deployment
+description: Require the latest branch workflow run and exact required jobs to succeed for an exact SHA
+inputs:
+  workflow:
+    description: Workflow filename under .github/workflows (not a path or workflow ID)
+    required: true
+  branch:
+    description: Exact short branch name that receives push deployments
+    required: true
+  sha:
+    description: Exact full 40-character lowercase commit SHA
+    required: true
+  required_jobs:
+    description: JSON array of exact required job display names (including matrix suffixes)
+    required: true
+outputs:
+  run_id:
+    description: Verified deployment workflow run ID
+    value: ${{ steps.verify.outputs.run_id }}
+  html_url:
+    description: Verified deployment workflow run HTML URL
+    value: ${{ steps.verify.outputs.html_url }}
+runs:
+  using: composite
+  steps:
+    - name: Verify latest deployment workflow run
+      id: verify
+      shell: bash
+      env:
+        DEPLOYMENT_REPOSITORY: ${{ github.repository }}
+        DEPLOYMENT_TOKEN: ${{ github.token }}
+        INPUT_WORKFLOW: ${{ inputs.workflow }}
+        INPUT_BRANCH: ${{ inputs.branch }}
+        INPUT_SHA: ${{ inputs.sha }}
+        INPUT_REQUIRED_JOBS: ${{ inputs.required_jobs }}
+      run: timeout --kill-after=5s 90s python3 "$GITHUB_ACTION_PATH/verify.py"
