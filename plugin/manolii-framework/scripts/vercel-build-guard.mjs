@@ -2,7 +2,8 @@
 /**
  * vercel-build-guard.mjs — canonical "Ignored Build Step" for the ecosystem.
  *
- * Canonical source: ai-starter-pack registry/platform/framework.
+ * Canonical source: ai-starter-pack scripts/vercel-build-guard.mjs
+ * (rendered into plugin/manolii-framework and registry/platform/framework).
  * Do not edit in consumer repos — change it at the source and let the sync flow.
  *
  * Wire into a project's vercel.json (per-commit, overrides the dashboard
@@ -24,7 +25,9 @@
  *   VERCEL_BUILD_GUARD_PREFIXES="claude/,codex/"
  *     Full replacement of the default skip set (below).
  *   VERCEL_BUILD_GUARD_EXTRA_SKIP="staging,custom/"
- *     Appended to the active skip set (works with defaults or PREFIXES).
+ *     Always-on skip set — checked BEFORE ONLY and PREFIXES, so an entry here
+ *     wins over every other mode. Use it to carve exceptions out of an
+ *     allowlist (e.g. ONLY="main,release/" + EXTRA_SKIP="release/staging").
  *   VERCEL_BUILD_GUARD_DEBUG=1
  *     Verbose decision logging.
  *
@@ -67,6 +70,14 @@ const matches = (entry, r) => (entry.endsWith("/") ? r.startsWith(entry) : r ===
 const decide = () => {
   if (!ref) return [1, "no commit ref — building (fail-open)"];
 
+  // EXTRA_SKIP is evaluated before every other mode: an entry here always
+  // skips, even when the ref is inside the ONLY allowlist.
+  const extra = parse(process.env.VERCEL_BUILD_GUARD_EXTRA_SKIP);
+  const extraHit = extra.find((e) => matches(e, ref));
+  if (extraHit) {
+    return [0, `ref "${ref}" matched EXTRA_SKIP entry "${extraHit}"`];
+  }
+
   const only = parse(process.env.VERCEL_BUILD_GUARD_ONLY);
   if (only.length) {
     return only.some((e) => matches(e, ref))
@@ -78,7 +89,6 @@ const decide = () => {
     process.env.VERCEL_BUILD_GUARD_PREFIXES !== undefined
       ? parse(process.env.VERCEL_BUILD_GUARD_PREFIXES)
       : [...DEFAULT_SKIP];
-  skipSet.push(...parse(process.env.VERCEL_BUILD_GUARD_EXTRA_SKIP));
 
   const hit = skipSet.find((e) => matches(e, ref));
   return hit

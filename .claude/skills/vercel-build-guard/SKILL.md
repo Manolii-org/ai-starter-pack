@@ -14,8 +14,11 @@ preview deployments that CI actually consumes.
 **1. `git.deploymentEnabled` in vercel.json — for prod-only projects.**
 
 ```json
-"git": { "deploymentEnabled": { "*": false, "main": true } }
+"git": { "deploymentEnabled": { "**": false, "main": true } }
 ```
+
+Patterns are minimatch — `*` does NOT cross `/`, so `"*": false` silently
+leaves slash branches (`devin/x`, `automated/y`) building. Always use `"**"`.
 
 Use when nothing consumes preview deployments (cron/ops projects, services whose
 e2e gates on the production alias). Deployments on other refs are created and
