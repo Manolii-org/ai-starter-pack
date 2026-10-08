@@ -1,0 +1,714 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.example.invalid/feature-controls/v1",
+  "$defs": {
+    "scope": {
+      "type": "object",
+      "properties": {
+        "feature_namespace": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        },
+        "environment_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        },
+        "ecosystem_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        },
+        "deployment_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        }
+      },
+      "required": [
+        "deployment_id",
+        "ecosystem_id",
+        "feature_namespace",
+        "environment_id"
+      ],
+      "additionalProperties": false
+    },
+    "feature": {
+      "type": "object",
+      "properties": {
+        "value_type": {
+          "enum": [
+            "boolean",
+            "number",
+            "string",
+            "json"
+          ]
+        },
+        "baseline": {},
+        "failure": {
+          "enum": [
+            "baseline",
+            "deny"
+          ]
+        },
+        "surfaces": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+          },
+          "maxItems": 128,
+          "uniqueItems": true
+        },
+        "ancestors": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+          },
+          "maxItems": 128,
+          "uniqueItems": true
+        },
+        "experiment": {
+          "type": "object",
+          "properties": {
+            "key": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+            },
+            "epoch": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "assignment_boundary": {
+              "type": "object",
+              "properties": {
+                "key": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+                },
+                "applications": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+                  },
+                  "minItems": 1,
+                  "maxItems": 128,
+                  "uniqueItems": true
+                }
+              },
+              "required": [
+                "key",
+                "applications"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "key",
+            "epoch"
+          ],
+          "additionalProperties": false
+        },
+        "disabled_value": {},
+        "allowed_values": {
+          "type": "array",
+          "items": {},
+          "minItems": 1,
+          "maxItems": 128,
+          "uniqueItems": true
+        },
+        "value_schema": {
+          "type": "object",
+          "maxProperties": 16
+        },
+        "applications": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+          },
+          "minItems": 1,
+          "maxItems": 128,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "value_type",
+        "baseline",
+        "failure",
+        "surfaces",
+        "ancestors",
+        "disabled_value"
+      ],
+      "additionalProperties": false
+    },
+    "catalog": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "scope": {
+          "$ref": "#/$defs/scope"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "features": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 1000,
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/feature"
+          }
+        },
+        "applications": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+          },
+          "minItems": 1,
+          "maxItems": 128,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "schema_version",
+        "scope",
+        "revision",
+        "features",
+        "applications"
+      ],
+      "additionalProperties": false
+    },
+    "bundle": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "scope": {
+          "$ref": "#/$defs/scope"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "catalog_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "created_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "expires_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "provider_semantics": {
+          "const": "growthbook:js-1.8.0:py-3.2.0:hash-2"
+        },
+        "payload_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}(?![\\s\\S])"
+        },
+        "payload_bytes": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1048576
+        },
+        "approval_ref": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        }
+      },
+      "required": [
+        "schema_version",
+        "scope",
+        "revision",
+        "catalog_revision",
+        "created_at",
+        "expires_at",
+        "provider_semantics",
+        "payload_sha256",
+        "payload_bytes",
+        "approval_ref"
+      ],
+      "additionalProperties": false
+    },
+    "context": {
+      "type": "object",
+      "properties": {
+        "assignment_key": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        },
+        "authorized": {
+          "type": "boolean"
+        },
+        "eligible": {
+          "type": "boolean"
+        },
+        "expires_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "excluded": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+          },
+          "maxItems": 128,
+          "uniqueItems": true
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "scope": {
+          "$ref": "#/$defs/scope"
+        },
+        "surface_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        },
+        "groups": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+          },
+          "maxItems": 128,
+          "uniqueItems": true
+        },
+        "roles": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+          },
+          "maxItems": 128,
+          "uniqueItems": true
+        },
+        "tenant_key": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        },
+        "excluded_groups": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+          },
+          "maxItems": 128,
+          "uniqueItems": true
+        },
+        "group_ancestors": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+          },
+          "maxProperties": 128,
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+            },
+            "maxItems": 128,
+            "uniqueItems": true
+          }
+        },
+        "application_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        },
+        "projection_source": {
+          "const": "trusted-server"
+        },
+        "context_scope": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        }
+      },
+      "required": [
+        "assignment_key",
+        "authorized",
+        "eligible",
+        "expires_at",
+        "excluded",
+        "schema_version",
+        "scope",
+        "surface_id",
+        "groups",
+        "roles",
+        "tenant_key",
+        "excluded_groups",
+        "group_ancestors",
+        "application_id",
+        "projection_source",
+        "context_scope"
+      ],
+      "additionalProperties": false
+    },
+    "kill": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "scope": {
+          "$ref": "#/$defs/scope"
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "expires_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "disabled": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+          },
+          "maxItems": 128,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "schema_version",
+        "scope",
+        "generation",
+        "expires_at",
+        "disabled"
+      ],
+      "additionalProperties": false
+    },
+    "event": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "scope": {
+          "$ref": "#/$defs/scope"
+        },
+        "event_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        },
+        "kind": {
+          "enum": [
+            "exposure",
+            "outcome"
+          ]
+        },
+        "decision_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        },
+        "feature_key": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        },
+        "assignment_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        },
+        "configuration_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "allocation_epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "variant": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        },
+        "timestamp": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "evidence": {
+          "type": "object",
+          "properties": {
+            "source": {
+              "enum": [
+                "render",
+                "behavior",
+                "business-transition"
+              ]
+            },
+            "unit_key": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+            },
+            "transition_key": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+            }
+          },
+          "required": [
+            "source",
+            "unit_key"
+          ],
+          "additionalProperties": false
+        },
+        "application_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        },
+        "surface_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        },
+        "context_scope": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        }
+      },
+      "required": [
+        "schema_version",
+        "scope",
+        "event_id",
+        "kind",
+        "decision_id",
+        "feature_key",
+        "assignment_id",
+        "configuration_revision",
+        "allocation_epoch",
+        "variant",
+        "timestamp",
+        "evidence",
+        "application_id",
+        "surface_id",
+        "context_scope"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "outcome"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "evidence": {
+                "type": "object",
+                "required": [
+                  "transition_key"
+                ],
+                "properties": {
+                  "transition_key": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "resolved_decision": {
+      "type": "object",
+      "properties": {
+        "value": {},
+        "reason": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "status": {
+          "enum": [
+            "resolved",
+            "baseline",
+            "denied"
+          ]
+        },
+        "expires_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "configuration_revision": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kill_generation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "value",
+        "reason",
+        "status",
+        "expires_at",
+        "configuration_revision",
+        "kill_generation"
+      ],
+      "additionalProperties": false
+    },
+    "snapshot": {
+      "type": "object",
+      "properties": {
+        "feature_namespace": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        },
+        "application_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        },
+        "environment_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        },
+        "ecosystem_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        },
+        "deployment_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        },
+        "surface_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "generated_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "expires_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "decisions": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+          },
+          "maxProperties": 64,
+          "additionalProperties": {
+            "$ref": "#/$defs/resolved_decision"
+          }
+        },
+        "context_scope": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        },
+        "configuration_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "kill_generation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "time_highwater": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "deployment_id",
+        "ecosystem_id",
+        "feature_namespace",
+        "application_id",
+        "environment_id",
+        "surface_id",
+        "schema_version",
+        "generated_at",
+        "expires_at",
+        "decisions",
+        "context_scope",
+        "configuration_revision",
+        "kill_generation",
+        "time_highwater"
+      ],
+      "additionalProperties": false
+    },
+    "control_state": {
+      "type": "object",
+      "properties": {
+        "bundle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/bundle"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kill": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/kill"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "time_highwater": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "bundle",
+        "kill",
+        "time_highwater"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "name": "@manolii/feature-controls",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Offline provider-backed feature control primitives",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=20.19"
+  },
+  "exports": {
+    ".": {
+      "types": "./packages/feature-controls/dist/packages/feature-controls/ts/server.d.ts",
+      "import": "./packages/feature-controls/dist/packages/feature-controls/ts/server.js"
+    },
+    "./client": {
+      "types": "./packages/feature-controls/dist/packages/feature-controls/ts/client.d.ts",
+      "import": "./packages/feature-controls/dist/packages/feature-controls/ts/client.js"
+    }
+  },
+  "files": [
+    "packages/feature-controls/dist/",
+    "packages/feature-controls/ts/",
+    "packages/feature-controls/tsconfig.json",
+    "contracts/feature-controls/schema.json",
+    "docs/feature-controls.md"
+  ],
+  "scripts": {
+    "build": "tsc -p packages/feature-controls/tsconfig.json",
+    "prepare": "npm run build",
+    "typecheck": "tsc -p packages/feature-controls/tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "test": "npm run build && node --test tests/feature_controls/*.test.mjs"
+  },
+  "dependencies": {
+    "@growthbook/growthbook": "1.8.0",
+    "ajv": "8.20.0",
+    "typescript": "5.8.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "22.14.0",
+    "eslint": "10.0.0",
+    "globals": "16.0.0",
+    "lint-staged": "16.4.0",
+    "typescript-eslint": "8.58.0"
+  },
+  "lint-staged": {
+    "packages/feature-controls/ts/**/*.ts": "eslint"
+  }
+}

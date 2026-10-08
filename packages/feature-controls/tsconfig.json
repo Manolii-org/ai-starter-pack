@@ -1,0 +1,9 @@
+{
+  "compilerOptions": {
+    "target": "ES2022", "module": "NodeNext", "moduleResolution": "NodeNext",
+    "strict": true, "declaration": true, "resolveJsonModule": true,
+    "esModuleInterop": true, "skipLibCheck": true,
+    "rootDir": "../..", "outDir": "dist"
+  },
+  "include": ["ts/*.ts", "../../contracts/feature-controls/schema.json"]
+}

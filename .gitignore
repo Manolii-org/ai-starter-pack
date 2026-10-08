@@ -10,6 +10,9 @@
 .git/.credential-cache/
 .git/.session-health
 
+# Root npm dependencies
+/node_modules/
+
 # Python caches (test / runtime)
 __pycache__/
 *.pyc
