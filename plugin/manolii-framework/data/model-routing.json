@@ -1034,7 +1034,7 @@
         "ANTHROPIC_BASE_URL": {
           "value": "https://your-litellm-proxy.fly.dev",
           "status": "ACTIVE — set by SessionStart hook (scripts/claude-session-start.sh line 342) when proxy health check passes",
-          "effect": "All Claude Code API traffic routes through the LiteLLM proxy. The proxy passes claude-sonnet-4-6 and claude-opus-4-6 through to Anthropic directly. Intercepts: claude-haiku-4-5-20251001 → Fireworks M2.7 ($0.30/$1.20); sonnet alias → Fireworks DeepSeek V4 Pro (PRC-origin on US infra, advisor-guardrailed, restricted_us_oss_ok max). Use claude-sonnet-4-6 (full ID) for Anthropic-direct Sonnet. Auth: ANTHROPIC_API_KEY is set to Bearer ${LITELLM_MASTER_KEY} by the SessionStart hook.",
+          "effect": "All Claude Code API traffic routes through the LiteLLM proxy. The proxy passes claude-sonnet-4-6, claude-opus-4-6 and claude-haiku-4-5-20251001 through to Anthropic directly (the dated haiku ID's Fireworks intercept was removed 2026-10-09). Intercepts: `haiku` pack alias → Fireworks GPT-OSS 120B ($0.30/$1.20); sonnet alias → Fireworks DeepSeek V4 Pro (PRC-origin on US infra, advisor-guardrailed, restricted_us_oss_ok max). Use claude-sonnet-4-6 (full ID) for Anthropic-direct Sonnet. Auth: ANTHROPIC_API_KEY is set to Bearer ${LITELLM_MASTER_KEY} by the SessionStart hook.",
           "verified": "2026-04-16: confirmed ANTHROPIC_BASE_URL=https://your-litellm-proxy.fly.dev in runtime env. Proxy alive. Test sub-agent with model=haiku dispatched successfully.",
           "fallback": "If proxy health check fails, SessionStart sets LITELLM_FALLBACK_MODE=1 and routes natively to Anthropic."
         }
@@ -1962,59 +1962,25 @@
     }
   },
   "proxy_fallback_aliases": {
-    "tier-1-fast": "claude-haiku-4-5-20251001",
+    "tier-1-fast": "haiku",
     "tier-2-agentic": "claude-sonnet-4-6",
     "tier-3-tool": "claude-sonnet-4-6",
-    "tier-4-extract": "claude-haiku-4-5-20251001",
-    "tier-5-latency": "claude-haiku-4-5-20251001",
+    "tier-4-extract": "haiku",
+    "tier-5-latency": "haiku",
     "tier-0-oss-heavy": "claude-sonnet-4-6",
     "tier-3-tool-us": "claude-sonnet-4-6",
     "tier-vision": "claude-sonnet-4-6"
   },
   "proxy_intercepted_models": {
     "claude-haiku-4-5-20251001": {
-      "label": "Claude Haiku 4.5 (proxy-intercepted)",
-      "remapped_to_tier": "tier-1-fast",
-      "resolves_to": "fireworks:accounts/fireworks/models/gpt-oss-120b",
+      "label": "Claude Haiku 4.5 (real Anthropic backend — intercept removed 2026-10-09)",
+      "remapped_to_tier": null,
+      "resolves_to": "anthropic:claude-haiku-4-5-20251001",
       "data_sensitivity_max": "internal",
       "proxy_live_since": "2026-04-10",
-      "warning": "This Anthropic model ID is intercepted by the LiteLLM proxy and routed to Fireworks GPT-OSS 120B (OpenAI OSS, US-origin). Any call reaching the proxy with this model name will NOT use Anthropic infrastructure. Do not assign to agents with data_sensitivity: restricted or restricted_us_oss_ok.",
+      "warning": "Real Anthropic model ID — since 2026-10-09 the proxy serves it from the Anthropic backend (previously silently remapped to Fireworks GPT-OSS; that remap sent Anthropic-intended traffic to a third party). OSS offload moved to the pack-defined `haiku` alias (internal-only). Do not use this ID for OSS offload.",
       "fallback_chain": {
-        "primary": {
-          "provider": "fireworks",
-          "litellm_alias": "claude-haiku-4-5-20251001",
-          "model_id_hint": "accounts/fireworks/models/gpt-oss-120b",
-          "vision": {
-            "supported": false,
-            "modalities": [
-              "text"
-            ]
-          }
-        },
-        "secondary": {
-          "provider": "together",
-          "litellm_alias": "claude-haiku-4-5-20251001-together-fallback",
-          "model_id_hint": "moonshotai/Kimi-K2.6",
-          "notes": "Kimi K2.6 on Together — cross-provider escape from Fireworks primary. 262K context, 0.71s TTFT.",
-          "vision": {
-            "supported": false,
-            "modalities": [
-              "text"
-            ]
-          }
-        },
-        "tertiary": {
-          "provider": "groq",
-          "litellm_alias": "claude-haiku-4-5-20251001-groq-fallback",
-          "model_id_hint": "llama-3.3-70b-versatile",
-          "notes": "Third-provider last resort. Llama 3.3 70B on Groq LPU — different provider and different model family.",
-          "vision": {
-            "supported": false,
-            "modalities": [
-              "text"
-            ]
-          }
-        }
+        "note": "OSS fallback ladder moved to the `haiku` pack alias; this ID is an Anthropic passthrough and has no OSS fallback."
       },
       "vision": {
         "supported": false,
@@ -2028,7 +1994,7 @@
       "remapped_to_tier": "tier-1-fast",
       "resolves_to": "fireworks:accounts/fireworks/models/gpt-oss-120b",
       "data_sensitivity_max": "internal",
-      "warning": "Short alias for claude-haiku-4-5-20251001. ANTHROPIC_BASE_URL is set to the proxy by SessionStart — haiku sub-agent calls route through the proxy to Fireworks GPT-OSS 120B. Text-only OSS weights. Treat as OSS-routed when assigning to agents.",
+      "warning": "Pack-defined Fireworks-backed OSS-offload alias — NOT an alias for the dated Anthropic model ID. ANTHROPIC_BASE_URL is set to the proxy by SessionStart — `haiku` sub-agent calls route through the proxy to Fireworks GPT-OSS 120B (text-only OSS weights). claude-haiku-4-5-20251001 resolves to the real Anthropic backend instead. Treat this alias as OSS-routed when assigning to agents.",
       "vision": {
         "supported": false,
         "modalities": [

@@ -16,6 +16,25 @@
   "otelHeadersHelper": "scripts/otel-langfuse-headers.sh",
   "permissions": {
     "defaultMode": "bypassPermissions",
+    "deny": [
+      "Bash(rm -rf /*)",
+      "Bash(rm -rf ~*)",
+      "Bash(git push --force*)",
+      "Bash(git push -f *)",
+      "Bash(git reset --hard*)",
+      "Bash(git clean -f*)",
+      "Bash(git branch -D *)",
+      "Bash(* | sh*)",
+      "Bash(* | bash*)",
+      "Bash(* | */sh*)",
+      "Bash(* | */bash*)",
+      "Bash(* | sudo *)",
+      "Bash(*>*.netrc*)",
+      "Bash(*tee *.netrc*)",
+      "mcp__*__kl_approve_action",
+      "mcp__*__kl_undo_action",
+      "mcp__*__kl_approve_email_action"
+    ],
     "allow": [
       "Bash(*)",
       "Edit(*)",

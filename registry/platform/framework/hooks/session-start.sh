@@ -3,7 +3,8 @@
 # Loads credentials from Doppler (with 1hr cache) and sets up session health.
 set -euo pipefail
 
-CACHE_DIR=".git/.credential-cache"
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/ai-starter-pack-session${REPO_ROOT}"
 CACHE_FILE="$CACHE_DIR/secrets.json"
 CACHE_TTL=3600  # 1 hour in seconds
 HEALTH_FILE=".git/.session-health"
@@ -12,7 +13,20 @@ log() { echo "[session-start] $*" >&2; }
 
 # --- Credential Loading ---
 
+prepare_cache_dir() {
+  mkdir -p "$CACHE_DIR"
+  chmod 700 "$CACHE_DIR" 2>/dev/null || true
+  local mode
+  mode="$(stat -c '%a' "$CACHE_DIR" 2>/dev/null || stat -f '%Lp' "$CACHE_DIR" 2>/dev/null || echo "")"
+  if [[ ! -O "$CACHE_DIR" || -L "$CACHE_DIR" || "$mode" != "700" ]]; then
+    log "Cache dir ownership/symlink/mode check failed (mode=${mode:-unknown}) — skipping cache"
+    return 1
+  fi
+  return 0
+}
+
 load_from_cache() {
+  prepare_cache_dir || return 1
   if [[ -f "$CACHE_FILE" ]]; then
     local age
     age=$(( $(date +%s) - $(stat -c %Y "$CACHE_FILE" 2>/dev/null || stat -f %m "$CACHE_FILE" 2>/dev/null || echo 0) ))
@@ -26,13 +40,9 @@ load_from_cache() {
 }
 
 fetch_from_doppler() {
-  # Prefer the ecosystem loader if available (e.g., in master repo)
-  local ecosystem_loader="${CLAUDE_PLUGIN_ROOT:-.}/scripts/load-ecosystem.sh"
-  if [[ -f "$ecosystem_loader" ]]; then
-    log "Using ecosystem loader: $ecosystem_loader"
-    # shellcheck source=/dev/null
-    source "$ecosystem_loader" 2>/dev/null && return 0
-  fi
+  # Do NOT source workspace scripts/load-ecosystem.sh here — this hook runs
+  # with credentials; sourcing caller-controlled files would hand them secrets
+  # (Codex finding 5aba4592/b32f51e5). Doppler tokens come from env only.
 
   local token="${DOPPLER_TOKEN_PRD:-${DOPPLER_TOKEN:-${DOPPLER_PERSONAL:-}}}"
   if [[ -z "$token" ]]; then
@@ -52,7 +62,7 @@ fetch_from_doppler() {
     return 1
   }
 
-  mkdir -p "$CACHE_DIR"
+  prepare_cache_dir || return 1
   # Cache only the keys we actually need — not the full Doppler project dump
   local filtered
   if ! filtered=$(echo "$secrets" | jq '{GH_TOKEN, SUPABASE_ACCESS_TOKEN, VERCEL_TOKEN, VOYAGE_API_KEY, LLM_API_KEY, MCP_API_KEY} | with_entries(select(.value != null))' 2>/dev/null); then

@@ -58,7 +58,9 @@ bakes config + guardrail into a custom image), the fly.toml diff is:
 ```diff
  [build]
 -  dockerfile = "Dockerfile"
-+  image = "ghcr.io/berriai/litellm-non_root:v1.82.3-stable.patch.4"
++  # tag@sha256 — tags are mutable; the digest makes the image immutable.
++  # Resolve a fresh digest with `docker manifest inspect` before bumping.
++  image = "ghcr.io/berriai/litellm-non_root:v1.82.3-stable.patch.4@sha256:175cad9ac9335c49960f4ef602d37246b1f87b4b0da7126e8a026e1ab3283627"
 
 +[[files]]
 +  guest_path = "/tmp/config.yaml"

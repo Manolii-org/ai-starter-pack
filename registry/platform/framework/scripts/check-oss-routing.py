@@ -73,7 +73,7 @@ def _urlopen(
 # model_list when a tier is genuinely added to / removed from the deployment.
 # (Fallback aliases ARE supplemented dynamically — see load_fallback_aliases.)
 TIERS: list[str] = [
-    "claude-haiku-4-5-20251001",  # intercept → DeepSeek V4 Flash on OpenRouter (tier-1-fast)
+    "haiku",                     # pack-defined OSS offload alias → GPT-OSS 120B on Fireworks (claude-haiku-4-5-20251001 is a real Anthropic ID — passthrough since 2026-10-09)
     "tier-0-oss-heavy",            # Kimi K2.6 on Fireworks
     "tier-1-fast",                 # DeepSeek V4 Flash on OpenRouter (2026-05-23 capability primary)
     "tier-2-agentic",              # Kimi K2.6 on Fireworks
@@ -151,6 +151,7 @@ LATENCY_THRESHOLDS: dict[str, dict[str, int]] = {
     "tier-2-agentic":              {"warn": 10000, "fail": 25000},
     "tier-0-oss-heavy":            {"warn": 15000, "fail": 30000},
     "claude-haiku-4-5-20251001":   {"warn": 8000,  "fail": 20000},
+    "haiku":                     {"warn": 8000,  "fail": 20000},
 }
 # Fallback aliases inherit parent-tier thresholds with 50% headroom for cold starts
 _FALLBACK_LATENCY_MULTIPLIER = 1.5
