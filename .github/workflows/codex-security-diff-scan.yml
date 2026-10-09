@@ -131,7 +131,7 @@ jobs:
           curl -fsS --max-time 30 --connect-timeout 10 \
             -H "Authorization: Bearer ${DOPPLER_TOKEN_CODEX}" \
             "https://api.doppler.com/v3/configs/config/secret?project=master&config=prd&name=CODEX_SUBSCRIPTION_AUTH_JSON" \
-            | python3 -c 'import json,sys;print(json.load(sys.stdin)["value"]["raw"])' \
+            | python3 -c 'import json,sys;v=json.load(sys.stdin)["value"];r=v.get("computed") or v.get("raw");assert r, "Doppler response has neither value.computed nor value.raw";print(r)' \
             > "$RUNNER_TEMP/codex-home/auth.json"
           chmod 600 "$RUNNER_TEMP/codex-home/auth.json"
           python3 - <<'PY'
