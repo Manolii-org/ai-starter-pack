@@ -94,7 +94,8 @@ else is a resolver error. `retrieval_overrides` is optional and accepts
 | `external-browser` | `BROWSERBASE_API_KEY` | doppler | deferred | managed |
 | `billing-read` | `GH_BILLING_TOKEN` | doppler | deferred | managed |
 
-`llm-proxy` and `llm-anthropic` are mutually exclusive lanes, not tiers:
+`llm-proxy` and `llm-anthropic` are mutually exclusive lanes, not tiers —
+`resolve()` rejects a manifest that selects both with a contract error:
 `llm-proxy` routes calls through a LiteLLM proxy credential; `llm-anthropic`
 is the direct provider key. A consumer selects one — never both — by which
 credential is actually published to it. Public consumers take the direct
