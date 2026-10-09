@@ -20,43 +20,78 @@ def interrupted(signum, _frame):
     received = received or signum
 
 
-def reap(root, parent, descendants, end):
+def child_pids():
+    with open(f"/proc/self/task/{os.getpid()}/children") as children:
+        return {int(pid) for pid in children.read(65536).split()}
+
+
+def adopt(owned, foreign):
+    """Record command descendants visible now. False means enumeration failed."""
+    try:
+        visible = child_pids()
+    except OSError:
+        return False
+    for pid in visible:
+        if pid not in foreign:
+            owned.add(pid)
+    return True
+
+
+def reap(root, parent, descendants, end, owned, foreign):
+    """Wait only pids this invocation owns. Never waitpid(-1)."""
     while time.monotonic() < end:
-        try:
-            pid, status = os.waitpid(-1, os.WNOHANG)
-        except ChildProcessError:
+        enumerated = adopt(owned, foreign)
+        if not enumerated and root is None and not owned:
+            # Setup failed before spawn. There is no owned child to reap,
+            # and waitpid(-1) would collect launcher children.
             return parent, True
-        if not pid:
-            return parent, False
-        code = os.waitstatus_to_exitcode(status)
-        code = 128 - code if code < 0 else code
-        if pid == root and parent is None:
-            parent = code
-        else:
-            descendants[code] = descendants.get(code, 0) + 1
+        if enumerated and not owned:
+            return parent, True
+        ready = False
+        for pid in list(owned):
+            try:
+                waited, status = os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                owned.discard(pid)
+                continue
+            if not waited:
+                continue
+            ready = True
+            owned.discard(waited)
+            code = os.waitstatus_to_exitcode(status)
+            code = 128 - code if code < 0 else code
+            if waited == root and parent is None:
+                parent = code
+            else:
+                descendants[code] = descendants.get(code, 0) + 1
+        if ready:
+            continue
+        # A parent exit can reparent a descendant after the scan above.
+        if adopt(owned, foreign) and not owned:
+            return parent, True
+        return parent, False
     return parent, False
 
 
-def cleanup(root, parent, descendants):
+def cleanup(root, parent, descendants, owned, foreign):
     end = time.monotonic() + CLEANUP_SECONDS
     enumeration_ok = True
     while time.monotonic() < end:
-        parent, complete = reap(root, parent, descendants, end)
+        parent, complete = reap(root, parent, descendants, end, owned, foreign)
         if complete:
             return parent, enumeration_ok
-        # Unreaped direct children cannot recycle PIDs. Killing each wave
-        # adopts its children, including double-forked/new-session processes.
-        try:
-            with open(f"/proc/self/task/{os.getpid()}/children") as children:
-                pids = children.read(65536).rsplit(" ", 1)[0].split()
-        except OSError:
+        if not adopt(owned, foreign):
             enumeration_ok = False
-            pids = [root] if root is not None and parent is None else []
-        for pid in pids:
-            if time.monotonic() >= end:
-                break
+            if root is not None and parent is None:
+                owned.add(root)
+        # Unreaped owned children cannot recycle PIDs. Killing each wave adopts
+        # its children, including double-forked/new-session processes.
+        # Pids already present before fork are foreign and must not be signaled.
+        for pid in list(owned):
+            if pid in foreign or time.monotonic() >= end:
+                continue
             try:
-                os.kill(int(pid), signal.SIGKILL)
+                os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
         time.sleep(0.005)
@@ -67,13 +102,13 @@ def execute(timeout, command):
     root, parent, descendants = None, None, {}
     reason, complete, data = "success", False, bytearray()
     read_fd = write_fd = null_fd = None
+    owned, foreign = set(), set()
     end = time.monotonic() + timeout
     try:
         libc = ctypes.CDLL(None, use_errno=True)
         if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
             raise OSError
-        with open(f"/proc/self/task/{os.getpid()}/children") as children:
-            children.read(65536)
+        foreign = child_pids()
         signal.signal(signal.SIGCHLD, signal.SIG_DFL)
         if received:
             reason = "signal"
@@ -81,10 +116,15 @@ def execute(timeout, command):
             read_fd, write_fd = os.pipe()
             null_fd = os.open(os.devnull, os.O_RDWR)
             # Setup can consume the budget sampled before it. Never fork after expiry.
+            # Refresh the foreign set immediately before fork so launcher children
+            # are not owned, waited, or signaled.
+            foreign.update(child_pids())
             if time.monotonic() >= end:
                 reason = "deadline"
             else:
                 root = os.fork()
+                if root:
+                    owned.add(root)
             if root == 0:
                 try:
                     for sig in STOP:
@@ -107,7 +147,7 @@ def execute(timeout, command):
                 write_fd = None
                 os.set_blocking(read_fd, False)
                 while True:
-                    parent, complete = reap(root, parent, descendants, end)
+                    parent, complete = reap(root, parent, descendants, end, owned, foreign)
                     if received:
                         reason = "signal"
                     elif time.monotonic() >= end:
@@ -133,7 +173,7 @@ def execute(timeout, command):
         reason = "setup_failure" if root is None else "runtime_failure"
     finally:
         try:
-            parent, complete = cleanup(root, parent, descendants)
+            parent, complete = cleanup(root, parent, descendants, owned, foreign)
         except OSError:
             complete = False
         for fd in (read_fd, write_fd, null_fd):

@@ -89,6 +89,15 @@ def trace(frame, event, arg):
             and frame.f_code.co_name == ("finish" if phase.startswith("final") else "cleanup")):
         os.kill(os.getpid(), int(phase.split(":")[1]))
     return trace
+if phase == "foreign_child":
+    foreign_pid = fork()
+    if foreign_pid == 0:
+        devnull = os.open(os.devnull, os.O_RDWR)
+        os.dup2(devnull, 0); os.dup2(devnull, 1); os.dup2(devnull, 2)
+        os.closerange(3, 256)
+        time.sleep(30)
+        os._exit(0)
+    record(["foreign", foreign_pid])
 os.fork, os.waitpid, signal.signal = observed_fork, observed_wait, observed_install
 os.read = observed_read
 signal.sigpending = observed_pending
@@ -264,6 +273,24 @@ def test_incomplete_cleanup_fault_injection(tmp_path):
     result, report, native = run(tmp_path, "print('withheld')", phase="budget_zero")
     assert result.returncode == 125 and report["reason"] == "cleanup_incomplete"
     assert list(native.values()) == [0]
+
+
+def test_preexisting_child_is_not_reaped_or_signaled(tmp_path):
+    result, report, native = run(
+        tmp_path, "import os; os.write(1, b'ok')", timeout="1", phase="foreign_child",
+    )
+    assert result.returncode == 0 and result.stdout == b"ok"
+    assert report["reason"] == "success" and report["native_descendants"] == {}
+    assert list(native.values()) == [0]
+    rows = [json.loads(line) for line in (tmp_path / "waits").read_text().splitlines()]
+    foreign = next(row[1] for row in rows if row[0] == "foreign")
+    assert foreign not in native
+    assert Path(f"/proc/{foreign}").exists()
+    os.kill(foreign, signal.SIGKILL)
+    deadline = time.monotonic() + 1
+    while Path(f"/proc/{foreign}").exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert not Path(f"/proc/{foreign}").exists()
 
 
 def test_expired_deadline_before_fork_does_not_spawn(tmp_path):
