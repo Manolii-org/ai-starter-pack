@@ -3,7 +3,7 @@
 # Loads credentials from Doppler (with 1hr cache) and sets up session health.
 set -euo pipefail
 
-CACHE_DIR=".git/.credential-cache"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/ai-starter-pack-session/$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")"
 CACHE_FILE="$CACHE_DIR/secrets.json"
 CACHE_TTL=3600  # 1 hour in seconds
 HEALTH_FILE=".git/.session-health"
@@ -26,13 +26,9 @@ load_from_cache() {
 }
 
 fetch_from_doppler() {
-  # Prefer the ecosystem loader if available (e.g., in master repo)
-  local ecosystem_loader="${CLAUDE_PLUGIN_ROOT:-.}/scripts/load-ecosystem.sh"
-  if [[ -f "$ecosystem_loader" ]]; then
-    log "Using ecosystem loader: $ecosystem_loader"
-    # shellcheck source=/dev/null
-    source "$ecosystem_loader" 2>/dev/null && return 0
-  fi
+  # Do NOT source workspace scripts/load-ecosystem.sh here — this hook runs
+  # with credentials; sourcing caller-controlled files would hand them secrets
+  # (Codex finding 5aba4592/b32f51e5). Doppler tokens come from env only.
 
   local token="${DOPPLER_TOKEN_PRD:-${DOPPLER_TOKEN:-${DOPPLER_PERSONAL:-}}}"
   if [[ -z "$token" ]]; then

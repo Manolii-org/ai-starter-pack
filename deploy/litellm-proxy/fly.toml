@@ -10,7 +10,7 @@ app = "{YOUR_APP_NAME}"
 primary_region = "lax"
 
 [build]
-  image = "ghcr.io/berriai/litellm-non_root:v1.82.3-stable.patch.4"
+  image = "ghcr.io/berriai/litellm-non_root:v1.82.3-stable.patch.4@sha256:175cad9ac9335c49960f4ef602d37246b1f87b4b0da7126e8a026e1ab3283627"
 
 # Both files are injected from this directory at deploy time (validated on a
 # live Fly app 2026-06-12: /health/liveliness 200 + SonnetAdvisorGuardrail

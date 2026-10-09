@@ -7,7 +7,7 @@
 # Required secrets (set via Fly: flyctl secrets set KEY=VALUE --app {YOUR_APP_NAME}):
 #   LITELLM_MASTER_KEY   generate with: openssl rand -hex 24
 #   ANTHROPIC_API_KEY    for tier-0-opus/sonnet passthrough
-#   FIREWORKS_API_KEY    for tier-1-fast, tier-0-oss-heavy (tier-3-tool fallback), sonnet alias, tier-review, claude-haiku-4-5-20251001
+#   FIREWORKS_API_KEY    for tier-1-fast, tier-0-oss-heavy (tier-3-tool fallback), sonnet alias, tier-review, haiku (OSS offload)
 #   TOGETHER_API_KEY     for tier-2-agentic (Kimi K2.6)
 #   GROQ_API_KEY         for tier-4-extract, tier-5-latency, sonnet advisor (fail-closed: every sonnet response is reviewed by the Groq advisor — absent key fails the request)
 #   OPENROUTER_API_KEY   for tier-3-tool (Gemma 4 31B)
@@ -204,8 +204,8 @@ model_list:
   # data_clearance: internal-only (NOT for client code or restricted data).
   - model_name: claude-haiku-4-5-20251001
     litellm_params:
-      model: fireworks_ai/accounts/fireworks/models/gpt-oss-120b
-      api_key: os.environ/FIREWORKS_API_KEY
+      model: anthropic/claude-haiku-4-5-20251001
+      api_key: os.environ/ANTHROPIC_API_KEY
   # Short alias — Claude Code and the scripts/run-*.py proxy maps send `haiku`.
   - model_name: haiku
     litellm_params:
