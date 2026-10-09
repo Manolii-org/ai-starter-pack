@@ -1034,7 +1034,7 @@
         "ANTHROPIC_BASE_URL": {
           "value": "https://your-litellm-proxy.fly.dev",
           "status": "ACTIVE — set by SessionStart hook (scripts/claude-session-start.sh line 342) when proxy health check passes",
-          "effect": "All Claude Code API traffic routes through the LiteLLM proxy. The proxy passes claude-sonnet-4-6 and claude-opus-4-6 through to Anthropic directly. Intercepts: claude-haiku-4-5-20251001 → Fireworks M2.7 ($0.30/$1.20); sonnet alias → Fireworks DeepSeek V4 Pro (PRC-origin on US infra, advisor-guardrailed, restricted_us_oss_ok max). Use claude-sonnet-4-6 (full ID) for Anthropic-direct Sonnet. Auth: ANTHROPIC_API_KEY is set to Bearer ${LITELLM_MASTER_KEY} by the SessionStart hook.",
+          "effect": "All Claude Code API traffic routes through the LiteLLM proxy. The proxy passes claude-sonnet-4-6, claude-opus-4-6 and claude-haiku-4-5-20251001 through to Anthropic directly (the dated haiku ID's Fireworks intercept was removed 2026-10-09). Intercepts: `haiku` pack alias → Fireworks GPT-OSS 120B ($0.30/$1.20); sonnet alias → Fireworks DeepSeek V4 Pro (PRC-origin on US infra, advisor-guardrailed, restricted_us_oss_ok max). Use claude-sonnet-4-6 (full ID) for Anthropic-direct Sonnet. Auth: ANTHROPIC_API_KEY is set to Bearer ${LITELLM_MASTER_KEY} by the SessionStart hook.",
           "verified": "2026-04-16: confirmed ANTHROPIC_BASE_URL=https://your-litellm-proxy.fly.dev in runtime env. Proxy alive. Test sub-agent with model=haiku dispatched successfully.",
           "fallback": "If proxy health check fails, SessionStart sets LITELLM_FALLBACK_MODE=1 and routes natively to Anthropic."
         }
@@ -1994,7 +1994,7 @@
       "remapped_to_tier": "tier-1-fast",
       "resolves_to": "fireworks:accounts/fireworks/models/gpt-oss-120b",
       "data_sensitivity_max": "internal",
-      "warning": "Short alias for claude-haiku-4-5-20251001. ANTHROPIC_BASE_URL is set to the proxy by SessionStart — haiku sub-agent calls route through the proxy to Fireworks GPT-OSS 120B. Text-only OSS weights. Treat as OSS-routed when assigning to agents.",
+      "warning": "Pack-defined Fireworks-backed OSS-offload alias — NOT an alias for the dated Anthropic model ID. ANTHROPIC_BASE_URL is set to the proxy by SessionStart — `haiku` sub-agent calls route through the proxy to Fireworks GPT-OSS 120B (text-only OSS weights). claude-haiku-4-5-20251001 resolves to the real Anthropic backend instead. Treat this alias as OSS-routed when assigning to agents.",
       "vision": {
         "supported": false,
         "modalities": [

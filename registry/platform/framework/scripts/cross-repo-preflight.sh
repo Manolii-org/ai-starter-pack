@@ -24,8 +24,9 @@ if [[ -z "$GH_TOKEN_VALUE" ]]; then
 fi
 
 if [[ -z "$GH_TOKEN_VALUE" ]]; then
-  # Try .git/.credential-cache from session-start hook
-  CACHE_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/ai-starter-pack-session/$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")/secrets.json"
+  # Try the session-start hook's credential cache (keyed by canonical repo root)
+  PRE_REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)"
+  CACHE_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/ai-starter-pack-session${PRE_REPO_ROOT}/secrets.json"
   if [[ -f "$CACHE_FILE" ]]; then
     GH_TOKEN_VALUE=$(python3 -c "import json; print(json.load(open('$CACHE_FILE')).get('GH_TOKEN',''))" 2>/dev/null || echo "")
   fi

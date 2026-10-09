@@ -3,7 +3,8 @@
 # Loads credentials from Doppler (with 1hr cache) and sets up session health.
 set -euo pipefail
 
-CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/ai-starter-pack-session/$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")"
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/ai-starter-pack-session${REPO_ROOT}"
 CACHE_FILE="$CACHE_DIR/secrets.json"
 CACHE_TTL=3600  # 1 hour in seconds
 HEALTH_FILE=".git/.session-health"
@@ -12,7 +13,18 @@ log() { echo "[session-start] $*" >&2; }
 
 # --- Credential Loading ---
 
+prepare_cache_dir() {
+  mkdir -p -m 700 "$CACHE_DIR"
+  chmod 700 "$CACHE_DIR" 2>/dev/null || true
+  if [[ ! -O "$CACHE_DIR" || -L "$CACHE_DIR" ]]; then
+    log "Cache dir not owned by current user or is a symlink — skipping cache"
+    return 1
+  fi
+  return 0
+}
+
 load_from_cache() {
+  prepare_cache_dir || return 1
   if [[ -f "$CACHE_FILE" ]]; then
     local age
     age=$(( $(date +%s) - $(stat -c %Y "$CACHE_FILE" 2>/dev/null || stat -f %m "$CACHE_FILE" 2>/dev/null || echo 0) ))
@@ -48,7 +60,7 @@ fetch_from_doppler() {
     return 1
   }
 
-  mkdir -p "$CACHE_DIR"
+  prepare_cache_dir || return 1
   # Cache only the keys we actually need — not the full Doppler project dump
   local filtered
   if ! filtered=$(echo "$secrets" | jq '{GH_TOKEN, SUPABASE_ACCESS_TOKEN, VERCEL_TOKEN, VOYAGE_API_KEY, LLM_API_KEY, MCP_API_KEY} | with_entries(select(.value != null))' 2>/dev/null); then
