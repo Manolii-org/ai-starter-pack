@@ -276,9 +276,11 @@ def _parse_findings(raw: str) -> dict:
         pass
     for block in reversed(re.findall(r"```(?:json)?\s*\n(.*?)```", raw, re.S)):
         try:
-            return json.loads(block.strip())
+            candidate = json.loads(block.strip())
         except json.JSONDecodeError:
             continue
+        if isinstance(candidate, dict) and "findings" in candidate:
+            return candidate
     decoder = json.JSONDecoder()
     for match in reversed(list(re.finditer(r"\{", raw))):
         try:
@@ -503,7 +505,8 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
             _write_skip_marker(skill_name, output_dir, "api_error")
         else:
             _write_skipped_marker(skill_name, output_dir, "api_error")
-        return skill_name, f"Failed to parse response as JSON: {exc}"
+        raw_head = repr(locals().get("raw", "<unset>"))[:160]
+        return skill_name, f"Failed to parse response as JSON: {exc} | raw[:160]={raw_head}"
     except Exception as exc:
         if first_party:
             _write_skip_marker(skill_name, output_dir, "api_error")
