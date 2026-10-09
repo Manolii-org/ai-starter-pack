@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "mode": "capabilities",
+  "capabilities": [
+    "git-read",
+    "doppler-read",
+    "mcp-knowledge",
+    "llm-proxy",
+    "github-actions-read"
+  ],
+  "retrieval_overrides": {}
+}
