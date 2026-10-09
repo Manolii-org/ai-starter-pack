@@ -27,9 +27,11 @@ Three layers, in descending authority:
    (`standard` | `managed` | `privileged`).
 3. **Session manifest** — `config/agent-capabilities.json` (or
    `.ai/capabilities.json` in a consumer): the capabilities THIS session
-   needs. The resolver intersects manifest × table → the exact env-var
-   names the bootstrap may fetch. Absence of a capability means absence of
-   the credential.
+   needs. In `capabilities` mode the resolver intersects manifest × table
+   → the exact env-var names the bootstrap may fetch — absence of a
+   capability means absence of the credential. (`mode: legacy` instead
+   unions the whole table — a temporary migration path that bypasses the
+   manifest, deprecated; it is not the normative model.)
 
 ## Rules
 
