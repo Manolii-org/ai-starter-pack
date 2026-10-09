@@ -164,6 +164,9 @@ jobs:
           unset OPENAI_API_KEY CODEX_API_KEY
           OUT_DIR="$RUNNER_TEMP/codex-security-diff"
           install -d -m 700 "$OUT_DIR"
+          # The pull_request checkout is the merge commit; committed-diff
+          # scans require checkout HEAD to equal the requested head SHA.
+          git checkout "$HEAD_SHA"
           # safety-identifier: stable hashed repo slug (1-64 chars) — never
           # the plaintext repo name.
           SAFETY_ID="$(printf '%s' "$GITHUB_REPOSITORY" | sha256sum | cut -c1-32)"
