@@ -1,0 +1,334 @@
+name: Codex Security Diff Scan (advisory)
+# GitHub Actions steps legitimately mix uses/run/with shapes within one job.
+# config-completeness-ignore: uses
+# config-completeness-ignore: with
+# config-completeness-ignore: id
+# config-completeness-ignore: name
+# config-completeness-ignore: run
+#
+# ADVISORY tier: scans the PR diff with codex-security and reports findings in
+# a step summary + upserted PR comment. This job NEVER blocks a merge — the
+# job is continue-on-error, every failure path exits 0 or reports, and it must
+# never be added to required status checks.
+#
+# Trigger shape (pull_request ONLY — never pull_request_target):
+#   This job materializes secrets.CODEX_SUBSCRIPTION_AUTH_JSON. On
+#   pull_request_target the workflow runs from the trusted base ref while the
+#   secrets context is live — any base-ref workflow edit would then execute
+#   under a real credential. pull_request runs the PR's own copy of this file;
+#   the job-level same-repo `if:` gate bounds that to members who can already
+#   push branches, and GitHub additionally withholds secrets from fork PRs
+#   natively. Fork PRs therefore skip silently: never fail, never see the
+#   secret.
+#
+# Draft policy: drafts skip (the `pull_request.draft != true` gate) so a WIP
+# branch does not spend scan budget. ready_for_review runs the first scan;
+# converted_to_draft is a trigger only so concurrency cancel-in-progress can
+# abort an in-flight scan.
+#
+# Scope: `codex-security scan . --diff <base> --head <head>` reviews the
+# committed changes between the PR base and head (target kind "refs" in the
+# CLI). Standard mode only — deep mode is repo/path-scoped and far too slow
+# for a PR lane. Limitation: the scan sees the changed commits plus their
+# file context; regressions that only become visible across unchanged files
+# are out of scope. Acceptable for an advisory tier.
+#
+# No repository code executes in this job: the checkout is scan input only,
+# npm runs with --ignore-scripts, and no repo script is invoked. Scan output
+# is model-generated data — treat findings as untrusted text.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
+
+concurrency:
+  group: codex-security-diff-scan-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write # upsert the advisory findings comment
+
+jobs:
+  scan:
+    name: Advisory diff scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    # Hard gate: same-repo PRs only. Drafts skip. Both conditions are silent
+    # skips — the job reports "Skipped", never a failure.
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository
+      && github.event.pull_request.draft != true
+    steps:
+      # The default pull_request checkout is the merge commit, whose parents
+      # are the base tip and the PR head — so with fetch-depth: 0 both
+      # pull_request base and head SHAs resolve locally with no extra fetch
+      # and no credentials (persist-credentials stays off).
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve diff range
+        id: range
+        run: |
+          set -euo pipefail
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+          # Base tip can drift between merge-commit creation and this run;
+          # try a shallow fetch, then skip softly if still unresolvable
+          # (fetch is anonymous — private-repo checkouts rely on the merge
+          # commit already carrying the base parent).
+          if ! git cat-file -e "$BASE" 2>/dev/null; then
+            git fetch --no-tags --depth=1 origin "$BASE" 2>/dev/null || true
+          fi
+          if ! git cat-file -e "$BASE" 2>/dev/null || ! git cat-file -e "$HEAD" 2>/dev/null; then
+            {
+              echo "### Codex Security diff scan"
+              echo "Advisory scan skipped: could not resolve the PR diff range locally."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "scannable=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          CHANGED="$(git diff --name-only "$BASE...$HEAD" | wc -l | tr -d ' ')"
+          echo "changed_files=$CHANGED" >> "$GITHUB_OUTPUT"
+          if [ "$CHANGED" = "0" ]; then
+            {
+              echo "### Codex Security diff scan"
+              echo "Advisory scan skipped: empty diff (merge-only or already-merged content)."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "scannable=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "scannable=true" >> "$GITHUB_OUTPUT"
+          echo "Diff range: $BASE...$HEAD ($CHANGED files)"
+
+      - name: Materialize Codex subscription credential
+        id: auth
+        env:
+          CODEX_SUBSCRIPTION_AUTH_JSON: ${{ secrets.CODEX_SUBSCRIPTION_AUTH_JSON }}
+        run: |
+          set -euo pipefail
+          # Subscription auth lives in ~/.codex/auth.json. An API key env var
+          # would force usage-priced billing — always unset both.
+          unset OPENAI_API_KEY CODEX_API_KEY
+          echo "CODEX_HOME=$RUNNER_TEMP/codex-home" >> "$GITHUB_ENV"
+          if [ -z "${CODEX_SUBSCRIPTION_AUTH_JSON:-}" ]; then
+            {
+              echo "### Codex Security diff scan"
+              echo "Advisory scan skipped: repository secret \`CODEX_SUBSCRIPTION_AUTH_JSON\` is not provisioned."
+              echo "Provision it (ChatGPT subscription auth.json), then re-run this job."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::notice::CODEX_SUBSCRIPTION_AUTH_JSON not provisioned — advisory diff scan skipped"
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          install -d -m 700 "$RUNNER_TEMP/codex-home"
+          printf '%s' "$CODEX_SUBSCRIPTION_AUTH_JSON" > "$RUNNER_TEMP/codex-home/auth.json"
+          chmod 600 "$RUNNER_TEMP/codex-home/auth.json"
+          unset CODEX_SUBSCRIPTION_AUTH_JSON
+          echo "present=true" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node
+        if: steps.range.outputs.scannable == 'true' && steps.auth.outputs.present == 'true'
+        continue-on-error: true
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: "24"
+
+      - name: Install codex-security package
+        id: install
+        if: steps.range.outputs.scannable == 'true' && steps.auth.outputs.present == 'true'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          # Pinned version + --ignore-scripts: no lifecycle code runs on a
+          # secret-bearing runner. Bump deliberately after a local --dry-run.
+          npm install --prefix "$RUNNER_TEMP/codex-security-cli" --no-save --ignore-scripts \
+            @openai/codex-security@0.2.0
+          echo "$RUNNER_TEMP/codex-security-cli/node_modules/.bin" >> "$GITHUB_PATH"
+          codex-security --version
+
+      - name: Run codex-security on the PR diff
+        id: scan
+        if: steps.range.outputs.scannable == 'true' && steps.auth.outputs.present == 'true' && steps.install.outcome != 'failure'
+        continue-on-error: true
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          unset OPENAI_API_KEY CODEX_API_KEY
+          OUT_DIR="$RUNNER_TEMP/codex-security-diff"
+          install -d -m 700 "$OUT_DIR"
+          # safety-identifier: stable hashed repo slug (1-64 chars) — never
+          # the plaintext repo name.
+          SAFETY_ID="$(printf '%s' "$GITHUB_REPOSITORY" | sha256sum | cut -c1-32)"
+          codex-security scan . \
+            --diff "$BASE_SHA" \
+            --head "$HEAD_SHA" \
+            --auth chatgpt \
+            --headless \
+            --verbose \
+            --safety-identifier "$SAFETY_ID" \
+            --output-dir "$OUT_DIR"
+
+      - name: Summarise findings
+        id: report
+        if: always() && steps.range.outputs.scannable == 'true' && steps.auth.outputs.present == 'true'
+        env:
+          OUT_DIR: ${{ runner.temp }}/codex-security-diff
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          SCAN_OUTCOME: ${{ steps.scan.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+
+          out_dir = Path(os.environ["OUT_DIR"])
+          findings_file = out_dir / "findings.json"
+          body_path = Path(os.environ["RUNNER_TEMP"]) / "codex-diff-scan-comment.md"
+          head = os.environ["HEAD_SHA"][:10]
+          base = os.environ["BASE_SHA"][:10]
+          run_url = os.environ["RUN_URL"]
+
+          def esc(text, cap=160):
+              t = re.sub(r"\s+", " ", str(text or "")).strip()
+              t = t.replace("|", "\\|").replace("@", "@\u200b")
+              return t[:cap]
+
+          findings = []
+          if findings_file.exists():
+              try:
+                  data = json.loads(findings_file.read_text(encoding="utf-8"))
+                  findings = data.get("findings", []) if isinstance(data, dict) else list(data)
+              except Exception as exc:
+                  print(f"could not parse findings.json: {exc}")
+
+          order = ["critical", "high", "medium", "low"]
+          counts = {level: 0 for level in order}
+          other = 0
+          for f in findings:
+              level = str((f.get("severity") or {}).get("level") or "").lower()
+              if level in counts:
+                  counts[level] += 1
+              else:
+                  other += 1
+
+          lines = ["### Codex Security diff scan (advisory)", ""]
+          if os.environ["SCAN_OUTCOME"] == "failure":
+              lines.append(
+                  f"Scan run did not complete (see [run logs]({run_url})). "
+                  "No findings produced — this is advisory only."
+              )
+          elif not findings_file.exists():
+              lines.append("Scan produced no findings file — treated as clean for advisory purposes.")
+          elif not findings:
+              lines.append(f"No findings in diff `{base}...{head}`.")
+          else:
+              lines.append(f"Diff `{base}...{head}` — **{len(findings)} finding(s)**: "
+                           + ", ".join(f"{counts[l]} {l}" for l in order if counts[l])
+                           + (f", {other} unclassified" if other else ""))
+              lines.append("")
+              lines.append("| Severity | Finding | Location |")
+              lines.append("|---|---|---|")
+              for f in sorted(
+                  findings,
+                  key=lambda x: order.index(str((x.get("severity") or {}).get("level") or "").lower())
+                  if str((x.get("severity") or {}).get("level") or "").lower() in order else len(order),
+              )[:12]:
+                  level = str((f.get("severity") or {}).get("level") or "?").upper()
+                  loc = (f.get("locations") or [{}])[0]
+                  path = esc(loc.get("path"), 80)
+                  line = loc.get("startLine") or ""
+                  where = f"`{path}:{line}`" if path else "—"
+                  lines.append(f"| {level} | {esc(f.get('title') or f.get('ruleId'))} | {where} |")
+              if len(findings) > 12:
+                  lines.append(f"\n…{len(findings) - 12} more in the run artifact.")
+          lines.append("")
+          lines.append(
+              "_Advisory only — never a required check. Findings are model output: "
+              "verify before acting._"
+          )
+          text = "\n".join(lines)
+          Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text(text + "\n", encoding="utf-8")
+          body_path.write_text(text, encoding="utf-8")
+          print(text)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"post_comment=true\nfindings={len(findings)}\n")
+          PY
+
+      - name: Upsert advisory PR comment
+        if: steps.report.outputs.post_comment == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BODY_FILE: ${{ runner.temp }}/codex-diff-scan-comment.md
+        run: |
+          python3 - <<'PY'
+          import json, os, sys, urllib.request
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          pr = os.environ["PR_NUM"]
+          body = open(os.environ["BODY_FILE"], encoding="utf-8").read()
+          marker = "<!-- codex-security-diff-scan:v1 -->"
+          body = f"{marker}\n{body}\n\n<sub>head `{os.environ['HEAD_SHA'][:10]}`</sub>"
+          headers = {
+              "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+              "Accept": "application/vnd.github+json",
+          }
+          try:
+              page = 1
+              existing = None
+              while True:
+                  req = urllib.request.Request(
+                      f"https://api.github.com/repos/{repo}/issues/{pr}/comments?per_page=100&page={page}",
+                      headers=headers,
+                  )
+                  comments = json.loads(urllib.request.urlopen(req, timeout=30).read())
+                  existing = next(
+                      (
+                          c for c in comments
+                          if (c.get("body") or "").startswith(marker)
+                          and (c.get("user") or {}).get("login") == "github-actions[bot]"
+                      ),
+                      None,
+                  )
+                  if existing or len(comments) < 100:
+                      break
+                  page += 1
+              if existing and (existing.get("body") or "") == body:
+                  print("comment already current — skipping")
+                  sys.exit(0)
+              endpoint = (
+                  f"https://api.github.com/repos/{repo}/issues/comments/{existing['id']}"
+                  if existing
+                  else f"https://api.github.com/repos/{repo}/issues/{pr}/comments"
+              )
+              req = urllib.request.Request(
+                  endpoint,
+                  data=json.dumps({"body": body}).encode(),
+                  headers={**headers, "Content-Type": "application/json"},
+                  method="PATCH" if existing else "POST",
+              )
+              urllib.request.urlopen(req, timeout=30)
+              print("advisory comment " + ("updated" if existing else "posted"))
+          except Exception as exc:
+              # Advisory: a comment failure must not surface as a job failure.
+              print(f"comment upsert failed (advisory, non-fatal): {exc}")
+          PY
+
+      - name: Upload findings artifact
+        if: always() && steps.auth.outputs.present == 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: codex-security-diff-${{ github.run_id }}
+          path: ${{ runner.temp }}/codex-security-diff/
+          retention-days: 14
+          if-no-files-found: ignore
