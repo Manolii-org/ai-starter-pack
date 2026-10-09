@@ -12,6 +12,25 @@ import pytest
 
 SCRIPT = Path(__file__).resolve().parents[1] / "bin/bounded-command.py"
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux subreaper")
+
+
+def _children_interface_readable():
+    try:
+        fd = os.open(f"/proc/self/task/{os.getpid()}/children", os.O_RDONLY)
+    except OSError:
+        return False
+    os.close(fd)
+    return True
+
+
+@pytest.fixture(autouse=True)
+def _require_children_interface(request):
+    # Injected setup failures do not need the kernel file. Every other case
+    # here asserts a spawned command, which this helper refuses without it.
+    if request.node.originalname == "test_unavailable_child_enumeration_prevents_spawn":
+        return
+    if not _children_interface_readable():
+        pytest.skip("Linux /proc/<pid>/task/<pid>/children is not readable")
 OBSERVER = r'''
 import atexit, builtins, json, os, runpy, signal, sys, time
 log, phase, script, *args = sys.argv[1:]
@@ -83,12 +102,32 @@ def observed_pending():
     result = pending()
     if phase.startswith("commit"): os.kill(os.getpid(), int(phase.split(":")[1]))
     return result
+lineage = {"child": 0}
 def trace(frame, event, arg):
     if phase == "budget_zero" and event == "call" and frame.f_code.co_name == "cleanup": frame.f_globals["CLEANUP_SECONDS"] = 0
     if (phase.split(":")[0] in {"final", "cleanup"} and event == "call"
             and frame.f_code.co_name == ("finish" if phase.startswith("final") else "cleanup")):
         os.kill(os.getpid(), int(phase.split(":")[1]))
+    if (phase == "foreign_lineage" and event == "call" and lineage["child"]
+            and frame.f_code.co_name == "cleanup"):
+        os.kill(lineage["child"], signal.SIGTERM)
+        wait(lineage["child"], 0)
+        lineage["child"] = 0
     return trace
+if phase == "foreign_lineage":
+    lineage["child"] = fork()
+    if lineage["child"] == 0:
+        grand = fork()
+        if grand == 0:
+            devnull = os.open(os.devnull, os.O_RDWR)
+            os.dup2(devnull, 0); os.dup2(devnull, 1); os.dup2(devnull, 2)
+            os.closerange(3, 256)
+            time.sleep(30)
+            os._exit(0)
+        record(["grandchild", grand])
+        time.sleep(30)
+        os._exit(0)
+    record(["foreign", lineage["child"]])
 if phase == "foreign_child":
     foreign_pid = fork()
     if foreign_pid == 0:
@@ -275,22 +314,37 @@ def test_incomplete_cleanup_fault_injection(tmp_path):
     assert list(native.values()) == [0]
 
 
+def _reap_survivor(pid):
+    os.kill(pid, signal.SIGKILL)
+    deadline = time.monotonic() + 1
+    while Path(f"/proc/{pid}").exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert not Path(f"/proc/{pid}").exists()
+
+
 def test_preexisting_child_is_not_reaped_or_signaled(tmp_path):
     result, report, native = run(
         tmp_path, "import os; os.write(1, b'ok')", timeout="1", phase="foreign_child",
     )
-    assert result.returncode == 0 and result.stdout == b"ok"
-    assert report["reason"] == "success" and report["native_descendants"] == {}
-    assert list(native.values()) == [0]
+    assert result.returncode == 125 and report["reason"] == "setup_failure"
+    assert report["native_parent"] is None and native == {} and result.stdout == b""
     rows = [json.loads(line) for line in (tmp_path / "waits").read_text().splitlines()]
     foreign = next(row[1] for row in rows if row[0] == "foreign")
-    assert foreign not in native
     assert Path(f"/proc/{foreign}").exists()
-    os.kill(foreign, signal.SIGKILL)
-    deadline = time.monotonic() + 1
-    while Path(f"/proc/{foreign}").exists() and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert not Path(f"/proc/{foreign}").exists()
+    _reap_survivor(foreign)
+
+
+def test_reparented_foreign_grandchild_is_not_signaled(tmp_path):
+    result, report, native = run(
+        tmp_path, "import os; os.write(1, b'ok')", timeout="1", phase="foreign_lineage",
+    )
+    assert result.returncode == 125 and report["reason"] == "setup_failure"
+    assert report["native_parent"] is None and report["native_descendants"] == {}
+    assert native == {} and result.stdout == b""
+    rows = [json.loads(line) for line in (tmp_path / "waits").read_text().splitlines()]
+    grand = next(row[1] for row in rows if row[0] == "grandchild")
+    assert Path(f"/proc/{grand}").exists()
+    _reap_survivor(grand)
 
 
 def test_expired_deadline_before_fork_does_not_spawn(tmp_path):

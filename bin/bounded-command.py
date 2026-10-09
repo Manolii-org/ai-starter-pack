@@ -39,6 +39,10 @@ def adopt(owned, foreign):
 
 def reap(root, parent, descendants, end, owned, foreign):
     """Wait only pids this invocation owns. Never waitpid(-1)."""
+    if foreign:
+        # Any pre-fork child makes the process a subreaper for that child's
+        # later grandchildren. Do not scan, wait, or signal after that point.
+        return parent, True
     while time.monotonic() < end:
         enumerated = adopt(owned, foreign)
         if not enumerated and root is None and not owned:
@@ -116,10 +120,12 @@ def execute(timeout, command):
             read_fd, write_fd = os.pipe()
             null_fd = os.open(os.devnull, os.O_RDWR)
             # Setup can consume the budget sampled before it. Never fork after expiry.
-            # Refresh the foreign set immediately before fork so launcher children
-            # are not owned, waited, or signaled.
+            # Any direct child already present aborts before fork. A snapshot of
+            # those pids cannot name grandchildren reparented after it.
             foreign.update(child_pids())
-            if time.monotonic() >= end:
+            if foreign:
+                reason = "setup_failure"
+            elif time.monotonic() >= end:
                 reason = "deadline"
             else:
                 root = os.fork()
