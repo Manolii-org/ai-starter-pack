@@ -21,6 +21,8 @@ import io
 import json
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
     "run_specialists", ROOT / "scripts/run-specialists.py"
@@ -146,3 +148,46 @@ def test_direct_persistent_empty_returns_empty_after_retry(monkeypatch):
     sent = _fake_urlopen(monkeypatch, [empty_end_turn, empty_end_turn])
     assert MODULE._call_api("sys", "user", "claude-haiku-4-5-20251001", 800) == ""
     assert len(sent) == 2
+
+
+def test_truncated_unparseable_max_tokens_retries_doubled(monkeypatch):
+    """Reasoning prose cut at max_tokens (unparseable, no findings JSON)
+    retries once at doubled budget — observed on the direct lane."""
+    _patch_endpoint(monkeypatch, proxied=False)
+    truncated = _api_payload(
+        [{"type": "text", "text": "# Phase 1: reasoning… {\"findings\": ["}],
+        stop_reason="max_tokens")
+    sent = _fake_urlopen(monkeypatch, [truncated, _ANSWER])
+    out = MODULE._call_api("sys", "user", "claude-haiku-4-5-20251001", 800,
+                           validate=lambda t: '"findings"' in t and t.rstrip().endswith("}"))
+    assert json.loads(out)["findings"] == []
+    assert len(sent) == 2
+    assert sent[1]["max_tokens"] == 1600
+
+
+def test_unparseable_end_turn_text_not_retried(monkeypatch):
+    """Unparseable output that finished cleanly is a real answer, not
+    starvation — no retry regardless of the validator."""
+    _patch_endpoint(monkeypatch, proxied=False)
+    weird = _api_payload(
+        [{"type": "text", "text": "no json here"}], stop_reason="end_turn")
+    sent = _fake_urlopen(monkeypatch, [weird])
+    assert MODULE._call_api("sys", "user", "claude-haiku-4-5-20251001", 800,
+                            validate=lambda t: False) == "no json here"
+    assert len(sent) == 1
+
+
+def test_parse_findings_extracts_json_after_prose():
+    out = MODULE._parse_findings(
+        '# Phase 1\nreasoning text\n{"source": "s", "findings": []}')
+    assert out["findings"] == []
+
+
+def test_parse_findings_prefers_last_fenced_block():
+    raw = 'prose\n```json\n{"source": "s", "findings": [{"id": "f1"}]}\n```\nmore'
+    assert MODULE._parse_findings(raw)["findings"] == [{"id": "f1"}]
+
+
+def test_parse_findings_raises_on_no_json():
+    with pytest.raises(json.JSONDecodeError):
+        MODULE._parse_findings("plain prose, no braces")

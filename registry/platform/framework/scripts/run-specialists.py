@@ -152,7 +152,7 @@ def _load_skill(skill_name: str) -> tuple[dict, str]:
     return frontmatter, system_prompt
 
 
-def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int, *, first_party: bool = False) -> str:
+def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int, *, first_party: bool = False, validate=None) -> str:
     """Call the Messages API via urllib (Anthropic direct or LiteLLM proxy)."""
     api_key, api_url, proxied = _endpoint(direct=first_party)
     if not api_key:
@@ -182,9 +182,9 @@ def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int
     # ~1k-token chain-of-thought exhausts a specialist's declared 800 and
     # returns stop_reason=max_tokens with an empty text block; every
     # specialist failed that way). Proxied calls therefore get headroom on
-    # top of the declared answer budget, plus one doubled retry if the
-    # answer still comes back starved. Anthropic-direct keeps the declared
-    # budget verbatim.
+    # top of the declared answer budget. Both lanes get one doubled-budget
+    # retry on starvation signals — an empty first block, or max_tokens
+    # output that fails the caller's parse validator (truncated mid-JSON).
     budget = max_tokens + _PROXY_THINKING_HEADROOM if proxied else max_tokens
     data = None
     for _budget_attempt in range(2):
@@ -232,6 +232,13 @@ def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int
                 text = block["text"]
                 break
         if text:
+            if (_budget_attempt == 0 and validate is not None
+                    and data.get("stop_reason") == "max_tokens"
+                    and not validate(text)):
+                # Truncated mid-payload (e.g. reasoning + findings JSON cut
+                # at the declared budget): one doubled-budget retry.
+                budget *= 2
+                continue
             return text
         if _budget_attempt == 0:
             # An empty first block on attempt 0 is either starvation
@@ -246,13 +253,35 @@ def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int
 
 
 def _parse_findings(raw: str) -> dict:
-    """Strip markdown fences and parse JSON findings."""
+    """Extract and parse the findings JSON from possibly mixed output.
+
+    Multi-phase skills reason aloud before emitting the findings block, so
+    prose may precede the JSON. Try the whole string, then the last fenced
+    block, then the last balanced object that carries a "findings" key.
+    """
     text = raw.strip()
     if text.startswith("```"):
         lines = text.splitlines()
         end = next((i for i, ln in enumerate(lines[1:], 1) if ln.startswith("```")), len(lines))
         text = "\n".join(lines[1:end])
-    return json.loads(text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    for block in reversed(re.findall(r"```(?:json)?\s*\n(.*?)```", raw, re.S)):
+        try:
+            return json.loads(block.strip())
+        except json.JSONDecodeError:
+            continue
+    decoder = json.JSONDecoder()
+    for match in reversed(list(re.finditer(r"\{", raw))):
+        try:
+            obj, _ = decoder.raw_decode(raw, match.start())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and "findings" in obj:
+            return obj
+    raise json.JSONDecodeError("no findings JSON in response", raw, 0)
 
 
 def _load_skill_is_first_party(skill_name: str) -> bool:
@@ -415,7 +444,15 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
     )
 
     try:
-        raw = _call_api(system_prompt, user_message, model, max_tokens, first_party=first_party)
+        def _parse_ok(candidate: str) -> bool:
+            try:
+                parsed = _parse_findings(candidate)
+            except json.JSONDecodeError:
+                return False
+            return isinstance(parsed, dict) and "findings" in parsed
+
+        raw = _call_api(system_prompt, user_message, model, max_tokens,
+                        first_party=first_party, validate=_parse_ok)
         data = _parse_findings(raw)
 
         # Validate structure. A first-party skill returning a malformed
