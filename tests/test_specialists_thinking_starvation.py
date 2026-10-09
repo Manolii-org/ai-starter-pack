@@ -8,7 +8,11 @@ specialist lane silently produced zero coverage.
 _call_api must therefore add headroom on top of the declared answer budget
 for proxied calls and retry once at a doubled budget when the response comes
 back starved (no text block + stop_reason=max_tokens). Anthropic-direct
-calls must keep the declared budget verbatim and never retry on starvation.
+calls keep the declared budget verbatim but retry an empty response once —
+transient empty output is cheaper to re-ask than to let collapse a
+specialist into an api_error skip marker (observed 2026-10-09: an
+end_turn empty text block on the direct lane silently skipped
+docs-fact-check).
 """
 from __future__ import annotations
 
@@ -113,10 +117,30 @@ def test_non_max_tokens_empty_text_is_not_retried(monkeypatch):
     assert len(sent) == 1
 
 
-def test_direct_call_keeps_declared_budget_and_never_retries(monkeypatch):
+def test_direct_call_keeps_declared_budget(monkeypatch):
     _patch_endpoint(monkeypatch, proxied=False)
-    sent = _fake_urlopen(monkeypatch, [_THINKING_ONLY])
-    assert MODULE._call_api("sys", "user", "claude-haiku-4-5-20251001", 800) == ""
+    sent = _fake_urlopen(monkeypatch, [_ANSWER])
+    assert MODULE._call_api("sys", "user", "claude-haiku-4-5-20251001", 800) != ""
     assert len(sent) == 1
     assert sent[0]["max_tokens"] == 800
     assert sent[0]["model"] == "claude-haiku-4-5-20251001"
+
+
+def test_direct_empty_response_retries_once_at_same_budget(monkeypatch):
+    """A direct call returning no text block retries exactly once — transient
+    empty output must not write an api_error marker on a single flake."""
+    _patch_endpoint(monkeypatch, proxied=False)
+    empty_end_turn = _api_payload([{"type": "text", "text": ""}], stop_reason="end_turn")
+    sent = _fake_urlopen(monkeypatch, [empty_end_turn, _ANSWER])
+    out = MODULE._call_api("sys", "user", "claude-haiku-4-5-20251001", 800)
+    assert json.loads(out)["findings"] == []
+    assert len(sent) == 2
+    assert sent[0]["max_tokens"] == sent[1]["max_tokens"] == 800
+
+
+def test_direct_persistent_empty_returns_empty_after_retry(monkeypatch):
+    _patch_endpoint(monkeypatch, proxied=False)
+    empty_end_turn = _api_payload([{"type": "text", "text": ""}], stop_reason="end_turn")
+    sent = _fake_urlopen(monkeypatch, [empty_end_turn, empty_end_turn])
+    assert MODULE._call_api("sys", "user", "claude-haiku-4-5-20251001", 800) == ""
+    assert len(sent) == 2

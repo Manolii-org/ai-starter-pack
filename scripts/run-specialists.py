@@ -231,8 +231,17 @@ def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int
             if block.get("type") == "text":
                 text = block["text"]
                 break
-        if text or data.get("stop_reason") != "max_tokens" or not proxied:
+        if text:
             return text
+        if not proxied:
+            # An empty first block on the direct lane is transient model
+            # behaviour, not a credential or truncation signal — retry once
+            # before letting it become an api_error skip marker.
+            if _budget_attempt == 0:
+                continue
+            return ""
+        if data.get("stop_reason") != "max_tokens":
+            return ""
         # Thinking starved the answer: double the budget once and retry.
         budget *= 2
     return ""
