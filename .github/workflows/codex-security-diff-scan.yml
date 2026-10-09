@@ -262,6 +262,28 @@ jobs:
                   f"{os.environ['SCAN_OUTCOME']}; see [run logs]({run_url})). "
                   "Nothing was scanned — this is advisory only."
               )
+              # A scan can still validate candidates before dying (observed:
+              # exit 2 on cloud draft-save/cyber-safeguard failures AFTER
+              # reproducing an RCE). Surface them so the advisory never
+              # under-signals a dangerous diff.
+              try:
+                  cov = json.loads((out_dir / "coverage.json").read_text(encoding="utf-8"))
+              except Exception:
+                  cov = {}
+              seen, flagged = set(), []
+              for item in cov.get("deferred", []) if isinstance(cov, dict) else []:
+                  r = str(item.get("reason") or "").strip()
+                  m = re.search(r"Candidate `([^`]+)`", r)
+                  key = m.group(1) if m else r[:80]
+                  if not r or key in seen:
+                      continue
+                  seen.add(key)
+                  flagged.append(r)
+              if flagged:
+                  lines.append("")
+                  lines.append("Flagged before it stopped (validated candidates, not recorded findings):")
+                  for r in flagged[:5]:
+                      lines.append(f"- {esc(r, 220)}")
           elif not findings_file.exists():
               lines.append("Scan produced no findings file — treated as clean for advisory purposes.")
           elif not findings:
