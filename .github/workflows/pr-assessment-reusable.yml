@@ -131,7 +131,13 @@ jobs:
           for f in $ASSESSMENT_RUNTIME_FILES; do
             [[ -e "$f" ]] || missing="$missing $f"
           done
-          if [[ -n "$missing" ]]; then
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            # A PR-triggered run executes inside the caller's merge commit —
+            # every file under the runtime list is attacker-controlled there.
+            # Always hydrate (and overwrite below); never trust caller copies.
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+            echo "pull_request trigger: forcing hydration — caller-shipped runtime files are untrusted"
+          elif [[ -n "$missing" ]]; then
             echo "needed=true" >> "$GITHUB_OUTPUT"
             echo "Hydration required for:$missing"
           else
@@ -164,8 +170,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          FORCE=false
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            FORCE=true
+          fi
           for f in $ASSESSMENT_RUNTIME_FILES; do
-            [[ -e "$f" ]] && continue
+            if [[ "$FORCE" != "true" && -e "$f" ]]; then continue; fi
             if [[ ! -e ".pack-hydrate/$f" ]]; then
               # A listed path the pack no longer ships means this list and the
               # runners have drifted. Continuing would resurface later as an
@@ -174,9 +184,16 @@ jobs:
               exit 1
             fi
             mkdir -p "$(dirname "$f")"
-            cp ".pack-hydrate/$f" "$f"
+            cp -f ".pack-hydrate/$f" "$f"
             echo "hydrated $f"
           done
+          if [[ "$FORCE" == "true" && -d ".pack-hydrate/.claude" ]]; then
+            # .claude agent/skill definitions are prompt input to the runners
+            # — on PR triggers they must come from the trusted pack too.
+            mkdir -p .claude
+            cp -fa .pack-hydrate/.claude/. .claude/
+            echo "hydrated .claude (forced)"
+          fi
           chmod +x scripts/run-*.py 2>/dev/null || true
           # Scratch tree: leaving a second full copy of the pack in the
           # workspace would be walked by later steps (skill discovery,
@@ -500,7 +517,13 @@ jobs:
           for f in $ASSESSMENT_RUNTIME_FILES; do
             [[ -e "$f" ]] || missing="$missing $f"
           done
-          if [[ -n "$missing" ]]; then
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            # A PR-triggered run executes inside the caller's merge commit —
+            # every file under the runtime list is attacker-controlled there.
+            # Always hydrate (and overwrite below); never trust caller copies.
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+            echo "pull_request trigger: forcing hydration — caller-shipped runtime files are untrusted"
+          elif [[ -n "$missing" ]]; then
             echo "needed=true" >> "$GITHUB_OUTPUT"
             echo "Hydration required for:$missing"
           else
@@ -533,8 +556,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          FORCE=false
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            FORCE=true
+          fi
           for f in $ASSESSMENT_RUNTIME_FILES; do
-            [[ -e "$f" ]] && continue
+            if [[ "$FORCE" != "true" && -e "$f" ]]; then continue; fi
             if [[ ! -e ".pack-hydrate/$f" ]]; then
               # A listed path the pack no longer ships means this list and the
               # runners have drifted. Continuing would resurface later as an
@@ -543,9 +570,16 @@ jobs:
               exit 1
             fi
             mkdir -p "$(dirname "$f")"
-            cp ".pack-hydrate/$f" "$f"
+            cp -f ".pack-hydrate/$f" "$f"
             echo "hydrated $f"
           done
+          if [[ "$FORCE" == "true" && -d ".pack-hydrate/.claude" ]]; then
+            # .claude agent/skill definitions are prompt input to the runners
+            # — on PR triggers they must come from the trusted pack too.
+            mkdir -p .claude
+            cp -fa .pack-hydrate/.claude/. .claude/
+            echo "hydrated .claude (forced)"
+          fi
           chmod +x scripts/run-*.py 2>/dev/null || true
           # Scratch tree: leaving a second full copy of the pack in the
           # workspace would be walked by later steps (skill discovery,
@@ -624,7 +658,13 @@ jobs:
           for f in $ASSESSMENT_RUNTIME_FILES; do
             [[ -e "$f" ]] || missing="$missing $f"
           done
-          if [[ -n "$missing" ]]; then
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            # A PR-triggered run executes inside the caller's merge commit —
+            # every file under the runtime list is attacker-controlled there.
+            # Always hydrate (and overwrite below); never trust caller copies.
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+            echo "pull_request trigger: forcing hydration — caller-shipped runtime files are untrusted"
+          elif [[ -n "$missing" ]]; then
             echo "needed=true" >> "$GITHUB_OUTPUT"
             echo "Hydration required for:$missing"
           else
@@ -657,8 +697,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          FORCE=false
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            FORCE=true
+          fi
           for f in $ASSESSMENT_RUNTIME_FILES; do
-            [[ -e "$f" ]] && continue
+            if [[ "$FORCE" != "true" && -e "$f" ]]; then continue; fi
             if [[ ! -e ".pack-hydrate/$f" ]]; then
               # A listed path the pack no longer ships means this list and the
               # runners have drifted. Continuing would resurface later as an
@@ -667,9 +711,16 @@ jobs:
               exit 1
             fi
             mkdir -p "$(dirname "$f")"
-            cp ".pack-hydrate/$f" "$f"
+            cp -f ".pack-hydrate/$f" "$f"
             echo "hydrated $f"
           done
+          if [[ "$FORCE" == "true" && -d ".pack-hydrate/.claude" ]]; then
+            # .claude agent/skill definitions are prompt input to the runners
+            # — on PR triggers they must come from the trusted pack too.
+            mkdir -p .claude
+            cp -fa .pack-hydrate/.claude/. .claude/
+            echo "hydrated .claude (forced)"
+          fi
           chmod +x scripts/run-*.py 2>/dev/null || true
           # Scratch tree: leaving a second full copy of the pack in the
           # workspace would be walked by later steps (skill discovery,
@@ -751,7 +802,13 @@ jobs:
           for f in $ASSESSMENT_RUNTIME_FILES; do
             [[ -e "$f" ]] || missing="$missing $f"
           done
-          if [[ -n "$missing" ]]; then
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            # A PR-triggered run executes inside the caller's merge commit —
+            # every file under the runtime list is attacker-controlled there.
+            # Always hydrate (and overwrite below); never trust caller copies.
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+            echo "pull_request trigger: forcing hydration — caller-shipped runtime files are untrusted"
+          elif [[ -n "$missing" ]]; then
             echo "needed=true" >> "$GITHUB_OUTPUT"
             echo "Hydration required for:$missing"
           else
@@ -784,8 +841,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          FORCE=false
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            FORCE=true
+          fi
           for f in $ASSESSMENT_RUNTIME_FILES; do
-            [[ -e "$f" ]] && continue
+            if [[ "$FORCE" != "true" && -e "$f" ]]; then continue; fi
             if [[ ! -e ".pack-hydrate/$f" ]]; then
               # A listed path the pack no longer ships means this list and the
               # runners have drifted. Continuing would resurface later as an
@@ -794,9 +855,16 @@ jobs:
               exit 1
             fi
             mkdir -p "$(dirname "$f")"
-            cp ".pack-hydrate/$f" "$f"
+            cp -f ".pack-hydrate/$f" "$f"
             echo "hydrated $f"
           done
+          if [[ "$FORCE" == "true" && -d ".pack-hydrate/.claude" ]]; then
+            # .claude agent/skill definitions are prompt input to the runners
+            # — on PR triggers they must come from the trusted pack too.
+            mkdir -p .claude
+            cp -fa .pack-hydrate/.claude/. .claude/
+            echo "hydrated .claude (forced)"
+          fi
           chmod +x scripts/run-*.py 2>/dev/null || true
           # Scratch tree: leaving a second full copy of the pack in the
           # workspace would be walked by later steps (skill discovery,

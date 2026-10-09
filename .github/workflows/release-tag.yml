@@ -48,7 +48,8 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "$SHA" ]; then
-            SHA=$(curl -sf --max-time 30 -H "Authorization: Bearer $GH_TOKEN" \
+            # Bearer token via stdin (-H @-), never argv — argv is world-readable in ps.
+            SHA=$(printf 'Authorization: Bearer %s\n' "$GH_TOKEN" | curl -sf --max-time 30 -H @- \
               -H "Accept: application/vnd.github+json" \
               "https://api.github.com/repos/$REPO/commits/main" | python3 -c "import json,sys; print(json.load(sys.stdin)['sha'])")
           fi

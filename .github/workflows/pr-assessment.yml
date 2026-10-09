@@ -62,6 +62,26 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
+          persist-credentials: false
+
+      # The checkout is the PR merge commit — scripts/ and the instruction
+      # surface under .claude/, CLAUDE.md and AGENTS.md are PR-controlled but
+      # get executed/read by the runners below while secrets are in the
+      # environment. Restore them from the PR base; paths the PR adds are
+      # dropped, never run.
+      - name: Restore trusted runtime from PR base
+        run: |
+          set -euo pipefail
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          [ -n "$BASE_SHA" ] || { echo "No pull_request base context — nothing to restore"; exit 0; }
+          git fetch --depth=1 origin "$BASE_SHA"
+          for p in .claude scripts CLAUDE.md AGENTS.md; do
+            if git cat-file -e "${BASE_SHA}:${p}" 2>/dev/null; then
+              git checkout "$BASE_SHA" -- "$p"
+            else
+              rm -rf "$p"
+            fi
+          done
 
       - name: Get PR diff
         id: diff
@@ -290,6 +310,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Run Semgrep
         uses: returntocorp/semgrep-action@713efdd345f3035192eaa63f56867b88e63e4e5d # v1
@@ -354,6 +375,21 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
+          persist-credentials: false
+
+      - name: Restore trusted runtime from PR base
+        run: |
+          set -euo pipefail
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          [ -n "$BASE_SHA" ] || { echo "No pull_request base context — nothing to restore"; exit 0; }
+          git fetch --depth=1 origin "$BASE_SHA"
+          for p in .claude scripts CLAUDE.md AGENTS.md; do
+            if git cat-file -e "${BASE_SHA}:${p}" 2>/dev/null; then
+              git checkout "$BASE_SHA" -- "$p"
+            else
+              rm -rf "$p"
+            fi
+          done
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         # Only the designed empty-diff skip bypasses the download; a sast
@@ -410,6 +446,21 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
+          persist-credentials: false
+
+      - name: Restore trusted runtime from PR base
+        run: |
+          set -euo pipefail
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          [ -n "$BASE_SHA" ] || { echo "No pull_request base context — nothing to restore"; exit 0; }
+          git fetch --depth=1 origin "$BASE_SHA"
+          for p in .claude scripts CLAUDE.md AGENTS.md; do
+            if git cat-file -e "${BASE_SHA}:${p}" 2>/dev/null; then
+              git checkout "$BASE_SHA" -- "$p"
+            else
+              rm -rf "$p"
+            fi
+          done
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         if: needs.sast.result != 'skipped'
@@ -456,6 +507,22 @@ jobs:
     if: always() && needs.classify.result == 'success' && needs.classify.outputs.depth != 'none'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Restore trusted runtime from PR base
+        run: |
+          set -euo pipefail
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          [ -n "$BASE_SHA" ] || { echo "No pull_request base context — nothing to restore"; exit 0; }
+          git fetch --depth=1 origin "$BASE_SHA"
+          for p in .claude scripts CLAUDE.md AGENTS.md; do
+            if git cat-file -e "${BASE_SHA}:${p}" 2>/dev/null; then
+              git checkout "$BASE_SHA" -- "$p"
+            else
+              rm -rf "$p"
+            fi
+          done
 
       - name: Fail when an upstream assessment stage failed
         # A specialists/broad-agents job that fails before uploading its
