@@ -16,7 +16,7 @@ Wrapper stderr is sanitized JSON only (never argv/environment/raw command output
 `reason`, `cleanup`, `signal` are context; `selected` is not necessarily native. Precedence: nonzero native parent, smallest nonzero native descendant, then 125 incomplete cleanup, 128 + own TERM/INT, 124 deadline, 125 setup/validation/publication failure.
 Native 124/137/143/17 stay distinct; a deadline killing the root usually selects native 137, **not** 124.
 
-TERM/INT handlers cover setup through finalization, requesting cleanup without raising through ownership setup.
+TERM/INT handlers cover setup through finalization, requesting cleanup without raising through ownership setup. TERM/INT are blocked across the final cancellation check and fork; a pending stop signal does not spawn. The child restores the prior mask only after stop dispositions are defaulted.
 TERM/INT are unblocked after handler installation even when inherited blocked from a launcher; other inherited signal-mask bits are preserved.
 Cleanup: independent **2-second budget**, SIGKILL, no grace. Total: timeout + 2 seconds plus startup/scheduling/finalization.
 If enumeration becomes unreadable after spawn, the known unreaped root is killed and awaited within that same budget; cleanup is still reported incomplete. Unknown live descendants cannot be safely enumerated under that platform fault, so there is no success/publication or claim of complete cleanup.

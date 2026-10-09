@@ -60,10 +60,14 @@ def observed_wait(*args):
         owned.discard(pid)
         record(["wait", pid, status])
     return pid, status
+child_opens = {"n": 0}
 def observed_open(path, *args, **kwargs):
     if str(path) == f"/proc/self/task/{os.getpid()}/children":
+        child_opens["n"] += 1
         if phase == "pre_fork_expire":
             time.sleep(0.2)
+        if phase == "fork_race" and child_opens["n"] == 2:
+            os.kill(os.getpid(), signal.SIGTERM)
         if phase.startswith("proc_setup") or (phase.startswith("proc_runtime") and owned):
             raise OSError(int(phase.split(":")[1]), "injected proc failure")
     return original_open(path, *args, **kwargs)
@@ -75,7 +79,7 @@ def final_owned_cleanup():
     while owned and time.monotonic() < end:
         observed_wait(-1, os.WNOHANG)
         time.sleep(.005)
-if phase.startswith("proc_") or phase == "pre_fork_expire":
+if phase.startswith("proc_") or phase in {"pre_fork_expire", "fork_race"}:
     builtins.open = observed_open
     atexit.register(final_owned_cleanup)
     def observed_exit(status):
@@ -103,7 +107,8 @@ def observed_read(*args):
     return data
 def observed_pending():
     result = pending()
-    if phase.startswith("commit"): os.kill(os.getpid(), int(phase.split(":")[1]))
+    if phase.startswith("commit") and sys._getframe(1).f_code.co_name == "finish":
+        os.kill(os.getpid(), int(phase.split(":")[1]))
     return result
 lineage = {"child": 0}
 def trace(frame, event, arg):
@@ -368,6 +373,20 @@ def test_non_linux_is_unsupported_without_pthread():
     assert result.returncode == 125 and report["reason"] == "unsupported"
     assert report["selected"] == 125 and result.stdout == b""
     assert b"Traceback" not in result.stderr
+
+
+def test_stop_during_prefork_enumeration_does_not_spawn(tmp_path):
+    marker = tmp_path / "launched"
+    code = "import sys; open(sys.argv[1], 'w').write('launched')"
+    result, report, native = run(
+        tmp_path, code, [marker], timeout="1", phase="fork_race",
+    )
+    assert result.returncode == 128 + signal.SIGTERM
+    assert report["reason"] == "signal" and report["signal"] == signal.SIGTERM
+    assert report["native_parent"] is None and native == {}
+    assert not marker.exists()
+    log = tmp_path / "waits"
+    assert not log.exists() or "root" not in log.read_text()
 
 
 def test_expired_deadline_before_fork_does_not_spawn(tmp_path):

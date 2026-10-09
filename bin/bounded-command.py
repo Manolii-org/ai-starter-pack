@@ -117,38 +117,47 @@ def execute(timeout, command):
         if received:
             reason = "signal"
         else:
-            read_fd, write_fd = os.pipe()
-            null_fd = os.open(os.devnull, os.O_RDWR)
-            # Setup can consume the budget sampled before it. Never fork after expiry.
-            # Any direct child already present aborts before fork. A snapshot of
-            # those pids cannot name grandchildren reparented after it.
-            foreign.update(child_pids())
-            if foreign:
-                reason = "setup_failure"
-            elif time.monotonic() >= end:
-                reason = "deadline"
-            else:
-                root = os.fork()
-                if root:
-                    owned.add(root)
-            if root == 0:
-                try:
-                    for sig in STOP:
-                        signal.signal(sig, signal.SIG_DFL)
-                    for name in ("SIGPIPE", "SIGXFZ", "SIGXFSZ"):
-                        sig = getattr(signal, name, None)
-                        if sig is not None and signal.getsignal(sig) == signal.SIG_IGN:
+            # Hold STOP across setup and fork. A signal delivered in that
+            # window stays pending so the check below can refuse to spawn.
+            held = signal.pthread_sigmask(signal.SIG_BLOCK, STOP)
+            try:
+                read_fd, write_fd = os.pipe()
+                null_fd = os.open(os.devnull, os.O_RDWR)
+                # Setup can consume the budget sampled before it.
+                # Any direct child already present aborts before fork.
+                foreign.update(child_pids())
+                if received or (signal.sigpending() & STOP):
+                    reason = "signal"
+                elif foreign:
+                    reason = "setup_failure"
+                elif time.monotonic() >= end:
+                    reason = "deadline"
+                else:
+                    root = os.fork()
+                    if root:
+                        owned.add(root)
+                if root == 0:
+                    try:
+                        for sig in STOP:
                             signal.signal(sig, signal.SIG_DFL)
-                    os.dup2(null_fd, 0)
-                    os.dup2(write_fd, 1)
-                    os.dup2(null_fd, 2)
-                    for fd in (read_fd, write_fd, null_fd):
-                        if fd > 2:
-                            os.close(fd)
-                    os.execvp(command[0], command)
-                except (OSError, ValueError):
-                    os._exit(127)
-            elif root is not None:
+                        for name in ("SIGPIPE", "SIGXFZ", "SIGXFSZ"):
+                            sig = getattr(signal, name, None)
+                            if sig is not None and signal.getsignal(sig) == signal.SIG_IGN:
+                                signal.signal(sig, signal.SIG_DFL)
+                        signal.pthread_sigmask(signal.SIG_SETMASK, held)
+                        os.dup2(null_fd, 0)
+                        os.dup2(write_fd, 1)
+                        os.dup2(null_fd, 2)
+                        for fd in (read_fd, write_fd, null_fd):
+                            if fd > 2:
+                                os.close(fd)
+                        os.execvp(command[0], command)
+                    except (OSError, ValueError):
+                        os._exit(127)
+            finally:
+                if root != 0:
+                    signal.pthread_sigmask(signal.SIG_SETMASK, held)
+            if root is not None and root != 0:
                 os.close(write_fd)
                 write_fd = None
                 os.set_blocking(read_fd, False)
