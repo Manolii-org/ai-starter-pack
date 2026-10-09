@@ -87,3 +87,81 @@ def test_example_manifest_resolves():
     assert "DOPPLER_TOKEN_PRD" in out and "MCP_API_KEY" in out
     assert "GH_TOKEN" in out  # github-actions-read
     assert "VERCEL_TOKEN" not in out
+
+
+def test_agent_telemetry_includes_langfuse_secret(tmp_path):
+    m = _manifest(tmp_path, {"capabilities": ["agent-telemetry"]})
+    out = ac.resolve(m)
+    assert "LANGFUSE_PUBLIC_KEY" in out
+    assert "LANGFUSE_SECRET_KEY" in out
+
+
+def _table(tmp_path, caps):
+    t = tmp_path / "table.json"
+    t.write_text(json.dumps({"capabilities": caps}))
+    return str(t)
+
+
+def test_extension_cannot_redefine_canonical(tmp_path):
+    t = _table(tmp_path, {"github-actions-read": {
+        "secret_names": [], "source": "doppler"}})
+    m = _manifest(tmp_path, {"capabilities": ["github-actions-read"]})
+    with pytest.raises(ValueError, match="redefines a canonical"):
+        ac.resolve(m, t)
+
+
+def test_extension_broker_with_names_rejected(tmp_path):
+    t = _table(tmp_path, {"sneaky-broker": {
+        "secret_names": ["ADMIN_TOKEN"], "source": "broker"}})
+    m = _manifest(tmp_path, {"capabilities": ["sneaky-broker"]})
+    with pytest.raises(ValueError, match="broker"):
+        ac.resolve(m, t)
+
+
+def test_extension_scalar_secret_names_rejected(tmp_path):
+    t = _table(tmp_path, {"bad-shape": {
+        "secret_names": "TOKEN", "source": "doppler"}})
+    m = _manifest(tmp_path, {"capabilities": ["bad-shape"]})
+    with pytest.raises(TypeError, match="array"):
+        ac.resolve(m, t)
+
+
+def test_extension_invalid_source_rejected(tmp_path):
+    t = _table(tmp_path, {"bad-src": {
+        "secret_names": [], "source": "vault-of-doom"}})
+    m = _manifest(tmp_path, {"capabilities": ["bad-src"]})
+    with pytest.raises(ValueError, match="invalid source"):
+        ac.resolve(m, t)
+
+
+def test_unknown_mode_rejected(tmp_path):
+    m = _manifest(tmp_path, {"mode": "legcy", "capabilities": ["git-read"]})
+    with pytest.raises(ValueError, match="mode"):
+        ac.resolve(m)
+
+
+def test_invalid_retrieval_override_rejected(tmp_path):
+    m = _manifest(tmp_path, {
+        "capabilities": ["deploy-vercel"],
+        "retrieval_overrides": {"VERCEL_TOKEN": "eagre"},
+    })
+    with pytest.raises(ValueError, match="retrieval_overrides"):
+        ac.resolve(m)
+
+
+def test_conflicting_mapping_rejected(tmp_path):
+    t = _table(tmp_path, {"repo-mcp": {
+        "secret_names": ["MCP_API_KEY"], "source": "doppler",
+        "retrieval": "deferred", "privilege": "managed"}})
+    m = _manifest(tmp_path, {"capabilities": ["mcp-knowledge", "repo-mcp"]})
+    with pytest.raises(ValueError, match="conflicting mappings"):
+        ac.resolve(m, t)
+
+
+def test_identical_shared_name_ok(tmp_path):
+    t = _table(tmp_path, {"repo-mcp": {
+        "secret_names": ["MCP_API_KEY"], "source": "doppler",
+        "retrieval": "eager", "privilege": "managed"}})
+    m = _manifest(tmp_path, {"capabilities": ["mcp-knowledge", "repo-mcp"]})
+    out = ac.resolve(m, t)
+    assert out["MCP_API_KEY"]["retrieval"] == "eager"

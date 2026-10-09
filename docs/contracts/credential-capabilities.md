@@ -62,15 +62,19 @@ Three layers, in descending authority:
 ```json
 {
   "version": 1,
-  "mode": "capabilities",               // or "legacy" during migration
+  "mode": "capabilities",
   "capabilities": [
     "git-read", "mcp-knowledge", "llm-proxy"
   ],
-  "retrieval_overrides": {              // optional per-secret override
+  "retrieval_overrides": {
     "SUPABASE_ACCESS_TOKEN": "eager"
   }
 }
 ```
+
+`mode` is `capabilities` (default) or `legacy` during migration — anything
+else is a resolver error. `retrieval_overrides` is optional and accepts
+`eager`/`deferred` per secret name only.
 
 ## Capability table (canonical entries)
 
@@ -85,12 +89,17 @@ Three layers, in descending authority:
 | `deploy-vercel` | `VERCEL_TOKEN` | doppler | deferred | managed |
 | `deploy-fly` | `FLY_API_TOKEN` | doppler | deferred | managed |
 | `db-admin-supabase` | `SUPABASE_ACCESS_TOKEN` | doppler | deferred | managed |
-| `agent-telemetry` | `MCP_FINANCIAL_KEY`, `LANGFUSE_*` | doppler | deferred | managed |
+| `agent-telemetry` | `MCP_FINANCIAL_KEY`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` | doppler | deferred | managed |
 | `external-browser` | `BROWSERBASE_API_KEY` | doppler | deferred | managed |
 | `billing-read` | `GH_BILLING_TOKEN` | doppler | deferred | managed |
 
 Repo-local capabilities extend the table; a consumer must not silently
-narrow a pack capability it did not define.
+narrow a pack capability it did not define. Extensions are validated
+fail-closed: redefining a canonical name, a `secret_names` value that is
+not an array of nonempty strings, an unknown `source`/`retrieval`/
+`privilege`, or `secret_names` on a `broker` source are all resolver
+errors. When two selected capabilities emit the same env name, their
+mappings must agree — a conflict is an error, never last-write-wins.
 
 ## Reference resolver
 

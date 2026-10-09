@@ -13,6 +13,11 @@ import argparse
 import json
 import sys
 
+VALID_SOURCES = {"env", "doppler", "broker", "mcp"}
+VALID_RETRIEVAL = {"eager", "deferred"}
+VALID_PRIVILEGE = {"standard", "managed", "privileged"}
+VALID_MODES = {"capabilities", "legacy"}
+
 CANONICAL_TABLE = {
     # capability: (secret_names, source, retrieval, privilege)
     "git-read": ([], "env", "eager", "standard"),
@@ -24,7 +29,9 @@ CANONICAL_TABLE = {
     "deploy-vercel": (["VERCEL_TOKEN"], "doppler", "deferred", "managed"),
     "deploy-fly": (["FLY_API_TOKEN"], "doppler", "deferred", "managed"),
     "db-admin-supabase": (["SUPABASE_ACCESS_TOKEN"], "doppler", "deferred", "managed"),
-    "agent-telemetry": (["MCP_FINANCIAL_KEY", "LANGFUSE_PUBLIC_KEY"], "doppler", "deferred", "managed"),
+    "agent-telemetry": (
+        ["MCP_FINANCIAL_KEY", "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY"],
+        "doppler", "deferred", "managed"),
     "external-browser": (["BROWSERBASE_API_KEY"], "doppler", "deferred", "managed"),
     "billing-read": (["GH_BILLING_TOKEN"], "doppler", "deferred", "managed"),
 }
@@ -58,27 +65,63 @@ def _load_table(extra_path=None):
         if not isinstance(caps, dict):
             raise TypeError("capability table: 'capabilities' must be an object")
         for name, spec in caps.items():
+            if name in CANONICAL_TABLE:
+                raise ValueError(
+                    f"capability table: '{name}' redefines a canonical capability — "
+                    "extensions must not narrow pack capabilities")
             if not isinstance(spec, dict) or "source" not in spec:
                 raise ValueError(f"capability table: '{name}' missing required 'source'")
+            source = spec["source"]
+            if source not in VALID_SOURCES:
+                raise ValueError(
+                    f"capability table: '{name}' invalid source '{source}' "
+                    f"(want one of {sorted(VALID_SOURCES)})")
+            retrieval = spec.get("retrieval", "deferred")
+            if retrieval not in VALID_RETRIEVAL:
+                raise ValueError(
+                    f"capability table: '{name}' invalid retrieval '{retrieval}'")
+            privilege = spec.get("privilege", "managed")
+            if privilege not in VALID_PRIVILEGE:
+                raise ValueError(
+                    f"capability table: '{name}' invalid privilege '{privilege}'")
+            names = spec.get("secret_names", [])
+            if (not isinstance(names, list)
+                    or not all(isinstance(n, str) and n for n in names)):
+                raise TypeError(
+                    f"capability table: '{name}'.secret_names must be an array "
+                    "of nonempty strings")
+            if source == "broker" and names:
+                raise ValueError(
+                    f"capability table: '{name}' declares secret_names on a "
+                    "broker source — broker capabilities dispatch, they never inject")
             table[name] = {
-                "secret_names": list(spec.get("secret_names", [])),
-                "source": spec["source"],
-                "retrieval": spec.get("retrieval", "deferred"),
-                "privilege": spec.get("privilege", "managed"),
+                "secret_names": list(names),
+                "source": source,
+                "retrieval": retrieval,
+                "privilege": privilege,
             }
     return table
 
 
 def resolve(manifest_path, table_path=None):
     """Return {env_name: {'retrieval':..., 'source':..., 'capability':...}}.
-    Raises ValueError on any contract violation."""
+    Raises (TypeError, ValueError) on any contract violation."""
     manifest = _load_json(manifest_path, "manifest")
     table = _load_table(table_path)
     overrides = manifest.get("retrieval_overrides", {})
     if not isinstance(overrides, dict):
         raise TypeError("manifest.retrieval_overrides must be an object")
+    for name, value in overrides.items():
+        if value not in VALID_RETRIEVAL:
+            raise ValueError(
+                f"manifest.retrieval_overrides['{name}'] must be 'eager' or "
+                f"'deferred', got '{value}'")
 
-    if manifest.get("mode", "capabilities") == "legacy":
+    mode = manifest.get("mode", "capabilities")
+    if mode not in VALID_MODES:
+        raise ValueError(
+            f"manifest.mode must be 'capabilities' or 'legacy', got '{mode}'")
+    if mode == "legacy":
         wanted = sorted(table)  # union — documented migration path only
     else:
         wanted = manifest.get("capabilities")
@@ -90,15 +133,27 @@ def resolve(manifest_path, table_path=None):
         spec = table.get(cap)
         if spec is None:
             raise ValueError(f"unknown capability '{cap}' — fail closed, no fallback")
+        if spec["source"] == "broker":
+            continue  # dispatch-only: injects nothing even if names were declared
         for name in spec["secret_names"]:
-            if not isinstance(name, str) or not name:
-                raise ValueError(f"capability '{cap}' has an invalid secret name")
-            out[name] = {
+            mapping = {
                 "source": spec["source"],
                 "retrieval": overrides.get(name, spec["retrieval"]),
                 "privilege": spec["privilege"],
                 "capability": cap,
             }
+            prior = out.get(name)
+            if prior is not None:
+                differing = {k for k in ("source", "retrieval", "privilege")
+                             if prior[k] != mapping[k]}
+                if differing:
+                    raise ValueError(
+                        f"conflicting mappings for '{name}' from capabilities "
+                        f"'{prior['capability']}' and '{cap}' "
+                        f"({', '.join(sorted(differing))} differ) — "
+                        "manifest order must not decide")
+                continue
+            out[name] = mapping
     return out
 
 
