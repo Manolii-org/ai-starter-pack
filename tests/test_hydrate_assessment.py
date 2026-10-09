@@ -118,13 +118,32 @@ def test_sast_job_is_not_hydrated() -> None:
 
 
 def test_hydration_never_overwrites_caller_files() -> None:
-    """Caller-owned copies must win, or a consumer's customised prompt is clobbered."""
+    """Caller-owned copies must win on trusted triggers, or a consumer's
+    customised prompt is clobbered. On pull_request the opposite holds:
+    caller-shipped runtime files are attacker-controlled and hydration must
+    overwrite them."""
     steps = _workflow()["jobs"]["classify"]["steps"]
     body = next(
         s["run"] for s in steps if str(s.get("name", "")) == "Hydrate assessment runtime"
     )
-    assert "[[ -e \"$f\" ]] && continue" in body, (
-        "hydration must skip files the caller already provides"
+    assert '"$FORCE" != "true" && -e "$f"' in body, (
+        "hydration must skip files the caller already provides on non-PR triggers"
+    )
+    assert '"${{ github.event_name }}" == "pull_request"' in body, (
+        "hydration must force-overwrite runtime files on pull_request triggers"
+    )
+
+
+def test_probe_forces_hydration_on_pull_request() -> None:
+    """The probe may not skip hydration when a PR ships the full runtime —
+    that is exactly the caller-controlled-code attack the forced copy prevents."""
+    steps = _workflow()["jobs"]["classify"]["steps"]
+    body = next(
+        s["run"] for s in steps if str(s.get("name", "")) == "Probe assessment runtime"
+    )
+    assert '"${{ github.event_name }}" == "pull_request"' in body
+    assert body.index('"${{ github.event_name }}" == "pull_request"') < body.index(
+        "elif [[ -n \"$missing\" ]]"
     )
 
 
