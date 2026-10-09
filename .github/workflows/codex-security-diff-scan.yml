@@ -148,7 +148,9 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/codex-security-cli" --no-save --ignore-scripts \
             @openai/codex-security@0.2.0
           echo "$RUNNER_TEMP/codex-security-cli/node_modules/.bin" >> "$GITHUB_PATH"
-          codex-security --version
+          # Verify via absolute path: GITHUB_PATH only applies to later steps,
+          # so `codex-security` is not resolvable inside THIS step.
+          "$RUNNER_TEMP/codex-security-cli/node_modules/.bin/codex-security" --version
 
       - name: Run codex-security on the PR diff
         id: scan
@@ -219,10 +221,13 @@ jobs:
                   other += 1
 
           lines = ["### Codex Security diff scan (advisory)", ""]
-          if os.environ["SCAN_OUTCOME"] == "failure":
+          if os.environ["SCAN_OUTCOME"] != "success":
+              # 'failure', 'skipped' (e.g. install failed), or 'cancelled' all
+              # mean nothing was scanned — never report that as clean.
               lines.append(
-                  f"Scan run did not complete (see [run logs]({run_url})). "
-                  "No findings produced — this is advisory only."
+                  f"Scan did not run to completion (outcome: "
+                  f"{os.environ['SCAN_OUTCOME']}; see [run logs]({run_url})). "
+                  "Nothing was scanned — this is advisory only."
               )
           elif not findings_file.exists():
               lines.append("Scan produced no findings file — treated as clean for advisory purposes.")
