@@ -215,7 +215,13 @@ def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int
         for attempt in range(2):
             try:
                 with _urlopen_https(req, timeout=_API_TIMEOUT, host=urllib.parse.urlparse(api_url).hostname or "") as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
+                    body = resp.read().decode("utf-8", errors="replace")
+                try:
+                    data = json.loads(body)
+                except json.JSONDecodeError:
+                    raise RuntimeError(
+                        f"non-JSON API response (status {resp.status}, "
+                        f"{len(body)} bytes): {body[:160]!r}")
                 break
             except urllib.error.HTTPError as e:
                 error_body = e.read().decode("utf-8", errors="replace")
