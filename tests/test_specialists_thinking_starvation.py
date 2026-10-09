@@ -107,14 +107,15 @@ def test_double_starvation_returns_empty_without_third_call(monkeypatch):
     assert len(sent) == 2
 
 
-def test_non_max_tokens_empty_text_is_not_retried(monkeypatch):
-    """An empty answer with stop_reason=end_turn is a real empty answer, not
-    starvation — no retry."""
+def test_non_max_tokens_empty_text_retried_once(monkeypatch):
+    """An empty first block retries once on either lane — transient empty is
+    cheaper to re-ask than to collapse a specialist into an api_error marker.
+    A second empty is terminal."""
     _patch_endpoint(monkeypatch, proxied=True)
     empty_end_turn = _api_payload([{"type": "text", "text": ""}], stop_reason="end_turn")
-    sent = _fake_urlopen(monkeypatch, [empty_end_turn])
+    sent = _fake_urlopen(monkeypatch, [empty_end_turn, empty_end_turn])
     assert MODULE._call_api("sys", "user", "haiku", 800) == ""
-    assert len(sent) == 1
+    assert len(sent) == 2
 
 
 def test_direct_call_keeps_declared_budget(monkeypatch):
@@ -126,16 +127,17 @@ def test_direct_call_keeps_declared_budget(monkeypatch):
     assert sent[0]["model"] == "claude-haiku-4-5-20251001"
 
 
-def test_direct_empty_response_retries_once_at_same_budget(monkeypatch):
-    """A direct call returning no text block retries exactly once — transient
-    empty output must not write an api_error marker on a single flake."""
+def test_direct_empty_response_retries_once_doubled_budget(monkeypatch):
+    """A direct call returning no text block retries once at doubled budget —
+    covers both starvation and transient empty on the direct lane."""
     _patch_endpoint(monkeypatch, proxied=False)
     empty_end_turn = _api_payload([{"type": "text", "text": ""}], stop_reason="end_turn")
     sent = _fake_urlopen(monkeypatch, [empty_end_turn, _ANSWER])
     out = MODULE._call_api("sys", "user", "claude-haiku-4-5-20251001", 800)
     assert json.loads(out)["findings"] == []
     assert len(sent) == 2
-    assert sent[0]["max_tokens"] == sent[1]["max_tokens"] == 800
+    assert sent[0]["max_tokens"] == 800
+    assert sent[1]["max_tokens"] == 1600
 
 
 def test_direct_persistent_empty_returns_empty_after_retry(monkeypatch):

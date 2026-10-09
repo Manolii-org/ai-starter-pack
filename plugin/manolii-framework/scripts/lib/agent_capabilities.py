@@ -128,6 +128,10 @@ def resolve(manifest_path, table_path=None):
         wanted = manifest.get("capabilities")
         if not isinstance(wanted, list) or not all(isinstance(c, str) for c in wanted):
             raise TypeError("manifest.capabilities must be a list of strings")
+        if "llm-proxy" in wanted and "llm-anthropic" in wanted:
+            raise ValueError(
+                "manifest selects both 'llm-proxy' and 'llm-anthropic' — the "
+                "LLM lanes are mutually exclusive per consumer")
 
     out = {}
     for cap in wanted:

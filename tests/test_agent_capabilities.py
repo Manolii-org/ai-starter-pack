@@ -166,10 +166,10 @@ def test_llm_anthropic_direct_lane(tmp_path):
         "privilege": "managed", "capability": "llm-anthropic"}}
 
 
-def test_llm_lanes_are_distinct(tmp_path):
+def test_llm_lanes_are_mutually_exclusive(tmp_path):
     m = _manifest(tmp_path, {"capabilities": ["llm-proxy", "llm-anthropic"]})
-    out = ac.resolve(m)
-    assert sorted(out) == ["ANTHROPIC_API_KEY", "LLM_API_KEY"]
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        ac.resolve(m)
 
 
 def test_identical_shared_name_ok(tmp_path):

@@ -233,17 +233,15 @@ def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int
                 break
         if text:
             return text
-        if not proxied:
-            # An empty first block on the direct lane is transient model
-            # behaviour, not a credential or truncation signal — retry once
-            # before letting it become an api_error skip marker.
-            if _budget_attempt == 0:
-                continue
-            return ""
-        if data.get("stop_reason") != "max_tokens":
-            return ""
-        # Thinking starved the answer: double the budget once and retry.
-        budget *= 2
+        if _budget_attempt == 0:
+            # An empty first block on attempt 0 is either starvation
+            # (stop_reason=max_tokens — reasoning burned the declared budget
+            # before the answer, observed on the direct lane too) or a
+            # transient empty. One doubled-budget retry recovers both; a
+            # second empty is terminal.
+            budget *= 2
+            continue
+        return ""
     return ""
 
 
