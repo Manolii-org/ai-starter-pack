@@ -12,8 +12,10 @@ name: Codex Security Diff Scan (advisory)
 # never be added to required status checks.
 #
 # Trigger shape (pull_request ONLY — never pull_request_target):
-#   This job pulls CODEX_SUBSCRIPTION_AUTH_JSON live from Doppler (master/prd)
-#   via secrets.DOPPLER_TOKEN_CODEX — a read-only service token. On
+#   This job pulls CODEX_SUBSCRIPTION_AUTH_JSON live from Doppler
+#   (master/prd_codex — a dedicated config holding ONLY this secret) via
+#   secrets.DOPPLER_TOKEN_CODEX — a read-only service token whose blast
+#   radius is this one credential even if a same-repo PR edits this job. On
 #   pull_request_target the workflow runs from the trusted base ref while the
 #   secrets context is live — any base-ref workflow edit would then execute
 #   under a real credential. pull_request runs the PR's own copy of this file;
@@ -112,8 +114,9 @@ jobs:
         run: |
           set -euo pipefail
           # Subscription auth lives in CODEX_HOME/auth.json, pulled LIVE from
-          # Doppler (source of truth) — never a repo-snapshot credential that
-          # goes stale when codex rotates access tokens. An API key env var
+          # Doppler master/prd_codex — a dedicated config holding ONLY this
+          # secret, so the read-only service token's blast radius is the codex
+          # credential alone (never master/prd). An API key env var
           # would force usage-priced billing — always unset both.
           unset OPENAI_API_KEY CODEX_API_KEY
           echo "CODEX_HOME=$RUNNER_TEMP/codex-home" >> "$GITHUB_ENV"
@@ -121,24 +124,30 @@ jobs:
             {
               echo "### Codex Security diff scan"
               echo "Advisory scan skipped: repository secret \`DOPPLER_TOKEN_CODEX\` is not provisioned."
-              echo "Provision a read-only Doppler service token scoped to master/prd, then re-run this job."
+              echo "Provision a read-only Doppler service token scoped to master/prd_codex, then re-run this job."
             } >> "$GITHUB_STEP_SUMMARY"
             echo "::notice::DOPPLER_TOKEN_CODEX not provisioned — advisory diff scan skipped"
             echo "present=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           install -d -m 700 "$RUNNER_TEMP/codex-home"
-          curl -fsS --max-time 30 --connect-timeout 10 \
+          # Any fetch/parse/shape failure emits present=failed (never a silent
+          # step exit) so the report step can publish 'did not run' and replace
+          # any stale clean comment on this head.
+          if ! curl -fsS --max-time 30 --connect-timeout 10 \
             -H "Authorization: Bearer ${DOPPLER_TOKEN_CODEX}" \
-            "https://api.doppler.com/v3/configs/config/secret?project=master&config=prd&name=CODEX_SUBSCRIPTION_AUTH_JSON" \
-            | python3 -c 'import json,sys;v=json.load(sys.stdin)["value"];r=v.get("computed") or v.get("raw");assert r, "Doppler response has neither value.computed nor value.raw";print(r)' \
-            > "$RUNNER_TEMP/codex-home/auth.json"
+            "https://api.doppler.com/v3/configs/config/secret?project=master&config=prd_codex&name=CODEX_SUBSCRIPTION_AUTH_JSON" \
+            | python3 -c 'import json,sys;v=json.load(sys.stdin)["value"];r=v.get("computed") or v.get("raw");assert r, "Doppler response has neither value.computed nor value.raw";d=json.loads(r);assert "tokens" in d and "access_token" in d["tokens"], "unexpected auth.json shape";print(r)' \
+            > "$RUNNER_TEMP/codex-home/auth.json"; then
+            {
+              echo "### Codex Security diff scan"
+              echo "Scan did not run: Doppler credential fetch failed (timeout, non-2xx, or malformed auth payload)."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::Doppler credential fetch failed — advisory diff scan did not run"
+            echo "present=failed" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           chmod 600 "$RUNNER_TEMP/codex-home/auth.json"
-          python3 - <<'PY'
-          import json
-          d = json.load(open(__import__("os").environ["RUNNER_TEMP"] + "/codex-home/auth.json"))
-          assert "tokens" in d and "access_token" in d["tokens"], "unexpected auth.json shape"
-          PY
           unset DOPPLER_TOKEN_CODEX
           echo "present=true" >> "$GITHUB_OUTPUT"
 
@@ -195,12 +204,13 @@ jobs:
 
       - name: Summarise findings
         id: report
-        if: always() && steps.range.outputs.scannable == 'true' && steps.auth.outputs.present == 'true'
+        if: always() && steps.range.outputs.scannable == 'true' && (steps.auth.outputs.present == 'true' || steps.auth.outputs.present == 'failed')
         env:
           OUT_DIR: ${{ runner.temp }}/codex-security-diff
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           SCAN_OUTCOME: ${{ steps.scan.outcome }}
+          AUTH_PRESENT: ${{ steps.auth.outputs.present }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           python3 - <<'PY'
@@ -238,7 +248,13 @@ jobs:
                   other += 1
 
           lines = ["### Codex Security diff scan (advisory)", ""]
-          if os.environ["SCAN_OUTCOME"] != "success":
+          if os.environ.get("AUTH_PRESENT") == "failed":
+              lines.append(
+                  f"Scan did not run: Doppler credential fetch failed "
+                  f"(timeout, non-2xx, or malformed payload; see [run logs]({run_url})). "
+                  "Nothing was scanned — this is advisory only."
+              )
+          elif os.environ["SCAN_OUTCOME"] != "success":
               # 'failure', 'skipped' (e.g. install failed), or 'cancelled' all
               # mean nothing was scanned — never report that as clean.
               lines.append(
