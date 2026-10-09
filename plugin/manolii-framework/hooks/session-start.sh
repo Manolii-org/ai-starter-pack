@@ -16,8 +16,10 @@ log() { echo "[session-start] $*" >&2; }
 prepare_cache_dir() {
   mkdir -p -m 700 "$CACHE_DIR"
   chmod 700 "$CACHE_DIR" 2>/dev/null || true
-  if [[ ! -O "$CACHE_DIR" || -L "$CACHE_DIR" ]]; then
-    log "Cache dir not owned by current user or is a symlink — skipping cache"
+  local mode
+  mode="$(stat -c '%a' "$CACHE_DIR" 2>/dev/null || stat -f '%Lp' "$CACHE_DIR" 2>/dev/null || echo "")"
+  if [[ ! -O "$CACHE_DIR" || -L "$CACHE_DIR" || "$mode" != "700" ]]; then
+    log "Cache dir ownership/symlink/mode check failed (mode=${mode:-unknown}) — skipping cache"
     return 1
   fi
   return 0

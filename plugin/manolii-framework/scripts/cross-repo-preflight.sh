@@ -24,10 +24,15 @@ if [[ -z "$GH_TOKEN_VALUE" ]]; then
 fi
 
 if [[ -z "$GH_TOKEN_VALUE" ]]; then
-  # Try the session-start hook's credential cache (keyed by canonical repo root)
+  # Try the session-start hook's credential cache (keyed by canonical repo
+  # root). The hook's own boundary checks don't run on this read path, so
+  # validate the cache here too: owned, non-symlink dir at mode 700 and an
+  # owned, non-symlink regular file — anything else is untrusted input.
   PRE_REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)"
-  CACHE_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/ai-starter-pack-session${PRE_REPO_ROOT}/secrets.json"
-  if [[ -f "$CACHE_FILE" ]]; then
+  CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/ai-starter-pack-session${PRE_REPO_ROOT}"
+  CACHE_FILE="$CACHE_DIR/secrets.json"
+  CACHE_MODE="$(stat -c '%a' "$CACHE_DIR" 2>/dev/null || stat -f '%Lp' "$CACHE_DIR" 2>/dev/null || echo "")"
+  if [[ -d "$CACHE_DIR" && -O "$CACHE_DIR" && ! -L "$CACHE_DIR" && "$CACHE_MODE" == "700" && -f "$CACHE_FILE" && ! -L "$CACHE_FILE" && -O "$CACHE_FILE" ]]; then
     GH_TOKEN_VALUE=$(python3 -c "import json; print(json.load(open('$CACHE_FILE')).get('GH_TOKEN',''))" 2>/dev/null || echo "")
   fi
 fi
