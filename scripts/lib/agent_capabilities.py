@@ -26,6 +26,7 @@ CANONICAL_TABLE = {
     "doppler-read": (["DOPPLER_TOKEN_PRD"], "doppler", "eager", "managed"),
     "mcp-knowledge": (["MCP_API_KEY"], "doppler", "eager", "managed"),
     "llm-proxy": (["LLM_API_KEY"], "doppler", "eager", "managed"),
+    "llm-anthropic": (["ANTHROPIC_API_KEY"], "doppler", "eager", "managed"),
     "deploy-vercel": (["VERCEL_TOKEN"], "doppler", "deferred", "managed"),
     "deploy-fly": (["FLY_API_TOKEN"], "doppler", "deferred", "managed"),
     "db-admin-supabase": (["SUPABASE_ACCESS_TOKEN"], "doppler", "deferred", "managed"),

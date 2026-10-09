@@ -158,6 +158,20 @@ def test_conflicting_mapping_rejected(tmp_path):
         ac.resolve(m, t)
 
 
+def test_llm_anthropic_direct_lane(tmp_path):
+    m = _manifest(tmp_path, {"capabilities": ["llm-anthropic"]})
+    out = ac.resolve(m)
+    assert out == {"ANTHROPIC_API_KEY": {
+        "source": "doppler", "retrieval": "eager",
+        "privilege": "managed", "capability": "llm-anthropic"}}
+
+
+def test_llm_lanes_are_distinct(tmp_path):
+    m = _manifest(tmp_path, {"capabilities": ["llm-proxy", "llm-anthropic"]})
+    out = ac.resolve(m)
+    assert sorted(out) == ["ANTHROPIC_API_KEY", "LLM_API_KEY"]
+
+
 def test_identical_shared_name_ok(tmp_path):
     t = _table(tmp_path, {"repo-mcp": {
         "secret_names": ["MCP_API_KEY"], "source": "doppler",

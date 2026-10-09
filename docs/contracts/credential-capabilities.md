@@ -86,12 +86,21 @@ else is a resolver error. `retrieval_overrides` is optional and accepts
 | `doppler-read` | `DOPPLER_TOKEN_PRD` | doppler | eager | managed |
 | `mcp-knowledge` | `MCP_API_KEY` | doppler | eager | managed |
 | `llm-proxy` | `LLM_API_KEY` (or `LITELLM_PROXY_API_KEY`) | doppler | eager | managed |
+| `llm-anthropic` | `ANTHROPIC_API_KEY` | doppler | eager | managed |
 | `deploy-vercel` | `VERCEL_TOKEN` | doppler | deferred | managed |
 | `deploy-fly` | `FLY_API_TOKEN` | doppler | deferred | managed |
 | `db-admin-supabase` | `SUPABASE_ACCESS_TOKEN` | doppler | deferred | managed |
 | `agent-telemetry` | `MCP_FINANCIAL_KEY`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` | doppler | deferred | managed |
 | `external-browser` | `BROWSERBASE_API_KEY` | doppler | deferred | managed |
 | `billing-read` | `GH_BILLING_TOKEN` | doppler | deferred | managed |
+
+`llm-proxy` and `llm-anthropic` are mutually exclusive lanes, not tiers:
+`llm-proxy` routes calls through a LiteLLM proxy credential; `llm-anthropic`
+is the direct provider key. A consumer selects one — never both — by which
+credential is actually published to it. Public consumers take the direct
+lane (`llm-anthropic`): a proxy master key must never be published to a
+repo that accepts contributions from outside the org boundary, and this
+contract does not provide a scoped proxy credential for that surface.
 
 Repo-local capabilities extend the table; a consumer must not silently
 narrow a pack capability it did not define. Extensions are validated
