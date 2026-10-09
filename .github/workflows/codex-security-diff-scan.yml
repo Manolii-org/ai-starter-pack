@@ -12,7 +12,10 @@ name: Codex Security Diff Scan (advisory)
 # never be added to required status checks.
 #
 # Trigger shape (pull_request ONLY — never pull_request_target):
-#   This job materializes secrets.CODEX_SUBSCRIPTION_AUTH_JSON. On
+#   This job pulls CODEX_SUBSCRIPTION_AUTH_JSON live from Doppler
+#   (master/prd_codex — a dedicated config holding ONLY this secret) via
+#   secrets.DOPPLER_TOKEN_CODEX — a read-only service token whose blast
+#   radius is this one credential even if a same-repo PR edits this job. On
 #   pull_request_target the workflow runs from the trusted base ref while the
 #   secrets context is live — any base-ref workflow edit would then execute
 #   under a real credential. pull_request runs the PR's own copy of this file;
@@ -107,27 +110,45 @@ jobs:
       - name: Materialize Codex subscription credential
         id: auth
         env:
-          CODEX_SUBSCRIPTION_AUTH_JSON: ${{ secrets.CODEX_SUBSCRIPTION_AUTH_JSON }}
+          DOPPLER_TOKEN_CODEX: ${{ secrets.DOPPLER_TOKEN_CODEX }}
         run: |
           set -euo pipefail
-          # Subscription auth lives in ~/.codex/auth.json. An API key env var
+          # Subscription auth lives in CODEX_HOME/auth.json, pulled LIVE from
+          # Doppler master/prd_codex — a dedicated config holding ONLY this
+          # secret, so the read-only service token's blast radius is the codex
+          # credential alone (never master/prd). An API key env var
           # would force usage-priced billing — always unset both.
           unset OPENAI_API_KEY CODEX_API_KEY
           echo "CODEX_HOME=$RUNNER_TEMP/codex-home" >> "$GITHUB_ENV"
-          if [ -z "${CODEX_SUBSCRIPTION_AUTH_JSON:-}" ]; then
+          if [ -z "${DOPPLER_TOKEN_CODEX:-}" ]; then
             {
               echo "### Codex Security diff scan"
-              echo "Advisory scan skipped: repository secret \`CODEX_SUBSCRIPTION_AUTH_JSON\` is not provisioned."
-              echo "Provision it (ChatGPT subscription auth.json), then re-run this job."
+              echo "Advisory scan skipped: repository secret \`DOPPLER_TOKEN_CODEX\` is not provisioned."
+              echo "Provision a read-only Doppler service token scoped to master/prd_codex, then re-run this job."
             } >> "$GITHUB_STEP_SUMMARY"
-            echo "::notice::CODEX_SUBSCRIPTION_AUTH_JSON not provisioned — advisory diff scan skipped"
+            echo "::notice::DOPPLER_TOKEN_CODEX not provisioned — advisory diff scan skipped"
             echo "present=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           install -d -m 700 "$RUNNER_TEMP/codex-home"
-          printf '%s' "$CODEX_SUBSCRIPTION_AUTH_JSON" > "$RUNNER_TEMP/codex-home/auth.json"
+          # Any fetch/parse/shape failure emits present=failed (never a silent
+          # step exit) so the report step can publish 'did not run' and replace
+          # any stale clean comment on this head.
+          if ! curl -fsS --max-time 30 --connect-timeout 10 \
+            -H "Authorization: Bearer ${DOPPLER_TOKEN_CODEX}" \
+            "https://api.doppler.com/v3/configs/config/secret?project=master&config=prd_codex&name=CODEX_SUBSCRIPTION_AUTH_JSON" \
+            | python3 -c 'import json,sys;v=json.load(sys.stdin)["value"];r=v.get("computed") or v.get("raw");assert r, "Doppler response has neither value.computed nor value.raw";d=json.loads(r);assert "tokens" in d and "access_token" in d["tokens"], "unexpected auth.json shape";print(r)' \
+            > "$RUNNER_TEMP/codex-home/auth.json"; then
+            {
+              echo "### Codex Security diff scan"
+              echo "Scan did not run: Doppler credential fetch failed (timeout, non-2xx, or malformed auth payload)."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::Doppler credential fetch failed — advisory diff scan did not run"
+            echo "present=failed" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           chmod 600 "$RUNNER_TEMP/codex-home/auth.json"
-          unset CODEX_SUBSCRIPTION_AUTH_JSON
+          unset DOPPLER_TOKEN_CODEX
           echo "present=true" >> "$GITHUB_OUTPUT"
 
       - name: Set up Node
@@ -148,7 +169,9 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/codex-security-cli" --no-save --ignore-scripts \
             @openai/codex-security@0.2.0
           echo "$RUNNER_TEMP/codex-security-cli/node_modules/.bin" >> "$GITHUB_PATH"
-          codex-security --version
+          # Verify via absolute path: GITHUB_PATH only applies to later steps,
+          # so `codex-security` is not resolvable inside THIS step.
+          "$RUNNER_TEMP/codex-security-cli/node_modules/.bin/codex-security" --version
 
       - name: Run codex-security on the PR diff
         id: scan
@@ -162,26 +185,32 @@ jobs:
           unset OPENAI_API_KEY CODEX_API_KEY
           OUT_DIR="$RUNNER_TEMP/codex-security-diff"
           install -d -m 700 "$OUT_DIR"
-          # safety-identifier: stable hashed repo slug (1-64 chars) — never
-          # the plaintext repo name.
-          SAFETY_ID="$(printf '%s' "$GITHUB_REPOSITORY" | sha256sum | cut -c1-32)"
+          # The pull_request checkout is the merge commit; committed-diff
+          # scans require checkout HEAD to equal the requested head SHA.
+          git checkout "$HEAD_SHA"
+          # Codex's Bubblewrap sandbox needs unprivileged user namespaces;
+          # Ubuntu 24.04+ runners restrict them by default. Scoped to this
+          # ephemeral job runner.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          # No --safety-identifier: it requires API-key auth and is rejected
+          # under --auth chatgpt (subscription mode).
           codex-security scan . \
             --diff "$BASE_SHA" \
             --head "$HEAD_SHA" \
             --auth chatgpt \
             --headless \
             --verbose \
-            --safety-identifier "$SAFETY_ID" \
             --output-dir "$OUT_DIR"
 
       - name: Summarise findings
         id: report
-        if: always() && steps.range.outputs.scannable == 'true' && steps.auth.outputs.present == 'true'
+        if: always() && steps.range.outputs.scannable == 'true' && (steps.auth.outputs.present == 'true' || steps.auth.outputs.present == 'failed')
         env:
           OUT_DIR: ${{ runner.temp }}/codex-security-diff
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           SCAN_OUTCOME: ${{ steps.scan.outcome }}
+          AUTH_PRESENT: ${{ steps.auth.outputs.present }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           python3 - <<'PY'
@@ -219,10 +248,19 @@ jobs:
                   other += 1
 
           lines = ["### Codex Security diff scan (advisory)", ""]
-          if os.environ["SCAN_OUTCOME"] == "failure":
+          if os.environ.get("AUTH_PRESENT") == "failed":
               lines.append(
-                  f"Scan run did not complete (see [run logs]({run_url})). "
-                  "No findings produced — this is advisory only."
+                  f"Scan did not run: Doppler credential fetch failed "
+                  f"(timeout, non-2xx, or malformed payload; see [run logs]({run_url})). "
+                  "Nothing was scanned — this is advisory only."
+              )
+          elif os.environ["SCAN_OUTCOME"] != "success":
+              # 'failure', 'skipped' (e.g. install failed), or 'cancelled' all
+              # mean nothing was scanned — never report that as clean.
+              lines.append(
+                  f"Scan did not run to completion (outcome: "
+                  f"{os.environ['SCAN_OUTCOME']}; see [run logs]({run_url})). "
+                  "Nothing was scanned — this is advisory only."
               )
           elif not findings_file.exists():
               lines.append("Scan produced no findings file — treated as clean for advisory purposes.")
