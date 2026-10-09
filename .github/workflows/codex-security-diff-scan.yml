@@ -12,7 +12,8 @@ name: Codex Security Diff Scan (advisory)
 # never be added to required status checks.
 #
 # Trigger shape (pull_request ONLY — never pull_request_target):
-#   This job materializes secrets.CODEX_SUBSCRIPTION_AUTH_JSON. On
+#   This job pulls CODEX_SUBSCRIPTION_AUTH_JSON live from Doppler (master/prd)
+#   via secrets.DOPPLER_TOKEN_CODEX — a read-only service token. On
 #   pull_request_target the workflow runs from the trusted base ref while the
 #   secrets context is live — any base-ref workflow edit would then execute
 #   under a real credential. pull_request runs the PR's own copy of this file;
@@ -107,27 +108,38 @@ jobs:
       - name: Materialize Codex subscription credential
         id: auth
         env:
-          CODEX_SUBSCRIPTION_AUTH_JSON: ${{ secrets.CODEX_SUBSCRIPTION_AUTH_JSON }}
+          DOPPLER_TOKEN_CODEX: ${{ secrets.DOPPLER_TOKEN_CODEX }}
         run: |
           set -euo pipefail
-          # Subscription auth lives in ~/.codex/auth.json. An API key env var
+          # Subscription auth lives in CODEX_HOME/auth.json, pulled LIVE from
+          # Doppler (source of truth) — never a repo-snapshot credential that
+          # goes stale when codex rotates access tokens. An API key env var
           # would force usage-priced billing — always unset both.
           unset OPENAI_API_KEY CODEX_API_KEY
           echo "CODEX_HOME=$RUNNER_TEMP/codex-home" >> "$GITHUB_ENV"
-          if [ -z "${CODEX_SUBSCRIPTION_AUTH_JSON:-}" ]; then
+          if [ -z "${DOPPLER_TOKEN_CODEX:-}" ]; then
             {
               echo "### Codex Security diff scan"
-              echo "Advisory scan skipped: repository secret \`CODEX_SUBSCRIPTION_AUTH_JSON\` is not provisioned."
-              echo "Provision it (ChatGPT subscription auth.json), then re-run this job."
+              echo "Advisory scan skipped: repository secret \`DOPPLER_TOKEN_CODEX\` is not provisioned."
+              echo "Provision a read-only Doppler service token scoped to master/prd, then re-run this job."
             } >> "$GITHUB_STEP_SUMMARY"
-            echo "::notice::CODEX_SUBSCRIPTION_AUTH_JSON not provisioned — advisory diff scan skipped"
+            echo "::notice::DOPPLER_TOKEN_CODEX not provisioned — advisory diff scan skipped"
             echo "present=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           install -d -m 700 "$RUNNER_TEMP/codex-home"
-          printf '%s' "$CODEX_SUBSCRIPTION_AUTH_JSON" > "$RUNNER_TEMP/codex-home/auth.json"
+          curl -fsS --max-time 30 --connect-timeout 10 \
+            -H "Authorization: Bearer ${DOPPLER_TOKEN_CODEX}" \
+            "https://api.doppler.com/v3/configs/config/secret?project=master&config=prd&name=CODEX_SUBSCRIPTION_AUTH_JSON" \
+            | python3 -c 'import json,sys;print(json.load(sys.stdin)["value"]["raw"])' \
+            > "$RUNNER_TEMP/codex-home/auth.json"
           chmod 600 "$RUNNER_TEMP/codex-home/auth.json"
-          unset CODEX_SUBSCRIPTION_AUTH_JSON
+          python3 - <<'PY'
+          import json
+          d = json.load(open(__import__("os").environ["RUNNER_TEMP"] + "/codex-home/auth.json"))
+          assert "tokens" in d and "access_token" in d["tokens"], "unexpected auth.json shape"
+          PY
+          unset DOPPLER_TOKEN_CODEX
           echo "present=true" >> "$GITHUB_OUTPUT"
 
       - name: Set up Node
