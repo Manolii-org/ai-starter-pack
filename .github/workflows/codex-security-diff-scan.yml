@@ -171,16 +171,14 @@ jobs:
           # Ubuntu 24.04+ runners restrict them by default. Scoped to this
           # ephemeral job runner.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          # safety-identifier: stable hashed repo slug (1-64 chars) — never
-          # the plaintext repo name.
-          SAFETY_ID="$(printf '%s' "$GITHUB_REPOSITORY" | sha256sum | cut -c1-32)"
+          # No --safety-identifier: it requires API-key auth and is rejected
+          # under --auth chatgpt (subscription mode).
           codex-security scan . \
             --diff "$BASE_SHA" \
             --head "$HEAD_SHA" \
             --auth chatgpt \
             --headless \
             --verbose \
-            --safety-identifier "$SAFETY_ID" \
             --output-dir "$OUT_DIR"
 
       - name: Summarise findings
