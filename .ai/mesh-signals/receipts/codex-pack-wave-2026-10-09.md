@@ -12,7 +12,7 @@ Remediation session: https://app.devin.ai/sessions/b3dbd832a5e945e684d0dd9c79532
 |---|---|---|
 | 0b93684e (critical) | `.github/workflows/pr-autofix-loop.yml` | PR head ref through env var + `git check-ref-format`; checkout pinned to preflight-validated head_sha; instruction surface restored from base SHA |
 | 920ebb3b | `.github/workflows/pr-assessment.yml` | `persist-credentials: false` on all checkouts; `.claude`, `scripts`, `CLAUDE.md`, `AGENTS.md` restored from `pull_request.base.sha` in classify/specialists/broad-agents/judge |
-| fa2a829d, 6ed192c9 | `.github/workflows/pr-assessment-reusable.yml` | pull_request ⇒ probe forces `needed=true`; hydration force-overwrites runtime files + `.claude` from the pinned pack ref — caller-shipped runtime can no longer poison the secret-bearing lane (dormant `sp05` style lanes get the same protection when enabled) |
+| fa2a829d, 6ed192c9 | `.github/workflows/pr-assessment-reusable.yml` | pull_request ⇒ probe forces `needed=true`; hydration force-overwrites runtime files + `.claude` from `inputs.pack_ref` (defaulting to the moving `v1` alias) — caller-shipped runtime can no longer poison the secret-bearing lane (dormant `sp05` style lanes get the same protection when enabled) |
 | d44ba37b | `pr-autofix-loop.yml` tier-2 prompt | 30KB cap + explicit UNTRUSTED-data framing for CI logs/diffs/comments |
 | 5bc596ce, f79b8ffc | `.github/workflows/release-tag.yml` | Bearer token via `curl -H @-` stdin, never argv |
 | 11900f53 | `deploy/litellm-proxy/fly.toml`, README | GHCR image pinned by digest `sha256:175cad…` (tags mutable) |
@@ -42,4 +42,4 @@ Remediation session: https://app.devin.ai/sessions/b3dbd832a5e945e684d0dd9c79532
 
 ## Residual risk noted (not a finding fix)
 
-- `5c763818` residual: `session-start.sh` still exports Doppler-derived env vars for the session; the *on-disk cache* moved out of the checkout, but any session-level export is visible to later shell commands. Mitigation beyond this is a session-env policy decision.
+- `5c763818` residual: `session-start.sh` writes selected cached credential values to `CLAUDE_ENV_FILE` as `KEY=VALUE` entries (not `export` statements) — the hook itself does not establish a session-level export; any propagation is performed by the hook host reading that file. The *on-disk cache* moved out of the checkout; mitigation beyond this is a session-env policy decision.

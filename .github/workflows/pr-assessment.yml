@@ -75,11 +75,26 @@ jobs:
           BASE_SHA="${{ github.event.pull_request.base.sha }}"
           [ -n "$BASE_SHA" ] || { echo "No pull_request base context — nothing to restore"; exit 0; }
           git fetch --depth=1 origin "$BASE_SHA"
+          # rm first: `git checkout BASE -- dir` overwrites base content but
+          # leaves PR-added files (e.g. scripts/json.py shadowing stdlib) live
+          # in lanes that carry secrets.
           for p in .claude scripts CLAUDE.md AGENTS.md; do
+            rm -rf "$p"
             if git cat-file -e "${BASE_SHA}:${p}" 2>/dev/null; then
               git checkout "$BASE_SHA" -- "$p"
-            else
-              rm -rf "$p"
+            fi
+          done
+          # Nested instruction files outside the restored trees (e.g.
+          # docs/CLAUDE.md) auto-load when an agent descends into their
+          # directory — restore from base or drop them.
+          find . -path ./.git -prune -o -path ./.claude -prune -o \
+              -path ./scripts -prune -o \
+              \( -name CLAUDE.md -o -name AGENTS.md \) -type f -print0 |
+          while IFS= read -r -d '' f; do
+            rel="${f#./}"
+            rm -f "$rel"
+            if git cat-file -e "${BASE_SHA}:${rel}" 2>/dev/null; then
+              git checkout "$BASE_SHA" -- "$rel"
             fi
           done
 
@@ -383,11 +398,26 @@ jobs:
           BASE_SHA="${{ github.event.pull_request.base.sha }}"
           [ -n "$BASE_SHA" ] || { echo "No pull_request base context — nothing to restore"; exit 0; }
           git fetch --depth=1 origin "$BASE_SHA"
+          # rm first: `git checkout BASE -- dir` overwrites base content but
+          # leaves PR-added files (e.g. scripts/json.py shadowing stdlib) live
+          # in lanes that carry secrets.
           for p in .claude scripts CLAUDE.md AGENTS.md; do
+            rm -rf "$p"
             if git cat-file -e "${BASE_SHA}:${p}" 2>/dev/null; then
               git checkout "$BASE_SHA" -- "$p"
-            else
-              rm -rf "$p"
+            fi
+          done
+          # Nested instruction files outside the restored trees (e.g.
+          # docs/CLAUDE.md) auto-load when an agent descends into their
+          # directory — restore from base or drop them.
+          find . -path ./.git -prune -o -path ./.claude -prune -o \
+              -path ./scripts -prune -o \
+              \( -name CLAUDE.md -o -name AGENTS.md \) -type f -print0 |
+          while IFS= read -r -d '' f; do
+            rel="${f#./}"
+            rm -f "$rel"
+            if git cat-file -e "${BASE_SHA}:${rel}" 2>/dev/null; then
+              git checkout "$BASE_SHA" -- "$rel"
             fi
           done
 
@@ -454,11 +484,26 @@ jobs:
           BASE_SHA="${{ github.event.pull_request.base.sha }}"
           [ -n "$BASE_SHA" ] || { echo "No pull_request base context — nothing to restore"; exit 0; }
           git fetch --depth=1 origin "$BASE_SHA"
+          # rm first: `git checkout BASE -- dir` overwrites base content but
+          # leaves PR-added files (e.g. scripts/json.py shadowing stdlib) live
+          # in lanes that carry secrets.
           for p in .claude scripts CLAUDE.md AGENTS.md; do
+            rm -rf "$p"
             if git cat-file -e "${BASE_SHA}:${p}" 2>/dev/null; then
               git checkout "$BASE_SHA" -- "$p"
-            else
-              rm -rf "$p"
+            fi
+          done
+          # Nested instruction files outside the restored trees (e.g.
+          # docs/CLAUDE.md) auto-load when an agent descends into their
+          # directory — restore from base or drop them.
+          find . -path ./.git -prune -o -path ./.claude -prune -o \
+              -path ./scripts -prune -o \
+              \( -name CLAUDE.md -o -name AGENTS.md \) -type f -print0 |
+          while IFS= read -r -d '' f; do
+            rel="${f#./}"
+            rm -f "$rel"
+            if git cat-file -e "${BASE_SHA}:${rel}" 2>/dev/null; then
+              git checkout "$BASE_SHA" -- "$rel"
             fi
           done
 
@@ -516,11 +561,26 @@ jobs:
           BASE_SHA="${{ github.event.pull_request.base.sha }}"
           [ -n "$BASE_SHA" ] || { echo "No pull_request base context — nothing to restore"; exit 0; }
           git fetch --depth=1 origin "$BASE_SHA"
+          # rm first: `git checkout BASE -- dir` overwrites base content but
+          # leaves PR-added files (e.g. scripts/json.py shadowing stdlib) live
+          # in lanes that carry secrets.
           for p in .claude scripts CLAUDE.md AGENTS.md; do
+            rm -rf "$p"
             if git cat-file -e "${BASE_SHA}:${p}" 2>/dev/null; then
               git checkout "$BASE_SHA" -- "$p"
-            else
-              rm -rf "$p"
+            fi
+          done
+          # Nested instruction files outside the restored trees (e.g.
+          # docs/CLAUDE.md) auto-load when an agent descends into their
+          # directory — restore from base or drop them.
+          find . -path ./.git -prune -o -path ./.claude -prune -o \
+              -path ./scripts -prune -o \
+              \( -name CLAUDE.md -o -name AGENTS.md \) -type f -print0 |
+          while IFS= read -r -d '' f; do
+            rel="${f#./}"
+            rm -f "$rel"
+            if git cat-file -e "${BASE_SHA}:${rel}" 2>/dev/null; then
+              git checkout "$BASE_SHA" -- "$rel"
             fi
           done
 
