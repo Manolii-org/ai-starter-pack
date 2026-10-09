@@ -244,7 +244,20 @@ def finish(parent, descendants, reason, complete, payload):
     os._exit(selected)
 
 
+def unsupported():
+    """Non-Linux has no pthread_sigmask. Match finish()'s unsupported JSON."""
+    report = {"cleanup": "complete", "native_descendants": {}, "native_parent": None,
+              "reason": "unsupported", "selected": 125, "signal": 0}
+    try:
+        os.write(2, (json.dumps(report, sort_keys=True) + "\n").encode("ascii"))
+    except OSError:
+        pass
+    os._exit(125)
+
+
 def main():
+    if sys.platform != "linux":
+        unsupported()
     previous = signal.pthread_sigmask(signal.SIG_BLOCK, STOP)
     for sig in STOP:
         signal.signal(sig, interrupted)
@@ -255,8 +268,6 @@ def main():
             raise ValueError
     except (ValueError, IndexError):
         finish(None, {}, "usage", True, b"")
-    if sys.platform != "linux":
-        finish(None, {}, "unsupported", True, b"")
     finish(*execute(timeout, sys.argv[2:]))
 
 

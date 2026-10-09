@@ -27,7 +27,10 @@ def _children_interface_readable():
 def _require_children_interface(request):
     # Injected setup failures do not need the kernel file. Every other case
     # here asserts a spawned command, which this helper refuses without it.
-    if request.node.originalname == "test_unavailable_child_enumeration_prevents_spawn":
+    if request.node.originalname in {
+        "test_unavailable_child_enumeration_prevents_spawn",
+        "test_non_linux_is_unsupported_without_pthread",
+    }:
         return
     if not _children_interface_readable():
         pytest.skip("Linux /proc/<pid>/task/<pid>/children is not readable")
@@ -345,6 +348,26 @@ def test_reparented_foreign_grandchild_is_not_signaled(tmp_path):
     grand = next(row[1] for row in rows if row[0] == "grandchild")
     assert Path(f"/proc/{grand}").exists()
     _reap_survivor(grand)
+
+
+def test_non_linux_is_unsupported_without_pthread():
+    code = (
+        "import signal, sys\n"
+        "sys.platform = 'win32'\n"
+        "def missing(*_a, **_k):\n"
+        "    raise AttributeError('pthread_sigmask')\n"
+        "signal.pthread_sigmask = missing\n"
+        "import runpy\n"
+        "runpy.run_path(sys.argv[1], run_name='__main__')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(SCRIPT)],
+        capture_output=True, timeout=3, check=False,
+    )
+    report = json.loads(result.stderr)
+    assert result.returncode == 125 and report["reason"] == "unsupported"
+    assert report["selected"] == 125 and result.stdout == b""
+    assert b"Traceback" not in result.stderr
 
 
 def test_expired_deadline_before_fork_does_not_spawn(tmp_path):
