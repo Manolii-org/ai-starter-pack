@@ -1,6 +1,6 @@
 # Bounded command (Linux only)
 
-Run `python3 bin/bounded-command.py TIMEOUT_SECONDS COMMAND ARGS...`. Finite positive timeout: monotonic clock from before setup.
+Run `python3 bin/bounded-command.py TIMEOUT_SECONDS COMMAND ARGS...`. Finite positive timeout: monotonic clock from before setup. If that deadline is already expired immediately before fork, the helper does not fork or exec and reports `deadline` (selected 124) with complete cleanup and no native child.
 No shell; command stdin/stderr go to `/dev/null`. Only stdlib and Linux `/proc`/`prctl` needed.
 
 Root cause: shell substitution removes raw NUL; process-group cleanup misses detached processes; lost waits hide child failure.

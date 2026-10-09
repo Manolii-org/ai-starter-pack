@@ -40,6 +40,8 @@ def observed_wait(*args):
     return pid, status
 def observed_open(path, *args, **kwargs):
     if str(path) == f"/proc/self/task/{os.getpid()}/children":
+        if phase == "pre_fork_expire":
+            time.sleep(0.2)
         if phase.startswith("proc_setup") or (phase.startswith("proc_runtime") and owned):
             raise OSError(int(phase.split(":")[1]), "injected proc failure")
     return original_open(path, *args, **kwargs)
@@ -51,7 +53,7 @@ def final_owned_cleanup():
     while owned and time.monotonic() < end:
         observed_wait(-1, os.WNOHANG)
         time.sleep(.005)
-if phase.startswith("proc_"):
+if phase.startswith("proc_") or phase == "pre_fork_expire":
     builtins.open = observed_open
     atexit.register(final_owned_cleanup)
     def observed_exit(status):
@@ -262,6 +264,20 @@ def test_incomplete_cleanup_fault_injection(tmp_path):
     result, report, native = run(tmp_path, "print('withheld')", phase="budget_zero")
     assert result.returncode == 125 and report["reason"] == "cleanup_incomplete"
     assert list(native.values()) == [0]
+
+
+def test_expired_deadline_before_fork_does_not_spawn(tmp_path):
+    marker = tmp_path / "launched"
+    code = "import sys; open(sys.argv[1], 'w').write('launched')"
+    result, report, native = run(
+        tmp_path, code, [marker], timeout="0.05", phase="pre_fork_expire",
+    )
+    assert result.returncode == 124 and report["reason"] == "deadline"
+    assert report["selected"] == 124 and report["cleanup"] == "complete"
+    assert report["native_parent"] is None and native == {}
+    assert not marker.exists()
+    log = tmp_path / "waits"
+    assert not log.exists()
 
 
 @pytest.mark.parametrize("error", [2, 13])

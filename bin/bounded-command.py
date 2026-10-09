@@ -80,7 +80,11 @@ def execute(timeout, command):
         else:
             read_fd, write_fd = os.pipe()
             null_fd = os.open(os.devnull, os.O_RDWR)
-            root = os.fork()
+            # Setup can consume the budget sampled before it. Never fork after expiry.
+            if time.monotonic() >= end:
+                reason = "deadline"
+            else:
+                root = os.fork()
             if root == 0:
                 try:
                     for sig in STOP:
@@ -98,32 +102,33 @@ def execute(timeout, command):
                     os.execvp(command[0], command)
                 except (OSError, ValueError):
                     os._exit(127)
-            os.close(write_fd)
-            write_fd = None
-            os.set_blocking(read_fd, False)
-            while True:
-                parent, complete = reap(root, parent, descendants, end)
-                if received:
-                    reason = "signal"
-                elif time.monotonic() >= end:
-                    reason = "deadline"
-                elif parent or any(descendants):
-                    reason = "native_failure"
-                if reason != "success":
-                    break
-                chunk = None
-                try:
-                    chunk = os.read(read_fd, LIMIT + 1 - len(data))
-                except BlockingIOError:
-                    pass
-                if chunk:
-                    data.extend(chunk)
-                if len(data) > LIMIT:
-                    reason = "stdout_limit"
-                    break
-                if complete and chunk == b"":
-                    break
-                time.sleep(0.005)
+            elif root is not None:
+                os.close(write_fd)
+                write_fd = None
+                os.set_blocking(read_fd, False)
+                while True:
+                    parent, complete = reap(root, parent, descendants, end)
+                    if received:
+                        reason = "signal"
+                    elif time.monotonic() >= end:
+                        reason = "deadline"
+                    elif parent or any(descendants):
+                        reason = "native_failure"
+                    if reason != "success":
+                        break
+                    chunk = None
+                    try:
+                        chunk = os.read(read_fd, LIMIT + 1 - len(data))
+                    except BlockingIOError:
+                        pass
+                    if chunk:
+                        data.extend(chunk)
+                    if len(data) > LIMIT:
+                        reason = "stdout_limit"
+                        break
+                    if complete and chunk == b"":
+                        break
+                    time.sleep(0.005)
     except (OSError, ValueError):
         reason = "setup_failure" if root is None else "runtime_failure"
     finally:
