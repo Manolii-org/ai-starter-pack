@@ -158,6 +158,9 @@ jobs:
         run: |
           set -euo pipefail
           unset OPENAI_API_KEY CODEX_API_KEY
+          # Remove the credential on ANY step exit (failure, timeout, cancel)
+          # — belt-and-suspenders with the always() cleanup step below.
+          trap 'rm -f "$CODEX_HOME/auth.json"' EXIT
           git checkout "$HEAD_SHA"
           # Codex's Bubblewrap sandbox needs unprivileged user namespaces;
           # Ubuntu 24.04+ runners restrict them by default. Ephemeral job runner.
@@ -244,7 +247,7 @@ jobs:
               text_lines = [
                   ln for ln in raw.splitlines()
                   if ln.strip()
-                  and not ln.startswith(("2026-", "20"))  # otel/INFO timestamps
+                  and not re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}", ln)  # otel/INFO timestamps
                   and "event.name=" not in ln
                   and not re.match(r"^\s*(INFO|WARN|ERROR)\b", ln)
               ]
@@ -347,3 +350,8 @@ jobs:
           path: ${{ runner.temp }}/codex-review-out.txt
           retention-days: 14
           if-no-files-found: ignore
+
+      - name: Remove subscription credential
+        if: always()
+        continue-on-error: true
+        run: rm -f "${CODEX_HOME:-$RUNNER_TEMP/codex-home}/auth.json"
