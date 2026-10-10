@@ -266,7 +266,9 @@ jobs:
 
       - name: Summarise review
         id: report
-        if: always() && steps.range.outputs.scannable == 'true' && (steps.auth.outputs.present == 'true' || steps.auth.outputs.present == 'failed')
+        # always(): skipped runs must still publish so a comment from an
+        # earlier head cannot appear to describe the current revision.
+        if: always()
         env:
           REVIEW_OUT: ${{ runner.temp }}/codex-review-out.txt
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -275,6 +277,7 @@ jobs:
           SCAN_RC: ${{ steps.scan.outputs.rc }}
           SCAN_WITHHELD: ${{ steps.scan.outputs.withheld }}
           AUTH_PRESENT: ${{ steps.auth.outputs.present }}
+          RANGE_SCANNABLE: ${{ steps.range.outputs.scannable }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           python3 - <<'PY'
@@ -288,10 +291,20 @@ jobs:
           run_url = os.environ["RUN_URL"]
 
           lines = ["### Codex PR review (advisory, subscription)", ""]
-          if os.environ.get("AUTH_PRESENT") == "failed":
+          if os.environ.get("RANGE_SCANNABLE") != "true":
+              lines.append(
+                  f"Review skipped for head `{head}`: empty or unresolvable "
+                  f"diff (see [run logs]({run_url}))."
+              )
+          elif os.environ.get("AUTH_PRESENT") == "failed":
               lines.append(
                   f"Review did not run: Doppler credential fetch failed "
                   f"(see [run logs]({run_url})). Advisory only."
+              )
+          elif os.environ.get("AUTH_PRESENT") != "true":
+              lines.append(
+                  f"Review skipped for head `{head}`: subscription credential "
+                  f"not provisioned (see [run logs]({run_url}))."
               )
           elif os.environ.get("SCAN_OUTCOME") != "success" or os.environ.get("SCAN_RC", "0") != "0":
               lines.append(
@@ -349,7 +362,7 @@ jobs:
           PY
 
       - name: Upsert advisory PR comment
-        if: steps.report.outputs.post_comment == 'true'
+        if: always() && steps.report.outputs.post_comment == 'true'
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
