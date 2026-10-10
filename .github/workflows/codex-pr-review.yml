@@ -184,7 +184,7 @@ jobs:
           # chunk survives into whitespace-normalised output, withhold the whole
           # output and skip the artifact rather than publish it.
           python3 - "$REVIEW_OUT" "$CODEX_HOME/auth.json" <<'PY'
-          import base64, json, re, sys
+          import base64, json, os, re, sys
           p, auth_path = sys.argv[1], sys.argv[2]
           raw = open(p, encoding="utf-8", errors="replace").read()
           try:
@@ -291,23 +291,26 @@ jobs:
               # Model output is untrusted: cap length, break comment markers
               # and mentions before embedding in a PR comment.
               text = text.replace("<!--", "<!—").replace("@", "@​")
+              # Neutralise every backtick: a zero-width space after each means
+              # no run can ever form a closing fence — fixed fence always holds
+              # and the body size stays bounded regardless of output content.
+              text = text.replace("`", "`​")
               if len(text) > 55000:
                   text = text[:55000] + "\n\n…truncated (full output in run artifact)"
               lines.append(f"Diff `{base}...{head}`:")
               lines.append("")
-              # Dynamic fence: one backtick longer than the longest run in the
-              # output, so embedded fences cannot break out into live markdown.
-              longest = max((len(m.group(0)) for m in re.finditer(r"`{3,}", text)), default=2)
-              fence = "`" * (longest + 1)
-              lines.append(fence)
+              lines.append("```")
               lines.append(text)
-              lines.append(fence)
+              lines.append("```")
           lines.append("")
           lines.append(
               "_Advisory only — never a required check. Review text is model output: "
               "verify before acting._"
           )
           body = "\n".join(lines)
+          if len(body) > 60000:
+              body = body[:59900] + "\n…truncated (comment-size bound)\n```\n" + \
+                  "_Advisory only — review text is model output: verify before acting._"
           Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text(body + "\n", encoding="utf-8")
           body_path.write_text(body, encoding="utf-8")
           print(body)
