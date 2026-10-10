@@ -165,10 +165,40 @@ jobs:
           # --base reviews committed changes against the pinned base ref.
           # Output is model-generated data — treat as untrusted text; the
           # report step truncates and neutralises it before posting.
+          set +e
           timeout 20m "$RUNNER_TEMP/codex-cli/node_modules/.bin/codex" exec review \
             --base codex-review-base \
             --title "$PR_TITLE" \
-            > "$REVIEW_OUT" 2>&1 || true
+            > "$REVIEW_OUT" 2>&1
+          rc=$?
+          set -e
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          # Exfil defence: a same-repo PR can carry injected instructions that
+          # steer the reviewer into printing $CODEX_HOME/auth.json — scrub any
+          # token values that leaked into the captured output, then delete the
+          # credential before any later step, artifact, or comment sees it.
+          python3 - "$REVIEW_OUT" "$CODEX_HOME/auth.json" <<'PY'
+          import json, os, sys
+          p, auth_path = sys.argv[1], sys.argv[2]
+          raw = open(p, encoding="utf-8", errors="replace").read()
+          try:
+              d = json.loads(open(auth_path, encoding="utf-8").read())
+          except Exception:
+              d = {}
+          secrets = []
+          def collect(o):
+              if isinstance(o, str) and len(o) >= 20:
+                  secrets.append(o)
+              elif isinstance(o, dict):
+                  for v in o.values():
+                      collect(v)
+          collect(d.get("tokens", {}))
+          for s in secrets:
+              raw = raw.replace(s, "[REDACTED-CREDENTIAL]")
+          open(p, "w", encoding="utf-8").write(raw)
+          print(f"redacted {len(secrets)} credential value(s) from review output")
+          PY
+          rm -f "$CODEX_HOME/auth.json"
           wc -l "$REVIEW_OUT"
 
       - name: Summarise review
@@ -179,6 +209,7 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           SCAN_OUTCOME: ${{ steps.scan.outcome }}
+          SCAN_RC: ${{ steps.scan.outputs.rc }}
           AUTH_PRESENT: ${{ steps.auth.outputs.present }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -198,10 +229,11 @@ jobs:
                   f"Review did not run: Doppler credential fetch failed "
                   f"(see [run logs]({run_url})). Advisory only."
               )
-          elif os.environ.get("SCAN_OUTCOME") != "success":
+          elif os.environ.get("SCAN_OUTCOME") != "success" or os.environ.get("SCAN_RC", "0") != "0":
               lines.append(
                   f"Review did not run to completion (outcome: "
-                  f"{os.environ.get('SCAN_OUTCOME')}; see [run logs]({run_url})). "
+                  f"{os.environ.get('SCAN_OUTCOME')}, exit "
+                  f"{os.environ.get('SCAN_RC', '?')}; see [run logs]({run_url})). "
                   "Advisory only."
               )
           elif not out_path.exists() or not out_path.read_text(encoding="utf-8", errors="replace").strip():
@@ -224,9 +256,13 @@ jobs:
                   text = text[:55000] + "\n\n…truncated (full output in run artifact)"
               lines.append(f"Diff `{base}...{head}`:")
               lines.append("")
-              lines.append("```")
+              # Dynamic fence: one backtick longer than the longest run in the
+              # output, so embedded fences cannot break out into live markdown.
+              longest = max((len(m.group(0)) for m in re.finditer(r"`{3,}", text)), default=2)
+              fence = "`" * (longest + 1)
+              lines.append(fence)
               lines.append(text)
-              lines.append("```")
+              lines.append(fence)
           lines.append("")
           lines.append(
               "_Advisory only — never a required check. Review text is model output: "
