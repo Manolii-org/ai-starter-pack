@@ -177,11 +177,14 @@ jobs:
           set -e
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
           # Exfil defence: a same-repo PR can carry injected instructions that
-          # steer the reviewer into printing $CODEX_HOME/auth.json — scrub any
-          # token values that leaked into the captured output, then delete the
-          # credential before any later step, artifact, or comment sees it.
+          # steer the reviewer into printing $CODEX_HOME/auth.json — and literal
+          # redaction alone is bypassable via transforms (base64, hex, reversal,
+          # whitespace-fragmentation). Two layers: (1) replace the exact value
+          # and its common encodings; (2) fail-closed — if any 40-char secret
+          # chunk survives into whitespace-normalised output, withhold the whole
+          # output and skip the artifact rather than publish it.
           python3 - "$REVIEW_OUT" "$CODEX_HOME/auth.json" <<'PY'
-          import json, os, sys
+          import base64, json, re, sys
           p, auth_path = sys.argv[1], sys.argv[2]
           raw = open(p, encoding="utf-8", errors="replace").read()
           try:
@@ -196,10 +199,37 @@ jobs:
                   for v in o.values():
                       collect(v)
           collect(d.get("tokens", {}))
+          variants = set()
           for s in secrets:
-              raw = raw.replace(s, "[REDACTED-CREDENTIAL]")
-          open(p, "w", encoding="utf-8").write(raw)
-          print(f"redacted {len(secrets)} credential value(s) from review output")
+            variants |= {
+                s,
+                base64.b64encode(s.encode()).decode(),
+                base64.urlsafe_b64encode(s.encode()).decode(),
+                s.encode().hex(),
+                s[::-1],
+            }
+          for v in variants:
+              raw = raw.replace(v, "[REDACTED-CREDENTIAL]")
+          withheld = False
+          normalised = re.sub(r"\s+", "", raw)
+          for s in secrets:
+              for i in range(0, max(1, len(s) - 39), 8):
+                  if s[i:i + 40] in normalised:
+                      withheld = True
+                      break
+              if withheld:
+                  break
+          if withheld:
+              open(p, "w", encoding="utf-8").write(
+                  "[review output withheld: possible credential material detected — "
+                  "see run logs]"
+              )
+              print("WITHHELD: output may contain credential material")
+          else:
+              open(p, "w", encoding="utf-8").write(raw)
+              print(f"redacted {len(secrets)} credential value(s) from review output")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"withheld={'true' if withheld else 'false'}\n")
           PY
           rm -f "$CODEX_HOME/auth.json"
           wc -l "$REVIEW_OUT"
@@ -213,6 +243,7 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           SCAN_OUTCOME: ${{ steps.scan.outcome }}
           SCAN_RC: ${{ steps.scan.outputs.rc }}
+          SCAN_WITHHELD: ${{ steps.scan.outputs.withheld }}
           AUTH_PRESENT: ${{ steps.auth.outputs.present }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -243,15 +274,20 @@ jobs:
               lines.append(f"Review produced no output for diff `{base}...{head}`.")
           else:
               raw = out_path.read_text(encoding="utf-8", errors="replace")
-              # Keep the model's own verdict lines, drop CLI noise/telemetry.
+              # Publish only the final model turn — exec traces (command
+              # outputs the agent ran, e.g. a steered `cat auth.json`) are
+              # never part of the model's own verdict and never reach the
+              # comment. Fallback: filtered full output.
+              segments = re.split(r"(?m)^codex$", raw)
+              model_turn = segments[-1] if len(segments) > 1 else raw
               text_lines = [
-                  ln for ln in raw.splitlines()
+                  ln for ln in model_turn.splitlines()
                   if ln.strip()
                   and not re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}", ln)  # otel/INFO timestamps
                   and "event.name=" not in ln
                   and not re.match(r"^\s*(INFO|WARN|ERROR)\b", ln)
               ]
-              text = "\n".join(text_lines).strip() or raw.strip()
+              text = "\n".join(text_lines).strip() or model_turn.strip()
               # Model output is untrusted: cap length, break comment markers
               # and mentions before embedding in a PR comment.
               text = text.replace("<!--", "<!—").replace("@", "@​")
@@ -342,7 +378,7 @@ jobs:
           PY
 
       - name: Upload review artifact
-        if: always() && steps.auth.outputs.present == 'true'
+        if: always() && steps.auth.outputs.present == 'true' && steps.scan.outputs.withheld != 'true'
         continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
