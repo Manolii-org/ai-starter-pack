@@ -23,7 +23,7 @@ Not mailbox-tested until a sender exists: signup confirmation (`enable_confirmat
 
 ## CPDcheck suite (evidenced senders)
 
-Five hermetic lanes, all consuming the pack by tag checkout (`@v0.2.3`) at
+Six hermetic lanes, all consuming the pack by tag checkout (`@v0.2.3`) at
 CI time — CI tooling only, no runtime/secrets/data coupling across universes.
 Consumer ADR in each repo: `docs/adr/ADR-0001-hermetic-email-capture.md`.
 
@@ -36,6 +36,7 @@ Consumer ADR in each repo: `docs/adr/ADR-0001-hermetic-email-capture.md`.
 | Adviser browser forgot-password | `/forgot-password` → link → `/forgot-password-reset` → `/login` → `/dashboard` | `e2e/email-capture.spec.ts` (professional frontend) |
 | AFSL-admin invite (ACS queue) | `POST /api/admin/afsl-admins/invite` → queued send → claim link → `GET/POST /api/auth/claim` → AFSL login | same API lane script (`hermetic_journey.py`) |
 | AFSL browser invite + claim | captured claim link → `/claim?token=` → set password → `/login` → portal | `e2e/email-capture.spec.ts` (AFSL portal frontend) |
+| Marketing browser request-demo | `/request-demo` → `/api/request-demo` → `POST /contact` → contact email (+ validation negative) | `e2e/email-capture.spec.ts` (marketing site) |
 
 Patterns CPDcheck adds to the shared playbook:
 
@@ -54,6 +55,8 @@ Patterns CPDcheck adds to the shared playbook:
   service); a shared `capture_smtp_send` helper routes both into the
   allocation's Mailpit under the same fail-closed seam check, so queued
   sends (invites, reminders) are capturable too.
+- The marketing contact lane points `CONTACT_FORM_RECIPIENT` at the
+  allocation — the allocation itself is the inbox, no seed user needed.
 - Cookie-forwarding API clients must drop deletion cookies
   (`access_token_cookie=""`) or the forwarded jar clobbers the live token.
 - `await --count N` counts only messages newer than the allocation cursor —
