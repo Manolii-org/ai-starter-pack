@@ -48,6 +48,9 @@ Patterns CPDcheck adds to the shared playbook:
 - Negative (unknown-email) assertions run on a distinct `run_id`
   (`${RUN_ID}-neg`) — allocation scope is deterministic, so an identical
   request would share the main inbox.
+- `await --count N` counts only messages newer than the allocation cursor —
+  after an await advances the cursor, each further expected message is
+  awaited with `--count 1` (and `--count 0` bounds the negative window).
 - Frontend specs live in a dedicated Playwright project (`email-capture`)
   with an empty storage state; the default `chromium` project `testIgnore`s
   them, keeping the post-deploy UAT suite untouched.
