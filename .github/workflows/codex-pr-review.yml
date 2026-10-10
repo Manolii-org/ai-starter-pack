@@ -90,6 +90,33 @@ jobs:
           echo "scannable=true" >> "$GITHUB_OUTPUT"
           echo "Diff range: $BASE...$HEAD ($CHANGED files)"
 
+      - name: Set up Node
+        if: steps.range.outputs.scannable == 'true'
+        continue-on-error: true
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: "24"
+
+      - name: Install Codex CLI
+        id: install
+        if: steps.range.outputs.scannable == 'true'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          # Pinned version + --ignore-scripts: no lifecycle code runs on a
+          # secret-bearing runner. Bump deliberately after a local check.
+          # Isolation from PR-controlled config: npm merges .npmrc from the
+          # package root; a same-repo PR could redirect the @openai scope to
+          # an attacker registry. Install from a clean directory outside the
+          # checkout, pin the public registry, and ignore user config.
+          install -d -m 700 "$RUNNER_TEMP/codex-cli"
+          cd "$RUNNER_TEMP/codex-cli"
+          npm install --no-save --ignore-scripts \
+            --registry https://registry.npmjs.org/ \
+            --userconfig /dev/null \
+            @openai/codex@0.151.0
+          "$RUNNER_TEMP/codex-cli/node_modules/.bin/codex" --version
+
       - name: Materialize Codex subscription credential
         id: auth
         env:
@@ -127,25 +154,6 @@ jobs:
           chmod 600 "$RUNNER_TEMP/codex-home/auth.json"
           unset DOPPLER_TOKEN_CODEX
           echo "present=true" >> "$GITHUB_OUTPUT"
-
-      - name: Set up Node
-        if: steps.range.outputs.scannable == 'true' && steps.auth.outputs.present == 'true'
-        continue-on-error: true
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
-        with:
-          node-version: "24"
-
-      - name: Install Codex CLI
-        id: install
-        if: steps.range.outputs.scannable == 'true' && steps.auth.outputs.present == 'true'
-        continue-on-error: true
-        run: |
-          set -euo pipefail
-          # Pinned version + --ignore-scripts: no lifecycle code runs on a
-          # secret-bearing runner. Bump deliberately after a local check.
-          npm install --prefix "$RUNNER_TEMP/codex-cli" --no-save --ignore-scripts \
-            @openai/codex@0.151.0
-          "$RUNNER_TEMP/codex-cli/node_modules/.bin/codex" --version
 
       - name: Run codex exec review on the PR diff
         id: scan
