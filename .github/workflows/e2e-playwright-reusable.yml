@@ -158,6 +158,13 @@ on:
       E2E_TEST_USER_PASSWORD:
         required: false
         description: Synthetic test-account password — lands as TEST_USER_PASSWORD.
+      VERCEL_BYPASS_SECRET:
+        required: false
+        description: >-
+          Vercel automation bypass secret — lands as
+          VERCEL_AUTOMATION_BYPASS_SECRET so specs can cross Deployment
+          Protection on preview/staging URLs (see bcp-core
+          e2e/browser-headers.ts).
 
 jobs:
   e2e:
@@ -246,6 +253,7 @@ jobs:
         env:
           TEST_USER_EMAIL: ${{ secrets.E2E_TEST_USER_EMAIL }}
           TEST_USER_PASSWORD: ${{ secrets.E2E_TEST_USER_PASSWORD }}
+          VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_BYPASS_SECRET }}
         run: |
           python3 -c '
           import json, os, re, subprocess, sys
