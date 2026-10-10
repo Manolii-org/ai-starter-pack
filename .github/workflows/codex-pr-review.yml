@@ -142,8 +142,10 @@ jobs:
             exit 0
           fi
           install -d -m 700 "$RUNNER_TEMP/codex-home"
-          if ! curl -fsS --max-time 30 --connect-timeout 10 \
-            -H "Authorization: Bearer ${DOPPLER_TOKEN_CODEX}" \
+          # Header via stdin (-H @-): keeps the token out of curl's argv so
+          # co-resident runner processes cannot read /proc/<pid>/cmdline.
+          if ! printf 'Authorization: Bearer %s\n' "$DOPPLER_TOKEN_CODEX" \
+            | curl -fsS --max-time 30 --connect-timeout 10 -H @- \
             "https://api.doppler.com/v3/configs/config/secret?project=master&config=prd_codex&name=CODEX_SUBSCRIPTION_AUTH_JSON" \
             | python3 -c 'import json,sys;v=json.load(sys.stdin)["value"];r=v.get("computed") or v.get("raw");assert r, "Doppler response has neither value.computed nor value.raw";d=json.loads(r);assert "tokens" in d and "access_token" in d["tokens"], "unexpected auth.json shape";print(r)' \
             > "$RUNNER_TEMP/codex-home/auth.json"; then
