@@ -230,6 +230,12 @@ jobs:
                       break
               if withheld:
                   break
+          # Generic net for encodings outside the enumerated set: a token
+          # material stays a long unbroken run of token-family chars under
+          # most transforms (caesar, XOR-then-base64, etc.). No legitimate
+          # review text carries a 300+ char unbroken run.
+          if not withheld and re.search(r"[A-Za-z0-9_+\-.=/]{300,}", raw):
+              withheld = True
           if withheld:
               open(p, "w", encoding="utf-8").write(
                   "[review output withheld: possible credential material detected — "
