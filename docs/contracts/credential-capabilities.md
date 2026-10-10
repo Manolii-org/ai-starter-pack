@@ -105,6 +105,27 @@ lane (`llm-anthropic`): a proxy master key must never be published to a
 repo that accepts contributions from outside the org boundary, and this
 contract does not provide a scoped proxy credential for that surface.
 
+**Amendment 2026-10-10 — estate spend policy and the scoped CI plane.** Two
+changes since this section was written:
+
+1. **Policy: no direct Anthropic API credits unless there is absolutely no
+   alternative** (operator directive). `llm-anthropic` remains a valid
+   *external-consumer* lane — a third party running this pack on their own
+   Anthropic account is their spend — but nothing in the Manolii estate may
+   provision `ANTHROPIC_API_KEY`/`ANTHROPIC_DIRECT_API_KEY` for its own
+   workloads. This repo's `ANTHROPIC_API_KEY` secret was deleted the same day;
+   the workflows that consumed it resolve proxy-mode envs first and now take
+   the proxy lane unchanged.
+2. The missing scoped credential now exists: **a dedicated CI-scoped LiteLLM
+   plane** whose per-app `LITELLM_MASTER_KEY` is the scoped key the contract
+   said could not be minted (the proxies run DB-less). This repo holds it as
+   `LITELLM_MASTER_KEY` + `LITELLM_PROXY_URL`; its blast radius if leaked from
+   this public repo is OSS calls on that app only. A manifest selecting
+   `llm-proxy` inside the estate resolves against this plane —
+   `llm-anthropic` is no longer selected for any org-owned consumer.
+   (Deployment identifiers live in the private control-plane repo's instance
+   doc — not published here per this repo's surface boundary.)
+
 Repo-local capabilities extend the table; a consumer must not silently
 narrow a pack capability it did not define. Extensions are validated
 fail-closed: redefining a canonical name, a `secret_names` value that is
