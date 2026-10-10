@@ -23,7 +23,7 @@ Not mailbox-tested until a sender exists: signup confirmation (`enable_confirmat
 
 ## CPDcheck suite (evidenced senders)
 
-Four hermetic lanes, all consuming the pack by tag checkout (`@v0.2.3`) at
+Five hermetic lanes, all consuming the pack by tag checkout (`@v0.2.3`) at
 CI time — CI tooling only, no runtime/secrets/data coupling across universes.
 Consumer ADR in each repo: `docs/adr/ADR-0001-hermetic-email-capture.md`.
 
@@ -34,6 +34,8 @@ Consumer ADR in each repo: `docs/adr/ADR-0001-hermetic-email-capture.md`.
 | Provider reset + OTP password change (FastAPI) | `POST /api/auth/send-reset` → reset-password → `provider/login` → `change-pw-request-otp` → `change-pw-confirm-otp` | `scripts/email_capture/hermetic_journey.py` |
 | Provider browser forgot-password | `/forgot-password` → link → `/forgotpwreset` → `/login` → `/dashboard` | `e2e/email-capture.spec.ts` (provider frontend) |
 | Adviser browser forgot-password | `/forgot-password` → link → `/forgot-password-reset` → `/login` → `/dashboard` | `e2e/email-capture.spec.ts` (professional frontend) |
+| AFSL-admin invite (ACS queue) | `POST /api/admin/afsl-admins/invite` → queued send → claim link → `GET/POST /api/auth/claim` → AFSL login | same API lane script (`hermetic_journey.py`) |
+| AFSL browser invite + claim | captured claim link → `/claim?token=` → set password → `/login` → portal | `e2e/email-capture.spec.ts` (AFSL portal frontend) |
 
 Patterns CPDcheck adds to the shared playbook:
 
@@ -48,6 +50,12 @@ Patterns CPDcheck adds to the shared playbook:
 - Negative (unknown-email) assertions run on a distinct `run_id`
   (`${RUN_ID}-neg`) — allocation scope is deterministic, so an identical
   request would share the main inbox.
+- The FastAPI API has two send paths (MS Graph mailer + a queued ACS
+  service); a shared `capture_smtp_send` helper routes both into the
+  allocation's Mailpit under the same fail-closed seam check, so queued
+  sends (invites, reminders) are capturable too.
+- Cookie-forwarding API clients must drop deletion cookies
+  (`access_token_cookie=""`) or the forwarded jar clobbers the live token.
 - `await --count N` counts only messages newer than the allocation cursor —
   after an await advances the cursor, each further expected message is
   awaited with `--count 1` (and `--count 0` bounds the negative window).
