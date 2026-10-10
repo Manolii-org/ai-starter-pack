@@ -8,7 +8,11 @@ specialist lane silently produced zero coverage.
 _call_api must therefore add headroom on top of the declared answer budget
 for proxied calls and retry once at a doubled budget when the response comes
 back starved (no text block + stop_reason=max_tokens). Anthropic-direct
-calls must keep the declared budget verbatim and never retry on starvation.
+calls keep the declared budget verbatim but retry an empty response once —
+transient empty output is cheaper to re-ask than to let collapse a
+specialist into an api_error skip marker (observed 2026-10-09: an
+end_turn empty text block on the direct lane silently skipped
+docs-fact-check).
 """
 from __future__ import annotations
 
@@ -16,6 +20,8 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
@@ -103,20 +109,85 @@ def test_double_starvation_returns_empty_without_third_call(monkeypatch):
     assert len(sent) == 2
 
 
-def test_non_max_tokens_empty_text_is_not_retried(monkeypatch):
-    """An empty answer with stop_reason=end_turn is a real empty answer, not
-    starvation — no retry."""
+def test_non_max_tokens_empty_text_retried_once(monkeypatch):
+    """An empty first block retries once on either lane — transient empty is
+    cheaper to re-ask than to collapse a specialist into an api_error marker.
+    A second empty is terminal."""
     _patch_endpoint(monkeypatch, proxied=True)
     empty_end_turn = _api_payload([{"type": "text", "text": ""}], stop_reason="end_turn")
-    sent = _fake_urlopen(monkeypatch, [empty_end_turn])
+    sent = _fake_urlopen(monkeypatch, [empty_end_turn, empty_end_turn])
     assert MODULE._call_api("sys", "user", "haiku", 800) == ""
-    assert len(sent) == 1
+    assert len(sent) == 2
 
 
-def test_direct_call_keeps_declared_budget_and_never_retries(monkeypatch):
+def test_direct_call_keeps_declared_budget(monkeypatch):
     _patch_endpoint(monkeypatch, proxied=False)
-    sent = _fake_urlopen(monkeypatch, [_THINKING_ONLY])
-    assert MODULE._call_api("sys", "user", "claude-haiku-4-5-20251001", 800) == ""
+    sent = _fake_urlopen(monkeypatch, [_ANSWER])
+    assert MODULE._call_api("sys", "user", "claude-haiku-4-5-20251001", 800) != ""
     assert len(sent) == 1
     assert sent[0]["max_tokens"] == 800
     assert sent[0]["model"] == "claude-haiku-4-5-20251001"
+
+
+def test_direct_empty_response_retries_once_doubled_budget(monkeypatch):
+    """A direct call returning no text block retries once at doubled budget —
+    covers both starvation and transient empty on the direct lane."""
+    _patch_endpoint(monkeypatch, proxied=False)
+    empty_end_turn = _api_payload([{"type": "text", "text": ""}], stop_reason="end_turn")
+    sent = _fake_urlopen(monkeypatch, [empty_end_turn, _ANSWER])
+    out = MODULE._call_api("sys", "user", "claude-haiku-4-5-20251001", 800)
+    assert json.loads(out)["findings"] == []
+    assert len(sent) == 2
+    assert sent[0]["max_tokens"] == 800
+    assert sent[1]["max_tokens"] == 1600
+
+
+def test_direct_persistent_empty_returns_empty_after_retry(monkeypatch):
+    _patch_endpoint(monkeypatch, proxied=False)
+    empty_end_turn = _api_payload([{"type": "text", "text": ""}], stop_reason="end_turn")
+    sent = _fake_urlopen(monkeypatch, [empty_end_turn, empty_end_turn])
+    assert MODULE._call_api("sys", "user", "claude-haiku-4-5-20251001", 800) == ""
+    assert len(sent) == 2
+
+
+def test_truncated_unparseable_max_tokens_retries_doubled(monkeypatch):
+    """Reasoning prose cut at max_tokens (unparseable, no findings JSON)
+    retries once at doubled budget — observed on the direct lane."""
+    _patch_endpoint(monkeypatch, proxied=False)
+    truncated = _api_payload(
+        [{"type": "text", "text": "# Phase 1: reasoning… {\"findings\": ["}],
+        stop_reason="max_tokens")
+    sent = _fake_urlopen(monkeypatch, [truncated, _ANSWER])
+    out = MODULE._call_api("sys", "user", "claude-haiku-4-5-20251001", 800,
+                           validate=lambda t: '"findings"' in t and t.rstrip().endswith("}"))
+    assert json.loads(out)["findings"] == []
+    assert len(sent) == 2
+    assert sent[1]["max_tokens"] == 1600
+
+
+def test_unparseable_end_turn_text_not_retried(monkeypatch):
+    """Unparseable output that finished cleanly is a real answer, not
+    starvation — no retry regardless of the validator."""
+    _patch_endpoint(monkeypatch, proxied=False)
+    weird = _api_payload(
+        [{"type": "text", "text": "no json here"}], stop_reason="end_turn")
+    sent = _fake_urlopen(monkeypatch, [weird])
+    assert MODULE._call_api("sys", "user", "claude-haiku-4-5-20251001", 800,
+                            validate=lambda t: False) == "no json here"
+    assert len(sent) == 1
+
+
+def test_parse_findings_extracts_json_after_prose():
+    out = MODULE._parse_findings(
+        '# Phase 1\nreasoning text\n{"source": "s", "findings": []}')
+    assert out["findings"] == []
+
+
+def test_parse_findings_prefers_last_fenced_block():
+    raw = 'prose\n```json\n{"source": "s", "findings": [{"id": "f1"}]}\n```\nmore'
+    assert MODULE._parse_findings(raw)["findings"] == [{"id": "f1"}]
+
+
+def test_parse_findings_raises_on_no_json():
+    with pytest.raises(json.JSONDecodeError):
+        MODULE._parse_findings("plain prose, no braces")

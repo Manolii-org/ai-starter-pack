@@ -152,7 +152,7 @@ def _load_skill(skill_name: str) -> tuple[dict, str]:
     return frontmatter, system_prompt
 
 
-def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int, *, first_party: bool = False) -> str:
+def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int, *, first_party: bool = False, validate=None) -> str:
     """Call the Messages API via urllib (Anthropic direct or LiteLLM proxy)."""
     api_key, api_url, proxied = _endpoint(direct=first_party)
     if not api_key:
@@ -182,9 +182,9 @@ def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int
     # ~1k-token chain-of-thought exhausts a specialist's declared 800 and
     # returns stop_reason=max_tokens with an empty text block; every
     # specialist failed that way). Proxied calls therefore get headroom on
-    # top of the declared answer budget, plus one doubled retry if the
-    # answer still comes back starved. Anthropic-direct keeps the declared
-    # budget verbatim.
+    # top of the declared answer budget. Both lanes get one doubled-budget
+    # retry on starvation signals — an empty first block, or max_tokens
+    # output that fails the caller's parse validator (truncated mid-JSON).
     budget = max_tokens + _PROXY_THINKING_HEADROOM if proxied else max_tokens
     data = None
     for _budget_attempt in range(2):
@@ -215,7 +215,13 @@ def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int
         for attempt in range(2):
             try:
                 with _urlopen_https(req, timeout=_API_TIMEOUT, host=urllib.parse.urlparse(api_url).hostname or "") as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
+                    body = resp.read().decode("utf-8", errors="replace")
+                try:
+                    data = json.loads(body)
+                except json.JSONDecodeError:
+                    raise RuntimeError(
+                        f"non-JSON API response (status {resp.status}, "
+                        f"{len(body)} bytes): {body[:160]!r}")
                 break
             except urllib.error.HTTPError as e:
                 error_body = e.read().decode("utf-8", errors="replace")
@@ -231,21 +237,59 @@ def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int
             if block.get("type") == "text":
                 text = block["text"]
                 break
-        if text or data.get("stop_reason") != "max_tokens" or not proxied:
+        if text:
+            if (_budget_attempt == 0 and validate is not None
+                    and data.get("stop_reason") == "max_tokens"
+                    and not validate(text)):
+                # Truncated mid-payload (e.g. reasoning + findings JSON cut
+                # at the declared budget): one doubled-budget retry.
+                budget *= 2
+                continue
             return text
-        # Thinking starved the answer: double the budget once and retry.
-        budget *= 2
+        if _budget_attempt == 0:
+            # An empty first block on attempt 0 is either starvation
+            # (stop_reason=max_tokens — reasoning burned the declared budget
+            # before the answer, observed on the direct lane too) or a
+            # transient empty. One doubled-budget retry recovers both; a
+            # second empty is terminal.
+            budget *= 2
+            continue
+        return ""
     return ""
 
 
 def _parse_findings(raw: str) -> dict:
-    """Strip markdown fences and parse JSON findings."""
+    """Extract and parse the findings JSON from possibly mixed output.
+
+    Multi-phase skills reason aloud before emitting the findings block, so
+    prose may precede the JSON. Try the whole string, then the last fenced
+    block, then the last balanced object that carries a "findings" key.
+    """
     text = raw.strip()
     if text.startswith("```"):
         lines = text.splitlines()
         end = next((i for i, ln in enumerate(lines[1:], 1) if ln.startswith("```")), len(lines))
         text = "\n".join(lines[1:end])
-    return json.loads(text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    for block in reversed(re.findall(r"```(?:json)?\s*\n(.*?)```", raw, re.S)):
+        try:
+            candidate = json.loads(block.strip())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict) and "findings" in candidate:
+            return candidate
+    decoder = json.JSONDecoder()
+    for match in reversed(list(re.finditer(r"\{", raw))):
+        try:
+            obj, _ = decoder.raw_decode(raw, match.start())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and "findings" in obj:
+            return obj
+    raise json.JSONDecodeError("no findings JSON in response", raw, 0)
 
 
 def _load_skill_is_first_party(skill_name: str) -> bool:
@@ -408,7 +452,15 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
     )
 
     try:
-        raw = _call_api(system_prompt, user_message, model, max_tokens, first_party=first_party)
+        def _parse_ok(candidate: str) -> bool:
+            try:
+                parsed = _parse_findings(candidate)
+            except json.JSONDecodeError:
+                return False
+            return isinstance(parsed, dict) and "findings" in parsed
+
+        raw = _call_api(system_prompt, user_message, model, max_tokens,
+                        first_party=first_party, validate=_parse_ok)
         data = _parse_findings(raw)
 
         # Validate structure. A first-party skill returning a malformed
@@ -453,7 +505,8 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
             _write_skip_marker(skill_name, output_dir, "api_error")
         else:
             _write_skipped_marker(skill_name, output_dir, "api_error")
-        return skill_name, f"Failed to parse response as JSON: {exc}"
+        raw_head = repr(locals().get("raw", "<unset>"))[:160]
+        return skill_name, f"Failed to parse response as JSON: {exc} | raw[:160]={raw_head}"
     except Exception as exc:
         if first_party:
             _write_skip_marker(skill_name, output_dir, "api_error")
