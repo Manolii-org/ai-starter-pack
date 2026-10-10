@@ -27,6 +27,8 @@ name: Codex PR Review (advisory)
 #
 # Draft policy: drafts skip so WIP does not spend review budget;
 # converted_to_draft is a trigger only so concurrency cancels in-flight work.
+# Operator kill switch (pr-standards LLM-workflow rule): set repository
+# variable CODEX_REVIEW_ENABLED=false to disable the job silently.
 
 on:
   pull_request:
@@ -50,6 +52,7 @@ jobs:
     if: >-
       github.event.pull_request.head.repo.full_name == github.repository
       && github.event.pull_request.draft != true
+      && vars.CODEX_REVIEW_ENABLED != 'false'
     steps:
       # Merge-commit checkout with fetch-depth: 0 resolves both base and head
       # SHAs locally with no credentials (persist-credentials stays off).
@@ -119,6 +122,7 @@ jobs:
 
       - name: Materialize Codex subscription credential
         id: auth
+        if: steps.range.outputs.scannable == 'true'
         env:
           DOPPLER_TOKEN_CODEX: ${{ secrets.DOPPLER_TOKEN_CODEX }}
         run: |
