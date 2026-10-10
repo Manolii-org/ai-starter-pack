@@ -1,0 +1,313 @@
+name: Codex PR Review (advisory)
+# GitHub Actions steps legitimately mix uses/run/with shapes within one job.
+# config-completeness-ignore: uses
+# config-completeness-ignore: with
+# config-completeness-ignore: id
+# config-completeness-ignore: name
+# config-completeness-ignore: run
+#
+# ADVISORY tier: reviews the PR diff with the Codex CLI (`codex exec review`)
+# on the ChatGPT SUBSCRIPTION and reports in a step summary + upserted PR
+# comment. This job NEVER blocks a merge — continue-on-error, every failure
+# path exits 0 or reports, and it must never be added to required checks.
+#
+# Why this exists: the OpenAI Codex cloud connector (chatgpt-codex-connector)
+# bills code reviews against usage credits and stops when credits run out.
+# This job produces the same class of signal through `codex exec review`
+# authenticated with CODEX_SUBSCRIPTION_AUTH_JSON (chatgpt auth_mode) — flat
+# subscription, no per-request credits. It deliberately does NOT pass an API
+# key: OPENAI_API_KEY/CODEX_API_KEY are unset in every step.
+#
+# Auth contract (same as codex-security-diff-scan): the credential is pulled
+# LIVE from Doppler master/prd_codex — a dedicated config holding ONLY
+# CODEX_SUBSCRIPTION_AUTH_JSON — via secrets.DOPPLER_TOKEN_CODEX, a read-only
+# service token whose blast radius is that one credential even if a same-repo
+# PR edits this job. pull_request runs the PR's own copy of this file and
+# GitHub withholds secrets from forks natively, so fork PRs skip silently.
+#
+# Draft policy: drafts skip so WIP does not spend review budget;
+# converted_to_draft is a trigger only so concurrency cancels in-flight work.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
+
+concurrency:
+  group: codex-pr-review-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write # upsert the advisory review comment
+
+jobs:
+  review:
+    name: Codex review (subscription)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    continue-on-error: true
+    # Same-repo PRs only; drafts skip. Silent skips, never a failure.
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository
+      && github.event.pull_request.draft != true
+    steps:
+      # Merge-commit checkout with fetch-depth: 0 resolves both base and head
+      # SHAs locally with no credentials (persist-credentials stays off).
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve diff range
+        id: range
+        run: |
+          set -euo pipefail
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+          if ! git cat-file -e "$BASE" 2>/dev/null; then
+            git fetch --no-tags --depth=1 origin "$BASE" 2>/dev/null || true
+          fi
+          if ! git cat-file -e "$BASE" 2>/dev/null || ! git cat-file -e "$HEAD" 2>/dev/null; then
+            {
+              echo "### Codex PR review"
+              echo "Advisory review skipped: could not resolve the PR diff range locally."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "scannable=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          CHANGED="$(git diff --name-only "$BASE...$HEAD" | wc -l | tr -d ' ')"
+          if [ "$CHANGED" = "0" ]; then
+            {
+              echo "### Codex PR review"
+              echo "Advisory review skipped: empty diff (merge-only or already-merged content)."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "scannable=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # `codex exec review --base` takes a ref; pin the base SHA to a
+          # local branch so a drifting base tip cannot move the diff range.
+          git branch -f codex-review-base "$BASE"
+          echo "scannable=true" >> "$GITHUB_OUTPUT"
+          echo "Diff range: $BASE...$HEAD ($CHANGED files)"
+
+      - name: Materialize Codex subscription credential
+        id: auth
+        env:
+          DOPPLER_TOKEN_CODEX: ${{ secrets.DOPPLER_TOKEN_CODEX }}
+        run: |
+          set -euo pipefail
+          # Subscription auth lives in CODEX_HOME/auth.json. An API key env
+          # var would force usage-priced billing — always unset both.
+          unset OPENAI_API_KEY CODEX_API_KEY
+          echo "CODEX_HOME=$RUNNER_TEMP/codex-home" >> "$GITHUB_ENV"
+          if [ -z "${DOPPLER_TOKEN_CODEX:-}" ]; then
+            {
+              echo "### Codex PR review"
+              echo "Advisory review skipped: repository secret \`DOPPLER_TOKEN_CODEX\` is not provisioned."
+              echo "Provision a read-only Doppler service token scoped to master/prd_codex, then re-run this job."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::notice::DOPPLER_TOKEN_CODEX not provisioned — advisory review skipped"
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          install -d -m 700 "$RUNNER_TEMP/codex-home"
+          if ! curl -fsS --max-time 30 --connect-timeout 10 \
+            -H "Authorization: Bearer ${DOPPLER_TOKEN_CODEX}" \
+            "https://api.doppler.com/v3/configs/config/secret?project=master&config=prd_codex&name=CODEX_SUBSCRIPTION_AUTH_JSON" \
+            | python3 -c 'import json,sys;v=json.load(sys.stdin)["value"];r=v.get("computed") or v.get("raw");assert r, "Doppler response has neither value.computed nor value.raw";d=json.loads(r);assert "tokens" in d and "access_token" in d["tokens"], "unexpected auth.json shape";print(r)' \
+            > "$RUNNER_TEMP/codex-home/auth.json"; then
+            {
+              echo "### Codex PR review"
+              echo "Review did not run: Doppler credential fetch failed (timeout, non-2xx, or malformed auth payload)."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::Doppler credential fetch failed — advisory review did not run"
+            echo "present=failed" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          chmod 600 "$RUNNER_TEMP/codex-home/auth.json"
+          unset DOPPLER_TOKEN_CODEX
+          echo "present=true" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node
+        if: steps.range.outputs.scannable == 'true' && steps.auth.outputs.present == 'true'
+        continue-on-error: true
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: "24"
+
+      - name: Install Codex CLI
+        id: install
+        if: steps.range.outputs.scannable == 'true' && steps.auth.outputs.present == 'true'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          # Pinned version + --ignore-scripts: no lifecycle code runs on a
+          # secret-bearing runner. Bump deliberately after a local check.
+          npm install --prefix "$RUNNER_TEMP/codex-cli" --no-save --ignore-scripts \
+            @openai/codex@0.151.0
+          "$RUNNER_TEMP/codex-cli/node_modules/.bin/codex" --version
+
+      - name: Run codex exec review on the PR diff
+        id: scan
+        if: steps.range.outputs.scannable == 'true' && steps.auth.outputs.present == 'true' && steps.install.outcome != 'failure'
+        continue-on-error: true
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          REVIEW_OUT: ${{ runner.temp }}/codex-review-out.txt
+        run: |
+          set -euo pipefail
+          unset OPENAI_API_KEY CODEX_API_KEY
+          git checkout "$HEAD_SHA"
+          # Codex's Bubblewrap sandbox needs unprivileged user namespaces;
+          # Ubuntu 24.04+ runners restrict them by default. Ephemeral job runner.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          # --base reviews committed changes against the pinned base ref.
+          # Output is model-generated data — treat as untrusted text; the
+          # report step truncates and neutralises it before posting.
+          timeout 20m "$RUNNER_TEMP/codex-cli/node_modules/.bin/codex" exec review \
+            --base codex-review-base \
+            --title "$PR_TITLE" \
+            > "$REVIEW_OUT" 2>&1 || true
+          wc -l "$REVIEW_OUT"
+
+      - name: Summarise review
+        id: report
+        if: always() && steps.range.outputs.scannable == 'true' && (steps.auth.outputs.present == 'true' || steps.auth.outputs.present == 'failed')
+        env:
+          REVIEW_OUT: ${{ runner.temp }}/codex-review-out.txt
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          SCAN_OUTCOME: ${{ steps.scan.outcome }}
+          AUTH_PRESENT: ${{ steps.auth.outputs.present }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 - <<'PY'
+          import os, re
+          from pathlib import Path
+
+          out_path = Path(os.environ["REVIEW_OUT"])
+          body_path = Path(os.environ["RUNNER_TEMP"]) / "codex-review-comment.md"
+          head = os.environ["HEAD_SHA"][:10]
+          base = os.environ["BASE_SHA"][:10]
+          run_url = os.environ["RUN_URL"]
+
+          lines = ["### Codex PR review (advisory, subscription)", ""]
+          if os.environ.get("AUTH_PRESENT") == "failed":
+              lines.append(
+                  f"Review did not run: Doppler credential fetch failed "
+                  f"(see [run logs]({run_url})). Advisory only."
+              )
+          elif os.environ.get("SCAN_OUTCOME") != "success":
+              lines.append(
+                  f"Review did not run to completion (outcome: "
+                  f"{os.environ.get('SCAN_OUTCOME')}; see [run logs]({run_url})). "
+                  "Advisory only."
+              )
+          elif not out_path.exists() or not out_path.read_text(encoding="utf-8", errors="replace").strip():
+              lines.append(f"Review produced no output for diff `{base}...{head}`.")
+          else:
+              raw = out_path.read_text(encoding="utf-8", errors="replace")
+              # Keep the model's own verdict lines, drop CLI noise/telemetry.
+              text_lines = [
+                  ln for ln in raw.splitlines()
+                  if ln.strip()
+                  and not ln.startswith(("2026-", "20"))  # otel/INFO timestamps
+                  and "event.name=" not in ln
+                  and not re.match(r"^\s*(INFO|WARN|ERROR)\b", ln)
+              ]
+              text = "\n".join(text_lines).strip() or raw.strip()
+              # Model output is untrusted: cap length, break comment markers
+              # and mentions before embedding in a PR comment.
+              text = text.replace("<!--", "<!—").replace("@", "@​")
+              if len(text) > 55000:
+                  text = text[:55000] + "\n\n…truncated (full output in run artifact)"
+              lines.append(f"Diff `{base}...{head}`:")
+              lines.append("")
+              lines.append("```")
+              lines.append(text)
+              lines.append("```")
+          lines.append("")
+          lines.append(
+              "_Advisory only — never a required check. Review text is model output: "
+              "verify before acting._"
+          )
+          body = "\n".join(lines)
+          Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text(body + "\n", encoding="utf-8")
+          body_path.write_text(body, encoding="utf-8")
+          print(body)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write("post_comment=true\n")
+          PY
+
+      - name: Upsert advisory PR comment
+        if: steps.report.outputs.post_comment == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BODY_FILE: ${{ runner.temp }}/codex-review-comment.md
+        run: |
+          python3 - <<'PY'
+          import json, os, sys, urllib.request
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          pr = os.environ["PR_NUM"]
+          body = open(os.environ["BODY_FILE"], encoding="utf-8").read()
+          marker = "<!-- codex-pr-review:v1 -->"
+          body = f"{marker}\n{body}\n\n<sub>head `{os.environ['HEAD_SHA'][:10]}`</sub>"
+          headers = {
+              "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+              "Accept": "application/vnd.github+json",
+          }
+          try:
+              page = 1
+              existing = None
+              while True:
+                  req = urllib.request.Request(
+                      f"https://api.github.com/repos/{repo}/issues/{pr}/comments?per_page=100&page={page}",
+                      headers=headers,
+                  )
+                  comments = json.loads(urllib.request.urlopen(req, timeout=30).read())
+                  existing = next(
+                      (
+                          c for c in comments
+                          if (c.get("body") or "").startswith(marker)
+                          and (c.get("user") or {}).get("login") == "github-actions[bot]"
+                      ),
+                      None,
+                  )
+                  if existing or len(comments) < 100:
+                      break
+                  page += 1
+              if existing and (existing.get("body") or "") == body:
+                  print("comment already current — skipping")
+                  sys.exit(0)
+              endpoint = (
+                  f"https://api.github.com/repos/{repo}/issues/comments/{existing['id']}"
+                  if existing
+                  else f"https://api.github.com/repos/{repo}/issues/{pr}/comments"
+              )
+              req = urllib.request.Request(
+                  endpoint,
+                  data=json.dumps({"body": body}).encode(),
+                  headers={**headers, "Content-Type": "application/json"},
+                  method="PATCH" if existing else "POST",
+              )
+              urllib.request.urlopen(req, timeout=30)
+              print("advisory comment " + ("updated" if existing else "posted"))
+          except Exception as exc:
+              # Advisory: a comment failure must not surface as a job failure.
+              print(f"comment upsert failed (advisory, non-fatal): {exc}")
+          PY
+
+      - name: Upload review artifact
+        if: always() && steps.auth.outputs.present == 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: codex-pr-review-${{ github.run_id }}
+          path: ${{ runner.temp }}/codex-review-out.txt
+          retention-days: 14
+          if-no-files-found: ignore
