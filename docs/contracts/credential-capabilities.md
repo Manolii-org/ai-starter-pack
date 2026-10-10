@@ -116,13 +116,15 @@ changes since this section was written:
    workloads. This repo's `ANTHROPIC_API_KEY` secret was deleted the same day;
    the workflows that consumed it resolve proxy-mode envs first and now take
    the proxy lane unchanged.
-2. The missing scoped credential now exists: **`manolii-litellm-ci.fly.dev`**,
-   a per-app LiteLLM instance whose own `LITELLM_MASTER_KEY` is the scoped key
-   the contract said could not be minted (the proxies run DB-less). This repo
-   holds it as `LITELLM_MASTER_KEY` + `LITELLM_PROXY_URL`; its blast radius if
-   leaked from this public repo is OSS calls on that app only. A manifest
-   selecting `llm-proxy` inside the estate resolves against this plane —
+2. The missing scoped credential now exists: **a dedicated CI-scoped LiteLLM
+   plane** whose per-app `LITELLM_MASTER_KEY` is the scoped key the contract
+   said could not be minted (the proxies run DB-less). This repo holds it as
+   `LITELLM_MASTER_KEY` + `LITELLM_PROXY_URL`; its blast radius if leaked from
+   this public repo is OSS calls on that app only. A manifest selecting
+   `llm-proxy` inside the estate resolves against this plane —
    `llm-anthropic` is no longer selected for any org-owned consumer.
+   (Deployment identifiers live in the private control-plane repo's instance
+   doc — not published here per this repo's surface boundary.)
 
 Repo-local capabilities extend the table; a consumer must not silently
 narrow a pack capability it did not define. Extensions are validated
