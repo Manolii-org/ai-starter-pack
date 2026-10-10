@@ -199,6 +199,9 @@ jobs:
                   for v in o.values():
                       collect(v)
           collect(d.get("tokens", {}))
+          rot13 = lambda t: t.translate(str.maketrans(
+              "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
+              "NOPQRSTUVWXYZABCDEFGHIJKLMnopqrstuvwxyzabcdefghijklm"))
           variants = set()
           for s in secrets:
             variants |= {
@@ -207,14 +210,22 @@ jobs:
                 base64.urlsafe_b64encode(s.encode()).decode(),
                 s.encode().hex(),
                 s[::-1],
+                rot13(s),
             }
           for v in variants:
               raw = raw.replace(v, "[REDACTED-CREDENTIAL]")
           withheld = False
-          normalised = re.sub(r"\s+", "", raw)
-          for s in secrets:
-              for i in range(0, max(1, len(s) - 39), 8):
-                  if s[i:i + 40] in normalised:
+          # Alnum-only normalisation defeats separator fragmentation
+          # (e.g. "e-y-J..." with dashes between every character); chunk
+          # matching across transform variants catches encoded/reversed/rot13
+          # reconstructions a literal replace cannot.
+          normalised = re.sub(r"[^A-Za-z0-9]", "", raw)
+          for v in variants:
+              vn = re.sub(r"[^A-Za-z0-9]", "", v)
+              if len(vn) < 40:
+                  continue
+              for i in range(0, max(1, len(vn) - 39), 8):
+                  if vn[i:i + 40] in normalised:
                       withheld = True
                       break
               if withheld:
