@@ -41,6 +41,11 @@
       "_disabled": true,
       "command": "npx",
       "args": ["-y", "@anthropic/mcp-playwright"]
+    },
+    "microsoft-learn": {
+      "_comment": "Microsoft Learn docs search/fetch/code-samples — free, no auth, enabled by default",
+      "type": "http",
+      "url": "https://learn.microsoft.com/api/mcp"
     }
   }
 }
