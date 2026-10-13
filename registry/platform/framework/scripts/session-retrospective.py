@@ -650,6 +650,111 @@ def plain_text_note(branch: str, signals: dict, dscore: int, fclass: str, diff_s
     return "\n".join(lines)
 
 
+def capture_receipt_v2(record: dict, binding: dict, readback: dict | None = None) -> dict:
+    """Pure legacy adapter; supplied evidence is not authorization or persistence.
+
+    No file, environment, network or model access. A future trusted sink adapter
+    must supply verified readback and retain this result using the existing store.
+    """
+    import hashlib
+
+    allowed = {
+        "organization", "repository", "provider", "provider_run_id", "operator_id",
+        "operator_evidence", "trigger", "package_revision", "hook_revision",
+        "sanitized_artifact_id", "sanitized_artifact_sha256", "coverage",
+        "missing_sources", "expected_record_id", "store_reference", "outcome",
+    }
+    if not isinstance(record, dict) or not isinstance(binding, dict) or set(binding) - allowed:
+        raise ValueError("capture_binding_rejected")
+
+    def pointer(value):
+        if value is None or value == "":
+            return None
+        if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_.:/@-]{1,512}", value):
+            raise ValueError("capture_pointer_rejected")
+        # Retain opaque owner-local pointers, never URLs or userinfo forms.
+        if "://" in value or (":" in value and "@" in value):
+            raise ValueError("capture_pointer_rejected")
+        # Reject recognizable credential/token forms and narrative/header text.
+        if re.search(r"(?i)(?:bearer|password|secret|token|api[-_]?key)[-_:]", value):
+            raise ValueError("capture_pointer_rejected")
+        if re.search(r"(?:sk-|ghp_|github_pat_|eyJ)[A-Za-z0-9_-]{12,}", value):
+            raise ValueError("capture_pointer_rejected")
+        return value
+
+    def pointers(values):
+        if not isinstance(values, list) or len(values) > 64:
+            raise ValueError("capture_evidence_rejected")
+        result = [pointer(value) for value in values]
+        if any(value is None for value in result):
+            raise ValueError("capture_evidence_rejected")
+        return result
+
+    digest = binding.get("sanitized_artifact_sha256")
+    if digest is not None and (not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest)):
+        raise ValueError("capture_artifact_hash_rejected")
+    trigger = binding.get("trigger", "unknown")
+    if trigger not in {"automatic_hook", "manual_summary", "recovery", "backfill", "unknown"}:
+        raise ValueError("capture_trigger_rejected")
+    outcome = binding.get("outcome", "unknown")
+    if outcome not in {"pending", "failed", "no_actionable_signal", "unknown"}:
+        raise ValueError("capture_outcome_rejected")
+    evidence = pointers(binding.get("operator_evidence", []))
+    fields = {
+        "schema": "session-capture-receipt/v2",
+        "capture_id": pointer(record.get("capture_id")),
+        "source_session_id": pointer(record.get("source_session_id") or record.get("session_id")),
+        "provider_run_id": pointer(binding.get("provider_run_id")),
+        "organization": pointer(binding.get("organization")),
+        "entity": pointer(record.get("entity")),
+        "repository": pointer(binding.get("repository")),
+        "ref": pointer(record.get("branch")),
+        "start_baseline": pointer(record.get("start_baseline")),
+        "provider": pointer(binding.get("provider")),
+        "operator_id": pointer(binding.get("operator_id")) if evidence else None,
+        "operator_evidence": evidence,
+        "trigger": trigger,
+        "package_revision": pointer(binding.get("package_revision")),
+        "hook_revision": pointer(binding.get("hook_revision")),
+        "coverage": pointer(binding.get("coverage")),
+        "missing_sources": pointers(binding.get("missing_sources", [])),
+        "sanitized_artifact_id": pointer(binding.get("sanitized_artifact_id")),
+        "sanitized_artifact_sha256": digest,
+        "store_reference": pointer(binding.get("store_reference")),
+        "persisted_record_id": None,
+        "delivery_state": outcome,
+        "verification_evidence": [],
+        "legacy_kl_written": record.get("kl_written") if isinstance(record.get("kl_written"), bool) else None,
+    }
+    if record.get("delivery_policy") == "local_only":
+        fields["delivery_state"] = "local_only"
+    elif record.get("kl_written") is True and outcome in {"unknown", "pending"}:
+        fields["delivery_state"] = "acknowledged_unverified"
+    if readback is not None and fields["delivery_state"] != "local_only":
+        required = {"organization", "entity", "store_reference", "capture_id", "record_id", "artifact_sha256", "evidence"}
+        if not isinstance(readback, dict) or set(readback) != required:
+            raise ValueError("capture_readback_rejected")
+        proof = pointers(readback["evidence"])
+        expected = pointer(binding.get("expected_record_id"))
+        matches = (
+            all(fields[name] is not None and readback[name] == fields[name]
+                for name in ("organization", "entity", "store_reference", "capture_id"))
+            and expected is not None and readback["record_id"] == expected
+            and digest is not None and readback["artifact_sha256"] == digest
+            and fields["sanitized_artifact_id"] is not None and bool(proof)
+            and outcome not in {"failed", "no_actionable_signal"}
+        )
+        if matches:
+            fields["delivery_state"] = "verified"
+            fields["persisted_record_id"] = expected
+            fields["verification_evidence"] = proof
+        else:
+            # Ambiguous/mismatched response is not safe to blindly retry.
+            fields["delivery_state"] = "unknown"
+    fields["receipt_id"] = hashlib.sha256(json.dumps(fields, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return fields
+
+
 def _write_local_record(record: dict) -> Path:
     global _INFLIGHT_SNAP, _INFLIGHT_JSONL_PRESIZE, _LOCAL_RECORD_COMMITTED
     # Codex P2 2026-07-19 (internal-repo review line 1850): reset the committed

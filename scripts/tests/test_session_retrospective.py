@@ -1903,3 +1903,123 @@ def test_local_only_backlog_does_not_starve_drain(project, monkeypatch):
     monkeypatch.setattr(mod, "mode_kl_only", lambda session_id: dispatched.append(session_id))
     mod.mode_kl_drain(max_sessions=10)
     assert dispatched == ["s10"]
+
+
+
+def receipt_inputs():
+    record = {"capture_id": "capture-1", "session_id": "source-1", "entity": "example",
+              "branch": "feature/one", "kl_written": True}
+    binding = {"organization": "ExampleOrg", "repository": "ExampleOrg/example",
+               "store_reference": "owner-store:notes", "expected_record_id": "note-1",
+               "sanitized_artifact_id": "artifact-1", "sanitized_artifact_sha256": "a" * 64,
+               "outcome": "pending", "trigger": "manual_summary"}
+    readback = {"organization": "ExampleOrg", "entity": "example", "store_reference": "owner-store:notes",
+                "capture_id": "capture-1", "record_id": "note-1", "artifact_sha256": "a" * 64,
+                "evidence": ["receipt:read-1"]}
+    return record, binding, readback
+
+
+def test_receipt_v2_exact_readback_and_provenance(project):
+    mod = _load_module(project)
+    record, binding, readback = receipt_inputs()
+    result = mod.capture_receipt_v2(record, binding, readback)
+    assert result["schema"] == "session-capture-receipt/v2"
+    assert result["delivery_state"] == "verified"
+    assert result["persisted_record_id"] == "note-1"
+    assert result["source_session_id"] == "source-1"
+    assert result["trigger"] == "manual_summary"
+    assert result["operator_id"] is None
+    assert result == mod.capture_receipt_v2(record, binding, readback)
+    assert "session_minutes" not in result
+
+
+@pytest.mark.parametrize("field", ["organization", "entity", "store_reference", "capture_id", "record_id", "artifact_sha256"])
+def test_receipt_v2_wrong_readback_requires_reconciliation(project, field):
+    mod = _load_module(project)
+    record, binding, readback = receipt_inputs()
+    readback[field] = "foreign"
+    result = mod.capture_receipt_v2(record, binding, readback)
+    assert result["delivery_state"] == "unknown"
+    assert result["persisted_record_id"] is None
+    assert result["verification_evidence"] == []
+
+
+@pytest.mark.parametrize("field", ["organization", "store_reference", "expected_record_id", "sanitized_artifact_id", "sanitized_artifact_sha256"])
+def test_receipt_v2_missing_required_binding_is_not_verified(project, field):
+    mod = _load_module(project)
+    record, binding, readback = receipt_inputs()
+    binding.pop(field)
+    assert mod.capture_receipt_v2(record, binding, readback)["delivery_state"] == "unknown"
+
+
+def test_receipt_v2_boolean_or_empty_ack_is_not_persistence(project):
+    mod = _load_module(project)
+    record, binding, readback = receipt_inputs()
+    assert mod.capture_receipt_v2(record, binding)["delivery_state"] == "acknowledged_unverified"
+    with pytest.raises(ValueError, match="capture_readback_rejected"):
+        mod.capture_receipt_v2(record, binding, {})
+    readback["evidence"] = []
+    assert mod.capture_receipt_v2(record, binding, readback)["delivery_state"] == "unknown"
+
+
+def test_receipt_v2_captured_local_policy_wins_despite_ambient_keys(project, monkeypatch):
+    mod = _load_module(project)
+    monkeypatch.setenv("MCP_API_KEY", "fixture")
+    record, binding, readback = receipt_inputs()
+    record["delivery_policy"] = "local_only"
+    result = mod.capture_receipt_v2(record, binding, readback)
+    assert result["delivery_state"] == "local_only"
+    assert result["persisted_record_id"] is None
+    assert result["verification_evidence"] == []
+
+
+@pytest.mark.parametrize("outcome", ["pending", "failed", "no_actionable_signal", "unknown"])
+def test_receipt_v2_distinct_outcomes_and_legacy_unknowns(project, outcome):
+    mod = _load_module(project)
+    result = mod.capture_receipt_v2({}, {"outcome": outcome})
+    assert result["delivery_state"] == outcome
+    assert result["source_session_id"] is None
+    assert result["capture_id"] is None
+    assert result["legacy_kl_written"] is None
+    assert result["trigger"] == "unknown"
+    assert result["sanitized_artifact_sha256"] is None
+
+
+def test_receipt_v2_failure_and_no_signal_cannot_promote_with_readback(project):
+    mod = _load_module(project)
+    record, binding, readback = receipt_inputs()
+    for state in ("failed", "no_actionable_signal"):
+        binding["outcome"] = state
+        assert mod.capture_receipt_v2(record, binding)["delivery_state"] == state
+        assert mod.capture_receipt_v2(record, binding, readback)["delivery_state"] == "unknown"
+
+
+def test_receipt_v2_operator_requires_evidence_and_run_is_separate(project):
+    mod = _load_module(project)
+    record, binding, _ = receipt_inputs()
+    binding.update(operator_id="human-1", provider_run_id="run-2")
+    assert mod.capture_receipt_v2(record, binding)["operator_id"] is None
+    binding["operator_evidence"] = ["receipt:operator-1"]
+    result = mod.capture_receipt_v2(record, binding)
+    assert result["operator_id"] == "human-1"
+    assert result["provider_run_id"] == "run-2"
+    assert result["source_session_id"] == "source-1"
+
+
+@pytest.mark.parametrize("binding", [{"raw_transcript": "narrative"}, {"trigger": "auto-generated"},
+                                      {"sanitized_artifact_sha256": "invalid"},
+                                      {"organization": "untrusted narrative"},
+                                      {"operator_evidence": ["header:Bearer:" + "example" * 4]}])
+def test_receipt_v2_closed_binding_rejects_narratives_credentials_and_bad_versions(project, binding):
+    mod = _load_module(project)
+    with pytest.raises(ValueError):
+        mod.capture_receipt_v2({}, binding)
+
+
+
+@pytest.mark.parametrize("value", ["https://user:dummy@example.test/path", "user:dummy@example.test", "https://example.test/receipt"])
+def test_receipt_v2_rejects_url_and_userinfo_pointers_without_echo(project, value):
+    mod = _load_module(project)
+    with pytest.raises(ValueError) as error:
+        mod.capture_receipt_v2({}, {"store_reference": value})
+    assert value not in str(error.value)

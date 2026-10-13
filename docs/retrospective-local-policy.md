@@ -36,3 +36,42 @@ Rollback: restore the prior collector/package pin and config from owner-controll
 version history. Retain snapshots; do not automatically flush local-only captures.
 Opting into delivery is a separate owner decision and does not authorize a foreign
 entity, new credential, migration or new provider grant.
+
+
+## Receipt v2 read adapter (not wired to delivery)
+
+Reuse decision: `capture_receipt_v2` extends the canonical existing collector as
+an unused pure adapter; snapshots/JSONL, recovery and sink ownership stay with
+existing components. It adds no collector, queue, logger or service. Legacy
+`kl_written` remains readable but maps to `acknowledged_unverified`, not verified
+persistence. Missing context, identities and artifact hashes stay null; old IDs
+are preserved. Trigger provenance is explicit and defaults to unknown; tags do
+not establish automatic capture. Unproved operators remain unknown.
+
+Call the adapter with a legacy record and explicit nonsecret owner binding.
+The closed binding accepts organization/repository/provider/run/operator evidence,
+trigger/package/hook revisions, coverage/missing sources, sanitized artifact
+ID/hash, store reference, expected record ID and outcome. Narrative, URLs/userinfo, recognizable credential patterns
+and unknown fields are rejected. Opaque IDs still require a trusted owner binding;
+this helper is not a general secret detector. The artifact must already be sanitized by the
+canonical capture path; a caller-supplied hash is not sanitizer proof. No metric
+values are manufactured. This adapter does not infer session-start provenance
+from a supplied baseline.
+
+States are local_only, pending, failed, no_actionable_signal, unknown,
+acknowledged_unverified and verified. Empty acknowledgement, legacy boolean or
+hash alone cannot establish verification. A future trusted sink adapter must
+provide an exact readback matching organization/entity/store/capture/expected
+record ID/artifact hash plus evidence pointers. Even then this pure function
+cannot establish the truth or authorization of caller-supplied evidence.
+Captured local-only policy wins over supplied readback. Mismatched readback
+produces unknown, requiring reconciliation before any retry. No network delivery,
+mutation, durable acknowledgement or automatic hook is activated by this helper.
+Retain the result through the existing approved owner-local capture destination
+before acknowledging a hook or disposing of the checkout.
+
+Rollback removes the unused adapter or restores the prior package pin; legacy
+capture formats and delivery behavior are unchanged. The adapter's deterministic
+unit tests include wrong scope/store/hash/record IDs, empty acknowledgements,
+explicit local-only, legacy records and unknown operator provenance. Real sink,
+tenancy and session-teardown canaries remain NOT RUN.
