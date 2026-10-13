@@ -1794,3 +1794,112 @@ def test_snap_order_key_puts_counter_after_zero(project):
     other = Path("20260719T000001Z-main-SIDcap-001.json")
     ordered2 = sorted([other, p_zero], key=mod._snap_order_key)
     assert ordered2 == [p_zero, other]
+
+
+@pytest.mark.parametrize("config", ['{"local_only":true}', '{"local_only":"false"}', '[]', '{'])
+def test_owner_local_policy_blocks_ambient_network(project, monkeypatch, config):
+    mod = _load_module(project)
+    mod.CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    mod.CONFIG_PATH.write_text(config)
+    monkeypatch.setenv("MCP_API_KEY", "dummy-key")
+    monkeypatch.setenv("KL_ENTITY", "test-owner")
+    monkeypatch.setenv("KL_MCP_URL", "https://sink.example.test/api/mcp")
+    def forbidden(*args, **kwargs):
+        pytest.fail("local-only called network")
+    monkeypatch.setattr(mod, "_kl_urlopen", forbidden)
+    assert mod._kl_ready("test-owner", False) is False
+    assert mod.kl_create_note("test-owner", "title", "body", []) is False
+    mod.mode_kl_only("canary")
+    mod.mode_kl_drain()
+
+
+def test_local_only_capture_survives_config_change(project, monkeypatch):
+    mod = _load_module(project)
+    mod.CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    mod.CONFIG_PATH.write_text('{"local_only":true}')
+    log = project / "transcript.jsonl"
+    log.write_text(json.dumps({"type":"user", "message":{"role":"user", "content":"test"}})+"\n")
+    mod.mode_stop("local-canary", local_only=True, transcript=str(log))
+    snapshots = list(mod.RETROSPECTIVES_DIR.glob("*-*.json"))
+    assert len(snapshots) == 1
+    record = json.loads(snapshots[0].read_text())
+    assert record["delivery_policy"] == "local_only"
+    assert record["kl_written"] is False
+    mod.CONFIG_PATH.write_text('{"local_only":false}')
+    monkeypatch.setenv("MCP_API_KEY", "dummy-key")
+    monkeypatch.setenv("KL_ENTITY", "test-owner")
+    monkeypatch.setattr(mod, "kl_create_note", lambda *a, **k: pytest.fail("exported local capture"))
+    mod.mode_kl_only("local-canary")
+    assert "kl_in_flight_at" not in json.loads(snapshots[0].read_text())
+    # Pruned snapshot fallback must preserve the captured policy as well.
+    snapshots[0].unlink()
+    mod.mode_kl_only("local-canary")
+
+
+def test_env_local_only_cannot_be_cleared_by_false_config(project, monkeypatch):
+    mod = _load_module(project)
+    mod.CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    mod.CONFIG_PATH.write_text('{"local_only":false}')
+    monkeypatch.setenv("SESSION_RETRO_LOCAL_ONLY", "1")
+    assert mod._configured_local_only() is True
+
+
+def test_diff_without_start_baseline_does_not_use_main(project, monkeypatch):
+    mod = _load_module(project)
+    monkeypatch.delenv("SESSION_RETRO_START_SHA", raising=False)
+    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: pytest.fail("guessed baseline"))
+    assert mod._git_diff_stats() == ""
+    monkeypatch.setenv("SESSION_RETRO_START_SHA", "--output=bad")
+    assert mod._git_diff_stats() == ""
+
+
+def test_diff_uses_exact_start_commit(project, monkeypatch):
+    import subprocess
+    subprocess.run(["git", "init", "-q", str(project)], check=True)
+    subprocess.run(["git", "-C", str(project), "config", "user.email", "test@example.test"], check=True)
+    subprocess.run(["git", "-C", str(project), "config", "user.name", "Test"], check=True)
+    tracked = project / "tracked.txt"
+    tracked.write_text("inherited\n")
+    subprocess.run(["git", "-C", str(project), "add", "tracked.txt"], check=True)
+    subprocess.run(["git", "-C", str(project), "commit", "-qm", "start"], check=True)
+    baseline = subprocess.check_output(["git", "-C", str(project), "rev-parse", "HEAD"], text=True).strip()
+    tracked.write_text("inherited\nsession change\n")
+    subprocess.run(["git", "-C", str(project), "commit", "-qam", "session"], check=True)
+    mod = _load_module(project)
+    monkeypatch.setenv("SESSION_RETRO_START_SHA", baseline)
+    assert "1 insertion" in mod._git_diff_stats()
+    monkeypatch.setenv("SESSION_RETRO_START_SHA", "f" * 40)
+    assert mod._git_diff_stats() == ""
+
+
+
+def test_capture_policy_is_fixed_before_sync_delivery(project, monkeypatch):
+    mod = _load_module(project)
+    mod.CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    mod.CONFIG_PATH.write_text('{"local_only":true,"entity":"test-owner"}')
+    monkeypatch.setenv("MCP_API_KEY", "dummy-key")
+    log = project / "transcript.jsonl"
+    log.write_text(json.dumps({"type":"user", "message":{"role":"user", "content":"test"}})+"\n")
+    original = mod._write_local_record
+    def change_policy(record):
+        snap = original(record)
+        mod.CONFIG_PATH.write_text('{"local_only":false,"entity":"test-owner"}')
+        return snap
+    monkeypatch.setattr(mod, "_write_local_record", change_policy)
+    monkeypatch.setattr(mod, "kl_create_note", lambda *a, **k: pytest.fail("exported fixed local-only policy"))
+    mod.mode_stop("fixed-policy", transcript=str(log))
+
+
+def test_local_only_backlog_does_not_starve_drain(project, monkeypatch):
+    import time
+    mod = _load_module(project)
+    monkeypatch.setenv("MCP_API_KEY", "dummy-key")
+    for n in range(11):
+        snap = mod.RETROSPECTIVES_DIR / f"2026-01-01T0000{n:02d}-s{n}.json"
+        snap.write_text(json.dumps({"session_id": f"s{n}", "kl_written":False,
+                                   "delivery_policy":"local_only" if n < 10 else "legacy_optional"}))
+        os.utime(snap, (time.time()-120, time.time()-120))
+    dispatched = []
+    monkeypatch.setattr(mod, "mode_kl_only", lambda session_id: dispatched.append(session_id))
+    mod.mode_kl_drain(max_sessions=10)
+    assert dispatched == ["s10"]

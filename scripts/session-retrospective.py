@@ -183,12 +183,23 @@ def _get_branch() -> str:
 
 
 def _git_diff_stats() -> str:
+    # Only an explicit session-start commit can attribute changes to this
+    # session. A comparison with main includes inherited checkout differences.
+    baseline = (os.environ.get("SESSION_RETRO_START_SHA") or "").strip()
+    if not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", baseline):
+        return ""
     try:
-        r = subprocess.run(
-            ["git", "-C", str(REPO_ROOT), "diff", "--shortstat", "origin/main...HEAD"],
-            capture_output=True, text=True, timeout=5,
+        checked = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "cat-file", "-t", baseline],
+            capture_output=True, text=True, timeout=5, check=False,
         )
-        return (r.stdout or "").strip()
+        if checked.returncode != 0 or checked.stdout.strip() != "commit":
+            return ""
+        r = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "diff", "--shortstat", baseline, "HEAD", "--"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        return (r.stdout or "").strip() if r.returncode == 0 else ""
     except Exception as e:
         print(f"[session-retro] git_diff_stats: {type(e).__name__}", file=sys.stderr)
         return ""
@@ -209,8 +220,31 @@ def _resolve_entity() -> Optional[str]:
     return None
 
 
+def _configured_local_only() -> bool:
+    """Owner policy wins over ambient keys; invalid policy fails closed.
+
+    Unlike Stop's --local-only (synchronous leg only), this policy also
+    disables background flush/drain. Values never appear in diagnostics.
+    """
+    if os.environ.get("SESSION_RETRO_LOCAL_ONLY", "").strip().lower() not in ("", "0", "false"):
+        return True
+    try:
+        if not CONFIG_PATH.exists():
+            return False  # Legacy installations keep their existing behavior.
+        cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        if not isinstance(cfg, dict):
+            raise TypeError("expected object")
+        policy = cfg.get("local_only", False)
+        if not isinstance(policy, bool):
+            raise TypeError("local_only must be boolean")
+        return policy
+    except (OSError, ValueError, TypeError):
+        print("[session-retro] invalid delivery policy; local-only", file=sys.stderr)
+        return True
+
+
 def _kl_ready(entity: Optional[str], local_only: bool) -> bool:
-    if local_only or not entity:
+    if local_only or _configured_local_only() or not entity:
         return False
     return bool((os.environ.get("MCP_API_KEY") or "").strip())
 
@@ -315,6 +349,8 @@ def _kl_url() -> Optional[str]:
     per-deployment secret in disguise, so we never invent one; callers
     skip the network leg when None.
     """
+    if _configured_local_only():
+        return None
     for key in ("KL_MCP_URL", "KNOWLEDGE_LAYER_MCP_URL"):
         val = os.environ.get(key) or ""
         if val.strip():
@@ -1380,6 +1416,8 @@ def mode_kl_only(session_id: str = "") -> None:
                     continue
                 if str(candidate.get("session_id") or "") != session_id:
                     continue
+                if candidate.get("delivery_policy") == "local_only":
+                    continue
                 if candidate.get("kl_written") is True:
                     # Codex P2 2026-07-19 (ai-starter-pack line 965):
                     # remember that this session HAS a flushed snapshot so
@@ -1482,6 +1520,8 @@ def mode_kl_only(session_id: str = "") -> None:
                 # succeeded, then a follow-up flush that hits the JSONL
                 # fallback, must not re-upload the same row.
                 if candidate.get("kl_written") is True:
+                    continue
+                if candidate.get("delivery_policy") == "local_only":
                     continue
                 if str(candidate.get("session_id") or "") == session_id:
                     cid = str(candidate.get("capture_id") or "")
@@ -1750,6 +1790,8 @@ def mode_kl_drain(max_sessions: int = 10) -> None:
         if not isinstance(candidate, dict):
             continue
         if candidate.get("kl_written") is True:
+            continue
+        if candidate.get("delivery_policy") == "local_only":
             continue
         if _lease_fresh(candidate):
             continue
@@ -2034,6 +2076,8 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False,
         "kl_written": False,
         "entity": entity,
         "source": "ai-starter-pack",
+        "delivery_policy": "local_only" if _configured_local_only() else "legacy_optional",
+        "start_baseline": (os.environ.get("SESSION_RETRO_START_SHA") or "").strip() or None,
     }
 
     if os.environ.get("SESSION_RETRO_DRY_RUN"):
@@ -2088,7 +2132,7 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False,
 
     # KL network leg (optional). Callers that must stay within Stop budget use --local-only
     # and background a second invocation without --local-only for this path.
-    if _kl_ready(entity, local_only):
+    if record["delivery_policy"] != "local_only" and _kl_ready(entity, local_only):
         assert entity is not None
         safe_branch = branch.replace("/", "-").replace(" ", "-")
         branch_tag = f"branch:{safe_branch}"
