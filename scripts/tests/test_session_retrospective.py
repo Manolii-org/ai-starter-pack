@@ -2023,3 +2023,23 @@ def test_receipt_v2_rejects_url_and_userinfo_pointers_without_echo(project, valu
     with pytest.raises(ValueError) as error:
         mod.capture_receipt_v2({}, {"store_reference": value})
     assert value not in str(error.value)
+
+
+@pytest.mark.parametrize("branch", ["feature/foo+bar", "fix/token-refresh", "feature/日本語", "fix/api-key-rotation"])
+def test_receipt_v2_preserves_legacy_git_identity(project, branch):
+    mod = _load_module(project)
+    record, binding, _ = receipt_inputs()
+    record.update(branch=branch, capture_id="20261016-" + branch.replace("/", "--") + "-source-1")
+    result = mod.capture_receipt_v2(record, binding)
+    assert result["ref"] == branch
+    assert result["capture_id"] == record["capture_id"]
+
+
+@pytest.mark.parametrize("value", ["https://example.test/id", "user:password@example.test", "two words", "line\nbreak", "ghp_" + "x" * 24])
+def test_receipt_v2_legacy_identity_keeps_credential_and_control_rejection(project, value):
+    mod = _load_module(project)
+    record, binding, _ = receipt_inputs()
+    for field in ("branch", "capture_id", "session_id"):
+        with pytest.raises(ValueError) as error:
+            mod.capture_receipt_v2({**record, field: value}, binding)
+        assert value not in str(error.value)

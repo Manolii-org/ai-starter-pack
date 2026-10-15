@@ -667,16 +667,18 @@ def capture_receipt_v2(record: dict, binding: dict, readback: dict | None = None
     if not isinstance(record, dict) or not isinstance(binding, dict) or set(binding) - allowed:
         raise ValueError("capture_binding_rejected")
 
-    def pointer(value):
+    def pointer(value, *, legacy_identity=False):
         if value is None or value == "":
             return None
-        if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_.:/@-]{1,512}", value):
+        # Preserve punctuation and Unicode in existing IDs and Git refs.
+        pattern = r"[^\s\x00-\x1f\x7f]{1,512}" if legacy_identity else r"[A-Za-z0-9_.:/@-]{1,512}"
+        if not isinstance(value, str) or not re.fullmatch(pattern, value):
             raise ValueError("capture_pointer_rejected")
         # Retain opaque owner-local pointers, never URLs or userinfo forms.
         if "://" in value or (":" in value and "@" in value):
             raise ValueError("capture_pointer_rejected")
         # Reject recognizable credential/token forms and narrative/header text.
-        if re.search(r"(?i)(?:bearer|password|secret|token|api[-_]?key)[-_:]", value):
+        if not legacy_identity and re.search(r"(?i)(?:bearer|password|secret|token|api[-_]?key)[-_:]", value):
             raise ValueError("capture_pointer_rejected")
         if re.search(r"(?:sk-|ghp_|github_pat_|eyJ)[A-Za-z0-9_-]{12,}", value):
             raise ValueError("capture_pointer_rejected")
@@ -702,13 +704,13 @@ def capture_receipt_v2(record: dict, binding: dict, readback: dict | None = None
     evidence = pointers(binding.get("operator_evidence", []))
     fields = {
         "schema": "session-capture-receipt/v2",
-        "capture_id": pointer(record.get("capture_id")),
-        "source_session_id": pointer(record.get("source_session_id") or record.get("session_id")),
+        "capture_id": pointer(record.get("capture_id"), legacy_identity=True),
+        "source_session_id": pointer(record.get("source_session_id") or record.get("session_id"), legacy_identity=True),
         "provider_run_id": pointer(binding.get("provider_run_id")),
         "organization": pointer(binding.get("organization")),
         "entity": pointer(record.get("entity")),
         "repository": pointer(binding.get("repository")),
-        "ref": pointer(record.get("branch")),
+        "ref": pointer(record.get("branch"), legacy_identity=True),
         "start_baseline": pointer(record.get("start_baseline")),
         "provider": pointer(binding.get("provider")),
         "operator_id": pointer(binding.get("operator_id")) if evidence else None,
