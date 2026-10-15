@@ -98,6 +98,119 @@ def _opener(
 ALL_HIGH = dict.fromkeys(shadow.judge_shadow_questions(), 0.9)
 
 
+@pytest.mark.parametrize("model", ["jev-1.13.0", "jev-1.14.0"])
+def test_explicit_model_pin_reaches_wire_receipt_and_summary(tmp_path, model):
+    calls = []
+    reason, receipts = shadow.run_shadow(
+        **_workspace(tmp_path, {"a": "post"}),
+        pr_number=7,
+        head_sha=SHA,
+        env=_env(**{shadow.MODEL_ENV: model}),
+        opener=_opener(ALL_HIGH, model=model, sink=calls),
+    )
+    assert reason is None
+    assert json.loads(calls[0].data)["model"] == model
+    assert receipts[0]["pinned_model"] == model
+    assert receipts[0]["shadow_class"] == "agreement_keep"
+    assert model in shadow._summary(reason, receipts)
+
+
+@pytest.mark.parametrize("model", ["", "jev-latest", "jev-1.15.0", " jev-1.14.0", "jev-1.14.0\n"])
+def test_invalid_model_pin_refuses_before_transport(tmp_path, model):
+    calls = []
+    reason, receipts = shadow.run_shadow(
+        **_workspace(tmp_path, {"a": "post"}),
+        pr_number=7,
+        head_sha=SHA,
+        env=_env(**{shadow.MODEL_ENV: model}),
+        opener=_opener(ALL_HIGH, sink=calls),
+    )
+    assert (reason, receipts, calls) == ("model_not_pinned", [], [])
+
+
+def test_candidate_response_from_baseline_is_unavailable_and_payload_free(tmp_path):
+    _, receipts = shadow.run_shadow(
+        **_workspace(tmp_path, {"a": "post"}),
+        pr_number=7,
+        head_sha=SHA,
+        env=_env(**{shadow.MODEL_ENV: "jev-1.14.0"}),
+        opener=_opener(ALL_HIGH, model="jev-1.13.0"),
+    )
+    assert receipts[0]["pinned_model"] == "jev-1.14.0"
+    assert receipts[0]["shadow_class"] == "unavailable"
+    assert receipts[0]["error_class"] == "ShadowResponseError"
+    assert receipts[0]["override"] == "judge_unchanged"
+    assert SECRET_MESSAGE not in json.dumps(receipts)
+
+
+def test_generic_model_override_does_not_select_this_surface(tmp_path):
+    calls = []
+    _, receipts = shadow.run_shadow(
+        **_workspace(tmp_path, {"a": "post"}),
+        pr_number=7,
+        head_sha=SHA,
+        env=_env(JEV_MODEL="jev-1.14.0"),
+        opener=_opener(ALL_HIGH, sink=calls),
+    )
+    assert json.loads(calls[0].data)["model"] == "jev-1.13.0"
+    assert receipts[0]["pinned_model"] == "jev-1.13.0"
+
+
+def test_surface_model_pin_overrides_generic_model_when_both_are_set(tmp_path):
+    calls = []
+    _, receipts = shadow.run_shadow(
+        **_workspace(tmp_path, {"a": "post"}),
+        pr_number=7,
+        head_sha=SHA,
+        env=_env(JEV_MODEL="jev-1.13.0", **{shadow.MODEL_ENV: "jev-1.14.0"}),
+        opener=_opener(ALL_HIGH, model="jev-1.14.0", sink=calls),
+    )
+    assert json.loads(calls[0].data)["model"] == "jev-1.14.0"
+    assert receipts[0]["pinned_model"] == "jev-1.14.0"
+    assert receipts[0]["shadow_class"] == "agreement_keep"
+
+
+def test_empty_candidate_run_summary_preserves_selected_pin(tmp_path):
+    ws = _workspace(tmp_path, {"orphan": "post"})
+    (ws["candidates_dir"] / "skill.json").write_text(
+        json.dumps({"source": "skill", "findings": []})
+    )
+    calls = []
+    env = _env(**{shadow.MODEL_ENV: "jev-1.14.0"})
+    reason, receipts = shadow.run_shadow(
+        **ws,
+        pr_number=7,
+        head_sha=SHA,
+        env=env,
+        opener=_opener(ALL_HIGH, model="jev-1.14.0", sink=calls),
+    )
+    assert (reason, receipts, calls) == (None, [], [])
+    summary = shadow._summary(reason, receipts, model=env[shadow.MODEL_ENV])
+    assert "jev-1.14.0" in summary and "jev-1.13.0" not in summary
+    assert "observed=0" in summary
+
+
+def test_main_forwards_candidate_pin_to_empty_summary(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv(shadow.MODEL_ENV, "jev-1.14.0")
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    monkeypatch.setattr(shadow, "run_shadow", lambda **_: (None, []))
+    assert shadow.main(["--pr-number", "7", "--sha", SHA, "--output", str(tmp_path / "o")]) == 0
+    summary = capsys.readouterr().out
+    assert "jev-1.14.0" in summary and "jev-1.13.0" not in summary
+    assert "observed=0" in summary
+
+
+def test_main_invalid_pin_still_refuses_before_transport(tmp_path, monkeypatch, capsys):
+    for key, value in _env(**{shadow.MODEL_ENV: "jev-latest", "CLIENT_AI_POLICY": ""}).items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    calls = []
+    monkeypatch.setattr(shadow, "evaluate", lambda *args, **kwargs: calls.append(args))
+    assert shadow.main(["--pr-number", "7", "--sha", SHA, "--output", str(tmp_path / "o")]) == 0
+    assert calls == []
+    assert "not run (model_not_pinned)" in capsys.readouterr().out
+
+
 @pytest.mark.parametrize(
     ("over", "reason"),
     [
