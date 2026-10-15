@@ -1,7 +1,7 @@
 # Jev judge shadow (CI-only, observe-only)
 
 An opt-in arm of `pr-assessment-reusable.yml` that measures whether Jev
-(TypeSafe System One, pinned `jev-1.13.0`) agrees with the Judge's four
+(TypeSafe System One, default pin `jev-1.13.0`) agrees with the Judge's four
 per-finding gates. Pack equivalent of Manolii master's
 `JEV_ENABLED_JUDGE_FINDING_SHADOW` judge shadow.
 
@@ -48,6 +48,16 @@ that case no provider call is made.
 
 **Rollback:** set `JEV_ENABLED_JUDGE_FINDING_SHADOW=0`. The caller doesn't
 need editing.
+
+For a controlled script evaluation, set
+`JEV_JUDGE_FINDING_SHADOW_MODEL=jev-1.14.0` to measure the new version. The
+only accepted values are the exact pins `jev-1.13.0` and `jev-1.14.0`;
+unset defaults to `jev-1.13.0`, and all other values refuse before a provider
+call. Receipts and the summary report the requested pin, and responses must
+resolve to that exact version. Generic `JEV_MODEL` variables do not select
+this surface's model. This does not activate the shadow or change its gates,
+thresholds, budgets, or authority. The reusable workflow currently does not
+forward this model variable, so its default remains the baseline pin.
 
 ## Credentials: entity-scoped only
 

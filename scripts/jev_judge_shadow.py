@@ -33,6 +33,8 @@ from typing import Any
 
 FLAG_NAME = "JEV_ENABLED_JUDGE_FINDING_SHADOW"
 MODEL = "jev-1.13.0"
+MODEL_ENV = "JEV_JUDGE_FINDING_SHADOW_MODEL"
+SUPPORTED_MODELS = frozenset({MODEL, "jev-1.14.0"})
 POLICY_VERSION = "pack-judge-shadow-v1"
 SCHEMA_VERSION = 1
 SURFACE = "pack_judge_finding_shadow"
@@ -115,6 +117,8 @@ def refusal_reason(env: Mapping[str, str]) -> str | None:
         return "entity_unset"
     if not env.get("TYPESAFE_API_KEY", ""):
         return "credential_unavailable"
+    if env.get(MODEL_ENV, MODEL) not in SUPPORTED_MODELS:
+        return "model_not_pinned"
     return None
 
 
@@ -254,6 +258,9 @@ def evaluate(
     *,
     opener: Callable[..., Any] = open_no_redirect,
 ) -> dict[str, float]:
+    model = env.get(MODEL_ENV, MODEL)
+    if model not in SUPPORTED_MODELS:
+        raise ShadowResponseError("model must be an approved version pin")
     base = (env.get("TYPESAFE_BASE_URL", "") or DEFAULT_BASE_URL).strip().rstrip("/")
     if not base.startswith("https://"):
         raise ShadowTransportError("TYPESAFE_BASE_URL must be https")
@@ -261,7 +268,7 @@ def evaluate(
     request = urllib.request.Request(
         f"{base}/v1/systemone",
         data=json.dumps(
-            {"state": state, "model": MODEL, "questions": questions},
+            {"state": state, "model": model, "questions": questions},
             separators=(",", ":"),
         ).encode("utf-8"),
         headers={
@@ -284,7 +291,7 @@ def evaluate(
         data = json.loads(raw)
     except ValueError:
         raise ShadowResponseError("invalid json") from None
-    if not isinstance(data, dict) or data.get("model") != MODEL:
+    if not isinstance(data, dict) or data.get("model") != model:
         raise ShadowResponseError("model mismatch")
     answers = data.get("answers")
     if not isinstance(answers, dict) or set(answers) != set(questions):
@@ -319,6 +326,7 @@ def run_shadow(
     reason = refusal_reason(env)
     if reason:
         return reason, []
+    model = env.get(MODEL_ENV, MODEL)
     decisions = load_decisions(judge_log_dir, pr_number, head_sha)
     if not decisions:
         return "no_judge_decisions", []
@@ -342,7 +350,7 @@ def run_shadow(
             "pr_number": pr_number,
             "head_sha": head_sha,
             "finding_id": finding["finding_id"],
-            "pinned_model": MODEL,
+            "pinned_model": model,
             "policy_version": POLICY_VERSION,
             "thresholds": {"all_nouls_min": NOUL_THRESHOLD},
             "judge_kept": kept,
@@ -378,15 +386,21 @@ def run_shadow(
     return None, receipts
 
 
-def _summary(reason: str | None, receipts: list[dict[str, Any]]) -> str:
+def _summary(
+    reason: str | None,
+    receipts: list[dict[str, Any]],
+    *,
+    model: str = MODEL,
+) -> str:
     if reason:
         return f"Jev judge shadow: not run ({reason}). Judge verdict unaffected."
     counts: dict[str, int] = {}
     for r in receipts:
         counts[r["shadow_class"]] = counts.get(r["shadow_class"], 0) + 1
     detail = ", ".join(f"{k}={v}" for k, v in sorted(counts.items())) or "none"
+    models = ", ".join(sorted({r["pinned_model"] for r in receipts})) or model
     return (
-        f"Jev judge shadow ({MODEL}, observe-only): observed={len(receipts)} {detail}. "
+        f"Jev judge shadow ({models}, observe-only): observed={len(receipts)} {detail}. "
         "Judge verdict unaffected."
     )
 
@@ -414,7 +428,7 @@ def main(argv: list[str] | None = None) -> int:
             with args.output.open("a", encoding="utf-8") as handle:
                 for receipt in receipts:
                     handle.write(json.dumps(receipt, sort_keys=True) + "\n")
-        line = _summary(reason, receipts)
+        line = _summary(reason, receipts, model=os.environ.get(MODEL_ENV, MODEL))
     except Exception as exc:  # noqa: BLE001 — fail open: never fail the Judge job.
         line = f"Jev judge shadow: internal error ({type(exc).__name__}). Judge verdict unaffected."
     print(f"[jev-judge-shadow] {line}")
