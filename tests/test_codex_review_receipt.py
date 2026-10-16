@@ -6,6 +6,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("receipt", ROOT / "scripts/ci/codex_review_receipt.py")
+assert SPEC is not None and SPEC.loader is not None
 receipt = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(receipt)
 READY = {"RANGE_STATE": "ready", "AUTH_PRESENT": "true", "INSTALL_OUTCOME": "success", "SCAN_OUTCOME": "success", "SCAN_RC": "0"}
