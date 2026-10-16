@@ -16,6 +16,7 @@ SENSITIVE = re.compile(
     r"(?:^|/)(?:ci|\.github|\.gitlab|\.ai|\.claude|\.codex|\.cursor|\.githooks|auth(?:entication|orization)?|security|secrets?|"
     r"migrations?|supabase|policies|permissions|deploy|infrastructure|terraform|"
     r"crypto(?:graphy)?|network|webhooks?|audit|tenants?)(?:/|[_.-]|$)|"
+    r"(?:^|[/_.-])(?:deploy(?:ment)?|merge|hold|feature[-_]train|polic(?:y|ies)|guard|release|rollout)(?:/|[_.-]|$)|"
     r"(?:^|/)(?:middleware|proxy|schema|Dockerfile|docker-compose|CODEOWNERS)(?:[./_-]|$)|"
     r"(?:^|[/_.-])(?:rls|oauth|jwt|ssrf|csrf|acl|rbac|encryption|signing|"
     r"saniti[sz](?:er|ation)|redact(?:ion|or)?|credentials?|secrets?|tokens?|session|payment|billing|boundaries|isolation|safety|authorization|authentication)(?:/|[_.-]|$)|"

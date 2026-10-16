@@ -81,6 +81,22 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Load review helper from immutable base revision
+        id: trusted
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 "$RUNNER_TEMP/codex-trusted"
+          helper="$RUNNER_TEMP/codex-trusted/codex_review_receipt.py"
+          rm -f "$helper"
+          if ! git show "$BASE_SHA:scripts/ci/codex_review_receipt.py" > "$helper"; then
+            rm -f "$helper"
+            echo "::error::Trusted base helper unavailable. Bootstrap this adoption with native review and human workflow review; never execute the PR helper with credentials."
+            exit 1
+          fi
+          chmod 400 "$helper"
+
       - name: Resolve diff range
         id: range
         run: |
@@ -115,7 +131,7 @@ jobs:
             exit 0
           fi
           git diff --name-only -z "$BASE...$HEAD" > "$RUNNER_TEMP/codex-security-paths.bin"
-          decision=$(python3 scripts/ci/codex_review_receipt.py --classify-paths "$RUNNER_TEMP/codex-security-paths.bin")
+          decision=$(python3 -I "$RUNNER_TEMP/codex-trusted/codex_review_receipt.py" --classify-paths "$RUNNER_TEMP/codex-security-paths.bin")
           if [ "$decision" = "security_required=false" ]; then
             echo "range_state=security_exempt" >> "$GITHUB_OUTPUT"
             echo "scannable=false" >> "$GITHUB_OUTPUT"
@@ -230,9 +246,9 @@ jobs:
 
       - name: Redact security artifacts
         id: redact
-        if: always() && steps.auth.outputs.present == 'true'
+        if: always() && steps.trusted.outcome == 'success' && steps.auth.outputs.present == 'true'
         run: >-
-          python3 scripts/ci/codex_review_receipt.py
+          python3 -I "$RUNNER_TEMP/codex-trusted/codex_review_receipt.py"
           --redact-directory "$RUNNER_TEMP/codex-security-diff"
           --auth-file "$CODEX_HOME/auth.json"
 
@@ -242,7 +258,7 @@ jobs:
 
       - name: Record security review execution state
         id: receipt
-        if: always()
+        if: always() && steps.trusted.outcome == 'success'
         env:
           PR_NUM: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -255,7 +271,7 @@ jobs:
           SCAN_WITHHELD: ${{ steps.redact.outputs.withheld != 'false' && 'true' || 'false' }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: >-
-          python3 scripts/ci/codex_review_receipt.py --lane security
+          python3 -I "$RUNNER_TEMP/codex-trusted/codex_review_receipt.py" --lane security
           --input "${{ runner.temp }}/codex-security-diff/findings.json"
           --output "$RUNNER_TEMP/codex-security-receipt.json"
 

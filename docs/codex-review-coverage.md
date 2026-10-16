@@ -68,3 +68,14 @@ It never reruns the model job, publishes a forged status, or retries exhausted
 quota. Install this workflow on the default branch for event-driven recovery.
 Before requiring coverage, verify that the repository permits Actions to rerun
 its own failed jobs and exercise a real late-native-review recovery.
+
+
+The classifier, credential redactor, and receipt writer execute from the immutable
+PR base SHA in an isolated Python process outside the checkout. A PR's modified
+helper is scan input only. First-time adoption without that base helper fails
+before credentials are fetched: bootstrap with native code/security review and
+required human workflow review, then merge the reviewed helper before CLI use.
+Helper updates take effect for subsequent PRs after their reviewed base includes
+them. Same-repository workflow authors retain the existing ability to edit the
+workflow itself; this does not substitute for workflow review or branch controls.
+Merge, deployment, release, hold, guard and policy paths require security review.

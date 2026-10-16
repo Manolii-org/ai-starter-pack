@@ -4,6 +4,7 @@ import json
 import os
 import re
 import subprocess
+import shutil
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,9 @@ ROOT = Path(__file__).resolve().parents[1]
     ("security", '{"findings":[{"title":"an issue","severity":"high"}]}', "completed"),
 ])
 def test_actual_receipt_and_comment_steps(tmp_path, lane, raw, expected):
+    trusted_dir = tmp_path / "codex-trusted"
+    trusted_dir.mkdir()
+    shutil.copyfile(ROOT / "scripts/ci/codex_review_receipt.py", trusted_dir / "codex_review_receipt.py")
     workflow = "codex-pr-review.yml" if lane == "code" else "codex-security-diff-scan.yml"
     data = yaml.safe_load((ROOT / ".github/workflows" / workflow).read_text())
     job = data["jobs"]["review" if lane == "code" else "scan"]
@@ -162,6 +166,9 @@ def test_actual_security_scan_exit_is_bound_to_receipt(tmp_path, scanner_rc, exp
                AUTH_PRESENT='true', INSTALL_OUTCOME='success', SCAN_WITHHELD='false',
                SCAN_OUTCOME='success' if result.returncode == 0 else 'failure',
                SCAN_RC=output.read_text().strip().split('=')[1])
+    trusted_dir = tmp_path / "codex-trusted"
+    trusted_dir.mkdir()
+    shutil.copyfile(ROOT / "scripts/ci/codex_review_receipt.py", trusted_dir / "codex_review_receipt.py")
     record = record.replace('${{ runner.temp }}', str(tmp_path))
     subprocess.run(['bash', '-c', record], cwd=ROOT, env=env, capture_output=True, text=True, check=True, timeout=10)
     assert json.loads((tmp_path / 'codex-security-receipt.json').read_text())['state'] == expected
@@ -187,3 +194,36 @@ def test_raw_security_artifact_cannot_upload_without_redaction(outcome, withheld
             return evaluate(node.left) == evaluate(node.comparators[0])
         raise AssertionError('Unexpected artifact-admission expression')
     assert evaluate(ast.parse(expression, mode='eval').body) is allowed
+
+
+@pytest.mark.parametrize("workflow,job", [("codex-pr-review.yml", "review"), ("codex-security-diff-scan.yml", "scan")])
+def test_secret_handling_executes_base_helper_not_pr_helper(tmp_path, workflow, job):
+    steps = yaml.safe_load((ROOT / ".github/workflows" / workflow).read_text())["jobs"][job]["steps"]
+    trusted = next(step for step in steps if step.get("id") == "trusted")
+    assert steps.index(trusted) < next(i for i, step in enumerate(steps) if step.get("id") == "auth")
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    helper = checkout / "scripts/ci/codex_review_receipt.py"
+    helper.parent.mkdir(parents=True)
+    helper.write_text('print("trusted-base")\n')
+    subprocess.run(["git", "init", "-q"], cwd=checkout, check=True)
+    subprocess.run(["git", "add", "."], cwd=checkout, check=True)
+    subprocess.run(["git", "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base"], cwd=checkout, check=True)
+    base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=checkout, text=True).strip()
+    helper.write_text('raise RuntimeError("PR helper must never execute")\n')
+    env = os.environ | {"RUNNER_TEMP": str(tmp_path), "BASE_SHA": base}
+    subprocess.run(["bash", "-c", trusted["run"]], cwd=checkout, env=env, check=True, capture_output=True)
+    copied = tmp_path / "codex-trusted/codex_review_receipt.py"
+    result = subprocess.run(["python3", "-I", str(copied)], cwd=checkout, env=env, check=True, capture_output=True, text=True)
+    assert result.stdout.strip() == "trusted-base"
+    for step in steps:
+        command = step.get("run", "")
+        if "python3" in command and "codex_review_receipt.py" in command:
+            assert 'python3 -I "$RUNNER_TEMP/codex-trusted/codex_review_receipt.py"' in command
+            assert "python3 scripts/" not in command
+    # Failed base lookup cannot leave a cached helper usable by always() steps.
+    env["BASE_SHA"] = "0" * 40
+    result = subprocess.run(["bash", "-c", trusted["run"]], cwd=checkout, env=env, capture_output=True)
+    assert result.returncode != 0 and not copied.exists()
+    receipt = next(step for step in steps if step.get("id") == "receipt")
+    assert "steps.trusted.outcome == 'success'" in receipt["if"]

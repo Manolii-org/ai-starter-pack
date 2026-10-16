@@ -50,7 +50,7 @@ def test_security_zero_and_nonzero_findings_are_completed_not_clean_permissions(
     assert receipt.classify("security", READY, '[{"title":"an issue"}]') == ("completed", "findings_validated", 1)
 
 
-@pytest.mark.parametrize("path", ["src/auth/session.ts", "supabase/migrations/a.sql", ".github/workflows/test.yml", "src/middleware.ts", "src/jwt.ts", "package-lock.json", "src/tenants/access.py", "deploy/app.toml", ".ai/entity-boundaries.yml", "prisma/schema.prisma", "src/billing/charge.ts", "pyproject.toml", "composer.lock", "Cargo.toml", "scripts/ci/codex_review_receipt.py", "scripts/assessment/sanitiser.py", "lib/redaction.py"])
+@pytest.mark.parametrize("path", ["src/auth/session.ts", "supabase/migrations/a.sql", ".github/workflows/test.yml", "src/middleware.ts", "src/jwt.ts", "package-lock.json", "src/tenants/access.py", "deploy/app.toml", ".ai/entity-boundaries.yml", "prisma/schema.prisma", "src/billing/charge.ts", "pyproject.toml", "composer.lock", "Cargo.toml", "scripts/ci/codex_review_receipt.py", "scripts/assessment/sanitiser.py", "lib/redaction.py", "config/human-merge-policy.yaml", "config/deployment-contracts.yaml", "config/feature-train-policy.yaml", "config/release-holds.yml", "src/policy.ts"])
 def test_sensitive_paths_require_security(path):
     assert receipt.security_required([path])
 

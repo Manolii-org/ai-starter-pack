@@ -68,6 +68,22 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Load review helper from immutable base revision
+        id: trusted
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 "$RUNNER_TEMP/codex-trusted"
+          helper="$RUNNER_TEMP/codex-trusted/codex_review_receipt.py"
+          rm -f "$helper"
+          if ! git show "$BASE_SHA:scripts/ci/codex_review_receipt.py" > "$helper"; then
+            rm -f "$helper"
+            echo "::error::Trusted base helper unavailable. Bootstrap this adoption with native review and human workflow review; never execute the PR helper with credentials."
+            exit 1
+          fi
+          chmod 400 "$helper"
+
       - name: Resolve diff range
         id: range
         run: |
@@ -211,7 +227,7 @@ jobs:
           # and its common encodings; (2) fail-closed — if any 40-char secret
           # chunk survives into whitespace-normalised output, withhold the whole
           # output and skip the artifact rather than publish it.
-          python3 scripts/ci/codex_review_receipt.py \
+          python3 -I "$RUNNER_TEMP/codex-trusted/codex_review_receipt.py" \
             --redact-path "$REVIEW_OUT" --auth-file "$CODEX_HOME/auth.json"
           rm -f "$RUNNER_TEMP/.redactor-pending"
           rm -f "$CODEX_HOME/auth.json"
@@ -223,7 +239,7 @@ jobs:
 
       - name: Record code review execution state
         id: receipt
-        if: always()
+        if: always() && steps.trusted.outcome == 'success'
         env:
           PR_NUM: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -236,7 +252,7 @@ jobs:
           SCAN_WITHHELD: ${{ steps.scan.outputs.withheld }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: >-
-          python3 scripts/ci/codex_review_receipt.py --lane code
+          python3 -I "$RUNNER_TEMP/codex-trusted/codex_review_receipt.py" --lane code
           --input "${{ runner.temp }}/codex-review-out.txt"
           --output "$RUNNER_TEMP/codex-code-receipt.json"
 
