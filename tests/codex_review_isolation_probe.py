@@ -93,10 +93,11 @@ def qualify(codex: Path, *, timeout: int = 30) -> dict:
             except (ValueError, TypeError):
                 checks = None
             expected = {'private_file', 'symlink', 'process_environment', 'descriptor_alias', 'network'}
-            valid = isinstance(checks, dict) and set(checks) == expected and all(v is True for v in checks.values())
+            shaped = isinstance(checks, dict) and set(checks) == expected and all(type(v) is bool for v in checks.values())
+            valid = shaped and all(checks.values())
             return {'qualified': result.returncode == 0 and valid,
                     'reason': 'qualified_tool_sandbox' if result.returncode == 0 and valid else 'sandbox_qualification_failed',
-                    'exit_code': result.returncode, 'checks': checks if valid else None,
+                    'exit_code': result.returncode, 'checks': checks if shaped else None,
                     # Synthetic-only process. Retain startup errors for diagnosis.
                     'diagnostic': result.stderr[-1800:] if result.returncode else '',
                     'scope': 'tool file/proc/descriptor/symlink/network isolation only; not model, MCP, workflow or credential-source acceptance'}

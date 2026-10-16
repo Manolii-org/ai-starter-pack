@@ -32,7 +32,10 @@ def test_subprocess_boundary_requires_all_proofs(tmp_path, monkeypatch, output, 
         return subprocess.CompletedProcess(command, exit_code,
             json.dumps(output) if isinstance(output, dict) else output, 'startup diagnostic')
     monkeypatch.setattr(probe.subprocess, 'run', run)
-    assert probe.qualify(tmp_path / 'codex')['qualified'] is qualified
+    result = probe.qualify(tmp_path / 'codex')
+    assert result['qualified'] is qualified
+    if isinstance(output, dict) and output.get('symlink') is False:
+        assert result['checks'] == output  # failed controls must remain diagnosable
 
 
 @pytest.mark.parametrize('failure,reason', [
