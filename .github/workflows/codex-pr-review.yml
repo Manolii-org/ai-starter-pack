@@ -211,71 +211,8 @@ jobs:
           # and its common encodings; (2) fail-closed — if any 40-char secret
           # chunk survives into whitespace-normalised output, withhold the whole
           # output and skip the artifact rather than publish it.
-          python3 - "$REVIEW_OUT" "$CODEX_HOME/auth.json" <<'PY'
-          import base64, json, os, re, sys
-          p, auth_path = sys.argv[1], sys.argv[2]
-          raw = open(p, encoding="utf-8", errors="replace").read()
-          try:
-              d = json.loads(open(auth_path, encoding="utf-8").read())
-          except Exception:
-              d = {}
-          secrets = []
-          def collect(o):
-              if isinstance(o, str) and len(o) >= 20:
-                  secrets.append(o)
-              elif isinstance(o, dict):
-                  for v in o.values():
-                      collect(v)
-          collect(d.get("tokens", {}))
-          rot13 = lambda t: t.translate(str.maketrans(
-              "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
-              "NOPQRSTUVWXYZABCDEFGHIJKLMnopqrstuvwxyzabcdefghijklm"))
-          variants = set()
-          for s in secrets:
-            variants |= {
-                s,
-                base64.b64encode(s.encode()).decode(),
-                base64.urlsafe_b64encode(s.encode()).decode(),
-                s.encode().hex(),
-                s[::-1],
-                rot13(s),
-            }
-          for v in variants:
-              raw = raw.replace(v, "[REDACTED-CREDENTIAL]")
-          withheld = False
-          # Alnum-only normalisation defeats separator fragmentation
-          # (e.g. "e-y-J..." with dashes between every character); chunk
-          # matching across transform variants catches encoded/reversed/rot13
-          # reconstructions a literal replace cannot.
-          normalised = re.sub(r"[^A-Za-z0-9]", "", raw)
-          for v in variants:
-              vn = re.sub(r"[^A-Za-z0-9]", "", v)
-              if len(vn) < 40:
-                  continue
-              for i in range(0, max(1, len(vn) - 39), 8):
-                  if vn[i:i + 40] in normalised:
-                      withheld = True
-                      break
-              if withheld:
-                  break
-          # Generic net for encodings outside the enumerated set: a token
-          # material stays a long unbroken run of token-family chars under
-          # most transforms (caesar, XOR-then-base64, etc.). No legitimate
-          # review text carries a 300+ char unbroken run.
-          if not withheld and re.search(r"[A-Za-z0-9_+\-.=/]{300,}", raw):
-              withheld = True
-          if withheld:
-              open(p, "w", encoding="utf-8").write(
-                  "[review output withheld: possible credential material detected — "
-                  "see run logs]"
-              )
-              print("WITHHELD: output may contain credential material")
-          else:
-              open(p, "w", encoding="utf-8").write(raw)
-              print(f"redacted {len(secrets)} credential value(s) from review output")
-          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
-              fh.write(f"withheld={'true' if withheld else 'false'}\n")
-          PY
+          python3 scripts/ci/codex_review_receipt.py \
+            --redact-path "$REVIEW_OUT" --auth-file "$CODEX_HOME/auth.json"
           rm -f "$RUNNER_TEMP/.redactor-pending"
           rm -f "$CODEX_HOME/auth.json"
           wc -l "$REVIEW_OUT"
@@ -528,9 +465,8 @@ jobs:
               core.info('code review coverage: ' + process.env.REVIEW_STATE + ' for ' + head);
               return;
             }
-            const [reviews, inline, comments] = await Promise.all([
+            const [reviews, comments] = await Promise.all([
               github.paginate(github.rest.pulls.listReviews, {owner, repo, pull_number, per_page: 100}),
-              github.paginate(github.rest.pulls.listReviewComments, {owner, repo, pull_number, per_page: 100}),
               github.paginate(github.rest.issues.listComments, {owner, repo, issue_number: pull_number, per_page: 100}),
             ]);
             const bot = item => item.user && item.user.login === 'chatgpt-codex-connector[bot]';
@@ -556,7 +492,7 @@ jobs:
             const prefixes = new Set();
             for (const item of comments.filter(bot)) {
               const body = item.body || '';
-              if (true && !bad(item) && /codex review:[^\n]*didn.?t find any major issues/i.test(body)) {
+              if (!bad(item) && /codex review:[^\n]*didn.?t find any major issues/i.test(body)) {
                 const clean = body.match(/reviewed commit:[^0-9a-f]*([0-9a-f]{7,40})/i);
                 if (clean) prefixes.add(clean[1]);
               }
@@ -569,7 +505,7 @@ jobs:
                 if (commit) prefixes.add(commit[1]);
               }
             }
-            let native = true && codeReviews.length > 0;
+            let native = codeReviews.length > 0;
             for (const prefix of prefixes) {
               if (native) break;
               native = await bound(prefix);

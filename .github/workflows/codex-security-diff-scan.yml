@@ -510,13 +510,12 @@ jobs:
               core.info('security review coverage: ' + process.env.REVIEW_STATE + ' for ' + head);
               return;
             }
-            const [reviews, inline, comments] = await Promise.all([
-              github.paginate(github.rest.pulls.listReviews, {owner, repo, pull_number, per_page: 100}),
-              github.paginate(github.rest.pulls.listReviewComments, {owner, repo, pull_number, per_page: 100}),
-              github.paginate(github.rest.issues.listComments, {owner, repo, issue_number: pull_number, per_page: 100}),
-            ]);
+            // Native security completion is published as a summary row, not
+            // as a formal code review. Do not conflate these protocol objects.
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number: pull_number, per_page: 100,
+            });
             const bot = item => item.user && item.user.login === 'chatgpt-codex-connector[bot]';
-            const bad = item => /(?:^|\n)(?:you have reached your Codex usage limits|Codex usage limits have been reached)|connect to github|create a Codex account/i.test(item.body || '');
             const bound = async prefix => {
               if (typeof prefix !== 'string' || !/^[0-9a-f]{7,40}$/i.test(prefix)
                   || !head.toLowerCase().startsWith(prefix.toLowerCase())) return false;
@@ -531,17 +530,9 @@ jobs:
                 return false;
               }
             };
-            const codeReviews = reviews.filter(item => bot(item) && !bad(item) && item.commit_id === head
-              && String(item.state || '').toUpperCase() !== 'PENDING'
-              && /codex review/i.test(item.body || '')
-              && !/codex-security-review|codex security review/i.test(item.body || ''));
             const prefixes = new Set();
             for (const item of comments.filter(bot)) {
               const body = item.body || '';
-              if (false && !bad(item) && /codex review:[^\n]*didn.?t find any major issues/i.test(body)) {
-                const clean = body.match(/reviewed commit:[^0-9a-f]*([0-9a-f]{7,40})/i);
-                if (clean) prefixes.add(clean[1]);
-              }
               for (const line of body.split('\n')) {
                 const cells = line.split('|').map(cell => cell.trim());
                 // Match the status cell, not a word in another column/lane.
@@ -551,7 +542,7 @@ jobs:
                 if (commit) prefixes.add(commit[1]);
               }
             }
-            let native = false && codeReviews.length > 0;
+            let native = false;
             for (const prefix of prefixes) {
               if (native) break;
               native = await bound(prefix);

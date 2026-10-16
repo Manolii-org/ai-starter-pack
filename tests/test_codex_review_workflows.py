@@ -109,7 +109,13 @@ new AsyncFunction('github','core','context','process',p.script)(github,core,cont
     assert (not json.loads(result.stdout)['failures']) == passed
 
 
-def test_actual_recovery_reruns_only_completion_jobs():
+@pytest.mark.parametrize('body,expected', [
+    ('Codex review: Didn’t find any major issues.\nreviewed commit: aaaaaaaaaa', 2),
+    ('| 📝 **Code Review** | ✅ **Completed** | `aaaaaaaaaa` |', 2),
+    ('You have reached your Codex usage limits for code reviews.', 0),
+    ('Codex review: Didn’t find any major issues.\nReviewed commit: bbbbbbbbbb', 0),
+])
+def test_actual_recovery_reruns_only_completion_jobs(body, expected):
     data = yaml.safe_load((ROOT / '.github/workflows/codex-review-recovery.yml').read_text())
     script = data['jobs']['recover']['steps'][0]['with']['script']
     runner = r'''
@@ -120,12 +126,12 @@ listWorkflowRuns:async args=>({data:{workflow_runs:[{id:args.workflow_id,head_sh
 listJobsForWorkflowRun:async args=>({data:[{id:1,name:'Codex review (subscription)',conclusion:'failure'},{id:args.run_id,name:args.run_id==='codex-pr-review.yml'?'Codex review coverage':'Codex security coverage',conclusion:'failure'}]}),
 reRunJobForWorkflowRun:async args=>rerun.push(args.job_id)
 }},paginate:async(fn,args)=>(await fn(args)).data};
-const context={repo:{owner:'example',repo:'project'},payload:{issue:{number:1}}};
+const context={repo:{owner:'example',repo:'project'},payload:{issue:{number:1},comment:{body:p.body}}};
 const AsyncFunction=Object.getPrototypeOf(async function(){}).constructor;
 new AsyncFunction('github','core','context',p.script)(github,{info:()=>{}},context).then(()=>process.stdout.write(JSON.stringify(rerun))).catch(e=>{console.error(e);process.exit(1);});
 '''
-    result = subprocess.run(['node', '-e', runner], input=json.dumps({'script':script}), capture_output=True, text=True, check=True, timeout=10)
-    assert json.loads(result.stdout) == ['codex-pr-review.yml','codex-security-diff-scan.yml']
+    result = subprocess.run(['node', '-e', runner], input=json.dumps({'script':script,'body':body}), capture_output=True, text=True, check=True, timeout=10)
+    assert json.loads(result.stdout) == (['codex-pr-review.yml','codex-security-diff-scan.yml'] if expected else [])
 
 
 @pytest.mark.parametrize('scanner_rc,expected', [(0, 'completed'), (9, 'failed_scan')])

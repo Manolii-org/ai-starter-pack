@@ -76,7 +76,7 @@ def classify(lane: str, env: dict[str, str], output: str | None) -> tuple[str, s
 
 
 def redact_directory(directory: Path, auth_file: Path) -> bool:
-    """Redact common token encodings; withhold artifacts if fragments survive."""
+    """Redact a file/directory; withhold artifacts if credential fragments survive."""
     auth = json.loads(auth_file.read_text(encoding="utf-8"))
     values: list[str] = []
 
@@ -95,7 +95,7 @@ def redact_directory(directory: Path, auth_file: Path) -> bool:
                 base64.b64encode(s.encode()).decode(), base64.urlsafe_b64encode(s.encode()).decode(),
                 codecs.encode(s, "rot_13"))}
     withheld = False
-    for path in directory.rglob("*"):
+    for path in ([directory] if directory.is_file() else directory.rglob("*")):
         if path.is_symlink():
             withheld = True
             continue
@@ -140,7 +140,7 @@ def main() -> int:
     ap.add_argument("--input", type=Path)
     ap.add_argument("--output", type=Path)
     ap.add_argument("--classify-paths", type=Path, help="NUL-delimited git paths")
-    ap.add_argument("--redact-directory", type=Path)
+    ap.add_argument("--redact-directory", "--redact-path", type=Path)
     ap.add_argument("--auth-file", type=Path)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()

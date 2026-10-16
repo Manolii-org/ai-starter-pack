@@ -267,13 +267,13 @@ def test_cost_profile_lean_omits_measured_waste_callers(default_render):
     ("flags", "expected"),
     [
         ({}, {"Hooks": 5, "Commands": 50, "Skills": 32, "Agents": 27,
-              "Scripts": 50, "Husky": 3, "CI": 33, "Docs": 23}),
+              "Scripts": 50, "Husky": 3, "CI": 34, "Docs": 24}),
         ({flag: "true" for flag in FEATURE_FLAGS},
          {"Hooks": 5, "Commands": 53, "Skills": 36, "Agents": 28,
-              "Scripts": 50, "Husky": 3, "CI": 33, "Docs": 25}),
+              "Scripts": 50, "Husky": 3, "CI": 34, "Docs": 26}),
         ({"cost_profile": "lean"},
          {"Hooks": 5, "Commands": 50, "Skills": 32, "Agents": 27,
-              "Scripts": 50, "Husky": 3, "CI": 32, "Docs": 23}),
+              "Scripts": 50, "Husky": 3, "CI": 33, "Docs": 24}),
     ],
 )
 def test_rendered_readme_counts_match_rendered_tree(flags, expected):
@@ -481,8 +481,8 @@ def test_pack_components_contract(default_render):
     # Required secrets (default: no OSS routing or mesh telemetry)
     required_secrets = instance.get("required_secrets", {})
     github_secrets = required_secrets.get("github", [])
-    assert github_secrets == ["ANTHROPIC_API_KEY"], (
-        f"required_secrets.github: expected ['ANTHROPIC_API_KEY'], got {github_secrets}"
+    assert github_secrets == ["DOPPLER_TOKEN_CODEX", "ANTHROPIC_API_KEY"], (
+        f"required_secrets.github: expected dedicated Codex token and direct-provider credential, got {github_secrets}"
     )
 
     doppler_secrets = required_secrets.get("doppler", {})
@@ -525,7 +525,7 @@ def test_pack_components_flags(tmp_path):
 
     # GitHub secrets
     github_secrets = required_secrets.get("github", [])
-    expected_github = {"DOPPLER_SERVICE_TOKEN_LITELLM", "FLY_API_TOKEN", "LITELLM_MASTER_KEY"}  # ANTHROPIC_API_KEY not required on the proxy plane
+    expected_github = {"DOPPLER_TOKEN_CODEX", "DOPPLER_SERVICE_TOKEN_LITELLM", "FLY_API_TOKEN", "LITELLM_MASTER_KEY"}  # ANTHROPIC_API_KEY not required on the proxy plane
     assert set(github_secrets) == expected_github, (
         f"required_secrets.github: expected {expected_github}, got {set(github_secrets)}"
     )

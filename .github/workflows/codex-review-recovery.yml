@@ -21,10 +21,7 @@ jobs:
   recover:
     if: >-
       github.actor == 'chatgpt-codex-connector[bot]' &&
-      (github.event_name == 'pull_request_review' ||
-       (github.event.issue.pull_request &&
-        (contains(github.event.comment.body, 'codex-pull-request-review-summary') ||
-         contains(github.event.comment.body, 'Reviewed commit:'))))
+      (github.event_name == 'pull_request_review' || github.event.issue.pull_request)
     runs-on: ubuntu-slim
     timeout-minutes: 3
     steps:
@@ -36,6 +33,23 @@ jobs:
             const pull_number = context.payload.pull_request?.number || context.payload.issue?.number;
             const pull = (await github.rest.pulls.get({owner, repo, pull_number})).data;
             if (pull.state !== 'open' || pull.draft) return;
+            const event = context.payload.review || context.payload.comment || {};
+            const body = event.body || '';
+            const prefixMatches = prefix => /^[0-9a-f]{7,40}$/i.test(prefix || '')
+              && pull.head.sha.toLowerCase().startsWith(prefix.toLowerCase());
+            const formal = event.commit_id === pull.head.sha
+              && String(event.state || '').toUpperCase() !== 'PENDING'
+              && /codex review/i.test(body);
+            const clean = body.match(/codex review:[^\n]*didn.?t find any major issues[\s\S]*?reviewed commit:[^0-9a-f]*([0-9a-f]{7,40})/i);
+            const summary = body.split('\n').some(line => {
+              const cells = line.split('|').map(cell => cell.trim());
+              const commit = (cells[3] || '').match(/^`([0-9a-f]{7,40})`$/i);
+              return /\*\*(?:Code|Security) Review\*\*/i.test(cells[1] || '')
+                && /^✅\s*\*\*Completed\*\*(?:\s*<relative-time[^>]*>[^<]*<\/relative-time>)?$/i.test(cells[2] || '')
+                && commit && prefixMatches(commit[1]);
+            });
+            // Quota notices and stale events never restart even a coverage job.
+            if (!formal && !(clean && prefixMatches(clean[1])) && !summary) return;
             const lanes = [
               ['codex-pr-review.yml', 'Codex review coverage'],
               ['codex-security-diff-scan.yml', 'Codex security coverage'],
