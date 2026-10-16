@@ -96,7 +96,13 @@ Each round:
 2. Run `check-amber-labels` against that complete label array. A Red result
    first disables any auto-merge request armed by an earlier wake, then vetoes
    all mutation and terminates `blocked_on_human`.
-3. Maintain the existing wake owner and emit its supported heartbeat when available; do not add a competing trigger or poller
+3. Keep the existing PR-activity subscription or accepted durable wake owner as
+   the primary signal. For that owner's bounded heartbeat, use `create_trigger`
+   with `run_once_at` where supported; in remote sessions, fall back to
+   `ScheduleWakeup`, then one supported background wait. Only use a fallback
+   that delivers a real wake within the existing owner's policy. If none works,
+   skip heartbeat scheduling and retain the actual owner or accepted handoff.
+   Never simulate a wake with a blocking sleep or add a competing trigger/poller.
 4. Triage events: new review comments, CI failure, merge conflict, branch out of sync
 5. Decide: continue | terminal
 6. If continue: spawn inline fix or request human decision
