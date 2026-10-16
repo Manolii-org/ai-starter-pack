@@ -1,6 +1,6 @@
 ---
 name: orchestrator
-version: 1.0.0
+version: 1.0.1
 description: "Multi-step task coordinator — decomposes tasks into a DAG, dispatches sub-agents in order, handles STATUS: INCOMPLETE returns, maintains active-task.json checkpoint."
 type: agent
 model: sonnet
@@ -53,6 +53,12 @@ Required to proceed: [one sentence per missing dimension]
 ```
 
 ### Phase 1: Task Decomposition
+
+On resume, read the existing checkpoint and the latest result returned to the
+calling thread before planning. Reconcile child IDs/statuses and any in-flight
+work; do not overwrite unfinished parent custody with a fresh DAG or redispatch
+an operation whose outcome is unknown. Missing dispatch identifiers alone do
+not establish that work never ran. Preserve existing approval pauses and holds.
 
 1. Parse the task into 2–6 discrete steps
 2. For each step, determine:
@@ -111,15 +117,19 @@ For each completed step:
 After all steps complete:
 1. Collect results from all `output_summary` fields
 2. Synthesise into a coherent final output
-3. Update checkpoint: clear `active_step_id`, all steps have final status
+3. Update child status and clear `active_step_id` through the repository's existing checkpoint writer only when it preserves current parent commitments, approvals and ownership fields. If preservation is unverified, retain the checkpoint unchanged and return the child IDs/statuses and checkpoint pointer to the calling thread.
 
 ### Phase 4: Checkpoint Cleanup
 
-```bash
-rm -f .ai/sessions/active-task.json
-```
+Retain `.ai/sessions/active-task.json`, including after all child steps complete.
+A completed child DAG or merged PR does not establish the parent outcome.
+Return retained evidence pointers and unfinished parent follow-ups with their
+existing owner to the calling thread. Do not delete custody as cleanup or
+claim a handoff was accepted without acknowledgement.
 
-Leave in place if any steps are `partial` or `failed`.
+Leave partial, failed and pending outcomes explicitly unfinished. A scoped hold
+does not stop independent authorized work. This instruction requires no new
+checkpoint helper, credentials, provider operation or storage destination.
 
 ## Sub-Agent Selection Guide
 
