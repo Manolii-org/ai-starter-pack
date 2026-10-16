@@ -69,7 +69,9 @@ def test_completed_task_preserves_final_and_strips_parent_credentials(tmp_path):
 
 def test_completed_operation_is_reused_without_second_paid_execution(tmp_path):
     args, env, calls = setup(tmp_path)
-    assert muse.run(args, env) == muse.run(args, {}) == 0
+    assert muse.run(args, env) == 0
+    args.workdir.rmdir()  # Historical reuse is independent of a disposed checkout.
+    assert muse.run(args, {}) == 0
     assert calls.read_text().splitlines() == ["version", "exec"]
 
 

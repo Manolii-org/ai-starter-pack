@@ -141,8 +141,6 @@ def execute(command: list[str], workdir: Path, env: dict, stdout, stderr, timeou
 
 def run(args, env: dict[str, str]) -> int:
     workdir, output = args.workdir.resolve(), args.output_dir.resolve()
-    if not workdir.is_dir():
-        raise ValueError("Workdir must be an existing directory")
     prompt = args.prompt_file.read_text(encoding="utf-8")
     if not prompt.strip():
         raise ValueError("Prompt must not be empty")
@@ -164,6 +162,8 @@ def run(args, env: dict[str, str]) -> int:
                 print(json.dumps({**receipt, "reused_completed_result": True}))
                 return 0
         raise ValueError("Existing operation needs reconciliation; paid inference was not repeated")
+    if not workdir.is_dir():
+        raise ValueError("Workdir must be an existing directory")
     if any(env.get(name) for name in FORBIDDEN):
         raise ValueError("Remove ambient usage-priced provider credentials before subscription execution")
     key = (env.get("MUSE_CODE_SUBSCRIPTION_KEY") or "").strip()
