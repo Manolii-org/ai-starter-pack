@@ -130,7 +130,9 @@ jobs:
             echo "scannable=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          git diff --name-only -z "$BASE...$HEAD" > "$RUNNER_TEMP/codex-security-paths.bin"
+          # Treat renames as deletion + addition so both source and destination
+          # participate in the security decision.
+          git diff --no-renames --name-only -z "$BASE...$HEAD" > "$RUNNER_TEMP/codex-security-paths.bin"
           decision=$(python3 -I "$RUNNER_TEMP/codex-trusted/codex_review_receipt.py" --classify-paths "$RUNNER_TEMP/codex-security-paths.bin")
           if [ "$decision" = "security_required=false" ]; then
             echo "range_state=security_exempt" >> "$GITHUB_OUTPUT"

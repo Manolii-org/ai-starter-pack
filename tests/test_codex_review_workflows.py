@@ -227,3 +227,35 @@ def test_secret_handling_executes_base_helper_not_pr_helper(tmp_path, workflow, 
     assert result.returncode != 0 and not copied.exists()
     receipt = next(step for step in steps if step.get("id") == "receipt")
     assert "steps.trusted.outcome == 'success'" in receipt["if"]
+
+
+def test_actual_range_step_keeps_renamed_sensitive_source(tmp_path):
+    steps = yaml.safe_load((ROOT / ".github/workflows/codex-security-diff-scan.yml").read_text())["jobs"]["scan"]["steps"]
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    config = checkout / "config"
+    config.mkdir()
+    (config / "human-merge-policy.yaml").write_text("labels: [human-merge]\n")
+    def git(*args):
+        return subprocess.check_output(["git", *args], cwd=checkout, text=True).strip()
+    git("init", "-q")
+    git("config", "user.name", "test")
+    git("config", "user.email", "test@example.com")
+    git("add", ".")
+    git("commit", "-qm", "base")
+    base = git("rev-parse", "HEAD")
+    git("mv", "config/human-merge-policy.yaml", "config/ordinary.yaml")
+    git("commit", "-qam", "rename control")
+    head = git("rev-parse", "HEAD")
+    # Establish the reported failure under the old git invocation.
+    assert git("diff", "--name-only", base + "..." + head) == "config/ordinary.yaml"
+    trusted = tmp_path / "codex-trusted"
+    trusted.mkdir()
+    shutil.copyfile(ROOT / "scripts/ci/codex_review_receipt.py", trusted / "codex_review_receipt.py")
+    command = next(step["run"] for step in steps if step.get("id") == "range")
+    command = command.replace("${{ github.event.pull_request.base.sha }}", base).replace("${{ github.event.pull_request.head.sha }}", head)
+    env = os.environ | {"RUNNER_TEMP": str(tmp_path), "GITHUB_OUTPUT": str(tmp_path / "output"), "GITHUB_STEP_SUMMARY": str(tmp_path / "summary")}
+    subprocess.run(["bash", "-c", command], cwd=checkout, env=env, check=True, capture_output=True)
+    assert "scannable=true" in (tmp_path / "output").read_text()
+    assert "range_state=security_exempt" not in (tmp_path / "output").read_text()
+    assert "config/human-merge-policy.yaml" in (tmp_path / "codex-security-paths.bin").read_text().split("\0")
