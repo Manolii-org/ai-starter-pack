@@ -82,6 +82,18 @@ Post findings as PR comment tagged `<!-- qa-pre-process -->`. Block on P0 errors
 
 Max repair rounds (default 5; passive CI/review waits do not consume them): read from `config/autonomy-executor-policy.yaml` → `follow_through.max_rearms`.
 
+Bound passive heartbeat scheduling separately from repair attempts. Before
+arming a heartbeat, record the existing owner's explicit wait deadline or wake
+lease. If it has none, allow at most one one-shot heartbeat for the unchanged
+pending operation, then return to the existing subscription or accepted durable
+handoff. Do not reset an expired wait or chain new one-shots merely because the
+same check or review is still pending. At the bound, persist the pending status,
+evidence and actual continuation owner, and suspend this active wait chain;
+an infrastructure timeout is `blocked_on_infra`, not a new human-consent request
+or PASS. Retain a user-authorized durable owner's existing schedule. If no real
+continuation exists, report that monitoring is unavailable. Resume active work
+on a substantive new event or decisive evidence under the existing retry rules.
+
 Before the first round, dispatch one persistent opus-pinned named `infra` agent
 with `model=` omitted to own the bounded authenticated read loop. Reuse that
 same agent for every wake; do not create an N-call credential-bearing fan-out.
@@ -118,7 +130,7 @@ Each round:
 | `superseded` | New PR opened for same scope, **or** a Codex L4 seed (`codex/audit-*` / `codex/mesh-*`) still has `changed_files=0` after one wake (or a connector summary with no commit) once an implementing session-prefix PR exists (`cursor/` or `claude/`, never `codex/`) | Close the seed; link the Act PR |
 | `gave_up` | `max_rearms` exhausted without a recoverable infra path or a specific human decision to request | Escalate with evidence; Red and other human-decision gates use `blocked_on_human` instead |
 
-**No-delta rule:** `follow_through.no_delta_limit` bounds repeated failed repairs, not passive CI/review waits or duplicate informational wakes. An unavailable review service is infrastructure, not missing execution consent. A required independent human merge approval is a real human hold; readiness needs no such preapproval. Do **not** apply the passive-wait exception to an empty Codex L4 seed: after **one** wake with `changed_files=0`, implement on a session prefix (`cursor/` or `claude/`, never `codex/`) per the orchestrator repo's `docs/runbooks/daily-leftover-act.md` and terminate the seed `superseded`. A native `chatgpt-codex-connector` summary is not an implementation. Kickoff has no empty-seed closer.
+**No-delta rule:** `follow_through.no_delta_limit` bounds repeated failed repairs, not passive CI/review waits or duplicate informational wakes. An unavailable review service is infrastructure, not missing execution consent. A required independent human merge approval is a real human hold; readiness needs no such preapproval. Do **not** apply the passive-wait exception to an empty Codex L4 seed: after **one** wake with `changed_files=0`, implement on a session prefix (`cursor/` or `claude/`, never `codex/`) per the orchestrator repo's `docs/runbooks/daily-leftover-act.md`. Only once that implementation PR actually exists, terminate the seed `superseded` and link the replacement PR. Until then, keep the seed open with the implementation work outstanding. A native `chatgpt-codex-connector` summary is not an implementation. Kickoff has no empty-seed closer.
 
 **Named required check:** Combined commit `status.state=success` is not CI green. A required check (e.g. a repo's anchor job) must be check-run `completed`/`success` on the **current head SHA**. `action_required` with zero jobs is not green.
 
