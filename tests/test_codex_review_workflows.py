@@ -72,6 +72,15 @@ def test_all_workflow_shell_blocks_parse():
 
 @pytest.mark.parametrize('lane,cli,native,actor,stale,passed', [
     ('code', '', 'formal', 'chatgpt-codex-connector[bot]', False, True),
+    ('code', '', 'inline', 'chatgpt-codex-connector[bot]', False, True),
+    ('code', 'blocked_quota', 'inline', 'chatgpt-codex-connector[bot]', False, True),
+    ('code', '', 'inline_reply', 'chatgpt-codex-connector[bot]', False, False),
+    ('code', '', 'inline_no_review', 'chatgpt-codex-connector[bot]', False, False),
+    ('code', '', 'inline_stale', 'chatgpt-codex-connector[bot]', False, False),
+    ('code', '', 'inline', 'github-actions[bot]', False, False),
+    ('code', '', 'security_inline', 'chatgpt-codex-connector[bot]', False, False),
+    ('security', '', 'inline', 'chatgpt-codex-connector[bot]', False, False),
+    ('code', '', 'inline_unmarked', 'chatgpt-codex-connector[bot]', False, False),
     ('code', '', 'quota_summary', 'chatgpt-codex-connector[bot]', False, False),
     ('code', '', 'misleading_summary', 'chatgpt-codex-connector[bot]', False, False),
     ('security', '', 'mixed_summary', 'chatgpt-codex-connector[bot]', False, True),
@@ -102,7 +111,7 @@ misleading_summary:'| 📝 **Code Review** | ⚠️ **Usage limits reached** | `
 mixed_summary:'| 📝 **Code Review** | ⚠️ **Usage limits reached** | `aaaaaaaaaa` |\n| 🔒 **Security Review** | ✅ **Completed** | `aaaaaaaaaa` |',
 ambiguous_summary:'| 🔒 **Security Review** | ✅ **Completed** | `aaaaaaaaaa` |'};
 const comments=bodies[p.native]?[{user:{login:p.actor},body:bodies[p.native]}]:[];
-const api={repos:{getCommit:async()=>{if(p.native==='ambiguous_summary')throw Error('422 ambiguous');return {data:{sha}};}},pulls:{get:async()=>({data:{head:{sha:p.stale?'b'.repeat(40):sha}}}),listReviews:async()=>({data:p.native==='formal'?[item]:[]}),listReviewComments:async()=>({data:[]})},issues:{listComments:async()=>({data:comments})}};
+const api={repos:{getCommit:async()=>{if(p.native==='ambiguous_summary')throw Error('422 ambiguous');return {data:{sha}};}},pulls:{get:async()=>({data:{head:{sha:p.stale?'b'.repeat(40):sha}}}),listReviews:async()=>({data:p.native==='formal'?[item]:[]}),listReviewComments:async()=>({data:['inline','inline_stale','security_inline','inline_unmarked','inline_reply','inline_no_review'].includes(p.native)?[{user:{login:p.actor},commit_id:p.native==='inline_stale'?'b'.repeat(40):sha,path:'src/file.ts',pull_request_review_id:p.native==='inline_no_review'?null:123,in_reply_to_id:p.native==='inline_reply'?44:null,body:p.native==='inline_unmarked'?'arbitrary text':'a finding\n<!-- codex-'+(p.native==='security_inline'?'security':'code')+'-review-finding:v1 -->'}]:[]})},issues:{listComments:async()=>({data:comments})}};
 const github={rest:api,paginate:async fn=>(await fn()).data};
 const core={info:s=>messages.push(s),setFailed:s=>failures.push(s)};
 const context={repo:{owner:'example',repo:'project'},payload:{pull_request:{number:1}}};
@@ -115,8 +124,14 @@ new AsyncFunction('github','core','context','process',p.script)(github,core,cont
 
 
 @pytest.mark.parametrize('body,expected', [
-    ('Codex review: Didn’t find any major issues.\nreviewed commit: aaaaaaaaaa', 2),
-    ('| 📝 **Code Review** | ✅ **Completed** | `aaaaaaaaaa` |', 2),
+    ('Codex review: Didn’t find any major issues.\nreviewed commit: aaaaaaaaaa', ['codex-pr-review.yml']),
+    ('| 📝 **Code Review** | ✅ **Completed** | `aaaaaaaaaa` |', ['codex-pr-review.yml']),
+    ('| 🔒 **Security Review** | ✅ **Completed** | `aaaaaaaaaa` |', ['codex-security-diff-scan.yml']),
+    ('| 📝 **Code Review** | ✅ **Completed** | `aaaaaaaaaa` |\n| 🔒 **Security Review** | ✅ **Completed** | `aaaaaaaaaa` |', ['codex-pr-review.yml','codex-security-diff-scan.yml']),
+    ('inline', ['codex-pr-review.yml']),
+    ('inline_stale', []),
+    ('quota_inline', []),
+    ('security_inline', []),
     ('You have reached your Codex usage limits for code reviews.', 0),
     ('Codex review: Didn’t find any major issues.\nReviewed commit: bbbbbbbbbb', 0),
 ])
@@ -131,12 +146,15 @@ listWorkflowRuns:async args=>({data:{workflow_runs:[{id:'other-pr',head_sha:sha,
 listJobsForWorkflowRun:async args=>({data:[{id:1,name:'Codex review (subscription)',conclusion:'failure'},{id:args.run_id,name:args.run_id==='codex-pr-review.yml'?'Codex review coverage':'Codex security coverage',conclusion:'failure'}]}),
 reRunJobForWorkflowRun:async args=>rerun.push(args.job_id)
 }},paginate:async(fn,args)=>(await fn(args)).data};
-const context={repo:{owner:'example',repo:'project'},payload:{issue:{number:1},comment:{body:p.body}}};
+const context={repo:{owner:'example',repo:'project'},payload:{issue:{number:1},comment:{body:p.body,commit_id:['inline','quota_inline'].includes(p.body)?sha:'b'.repeat(40),path:'src/file.ts',pull_request_review_id:123}}};
+if(['inline','inline_stale','security_inline','quota_inline'].includes(p.body)){context.payload.pull_request={number:1};delete context.payload.issue;}
+if(['inline','inline_stale','security_inline','quota_inline'].includes(p.body))context.payload.comment.body='a finding\n<!-- codex-'+(p.body==='security_inline'?'security':'code')+'-review-finding:v1 -->';
+if(p.body==='quota_inline')context.payload.comment.body='You have reached your Codex usage limits for code reviews.\n<!-- codex-code-review-finding:v1 -->';
 const AsyncFunction=Object.getPrototypeOf(async function(){}).constructor;
 new AsyncFunction('github','core','context',p.script)(github,{info:()=>{}},context).then(()=>process.stdout.write(JSON.stringify(rerun))).catch(e=>{console.error(e);process.exit(1);});
 '''
     result = subprocess.run(['node', '-e', runner], input=json.dumps({'script':script,'body':body}), capture_output=True, text=True, check=True, timeout=10)
-    assert json.loads(result.stdout) == (['codex-pr-review.yml','codex-security-diff-scan.yml'] if expected else [])
+    assert json.loads(result.stdout) == (expected if isinstance(expected, list) else [])
 
 
 @pytest.mark.parametrize('scanner_rc,expected', [(0, 'completed'), (9, 'failed_scan')])
@@ -259,3 +277,11 @@ def test_actual_range_step_keeps_renamed_sensitive_source(tmp_path):
     assert "scannable=true" in (tmp_path / "output").read_text()
     assert "range_state=security_exempt" not in (tmp_path / "output").read_text()
     assert "config/human-merge-policy.yaml" in (tmp_path / "codex-security-paths.bin").read_text().split("\0")
+
+
+def test_inline_recovery_has_native_event_admission():
+    data = yaml.safe_load((ROOT / ".github/workflows/codex-review-recovery.yml").read_text())
+    triggers = data.get("on", data.get(True))
+    assert "created" in triggers["pull_request_review_comment"]["types"]
+    assert "github.event_name == 'pull_request_review_comment'" in data["jobs"]["recover"]["if"]
+    assert "github.actor == 'chatgpt-codex-connector[bot]'" in data["jobs"]["recover"]["if"]

@@ -4,6 +4,8 @@ name: Codex Review Coverage Recovery
 on:
   pull_request_review:
     types: [submitted]
+  pull_request_review_comment:
+    types: [created]
   issue_comment:
     types: [created, edited]
 
@@ -21,7 +23,7 @@ jobs:
   recover:
     if: >-
       github.actor == 'chatgpt-codex-connector[bot]' &&
-      (github.event_name == 'pull_request_review' || github.event.issue.pull_request)
+      (github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event.issue.pull_request)
     runs-on: ubuntu-slim
     timeout-minutes: 3
     steps:
@@ -37,23 +39,31 @@ jobs:
             const body = event.body || '';
             const prefixMatches = prefix => /^[0-9a-f]{7,40}$/i.test(prefix || '')
               && pull.head.sha.toLowerCase().startsWith(prefix.toLowerCase());
+            if (/(?:^|\n)(?:you have reached your Codex usage limits|Codex usage limits have been reached)|connect to github|create a Codex account/i.test(body)) return;
             const formal = event.commit_id === pull.head.sha
               && String(event.state || '').toUpperCase() !== 'PENDING'
-              && /codex review/i.test(body);
+              && /codex review/i.test(body)
+              && !/codex-security-review|codex security review/i.test(body);
+            const inline = event.commit_id === pull.head.sha && event.path
+              && !event.in_reply_to_id && Number(event.pull_request_review_id) > 0
+              && /<!-- codex-code-review-finding:v1 -->\s*$/.test(body);
             const clean = body.match(/codex review:[^\n]*didn.?t find any major issues[\s\S]*?reviewed commit:[^0-9a-f]*([0-9a-f]{7,40})/i);
-            const summary = body.split('\n').some(line => {
+            const summary = lane => body.split('\n').some(line => {
               const cells = line.split('|').map(cell => cell.trim());
               const commit = (cells[3] || '').match(/^`([0-9a-f]{7,40})`$/i);
-              return /\*\*(?:Code|Security) Review\*\*/i.test(cells[1] || '')
+              return (cells[1] || '').includes('**' + lane + ' Review**')
                 && /^✅\s*\*\*Completed\*\*(?:\s*<relative-time[^>]*>[^<]*<\/relative-time>)?$/i.test(cells[2] || '')
                 && commit && prefixMatches(commit[1]);
             });
-            // Quota notices and stale events never restart even a coverage job.
-            if (!formal && !(clean && prefixMatches(clean[1])) && !summary) return;
-            const lanes = [
-              ['codex-pr-review.yml', 'Codex review coverage'],
-              ['codex-security-diff-scan.yml', 'Codex security coverage'],
-            ];
+            // Only a matching lane is rechecked. Inline code findings must
+            // not spend another job rechecking an unfinished security lane.
+            const lanes = [];
+            if (formal || inline || (clean && prefixMatches(clean[1])) || summary('Code')) {
+              lanes.push(['codex-pr-review.yml', 'Codex review coverage']);
+            }
+            if (summary('Security')) {
+              lanes.push(['codex-security-diff-scan.yml', 'Codex security coverage']);
+            }
             for (const [workflow_id, jobName] of lanes) {
               const response = await github.rest.actions.listWorkflowRuns({
                 owner, repo, workflow_id, event: 'pull_request', head_sha: pull.head.sha,

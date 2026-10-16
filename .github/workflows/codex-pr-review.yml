@@ -485,8 +485,9 @@ jobs:
               core.info('code review coverage: ' + process.env.REVIEW_STATE + ' for ' + head);
               return;
             }
-            const [reviews, comments] = await Promise.all([
+            const [reviews, inlineComments, comments] = await Promise.all([
               github.paginate(github.rest.pulls.listReviews, {owner, repo, pull_number, per_page: 100}),
+              github.paginate(github.rest.pulls.listReviewComments, {owner, repo, pull_number, per_page: 100}),
               github.paginate(github.rest.issues.listComments, {owner, repo, issue_number: pull_number, per_page: 100}),
             ]);
             const bot = item => item.user && item.user.login === 'chatgpt-codex-connector[bot]';
@@ -509,6 +510,13 @@ jobs:
               && String(item.state || '').toUpperCase() !== 'PENDING'
               && /codex review/i.test(item.body || '')
               && !/codex-security-review|codex security review/i.test(item.body || ''));
+            // Native inline findings are review evidence, not a clean verdict.
+            // Require the native code-lane marker so security-only activity or
+            // an arbitrary/relayed comment cannot satisfy code coverage.
+            const codeInline = inlineComments.some(item => bot(item) && !bad(item)
+              && item.commit_id === head && item.path && !item.in_reply_to_id
+              && Number(item.pull_request_review_id) > 0
+              && /<!-- codex-code-review-finding:v1 -->\s*$/.test(item.body || ''));
             const prefixes = new Set();
             for (const item of comments.filter(bot)) {
               const body = item.body || '';
@@ -525,7 +533,7 @@ jobs:
                 if (commit) prefixes.add(commit[1]);
               }
             }
-            let native = codeReviews.length > 0;
+            let native = codeReviews.length > 0 || codeInline;
             for (const prefix of prefixes) {
               if (native) break;
               native = await bound(prefix);
