@@ -336,8 +336,12 @@ jobs:
                   "_Advisory only — review text is model output: verify before acting._"
           Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text(body + "\n", encoding="utf-8")
           receipt_path = Path(os.environ["RUNNER_TEMP"]) / "codex-code-receipt.json"
-          receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-          receipt_marker = "<!-- codex-review-receipt:v1 " + json.dumps(receipt, sort_keys=True) + " -->"
+          try:
+              receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+              receipt_marker = "<!-- codex-review-receipt:v1 " + json.dumps(receipt, sort_keys=True) + " -->"
+          except (OSError, ValueError):
+              receipt_marker = "<!-- codex-review-receipt-unavailable:v1 -->"
+              print("::warning::Execution receipt unavailable; coverage remains incomplete.")
           body_path.write_text(receipt_marker + "\n" + body, encoding="utf-8")
           print(body)
           with open(os.environ["GITHUB_OUTPUT"], "a") as fh:

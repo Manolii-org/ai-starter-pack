@@ -164,3 +164,17 @@ def test_actual_security_scan_exit_is_bound_to_receipt(tmp_path, scanner_rc, exp
     record = record.replace('${{ runner.temp }}', str(tmp_path))
     subprocess.run(['bash', '-c', record], cwd=ROOT, env=env, capture_output=True, text=True, check=True, timeout=10)
     assert json.loads((tmp_path / 'codex-security-receipt.json').read_text())['state'] == expected
+
+
+@pytest.mark.parametrize('outcome,withheld,allowed', [
+    ('success', 'false', True), ('success', 'true', False),
+    ('failure', '', False), ('cancelled', '', False), ('skipped', '', False),
+])
+def test_raw_security_artifact_cannot_upload_without_redaction(outcome, withheld, allowed):
+    doc = yaml.safe_load((ROOT / '.github/workflows/codex-security-diff-scan.yml').read_text())
+    step = next(s for s in doc['jobs']['scan']['steps'] if s.get('name') == 'Upload findings artifact')
+    expression = step['if'].replace('always()', 'True').replace('&&', ' and ')
+    expression = expression.replace('steps.auth.outputs.present', repr('true'))
+    expression = expression.replace('steps.redact.outcome', repr(outcome))
+    expression = expression.replace('steps.redact.outputs.withheld', repr(withheld))
+    assert eval(expression, {'__builtins__': {}}) is allowed
