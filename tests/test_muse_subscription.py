@@ -275,3 +275,24 @@ def test_exit_between_wait_and_forced_kill_still_completes_cleanup(monkeypatch):
     monkeypatch.setattr(muse.os, "killpg", kill)
     muse.stop_process(process)
     assert process.wait.call_count == 2
+    assert kill.call_args_list == [((process.pid, signal.SIGTERM), {}), ((process.pid, signal.SIGKILL), {})]
+
+
+def test_missing_workdir_is_blocked_before_setup_or_receipt(tmp_path):
+    args, env, calls = setup(tmp_path)
+    args.workdir = tmp_path / "missing"
+    with pytest.raises(ValueError, match="existing directory"):
+        muse.run(args, env)
+    assert not calls.exists() and not args.output_dir.exists()
+
+
+def test_executable_disappearing_after_preflight_saves_startup_failure(tmp_path):
+    args, env, calls = setup(tmp_path)
+    cli = Path(env["PATH"].split(os.pathsep)[0]) / "muse"
+    statement = 'print("Safety (approval and the sandbox are ON by default):");sys.exit(0)'
+    cli.write_text(cli.read_text().replace(statement, statement.replace(";sys.exit(0)", ";Path(__file__).unlink();sys.exit(0)")))
+    assert muse.run(args, env) == 2
+    saved = json.loads((args.output_dir / "receipt.json").read_text())
+    assert saved["status"] == "startup_failed" and saved["startup_error"] == "FileNotFoundError"
+    assert saved["final_message_available"] is False
+    assert calls.read_text().splitlines() == ["version"]

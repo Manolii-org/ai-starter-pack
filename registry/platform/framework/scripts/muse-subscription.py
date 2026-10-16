@@ -28,6 +28,10 @@ RUNTIME_ENV = {
 }
 
 
+class ProcessStartupError(RuntimeError):
+    """The provider process could not be started; retain a terminal receipt."""
+
+
 def digest(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
@@ -103,8 +107,11 @@ def stop_process(process: subprocess.Popen) -> None:
 
 def execute(command: list[str], workdir: Path, env: dict, stdout, stderr, timeout: int) -> tuple[int, str | None]:
     """Propagate cancellation to provider/tool processes and retain final evidence."""
-    process = subprocess.Popen(command, cwd=workdir, env=env, stdout=stdout, stderr=stderr,
-                               start_new_session=os.name == "posix")
+    try:
+        process = subprocess.Popen(command, cwd=workdir, env=env, stdout=stdout, stderr=stderr,
+                                   start_new_session=os.name == "posix")
+    except OSError as exc:
+        raise ProcessStartupError(type(exc).__name__) from exc
     interrupted = False
     handlers = {}
 
@@ -134,6 +141,8 @@ def execute(command: list[str], workdir: Path, env: dict, stdout, stderr, timeou
 
 def run(args, env: dict[str, str]) -> int:
     workdir, output = args.workdir.resolve(), args.output_dir.resolve()
+    if not workdir.is_dir():
+        raise ValueError("Workdir must be an existing directory")
     prompt = args.prompt_file.read_text(encoding="utf-8")
     if not prompt.strip():
         raise ValueError("Prompt must not be empty")
@@ -207,7 +216,11 @@ def run(args, env: dict[str, str]) -> int:
             os.fdopen(os.open(trace, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as stdout,
             os.fdopen(os.open(errors, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as stderr,
         ):
-            exit_code, stopped = execute(command, workdir, clean, stdout, stderr, args.timeout_seconds)
+            try:
+                exit_code, stopped = execute(command, workdir, clean, stdout, stderr, args.timeout_seconds)
+            except ProcessStartupError as exc:
+                exit_code, stopped = 127, "startup_failed"
+                receipt["startup_error"] = str(exc)
         terminal, final = terminal_output(trace, key)
         if terminal == "output_limit_exceeded":
             receipt["output_parse_error"] = "event_record_exceeds_16_mib"

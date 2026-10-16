@@ -61,3 +61,7 @@ Receipts label billing evidence as a declared credential contract and explicitly
 record that the account plan was not verified. Exit 2 requires reading the
 structured status: blocked setup has no inference; failed, timed_out or interrupted
 operations need reconciliation of their retained evidence before a new attempt.
+
+The work directory is checked before setup. A process that cannot start after
+preflight records `startup_failed` and the error class, preserving evidence
+instead of leaving the receipt marked `running`.
