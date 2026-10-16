@@ -9,6 +9,7 @@ import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -251,3 +252,26 @@ def test_malformed_existing_receipt_is_structured_reconciliation_failure(tmp_pat
     with pytest.raises(ValueError, match="reconciliation"):
         muse.run(args, {})
     assert calls.read_text().splitlines() == ["version", "exec"]
+
+
+def test_unicode_completed_result_is_reused_on_non_utf8_hosts(tmp_path, monkeypatch):
+    args, env, calls = setup(tmp_path, [event(text="Completed — résumé ✅")])
+    assert muse.run(args, env) == 0
+    original = Path.read_text
+
+    def locale_read(path, *positional, **kwargs):
+        kwargs.setdefault("encoding", "ascii")
+        return original(path, *positional, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", locale_read)
+    assert muse.run(args, {}) == 0
+    assert calls.read_text().splitlines() == ["version", "exec"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process group race")
+def test_exit_between_wait_and_forced_kill_still_completes_cleanup(monkeypatch):
+    process = SimpleNamespace(pid=42, wait=Mock(side_effect=[subprocess.TimeoutExpired("muse", 5), 0]))
+    kill = Mock(side_effect=[None, ProcessLookupError()])
+    monkeypatch.setattr(muse.os, "killpg", kill)
+    muse.stop_process(process)
+    assert process.wait.call_count == 2

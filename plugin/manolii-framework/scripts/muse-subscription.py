@@ -91,10 +91,13 @@ def stop_process(process: subprocess.Popen) -> None:
     except ProcessLookupError:
         process.wait(timeout=5)
     except subprocess.TimeoutExpired:
-        if os.name == "posix":
-            os.killpg(process.pid, signal.SIGKILL)
-        else:
-            process.kill()
+        try:
+            if os.name == "posix":
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+        except ProcessLookupError:
+            pass  # It exited between the graceful wait and forced kill.
         process.wait(timeout=5)
 
 
@@ -143,10 +146,10 @@ def run(args, env: dict[str, str]) -> int:
     if output.exists() and not args.dry_run:
         receipt_path, final_path = output / "receipt.json", output / "final.md"
         if receipt_path.is_file() and final_path.is_file():
-            receipt = json.loads(receipt_path.read_text())
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
             if not isinstance(receipt, dict):
                 raise ValueError("Existing receipt is invalid; reconciliation required")
-            final = final_path.read_text()
+            final = final_path.read_text(encoding="utf-8")
             if (all(receipt.get(k) == v for k, v in identity.items()) and receipt.get("status") == "completed"
                     and final.strip() and receipt.get("final_sha256") == digest(final)):
                 print(json.dumps({**receipt, "reused_completed_result": True}))
