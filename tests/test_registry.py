@@ -1966,7 +1966,8 @@ def _bootstrap_env(tmp_path):
     empty_cfg.write_text("")
     return dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}",
                 GIT_CONFIG_GLOBAL=str(empty_cfg),
-                MIRROR_TRUST_DIRS=str(bin_dir))
+                MIRROR_TRUST_DIRS=os.pathsep.join(filter(None,
+                    (str(bin_dir), os.environ.get("MIRROR_TRUST_DIRS", "")))))
 
 def test_bootstrap_mirror_seed(tmp_path):
     """bootstrap-mirror.py seeds a complete lint-clean mirror scaffold:
@@ -3556,6 +3557,11 @@ def test_bootstrap_mirror_refresh_preserves_owned_state(tmp_path):
     al = root / "registry/pack-surface-allowlist.txt"
     al.write_text(al.read_text() + keep_key + "\n")
 
+    # ORG-LEAK uses registry-relative paths, unlike PACK-SURFACE above.
+    leak_al = root / "registry/leak-allowlist.txt"
+    leak_keep = "cpdcheck/keep.md#" + hashlib.sha256(keep_line.lower().encode()).hexdigest()[:8]
+    leak_al.write_text(leak_al.read_text() + leak_keep + "\n")
+
     # A NEW mirror-owned violation that was never ratcheted.
     (root / "registry/cpdcheck/new.md").write_text(
         "also see Manolii-org/master\n")
@@ -3575,6 +3581,14 @@ def test_bootstrap_mirror_refresh_preserves_owned_state(tmp_path):
         "live mirror-owned ratchet entry dropped on refresh"
     assert "registry/cpdcheck/new.md" not in entries, \
         "refresh ratcheted a new mirror-owned violation"
+    leak_entries = {line for line in leak_al.read_text().splitlines()
+                    if line.strip() and not line.startswith("#")}
+    assert any(line.startswith("platform/") for line in leak_entries), \
+        "refresh discarded canonical registry-relative platform ratchets"
+    assert leak_keep in leak_entries, "existing owned ORG-LEAK entry was lost"
+    assert not any(line.startswith("cpdcheck/new.md#") for line in leak_entries), \
+        "refresh must not ratchet new owned ORG-LEAK violations"
+
 def test_pack_surface_scans_tracked_skip_dir(tmp_path):
     """A slug committed under a skip-listed dir is still published —
     the scan enumerates tracked files, not directory names."""
@@ -14657,3 +14671,24 @@ def test_script_dep_round93_date_option_classes(tmp_path):
     assert mod.script_dep_block(
         pdir, b"(date --rfc-3339=s '+x'; echo -n 'sh s'; "
               b"echo cripts/x.sh) | sh\n")
+
+
+def test_bootstrap_ratchet_coordinate_spaces():
+    mod = _load_bootstrap()
+    cases = [
+        ("registry/leak-allowlist.txt", "platform/framework/a.md", True),
+        ("registry/leak-allowlist.txt", "platform-other/a.md", False),
+        ("registry/leak-allowlist.txt", "manolii/a.md", False),
+        ("registry/leak-allowlist.txt", "cpdcheck/a.md", False),
+        ("registry/leak-allowlist.txt", "plugins.json", False),
+        ("registry/leak-allowlist.txt", "README.md", False),
+        ("registry/pack-surface-allowlist.txt", "registry/platform/framework/a.md", True),
+        ("registry/pack-surface-allowlist.txt", "registry/platform-other/a.md", False),
+        ("registry/pack-surface-allowlist.txt", "registry/manolii/a.md", False),
+        ("registry/pack-surface-allowlist.txt", "registry/plugins.json", False),
+        ("registry/pack-surface-allowlist.txt", "platform/framework/a.md", False),
+        ("registry/pack-surface-allowlist.txt", "README.md", True),
+        ("registry/unknown-allowlist.txt", "registry/platform/framework/a.md", False),
+    ]
+    for allowlist, path, expected in cases:
+        assert mod._ratchet_vendored(allowlist, path) is expected, (allowlist, path)
