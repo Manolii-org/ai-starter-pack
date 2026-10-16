@@ -5856,7 +5856,7 @@ def test_dirfd_apply_writes_through_planted_parent_symlink(tmp_path):
     """An --apply that prefetched a dir_fd must write beneath the real
     directory even if the parent path is swapped for a symlink between
     planning and apply."""
-    mod = load_resolve_module()
+    load_resolve_module()
     reg_root = make_registry(tmp_path / "src", {
         "platform/framework": [("skills/demo/SKILL.md",
                                 "---\nname: demo\ndescription: d\n---\nv1")],
@@ -6195,18 +6195,22 @@ def test_stale_skip_recheck(tmp_path):
         resolved=[{"files": {".claude/agents/a.md":
                              _hl.sha256(b"same").hexdigest()},
                    "exec": {".claude/agents/a.md": 0o644}}])
-    ok_snap = lambda p: (b"same", 0o644, (1, 2))
+    def ok_snap(p):
+        return (b"same", 0o644, (1, 2))
     assert mod._stale_skip(root, plan, ok_snap) is None
     # changed bytes -> stale
-    bad_snap = lambda p: (b"changed", 0o644, (1, 2))
+    def bad_snap(p):
+        return (b"changed", 0o644, (1, 2))
     assert mod._stale_skip(
         root, plan, bad_snap) == ".claude/agents/a.md"
     # vanished -> stale
-    gone_snap = lambda p: None
+    def gone_snap(p):
+        return None
     assert mod._stale_skip(
         root, plan, gone_snap) == ".claude/agents/a.md"
     # mode drift -> stale
-    mode_snap = lambda p: (b"same", 0o755, (1, 2))
+    def mode_snap(p):
+        return (b"same", 0o755, (1, 2))
     assert mod._stale_skip(
         root, plan, mode_snap) == ".claude/agents/a.md"
     # and the reverse: bundled path + declared module still blocks
@@ -6592,7 +6596,7 @@ def test_prune_type_change_fails_closed(tmp_path):
     """A prune candidate swapped for a symlink/dir after planning fails the
     apply (rollback) instead of being silently skipped while its lock entry
     drops (Codex on #1953)."""
-    import os, subprocess, json
+    import json
     repo = tmp_path / "repo"
     (repo / ".claude" / "skills" / "old-skill").mkdir(parents=True)
     stale = repo / ".claude" / "skills" / "old-skill" / "SKILL.md"
@@ -6659,7 +6663,8 @@ def test_line_continuation_script_dep(tmp_path):
 def test_prune_missing_parent_dir_noop(tmp_path):
     """An orphan whose parent dir was deleted — under a read-only ancestor —
     is a no-op lock clear, never a mkdir failure (Devin on #123)."""
-    import os, json
+    import os
+    import json
     repo = tmp_path / "repo"
     skills = repo / ".claude" / "skills"
     skills.mkdir(parents=True)
@@ -6983,7 +6988,8 @@ def test_script_dep_redirect_targets_and_bare_module(tmp_path):
     dependencies; input redirects (`<`, `<>`) still are — and a bare
     `python -m scripts` probes scripts/__main__.py."""
     mod = load_resolve_module()
-    dep = lambda b: mod.script_dep_block(tmp_path, b.encode())
+    def dep(b):
+        return mod.script_dep_block(tmp_path, b.encode())
     # output / fd / heredoc / here-string targets — created, not read
     for body in [
         "python run.py > scripts/out.py",
@@ -7024,7 +7030,8 @@ def test_script_dep_extensionless_option_values(tmp_path):
     argument value (`--directory scripts/site`), not an invocation;
     after a bare `--` or a short flag it still gates (Codex on #1344)."""
     mod = load_resolve_module()
-    dep = lambda b: mod.script_dep_block(tmp_path, b.encode())
+    def dep(b):
+        return mod.script_dep_block(tmp_path, b.encode())
     assert not dep("python -m http.server --directory scripts/site")
     assert not dep("python -m http.server --directory=scripts/site")
     assert not dep("python -m http.server -d scripts/site")
@@ -7539,7 +7546,7 @@ def test_prune_cleanup_revalidates_ancestor_chain(tmp_path):
     real = consumer / ".claude-real"
     claude.rename(real)
     claude.symlink_to(external)
-    r = run_resolver(m, reg_root, consumer, "--apply", "--prune")
+    run_resolver(m, reg_root, consumer, "--apply", "--prune")
     # the external commands dir must survive the cleanup sweep
     assert (external / "commands").is_dir()
 

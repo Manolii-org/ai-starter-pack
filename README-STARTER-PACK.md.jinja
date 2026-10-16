@@ -34,7 +34,7 @@ flags in `pack.manifest.yml`:
 - **Remote memory backend** (`kl_integration`) — memory is local git-tracked JSONL by
   default; a remote MCP memory backend is opt-in.
 - **Browser automation** (`browserbase`), **telemetry** (`langfuse_telemetry`), and
-  **cross-provider adversarial review** (`codex_adversarial`, needs `OPENAI_API_KEY`) — opt-in.
+  **native Codex MCP adversarial review** (`codex_adversarial`, configure its MCP provider credentials separately) — opt-in.
 
 Run `python3 scripts/pack-drift-check.py` after customising to verify the pack stays
 self-consistent (README counts, feature-exclude paths, sub-agent models) and free of
