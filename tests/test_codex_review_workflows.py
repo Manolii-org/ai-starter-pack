@@ -123,7 +123,7 @@ def test_actual_recovery_reruns_only_completion_jobs(body, expected):
 const fs=require('fs'),p=JSON.parse(fs.readFileSync(0,'utf8')),sha='a'.repeat(40),rerun=[];
 const pull={state:'open',draft:false,head:{sha}};
 const github={rest:{pulls:{get:async()=>({data:pull})},actions:{
-listWorkflowRuns:async args=>({data:{workflow_runs:[{id:args.workflow_id,head_sha:sha,path:'.github/workflows/'+args.workflow_id,conclusion:'failure'}]}}),
+listWorkflowRuns:async args=>({data:{workflow_runs:[{id:'other-pr',head_sha:sha,path:'.github/workflows/'+args.workflow_id,conclusion:'failure',pull_requests:[{number:99}]},{id:args.workflow_id,head_sha:sha,path:'.github/workflows/'+args.workflow_id,conclusion:'failure',pull_requests:[{number:1}]}]}}),
 listJobsForWorkflowRun:async args=>({data:[{id:1,name:'Codex review (subscription)',conclusion:'failure'},{id:args.run_id,name:args.run_id==='codex-pr-review.yml'?'Codex review coverage':'Codex security coverage',conclusion:'failure'}]}),
 reRunJobForWorkflowRun:async args=>rerun.push(args.job_id)
 }},paginate:async(fn,args)=>(await fn(args)).data};
