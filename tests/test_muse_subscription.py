@@ -75,6 +75,16 @@ def test_completed_operation_is_reused_without_second_paid_execution(tmp_path):
     assert calls.read_text().splitlines() == ["version", "exec"]
 
 
+def test_relative_path_discovery_survives_a_different_target_checkout(tmp_path, monkeypatch):
+    args, env, _ = setup(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    env["PATH"] = "." + os.sep + "bin" + os.pathsep + os.environ["PATH"]
+    assert args.workdir != Path.cwd()
+    assert muse.run(args, env) == 0
+    observed = json.loads((args.output_dir / "stderr.txt").read_text())
+    assert Path(observed["argv"][0]).is_absolute()
+
+
 def test_reuse_requires_identical_execution_controls(tmp_path):
     args, env, calls = setup(tmp_path)
     assert muse.run(args, env) == 0

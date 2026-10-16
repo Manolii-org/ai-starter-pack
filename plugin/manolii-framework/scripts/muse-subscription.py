@@ -172,6 +172,7 @@ def run(args, env: dict[str, str]) -> int:
     executable = shutil.which("muse", path=env.get("PATH"))
     if not executable:
         raise ValueError("Install the official Muse CLI before running this task")
+    executable = os.path.abspath(executable)  # Discovery uses the caller's PATH, execution uses workdir.
     clean = {k: v for k, v in env.items() if k in RUNTIME_ENV}
     receipt = {"version": 1, **identity, "runtime_provider": "muse_code", "transport": "native_cli",
                "billing_mode": "subscription", "allow_usage_priced_api": False, "model": MODEL,
