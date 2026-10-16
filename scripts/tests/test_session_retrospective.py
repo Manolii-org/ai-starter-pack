@@ -1884,6 +1884,99 @@ def test_stop_checklist_forwards_exact_live_transcript(stop_checklist, no_timeou
     assert not (root / "kl-only-args.json").exists()
 
 
+@pytest.mark.parametrize("committed", [False, True])
+@pytest.mark.parametrize("interruption", ["alarm", "TERM", "INT"])
+def test_stop_perl_timeout_preserves_real_collector_retry(stop_checklist, committed, interruption):
+    """The portable timeout must run real rollback without duplicating a commit."""
+    root, environment = stop_checklist
+    environment = dict(environment)
+    environment.pop("BASH_ENV")
+    binaries = root / "bin"
+    binaries.mkdir()
+    for name in ("bash", "cat", "dirname", "git", "perl", "python3", "mkdir", "date", "rm"):
+        executable = shutil.which(name)
+        assert executable, f"fixture dependency missing: {name}"
+        (binaries / name).symlink_to(executable)
+    environment["PATH"] = str(binaries)
+    assert shutil.which("timeout", path=environment["PATH"]) is None
+    (root / "scripts/session-retrospective.py").write_text(f'''
+import importlib.util, os, pathlib, sys, time
+root = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, {str(SCRIPTS_DIR)!r})
+spec = importlib.util.spec_from_file_location("actual_collector", {str(SESSION_RETRO_PATH)!r})
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+if (root / "block-capture").exists():
+    if {committed!r}:
+        original = mod._write_local_record
+        def block(record):
+            result = original(record)
+            (root / "collector-blocked.tmp").write_text(str(os.getppid()))
+            (root / "collector-blocked.tmp").replace(root / "collector-blocked")
+            time.sleep(30)
+            return result
+        mod._write_local_record = block
+    else:
+        original = mod.extract_signals
+        def block(path):
+            (root / "collector-blocked.tmp").write_text(str(os.getppid()))
+            (root / "collector-blocked.tmp").replace(root / "collector-blocked")
+            time.sleep(30)
+            return original(path)
+        mod.extract_signals = block
+mod.mode_stop("portable-timeout", local_only=True, transcript=str(root / "live.jsonl"))
+''')
+    transcript = root / "live.jsonl"
+    transcript.write_text(json.dumps({"type": "user", "message": {
+        "role": "user", "content": "Verify the current task.",
+    }}) + "\n")
+    (root / "block-capture").touch()
+    payload = json.dumps({"session_id": "portable-timeout", "transcript_path": str(transcript)})
+    started = time.monotonic()
+    first = subprocess.Popen(
+        ["bash", "scripts/session-stop-checklist.sh"], cwd=root,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, env=environment, start_new_session=True,
+    )
+    try:
+        first.stdin.write(payload)
+        first.stdin.close()
+        first.stdin = None
+        if interruption != "alarm":
+            blocked = root / "collector-blocked"
+            deadline = time.monotonic() + 3
+            while not blocked.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            os.kill(int(blocked.read_text()), getattr(signal, "SIG" + interruption))
+        stdout, stderr = first.communicate(timeout=12)
+        assert first.returncode == 0, stderr
+    finally:
+        try:
+            os.killpg(first.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        first.wait(timeout=2)
+    assert time.monotonic() - started < 10
+    assert (root / "collector-blocked").exists()
+    assert "Session ending checklist:" in stdout
+    records = root / ".ai/memory/retrospectives"
+    expected_exit = {"alarm": 124, "TERM": 143, "INT": 130}[interruption]
+    assert json.loads((records / ".last-capture-failed").read_text())["exit_code"] == expected_exit
+    assert len(list(records.glob("*.json"))) == int(committed)
+    (root / "block-capture").unlink()
+    second = subprocess.run(
+        ["bash", "scripts/session-stop-checklist.sh"], cwd=root, input=payload,
+        text=True, capture_output=True, env=environment, timeout=5,
+    )
+    assert second.returncode == 0, second.stderr
+    assert not (records / ".last-capture-failed").exists()
+    assert len(list(records.glob("*.json"))) == 1
+    rows = (records / "session-retrospectives.jsonl").read_text().splitlines()
+    assert len(rows) == 1
+    assert json.loads(rows[0])["session_id"] == "portable-timeout"
+    assert not (root / "kl-only-args.json").exists()
+
+
 @pytest.mark.parametrize("transcript", [None, 42, {"path": "invalid"}])
 def test_stop_checklist_ignores_non_string_transcript(stop_checklist, transcript):
     """Malformed transcript fields never become collector path arguments."""

@@ -50,7 +50,57 @@ _run_session_retrospective() {
         timeout 8s python3 "$retro" "${args[@]}" \
             >/dev/null 2>&1 || rc=$?
     else
-        perl -e 'alarm 8; exec @ARGV' python3 "$retro" "${args[@]}" \
+        # Keep a parent alive to deliver the collector's rollback signal.
+        # An alarm inherited across exec sends SIGALRM, which skips rollback.
+        perl -e '
+            use Errno qw(EINTR);
+            use POSIX qw(:signal_h :sys_wait_h);
+            my $old = POSIX::SigSet->new;
+            sigprocmask(SIG_BLOCK, POSIX::SigSet->new(SIGALRM, SIGTERM, SIGINT), $old)
+                or exit 125;
+            my $pid = fork();
+            defined $pid or exit 125;
+            if ($pid == 0) {
+                $SIG{ALRM} = $SIG{TERM} = $SIG{INT} = "DEFAULT";
+                sigprocmask(SIG_SETMASK, $old) or exit 125;
+                exec @ARGV;
+                exit 127;
+            }
+            my ($reaped, $status, $timed_out, $cancelled) = (0, 0, 0, 0);
+            my $signal_child = sub {
+                local ($!, $?);
+                return 0 if $reaped;
+                my $done = waitpid($pid, WNOHANG);
+                if ($done == $pid) { $status = $?; $reaped = 1; return 0; }
+                return 0 if $done < 0;
+                return kill $_[0], $pid;
+            };
+            $SIG{ALRM} = sub {
+                if ($timed_out || $cancelled) { $signal_child->("KILL"); }
+                elsif ($signal_child->("TERM")) { $timed_out = 1; alarm 1; }
+            };
+            for my $sig ("TERM", "INT") {
+                my $name = $sig;
+                $SIG{$name} = sub {
+                    $cancelled = $name eq "TERM" ? 143 : 130;
+                    # The collector rolls back on TERM, including INT cancellation.
+                    alarm 1 if $signal_child->("TERM");
+                };
+            }
+            alarm 8;
+            sigprocmask(SIG_SETMASK, $old) or exit 125;
+            while (!$reaped) {
+                my $done = waitpid($pid, 0);
+                if ($done == $pid) { $status = $?; $reaped = 1; last; }
+                next if $done < 0 && $! == EINTR;
+                last;
+            }
+            alarm 0;
+            exit 124 if $timed_out;
+            exit $cancelled if $cancelled;
+            exit 125 unless $reaped;
+            exit(($status & 127) ? 128 + ($status & 127) : $status >> 8);
+        ' python3 "$retro" "${args[@]}" \
             >/dev/null 2>&1 || rc=$?
     fi
 
