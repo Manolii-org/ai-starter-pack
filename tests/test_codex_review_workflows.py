@@ -67,6 +67,11 @@ def test_all_workflow_shell_blocks_parse():
 
 @pytest.mark.parametrize('lane,cli,native,actor,stale,passed', [
     ('code', '', 'formal', 'chatgpt-codex-connector[bot]', False, True),
+    ('code', '', 'quota_summary', 'chatgpt-codex-connector[bot]', False, False),
+    ('code', '', 'misleading_summary', 'chatgpt-codex-connector[bot]', False, False),
+    ('security', '', 'mixed_summary', 'chatgpt-codex-connector[bot]', False, True),
+    ('code', '', 'mixed_summary', 'chatgpt-codex-connector[bot]', False, False),
+    ('security', '', 'ambiguous_summary', 'chatgpt-codex-connector[bot]', False, False),
     ('code', '', None, 'chatgpt-codex-connector[bot]', False, False),
     ('security', '', 'security', 'chatgpt-codex-connector[bot]', False, True),
     ('code', 'completed', None, 'chatgpt-codex-connector[bot]', False, True),
@@ -86,8 +91,13 @@ def test_actual_completion_job_native_fallback(lane, cli, native, actor, stale, 
 const fs=require('fs'),p=JSON.parse(fs.readFileSync(0,'utf8'));
 const sha='a'.repeat(40), messages=[], failures=[];
 const item={user:{login:p.actor},body:'Codex Review',commit_id:sha,state:'COMMENTED'};
-const comments=p.native==='security'?[{user:{login:p.actor},body:'| 🔒 **Security Review** | ✅ **Completed** | `aaaaaaaaaa` |'}]:[];
-const api={pulls:{get:async()=>({data:{head:{sha:p.stale?'b'.repeat(40):sha}}}),listReviews:async()=>({data:p.native==='formal'?[item]:[]}),listReviewComments:async()=>({data:[]})},issues:{listComments:async()=>({data:comments})}};
+const bodies={security:'| 🔒 **Security Review** | ✅ **Completed** | `aaaaaaaaaa` |',
+quota_summary:'| 📝 **Code Review** | ⚠️ **Usage limits reached** | `aaaaaaaaaa` |',
+misleading_summary:'| 📝 **Code Review** | ⚠️ **Usage limits reached** | `aaaaaaaaaa` | ✅ **Completed** |',
+mixed_summary:'| 📝 **Code Review** | ⚠️ **Usage limits reached** | `aaaaaaaaaa` |\n| 🔒 **Security Review** | ✅ **Completed** | `aaaaaaaaaa` |',
+ambiguous_summary:'| 🔒 **Security Review** | ✅ **Completed** | `aaaaaaaaaa` |'};
+const comments=bodies[p.native]?[{user:{login:p.actor},body:bodies[p.native]}]:[];
+const api={repos:{getCommit:async()=>{if(p.native==='ambiguous_summary')throw Error('422 ambiguous');return {data:{sha}};}},pulls:{get:async()=>({data:{head:{sha:p.stale?'b'.repeat(40):sha}}}),listReviews:async()=>({data:p.native==='formal'?[item]:[]}),listReviewComments:async()=>({data:[]})},issues:{listComments:async()=>({data:comments})}};
 const github={rest:api,paginate:async fn=>(await fn()).data};
 const core={info:s=>messages.push(s),setFailed:s=>failures.push(s)};
 const context={repo:{owner:'example',repo:'project'},payload:{pull_request:{number:1}}};

@@ -535,27 +535,46 @@ jobs:
             ]);
             const bot = item => item.user && item.user.login === 'chatgpt-codex-connector[bot]';
             const bad = item => /(?:^|\n)(?:you have reached your Codex usage limits|Codex usage limits have been reached)|connect to github|create a Codex account/i.test(item.body || '');
-            const bound = prefix => typeof prefix === 'string' && /^[0-9a-f]{7,40}$/i.test(prefix) && head.toLowerCase().startsWith(prefix.toLowerCase());
+            const bound = async prefix => {
+              if (typeof prefix !== 'string' || !/^[0-9a-f]{7,40}$/i.test(prefix)
+                  || !head.toLowerCase().startsWith(prefix.toLowerCase())) return false;
+              if (prefix.length === 40) return true;
+              // Native summary tables abbreviate SHAs. GitHub must resolve the
+              // prefix uniquely; an ambiguous or stale prefix is never proof.
+              try {
+                const resolved = await github.rest.repos.getCommit({owner, repo, ref: prefix});
+                return resolved.data.sha === head;
+              } catch (error) {
+                core.info('Native abbreviated commit could not be uniquely resolved.');
+                return false;
+              }
+            };
             const codeReviews = reviews.filter(item => bot(item) && !bad(item) && item.commit_id === head
               && String(item.state || '').toUpperCase() !== 'PENDING'
               && /codex review/i.test(item.body || '')
               && !/codex-security-review|codex security review/i.test(item.body || ''));
-            const codeReviewIds = new Set(codeReviews.map(item => item.id));
-            const formal = codeReviews.length > 0 || inline.some(item => bot(item) && !bad(item)
-              && item.commit_id === head && codeReviewIds.has(item.pull_request_review_id));
-            const clean = comments.some(item => {
-              if (!bot(item) || bad(item) || !/codex review:[^\n]*didn.?t find any major issues/i.test(item.body || '')) return false;
-              const match = item.body.match(/reviewed commit:[^0-9a-f]*([0-9a-f]{7,40})/i);
-              return match && bound(match[1]);
-            });
-            const summary = comments.some(item => {
-              if (!bot(item)) return false;
-              return (item.body || '').split('\n').some(line => {
-                const match = line.match(/\|[^\n]*\*\*Code Review\*\*[^\n]*\*\*Completed\*\*[^\n]*`([0-9a-f]{7,40})`/i);
-                return match && bound(match[1]);
-              });
-            });
-            if (formal || clean || summary) {
+            const prefixes = new Set();
+            for (const item of comments.filter(bot)) {
+              const body = item.body || '';
+              if (true && !bad(item) && /codex review:[^\n]*didn.?t find any major issues/i.test(body)) {
+                const clean = body.match(/reviewed commit:[^0-9a-f]*([0-9a-f]{7,40})/i);
+                if (clean) prefixes.add(clean[1]);
+              }
+              for (const line of body.split('\n')) {
+                const cells = line.split('|').map(cell => cell.trim());
+                // Match the status cell, not a word in another column/lane.
+                if (!/\*\*Code Review\*\*/i.test(cells[1] || '')
+                    || !/^✅\s*\*\*Completed\*\*(?:\s*<relative-time[^>]*>[^<]*<\/relative-time>)?$/i.test(cells[2] || '')) continue;
+                const commit = (cells[3] || '').match(/^`([0-9a-f]{7,40})`$/i);
+                if (commit) prefixes.add(commit[1]);
+              }
+            }
+            let native = true && codeReviews.length > 0;
+            for (const prefix of prefixes) {
+              if (native) break;
+              native = await bound(prefix);
+            }
+            if (native) {
               core.info('code review coverage completed through authenticated native Codex evidence for ' + head);
               return;
             }
