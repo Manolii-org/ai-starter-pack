@@ -80,6 +80,16 @@ _run_session_retrospective() {
 _RETRO_SESSION_ID="${_SESSION_ID_FOR_RETRO:-${_RETRO_SESSION_ID:-}}"
 _run_session_retrospective
 
+# Emit primary hook context before optional work can consume the host deadline.
+cat <<'EOF'
+Session ending checklist:
+- Run /extract-insights if decisions were made
+- Run /session-summary for significant sessions
+- Flag any unresolved issues for next session
+- Check if .ai/memory/ changes should be committed
+- Check .ai/reflections/ for any pending-review reflection proposals (or run /reflect)
+EOF
+
 # Local capture has first use of the host's 10-second budget. Optional receipt
 # retention, reflection and doctor work may be interrupted afterward without
 # starving the durable collector's own bounded attempt.
@@ -104,14 +114,6 @@ if [ "${CLAUDE_AUTO_REFLECT:-0}" = "1" ]; then
   python3 "${SCRIPT_DIR}/reflect-on-failures.py" >/dev/null 2>&1 || true
 fi
 
-cat <<'EOF'
-Session ending checklist:
-- Run /extract-insights if decisions were made
-- Run /session-summary for significant sessions
-- Flag any unresolved issues for next session
-- Check if .ai/memory/ changes should be committed
-- Check .ai/reflections/ for any pending-review reflection proposals (or run /reflect)
-EOF
 
 # ── Branch fingerprint ───────────────────────────────────────────────────────
 # One-line visibility of what this branch has done relative to main: files

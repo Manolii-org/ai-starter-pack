@@ -2031,3 +2031,36 @@ def test_stop_checklist_captures_before_optional_work_uses_outer_budget(stop_che
         except ProcessLookupError:
             pass
         process.communicate(timeout=3)
+
+
+def test_stop_checklist_emits_primary_context_before_optional_reflection_timeout(stop_checklist):
+    """Near-budget capture still emits the checklist before optional work is killed."""
+    root, environment = stop_checklist
+    (root / "scripts/rotate-jsonl-receipt.py").write_text("import time; time.sleep(2)\n")
+    (root / "scripts/reflect-on-failures.py").write_text(
+        "import pathlib, time\n"
+        "pathlib.Path('reflection-started').touch()\n"
+        "time.sleep(20)\n"
+    )
+    environment = dict(environment, LOCAL_DELAY="7.2", CLAUDE_AUTO_REFLECT="1")
+    environment.pop("BASH_ENV")
+    process = subprocess.Popen(
+        ["bash", "scripts/session-stop-checklist.sh"], cwd=root,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, env=environment, start_new_session=True,
+    )
+    try:
+        try:
+            process.communicate('{"session_id":"primary-context"}', timeout=10)
+        except subprocess.TimeoutExpired:
+            pass  # Model the host stopping optional work at its real deadline.
+        assert (root / "stop-finished").exists()
+        assert (root / "reflection-started").exists()
+    finally:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        stdout, _ = process.communicate(timeout=3)
+    assert "Session ending checklist:" in stdout
+    assert "Run /extract-insights if decisions were made" in stdout
