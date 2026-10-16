@@ -16,11 +16,11 @@ SPEC.loader.exec_module(probe)
 
 
 @pytest.mark.parametrize('output,exit_code,qualified', [
-    ({'private_file': True, 'symlink': True, 'process_environment': True, 'network': True}, 0, True),
-    ({'private_file': True, 'symlink': False, 'process_environment': True, 'network': True}, 0, False),
-    ({'private_file': True, 'symlink': True, 'process_environment': True, 'network': True}, 1, False),
+    ({'private_file': True, 'symlink': True, 'process_environment': True, 'descriptor_alias': True, 'network': True}, 0, True),
+    ({'private_file': True, 'symlink': False, 'process_environment': True, 'descriptor_alias': True, 'network': True}, 0, False),
+    ({'private_file': True, 'symlink': True, 'process_environment': True, 'descriptor_alias': True, 'network': True}, 1, False),
     ({'private_file': True, 'symlink': True, 'process_environment': True}, 0, False),
-    ({'private_file': True, 'symlink': True, 'process_environment': True, 'network': 'true'}, 0, False),
+    ({'private_file': True, 'symlink': True, 'process_environment': True, 'descriptor_alias': True, 'network': 'true'}, 0, False),
     ('not JSON', 0, False),
 ])
 def test_subprocess_boundary_requires_all_proofs(tmp_path, monkeypatch, output, exit_code, qualified):
@@ -54,16 +54,20 @@ def test_real_attack_program_fails_in_unsandboxed_control(tmp_path):
     for name in ('source', 'private'):
         (tmp_path / name).mkdir()
     (tmp_path / 'source/allowed.txt').write_text('source-visible')
-    (tmp_path / 'private/sentinel').write_text('synthetic')
+    (tmp_path / 'private/sentinel').write_text(probe.DESCRIPTOR_CANARY)
     (tmp_path / 'source/private-link').symlink_to(tmp_path / 'private/sentinel')
     with socket.socket() as server:
         server.bind(('127.0.0.1', 0))
         server.listen(1)
-        result = subprocess.run(['python3', '-c', probe.PROBE, str(tmp_path), str(server.getsockname()[1])],
-                                capture_output=True, text=True, check=False)
-    assert result.returncode == 1
+        with (tmp_path / 'private/sentinel').open('rb') as descriptor:
+            result = subprocess.run(['python3', '-c', probe.PROBE, str(tmp_path),
+                                     str(server.getsockname()[1]), str(descriptor.fileno())],
+                                    capture_output=True, stdin=subprocess.DEVNULL, text=True,
+                                    pass_fds=(descriptor.fileno(),), check=False)
+    assert result.returncode == 1 and result.stderr == ''
     report = json.loads(result.stdout)
-    assert all(value is False for value in report.values())
+    assert report == {'private_file': False, 'symlink': False, 'process_environment': False,
+                      'descriptor_alias': False, 'network': False}
 
 
 def test_probe_workflow_never_gets_credentials_or_calls_a_model():

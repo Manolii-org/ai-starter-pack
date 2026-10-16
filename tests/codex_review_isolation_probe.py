@@ -11,6 +11,9 @@ import subprocess
 import tempfile
 
 
+DESCRIPTOR_CANARY = 'synthetic-descriptor-canary'
+
+
 PROBE = r'''
 import json, pathlib, socket, sys
 root = pathlib.Path(sys.argv[1])
@@ -18,9 +21,12 @@ assert (root / 'source' / 'allowed.txt').read_text() == 'source-visible'
 denied = {}
 for label, path in [('private_file', root / 'private' / 'sentinel'),
                     ('symlink', root / 'source' / 'private-link'),
-                    ('process_environment', pathlib.Path('/proc/self/environ'))]:
+                    ('process_environment', pathlib.Path('/proc/self/environ')),
+                    ('descriptor_alias', pathlib.Path('/dev/fd') / sys.argv[3])]:
     try:
-        path.read_bytes()
+        data = path.read_bytes()
+        if label == 'descriptor_alias' and data != b'synthetic-descriptor-canary':
+            raise RuntimeError('descriptor positive-control input was not carried through')
     except (PermissionError, FileNotFoundError):
         denied[label] = True
     else:
@@ -39,7 +45,9 @@ sys.exit(0 if all(denied.values()) else 1)
 
 def permission_args(private: Path) -> list[str]:
     """Use the pinned CLI's real profile syntax, including proc/descriptor denial."""
-    denied = (private.resolve(), Path('/proc'), Path('/sys'), Path('/run'), Path('/dev/fd'))
+    # /dev/fd is a symlink into /proc, not an independent mount target.
+    # Mask the canonical proc tree and test its descriptor alias explicitly.
+    denied = (private.resolve(), Path('/proc'), Path('/sys'), Path('/run'))
     entries = ','.join(json.dumps(str(path)) + '="deny"' for path in denied)
     return ['-c', 'default_permissions="review_probe"', '-c',
             'permissions.review_probe={extends=":read-only",filesystem={' + entries + '}}',
@@ -54,7 +62,7 @@ def qualify(codex: Path, *, timeout: int = 30) -> dict:
         for path in (private, source, temporary):
             path.mkdir(mode=0o700)
         # No credential is fetched, copied, inspected or passed to the CLI.
-        (private / 'sentinel').write_text('synthetic-isolation-probe')
+        (private / 'sentinel').write_text(DESCRIPTOR_CANARY)
         (source / 'allowed.txt').write_text('source-visible')
         (source / 'private-link').symlink_to(private / 'sentinel')
         # The control proves the host can reach the server, so a failed sandbox
@@ -71,8 +79,11 @@ def qualify(codex: Path, *, timeout: int = 30) -> dict:
             command = [str(codex.resolve()), *permission_args(private), 'sandbox', '--',
                        'python3', '-c', PROBE, str(root), str(port)]
             try:
-                result = subprocess.run(command, cwd=source, env=environment, text=True,
-                                        capture_output=True, timeout=timeout, check=False)
+                with (private / 'sentinel').open('rb') as descriptor:
+                    result = subprocess.run(command + [str(descriptor.fileno())], cwd=source,
+                                            env=environment, text=True, capture_output=True,
+                                            stdin=subprocess.DEVNULL, pass_fds=(descriptor.fileno(),),
+                                            timeout=timeout, check=False)
             except subprocess.TimeoutExpired:
                 return {'qualified': False, 'reason': 'sandbox_timeout'}
             except OSError as exc:
@@ -81,14 +92,14 @@ def qualify(codex: Path, *, timeout: int = 30) -> dict:
                 checks = json.loads(result.stdout)
             except (ValueError, TypeError):
                 checks = None
-            expected = {'private_file', 'symlink', 'process_environment', 'network'}
+            expected = {'private_file', 'symlink', 'process_environment', 'descriptor_alias', 'network'}
             valid = isinstance(checks, dict) and set(checks) == expected and all(v is True for v in checks.values())
             return {'qualified': result.returncode == 0 and valid,
                     'reason': 'qualified_tool_sandbox' if result.returncode == 0 and valid else 'sandbox_qualification_failed',
                     'exit_code': result.returncode, 'checks': checks if valid else None,
                     # Synthetic-only process. Retain startup errors for diagnosis.
                     'diagnostic': result.stderr[-1800:] if result.returncode else '',
-                    'scope': 'tool file/proc/symlink/network isolation only; not model, MCP, workflow or credential-source acceptance'}
+                    'scope': 'tool file/proc/descriptor/symlink/network isolation only; not model, MCP, workflow or credential-source acceptance'}
 
 
 def main() -> int:
