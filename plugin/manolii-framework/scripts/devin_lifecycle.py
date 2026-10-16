@@ -180,6 +180,11 @@ def sweep(client, policy, apply=False, reviewed=None, now=None, audit=None):
         raise ValueError("apply needs a matching dry-run report less than 15 minutes old")
     report["policy"] = policy
     candidates = client.pages(limit=policy["max_sessions"], filters={"origins": ["automation"], "automation_ids": policy["automation_ids"], "is_archived": "false"})
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            raise TypeError("invalid inventory candidate")
+        if candidate.get("origin") == "automation" and candidate.get("automation_id") in policy["automation_ids"]:
+            canonical_session_id(candidate.get("session_id"))
     archived = 0
     for candidate in candidates:
         if candidate.get("origin") != "automation" or candidate.get("automation_id") not in policy["automation_ids"]:

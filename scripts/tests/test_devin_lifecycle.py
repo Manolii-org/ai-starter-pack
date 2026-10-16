@@ -109,6 +109,19 @@ def test_dry_run_apply_and_idempotence(monkeypatch):
     assert len(client.writes) == 1
 
 
+@pytest.mark.parametrize("apply", [False, True])
+@pytest.mark.parametrize("malformed", [None, "unexpected", {"origin": "automation", "automation_id": "auto-example"}, {"origin": "automation", "automation_id": "auto-example", "session_id": "../bad"}])
+def test_inventory_is_validated_before_any_session_processing(monkeypatch, apply, malformed):
+    monkeypatch.setattr(life.time, "time", lambda: NOW)
+    client = FakeClient()
+    dry = life.sweep(client, POLICY, now=NOW)
+    client.pages = lambda **kwargs: [client.session, malformed]
+    client.read = lambda sid: pytest.fail("inventory must be validated before any session read")
+    with pytest.raises(ValueError if isinstance(malformed, dict) else TypeError):
+        life.sweep(client, POLICY, apply, dry, NOW)
+    assert not client.writes
+
+
 def test_changed_or_stale_review_rejected(monkeypatch):
     monkeypatch.setattr(life.time, "time", lambda: NOW)
     client = FakeClient()
