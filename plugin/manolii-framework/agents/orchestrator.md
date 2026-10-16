@@ -74,6 +74,7 @@ not establish that work never ran. Preserve existing approval pauses and holds.
 {
   "version": 1,
   "task": "brief task description",
+  "status": "active",
   "branch": "current-branch-name",
   "started_at": "ISO timestamp",
   "last_updated": "ISO timestamp",
@@ -126,6 +127,14 @@ A completed child DAG or merged PR does not establish the parent outcome.
 Return retained evidence pointers and unfinished parent follow-ups with their
 existing owner to the calling thread. Do not delete custody as cleanup or
 claim a handoff was accepted without acknowledgement.
+
+Once the checkpoint's complete original task outcome is verified, its parent
+owner records top-level `status: "done"` through the qualified existing writer,
+retaining the checkpoint and evidence. The unfinished-work checker recognizes
+that terminal status. Child completion alone never sets it: keep `status:
+"active"` while parent acceptance or follow-ups remain unfinished. If writer
+preservation is unverified, return this completion evidence to the parent owner
+for reconciliation instead of rewriting the record.
 
 Leave partial, failed and pending outcomes explicitly unfinished. A scoped hold
 does not stop independent authorized work. This instruction requires no new
