@@ -91,8 +91,10 @@ same check or review is still pending. At the bound, persist the pending status,
 evidence and actual continuation owner, and suspend this active wait chain;
 an infrastructure timeout is `blocked_on_infra`, not a new human-consent request
 or PASS. Retain a user-authorized durable owner's existing schedule. If no real
-continuation exists, report that monitoring is unavailable. Resume active work
-on a substantive new event or decisive evidence under the existing retry rules.
+continuation exists, terminate this invocation `blocked_on_infra` and follow
+that state's incident/escalation actions below; report monitoring as unavailable
+with the pending-work evidence. Resume active work on a substantive new event
+or decisive evidence under the existing retry rules.
 
 Before the first round, dispatch one persistent opus-pinned named `infra` agent
 with `model=` omitted to own the bounded authenticated read loop. Reuse that
