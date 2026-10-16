@@ -1,0 +1,61 @@
+name: Codex Review Coverage Recovery
+
+# Event-driven recovery only: rerun failed completion checks, never model jobs.
+on:
+  pull_request_review:
+    types: [submitted]
+  issue_comment:
+    types: [created, edited]
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+  actions: write
+
+concurrency:
+  group: codex-review-recovery-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    if: >-
+      github.actor == 'chatgpt-codex-connector[bot]' &&
+      (github.event_name == 'pull_request_review' ||
+       (github.event.issue.pull_request &&
+        (contains(github.event.comment.body, 'codex-pull-request-review-summary') ||
+         contains(github.event.comment.body, 'Reviewed commit:'))))
+    runs-on: ubuntu-slim
+    timeout-minutes: 3
+    steps:
+      - name: Retry only failed completion jobs for the live PR revision
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const pull_number = context.payload.pull_request?.number || context.payload.issue?.number;
+            const pull = (await github.rest.pulls.get({owner, repo, pull_number})).data;
+            if (pull.state !== 'open' || pull.draft) return;
+            const lanes = [
+              ['codex-pr-review.yml', 'Codex review coverage'],
+              ['codex-security-diff-scan.yml', 'Codex security coverage'],
+            ];
+            for (const [workflow_id, jobName] of lanes) {
+              const response = await github.rest.actions.listWorkflowRuns({
+                owner, repo, workflow_id, event: 'pull_request', head_sha: pull.head.sha,
+                per_page: 10,
+              });
+              const run = response.data.workflow_runs.find(item =>
+                item.head_sha === pull.head.sha && item.path === '.github/workflows/' + workflow_id);
+              if (!run || run.conclusion !== 'failure') continue;
+              const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+                owner, repo, run_id: run.id, per_page: 100,
+              });
+              const job = jobs.find(item => item.name === jobName && item.conclusion === 'failure');
+              if (!job) continue;
+              // Recheck after reads: never restart a superseded revision.
+              const live = (await github.rest.pulls.get({owner, repo, pull_number})).data;
+              if (live.head.sha !== pull.head.sha || live.draft || live.state !== 'open') return;
+              await github.rest.actions.reRunJobForWorkflowRun({owner, repo, job_id: job.id});
+              core.info('Retried completion job ' + job.id + ' for ' + pull.head.sha + '; no model rerun.');
+            }

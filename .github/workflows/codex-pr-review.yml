@@ -8,14 +8,14 @@ name: Codex PR Review (advisory)
 #
 # ADVISORY tier: reviews the PR diff with the Codex CLI (`codex exec review`)
 # on the ChatGPT SUBSCRIPTION and reports in a step summary + upserted PR
-# comment. This job NEVER blocks a merge — continue-on-error, every failure
-# path exits 0 or reports, and it must never be added to required checks.
+# comment. Model findings stay advisory. The separate completion job records
+# whether review executed; only that job may be required after a validated rollout.
 #
 # Why this exists: the OpenAI Codex cloud connector (chatgpt-codex-connector)
 # bills code reviews against usage credits and stops when credits run out.
 # This job produces the same class of signal through `codex exec review`
-# authenticated with CODEX_SUBSCRIPTION_AUTH_JSON (chatgpt auth_mode) — flat
-# subscription, no per-request credits. It deliberately does NOT pass an API
+# authenticated with CODEX_SUBSCRIPTION_AUTH_JSON (chatgpt auth_mode) —
+# subscription entitlement, subject to its usage limits. It deliberately does NOT pass an API
 # key: OPENAI_API_KEY/CODEX_API_KEY are unset in every step.
 #
 # Auth contract (same as codex-security-diff-scan): the credential is pulled
@@ -23,12 +23,12 @@ name: Codex PR Review (advisory)
 # CODEX_SUBSCRIPTION_AUTH_JSON — via secrets.DOPPLER_TOKEN_CODEX, a read-only
 # service token whose blast radius is that one credential even if a same-repo
 # PR edits this job. pull_request runs the PR's own copy of this file and
-# GitHub withholds secrets from forks natively, so fork PRs skip silently.
+# GitHub withholds secrets from forks natively, so fork PRs skip model work; the coverage job still checks native evidence.
 #
 # Draft policy: drafts skip so WIP does not spend review budget;
 # converted_to_draft is a trigger only so concurrency cancels in-flight work.
-# Operator kill switch (pr-standards LLM-workflow rule): set repository
-# variable CODEX_REVIEW_ENABLED=false to disable the job silently.
+# Operator kill switch: CODEX_REVIEW_ENABLED=false stops model execution.
+# Coverage then remains unsatisfied rather than pretending a review occurred.
 
 on:
   pull_request:
@@ -48,10 +48,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     continue-on-error: true
+    outputs:
+      review_state: ${{ steps.receipt.outputs.review_state }}
+      review_head: ${{ steps.receipt.outputs.review_head }}
     # Same-repo PRs only; drafts skip. Silent skips, never a failure.
     if: >-
       github.event.pull_request.head.repo.full_name == github.repository
       && github.event.pull_request.draft != true
+      && (
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'), github.event.pull_request.author_association)
+        || contains(fromJSON('["devin-ai-integration[bot]","renovate[bot]","dependabot[bot]","mend-bolt-for-github[bot]","claude[bot]","cursor[bot]"]'), github.event.pull_request.user.login)
+      )
       && vars.CODEX_REVIEW_ENABLED != 'false'
     steps:
       # Merge-commit checkout with fetch-depth: 0 resolves both base and head
@@ -65,6 +72,7 @@ jobs:
         id: range
         run: |
           set -euo pipefail
+          echo "range_state=unresolved" >> "$GITHUB_OUTPUT"
           BASE="${{ github.event.pull_request.base.sha }}"
           HEAD="${{ github.event.pull_request.head.sha }}"
           if ! git cat-file -e "$BASE" 2>/dev/null; then
@@ -80,6 +88,7 @@ jobs:
           fi
           CHANGED="$(git diff --name-only "$BASE...$HEAD" | wc -l | tr -d ' ')"
           if [ "$CHANGED" = "0" ]; then
+            echo "range_state=empty" >> "$GITHUB_OUTPUT"
             {
               echo "### Codex PR review"
               echo "Advisory review skipped: empty diff (merge-only or already-merged content)."
@@ -90,6 +99,7 @@ jobs:
           # `codex exec review --base` takes a ref; pin the base SHA to a
           # local branch so a drifting base tip cannot move the diff range.
           git branch -f codex-review-base "$BASE"
+          echo "range_state=ready" >> "$GITHUB_OUTPUT"
           echo "scannable=true" >> "$GITHUB_OUTPUT"
           echo "Diff range: $BASE...$HEAD ($CHANGED files)"
 
@@ -129,7 +139,7 @@ jobs:
           set -euo pipefail
           # Subscription auth lives in CODEX_HOME/auth.json. An API key env
           # var would force usage-priced billing — always unset both.
-          unset OPENAI_API_KEY CODEX_API_KEY
+          unset OPENAI_API_KEY CODEX_API_KEY OPENAI_BASE_URL
           echo "CODEX_HOME=$RUNNER_TEMP/codex-home" >> "$GITHUB_ENV"
           if [ -z "${DOPPLER_TOKEN_CODEX:-}" ]; then
             {
@@ -147,7 +157,7 @@ jobs:
           if ! printf 'Authorization: Bearer %s\n' "$DOPPLER_TOKEN_CODEX" \
             | curl -fsS --max-time 30 --connect-timeout 10 -H @- \
             "https://api.doppler.com/v3/configs/config/secret?project=master&config=prd_codex&name=CODEX_SUBSCRIPTION_AUTH_JSON" \
-            | python3 -c 'import json,sys;v=json.load(sys.stdin)["value"];r=v.get("computed") or v.get("raw");assert r, "Doppler response has neither value.computed nor value.raw";d=json.loads(r);assert "tokens" in d and "access_token" in d["tokens"], "unexpected auth.json shape";print(r)' \
+            | python3 -c 'import json,sys;v=json.load(sys.stdin)["value"];r=v.get("computed") or v.get("raw");assert r, "Doppler response has neither value.computed nor value.raw";d=json.loads(r);assert "tokens" in d and "access_token" in d["tokens"], "unexpected auth.json shape";assert d.get("auth_mode") in (None, "chatgpt") and not d.get("OPENAI_API_KEY"), "subscription authentication required";print(r)' \
             > "$RUNNER_TEMP/codex-home/auth.json"; then
             {
               echo "### Codex PR review"
@@ -171,7 +181,7 @@ jobs:
           REVIEW_OUT: ${{ runner.temp }}/codex-review-out.txt
         run: |
           set -euo pipefail
-          unset OPENAI_API_KEY CODEX_API_KEY
+          unset OPENAI_API_KEY CODEX_API_KEY OPENAI_BASE_URL
           # Remove the credential on ANY step exit (failure, timeout, cancel)
           # — belt-and-suspenders with the always() cleanup step below.
           # If the redactor never completes (crash/timeout/cancel), the raw
@@ -270,6 +280,29 @@ jobs:
           rm -f "$CODEX_HOME/auth.json"
           wc -l "$REVIEW_OUT"
 
+      - name: Remove subscription credential before reporting
+        if: always()
+        run: rm -f "${CODEX_HOME:-$RUNNER_TEMP/codex-home}/auth.json"
+
+      - name: Record code review execution state
+        id: receipt
+        if: always()
+        env:
+          PR_NUM: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          RANGE_STATE: ${{ steps.range.outputs.range_state }}
+          AUTH_PRESENT: ${{ steps.auth.outputs.present }}
+          INSTALL_OUTCOME: ${{ steps.install.outcome }}
+          SCAN_OUTCOME: ${{ steps.scan.outcome }}
+          SCAN_RC: ${{ steps.scan.outputs.rc }}
+          SCAN_WITHHELD: ${{ steps.scan.outputs.withheld }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: >-
+          python3 scripts/ci/codex_review_receipt.py --lane code
+          --input "${{ runner.temp }}/codex-review-out.txt"
+          --output "$RUNNER_TEMP/codex-code-receipt.json"
+
       - name: Summarise review
         id: report
         # always(): skipped runs must still publish so a comment from an
@@ -284,10 +317,11 @@ jobs:
           SCAN_WITHHELD: ${{ steps.scan.outputs.withheld }}
           AUTH_PRESENT: ${{ steps.auth.outputs.present }}
           RANGE_SCANNABLE: ${{ steps.range.outputs.scannable }}
+          REVIEW_STATE: ${{ steps.receipt.outputs.review_state }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           python3 - <<'PY'
-          import os, re
+          import json, os, re
           from pathlib import Path
 
           out_path = Path(os.environ["REVIEW_OUT"])
@@ -297,7 +331,9 @@ jobs:
           run_url = os.environ["RUN_URL"]
 
           lines = ["### Codex PR review (advisory, subscription)", ""]
-          if os.environ.get("RANGE_SCANNABLE") != "true":
+          if os.environ.get("REVIEW_STATE") not in {"completed", "exempt"}:
+              lines.append(f"Review coverage: **{os.environ.get('REVIEW_STATE') or 'failed_output'}** for head `{head}`. No completed review; see [run logs]({run_url}).")
+          elif os.environ.get("RANGE_SCANNABLE") != "true":
               lines.append(
                   f"Review skipped for head `{head}`: empty or unresolvable "
                   f"diff (see [run logs]({run_url}))."
@@ -326,9 +362,10 @@ jobs:
               # Publish only the final model turn — exec traces (command
               # outputs the agent ran, e.g. a steered `cat auth.json`) are
               # never part of the model's own verdict and never reach the
-              # comment. Fallback: filtered full output.
-              segments = re.split(r"(?m)^codex$", raw)
-              model_turn = segments[-1] if len(segments) > 1 else raw
+              # comment. Missing final model turns are never published.
+              segments = re.split(r"(?m)^codex\r?$", raw)
+              model_turn = segments[-1] if len(segments) > 1 else ""
+              model_turn = re.split(r"(?m)^tokens used\s*$", model_turn)[0]
               text_lines = [
                   ln for ln in model_turn.splitlines()
                   if ln.strip()
@@ -353,7 +390,7 @@ jobs:
               lines.append("```")
           lines.append("")
           lines.append(
-              "_Advisory only — never a required check. Review text is model output: "
+              "_Findings are advisory. Execution coverage is recorded separately. Review text is model output: "
               "verify before acting._"
           )
           body = "\n".join(lines)
@@ -361,7 +398,10 @@ jobs:
               body = body[:59900] + "\n…truncated (comment-size bound)\n```\n" + \
                   "_Advisory only — review text is model output: verify before acting._"
           Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text(body + "\n", encoding="utf-8")
-          body_path.write_text(body, encoding="utf-8")
+          receipt_path = Path(os.environ["RUNNER_TEMP"]) / "codex-code-receipt.json"
+          receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+          receipt_marker = "<!-- codex-review-receipt:v1 " + json.dumps(receipt, sort_keys=True) + " -->"
+          body_path.write_text(receipt_marker + "\n" + body, encoding="utf-8")
           print(body)
           with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
               fh.write("post_comment=true\n")
@@ -389,6 +429,11 @@ jobs:
               "Accept": "application/vnd.github+json",
           }
           try:
+              current_req = urllib.request.Request(f"https://api.github.com/repos/{repo}/pulls/{pr}", headers=headers)
+              current = json.loads(urllib.request.urlopen(current_req, timeout=30).read())
+              if (current.get("head") or {}).get("sha") != os.environ["HEAD_SHA"]:
+                  print("Superseded review revision — preserving the newer comment.")
+                  sys.exit(0)
               page = 1
               existing = None
               while True:
@@ -443,3 +488,75 @@ jobs:
         if: always()
         continue-on-error: true
         run: rm -f "${CODEX_HOME:-$RUNNER_TEMP/codex-home}/auth.json"
+
+      - name: Upload code execution receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: codex-code-receipt-${{ github.run_id }}
+          path: ${{ runner.temp }}/codex-code-receipt.json
+          retention-days: 14
+          if-no-files-found: warn
+
+  completion:
+    name: Codex review coverage
+    if: always() && github.event.pull_request.draft != true
+    needs: review
+    runs-on: ubuntu-slim
+    timeout-minutes: 2
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Require revision-bound CLI or native review evidence
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        env:
+          REVIEW_STATE: ${{ needs.review.outputs.review_state }}
+          REVIEW_HEAD: ${{ needs.review.outputs.review_head }}
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const pull_number = context.payload.pull_request.number;
+            const head = process.env.EXPECTED_HEAD;
+            const live = await github.rest.pulls.get({owner, repo, pull_number});
+            if (live.data.head.sha !== head) {
+              core.setFailed('Superseded revision; a later head must have its own review.');
+              return;
+            }
+            if (process.env.REVIEW_HEAD === head && ['completed', 'exempt'].includes(process.env.REVIEW_STATE)) {
+              core.info('code review coverage: ' + process.env.REVIEW_STATE + ' for ' + head);
+              return;
+            }
+            const [reviews, inline, comments] = await Promise.all([
+              github.paginate(github.rest.pulls.listReviews, {owner, repo, pull_number, per_page: 100}),
+              github.paginate(github.rest.pulls.listReviewComments, {owner, repo, pull_number, per_page: 100}),
+              github.paginate(github.rest.issues.listComments, {owner, repo, issue_number: pull_number, per_page: 100}),
+            ]);
+            const bot = item => item.user && item.user.login === 'chatgpt-codex-connector[bot]';
+            const bad = item => /(?:^|\n)(?:you have reached your Codex usage limits|Codex usage limits have been reached)|connect to github|create a Codex account/i.test(item.body || '');
+            const bound = prefix => typeof prefix === 'string' && /^[0-9a-f]{7,40}$/i.test(prefix) && head.toLowerCase().startsWith(prefix.toLowerCase());
+            const codeReviews = reviews.filter(item => bot(item) && !bad(item) && item.commit_id === head
+              && String(item.state || '').toUpperCase() !== 'PENDING'
+              && /codex review/i.test(item.body || '')
+              && !/codex-security-review|codex security review/i.test(item.body || ''));
+            const codeReviewIds = new Set(codeReviews.map(item => item.id));
+            const formal = codeReviews.length > 0 || inline.some(item => bot(item) && !bad(item)
+              && item.commit_id === head && codeReviewIds.has(item.pull_request_review_id));
+            const clean = comments.some(item => {
+              if (!bot(item) || bad(item) || !/codex review:[^\n]*didn.?t find any major issues/i.test(item.body || '')) return false;
+              const match = item.body.match(/reviewed commit:[^0-9a-f]*([0-9a-f]{7,40})/i);
+              return match && bound(match[1]);
+            });
+            const summary = comments.some(item => {
+              if (!bot(item)) return false;
+              return (item.body || '').split('\n').some(line => {
+                const match = line.match(/\|[^\n]*\*\*Code Review\*\*[^\n]*\*\*Completed\*\*[^\n]*`([0-9a-f]{7,40})`/i);
+                return match && bound(match[1]);
+              });
+            });
+            if (formal || clean || summary) {
+              core.info('code review coverage completed through authenticated native Codex evidence for ' + head);
+              return;
+            }
+            core.setFailed('code review coverage incomplete (' + (process.env.REVIEW_STATE || 'not admitted') + '). No current-head CLI or native completion proof.');

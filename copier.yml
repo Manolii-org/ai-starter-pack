@@ -57,7 +57,7 @@ langfuse_telemetry:
 
 codex_adversarial:
   type: bool
-  help: Cross-provider adversarial PR review agent. Requires OPENAI_API_KEY.
+  help: Optional native Codex MCP adversarial agent; separate from subscription CLI review. Configure its MCP provider credentials separately.
   default: false
 
 mesh_telemetry:
