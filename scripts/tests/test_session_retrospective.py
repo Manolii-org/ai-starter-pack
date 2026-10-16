@@ -14,6 +14,7 @@ import importlib.util
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -1816,11 +1817,13 @@ if os.environ.get("BLOCK_LOGGER"):
         time.sleep(0.01)
 ''')
     (scripts / "session-retrospective.py").write_text('''
-import json, os, pathlib, sys
+import json, os, pathlib, sys, time
 root = pathlib.Path(__file__).resolve().parent.parent
 mode = sys.argv[sys.argv.index("--mode") + 1]
 (root / (mode + "-args.json")).write_text(json.dumps(sys.argv[1:]))
 if mode == "stop":
+    time.sleep(float(os.environ.get("LOCAL_DELAY", "0")))
+    (root / "stop-finished").touch()
     sys.exit(int(os.environ.get("LOCAL_RC", "0")))
 (root / "kl-saw-local").write_text(str((root / "stop-args.json").exists()))
 ''')
@@ -1836,6 +1839,7 @@ if mode == "stop":
 
 
 def _run_stop_checklist(fixture, payload, *, local_rc=0, credentials=False, no_timeout=False):
+    """Run the real hook with isolated doubles and join every fixture worker."""
     root, environment = fixture
     environment = dict(environment, LOCAL_RC=str(local_rc))
     if credentials:
@@ -1860,38 +1864,49 @@ def _run_stop_checklist(fixture, payload, *, local_rc=0, credentials=False, no_t
 
 
 @pytest.mark.parametrize("no_timeout", [False, True])
-def test_stop_checklist_forwards_exact_live_transcript(stop_checklist, no_timeout):
+@pytest.mark.parametrize("suffix", ["", "\n\n"])
+def test_stop_checklist_forwards_exact_live_transcript(stop_checklist, no_timeout, suffix):
+    """Both timeout branches preserve exact payload and cost-logger arguments."""
     root, _ = stop_checklist
-    transcript = str(root / "live transcript 'quoted' $dollar.jsonl")
+    transcript = str(root / "live transcript 'quoted' $dollar.jsonl") + suffix
+    session_id = "session with spaces" + suffix
     argv = _run_stop_checklist(
-        stop_checklist, {"session_id": "session with spaces", "transcript_path": transcript},
+        stop_checklist, {"session_id": session_id, "transcript_path": transcript},
         no_timeout=no_timeout,
     )
     assert argv == [
-        "--mode", "stop", "--local-only", "--session-id", "session with spaces",
+        "--mode", "stop", "--local-only", "--session-id", session_id,
         "--transcript", transcript,
     ]
     assert json.loads((root / "logger-args.json").read_text()) == [
-        "--session", "session with spaces",
+        "--session", session_id,
     ]
     assert not (root / "kl-only-args.json").exists()
 
 
 @pytest.mark.parametrize("transcript", [None, 42, {"path": "invalid"}])
 def test_stop_checklist_ignores_non_string_transcript(stop_checklist, transcript):
+    """Malformed transcript fields never become collector path arguments."""
     argv = _run_stop_checklist(stop_checklist, {"transcript_path": transcript})
     assert "--transcript" not in argv
 
 
 def test_stop_checklist_suppresses_kl_after_failed_local_capture(stop_checklist):
+    """A failed local attempt retains pending data and forbids a KL drain."""
     root, _ = stop_checklist
+    pending = root / ".ai/memory/retrospectives/existing-pending.json"
+    pending.parent.mkdir(parents=True)
+    pending.write_text('{"pending":"retained"}\n')
+    pending_before = pending.read_bytes()
     _run_stop_checklist(stop_checklist, {"session_id": "failed"}, local_rc=42, credentials=True)
     marker = root / ".ai/memory/retrospectives/.last-capture-failed"
     assert json.loads(marker.read_text())["exit_code"] == 42
+    assert pending.read_bytes() == pending_before
     assert not (root / "kl-only-args.json").exists()
 
 
 def test_stop_checklist_starts_drain_after_successful_local_step(stop_checklist):
+    """A clean local step may drain pending work only after that step has run."""
     root, _ = stop_checklist
     _run_stop_checklist(stop_checklist, {"session_id": "pending"}, credentials=True)
     assert json.loads((root / "kl-only-args.json").read_text()) == [
@@ -1925,6 +1940,7 @@ def test_stop_collector_cli_accepts_the_forwarded_transcript_flags(tmp_path, mon
 
 
 def test_stop_checklist_capture_does_not_wait_for_cost_logger(stop_checklist):
+    """Local capture completes while optional cost reporting remains blocked."""
     root, environment = stop_checklist
     process = subprocess.Popen(
         ["bash", "scripts/session-stop-checklist.sh"], cwd=root,
@@ -1944,3 +1960,74 @@ def test_stop_checklist_capture_does_not_wait_for_cost_logger(stop_checklist):
         (root / "release-logger").touch()
         process.wait(timeout=5)
     assert process.returncode == 0
+
+
+def test_stop_checklist_detaches_logger_output_until_worker_is_released(stop_checklist):
+    """The real shell and both captured pipes finish while the logger is blocked."""
+    root, environment = stop_checklist
+    environment = dict(environment, BLOCK_LOGGER="1")
+    environment.pop("BASH_ENV")  # No test EXIT wait trap or disown override.
+    process = subprocess.Popen(
+        ["bash", "scripts/session-stop-checklist.sh"], cwd=root,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, env=environment, start_new_session=True,
+    )
+    try:
+        stdout, _ = process.communicate('{"session_id":"detached-logger"}', timeout=3)
+        assert process.returncode == 0
+        assert "Session ending checklist" in stdout
+        assert (root / "stop-finished").exists()
+        deadline = time.monotonic() + 2
+        while not (root / "logger-started").exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert (root / "logger-started").exists()
+        assert not (root / "release-logger").exists()
+    finally:
+        (root / "release-logger").touch()
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        process.communicate(timeout=3)
+
+
+def test_stop_checklist_captures_before_optional_work_uses_outer_budget(stop_checklist):
+    """A near-eight-second capture finishes before optional work hits host limits."""
+    root, environment = stop_checklist
+    scripts = root / "scripts"
+    for name, delay in (
+        ("rotate-jsonl-receipt.py", 2),
+        ("reflect-on-failures.py", 0.2),
+        ("doctor-analyse.py", 3),
+    ):
+        (scripts / name).write_text(
+            "import json, pathlib, time\n"
+            "root = pathlib.Path(__file__).resolve().parent.parent\n"
+            f"(root / {name + '-saw-capture.json'!r}).write_text(\n"
+            "    json.dumps((root / 'stop-finished').exists()))\n"
+            f"time.sleep({delay!r})\n"
+            "print('{}')\n"
+        )
+    environment = dict(environment, LOCAL_DELAY="7.2", CLAUDE_AUTO_REFLECT="1")
+    environment.pop("BASH_ENV")
+    process = subprocess.Popen(
+        ["bash", "scripts/session-stop-checklist.sh"], cwd=root,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, env=environment, start_new_session=True,
+    )
+    try:
+        try:
+            process.communicate('{"session_id":"near-budget"}', timeout=10)
+        except subprocess.TimeoutExpired:
+            # The host may stop optional work; the durable local attempt won
+            # its own 8-second slot and must already have finished by then.
+            pass
+        assert (root / "stop-finished").exists()
+        for name in ("rotate-jsonl-receipt.py", "reflect-on-failures.py", "doctor-analyse.py"):
+            assert json.loads((root / (name + "-saw-capture.json")).read_text()) is True
+    finally:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        process.communicate(timeout=3)
