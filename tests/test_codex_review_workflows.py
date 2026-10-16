@@ -1,4 +1,5 @@
 """Execute receipt and publisher preparation from the actual workflow definitions."""
+import ast
 import json
 import os
 import re
@@ -177,4 +178,12 @@ def test_raw_security_artifact_cannot_upload_without_redaction(outcome, withheld
     expression = expression.replace('steps.auth.outputs.present', repr('true'))
     expression = expression.replace('steps.redact.outcome', repr(outcome))
     expression = expression.replace('steps.redact.outputs.withheld', repr(withheld))
-    assert eval(expression, {'__builtins__': {}}) is allowed
+    def evaluate(node):
+        if isinstance(node, ast.Constant):
+            return node.value
+        if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.And):
+            return all(evaluate(value) for value in node.values)
+        if isinstance(node, ast.Compare) and len(node.ops) == 1 and isinstance(node.ops[0], ast.Eq):
+            return evaluate(node.left) == evaluate(node.comparators[0])
+        raise AssertionError('Unexpected artifact-admission expression')
+    assert evaluate(ast.parse(expression, mode='eval').body) is allowed
