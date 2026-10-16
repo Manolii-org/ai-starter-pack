@@ -36,10 +36,17 @@ Executes `.claude/skills/autonomy-follow-through/SKILL.md`:
 3. Detects terminal conditions (done, blocked_on_human, blocked_on_infra, superseded, gave_up)
 4. Escalates with evidence JSON in PR comment
 5. Merges when safe (named required checks green on the current SHA, qualifying
-   current-head review present, threads resolved, not guarded); otherwise stops
-   `blocked_on_human`. Leftover-Act **trusted-packet squash** is
+   current-head review present, threads resolved, not guarded); otherwise retains
+   the actual pending, infrastructure or specific human-decision state.
+   Leftover-Act **trusted-packet squash** is
    `docs/runbooks/daily-leftover-act.md` only — `/watch-pr` never inherits it.
-6. Enforces anti-loop budgets (rearms, no-delta limit, infra backoff)
+6. Enforces repair budgets and infrastructure retry limits; passive CI/review
+   waits and duplicate informational events do not consume repair budgets
+7. Allows author-controlled readiness after complete initial scope, deterministic
+   and user verification, current-head required fast/secret checks and no HIGH
+   defect or input/security refusal; independent merge review remains required
+8. Preserves authorization and actual review outcomes through repairs, keeps one
+   real monitor and completes authorized parent-task verification after merge
 
 Returns terminal state + escalation status or merge confirmation.
 
