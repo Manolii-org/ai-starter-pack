@@ -298,3 +298,19 @@ def test_executable_disappearing_after_preflight_saves_startup_failure(tmp_path)
     assert saved["status"] == "startup_failed" and saved["startup_error"] == "FileNotFoundError"
     assert saved["final_message_available"] is False
     assert calls.read_text().splitlines() == ["version"]
+
+
+def test_provider_executes_hashed_snapshot_when_original_prompt_changes(tmp_path, monkeypatch):
+    args, env, _ = setup(tmp_path)
+    expected, execute = args.prompt_file.read_text(), muse.execute
+
+    def change_source(command, *positional):
+        args.prompt_file.write_text("Concurrent edit must not become this paid operation.")
+        snapshot = Path(command[command.index("--prompt-file") + 1])
+        assert snapshot != args.prompt_file and snapshot.read_text() == expected
+        assert snapshot.stat().st_mode & 0o777 == 0o600
+        return execute(command, *positional)
+
+    monkeypatch.setattr(muse, "execute", change_source)
+    assert muse.run(args, env) == 0
+    assert json.loads((args.output_dir / "receipt.json").read_text())["prompt_sha256"] == muse.digest(expected)

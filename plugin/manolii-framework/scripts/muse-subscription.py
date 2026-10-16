@@ -200,6 +200,10 @@ def run(args, env: dict[str, str]) -> int:
         output.chmod(0o700)
         receipt["status"] = "running"
         protected_write(output / "receipt.json", json.dumps(receipt, indent=2) + "\n")
+        # Execute exactly the instructions bound to the receipt, even if the
+        # caller's source file changes after it was read and hashed.
+        prompt_snapshot = Path(home) / "prompt.md"
+        protected_write(prompt_snapshot, prompt)
         # Parent secrets and personal configuration never enter the provider
         # process. Only the explicitly named CLI subscription key is injected.
         clean["META_API_KEY"] = key
@@ -208,7 +212,7 @@ def run(args, env: dict[str, str]) -> int:
                    "--disable-approval", "--trust-workspace",
                    "--no-foreign-personal-context", "--disable-web-tools", "--disable-reminders",
                    "--disable-request-user-input", "-c", 'run.subagent_delegation_mode="off"',
-                   "--max-model-steps", str(args.max_model_steps), "--prompt-file", str(args.prompt_file.resolve())]
+                   "--max-model-steps", str(args.max_model_steps), "--prompt-file", str(prompt_snapshot)]
         if args.read_only:
             command.extend(["--disable-write", "--disable-shell"])
         trace, errors = output / "events.jsonl", output / "stderr.txt"
