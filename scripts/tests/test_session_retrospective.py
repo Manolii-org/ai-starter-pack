@@ -1794,3 +1794,267 @@ def test_snap_order_key_puts_counter_after_zero(project):
     other = Path("20260719T000001Z-main-SIDcap-001.json")
     ordered2 = sorted([other, p_zero], key=mod._snap_order_key)
     assert ordered2 == [p_zero, other]
+
+
+@pytest.mark.parametrize("config", ['{"local_only":true}', '{"local_only":"false"}', '[]', '{'])
+def test_owner_local_policy_blocks_ambient_network(project, monkeypatch, config):
+    mod = _load_module(project)
+    mod.CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    mod.CONFIG_PATH.write_text(config)
+    monkeypatch.setenv("MCP_API_KEY", "dummy-key")
+    monkeypatch.setenv("KL_ENTITY", "test-owner")
+    monkeypatch.setenv("KL_MCP_URL", "https://sink.example.test/api/mcp")
+    def forbidden(*args, **kwargs):
+        pytest.fail("local-only called network")
+    monkeypatch.setattr(mod, "_kl_urlopen", forbidden)
+    assert mod._kl_ready("test-owner", False) is False
+    assert mod.kl_create_note("test-owner", "title", "body", []) is False
+    mod.mode_kl_only("canary")
+    mod.mode_kl_drain()
+
+
+def test_local_only_capture_survives_config_change(project, monkeypatch):
+    mod = _load_module(project)
+    mod.CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    mod.CONFIG_PATH.write_text('{"local_only":true}')
+    log = project / "transcript.jsonl"
+    log.write_text(json.dumps({"type":"user", "message":{"role":"user", "content":"test"}})+"\n")
+    mod.mode_stop("local-canary", local_only=True, transcript=str(log))
+    snapshots = list(mod.RETROSPECTIVES_DIR.glob("*-*.json"))
+    assert len(snapshots) == 1
+    record = json.loads(snapshots[0].read_text())
+    assert record["delivery_policy"] == "local_only"
+    assert record["kl_written"] is False
+    mod.CONFIG_PATH.write_text('{"local_only":false}')
+    monkeypatch.setenv("MCP_API_KEY", "dummy-key")
+    monkeypatch.setenv("KL_ENTITY", "test-owner")
+    monkeypatch.setattr(mod, "kl_create_note", lambda *a, **k: pytest.fail("exported local capture"))
+    mod.mode_kl_only("local-canary")
+    assert "kl_in_flight_at" not in json.loads(snapshots[0].read_text())
+    # Pruned snapshot fallback must preserve the captured policy as well.
+    snapshots[0].unlink()
+    mod.mode_kl_only("local-canary")
+
+
+def test_env_local_only_cannot_be_cleared_by_false_config(project, monkeypatch):
+    mod = _load_module(project)
+    mod.CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    mod.CONFIG_PATH.write_text('{"local_only":false}')
+    monkeypatch.setenv("SESSION_RETRO_LOCAL_ONLY", "1")
+    assert mod._configured_local_only() is True
+
+
+def test_diff_without_start_baseline_does_not_use_main(project, monkeypatch):
+    mod = _load_module(project)
+    monkeypatch.delenv("SESSION_RETRO_START_SHA", raising=False)
+    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: pytest.fail("guessed baseline"))
+    assert mod._git_diff_stats() == ""
+    monkeypatch.setenv("SESSION_RETRO_START_SHA", "--output=bad")
+    assert mod._git_diff_stats() == ""
+
+
+def test_diff_uses_exact_start_commit(project, monkeypatch):
+    import subprocess
+    subprocess.run(["git", "init", "-q", str(project)], check=True)
+    subprocess.run(["git", "-C", str(project), "config", "user.email", "test@example.test"], check=True)
+    subprocess.run(["git", "-C", str(project), "config", "user.name", "Test"], check=True)
+    tracked = project / "tracked.txt"
+    tracked.write_text("inherited\n")
+    subprocess.run(["git", "-C", str(project), "add", "tracked.txt"], check=True)
+    subprocess.run(["git", "-C", str(project), "commit", "-qm", "start"], check=True)
+    baseline = subprocess.check_output(["git", "-C", str(project), "rev-parse", "HEAD"], text=True).strip()
+    tracked.write_text("inherited\nsession change\n")
+    subprocess.run(["git", "-C", str(project), "commit", "-qam", "session"], check=True)
+    mod = _load_module(project)
+    monkeypatch.setenv("SESSION_RETRO_START_SHA", baseline)
+    assert mod._session_start_baseline() == baseline
+    assert "1 insertion" in mod._git_diff_stats()
+    monkeypatch.setenv("SESSION_RETRO_START_SHA", "f" * 40)
+    assert mod._git_diff_stats() == ""
+
+
+
+def test_capture_policy_is_fixed_before_sync_delivery(project, monkeypatch):
+    mod = _load_module(project)
+    mod.CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    mod.CONFIG_PATH.write_text('{"local_only":true,"entity":"test-owner"}')
+    monkeypatch.setenv("MCP_API_KEY", "dummy-key")
+    log = project / "transcript.jsonl"
+    log.write_text(json.dumps({"type":"user", "message":{"role":"user", "content":"test"}})+"\n")
+    original = mod._write_local_record
+    def change_policy(record):
+        snap = original(record)
+        mod.CONFIG_PATH.write_text('{"local_only":false,"entity":"test-owner"}')
+        return snap
+    monkeypatch.setattr(mod, "_write_local_record", change_policy)
+    monkeypatch.setattr(mod, "kl_create_note", lambda *a, **k: pytest.fail("exported fixed local-only policy"))
+    mod.mode_stop("fixed-policy", transcript=str(log))
+
+
+def test_local_only_backlog_does_not_starve_drain(project, monkeypatch):
+    import time
+    mod = _load_module(project)
+    monkeypatch.setenv("MCP_API_KEY", "dummy-key")
+    for n in range(11):
+        snap = mod.RETROSPECTIVES_DIR / f"2026-01-01T0000{n:02d}-s{n}.json"
+        snap.write_text(json.dumps({"session_id": f"s{n}", "kl_written":False,
+                                   "delivery_policy":"local_only" if n < 10 else "legacy_optional"}))
+        os.utime(snap, (time.time()-120, time.time()-120))
+    dispatched = []
+    monkeypatch.setattr(mod, "mode_kl_only", lambda session_id: dispatched.append(session_id))
+    mod.mode_kl_drain(max_sessions=10)
+    assert dispatched == ["s10"]
+
+
+
+def receipt_inputs():
+    record = {"capture_id": "capture-1", "session_id": "source-1", "entity": "example",
+              "branch": "feature/one", "kl_written": True}
+    binding = {"organization": "ExampleOrg", "repository": "ExampleOrg/example",
+               "store_reference": "owner-store:notes", "expected_record_id": "note-1",
+               "sanitized_artifact_id": "artifact-1", "sanitized_artifact_sha256": "a" * 64,
+               "outcome": "pending", "trigger": "manual_summary"}
+    readback = {"organization": "ExampleOrg", "entity": "example", "store_reference": "owner-store:notes",
+                "capture_id": "capture-1", "record_id": "note-1", "artifact_sha256": "a" * 64,
+                "evidence": ["receipt:read-1"]}
+    return record, binding, readback
+
+
+def test_receipt_v2_exact_readback_and_provenance(project):
+    mod = _load_module(project)
+    record, binding, readback = receipt_inputs()
+    result = mod.capture_receipt_v2(record, binding, readback)
+    assert result["schema"] == "session-capture-receipt/v2"
+    assert result["delivery_state"] == "verified"
+    assert result["persisted_record_id"] == "note-1"
+    assert result["source_session_id"] == "source-1"
+    assert result["trigger"] == "manual_summary"
+    assert result["operator_id"] is None
+    assert result == mod.capture_receipt_v2(record, binding, readback)
+    assert "session_minutes" not in result
+
+
+@pytest.mark.parametrize("field", ["organization", "entity", "store_reference", "capture_id", "record_id", "artifact_sha256"])
+def test_receipt_v2_wrong_readback_requires_reconciliation(project, field):
+    mod = _load_module(project)
+    record, binding, readback = receipt_inputs()
+    readback[field] = "foreign"
+    result = mod.capture_receipt_v2(record, binding, readback)
+    assert result["delivery_state"] == "unknown"
+    assert result["persisted_record_id"] is None
+    assert result["verification_evidence"] == []
+
+
+@pytest.mark.parametrize("field", ["organization", "store_reference", "expected_record_id", "sanitized_artifact_id", "sanitized_artifact_sha256"])
+def test_receipt_v2_missing_required_binding_is_not_verified(project, field):
+    mod = _load_module(project)
+    record, binding, readback = receipt_inputs()
+    binding.pop(field)
+    assert mod.capture_receipt_v2(record, binding, readback)["delivery_state"] == "unknown"
+
+
+def test_receipt_v2_boolean_or_empty_ack_is_not_persistence(project):
+    mod = _load_module(project)
+    record, binding, readback = receipt_inputs()
+    assert mod.capture_receipt_v2(record, binding)["delivery_state"] == "acknowledged_unverified"
+    with pytest.raises(ValueError, match="capture_readback_rejected"):
+        mod.capture_receipt_v2(record, binding, {})
+    readback["evidence"] = []
+    assert mod.capture_receipt_v2(record, binding, readback)["delivery_state"] == "unknown"
+
+
+def test_receipt_v2_captured_local_policy_wins_despite_ambient_keys(project, monkeypatch):
+    mod = _load_module(project)
+    monkeypatch.setenv("MCP_API_KEY", "fixture")
+    record, binding, readback = receipt_inputs()
+    record["delivery_policy"] = "local_only"
+    result = mod.capture_receipt_v2(record, binding, readback)
+    assert result["delivery_state"] == "local_only"
+    assert result["persisted_record_id"] is None
+    assert result["verification_evidence"] == []
+
+
+@pytest.mark.parametrize("outcome", ["pending", "failed", "no_actionable_signal", "unknown"])
+def test_receipt_v2_distinct_outcomes_and_legacy_unknowns(project, outcome):
+    mod = _load_module(project)
+    result = mod.capture_receipt_v2({}, {"outcome": outcome})
+    assert result["delivery_state"] == outcome
+    assert result["source_session_id"] is None
+    assert result["capture_id"] is None
+    assert result["legacy_kl_written"] is None
+    assert result["trigger"] == "unknown"
+    assert result["sanitized_artifact_sha256"] is None
+
+
+def test_receipt_v2_failure_and_no_signal_cannot_promote_with_readback(project):
+    mod = _load_module(project)
+    record, binding, readback = receipt_inputs()
+    for state in ("failed", "no_actionable_signal"):
+        binding["outcome"] = state
+        assert mod.capture_receipt_v2(record, binding)["delivery_state"] == state
+        assert mod.capture_receipt_v2(record, binding, readback)["delivery_state"] == "unknown"
+
+
+def test_receipt_v2_operator_requires_evidence_and_run_is_separate(project):
+    mod = _load_module(project)
+    record, binding, _ = receipt_inputs()
+    binding.update(operator_id="human-1", provider_run_id="run-2")
+    assert mod.capture_receipt_v2(record, binding)["operator_id"] is None
+    binding["operator_evidence"] = ["receipt:operator-1"]
+    result = mod.capture_receipt_v2(record, binding)
+    assert result["operator_id"] == "human-1"
+    assert result["provider_run_id"] == "run-2"
+    assert result["source_session_id"] == "source-1"
+
+
+@pytest.mark.parametrize("binding", [{"raw_transcript": "narrative"}, {"trigger": "auto-generated"},
+                                      {"sanitized_artifact_sha256": "invalid"},
+                                      {"organization": "untrusted narrative"},
+                                      {"operator_evidence": ["header:Bearer:" + "example" * 4]}])
+def test_receipt_v2_closed_binding_rejects_narratives_credentials_and_bad_versions(project, binding):
+    mod = _load_module(project)
+    with pytest.raises(ValueError):
+        mod.capture_receipt_v2({}, binding)
+
+
+
+@pytest.mark.parametrize("value", ["https://user:dummy@example.test/path", "user:dummy@example.test", "https://example.test/receipt"])
+def test_receipt_v2_rejects_url_and_userinfo_pointers_without_echo(project, value):
+    mod = _load_module(project)
+    with pytest.raises(ValueError) as error:
+        mod.capture_receipt_v2({}, {"store_reference": value})
+    assert value not in str(error.value)
+
+
+@pytest.mark.parametrize("branch", ["feature/foo+bar", "fix/token-refresh", "feature/日本語", "fix/api-key-rotation",
+                                   "fix/task-queue-improvements", "feature/risk-scoring-engine"])
+def test_receipt_v2_preserves_legacy_git_identity(project, branch):
+    mod = _load_module(project)
+    record, binding, _ = receipt_inputs()
+    record.update(branch=branch, capture_id="20261016-" + branch.replace("/", "--") + "-source-1")
+    result = mod.capture_receipt_v2(record, binding)
+    assert result["ref"] == branch
+    assert result["capture_id"] == record["capture_id"]
+
+
+@pytest.mark.parametrize("value", ["https://example.test/id", "user:password@example.test", "two words", "line\nbreak", "ghp_" + "x" * 24])
+def test_receipt_v2_legacy_identity_keeps_credential_and_control_rejection(project, value):
+    mod = _load_module(project)
+    record, binding, _ = receipt_inputs()
+    for field in ("branch", "capture_id", "session_id"):
+        with pytest.raises(ValueError) as error:
+            mod.capture_receipt_v2({**record, field: value}, binding)
+        assert value not in str(error.value)
+
+
+@pytest.mark.parametrize("baseline", ["main", "HEAD~1", "f" * 40, "not-a-commit"])
+def test_capture_does_not_record_unvalidated_start_baseline(project, monkeypatch, baseline):
+    mod = _load_module(project)
+    monkeypatch.setenv("SESSION_RETRO_START_SHA", baseline)
+    monkeypatch.setenv("SESSION_RETRO_LOCAL_ONLY", "1")
+    log = project / "source.jsonl"
+    log.write_text(json.dumps({"type": "user", "message": {"role": "user", "content": "test"}}) + "\n")
+    mod.mode_stop("baseline-capture", transcript=str(log))
+    records = [json.loads(path.read_text()) for path in mod.RETROSPECTIVES_DIR.glob("*.json")]
+    assert len(records) == 1
+    assert records[0]["start_baseline"] is None
