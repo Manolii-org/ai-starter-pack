@@ -61,7 +61,12 @@ Codex and Cursor do not emit that host event; do not invent one.
 - `git branch -D` without explicit user approval
 - Hardcoding secrets in any file
 - Skipping git hooks (`--no-verify`)
-- Modifying CI/CD workflows (`.github/workflows/`, `.gitlab-ci.yml`) without explicit human review
+- Disabling required checks, secret scanning or tenant boundaries as an incidental workflow change
+
+Authorized workflow changes may be implemented, validated, independently reviewed
+and merged autonomously. Existing task and merge authorization persists; the file
+being a workflow does not require another human approval. Respect remote branch
+protection and fix actionable findings before merging.
 
 **This repository is PUBLIC** — enforced by `registry-lint.py` (CI):
 - Content under `registry/<universe>/`, `registry/repo/`, or

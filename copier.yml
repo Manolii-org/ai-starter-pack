@@ -155,6 +155,10 @@ _exclude:
   - .svn
   - .svn/**
   # Pack-internal scaffolding (never ships)
+  # Synthetic qualification is source-repository CI, not a consumer workflow.
+  - .github/workflows/codex-review-isolation-proof.yml
+  - tests/codex_review_isolation_probe.py
+  - tests/test_codex_review_isolation_probe.py
   # Renovate preset: consumers extend it remotely via
   # "github>Manolii-org/ai-starter-pack" — copying it into a rendered repo
   # would shadow the shared preset with a stale local snapshot.
