@@ -13,12 +13,12 @@ QUOTA = re.compile(r"(?:usage limits?|quota).{0,100}(?:reached|exceeded|exhauste
                    r"(?:reached|exceeded|exhausted).{0,100}(?:usage limits?|quota)|"
                    r"insufficient_quota|rate_limit_exceeded", re.I | re.S)
 SENSITIVE = re.compile(
-    r"(?:^|/)(?:\.github|\.gitlab|\.ai|\.claude|\.codex|\.cursor|\.githooks|auth(?:entication|orization)?|security|secrets?|"
+    r"(?:^|/)(?:ci|\.github|\.gitlab|\.ai|\.claude|\.codex|\.cursor|\.githooks|auth(?:entication|orization)?|security|secrets?|"
     r"migrations?|supabase|policies|permissions|deploy|infrastructure|terraform|"
     r"crypto(?:graphy)?|network|webhooks?|audit|tenants?)(?:/|[_.-]|$)|"
     r"(?:^|/)(?:middleware|proxy|schema|Dockerfile|docker-compose|CODEOWNERS)(?:[./_-]|$)|"
     r"(?:^|[/_.-])(?:rls|oauth|jwt|ssrf|csrf|acl|rbac|encryption|signing|"
-    r"credentials?|secrets?|tokens?|session|payment|billing|boundaries|isolation|safety|authorization|authentication)(?:/|[_.-]|$)|"
+    r"saniti[sz](?:er|ation)|redact(?:ion|or)?|credentials?|secrets?|tokens?|session|payment|billing|boundaries|isolation|safety|authorization|authentication)(?:/|[_.-]|$)|"
     r"(?:^|/)(?:package(?:-lock)?\.json|composer\.(?:json|lock)|Gemfile(?:\.lock)?|Cargo\.toml|pyproject\.toml|Pipfile(?:\.lock)?|pnpm-lock\.yaml|yarn\.lock|"
     r"requirements[^/]*\.txt|uv\.lock|poetry\.lock|go\.(?:mod|sum)|Cargo\.lock)$",
     re.I,
