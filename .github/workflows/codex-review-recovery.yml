@@ -40,15 +40,23 @@ jobs:
             const prefixMatches = prefix => /^[0-9a-f]{7,40}$/i.test(prefix || '')
               && pull.head.sha.toLowerCase().startsWith(prefix.toLowerCase());
             if (/(?:^|\n)(?:you have reached your Codex usage limits|Codex usage limits have been reached)|connect to github|create a Codex account/i.test(body)) return;
-            const formal = event.commit_id === pull.head.sha
-              && String(event.state || '').toUpperCase() !== 'PENDING'
+            const formal = Boolean(context.payload.review) && event.commit_id === pull.head.sha
+              && ['APPROVED','COMMENTED','CHANGES_REQUESTED','DISMISSED'].includes(String(event.state || '').toUpperCase())
               && /codex review/i.test(body)
               && !/codex-security-review|codex security review/i.test(body);
-            const inline = event.commit_id === pull.head.sha && event.path
+            let inline = event.commit_id === pull.head.sha && event.original_commit_id === pull.head.sha && event.path
               && !event.in_reply_to_id && Number(event.pull_request_review_id) > 0
               && /<!-- codex-code-review-finding:v1 -->\s*$/.test(body);
-            const clean = body.match(/codex review:[^\n]*didn.?t find any major issues[\s\S]*?reviewed commit:[^0-9a-f]*([0-9a-f]{7,40})/i);
-            const summary = lane => body.split('\n').some(line => {
+            if (inline) {
+              const parent = (await github.rest.pulls.getReview({owner, repo, pull_number,
+                review_id: Number(event.pull_request_review_id)})).data;
+              inline = parent.commit_id === pull.head.sha
+                && parent.user?.login === 'chatgpt-codex-connector[bot]'
+                && ['APPROVED','COMMENTED','CHANGES_REQUESTED','DISMISSED'].includes(String(parent.state || '').toUpperCase());
+            }
+            const issueProof = Boolean(context.payload.issue?.pull_request && context.payload.comment);
+            const clean = issueProof && body.match(/codex review:[^\n]*didn.?t find any major issues[\s\S]*?reviewed commit:[^0-9a-f]*([0-9a-f]{7,40})/i);
+            const summary = lane => issueProof && body.split('\n').some(line => {
               const cells = line.split('|').map(cell => cell.trim());
               const commit = (cells[3] || '').match(/^`([0-9a-f]{7,40})`$/i);
               return (cells[1] || '').includes('**' + lane + ' Review**')

@@ -507,15 +507,21 @@ jobs:
               }
             };
             const codeReviews = reviews.filter(item => bot(item) && !bad(item) && item.commit_id === head
-              && String(item.state || '').toUpperCase() !== 'PENDING'
+              && ['APPROVED','COMMENTED','CHANGES_REQUESTED','DISMISSED'].includes(String(item.state || '').toUpperCase())
               && /codex review/i.test(item.body || '')
               && !/codex-security-review|codex security review/i.test(item.body || ''));
             // Native inline findings are review evidence, not a clean verdict.
             // Require the native code-lane marker so security-only activity or
             // an arbitrary/relayed comment cannot satisfy code coverage.
+            // GitHub remaps an old inline comment's commit_id as its line moves
+            // to later heads. The parent review's commit is immutable evidence.
+            const currentReviews = new Set(reviews.filter(item => bot(item) && !bad(item)
+              && item.commit_id === head && ['APPROVED','COMMENTED','CHANGES_REQUESTED','DISMISSED'].includes(String(item.state || '').toUpperCase()))
+              .map(item => Number(item.id)));
             const codeInline = inlineComments.some(item => bot(item) && !bad(item)
-              && item.commit_id === head && item.path && !item.in_reply_to_id
+              && item.commit_id === head && item.original_commit_id === head && item.path && !item.in_reply_to_id
               && Number(item.pull_request_review_id) > 0
+              && currentReviews.has(Number(item.pull_request_review_id))
               && /<!-- codex-code-review-finding:v1 -->\s*$/.test(item.body || ''));
             const prefixes = new Set();
             for (const item of comments.filter(bot)) {

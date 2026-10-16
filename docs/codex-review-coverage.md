@@ -79,3 +79,12 @@ Helper updates take effect for subsequent PRs after their reviewed base includes
 them. Same-repository workflow authors retain the existing ability to edit the
 workflow itself; this does not substitute for workflow review or branch controls.
 Merge, deployment, release, hold, guard and policy paths require security review.
+
+
+GitHub can remap an old inline comment's `commit_id` when moving its line to a
+newer PR head. Inline execution proof therefore also requires its immutable
+parent review to be authored by native Codex, submitted, and bound to that full
+head. Recovery verifies that parent before selecting a completion rerun. An old
+comment relocated onto current code is not a new review. Connectivity telemetry
+uses `original_commit_id` when present and does not promote a remapped comment
+to current-head execution evidence.
