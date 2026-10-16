@@ -38,6 +38,7 @@ instance:
   # fly sections are printed as a manual checklist (not locally verifiable).
   required_secrets:
     github:
+      - DOPPLER_TOKEN_CODEX  # read-only subscription credential fetch; no provider API key
 {% if oss_routing %}
       - DOPPLER_SERVICE_TOKEN_LITELLM
       - FLY_API_TOKEN

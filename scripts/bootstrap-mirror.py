@@ -1313,6 +1313,16 @@ def _vendored(path: str) -> bool:
                for p in VENDORED_PATHS)
 
 
+
+def _ratchet_vendored(allowlist: str, path: str) -> bool:
+    """ORG-LEAK paths are registry-relative; PACK-SURFACE paths are repo-relative."""
+    if allowlist not in ALLOWLIST_FILES:
+        return False
+    if allowlist == "registry/leak-allowlist.txt":
+        path = "registry/" + path
+    return _vendored(path)
+
+
 def regen_allowlists(root: Path, established: bool) -> bool:
     """Regenerate the ratchet allowlists via the vendored lint (its REPO
     resolves from its own location). Mirror mode is already active — marker
@@ -1377,10 +1387,10 @@ def regen_allowlists(root: Path, established: bool) -> bool:
             headers = [ln for ln in fresh if _entry_path(ln) is None]
             keep = [ln for ln in fresh
                     if _entry_path(ln) is not None
-                    and _vendored(_entry_path(ln))]
+                    and _ratchet_vendored(rel, _entry_path(ln))]
             preserved = [ln for ln in old.get(rel, [])
                          if _entry_path(ln) is not None
-                         and not _vendored(_entry_path(ln))
+                         and not _ratchet_vendored(rel, _entry_path(ln))
                          and ln in fresh_entries]
             p.write_text("\n".join(headers + keep + preserved) + "\n",
                          encoding="utf-8")
