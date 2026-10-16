@@ -11,14 +11,12 @@ if [ "${CLAUDE_AUTO_REFLECT:-0}" = "1" ]; then
   python3 "${SCRIPT_DIR}/reflect-on-failures.py" > /dev/null 2>&1 || true
 fi
 
-# ── Session cost logger ───────────────────────────────────────────────────────
-# Parses the active session JSONL for token usage, estimates cost, and appends
-# one record to .ai/metrics/session-costs.jsonl. Silent on missing files.
+# ── Stop payload and receipt retention ───────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Extract session_id from the Stop hook JSON payload on stdin (consumed once here).
 _HOOK_INPUT=$(cat)
 _SESSION_ID=$(printf '%s' "$_HOOK_INPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('session_id',''))" 2>/dev/null || true)
-python3 "${SCRIPT_DIR}/session-cost-logger.py" ${_SESSION_ID:+--session "$_SESSION_ID"} 2>/dev/null || true
+_TRANSCRIPT_PATH=$(printf '%s' "$_HOOK_INPUT" | python3 -c "import sys,json; value=json.load(sys.stdin).get('transcript_path',''); print(value if isinstance(value,str) else '')" 2>/dev/null || true)
 if [ -f "${SCRIPT_DIR}/rotate-jsonl-receipt.py" ]; then
   if command -v timeout >/dev/null 2>&1; then
     timeout 1 python3 "${SCRIPT_DIR}/rotate-jsonl-receipt.py" >/dev/null 2>&1 || true
@@ -27,7 +25,8 @@ if [ -f "${SCRIPT_DIR}/rotate-jsonl-receipt.py" ]; then
   fi
 fi
 _SESSION_ID_FOR_RETRO="${_SESSION_ID:-}"
-unset _HOOK_INPUT _SESSION_ID
+_TRANSCRIPT_PATH_FOR_RETRO="${_TRANSCRIPT_PATH:-}"
+unset _HOOK_INPUT _SESSION_ID _TRANSCRIPT_PATH
 
 cat <<'EOF'
 Session ending checklist:
@@ -123,14 +122,15 @@ _run_session_retrospective() {
         sid="$_SESSION_ID_FOR_RETRO"
     fi
 
+    local tpath="${_TRANSCRIPT_PATH_FOR_RETRO:-}"
     local rc=0
     # LOCAL durable write only (sync-with-timeout). Inner 8s < outer Stop 10s.
     # --local-only guarantees we do not burn the budget on KL HTTP.
     if command -v timeout >/dev/null 2>&1; then
-        timeout 8s python3 "$retro" --mode stop --local-only ${sid:+--session-id "$sid"} \
+        timeout 8s python3 "$retro" --mode stop --local-only ${sid:+--session-id "$sid"} ${tpath:+--transcript "$tpath"} \
             >/dev/null 2>&1 || rc=$?
     else
-        perl -e 'alarm 8; exec @ARGV' python3 "$retro" --mode stop --local-only ${sid:+--session-id "$sid"} \
+        perl -e 'alarm 8; exec @ARGV' python3 "$retro" --mode stop --local-only ${sid:+--session-id "$sid"} ${tpath:+--transcript "$tpath"} \
             >/dev/null 2>&1 || rc=$?
     fi
 
@@ -144,18 +144,24 @@ _run_session_retrospective() {
         rm -f .ai/memory/retrospectives/.last-capture-failed 2>/dev/null || true
     fi
 
-    # KL network leg only — backgrounded; never blocks Stop. Skipped if no creds.
-    # --kl-only flushes the just-written local record without a second JSONL append.
-    if [ -n "${MCP_API_KEY:-}" ] && { [ -n "${KL_ENTITY:-}" ] || [ -n "${RETROSPECTIVE_ENTITY:-}" ]; }; then
+    # Drain only after the local step exits cleanly. Failed capture keeps its
+    # marker and pending records for a later retry. An unchanged-transcript
+    # rc=0 no-op may retry an older pending record without claiming fresh data.
+    if [ "$rc" -eq 0 ] && [ -n "${MCP_API_KEY:-}" ] \
+        && { [ -n "${KL_ENTITY:-}" ] || [ -n "${RETROSPECTIVE_ENTITY:-}" ]; }; then
         ( python3 "$retro" --mode kl-only ${sid:+--session-id "$sid"} >/dev/null 2>&1 ) &
         disown $! 2>/dev/null || true
     fi
     return 0
 }
-# Preserve session id from cost-logger block if still in scope; else empty.
+# Preserve the session id parsed from the Stop payload; else use the caller fallback.
 _RETRO_SESSION_ID="${_SESSION_ID_FOR_RETRO:-${_RETRO_SESSION_ID:-}}"
 _run_session_retrospective
-unset _RETRO_SESSION_ID _SESSION_ID_FOR_RETRO
+# Optional best-effort cost reporting follows the local capture attempt and receipt
+# rotation. A host process-group kill may interrupt it; local capture is primary.
+( python3 "${SCRIPT_DIR}/session-cost-logger.py" ${_SESSION_ID_FOR_RETRO:+--session "$_SESSION_ID_FOR_RETRO"} </dev/null >/dev/null 2>&1 || true ) &
+disown $! 2>/dev/null || true
+unset _RETRO_SESSION_ID _SESSION_ID_FOR_RETRO _TRANSCRIPT_PATH_FOR_RETRO
 
 # ── Intent-drift check ───────────────────────────────────────────────────────
 # Compares the session diff against the original user prompt (if available).
