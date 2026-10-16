@@ -182,19 +182,30 @@ def _get_branch() -> str:
         return "unknown"
 
 
-def _git_diff_stats() -> str:
-    # Only an explicit session-start commit can attribute changes to this
-    # session. A comparison with main includes inherited checkout differences.
+def _session_start_baseline() -> Optional[str]:
+    """Return only an explicit existing commit, never an unvalidated ref."""
     baseline = (os.environ.get("SESSION_RETRO_START_SHA") or "").strip()
     if not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", baseline):
-        return ""
+        return None
     try:
         checked = subprocess.run(
             ["git", "-C", str(REPO_ROOT), "cat-file", "-t", baseline],
             capture_output=True, text=True, timeout=5, check=False,
         )
         if checked.returncode != 0 or checked.stdout.strip() != "commit":
-            return ""
+            return None
+        return baseline
+    except Exception as e:
+        print(f"[session-retro] start_baseline: {type(e).__name__}", file=sys.stderr)
+        return None
+
+
+def _git_diff_stats() -> str:
+    # Only an explicit session-start commit can attribute this session's diff.
+    baseline = _session_start_baseline()
+    if baseline is None:
+        return ""
+    try:
         r = subprocess.run(
             ["git", "-C", str(REPO_ROOT), "diff", "--shortstat", baseline, "HEAD", "--"],
             capture_output=True, text=True, timeout=5, check=False,
@@ -680,7 +691,7 @@ def capture_receipt_v2(record: dict, binding: dict, readback: dict | None = None
         # Reject recognizable credential/token forms and narrative/header text.
         if not legacy_identity and re.search(r"(?i)(?:bearer|password|secret|token|api[-_]?key)[-_:]", value):
             raise ValueError("capture_pointer_rejected")
-        if re.search(r"(?:sk-|ghp_|github_pat_|eyJ)[A-Za-z0-9_-]{12,}", value):
+        if re.search(r"(?<![A-Za-z0-9_])(?:sk-|ghp_|github_pat_|eyJ)[A-Za-z0-9_-]{12,}", value):
             raise ValueError("capture_pointer_rejected")
         return value
 
@@ -2184,7 +2195,7 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False,
         "entity": entity,
         "source": "ai-starter-pack",
         "delivery_policy": "local_only" if _configured_local_only() else "legacy_optional",
-        "start_baseline": (os.environ.get("SESSION_RETRO_START_SHA") or "").strip() or None,
+        "start_baseline": _session_start_baseline(),
     }
 
     if os.environ.get("SESSION_RETRO_DRY_RUN"):

@@ -1867,6 +1867,7 @@ def test_diff_uses_exact_start_commit(project, monkeypatch):
     subprocess.run(["git", "-C", str(project), "commit", "-qam", "session"], check=True)
     mod = _load_module(project)
     monkeypatch.setenv("SESSION_RETRO_START_SHA", baseline)
+    assert mod._session_start_baseline() == baseline
     assert "1 insertion" in mod._git_diff_stats()
     monkeypatch.setenv("SESSION_RETRO_START_SHA", "f" * 40)
     assert mod._git_diff_stats() == ""
@@ -2025,7 +2026,8 @@ def test_receipt_v2_rejects_url_and_userinfo_pointers_without_echo(project, valu
     assert value not in str(error.value)
 
 
-@pytest.mark.parametrize("branch", ["feature/foo+bar", "fix/token-refresh", "feature/日本語", "fix/api-key-rotation"])
+@pytest.mark.parametrize("branch", ["feature/foo+bar", "fix/token-refresh", "feature/日本語", "fix/api-key-rotation",
+                                   "fix/task-queue-improvements", "feature/risk-scoring-engine"])
 def test_receipt_v2_preserves_legacy_git_identity(project, branch):
     mod = _load_module(project)
     record, binding, _ = receipt_inputs()
@@ -2043,3 +2045,16 @@ def test_receipt_v2_legacy_identity_keeps_credential_and_control_rejection(proje
         with pytest.raises(ValueError) as error:
             mod.capture_receipt_v2({**record, field: value}, binding)
         assert value not in str(error.value)
+
+
+@pytest.mark.parametrize("baseline", ["main", "HEAD~1", "f" * 40, "not-a-commit"])
+def test_capture_does_not_record_unvalidated_start_baseline(project, monkeypatch, baseline):
+    mod = _load_module(project)
+    monkeypatch.setenv("SESSION_RETRO_START_SHA", baseline)
+    monkeypatch.setenv("SESSION_RETRO_LOCAL_ONLY", "1")
+    log = project / "source.jsonl"
+    log.write_text(json.dumps({"type": "user", "message": {"role": "user", "content": "test"}}) + "\n")
+    mod.mode_stop("baseline-capture", transcript=str(log))
+    records = [json.loads(path.read_text()) for path in mod.RETROSPECTIVES_DIR.glob("*.json")]
+    assert len(records) == 1
+    assert records[0]["start_baseline"] is None
