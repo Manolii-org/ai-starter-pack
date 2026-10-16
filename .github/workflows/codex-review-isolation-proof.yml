@@ -1,0 +1,47 @@
+name: Codex Review Isolation Proof
+# Synthetic tool-sandbox qualification only. No live credentials or model calls.
+# This check never certifies workflow/MCP/account isolation or enables rollout.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '.github/workflows/codex-review-isolation-proof.yml'
+      - 'tests/codex_review_isolation_probe.py'
+      - 'tests/test_codex_review_isolation_probe.py'
+  workflow_dispatch:
+concurrency:
+  group: codex-isolation-proof-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  prove:
+    name: Qualify tool credential isolation (synthetic)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: '24'
+      - name: Install pinned CLI without lifecycle scripts
+        run: >-
+          npm install --prefix "$RUNNER_TEMP/isolation-cli" --no-save --ignore-scripts
+          --registry https://registry.npmjs.org/ --userconfig /dev/null @openai/codex@0.151.0
+      - name: Enable sandbox namespaces on this credential-free ephemeral runner
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Prove private file, symlink, proc and network denial
+        run: >-
+          python3 -I tests/codex_review_isolation_probe.py
+          --codex "$RUNNER_TEMP/isolation-cli/node_modules/.bin/codex"
+          --output "$RUNNER_TEMP/codex-isolation-proof.json"
+      - name: Retain synthetic evidence including startup failures
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: codex-isolation-proof-${{ github.run_id }}
+          path: ${{ runner.temp }}/codex-isolation-proof.json
+          if-no-files-found: warn
+          retention-days: 14
