@@ -229,10 +229,35 @@ class Finding:
         self.fix = fix
         self.confidence = _normalise_confidence(confidence)
         # Synthesize a stable ID when the producer did not supply one.
-        identity = f"{source}|{file}|{line}|{message}"
-        self.finding_id = (
-            finding_id or hashlib.sha256(identity.encode()).hexdigest()[:12]
-        )
+        self.finding_id = finding_id or self.legacy_id()
+
+    def legacy_id(self) -> str:
+        identity = f"{self.source}|{self.file}|{self.line}|{self.message}"
+        return hashlib.sha256(identity.encode()).hexdigest()[:12]
+
+    @classmethod
+    def from_record(cls, source, raw):
+        """One validated adapter for aggregate and historical receipt findings.
+
+        Supplied public IDs stay unchanged; missing/null retains legacy IDs.
+        Raw candidate artifacts remain the authoritative producer provenance.
+        """
+        if (not isinstance(source, str) or not isinstance(raw, dict)
+                or not isinstance(raw.get("file", ""), str)
+                or (raw.get("line") is not None and type(raw["line"]) is not int)
+                or not isinstance(raw.get("severity", "WARNING"), str)
+                or not isinstance(raw.get("message", ""), str)
+                or not isinstance(raw.get("fix", ""), str)
+                or (raw.get("finding_id") is not None
+                    and (not isinstance(raw["finding_id"], str) or not raw["finding_id"].strip()))):
+            raise ValueError("invalid candidate field types or identity")
+        return cls(source, raw.get("file", ""), raw.get("line"),
+                   raw.get("severity", "WARNING"), raw.get("message", ""),
+                   raw.get("fix", ""), raw.get("confidence", "medium"), raw.get("finding_id"))
+
+    def comparison_key(self) -> tuple:
+        """Local reviewer agreement, independent of IDs and confidence scores."""
+        return (self.source, self.file, self.line, self.severity, self.message, self.fix)
 
     def to_dict(self) -> dict:
         return {
@@ -684,14 +709,32 @@ def _judge_evidence(findings: list[Finding], head: str) -> dict:
 def _investigations(findings: list[Finding], observations: list[dict]) -> list[dict]:
     """Differences are investigation signals, never majority votes or proof of safety."""
     groups = {}
+    aliases = {}
     for finding in findings:
         groups.setdefault((finding.file, finding.line), []).append(finding)
+        for alias in (finding.finding_id, finding.legacy_id()):
+            aliases.setdefault(alias, set()).add(finding.comparison_key())
     result = []
     for location, rows in groups.items():
         ids = sorted({f.finding_id for f in rows})
         sources = {f.source for f in rows}
-        leg_sets = [set(leg["finding_ids"]) & set(ids) for leg in observations]
-        differing_legs = bool(leg_sets) and any(s != leg_sets[0] for s in leg_sets[1:])
+        row_keys = {finding.comparison_key() for finding in rows}
+        # Producer IDs are provenance, not semantic equality. Resolve them
+        # locally, including old synthesized observation IDs. A legacy alias
+        # that maps to distinct contents is ambiguous, never agreement.
+        leg_sets, ambiguous = [], False
+        for leg in observations:
+            keys = set()
+            for fid in leg["finding_ids"]:
+                if not isinstance(fid, str):
+                    ambiguous = True
+                    continue
+                matches = aliases.get(fid, set())
+                local_matches = matches & row_keys
+                ambiguous |= bool(local_matches) and len(matches) > 1
+                keys.update(local_matches)
+            leg_sets.append(keys)
+        differing_legs = ambiguous or (bool(leg_sets) and any(s != leg_sets[0] for s in leg_sets[1:]))
         if len(sources) > 1 or differing_legs or "codex-adversarial" in sources:
             key = hashlib.sha256(json.dumps([location, ids]).encode()).hexdigest()[:16]
             result.append(
@@ -868,6 +911,7 @@ class Judge:
     def load_candidates(self) -> list[Finding]:
         """Load all findings from .ai/candidates/*.json (skip manifest.json)."""
         findings: list[Finding] = []
+        accepted_ids = {}
         expected_security = (
             set(re.split(r"[,\s]+", os.environ.get("REQUIRED_SECURITY_ROLES", "")))
             & protected_review.ROLES
@@ -895,6 +939,14 @@ class Judge:
                     if source != candidate_file.stem or source not in expected_security:
                         raise ValueError("unexpected protected review source")
                     seen_security.add(source)
+                if not isinstance(candidate_findings, list):
+                    raise ValueError("candidate findings must be a list")
+                # Validate an entire artifact before admitting any observations
+                # or candidates; a malformed late row must not poison a batch.
+                artifact_findings = [Finding.from_record(source, row) for row in candidate_findings]
+                artifact_observations = []
+                if estate_security and data.get("skipped") and candidate_findings:
+                    raise ValueError("skipped protected review cannot carry findings")
                 if estate_security and not data.get("skipped"):
                     diff_path = os.environ.get("REVIEW_DIFF_PATH", "")
                     if not diff_path:
@@ -905,22 +957,12 @@ class Judge:
                     evidence = data.get("protected_review")
                     protected_review.validate(evidence, source, self.sha, diff_hash)
                     for leg in evidence["legs"]:
-                        ids = [
-                            Finding(
-                                source=source,
-                                file=f["file"],
-                                line=f["line"],
-                                severity=f["severity"],
-                                message=f["message"],
-                                fix=f["fix"],
-                            ).finding_id
-                            for f in leg["findings"]
-                        ]
-                        self._review_observations.append(
+                        leg_findings = [Finding.from_record(source, row) for row in leg["findings"]]
+                        artifact_observations.append(
                             {
                                 "family": leg["family"],
                                 "deployment_id": leg["deployment_id"],
-                                "finding_ids": ids,
+                                "finding_ids": [f.finding_id for f in leg_findings],
                             }
                         )
                     expected = {
@@ -938,6 +980,17 @@ class Judge:
                     raise ValueError(
                         "protected proxy receipt is not enabled for this consumer"
                     )
+                artifact_ids = {}
+                for finding in artifact_findings:
+                    previous = artifact_ids.get(finding.finding_id) or accepted_ids.get(finding.finding_id)
+                    if previous is not None and previous.to_dict() != finding.to_dict():
+                        raise ValueError("ambiguous candidate identity; original artifact retained")
+                    # Only exact duplicates can collapse. Distinct supplied IDs
+                    # and every original raw receipt/leg remain intact.
+                    artifact_ids[finding.finding_id] = finding
+                new_findings = [f for fid, f in artifact_ids.items() if fid not in accepted_ids]
+                accepted_ids.update(artifact_ids)
+                self._review_observations.extend(artifact_observations)
                 if (
                     data.get("first_party")
                     and candidate_findings
@@ -957,24 +1010,7 @@ class Judge:
                     # the review must disclose.
                     self._skipped_other.append(source)
 
-                for raw_finding in candidate_findings:
-                    if (not isinstance(raw_finding, dict)
-                            or not isinstance(raw_finding.get("file", ""), str)
-                            or (raw_finding.get("line") is not None and type(raw_finding["line"]) is not int)
-                            or not isinstance(raw_finding.get("message", ""), str)
-                            or not isinstance(raw_finding.get("fix", ""), str)
-                            or (raw_finding.get("finding_id") is not None and not isinstance(raw_finding["finding_id"], str))):
-                        raise ValueError("invalid candidate field types")
-                    finding = Finding(
-                        source=source,
-                        file=raw_finding.get("file", ""),
-                        line=raw_finding.get("line"),
-                        severity=raw_finding.get("severity", "WARNING"),
-                        message=raw_finding.get("message", ""),
-                        fix=raw_finding.get("fix", ""),
-                        confidence=raw_finding.get("confidence", "medium"),
-                        finding_id=raw_finding.get("finding_id"),
-                    )
+                for finding in new_findings:
                     findings.append(finding)
                     logger.info(
                         f"Loaded finding from {source}: {finding.file}:{finding.line}"
@@ -1057,6 +1093,12 @@ Only keep original IDs that pass all four gates. Never post to GitHub yourself."
         LiteLLM proxy, per _endpoint()).
         Returns parsed judge response or None on failure.
         """
+        ids = [finding.finding_id for finding in findings]
+        if (any(not isinstance(fid, str) or not fid.strip() for fid in ids)
+                or len(set(ids)) != len(ids)):
+            self._adjudication_incomplete = True
+            logger.error("Ambiguous candidate identity; adjudication withheld before dispatch")
+            return None
         # A candidate set carrying first_party findings must be adjudicated
         # on a first-party model — the OSS proxy would let an OSS backend drop
         # a true security finding before it is ever posted. With no direct

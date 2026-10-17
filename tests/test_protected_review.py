@@ -1,6 +1,7 @@
 """Offline production-path checks; these are not model efficacy evidence."""
 
 import importlib.util
+import hashlib
 import io
 import json
 import sys
@@ -312,6 +313,221 @@ def test_real_specialist_and_judge_receipt_binding(monkeypatch, tmp_path):
     assert judge.load_candidates() == [] and judge._candidate_load_errors == 1
 
 
+def load_identity_receipt(monkeypatch, tmp_path, first, second, *, aggregate_duplicates=False, module=None):
+    """Actual v1 producer receipt and Judge loader; never a model/network call."""
+    install(monkeypatch, [verdict(first), verdict(second)])
+    result = run()
+    if aggregate_duplicates:
+        result["findings"] *= 2
+    diff_path = tmp_path / "identity-input.diff"
+    diff_path.write_text(DIFF)
+    monkeypatch.setenv("REVIEW_DIFF_PATH", str(diff_path))
+    candidates = tmp_path / "identity-candidates"
+    candidates.mkdir()
+    path = candidates / "security-boundary-test.json"
+    original = json.dumps(result).encode()
+    path.write_bytes(original)
+    module = module or load_script("run-judge")
+    judge = module.Judge(str(candidates), 1, HEAD)
+    judge.judge_log_dir = tmp_path / "identity-logs"
+    loaded = judge.load_candidates()
+    assert path.read_bytes() == original  # Historical/original v1 receipt is immutable.
+    assert result["protected_review"]["version"] == 1
+    return module, judge, loaded, result
+
+
+@pytest.mark.parametrize("left_id,right_id,second_present,expected_count,expected_investigations", [
+    ("original-id", "original-id", False, 1, 1),
+    ("original-id", "original-id", True, 1, 0),
+    ("original-id", "other-original-id", True, 2, 0),
+    ("original-id", None, True, 2, 0),
+    (None, None, True, 1, 0),
+    (None, None, False, 1, 1),
+])
+def test_protected_identity_agreement_uses_content_not_producer_ids(
+    monkeypatch, tmp_path, left_id, right_id, second_present, expected_count, expected_investigations
+):
+    left, right = finding(), finding()
+    if left_id is not None:
+        left["finding_id"] = left_id
+    if right_id is not None:
+        right["finding_id"] = right_id
+    module, judge, loaded, _ = load_identity_receipt(
+        monkeypatch, tmp_path, [left], [right] if second_present else [])
+    assert judge._candidate_load_errors == 0 and len(loaded) == expected_count
+    assert left_id is None or loaded[0].finding_id == left_id
+    investigations = module._investigations(loaded, judge._review_observations)
+    assert len(investigations) == expected_investigations
+    if investigations:
+        assert investigations[0]["status"] == "MUST_INVESTIGATE"
+        assert set(investigations[0]["finding_ids"]) == {f.finding_id for f in loaded}
+
+
+@pytest.mark.parametrize("bad", [False, 0, 7, [], {}, "", "   "])
+def test_malformed_protected_id_is_explicit_incomplete_without_partial_observations(monkeypatch, tmp_path, bad):
+    raw = dict(finding(), finding_id=bad)
+    module, judge, loaded, _ = load_identity_receipt(monkeypatch, tmp_path, [finding(), raw], [])
+    assert loaded == [] and judge._candidate_load_errors == 1
+    assert judge._review_observations == []
+    monkeypatch.setattr(judge, "load_candidates", lambda: loaded)
+    monkeypatch.setattr(judge, "invoke_judge_agent", lambda *_: pytest.fail("invalid artifact dispatch"))
+    monkeypatch.setattr(judge, "_post_no_findings_comment", lambda: pytest.fail("false clean"))
+    posted = []
+    monkeypatch.setattr(judge, "_post_advisory_warning", lambda detail: posted.append(detail) or False)
+    assert judge.run() == 0 and posted
+
+
+def test_exact_duplicate_protected_candidates_keep_one_id_and_original_provenance(monkeypatch, tmp_path):
+    raw = dict(finding(), finding_id="historical-id")
+    _, judge, loaded, original = load_identity_receipt(
+        monkeypatch, tmp_path, [raw, raw], [raw], aggregate_duplicates=True)
+    assert len(loaded) == 1 and loaded[0].finding_id == "historical-id"
+    assert judge._candidate_load_errors == 0
+    assert len(original["protected_review"]["legs"][0]["findings"]) == 2
+
+
+@pytest.mark.parametrize("field,value", [("message", "Different concrete defect"), ("fix", "Different proposed repair"), ("severity", "WARNING")])
+def test_distinct_findings_with_colliding_ids_are_incomplete_not_merged(monkeypatch, tmp_path, field, value):
+    first = dict(finding(), finding_id="collision")
+    second = dict(first, **{field: value})
+    _, judge, loaded, original = load_identity_receipt(monkeypatch, tmp_path, [first], [second])
+    assert loaded == [] and judge._candidate_load_errors == 1
+    assert judge._review_observations == []
+    assert len(original["findings"]) == 2
+
+
+@pytest.mark.parametrize("field,value", [("message", "Different concrete defect"), ("fix", "Different proposed repair"), ("severity", "WARNING")])
+def test_distinct_findings_with_distinct_ids_require_disagreement_investigation(monkeypatch, tmp_path, field, value):
+    first = dict(finding(), finding_id="first-original")
+    second = dict(first, finding_id="second-original", **{field: value})
+    module, judge, loaded, _ = load_identity_receipt(monkeypatch, tmp_path, [first], [second])
+    assert len(loaded) == 2 and judge._candidate_load_errors == 0
+    investigations = module._investigations(loaded, judge._review_observations)
+    assert len(investigations) == 1
+    assert set(investigations[0]["finding_ids"]) == {"first-original", "second-original"}
+
+
+@pytest.mark.parametrize("identity", ["missing", None, "  original-id  "])
+def test_historical_v1_ids_keep_legacy_synthesis_or_exact_original(monkeypatch, tmp_path, identity):
+    raw = finding()
+    if identity != "missing":
+        raw["finding_id"] = identity
+    module, judge, loaded, _ = load_identity_receipt(monkeypatch, tmp_path, [raw], [])
+    expected = identity if isinstance(identity, str) and identity != "missing" else hashlib.sha256(
+        f"security-boundary-test|{raw['file']}|{raw['line']}|{raw['message']}".encode()).hexdigest()[:12]
+    assert loaded[0].finding_id == expected
+    assert judge._review_observations[0]["finding_ids"] == [expected]
+    assert module._investigations(loaded, judge._review_observations)[0]["finding_ids"] == [expected]
+    assert set(loaded[0].to_dict()) == {"finding_id", "source", "file", "line", "severity", "message", "fix", "confidence"}
+
+
+@pytest.mark.parametrize("field,value", [("fix", "Different repair"), ("severity", "WARNING")])
+def test_legacy_id_collision_cannot_merge_distinct_content(monkeypatch, tmp_path, field, value):
+    first, second = finding(), dict(finding(), **{field: value})
+    _, judge, loaded, original = load_identity_receipt(monkeypatch, tmp_path, [first], [second])
+    assert not loaded and judge._candidate_load_errors == 1
+    assert len(original["findings"]) == 2 and not judge._review_observations
+
+
+def test_equal_content_different_ids_and_confidence_retains_both_provenances(monkeypatch, tmp_path):
+    first = dict(finding(), finding_id="first-id", confidence=0.9)
+    second = dict(finding(), finding_id="second-id", confidence=0.6)
+    module, judge, loaded, original = load_identity_receipt(monkeypatch, tmp_path, [first], [second])
+    assert [f.finding_id for f in loaded] == ["first-id", "second-id"]
+    assert [f.confidence for f in loaded] == [0.9, 0.6]
+    assert not module._investigations(loaded, judge._review_observations)
+    assert original["protected_review"]["legs"][0]["findings"] == [first]
+
+
+@pytest.mark.parametrize("layout", ["", "plugin/manolii-framework/", "registry/platform/framework/"])
+@pytest.mark.parametrize("identity", [None, "original-id"])
+def test_protected_identity_is_stable_in_all_shipped_judges(monkeypatch, tmp_path, layout, identity):
+    path = ROOT / layout / "scripts/run-judge.py"
+    spec = importlib.util.spec_from_file_location("identity_judge_" + layout.replace("/", "_"), path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    raw = finding() if identity is None else dict(finding(), finding_id=identity)
+    _, judge, loaded, _ = load_identity_receipt(monkeypatch, tmp_path, [raw], [], module=module)
+    expected = module.Finding.from_record("security-boundary-test", raw)
+    assert loaded[0].to_dict() == expected.to_dict()
+    assert len(module._investigations(loaded, judge._review_observations)) == 1
+
+
+def test_colliding_later_artifact_keeps_prior_valid_candidate_and_incomplete_state(monkeypatch, tmp_path):
+    monkeypatch.setenv("SECURITY_REVIEW_MODE", "direct")
+    module = load_script("run-judge")
+    for name, source in [("a.json", "first-source"), ("z.json", "second-source")]:
+        (tmp_path / name).write_text(json.dumps({"source": source, "findings": [dict(finding(), finding_id="collision")]}))
+    judge = module.Judge(str(tmp_path), 1, HEAD)
+    loaded = judge.load_candidates()
+    assert len(loaded) == 1 and loaded[0].source == "first-source"
+    assert judge._candidate_load_errors == 1
+
+
+def test_direct_ambiguous_identity_refuses_before_endpoint_or_model_dispatch(monkeypatch):
+    module = load_script("run-judge")
+    monkeypatch.setattr(module, "_endpoint", lambda **kw: pytest.fail("identity ambiguity reached route selection"))
+    first = module.Finding.from_record("review", dict(finding(), finding_id="collision"))
+    second = module.Finding.from_record("review", dict(finding(), finding_id="collision", message="Distinct defect"))
+    judge = module.Judge("unused", 1, HEAD)
+    assert judge.invoke_judge_agent([first, second]) is None and judge._adjudication_incomplete
+
+
+def test_historical_observation_alias_cannot_hide_one_leg_disagreement():
+    module = load_script("run-judge")
+    item = module.Finding.from_record("security-boundary-test", dict(finding(), finding_id="original-id"))
+    observations = [{"finding_ids": [item.legacy_id()]}, {"finding_ids": []}]
+    result = module._investigations([item], observations)
+    assert len(result) == 1 and result[0]["finding_ids"] == ["original-id"]
+
+
+@pytest.mark.parametrize("field,value", [("fix", "Different repair"), ("severity", "WARNING")])
+def test_ambiguous_historical_alias_is_not_evidence_of_agreement(field, value):
+    module = load_script("run-judge")
+    first = module.Finding.from_record("review", dict(finding(), finding_id="first"))
+    second = module.Finding.from_record("review", dict(finding(), finding_id="second", **{field: value}))
+    assert first.legacy_id() == second.legacy_id()
+    observations = [{"finding_ids": [first.legacy_id()]}, {"finding_ids": [second.legacy_id()]}]
+    assert len(module._investigations([first, second], observations)) == 1
+
+
+def test_malformed_historical_observation_cannot_count_as_agreement():
+    module = load_script("run-judge")
+    item = module.Finding.from_record("review", finding())
+    assert len(module._investigations([item], [{"finding_ids": [False]}, {"finding_ids": []}])) == 1
+
+
+def test_cross_location_public_id_cannot_impersonate_legacy_alias():
+    module = load_script("run-judge")
+    first = module.Finding.from_record("review", dict(finding(), finding_id="first"))
+    second = module.Finding.from_record("review", dict(finding(), file="src/other.py", finding_id=first.legacy_id()))
+    observations = [{"finding_ids": [first.finding_id]}, {"finding_ids": [second.finding_id]}]
+    investigations = module._investigations([first, second], observations)
+    assert len(investigations) == 2
+    assert {tuple(row["finding_ids"]) for row in investigations} == {(first.finding_id,), (second.finding_id,)}
+
+
+@pytest.mark.parametrize("first_party", [False, True])
+def test_skipped_protected_artifact_cannot_admit_unverified_findings(monkeypatch, tmp_path, first_party):
+    module = load_script("run-judge")
+    path = tmp_path / "security-boundary-test.json"
+    original = json.dumps({"source": "security-boundary-test", "skipped": True,
+                           "first_party": first_party, "findings": [finding()]}).encode()
+    path.write_bytes(original)
+    judge = module.Judge(str(tmp_path), 1, HEAD)
+    loaded = judge.load_candidates()
+    assert loaded == [] and judge._candidate_load_errors == 1
+    assert not judge._review_observations and not judge._has_first_party_candidates
+    assert path.read_bytes() == original
+    monkeypatch.setattr(judge, "load_candidates", lambda: loaded)
+    monkeypatch.setattr(module, "_endpoint", lambda **kw: pytest.fail("unverified findings reached route selection"))
+    monkeypatch.setattr(judge, "invoke_judge_agent", lambda *_: pytest.fail("unverified findings dispatched"))
+    monkeypatch.setattr(judge, "_post_no_findings_comment", lambda: pytest.fail("false clean"))
+    posted = []
+    monkeypatch.setattr(judge, "_post_advisory_warning", lambda detail: posted.append(detail) or False)
+    assert judge.run() == 0 and posted
+
+
 def test_impossible_independence_rejects_before_either_call(monkeypatch):
     data = inventory()
     data["data"][1]["litellm_params"]["model"] = "fireworks_ai/deepseek-v4p1-flash"
@@ -604,7 +820,9 @@ def test_canonical_estate_specialist_fails_closed_without_direct_fallback(monkey
 
 
 @pytest.mark.parametrize("truncated_first", [False, True])
-def test_real_canonical_specialist_to_source_grounded_judge(monkeypatch, tmp_path, truncated_first):
+@pytest.mark.parametrize("producer_id", [None, "original-producer-id"])
+@pytest.mark.parametrize("disagree", [False, True])
+def test_real_canonical_specialist_to_source_grounded_judge(monkeypatch, tmp_path, truncated_first, producer_id, disagree):
     root = tmp_path / "subject"
     root.mkdir()
     def git(*args):
@@ -629,7 +847,8 @@ def test_real_canonical_specialist_to_source_grounded_judge(monkeypatch, tmp_pat
     monkeypatch.setenv("LITELLM_PROXY_URL", "https://proxy.example")
     monkeypatch.setenv("LLM_API_KEY", "offline-proxy-key")
     specialist = load_script("run-specialists")
-    sent = install(monkeypatch, [verdict([finding()]), verdict([finding()])],
+    raw = finding() if producer_id is None else dict(finding(), finding_id=producer_id)
+    sent = install(monkeypatch, [verdict([raw]), verdict([] if disagree else [raw])],
                    helper=specialist.protected_review)
     candidates = tmp_path / "candidates"
     candidates.mkdir()
@@ -641,6 +860,7 @@ def test_real_canonical_specialist_to_source_grounded_judge(monkeypatch, tmp_pat
     judge = module.Judge(str(candidates), 1, head)
     findings = judge.load_candidates()
     assert len(findings) == 1 and judge._candidate_load_errors == 0
+    assert producer_id is None or findings[0].finding_id == producer_id
     assert not judge._has_first_party_candidates
     requests = []
     class Reply(io.BytesIO):
@@ -651,12 +871,16 @@ def test_real_canonical_specialist_to_source_grounded_judge(monkeypatch, tmp_pat
         payload = json.loads(request.data)
         requests.append(payload)
         packet = json.loads(payload["messages"][0]["content"].split("<untrusted_review_data>\n", 1)[1].split("\n</untrusted_review_data>", 1)[0])
+        assert "_comparison_keys" not in json.dumps(packet)
+        assert packet["candidates"] == [f.to_dict() for f in findings]
         locations = list(packet["source_evidence"]["locations"])
         answer = {"version": 2, "decisions": [
             {"finding_id": f["finding_id"], "decision": "keep", "gate": "passed",
              "reason": "The complete tracked source has no tenant denial test assertion.", "evidence_ids": locations}
-            for f in packet["candidates"]], "investigations": []}
-        assert not packet["investigations"]
+            for f in packet["candidates"]], "investigations": [
+                {"id": investigation["id"], "status": "resolved", "reason": "Both retained observations were checked against the exact source.", "evidence_ids": locations}
+                for investigation in packet["investigations"]]}
+        assert len(packet["investigations"]) == int(disagree)
         return Reply(json.dumps({
             "stop_reason": "max_tokens" if truncated_first and len(requests) == 1 else "end_turn",
             "content": [{"type": "text", "text": json.dumps(answer)}]}).encode())
