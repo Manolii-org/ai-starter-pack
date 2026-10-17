@@ -395,10 +395,14 @@ class QualityTests(unittest.TestCase):
             for _ in range(50):
                 try:
                     os.kill(pid, 0)
-                    # Linux may retain an orphan as a zombie until init reaps it.
-                    stopped = Path('/proc/' + str(pid) + '/stat').read_text().split()[2] == 'Z'
-                except (ProcessLookupError, FileNotFoundError):
+                except ProcessLookupError:
                     stopped = True
+                else:
+                    try:
+                        # Linux may retain an orphan as a zombie until init reaps it.
+                        stopped = Path('/proc/' + str(pid) + '/stat').read_text().split()[2] == 'Z'
+                    except FileNotFoundError:
+                        stopped = False  # Missing /proc does not prove the process exited.
                 if stopped:
                     break
                 time.sleep(0.01)
