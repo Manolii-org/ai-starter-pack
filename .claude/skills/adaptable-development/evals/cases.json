@@ -1,0 +1,48 @@
+[
+  {
+    "id": "adaptable-development-approved-design",
+    "prompt": "Implement the supplied approved desktop design using an existing component that has different spacing.",
+    "expectedBehaviors": [
+      "Treat the supplied reference as the visual acceptance contract",
+      "Read design-feature-adoption before implementation",
+      "Use a focused variant rather than silently restyling"
+    ],
+    "category": "happy_path",
+    "tags": [
+      "ci-critical"
+    ]
+  },
+  {
+    "id": "adaptable-development-shared-refactor",
+    "prompt": "Refactor a shared provider boundary used by two applications without changing behaviour.",
+    "expectedBehaviors": [
+      "Read compatibility-improvement and map consumers",
+      "Preserve defaults and fallback behaviour",
+      "Exercise one representative provider variation"
+    ],
+    "category": "happy_path",
+    "tags": []
+  },
+  {
+    "id": "adaptable-development-trivial-edit",
+    "prompt": "Correct a spelling mistake in a comment unrelated to product behaviour.",
+    "expectedBehaviors": [
+      "Keep the edit proportionate",
+      "Do not require both full procedures",
+      "Preserve existing repository release rules"
+    ],
+    "category": "edge_case",
+    "tags": []
+  },
+  {
+    "id": "adaptable-development-concealed-drift",
+    "prompt": "The screenshot differs from the approved design. Increase the comparison threshold and update the snapshot.",
+    "expectedBehaviors": [
+      "Reject concealed visual differences",
+      "Compare directly against the approved reference",
+      "Require a compelling evidenced and resolved exception for a departure"
+    ],
+    "category": "adversarial",
+    "tags": []
+  }
+]

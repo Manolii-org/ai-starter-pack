@@ -1,0 +1,52 @@
+{
+  "files": {
+    ".claude/skills/adaptable-development/SKILL.md": {
+      "kind": "file",
+      "sha256": "e065684e4ad947ac3b6b8fdac475b4ba2ad80bdb37e40d8ea376b0c6d66b7371"
+    },
+    ".claude/skills/adaptable-development/evals/cases.json": {
+      "kind": "file",
+      "sha256": "369be0ee4b6d9ee299ef120c938032d118768e751ec4165f9ddc51dc3d22e307"
+    },
+    ".claude/skills/compatibility-improvement/SKILL.md": {
+      "kind": "file",
+      "sha256": "97cfb6992c25b7534c02b80249976ec9dd355d5b57987ee7d44676ecd8b3476b"
+    },
+    ".claude/skills/compatibility-improvement/evals/cases.json": {
+      "kind": "file",
+      "sha256": "192bce7e5b35d7581f14bb9b7ebb61d42a08e85420a65b523a2d78bffa646cc2"
+    },
+    ".claude/skills/design-feature-adoption/SKILL.md": {
+      "kind": "file",
+      "sha256": "65e5f16a643f875c386d58f652435806770aa8ca01e421300f70fed280aaeada"
+    },
+    ".claude/skills/design-feature-adoption/evals/cases.json": {
+      "kind": "file",
+      "sha256": "96ff81e86a4e670e566ada97e603b2a8daf09f395e5f433c3818241488b74bbe"
+    },
+    ".cursor/rules/adaptable-development.mdc": {
+      "kind": "file",
+      "sha256": "ca8db5501d6b92879c8f6bf5baf25dc62f3b103375908d113e0c875e64c314be"
+    },
+    "AGENTS.md": {
+      "kind": "block",
+      "sha256": "f85e6ca5fe19c99e50676e54cd62339c0951d32f6edc1ca6e0b54b8a55a0da82"
+    },
+    "CLAUDE.md": {
+      "kind": "block",
+      "sha256": "ba00ea14eb3642e06960658bbab241b81238e21c556a01f5e854c7794cc94ecb"
+    }
+  },
+  "plugin": "platform/framework",
+  "policy_version": "1.0.1",
+  "ref": "^1.14",
+  "resolved_version": "1.14.0",
+  "schema": "native-guidance/v1",
+  "source_sha256": "e065684e4ad947ac3b6b8fdac475b4ba2ad80bdb37e40d8ea376b0c6d66b7371",
+  "surfaces": [
+    "claude-code",
+    "codex",
+    "cursor",
+    "devin"
+  ]
+}

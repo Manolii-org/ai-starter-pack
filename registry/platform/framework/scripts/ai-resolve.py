@@ -33,6 +33,7 @@ import argparse
 import contextlib
 import errno
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -14211,6 +14212,9 @@ class Plan:
     # it present — an installed file the consumer deleted is a planned
     # restore, not a concurrent edit (Devin on #123).
     absent: set[str] = field(default_factory=set)
+    # Native renderers must use the commit that passed pin validation, never a
+    # later HEAD read after another process switches the registry checkout.
+    pins: dict[str, str] = field(default_factory=dict)
 
 
 def load_manifest(path: Path) -> dict:
@@ -14255,8 +14259,11 @@ def load_manifest(path: Path) -> dict:
     surfaces = data.get("surfaces")
     if surfaces is not None and (
             not isinstance(surfaces, list)
-            or not all(isinstance(s, str) for s in surfaces)):
-        sys.stderr.write("FAIL: surfaces must be a list of strings\n")
+            or not all(isinstance(s, str) and s in {
+                "claude-code", "devin", "cursor", "codex", "openhands"
+            } for s in surfaces)
+            or len(surfaces) != len(set(surfaces))):
+        sys.stderr.write("FAIL: surfaces must be unique supported manifest values\n")
         sys.exit(2)
     return data
 
@@ -14510,7 +14517,8 @@ def _repo_apply_mutex(repo_root: Path):
 def atomic_replace(dst: Path, fill,
                    times: tuple[int, int] | None = None,
                    mode: int | None = None,
-                   dfd: int | None = None) -> None:
+                   dfd: int | None = None,
+                   before_replace=None) -> None:
     """Install `dst` through an exclusively-created sibling temp + rename.
 
     tempfile.mkstemp picks a random name with O_EXCL — a consumer cannot
@@ -14529,7 +14537,11 @@ def atomic_replace(dst: Path, fill,
     `times` is the (atime_ns, mtime_ns) snapshot captured at PLAN time —
     apply must never re-stat the registry source: a source that
     disappears mid-apply would otherwise strand already-written files
-    with no lock record."""
+    with no lock record.
+
+    `before_replace`, when supplied, validates the destination after temp-file
+    preparation and immediately before rename. The caller still coordinates
+    writers: validation plus POSIX rename is not an atomic content CAS."""
     if dfd is not None:
         # Descriptor-relative temp — same O_EXCL guarantee as mkstemp but
         # bound to the held-open parent instead of a rewalked path.
@@ -14550,6 +14562,8 @@ def atomic_replace(dst: Path, fill,
             if mode is not None:
                 os.chmod(tmp_name, mode & 0o777, dir_fd=dfd,
                          follow_symlinks=False)
+            if before_replace is not None:
+                before_replace()
             os.rename(tmp_name, dst.name, src_dir_fd=dfd, dst_dir_fd=dfd)
         finally:
             try:
@@ -14572,6 +14586,8 @@ def atomic_replace(dst: Path, fill,
             # The PLANNED mask — the source's mode may have drifted between
             # plan and apply; the installed file must match the lock record.
             os.chmod(tmp, mode & 0o777)
+        if before_replace is not None:
+            before_replace()
         os.replace(tmp, dst)
     finally:
         if tmp.exists():
@@ -15263,6 +15279,8 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                 f"{req}: '{comp}/' needs surface wiring (settings merge) — "
                 f"not materialised by --apply; see docs/registry.md")
 
+    if pinned:
+        plan.pins[req] = pinned_sha
     plan.resolved.append({
         "plugin": req,
         "scope": scope,
@@ -15434,9 +15452,13 @@ def main() -> int:
     mode.add_argument("--dry-run", action="store_true")
     ap.add_argument("--prune", action="store_true",
                     help="with --apply, also remove lockfile-tracked files no longer required")
+    ap.add_argument("--native-guidance", action="store_true",
+                    help="deliver only the shared policy and task procedures to native instruction surfaces; preserve curated capability trees")
     args = ap.parse_args()
     if args.prune and not args.apply:
         ap.error("--prune requires --apply")
+    if args.native_guidance and args.prune:
+        ap.error("native guidance rollback uses the owning commit, not --prune")
 
     repo_root = Path(args.repo_root).resolve()
     if args.apply:
@@ -15447,6 +15469,15 @@ def main() -> int:
     return _run(args, repo_root)
 
 
+def _native_guidance_module():
+    """Load the bundled helper, independent of unrelated top-level lib packages."""
+    spec = importlib.util.spec_from_file_location(
+        "_ai_resolve_native_guidance", Path(__file__).resolve().parent / "lib/native_guidance.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _run(args: argparse.Namespace, repo_root: Path) -> int:
     manifest_path = Path(args.manifest)
     if not manifest_path.is_absolute():
@@ -15455,6 +15486,9 @@ def _run(args: argparse.Namespace, repo_root: Path) -> int:
     universe = str(manifest["universe"])
     registry_root = find_registry_root(Path(args.registry).resolve())
     index = load_plugins_index(registry_root)
+    if args.native_guidance:
+        return _native_guidance_module().resolve(
+            args, repo_root, sys.modules[__name__], manifest, registry_root, index)
     lock, lock_err = load_lock(repo_root)
 
     locked_dig = locked_digests(lock)
