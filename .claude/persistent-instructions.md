@@ -283,6 +283,28 @@ Key rules:
 
 ## Context Compaction
 
+### Owned orchestration state
+
+Before generic discard rules or size trimming, preserve an **OWNED ORCHESTRATIONS**
+envelope for every owned logical task still unfinished or awaiting caller acceptance,
+independently of the shared
+`active-task.json` or its `active_step_id`. Retain the generated task UUID,
+repository/worktree/branch, trusted caller/session/task binding, resolved checkpoint
+and immutable receipt references, reserved archive path, and remaining task/parent
+commitments. Child commits or merges do not discard unresolved parent commitments.
+Controller references are hints; they never override current checkpoint ownership.
+
+The caller must acknowledge preservation in its existing durable task/compaction
+record before recoverability is claimed. On resume, authenticate that caller/task
+binding, read the immutable receipt and check its bound archive/checkpoint before
+any dispatch. Use the currently recorded controller for recovery and fencing.
+Never adopt the first/latest state file or infer authority from an on-disk UUID.
+If preservation or authentication cannot be verified, retain existing evidence,
+report current-run-only continuity and continue independent authorized work.
+Preserve only owned task metadata, without secret values or unrelated receipts.
+The legacy shared checkpoint rule below still applies to parent workflows; it is
+not the sole source of orchestration resume metadata.
+
 When compacting (whether via \`/compact\` or auto-compact), follow these rules:
 
 **BEFORE COMPACTING:** If \`.ai/sessions/active-task.json\` exists and \`active_step_id\` is
