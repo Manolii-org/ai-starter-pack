@@ -1,6 +1,6 @@
 ---
 name: orchestrator
-version: 1.0.4
+version: 1.0.5
 description: "Multi-step task coordinator — decomposes tasks into a DAG, dispatches sub-agents in order, handles STATUS: INCOMPLETE returns, preserves checkpoint custody when checkpointing is available."
 type: agent
 model: sonnet
@@ -63,6 +63,11 @@ Use an installed owner-preserving writer when available. Otherwise use this
 portable local procedure with Python 3's standard library for every creation or
 update, including synthesis and cleanup:
 
+Before opening the lock or writing state, create `.ai/sessions`,
+`.ai/sessions/orchestrator-receipts` and `.ai/sessions/archive` with
+`Path.mkdir(parents=True, exist_ok=True, mode=0o700)`. Fsync the parents of newly
+created directories. Fail safely on conflicting non-directory paths.
+
 1. For a new task, retain a stable logical task ID and generate an owner UUID.
    Persist a mode-0600 custody receipt in
    `.ai/sessions/orchestrator-receipts/<owner_thread_id>.json` using the atomic
@@ -76,7 +81,7 @@ update, including synthesis and cleanup:
    before receipt delivery cannot orphan a singleton. Verify receipt readback
    before claiming recoverable custody. Never infer caller identity from a
    checkpoint or child-supplied payload.
-2. Create `.ai/sessions` if needed. Hold an exclusive `fcntl.flock` on the stable
+2. Hold an exclusive `fcntl.flock` on the stable
    `.ai/sessions/active-task.lock` file and re-read `active-task.json` under the lock.
 3. Create a checkpoint only if absent. Update an existing checkpoint only when
    its `owner_thread_id` matches this orchestrator. A missing or different owner
@@ -84,7 +89,7 @@ update, including synthesis and cleanup:
 4. Merge only this task's fields and owned step IDs, retaining unknown fields,
    parent commitments and sibling state. Write valid JSON to a mode-0600 temp
    file in the same directory, flush and `os.fsync`, then `os.replace` it while
-   holding the lock. Re-read and verify the owner and written state before
+   holding the lock, then fsync the containing directory. Re-read and verify the owner and written state before
    reporting persistence. Release the lock; retain its stable file.
 
 If Python, locking or the installed writer is unavailable, ownership conflicts,
@@ -216,7 +221,7 @@ runtime status before recovering lost work under existing task authorization.
 For a resumed invocation, establish custody through an installed
 verified handoff operation, the same authoritative stable caller/task identity,
 or a custody receipt supplied from the trusted caller's retained task context.
-Under the stable lock, verify receipt/checkpoint repository, worktree and logical
+Under the stable lock, verify the receipt/checkpoint current owner UUID, repository, worktree and logical
 task bindings, and verify the previous controller is terminal or the trusted
 executor has explicitly handed off its work. Generate a fresh owner UUID and
 record the old/new ownership transfer, preserving the complete plan, approvals,
