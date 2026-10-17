@@ -461,8 +461,7 @@ def _judge_evidence(findings: list[Finding], head: str) -> dict:
             or path.is_absolute()
             or ".." in path.parts
             or "\\" in finding.file
-            or type(finding.line) is not int
-            or finding.line < 1
+            or (finding.line is not None and (type(finding.line) is not int or finding.line < 1))
         ):
             row["status"] = "invalid_location"
             continue
@@ -491,11 +490,14 @@ def _judge_evidence(findings: list[Finding], head: str) -> dict:
             decoded = body.decode("utf-8", errors="replace")
             _require_safe_packet(decoded)
             lines = decoded.splitlines()
-            if finding.line > len(lines):
+            if finding.line is not None and finding.line > len(lines):
                 row["status"] = "line_out_of_range"
                 continue
-            start = max(1, finding.line - _EVIDENCE_CONTEXT_LINES)
-            end = min(len(lines), finding.line + _EVIDENCE_CONTEXT_LINES)
+            # Producers support file-level findings with line=None. Quote the
+            # complete file within the unchanged budget, never invent a line
+            # or clip the file and present that as complete evidence.
+            start = 1 if finding.line is None else max(1, finding.line - _EVIDENCE_CONTEXT_LINES)
+            end = len(lines) if finding.line is None else min(len(lines), finding.line + _EVIDENCE_CONTEXT_LINES)
             text = "\n".join(f"{n}: {lines[n - 1]}" for n in range(start, end + 1))
             if used + len(text) > _EVIDENCE_CHAR_BUDGET:
                 row["status"] = "evidence_budget"
@@ -528,7 +530,7 @@ def _judge_evidence(findings: list[Finding], head: str) -> dict:
                 if len(match) != 1 or match[0][0] not in {b"100644", b"100755"}:
                     continue
                 body = _git_bounded(root, "cat-file", "blob", match[0][2].decode(), limit=min(20000, _EVIDENCE_MAX_FILE_BYTES))
-                if b"\0" in body or row["line"] > len(body.decode("utf-8").splitlines()):
+                if b"\0" in body or (row["line"] is not None and row["line"] > len(body.decode("utf-8").splitlines())):
                     continue
                 _require_safe_packet(body.decode("utf-8"))
                 row.update(status="available", revision=base, source_state="deleted_at_head",
