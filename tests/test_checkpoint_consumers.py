@@ -114,3 +114,24 @@ def run_drift(tmp_path, plugin_root=ROOT):
              **({"CLAUDE_PLUGIN_ROOT": str(plugin_root)} if plugin_root else {})},
     )
     return result.stdout
+
+
+def test_existing_standalone_watch_merge_remains_terminal(tmp_path, monkeypatch):
+    path = checkpoint(tmp_path, monkeypatch, type="watch-pr", status="merged", pr=12,
+                      last_updated="2000-01-01T00:00:00Z")
+    task = json.loads(path.read_text())
+    del task["steps"]  # The actual standalone watch producer creates no child DAG.
+    path.write_text(json.dumps(task))
+    before = path.read_bytes()
+    assert CHECKER._active_task_gaps("feature/test") == []
+    assert "Retained terminal checkpoint" in run_drift(tmp_path)
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("extra", [
+    {"task": "parent outcome"}, {"original_pr_stack": [11]}, {"steps": []},
+    {"scope_budget": {"allowed_paths": ["docs/**"]}}, {"unknown": True},
+])
+def test_merged_watch_with_parent_or_unknown_fields_remains_unverified(extra):
+    task = {"type": "watch-pr", "status": "merged", "pr": 12, **extra}
+    assert CHECKER._terminal_task(task) is False

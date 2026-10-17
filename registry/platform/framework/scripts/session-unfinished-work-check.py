@@ -33,6 +33,8 @@ DEFAULT_WRITE_PATH = REPO_ROOT / ".ai" / "unfinished-work.md"
 HTTP_TIMEOUT_SECONDS = 20
 SUBPROCESS_TIMEOUT_SECONDS = 20
 TERMINAL_TASK_STATUSES = {"done", "cancelled", "canceled"}
+LEGACY_WATCH_KEYS = {"type", "status", "round", "started_at", "last_updated",
+                     "branch", "git_branch", "current_branch", "pr", "pr_url", "pr_number"}
 TOKEN_IN_URL_RE = re.compile(r"(https?://)([^/@\s]+)@")
 
 
@@ -358,7 +360,12 @@ def _terminal_task(task: dict[str, Any]) -> bool:
             return False
     if any(step.get("status") not in TERMINAL_TASK_STATUSES | {"merged"} for step in steps):
         return False
-    return str(task.get("status", "")).strip().lower() in TERMINAL_TASK_STATUSES
+    status = str(task.get("status", "")).strip().lower()
+    # Preserve the existing standalone watch producer without certifying parents.
+    standalone_watch = (status == "merged" and task.get("type") == "watch-pr"
+                        and set(task) <= LEGACY_WATCH_KEYS
+                        and any(task.get(key) for key in ("pr", "pr_url", "pr_number")))
+    return status in TERMINAL_TASK_STATUSES or bool(standalone_watch)
 
 
 def assess(*, skip_remote: bool = False) -> dict[str, Any]:
