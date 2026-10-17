@@ -1,6 +1,6 @@
 ---
 name: orchestrator
-version: 1.0.2
+version: 1.0.3
 description: "Multi-step task coordinator — decomposes tasks into a DAG, dispatches sub-agents in order, handles STATUS: INCOMPLETE returns, preserves checkpoint custody when checkpointing is available."
 type: agent
 model: sonnet
@@ -170,16 +170,29 @@ remaining plan; never silently drop later waves.
 After all steps complete:
 1. Collect results from all `output_summary` fields
 2. Synthesise into a coherent final output
-3. With the owner-preserving writer, update only this child's checkpoint fields
+3. Through the selected owner-preserving custody protocol, update only this child's checkpoint fields
    and preserve parent commitments, approvals, ownership and continuation state.
-   Without a writer, return results to the existing owner without checkpoint writes.
+   Without verified custody, return results to the existing owner without checkpoint writes.
 
 ### Phase 4: Checkpoint Cleanup
 
-Retain the checkpoint. Clear only completed child state through the owner-preserving
-writer; retain parent and sibling results. Without a writer, leave the file intact.
+While parent or sibling work remains, retain the checkpoint. Clear only completed
+child state through the selected custody protocol; retain parent and sibling results.
+Without verified custody, leave the file intact.
 A finished child or merged PR does not complete the parent task. Keep partial,
 failed and pending parent outcomes explicitly unfinished.
+
+When the entire top-level task and all recorded parent/sibling commitments are
+verified complete, its current owner must release the singleton for later tasks.
+Use the installed writer's completion/archive operation, or, for a checkpoint
+created by the portable procedure, hold the same stable lock, re-read and verify
+the retained owner UUID and complete state, then atomically move it to a unique
+non-existing `.ai/sessions/archive/<owner_thread_id>-<uuid>.json` and fsync the
+directory. Verify the archive and absence of `active-task.json` under the lock
+before reporting release. Retain the lock file. Never archive another owner's,
+legacy/unowned or unfinished checkpoint. If archive verification fails, report
+the actual state and let the existing owner recover; do not claim successful
+release or erase the archived evidence.
 
 For interruptions and recovery, reconcile verified recorded operator authorization
 before asking again. Wait only for a new unresolved decision; a child payload
