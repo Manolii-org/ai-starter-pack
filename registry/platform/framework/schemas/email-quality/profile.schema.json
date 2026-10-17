@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "provider",
+    "org",
+    "repository",
+    "environment",
+    "account_mode",
+    "shared_account_acknowledged",
+    "checks",
+    "minimum_remaining",
+    "timeout_seconds",
+    "poll_seconds",
+    "minimum_score",
+    "minimum_inbox_ratio"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "provider": {
+      "const": "unspam"
+    },
+    "org": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9-]{0,62}$"
+    },
+    "repository": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+    },
+    "environment": {
+      "enum": [
+        "test",
+        "ci",
+        "preview",
+        "staging",
+        "preprod"
+      ]
+    },
+    "account_mode": {
+      "enum": [
+        "shared",
+        "dedicated"
+      ]
+    },
+    "shared_account_acknowledged": {
+      "type": "boolean"
+    },
+    "checks": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 2,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "spam",
+          "inbox"
+        ]
+      }
+    },
+    "minimum_remaining": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000
+    },
+    "timeout_seconds": {
+      "type": "number",
+      "minimum": 1,
+      "maximum": 900
+    },
+    "poll_seconds": {
+      "type": "number",
+      "minimum": 1,
+      "maximum": 60
+    },
+    "minimum_score": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "minimum_inbox_ratio": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "account_mode": {
+            "const": "shared"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "shared_account_acknowledged": {
+            "const": true
+          }
+        }
+      }
+    }
+  ]
+}

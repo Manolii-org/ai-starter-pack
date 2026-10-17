@@ -42,3 +42,10 @@ rm -f allocation.json messages.json
 ```
 
 Hermetic capture is fail-closed in staging/production. Hosted capture is allowlisted for `test|ci|preview|preprod|staging` over HTTPS, with the bearer token only in `EMAIL_CAPTURE_HOSTED_TOKEN`. Disable either with `EMAIL_CAPTURE_MODE=off`; this never changes business-provider configuration.
+
+## Email deliverability
+
+The opt-in `bin/email-quality` capability complements email capture with bounded
+Unspam spam/placement checks, private run checkpoints and metadata-only receipts.
+See [email-quality](docs/email-quality.md) for profiles, shared-account limits,
+sender hooks, immutable CI consumption and rollout/rollback.

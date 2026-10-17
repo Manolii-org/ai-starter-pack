@@ -1,0 +1,157 @@
+"""Provider lifecycle and consumer-owned sender seam. Receipts contain metadata only."""
+import os
+import re
+import signal
+import subprocess
+import time
+from pathlib import Path
+
+from .profile import QualityError, number
+from .state import private_write
+
+
+def delivery(kind, response):
+    try:
+        identifier = response['id']
+        if not isinstance(identifier, str) or not re.fullmatch(r'[A-Za-z0-9_:-]{1,128}', identifier):
+            raise QualityError('PROVIDER_INVALID')
+        recipients = ([response['inbox_address']] if kind == 'spam'
+                      else [m['address'] for m in response['mailboxes']])
+        if not recipients or len(recipients) > 100 or len(set(recipients)) != len(recipients):
+            raise QualityError('PROVIDER_INVALID')
+        if any(not isinstance(r, str) or not re.fullmatch(r'[^\s<>@,;]+@[^\s<>@,;]+\.[^\s<>@,;]+', r)
+               for r in recipients):
+            raise QualityError('PROVIDER_INVALID')
+        mailbox_ids = [m['id'] for m in response['mailboxes']] if kind == 'inbox' else []
+        if (any(type(i) is not int or i < 1 for i in mailbox_ids)
+                or len(set(mailbox_ids)) != len(mailbox_ids)):
+            raise QualityError('PROVIDER_INVALID')
+        return {'schema_version': '1.0', 'kind': kind, 'test_id': identifier,
+                'recipients': recipients, 'mailbox_ids': mailbox_ids,
+                'body_marker': identifier if kind == 'inbox' else ''}
+    except (TypeError, KeyError):
+        raise QualityError('PROVIDER_INVALID') from None
+
+
+def start(client, state, profile, kind):
+    checks = state.data['checks']
+    if kind in checks:
+        if checks[kind].get('phase') == 'creating':
+            raise QualityError('CREATE_OUTCOME_UNKNOWN')
+        if checks[kind].get('phase') != 'created_unvalidated':
+            return checks[kind]
+    if kind not in checks:
+        limits = client.status()
+        key = 'spam_checks' if kind == 'spam' else 'inbox_placements'
+        if limits[key] <= profile['minimum_remaining']:
+            raise QualityError('QUOTA_RESERVE')
+        checks[kind] = {'phase': 'creating'}
+        state.save()  # Persist BEFORE POST; network ambiguity must not create duplicate billable work.
+        response = client.create(kind)
+        checks[kind] = {'phase': 'created_unvalidated', 'response': response}
+        state.save()  # Preserve provider response for safe shape-repair without another POST.
+    data = delivery(kind, checks[kind]['response'])
+    checks[kind] = {'phase': 'created', 'delivery': data}
+    private_write(state.directory / ('delivery-' + kind + '.json'), data)
+    state.save()
+    return checks[kind]
+
+
+def assess(profile, kind, data):
+    if not isinstance(data, dict):
+        raise QualityError('PROVIDER_INVALID')
+    if data.get('status') in ('failed', 'error', 'cancelled'):
+        raise QualityError('PROVIDER_TEST_FAILED')
+    if data.get('status') not in ('completed', 'complete', 'finished', 'done', 'success'):
+        if data.get('status') not in ('pending', 'waiting', 'running', 'processing', 'queued', 'created'):
+            raise QualityError('PROVIDER_INVALID')
+        return None
+    if kind == 'spam':
+        score = data.get('score')
+        if not number(score, 0, 100):
+            raise QualityError('PROVIDER_INVALID')
+        return {'kind': kind, 'score': score, 'passed': score >= profile['minimum_score']}
+    results = data.get('results')
+    if not isinstance(results, list) or not results:
+        raise QualityError('PROVIDER_INVALID')
+    statuses = []
+    for row in results:
+        if not isinstance(row, dict):
+            raise QualityError('PROVIDER_INVALID')
+        # Live API reports delivery status=success separately from placement tab.
+        value = row.get('tab') if row.get('status') == 'success' else row.get('status')
+        statuses.append(value.lower() if isinstance(value, str) else None)
+    if len(statuses) != len(results) or any(s not in ('inbox', 'spam', 'missing', 'promotions') for s in statuses):
+        raise QualityError('PROVIDER_INVALID')
+    ratio = sum(s == 'inbox' for s in statuses) / len(statuses)
+    return {'kind': kind, 'inbox_ratio': ratio, 'mailbox_count': len(statuses),
+            'passed': ratio >= profile['minimum_inbox_ratio']}
+
+
+def wait(client, state, profile, kind):
+    record = state.data['checks'].get(kind, {})
+    if record.get('phase') == 'completed':
+        return record['result']
+    if record.get('phase') not in ('created', 'sent'):
+        raise QualityError('STATE_SCOPE_MISMATCH')
+    deadline = time.monotonic() + profile['timeout_seconds']
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise QualityError('RESULT_TIMEOUT')
+        payload = client.result(kind, record['delivery']['test_id'], remaining)
+        if not isinstance(payload, dict) or payload.get('id') != record['delivery']['test_id']:
+            raise QualityError('PROVIDER_INVALID')
+        if kind == 'inbox' and payload.get('status') in ('completed', 'complete', 'finished', 'done', 'success'):
+            rows = payload.get('results')
+            try:
+                actual = [row['mailbox']['id'] for row in rows]
+                expected = record['delivery']['mailbox_ids']
+                if len(actual) != len(expected) or set(actual) != set(expected):
+                    raise QualityError('PROVIDER_INVALID')
+            except (TypeError, KeyError):
+                raise QualityError('PROVIDER_INVALID') from None
+        result = assess(profile, kind, payload)
+        if result is not None:
+            record.update(phase='completed', result=result)
+            state.save()
+            return result
+        time.sleep(min(profile['poll_seconds'], max(0, deadline - time.monotonic())))
+
+
+def send(state, record, sender, timeout):
+    if record['phase'] in ('sent', 'completed'):
+        return
+    if record['phase'] != 'created':
+        raise QualityError('SEND_OUTCOME_UNKNOWN')
+    executable = Path(sender).resolve()
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        raise QualityError('SENDER_INVALID')
+    path = state.directory / 'delivery.json'
+    private_write(path, record['delivery'])
+    record['phase'] = 'sending'
+    state.save()
+    # Explicit allowlist prevents provider/admin credentials reaching consumer code.
+    env = {k: v for k, v in os.environ.items()
+           if k in ('PATH', 'LANG', 'LC_ALL', 'SYSTEMROOT', 'HTTP_PROXY', 'HTTPS_PROXY',
+                    'NO_PROXY', 'SSL_CERT_FILE', 'REQUESTS_CA_BUNDLE', 'NODE_EXTRA_CA_CERTS')
+           or k.startswith('EMAIL_QUALITY_SENDER_')}
+    try:
+        process = subprocess.Popen([str(executable), str(path)], env=env, start_new_session=True,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            if process.wait(timeout=timeout):
+                raise QualityError('SENDER_FAILED')
+        finally:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                # The isolated group already exited; there is nothing to terminate.
+                process.poll()
+            process.wait(timeout=5)
+        record['phase'] = 'sent'
+        state.save()
+    except subprocess.TimeoutExpired:
+        raise QualityError('SEND_OUTCOME_UNKNOWN') from None
+    finally:
+        path.unlink(missing_ok=True)

@@ -7,3 +7,7 @@ Profiles accept major version 1. Modes are `off|hermetic|hosted`. Hermetic backe
 Optional `fidelity` is `provider-to-capture` (default) or `deployed-substitution`. The CLI `canary` command probes hosted health and emits a metadata-only receipt. Sender routing, vendor accounts, and provider evidence stay consumer-owned. Do not bake MailSlurp/Mailtrap keys into this pack.
 
 Consumer journey coverage (which product paths actually send mail) is documented in `docs/email-capture-journeys.md`. The protocol does not imply every Auth template is tested.
+
+Live spam/inbox-placement checks use the separate `bin/email-quality` contract;
+see `docs/email-quality.md`. Capture modes, receivers and existing pins retain
+their current semantics.
