@@ -1,7 +1,7 @@
 # Shared adaptable-development policy delivery
 
 The standing policy is authored once in
-`.claude/skills/adaptable-development/SKILL.md` (version `1.0.0`, 276 body words).
+`.claude/skills/adaptable-development/SKILL.md` (version `1.0.1`, 276 body words).
 Detailed procedures use the existing skills system:
 `design-feature-adoption` and `compatibility-improvement`. Root triggers select
 them before implementation; unrelated trivial tasks remain proportionate.
@@ -107,3 +107,9 @@ later unrelated edits: resolve revert conflicts deliberately. Do not use full
 tree restores or `--prune` for native blocks. This changes instructions only;
 application code, stored data and in-flight operations need no rollback here.
 Platform/account caches require a fresh session to verify restored guidance.
+
+Metadata revision `1.0.1` declares empty MCP/entity prerequisites and generic
+engineering/design/testing tags for stricter consumer manifest checks. Policy and
+procedure bodies are unchanged from `1.0.0`; existing reviewed installations may
+retain that recorded version until their normal update. Report installed version
+and source hash explicitly; do not claim byte parity across different revisions.

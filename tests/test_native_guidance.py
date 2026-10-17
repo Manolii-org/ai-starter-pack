@@ -80,12 +80,12 @@ def test_update_preserves_new_local_text(consumer):
         stream.write(b"\nNew local rule survives.\n")
     # A reviewed update changes only the managed source, never local tails.
     skill = source / "registry/platform/framework/skills/adaptable-development/SKILL.md"
-    skill.write_text(skill.read_text().replace("version: 1.0.0", "version: 1.0.1")
+    skill.write_text(skill.read_text().replace("version: 1.0.1", "version: 1.0.2")
                      .replace("Build the current approved feature", "Implement the current approved feature"))
     assert run(consumer, "--check").returncode == 1
     assert run(consumer, "--apply").returncode == 0
     assert (root / "AGENTS.md").read_bytes().endswith(b"New local rule survives.\n")
-    assert json.loads((root / native.LOCK).read_text())["policy_version"] == "1.0.1"
+    assert json.loads((root / native.LOCK).read_text())["policy_version"] == "1.0.2"
 
 
 @pytest.mark.parametrize("path", ["AGENTS.md", ".claude/skills/design-feature-adoption/SKILL.md"])
@@ -517,3 +517,12 @@ def test_atomic_replace_guard_runs_after_preparation_without_publishing(tmp_path
             os.close(dfd)
     assert target.read_bytes() == b"Original"
     assert not list(tmp_path.glob(".*.tmp"))
+
+
+@pytest.mark.parametrize("name", native.NAMES)
+def test_shared_policy_metadata_declares_no_external_prerequisites(name):
+    import yaml
+    data = yaml.safe_load((REPO / f".claude/skills/{name}/SKILL.md").read_text().split("---", 2)[1])
+    assert data["requires_mcp"] == []
+    assert data["required_entities"] == []
+    assert data["tags"] and all(isinstance(tag, str) for tag in data["tags"])
