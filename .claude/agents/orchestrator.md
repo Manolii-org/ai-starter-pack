@@ -93,6 +93,18 @@ Admit an installed writer only if it supports this dedicated path, orchestration
 schema and per-task locking/ownership protocol; a parent-continuation helper
 alone is not such a writer. Otherwise use the portable procedure below.
 
+The standard-library locking fallback requires a POSIX runtime with `fcntl`;
+other runtimes need an admitted writer or use the current-run fallback below.
+Before writing, reject existing custody directories that are group/world-writable
+or not owned by the executing user; retain their contents and use current-run state.
+Under the stable per-task lock, never replace an existing immutable receipt:
+reuse it only after verifying every caller/task/repository/worktree/branch and
+reserved-path binding, otherwise retain it and report the conflict. For a new
+receipt, write and fsync a mode-0600 same-directory temporary file, publish it
+with `os.link(temp, receipt)` (create-if-absent), unlink the temporary name and
+fsync the directory. If the destination already exists, verify/reuse or fail
+without replacement. Checkpoint updates still use `os.replace` under the lock.
+
 
 Use an admitted owner-preserving writer when available. Otherwise use this
 portable local procedure with Python 3's standard library for every creation or
@@ -105,8 +117,8 @@ created directories. Fail safely on conflicting non-directory paths.
 
 1. For a new task, retain a stable logical task ID and generate an owner UUID.
    Persist a mode-0600 custody receipt in
-   `.ai/sessions/orchestrator-receipts/<logical_task_id>.json` using the atomic
-   write procedure below. Bind it to the trusted caller's stable task/thread
+   `.ai/sessions/orchestrator-receipts/<logical_task_id>.json` using the non-replacing receipt
+   creation procedure above. Bind it to the trusted caller's stable task/thread
    identity, logical task ID, repository, worktree and branch. Reserve a unique
    non-existing `.ai/sessions/archive/<logical_task_id>-<uuid>.json` path in
    this receipt for the entire logical task.
@@ -149,7 +161,8 @@ monitoring without a verified receipt. Core coordination needs no optional MCP.
    - `depends_on` (list of step IDs that must complete first; `[]` = can start immediately)
    - `success_criteria` (one verifiable sentence, e.g. "Migration file exists and passes idempotency check")
    - `scope_budget` (`allowed_paths` and a positive `max_commits` for each write-capable child, chosen from the authorized task)
-3. At least 2 steps must have `depends_on: []`
+3. Parallel dispatch needs at least 2 independent ready steps; otherwise return
+   the complete plan to the calling executor for sequential execution.
 4. Write `.ai/sessions/orchestrator/<logical_task_id>.json`:
 
 ```json
