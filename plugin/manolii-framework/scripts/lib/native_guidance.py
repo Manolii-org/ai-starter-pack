@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+from time import monotonic
 
 NAMES = ("adaptable-development", "design-feature-adoption", "compatibility-improvement")
 LOCK = ".ai/native-guidance-lock.json"
@@ -198,8 +199,21 @@ def instruction_audit(root: Path, outputs: dict[str, bytes]) -> dict:
     proc = subprocess.run(
         ["git", "-C", str(root), "ls-files", "-z", "--cached", "--others", "--", *patterns],
         capture_output=True, timeout=30)
-    paths = (proc.stdout.decode().split("\0") if proc.returncode == 0 else
-             [p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()])
+    if proc.returncode == 0:
+        paths = proc.stdout.decode().split("\0")
+    else:
+        # Pre-init consumers also need basename filtering before instruction
+        # reads; avoid extra regular-file checks on unrelated entries.
+        deadline, paths, wanted_names = monotonic() + 30, [], set(names)
+
+        def unreadable_directory(exc):
+            raise exc
+
+        for directory, _, filenames in os.walk(root, onerror=unreadable_directory):
+            if monotonic() > deadline:
+                raise ValueError("non-Git instruction discovery exceeded 30s; initialize Git or narrow the workspace")
+            paths.extend((Path(directory) / name).relative_to(root).as_posix()
+                         for name in filenames if name in wanted_names)
     dirs = {Path(".")} | {Path(p).parent for p in paths if Path(p).name in names}
     chains = []
     for directory in sorted(dirs):
@@ -220,7 +234,7 @@ def instruction_audit(root: Path, outputs: dict[str, bytes]) -> dict:
     if largest["bytes"] > limit:
         raise ValueError(f"Codex chain {largest['directory']} is {largest['bytes']} bytes; limit {limit}; reconcile guidance, do not raise the limit to hide it")
     return {"codex_limit": limit, "global_bytes": global_bytes,
-            "config_sources": config_sources, "chains": chains,
+            "config_sources": config_sources, "fallback_filenames": fallbacks, "chains": chains,
             "host_overrides": "not inspected; confirm in a fresh target session"}
 
 
@@ -338,9 +352,9 @@ def _resolve(args, root, resolver, manifest, registry, index):
     if set(records) - set(outputs):
         raise ValueError("surface selection removes managed files; revert their owning commit explicitly")
     for rel in ("AGENTS.md", "AGENTS.override.md"):
-        if rel in outputs and outputs[rel].index(END) + len(END) > 16384:
+        if "devin" in surfaces and rel in outputs and outputs[rel].index(END) + len(END) > 16384:
             raise ValueError(f"{rel}: policy lies beyond Devin's 16 KiB inclusion limit")
-    audit = instruction_audit(root, outputs)
+    audit = instruction_audit(root, outputs) if "codex" in surfaces else None
     new_lock = {"schema": SCHEMA, "plugin": "platform/framework", "ref": entry["ref"],
                 "resolved_version": entry["resolved_version"], "policy_version": version,
                 "source_sha256": digest(sources[NAMES[0]]), "surfaces": surfaces,
@@ -352,7 +366,14 @@ def _resolve(args, root, resolver, manifest, registry, index):
     outputs[LOCK] = (json.dumps(new_lock, indent=2, sort_keys=True) + "\n").encode()
     changes = [rel for rel, data in outputs.items() if snapshots[rel] is None or snapshots[rel][0] != data]
     print(f"Native policy {version}: {', '.join(surfaces)}; {len(policy.split())} standing words")
-    print(f"Codex largest instruction chain: {max(c['bytes'] for c in audit['chains'])}/{audit['codex_limit']} bytes; global {audit['global_bytes']} bytes")
+    if audit is not None:
+        largest = max(audit["chains"], key=lambda chain: chain["bytes"])
+        print(f"Codex largest instruction chain: {largest['bytes']}/{audit['codex_limit']} bytes; global {audit['global_bytes']} bytes")
+        print(f"Codex audited directory: {json.dumps(largest['directory'])}")
+        print(f"Codex audited files: {json.dumps(largest['files'])}")
+        print(f"Codex configured fallback filenames: {json.dumps(audit['fallback_filenames'])}")
+    else:
+        print("Codex instruction audit: not requested (codex not selected)")
     for rel in changes:
         print(f"  {'write' if args.apply else 'would-write'} {rel}")
     if args.check:
