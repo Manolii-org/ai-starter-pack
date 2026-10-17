@@ -48,6 +48,19 @@ except (ImportError, OSError, AttributeError):
         raise RouteAdmissionError("direct review denied: compatible policy runtime missing")
 
 
+# Optional for older direct-only consumers; explicit estate mode fails closed
+# when this companion is absent. Never import a package initializer or .pyc.
+try:
+    _protected_path = pathlib.Path(__file__).resolve().parent / "lib/protected_review.py"
+    _protected_spec = importlib.util.spec_from_file_location("_assessment_protected_review", _protected_path)
+    if _protected_spec is None or _protected_spec.loader is None:
+        raise ImportError("missing protected review loader")
+    protected_review = importlib.util.module_from_spec(_protected_spec)
+    exec(compile(_protected_path.read_bytes(), str(_protected_path), "exec"), protected_review.__dict__)
+except (ImportError, OSError, AttributeError, SyntaxError):
+    protected_review = None
+
+
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 SKILLS_DIR = REPO_ROOT / ".claude/skills"
 MANIFEST_FILE = REPO_ROOT / ".ai/candidates/manifest.json"
@@ -378,14 +391,16 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
     # content may cross the OSS/proxy plane at all.
     first_party = bool(frontmatter.get("first_party")) or bool(os.environ.get("CLIENT_AI_POLICY"))
 
+    estate_requested = (first_party and not os.environ.get("CLIENT_AI_POLICY")
+                        and os.environ.get("SECURITY_REVIEW_MODE", "direct") != "direct")
     try:
-        api_key, _, _ = _endpoint(direct=first_party)
+        api_key, _, _ = (None, "", True) if estate_requested else _endpoint(direct=first_party)
     except RouteAdmissionError as exc:
         writer = _write_skip_marker if first_party else _write_skipped_marker
         writer(skill_name, output_dir, "route_policy_denied")
         return skill_name, str(exc)
 
-    if first_party and not api_key:
+    if not estate_requested and first_party and not api_key:
         # Write a marker, not nothing: a first-party skill that cannot run
         # must surface as a first-party candidate so the judge fails closed
         # into the advisory path instead of silently adjudicating the rest
@@ -394,7 +409,7 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
         print(f"[{skill_name}] first_party skill needs ANTHROPIC_DIRECT_API_KEY — marker written to {output_dir / (skill_name + '.json')}")
         return skill_name, "skipped: no direct Anthropic credential"
 
-    if not first_party and not api_key:
+    if not estate_requested and not first_party and not api_key:
         # Proxy configured but no shared credential (e.g. direct-only install):
         # the API call would raise immediately — record the marker up front so
         # the judge counts the missing coverage rather than a false clean.
@@ -444,9 +459,24 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
                 return False
             return isinstance(parsed, dict) and "findings" in parsed
 
-        raw = _call_api(system_prompt, user_message, model, max_tokens,
-                        first_party=first_party, validate=_parse_ok)
-        data = _parse_findings(raw)
+        if estate_requested:
+            # This is the explicit, dormant qualification adapter. It does not
+            # change default protected roles or confer provider/data authority.
+            if (protected_review is None or not protected_review.enabled()
+                    or skill_name not in protected_review.QUALIFICATION_ROLES):
+                raise ValueError("protected review role/runtime unavailable")
+            base = (os.environ.get("LITELLM_PROXY_URL")
+                    or os.environ.get("ANTHROPIC_BASE_URL") or "").rstrip("/")
+            if not base or (urllib.parse.urlparse(base).hostname or "").lower().rstrip(".") == _ANTHROPIC_HOST:
+                raise ValueError("protected review requires its existing proxy route")
+            key = _proxy_transport_key()
+            if not key:
+                raise ValueError("protected review proxy credential unavailable")
+            data = protected_review.review(skill_name, system_prompt, user_message, diff, base, key)
+        else:
+            raw = _call_api(system_prompt, user_message, model, max_tokens,
+                            first_party=first_party, validate=_parse_ok)
+            data = _parse_findings(raw)
 
         # Validate structure. A first-party skill returning a malformed
         # payload still owes the judge a skip marker — returning silently would
@@ -486,12 +516,18 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
         return skill_name, None
 
     except json.JSONDecodeError as exc:
+        if estate_requested:
+            _write_skip_marker(skill_name, output_dir, "protected_review_incomplete")
+            return skill_name, f"protected review incomplete ({type(exc).__name__})"
         if first_party:
             _write_skip_marker(skill_name, output_dir, "api_error")
         else:
             _write_skipped_marker(skill_name, output_dir, "api_error")
         return skill_name, f"Failed to parse response as JSON: {exc}"
     except Exception as exc:
+        if estate_requested:
+            _write_skip_marker(skill_name, output_dir, "protected_review_incomplete")
+            return skill_name, f"protected review incomplete ({type(exc).__name__})"
         if first_party:
             _write_skip_marker(skill_name, output_dir, "api_error")
         else:
