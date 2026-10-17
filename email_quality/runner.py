@@ -33,7 +33,14 @@ def delivery(kind, response):
         raise QualityError('PROVIDER_INVALID') from None
 
 
-def start(client, state, profile, kind):
+def remaining(deadline):
+    budget = deadline - time.monotonic()
+    if budget <= 0:
+        raise QualityError('RUN_TIMEOUT')
+    return budget
+
+
+def start(client, state, profile, kind, deadline=None):
     checks = state.data['checks']
     if kind in checks:
         if checks[kind].get('phase') == 'creating':
@@ -41,13 +48,22 @@ def start(client, state, profile, kind):
         if checks[kind].get('phase') != 'created_unvalidated':
             return checks[kind]
     if kind not in checks:
-        limits = client.status()
+        limits = client.status(**({'timeout': remaining(deadline)} if deadline is not None else {}))
         key = 'spam_checks' if kind == 'spam' else 'inbox_placements'
         if limits[key] <= profile['minimum_remaining']:
             raise QualityError('QUOTA_RESERVE')
+        if deadline is not None:
+            remaining(deadline)
         checks[kind] = {'phase': 'creating'}
         state.save()  # Persist BEFORE POST; network ambiguity must not create duplicate billable work.
-        response = client.create(kind)
+        try:
+            budget = {'timeout': remaining(deadline)} if deadline is not None else {}
+        except QualityError:
+            # No POST was attempted; preserve that knowledge for a safe later run.
+            del checks[kind]
+            state.save()
+            raise
+        response = client.create(kind, **budget)
         checks[kind] = {'phase': 'created_unvalidated', 'response': response}
         state.save()  # Preserve provider response for safe shape-repair without another POST.
     data = delivery(kind, checks[kind]['response'])
@@ -88,13 +104,14 @@ def assess(profile, kind, data):
             'passed': ratio >= profile['minimum_inbox_ratio']}
 
 
-def wait(client, state, profile, kind):
+def wait(client, state, profile, kind, deadline=None):
     record = state.data['checks'].get(kind, {})
     if record.get('phase') == 'completed':
         return record['result']
     if record.get('phase') not in ('created', 'sent'):
         raise QualityError('STATE_SCOPE_MISMATCH')
-    deadline = time.monotonic() + profile['timeout_seconds']
+    if deadline is None:
+        deadline = time.monotonic() + profile['timeout_seconds']
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -119,7 +136,7 @@ def wait(client, state, profile, kind):
         time.sleep(min(profile['poll_seconds'], max(0, deadline - time.monotonic())))
 
 
-def send(state, record, sender, timeout):
+def send(state, record, sender, timeout, deadline=None):
     if record['phase'] in ('sent', 'completed'):
         return
     if record['phase'] != 'created':
@@ -137,6 +154,14 @@ def send(state, record, sender, timeout):
                     'NO_PROXY', 'SSL_CERT_FILE', 'REQUESTS_CA_BUNDLE', 'NODE_EXTRA_CA_CERTS')
            or k.startswith('EMAIL_QUALITY_SENDER_')}
     try:
+        if deadline is not None:
+            try:
+                timeout = min(timeout, remaining(deadline))
+            except QualityError:
+                # The sender has not started, so this intent can be safely reset.
+                record['phase'] = 'created'
+                state.save()
+                raise
         process = subprocess.Popen([str(executable), str(path)], env=env, start_new_session=True,
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:

@@ -5,7 +5,7 @@ import time
 
 from .profile import QualityError, load
 from .provider import Unspam
-from .runner import send, start, wait
+from .runner import remaining, send, start, wait
 from .state import State
 
 
@@ -22,11 +22,12 @@ def main(argv=None):
     state = None
     try:
         profile = load(args.profile)
+        deadline = began + profile['timeout_seconds']
         receipt['scope'] = {k: profile[k] for k in ('org', 'repository', 'environment')}
         receipt['account_mode'] = profile['account_mode']
         client = Unspam()
         if args.command == 'status':
-            receipt.update(outcome='ready', remaining=client.status())
+            receipt.update(outcome='ready', remaining=client.status(timeout=remaining(deadline)))
         else:
             if not args.state or (args.command != 'run' and args.kind not in profile['checks']):
                 raise QualityError('CONFIG_INVALID')
@@ -34,13 +35,15 @@ def main(argv=None):
                 raise QualityError('SENDER_INVALID')
             state = State(args.state, profile)
             results = []
+            receipt['results'] = results
             for kind in profile['checks'] if args.command == 'run' else [args.kind]:
+                remaining(deadline)
                 if args.command in ('start', 'run'):
-                    record = start(client, state, profile, kind)
+                    record = start(client, state, profile, kind, deadline)
                     if args.command == 'run':
-                        send(state, record, args.sender, profile['timeout_seconds'])
+                        send(state, record, args.sender, remaining(deadline), deadline=deadline)
                 if args.command in ('wait', 'run'):
-                    results.append(wait(client, state, profile, kind))
+                    results.append(wait(client, state, profile, kind, deadline))
             receipt.update(outcome=('started' if args.command == 'start' else
                                     'passed' if all(r['passed'] for r in results) else 'assertion_failed'),
                            results=results)

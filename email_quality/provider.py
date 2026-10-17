@@ -46,8 +46,8 @@ class Unspam:
         except (OSError, ValueError):
             raise QualityError('PROVIDER_UNAVAILABLE') from None
 
-    def status(self):
-        data = self.request('/status')
+    def status(self, timeout=15):
+        data = self.request('/status', timeout=timeout)
         try:
             limits = data['subscription']['limits']
             expected = os.environ.get('UNSPAM_ACCOUNT_EMAIL')
@@ -62,8 +62,8 @@ class Unspam:
         except (TypeError, KeyError, AttributeError):
             raise QualityError('PROVIDER_INVALID') from None
 
-    def create(self, kind):
-        return self.request(PATHS[kind], create=True)
+    def create(self, kind, timeout=15):
+        return self.request(PATHS[kind], create=True, timeout=timeout)
 
     def result(self, kind, identifier, timeout):
         return self.request(PATHS[kind] + '/' + quote(identifier, safe=''), timeout=timeout)

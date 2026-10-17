@@ -28,10 +28,10 @@ class FakeClient:
         self.creates = 0
         self.reads = 0
 
-    def status(self):
+    def status(self, timeout=15):
         return {'spam_checks': 20, 'inbox_placements': 20}
 
-    def create(self, kind):
+    def create(self, kind, timeout=15):
         self.creates += 1
         return {'id': 'opaque-id', 'inbox_address': 'synthetic@example.test',
                 'mailboxes': [{'id': 1, 'address': 'seed@example.test'}]}
@@ -96,6 +96,104 @@ class QualityTests(unittest.TestCase):
         with patch('email_quality.cli.Unspam', return_value=FakeClient()):
             code, result = self.invoke('status')
         self.assertEqual((code, result['outcome']), (0, 'ready'))
+
+    def test_run_shares_one_deadline_and_preserves_completed_results(self):
+        clock = [0]
+        client = FakeClient()
+        budgets = []
+        def sender(state, record, path, timeout, **kwargs):
+            budgets.append(timeout)
+            clock[0] += 60 if record['delivery']['kind'] == 'spam' else 30
+            record['phase'] = 'sent'
+        def result(kind, identifier, timeout):
+            budgets.append(timeout)
+            if kind == 'spam':
+                clock[0] += 60
+                return {'id': identifier, 'status': 'completed', 'score': 90}
+            clock[0] += timeout
+            return {'id': identifier, 'status': 'pending'}
+        client.result = result
+        with patch('email_quality.cli.Unspam', return_value=client), \
+                patch('email_quality.cli.time.monotonic', side_effect=lambda: clock[0]), \
+                patch('email_quality.cli.send', side_effect=sender), \
+                patch('email_quality.runner.time.sleep'):
+            code, receipt = self.invoke('--sender', 'trusted', 'run')
+        self.assertEqual(code, 1)
+        self.assertEqual(receipt['outcome'], 'blocked')
+        self.assertEqual(receipt['error_code'], 'RESULT_TIMEOUT')
+        self.assertEqual(receipt['results'], [{'kind': 'spam', 'score': 90, 'passed': True}])
+        self.assertEqual(budgets, [180, 120, 60, 30])
+        self.assertLessEqual(receipt['duration_seconds'], self.profile['timeout_seconds'])
+
+    def test_expired_budget_does_not_create_another_paid_check(self):
+        clock = [0]
+        client = FakeClient()
+        def sender(*args, **kwargs):
+            clock[0] = 180
+        with patch('email_quality.cli.Unspam', return_value=client), \
+                patch('email_quality.cli.time.monotonic', side_effect=lambda: clock[0]), \
+                patch('email_quality.cli.send', side_effect=sender):
+            code, receipt = self.invoke('--sender', 'trusted', 'run')
+        self.assertEqual((code, receipt['error_code']), (1, 'RESULT_TIMEOUT'))
+        self.assertEqual(client.creates, 1)
+
+    def test_budget_expiring_during_quota_check_does_not_post(self):
+        clock = [0]
+        client = FakeClient()
+        def status(timeout=15):
+            clock[0] = 180
+            return {'spam_checks': 20, 'inbox_placements': 20}
+        client.status = status
+        state = self.state()
+        try:
+            with patch('email_quality.runner.time.monotonic', side_effect=lambda: clock[0]):
+                with self.assertRaisesRegex(QualityError, 'RUN_TIMEOUT'):
+                    start(client, state, self.profile, 'spam', deadline=180)
+            self.assertEqual(client.creates, 0)
+            self.assertEqual(state.data['checks'], {})
+        finally:
+            state.close()
+
+    def test_slow_create_checkpoint_never_posts_after_deadline(self):
+        clock = [0]
+        client = FakeClient()
+        state = self.state()
+        original_save = state.save
+        def slow_save():
+            original_save()
+            clock[0] = 2
+        state.save = slow_save
+        try:
+            with patch('email_quality.runner.time.monotonic', side_effect=lambda: clock[0]):
+                with self.assertRaisesRegex(QualityError, 'RUN_TIMEOUT'):
+                    start(client, state, self.profile, 'spam', deadline=1)
+            self.assertEqual(client.creates, 0)
+            self.assertEqual(json.loads((state.directory / 'state.json').read_text())['checks'], {})
+        finally:
+            state.close()
+
+    def test_slow_sender_checkpoint_never_launches_after_deadline(self):
+        sender = self.root / 'sender'
+        sender.write_text('#!/bin/sh\nexit 0\n')
+        sender.chmod(0o700)
+        clock = [0]
+        state = self.state()
+        record = start(FakeClient(), state, self.profile, 'spam')
+        original_save = state.save
+        def slow_save():
+            original_save()
+            clock[0] = 2
+        state.save = slow_save
+        try:
+            with patch('email_quality.runner.time.monotonic', side_effect=lambda: clock[0]), \
+                    patch('email_quality.runner.subprocess.Popen') as spawn:
+                with self.assertRaisesRegex(QualityError, 'RUN_TIMEOUT'):
+                    send(state, record, sender, 1, deadline=1)
+            spawn.assert_not_called()
+            self.assertEqual(record['phase'], 'created')
+            self.assertFalse((state.directory / 'delivery.json').exists())
+        finally:
+            state.close()
 
     def test_sender_subprocess_roundtrip_and_resume(self):
         sender = self.root / 'sender'
@@ -263,19 +361,30 @@ class QualityTests(unittest.TestCase):
                     state.close()
 
     def test_sender_timeout_kills_descendants(self):
-        marker = self.root / 'escaped'
+        import shlex
+        import time
+        pidfile = self.root / 'child.pid'
         sender = self.root / 'descendant'
-        sender.write_text('#!/usr/bin/env python3\nimport subprocess,time\n'
-            + 'subprocess.Popen(["python3","-c",' + repr('import time;from pathlib import Path;time.sleep(0.5);Path(' + repr(str(marker)) + ').touch()') + '])\ntime.sleep(5)\n')
+        sender.write_text('#!/bin/sh\nsleep 30 &\nprintf "%s" "$!" > '
+                          + shlex.quote(str(pidfile)) + '\nwait\n')
         sender.chmod(0o700)
         state = self.state()
         try:
             record = start(FakeClient(), state, self.profile, 'spam')
             with self.assertRaisesRegex(QualityError, 'SEND_OUTCOME_UNKNOWN'):
-                send(state, record, sender, 0.1)
-            import time
-            time.sleep(0.7)
-            self.assertFalse(marker.exists())
+                send(state, record, sender, 2)
+            pid = int(pidfile.read_text())  # A missing handshake must fail, never pass vacuously.
+            for _ in range(50):
+                try:
+                    os.kill(pid, 0)
+                    # Linux may retain an orphan as a zombie until init reaps it.
+                    stopped = Path('/proc/' + str(pid) + '/stat').read_text().split()[2] == 'Z'
+                except (ProcessLookupError, FileNotFoundError):
+                    stopped = True
+                if stopped:
+                    break
+                time.sleep(0.01)
+            self.assertTrue(stopped, 'sender descendant is still running')
         finally:
             state.close()
 

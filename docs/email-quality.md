@@ -53,6 +53,11 @@ Do not paste their contents into agent prompts or ordinary logs.
   malformed/mismatched results fail closed, and POSTs are never automatically
   repeated. Completed state resumes without another test/send. Save the same
   private checkpoint for in-process/local resume; losing it loses that guarantee.
+- `timeout_seconds` is one overall CLI budget shared by account checks, creation,
+  sender execution and polling across both checks. Completed results remain in
+  a blocked receipt if a later stage runs out of time. The maximum budget is
+  900 seconds, leaving cleanup headroom below the workflow's outer 1200-second
+  ceiling. External termination and hard kills cannot guarantee a receipt.
 - A persisted `creating` or `sending` intent denotes an uncertain mutation after a
   crash or failure. Investigate it; do not erase the state and blindly rerun.
   `SEND_OUTCOME_UNKNOWN` and `CREATE_OUTCOME_UNKNOWN` deliberately stop automation.
