@@ -34,7 +34,7 @@
     },
     "CLAUDE.md": {
       "kind": "block",
-      "sha256": "aec01dd4171427bd6a87b9e90d04cb5e5a3a8799eea297fe4ca545e173f403af"
+      "sha256": "ba00ea14eb3642e06960658bbab241b81238e21c556a01f5e854c7794cc94ecb"
     }
   },
   "plugin": "platform/framework",

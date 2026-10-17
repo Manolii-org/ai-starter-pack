@@ -296,9 +296,15 @@ def _resolve(args, root, resolver, manifest, registry, index):
         add("AGENTS.override.md", wanted, "block")
     if "claude-code" in surfaces:
         rel = ".claude/CLAUDE.md" if not (root / "CLAUDE.md").exists() and (root / ".claude/CLAUDE.md").exists() else "CLAUDE.md"
-        target = b"@../AGENTS.md" if rel.startswith(".claude/") else b"@AGENTS.md"
+        # Import only the canonical standing skill: curated AGENTS tails can be
+        # large and repeat Claude's existing operating rules. Preserve an
+        # unowned live AGENTS import, which already loads the standing policy.
+        prefix = "../" if rel.startswith(".claude/") else ""
+        target = f"@{prefix}{skill_root}/adaptable-development/SKILL.md".encode()
+        legacy_target = b"@../AGENTS.md" if rel.startswith(".claude/") else b"@AGENTS.md"
         previous = snapshot(rel)
-        if not previous or not live_import(previous[0], target) or block(previous[0]):
+        loaded = previous and (live_import(previous[0], target) or live_import(previous[0], legacy_target))
+        if not loaded or block(previous[0]):
             add(rel, BEGIN + b"\n" + target + b"\n" + END, "block")
     if "cursor" in surfaces:
         add(".cursor/rules/adaptable-development.mdc", b"---\ndescription: Apply the shared development policy and select the relevant task procedure.\nalwaysApply: true\n---\n\nEssential policy is in the discovered root AGENTS.md. Before design handoffs, new features or substantial redesigns read `.claude/skills/design-feature-adoption/SKILL.md`. Before existing-app refactoring read `.claude/skills/compatibility-improvement/SKILL.md`. Keep trivial unrelated edits proportionate. Referenced procedure contents require an explicit read.\n")

@@ -63,7 +63,7 @@ def test_preview_install_repeat_and_check_preserve_local_guidance(consumer):
     result = run(consumer, "--apply")
     assert result.returncode == 0, result.stdout + result.stderr
     assert (root / "AGENTS.md").read_bytes().endswith(local)
-    assert (root / "CLAUDE.md").read_bytes().splitlines()[1] == b"@AGENTS.md"
+    assert (root / "CLAUDE.md").read_bytes().splitlines()[1] == b"@.claude/skills/adaptable-development/SKILL.md"
     assert (root / ".cursor/rules/adaptable-development.mdc").read_text().startswith("---\n")
     assert "alwaysApply: true" in (root / ".cursor/rules/adaptable-development.mdc").read_text()
     installed = files(root)
@@ -132,7 +132,7 @@ def test_root_override_and_scoped_claude_import(consumer):
     (root / ".claude/CLAUDE.md").write_text("# Scoped Claude\n")
     assert run(consumer, "--apply").returncode == 0
     assert (root / "AGENTS.override.md").read_text().endswith("Retain this.\n")
-    assert b"@../AGENTS.md" in (root / ".claude/CLAUDE.md").read_bytes()
+    assert b"@../.claude/skills/adaptable-development/SKILL.md" in (root / ".claude/CLAUDE.md").read_bytes()
     assert not (root / "CLAUDE.md").exists()
 
 
@@ -146,6 +146,7 @@ def test_explicit_repo_local_skill_alias_is_preserved(consumer):
     assert run(consumer, "--apply").returncode == 0
     assert (root / ".claude/skills").is_symlink()
     assert (root / ".github/skills/design-feature-adoption/SKILL.md").is_file()
+    assert native.live_import((root / "CLAUDE.md").read_bytes(), b"@.github/skills/adaptable-development/SKILL.md")
     assert run(consumer, "--check").returncode == 0
 
 
@@ -169,16 +170,37 @@ def test_fake_import_does_not_satisfy_loading(consumer, example):
     (root / "CLAUDE.md").write_text("# Notes\n" + example)
     assert run(consumer, "--apply").returncode == 0
     data = (root / "CLAUDE.md").read_bytes()
-    assert native.live_import(data, b"@AGENTS.md")
-    assert data.startswith(native.BEGIN + b"\n@AGENTS.md\n")
+    assert native.live_import(data, b"@.claude/skills/adaptable-development/SKILL.md")
+    assert data.startswith(native.BEGIN + b"\n@.claude/skills/adaptable-development/SKILL.md\n")
 
 
-def test_existing_live_import_is_preserved(consumer):
+@pytest.mark.parametrize("target", ["AGENTS.md", ".claude/skills/adaptable-development/SKILL.md"])
+def test_existing_live_import_is_preserved(consumer, target):
     root, _ = consumer
-    local = b"# Local\n@AGENTS.md\n# Other instructions\n"
+    local = f"# Local\n@{target}\n# Other instructions\n".encode()
     (root / "CLAUDE.md").write_bytes(local)
     assert run(consumer, "--apply").returncode == 0
     assert (root / "CLAUDE.md").read_bytes() == local
+
+
+def test_policy_only_import_migrates_owned_block_without_loading_curated_tail(consumer):
+    root, _ = consumer
+    (root / "AGENTS.md").write_text("# Codex-only catalogue\n" + "Unrelated rule.\n" * 500)
+    assert run(consumer, "--apply").returncode == 0
+    claude = root / "CLAUDE.md"
+    data = claude.read_bytes().replace(b"@.claude/skills/adaptable-development/SKILL.md", b"@AGENTS.md")
+    claude.write_bytes(data + b"\n# Curated Claude rules\n")
+    lock = root / native.LOCK
+    recorded = json.loads(lock.read_text())
+    recorded["files"]["CLAUDE.md"]["sha256"] = native.digest(native.block(data))
+    lock.write_text(json.dumps(recorded))
+    assert run(consumer, "--apply").returncode == 0
+    updated = claude.read_bytes()
+    assert native.live_import(updated, b"@.claude/skills/adaptable-development/SKILL.md")
+    assert not native.live_import(updated, b"@AGENTS.md")
+    assert updated.endswith(b"# Curated Claude rules\n")
+    assert b"Unrelated rule" not in (root / ".claude/skills/adaptable-development/SKILL.md").read_bytes()
+    assert run(consumer, "--check").returncode == 0
 
 
 def test_nested_instruction_chain_limit_blocks_before_writes(consumer):

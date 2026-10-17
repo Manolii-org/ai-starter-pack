@@ -1,5 +1,5 @@
 <!-- ai-starter-pack:development-policy:begin -->
-@AGENTS.md
+@.claude/skills/adaptable-development/SKILL.md
 <!-- ai-starter-pack:development-policy:end -->
 
 # {PROJECT_NAME}

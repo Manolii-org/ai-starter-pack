@@ -19,10 +19,15 @@ Official documentation checked 17 October 2026 (Australia/Sydney):
 
 | Surface | Delivery and constraints | Official source |
 | --- | --- | --- |
-| Claude Code Web | Real `@AGENTS.md` import alongside existing root `CLAUDE.md`, or `@../AGENTS.md` from `.claude/CLAUDE.md`. Imports resolve from the importing file. Current native AGENTS support depends on version/config and defaults to CLAUDE when mixed; the explicit import covers that case and older hosts. | [Memory](https://code.claude.com/docs/en/memory), [cloud environments](https://code.claude.com/docs/en/cloud-environments) |
+| Claude Code Web | Real `@.claude/skills/adaptable-development/SKILL.md` import alongside existing root `CLAUDE.md` (relative to a scoped importer or the explicit canonical skill alias when applicable). Imports resolve from the importing file. This loads only the standing policy; existing unowned live AGENTS imports are preserved. Current native AGENTS support depends on version/config and defaults to CLAUDE when mixed; the explicit import covers that case and older hosts. | [Memory](https://code.claude.com/docs/en/memory), [cloud environments](https://code.claude.com/docs/en/cloud-environments) |
 | Codex Web | Discovered root AGENTS; a present root override receives the same managed policy because it replaces root AGENTS for Codex. Audit nested overrides/fallbacks and configured chain limit (default 32 KiB). Claude imports are not a Codex loader. | [AGENTS discovery](https://learn.chatgpt.com/docs/agent-configuration/agents-md) |
 | Cursor Web / Cloud | Supported root/nested AGENTS discovery; `.cursor/rules/adaptable-development.mdc` has `alwaysApply: true` and only selects procedures. Read referenced files explicitly. | [Rules](https://cursor.com/docs/rules) |
 | Devin | Essential policy prepended to AGENTS within its first 16,384 bytes; procedures remain repository-visible. Knowledge/personal memory and plugin declarations are not shared installation evidence. | [AGENTS](https://docs.devin.ai/onboard-devin/agents-md) |
+
+The policy skill import avoids loading a curated AGENTS catalogue into Claude
+when it already has separate operating instructions. Managed legacy AGENTS imports
+are migrated through their recorded block hash; unowned imports stay unchanged.
+The two detailed procedures remain on demand.
 
 No account settings, hooks, permissions, model routes or installed plugins are
 changed. CLI availability does not establish access to the corresponding cloud
