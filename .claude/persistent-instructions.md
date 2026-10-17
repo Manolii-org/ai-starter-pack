@@ -283,6 +283,28 @@ Key rules:
 
 ## Context Compaction
 
+### Owned orchestration state
+
+Before generic discard rules or size trimming, preserve an **OWNED ORCHESTRATIONS**
+envelope for every owned logical task still unfinished or awaiting caller acceptance,
+independently of the shared
+`active-task.json` or its `active_step_id`. Retain the generated task UUID,
+repository/worktree/branch, trusted caller/session/task binding, resolved checkpoint
+and immutable receipt references, reserved archive path, and remaining task/parent
+commitments. Child commits or merges do not discard unresolved parent commitments.
+Controller references are hints; they never override current checkpoint ownership.
+
+The caller must acknowledge preservation in its existing durable task/compaction
+record before recoverability is claimed. On resume, authenticate that caller/task
+binding, read the immutable receipt and check its bound archive/checkpoint before
+any dispatch. Use the currently recorded controller for recovery and fencing.
+Never adopt the first/latest state file or infer authority from an on-disk UUID.
+If preservation or authentication cannot be verified, retain existing evidence,
+report current-run-only continuity and continue independent authorized work.
+Preserve only owned task metadata, without secret values or unrelated receipts.
+The legacy shared checkpoint rule below still applies to parent workflows; it is
+not the sole source of orchestration resume metadata.
+
 When compacting (whether via \`/compact\` or auto-compact), follow these rules:
 
 **BEFORE COMPACTING:** If \`.ai/sessions/active-task.json\` exists and \`active_step_id\` is
@@ -290,12 +312,13 @@ non-null, include its full JSON content verbatim under the "ACTIVE TASK" section
 required for the orchestrator to resume without re-reading the task from scratch.
 
 **PRESERVE** (structured, in this order):
-1. ACTIVE TASK: current task description, branch name, PR number/URL/status (+ full active-task.json if active_step_id is non-null)
-2. REMAINING PLAN: any open plan items or steps not yet completed
-3. DECISIONS + WHY: every architectural/strategic decision made, with 1-sentence rationale
-4. MODIFIED FILES: list of files changed and what changed (not the content — just what)
-5. BLOCKERS & DEFERRED: unresolved errors, open questions, explicitly deferred items
-6. PATTERNS DISCOVERED: gotchas, constraints, or patterns learned this session
+1. OWNED ORCHESTRATIONS: every owned task envelope and remaining parent commitment described above; retain before trimming, even after child commits or merges
+2. ACTIVE TASK: current task description, branch name, PR number/URL/status (+ full active-task.json if active_step_id is non-null)
+3. REMAINING PLAN: any open plan items or steps not yet completed
+4. DECISIONS + WHY: every architectural/strategic decision made, with 1-sentence rationale
+5. MODIFIED FILES: list of files changed and what changed (not the content — just what)
+6. BLOCKERS & DEFERRED: unresolved errors, open questions, explicitly deferred items
+7. PATTERNS DISCOVERED: gotchas, constraints, or patterns learned this session
 
 **DISCARD** entirely (do not summarise — just drop):
 - Full tool output (bash output, file read contents, search results) — keep conclusions only
@@ -304,4 +327,4 @@ required for the orchestrator to resume without re-reading the task from scratch
 - Conversational back-and-forth and acknowledgements
 - Repeated tool calls that produced the same result
 
-**FORMAT:** Use the section headers above. Be terse — target 3000–4000 characters total so the full summary survives SessionStart reinjection.
+**FORMAT:** Use the section headers above, including OWNED ORCHESTRATIONS; keep its required bindings even if the target summary size is exceeded. Be terse — target 3000–4000 characters total so the full summary survives SessionStart reinjection.
