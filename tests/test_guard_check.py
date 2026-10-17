@@ -18,6 +18,29 @@ from guard_check import (
 )
 
 
+def test_advisory_guard_does_not_create_an_unfreeze_requirement(tmp_path, capsys):
+    config = tmp_path / ".ai/guards.json"
+    config.parent.mkdir()
+    config.write_text(json.dumps({"guards": [{"id": "workflow", "paths": [".github/workflows/**"],
+                                             "mode": "warn", "reason": "Validate the workflow"}]}))
+    assert check_edit(".github/workflows/test.yml", tmp_path) == {"action": "allow"}
+    assert "GUARD-WARN:workflow" in capsys.readouterr().err
+    assert check_bash("echo data > .github/workflows/test.yml", tmp_path) == {"action": "allow"}
+
+
+def test_advisory_guard_does_not_hide_overlapping_or_later_blocks(tmp_path):
+    config = tmp_path / ".ai/guards.json"
+    config.parent.mkdir()
+    config.write_text(json.dumps({"guards": [
+        {"id": "workflow", "paths": [".github/workflows/**"], "mode": "warn"},
+        {"id": "release", "paths": [".github/workflows/release.yml"]},
+    ]}))
+    assert check_edit(".github/workflows/release.yml", tmp_path)["guard_id"] == "release"
+    assert check_bash("echo x > .github/workflows/test.yml; echo y > .github/workflows/release.yml", tmp_path)["action"] == "block"
+    config.write_text(json.dumps({"guards": [{"id": "unknown", "paths": ["x"], "mode": "typo"}]}))
+    assert check_edit("x", tmp_path)["action"] == "block"
+
+
 def test_clear_session_unfreezes_is_atomic_and_preserves_guards(tmp_path):
     """The updateable SessionStart helper clears only temporary bypasses."""
     guards_file = tmp_path / ".ai" / "guards.json"
