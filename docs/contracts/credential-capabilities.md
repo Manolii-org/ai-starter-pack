@@ -126,6 +126,56 @@ changes since this section was written:
    (Deployment identifiers live in the private control-plane repo's instance
    doc — not published here per this repo's surface boundary.)
 
+### Review-runner admission (2026-10-17)
+
+The classifier, specialist, broad-agent and Judge runners check direct-route
+policy **before selecting provider credentials**. A `first_party` reviewer flag
+describes required capability; it never grants direct-credit spending authority.
+An ambient key, a posting target (`--repo`), or missing proxy configuration is
+not admission. Estate policy must select the approved proxy capability; an
+external declaration must come from existing trusted launcher/base-policy custody.
+Committed estate/proxy policy and missing or unknown policy fail closed on a direct
+request; ordinary configured LiteLLM calls retain their existing behavior. A denied protected reviewer leaves
+explicit missing coverage; it is never silently moved to an OSS model or counted
+as a completed review. The existing protected role/capability qualification is
+still required; this guard does not create a compatible alternate review route.
+
+External consumers spending their own account can select the existing
+`llm-anthropic` capability with two nonsecret ownership fields in their existing
+manifest (no key values):
+
+```json
+{
+  "version": 1,
+  "mode": "capabilities",
+  "capabilities": ["llm-anthropic"],
+  "consumer_scope": "external",
+  "consumer_repository": "ExampleOrg/example-service"
+}
+```
+
+The repository must match the trusted launcher's `GITHUB_REPOSITORY`. In Actions,
+the event's repository must also match; PR policy is read from the exact base SHA,
+and other events use `GITHUB_SHA`. Local runs read checked-in `HEAD`. The runners
+enumerate `.ai/capabilities.json` and `config/agent-capabilities.json` at that revision
+and require a successful read of every advertised policy blob, never a PR-edited
+working-tree declaration. Git object reads disable lazy fetching; unavailable
+objects or a Git runtime lacking that capability refuse direct admission. If both exist they must both
+admit the route. Missing, malformed, legacy or conflicting policy denies direct
+execution. Existing external installs must explicitly establish this committed
+policy before direct execution; a runner must not manufacture it from available
+keys. Existing capability-name resolution outside review admission is unchanged.
+
+This is local admission under trusted launcher/base-source custody, not independent
+proof of credential ownership, account entitlement, data-transfer permission or
+server-side isolation against a hostile process. It cannot authorize an estate
+exception. The shared helper is included in reusable assessment hydration and in
+the normal plugin/registry generation. A mixed/older consumer missing the compatible
+helper retains ordinary proxy calls but cannot admit direct execution. No credential
+provisioning, provider/model
+substitution, output/retry/timeout increase or live configuration change is part
+of this repair.
+
 Repo-local capabilities extend the table; a consumer must not silently
 narrow a pack capability it did not define. Extensions are validated
 fail-closed: redefining a canonical name, a `secret_names` value that is

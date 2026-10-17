@@ -53,6 +53,7 @@ env:
     scripts/run-specialists.py
     scripts/run-broad-agents.py
     scripts/run-judge.py
+    scripts/lib/agent_capabilities.py
     .claude/agents/pr-classifier.md
     .claude/agents/systems-consistency.md
     .claude/agents/architecture-impact.md
@@ -787,6 +788,8 @@ jobs:
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
+          # Admission reads policy from the immutable PR base, not merge HEAD.
+          fetch-depth: 0
           persist-credentials: false
 
       # ── Assessment runtime hydration ────────────────────────────────────

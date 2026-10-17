@@ -14,6 +14,7 @@ Usage:
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import logging
 import os
@@ -25,6 +26,30 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+# Load the exact hydrated helper, never an ambient/PR-added lib package initializer.
+# The launcher still owns complete runtime custody; this is not shell isolation.
+try:
+    _policy_spec = importlib.util.spec_from_file_location(
+        "_assessment_route_policy", Path(__file__).resolve().parent / "lib/agent_capabilities.py")
+    if _policy_spec is None or _policy_spec.loader is None:
+        raise ImportError("missing policy loader")
+    _policy_module = importlib.util.module_from_spec(_policy_spec)
+    # Execute hydrated source bytes, not a PR-retained bytecode cache.
+    _policy_path = _policy_spec.origin
+    exec(compile(Path(_policy_path).read_bytes(), _policy_path, "exec"),
+         _policy_module.__dict__)
+    RouteAdmissionError = _policy_module.RouteAdmissionError
+    require_direct_llm_admission = _policy_module.require_direct_llm_admission
+except (ImportError, OSError, AttributeError):
+    # Mixed/older consumer runtime: preserve ordinary proxy calls, but never
+    # admit a direct call without the shared policy implementation.
+    class RouteAdmissionError(ValueError):
+        pass
+
+    def require_direct_llm_admission():
+        raise RouteAdmissionError("direct review denied: compatible policy runtime missing")
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -82,12 +107,14 @@ def _endpoint(direct: bool = False) -> tuple[str, str, bool]:
     base = (os.environ.get("LITELLM_PROXY_URL") or os.environ.get("ANTHROPIC_BASE_URL") or "").rstrip("/")
     proxied = bool(base) and (urllib.parse.urlparse(base).hostname or "").lower().rstrip(".") != _ANTHROPIC_HOST
     if direct:
+        require_direct_llm_admission()
         key = os.environ.get("ANTHROPIC_DIRECT_API_KEY") or (
             os.environ.get("ANTHROPIC_API_KEY", "") if not proxied else ""
         )
         return key, _ANTHROPIC_API_URL, False
     if proxied:
         return _proxy_transport_key(), base + "/v1/messages", True
+    require_direct_llm_admission()
     return os.environ.get("ANTHROPIC_API_KEY", ""), _ANTHROPIC_API_URL, False
 
 
@@ -397,7 +424,11 @@ If any ERROR survives, set review_action to "REQUEST_CHANGES"; otherwise "COMMEN
         # CLIENT_AI_POLICY engagements keep the adjudication itself direct —
         # candidate findings carry PR content regardless of first_party flags.
         first_party = self._has_first_party_candidates or bool(os.environ.get("CLIENT_AI_POLICY"))
-        api_key, api_url, proxied = _endpoint(direct=first_party)
+        try:
+            api_key, api_url, proxied = _endpoint(direct=first_party)
+        except RouteAdmissionError as exc:
+            logger.error("%s; required adjudication incomplete", exc)
+            return None
         if first_party and not api_key:
             logger.error(
                 "first-party findings present but no direct Anthropic "
@@ -1022,10 +1053,10 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
         parts: list[str] = []
         if self._skipped_first_party:
             sources = ", ".join(sorted(set(self._skipped_first_party)))
-            parts.append(f"First-party security checks did not run (skipped: {sources})")
+            parts.append(f"First-party security checks incomplete (skipped: {sources})")
         if self._skipped_other:
             sources = ", ".join(sorted(set(self._skipped_other)))
-            parts.append(f"Other review checks did not run (skipped: {sources})")
+            parts.append(f"Other review checks incomplete (skipped: {sources})")
         return ". ".join(parts) + ("." if parts else "")
 
     def _post_clean_or_skip_advisory(self) -> None:
@@ -1055,7 +1086,7 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
             sources = ", ".join(
                 sorted(set(self._skipped_first_party) | set(self._skipped_other))
             )
-            logger.warning(f"review checks skipped (missing credential): {sources}")
+            logger.warning(f"review coverage incomplete: {sources}")
             if self._post_advisory_warning(self._skipped_coverage_detail()):
                 self._dismiss_stale_judge_reviews(
                     ("CHANGES_REQUESTED", "APPROVED")
@@ -1146,16 +1177,15 @@ def main() -> int:
     if not sha:
         parser.error("--sha or GITHUB_SHA is required for duplicate-review detection")
 
-    # --repo overrides GITHUB_REPOSITORY env so the workflow can pass it explicitly
-    if args.repo:
-        os.environ["GITHUB_REPOSITORY"] = args.repo
-
+    # Posting target is separate from trusted launcher policy identity.
     judge = Judge(
         candidates_dir=args.candidates_dir,
         pr_number=args.pr_number,
         sha=sha,
     )
 
+    if args.repo:
+        judge.repo = args.repo
     return judge.run()
 
 
