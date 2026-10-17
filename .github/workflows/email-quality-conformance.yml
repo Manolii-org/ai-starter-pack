@@ -1,0 +1,22 @@
+name: Email quality conformance
+on:
+  pull_request:
+    paths: ['email_quality/**', 'bin/email-quality', 'schemas/email-quality/**', 'tests/email_quality/**', '.github/workflows/email-quality-*.yml', 'config/email-quality.example.json']
+  push:
+    branches: [main]
+    paths: ['email_quality/**', 'bin/email-quality', 'schemas/email-quality/**', 'tests/email_quality/**', '.github/workflows/email-quality-*.yml', 'config/email-quality.example.json']
+permissions:
+  contents: read
+concurrency:
+  group: email-quality-conformance-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - run: python3 -m pip install jsonschema==4.26.0
+      - run: python3 -m unittest discover -s tests/email_quality -v
