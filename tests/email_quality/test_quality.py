@@ -316,6 +316,24 @@ class QualityTests(unittest.TestCase):
         finally:
             state.close()
 
+    def test_failed_sender_spawn_resumes_without_another_paid_test(self):
+        self.profile['checks'] = ['spam']
+        self.profile_path.write_text(json.dumps(self.profile))
+        sender = self.root / 'bad-interpreter'
+        sender.write_text('#!/missing/email-quality/interpreter\n')
+        sender.chmod(0o700)
+        client = FakeClient()
+        with patch('email_quality.cli.Unspam', return_value=client):
+            code, receipt = self.invoke('--sender', str(sender), 'run')
+            self.assertEqual((code, receipt['error_code']), (1, 'SENDER_INVALID'))
+            data = json.loads((self.root / 'state/state.json').read_text())
+            self.assertEqual(data['checks']['spam']['phase'], 'created')
+            sender.write_text('#!/bin/sh\nexit 0\n')
+            resumed, result = self.invoke('--sender', str(sender), 'run')
+        self.assertEqual((resumed, result['outcome']), (0, 'passed'))
+        self.assertEqual(client.creates, 1)
+        self.assertFalse((self.root / 'state/delivery.json').exists())
+
     def test_symlink_checkpoint_never_overwrites_target(self):
         state = self.state()
         target = self.root / 'victim'

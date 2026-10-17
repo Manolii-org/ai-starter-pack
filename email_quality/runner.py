@@ -163,8 +163,14 @@ def send(state, record, sender, timeout, deadline=None):
                 record['phase'] = 'created'
                 state.save()
                 raise
-        process = subprocess.Popen([str(executable), str(path)], env=env, start_new_session=True,
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            process = subprocess.Popen([str(executable), str(path)], env=env, start_new_session=True,
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError:
+            # Popen could not execute the sender; no message could have been sent.
+            record['phase'] = 'created'
+            state.save()
+            raise QualityError('SENDER_INVALID') from None
         try:
             if process.wait(timeout=timeout):
                 raise QualityError('SENDER_FAILED')
