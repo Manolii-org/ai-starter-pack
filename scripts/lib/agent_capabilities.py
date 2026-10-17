@@ -11,12 +11,92 @@ Usage:
 """
 import argparse
 import json
+import os
+from pathlib import Path
+import re
+import subprocess
 import sys
 
 VALID_SOURCES = {"env", "doppler", "broker", "mcp"}
 VALID_RETRIEVAL = {"eager", "deferred"}
 VALID_PRIVILEGE = {"standard", "managed", "privileged"}
 VALID_MODES = {"capabilities", "legacy"}
+
+class RouteAdmissionError(ValueError):
+    """The requested transport has no admitted consumer policy (no secrets)."""
+
+
+def require_direct_llm_admission(repo_root=None, environ=None):
+    """Admit the external-consumer lane before looking up any credential.
+
+    `first_party` is a reviewer requirement, never spending authority. Estate
+    and unknown consumers cannot use direct credits. An external launch must
+    explicitly select llm-anthropic in the existing capability manifest and
+    bind its external ownership declaration to the launcher's repository.
+    Policy comes from the PR base (CI) or checked-in HEAD (local), never a PR
+    working tree. This is local admission under a trusted launcher, not proof
+    of account entitlement or a security boundary against a hostile shell.
+    No manifest is created and no credential is read by this function.
+    """
+    env = os.environ if environ is None else environ
+    repository = env.get("GITHUB_REPOSITORY", "")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+        raise RouteAdmissionError("direct review denied: missing consumer repository evidence")
+    root = Path.cwd() if repo_root is None else Path(repo_root)
+    revision = "HEAD"
+    if env.get("GITHUB_ACTIONS") == "true":
+        try:
+            event = _load_json(env.get("GITHUB_EVENT_PATH", ""), "launch event")
+            if event["repository"]["full_name"].lower() != repository.lower():
+                raise ValueError("repository mismatch")
+            revision = (event["pull_request"]["base"]["sha"] if "pull_request" in event
+                        else env.get("GITHUB_SHA", ""))
+            if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", revision):
+                raise ValueError("missing immutable policy revision")
+        except (OSError, UnicodeError, TypeError, ValueError, KeyError, AttributeError):
+            raise RouteAdmissionError("direct review denied: invalid launcher policy provenance") from None
+    def read_git(*args):
+        try:
+            result = subprocess.run(
+                ["git", "--no-pager", "--no-replace-objects", "--no-lazy-fetch",
+                 "-C", str(root), "-c", "core.fsmonitor=false", *args],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5,
+                # Never pass provider credentials or allow implicit object fetch.
+                env={"PATH": os.defpath, "GIT_CONFIG_NOSYSTEM": "1",
+                     "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0"},
+            )
+        except (OSError, subprocess.SubprocessError):
+            raise RouteAdmissionError("direct review denied: policy source unavailable") from None
+        if result.returncode:
+            raise RouteAdmissionError("direct review denied: policy source unavailable")
+        return result.stdout
+
+    paths = {".ai/capabilities.json", "config/agent-capabilities.json"}
+    # Prove absence with a successful immutable-tree enumeration. A failed
+    # blob read must never mean "absent" after another policy was admitted.
+    entries = read_git("ls-tree", "-rz", revision, "--", *sorted(paths))
+    if not entries:
+        raise RouteAdmissionError("direct review denied: missing committed capability policy evidence")
+    for entry in entries.rstrip(b"\0").split(b"\0"):
+        try:
+            metadata, path = entry.decode("ascii").split("\t", 1)
+            mode, kind, oid = metadata.split()
+            if (path not in paths or mode not in {"100644", "100755"} or kind != "blob"
+                    or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", oid)):
+                raise ValueError("invalid policy tree entry")
+            manifest = json.loads(read_git("cat-file", "blob", oid).decode("utf-8"))
+            resolve_manifest(manifest)
+            admitted = (
+                type(manifest.get("version")) is int and manifest["version"] == 1
+                and manifest.get("mode") == "capabilities"
+                and "llm-anthropic" in manifest.get("capabilities", [])
+                and manifest.get("consumer_scope") == "external"
+                and manifest.get("consumer_repository", "").lower() == repository.lower()
+            )
+        except (UnicodeError, TypeError, ValueError, AttributeError):
+            admitted = False
+        if not admitted:
+            raise RouteAdmissionError("direct review denied: invalid or conflicting consumer policy evidence")
 
 CANONICAL_TABLE = {
     # capability: (secret_names, source, retrieval, privilege)
@@ -108,6 +188,13 @@ def resolve(manifest_path, table_path=None):
     """Return {env_name: {'retrieval':..., 'source':..., 'capability':...}}.
     Raises (TypeError, ValueError) on any contract violation."""
     manifest = _load_json(manifest_path, "manifest")
+    return resolve_manifest(manifest, table_path)
+
+
+def resolve_manifest(manifest, table_path=None):
+    """Validate an already-loaded manifest with the same name-only resolver."""
+    if not isinstance(manifest, dict):
+        raise TypeError("manifest must be a JSON object")
     table = _load_table(table_path)
     overrides = manifest.get("retrieval_overrides", {})
     if not isinstance(overrides, dict):

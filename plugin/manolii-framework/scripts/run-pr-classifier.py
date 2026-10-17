@@ -20,6 +20,20 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+# Shared policy code is part of the trusted, hydrated assessment runtime.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+try:
+    from lib.agent_capabilities import RouteAdmissionError, require_direct_llm_admission
+except ImportError:
+    # Mixed/older consumer runtime: preserve ordinary proxy calls, but never
+    # admit a direct call without the shared policy implementation.
+    class RouteAdmissionError(ValueError):
+        pass
+
+    def require_direct_llm_admission():
+        raise RouteAdmissionError("direct review denied: compatible policy runtime missing")
+
+
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 CLASSIFIER_AGENT = REPO_ROOT / ".claude/agents/pr-classifier.md"
 
@@ -84,12 +98,14 @@ def _endpoint() -> tuple[str, str, bool]:
     # CLIENT_AI_POLICY engagements keep every pipeline call Anthropic-direct —
     # including the classifier, which reads the full PR diff.
     if os.environ.get("CLIENT_AI_POLICY"):
+        require_direct_llm_admission()
         key = os.environ.get("ANTHROPIC_DIRECT_API_KEY") or (
             os.environ.get("ANTHROPIC_API_KEY", "") if not proxied else ""
         )
         return key, _ANTHROPIC_API_URL, False
     if proxied:
         return _proxy_transport_key(), base + "/v1/messages", True
+    require_direct_llm_admission()
     return os.environ.get("ANTHROPIC_API_KEY", ""), _ANTHROPIC_API_URL, False
 
 
@@ -584,7 +600,11 @@ def main() -> None:
     # themselves — a broad fallback could route the diff to the refused
     # proxy, while a silent depth:none no-op loses coverage invisibly. Fail
     # the classify job: non-invoking and visibly missing-coverage.
-    api_key, _, _ = _endpoint()
+    try:
+        api_key, _, _ = _endpoint()
+    except RouteAdmissionError as exc:
+        print(f"[classifier] {exc}; classification incomplete", file=sys.stderr)
+        sys.exit(1)
     if not api_key:
         if os.environ.get("CLIENT_AI_POLICY"):
             print(

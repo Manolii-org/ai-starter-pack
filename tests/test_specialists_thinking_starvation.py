@@ -33,6 +33,13 @@ MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
 
+@pytest.fixture(autouse=True)
+def admitted_transport_fixture(monkeypatch):
+    # These are transport/input unit tests with fake responses, not authority
+    # evidence. test_review_route_admission exercises real policy admission.
+    monkeypatch.setattr(MODULE, "require_direct_llm_admission", lambda: None)
+
+
 class _FakeResponse(io.BytesIO):
     """BytesIO with the context-manager surface urllib responses have."""
 

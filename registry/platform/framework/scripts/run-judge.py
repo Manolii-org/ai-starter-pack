@@ -26,6 +26,20 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+# Shared policy code is part of the trusted, hydrated assessment runtime.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    from lib.agent_capabilities import RouteAdmissionError, require_direct_llm_admission
+except ImportError:
+    # Mixed/older consumer runtime: preserve ordinary proxy calls, but never
+    # admit a direct call without the shared policy implementation.
+    class RouteAdmissionError(ValueError):
+        pass
+
+    def require_direct_llm_admission():
+        raise RouteAdmissionError("direct review denied: compatible policy runtime missing")
+
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -82,12 +96,14 @@ def _endpoint(direct: bool = False) -> tuple[str, str, bool]:
     base = (os.environ.get("LITELLM_PROXY_URL") or os.environ.get("ANTHROPIC_BASE_URL") or "").rstrip("/")
     proxied = bool(base) and (urllib.parse.urlparse(base).hostname or "").lower().rstrip(".") != _ANTHROPIC_HOST
     if direct:
+        require_direct_llm_admission()
         key = os.environ.get("ANTHROPIC_DIRECT_API_KEY") or (
             os.environ.get("ANTHROPIC_API_KEY", "") if not proxied else ""
         )
         return key, _ANTHROPIC_API_URL, False
     if proxied:
         return _proxy_transport_key(), base + "/v1/messages", True
+    require_direct_llm_admission()
     return os.environ.get("ANTHROPIC_API_KEY", ""), _ANTHROPIC_API_URL, False
 
 
@@ -397,7 +413,11 @@ If any ERROR survives, set review_action to "REQUEST_CHANGES"; otherwise "COMMEN
         # CLIENT_AI_POLICY engagements keep the adjudication itself direct —
         # candidate findings carry PR content regardless of first_party flags.
         first_party = self._has_first_party_candidates or bool(os.environ.get("CLIENT_AI_POLICY"))
-        api_key, api_url, proxied = _endpoint(direct=first_party)
+        try:
+            api_key, api_url, proxied = _endpoint(direct=first_party)
+        except RouteAdmissionError as exc:
+            logger.error("%s; required adjudication incomplete", exc)
+            return None
         if first_party and not api_key:
             logger.error(
                 "first-party findings present but no direct Anthropic "
@@ -1146,16 +1166,15 @@ def main() -> int:
     if not sha:
         parser.error("--sha or GITHUB_SHA is required for duplicate-review detection")
 
-    # --repo overrides GITHUB_REPOSITORY env so the workflow can pass it explicitly
-    if args.repo:
-        os.environ["GITHUB_REPOSITORY"] = args.repo
-
+    # Posting target is separate from trusted launcher policy identity.
     judge = Judge(
         candidates_dir=args.candidates_dir,
         pr_number=args.pr_number,
         sha=sha,
     )
 
+    if args.repo:
+        judge.repo = args.repo
     return judge.run()
 
 

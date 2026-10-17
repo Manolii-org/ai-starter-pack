@@ -23,6 +23,20 @@ import urllib.parse
 import urllib.request
 from typing import Optional
 
+# Shared policy code is part of the trusted, hydrated assessment runtime.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+try:
+    from lib.agent_capabilities import RouteAdmissionError, require_direct_llm_admission
+except ImportError:
+    # Mixed/older consumer runtime: preserve ordinary proxy calls, but never
+    # admit a direct call without the shared policy implementation.
+    class RouteAdmissionError(ValueError):
+        pass
+
+    def require_direct_llm_admission():
+        raise RouteAdmissionError("direct review denied: compatible policy runtime missing")
+
+
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 SKILLS_DIR = REPO_ROOT / ".claude/skills"
 MANIFEST_FILE = REPO_ROOT / ".ai/candidates/manifest.json"
@@ -91,6 +105,7 @@ def _endpoint(direct: bool = False) -> tuple[str, str, bool]:
     proxy_base = (os.environ.get("LITELLM_PROXY_URL") or os.environ.get("ANTHROPIC_BASE_URL") or "").rstrip("/")
     proxy_configured = bool(proxy_base) and (urllib.parse.urlparse(proxy_base).hostname or "").lower().rstrip(".") != _ANTHROPIC_HOST
     if direct:
+        require_direct_llm_admission()
         # Under a configured proxy ANTHROPIC_API_KEY holds the LiteLLM
         # credential — it must never be sent to api.anthropic.com. Only the
         # dedicated direct key authenticates first-party calls there.
@@ -100,6 +115,7 @@ def _endpoint(direct: bool = False) -> tuple[str, str, bool]:
         return key, _ANTHROPIC_API_URL, False
     if proxy_configured:
         return _proxy_transport_key(), proxy_base + "/v1/messages", True
+    require_direct_llm_admission()
     key = os.environ.get("ANTHROPIC_DIRECT_API_KEY") or os.environ.get("ANTHROPIC_API_KEY", "")
     return key, _ANTHROPIC_API_URL, False
 
@@ -351,7 +367,14 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
     # content may cross the OSS/proxy plane at all.
     first_party = bool(frontmatter.get("first_party")) or bool(os.environ.get("CLIENT_AI_POLICY"))
 
-    if first_party and not _endpoint(direct=True)[0]:
+    try:
+        api_key, _, _ = _endpoint(direct=first_party)
+    except RouteAdmissionError as exc:
+        writer = _write_skip_marker if first_party else _write_skipped_marker
+        writer(skill_name, output_dir, "route_policy_denied")
+        return skill_name, str(exc)
+
+    if first_party and not api_key:
         # Write a marker, not nothing: a first-party skill that cannot run
         # must surface as a first-party candidate so the judge fails closed
         # into the advisory path instead of silently adjudicating the rest
@@ -360,7 +383,7 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
         print(f"[{skill_name}] first_party skill needs ANTHROPIC_DIRECT_API_KEY — marker written to {output_dir / (skill_name + '.json')}")
         return skill_name, "skipped: no direct Anthropic credential"
 
-    if not first_party and not _endpoint()[0]:
+    if not first_party and not api_key:
         # Proxy configured but no shared credential (e.g. direct-only install):
         # the API call would raise immediately — record the marker up front so
         # the judge counts the missing coverage rather than a false clean.
@@ -479,11 +502,7 @@ def _write_skipped_marker(skill_name: str, output_dir: pathlib.Path, reason: str
 
 
 def main() -> None:
-    # A direct-only install (ANTHROPIC_DIRECT_API_KEY but no shared transport
-    # credential) must still start: first-party skills dispatch through it,
-    # the rest return their skip/error marker.
-    api_key, _, _ = _endpoint()
-
+    # Resolve credentials per admitted role, never before its policy check.
     # Parse CLI args — before the credential gate so a no-credential run can
     # still write a skip marker for every requested skill.
     skills_arg = None
@@ -555,15 +574,6 @@ def main() -> None:
 
     if not invoke_skills:
         print("[specialists] nothing to run")
-        sys.exit(0)
-
-    # No credential at all (fork PR, unconfigured consumer): still write one
-    # skip marker per requested skill so the judge sees the missing coverage
-    # and posts the advisory instead of a false-clean verdict.
-    if not api_key and not os.environ.get("ANTHROPIC_DIRECT_API_KEY"):
-        print("[specialists] no API credential set — writing skip markers for all requested skills")
-        for skill in invoke_skills:
-            _write_skipped_marker(skill, output_dir, "no_credential")
         sys.exit(0)
 
     print(f"[specialists] invoking {len(invoke_skills)} skills: {', '.join(invoke_skills)}")

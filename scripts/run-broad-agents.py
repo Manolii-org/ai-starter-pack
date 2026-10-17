@@ -29,6 +29,20 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 import yaml
 
+# Shared policy code is part of the trusted, hydrated assessment runtime.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    from lib.agent_capabilities import RouteAdmissionError, require_direct_llm_admission
+except ImportError:
+    # Mixed/older consumer runtime: preserve ordinary proxy calls, but never
+    # admit a direct call without the shared policy implementation.
+    class RouteAdmissionError(ValueError):
+        pass
+
+    def require_direct_llm_admission():
+        raise RouteAdmissionError("direct review denied: compatible policy runtime missing")
+
+
 logging.basicConfig(
     level=logging.INFO,
     format="[broad-agents] %(levelname)s: %(message)s"
@@ -172,7 +186,8 @@ def get_api_key() -> Optional[str]:
             key = normalized
             break
     else:
-        key = os.getenv("ANTHROPIC_API_KEY")
+        require_direct_llm_admission()
+        key = os.getenv("ANTHROPIC_DIRECT_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
     if not key:
         logger.warning("no API credential set; skipping agent invocations")
         return None
@@ -233,6 +248,14 @@ def invoke_agent(
     # failure must then degrade to the skipped first-party marker so the judge
     # fails closed instead of adjudicating without the required direct leg.
     direct_required = False
+    try:
+        if agent_config.first_party or os.environ.get("CLIENT_AI_POLICY") or not proxy:
+            require_direct_llm_admission()
+    except RouteAdmissionError as exc:
+        logger.warning("%s: %s", agent_config.name, exc)
+        return {"source": agent_config.name, "findings": [],
+                "first_party": bool(agent_config.first_party or os.environ.get("CLIENT_AI_POLICY")),
+                "skipped": "route_policy_denied"}
     # first_party agents (security review per the eligibility matrix) always go
     # Anthropic-direct — never the OSS proxy, regardless of declared model.
     if agent_config.first_party:
@@ -292,6 +315,11 @@ def invoke_agent(
         logger.info(
             f"{agent_config.name}: CLIENT_AI_POLICY active — dispatching {model} (Anthropic-direct)"
         )
+    else:
+        api_key = api_key or get_api_key()
+    if not api_key:
+        return {"source": agent_config.name, "findings": [],
+                "first_party": direct_required, "skipped": "no_credential"}
     base_url = proxy or "https://api.anthropic.com"
     if proxy and model in {"claude-haiku-4-5-20251001", "claude-sonnet-4-6"}:
         model = {"claude-haiku-4-5-20251001": "haiku", "claude-sonnet-4-6": "sonnet"}[model]
@@ -527,36 +555,8 @@ def run_broad_agents(
     changed_files = get_changed_files()
     user_message = build_user_message(diff, changed_files)
 
-    # Get API key. A direct-only install (ANTHROPIC_DIRECT_API_KEY without a
-    # shared transport credential) must still run: every agent dispatches
-    # Anthropic-direct through it (the proxy is absent by definition), so the
-    # direct key is also the shared transport credential here. When a proxy IS
-    # configured but has no credential, the direct key must NOT stand in — a
-    # non-direct agent would send `Bearer <anthropic key>` to the proxy host,
-    # leaking a first-party credential outside the Anthropic boundary. That
-    # state proceeds with an empty shared key instead: first_party /
-    # CLIENT_AI_POLICY agents re-resolve their own direct credential inside
-    # invoke_agent, and the rest skip on their empty key.
-    api_key = get_api_key() or (
-        os.getenv("ANTHROPIC_DIRECT_API_KEY", "") if _proxy_base() is None else ""
-    )
-    if not api_key and not os.getenv("ANTHROPIC_DIRECT_API_KEY"):
-        # No credential at all: write one marker per requested agent so the
-        # judge records the missing coverage instead of a false-clean verdict.
-        logger.warning(
-            "[broad-agents] no API key — writing skip markers for all requested agents"
-        )
-        output_dir.mkdir(parents=True, exist_ok=True)
-        for agent_name in invoke_list:
-            marker = {
-                "source": agent_name,
-                "findings": [],
-                "skipped": "no_credential",
-            }
-            (output_dir / f"{agent_name}.json").write_text(
-                json.dumps(marker, indent=2), encoding="utf-8"
-            )
-        return 0
+    # Each role admits its route before selecting any transport credential.
+    api_key = ""
 
     # Load agent configs
     agents_to_run = []
@@ -584,36 +584,7 @@ def run_broad_agents(
     output_dir.mkdir(parents=True, exist_ok=True)
     results = {}
 
-    # Proxy configured but no proxy credential: non-direct agents would
-    # dispatch with `Bearer ` and fail silently (no file → judge sees clean).
-    # Skip them up front and write the same durable marker the judge's
-    # coverage accounting understands.
-    runnable = []
-    for agent in agents_to_run:
-        if (
-            not api_key
-            and not agent.first_party
-            and not os.environ.get("CLIENT_AI_POLICY")
-        ):
-            marker = {
-                "source": agent.name,
-                "findings": [],
-                "first_party": False,
-                "skipped": "no_proxy_credential",
-            }
-            (output_dir / f"{agent.name}.json").write_text(
-                json.dumps(marker, indent=2), encoding="utf-8"
-            )
-            results[agent.name] = marker
-            logger.warning(
-                f"{agent.name}: no shared credential for the configured proxy — skipping (marker written)"
-            )
-            continue
-        runnable.append(agent)
-
-    if not runnable:
-        logger.warning("[broad-agents] every agent skipped — no runnable credential")
-        return 0
+    runnable = agents_to_run
 
     with ThreadPoolExecutor(max_workers=3) as executor:
         futures = {
