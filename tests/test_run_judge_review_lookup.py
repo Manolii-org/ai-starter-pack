@@ -187,6 +187,67 @@ def test_page_cap_is_bounded(judge, monkeypatch):
     )
 
 
+@pytest.mark.parametrize(
+    "proxied,responses,expected_calls,accepted",
+    [
+        (True, [("partial", "max_tokens"), ("valid", "end_turn")], 2, True),
+        (True, [("valid", "max_tokens"), ("valid", "end_turn")], 2, True),
+        (True, [("valid", "end_turn")], 1, True),
+        (True, [("partial", "max_tokens"), ("valid", "max_tokens")], 2, False),
+        (False, [("valid", "max_tokens")], 1, False),
+        (False, [("valid", "end_turn")], 1, True),
+        (True, [("partial", "end_turn")], 1, False),
+        (True, [("empty", "max_tokens"), ("valid", "end_turn")], 2, True),
+    ],
+)
+def test_judge_output_limit_uses_only_existing_retry(
+    judge, monkeypatch, caplog, proxied, responses, expected_calls, accepted
+):
+    """Actual runner refuses even valid JSON with an incomplete API status."""
+    endpoint = "https://proxy.example.invalid/v1/messages" if proxied else "https://api.anthropic.com/v1/messages"
+    monkeypatch.setattr(rj, "_endpoint", lambda **kwargs: ("offline-placeholder", endpoint, proxied))
+    verdict = {"surviving": [], "dropped_count": 1, "review_action": "COMMENT"}
+    text = {"valid": json.dumps(verdict), "partial": "PRIVATE_PARTIAL_VERDICT{", "empty": ""}
+    requests = []
+
+    def respond(req, *, timeout=None, host=None):
+        requests.append(json.loads(req.data))
+        kind, stop_reason = responses[len(requests) - 1]
+        assert timeout == 120
+        assert req.full_url == endpoint
+        return _FakeResponse(json.dumps({
+            "content": [{"type": "text", "text": text[kind]}],
+            "stop_reason": stop_reason,
+        }).encode())
+
+    monkeypatch.setattr(rj, "_urlopen_https", respond)
+    with caplog.at_level("INFO"):
+        result = judge.invoke_judge_agent([rj.Finding("review", "file.py", 1, "WARNING", "Check", "Fix")])
+    assert result == (verdict if accepted else None)
+    assert len(requests) == expected_calls
+    budgets = [4000, 6048] if proxied else [4000]
+    assert [request["max_tokens"] for request in requests] == budgets[:expected_calls]
+    assert {request["model"] for request in requests} == {"sonnet" if proxied else "claude-sonnet-4-6"}
+    if len(requests) == 2:
+        assert requests[0] | {"max_tokens": requests[1]["max_tokens"]} == requests[1]
+    assert "PRIVATE_PARTIAL_VERDICT" not in caplog.text
+    assert json.dumps(verdict) not in caplog.text
+
+
+@pytest.mark.parametrize("error", [TimeoutError("unknown remote outcome"), ValueError("malformed response")])
+def test_judge_transport_failure_is_not_replayed(judge, monkeypatch, error):
+    monkeypatch.setattr(rj, "_endpoint", lambda **kwargs: ("offline-placeholder", "https://proxy.example.invalid/v1/messages", True))
+    requests = []
+
+    def fail(req, *, timeout=None, host=None):
+        requests.append(req)
+        raise error
+
+    monkeypatch.setattr(rj, "_urlopen_https", fail)
+    assert judge.invoke_judge_agent([rj.Finding("review", "file.py", 1, "WARNING", "Check", "Fix")]) is None
+    assert len(requests) == 1
+
+
 def _review_full(
     body: str,
     commit_id: str = SHA,
@@ -284,3 +345,50 @@ def test_marker_text_appears_exactly_once_in_the_source():
         "the marker text must appear once, as REVIEW_MARKER — "
         "every other site should interpolate the constant"
     )
+
+
+@pytest.mark.parametrize("acknowledgement", ["posted", "failed", "empty", "malformed_id"])
+def test_failed_judge_retires_only_stale_approval_after_advisory_ack(
+    judge, monkeypatch, tmp_path, caplog, acknowledgement
+):
+    """Exercise run, real advisory posting and authenticated dismissal together."""
+    judge.candidates_dir = tmp_path / "candidates"
+    judge.candidates_dir.mkdir()
+    judge.judge_log_dir = tmp_path / "logs"
+    (judge.candidates_dir / "review.json").write_text(json.dumps({
+        "source": "review", "findings": [{
+            "file": "policy.py", "line": 3, "severity": "ERROR",
+            "message": "Missing tenant guard", "fix": "Add tenant guard at policy.py:3",
+        }],
+    }))
+    monkeypatch.setattr(judge, "invoke_judge_agent", lambda findings: None)
+    reviews = [
+        _review_full(rj.REVIEW_MARKER, state="APPROVED", review_id=1),
+        _review_full(rj.REVIEW_MARKER, state="CHANGES_REQUESTED", review_id=2),
+        _review_full(rj.REVIEW_MARKER, state="APPROVED", author="other-bot", review_id=3),
+        _review_full(rj.REVIEW_MARKER, state="APPROVED", commit_id="other-sha", review_id=4),
+    ]
+    calls = []
+
+    def serve(req, *, timeout=None, host=None):
+        calls.append((req.get_method(), req.full_url))
+        if req.get_method() == "POST":
+            assert json.loads(req.data)["event"] == "COMMENT"
+            if acknowledgement == "failed":
+                raise OSError("advisory outcome unknown")
+            body = {"id": 5} if acknowledgement == "posted" else ({"id": "5"} if acknowledgement == "malformed_id" else {})
+            return _FakeResponse(json.dumps(body).encode())
+        if req.get_method() == "GET":
+            return _FakeResponse(json.dumps(reviews).encode())
+        assert req.get_method() == "PUT"
+        return _FakeResponse(b"{}")
+
+    monkeypatch.setattr(rj, "_urlopen_https", serve)
+    with caplog.at_level("INFO"):
+        assert judge.run() == 0  # Advisory exit is not a successful model verdict.
+    assert ("Advisory warning posted" in caplog.text) is (acknowledgement == "posted")
+    assert [method for method, _ in calls].count("POST") == 1
+    dismissed = [url for method, url in calls if method == "PUT"]
+    assert dismissed == (["https://api.github.com/repos/Manolii-org/ai-starter-pack/pulls/1/reviews/1/dismissals"] if acknowledgement == "posted" else [])
+    if acknowledgement != "posted":
+        assert [method for method, _ in calls] == ["POST"]
