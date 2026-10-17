@@ -105,6 +105,10 @@ receipt, write and fsync a mode-0600 same-directory temporary file, publish it
 with `os.link(temp, receipt)` (create-if-absent), unlink the temporary name and
 fsync the directory. If the destination already exists, verify/reuse or fail
 without replacement. Checkpoint updates still use `os.replace` under the lock.
+The receipt retains its original branch binding. Verify a changed current branch
+against the checkpoint's trusted same-task old/new handoff chain anchored to that
+original branch; reuse checks compare immutable original bindings, not a rewritten
+receipt or an unverified current branch. Preserve this chain in the archive.
 
 
 Use an admitted owner-preserving writer when available. Otherwise use this
