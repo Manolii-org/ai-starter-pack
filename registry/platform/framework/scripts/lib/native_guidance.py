@@ -107,10 +107,18 @@ def apply_outputs(root: Path, outputs: dict, snapshots: dict, resolver) -> None:
 
     Caller holds the existing repository mutex. Ordered outputs put a native
     ownership lock last; bounded mirror refresh uses the same file transaction.
+    External editors/generators must be quiescent for the affected paths. The
+    mutex coordinates participating writers only; snapshot checks plus rename
+    are not a content compare-and-swap against uncoordinated writers.
     """
     changes = [rel for rel, data in outputs.items() if snapshots[rel] is None or snapshots[rel][0] != data]
     dfds, written = {}, []
     snapshot = lambda rel: file_snapshot(root, rel, resolver)
+
+    def require_snapshot(rel, expected, stage):
+        if snapshot(rel) != expected:
+            raise ValueError(f"{rel}: changed {stage}; reconcile concurrent work")
+
     try:
         for rel in changes:
             parent = Path(rel).parent.as_posix()
@@ -127,7 +135,9 @@ def apply_outputs(root: Path, outputs: dict, snapshots: dict, resolver) -> None:
             data = outputs[rel]
             resolver.atomic_replace(root / rel, lambda f, data=data: f.write(data),
                                     mode=snapshots[rel][1] if snapshots[rel] else 0o644,
-                                    dfd=dfds[Path(rel).parent.as_posix()])
+                                    dfd=dfds[Path(rel).parent.as_posix()],
+                                    before_replace=lambda rel=rel: require_snapshot(
+                                        rel, snapshots[rel], "before replacement"))
             written.append(rel)
     except Exception:
         for rel in reversed(written):
@@ -136,9 +146,14 @@ def apply_outputs(root: Path, outputs: dict, snapshots: dict, resolver) -> None:
             dfd = dfds[Path(rel).parent.as_posix()]
             old = snapshots[rel]
             if old is None:
+                require_snapshot(rel, (outputs[rel], 0o644),
+                                 "before rollback removal; retained for manual recovery")
                 os.unlink(Path(rel).name, dir_fd=dfd)
             else:
-                resolver.atomic_replace(root / rel, lambda f, data=old[0]: f.write(data), mode=old[1], dfd=dfd)
+                expected = (outputs[rel], old[1])
+                resolver.atomic_replace(root / rel, lambda f, data=old[0]: f.write(data), mode=old[1], dfd=dfd,
+                                        before_replace=lambda rel=rel, expected=expected: require_snapshot(
+                                            rel, expected, "during rollback; retained for manual recovery"))
         raise
     finally:
         for dfd in dfds.values():
@@ -214,8 +229,12 @@ def resolve(args, root: Path, resolver, manifest: dict, registry: Path, index: d
 
 
 def _resolve(args, root, resolver, manifest, registry, index):
-    surfaces = manifest.get("surfaces", ["claude-code"])
-    if not surfaces or any(s not in SURFACES for s in surfaces):
+    selected = manifest.get("surfaces", ["claude-code"])
+    surfaces = [surface for surface in selected if surface in SURFACES]
+    for surface in selected:
+        if surface not in SURFACES:
+            print(f"  note    surface '{surface}' is advisory-only for native guidance")
+    if not surfaces:
         raise ValueError("native policy supports claude-code, codex, cursor and devin only")
     plan = resolver.Plan()
     for req in manifest["requires"]:

@@ -14516,7 +14516,8 @@ def _repo_apply_mutex(repo_root: Path):
 def atomic_replace(dst: Path, fill,
                    times: tuple[int, int] | None = None,
                    mode: int | None = None,
-                   dfd: int | None = None) -> None:
+                   dfd: int | None = None,
+                   before_replace=None) -> None:
     """Install `dst` through an exclusively-created sibling temp + rename.
 
     tempfile.mkstemp picks a random name with O_EXCL — a consumer cannot
@@ -14535,7 +14536,11 @@ def atomic_replace(dst: Path, fill,
     `times` is the (atime_ns, mtime_ns) snapshot captured at PLAN time —
     apply must never re-stat the registry source: a source that
     disappears mid-apply would otherwise strand already-written files
-    with no lock record."""
+    with no lock record.
+
+    `before_replace`, when supplied, validates the destination after temp-file
+    preparation and immediately before rename. The caller still coordinates
+    writers: validation plus POSIX rename is not an atomic content CAS."""
     if dfd is not None:
         # Descriptor-relative temp — same O_EXCL guarantee as mkstemp but
         # bound to the held-open parent instead of a rewalked path.
@@ -14556,6 +14561,8 @@ def atomic_replace(dst: Path, fill,
             if mode is not None:
                 os.chmod(tmp_name, mode & 0o777, dir_fd=dfd,
                          follow_symlinks=False)
+            if before_replace is not None:
+                before_replace()
             os.rename(tmp_name, dst.name, src_dir_fd=dfd, dst_dir_fd=dfd)
         finally:
             try:
@@ -14578,6 +14585,8 @@ def atomic_replace(dst: Path, fill,
             # The PLANNED mask — the source's mode may have drifted between
             # plan and apply; the installed file must match the lock record.
             os.chmod(tmp, mode & 0o777)
+        if before_replace is not None:
+            before_replace()
         os.replace(tmp, dst)
     finally:
         if tmp.exists():

@@ -163,6 +163,9 @@ python3 scripts/ai-resolve.py --registry <pinned-pack-checkout> --repo-root <con
 ```
 
 Select `platform/framework` and supported `surfaces` in the consumer manifest.
+Schema-valid advisory surfaces such as `openhands` are reported and skipped;
+native mode fails if no supported surface remains. Its lock records only actual
+native delivery, never advisory support.
 Use a reviewed pack revision containing the policy; older pins fail explicitly.
 The renderer owns marked blocks in root `AGENTS.md` (and a present root
 `AGENTS.override.md`), a real relative import in `CLAUDE.md`, a small valid
@@ -172,6 +175,12 @@ from full component ownership. Local text outside the blocks survives updates.
 Local edits inside owned blocks/files, malformed markers, unsafe paths and
 oversized discovered Codex chains fail before file writes. Failed writes roll
 back this invocation; the lock is written last. Always preview first.
+The mutex coordinates participating installers only. Use an isolated worktree or
+pause other editors/generators for the affected files and directories during
+apply/recovery. Late snapshot checks and atomic file replacement do not provide
+content compare-and-swap against an uncoordinated writer. If concurrent editing
+prevents safe recovery, retain the files and reconcile manually. See the
+[native guidance operating contract](native-guidance.md#adoption-and-verification).
 
 For an existing repository-local `.claude/skills` alias, explicitly set
 `feature_flags.native_guidance_skill_root` to its canonical directory (for

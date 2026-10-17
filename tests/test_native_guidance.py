@@ -238,6 +238,32 @@ def test_unsupported_manifest_values_are_rejected(consumer, surfaces):
     assert not (root / "AGENTS.md").exists()
 
 
+def test_mixed_advisory_surface_installs_supported_subset(consumer):
+    root, _ = consumer
+    manifest = root / "ai-manifest.yaml"
+    manifest.write_text(manifest.read_text().replace(
+        "[claude-code, codex, cursor, devin]", "[claude-code, openhands]"))
+    result = run(consumer, "--apply")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "surface 'openhands' is advisory-only" in result.stdout
+    assert (root / "CLAUDE.md").is_file()
+    assert not (root / ".cursor/rules/adaptable-development.mdc").exists()
+    assert json.loads((root / native.LOCK).read_text())["surfaces"] == ["claude-code"]
+    assert run(consumer, "--check").returncode == 0
+
+
+def test_advisory_only_selection_fails_without_writes(consumer):
+    root, _ = consumer
+    manifest = root / "ai-manifest.yaml"
+    manifest.write_text(manifest.read_text().replace(
+        "[claude-code, codex, cursor, devin]", "[openhands]"))
+    before = files(root)
+    result = run(consumer, "--apply")
+    assert result.returncode == 1
+    assert "surface 'openhands' is advisory-only" in result.stdout
+    assert files(root) == before
+
+
 def test_pin_cannot_hide_modified_policy(consumer):
     root, source = consumer
     subprocess.run(["git", "init", "-q", str(source)], check=True)
@@ -403,3 +429,91 @@ def test_mirror_write_failure_restores_prior_assets(consumer, monkeypatch):
     with pytest.raises(OSError, match="simulated mirror"):
         builder.refresh_policy(registry)
     assert files(registry) == before
+
+
+@pytest.mark.parametrize("conflict", ["created", "edited", "mode"])
+def test_late_destination_change_preserves_work_and_does_not_publish_lock(tmp_path, monkeypatch, conflict):
+    root = tmp_path
+    first, later = root / "first.md", root / "later.md"
+    first.write_bytes(b"Original first")
+    if conflict != "created":
+        later.write_bytes(b"Original later")
+        later.chmod(0o644)
+    resolver = load_script("native_late_edit_resolver", "scripts/ai-resolve.py")
+    outputs = {"first.md": b"Updated first", "later.md": b"Updated later", "lock.json": b"Owned"}
+    snapshots = {rel: native.file_snapshot(root, rel, resolver) for rel in outputs}
+    atomic = resolver.atomic_replace
+
+    def edit_while_preparing(dst, fill, **kwargs):
+        def prepare(stream):
+            fill(stream)
+            if dst == later:
+                if conflict == "mode":
+                    later.chmod(0o600)
+                else:
+                    later.write_bytes(b"Concurrent local edit")
+        return atomic(dst, prepare, **kwargs)
+
+    monkeypatch.setattr(resolver, "atomic_replace", edit_while_preparing)
+    with resolver._repo_apply_mutex(root):
+        with pytest.raises(ValueError, match="later.md: changed before replacement"):
+            native.apply_outputs(root, outputs, snapshots, resolver)
+    assert first.read_bytes() == b"Original first"
+    assert later.read_bytes() == (b"Original later" if conflict == "mode" else b"Concurrent local edit")
+    if conflict == "mode":
+        assert later.stat().st_mode & 0o777 == 0o600
+    assert not (root / "lock.json").exists()
+    assert not list(root.glob(".*.tmp"))
+
+
+def test_rollback_revalidates_after_preparing_recovery(tmp_path, monkeypatch):
+    root = tmp_path
+    first, later = root / "first.md", root / "later.md"
+    first.write_bytes(b"Original first")
+    later.write_bytes(b"Original later")
+    resolver = load_script("native_rollback_edit_resolver", "scripts/ai-resolve.py")
+    outputs = {"first.md": b"Updated first", "later.md": b"Updated later", "lock.json": b"Owned"}
+    snapshots = {rel: native.file_snapshot(root, rel, resolver) for rel in outputs}
+    atomic = resolver.atomic_replace
+
+    def fail_then_edit_recovery(dst, fill, **kwargs):
+        if dst == later:
+            raise OSError("simulated late failure")
+        def prepare(stream):
+            fill(stream)
+            if first.read_bytes() == b"Updated first":
+                first.write_bytes(b"Newer local edit")
+        return atomic(dst, prepare, **kwargs)
+
+    monkeypatch.setattr(resolver, "atomic_replace", fail_then_edit_recovery)
+    with resolver._repo_apply_mutex(root):
+        with pytest.raises(ValueError, match="during rollback; retained for manual recovery"):
+            native.apply_outputs(root, outputs, snapshots, resolver)
+    assert first.read_bytes() == b"Newer local edit"
+    assert later.read_bytes() == b"Original later"
+    assert not (root / "lock.json").exists()
+    assert not list(root.glob(".*.tmp"))
+
+
+@pytest.mark.parametrize("descriptor_relative", [False, True])
+def test_atomic_replace_guard_runs_after_preparation_without_publishing(tmp_path, descriptor_relative):
+    resolver = load_script("native_guard_order_resolver", "scripts/ai-resolve.py")
+    target = tmp_path / "target.md"
+    target.write_bytes(b"Original")
+    filled = []
+    def fill(stream):
+        stream.write(b"Replacement")
+        filled.append(True)
+    def reject():
+        assert filled == [True]
+        assert target.read_bytes() == b"Original"
+        raise ValueError("guard rejected replacement")
+    dfd = resolver.secure_dir_fd(tmp_path, ".") if descriptor_relative else None
+    try:
+        with pytest.raises(ValueError, match="guard rejected replacement"):
+            resolver.atomic_replace(target, fill, mode=0o644, dfd=dfd, before_replace=reject)
+    finally:
+        if dfd is not None:
+            os.close(dfd)
+    assert target.read_bytes() == b"Original"
+    assert not list(tmp_path.glob(".*.tmp"))

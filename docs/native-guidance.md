@@ -49,6 +49,16 @@ conflict; do not delete curated files just to clear the resolver.
 Run `--native-guidance` first (read-only), then `--apply`, then `--check`.
 Repeat `--apply` and verify no diff. Inspect the complete diff for local guidance
 preservation, public/private boundaries, actual imports and procedure paths.
+Apply in an exclusive editing window for the affected files: pause external
+editors, formatters and other generators until the update finishes. Prefer an
+isolated task worktree. The existing repository mutex serializes participating
+resolver/mirror writers; it cannot lock an unrelated editor. Destination snapshots
+are revalidated after preparing each temporary file, immediately before its atomic
+rename (including recovery). This detects edits during preparation but is not an
+atomic content compare-and-swap against a writer that ignores the mutex. Each file
+replacement is atomic; the batch is not one atomic filesystem transaction. A
+recovery conflict retains the newer file and requires manual reconciliation;
+do not blindly retry it. Keep destination directories stable during the update.
 Existing registry lint, builder freshness and native-guidance tests verify
 distribution separately from platform behaviour. Record version, source ref,
 hashes and exact checks in the owning rollout record.
