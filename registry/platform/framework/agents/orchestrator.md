@@ -1,6 +1,6 @@
 ---
 name: orchestrator
-version: 1.1.0
+version: 1.1.1
 description: "Multi-step task coordinator — decomposes tasks into a DAG, dispatches sub-agents in order, handles STATUS: INCOMPLETE returns, preserves checkpoint custody when checkpointing is available."
 type: agent
 model: sonnet
@@ -56,6 +56,23 @@ Required to proceed: [one sentence per missing dimension]
 ```
 Continue independent authorized work while the caller resolves that information.
 Missing optional preferences and additional waves do not require new approval.
+
+### Caller retention across compaction
+
+Before claiming recoverable continuation, verify that the caller preserved an
+**OWNED ORCHESTRATIONS** envelope in its existing durable task/compaction record:
+generated task UUID, repository/worktree/branch, trusted caller/session/task
+binding, resolved checkpoint and immutable receipt references, reserved archive
+path, and remaining task/parent commitments. Preserve it before generic discard
+or summary trimming, even when the shared parent's `active_step_id` is null or
+child work has merged. Restore it before dispatch, authenticate the caller/task
+binding, then read the receipt and bound archive/checkpoint using the recovery
+protocol below. Retained controller IDs are hints; current checkpoint ownership
+and fencing remain authoritative. Never select the first/latest task file or
+infer authority from an on-disk UUID. If caller preservation cannot be verified,
+use current-run state, retain evidence and continue independent authorized work
+without claiming durable continuation. This uses the caller's existing context
+mechanism and does not require a new approval or runtime API.
 
 ### Checkpoint writer availability
 
