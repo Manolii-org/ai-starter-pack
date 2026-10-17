@@ -320,3 +320,59 @@ def test_native_nested_catalog_restore_refuses_unsafe_state_root(tmp_path, job, 
         text=True, timeout=15)
     assert result.returncode == 1 and "Assessment state root" in result.stderr
     assert sentinel.read_text() == "retain outside subtree"
+
+
+def test_native_judge_checkout_contains_exact_head_and_merge_base(tmp_path):
+    """A shallow synthetic merge plus a base fetch omits the PR head object."""
+    import shlex
+    import subprocess
+
+    def git(cwd, *args, check=True):
+        return subprocess.run(["git", *args], cwd=cwd, check=check,
+                              capture_output=True, text=True, timeout=15)
+
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    git(origin, "init", "-b", "main")
+    git(origin, "config", "user.name", "Offline fixture")
+    git(origin, "config", "user.email", "fixture@example.invalid")
+    (origin / "source.py").write_text("original = True\n")
+    git(origin, "add", ".")
+    git(origin, "commit", "-m", "common ancestor")
+    git(origin, "checkout", "-b", "feature")
+    (origin / "source.py").write_text("corrected = True\n")
+    git(origin, "commit", "-am", "PR head")
+    head = git(origin, "rev-parse", "HEAD").stdout.strip()
+    git(origin, "checkout", "main")
+    (origin / "other.txt").write_text("base advanced\n")
+    git(origin, "add", ".")
+    git(origin, "commit", "-m", "current base")
+    base = git(origin, "rev-parse", "HEAD").stdout.strip()
+    git(origin, "merge", "--no-ff", "feature", "-m", "synthetic PR merge")
+    merge = git(origin, "rev-parse", "HEAD").stdout.strip()
+
+    def checkout(name, depth, base_fetch):
+        target = tmp_path / name
+        target.mkdir()
+        git(target, "init")
+        git(target, "remote", "add", "origin", origin.as_uri())
+        git(target, "fetch", *(["--depth", str(depth)] if depth else []), "origin", merge)
+        git(target, "checkout", "--detach", "FETCH_HEAD")
+        # The trusted-runtime restore fetch alone cannot supply the head.
+        git(target, *base_fetch)
+        return target
+
+    shallow = checkout("old-default", 1, ["fetch", "--depth=1", "origin", base])
+    assert git(shallow, "rev-parse", head + "^{tree}", check=False).returncode != 0
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/pr-assessment.yml").read_text())
+    step = next(s for s in workflow["jobs"]["judge"]["steps"]
+                if s.get("uses", "").startswith("actions/checkout@"))
+    restore = next(s for s in workflow["jobs"]["judge"]["steps"]
+                   if s.get("name") == "Restore trusted runtime from PR base")
+    fetch_line = next(line.strip() for line in restore["run"].splitlines()
+                      if line.strip().startswith("git fetch "))
+    base_fetch = shlex.split(fetch_line.replace('"$BASE_SHA"', base))[1:]
+    complete = checkout("configured-checkout", step.get("with", {}).get("fetch-depth", 1), base_fetch)
+    assert git(complete, "rev-parse", head + "^{tree}").stdout.strip()
+    assert git(complete, "show", head + ":source.py").stdout == "corrected = True\n"
+    assert "+corrected = True" in git(complete, "diff", base + "..." + head).stdout
