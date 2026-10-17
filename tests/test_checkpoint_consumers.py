@@ -135,3 +135,21 @@ def test_existing_standalone_watch_merge_remains_terminal(tmp_path, monkeypatch)
 def test_merged_watch_with_parent_or_unknown_fields_remains_unverified(extra):
     task = {"type": "watch-pr", "status": "merged", "pr": 12, **extra}
     assert CHECKER._terminal_task(task) is False
+
+
+def test_current_run_fallback_consumers_do_not_create_shared_custody(tmp_path, monkeypatch):
+    path = tmp_path / ".ai/sessions/active-task.json"
+    monkeypatch.setattr(CHECKER, "ACTIVE_TASK_PATH", path)
+    assert CHECKER._active_task_gaps("feature/test") == []
+    assert run_drift(tmp_path) == ""
+    assert not path.exists()
+
+
+def test_current_run_fallback_retains_existing_held_custody(tmp_path, monkeypatch):
+    path = checkpoint(tmp_path, monkeypatch, status="blocked_on_human",
+                      active_step_id="parent", interrupt_value={}, owner="existing-owner",
+                      last_updated="2000-01-01T00:00:00Z")
+    before = path.read_bytes()
+    assert CHECKER._active_task_gaps("feature/test")
+    assert "Retained terminal checkpoint" not in run_drift(tmp_path)
+    assert path.read_bytes() == before
