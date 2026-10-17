@@ -471,3 +471,39 @@ def test_valid_first_policy_plus_failed_second_blob_denied(external, monkeypatch
     with pytest.raises(policy.RouteAdmissionError):
         policy.require_direct_llm_admission()
     assert len(reads) == 2
+
+
+def test_all_reusable_runner_checkouts_retain_base_objects():
+    """Every admission caller must retain the immutable PR base locally."""
+    import yaml
+    data = yaml.safe_load((ROOT / '.github/workflows/pr-assessment-reusable.yml').read_text())
+    for name in ['classify', 'specialists', 'broad-agents', 'judge']:
+        checkout = next(step for step in data['jobs'][name]['steps']
+                        if step.get('uses', '').startswith('actions/checkout@'))
+        assert checkout['with']['fetch-depth'] == 0, name
+        if name == 'judge':
+            assert checkout['with']['persist-credentials'] is False
+
+
+def test_external_pr_policy_base_requires_nonshallow_checkout(external, monkeypatch, tmp_path_factory):
+    """Real shallow checkout refuses unavailable policy; full history admits it."""
+    root, manifest, commit = external
+    base = commit()
+    commit({**manifest, 'fixture_note': 'newer head'})
+    shallow = tmp_path_factory.mktemp('shallow-parent') / 'consumer'
+    subprocess.run(['git', 'clone', '-q', '--depth=1', '--no-local',
+                    root.as_uri(), str(shallow)], check=True)
+    missing = subprocess.run(['git', '-C', str(shallow), 'cat-file', '-e', base],
+                             capture_output=True)
+    assert missing.returncode != 0
+    event = root / 'event.json'
+    event.write_text(json.dumps({'repository': {'full_name': 'ExternalExample/project'},
+                                'pull_request': {'base': {'sha': base}}}))
+    monkeypatch.chdir(shallow)
+    monkeypatch.setenv('GITHUB_ACTIONS', 'true')
+    monkeypatch.setenv('GITHUB_EVENT_PATH', str(event))
+    with pytest.raises(policy.RouteAdmissionError, match='policy source unavailable'):
+        policy.require_direct_llm_admission()
+    # Only a local fixture is fetched; admission itself must never lazy-fetch.
+    subprocess.run(['git', 'fetch', '-q', '--unshallow', 'origin'], check=True)
+    assert policy.require_direct_llm_admission() is None
