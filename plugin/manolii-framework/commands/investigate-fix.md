@@ -91,21 +91,17 @@ i. **Maximum 5 rounds.** If issues persist after 5 rounds — stop and escalate 
 
 ### 10. Checkpoint Cleanup
 
-Once step 9's exit conditions are **all** true, clear the checkpoint:
+Once step 9's exit conditions are **all** true, retain the checkpoint and verify
+the complete original task outcome, including any parent follow-ups. Use the
+repository's qualified checkpoint writer to clear `active_step_id` and record
+top-level `status: "done"` only when that outcome is complete. Preserve current
+parent commitments, approvals, ownership and evidence; a merged PR alone is
+insufficient. If safe preservation is unverified, return child IDs/statuses and
+the retained source pointer to the calling owner instead of rewriting custody.
 
-```bash
-rm -f .ai/sessions/active-task.json
-```
-
-Step 1 writes a non-null `active_step_id` and nothing else ever clears it, so without
-this the finished run's checkpoint persists indefinitely — and `.claude/persistent-instructions.md`
-preserves the file verbatim on *every* later compaction while that key is non-null.
-A completed task then keeps being re-injected as if it were live, crowding out the
-context the session actually needs.
-
-**Leave the file in place** on any other ending: escalation at 9(i), an abandoned
-session, or any step still `partial` / `failed`. There, a surviving checkpoint is the
-mechanism working as designed — it is only noise once the work is genuinely done.
+Keep escalation, abandonment, partial/failed work and pending parent acceptance
+explicitly unfinished. On resume, reconcile the retained evidence before
+redispatch; an unknown provider outcome must not be replayed.
 Same rule as `.claude/agents/orchestrator.md` Phase 4.
 
 ---
