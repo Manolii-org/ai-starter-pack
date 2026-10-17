@@ -312,12 +312,13 @@ non-null, include its full JSON content verbatim under the "ACTIVE TASK" section
 required for the orchestrator to resume without re-reading the task from scratch.
 
 **PRESERVE** (structured, in this order):
-1. ACTIVE TASK: current task description, branch name, PR number/URL/status (+ full active-task.json if active_step_id is non-null)
-2. REMAINING PLAN: any open plan items or steps not yet completed
-3. DECISIONS + WHY: every architectural/strategic decision made, with 1-sentence rationale
-4. MODIFIED FILES: list of files changed and what changed (not the content — just what)
-5. BLOCKERS & DEFERRED: unresolved errors, open questions, explicitly deferred items
-6. PATTERNS DISCOVERED: gotchas, constraints, or patterns learned this session
+1. OWNED ORCHESTRATIONS: every owned task envelope and remaining parent commitment described above; retain before trimming, even after child commits or merges
+2. ACTIVE TASK: current task description, branch name, PR number/URL/status (+ full active-task.json if active_step_id is non-null)
+3. REMAINING PLAN: any open plan items or steps not yet completed
+4. DECISIONS + WHY: every architectural/strategic decision made, with 1-sentence rationale
+5. MODIFIED FILES: list of files changed and what changed (not the content — just what)
+6. BLOCKERS & DEFERRED: unresolved errors, open questions, explicitly deferred items
+7. PATTERNS DISCOVERED: gotchas, constraints, or patterns learned this session
 
 **DISCARD** entirely (do not summarise — just drop):
 - Full tool output (bash output, file read contents, search results) — keep conclusions only
@@ -326,4 +327,4 @@ required for the orchestrator to resume without re-reading the task from scratch
 - Conversational back-and-forth and acknowledgements
 - Repeated tool calls that produced the same result
 
-**FORMAT:** Use the section headers above. Be terse — target 3000–4000 characters total so the full summary survives SessionStart reinjection.
+**FORMAT:** Use the section headers above, including OWNED ORCHESTRATIONS; keep its required bindings even if the target summary size is exceeded. Be terse — target 3000–4000 characters total so the full summary survives SessionStart reinjection.
