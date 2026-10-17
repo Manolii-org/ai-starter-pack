@@ -95,8 +95,9 @@ alone is not such a writer. Otherwise use the portable procedure below.
 
 The standard-library locking fallback requires a POSIX runtime with `fcntl`;
 other runtimes need an admitted writer or use the current-run fallback below.
-Before writing, reject existing custody directories that are group/world-writable
-or not owned by the executing user; retain their contents and use current-run state.
+Before writing, reject existing custody directories and their ancestors within
+the repository (including `.ai`) that are group/world-writable or not owned by
+the executing user; retain their contents and use current-run state.
 Under the stable per-task lock, never replace an existing immutable receipt:
 reuse it only after verifying every caller/task/repository/worktree/branch and
 reserved-path binding, otherwise retain it and report the conflict. For a new
