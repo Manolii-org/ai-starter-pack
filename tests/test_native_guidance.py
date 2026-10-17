@@ -234,6 +234,47 @@ def test_ignored_nested_instructions_block_oversized_install(consumer, filename)
     assert files(root) == before
 
 
+def test_non_git_audit_filters_unrelated_files_before_stat(consumer, monkeypatch):
+    root, _ = consumer
+    (root / ".codex").mkdir()
+    (root / ".codex/config.toml").write_text('project_doc_fallback_filenames = ["TEAM[1].md"]\n')
+    (root / "nested").mkdir()
+    (root / "nested/TEAM[1].md").write_text("local")
+    (root / "unrelated.bin").write_text("not an instruction")
+    original = Path.is_file
+    def reject_unrelated(path):
+        if path.name == "unrelated.bin":
+            raise OSError("unrelated file must not be inspected")
+        return original(path)
+    monkeypatch.setattr(Path, "is_file", reject_unrelated)
+    audit = native.instruction_audit(root, {"AGENTS.md": b"root"})
+    largest = max(audit["chains"], key=lambda chain: chain["bytes"])
+    assert largest["directory"] == "nested"
+    assert largest["files"] == ["AGENTS.md", "nested/TEAM[1].md"]
+
+
+def test_non_git_audit_discovery_has_a_time_budget(consumer, monkeypatch):
+    root, _ = consumer
+    ticks = iter([0, 31])
+    monkeypatch.setattr(native, "monotonic", lambda: next(ticks), raising=False)
+    with pytest.raises(ValueError, match="non-Git instruction discovery exceeded"):
+        native.instruction_audit(root, {"AGENTS.md": b"root"})
+
+
+def test_cli_reports_audited_override_and_fallback_chain(consumer):
+    root, _ = consumer
+    (root / ".codex").mkdir()
+    (root / ".codex/config.toml").write_text('project_doc_fallback_filenames = ["TEAM.md"]\n')
+    (root / "src/deep").mkdir(parents=True)
+    (root / "src/AGENTS.override.md").write_text("Scoped override")
+    (root / "src/deep/TEAM.md").write_text("Scoped fallback")
+    result = run(consumer, "--apply")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'Codex audited directory: "src/deep"' in result.stdout
+    assert 'Codex audited files: ["AGENTS.md", "src/AGENTS.override.md", "src/deep/TEAM.md"]' in result.stdout
+    assert 'Codex configured fallback filenames: ["TEAM.md"]' in result.stdout
+
+
 def test_configured_fallback_and_global_size_are_counted(consumer, monkeypatch, tmp_path):
     root, _ = consumer
     home = tmp_path / "custom-codex"

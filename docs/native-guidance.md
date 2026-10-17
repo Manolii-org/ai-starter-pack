@@ -37,6 +37,11 @@ The checker reports the configured local Codex chain and fallback filenames,
 including global-file size and Git-ignored nested instruction files, without
 printing global instruction contents. Git enumeration is limited to instruction
 filenames so unrelated ignored build/dependency files do not fill its output.
+Before Git initialization, discovery uses one basename-filtered directory walk
+with a 30-second budget checked per directory; it filters basenames before
+instruction-file reads.
+The CLI reports the largest chain's directory/files and configured fallback
+filenames, while omitting global instruction contents.
 Codex configuration/chain checks and Devin's inclusion-window check apply only
 when that surface is selected in the manifest. Do not raise limits to conceal
 oversized guidance. A long legacy AGENTS tail
