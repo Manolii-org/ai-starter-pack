@@ -5,6 +5,7 @@ atomic writer. Owns named blocks and three skills with eval fixtures, never whol
 """
 from __future__ import annotations
 
+import glob
 import hashlib
 import json
 import os
@@ -190,12 +191,15 @@ def instruction_audit(root: Path, outputs: dict[str, bytes]) -> dict:
         if p.is_file() and p.stat().st_size:
             global_bytes = p.stat().st_size + 2
             break
+    names = ("AGENTS.override.md", "AGENTS.md", *fallbacks)
+    # Git ignores do not affect Codex discovery. Restrict enumeration to literal
+    # instruction filenames so ignored dependency/build trees do not flood stdout.
+    patterns = [":(glob)**/" + glob.escape(name).replace("\\", "\\\\") for name in names]
     proc = subprocess.run(
-        ["git", "-C", str(root), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+        ["git", "-C", str(root), "ls-files", "-z", "--cached", "--others", "--", *patterns],
         capture_output=True, timeout=30)
     paths = (proc.stdout.decode().split("\0") if proc.returncode == 0 else
              [p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()])
-    names = ("AGENTS.override.md", "AGENTS.md", *fallbacks)
     dirs = {Path(".")} | {Path(p).parent for p in paths if Path(p).name in names}
     chains = []
     for directory in sorted(dirs):
