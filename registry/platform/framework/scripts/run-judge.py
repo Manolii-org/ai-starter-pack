@@ -507,15 +507,19 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
                     for b in result.get("content", [])
                     if isinstance(b, dict) and b.get("type", "text") == "text"
                 )
-                if response_text:
+                # Partial text is still a starved answer. Use only the existing
+                # proxy retry slot; never parse an output-limited verdict.
+                if response_text and result.get("stop_reason") != "max_tokens":
                     break
                 logger.warning(
-                    f"Judge returned no text blocks at max_tokens={budget} "
+                    f"Judge returned incomplete text at max_tokens={budget} "
                     f"(stop_reason={result.get('stop_reason')})"
                 )
+            if result.get("stop_reason") == "max_tokens":
+                raise ValueError("Judge output limit reached; verdict incomplete")
             if not response_text:
                 raise KeyError("no text blocks in judge response content")
-            logger.info(f"Judge response: {response_text[:200]}...")
+            logger.info("Judge response received (%d characters)", len(response_text))
 
             # Parse JSON, stripping markdown fences if present
             json_text = response_text

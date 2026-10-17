@@ -187,6 +187,67 @@ def test_page_cap_is_bounded(judge, monkeypatch):
     )
 
 
+@pytest.mark.parametrize(
+    "proxied,responses,expected_calls,accepted",
+    [
+        (True, [("partial", "max_tokens"), ("valid", "end_turn")], 2, True),
+        (True, [("valid", "max_tokens"), ("valid", "end_turn")], 2, True),
+        (True, [("valid", "end_turn")], 1, True),
+        (True, [("partial", "max_tokens"), ("valid", "max_tokens")], 2, False),
+        (False, [("valid", "max_tokens")], 1, False),
+        (False, [("valid", "end_turn")], 1, True),
+        (True, [("partial", "end_turn")], 1, False),
+        (True, [("empty", "max_tokens"), ("valid", "end_turn")], 2, True),
+    ],
+)
+def test_judge_output_limit_uses_only_existing_retry(
+    judge, monkeypatch, caplog, proxied, responses, expected_calls, accepted
+):
+    """Actual runner refuses even valid JSON with an incomplete API status."""
+    endpoint = "https://proxy.example.invalid/v1/messages" if proxied else "https://api.anthropic.com/v1/messages"
+    monkeypatch.setattr(rj, "_endpoint", lambda **kwargs: ("offline-placeholder", endpoint, proxied))
+    verdict = {"surviving": [], "dropped_count": 1, "review_action": "COMMENT"}
+    text = {"valid": json.dumps(verdict), "partial": "PRIVATE_PARTIAL_VERDICT{", "empty": ""}
+    requests = []
+
+    def respond(req, *, timeout=None, host=None):
+        requests.append(json.loads(req.data))
+        kind, stop_reason = responses[len(requests) - 1]
+        assert timeout == 120
+        assert req.full_url == endpoint
+        return _FakeResponse(json.dumps({
+            "content": [{"type": "text", "text": text[kind]}],
+            "stop_reason": stop_reason,
+        }).encode())
+
+    monkeypatch.setattr(rj, "_urlopen_https", respond)
+    with caplog.at_level("INFO"):
+        result = judge.invoke_judge_agent([rj.Finding("review", "file.py", 1, "WARNING", "Check", "Fix")])
+    assert result == (verdict if accepted else None)
+    assert len(requests) == expected_calls
+    budgets = [4000, 4000 + rj._PROXY_THINKING_HEADROOM] if proxied else [4000]
+    assert [request["max_tokens"] for request in requests] == budgets[:expected_calls]
+    assert {request["model"] for request in requests} == {"sonnet" if proxied else "claude-sonnet-4-6"}
+    if len(requests) == 2:
+        assert requests[0] | {"max_tokens": requests[1]["max_tokens"]} == requests[1]
+    assert "PRIVATE_PARTIAL_VERDICT" not in caplog.text
+    assert json.dumps(verdict) not in caplog.text
+
+
+@pytest.mark.parametrize("error", [TimeoutError("unknown remote outcome"), ValueError("malformed response")])
+def test_judge_transport_failure_is_not_replayed(judge, monkeypatch, error):
+    monkeypatch.setattr(rj, "_endpoint", lambda **kwargs: ("offline-placeholder", "https://proxy.example.invalid/v1/messages", True))
+    requests = []
+
+    def fail(req, *, timeout=None, host=None):
+        requests.append(req)
+        raise error
+
+    monkeypatch.setattr(rj, "_urlopen_https", fail)
+    assert judge.invoke_judge_agent([rj.Finding("review", "file.py", 1, "WARNING", "Check", "Fix")]) is None
+    assert len(requests) == 1
+
+
 def _review_full(
     body: str,
     commit_id: str = SHA,
