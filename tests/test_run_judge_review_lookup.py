@@ -225,7 +225,7 @@ def test_judge_output_limit_uses_only_existing_retry(
         result = judge.invoke_judge_agent([rj.Finding("review", "file.py", 1, "WARNING", "Check", "Fix")])
     assert result == (verdict if accepted else None)
     assert len(requests) == expected_calls
-    budgets = [4000, 4000 + rj._PROXY_THINKING_HEADROOM] if proxied else [4000]
+    budgets = [4000, 6048] if proxied else [4000]
     assert [request["max_tokens"] for request in requests] == budgets[:expected_calls]
     assert {request["model"] for request in requests} == {"sonnet" if proxied else "claude-sonnet-4-6"}
     if len(requests) == 2:
