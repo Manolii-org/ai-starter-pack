@@ -246,3 +246,77 @@ def test_native_workflow_restores_sanitizer_with_trusted_runtime(job):
     assert "for p in .claude scripts .ai/security CLAUDE.md AGENTS.md; do" in step["run"]
     assert 'git checkout "$BASE_SHA" -- "$p"' in step["run"]
     assert 'rm -rf "$p"' in step["run"]
+
+
+@pytest.mark.parametrize("job", sorted(RUNNER_JOBS))
+@pytest.mark.parametrize(("component", "kind"), [
+    (p, "symlink") for p in [".ai", ".ai/security", ".ai/security/token-shapes.json",
+                            "scripts", "scripts/lib", "scripts/lib/protected_review.py"]
+] + [(p, "file") for p in [".ai", ".ai/security", "scripts", "scripts/lib"]]
+  + [(p, "directory") for p in [".ai/security/token-shapes.json", "scripts/lib/protected_review.py"]])
+def test_hydration_refuses_redirected_new_dependency_without_touching_outside(tmp_path, job, component, kind):
+    import os
+    import subprocess
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "sentinel"
+    sentinel.write_text("retain outside target unchanged")
+    destination = workspace / component
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if kind == "symlink":
+        destination.symlink_to(sentinel if component.endswith(".json") or component.endswith(".py") else outside)
+    elif kind == "file":
+        destination.write_text("parent must remain unchanged")
+    else:
+        destination.mkdir()
+    body = next(s["run"] for s in _workflow()["jobs"][job]["steps"]
+                if s.get("name") == "Hydrate assessment runtime")
+    body = body.replace("${{ github.event_name }}", "pull_request").replace("${{ inputs.pack_ref }}", "offline")
+    # Provide real source bytes at the new destinations. Without the refusal,
+    # cp would reach the external target instead of merely failing on missing
+    # scratch input, so the sentinel assertion exercises the actual risk.
+    for relative in ["scripts/lib/protected_review.py", ".ai/security/token-shapes.json"]:
+        source = workspace / ".pack-hydrate" / relative
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("replacement source bytes")
+    result = subprocess.run(["bash", "-c", body], cwd=workspace,
+        env={"PATH": os.defpath, "ASSESSMENT_RUNTIME_FILES": ".ai/security/token-shapes.json scripts/lib/protected_review.py"},
+        capture_output=True, text=True, timeout=15)
+    assert result.returncode == 1 and "::error::Assessment dependency" in result.stderr
+    assert sentinel.read_text() == "retain outside target unchanged"
+    assert {p for p in outside.rglob("*") if p.is_file()} == {sentinel}
+
+
+@pytest.mark.parametrize("job", sorted(RUNNER_JOBS))
+@pytest.mark.parametrize("layout", ["symlink", "file"])
+def test_native_nested_catalog_restore_refuses_unsafe_state_root(tmp_path, job, layout):
+    import os
+    import subprocess
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    (outside / "security").mkdir(parents=True)
+    sentinel = outside / "security/sentinel"
+    sentinel.write_text("retain outside subtree")
+    if layout == "symlink":
+        (workspace / ".ai").symlink_to(outside)
+    else:
+        (workspace / ".ai").write_text("not a directory")
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    # No network or Git authentication: execute the real restore body against
+    # a controlled fake Git. Old rm -rf .ai/security deletes the external
+    # subtree through the symlink; the corrected body exits before any Git.
+    (tools / "git").write_text("#!/bin/sh\nif [ \"$1\" = cat-file ]; then exit 1; fi\nexit 0\n")
+    (tools / "git").chmod(0o755)
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/pr-assessment.yml").read_text())
+    body = next(s["run"] for s in workflow["jobs"][job]["steps"]
+                if s.get("name") == "Restore trusted runtime from PR base")
+    body = body.replace("${{ github.event.pull_request.base.sha }}", "a" * 40)
+    result = subprocess.run(["bash", "-c", body], cwd=workspace,
+        env={"PATH": str(tools) + os.pathsep + os.defpath}, capture_output=True,
+        text=True, timeout=15)
+    assert result.returncode == 1 and "Assessment state root" in result.stderr
+    assert sentinel.read_text() == "retain outside subtree"

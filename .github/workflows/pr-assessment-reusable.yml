@@ -181,6 +181,20 @@ jobs:
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             FORCE=true
           fi
+          # Refuse redirected destinations for the new helper/catalog; this
+          # is defensive path validation, not complete executor isolation.
+          for d in .ai .ai/security scripts scripts/lib; do
+            if [[ -L "$d" || ( -e "$d" && ! -d "$d" ) ]]; then
+              echo "::error::Assessment dependency parent must be a real directory" >&2
+              exit 1
+            fi
+          done
+          for f in .ai/security/token-shapes.json scripts/lib/protected_review.py; do
+            if [[ -L "$f" || ( -e "$f" && ! -f "$f" ) ]]; then
+              echo "::error::Assessment dependency must be a regular file" >&2
+              exit 1
+            fi
+          done
           for f in $ASSESSMENT_RUNTIME_FILES; do
             if [[ "$FORCE" != "true" && -e "$f" ]]; then continue; fi
             if [[ ! -e ".pack-hydrate/$f" ]]; then
@@ -568,6 +582,20 @@ jobs:
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             FORCE=true
           fi
+          # Refuse redirected destinations for the new helper/catalog; this
+          # is defensive path validation, not complete executor isolation.
+          for d in .ai .ai/security scripts scripts/lib; do
+            if [[ -L "$d" || ( -e "$d" && ! -d "$d" ) ]]; then
+              echo "::error::Assessment dependency parent must be a real directory" >&2
+              exit 1
+            fi
+          done
+          for f in .ai/security/token-shapes.json scripts/lib/protected_review.py; do
+            if [[ -L "$f" || ( -e "$f" && ! -f "$f" ) ]]; then
+              echo "::error::Assessment dependency must be a regular file" >&2
+              exit 1
+            fi
+          done
           for f in $ASSESSMENT_RUNTIME_FILES; do
             if [[ "$FORCE" != "true" && -e "$f" ]]; then continue; fi
             if [[ ! -e ".pack-hydrate/$f" ]]; then
@@ -710,6 +738,20 @@ jobs:
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             FORCE=true
           fi
+          # Refuse redirected destinations for the new helper/catalog; this
+          # is defensive path validation, not complete executor isolation.
+          for d in .ai .ai/security scripts scripts/lib; do
+            if [[ -L "$d" || ( -e "$d" && ! -d "$d" ) ]]; then
+              echo "::error::Assessment dependency parent must be a real directory" >&2
+              exit 1
+            fi
+          done
+          for f in .ai/security/token-shapes.json scripts/lib/protected_review.py; do
+            if [[ -L "$f" || ( -e "$f" && ! -f "$f" ) ]]; then
+              echo "::error::Assessment dependency must be a regular file" >&2
+              exit 1
+            fi
+          done
           for f in $ASSESSMENT_RUNTIME_FILES; do
             if [[ "$FORCE" != "true" && -e "$f" ]]; then continue; fi
             if [[ ! -e ".pack-hydrate/$f" ]]; then
@@ -857,6 +899,20 @@ jobs:
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             FORCE=true
           fi
+          # Refuse redirected destinations for the new helper/catalog; this
+          # is defensive path validation, not complete executor isolation.
+          for d in .ai .ai/security scripts scripts/lib; do
+            if [[ -L "$d" || ( -e "$d" && ! -d "$d" ) ]]; then
+              echo "::error::Assessment dependency parent must be a real directory" >&2
+              exit 1
+            fi
+          done
+          for f in .ai/security/token-shapes.json scripts/lib/protected_review.py; do
+            if [[ -L "$f" || ( -e "$f" && ! -f "$f" ) ]]; then
+              echo "::error::Assessment dependency must be a regular file" >&2
+              exit 1
+            fi
+          done
           for f in $ASSESSMENT_RUNTIME_FILES; do
             if [[ "$FORCE" != "true" && -e "$f" ]]; then continue; fi
             if [[ ! -e ".pack-hydrate/$f" ]]; then

@@ -74,6 +74,11 @@ jobs:
           set -euo pipefail
           BASE_SHA="${{ github.event.pull_request.base.sha }}"
           [ -n "$BASE_SHA" ] || { echo "No pull_request base context — nothing to restore"; exit 0; }
+          # A PR-owned .ai symlink would redirect the nested catalog deletion.
+          if [ -L .ai ] || { [ -e .ai ] && [ ! -d .ai ]; }; then
+            echo "::error::Assessment state root must be a real directory" >&2
+            exit 1
+          fi
           git fetch --depth=1 origin "$BASE_SHA"
           # rm first: `git checkout BASE -- dir` overwrites base content but
           # leaves PR-added files (e.g. scripts/json.py shadowing stdlib) live
@@ -397,6 +402,11 @@ jobs:
           set -euo pipefail
           BASE_SHA="${{ github.event.pull_request.base.sha }}"
           [ -n "$BASE_SHA" ] || { echo "No pull_request base context — nothing to restore"; exit 0; }
+          # A PR-owned .ai symlink would redirect the nested catalog deletion.
+          if [ -L .ai ] || { [ -e .ai ] && [ ! -d .ai ]; }; then
+            echo "::error::Assessment state root must be a real directory" >&2
+            exit 1
+          fi
           git fetch --depth=1 origin "$BASE_SHA"
           # rm first: `git checkout BASE -- dir` overwrites base content but
           # leaves PR-added files (e.g. scripts/json.py shadowing stdlib) live
@@ -483,6 +493,11 @@ jobs:
           set -euo pipefail
           BASE_SHA="${{ github.event.pull_request.base.sha }}"
           [ -n "$BASE_SHA" ] || { echo "No pull_request base context — nothing to restore"; exit 0; }
+          # A PR-owned .ai symlink would redirect the nested catalog deletion.
+          if [ -L .ai ] || { [ -e .ai ] && [ ! -d .ai ]; }; then
+            echo "::error::Assessment state root must be a real directory" >&2
+            exit 1
+          fi
           git fetch --depth=1 origin "$BASE_SHA"
           # rm first: `git checkout BASE -- dir` overwrites base content but
           # leaves PR-added files (e.g. scripts/json.py shadowing stdlib) live
@@ -560,6 +575,11 @@ jobs:
           set -euo pipefail
           BASE_SHA="${{ github.event.pull_request.base.sha }}"
           [ -n "$BASE_SHA" ] || { echo "No pull_request base context — nothing to restore"; exit 0; }
+          # A PR-owned .ai symlink would redirect the nested catalog deletion.
+          if [ -L .ai ] || { [ -e .ai ] && [ ! -d .ai ]; }; then
+            echo "::error::Assessment state root must be a real directory" >&2
+            exit 1
+          fi
           git fetch --depth=1 origin "$BASE_SHA"
           # rm first: `git checkout BASE -- dir` overwrites base content but
           # leaves PR-added files (e.g. scripts/json.py shadowing stdlib) live
