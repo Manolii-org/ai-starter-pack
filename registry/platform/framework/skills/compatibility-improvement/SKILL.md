@@ -1,12 +1,15 @@
 ---
 name: compatibility-improvement
-version: 1.0.0
+version: 1.0.1
 scope: platform
 author: AI Starter Pack contributors
 license: Apache-2.0
 description: Read before structural improvement or refactoring of an existing application; preserve consumers, defaults, stored state and in-flight activity.
 type: skill
 safety_tier: green
+requires_mcp: []
+required_entities: []
+tags: [engineering, design, testing]
 ---
 
 # Existing-application improvement

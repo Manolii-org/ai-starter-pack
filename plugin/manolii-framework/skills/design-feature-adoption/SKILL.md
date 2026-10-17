@@ -1,12 +1,15 @@
 ---
 name: design-feature-adoption
-version: 1.0.0
+version: 1.0.1
 scope: platform
 author: AI Starter Pack contributors
 license: Apache-2.0
 description: Read before implementing a design handoff, new feature or substantial redesign; preserve the approved visual contract and verify complete functionality.
 type: skill
 safety_tier: green
+requires_mcp: []
+required_entities: []
+tags: [engineering, design, testing]
 ---
 
 # Design and feature adoption

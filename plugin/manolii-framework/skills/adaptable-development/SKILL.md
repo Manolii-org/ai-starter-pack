@@ -1,12 +1,15 @@
 ---
 name: adaptable-development
-version: 1.0.0
+version: 1.0.1
 scope: platform
 author: AI Starter Pack contributors
 license: Apache-2.0
 description: Standing adaptable-development and design-fidelity policy; rendered into native repository instructions by ai-resolve --native-guidance.
 type: skill
 safety_tier: green
+requires_mcp: []
+required_entities: []
+tags: [engineering, design, testing]
 ---
 
 # Adaptable development and design fidelity

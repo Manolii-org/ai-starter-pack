@@ -1,5 +1,5 @@
 <!-- ai-starter-pack:development-policy:begin -->
-<!-- Generated from platform/framework/skills/adaptable-development/SKILL.md; policy 1.0.0; sha256 595f5d3bd74ca746db0146fde5a0d10dc24637596fdd59b24a4e261f75f8fcfd. -->
+<!-- Generated from platform/framework/skills/adaptable-development/SKILL.md; policy 1.0.1; sha256 e065684e4ad947ac3b6b8fdac475b4ba2ad80bdb37e40d8ea376b0c6d66b7371. -->
 # Adaptable development and design fidelity
 
 Build the current approved feature so likely changes stay local. Scale preparation and verification to the impact of the work; keep trivial unrelated edits proportionate.
