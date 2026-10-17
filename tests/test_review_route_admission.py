@@ -377,6 +377,9 @@ def test_old_helper_preserves_proxy_but_never_admits_direct(monkeypatch, tmp_pat
     if helper is not None:
         (scripts / 'lib').mkdir()
         (scripts / 'lib/agent_capabilities.py').write_text(helper)
+    if name == 'run-judge.py':
+        (scripts / 'lib').mkdir(exist_ok=True)
+        shutil.copy2(ROOT / 'scripts/lib/protected_review.py', scripts / 'lib/protected_review.py')
     spec = importlib.util.spec_from_file_location('old_helper_runner', scripts / name)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -406,6 +409,8 @@ def test_exact_helper_load_ignores_ambient_package_initializer(monkeypatch, tmp_
     (scripts / 'lib').mkdir(parents=True)
     shutil.copy2(ROOT / 'scripts' / name, scripts / name)
     helper = scripts / 'lib/agent_capabilities.py'
+    if name == 'run-judge.py':
+        shutil.copy2(ROOT / 'scripts/lib/protected_review.py', scripts / 'lib/protected_review.py')
     if retained_bytecode:
         helper.write_text('raise AssertionError("retained bytecode executed")\n')
         py_compile.compile(str(helper), doraise=True,

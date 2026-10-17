@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -187,6 +188,22 @@ def test_page_cap_is_bounded(judge, monkeypatch):
     )
 
 
+@pytest.fixture
+def invocation_context(judge, monkeypatch, tmp_path):
+    """Supply the immutable source required by the evidence-grounded protocol."""
+    subject = tmp_path / "subject"
+    subject.mkdir()
+    (subject / "file.py").write_text("def allowed(): return True\n")
+    subprocess.run(["git", "init", "-q", str(subject)], check=True)
+    subprocess.run(["git", "-C", str(subject), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(subject), "-c", "user.name=Offline",
+                    "-c", "user.email=offline@example.invalid", "commit", "-qm", "Source fixture"], check=True)
+    judge.sha = subprocess.check_output(["git", "-C", str(subject), "rev-parse", "HEAD"], text=True).strip()
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(subject))
+    monkeypatch.setenv("PR_BASE_SHA", judge.sha)
+    return rj.Finding("review", "file.py", 1, "WARNING", "Check", "Change the check in file.py:1")
+
+
 @pytest.mark.parametrize(
     "proxied,responses,expected_calls,accepted",
     [
@@ -201,13 +218,18 @@ def test_page_cap_is_bounded(judge, monkeypatch):
     ],
 )
 def test_judge_output_limit_uses_only_existing_retry(
-    judge, monkeypatch, caplog, proxied, responses, expected_calls, accepted
+    judge, monkeypatch, caplog, invocation_context, proxied, responses, expected_calls, accepted
 ):
     """Actual runner refuses even valid JSON with an incomplete API status."""
     endpoint = "https://proxy.example.invalid/v1/messages" if proxied else "https://api.anthropic.com/v1/messages"
     monkeypatch.setattr(rj, "_endpoint", lambda **kwargs: ("offline-placeholder", endpoint, proxied))
     verdict = {"surviving": [], "dropped_count": 1, "review_action": "COMMENT"}
-    text = {"valid": json.dumps(verdict), "partial": "PRIVATE_PARTIAL_VERDICT{", "empty": ""}
+    response_verdict = {"version": 2, "decisions": [{
+        "finding_id": invocation_context.finding_id, "decision": "drop", "gate": "accuracy",
+        "reason": "The supplied file.py:1 defines this intended behavior.",
+        "evidence_ids": [hashlib.sha256(b"file.py|1").hexdigest()[:16]],
+    }], "investigations": []}
+    text = {"valid": json.dumps(response_verdict), "partial": "PRIVATE_PARTIAL_VERDICT{", "empty": ""}
     requests = []
 
     def respond(req, *, timeout=None, host=None):
@@ -222,8 +244,10 @@ def test_judge_output_limit_uses_only_existing_retry(
 
     monkeypatch.setattr(rj, "_urlopen_https", respond)
     with caplog.at_level("INFO"):
-        result = judge.invoke_judge_agent([rj.Finding("review", "file.py", 1, "WARNING", "Check", "Fix")])
-    assert result == (verdict if accepted else None)
+        result = judge.invoke_judge_agent([invocation_context])
+    assert ({key: result[key] for key in verdict} if result is not None else None) == (verdict if accepted else None)
+    if accepted:
+        assert result["complete"] is True and result["decisions"] == response_verdict["decisions"]
     assert len(requests) == expected_calls
     budgets = [4000, 6048] if proxied else [4000]
     assert [request["max_tokens"] for request in requests] == budgets[:expected_calls]
@@ -235,7 +259,7 @@ def test_judge_output_limit_uses_only_existing_retry(
 
 
 @pytest.mark.parametrize("error", [TimeoutError("unknown remote outcome"), ValueError("malformed response")])
-def test_judge_transport_failure_is_not_replayed(judge, monkeypatch, error):
+def test_judge_transport_failure_is_not_replayed(judge, monkeypatch, invocation_context, error):
     monkeypatch.setattr(rj, "_endpoint", lambda **kwargs: ("offline-placeholder", "https://proxy.example.invalid/v1/messages", True))
     requests = []
 
@@ -244,7 +268,7 @@ def test_judge_transport_failure_is_not_replayed(judge, monkeypatch, error):
         raise error
 
     monkeypatch.setattr(rj, "_urlopen_https", fail)
-    assert judge.invoke_judge_agent([rj.Finding("review", "file.py", 1, "WARNING", "Check", "Fix")]) is None
+    assert judge.invoke_judge_agent([invocation_context]) is None
     assert len(requests) == 1
 
 
@@ -348,8 +372,9 @@ def test_marker_text_appears_exactly_once_in_the_source():
 
 
 @pytest.mark.parametrize("acknowledgement", ["posted", "failed", "empty", "malformed_id"])
+@pytest.mark.parametrize("failure", ["invocation", "specificity", "adjudication"])
 def test_failed_judge_retires_only_stale_approval_after_advisory_ack(
-    judge, monkeypatch, tmp_path, caplog, acknowledgement
+    judge, monkeypatch, tmp_path, caplog, acknowledgement, failure
 ):
     """Exercise run, real advisory posting and authenticated dismissal together."""
     judge.candidates_dir = tmp_path / "candidates"
@@ -358,10 +383,13 @@ def test_failed_judge_retires_only_stale_approval_after_advisory_ack(
     (judge.candidates_dir / "review.json").write_text(json.dumps({
         "source": "review", "findings": [{
             "file": "policy.py", "line": 3, "severity": "ERROR",
-            "message": "Missing tenant guard", "fix": "Add tenant guard at policy.py:3",
+            "message": "Missing tenant guard", "fix": "" if failure == "specificity" else "Add tenant guard at policy.py:3",
         }],
     }))
-    monkeypatch.setattr(judge, "invoke_judge_agent", lambda findings: None)
+    monkeypatch.setattr(judge, "invoke_judge_agent", lambda findings: (
+        {"surviving": [], "dropped_count": 1, "complete": False, "decisions": []}
+        if failure == "adjudication" else None
+    ))
     reviews = [
         _review_full(rj.REVIEW_MARKER, state="APPROVED", review_id=1),
         _review_full(rj.REVIEW_MARKER, state="CHANGES_REQUESTED", review_id=2),
