@@ -50,7 +50,7 @@ def merge(data: bytes, wanted: bytes, recorded: str | None) -> bytes:
     if recorded:
         raise ValueError("managed policy block was removed; reconcile manually")
     # Keep the entire pre-existing file byte-for-byte after the new block.
-    return wanted + b"\n\n" + data
+    return wanted + (b"\n\n" + data if data else b"\n")
 
 
 def live_import(data: bytes, target: bytes) -> bool:
