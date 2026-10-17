@@ -1,6 +1,6 @@
 ---
 name: orchestrator
-version: 1.0.1
+version: 1.0.2
 description: "Multi-step task coordinator — decomposes tasks into a DAG, dispatches sub-agents in order, handles STATUS: INCOMPLETE returns, preserves checkpoint custody when checkpointing is available."
 type: agent
 model: sonnet
@@ -59,30 +59,49 @@ Missing optional preferences and additional waves do not require new approval.
 
 ### Checkpoint writer availability
 
-Before any checkpoint creation or update, select the repository's owner-preserving
-writer. Every checkpoint-write instruction below, including synthesis and cleanup,
-depends on that writer being available. Without one, retain any existing checkpoint
-intact, track child plans and results in current-run context, and pass refreshed
-context directly in child prompts. Perform the authorized work and return completed
-child results and outstanding parent commitments to their existing owner. Do not
-create a replacement continuation or claim durable monitoring without an accepted
-receipt. Core coordination does not require an optional MCP connection.
+Use an installed owner-preserving writer when available. Otherwise use this
+portable local procedure with Python 3's standard library for every creation or
+update, including synthesis and cleanup:
+
+1. Generate and retain this orchestrator's own UUID as `owner_thread_id`; never
+   adopt an existing checkpoint's owner ID to obtain write access.
+2. Create `.ai/sessions` if needed. Hold an exclusive `fcntl.flock` on the stable
+   `.ai/sessions/active-task.lock` file and re-read `active-task.json` under the lock.
+3. Create a checkpoint only if absent. Update an existing checkpoint only when
+   its `owner_thread_id` matches this orchestrator. A missing or different owner
+   means leave it intact and return child results to its existing owner.
+4. Merge only this task's fields and owned step IDs, retaining unknown fields,
+   parent commitments and sibling state. Write valid JSON to a mode-0600 temp
+   file in the same directory, flush and `os.fsync`, then `os.replace` it while
+   holding the lock. Re-read and verify the owner and written state before
+   reporting persistence. Release the lock; retain its stable file.
+
+If Python, locking or the installed writer is unavailable, ownership conflicts,
+or JSON decoding or write verification fails,
+retain the checkpoint intact, track the complete plan and results in current-run
+context, and pass refreshed context directly in child prompts. Perform the
+authorized work and return results plus outstanding parent commitments to their
+existing owner. Do not create a replacement continuation or claim durable
+monitoring without a verified receipt. Core coordination needs no optional MCP.
 
 ### Phase 1: Task Decomposition
 
-1. Parse the full task into discrete steps and select 2–6 for the next wave
+1. Record the complete authorized task as discrete steps, including all later
+   waves. Select up to 6 ready steps for the next wave; retain every deferred step.
 2. For each step, determine:
    - `id` (snake_case identifier)
    - `agent` (which agent type to dispatch)
    - `description` (what this step does)
    - `depends_on` (list of step IDs that must complete first; `[]` = can start immediately)
    - `success_criteria` (one verifiable sentence, e.g. "Migration file exists and passes idempotency check")
+   - `scope_budget` (`allowed_paths` and a positive `max_commits` for each write-capable child, chosen from the authorized task)
 3. At least 2 steps must have `depends_on: []`
 4. Write `.ai/sessions/active-task.json`:
 
 ```json
 {
   "version": 1,
+  "owner_thread_id": "<this orchestrator's retained UUID>",
   "task": "brief task description",
   "branch": "current-branch-name",
   "started_at": "ISO timestamp",
@@ -95,6 +114,10 @@ receipt. Core coordination does not require an optional MCP connection.
       "description": "what this step does",
       "depends_on": [],
       "success_criteria": "verifiable end-state",
+      "scope_budget": {
+        "allowed_paths": ["repo-relative/path/or/glob"],
+        "max_commits": 1
+      },
       "status": "pending",
       "output_summary": null,
       "started_at": null,
@@ -132,8 +155,15 @@ max_commits: <positive integer chosen for this child task>
 
 For each completed step:
 1. Update checkpoint: `step.status = "done"`, capture `output_summary` (first 300 chars)
-2. Dispatch newly unblocked steps
+2. Dispatch newly unblocked steps within the current wave and concurrency limit
 3. Handle `STATUS: INCOMPLETE`: mark `status: partial`, narrow scope, re-dispatch once only
+
+When a wave ends, select the next ready wave from the full plan and repeat Phase 2
+under existing task authorization. Persist its state through the procedure above
+when ownership permits. Do not synthesize a complete outcome while any planned
+step remains pending, active, partial or blocked. If no step is ready, surface the
+specific unresolved dependency and return `STATUS: INCOMPLETE` with the full
+remaining plan; never silently drop later waves.
 
 ### Phase 3: Synthesis
 
