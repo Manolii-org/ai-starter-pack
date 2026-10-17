@@ -1,6 +1,6 @@
 ---
 name: orchestrator
-version: 1.0.7
+version: 1.1.0
 description: "Multi-step task coordinator — decomposes tasks into a DAG, dispatches sub-agents in order, handles STATUS: INCOMPLETE returns, preserves checkpoint custody when checkpointing is available."
 type: agent
 model: sonnet
@@ -59,11 +59,29 @@ Missing optional preferences and additional waves do not require new approval.
 
 ### Checkpoint writer availability
 
-Use an installed owner-preserving writer when available. Otherwise use this
+Orchestrator-owned state uses `.ai/sessions/orchestrator/<logical_task_id>.json`
+and its stable `.json.lock` file. Generate `logical_task_id` with `uuid.uuid4()`;
+validate and normalize retained IDs with `uuid.UUID` before reuse. Caller/thread
+identifiers stay metadata in the receipt and are never substituted into paths.
+Check resolved state paths stay within this repository's `.ai/sessions` tree.
+
+The shared `.ai/sessions/active-task.json` remains owned by the calling executor
+and other workflows such as `/watch-pr`. Treat it as read-only context here;
+never replace, delete or directly update it. Return child outcomes and the
+per-task checkpoint/receipt references to its owner for updates through that
+owner's protocol. Preserve legacy checkpoint state rather than migrating it
+without a verified owner handoff. Other logical tasks use different files.
+
+Admit an installed writer only if it supports this dedicated path, orchestration
+schema and per-task locking/ownership protocol; a parent-continuation helper
+alone is not such a writer. Otherwise use the portable procedure below.
+
+
+Use an admitted owner-preserving writer when available. Otherwise use this
 portable local procedure with Python 3's standard library for every creation or
 update, including synthesis and cleanup:
 
-Before opening the lock or writing state, create `.ai/sessions`,
+Before opening the lock or writing state, create `.ai/sessions`, `.ai/sessions/orchestrator`,
 `.ai/sessions/orchestrator-receipts` and `.ai/sessions/archive` with
 `Path.mkdir(parents=True, exist_ok=True, mode=0o700)`. Fsync the parents of newly
 created directories. Fail safely on conflicting non-directory paths.
@@ -76,15 +94,15 @@ created directories. Fail safely on conflicting non-directory paths.
    non-existing `.ai/sessions/archive/<logical_task_id>-<uuid>.json` path in
    this receipt for the entire logical task.
    Return its reference to the caller's retained task context. Before creating
-   a singleton, verify an authoritative stable caller/task identity or that the
+   a per-task checkpoint, verify an authoritative stable caller/task identity or that the
    caller retained the receipt; otherwise use current-run state so a crash
-   before receipt delivery cannot orphan a singleton. Verify receipt readback
+   before receipt delivery cannot orphan a per-task checkpoint. Verify receipt readback
    before claiming recoverable custody. Never infer caller identity from a
    checkpoint or child-supplied payload.
    Keep this logical-task receipt immutable across controller transfers. Its
    authority binds the logical task and trusted caller, not a current owner UUID.
 2. Hold an exclusive `fcntl.flock` on the stable
-   `.ai/sessions/active-task.lock` file and re-read `active-task.json` under the lock.
+   `.ai/sessions/orchestrator/<logical_task_id>.json.lock` file and re-read the per-task checkpoint under the lock.
 3. Create a checkpoint only if absent. Update an existing checkpoint only when
    its `owner_thread_id` matches this orchestrator, except for the verified
    recovery transfer described below. A missing or different owner without that recovery
@@ -115,12 +133,12 @@ monitoring without a verified receipt. Core coordination needs no optional MCP.
    - `success_criteria` (one verifiable sentence, e.g. "Migration file exists and passes idempotency check")
    - `scope_budget` (`allowed_paths` and a positive `max_commits` for each write-capable child, chosen from the authorized task)
 3. At least 2 steps must have `depends_on: []`
-4. Write `.ai/sessions/active-task.json`:
+4. Write `.ai/sessions/orchestrator/<logical_task_id>.json`:
 
 ```json
 {
   "version": 1,
-  "logical_task_id": "<stable caller-bound task ID>",
+  "logical_task_id": "<generated canonical UUID mapped to the trusted caller task>",
   "owner_thread_id": "<this orchestrator's retained UUID>",
   "controller_reference": "<trusted runtime/caller handle for this owner>",
   "custody_receipt": "<verified receipt reference with reserved archive path>",
@@ -175,6 +193,9 @@ allowed_paths: <comma-separated repo-relative paths/globs>
 max_commits: <positive integer chosen for this child task>
 ```
 
+The caller verifies each child’s changed paths and commit count against its
+issued budget before accepting completion.
+
 For each completed step:
 1. Update checkpoint: `step.status = "done"`, capture `output_summary` (first 300 chars)
 2. Dispatch newly unblocked steps within the current wave and concurrency limit
@@ -195,6 +216,8 @@ After all steps complete:
 3. Through the selected owner-preserving custody protocol, update only this child's checkpoint fields
    and preserve parent commitments, approvals, ownership and continuation state.
    Without verified custody, return results to the existing owner without checkpoint writes.
+4. Return results, resolved per-task checkpoint/custody-receipt references, and
+   outstanding parent commitments to the calling executor.
 
 ### Phase 4: Checkpoint Cleanup
 
@@ -205,13 +228,14 @@ A finished child or merged PR does not complete the parent task. Keep partial,
 failed and pending parent outcomes explicitly unfinished.
 
 When the entire top-level task and all recorded parent/sibling commitments are
-verified complete, its current owner must release the singleton for later tasks.
+verified complete, its current owner archives its completed per-task record.
+Other logical tasks already use independent paths.
 Use the installed writer's completion/archive operation, or, for a checkpoint
 created by the portable procedure, hold the same stable lock, re-read and verify
 the current owner UUID and complete state, then atomically move it to the unique
 non-existing archive path reserved in the logical task's custody receipt.
 Fsync both source and destination directories. Verify the archive and absence
-of `active-task.json` under the lock, with completion recorded in the archived checkpoint,
+of the per-task checkpoint under the lock, with completion recorded in the archived checkpoint,
 and return the verified archive/release receipt. Retain the lock file. Never archive another owner's,
 legacy/unowned or unfinished checkpoint. If archive verification fails, report
 the actual state and let the existing owner recover; do not claim successful
@@ -227,7 +251,7 @@ verified handoff operation, the same authoritative stable caller/task identity,
 or a custody receipt supplied from the trusted caller's retained task context.
 On every authenticated resume, first check the task's bound archive under the
 stable lock. If its binding and completed outcome verify, return that result
-even when another task now owns `active-task.json`; leave that task untouched.
+even while another logical task is active; leave its files and the shared parent untouched.
 Under the stable lock, verify the immutable receipt/checkpoint repository, worktree and logical
 task bindings, and verify the previous controller is terminal or the trusted
 executor has explicitly handed off its work. That status/handoff must identify
@@ -244,7 +268,7 @@ branch change needs an explicit same-task handoff recording the old/new branch,
 not another human approval. Reading an owner UUID or receipt from disk alone is
 not authority to resume. If caller provenance or worker status cannot be verified,
 leave custody intact and return current-run results to its existing owner.
-Never create another singleton or repeat completed work merely because the active
+Never create another per-task checkpoint or repeat completed work merely because the active
 file is absent. If neither this task's active nor bound archive state can be verified, preserve the
 receipts, report the custody limitation and continue independent authorized work.
 
