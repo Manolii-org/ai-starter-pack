@@ -37,7 +37,9 @@ The checker reports the configured local Codex chain and fallback filenames,
 including global-file size and Git-ignored nested instruction files, without
 printing global instruction contents. Git enumeration is limited to instruction
 filenames so unrelated ignored build/dependency files do not fill its output.
-Do not raise limits to conceal oversized guidance. A long legacy AGENTS tail
+Codex configuration/chain checks and Devin's inclusion-window check apply only
+when that surface is selected in the manifest. Do not raise limits to conceal
+oversized guidance. A long legacy AGENTS tail
 may still be truncated by Devin even though the new essential policy is early.
 
 ## Adoption and verification

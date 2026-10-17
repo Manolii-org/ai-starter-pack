@@ -257,6 +257,40 @@ def test_unsupported_manifest_values_are_rejected(consumer, surfaces):
     assert not (root / "AGENTS.md").exists()
 
 
+@pytest.mark.parametrize("surface", ["claude-code", "cursor", "devin"])
+@pytest.mark.parametrize("config", ["project_doc_max_bytes = 1\n", "invalid TOML [\n"])
+def test_unselected_codex_configuration_does_not_block_install(consumer, surface, config):
+    root, _ = consumer
+    manifest = root / "ai-manifest.yaml"
+    manifest.write_text(manifest.read_text().replace(
+        "[claude-code, codex, cursor, devin]", "[" + surface + "]"))
+    (root / ".codex").mkdir()
+    (root / ".codex/config.toml").write_text(config)
+    result = run(consumer, "--apply")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Codex largest instruction chain" not in result.stdout
+    assert "codex not selected" in result.stdout
+    assert json.loads((root / native.LOCK).read_text())["surfaces"] == [surface]
+    assert run(consumer, "--check").returncode == 0
+
+
+@pytest.mark.parametrize("surface", ["claude-code", "codex", "cursor", "devin"])
+def test_devin_window_only_blocks_selected_devin(consumer, surface):
+    root, _ = consumer
+    manifest = root / "ai-manifest.yaml"
+    manifest.write_text(manifest.read_text().replace(
+        "[claude-code, codex, cursor, devin]", "[" + surface + "]"))
+    assert run(consumer, "--apply").returncode == 0
+    agents = root / "AGENTS.md"
+    agents.write_bytes(b"Local curated introduction.\n" + b"x" * 20000 + b"\n" + agents.read_bytes())
+    before = files(root)
+    result = run(consumer, "--check")
+    assert result.returncode == (1 if surface == "devin" else 0), result.stdout + result.stderr
+    if surface == "devin":
+        assert "Devin's 16 KiB inclusion limit" in result.stdout
+    assert files(root) == before
+
+
 def test_mixed_advisory_surface_installs_supported_subset(consumer):
     root, _ = consumer
     manifest = root / "ai-manifest.yaml"

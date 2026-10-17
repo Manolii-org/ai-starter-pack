@@ -338,9 +338,9 @@ def _resolve(args, root, resolver, manifest, registry, index):
     if set(records) - set(outputs):
         raise ValueError("surface selection removes managed files; revert their owning commit explicitly")
     for rel in ("AGENTS.md", "AGENTS.override.md"):
-        if rel in outputs and outputs[rel].index(END) + len(END) > 16384:
+        if "devin" in surfaces and rel in outputs and outputs[rel].index(END) + len(END) > 16384:
             raise ValueError(f"{rel}: policy lies beyond Devin's 16 KiB inclusion limit")
-    audit = instruction_audit(root, outputs)
+    audit = instruction_audit(root, outputs) if "codex" in surfaces else None
     new_lock = {"schema": SCHEMA, "plugin": "platform/framework", "ref": entry["ref"],
                 "resolved_version": entry["resolved_version"], "policy_version": version,
                 "source_sha256": digest(sources[NAMES[0]]), "surfaces": surfaces,
@@ -352,7 +352,10 @@ def _resolve(args, root, resolver, manifest, registry, index):
     outputs[LOCK] = (json.dumps(new_lock, indent=2, sort_keys=True) + "\n").encode()
     changes = [rel for rel, data in outputs.items() if snapshots[rel] is None or snapshots[rel][0] != data]
     print(f"Native policy {version}: {', '.join(surfaces)}; {len(policy.split())} standing words")
-    print(f"Codex largest instruction chain: {max(c['bytes'] for c in audit['chains'])}/{audit['codex_limit']} bytes; global {audit['global_bytes']} bytes")
+    if audit is not None:
+        print(f"Codex largest instruction chain: {max(c['bytes'] for c in audit['chains'])}/{audit['codex_limit']} bytes; global {audit['global_bytes']} bytes")
+    else:
+        print("Codex instruction audit: not requested (codex not selected)")
     for rel in changes:
         print(f"  {'write' if args.apply else 'would-write'} {rel}")
     if args.check:
