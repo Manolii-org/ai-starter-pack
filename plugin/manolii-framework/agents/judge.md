@@ -154,7 +154,7 @@ frozen qualification experiments must retain their own criteria and outcomes.
 
 When the same shared evidence budget permits, the automated runner attaches a
 complete Git diff at the actual merge base and complete contents of a small
-tracked HEAD tree. These are supplemental version2 evidence, never truncated
+tracked HEAD tree. These are supplemental version-2 evidence, never truncated
 excerpts described as complete. The requested target base and actual merge base
 are distinct. Deleted-file evidence explicitly names the old base blob and points
 to the complete deletion diff; it is not represented as live HEAD content.
@@ -162,7 +162,7 @@ to the complete deletion diff; it is not represented as live HEAD content.
 Complete tracked-tree context can support cross-file policy and test-presence
 claims within that tree. It does not prove external/generated test coverage or
 execution. A claim that needs omitted context remains investigate/incomplete.
-The existing20,000-character shared text budget and2MB per-file refusal remain;
+The existing 20,000-character shared text budget and 2 MB per-file refusal remain;
 no source-classification, provider, output or retry limit is expanded.
 
 

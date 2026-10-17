@@ -456,6 +456,301 @@ def test_sensitive_strings_refuse_dispatch_before_json_escaping(
     assert judge.invoke_judge_agent([f]) is None
 
 
+@pytest.mark.parametrize("unavailable", ["missing", "sensitive", "budget"])
+@pytest.mark.parametrize("severity", ["ERROR", "WARNING"])
+@pytest.mark.parametrize("acknowledged", [True, False])
+def test_mixed_evidence_keeps_verified_findings_without_clearing_old_blocks(
+    repo, monkeypatch, unavailable, severity, acknowledged
+):
+    root, head = repo
+    private_literal = 'PASSWORD = "offline-fixture-value"'
+    path, line = "missing.py", 1
+    if unavailable != "missing":
+        path = "unavailable.py"
+        (root / path).write_text(private_literal + "\n" if unavailable == "sensitive"
+                                 else "# ordinary complete source\n" * 1000)
+        git(root, "add", path)
+        git(root, "commit", "-m", "Unavailable evidence fixture")
+        head = git(root, "rev-parse", "HEAD")
+        line = 1 if unavailable == "sensitive" else None
+    supported, unknown = finding(), finding(path, line)
+    supported.severity = severity
+    rows = [supported, unknown]
+    judge = j.Judge(str(root), 1, head)
+    judge.judge_log_dir = root / "logs"
+    monkeypatch.setattr(j, "_endpoint", lambda **kw:
+                        ("offline", "https://example.invalid/v1/messages", False))
+    sent = []
+
+    def transport(request, **kw):
+        body = json.loads(request.data)
+        assert "offline-fixture-value" not in body["messages"][0]["content"]
+        sent.append(body)
+        verdict = answer(supported)
+        unresolved = answer(unknown, "investigate")["decisions"][0]
+        unresolved["evidence_ids"] = []
+        verdict["decisions"].append(unresolved)
+        return Response(json.dumps({"content": [{"type": "text", "text": json.dumps(verdict)}],
+                                    "stop_reason": "end_turn"}).encode())
+
+    monkeypatch.setattr(j, "_urlopen_https", transport)
+    result = judge.invoke_judge_agent(rows)
+    assert len(sent) == 1 and not result["complete"]
+    assert len(result["decisions"]) == len(rows)  # Missing evidence stays in the denominator.
+    assert result["surviving"] == [supported.to_dict()]
+    expected = "REQUEST_CHANGES" if severity == "ERROR" else "COMMENT"
+    assert result["review_action"] == expected
+    monkeypatch.setattr(judge, "load_candidates", lambda: rows)
+    monkeypatch.setattr(judge, "invoke_judge_agent", lambda _: result)
+    posted, retired = [], []
+    monkeypatch.setattr(judge, "post_review_to_github",
+                        lambda findings, action: posted.append((findings, action)) or acknowledged)
+    monkeypatch.setattr(judge, "_dismiss_stale_judge_reviews", lambda states: retired.append(states))
+    monkeypatch.setattr(judge, "_post_no_findings_comment", lambda: pytest.fail("false clean"))
+    judge.run()
+    assert judge._adjudication_incomplete and posted == [([supported.to_dict()], expected)]
+    assert retired == ([("APPROVED",)] if acknowledged else [])
+
+
+@pytest.mark.parametrize("failure", ["missing", "corrupt", "protected-skip", "other-skip"])
+@pytest.mark.parametrize("acknowledged", [True, False])
+def test_empty_incomplete_capture_never_retires_blocking_reviews(repo, monkeypatch, failure, acknowledged):
+    root, head = repo
+    candidates = root / "candidates"
+    if failure != "missing":
+        candidates.mkdir()
+        body = "bad json" if failure == "corrupt" else json.dumps({
+            "source": "security-boundary-test" if failure == "protected-skip" else "architecture-impact",
+            "first_party": failure == "protected-skip", "skipped": "unavailable", "findings": []})
+        (candidates / "candidate.json").write_text(body)
+    judge = j.Judge(str(candidates), 1, head)
+    judge.judge_log_dir = root / "logs"
+    retired = []
+    monkeypatch.setattr(judge, "_post_advisory_warning", lambda *_: acknowledged)
+    monkeypatch.setattr(judge, "_dismiss_stale_judge_reviews", lambda states: retired.append(states))
+    monkeypatch.setattr(judge, "_post_no_findings_comment", lambda: pytest.fail("false clean"))
+    monkeypatch.setattr(judge, "invoke_judge_agent", lambda *_: pytest.fail("empty review dispatch"))
+    judge.run()
+    assert retired == ([("APPROVED",)] if acknowledged else [])
+
+
+@pytest.mark.parametrize("ack", ["valid", "empty", "string", "boolean", "zero", "negative", "list", "invalid-json", "lost"])
+@pytest.mark.parametrize("severity", ["ERROR", "WARNING"])
+def test_partial_source_real_run_discloses_gap_and_requires_delivery_ack(repo, monkeypatch, ack, severity):
+    root, head = repo
+    supported, unknown = finding(), finding("missing.py", 1)
+    supported.severity = severity
+    judge = j.Judge(str(root), 1, head)
+    judge.token, judge.repo = "offline-fixture", "example/repository"
+    judge.judge_log_dir = root / "logs"
+    monkeypatch.setattr(judge, "load_candidates", lambda: [supported, unknown])
+    monkeypatch.setattr(j, "_endpoint", lambda **kw:
+                        ("offline", "https://example.invalid/v1/messages", False))
+    reviews = [{"id": rid, "body": j.REVIEW_MARKER, "commit_id": head,
+                "user": {"login": j.JUDGE_REVIEW_AUTHOR}, "state": state}
+               for rid, state in [(1, "APPROVED"), (2, "CHANGES_REQUESTED")]]
+    calls = []
+
+    def transport(request, **kw):
+        method, url = request.get_method(), request.full_url
+        calls.append((method, url))
+        if url == "https://example.invalid/v1/messages":
+            verdict = answer(supported)
+            unresolved = answer(unknown, "investigate")["decisions"][0]
+            unresolved["evidence_ids"] = []
+            verdict["decisions"].append(unresolved)
+            return Response(json.dumps({"content": [{"type": "text", "text": json.dumps(verdict)}],
+                                        "stop_reason": "end_turn"}).encode())
+        if method == "GET":
+            return Response(json.dumps(reviews).encode())
+        if method == "PUT":
+            return Response(b"{}")
+        assert method == "POST" and url.endswith("/reviews")
+        body = json.loads(request.data)
+        assert "**Incomplete coverage:** source evidence or adjudication" in body["body"]
+        assert body["event"] == ("REQUEST_CHANGES" if severity == "ERROR" else "COMMENT")
+        assert "Missing tenant-denial test" in body["body"]
+        if ack == "lost":
+            raise OSError("offline response lost; remote outcome unknown")
+        if ack == "invalid-json":
+            return Response(b"not json")
+        response = {"valid": {"id": 5}, "empty": {}, "string": {"id": "5"},
+                    "boolean": {"id": True}, "zero": {"id": 0}, "negative": {"id": -5}, "list": []}[ack]
+        return Response(json.dumps(response).encode())
+
+    monkeypatch.setattr(j, "_urlopen_https", transport)
+    assert judge.run() == 0
+    assert judge._adjudication_incomplete
+    assert sum(url == "https://example.invalid/v1/messages" for _, url in calls) == 1
+    assert sum(method == "POST" and url.endswith("/reviews") for method, url in calls) == 1
+    assert [url for method, url in calls if method == "PUT"] == (
+        ["https://api.github.com/repos/example/repository/pulls/1/reviews/1/dismissals"] if ack == "valid" else [])
+    assert judge._posted_review_id == (5 if ack == "valid" else None)
+
+
+@pytest.mark.parametrize("rhs", [
+    'os.getenv("GITHUB_TOKEN")', 'os.environ.get("GITHUB_TOKEN")',
+    'os.environ["GITHUB_TOKEN"]', 'get_password()',
+    'os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")',
+])
+def test_reference_only_git_source_survives_numbering_and_real_request(repo, monkeypatch, rhs):
+    root, _ = repo
+    source = f'π = 1; token = {rhs}\n'
+    (root / "policy.py").write_text(source)
+    (root / "link.py").unlink()
+    git(root, "add", "-A")
+    git(root, "commit", "-m", "Reference-only immutable source")
+    head = git(root, "rev-parse", "HEAD")
+    f = finding(line=None)
+    evidence = j._judge_evidence([f], head)
+    row = evidence["locations"][loc(f)]
+    assert row["status"] == "available" and row["whole_file"]
+    assert row["content_sha256"] == hashlib.sha256(source.encode()).hexdigest()
+    assert row["text"] == "1: " + source.rstrip("\n")
+    assert evidence["repository_context"]["status"] == "complete_tracked_head"
+    j._require_safe_packet(evidence)  # Proof survives both numbered source projections.
+    # Raw diff statements have no source-span proof: no excerpts or false
+    # complete-diff claims are substituted when that strict check refuses it.
+    assert evidence["diff"]["status"] == "unavailable_or_over_budget"
+    assert "text" not in evidence["diff"]
+    judge = j.Judge("unused", 1, head)
+    monkeypatch.setattr(j, "_endpoint", lambda **kw:
+                        ("offline", "https://example.invalid/v1/messages", False))
+    sent = []
+
+    def transport(request, **kw):
+        sent.append(json.loads(request.data))
+        return Response(json.dumps({"content": [{"type": "text", "text": json.dumps(answer(f))}],
+                                    "stop_reason": "end_turn"}).encode())
+
+    monkeypatch.setattr(j, "_urlopen_https", transport)
+    result = judge.invoke_judge_agent([f])
+    assert len(sent) == 1 and result["complete"] and result["surviving"] == [f.to_dict()]
+
+
+@pytest.mark.parametrize("source", [
+    'password = "offline-fixture-value"', 'password = offline_fixture_value',
+    'password = 1234567890', 'password = os.getenv("PASSWORD", "literal-default")',
+    'password = os.getenv("PASSWORD", default="literal-default")',
+    'password = get_password("literal-value")', 'password = unknown_getter()',
+    'password = os.getenv("PASSWORD") + "literal-value"',
+    'password = os.getenv("PASSWORD") if condition else get_password()',
+    'password = os.getenv("PASSWORD") or "literal-value"',
+    'password = os.getenv("PASSWORD") + f"{other}"',
+    'password = os.getenv(',
+    'token = os.getenv("TOKEN"); password = offline_fixture_value',
+    'token = os.getenv("TOKEN")  # password = offline_fixture_value',
+    'doc = "password = get_password()"',
+    '"""password = get_password()"""',
+    'π = 1; password = offline_fixture_value',
+])
+def test_reference_proof_does_not_exempt_literals_or_unproved_text(source):
+    for value in (j._source_text(source, "source.py"),
+                  j._numbered_source(j._source_text(source, "source.py"))):
+        with pytest.raises(ValueError, match="sensitive review material"):
+            j._require_safe_packet({"evidence": value})
+
+
+def test_reference_proof_never_exempts_catalog_or_other_packet_fields():
+    source = 'token = os.getenv("GITHUB_TOKEN")'
+    proved = j._source_text(source, "source.py")
+    j._require_safe_packet(proved)
+    # Shape-only fixture, not an actual credential. The env name is a valid
+    # Python identifier but the unchanged catalog must still reject it.
+    shaped = 'token = os.getenv("ghp_' + "a" * 36 + '")'
+    with pytest.raises(ValueError, match="sensitive review material"):
+        j._require_safe_packet(j._source_text(shaped, "source.py"))
+    for value in (source, j._source_text(source, "source.md"),
+                  j._numbered_source(source),
+                  {"verified_source": proved, "candidate_prose": source}):
+        with pytest.raises(ValueError, match="sensitive review material"):
+            j._require_safe_packet(value)
+
+
+@pytest.mark.parametrize("catalog", [None, '{"patterns": []}', '{"patterns": [{"regex": "["}]}'])
+def test_reference_proof_cannot_bypass_missing_or_malformed_catalog(tmp_path, monkeypatch, catalog):
+    monkeypatch.setattr(j, "__file__", str(tmp_path / "scripts/run-judge.py"))
+    if catalog is not None:
+        path = tmp_path / ".ai/security/token-shapes.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(catalog)
+    with pytest.raises(ValueError, match="catalog"):
+        j._require_safe_packet(j._source_text('token = os.getenv("TOKEN")', "source.py"))
+
+
+def test_actual_judge_environment_bindings_have_verified_source_proof():
+    source = (ROOT / "scripts/run-judge.py").read_text()
+    proved = j._source_text(source, "scripts/run-judge.py")
+    assert proved == source and "self.token = os.getenv" in source
+    j._require_safe_packet(proved)
+
+
+@pytest.mark.parametrize("condition", ["api_key", "not api_key", "ready and not self.token", "left == password"])
+@pytest.mark.parametrize("keyword", ["if", "while"])
+def test_control_flow_references_are_not_credential_assignments(condition, keyword):
+    source = f"{keyword} {condition}:\n    logger.error('unavailable')\n"
+    proved = j._source_text(source, "source.py")
+    assert proved == source
+    j._require_safe_packet(proved)
+    j._require_safe_packet(j._numbered_source(proved))
+
+
+@pytest.mark.parametrize("source", [
+    'if token: password = offline_fixture_value',
+    'if token:\n    password = offline_fixture_value',
+    'while not token:\n    password = "offline-fixture-value"',
+    'if (token := reference):\n    password = offline_fixture_value',
+    'if (password := offline_fixture_value):\n    logger.error("unavailable")',
+    'if api_key:\n    (password := "offline-fixture-value")',
+    'if api_key:\n    (password := offline_fixture_value)',
+    'while api_key:\n    (password := "offline-fixture-value")',
+    '(password := "offline-fixture-value")',
+    '(password := offline_fixture_value)',
+    'if token:\n    # password = offline_fixture_value\n    pass',
+    '"""if token: password = offline_fixture_value"""',
+])
+def test_control_flow_proof_does_not_mask_body_walrus_or_prose(source):
+    proved = j._source_text(source, "source.py")
+    for value in (proved, j._numbered_source(proved), {"evidence": j._numbered_source(proved)}):
+        with pytest.raises(ValueError, match="sensitive review material"):
+            j._require_safe_packet(value)
+
+
+def test_walrus_is_not_recognized_as_a_safe_reference():
+    source = 'if (token := os.getenv("TOKEN")):\n    pass\n'
+    proved = j._source_text(source, "source.py")
+    assert not proved.reference_spans
+
+
+def test_nfkc_identifier_cannot_mask_a_preceding_literal_or_packet_field():
+    prefix = "password = offline_fixture_value; "
+    source = prefix + "\ufb00" * len(prefix) + 'token = os.getenv("TOKEN")\n'
+    proved = j._source_text(source, "source.py")
+    assert proved == source and not proved.reference_spans
+    for value in (proved, j._numbered_source(proved), {"evidence": j._numbered_source(proved)}):
+        with pytest.raises(ValueError, match="sensitive review material"):
+            j._require_safe_packet(value)
+
+
+def test_deep_unknown_reference_falls_back_strictly_without_recursion_error():
+    source = "password = root" + ".attribute" * 1200 + "()\n"
+    proved = j._source_text(source, "source.py")
+    with pytest.raises(ValueError, match="sensitive review material"):
+        j._require_safe_packet(proved)
+
+
+def test_many_unicode_references_preserve_exact_projection_and_other_secrets():
+    source = "π = 1; " + "; ".join(f'token_{n}_token = os.getenv("TOKEN_{n}")' for n in range(800)) + "\n"
+    proved = j._source_text(source, "source.py")
+    j._require_safe_packet(proved)
+    numbered = j._numbered_source(proved)
+    assert numbered == "1: " + source.rstrip("\n")
+    j._require_safe_packet(numbered)
+    mixed = j._source_text(source + "password = offline_fixture_value\n", "source.py")
+    with pytest.raises(ValueError, match="sensitive review material"):
+        j._require_safe_packet(j._numbered_source(mixed))
+
+
 def test_unresolved_group_is_not_a_survivor(repo):
     _, head = repo
     f = finding()

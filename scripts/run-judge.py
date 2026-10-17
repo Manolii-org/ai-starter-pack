@@ -13,6 +13,9 @@ Usage:
 """
 
 import argparse
+import ast
+from array import array
+from bisect import bisect_left
 import hashlib
 import importlib.util
 import json
@@ -102,7 +105,7 @@ def _proxy_transport_key() -> str:
 def _endpoint(direct: bool = False) -> tuple[str, str, bool]:
     """Resolve (api_key, url, proxied).
 
-    Transport token: ANTHROPIC_API_KEY when calling Anthropic directly. When
+    Transport uses ANTHROPIC_API_KEY when calling Anthropic directly. When
     LITELLM_PROXY_URL or ANTHROPIC_BASE_URL points at a non-Anthropic host the
     request goes through that proxy with _proxy_transport_key().
 
@@ -252,11 +255,133 @@ def _sensitive_evidence_path(name: str) -> bool:
             or path.suffix.lower() in {".pem", ".key", ".p12", ".pfx", ".jks"})
 
 
+_CREDENTIAL_ASSIGNMENT = re.compile(r"(?i)\b([A-Za-z0-9_]*(?:api[_-]?key|secret|token|password|passwd))(\s*(?::=|[:=])\s*)(['\"]?)[^\s'\"]{8,}\3")
+
+
+class _VerifiedSourceText(str):
+    """Unchanged Git source with locally proved reference-identifier spans.
+
+    JSON producers cannot supply this type. It is not an executor/auth boundary.
+    Catalog matches and every other credential-assignment match remain refused.
+    """
+    def __new__(cls, text, reference_spans):
+        instance = super().__new__(cls, text)
+        instance.reference_spans = frozenset(reference_spans)
+        return instance
+
+
+def _source_text(text: str, path: str) -> str:
+    """Recognize narrow reference-only RHSs in an actual tracked Python blob."""
+    if PurePosixPath(path).suffix != ".py" or any(c in text for c in "\v\f\x1c\x1d\x1e\x85\u2028\u2029"):
+        return text
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError, RecursionError):
+        return text
+    lines = text.splitlines(keepends=True)
+    offsets, used = [], 0
+    for line in lines:
+        offsets.append(used)
+        used += len(line)
+
+    byte_columns = {}
+
+    def position(node, end=False):
+        number = node.end_lineno if end else node.lineno
+        column = node.end_col_offset if end else node.col_offset
+        if number not in byte_columns:
+            line = lines[number - 1]
+            columns = None
+            if not line.isascii():
+                columns = array("I", [0])
+                for char in line:
+                    columns.append(columns[-1] + len(char.encode("utf-8")))
+            byte_columns[number] = columns
+        columns = byte_columns[number]
+        return offsets[number - 1] + (column if columns is None else bisect_left(columns, column))
+
+    def dotted(node):
+        parts = []
+        while isinstance(node, ast.Attribute):
+            if len(parts) == 2:  # The longest admitted name is os.environ.get.
+                return ""
+            parts.append(node.attr)
+            node = node.value
+        return ".".join([node.id, *reversed(parts)]) if isinstance(node, ast.Name) else ""
+
+    def env_name(node):
+        return isinstance(node, ast.Constant) and isinstance(node.value, str) and bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", node.value))
+
+    def reference(node):
+        if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or):
+            return all(reference(value) for value in node.values)
+        if isinstance(node, ast.Subscript):
+            return dotted(node.value) == "os.environ" and env_name(node.slice)
+        if not isinstance(node, ast.Call) or node.keywords:
+            return False
+        name = dotted(node.func)
+        return ((name in {"os.getenv", "os.environ.get"} and len(node.args) == 1 and env_name(node.args[0]))
+                or (name == "get_password" and not node.args))
+
+    spans = []
+
+    def add_identifier(target):
+        name = target.id if isinstance(target, ast.Name) else target.attr if isinstance(target, ast.Attribute) else None
+        # Reuse the exact generic field-name grammar; the synthetic RHS is
+        # only a recognizer probe, never source or credential material.
+        match = _CREDENTIAL_ASSIGNMENT.fullmatch(f"{name} = reference_probe") if name else None
+        if match and match.group(1) == name:
+            end = position(target, True)
+            start = end - len(name)
+            # AST identifiers are NFKC-normalized. Never let normalized name
+            # length turn a proof into a span over preceding source/literals.
+            if 0 <= start <= end <= len(text) and text[start:end] == name:
+                spans.append((start, end))
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and reference(node.value):
+            add_identifier(node.targets[0])
+        elif isinstance(node, (ast.If, ast.While)):
+            # A control-flow colon is not a credential assignment. Only the
+            # final reference identifier is recognized, never its body/value.
+            terminal = node.test
+            while isinstance(terminal, (ast.BoolOp, ast.Compare)) or (isinstance(terminal, ast.UnaryOp) and isinstance(terminal.op, ast.Not)):
+                terminal = (terminal.values[-1] if isinstance(terminal, ast.BoolOp) else
+                            terminal.comparators[-1] if isinstance(terminal, ast.Compare) else terminal.operand)
+            if isinstance(terminal, (ast.Name, ast.Attribute)):
+                add_identifier(terminal)
+    return _VerifiedSourceText(text, spans)
+
+
+def _numbered_source(text: str, start: int = 1, end: int | None = None) -> str:
+    """Project proved source spans through the existing numbered-window format."""
+    parts, spans, raw_offset, output_offset = [], [], 0, 0
+    references = iter(sorted(getattr(text, "reference_spans", ())))
+    pending = next(references, None)
+    for number, raw_line in enumerate(text.splitlines(keepends=True), 1):
+        line = raw_line.rstrip("\r\n")
+        selected = number >= start and (end is None or number <= end)
+        prefix = f"{number}: "
+        while pending is not None and pending[0] < raw_offset + len(raw_line):
+            a, b = pending
+            if selected and raw_offset <= a <= b <= raw_offset + len(line):
+                spans.append((output_offset + len(prefix) + a - raw_offset,
+                              output_offset + len(prefix) + b - raw_offset))
+            pending = next(references, None)
+        if selected:
+            parts.append(prefix + line)
+            output_offset += len(prefix) + len(line) + 1
+        raw_offset += len(raw_line)
+    return _VerifiedSourceText("\n".join(parts), spans)
+
+
 def _require_safe_packet(value) -> None:
     """Refuse detected sensitive material; never redact code and claim completeness.
 
-    Use the canonical shipped token catalog and the existing quoted-assignment
-    check from the pack-only Jev redactor. The latter module is intentionally
+    Use the canonical shipped token catalog and credential-assignment refusal.
+    Only locally proved reference expressions in Git source are exempt from
+    the generic assignment heuristic; catalog matches are never exempt.
+    The pack-only Jev redactor is intentionally
     absent from rendered consumers; importing it would break ordinary installs.
     No optional shadow call is imported or activated.
     """
@@ -272,12 +397,22 @@ def _require_safe_packet(value) -> None:
         patterns = [re.compile(row["regex"]) for row in rows]
     except (OSError, KeyError, TypeError, re.error, ValueError) as exc:
         raise ValueError("secret-shape catalog invalid") from exc
-    # Same assignment rule as scripts/jev_judge_shadow.py, not a policy change.
-    patterns.append(re.compile(r"(?i)\b([A-Za-z0-9_]*(?:api[_-]?key|secret|token|password|passwd))(\s*[:=]\s*)(['\"]?)[^\s'\"]{8,}\3"))
-
     def check(item):
         if isinstance(item, str):
-            if any(pattern.search(item) for pattern in patterns):
+            # Scan the original text against every catalog rule, regardless
+            # of source provenance or any reference-only assignment proof.
+            # Omit only proved identifier characters from this local lexical
+            # check, then rescan so an overlapping later assignment cannot
+            # hide behind a safe reference. The actual packet/source string
+            # is never redacted or changed by this recognizer.
+            pieces, offset = [], 0
+            for a, b in sorted(getattr(item, "reference_spans", ())):
+                pieces.extend((item[offset:a], " " * (b - a)))
+                offset = b
+            pieces.append(item[offset:])
+            generic_text = "".join(pieces)
+            if (any(pattern.search(item) for pattern in patterns)
+                    or _CREDENTIAL_ASSIGNMENT.search(generic_text)):
                 raise ValueError("sensitive review material requires approved sanitized evidence")
         elif isinstance(item, dict):
             for key, child in item.items():
@@ -364,6 +499,9 @@ def _supplemental_source(root: Path, head: str, remaining: int) -> tuple[dict, d
             text = value.decode("utf-8")
             if len(text) > remaining:
                 raise ValueError("diff text budget")
+            # Diff text has no locally proved source-statement spans. Keep
+            # it strict/explicitly unavailable rather than trust prose that
+            # happens to resemble a safe Python reference expression.
             _require_safe_packet(text)
             digest = hashlib.sha256(value).hexdigest()
             diff = {"status": "available", "id": "diff-" + digest[:16],
@@ -389,9 +527,9 @@ def _supplemental_source(root: Path, head: str, remaining: int) -> tuple[dict, d
             body = _git_bounded(root, "cat-file", "blob", oid.decode(), limit=max(0, min(remaining - used, _EVIDENCE_MAX_FILE_BYTES)))
             if b"\0" in body:
                 raise ValueError("binary tracked source")
-            text = body.decode("utf-8")
+            text = _source_text(body.decode("utf-8"), path)
             _require_safe_packet(text)
-            numbered = "\n".join(f"{n}: {line}" for n, line in enumerate(text.splitlines(), 1))
+            numbered = _numbered_source(text)
             used += len(numbered)
             if used > remaining:
                 raise ValueError("complete tree text budget")
@@ -487,7 +625,7 @@ def _judge_evidence(findings: list[Finding], head: str) -> dict:
             if b"\0" in body:
                 row["status"] = "binary"
                 continue
-            decoded = body.decode("utf-8", errors="replace")
+            decoded = _source_text(body.decode("utf-8", errors="replace"), finding.file)
             _require_safe_packet(decoded)
             lines = decoded.splitlines()
             if finding.line is not None and finding.line > len(lines):
@@ -498,7 +636,7 @@ def _judge_evidence(findings: list[Finding], head: str) -> dict:
             # or clip the file and present that as complete evidence.
             start = 1 if finding.line is None else max(1, finding.line - _EVIDENCE_CONTEXT_LINES)
             end = len(lines) if finding.line is None else min(len(lines), finding.line + _EVIDENCE_CONTEXT_LINES)
-            text = "\n".join(f"{n}: {lines[n - 1]}" for n in range(start, end + 1))
+            text = _numbered_source(decoded, start, end)
             if used + len(text) > _EVIDENCE_CHAR_BUDGET:
                 row["status"] = "evidence_budget"
                 continue
@@ -532,7 +670,7 @@ def _judge_evidence(findings: list[Finding], head: str) -> dict:
                 body = _git_bounded(root, "cat-file", "blob", match[0][2].decode(), limit=min(20000, _EVIDENCE_MAX_FILE_BYTES))
                 if b"\0" in body or (row["line"] is not None and row["line"] > len(body.decode("utf-8").splitlines())):
                     continue
-                _require_safe_packet(body.decode("utf-8"))
+                _require_safe_packet(_source_text(body.decode("utf-8"), row["file"]))
                 row.update(status="available", revision=base, source_state="deleted_at_head",
                            evidence_ref=packet["diff"]["id"], blob=match[0][2].decode(),
                            content_sha256=hashlib.sha256(body).hexdigest())
@@ -942,10 +1080,14 @@ Only keep original IDs that pass all four gates. Never post to GitHub yourself."
             return None
 
         evidence = _judge_evidence(findings, self.sha)
-        if not evidence.get("tree") or any(row["status"] != "available" for row in evidence["locations"].values()):
+        if not evidence.get("tree") or not any(row["status"] == "available" for row in evidence["locations"].values()):
             self._judge_context = (evidence, [])
             logger.warning("Source evidence unavailable; adjudication withheld")
             return None
+        if any(row["status"] != "available" for row in evidence["locations"].values()):
+            # Retain supported findings while keeping every missing location
+            # in the denominator. Validation cannot approve partial coverage.
+            self._adjudication_incomplete = True
         investigations = _investigations(findings, self._review_observations)
         self._judge_context = (evidence, investigations)
         packet = {
@@ -1127,6 +1269,13 @@ Only keep original IDs that pass all four gates. Never post to GitHub yourself."
             line = "**Merge danger:** unknown (unclassified)"
         body_lines.append(line)
         body_lines.append("")
+        if self._adjudication_incomplete:
+            body_lines.append(
+                "**Incomplete coverage:** source evidence or adjudication "
+                "remains unresolved for some original candidates. The "
+                "verified findings below do not establish a complete assessment."
+            )
+            body_lines.append("")
         skipped_all = sorted(set(self._skipped_first_party) | set(self._skipped_other))
         if skipped_all:
             # Findings survived the gates but some checks never ran — the
@@ -1203,17 +1352,20 @@ Only keep original IDs that pass all four gates. Never post to GitHub yourself."
             logger.info(f"Posting review to {url}...")
             with _urlopen_https(req, timeout=30, host="api.github.com") as response:
                 result = json.loads(response.read().decode("utf-8"))
-                review_id = result.get("id", "unknown")
+                review_id = result.get("id") if isinstance(result, dict) else None
                 self._posted_review_id = (
-                    review_id if isinstance(review_id, int) else None
+                    review_id if type(review_id) is int and review_id > 0 else None
                 )
-                logger.info(f"Review posted successfully (ID: {review_id})")
+                if self._posted_review_id is None:
+                    logger.warning("Review acknowledgement has no valid review ID; outcome unknown")
+                    return False
+                logger.info(f"Review posted successfully (ID: {self._posted_review_id})")
                 return True
 
         # OSError: same response-phase rationale as the API call above — a
         # proxy that accepts then drops the connection raises raw OSError.
-        except OSError as e:
-            logger.error(f"Failed to post review: {e}")
+        except (OSError, ValueError, TypeError, AttributeError) as e:
+            logger.error("Failed to confirm review post (%s); outcome unknown", type(e).__name__)
             return False
 
     def _review_exists_at_sha(self, kind: str) -> bool:
@@ -1438,7 +1590,7 @@ Only keep original IDs that pass all four gates. Never post to GitHub yourself."
                     # The advisory supersedes any earlier same-SHA verdict — a
                     # stale APPROVE earned on evidence now known absent must not
                     # keep satisfying auto-merge (CodeRabbit major on #150).
-                    self._dismiss_stale_judge_reviews(("CHANGES_REQUESTED", "APPROVED"))
+                    self._dismiss_stale_judge_reviews(("APPROVED",))
                 return 0
             logger.info("No findings to process; posting verdict comment")
             self._post_clean_or_skip_advisory()
@@ -1555,7 +1707,12 @@ Only keep original IDs that pass all four gates. Never post to GitHub yourself."
                 # P2 on buromaster#261, Codex P1 on ai-starter-pack#150).
                 # Best-effort — failures only log; the newest judge review at
                 # this SHA is always kept.
-                self._dismiss_stale_judge_reviews(("CHANGES_REQUESTED", "APPROVED"))
+                incomplete = (self._adjudication_incomplete or self._candidate_load_errors
+                              or self._skipped_first_party or self._skipped_other)
+                # Partial evidence cannot resolve an older blocking finding.
+                self._dismiss_stale_judge_reviews(
+                    ("APPROVED",) if incomplete else ("CHANGES_REQUESTED", "APPROVED")
+                )
         else:
             logger.info("No findings survived filters; skipping GitHub post")
             self._post_clean_or_skip_advisory()
@@ -1668,7 +1825,7 @@ Only keep original IDs that pass all four gates. Never post to GitHub yourself."
                 "incomplete specialist review evidence; clean verdict "
                 "withheld."
             ):
-                self._dismiss_stale_judge_reviews(("CHANGES_REQUESTED", "APPROVED"))
+                self._dismiss_stale_judge_reviews(("APPROVED",))
             return
         if self._skipped_first_party or self._skipped_other:
             sources = ", ".join(
@@ -1676,7 +1833,7 @@ Only keep original IDs that pass all four gates. Never post to GitHub yourself."
             )
             logger.warning(f"review coverage incomplete: {sources}")
             if self._post_advisory_warning(self._skipped_coverage_detail()):
-                self._dismiss_stale_judge_reviews(("CHANGES_REQUESTED", "APPROVED"))
+                self._dismiss_stale_judge_reviews(("APPROVED",))
             return
         self._post_no_findings_comment()
 
