@@ -1,3 +1,7 @@
+<!-- ai-starter-pack:development-policy:begin -->
+@.claude/skills/adaptable-development/SKILL.md
+<!-- ai-starter-pack:development-policy:end -->
+
 # {PROJECT_NAME}
 
 > **Auto-generated from [AI Starter Pack](./README-STARTER-PACK.md)** — customize all `{PLACEHOLDER}` sections below.

@@ -6,6 +6,7 @@ Canonical home for the AI Starter Pack: a [Copier](https://copier.readthedocs.io
 - **Full pack docs:** [README-STARTER-PACK.md](./README-STARTER-PACK.md)
 - **License:** [Apache-2.0](./LICENSE) — free to deploy into your own and client environments.
 - **Native Muse subscription tasks:** [isolated executor and read-only smoke check](docs/muse-subscription.md), using only the consumer's own CLI credential.
+- **Shared development policy:** [native guidance](docs/native-guidance.md) delivers adaptable development, approved-design fidelity and triggered procedures to Claude Code, Codex, Cursor and Devin without replacing curated local instructions.
 
 ## Consumer pins (Prompt 11)
 

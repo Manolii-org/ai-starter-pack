@@ -1,0 +1,6 @@
+---
+description: Apply the shared development policy and select the relevant task procedure.
+alwaysApply: true
+---
+
+Essential policy is in the discovered root AGENTS.md. Before design handoffs, new features or substantial redesigns read `.claude/skills/design-feature-adoption/SKILL.md`. Before existing-app refactoring read `.claude/skills/compatibility-improvement/SKILL.md`. Keep trivial unrelated edits proportionate. Referenced procedure contents require an explicit read.

@@ -23,4 +23,4 @@ requires:
 
 feature_flags: {}
 
-surfaces: [claude-code]
+surfaces: [claude-code, codex, cursor, devin]

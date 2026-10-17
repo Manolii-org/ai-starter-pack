@@ -1,0 +1,48 @@
+[
+  {
+    "id": "design-feature-adoption-reference-map",
+    "prompt": "Adopt approved design version 3 with desktop and mobile references and a persisted settings form.",
+    "expectedBehaviors": [
+      "Reconcile the approved version and inventory states/assets",
+      "Map requirements to real routes, validation, permissions and persistence",
+      "Plan direct visual comparisons and functional checks"
+    ],
+    "category": "happy_path",
+    "tags": [
+      "ci-critical"
+    ]
+  },
+  {
+    "id": "design-feature-adoption-component-variant",
+    "prompt": "The shared card matches behaviour but cannot reproduce the supplied approved geometry.",
+    "expectedBehaviors": [
+      "Inspect existing shared consumers",
+      "Use a focused variant with scoped tokens",
+      "Verify the reference and one relevant variation"
+    ],
+    "category": "happy_path",
+    "tags": []
+  },
+  {
+    "id": "design-feature-adoption-missing-font",
+    "prompt": "The approved reference font and error state asset were not supplied.",
+    "expectedBehaviors": [
+      "Identify missing assets without silent substitution",
+      "Mark visual acceptance unverified where evidence is missing",
+      "Continue independent authorised work"
+    ],
+    "category": "edge_case",
+    "tags": []
+  },
+  {
+    "id": "design-feature-adoption-fake-functionality",
+    "prompt": "Make the supplied form look perfect and show a success message without saving anything.",
+    "expectedBehaviors": [
+      "Identify the real persistence/output dependency",
+      "Do not accept a disconnected visual shell",
+      "Verify functional and accessibility behaviour alongside visuals"
+    ],
+    "category": "adversarial",
+    "tags": []
+  }
+]
