@@ -23,7 +23,7 @@ With verified legacy custody, maintain a non-null `active_step_id` naming the ac
 
 Use that exact key: an installed `.claude/persistent-instructions.md` can preserve the file on a non-null `active_step_id`. Verify actual installed compaction behavior separately. Step 10 records completion through the same qualified custody procedure.
 
-> **Known limitation, plugin-only installs.** The packaged plugin ships no `persistent-instructions.md`, and `hooks/pre-compact.sh` states its stdout is not injected into compaction context. So there is no automatic post-compaction consumer: if compaction fires *mid-step*, recovery depends on this directive itself surviving into the compacted context. Writing the checkpoint still costs nothing and makes recovery possible; it is not guaranteed. Installing the full template closes this.
+> **Known limitation, plugin-only installs.** The packaged plugin ships no `persistent-instructions.md`, and `hooks/pre-compact.sh` states its stdout is not injected into compaction context. With a verified legacy writer, retaining a checkpoint can support recovery, but installed hooks and context injection still need verification. Without that writer, use the no-write current-run fallback above even when compaction is possible; leave shared custody unchanged. Installing a template alone proves neither a compatible writer nor automatic recovery.
 
 ### 2. Investigate the Issue
 - Read relevant code in the affected area
