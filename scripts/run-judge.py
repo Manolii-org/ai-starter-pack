@@ -983,10 +983,14 @@ class Judge:
                 artifact_ids = {}
                 for finding in artifact_findings:
                     previous = artifact_ids.get(finding.finding_id) or accepted_ids.get(finding.finding_id)
-                    if previous is not None and previous.to_dict() != finding.to_dict():
+                    if previous is not None and previous.comparison_key() != finding.comparison_key():
                         raise ValueError("ambiguous candidate identity; original artifact retained")
-                    # Only exact duplicates can collapse. Distinct supplied IDs
-                    # and every original raw receipt/leg remain intact.
+                    if previous is not None:
+                        # Confidence is an annotation, not finding identity or
+                        # source evidence. Keep the first original unchanged;
+                        # every score remains in the original receipt/legs.
+                        continue
+                    # Distinct supplied IDs and raw provenance remain intact.
                     artifact_ids[finding.finding_id] = finding
                 new_findings = [f for fid, f in artifact_ids.items() if fid not in accepted_ids]
                 accepted_ids.update(artifact_ids)

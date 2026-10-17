@@ -439,6 +439,25 @@ def test_equal_content_different_ids_and_confidence_retains_both_provenances(mon
     assert original["protected_review"]["legs"][0]["findings"] == [first]
 
 
+@pytest.mark.parametrize("identity", [None, "original-id"])
+@pytest.mark.parametrize("scores,expected_confidence", [
+    ((0.9, 0.6), 0.9), ((0.6, 0.9), 0.6), (("high", "medium"), 0.9), (("medium", "high"), 0.5),
+])
+def test_equal_identity_content_different_confidence_keeps_first_original_and_both_legs(
+    monkeypatch, tmp_path, identity, scores, expected_confidence
+):
+    first, second = dict(finding(), confidence=scores[0]), dict(finding(), confidence=scores[1])
+    if identity is not None:
+        first["finding_id"] = second["finding_id"] = identity
+    module, judge, loaded, original = load_identity_receipt(monkeypatch, tmp_path, [first], [second])
+    assert judge._candidate_load_errors == 0 and len(loaded) == 1
+    assert loaded[0].to_dict() == dict(finding(), source="security-boundary-test",
+                                     finding_id=identity or "bd16f754c699", confidence=expected_confidence)
+    assert not module._investigations(loaded, judge._review_observations)
+    assert original["findings"] == [first, second]
+    assert [leg["findings"] for leg in original["protected_review"]["legs"]] == [[first], [second]]
+
+
 @pytest.mark.parametrize("layout", ["", "plugin/manolii-framework/", "registry/platform/framework/"])
 @pytest.mark.parametrize("identity", [None, "original-id"])
 def test_protected_identity_is_stable_in_all_shipped_judges(monkeypatch, tmp_path, layout, identity):
@@ -448,8 +467,8 @@ def test_protected_identity_is_stable_in_all_shipped_judges(monkeypatch, tmp_pat
     spec.loader.exec_module(module)
     raw = finding() if identity is None else dict(finding(), finding_id=identity)
     _, judge, loaded, _ = load_identity_receipt(monkeypatch, tmp_path, [raw], [], module=module)
-    expected = module.Finding.from_record("security-boundary-test", raw)
-    assert loaded[0].to_dict() == expected.to_dict()
+    assert loaded[0].to_dict() == dict(finding(), source="security-boundary-test",
+                                     finding_id=identity or "bd16f754c699", confidence=0.5)
     assert len(module._investigations(loaded, judge._review_observations)) == 1
 
 
