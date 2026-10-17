@@ -912,7 +912,8 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
 
         if not judge_result:
             logger.error("Judge agent invocation failed")
-            self._post_advisory_warning(self._skipped_coverage_detail())
+            if self._post_advisory_warning(self._skipped_coverage_detail()):
+                self._dismiss_stale_judge_reviews(("APPROVED",))
             return 0
 
         # Validate and sanitise judge output before use
@@ -1140,8 +1141,11 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
                 self._posted_review_id = json.loads(
                     response.read().decode("utf-8")
                 ).get("id")
+            if type(self._posted_review_id) is int and self._posted_review_id > 0:
                 logger.info("Advisory warning posted")
-            return True
+                return True
+            logger.warning("Advisory acknowledgement has no valid review ID")
+            return False
 
         except Exception as e:
             logger.warning(f"Failed to post advisory warning: {e}")

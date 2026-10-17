@@ -345,3 +345,50 @@ def test_marker_text_appears_exactly_once_in_the_source():
         "the marker text must appear once, as REVIEW_MARKER — "
         "every other site should interpolate the constant"
     )
+
+
+@pytest.mark.parametrize("acknowledgement", ["posted", "failed", "empty", "malformed_id"])
+def test_failed_judge_retires_only_stale_approval_after_advisory_ack(
+    judge, monkeypatch, tmp_path, caplog, acknowledgement
+):
+    """Exercise run, real advisory posting and authenticated dismissal together."""
+    judge.candidates_dir = tmp_path / "candidates"
+    judge.candidates_dir.mkdir()
+    judge.judge_log_dir = tmp_path / "logs"
+    (judge.candidates_dir / "review.json").write_text(json.dumps({
+        "source": "review", "findings": [{
+            "file": "policy.py", "line": 3, "severity": "ERROR",
+            "message": "Missing tenant guard", "fix": "Add tenant guard at policy.py:3",
+        }],
+    }))
+    monkeypatch.setattr(judge, "invoke_judge_agent", lambda findings: None)
+    reviews = [
+        _review_full(rj.REVIEW_MARKER, state="APPROVED", review_id=1),
+        _review_full(rj.REVIEW_MARKER, state="CHANGES_REQUESTED", review_id=2),
+        _review_full(rj.REVIEW_MARKER, state="APPROVED", author="other-bot", review_id=3),
+        _review_full(rj.REVIEW_MARKER, state="APPROVED", commit_id="other-sha", review_id=4),
+    ]
+    calls = []
+
+    def serve(req, *, timeout=None, host=None):
+        calls.append((req.get_method(), req.full_url))
+        if req.get_method() == "POST":
+            assert json.loads(req.data)["event"] == "COMMENT"
+            if acknowledgement == "failed":
+                raise OSError("advisory outcome unknown")
+            body = {"id": 5} if acknowledgement == "posted" else ({"id": "5"} if acknowledgement == "malformed_id" else {})
+            return _FakeResponse(json.dumps(body).encode())
+        if req.get_method() == "GET":
+            return _FakeResponse(json.dumps(reviews).encode())
+        assert req.get_method() == "PUT"
+        return _FakeResponse(b"{}")
+
+    monkeypatch.setattr(rj, "_urlopen_https", serve)
+    with caplog.at_level("INFO"):
+        assert judge.run() == 0  # Advisory exit is not a successful model verdict.
+    assert ("Advisory warning posted" in caplog.text) is (acknowledgement == "posted")
+    assert [method for method, _ in calls].count("POST") == 1
+    dismissed = [url for method, url in calls if method == "PUT"]
+    assert dismissed == (["https://api.github.com/repos/Manolii-org/ai-starter-pack/pulls/1/reviews/1/dismissals"] if acknowledgement == "posted" else [])
+    if acknowledgement != "posted":
+        assert [method for method, _ in calls] == ["POST"]
