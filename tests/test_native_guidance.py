@@ -12,8 +12,17 @@ import sys
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO / "scripts"))
-from lib import native_guidance as native
+
+
+def load_script(name, rel):
+    spec = importlib.util.spec_from_file_location(name, REPO / rel)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+native = load_script("native_guidance_under_test", "scripts/lib/native_guidance.py")
 
 
 @pytest.fixture
@@ -50,6 +59,37 @@ def files(root):
     # The existing resolver mutex is operational state, not an installed file.
     return {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*")
             if p.is_file() and p.name != "capability-apply.lock"}
+
+
+@pytest.mark.parametrize("entrypoint", [
+    "scripts/ai-resolve.py",
+    "plugin/manolii-framework/scripts/ai-resolve.py",
+    "registry/platform/framework/scripts/ai-resolve.py",
+    "scripts/build-registry.py",
+])
+def test_native_entrypoints_ignore_unrelated_lib_package(consumer, entrypoint):
+    root, source = consumer
+    packages = root.parent / "unrelated-packages"
+    package = packages / "lib"
+    package.mkdir(parents=True)
+    marker = packages / "imported"
+    (package / "__init__.py").write_text(
+        "from pathlib import Path\nPath(" + repr(str(marker)) + ").write_text('unexpected import')\n")
+    command = [sys.executable, str(REPO / entrypoint)]
+    if entrypoint.endswith("build-registry.py"):
+        target = source / "registry/platform/framework/skills/design-feature-adoption/SKILL.md"
+        target.write_text("Previous procedure")
+        command += ["--policy-only", "--registry-root", str(source / "registry")]
+    else:
+        command += ["--repo-root", str(root), "--registry", str(source), "--native-guidance", "--apply"]
+    result = subprocess.run(command, env=dict(os.environ, PYTHONPATH=str(packages)),
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not marker.exists()
+    if entrypoint.endswith("build-registry.py"):
+        assert target.read_bytes() == (REPO / ".claude/skills/design-feature-adoption/SKILL.md").read_bytes()
+    else:
+        assert json.loads((root / native.LOCK).read_text())["policy_version"] == "1.0.1"
 
 
 def test_preview_install_repeat_and_check_preserve_local_guidance(consumer):
@@ -427,14 +467,6 @@ def test_bounded_mirror_generation_preserves_unrelated_content(consumer):
     assert subprocess.run(command, capture_output=True).returncode == 0
     assert unrelated.read_text() == "Mirror-owned existing content"
     assert subprocess.run(command + ["--check"], capture_output=True).returncode == 0
-
-
-def load_script(name, rel):
-    spec = importlib.util.spec_from_file_location(name, REPO / rel)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 def test_native_pin_stays_at_verified_commit_after_checkout(consumer, monkeypatch):

@@ -56,8 +56,10 @@ def refresh_policy(target: Path, check: bool = False) -> int:
     These three authored skills are scope-neutral and contain no Jinja. A
     bounded refresh avoids unrelated platform upgrades in private registries.
     """
-    from lib.native_guidance import apply_outputs, file_snapshot
     resolver = _policy_resolver()
+    native = resolver._native_guidance_module()
+    # This rejects existing links; the registry root and all its ancestors
+    # must remain stable throughout refresh, as the operating contract requires.
     if target.resolve() != target:
         raise ValueError("policy registry root must not contain a symlink")
     guard = contextlib.nullcontext() if check else resolver._repo_apply_mutex(target.parent)
@@ -74,10 +76,10 @@ def refresh_policy(target: Path, check: bool = False) -> int:
                 if source is None:
                     raise ValueError(f"unsafe or unreadable policy source: {name}/{leaf}")
                 outputs[rel] = source[0]
-                snapshots[rel] = file_snapshot(target, rel, resolver)
+                snapshots[rel] = native.file_snapshot(target, rel, resolver)
         stale = [rel for rel in outputs if snapshots[rel] is None or snapshots[rel][0] != outputs[rel]]
         if not check:
-            apply_outputs(target, outputs, snapshots, resolver)
+            native.apply_outputs(target, outputs, snapshots, resolver)
     print(f"{'STALE' if check and stale else 'OK'} policy assets: {len(stale)} {'differ' if check else 'updated'}")
     return int(check and bool(stale))
 

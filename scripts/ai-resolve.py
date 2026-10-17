@@ -33,6 +33,7 @@ import argparse
 import contextlib
 import errno
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -15468,6 +15469,15 @@ def main() -> int:
     return _run(args, repo_root)
 
 
+def _native_guidance_module():
+    """Load the bundled helper, independent of unrelated top-level lib packages."""
+    spec = importlib.util.spec_from_file_location(
+        "_ai_resolve_native_guidance", Path(__file__).resolve().parent / "lib/native_guidance.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _run(args: argparse.Namespace, repo_root: Path) -> int:
     manifest_path = Path(args.manifest)
     if not manifest_path.is_absolute():
@@ -15477,8 +15487,8 @@ def _run(args: argparse.Namespace, repo_root: Path) -> int:
     registry_root = find_registry_root(Path(args.registry).resolve())
     index = load_plugins_index(registry_root)
     if args.native_guidance:
-        from lib.native_guidance import resolve
-        return resolve(args, repo_root, sys.modules[__name__], manifest, registry_root, index)
+        return _native_guidance_module().resolve(
+            args, repo_root, sys.modules[__name__], manifest, registry_root, index)
     lock, lock_err = load_lock(repo_root)
 
     locked_dig = locked_digests(lock)

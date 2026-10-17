@@ -42,6 +42,8 @@ with a 30-second budget checked per directory; it filters basenames before
 instruction-file reads.
 The CLI reports the largest chain's directory/files and configured fallback
 filenames, while omitting global instruction contents.
+Native resolver and policy-refresh helpers load from their bundled sibling path,
+so an unrelated top-level Python `lib` package cannot select the helper.
 Codex configuration/chain checks and Devin's inclusion-window check apply only
 when that surface is selected in the manifest. Do not raise limits to conceal
 oversized guidance. A long legacy AGENTS tail
@@ -105,7 +107,10 @@ scope contracts. Never hand-edit generated plugin/registry skills.
 For an established private mirror that must keep its other platform versions,
 preview the bounded generation with `scripts/build-registry.py --policy-only
 --registry-root <mirror>/registry --check`, then omit `--check` to regenerate only
-the three public policy skill files. Inspect the diff and run the mirror's
+the six public skill/eval assets. The same exclusive editing window applies:
+keep the registry root and all its ancestors stable, and pause external writers
+through preview/apply/check. A startup symlink check does not protect against
+arbitrary concurrent ancestor replacement. Inspect the diff and run the mirror's
 existing lint/PR gates. This does not refresh unrelated components, private
 plugins, workflow pins or model routing. Use the resolver from the reviewed
 pack revision when the consumer's vendored resolver predates native delivery.
