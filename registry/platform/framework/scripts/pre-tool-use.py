@@ -92,7 +92,7 @@ def _path_guard() -> None:
             "decision": "block",
             "reason": (
                 f"[GUARD:{guard_id}] {decision.get('reason')} "
-                "If existing explicit task authorization covers this guard's configured scope, "
+                "If the operator's existing explicit task authorization covers this guard's configured scope, "
                 f"record guard ID {guard_id} in session_unfreezes and the bypass audit log, "
                 "then retry. For a narrower authorized operation, audit the exact path/operation, "
                 "temporarily add only the needed ID for that attempt, then immediately restore "
