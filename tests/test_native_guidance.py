@@ -75,7 +75,7 @@ def test_native_entrypoints_ignore_unrelated_lib_package(consumer, entrypoint):
     marker = packages / "imported"
     (package / "__init__.py").write_text(
         "from pathlib import Path\nPath(" + repr(str(marker)) + ").write_text('unexpected import')\n")
-    command = [sys.executable, str(REPO / entrypoint)]
+    command = [sys.executable, "-B", str(REPO / entrypoint)]
     if entrypoint.endswith("build-registry.py"):
         target = source / "registry/platform/framework/skills/design-feature-adoption/SKILL.md"
         target.write_text("Previous procedure")
