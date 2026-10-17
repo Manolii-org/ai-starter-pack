@@ -341,7 +341,7 @@ class QualityTests(unittest.TestCase):
             state.close()
 
     def test_partial_duplicate_or_foreign_mailbox_results_fail(self):
-        for ids in ([1], [1, 1], [1, 3]):
+        for ids in ([1], [1, 1], [1, 3], [True, 2], [1.0, 2]):
             with self.subTest(ids=ids):
                 state = State(self.root / ('state-' + str(ids)), self.profile)
                 client = FakeClient()

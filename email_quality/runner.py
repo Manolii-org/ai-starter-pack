@@ -124,7 +124,8 @@ def wait(client, state, profile, kind, deadline=None):
             try:
                 actual = [row['mailbox']['id'] for row in rows]
                 expected = record['delivery']['mailbox_ids']
-                if len(actual) != len(expected) or set(actual) != set(expected):
+                if (any(type(i) is not int for i in actual)
+                        or len(actual) != len(expected) or set(actual) != set(expected)):
                     raise QualityError('PROVIDER_INVALID')
             except (TypeError, KeyError):
                 raise QualityError('PROVIDER_INVALID') from None
