@@ -588,6 +588,27 @@ def test_partial_source_real_run_discloses_gap_and_requires_delivery_ack(repo, m
     assert judge._posted_review_id == (5 if ack == "valid" else None)
 
 
+@pytest.mark.parametrize("line", [None, 2])
+def test_non_utf8_git_source_is_unavailable_without_lossy_replacement(repo, monkeypatch, line):
+    root, _ = repo
+    (root / "policy.py").write_bytes(b"# coding: latin-1\nvalue = '\xff'\n")
+    git(root, "add", "policy.py")
+    git(root, "commit", "-m", "Non-UTF8 immutable evidence fixture")
+    head = git(root, "rev-parse", "HEAD")
+    f = finding(line=line)
+    evidence = j._judge_evidence([f], head)
+    row = evidence["locations"][loc(f)]
+    assert row["status"] == "read_failed"
+    assert "text" not in row and "whole_file" not in row
+    assert evidence["repository_context"]["status"] != "complete_tracked_head"
+    assert "\\ufffd" not in json.dumps(evidence)
+    judge = j.Judge(str(root), 1, head)
+    monkeypatch.setattr(j, "_endpoint", lambda **kw:
+                        ("offline", "https://example.invalid/v1/messages", False))
+    monkeypatch.setattr(j, "_urlopen_https", lambda *a, **kw: pytest.fail("unreadable source dispatch"))
+    assert judge.invoke_judge_agent([f]) is None
+
+
 @pytest.mark.parametrize("rhs", [
     'os.getenv("GITHUB_TOKEN")', 'os.environ.get("GITHUB_TOKEN")',
     'os.environ["GITHUB_TOKEN"]', 'get_password()',

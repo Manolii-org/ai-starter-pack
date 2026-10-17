@@ -625,7 +625,9 @@ def _judge_evidence(findings: list[Finding], head: str) -> dict:
             if b"\0" in body:
                 row["status"] = "binary"
                 continue
-            decoded = _source_text(body.decode("utf-8", errors="replace"), finding.file)
+            # Lossy replacement cannot establish exact-source evidence.
+            # Unsupported encodings remain explicitly unavailable.
+            decoded = _source_text(body.decode("utf-8"), finding.file)
             _require_safe_packet(decoded)
             lines = decoded.splitlines()
             if finding.line is not None and finding.line > len(lines):
