@@ -14211,6 +14211,9 @@ class Plan:
     # it present — an installed file the consumer deleted is a planned
     # restore, not a concurrent edit (Devin on #123).
     absent: set[str] = field(default_factory=set)
+    # Native renderers must use the commit that passed pin validation, never a
+    # later HEAD read after another process switches the registry checkout.
+    pins: dict[str, str] = field(default_factory=dict)
 
 
 def load_manifest(path: Path) -> dict:
@@ -14255,8 +14258,11 @@ def load_manifest(path: Path) -> dict:
     surfaces = data.get("surfaces")
     if surfaces is not None and (
             not isinstance(surfaces, list)
-            or not all(isinstance(s, str) for s in surfaces)):
-        sys.stderr.write("FAIL: surfaces must be a list of strings\n")
+            or not all(isinstance(s, str) and s in {
+                "claude-code", "devin", "cursor", "codex", "openhands"
+            } for s in surfaces)
+            or len(surfaces) != len(set(surfaces))):
+        sys.stderr.write("FAIL: surfaces must be unique supported manifest values\n")
         sys.exit(2)
     return data
 
@@ -15263,6 +15269,8 @@ def plan_requirement(req: str, ref: str, universe: str, registry_root: Path,
                 f"{req}: '{comp}/' needs surface wiring (settings merge) — "
                 f"not materialised by --apply; see docs/registry.md")
 
+    if pinned:
+        plan.pins[req] = pinned_sha
     plan.resolved.append({
         "plugin": req,
         "scope": scope,
@@ -15434,9 +15442,13 @@ def main() -> int:
     mode.add_argument("--dry-run", action="store_true")
     ap.add_argument("--prune", action="store_true",
                     help="with --apply, also remove lockfile-tracked files no longer required")
+    ap.add_argument("--native-guidance", action="store_true",
+                    help="deliver only the shared policy and task procedures to native instruction surfaces; preserve curated capability trees")
     args = ap.parse_args()
     if args.prune and not args.apply:
         ap.error("--prune requires --apply")
+    if args.native_guidance and args.prune:
+        ap.error("native guidance rollback uses the owning commit, not --prune")
 
     repo_root = Path(args.repo_root).resolve()
     if args.apply:
@@ -15455,6 +15467,9 @@ def _run(args: argparse.Namespace, repo_root: Path) -> int:
     universe = str(manifest["universe"])
     registry_root = find_registry_root(Path(args.registry).resolve())
     index = load_plugins_index(registry_root)
+    if args.native_guidance:
+        from lib.native_guidance import resolve
+        return resolve(args, repo_root, sys.modules[__name__], manifest, registry_root, index)
     lock, lock_err = load_lock(repo_root)
 
     locked_dig = locked_digests(lock)

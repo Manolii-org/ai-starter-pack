@@ -150,6 +150,45 @@ Materialised components today: `skills/` → `.claude/skills/`, `agents/` →
 `.claude/agents/`, `commands/` → `.claude/commands/`. `hooks/`+`scripts/`
 materialisation needs the settings-merge surface (P1) — reported as advisory.
 
+### Native policy for curated consumers
+
+`--native-guidance` is a narrow renderer for the shared adaptable-development
+policy and its two task procedures. It uses the same manifest, scope/ref checks
+and repository apply lock, without reconciling unrelated curated components:
+
+```bash
+python3 scripts/ai-resolve.py --registry <pinned-pack-checkout> --repo-root <consumer> --native-guidance
+python3 scripts/ai-resolve.py --registry <pinned-pack-checkout> --repo-root <consumer> --native-guidance --apply
+python3 scripts/ai-resolve.py --registry <pinned-pack-checkout> --repo-root <consumer> --native-guidance --check
+```
+
+Select `platform/framework` and supported `surfaces` in the consumer manifest.
+Use a reviewed pack revision containing the policy; older pins fail explicitly.
+The renderer owns marked blocks in root `AGENTS.md` (and a present root
+`AGENTS.override.md`), a real relative import in `CLAUDE.md`, a small valid
+always-applied Cursor rule and three repository-visible skills with eval fixtures. It records
+block/file digests and policy version in `.ai/native-guidance-lock.json`, separate
+from full component ownership. Local text outside the blocks survives updates.
+Local edits inside owned blocks/files, malformed markers, unsafe paths and
+oversized discovered Codex chains fail before file writes. Failed writes roll
+back this invocation; the lock is written last. Always preview first.
+
+For an existing repository-local `.claude/skills` alias, explicitly set
+`feature_flags.native_guidance_skill_root` to its canonical directory (for
+example `.github/skills`). The renderer verifies that exact in-repository
+relationship and writes the real directory, preserving the alias and all other
+skills. Arbitrary/outside-root or linked canonical destinations are refused.
+
+The canonical standing policy is
+`.claude/skills/adaptable-development/SKILL.md`; the other two skills contain the
+design/feature and compatibility procedures. Existing plugin/registry builders
+generate all three. `AGENTS.md` carries only the policy body and triggers;
+procedure paths require an explicit read and work without installed plugins.
+Cursor discovers the root carrier; its rule repeats only procedure selection,
+not the full policy. See [native guidance](native-guidance.md) for loader
+assumptions, probes and rollback. A normal component-only `--apply` is **not**
+evidence of native policy installation.
+
 ## Install paths per surface
 
 - **Devin:** the pack root is a meta-plugin (`.devin-plugin/plugin.json`) whose
@@ -162,9 +201,12 @@ materialisation needs the settings-merge surface (P1) — reported as advisory.
   it under `extraKnownMarketplaces` in `.claude/settings.json` and enable via
   `enabledPlugins` (`framework@manolii`). Marketplace source tracks a release
   tag (`ref`); individual plugin sources may pin `sha`.
-- **Cursor / Codex / OpenHands:** no plugin system — the resolved set compiles
-  to `.cursor/rules/*.mdc` / AGENTS.md sections as generated artifacts (same
-  one-source→per-surface pattern as `generate-devin-hooks.py`).
+- **Cursor / Codex / Devin / Claude Code:** `--native-guidance` implements the
+  repository policy carrier and on-demand procedures. General non-Claude
+  component rendering remains advisory; this adapter does not claim parity for
+  hooks, settings or the rest of the plugin.
+- **OpenHands:** native policy rendering is not implemented; do not infer
+  delivery from the schema accepting this surface.
 
 ## Migration
 

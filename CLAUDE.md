@@ -1,3 +1,7 @@
+<!-- ai-starter-pack:development-policy:begin -->
+@AGENTS.md
+<!-- ai-starter-pack:development-policy:end -->
+
 # {PROJECT_NAME}
 
 > **Auto-generated from [AI Starter Pack](./README-STARTER-PACK.md)** — customize all `{PLACEHOLDER}` sections below.

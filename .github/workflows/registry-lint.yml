@@ -54,4 +54,4 @@ jobs:
           mkdir -p /tmp/resolve-check
           python3 scripts/ai-resolve.py --registry . --manifest "$PWD/ai-manifest.yaml" --repo-root /tmp/resolve-check
       - name: Registry unit tests
-        run: python3 -m pytest tests/test_registry.py -q
+        run: python3 -m pytest tests/test_registry.py tests/test_native_guidance.py -q
