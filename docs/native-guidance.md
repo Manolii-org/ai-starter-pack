@@ -34,7 +34,9 @@ changed. CLI availability does not establish access to the corresponding cloud
 product. Static checks cannot inspect host-injected instructions, invocation
 overrides or semantic conflicts in local guidance; inspect them during adoption.
 The checker reports the configured local Codex chain and fallback filenames,
-including global-file size, without printing global instruction contents.
+including global-file size and Git-ignored nested instruction files, without
+printing global instruction contents. Git enumeration is limited to instruction
+filenames so unrelated ignored build/dependency files do not fill its output.
 Do not raise limits to conceal oversized guidance. A long legacy AGENTS tail
 may still be truncated by Devin even though the new essential policy is early.
 

@@ -215,6 +215,25 @@ def test_nested_instruction_chain_limit_blocks_before_writes(consumer):
     assert files(root) == before
 
 
+@pytest.mark.parametrize("filename", ["AGENTS.md", "AGENTS.override.md", "TEAM.md", "TEAM[1].md", r"TEAM\.md"])
+def test_ignored_nested_instructions_block_oversized_install(consumer, filename):
+    root, _ = consumer
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    (root / ".gitignore").write_text("scratch/\n")
+    (root / "AGENTS.md").write_bytes(b"r" * 20000)
+    (root / "scratch/deep").mkdir(parents=True)
+    (root / "scratch/deep" / filename).write_bytes(b"s" * 15000)
+    if filename.startswith("TEAM"):
+        (root / ".codex").mkdir()
+        (root / ".codex/config.toml").write_text(
+            "project_doc_fallback_filenames = " + json.dumps([filename]) + "\n")
+    before = files(root)
+    result = run(consumer, "--apply")
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "limit 32768" in result.stdout
+    assert files(root) == before
+
+
 def test_configured_fallback_and_global_size_are_counted(consumer, monkeypatch, tmp_path):
     root, _ = consumer
     home = tmp_path / "custom-codex"
