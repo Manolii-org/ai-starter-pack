@@ -1,6 +1,6 @@
 ---
 name: orchestrator
-version: 1.0.6
+version: 1.0.7
 description: "Multi-step task coordinator — decomposes tasks into a DAG, dispatches sub-agents in order, handles STATUS: INCOMPLETE returns, preserves checkpoint custody when checkpointing is available."
 type: agent
 model: sonnet
@@ -225,6 +225,9 @@ runtime status before recovering lost work under existing task authorization.
 For a resumed invocation, establish custody through an installed
 verified handoff operation, the same authoritative stable caller/task identity,
 or a custody receipt supplied from the trusted caller's retained task context.
+On every authenticated resume, first check the task's bound archive under the
+stable lock. If its binding and completed outcome verify, return that result
+even when another task now owns `active-task.json`; leave that task untouched.
 Under the stable lock, verify the immutable receipt/checkpoint repository, worktree and logical
 task bindings, and verify the previous controller is terminal or the trusted
 executor has explicitly handed off its work. That status/handoff must identify
@@ -241,10 +244,8 @@ branch change needs an explicit same-task handoff recording the old/new branch,
 not another human approval. Reading an owner UUID or receipt from disk alone is
 not authority to resume. If caller provenance or worker status cannot be verified,
 leave custody intact and return current-run results to its existing owner.
-If the active file is absent during recovery, first verify the task's bound
-archive/completion receipt and report its actual finished result. Never create
-another singleton or repeat completed work merely because the active file is
-absent. If neither active nor bound archive state can be verified, preserve the
+Never create another singleton or repeat completed work merely because the active
+file is absent. If neither this task's active nor bound archive state can be verified, preserve the
 receipts, report the custody limitation and continue independent authorized work.
 
 ## Sub-Agent Selection Guide
