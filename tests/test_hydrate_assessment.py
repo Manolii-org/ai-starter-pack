@@ -179,3 +179,70 @@ def test_scratch_checkout_is_cleaned_up() -> None:
             if str(s.get("name", "")) == "Hydrate assessment runtime"
         )
         assert re.search(r"rm -rf \.pack-hydrate", body), f"{job} leaves .pack-hydrate behind"
+
+
+def test_protected_helper_and_sanitizer_are_hydrated_and_in_sparse_checkout():
+    listed = _hydration_list()
+    assert {"scripts/lib/protected_review.py", ".ai/security/token-shapes.json"} <= set(listed)
+    for job in RUNNER_JOBS:
+        checkout = next(s for s in _workflow()["jobs"][job]["steps"]
+                        if s.get("name") == "Check out pack for hydration")
+        sparse = checkout["with"]["sparse-checkout"].split()
+        assert all(any(path == prefix or path.startswith(prefix + "/") for prefix in sparse)
+                   for path in listed), f"{job}: sparse checkout omits a runtime dependency"
+
+
+@pytest.mark.parametrize("job", sorted(RUNNER_JOBS))
+@pytest.mark.parametrize("trigger", ["pull_request", "workflow_dispatch"])
+def test_real_hydration_step_closes_dependencies_preserving_trusted_overrides(tmp_path, job, trigger):
+    import hashlib
+    import os
+    import shutil
+    import subprocess
+    import sys
+    listed = _hydration_list()
+    scratch = tmp_path / ".pack-hydrate"
+    for relative in listed:
+        destination = scratch / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(REPO_ROOT / relative, destination)
+    helper = tmp_path / "scripts/lib/protected_review.py"
+    helper.parent.mkdir(parents=True)
+    helper.write_text("# Existing trusted consumer override\n")
+    steps = _workflow()["jobs"][job]["steps"]
+    body = next(s["run"] for s in steps if s.get("name") == "Hydrate assessment runtime")
+    body = body.replace("${{ github.event_name }}", trigger).replace("${{ inputs.pack_ref }}", "offline-frozen-source")
+    env = {"PATH": os.defpath, "ASSESSMENT_RUNTIME_FILES": " ".join(listed)}
+    subprocess.run(["bash", "-c", body], cwd=tmp_path, env=env, check=True,
+                   capture_output=True, text=True, timeout=15)
+    assert not scratch.exists()
+    assert (tmp_path / ".ai/security/token-shapes.json").read_bytes() == (REPO_ROOT / ".ai/security/token-shapes.json").read_bytes()
+    for relative in listed:
+        if relative == "scripts/lib/protected_review.py" and trigger != "pull_request":
+            assert helper.read_text() == "# Existing trusted consumer override\n"
+        else:
+            assert hashlib.sha256((tmp_path / relative).read_bytes()).digest() == hashlib.sha256((REPO_ROOT / relative).read_bytes()).digest()
+    if trigger == "pull_request":
+        # Load the real hydrated modules from their new consumer root. Definitions
+        # only: no credentials, CLI invocation, model calls or workflow dispatch.
+        probe = '''import importlib.util, pathlib, sys
+for name in ("run-specialists.py", "run-broad-agents.py", "run-judge.py"):
+    path=pathlib.Path("scripts")/name
+    spec=importlib.util.spec_from_file_location(name.replace("-","_"),path)
+    module=importlib.util.module_from_spec(spec)
+    sys.modules[spec.name]=module
+    exec(compile(path.read_bytes(),str(path),"exec"),module.__dict__)
+    if name=="run-judge.py": module._require_safe_packet({"source":"ordinary synthetic input"})
+'''
+        subprocess.run([sys.executable, "-c", probe], cwd=tmp_path, env=env,
+                       check=True, capture_output=True, text=True, timeout=15)
+
+
+@pytest.mark.parametrize("job", sorted(RUNNER_JOBS))
+def test_native_workflow_restores_sanitizer_with_trusted_runtime(job):
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/pr-assessment.yml").read_text())
+    step = next(s for s in workflow["jobs"][job]["steps"]
+                if s.get("name") == "Restore trusted runtime from PR base")
+    assert "for p in .claude scripts .ai/security CLAUDE.md AGENTS.md; do" in step["run"]
+    assert 'git checkout "$BASE_SHA" -- "$p"' in step["run"]
+    assert 'rm -rf "$p"' in step["run"]

@@ -336,6 +336,13 @@ def invoke_agent(
     # failure must then degrade to the skipped first-party marker so the judge
     # fails closed instead of adjudicating without the required direct leg.
     direct_required = False
+    if (agent_config.first_party and not os.environ.get("CLIENT_AI_POLICY")
+            and os.environ.get("SECURITY_REVIEW_MODE", "direct") != "direct"):
+        # None of the broad security roles has an accepted estate producer.
+        # Preserve the three-argument API and missing coverage; do not route an
+        # unqualified role through either the proxy or a direct fallback.
+        return {"source": agent_config.name, "findings": [],
+                "first_party": True, "skipped": "protected_review_incomplete"}
     try:
         if agent_config.first_party or os.environ.get("CLIENT_AI_POLICY") or not proxy:
             require_direct_llm_admission()

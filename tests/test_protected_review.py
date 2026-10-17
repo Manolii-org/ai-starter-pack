@@ -4,8 +4,10 @@ import importlib.util
 import io
 import json
 import sys
+import subprocess
 from pathlib import Path
 import urllib.error
+import urllib.request
 
 import pytest
 
@@ -15,6 +17,13 @@ from lib import protected_review as pr  # noqa: E402 -- script-local library
 
 HEAD = "a" * 40
 DIFF = "+assert denied('tenant-b')\n"
+
+
+@pytest.fixture(autouse=True)
+def deny_unmocked_network(monkeypatch):
+    def denied(*args, **kwargs):
+        raise AssertionError("unmocked live HTTP forbidden in offline tests")
+    monkeypatch.setattr(urllib.request.OpenerDirector, "open", denied)
 
 
 @pytest.fixture(autouse=True)
@@ -68,7 +77,7 @@ def finding():
     }
 
 
-def install(monkeypatch, replies=None, info=None):
+def install(monkeypatch, replies=None, info=None, helper=pr):
     sent = []
     responses = list(replies) if replies is not None else [verdict(), verdict()]
 
@@ -86,7 +95,7 @@ def install(monkeypatch, replies=None, info=None):
             "payload_sha256": pr.digest(json.dumps(payload)),
         }
 
-    monkeypatch.setattr(pr, "_request", request)
+    monkeypatch.setattr(helper, "_request", request)
     return sent
 
 
@@ -291,7 +300,7 @@ def test_real_specialist_and_judge_receipt_binding(monkeypatch, tmp_path):
     specialist = load_script("run-specialists")
     monkeypatch.setenv("LITELLM_PROXY_URL", "https://proxy.example")
     monkeypatch.setenv("LLM_API_KEY", "offline")
-    install(monkeypatch)
+    install(monkeypatch, helper=specialist.protected_review)
     _, error = specialist._invoke_skill("security-boundary-test", DIFF, tmp_path)
     assert error is None
     diff_path = tmp_path / "input.diff"
@@ -361,7 +370,7 @@ def test_real_judge_run_never_approves_partial_roles(monkeypatch, tmp_path, miss
 
 
 def test_unqualified_broad_role_stays_incomplete_and_client_policy_stays_direct(
-    monkeypatch,
+    monkeypatch, tmp_path,
 ):
     module = load_script("run-broad-agents")
     agent = module.AgentConfig(
@@ -375,10 +384,25 @@ def test_unqualified_broad_role_stays_incomplete_and_client_policy_stays_direct(
     monkeypatch.setenv("LITELLM_PROXY_URL", "https://proxy.example")
     monkeypatch.delenv("ANTHROPIC_DIRECT_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    result = module.invoke_agent(agent, "offline", DIFF, DIFF)
+    result = module.invoke_agent(agent, "offline", DIFF)
     assert result["skipped"] == "protected_review_incomplete"
+    # The real direct-admission policy still runs before credential lookup.
+    # Supply an actually committed eligible external-consumer policy, rather
+    # than bypassing it to reach the no-direct-key branch under test.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "ExternalExample/project")
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    policy = tmp_path / ".ai/capabilities.json"
+    policy.parent.mkdir()
+    policy.write_text(json.dumps({"version": 1, "mode": "capabilities",
+        "capabilities": ["llm-anthropic"], "consumer_scope": "external",
+        "consumer_repository": "ExternalExample/project"}))
+    subprocess.run(["git", "init", "-q"], check=True)
+    subprocess.run(["git", "add", ".ai/capabilities.json"], check=True)
+    subprocess.run(["git", "-c", "user.email=offline@example.invalid", "-c", "user.name=Offline",
+                    "commit", "-qm", "External policy fixture"], check=True)
     monkeypatch.setenv("CLIENT_AI_POLICY", "us_weights_ok")
-    result = module.invoke_agent(agent, "offline", DIFF, DIFF)
+    result = module.invoke_agent(agent, "offline", DIFF)
     assert result["skipped"] == "no_direct_key"
 
 
@@ -542,3 +566,159 @@ def test_http_failure_is_incomplete_and_never_replayed(monkeypatch):
     with pytest.raises(RuntimeError, match="HTTP 503; incomplete"):
         run()
     assert calls == [90]
+
+
+@pytest.mark.parametrize("failure", ["missing_helper", "unknown_mode", "unqualified_role", "no_proxy", "no_key", "timeout"])
+def test_canonical_estate_specialist_fails_closed_without_direct_fallback(monkeypatch, tmp_path, failure):
+    specialist = load_script("run-specialists")
+    monkeypatch.setenv("LITELLM_PROXY_URL", "https://proxy.example")
+    monkeypatch.setenv("LLM_API_KEY", "offline-proxy-key")
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("LITELLM_MASTER_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(specialist, "_call_api", lambda *a, **k: pytest.fail("direct fallback"))
+    calls = []
+    helper = specialist.protected_review
+    if failure == "missing_helper":
+        monkeypatch.setattr(specialist, "protected_review", None)
+    elif failure == "unknown_mode":
+        monkeypatch.setenv("SECURITY_REVIEW_MODE", "unsupported")
+    elif failure == "no_proxy":
+        monkeypatch.delenv("LITELLM_PROXY_URL")
+    elif failure == "no_key":
+        monkeypatch.delenv("LLM_API_KEY")
+    elif failure == "timeout":
+        def broken(base, key, path, payload=None):
+            if payload is None:
+                return inventory(), {}
+            calls.append(payload)
+            raise TimeoutError("PRIVATE_PROVIDER_PAYLOAD")
+        monkeypatch.setattr(helper, "_request", broken)
+    role = "shell-security" if failure == "unqualified_role" else "security-boundary-test"
+    _, error = specialist._invoke_skill(role, DIFF, tmp_path)
+    result = json.loads((tmp_path / (role + ".json")).read_text())
+    assert result == {"source": role, "findings": [], "first_party": True,
+                      "skipped": "protected_review_incomplete"}
+    assert "PRIVATE_PROVIDER_PAYLOAD" not in error
+    assert len(calls) == (1 if failure == "timeout" else 0)
+
+
+@pytest.mark.parametrize("truncated_first", [False, True])
+def test_real_canonical_specialist_to_source_grounded_judge(monkeypatch, tmp_path, truncated_first):
+    root = tmp_path / "subject"
+    root.mkdir()
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(root), *args]).decode().strip()
+    git("init", "-q")
+    git("-c", "user.email=offline@example.invalid", "-c", "user.name=Offline",
+        "commit", "--allow-empty", "-qm", "Empty source baseline")
+    base = git("rev-parse", "HEAD")
+    (root / "src").mkdir()
+    (root / "src/auth.py").write_text("def permitted(tenant):\n    return tenant == 'owner'\n# FINAL_SOURCE_MARKER\n")
+    git("add", "src/auth.py")
+    git("-c", "user.email=offline@example.invalid", "-c", "user.name=Offline",
+        "commit", "-qm", "Synthetic policy implementation")
+    head = git("rev-parse", "HEAD")
+    diff = subprocess.check_output(["git", "-C", str(root), "diff", base, head]).decode()
+    diff_path = tmp_path / "complete.diff"
+    diff_path.write_text(diff)
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(root))
+    monkeypatch.setenv("PR_HEAD_SHA", head)
+    monkeypatch.setenv("PR_BASE_SHA", base)
+    monkeypatch.setenv("REVIEW_DIFF_PATH", str(diff_path))
+    monkeypatch.setenv("LITELLM_PROXY_URL", "https://proxy.example")
+    monkeypatch.setenv("LLM_API_KEY", "offline-proxy-key")
+    specialist = load_script("run-specialists")
+    sent = install(monkeypatch, [verdict([finding()]), verdict([finding()])],
+                   helper=specialist.protected_review)
+    candidates = tmp_path / "candidates"
+    candidates.mkdir()
+    assert specialist._invoke_skill("security-boundary-test", diff, candidates) == ("security-boundary-test", None)
+    assert [p["model"] for p in sent] == list(pr.ROUTES)
+    assert sent[0]["messages"] == sent[1]["messages"]
+    assert "FINAL_SOURCE_MARKER" in sent[0]["messages"][0]["content"]
+    module = load_script("run-judge")
+    judge = module.Judge(str(candidates), 1, head)
+    findings = judge.load_candidates()
+    assert len(findings) == 1 and judge._candidate_load_errors == 0
+    assert not judge._has_first_party_candidates
+    requests = []
+    class Reply(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+    def judge_reply(request, *, timeout, host):
+        assert host == "proxy.example" and timeout == 120
+        payload = json.loads(request.data)
+        requests.append(payload)
+        packet = json.loads(payload["messages"][0]["content"].split("<untrusted_review_data>\n", 1)[1].split("\n</untrusted_review_data>", 1)[0])
+        locations = list(packet["source_evidence"]["locations"])
+        answer = {"version": 2, "decisions": [
+            {"finding_id": f["finding_id"], "decision": "keep", "gate": "passed",
+             "reason": "The complete tracked source has no tenant denial test assertion.", "evidence_ids": locations}
+            for f in packet["candidates"]], "investigations": []}
+        assert not packet["investigations"]
+        return Reply(json.dumps({
+            "stop_reason": "max_tokens" if truncated_first and len(requests) == 1 else "end_turn",
+            "content": [{"type": "text", "text": json.dumps(answer)}]}).encode())
+    monkeypatch.setattr(module, "_urlopen_https", judge_reply)
+    result = judge.invoke_judge_agent(findings)
+    assert result["complete"] is True and result["review_action"] == "REQUEST_CHANGES"
+    assert len(result["surviving"]) == 1 and result["dropped_count"] == 0
+    assert [p["max_tokens"] for p in requests] == ([4000, 6048] if truncated_first else [4000])
+    assert all(p["messages"] == requests[0]["messages"] for p in requests)
+
+
+def test_copied_specialist_companion_uses_source_not_initializer_or_cached_bytecode(monkeypatch, tmp_path):
+    import py_compile
+    import shutil
+    consumer = tmp_path / "consumer"
+    for relative in ["scripts/run-specialists.py", "scripts/lib/agent_capabilities.py",
+                     ".claude/skills/security-boundary-test/SKILL.md"]:
+        dest = consumer / relative
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / relative, dest)
+    helper = consumer / "scripts/lib/protected_review.py"
+    helper.write_text("raise AssertionError('unchecked cache executed')\n")
+    py_compile.compile(str(helper), invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH)
+    helper.write_bytes((ROOT / "scripts/lib/protected_review.py").read_bytes())
+    (helper.parent / "__init__.py").write_text("raise AssertionError('package initializer executed')\n")
+    path = consumer / "scripts/run-specialists.py"
+    spec = importlib.util.spec_from_file_location("copied_canonical_specialist", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.protected_review.__file__ == str(helper)
+    monkeypatch.setenv("LITELLM_PROXY_URL", "https://proxy.example")
+    monkeypatch.setenv("LLM_API_KEY", "offline-proxy-key")
+    sent = install(monkeypatch, helper=module.protected_review)
+    candidates = tmp_path / "candidates"
+    candidates.mkdir()
+    assert module._invoke_skill("security-boundary-test", DIFF, candidates) == ("security-boundary-test", None)
+    assert len(sent) == 2
+
+
+def test_older_consumer_missing_companion_keeps_ordinary_proxy_and_marks_estate_gap(monkeypatch, tmp_path):
+    import shutil
+    consumer = tmp_path / "consumer"
+    for relative in ["scripts/run-specialists.py", "scripts/lib/agent_capabilities.py",
+                     ".claude/skills/security-boundary-test/SKILL.md",
+                     ".claude/skills/test-adequacy/SKILL.md"]:
+        dest = consumer / relative
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / relative, dest)
+    path = consumer / "scripts/run-specialists.py"
+    spec = importlib.util.spec_from_file_location("old_consumer_specialist", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.protected_review is None
+    monkeypatch.setenv("LITELLM_PROXY_URL", "https://proxy.example")
+    monkeypatch.setenv("LLM_API_KEY", "offline-proxy-key")
+    calls = []
+    def ordinary(*args, **kwargs):
+        calls.append(kwargs)
+        return '{"source":"test-adequacy","findings":[]}'
+    monkeypatch.setattr(module, "_call_api", ordinary)
+    assert module._invoke_skill("test-adequacy", DIFF, tmp_path) == ("test-adequacy", None)
+    assert len(calls) == 1 and calls[0]["first_party"] is False
+    _, error = module._invoke_skill("security-boundary-test", DIFF, tmp_path)
+    assert error and len(calls) == 1
+    assert json.loads((tmp_path / "security-boundary-test.json").read_text())["skipped"] == "protected_review_incomplete"
