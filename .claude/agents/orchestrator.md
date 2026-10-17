@@ -1,6 +1,6 @@
 ---
 name: orchestrator
-version: 1.0.5
+version: 1.0.6
 description: "Multi-step task coordinator — decomposes tasks into a DAG, dispatches sub-agents in order, handles STATUS: INCOMPLETE returns, preserves checkpoint custody when checkpointing is available."
 type: agent
 model: sonnet
@@ -70,7 +70,7 @@ created directories. Fail safely on conflicting non-directory paths.
 
 1. For a new task, retain a stable logical task ID and generate an owner UUID.
    Persist a mode-0600 custody receipt in
-   `.ai/sessions/orchestrator-receipts/<owner_thread_id>.json` using the atomic
+   `.ai/sessions/orchestrator-receipts/<logical_task_id>.json` using the atomic
    write procedure below. Bind it to the trusted caller's stable task/thread
    identity, logical task ID, repository, worktree and branch. Reserve a unique
    non-existing `.ai/sessions/archive/<logical_task_id>-<uuid>.json` path in
@@ -81,10 +81,13 @@ created directories. Fail safely on conflicting non-directory paths.
    before receipt delivery cannot orphan a singleton. Verify receipt readback
    before claiming recoverable custody. Never infer caller identity from a
    checkpoint or child-supplied payload.
+   Keep this logical-task receipt immutable across controller transfers. Its
+   authority binds the logical task and trusted caller, not a current owner UUID.
 2. Hold an exclusive `fcntl.flock` on the stable
    `.ai/sessions/active-task.lock` file and re-read `active-task.json` under the lock.
 3. Create a checkpoint only if absent. Update an existing checkpoint only when
-   its `owner_thread_id` matches this orchestrator. A missing or different owner
+   its `owner_thread_id` matches this orchestrator, except for the verified
+   recovery transfer described below. A missing or different owner without that recovery
    means leave it intact and return child results to its existing owner.
 4. Merge only this task's fields and owned step IDs, retaining unknown fields,
    parent commitments and sibling state. Write valid JSON to a mode-0600 temp
@@ -119,6 +122,7 @@ monitoring without a verified receipt. Core coordination needs no optional MCP.
   "version": 1,
   "logical_task_id": "<stable caller-bound task ID>",
   "owner_thread_id": "<this orchestrator's retained UUID>",
+  "controller_reference": "<trusted runtime/caller handle for this owner>",
   "custody_receipt": "<verified receipt reference with reserved archive path>",
   "task": "brief task description",
   "branch": "current-branch-name",
@@ -207,7 +211,7 @@ created by the portable procedure, hold the same stable lock, re-read and verify
 the current owner UUID and complete state, then atomically move it to the unique
 non-existing archive path reserved in the logical task's custody receipt.
 Fsync both source and destination directories. Verify the archive and absence
-of `active-task.json` under the lock, record completion in the custody receipt,
+of `active-task.json` under the lock, with completion recorded in the archived checkpoint,
 and return the verified archive/release receipt. Retain the lock file. Never archive another owner's,
 legacy/unowned or unfinished checkpoint. If archive verification fails, report
 the actual state and let the existing owner recover; do not claim successful
@@ -221,12 +225,17 @@ runtime status before recovering lost work under existing task authorization.
 For a resumed invocation, establish custody through an installed
 verified handoff operation, the same authoritative stable caller/task identity,
 or a custody receipt supplied from the trusted caller's retained task context.
-Under the stable lock, verify the receipt/checkpoint current owner UUID, repository, worktree and logical
+Under the stable lock, verify the immutable receipt/checkpoint repository, worktree and logical
 task bindings, and verify the previous controller is terminal or the trusted
-executor has explicitly handed off its work. Generate a fresh owner UUID and
-record the old/new ownership transfer, preserving the complete plan, approvals,
-parent/sibling state and unknown fields. Persist and verify the new caller-bound
-receipt, keeping the logical task's reserved archive path. Every subsequent write
+executor has explicitly handed off its work. That status/handoff must identify
+the currently recorded controller, not an earlier owner. Generate a fresh owner
+UUID and atomically write it, its controller reference and the old/new ownership
+transfer together in the checkpoint, preserving the complete plan, approvals,
+parent/sibling state and unknown fields. Keep the same immutable caller-retained
+logical-task receipt and reserved archive path; verify checkpoint readback.
+If a crash occurs before or after that atomic transfer, recover using this same
+receipt and the controller currently recorded in the checkpoint. No new receipt
+delivery is required to make transferred custody recoverable. Every subsequent write
 must re-check current ownership under the lock, fencing the old controller. A
 branch change needs an explicit same-task handoff recording the old/new branch,
 not another human approval. Reading an owner UUID or receipt from disk alone is
