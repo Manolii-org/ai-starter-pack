@@ -177,7 +177,7 @@ def test_denial_precedes_all_direct_key_reads(monkeypatch, name, protected):
         env['LITELLM_PROXY_URL'] = 'https://proxy.example'
     with monkeypatch.context() as patch:
         patch.setattr(module.os, 'environ', env)
-        with pytest.raises(policy.RouteAdmissionError):
+        with pytest.raises(module.RouteAdmissionError):
             if name == 'run-broad-agents.py':
                 # get_api_key is the generic transport resolver; force direct.
                 env.pop('LITELLM_PROXY_URL', None)
@@ -368,10 +368,19 @@ def test_judge_cli_repo_override_cannot_change_route_identity(monkeypatch, tmp_p
 
 
 @pytest.mark.parametrize('name', ['run-specialists.py', 'run-judge.py', 'run-pr-classifier.py', 'run-broad-agents.py'])
-def test_old_helper_preserves_proxy_but_never_admits_direct(monkeypatch, name):
-    import types
-    monkeypatch.setitem(sys.modules, 'lib.agent_capabilities', types.ModuleType('lib.agent_capabilities'))
-    module = load(name)
+@pytest.mark.parametrize('helper', [None, '# older helper without admission\n'])
+def test_old_helper_preserves_proxy_but_never_admits_direct(monkeypatch, tmp_path, name, helper):
+    import shutil
+    scripts = tmp_path / 'scripts'
+    scripts.mkdir()
+    shutil.copy2(ROOT / 'scripts' / name, scripts / name)
+    if helper is not None:
+        (scripts / 'lib').mkdir()
+        (scripts / 'lib/agent_capabilities.py').write_text(helper)
+    spec = importlib.util.spec_from_file_location('old_helper_runner', scripts / name)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
     with monkeypatch.context() as patch:
         patch.setattr(module.os, 'environ', {'GITHUB_REPOSITORY': 'ExampleOrg/project',
             'LITELLM_PROXY_URL': 'https://proxy.example', 'LLM_API_KEY': 'offline-proxy'})
@@ -385,6 +394,31 @@ def test_old_helper_preserves_proxy_but_never_admits_direct(monkeypatch, name):
                 module.get_api_key()
             else:
                 module._endpoint()
+
+
+@pytest.mark.parametrize('name', ['run-specialists.py', 'run-judge.py', 'run-pr-classifier.py', 'run-broad-agents.py'])
+@pytest.mark.parametrize('retained_bytecode', [False, True])
+def test_exact_helper_load_ignores_ambient_package_initializer(monkeypatch, tmp_path, name, retained_bytecode):
+    """Retained package initializers and unchecked bytecode cannot replace source."""
+    import py_compile
+    import shutil
+    scripts = tmp_path / 'scripts'
+    (scripts / 'lib').mkdir(parents=True)
+    shutil.copy2(ROOT / 'scripts' / name, scripts / name)
+    helper = scripts / 'lib/agent_capabilities.py'
+    if retained_bytecode:
+        helper.write_text('raise AssertionError("retained bytecode executed")\n')
+        py_compile.compile(str(helper), doraise=True,
+                           invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH)
+    shutil.copy2(ROOT / 'scripts/lib/agent_capabilities.py', helper)
+    (scripts / 'lib/__init__.py').write_text('raise AssertionError("package initializer executed")\n')
+    monkeypatch.syspath_prepend(str(scripts))
+    spec = importlib.util.spec_from_file_location('exact_helper_runner', scripts / name)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    with pytest.raises(module.RouteAdmissionError, match='missing consumer repository evidence'):
+        module.require_direct_llm_admission(environ={})
 
 
 def test_admitted_external_missing_key_keeps_protected_coverage_gap(external, monkeypatch):

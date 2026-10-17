@@ -10,6 +10,7 @@ Exit codes:
   1 = fatal error (agent file missing)
 """
 import argparse
+import importlib.util
 import json
 import os
 import pathlib
@@ -20,11 +21,21 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-# Shared policy code is part of the trusted, hydrated assessment runtime.
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+# Load the exact hydrated helper, never an ambient/PR-added lib package initializer.
+# The launcher still owns complete runtime custody; this is not shell isolation.
 try:
-    from lib.agent_capabilities import RouteAdmissionError, require_direct_llm_admission
-except ImportError:
+    _policy_spec = importlib.util.spec_from_file_location(
+        "_assessment_route_policy", pathlib.Path(__file__).resolve().parent / "lib/agent_capabilities.py")
+    if _policy_spec is None or _policy_spec.loader is None:
+        raise ImportError("missing policy loader")
+    _policy_module = importlib.util.module_from_spec(_policy_spec)
+    # Execute hydrated source bytes, not a PR-retained bytecode cache.
+    _policy_path = _policy_spec.origin
+    exec(compile(pathlib.Path(_policy_path).read_bytes(), _policy_path, "exec"),
+         _policy_module.__dict__)
+    RouteAdmissionError = _policy_module.RouteAdmissionError
+    require_direct_llm_admission = _policy_module.require_direct_llm_admission
+except (ImportError, OSError, AttributeError):
     # Mixed/older consumer runtime: preserve ordinary proxy calls, but never
     # admit a direct call without the shared policy implementation.
     class RouteAdmissionError(ValueError):

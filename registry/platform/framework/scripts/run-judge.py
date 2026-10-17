@@ -14,6 +14,7 @@ Usage:
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import logging
 import os
@@ -26,11 +27,21 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-# Shared policy code is part of the trusted, hydrated assessment runtime.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+# Load the exact hydrated helper, never an ambient/PR-added lib package initializer.
+# The launcher still owns complete runtime custody; this is not shell isolation.
 try:
-    from lib.agent_capabilities import RouteAdmissionError, require_direct_llm_admission
-except ImportError:
+    _policy_spec = importlib.util.spec_from_file_location(
+        "_assessment_route_policy", Path(__file__).resolve().parent / "lib/agent_capabilities.py")
+    if _policy_spec is None or _policy_spec.loader is None:
+        raise ImportError("missing policy loader")
+    _policy_module = importlib.util.module_from_spec(_policy_spec)
+    # Execute hydrated source bytes, not a PR-retained bytecode cache.
+    _policy_path = _policy_spec.origin
+    exec(compile(Path(_policy_path).read_bytes(), _policy_path, "exec"),
+         _policy_module.__dict__)
+    RouteAdmissionError = _policy_module.RouteAdmissionError
+    require_direct_llm_admission = _policy_module.require_direct_llm_admission
+except (ImportError, OSError, AttributeError):
     # Mixed/older consumer runtime: preserve ordinary proxy calls, but never
     # admit a direct call without the shared policy implementation.
     class RouteAdmissionError(ValueError):
@@ -1042,10 +1053,10 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
         parts: list[str] = []
         if self._skipped_first_party:
             sources = ", ".join(sorted(set(self._skipped_first_party)))
-            parts.append(f"First-party security checks did not run (skipped: {sources})")
+            parts.append(f"First-party security checks incomplete (skipped: {sources})")
         if self._skipped_other:
             sources = ", ".join(sorted(set(self._skipped_other)))
-            parts.append(f"Other review checks did not run (skipped: {sources})")
+            parts.append(f"Other review checks incomplete (skipped: {sources})")
         return ". ".join(parts) + ("." if parts else "")
 
     def _post_clean_or_skip_advisory(self) -> None:
@@ -1075,7 +1086,7 @@ Remember: pass all four gates or drop the finding. Return only valid JSON, no ma
             sources = ", ".join(
                 sorted(set(self._skipped_first_party) | set(self._skipped_other))
             )
-            logger.warning(f"review checks skipped (missing credential): {sources}")
+            logger.warning(f"review coverage incomplete: {sources}")
             if self._post_advisory_warning(self._skipped_coverage_detail()):
                 self._dismiss_stale_judge_reviews(
                     ("CHANGES_REQUESTED", "APPROVED")
