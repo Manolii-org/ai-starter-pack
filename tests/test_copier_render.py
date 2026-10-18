@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Test suite for Copier template rendering (copier.yml)."""
 import hashlib
 import json
@@ -266,14 +265,14 @@ def test_cost_profile_lean_omits_measured_waste_callers(default_render):
 @pytest.mark.parametrize(
     ("flags", "expected"),
     [
-        ({}, {"Hooks": 5, "Commands": 50, "Skills": 32, "Agents": 27,
-              "Scripts": 52, "Husky": 3, "CI": 33, "Docs": 24}),
+        ({}, {"Hooks": 5, "Commands": 51, "Skills": 35, "Agents": 27,
+              "Scripts": 53, "Husky": 3, "CI": 35, "Docs": 28}),
         ({flag: "true" for flag in FEATURE_FLAGS},
-         {"Hooks": 5, "Commands": 53, "Skills": 36, "Agents": 28,
-              "Scripts": 52, "Husky": 3, "CI": 33, "Docs": 26}),
+         {"Hooks": 5, "Commands": 54, "Skills": 39, "Agents": 28,
+              "Scripts": 53, "Husky": 3, "CI": 35, "Docs": 30}),
         ({"cost_profile": "lean"},
-         {"Hooks": 5, "Commands": 50, "Skills": 32, "Agents": 27,
-              "Scripts": 52, "Husky": 3, "CI": 32, "Docs": 24}),
+         {"Hooks": 5, "Commands": 51, "Skills": 35, "Agents": 27,
+              "Scripts": 53, "Husky": 3, "CI": 34, "Docs": 28}),
     ],
 )
 def test_rendered_readme_counts_match_rendered_tree(flags, expected):
@@ -594,6 +593,7 @@ def test_verify_secrets_cli(tmp_path):
     env_without_key = {k: v for k, v in os.environ.items() if k != "LITELLM_MASTER_KEY"}
     result = subprocess.run(
         [sys.executable, "scripts/first-run-setup.py", "--verify-secrets"],
+        check=False,
         cwd=oss_dst,
         capture_output=True,
         text=True,
@@ -611,6 +611,7 @@ def test_verify_secrets_cli(tmp_path):
     env_with_key = {**env_without_key, "LITELLM_MASTER_KEY": "test-value"}
     result = subprocess.run(
         [sys.executable, "scripts/first-run-setup.py", "--verify-secrets"],
+        check=False,
         cwd=oss_dst,
         capture_output=True,
         text=True,
@@ -628,6 +629,7 @@ def test_verify_secrets_cli(tmp_path):
 
     result = subprocess.run(
         [sys.executable, "scripts/first-run-setup.py", "--verify-secrets"],
+        check=False,
         cwd=default_dst,
         capture_output=True,
         text=True,

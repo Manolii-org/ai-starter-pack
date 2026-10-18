@@ -42,7 +42,7 @@
       "type": "array",
       "items": { "enum": ["claude-code", "devin", "cursor", "codex", "openhands"] },
       "uniqueItems": true,
-      "description": "Agent surfaces to materialise for. claude-code is implemented today; others are advisory until their renderers land."
+      "description": "Agent surfaces. Full component resolution implements claude-code; --native-guidance delivers the shared policy and procedures for claude-code, codex, cursor and devin. openhands remains advisory."
     }
   }
 }

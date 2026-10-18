@@ -319,6 +319,9 @@ def check_edit(
             if not any_changed:
                 continue  # Region untouched; this guard does not block
 
+        if guard.get("mode") == "warn":
+            print(f"[GUARD-WARN:{guard['id']}] {guard.get('reason', 'guarded path')}", file=sys.stderr)
+            continue  # A later overlapping blocking guard must still be checked.
         decision = _decision_for_guard(guard, session_unfreezes)
         if decision["action"] == "block":
             return decision

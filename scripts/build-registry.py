@@ -18,6 +18,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
+import importlib.util
 import json
 import shutil
 import subprocess
@@ -33,6 +35,53 @@ PLUGIN_MAP = {
     "manolii-framework": ("platform", "framework"),
     "manolii-om": ("platform", "om"),
 }
+
+POLICY_SKILLS = ("adaptable-development", "design-feature-adoption", "compatibility-improvement")
+
+
+def _policy_resolver():
+    """Reuse the installed resolver's checked I/O, not a second file writer."""
+    name = "policy_refresh_resolver"
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, REPO / "scripts/ai-resolve.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return sys.modules[name]
+
+
+def refresh_policy(target: Path, check: bool = False) -> int:
+    """Generate only public policy assets, preserving a mirror's other content.
+
+    These three authored skills are scope-neutral and contain no Jinja. A
+    bounded refresh avoids unrelated platform upgrades in private registries.
+    """
+    resolver = _policy_resolver()
+    native = resolver._native_guidance_module()
+    # This rejects existing links; the registry root and all its ancestors
+    # must remain stable throughout refresh, as the operating contract requires.
+    if target.resolve() != target:
+        raise ValueError("policy registry root must not contain a symlink")
+    guard = contextlib.nullcontext() if check else resolver._repo_apply_mutex(target.parent)
+    with guard:
+        if resolver._read_source(target, "platform/framework/.claude-plugin/plugin.json") is None:
+            raise ValueError("policy refresh requires an established framework registry")
+        outputs, snapshots = {}, {}
+        # Validate and capture ALL six sources and destinations before any
+        # materialisation. A late conflict must leave earlier assets untouched.
+        for name in POLICY_SKILLS:
+            for leaf in ("SKILL.md", "evals/cases.json"):
+                rel = f"platform/framework/skills/{name}/{leaf}"
+                source = resolver._read_source(REPO, f".claude/skills/{name}/{leaf}")
+                if source is None:
+                    raise ValueError(f"unsafe or unreadable policy source: {name}/{leaf}")
+                outputs[rel] = source[0]
+                snapshots[rel] = native.file_snapshot(target, rel, resolver)
+        stale = [rel for rel in outputs if snapshots[rel] is None or snapshots[rel][0] != outputs[rel]]
+        if not check:
+            native.apply_outputs(target, outputs, snapshots, resolver)
+    print(f"{'STALE' if check and stale else 'OK'} policy assets: {len(stale)} {'differ' if check else 'updated'}")
+    return int(check and bool(stale))
 
 DEVIN_DESCRIPTIONS = {
     "framework": "Platform-scope engineering framework — PR review, delivery governance, and verification skills.",
@@ -83,7 +132,19 @@ def main() -> None:
     ap.add_argument("--check", action="store_true",
                     help="rebuild into a temp dir and diff against registry/ "
                          "(freshness gate — no writes)")
+    ap.add_argument("--policy-only", action="store_true",
+                    help="refresh only the three policy skills in an established registry")
+    ap.add_argument("--registry-root", type=Path,
+                    help="with --policy-only, an established private mirror's registry directory")
     args = ap.parse_args()
+    if args.registry_root and not args.policy_only:
+        ap.error("--registry-root requires --policy-only")
+    if args.policy_only:
+        try:
+            status = refresh_policy((args.registry_root or REGISTRY).absolute(), args.check)
+        except (OSError, ValueError) as exc:
+            ap.error(str(exc))
+        sys.exit(status)
 
     target_root = Path(tempfile.mkdtemp(prefix="registry-build-")) if args.check \
         else REGISTRY

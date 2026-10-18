@@ -32,7 +32,9 @@ DEFAULT_WRITE_PATH = REPO_ROOT / ".ai" / "unfinished-work.md"
 
 HTTP_TIMEOUT_SECONDS = 20
 SUBPROCESS_TIMEOUT_SECONDS = 20
-TERMINAL_TASK_STATUSES = {"done", "merged", "cancelled", "canceled"}
+TERMINAL_TASK_STATUSES = {"done", "cancelled", "canceled"}
+LEGACY_WATCH_KEYS = {"type", "status", "round", "started_at", "last_updated",
+                     "branch", "git_branch", "current_branch", "pr", "pr_url", "pr_number"}
 TOKEN_IN_URL_RE = re.compile(r"(https?://)([^/@\s]+)@")
 
 
@@ -301,6 +303,11 @@ def _active_task_gaps(branch: str) -> list[str]:
         return []
     if task.get("_error"):
         return [str(task["_error"])]
+    if "continuation" in task:
+        return [
+            "versioned continuation checkpoint requires its owning adapter; "
+            "retain custody and reconcile parent work before claiming completion"
+        ]
 
     task_branch = (
         task.get("branch") or task.get("git_branch") or task.get("current_branch")
@@ -319,16 +326,46 @@ def _active_task_gaps(branch: str) -> list[str]:
     if task_branch and task_branch != branch:
         return []
 
-    if status in TERMINAL_TASK_STATUSES:
+    if _terminal_task(task):
         return []
 
     if task.get("pr") or task.get("pr_url") or task.get("pr_number"):
-        return []
+        return [
+            "active-task.json retains unfinished or unverified parent work despite a PR reference; "
+            "reconcile the original outcome and follow-ups with the existing owner. "
+            "A PR reference alone is not task completion; continue independent authorized work"
+        ]
 
     return [
         "active-task.json is still open on this branch and has no "
         "pr/pr_url/pr_number recorded"
     ]
+
+
+def _terminal_task(task: dict[str, Any]) -> bool:
+    """Local legacy outcome claim, never provider cancellation or authority."""
+    if "continuation" in task or task.get("active_step_id"):
+        return False
+    steps = task.get("steps", [])
+    if not isinstance(steps, list) or any(not isinstance(step, dict) for step in steps):
+        return False
+    if any((step.get("dispatched_at") or step.get("background_agent_id"))
+           and step.get("completed_at") is None for step in steps):
+        return False
+    for record in [task, *steps]:
+        decision = record.get("resume_value")
+        if (record.get("interrupt_value") is not None
+                or decision is not None and (
+                    not isinstance(decision, dict) or decision.get("decision") != "approved")):
+            return False
+    if any(step.get("status") not in TERMINAL_TASK_STATUSES | {"merged"} for step in steps):
+        return False
+    status = str(task.get("status", "")).strip().lower()
+    # Preserve the existing standalone watch producer without certifying parents.
+    standalone_watch = (status == "merged" and task.get("type") == "watch-pr"
+                        and set(task) <= LEGACY_WATCH_KEYS
+                        and any(task.get(key) for key in ("pr", "pr_url", "pr_number")))
+    return status in TERMINAL_TASK_STATUSES or bool(standalone_watch)
 
 
 def assess(*, skip_remote: bool = False) -> dict[str, Any]:

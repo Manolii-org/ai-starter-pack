@@ -5,6 +5,8 @@ Canonical home for the AI Starter Pack: a [Copier](https://copier.readthedocs.io
 - **Render / update an instance:** `copier copy gh:manolii-org/ai-starter-pack <dest>` then `copier update`.
 - **Full pack docs:** [README-STARTER-PACK.md](./README-STARTER-PACK.md)
 - **License:** [Apache-2.0](./LICENSE) — free to deploy into your own and client environments.
+- **Native Muse subscription tasks:** [isolated executor and read-only smoke check](docs/muse-subscription.md), using only the consumer's own CLI credential.
+- **Shared development policy:** [native guidance](docs/native-guidance.md) delivers adaptable development, approved-design fidelity and triggered procedures to Claude Code, Codex, Cursor and Devin without replacing curated local instructions.
 
 ## Consumer pins (Prompt 11)
 
@@ -40,3 +42,10 @@ rm -f allocation.json messages.json
 ```
 
 Hermetic capture is fail-closed in staging/production. Hosted capture is allowlisted for `test|ci|preview|preprod|staging` over HTTPS, with the bearer token only in `EMAIL_CAPTURE_HOSTED_TOKEN`. Disable either with `EMAIL_CAPTURE_MODE=off`; this never changes business-provider configuration.
+
+## Email deliverability
+
+The opt-in `bin/email-quality` capability complements email capture with bounded
+Unspam spam/placement checks, private run checkpoints and metadata-only receipts.
+See [email-quality](docs/email-quality.md) for profiles, shared-account limits,
+sender hooks, immutable CI consumption and rollout/rollback.

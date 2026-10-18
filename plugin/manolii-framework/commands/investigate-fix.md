@@ -11,15 +11,19 @@ A structured workflow for investigating bugs, diagnosing root causes, implementi
 ## Process Steps
 
 ### 1. Save Instructions
-Maintain `.ai/sessions/active-task.json` with a non-null `active_step_id` naming the step you are actually on. Three duties, and all three are required — the checkpoint is the replacement for a withdrawn tool, so it has to carry the state that tool used to:
+Before writing `.ai/sessions/active-task.json`, verify that this repository has an admitted owner-preserving writer for that exact shared legacy record. Its supported create/update/completion procedure must preserve current parent commitments, approvals, unknown fields and ownership, with locked readback. A helper name alone is not compatibility evidence. The orchestrator's per-task custody procedure uses a different path/protocol; do not treat it as a legacy completion API.
 
-- **Write** it when you begin step 1.
-- **Update** it at **every** step transition, before starting the new step. A checkpoint written once and never advanced survives compaction still naming step 1, and sends recovery back to the beginning — which is worse than having none, because it is *confidently* wrong rather than absent.
+If that capability is absent or unverified, leave any existing shared record unchanged. Track the complete plan, current step and results in current-run context, re-read retained source before dependent actions, and return outcomes, remaining commitments and any existing source/owner reference to the calling owner. Continue authorized investigation and repair. Do not create a checkpoint just to satisfy this command or claim durable recovery from current-run context.
+
+With verified legacy custody, maintain a non-null `active_step_id` naming the actual step through that writer:
+
+- **Write** it when you begin step 1, only after ownership permits creation.
+- **Update** it at **every** step transition, before starting the new step. A checkpoint written once and never advanced can restart recovery at the wrong step.
 - **Re-read** it before any action that depends on knowing which step you are on — not only at step boundaries.
 
-Use that exact key: where `.claude/persistent-instructions.md` is installed, it preserves the file verbatim on a non-null `active_step_id`, so the checkpoint survives compaction automatically. Step 10 clears it once the work is done.
+Use that exact key: an installed `.claude/persistent-instructions.md` can preserve the file on a non-null `active_step_id`. Verify actual installed compaction behavior separately. Step 10 records completion through the same qualified custody procedure.
 
-> **Known limitation, plugin-only installs.** The packaged plugin ships no `persistent-instructions.md`, and `hooks/pre-compact.sh` states its stdout is not injected into compaction context. So there is no automatic post-compaction consumer: if compaction fires *mid-step*, recovery depends on this directive itself surviving into the compacted context. Writing the checkpoint still costs nothing and makes recovery possible; it is not guaranteed. Installing the full template closes this.
+> **Known limitation, plugin-only installs.** The packaged plugin ships no `persistent-instructions.md`, and `hooks/pre-compact.sh` states its stdout is not injected into compaction context. With a verified legacy writer, retaining a checkpoint can support recovery, but installed hooks and context injection still need verification. Without that writer, use the no-write current-run fallback above even when compaction is possible; leave shared custody unchanged. Installing a template alone proves neither a compatible writer nor automatic recovery.
 
 ### 2. Investigate the Issue
 - Read relevant code in the affected area
@@ -91,21 +95,23 @@ i. **Maximum 5 rounds.** If issues persist after 5 rounds — stop and escalate 
 
 ### 10. Checkpoint Cleanup
 
-Once step 9's exit conditions are **all** true, clear the checkpoint:
+If step 1 used current-run context because no compatible writer was available,
+return the complete outcome and open follow-up ownership to the calling owner;
+leave existing shared state unchanged. Do not create a checkpoint during cleanup
+or claim durable completion without verified delivery.
 
-```bash
-rm -f .ai/sessions/active-task.json
-```
+For a checkpoint owned through step 1's qualified legacy custody procedure,
+once step 9's exit conditions are **all** true, retain it and verify the complete
+original task outcome, including any parent follow-ups. Use that same
+repository-qualified checkpoint writer to clear `active_step_id` and record
+top-level `status: "done"` only when that outcome is complete. Preserve current
+parent commitments, approvals, ownership and evidence; a merged PR alone is
+insufficient. If safe preservation is unverified, return child IDs/statuses and
+the retained source pointer to the calling owner instead of rewriting custody.
 
-Step 1 writes a non-null `active_step_id` and nothing else ever clears it, so without
-this the finished run's checkpoint persists indefinitely — and `.claude/persistent-instructions.md`
-preserves the file verbatim on *every* later compaction while that key is non-null.
-A completed task then keeps being re-injected as if it were live, crowding out the
-context the session actually needs.
-
-**Leave the file in place** on any other ending: escalation at 9(i), an abandoned
-session, or any step still `partial` / `failed`. There, a surviving checkpoint is the
-mechanism working as designed — it is only noise once the work is genuinely done.
+Keep escalation, abandonment, partial/failed work and pending parent acceptance
+explicitly unfinished. On resume, reconcile the retained evidence before
+redispatch; an unknown provider outcome must not be replayed.
 Same rule as `.claude/agents/orchestrator.md` Phase 4.
 
 ---

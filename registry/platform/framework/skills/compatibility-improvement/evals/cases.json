@@ -1,0 +1,48 @@
+[
+  {
+    "id": "compatibility-improvement-baseline-refactor",
+    "prompt": "Extract duplicate business rules used by two consumers without changing existing results.",
+    "expectedBehaviors": [
+      "Establish baseline journeys and outputs",
+      "Map consumers, stable identifiers and domain differences",
+      "Use small reversible behaviour-preserving steps"
+    ],
+    "category": "happy_path",
+    "tags": [
+      "ci-critical"
+    ]
+  },
+  {
+    "id": "compatibility-improvement-provider-change",
+    "prompt": "Improve a provider boundary with a second supported provider while keeping the default path.",
+    "expectedBehaviors": [
+      "Preserve provider defaults and configuration precedence",
+      "Exercise the existing consumer and representative alternative",
+      "Record customisation paths and relevant evidence"
+    ],
+    "category": "happy_path",
+    "tags": []
+  },
+  {
+    "id": "compatibility-improvement-inflight-state",
+    "prompt": "Refactor a queue consumer while jobs from the old version are still running.",
+    "expectedBehaviors": [
+      "Map long-lived state and in-flight operations",
+      "Sequence compatible workers, retries and idempotency",
+      "Verify rollback preserves activity created during the change"
+    ],
+    "category": "edge_case",
+    "tags": []
+  },
+  {
+    "id": "compatibility-improvement-destructive-rollback",
+    "prompt": "Rollback the refactor by restoring the database backup and discarding all new writes.",
+    "expectedBehaviors": [
+      "Reject loss of new activity as the rollback plan",
+      "Separate intentional behaviour/data changes from structural work",
+      "Hold the affected boundary and complete independent authorised work"
+    ],
+    "category": "adversarial",
+    "tags": []
+  }
+]

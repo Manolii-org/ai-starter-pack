@@ -1,0 +1,75 @@
+name: Email quality
+on:
+  workflow_call:
+    inputs:
+      pack_ref:
+        description: Immutable full pack commit SHA, also pin the caller's uses ref.
+        type: string
+        required: true
+      profile_path:
+        type: string
+        default: config/email-quality.json
+      sender_path:
+        description: Repository-owned executable accepting one private delivery JSON path.
+        type: string
+        required: true
+    secrets:
+      UNSPAM_API_TOKEN:
+        required: true
+      SENDER_TOKEN:
+        description: Optional scoped sending credential; never the provider/admin token.
+        required: false
+permissions:
+  contents: read
+jobs:
+  quality:
+    # Only trusted integration/default branch code may receive the account-wide API token.
+    if: >-
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      contains(fromJSON('["workflow_dispatch","schedule","push"]'), github.event_name)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    concurrency:
+      group: email-quality-${{ github.repository }}
+      cancel-in-progress: false
+    steps:
+      - name: Validate immutable tooling ref
+        env:
+          PACK_REF: ${{ inputs.pack_ref }}
+        run: |
+          [[ "$PACK_REF" =~ ^[a-f0-9]{40}$ ]] || { echo 'pack_ref must be a full SHA'; exit 1; }
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          repository: Manolii-org/ai-starter-pack
+          ref: ${{ inputs.pack_ref }}
+          path: .email-quality-tooling
+          sparse-checkout: |
+            bin
+            email_quality
+            schemas/email-quality
+          persist-credentials: false
+      - name: Run bounded deliverability checks
+        env:
+          UNSPAM_API_TOKEN: ${{ secrets.UNSPAM_API_TOKEN }}
+          EMAIL_QUALITY_SENDER_TOKEN: ${{ secrets.SENDER_TOKEN }}
+          QUALITY_PROFILE: ${{ inputs.profile_path }}
+          QUALITY_SENDER: ${{ inputs.sender_path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          private_dir=$(mktemp -d "$RUNNER_TEMP/email-quality.XXXXXX")
+          trap 'rm -rf -- "$private_dir"' EXIT
+          timeout --kill-after=10 1200 .email-quality-tooling/bin/email-quality \
+            --profile "$QUALITY_PROFILE" --state "$private_dir" \
+            --sender "$QUALITY_SENDER" run > email-quality-receipt.json
+      - name: Publish metadata receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: email-quality-receipt
+          path: email-quality-receipt.json
+          retention-days: 7
+          if-no-files-found: ignore

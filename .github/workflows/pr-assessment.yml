@@ -74,11 +74,16 @@ jobs:
           set -euo pipefail
           BASE_SHA="${{ github.event.pull_request.base.sha }}"
           [ -n "$BASE_SHA" ] || { echo "No pull_request base context — nothing to restore"; exit 0; }
+          # A PR-owned .ai symlink would redirect the nested catalog deletion.
+          if [ -L .ai ] || { [ -e .ai ] && [ ! -d .ai ]; }; then
+            echo "::error::Assessment state root must be a real directory" >&2
+            exit 1
+          fi
           git fetch --depth=1 origin "$BASE_SHA"
           # rm first: `git checkout BASE -- dir` overwrites base content but
           # leaves PR-added files (e.g. scripts/json.py shadowing stdlib) live
           # in lanes that carry secrets.
-          for p in .claude scripts CLAUDE.md AGENTS.md; do
+          for p in .claude scripts .ai/security CLAUDE.md AGENTS.md; do
             rm -rf "$p"
             if git cat-file -e "${BASE_SHA}:${p}" 2>/dev/null; then
               git checkout "$BASE_SHA" -- "$p"
@@ -397,11 +402,16 @@ jobs:
           set -euo pipefail
           BASE_SHA="${{ github.event.pull_request.base.sha }}"
           [ -n "$BASE_SHA" ] || { echo "No pull_request base context — nothing to restore"; exit 0; }
+          # A PR-owned .ai symlink would redirect the nested catalog deletion.
+          if [ -L .ai ] || { [ -e .ai ] && [ ! -d .ai ]; }; then
+            echo "::error::Assessment state root must be a real directory" >&2
+            exit 1
+          fi
           git fetch --depth=1 origin "$BASE_SHA"
           # rm first: `git checkout BASE -- dir` overwrites base content but
           # leaves PR-added files (e.g. scripts/json.py shadowing stdlib) live
           # in lanes that carry secrets.
-          for p in .claude scripts CLAUDE.md AGENTS.md; do
+          for p in .claude scripts .ai/security CLAUDE.md AGENTS.md; do
             rm -rf "$p"
             if git cat-file -e "${BASE_SHA}:${p}" 2>/dev/null; then
               git checkout "$BASE_SHA" -- "$p"
@@ -483,11 +493,16 @@ jobs:
           set -euo pipefail
           BASE_SHA="${{ github.event.pull_request.base.sha }}"
           [ -n "$BASE_SHA" ] || { echo "No pull_request base context — nothing to restore"; exit 0; }
+          # A PR-owned .ai symlink would redirect the nested catalog deletion.
+          if [ -L .ai ] || { [ -e .ai ] && [ ! -d .ai ]; }; then
+            echo "::error::Assessment state root must be a real directory" >&2
+            exit 1
+          fi
           git fetch --depth=1 origin "$BASE_SHA"
           # rm first: `git checkout BASE -- dir` overwrites base content but
           # leaves PR-added files (e.g. scripts/json.py shadowing stdlib) live
           # in lanes that carry secrets.
-          for p in .claude scripts CLAUDE.md AGENTS.md; do
+          for p in .claude scripts .ai/security CLAUDE.md AGENTS.md; do
             rm -rf "$p"
             if git cat-file -e "${BASE_SHA}:${p}" 2>/dev/null; then
               git checkout "$BASE_SHA" -- "$p"
@@ -554,17 +569,27 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
+          # Judge binds evidence to the PR head and its merge base, rather
+          # than the synthetic merge tree. Both histories must be available.
+          fetch-depth: 0
 
       - name: Restore trusted runtime from PR base
         run: |
           set -euo pipefail
           BASE_SHA="${{ github.event.pull_request.base.sha }}"
           [ -n "$BASE_SHA" ] || { echo "No pull_request base context — nothing to restore"; exit 0; }
-          git fetch --depth=1 origin "$BASE_SHA"
+          # A PR-owned .ai symlink would redirect the nested catalog deletion.
+          if [ -L .ai ] || { [ -e .ai ] && [ ! -d .ai ]; }; then
+            echo "::error::Assessment state root must be a real directory" >&2
+            exit 1
+          fi
+          # Do not re-shallow the base after the complete checkout: Judge
+          # also needs the common ancestor for its exact base...head diff.
+          git fetch origin "$BASE_SHA"
           # rm first: `git checkout BASE -- dir` overwrites base content but
           # leaves PR-added files (e.g. scripts/json.py shadowing stdlib) live
           # in lanes that carry secrets.
-          for p in .claude scripts CLAUDE.md AGENTS.md; do
+          for p in .claude scripts .ai/security CLAUDE.md AGENTS.md; do
             rm -rf "$p"
             if git cat-file -e "${BASE_SHA}:${p}" 2>/dev/null; then
               git checkout "$BASE_SHA" -- "$p"

@@ -1,6 +1,6 @@
 ---
 name: drift-check
-version: 1.0.0
+version: 1.0.1
 description: "Run project drift detection — checks agent routing, hook scripts, memory health, and stale checkpoints."
 type: command
 requires_mcp: []
@@ -53,15 +53,43 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/system-self-check.py"
 ```bash
 if [ -f .ai/sessions/active-task.json ]; then
   python3 -c "
-import json, datetime
+import json, datetime, os, runpy
 from pathlib import Path
 data = json.loads(Path('.ai/sessions/active-task.json').read_text())
-updated = datetime.datetime.fromisoformat(data.get('last_updated','').replace('Z','+00:00'))
-age = datetime.datetime.now(datetime.timezone.utc) - updated
-if age.total_seconds() > 86400:
-    print(f'STALE CHECKPOINT: {age.days}d {age.seconds//3600}h old — active_step_id: {data.get(\"active_step_id\")}')
+terminal = None
+plugin_root = os.environ.get('CLAUDE_PLUGIN_ROOT')
+checkers = ([Path(plugin_root) / 'scripts/session-unfinished-work-check.py'] if plugin_root else [])
+checkers.append(Path('scripts/session-unfinished-work-check.py'))
+for checker in checkers:
+    if checker.is_file():
+        helper = runpy.run_path(str(checker)).get('_terminal_task')
+        if callable(helper):
+            terminal = helper(data)
+            break
+if 'continuation' in data:
+    print('Checkpoint freshness unknown: use the owning continuation adapter; source retained')
+elif terminal is None:
+    print('Checkpoint terminal state unknown: checker unavailable; source retained')
+elif terminal:
+    print('Retained terminal checkpoint: evidence preserved; no stale-work warning')
 else:
-    print(f'Checkpoint is current ({int(age.total_seconds()/60)} min old)')
+    try:
+        raw_updated = data.get('last_updated')
+        if not isinstance(raw_updated, str):
+            raise ValueError('checkpoint timestamp is missing or not text')
+        updated = datetime.datetime.fromisoformat(raw_updated.replace('Z', '+00:00'))
+        if updated.tzinfo is None:
+            raise ValueError('checkpoint timestamp has no timezone')
+        age = datetime.datetime.now(datetime.timezone.utc) - updated
+        if age.total_seconds() < 0:
+            raise ValueError('checkpoint timestamp is in the future')
+    except (TypeError, ValueError):
+        print('Checkpoint freshness unknown: timestamp missing or invalid; source retained')
+    else:
+        if age.total_seconds() > 86400:
+            print(f'STALE CHECKPOINT: {age.days}d {age.seconds//3600}h old — active_step_id: {data.get(\"active_step_id\")}')
+        else:
+            print(f'Checkpoint is current ({int(age.total_seconds()/60)} min old)')
 "
 fi
 ```
