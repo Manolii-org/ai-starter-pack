@@ -94,11 +94,16 @@ class Lifecycle:
     def activate(self, bundle: ReleaseBundle, expected_revision: int, now: int | None = None) -> None:
         bundle = deepcopy(bundle)
         payload_of(bundle, self._catalog)
-        now = clock(now)
-        if bundle["created_at"] > now + 30000 or bundle["expires_at"] <= now or type(expected_revision) is not int:
+        if now is not None:
+            clock(now)
+        if type(expected_revision) is not int or now is not None and (bundle["created_at"] > now + 30000 or bundle["expires_at"] <= now):
             raise ValueError("stale bundle")
         self._approved(bundle)
         current = self._state()
+        # Sample implicit time after I/O that can overlap durable clock observations.
+        now = clock(now)
+        if bundle["created_at"] > now + 30000 or bundle["expires_at"] <= now:
+            raise ValueError("stale bundle")
         if now < current["time_highwater"]:
             raise ValueError("clock rollback")
         revision = current["bundle"]["revision"] if current["bundle"] else 0
@@ -109,12 +114,16 @@ class Lifecycle:
     def update_kills(self, kill: KillState, approval_ref: str, now: int | None = None) -> None:
         kill = deepcopy(kill)
         validate("kill", kill)
-        now = clock(now)
-        if kill["scope"] != self._catalog["scope"] or kill["expires_at"] <= now or set(kill["disabled"]) - set(self._catalog["features"]):
+        if now is not None:
+            clock(now)
+        if kill["scope"] != self._catalog["scope"] or now is not None and kill["expires_at"] <= now or set(kill["disabled"]) - set(self._catalog["features"]):
             raise ValueError("invalid kill binding")
         if self.trust_policy != "local-test" and (self.verifier is None or not self.verifier.verify(kill_message(kill), approval_ref, "kill")):
             raise ValueError("kill approval required")
         current = self._state()
+        now = clock(now)
+        if kill["expires_at"] <= now:
+            raise ValueError("invalid kill binding")
         generation = current["kill"]["generation"] if current["kill"] else 0
         if now < current["time_highwater"]:
             raise ValueError("clock rollback")
