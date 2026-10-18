@@ -92,3 +92,11 @@ def test_plugin_judge_copy_is_in_sync() -> None:
     assert (ROOT / "scripts" / "run-judge.py").read_text() == plugin_copy.read_text(), (
         "scripts/run-judge.py and the plugin copy have drifted"
     )
+
+
+def test_review_evidence_and_companion_ship_without_drift():
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    for prefix in ("plugin/manolii-framework", "registry/platform/framework"):
+        assert (root / prefix / "scripts/ci/review_evidence.py").read_bytes() == (root / "scripts/ci/review_evidence.py").read_bytes()
+        assert (root / prefix / "skills/autonomy-follow-through/review-evidence.md").read_bytes() == (root / ".claude/skills/autonomy-follow-through/review-evidence.md").read_bytes()

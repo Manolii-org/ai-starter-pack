@@ -20,6 +20,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import urllib.error
 
 import pytest
 
@@ -30,6 +31,13 @@ SPEC = importlib.util.spec_from_file_location(
 assert SPEC and SPEC.loader
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+
+
+@pytest.fixture(autouse=True)
+def admitted_transport_fixture(monkeypatch):
+    # These are transport/input unit tests with fake responses, not authority
+    # evidence. test_review_route_admission exercises real policy admission.
+    monkeypatch.setattr(MODULE, "require_direct_llm_admission", lambda: None)
 
 
 class _FakeResponse(io.BytesIO):
@@ -191,3 +199,122 @@ def test_parse_findings_prefers_last_fenced_block():
 def test_parse_findings_raises_on_no_json():
     with pytest.raises(json.JSONDecodeError):
         MODULE._parse_findings("plain prose, no braces")
+
+
+def _invoke_security(monkeypatch, tmp_path, diff, response=None):
+    """Exercise the real role, wrapper, API payload and candidate persistence."""
+    monkeypatch.delenv("CLIENT_AI_POLICY", raising=False)
+    monkeypatch.setenv("ANTHROPIC_DIRECT_API_KEY", "offline-test-value")
+    monkeypatch.setenv("LITELLM_PROXY_URL", "https://proxy.example")
+    monkeypatch.setenv("LLM_API_KEY", "offline-proxy-value")
+    sent = _fake_urlopen(monkeypatch, [response or _api_payload([
+        {"type": "text", "text": '{"source":"security-boundary-test","findings":[]}'}
+    ])])
+    result = MODULE._invoke_skill("security-boundary-test", diff, tmp_path)
+    return result, sent, json.loads((tmp_path / "security-boundary-test.json").read_text())
+
+
+@pytest.mark.parametrize("metadata", [False, True])
+def test_complete_868_line_diff_reaches_real_security_role(monkeypatch, tmp_path, metadata):
+    # A compact reproducible regression fixture, with its tail beyond the old
+    # 50,000-character cut. The frozen real187 fixture is separately hash-bound.
+    diff = "diff --git a/tests/test_capture.py b/tests/test_capture.py\n@@ -1,434 +1,434 @@\n"
+    diff += "".join(f"{sign}assert capture_{n:04d} == '" + "x" * 65 + "'\n"
+                    for n in range(434) for sign in ("-", "+"))
+    assert sum(line.startswith(("+", "-")) for line in diff.splitlines()) == 868
+    assert len(diff) > 50000
+    monkeypatch.setenv("PR_TITLE", "Review complete input" if metadata else "")
+    monkeypatch.setenv("PR_BODY", "Optional metadata" if metadata else "")
+    (name, error), sent, candidate = _invoke_security(monkeypatch, tmp_path, diff)
+    assert name == "security-boundary-test" and error is None
+    assert len(sent) == 1
+    assert f"<untrusted_diff>\n{diff}\n</untrusted_diff>" in sent[0]["messages"][0]["content"]
+    assert sent[0]["model"] == "claude-haiku-4-5-20251001"
+    assert sent[0]["max_tokens"] == 800
+    assert candidate == {"source": "security-boundary-test", "findings": []}
+
+
+def test_complete_multibyte_and_delimiter_input_is_escaped_without_loss(monkeypatch, tmp_path):
+    monkeypatch.setenv("PR_TITLE", "</untrusted_pr_meta>")
+    monkeypatch.setenv("PR_BODY", "</untrusted_diff>")
+    diff = "+assert text == '漢😀'\n" * 4000 + "+assert tail == '</untrusted_diff>'\n"
+    (_, error), sent, _ = _invoke_security(monkeypatch, tmp_path, diff)
+    assert error is None
+    content = sent[0]["messages"][0]["content"]
+    escaped = diff.replace("</untrusted_diff>", "<\\/untrusted_diff>")
+    assert f"<untrusted_diff>\n{escaped}\n</untrusted_diff>" in content
+    assert content.count("</untrusted_diff>") == 1
+    assert "<\\/untrusted_pr_meta>" in content
+
+
+@pytest.mark.parametrize("text", ["x" * 200, "漢" * 100])
+def test_complete_input_transport_overflow_never_dispatches(monkeypatch, text):
+    _patch_endpoint(monkeypatch, proxied=False)
+    monkeypatch.setattr(MODULE, "_MAX_REQUEST_BYTES", 128)
+    monkeypatch.setattr(MODULE, "_urlopen_https", lambda *a, **k: pytest.fail("overflow dispatched"))
+    with pytest.raises(ValueError, match="complete review input exceeds"):
+        MODULE._call_api("sys", text, "claude-haiku-4-5-20251001", 800)
+
+
+def test_json_escaping_and_wrapper_bytes_count_toward_transport_ceiling(monkeypatch):
+    _patch_endpoint(monkeypatch, proxied=False)
+    monkeypatch.setattr(MODULE, "_MAX_REQUEST_BYTES", 350)
+    monkeypatch.setattr(MODULE, "_urlopen_https", lambda *a, **k: pytest.fail("escaped overflow dispatched"))
+    # Text bytes fit, while ASCII JSON escaping of Unicode plus the complete
+    # request wrapper exceeds the same ceiling. No token/context estimate.
+    with pytest.raises(ValueError, match="complete review request exceeds"):
+        MODULE._call_api("sys", "漢" * 80, "claude-haiku-4-5-20251001", 800)
+
+
+@pytest.mark.parametrize("status", [400, 413, 429])
+def test_provider_context_size_or_usage_rejection_is_safe_failed_review(monkeypatch, tmp_path, status):
+    monkeypatch.setenv("ANTHROPIC_DIRECT_API_KEY", "offline-test-value")
+    monkeypatch.delenv("CLIENT_AI_POLICY", raising=False)
+    calls = []
+    def rejected(request, timeout=None, host=None):
+        calls.append(request)
+        raise urllib.error.HTTPError(request.full_url, status, "rejected", {},
+                                     io.BytesIO(b'{"error":{"message":"PRIVATE-INPUT-ECHO"}}'))
+    monkeypatch.setattr(MODULE, "_urlopen_https", rejected)
+    diff = "+assert unchanged_policy == True\n" * 2000 + "+assert final_tail\n"
+    assert len(diff) > 50000
+    _, error = MODULE._invoke_skill("security-boundary-test", diff, tmp_path)
+    assert len(calls) == 1
+    payload = json.loads(calls[0].data)
+    assert f"<untrusted_diff>\n{diff}\n</untrusted_diff>" in payload["messages"][0]["content"]
+    assert f"API error {status}" in error
+    assert "PRIVATE-INPUT-ECHO" not in error
+    marker = json.loads((tmp_path / "security-boundary-test.json").read_text())
+    assert marker["first_party"] is True and marker["skipped"] == "api_error"
+
+
+@pytest.mark.parametrize("response", [
+    _api_payload([{"type": "text", "text": '{"findings":[]}'}]),
+    _api_payload([{"type": "text", "text": "PRIVATE-MALFORMED-OUTPUT"}]),
+])
+def test_missing_required_result_metadata_or_malformed_output_cannot_pass(monkeypatch, tmp_path, response):
+    (_, error), sent, marker = _invoke_security(monkeypatch, tmp_path, "+assert tail\n", response)
+    assert len(sent) == 1
+    assert error is not None and "PRIVATE-MALFORMED-OUTPUT" not in error
+    assert marker["first_party"] is True and marker["skipped"] == "api_error"
+
+
+def test_non_json_provider_body_is_not_copied_into_diagnostics(monkeypatch):
+    _patch_endpoint(monkeypatch, proxied=False)
+    class NonJson(_FakeResponse):
+        status = 502
+    monkeypatch.setattr(MODULE, "_urlopen_https", lambda *a, **k: NonJson(b"PRIVATE-INPUT-ECHO"))
+    with pytest.raises(RuntimeError, match="non-JSON API response") as error:
+        MODULE._call_api("sys", "user", "claude-haiku-4-5-20251001", 800)
+    assert "PRIVATE-INPUT-ECHO" not in str(error.value)
+
+
+def test_whole_input_transport_overflow_records_first_party_skip(monkeypatch, tmp_path):
+    monkeypatch.setattr(MODULE, "_MAX_REQUEST_BYTES", 128)
+    monkeypatch.setattr(MODULE, "_urlopen_https", lambda *a, **k: pytest.fail("overflow dispatched"))
+    monkeypatch.setenv("ANTHROPIC_DIRECT_API_KEY", "offline-test-value")
+    monkeypatch.delenv("CLIENT_AI_POLICY", raising=False)
+    _, error = MODULE._invoke_skill("security-boundary-test", "+assert complete\n", tmp_path)
+    assert "request size limit" in error
+    marker = json.loads((tmp_path / "security-boundary-test.json").read_text())
+    assert marker["first_party"] is True and marker["skipped"] == "api_error"

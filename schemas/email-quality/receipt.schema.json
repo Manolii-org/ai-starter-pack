@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "provider",
+    "operation",
+    "outcome",
+    "duration_seconds"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "provider": {
+      "const": "unspam"
+    },
+    "operation": {
+      "enum": [
+        "status",
+        "start",
+        "wait",
+        "run"
+      ]
+    },
+    "outcome": {
+      "enum": [
+        "ready",
+        "started",
+        "passed",
+        "assertion_failed",
+        "blocked"
+      ]
+    },
+    "duration_seconds": {
+      "type": "number",
+      "minimum": 0
+    },
+    "account_mode": {
+      "enum": [
+        "shared",
+        "dedicated"
+      ]
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "org",
+        "repository",
+        "environment"
+      ],
+      "properties": {
+        "org": {
+          "type": "string"
+        },
+        "repository": {
+          "type": "string"
+        },
+        "environment": {
+          "type": "string"
+        }
+      }
+    },
+    "error_code": {
+      "type": "string",
+      "pattern": "^[A-Z_]+$"
+    },
+    "remaining": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "spam_checks",
+        "inbox_placements"
+      ],
+      "properties": {
+        "spam_checks": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "inbox_placements": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "passed"
+        ],
+        "properties": {
+          "kind": {
+            "enum": [
+              "spam",
+              "inbox"
+            ]
+          },
+          "passed": {
+            "type": "boolean"
+          },
+          "score": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "inbox_ratio": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "mailbox_count": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      }
+    }
+  }
+}

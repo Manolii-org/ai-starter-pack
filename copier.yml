@@ -259,6 +259,7 @@ _exclude:
   - scripts/registry-lint.py
   - scripts/bootstrap-mirror.py
   - tests/test_registry.py
+  - tests/test_native_guidance.py
   - .github/workflows/registry-lint.yml
   # Pack-only contract caller (require_contract: true would fail legacy
   # instances whose instance-owned CLAUDE.md predates the anchored sections).

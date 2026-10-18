@@ -13,6 +13,7 @@ Usage:
 """
 
 import argparse
+import importlib.util
 import json
 import logging
 import os
@@ -28,6 +29,30 @@ from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 import yaml
+
+# Load the exact hydrated helper, never an ambient/PR-added lib package initializer.
+# The launcher still owns complete runtime custody; this is not shell isolation.
+try:
+    _policy_spec = importlib.util.spec_from_file_location(
+        "_assessment_route_policy", Path(__file__).resolve().parent / "lib/agent_capabilities.py")
+    if _policy_spec is None or _policy_spec.loader is None:
+        raise ImportError("missing policy loader")
+    _policy_module = importlib.util.module_from_spec(_policy_spec)
+    # Execute hydrated source bytes, not a PR-retained bytecode cache.
+    _policy_path = _policy_spec.origin
+    exec(compile(Path(_policy_path).read_bytes(), _policy_path, "exec"),
+         _policy_module.__dict__)
+    RouteAdmissionError = _policy_module.RouteAdmissionError
+    require_direct_llm_admission = _policy_module.require_direct_llm_admission
+except (ImportError, OSError, AttributeError):
+    # Mixed/older consumer runtime: preserve ordinary proxy calls, but never
+    # admit a direct call without the shared policy implementation.
+    class RouteAdmissionError(ValueError):
+        pass
+
+    def require_direct_llm_admission():
+        raise RouteAdmissionError("direct review denied: compatible policy runtime missing")
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -56,7 +81,17 @@ BROAD_AGENTS = [
     "security-deep-dive",
 ]
 
-MAX_DIFF_CHARS = int(os.environ.get("BROAD_AGENTS_MAX_DIFF_CHARS", "40000"))
+# The former implicit 40K excerpt was not complete review. An explicit owner
+# limit remains a rejection boundary; it must never turn into a prefix review.
+MAX_DIFF_CHARS = (int(os.environ["BROAD_AGENTS_MAX_DIFF_CHARS"])
+                  if "BROAD_AGENTS_MAX_DIFF_CHARS" in os.environ else None)
+if MAX_DIFF_CHARS is not None and MAX_DIFF_CHARS <= 0:
+    raise ValueError("BROAD_AGENTS_MAX_DIFF_CHARS must be positive")
+# Same conservative Messages transport ceiling as the specialist runner.
+# https://platform.claude.com/docs/en/api/errors#request-size-limits
+# This is not evidence of a model's context entitlement; a tighter upstream
+# context limit still fails the review instead of authorizing an excerpt.
+_MAX_REQUEST_BYTES = 32_000_000
 # 240s covers a primary call plus its fail-closed advisor round trip on the
 # proxy — 120s was too tight for advisor-backed security-deep-dive-sized
 # payloads (buromaster#25) and aborts mid-advisor into api_error markers.
@@ -98,6 +133,9 @@ def parse_agent_file(agent_path: Path) -> AgentConfig:
         instructions = parts[2].strip()
     except yaml.YAMLError as e:
         logger.error(f"Agent {agent_path.name} YAML parse error: {e}")
+        return None
+    if not isinstance(frontmatter, dict):
+        logger.error("Agent %s frontmatter is not an object", agent_path.name)
         return None
 
     name = frontmatter.get("name", agent_path.stem)
@@ -172,7 +210,8 @@ def get_api_key() -> Optional[str]:
             key = normalized
             break
     else:
-        key = os.getenv("ANTHROPIC_API_KEY")
+        require_direct_llm_admission()
+        key = os.getenv("ANTHROPIC_DIRECT_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
     if not key:
         logger.warning("no API credential set; skipping agent invocations")
         return None
@@ -210,6 +249,66 @@ def build_user_message(diff: str, changed_files: list[str]) -> str:
     return f"<untrusted_diff>\n{diff}\n</untrusted_diff>"
 
 
+def _incomplete(agent: AgentConfig, reason: str) -> dict[str, Any]:
+    """Retain unavailable role coverage without inventing a clean result."""
+    return {"source": agent.name, "findings": [], "skipped": reason,
+            "first_party": bool(agent.first_party or os.environ.get("CLIENT_AI_POLICY"))}
+
+
+def _parse_findings(raw: str) -> dict[str, Any]:
+    """Validate one complete findings payload, retaining legacy list results.
+
+    Prose/fences may surround one JSON container. Never salvage a nested empty
+    list from malformed JSON or choose a clean result among multiple payloads.
+    """
+    text = raw.strip()
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        start = re.search(r"[\[{]", text)
+        if start is None:
+            raise
+        parsed, end = json.JSONDecoder().raw_decode(text, start.start())
+        if re.search(r"[\[{]", text[end:]):
+            raise ValueError("ambiguous findings payload")
+    skipped = None
+    # Absent status is the legacy contract. When supplied, accept only explicit
+    # completion, rather than guessing that an unfamiliar state means success.
+    if isinstance(parsed, dict) and ("error" in parsed or
+            ("status" in parsed and parsed["status"] not in
+             ("complete", "completed", "success", "ok"))):
+        raise ValueError("response reports incomplete assessment")
+    if isinstance(parsed, list):
+        findings = parsed
+    elif isinstance(parsed, dict) and "findings" in parsed:
+        findings = parsed["findings"]
+        if "skipped" in parsed:
+            skipped = parsed["skipped"]
+            if not isinstance(skipped, str) or not skipped.strip():
+                raise ValueError("invalid incomplete-coverage marker")
+    elif isinstance(parsed, dict) and any(k in parsed for k in ("file", "message", "severity")):
+        findings = [parsed]
+    else:
+        raise ValueError("missing findings contract")
+    if not isinstance(findings, list) or not all(
+        isinstance(f, dict) and any(k in f for k in ("file", "message", "severity"))
+        for f in findings
+    ):
+        raise ValueError("findings must be a list of finding objects")
+    for finding in findings:
+        if any(key in finding and not isinstance(finding[key], str)
+               for key in ("file", "message", "severity", "fix")):
+            raise ValueError("finding text fields must be strings")
+        line = finding.get("line")
+        if line is not None and (type(line) is not int or line < 1):
+            raise ValueError("finding line must be a positive integer or null")
+    defaults = {"file": "", "line": None, "severity": "WARNING", "message": "", "fix": ""}
+    result = {"findings": [{**defaults, **finding} for finding in findings]}
+    if skipped is not None:
+        result["skipped"] = skipped
+    return result
+
+
 def invoke_agent(
     agent_config: AgentConfig,
     api_key: str,
@@ -225,6 +324,10 @@ def invoke_agent(
             f"{agent_config.name}: data_sensitivity=restricted (no-AI) — skipping invocation"
         )
         return None
+    if sum(len(part.encode("utf-8")) for part in
+           (agent_config.system_prompt, agent_config.instructions, user_message)) > _MAX_REQUEST_BYTES:
+        logger.error("%s: complete review input exceeds request limit", agent_config.name)
+        return _incomplete(agent_config, "input_limit")
     # Route through the LiteLLM proxy when configured (Bearer auth); otherwise
     # direct Anthropic (x-api-key). The retired anthropic_only tier has no
     # callers left — its agents were remapped to restricted_us_oss_ok.
@@ -233,6 +336,21 @@ def invoke_agent(
     # failure must then degrade to the skipped first-party marker so the judge
     # fails closed instead of adjudicating without the required direct leg.
     direct_required = False
+    if (agent_config.first_party and not os.environ.get("CLIENT_AI_POLICY")
+            and os.environ.get("SECURITY_REVIEW_MODE", "direct") != "direct"):
+        # None of the broad security roles has an accepted estate producer.
+        # Preserve the three-argument API and missing coverage; do not route an
+        # unqualified role through either the proxy or a direct fallback.
+        return {"source": agent_config.name, "findings": [],
+                "first_party": True, "skipped": "protected_review_incomplete"}
+    try:
+        if agent_config.first_party or os.environ.get("CLIENT_AI_POLICY") or not proxy:
+            require_direct_llm_admission()
+    except RouteAdmissionError as exc:
+        logger.warning("%s: %s", agent_config.name, exc)
+        return {"source": agent_config.name, "findings": [],
+                "first_party": bool(agent_config.first_party or os.environ.get("CLIENT_AI_POLICY")),
+                "skipped": "route_policy_denied"}
     # first_party agents (security review per the eligibility matrix) always go
     # Anthropic-direct — never the OSS proxy, regardless of declared model.
     if agent_config.first_party:
@@ -292,6 +410,11 @@ def invoke_agent(
         logger.info(
             f"{agent_config.name}: CLIENT_AI_POLICY active — dispatching {model} (Anthropic-direct)"
         )
+    else:
+        api_key = api_key or get_api_key()
+    if not api_key:
+        return {"source": agent_config.name, "findings": [],
+                "first_party": direct_required, "skipped": "no_credential"}
     base_url = proxy or "https://api.anthropic.com"
     if proxy and model in {"claude-haiku-4-5-20251001", "claude-sonnet-4-6"}:
         model = {"claude-haiku-4-5-20251001": "haiku", "claude-sonnet-4-6": "sonnet"}[model]
@@ -321,6 +444,7 @@ def invoke_agent(
     # exponential backoff; a terminal failure takes the skip-marker path so the
     # judge still sees the agent as assessed-but-unavailable.
     content = ""
+    parsed_findings = None
     resp_data = None
     for budget in budgets:
         payload = {
@@ -334,7 +458,13 @@ def invoke_agent(
             "system": [
                 {
                     "type": "text",
-                    "text": agent_config.system_prompt,
+                    "text": agent_config.system_prompt + (
+                        "\n\nReturn the findings payload in the API response; the caller writes the file. "
+                        "Return one JSON object with source and findings (a list of finding objects). "
+                        "Do not return a file-write acknowledgement or explanatory prose. "
+                        "If evidence needed for the assigned checks is unavailable, include "
+                        '\"skipped\": \"missing_context\" rather than claiming a clean review.'
+                    ),
                     "cache_control": {"type": "ephemeral"},
                 }
             ],
@@ -345,12 +475,16 @@ def invoke_agent(
                 }
             ],
         }
+        request_bytes = json.dumps(payload).encode("utf-8")
+        if len(request_bytes) > _MAX_REQUEST_BYTES:
+            logger.error("%s: complete serialized review request exceeds limit", agent_config.name)
+            return _incomplete(agent_config, "input_limit")
         resp_data = None
         for attempt in range(MAX_RETRIES):
             try:
                 req = Request(
                     api_url,
-                    data=json.dumps(payload).encode("utf-8"),
+                    data=request_bytes,
                     headers=headers,
                     method="POST",
                 )
@@ -406,12 +540,32 @@ def invoke_agent(
 
         # Reasoning models (DeepSeek V4 via the proxy) prepend a `thinking`
         # block to the content array — select text blocks, not content[0].
+        if not isinstance(resp_data, dict):
+            return _incomplete(agent_config, "invalid_response")
         blocks = resp_data.get("content") or []
+        if not isinstance(blocks, list) or any(
+            not isinstance(b, dict) or (b.get("type", "text") == "text"
+                                       and not isinstance(b.get("text", ""), str))
+            for b in blocks
+        ):
+            return _incomplete(agent_config, "invalid_response")
         content = "".join(
             b.get("text", "") for b in blocks
             if isinstance(b, dict) and b.get("type", "text") == "text"
         )
+        if resp_data.get("stop_reason") == "max_tokens":
+            # Reuse the already-bounded proxy headroom attempt. A syntactically
+            # valid prefix can still omit findings, so it is never a full result.
+            logger.warning("%s: output limit reached at max_tokens=%s", agent_config.name, budget)
+            if budget == budgets[-1]:
+                return _incomplete(agent_config, "output_limit")
+            continue
         if content:
+            try:
+                parsed_findings = _parse_findings(content)
+            except (json.JSONDecodeError, ValueError) as exc:
+                logger.error("%s: invalid findings response (%s)", agent_config.name, type(exc).__name__)
+                return _incomplete(agent_config, "invalid_response")
             break
         logger.warning(
             f"Agent {agent_config.name} empty text at max_tokens={budget} "
@@ -429,63 +583,11 @@ def invoke_agent(
             }
         return None
 
-    try:
-        # Strip markdown fences
-        content = content.strip()
-        content = re.sub(r"^```(?:json)?\n?", "", content)
-        content = re.sub(r"\n?```$", "", content)
-
-        try:
-            parsed = json.loads(content)
-        except json.JSONDecodeError:
-            # OSS models sometimes wrap the JSON in prose — extract the first
-            # top-level array or object instead of failing the agent outright.
-            m = re.search(r"\[[\s\S]*\]|\{[\s\S]*\}", content)
-            if not m:
-                raise
-            parsed = json.loads(m.group(0))
-
-        # Normalise to {source, findings:[...]} contract expected by run-judge.py
-        if isinstance(parsed, dict) and "findings" in parsed and not isinstance(parsed["findings"], list):
-            # A non-list findings value (e.g. an object) would silently
-            # normalise to an empty result — a false clean for the check.
-            # Raise so the executor writes an api_error marker that preserves
-            # this agent's first-party status.
-            raise ValueError(f"Agent {agent_config.name} returned non-list findings: {type(parsed['findings'])}")
-        if isinstance(parsed, list):
-            raw_findings = parsed
-        elif isinstance(parsed, dict) and "findings" in parsed:
-            raw_findings = parsed["findings"]
-        elif isinstance(parsed, dict) and any(k in parsed for k in ("file", "message", "severity")):
-            raw_findings = [parsed]
-        else:
-            raw_findings = parsed.get("findings", []) if isinstance(parsed, dict) else []
-
-        # Ensure each finding has required keys
-        _DEFAULTS = {"file": "", "line": None, "severity": "WARNING", "message": "", "fix": ""}
-        normalised = [{**_DEFAULTS, **f} for f in raw_findings if isinstance(f, dict)]
-
-        return {
-            "source": agent_config.name,
-            # An empty result must not mark the file first-party: the judge
-            # would demand a direct key for a batch with nothing to adjudicate.
-            # direct_required covers BOTH direct lanes — static first_party
-            # frontmatter and CLIENT_AI_POLICY — so policy-driven findings keep
-            # the judge off the OSS proxy even when the flag never reaches the
-            # judge job's env.
-            "first_party": direct_required and bool(normalised),
-            "findings": normalised,
-        }
-    except json.JSONDecodeError as e:
-        logger.error(f"Agent {agent_config.name} JSON parse error: {e}")
-        if direct_required:
-            return {
-                "source": agent_config.name,
-                "findings": [],
-                "first_party": True,
-                "skipped": "api_error",
-            }
-        return None
+    if parsed_findings is None:
+        return _incomplete(agent_config, "invalid_response")
+    return {"source": agent_config.name,
+            "first_party": direct_required and bool(parsed_findings.get("skipped") or parsed_findings["findings"]),
+            **parsed_findings}
 
 
 def run_broad_agents(
@@ -518,60 +620,34 @@ def run_broad_agents(
         return 1
 
     diff = diff_path.read_text(encoding="utf-8")
-    if len(diff) > MAX_DIFF_CHARS:
-        logger.warning(
-            f"Diff truncated from {len(diff)} to {MAX_DIFF_CHARS} chars"
-        )
-        diff = diff[: MAX_DIFF_CHARS] + "\n... (truncated)"
+    exceeds_owner_limit = MAX_DIFF_CHARS is not None and len(diff) > MAX_DIFF_CHARS
 
     changed_files = get_changed_files()
     user_message = build_user_message(diff, changed_files)
 
-    # Get API key. A direct-only install (ANTHROPIC_DIRECT_API_KEY without a
-    # shared transport credential) must still run: every agent dispatches
-    # Anthropic-direct through it (the proxy is absent by definition), so the
-    # direct key is also the shared transport credential here. When a proxy IS
-    # configured but has no credential, the direct key must NOT stand in — a
-    # non-direct agent would send `Bearer <anthropic key>` to the proxy host,
-    # leaking a first-party credential outside the Anthropic boundary. That
-    # state proceeds with an empty shared key instead: first_party /
-    # CLIENT_AI_POLICY agents re-resolve their own direct credential inside
-    # invoke_agent, and the rest skip on their empty key.
-    api_key = get_api_key() or (
-        os.getenv("ANTHROPIC_DIRECT_API_KEY", "") if _proxy_base() is None else ""
-    )
-    if not api_key and not os.getenv("ANTHROPIC_DIRECT_API_KEY"):
-        # No credential at all: write one marker per requested agent so the
-        # judge records the missing coverage instead of a false-clean verdict.
-        logger.warning(
-            "[broad-agents] no API key — writing skip markers for all requested agents"
-        )
-        output_dir.mkdir(parents=True, exist_ok=True)
-        for agent_name in invoke_list:
-            marker = {
-                "source": agent_name,
-                "findings": [],
-                "skipped": "no_credential",
-            }
-            (output_dir / f"{agent_name}.json").write_text(
-                json.dumps(marker, indent=2), encoding="utf-8"
-            )
-        return 0
+    # Each role admits its route before selecting any transport credential.
+    api_key = ""
 
     # Load agent configs
+    output_dir.mkdir(parents=True, exist_ok=True)
     agents_to_run = []
     for agent_name in invoke_list:
         if agent_name not in BROAD_AGENTS:
-            logger.warning(f"Skipping unknown agent: {agent_name}")
-            continue
+            logger.error("Unknown requested broad agent; assessment unavailable")
+            return 1
 
         agent_path = agents_dir / f"{agent_name}.md"
-        if not agent_path.exists():
-            logger.error(f"Agent file not found: {agent_path}")
-            continue
-
-        config = parse_agent_file(agent_path)
+        try:
+            config = parse_agent_file(agent_path)
+        except (OSError, UnicodeError) as exc:
+            logger.error("Cannot load agent %s (%s)", agent_name, type(exc).__name__)
+            config = None
         if not config:
+            # Unknown capability on failed load is conservative missing coverage,
+            # never permission to run an ordinary/proxy replacement.
+            (output_dir / f"{agent_name}.json").write_text(json.dumps({
+                "source": agent_name, "findings": [], "skipped": "load_error",
+                "first_party": True}, indent=2), encoding="utf-8")
             continue
 
         agents_to_run.append(config)
@@ -581,39 +657,16 @@ def run_broad_agents(
         return 0
 
     # Run agents in parallel
-    output_dir.mkdir(parents=True, exist_ok=True)
     results = {}
 
-    # Proxy configured but no proxy credential: non-direct agents would
-    # dispatch with `Bearer ` and fail silently (no file → judge sees clean).
-    # Skip them up front and write the same durable marker the judge's
-    # coverage accounting understands.
-    runnable = []
-    for agent in agents_to_run:
-        if (
-            not api_key
-            and not agent.first_party
-            and not os.environ.get("CLIENT_AI_POLICY")
-        ):
-            marker = {
-                "source": agent.name,
-                "findings": [],
-                "first_party": False,
-                "skipped": "no_proxy_credential",
-            }
+    if exceeds_owner_limit:
+        logger.error("Complete diff exceeds explicit owner limit; no agent dispatched")
+        for agent in agents_to_run:
             (output_dir / f"{agent.name}.json").write_text(
-                json.dumps(marker, indent=2), encoding="utf-8"
-            )
-            results[agent.name] = marker
-            logger.warning(
-                f"{agent.name}: no shared credential for the configured proxy — skipping (marker written)"
-            )
-            continue
-        runnable.append(agent)
+                json.dumps(_incomplete(agent, "input_limit"), indent=2), encoding="utf-8")
+        return 0  # Durable incomplete markers, never a completed review.
 
-    if not runnable:
-        logger.warning("[broad-agents] every agent skipped — no runnable credential")
-        return 0
+    runnable = agents_to_run
 
     with ThreadPoolExecutor(max_workers=3) as executor:
         futures = {

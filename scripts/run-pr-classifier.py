@@ -10,6 +10,7 @@ Exit codes:
   1 = fatal error (agent file missing)
 """
 import argparse
+import importlib.util
 import json
 import os
 import pathlib
@@ -19,6 +20,30 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
+
+# Load the exact hydrated helper, never an ambient/PR-added lib package initializer.
+# The launcher still owns complete runtime custody; this is not shell isolation.
+try:
+    _policy_spec = importlib.util.spec_from_file_location(
+        "_assessment_route_policy", pathlib.Path(__file__).resolve().parent / "lib/agent_capabilities.py")
+    if _policy_spec is None or _policy_spec.loader is None:
+        raise ImportError("missing policy loader")
+    _policy_module = importlib.util.module_from_spec(_policy_spec)
+    # Execute hydrated source bytes, not a PR-retained bytecode cache.
+    _policy_path = _policy_spec.origin
+    exec(compile(pathlib.Path(_policy_path).read_bytes(), _policy_path, "exec"),
+         _policy_module.__dict__)
+    RouteAdmissionError = _policy_module.RouteAdmissionError
+    require_direct_llm_admission = _policy_module.require_direct_llm_admission
+except (ImportError, OSError, AttributeError):
+    # Mixed/older consumer runtime: preserve ordinary proxy calls, but never
+    # admit a direct call without the shared policy implementation.
+    class RouteAdmissionError(ValueError):
+        pass
+
+    def require_direct_llm_admission():
+        raise RouteAdmissionError("direct review denied: compatible policy runtime missing")
+
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 CLASSIFIER_AGENT = REPO_ROOT / ".claude/agents/pr-classifier.md"
@@ -84,12 +109,14 @@ def _endpoint() -> tuple[str, str, bool]:
     # CLIENT_AI_POLICY engagements keep every pipeline call Anthropic-direct —
     # including the classifier, which reads the full PR diff.
     if os.environ.get("CLIENT_AI_POLICY"):
+        require_direct_llm_admission()
         key = os.environ.get("ANTHROPIC_DIRECT_API_KEY") or (
             os.environ.get("ANTHROPIC_API_KEY", "") if not proxied else ""
         )
         return key, _ANTHROPIC_API_URL, False
     if proxied:
         return _proxy_transport_key(), base + "/v1/messages", True
+    require_direct_llm_admission()
     return os.environ.get("ANTHROPIC_API_KEY", ""), _ANTHROPIC_API_URL, False
 
 
@@ -584,7 +611,11 @@ def main() -> None:
     # themselves — a broad fallback could route the diff to the refused
     # proxy, while a silent depth:none no-op loses coverage invisibly. Fail
     # the classify job: non-invoking and visibly missing-coverage.
-    api_key, _, _ = _endpoint()
+    try:
+        api_key, _, _ = _endpoint()
+    except RouteAdmissionError as exc:
+        print(f"[classifier] {exc}; classification incomplete", file=sys.stderr)
+        sys.exit(1)
     if not api_key:
         if os.environ.get("CLIENT_AI_POLICY"):
             print(

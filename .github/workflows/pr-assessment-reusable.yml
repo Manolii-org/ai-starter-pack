@@ -45,7 +45,10 @@ permissions:
 # reads .claude/agents/pr-classifier.md, run-broad-agents.py reads the three
 # broad agents, run-specialists.py reads one SKILL.md per name in
 # run-pr-classifier.py's _VALID_SKILLS, and run-judge.py needs no prompt file
-# (its system prompt is inline). tests/test_hydrate_assessment.py fails if
+# (its system prompt is inline). The protected producer and Judge also require
+# their source-loaded helper and sanitizer catalog. This supplies dependencies,
+# never enables estate mode or changes trusted-execution requirements.
+# tests/test_hydrate_assessment.py fails if
 # this list and the runners drift apart.
 env:
   ASSESSMENT_RUNTIME_FILES: >-
@@ -53,6 +56,9 @@ env:
     scripts/run-specialists.py
     scripts/run-broad-agents.py
     scripts/run-judge.py
+    scripts/lib/agent_capabilities.py
+    scripts/lib/protected_review.py
+    .ai/security/token-shapes.json
     .claude/agents/pr-classifier.md
     .claude/agents/systems-consistency.md
     .claude/agents/architecture-impact.md
@@ -159,11 +165,12 @@ jobs:
           ref: ${{ inputs.pack_ref }}
           path: .pack-hydrate
           persist-credentials: false
-          # Only the two trees ASSESSMENT_RUNTIME_FILES can name — the rest of
+          # Only the runtime trees ASSESSMENT_RUNTIME_FILES can name — the rest of
           # the pack (kernel, docs, prompts, telemetry) is dead weight here.
           sparse-checkout: |
             scripts
             .claude
+            .ai/security
 
       - name: Hydrate assessment runtime
         if: steps.hydrate_probe.outputs.needed == 'true'
@@ -174,6 +181,20 @@ jobs:
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             FORCE=true
           fi
+          # Refuse redirected destinations for the new helper/catalog; this
+          # is defensive path validation, not complete executor isolation.
+          for d in .ai .ai/security scripts scripts/lib; do
+            if [[ -L "$d" || ( -e "$d" && ! -d "$d" ) ]]; then
+              echo "::error::Assessment dependency parent must be a real directory" >&2
+              exit 1
+            fi
+          done
+          for f in .ai/security/token-shapes.json scripts/lib/protected_review.py; do
+            if [[ -L "$f" || ( -e "$f" && ! -f "$f" ) ]]; then
+              echo "::error::Assessment dependency must be a regular file" >&2
+              exit 1
+            fi
+          done
           for f in $ASSESSMENT_RUNTIME_FILES; do
             if [[ "$FORCE" != "true" && -e "$f" ]]; then continue; fi
             if [[ ! -e ".pack-hydrate/$f" ]]; then
@@ -545,11 +566,12 @@ jobs:
           ref: ${{ inputs.pack_ref }}
           path: .pack-hydrate
           persist-credentials: false
-          # Only the two trees ASSESSMENT_RUNTIME_FILES can name — the rest of
+          # Only the runtime trees ASSESSMENT_RUNTIME_FILES can name — the rest of
           # the pack (kernel, docs, prompts, telemetry) is dead weight here.
           sparse-checkout: |
             scripts
             .claude
+            .ai/security
 
       - name: Hydrate assessment runtime
         if: steps.hydrate_probe.outputs.needed == 'true'
@@ -560,6 +582,20 @@ jobs:
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             FORCE=true
           fi
+          # Refuse redirected destinations for the new helper/catalog; this
+          # is defensive path validation, not complete executor isolation.
+          for d in .ai .ai/security scripts scripts/lib; do
+            if [[ -L "$d" || ( -e "$d" && ! -d "$d" ) ]]; then
+              echo "::error::Assessment dependency parent must be a real directory" >&2
+              exit 1
+            fi
+          done
+          for f in .ai/security/token-shapes.json scripts/lib/protected_review.py; do
+            if [[ -L "$f" || ( -e "$f" && ! -f "$f" ) ]]; then
+              echo "::error::Assessment dependency must be a regular file" >&2
+              exit 1
+            fi
+          done
           for f in $ASSESSMENT_RUNTIME_FILES; do
             if [[ "$FORCE" != "true" && -e "$f" ]]; then continue; fi
             if [[ ! -e ".pack-hydrate/$f" ]]; then
@@ -686,11 +722,12 @@ jobs:
           ref: ${{ inputs.pack_ref }}
           path: .pack-hydrate
           persist-credentials: false
-          # Only the two trees ASSESSMENT_RUNTIME_FILES can name — the rest of
+          # Only the runtime trees ASSESSMENT_RUNTIME_FILES can name — the rest of
           # the pack (kernel, docs, prompts, telemetry) is dead weight here.
           sparse-checkout: |
             scripts
             .claude
+            .ai/security
 
       - name: Hydrate assessment runtime
         if: steps.hydrate_probe.outputs.needed == 'true'
@@ -701,6 +738,20 @@ jobs:
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             FORCE=true
           fi
+          # Refuse redirected destinations for the new helper/catalog; this
+          # is defensive path validation, not complete executor isolation.
+          for d in .ai .ai/security scripts scripts/lib; do
+            if [[ -L "$d" || ( -e "$d" && ! -d "$d" ) ]]; then
+              echo "::error::Assessment dependency parent must be a real directory" >&2
+              exit 1
+            fi
+          done
+          for f in .ai/security/token-shapes.json scripts/lib/protected_review.py; do
+            if [[ -L "$f" || ( -e "$f" && ! -f "$f" ) ]]; then
+              echo "::error::Assessment dependency must be a regular file" >&2
+              exit 1
+            fi
+          done
           for f in $ASSESSMENT_RUNTIME_FILES; do
             if [[ "$FORCE" != "true" && -e "$f" ]]; then continue; fi
             if [[ ! -e ".pack-hydrate/$f" ]]; then
@@ -787,6 +838,8 @@ jobs:
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
+          # Admission reads policy from the immutable PR base, not merge HEAD.
+          fetch-depth: 0
           persist-credentials: false
 
       # ── Assessment runtime hydration ────────────────────────────────────
@@ -830,11 +883,12 @@ jobs:
           ref: ${{ inputs.pack_ref }}
           path: .pack-hydrate
           persist-credentials: false
-          # Only the two trees ASSESSMENT_RUNTIME_FILES can name — the rest of
+          # Only the runtime trees ASSESSMENT_RUNTIME_FILES can name — the rest of
           # the pack (kernel, docs, prompts, telemetry) is dead weight here.
           sparse-checkout: |
             scripts
             .claude
+            .ai/security
 
       - name: Hydrate assessment runtime
         if: steps.hydrate_probe.outputs.needed == 'true'
@@ -845,6 +899,20 @@ jobs:
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             FORCE=true
           fi
+          # Refuse redirected destinations for the new helper/catalog; this
+          # is defensive path validation, not complete executor isolation.
+          for d in .ai .ai/security scripts scripts/lib; do
+            if [[ -L "$d" || ( -e "$d" && ! -d "$d" ) ]]; then
+              echo "::error::Assessment dependency parent must be a real directory" >&2
+              exit 1
+            fi
+          done
+          for f in .ai/security/token-shapes.json scripts/lib/protected_review.py; do
+            if [[ -L "$f" || ( -e "$f" && ! -f "$f" ) ]]; then
+              echo "::error::Assessment dependency must be a regular file" >&2
+              exit 1
+            fi
+          done
           for f in $ASSESSMENT_RUNTIME_FILES; do
             if [[ "$FORCE" != "true" && -e "$f" ]]; then continue; fi
             if [[ ! -e ".pack-hydrate/$f" ]]; then
