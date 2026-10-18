@@ -88,7 +88,9 @@ class QualityTests(unittest.TestCase):
                     load(self.profile_path)
 
     def test_unknown_profile_key_is_rejected(self):
-        self.profile_path.write_text(json.dumps(dict(self.profile, token='must-not-be-here')))
+        invalid_profile = dict(self.profile)
+        invalid_profile['token'] = 'must-not-be-here'
+        self.profile_path.write_text(json.dumps(invalid_profile))
         with self.assertRaises(QualityError):
             load(self.profile_path)
 
