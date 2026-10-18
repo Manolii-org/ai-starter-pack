@@ -13,8 +13,8 @@ Use authenticated GitHub data from the actual PR and its freshly read head:
 | --- | --- |
 | Independent human approval | Existing human-review helper; author excluded and current-head vetoes retained |
 | Allowlisted review-bot approval | `review_evidence.py --head-sha <full-sha>` on the complete reviews array |
-| Completed CodeRabbit clean source review | `review_evidence.py --comments --repo <owner/repo> --pr <number> --head-sha <full-sha>` on API issue comments |
-| Existing clean Judge or native Codex review | Existing canonical helpers, where installed; their exact identity, completeness and head checks still apply |
+| Completed CodeRabbit clean source review | `review_evidence.py --comments --repo <owner/repo> --pr <number> --head-sha <full-sha>` on comments with complete GraphQL edit provenance |
+| Existing clean Judge or native Codex review | Existing canonical helpers, where installed; comment-based Codex evidence goes through `review_evidence.py --codex` and the same provenance check |
 
 The shared helper prints exactly `satisfy`, `block` or `none`. Exit zero only means
 the input was classified. Only `satisfy` supplies a review leg; it never authorizes
@@ -28,6 +28,18 @@ outside the walkthrough, which may quote contributor text. Pending, skipped,
 rate-limited, stale, partial, conflicting or copied evidence fails closed.
 Fetch evidence from GitHub; never construct a passing input or post an approval
 under the implementing account. A reviewer acknowledgement is not source review.
+
+Use `review_evidence.py --fetch-comments --repo <owner/repo> --pr <number> --head-sha <full-sha>` to
+read every comment page and complete GraphQL `userContentEdits` history with the
+caller's existing GitHub CLI authentication. REST retains the bot author when a
+repository writer edits its body, so REST authorship or the latest editor alone
+is insufficient. Require matching body/ID/timestamps, creation coverage for edited
+comments, every recorded editor being the actual bot, no deleted history, and
+complete stable pagination. Authenticate newer bot bodies before dismissing them
+as acknowledgements; do not inspect histories older than the selected source.
+Capture JSON as classifier input without logging bodies. Missing, partial, racing
+or tainted provenance supplies
+no passing comment evidence. Never fall back to a REST-only passing result.
 
 ## Remaining gates
 
@@ -58,7 +70,8 @@ readiness check establishes access and allowance, not delivery quality.
 
 The portable helper and this contract are shared across native, rendered plugin
 and registry consumers. Existing human, Judge and Codex helper entry points keep
-their contracts. A narrow legacy docs-summary entry point may remain installed
+their contracts; current merge gates authenticate mutable bodies before invoking
+the canonical Codex recognizer. A narrow legacy docs-summary entry point may remain installed
 for older callers; current primary and late-review gates use the shared helper.
 Missing or failing helpers return no passing evidence. Ship the helper alongside
 gate changes through existing sync manifests; preserve exclusions. Reverting this

@@ -16,13 +16,34 @@ BODY = (module.PREFIX + "\n<!-- recent_review_start -->\n"
         "<!-- recent_review_end -->\n<!-- walkthrough_start -->\nReviewed implementation.\n"
         "<!-- walkthrough_end -->\n<!-- final_review_risk_coverage:"
         '{"sourceCommitId":"' + SHA + '","coveredCommitId":"' + SHA + '","kind":"reviewed"} -->')
-COMMENT = {"id": 42, "updated_at": "2026-10-17T16:13:40Z",
+COMMENT = {"id": 42, "node_id": "IC_42", "created_at": "2026-10-17T16:00:00Z", "updated_at": "2026-10-17T16:13:40Z",
            "issue_url": f"https://api.github.com/repos/{REPO}/issues/201",
            "user": {"login": "coderabbitai[bot]", "type": "Bot"}, "body": BODY}
 
 
+def with_provenance(comment):
+    c = copy.deepcopy(comment)
+    actor = {"login": (c.get("user") or {}).get("login", "").removesuffix("[bot]"),
+             "__typename": (c.get("user") or {}).get("type")}
+    c["review_provenance"] = {"id": c.get("node_id"), "databaseId": c.get("id"),
+        "author": actor, "editor": actor, "body": c.get("body"),
+        "createdAt": c.get("created_at"), "updatedAt": c.get("updated_at"),
+        "lastEditedAt": c.get("updated_at"), "includesCreatedEdit": True,
+        "userContentEdits": {"totalCount": 2, "pageInfo": {"hasNextPage": False, "endCursor": "last"},
+            "nodes": [{"id": "created", "editedAt": c.get("created_at"), "editor": actor, "deletedAt": None},
+                      {"id": "edited", "editedAt": c.get("updated_at"), "editor": actor, "deletedAt": None}]}}
+    return c
+
+
+COMMENT = with_provenance(COMMENT)
+
+
 def verdict(comments):
-    return module.coderabbit_clean_summary(comments, SHA, REPO, 201)
+    # Semantic parser cases model fresh authenticated snapshots of each body.
+    # Provenance attack cases below deliberately bypass this fixture helper.
+    return module.coderabbit_clean_summary([with_provenance(c) if isinstance(c, dict) and isinstance(c.get("user"), dict) else c
+                                            for c in comments] if isinstance(comments, list) else comments,
+                                           SHA, REPO, 201)
 
 
 def test_actual_clean_summary_requires_no_synthetic_approval():
@@ -124,3 +145,126 @@ def test_real_cli_preserves_exact_context(comments, expected):
         input=json.dumps(comments), capture_output=True, text=True, check=True, timeout=10,
     )
     assert result.stdout.strip() == expected
+
+
+@pytest.mark.parametrize("change", [
+    lambda c: c.pop("review_provenance"),
+    lambda c: c["review_provenance"].update(id="IC_other"),
+    lambda c: c["review_provenance"].update(databaseId=43),
+    lambda c: c["review_provenance"].update(body="edited body"),
+    lambda c: c["review_provenance"].update(updatedAt="2026-10-18T16:13:40Z"),
+    lambda c: c["review_provenance"].update(editor={"login": "writer", "__typename": "User"}),
+    lambda c: c["review_provenance"].update(includesCreatedEdit=False),
+    lambda c: c["review_provenance"]["userContentEdits"].update(totalCount=3),
+    lambda c: c["review_provenance"]["userContentEdits"].update(totalCount=True),
+    lambda c: c["review_provenance"]["userContentEdits"]["pageInfo"].update(hasNextPage=True),
+    lambda c: c["review_provenance"]["userContentEdits"]["nodes"][0].update(editor=None),
+    lambda c: c["review_provenance"]["userContentEdits"]["nodes"][0].update(deletedAt="2026-10-17T16:02:00Z"),
+    lambda c: c["review_provenance"]["userContentEdits"]["nodes"][1].update(id="created"),
+    lambda c: c["review_provenance"]["userContentEdits"]["nodes"][0].update(editedAt="2026-10-17T16:05:00Z"),
+    # The latest editor is still the bot; an earlier human edit must veto.
+    lambda c: c["review_provenance"]["userContentEdits"]["nodes"][0].update(editor={"login": "writer", "__typename": "User"}),
+])
+def test_mutable_author_identity_is_not_edit_provenance(change):
+    c = copy.deepcopy(COMMENT)
+    change(c)
+    assert not module.coderabbit_clean_summary([c], SHA, REPO, 201)
+
+
+def test_unedited_bot_body_has_no_missing_edit_history():
+    c = copy.deepcopy(COMMENT)
+    c["updated_at"] = c["created_at"]
+    c["review_provenance"].update(updatedAt=c["created_at"], lastEditedAt=None,
+        editor=None, includesCreatedEdit=False,
+        userContentEdits={"totalCount": 0, "nodes": [], "pageInfo": {"hasNextPage": False}})
+    assert module.trusted_comment(c)
+    assert module.coderabbit_clean_summary([c], SHA, REPO, 201)
+
+
+def test_later_untrusted_snapshot_cannot_reuse_an_older_clean_result():
+    later = dict(COMMENT, id=43, updated_at="2026-10-17T16:14:00Z")
+    assert not module.coderabbit_clean_summary([COMMENT, later], SHA, REPO, 201)
+
+
+@pytest.mark.parametrize("body", ["Thanks, addressed.", "", "unrelated acknowledgement"])
+def test_removed_prefix_cannot_hide_a_later_tainted_review(body):
+    later = with_provenance(dict(COMMENT, id=43, node_id="IC_43",
+        updated_at="2026-10-17T16:14:00Z", body=body))
+    later["review_provenance"]["userContentEdits"]["nodes"][0]["editor"] = {
+        "login": "writer", "__typename": "User"}
+    assert not module.trusted_comment(later)
+    assert not module.coderabbit_clean_summary([COMMENT, later], SHA, REPO, 201)
+    assert not module.coderabbit_clean_summary([later, COMMENT], SHA, REPO, 201)
+
+
+def test_older_unused_history_does_not_block_a_current_authenticated_review():
+    older = dict(COMMENT, id=41, node_id="IC_41", updated_at="2026-10-17T16:10:00Z")
+    older.pop("review_provenance")
+    assert module.coderabbit_clean_summary([older, COMMENT], SHA, REPO, 201)
+
+
+def test_fetcher_authenticates_newer_acknowledgements_but_not_unused_old_history(monkeypatch):
+    import json
+    newer = with_provenance(dict(COMMENT, id=43, node_id="IC_43",
+        updated_at="2026-10-17T16:14:00Z", body="Thanks, addressed."))
+    older = with_provenance(dict(COMMENT, id=41, node_id="IC_41",
+        updated_at="2026-10-17T16:10:00Z"))
+    snapshots = {c["node_id"]: copy.deepcopy(c["review_provenance"]) for c in (COMMENT, newer)}
+    requested = []
+    def gh(arguments, payload=None):
+        if arguments[0] != "graphql":
+            return json.dumps([older, COMMENT, newer])
+        ident = json.loads(payload)["variables"]["id"]
+        requested.append(ident)
+        assert ident != "IC_41", "unused history must not add calls or block this review"
+        return json.dumps({"data": {"node": snapshots[ident]}})
+    monkeypatch.setattr(module, "gh_read", gh)
+    result = module.fetch_comments(REPO, 201, SHA)
+    assert requested == ["IC_43", "IC_42"]
+    assert module.coderabbit_clean_summary(result, SHA, REPO, 201)
+
+
+def test_fetcher_collects_all_comment_and_edit_pages(monkeypatch):
+    import json
+    calls = []
+    def gh(arguments, payload=None):
+        calls.append((arguments, payload))
+        if arguments[0] != "graphql":
+            assert "--paginate" in arguments
+            return json.dumps([COMMENT]) + "\n[]"
+        variables = json.loads(payload)["variables"]
+        n = copy.deepcopy(COMMENT["review_provenance"])
+        h = n["userContentEdits"]
+        if variables["cursor"] is None:
+            h["nodes"] = h["nodes"][:1]
+            h["pageInfo"] = {"hasNextPage": True, "endCursor": "next"}
+        else:
+            assert variables["cursor"] == "next"
+            h["nodes"] = h["nodes"][1:]
+        return json.dumps({"data": {"node": n}})
+    monkeypatch.setattr(module, "gh_read", gh)
+    result = module.fetch_comments(REPO, 201, SHA)
+    assert len(calls) == 3
+    assert module.coderabbit_clean_summary(result, SHA, REPO, 201)
+
+
+@pytest.mark.parametrize("failure", ["changed", "errors", "repeated_cursor"])
+def test_fetcher_never_combines_incomplete_or_racing_history(monkeypatch, failure):
+    import json
+    count = 0
+    def gh(arguments, payload=None):
+        nonlocal count
+        if arguments[0] != "graphql":
+            return json.dumps([COMMENT])
+        count += 1
+        if failure == "errors":
+            return json.dumps({"errors": [{"message": "unavailable"}]})
+        n = copy.deepcopy(COMMENT["review_provenance"])
+        n["userContentEdits"]["pageInfo"] = {"hasNextPage": True, "endCursor": "repeat"}
+        if count > 1 and failure == "changed":
+            n["body"] = "changed during pagination"
+        return json.dumps({"data": {"node": n}})
+    monkeypatch.setattr(module, "gh_read", gh)
+    with pytest.raises(ValueError):
+        module.fetch_comments(REPO, 201, SHA)
+    assert count <= 2
