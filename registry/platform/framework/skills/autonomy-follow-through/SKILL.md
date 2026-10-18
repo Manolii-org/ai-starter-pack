@@ -1,6 +1,6 @@
 ---
 name: autonomy-follow-through
-version: 1.1.0
+version: 1.1.1
 description: "Shared termination + escalation loop for routine-native autonomy and /watch-pr. Stops on done/blocked_on_human/blocked_on_infra/superseded/gave_up; merges when safe."
 type: skill
 model: sonnet
@@ -36,8 +36,8 @@ Before PR follow-through, reconcile every session commitment as `DONE`,
 The author or authorized agent may mark a PR ready once its complete assigned
 initial scope and commitment ledger are satisfied, deterministic checks and
 user-facing verification pass, required fast checks and secret scanning pass on
-the current head, and no demonstrated HIGH defect or input/security refusal
-remains. Another person's approval is not a prerequisite to marking ready.
+the current head, and no demonstrated Critical/P0 or HIGH/P1 defect or
+input/security refusal remains. Another person's approval is not a prerequisite to marking ready.
 Review workflows may run after readiness. Existing independent current-head
 MERGE review, CHANGES_REQUESTED vetoes, guarded paths, kill switches, native
 protections and Merge-When-Safe rules below remain unchanged.
