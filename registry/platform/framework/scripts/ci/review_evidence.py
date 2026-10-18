@@ -76,11 +76,11 @@ def coderabbit_clean_summary(comments: object, head: str, repo: str, pr: int) ->
         if not isinstance(body, str) or not body.startswith("<!-- This is an auto-generated comment:"):
             continue
         try:
-            key = _updated(comment)
-            if key[1] in identities and identities[key[1]] != (key, body):
+            order = _updated(comment)
+            if order[1] in identities and identities[order[1]] != (order, body):
                 return False
-            identities[key[1]] = (key, body)
-            candidates.append((key, body))
+            identities[order[1]] = (order, body)
+            candidates.append((order, body))
         except (KeyError, TypeError, ValueError, AttributeError):
             return False
     if not candidates:
