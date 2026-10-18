@@ -96,17 +96,19 @@ that state's incident/escalation actions below; report monitoring as unavailable
 with the pending-work evidence. Resume active work on a substantive new event
 or decisive evidence under the existing retry rules.
 
-Before the first round, dispatch one persistent opus-pinned named `infra` agent
-with `model=` omitted to own the bounded authenticated read loop. Reuse that
-same agent for every wake; do not create an N-call credential-bearing fan-out.
-The deterministic broker is preferred when it covers the operation.
+Use the owning repository's runtime dispatch policy for the authenticated read
+loop. Where that policy uses a persistent named `infra` agent, reuse it with the
+required model/plane binding; do not create one per wake. Where the runtime uses
+a deterministic broker or a batched main-thread read, use that existing route.
+An unavailable agent type is not a reason to add a supervisor or stop an
+otherwise authorised supported route. Preserve secret-handling and sensitivity
+boundaries; a model alias is not proof of its actual provider.
 
 Each round:
-1. Ask the persistent `infra` agent to fetch PR metadata + CI status + review
-   state + issue threads + the complete current label array in one credential-
-   bearing batch. The skill receives only its sanitised receipt; it never
-   carries `GH_TOKEN`, auth headers, or raw authenticated payloads through the
-   Sonnet execution path.
+1. Fetch PR metadata + CI status + review state + issue threads + the complete
+   current label array through that existing authorised route in one bounded
+   batch. Keep credentials and raw authenticated payloads out of delegated
+   model context; return only the permitted sanitised evidence.
 2. Run `check-amber-labels` against that complete label array. A Red result
    first disables any auto-merge request armed by an earlier wake, then vetoes
    all mutation and terminates `blocked_on_human`.
@@ -183,7 +185,18 @@ Merge only when ALL true:
 - The automated gate has a qualifying, non-blocking semantic review tied to the
   current head SHA. A mere unclassified comment is not a qualifying signal.
 - Not guarded path (verify `.ai/guards.json`)
-- Policy kill switches enabled (verify the `autonomy.follow_through.enabled` policy flag)
+- Verify the controls actually consumed by the selected executor and merge
+  controller, using the owning repository's documented configuration and
+  defaults. For a controller that consumes `AUTO_MERGE_ENABLED`, verify that
+  control; do not add a separate `autonomy.follow_through.enabled` requirement
+  merely because this shared skill previously named it. Executor switches
+  apply only to their actual consumers. An absent value means enabled only
+  where the consuming implementation explicitly defines that default.
+  Unreadable control state is unavailable, not disabled or missing user consent.
+  Hold the affected mutation unless the existing trusted controller has a
+  verified applicable job-level decision and explicitly supports that fallback.
+  Never invent a flag, broaden credentials, spoof a hosted context or bypass
+  a denied permission to satisfy this check.
 - Immediately before enabling auto-merge or merging, refresh the complete label
   array and rerun `check-amber-labels`. A Red result disables any armed
   auto-merge request and terminates `blocked_on_human` without further mutation.
