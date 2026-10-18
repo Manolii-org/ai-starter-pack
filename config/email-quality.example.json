@@ -1,0 +1,15 @@
+{
+  "schema_version": "1.0",
+  "provider": "unspam",
+  "org": "example",
+  "repository": "example/application",
+  "environment": "preprod",
+  "account_mode": "shared",
+  "shared_account_acknowledged": true,
+  "checks": ["spam", "inbox"],
+  "minimum_remaining": 4,
+  "timeout_seconds": 180,
+  "poll_seconds": 5,
+  "minimum_score": 80,
+  "minimum_inbox_ratio": 0.8
+}
