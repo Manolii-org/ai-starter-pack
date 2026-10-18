@@ -300,6 +300,7 @@ _exclude:
 # Instance-owned files: written on first copy, never overwritten by
 # `copier update` (report §4 Lever A / ADR-0023 Decision 1).
 _skip_if_exists:
+  - scripts/ci/codex-review-worker.json
   - CLAUDE.md
   - .claude/model-routing.json
   - .claude/mcp.json

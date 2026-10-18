@@ -38,7 +38,7 @@ instance:
   # fly sections are printed as a manual checklist (not locally verifiable).
   required_secrets:
     github:
-      - DOPPLER_TOKEN_CODEX  # read-only subscription credential fetch; no provider API key
+      # Subscription reviews use the separately provisioned trusted-worker OIDC identity.
 {% if oss_routing %}
       - DOPPLER_SERVICE_TOKEN_LITELLM
       - FLY_API_TOKEN
@@ -64,13 +64,10 @@ instance:
         - LANGFUSE_PUBLIC_KEY
         - LANGFUSE_SECRET_KEY
 {% endif %}
-{% if codex_adversarial %}
-        - OPENAI_API_KEY
-{% endif %}
 {% if mesh_telemetry %}
         - MESH_BEARER_AGENT
 {% endif %}
-{% if not oss_routing and not kl_integration and not browserbase and not langfuse_telemetry and not codex_adversarial and not mesh_telemetry %}
+{% if not oss_routing and not kl_integration and not browserbase and not langfuse_telemetry and not mesh_telemetry %}
         []
 {% endif %}
     fly:
