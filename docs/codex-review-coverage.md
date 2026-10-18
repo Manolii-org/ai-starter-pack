@@ -6,6 +6,15 @@ is not proof that the current PR revision was reviewed. Subscription CLI usage
 is subject to the owning account's entitlement and limits; no unlimited quota,
 billing saving or usage-priced API fallback is assumed.
 
+## Findings quality
+
+The existing PR Assessment Judge applies four filters to reported findings:
+Accuracy (verifiable), Actionability (a concrete fix), Novelty (not duplicated
+or already caught by CI), and Specificity (a precise affected location and
+explanation). These describe the Judge’s findings-quality contract. Review
+completion and merge eligibility retain their separate checks: filtering all
+findings does not establish that a missing or incomplete review finished.
+
 ## Execution and credential boundary
 
 `codex-pr-review.yml` and `codex-security-diff-scan.yml` retain their names,
