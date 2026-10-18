@@ -153,6 +153,13 @@ Wait for all results. Block commit if any CRITICAL or ERROR findings.
 
 ## Review Integration
 
+For authorized agent-managed work, review publication format alone must not add a
+human gate. Apply `.claude/skills/autonomy-follow-through/review-evidence.md`:
+verified current-head independent automated review can satisfy review without a
+formal Approve click; empty acknowledgements and incomplete reviews cannot.
+Preserve required checks, findings, explicit human holds and native merge queues.
+
+
 ### CodeRabbit
 - Automatically reviews all PRs
 - Comments are actionable — address or reply explaining why not

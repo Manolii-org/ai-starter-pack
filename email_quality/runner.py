@@ -49,8 +49,8 @@ def start(client, state, profile, kind, deadline=None):
             return checks[kind]
     if kind not in checks:
         limits = client.status(**({'timeout': remaining(deadline)} if deadline is not None else {}))
-        key = 'spam_checks' if kind == 'spam' else 'inbox_placements'
-        if limits[key] <= profile['minimum_remaining']:
+        allowance_field = 'spam_checks' if kind == 'spam' else 'inbox_placements'
+        if limits[allowance_field] <= profile['minimum_remaining']:
             raise QualityError('QUOTA_RESERVE')
         if deadline is not None:
             remaining(deadline)
