@@ -6,6 +6,48 @@ import { FeatureRuntime, approvalMessage, killMessage } from '@manolii/feature-c
 import { DecisionClient, decisionValue, validateSnapshot } from '@manolii/feature-controls/client';
 import { Assignments, Controls, Events, bundle, clone, eventFor, golden, kill, numericBundle, numericStickyProbe, setup } from './helpers.mjs';
 
+for (const action of ['release','kill']) for (const boundary of ['verifier','read']) {
+  test(`${action} samples implicit time after ${boundary} I/O`, async t => {
+    let now=golden.now, advanced=false;
+    t.mock.method(Date,'now',()=>now);
+    const controls=new Controls(), key=JSON.stringify(golden.scope);
+    const advance=()=>{
+      now+=10;advanced=true;
+      controls.values.set(key,{bundle:null,kill:null,time_highwater:now});
+    };
+    const read=controls.read.bind(controls);
+    controls.read=async scope=>{if(boundary==='read'&&!advanced)advance();return read(scope);};
+    const runtime=new FeatureRuntime(golden.catalog,{controls,verifier:{verify:async()=>{
+      if(boundary==='verifier')advance();return true;
+    }}});
+    if(action==='release')await runtime.activate(bundle(),0);
+    else await runtime.updateKills(kill(),'local-fixture');
+    const state=await read(golden.scope);
+    assert.equal(state.time_highwater,golden.now+10);
+    assert.equal(action==='release'?state.bundle.revision:state.kill.generation,1);
+  });
+}
+for (const action of ['release','kill']) {
+  test(`${action} rechecks expiry after I/O and rejects real clock rollback`, async t => {
+    let now=golden.now;
+    t.mock.method(Date,'now',()=>now);
+    const controls=new Controls(), key=JSON.stringify(golden.scope);
+    const runtime=new FeatureRuntime(golden.catalog,{controls,verifier:{verify:async()=>{
+      now=golden.expires_at;return true;
+    }}});
+    const apply=time=>action==='release'?runtime.activate(bundle(),0,time):runtime.updateKills(kill(),'local-fixture',time);
+    await assert.rejects(apply(undefined),action==='release'?/stale bundle/:/invalid kill binding/);
+    assert.equal(controls.writes,0);
+    now=golden.now;
+    runtime.options.verifier={verify:async()=>true};
+    controls.values.set(key,{bundle:null,kill:null,time_highwater:golden.now+1});
+    await assert.rejects(apply(undefined),/clock rollback/);
+    await assert.rejects(apply(golden.now),/clock rollback/);
+    for(const invalid of [null,NaN,1.5,-1])await assert.rejects(apply(invalid),/invalid clock/);
+    assert.equal(controls.writes,0);
+  });
+}
+
 test('shared golden hard-fence and typed baseline decisions', async () => {
   const runtime = await setup();
   for (const fixture of golden.cases) {

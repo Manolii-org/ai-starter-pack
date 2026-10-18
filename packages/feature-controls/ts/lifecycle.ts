@@ -53,26 +53,35 @@ export class Lifecycle {
     if (this.options.trust_policy === "local-test") return;
     if (!this.options.verifier || !await this.options.verifier.verify(approvalMessage(bundle), bundle.approval_ref, "release")) throw new Error("release approval required");
   }
-  async activate(bundle: ReleaseBundle, expected_revision: number, now = Date.now()): Promise<void> {
+  async activate(bundle: ReleaseBundle, expected_revision: number, now?: number): Promise<void> {
     bundle = structuredClone(bundle);
     payloadOf(bundle, this.catalog);
-    validateTime(now);
-    if (bundle.created_at > now + 30000 || bundle.expires_at <= now || !Number.isSafeInteger(expected_revision)) throw new Error("stale bundle");
+    if (now !== undefined) validateTime(now);
+    if (!Number.isSafeInteger(expected_revision) || now !== undefined &&
+        (bundle.created_at > now + 30000 || bundle.expires_at <= now)) throw new Error("stale bundle");
     await this.approved(bundle);
     const current = await this.state();
+    // Approval and store I/O can overlap observations that advance the durable floor.
+    if (now === undefined) now = Date.now();
+    validateTime(now);
+    if (bundle.created_at > now + 30000 || bundle.expires_at <= now) throw new Error("stale bundle");
     if (now < current.time_highwater) throw new Error("clock rollback");
     const revision = current.bundle?.revision ?? 0;
     if (revision !== expected_revision || bundle.revision <= revision) throw new Error("revision conflict or replay");
     await this.swap(current, { bundle, kill: current.kill, time_highwater: now });
   }
-  async updateKills(kill: KillState, approval_ref: string, now = Date.now()): Promise<void> {
+  async updateKills(kill: KillState, approval_ref: string, now?: number): Promise<void> {
     kill = structuredClone(kill);
-    validate("kill", kill); validateTime(now);
-    if (!sameScope(kill.scope, this.catalog.scope) || kill.expires_at <= now ||
+    validate("kill", kill);
+    if (now !== undefined) validateTime(now);
+    if (!sameScope(kill.scope, this.catalog.scope) || now !== undefined && kill.expires_at <= now ||
         kill.disabled.some(k => !Object.hasOwn(this.catalog.features, k))) throw new Error("invalid kill binding");
     if (this.options.trust_policy !== "local-test" && (!this.options.verifier ||
         !await this.options.verifier.verify(killMessage(kill), approval_ref, "kill"))) throw new Error("kill approval required");
     const current = await this.state();
+    if (now === undefined) now = Date.now();
+    validateTime(now);
+    if (kill.expires_at <= now) throw new Error("invalid kill binding");
     if (now < current.time_highwater) throw new Error("clock rollback");
     if (kill.generation <= (current.kill?.generation ?? 0)) throw new Error("kill replay");
     await this.swap(current, { bundle: current.bundle, kill, time_highwater: now });

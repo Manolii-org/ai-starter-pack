@@ -62,6 +62,8 @@ Production activation requires a trusted approval verifier and durable atomic `D
 
 Control states require `{bundle, kill, time_highwater}`. Reads validate metadata/scope; non-preview observations CAS-advance the persisted clock floor with at most four attempts. Activation, kills and evaluation reject earlier time. Never migrate by silently resetting high-water metadata. These mechanisms require real datastore atomicity/durability; synthetic in-memory restart/race probes are not production certification.
 
+When publication omits `now`, activation and kill updates sample wall time after approval verification and the durable state read, then check freshness and the clock floor before CAS. Explicit clocks retain their strict semantics. A later concurrent change fails CAS; owning publishers may retry bounded clock-only contention using the same approved message and original expected action fence. Never clamp time to a stored floor or silently adopt a competing release or kill.
+
 Snapshots capture one control state and validate/hash/parse payload once per request. Every decision projects that root revision/kill pair, including restrictive decisions. Requests accept at most **64 keys**. At the current time floor there is one control read; advancing it adds CAS and bounded contention rereads. SDK instances remain per-key/context, assignments serial: serialization/provider setup can still cost up to 128 provider loads for 64 randomized keys at the 1 MiB payload bound. No global mutable evaluator or arbitrary batch-efficiency claim. Context/options are copied before suspension. Preview writes no control/assignment/event records, installs no tracking callback, and uses read-only sticky fixtures.
 
 ## Client API and replay contract
