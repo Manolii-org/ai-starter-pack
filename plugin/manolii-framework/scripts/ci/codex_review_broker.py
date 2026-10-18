@@ -9,6 +9,7 @@ controller code, with a socket directory created by that controller.
 from __future__ import annotations
 
 import base64
+import hashlib
 from contextlib import contextmanager
 from email.message import Message
 from http.server import BaseHTTPRequestHandler
@@ -16,6 +17,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import socket
 import socketserver
 import struct
@@ -25,12 +27,238 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 
 UPSTREAM = "https://chatgpt.com/backend-api/codex/responses"
 REVIEW_MODEL = "gpt-5.6-sol"
 MAX_INPUT = 2 * 1024 * 1024
 MAX_OUTPUT = 32 * 1024 * 1024
 MAX_METADATA = 4096
+EXEC_GRAMMAR_SHA256 = "8eead048e20069c17fcd0b6fe5ee9ed29364868723f8e08889de146a2b4b7a8e"
+LOCAL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,127}\Z")
+
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def invalid_constant(_):
+    raise ValueError("non-finite JSON number")
+
+
+def shape(value, allowed, required=()):
+    if not isinstance(value, dict) or set(value) - set(allowed) or not set(required) <= set(value):
+        raise ValueError("unsupported request shape")
+
+
+def local_text(value):
+    if not isinstance(value, str):
+        raise ValueError("inline text required")
+
+
+def text_content(value):
+    if not isinstance(value, list):
+        raise ValueError("inline text content required")
+    for part in value:
+        shape(part, {"type", "text", "annotations"}, {"type", "text"})
+        if part["type"] not in {"input_text", "output_text"} or part.get("annotations", []) != []:
+            raise ValueError("nontext content refused")
+        local_text(part["text"])
+
+
+def local_schema(value):
+    """JSON Schema is data; resource resolution and unknown dialects are not."""
+    if isinstance(value, bool):
+        return
+    allowed = {"type", "properties", "required", "additionalProperties", "items",
+               "anyOf", "oneOf", "allOf", "enum", "const", "description", "title",
+               "default", "minimum", "maximum", "minLength", "maxLength",
+               "minItems", "maxItems", "pattern", "format", "encrypted",
+               "$defs", "definitions", "$ref", "not"}
+    shape(value, allowed)
+    if "type" in value:
+        types = value["type"] if isinstance(value["type"], list) else [value["type"]]
+        if not types or any(not isinstance(t, str) or t not in {"object", "array", "string", "number", "integer", "boolean", "null"} for t in types):
+            raise ValueError("invalid schema type")
+    for key in ("description", "title", "pattern", "format"):
+        if key in value:
+            local_text(value[key])
+    if "encrypted" in value and type(value["encrypted"]) is not bool:
+        raise ValueError("invalid schema annotation")
+    if "required" in value and (not isinstance(value["required"], list) or not all(isinstance(k, str) for k in value["required"])):
+        raise ValueError("invalid required properties")
+    if "enum" in value and (not isinstance(value["enum"], list) or not value["enum"]):
+        raise ValueError("invalid schema enum")
+    for key in ("minimum", "maximum", "minLength", "maxLength", "minItems", "maxItems"):
+        if key in value and type(value[key]) not in {int, float}:
+            raise ValueError("invalid schema bound")
+    if "$ref" in value and (not isinstance(value["$ref"], str) or not value["$ref"].startswith("#/")):
+        raise ValueError("external schema reference refused")
+    for key in ("properties", "$defs", "definitions"):
+        if key in value:
+            if not isinstance(value[key], dict):
+                raise ValueError("invalid schema map")
+            for child in value[key].values():
+                local_schema(child)
+    for key in ("items", "additionalProperties", "not"):
+        if key in value:
+            local_schema(value[key])
+    for key in ("anyOf", "oneOf", "allOf"):
+        if key in value:
+            if not isinstance(value[key], list):
+                raise ValueError("invalid schema union")
+            for child in value[key]:
+                local_schema(child)
+
+
+def local_tools(value, declarations, namespace=""):
+    if not isinstance(value, list):
+        raise ValueError("local tools required")
+    for tool in value:
+        if not isinstance(tool, dict) or not LOCAL_NAME.fullmatch(tool.get("name", "")):
+            raise ValueError("invalid local tool")
+        kind = tool.get("type")
+        if kind == "namespace" and not namespace:
+            shape(tool, {"type", "name", "description", "tools"}, {"type", "name", "tools"})
+            if "description" in tool:
+                local_text(tool["description"])
+            local_tools(tool["tools"], declarations, tool["name"])
+            continue
+        if kind == "function":
+            shape(tool, {"type", "name", "description", "parameters", "strict"}, {"type", "name", "parameters"})
+            if "strict" in tool and type(tool["strict"]) is not bool:
+                raise ValueError("invalid local tool strictness")
+            if not isinstance(tool["parameters"], dict) or tool["parameters"].get("type") != "object":
+                raise ValueError("object tool parameters required")
+            local_schema(tool["parameters"])
+        elif kind == "custom":
+            shape(tool, {"type", "name", "description", "format"}, {"type", "name", "format"})
+            fmt = tool["format"]
+            shape(fmt, {"type", "syntax", "definition"}, {"type", "syntax", "definition"})
+            if (tool["name"] != "exec" or fmt["type"] != "grammar" or fmt["syntax"] != "lark"
+                    or not isinstance(fmt["definition"], str)
+                    or hashlib.sha256(fmt["definition"].encode()).hexdigest() != EXEC_GRAMMAR_SHA256):
+                raise ValueError("unqualified custom grammar")
+        else:
+            raise ValueError("hosted tool refused")
+        if "description" in tool:
+            local_text(tool["description"])
+        identity = (namespace, tool["name"])
+        if identity in declarations:
+            raise ValueError("ambiguous local tool")
+        declarations[identity] = kind
+
+
+def review_request(raw, server):
+    """Admit only stateless inline review traffic before reading host auth."""
+    payload = json.loads(raw, object_pairs_hook=unique_object, parse_constant=invalid_constant)
+    shape(payload, {"model", "instructions", "input", "tools", "tool_choice",
+                    "parallel_tool_calls", "reasoning", "store", "stream", "include",
+                    "prompt_cache_key", "text", "client_metadata"},
+          {"model", "input", "store", "stream"})
+    if payload["model"] != REVIEW_MODEL or payload["store"] is not False or payload["stream"] is not True:
+        raise ValueError("stateless subscription review required")
+    # Bound recursive validation independently of Python's JSON recursion limit.
+    pending = [(payload, 0)]
+    nodes = 0
+    while pending:
+        value, depth = pending.pop()
+        nodes += 1
+        if depth > 32 or nodes > 100000:
+            raise ValueError("request shape budget exhausted")
+        if isinstance(value, (dict, list)) and nodes + len(pending) + len(value) > 100000:
+            raise ValueError("request shape budget exhausted")
+        if isinstance(value, dict):
+            pending.extend((v, depth + 1) for v in value.values())
+        elif isinstance(value, list):
+            pending.extend((v, depth + 1) for v in value)
+    if "instructions" in payload:
+        local_text(payload["instructions"])
+    if payload.get("tool_choice", "auto") != "auto" or payload.get("parallel_tool_calls", False) is not False:
+        raise ValueError("unsupported tool control")
+    if payload.get("include", []) not in ([], ["reasoning.encrypted_content"]):
+        raise ValueError("unsupported response expansion")
+    if "reasoning" in payload:
+        value = payload["reasoning"]
+        shape(value, {"effort", "summary", "context"})
+        if (value.get("effort", "low") not in {"low", "medium", "high", "xhigh"}
+                or value.get("summary", "auto") not in {"auto", "concise", "detailed"}
+                or value.get("context", "all_turns") != "all_turns"):
+            raise ValueError("unsupported reasoning control")
+    if "text" in payload:
+        shape(payload["text"], {"verbosity"})
+        if payload["text"].get("verbosity", "low") not in {"low", "medium", "high"}:
+            raise ValueError("unsupported text control")
+    # Untrusted account/session metadata never reaches the authenticated route.
+    if "client_metadata" in payload:
+        metadata = payload.pop("client_metadata")
+        if not isinstance(metadata, dict) or len(json.dumps(metadata)) > MAX_METADATA or not all(isinstance(v, str) for v in metadata.values()):
+            raise ValueError("invalid client metadata")
+    if "prompt_cache_key" in payload and (not isinstance(payload["prompt_cache_key"], str) or len(payload["prompt_cache_key"]) > 256):
+        raise ValueError("invalid cache key")
+    payload["prompt_cache_key"] = server.cache_key
+    declarations = {}
+    local_tools(payload.get("tools", []), declarations)
+    if not isinstance(payload["input"], list) or not payload["input"]:
+        raise ValueError("inline review history required")
+    calls = {}
+    for item in payload["input"]:
+        if not isinstance(item, dict):
+            raise ValueError("inline history object required")
+        kind = item.get("type", "message")
+        if kind == "message":
+            shape(item, {"type", "id", "role", "content"}, {"role", "content"})
+            if item["role"] not in {"system", "developer", "user", "assistant"}:
+                raise ValueError("unsupported message role")
+            text_content(item["content"])
+        elif kind == "additional_tools":
+            shape(item, {"type", "id", "role", "tools"}, {"type", "role", "tools"})
+            if item["role"] != "developer":
+                raise ValueError("unsupported tool declaration")
+            local_tools(item["tools"], declarations)
+        elif kind in {"function_call", "custom_tool_call"}:
+            argument = "arguments" if kind == "function_call" else "input"
+            shape(item, {"type", "id", "call_id", "name", "namespace", argument}, {"type", "call_id", "name", argument})
+            if declarations.get((item.get("namespace", ""), item["name"])) != ("function" if kind == "function_call" else "custom"):
+                raise ValueError("undeclared local tool call")
+            local_text(item[argument])
+            local_text(item["call_id"])
+            if not item["call_id"] or len(item["call_id"]) > 256 or item["call_id"] in calls:
+                raise ValueError("invalid local call identity")
+            calls[item["call_id"]] = kind
+        elif kind in {"function_call_output", "custom_tool_call_output"}:
+            shape(item, {"type", "id", "call_id", "output"}, {"type", "call_id", "output"})
+            if calls.get(item["call_id"]) != kind.removesuffix("_output"):
+                raise ValueError("orphan local tool output")
+            if isinstance(item["output"], str):
+                local_text(item["output"])
+            else:
+                text_content(item["output"])
+        elif kind == "reasoning":
+            shape(item, {"type", "id", "summary", "encrypted_content"}, {"type", "summary", "encrypted_content"})
+            if not isinstance(item["summary"], list):
+                raise ValueError("invalid reasoning summary")
+            for summary in item["summary"]:
+                shape(summary, {"type", "text"}, {"type", "text"})
+                if summary["type"] != "summary_text":
+                    raise ValueError("unsupported reasoning summary")
+                local_text(summary["text"])
+            local_text(item["encrypted_content"])
+            with server.lock:
+                if hashlib.sha256(item["encrypted_content"].encode()).digest() not in server.reasoning_context:
+                    raise ValueError("foreign opaque context refused")
+        else:
+            raise ValueError("resource or hosted input refused")
+        item.pop("id", None)
+    encoded = json.dumps(payload, separators=(",", ":"), allow_nan=False, ensure_ascii=False).encode("utf-8")
+    if len(encoded) > MAX_INPUT:
+        raise ValueError("canonical request budget exhausted")
+    return encoded
 
 
 class BrokerError(Exception):
@@ -375,6 +603,8 @@ class ModelBroker(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
         self.parse_seconds = parse_seconds
         self.turn_seconds = turn_seconds
         self.lock = threading.Lock()
+        self.cache_key = "review-" + uuid.uuid4().hex
+        self.reasoning_context = set()
         self.slots = threading.BoundedSemaphore(max_connections)
         self.connections = {}
         self.processes = {}
@@ -481,6 +711,41 @@ class ModelBroker(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
             "provider_route": "fixed_responses_only",
         }
 
+    def remember_reasoning(self, body, content_type):
+        documents = [body] if content_type == "application/json" else [
+            line[5:].strip() for line in io.BytesIO(body) if line.startswith(b"data:")
+        ]
+        found = set()
+        try:
+            for document in documents:
+                if document == b"[DONE]":
+                    continue
+                value = json.loads(document)
+                if not isinstance(value, dict):
+                    continue
+                if value.get("type") == "response.output_item.done":
+                    items = [value.get("item")]
+                elif value.get("type") == "response.completed":
+                    items = value["response"].get("output", [])
+                elif value.get("object") == "response":
+                    items = value.get("output", [])
+                else:
+                    continue
+                if not isinstance(items, list):
+                    raise ValueError("invalid provider output")
+                for item in items:
+                    if not isinstance(item, dict):
+                        raise ValueError("invalid provider item")
+                    if item.get("type") == "reasoning" and "encrypted_content" in item:
+                        local_text(item["encrypted_content"])
+                        found.add(hashlib.sha256(item["encrypted_content"].encode()).digest())
+        except (KeyError, ValueError, TypeError, RecursionError) as exc:
+            raise BrokerError("subscription_upstream_refused") from exc
+        with self.lock:
+            if len(self.reasoning_context | found) > 4096:
+                raise BrokerError("subscription_upstream_refused")
+            self.reasoning_context.update(found)
+
     def handle_error(self, request, client_address):
         self.last_error = "client_request_failed"
 
@@ -526,14 +791,7 @@ class BrokerHandler(BaseHTTPRequestHandler):
             raw = self.rfile.read(length)
             if len(raw) != length:
                 raise ValueError("short body")
-            payload = json.loads(raw)
-            if (
-                not isinstance(payload, dict)
-                or not isinstance(payload.get("model"), str)
-                or not 0 < len(payload["model"]) <= 100
-                or payload["model"] != REVIEW_MODEL
-            ):
-                raise ValueError("invalid model")
+            raw = review_request(raw, self.server)
         except (OSError, ValueError, TypeError, RecursionError):
             self.reject(400, "invalid_request")
             return
@@ -581,6 +839,7 @@ class BrokerHandler(BaseHTTPRequestHandler):
                     self.server.fail("subscription_upstream_refused")
                     self.reject(502, "incomplete_upstream_response")
                     return
+                self.server.remember_reasoning(body, content_type)
                 # Record validated provider completion before the client can
                 # observe HTTP success; otherwise an immediate audit races it.
                 with self.server.lock:

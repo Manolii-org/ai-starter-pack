@@ -1,6 +1,7 @@
 """Exercise the real Unix HTTP broker; never fetch a real credential."""
 
 import base64
+import copy
 from email.message import Message
 import http.client
 import importlib.util
@@ -19,6 +20,11 @@ SPEC = importlib.util.spec_from_file_location(
 broker = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(broker)
 SYNTHETIC = "synthetic-upstream-only-credential-123456789"
+
+
+def review_payload():
+    return {"model": broker.REVIEW_MODEL, "store": False, "stream": True,
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "Review this fixture."}]}]}
 
 
 class UnixClient(http.client.HTTPConnection):
@@ -50,7 +56,7 @@ def request(path, *, method="POST", url="/v1/responses", body=None, headers=None
         client.request(
             method,
             url,
-            body if body is not None else json.dumps({"model": broker.REVIEW_MODEL}),
+            body if body is not None else json.dumps(review_payload()),
             headers={"Content-Type": "application/json", **(headers or {})},
         )
     except BrokenPipeError:
@@ -595,3 +601,162 @@ def test_host_records_only_actual_completed_provider_turns(tmp_path, monkeypatch
             server.audit()["successful_provider_turns"] == 0 and not server.last_verdict
         )
     assert observed == [1, 0]
+
+
+@pytest.mark.parametrize('extra', [
+    {'previous_response_id': 'resp_foreign'}, {'conversation': 'conv_foreign'},
+    {'background': True}, {'store': True}, {'stream': False}, {'store': 0},
+    {'tools': [{'type': 'web_search'}]}, {'tools': [{'type': 'file_search', 'vector_store_ids': ['vs_foreign']}]},
+    {'tools': [{'type': 'mcp', 'server_url': 'https://example.invalid'}]},
+    {'tool_choice': {'type': 'function', 'name': 'unknown'}},
+    {'include': ['web_search_call.action.sources']}, {'parallel_tool_calls': True},
+    {'text': {'format': {'type': 'json_schema'}}}, {'reasoning': {'unknown': None}},
+    {'input': [{'type': 'item_reference', 'id': 'item_foreign'}]},
+    {'input': [{'role': 'user', 'content': [{'type': 'input_file', 'file_id': 'file_foreign'}]}]},
+    {'input': [{'role': 'user', 'content': [{'type': 'input_image', 'image_url': 'https://example.invalid'}]}]},
+    {'input': [{'type': 'additional_tools', 'role': 'developer', 'tools': [
+        {'type': 'namespace', 'name': 'functions', 'tools': [{'type': 'code_interpreter', 'name': 'remote'}]}]}]},
+    {'input': [{'type': 'custom_tool_call_output', 'call_id': 'foreign', 'output': 'text'}]},
+    {'input': [{'type': 'reasoning', 'summary': [], 'encrypted_content': 'foreign-context'}]},
+    {'unknown': None}, {'input': None},
+])
+def test_stateless_request_rejects_capabilities_before_host_auth(tmp_path, extra):
+    subscription = auth()
+    def forbidden_headers():
+        pytest.fail('Rejected payload touched subscription auth')
+    subscription.headers = forbidden_headers
+    def forbidden_upstream(*args, **kwargs):
+        pytest.fail('Rejected payload reached authenticated upstream')
+    path = tmp_path / 'model.sock'
+    with broker.serve(path, subscription, transport=forbidden_upstream) as server:
+        assert request(path, body=json.dumps(review_payload() | extra))[0] == 400
+        assert server.calls == 0
+
+
+@pytest.mark.parametrize('body', [
+    json.dumps(review_payload()).replace('"model": "gpt-5.6-sol"', '"model": "gpt-5.6-sol", "model": "gpt-5.6-sol"').encode(),
+    *[json.dumps(review_payload() | {'tools': [{'type': 'function', 'name': 'local',
+       'parameters': {'type': 'object', 'default': 123456789}}]}).replace('123456789', constant).encode()
+      for constant in ('NaN', 'Infinity', '-Infinity', '1e999')],
+])
+def test_ambiguous_or_nonfinite_json_never_reaches_auth(tmp_path, body):
+    def forbidden(*args, **kwargs):
+        pytest.fail('Invalid JSON reached upstream')
+    path = tmp_path / 'model.sock'
+    with broker.serve(path, auth(), transport=forbidden) as server:
+        assert request(path, body=body)[0] == 400
+        assert server.calls == 0
+
+
+def test_inline_function_history_strips_account_metadata_and_resource_ids(tmp_path):
+    payload = review_payload() | {
+        'client_metadata': {'thread_id': 'foreign-thread', 'opaque': '{"conversation":"foreign"}'},
+        'prompt_cache_key': 'caller-controlled',
+        'tools': [{'type': 'function', 'name': 'local', 'strict': False,
+                   'parameters': {'type': 'object', 'properties': {'file_id': {'type': 'string', 'encrypted': True}}}}],
+    }
+    payload['input'] += [
+        {'type': 'function_call', 'id': 'foreign-call-resource', 'call_id': 'local-call', 'name': 'local', 'arguments': '{}'},
+        {'type': 'function_call_output', 'id': 'foreign-result-resource', 'call_id': 'local-call', 'output': [{'type': 'input_text', 'text': 'Local result.'}]},
+        {'type': 'message', 'id': 'foreign-message-resource', 'role': 'assistant', 'content': [{'type': 'output_text', 'text': 'Review commentary.', 'annotations': []}]},
+    ]
+    sent = []
+    def upstream(body, headers, **kwargs):
+        sent.append(json.loads(body))
+        return Response()
+    path = tmp_path / 'model.sock'
+    with broker.serve(path, auth(), transport=upstream) as server:
+        assert request(path, body=json.dumps(payload))[0] == 200
+        assert sent[0]['prompt_cache_key'] == server.cache_key
+        assert 'client_metadata' not in sent[0]
+        assert all('id' not in item for item in sent[0]['input'])
+        assert payload['tools'] == sent[0]['tools']
+
+
+@pytest.mark.parametrize('changes', [
+    {'parameters': {'type': 'object', '$ref': 'https://example.invalid/schema'}},
+    {'parameters': {'type': 'object', '$schema': 'https://example.invalid/schema'}},
+    {'parameters': {'type': 'object', 'properties': {'value': {'$ref': 'file:///private'}}}},
+    {'type': 'mcp'}, {'server_url': 'https://example.invalid'},
+])
+def test_function_declarations_cannot_smuggle_hosted_capabilities(tmp_path, changes):
+    tool = {'type': 'function', 'name': 'local', 'parameters': {'type': 'object'}} | changes
+    path = tmp_path / 'model.sock'
+    with broker.serve(path, auth(), transport=lambda *a, **k: pytest.fail('Unsafe tool reached upstream')):
+        assert request(path, body=json.dumps(review_payload() | {'tools': [tool]}))[0] == 400
+
+
+def test_opaque_reasoning_requires_this_broker_successful_provider_provenance(tmp_path):
+    emitted = {'type': 'reasoning', 'id': 'rs_same_session', 'summary': [{'type': 'summary_text', 'text': 'Fixture reasoning.'}], 'encrypted_content': 'synthetic-encrypted-context'}
+    response_body = json.dumps({'object': 'response', 'status': 'completed', 'output': [emitted]}).encode()
+    path = tmp_path / 'model.sock'
+    with broker.serve(path, auth(), transport=lambda *a, **k: Response(response_body)) as server:
+        payload = review_payload()
+        payload['input'].append(copy.deepcopy(emitted))
+        assert request(path, body=json.dumps(payload))[0] == 400
+        assert request(path)[0] == 200
+        assert request(path, body=json.dumps(payload))[0] == 200
+        payload['input'][-1]['encrypted_content'] = 'foreign-encrypted-context'
+        assert request(path, body=json.dumps(payload))[0] == 400
+        assert server.calls == 2
+    with broker.serve(path, auth(), transport=lambda *a, **k: pytest.fail('Foreign context reached upstream')):
+        payload['input'][-1]['encrypted_content'] = emitted['encrypted_content']
+        assert request(path, body=json.dumps(payload))[0] == 400
+
+
+def test_ignored_sse_events_cannot_add_opaque_context(tmp_path):
+    events = [
+        {'type': 'response.unrecognized', 'output': None},
+        {'type': 'response.unrecognized', 'output': [{'type': 'reasoning', 'encrypted_content': 'forged-context'}]},
+        {'type': 'response.completed', 'response': {'status': 'completed', 'output': []}},
+    ]
+    body = ''.join('data: ' + json.dumps(event) + '\n\n' for event in events).encode()
+    path = tmp_path / 'model.sock'
+    with broker.serve(path, auth(), transport=lambda *a, **k: Response(body, {'Content-Type': 'text/event-stream'})) as server:
+        response = Response(body)
+        del response.headers['Content-Type']
+        response.headers['Content-Type'] = 'text/event-stream'
+        server.transport = lambda *a, **k: response
+        assert request(path)[0] == 200
+        assert not server.reasoning_context
+
+
+def test_malformed_opaque_provider_context_latches_failure(tmp_path):
+    body = json.dumps({'object': 'response', 'status': 'completed', 'output': [
+        {'type': 'reasoning', 'encrypted_content': None},
+    ]}).encode()
+    calls = []
+    def upstream(*args, **kwargs):
+        calls.append(1)
+        return Response(body)
+    path = tmp_path / 'model.sock'
+    with broker.serve(path, auth(), transport=upstream) as server:
+        assert request(path)[0] == 502
+        assert request(path)[0] == 400
+        assert calls == [1] and not server.reasoning_context
+        assert server.successful_turns == 0
+
+
+def test_request_node_budget_refuses_wide_input_before_auth(tmp_path):
+    path = tmp_path / 'model.sock'
+    with broker.serve(path, auth(), transport=lambda *a, **k: pytest.fail('Oversized shape reached upstream')) as server:
+        payload = review_payload() | {'tools': [{'type': 'function', 'name': 'local', 'parameters': {'type': 'object', 'properties': {'value': {'type': 'integer', 'enum': list(range(100001))}}}}]}
+        assert request(path, body=json.dumps(payload))[0] == 400
+        assert server.calls == 0
+
+
+def test_unicode_canonicalization_preserves_provider_input_budget(tmp_path):
+    payload = review_payload()
+    payload['input'][0]['content'][0]['text'] = '\u6f22' * 270000
+    sent = []
+    def upstream(body, headers, **kwargs):
+        assert len(body) <= broker.MAX_INPUT
+        sent.append(json.loads(body))
+        return Response()
+    path = tmp_path / 'model.sock'
+    with broker.serve(path, auth(), transport=upstream):
+        assert request(path, body=json.dumps(payload, ensure_ascii=False).encode())[0] == 200
+        assert sent[0]['input'] == payload['input']
+        payload['input'][0]['content'][0]['text'] = '\ud800'
+        assert request(path, body=json.dumps(payload).encode())[0] == 400
+        assert len(sent) == 1

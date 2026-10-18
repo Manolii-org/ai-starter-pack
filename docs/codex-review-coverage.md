@@ -44,6 +44,16 @@ killable provider children enforce absolute deadlines through DNS, headers and
 slow bodies. A defensive reflection filter does not claim to detect arbitrary
 encodings. Isolation prevents auth from becoming model input in the first place.
 
+Before attaching subscription auth, the broker admits only stateless inline
+review requests from the pinned clients. Hosted tools, response persistence,
+conversation/response references, files/images, unknown fields, ambiguous JSON
+and external schema references are refused without an upstream call. Only local
+function tools and the qualified custom execution grammar are accepted. Caller
+item IDs and session metadata are stripped; cache identity belongs to the host.
+Encrypted reasoning may be replayed only after that same broker has received it
+in a validated successful provider response. Unsupported client changes fail
+closed and require fresh protocol qualification.
+
 ## OIDC configuration and bootstrap
 
 `scripts/ci/codex-review-worker.json` is instance-owned and disabled by default.
