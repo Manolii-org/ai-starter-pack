@@ -117,6 +117,18 @@
           "mailbox_count": {
             "type": "integer",
             "minimum": 1
+          },
+          "placement_counts": {
+            "description": "Counts by exact validated provider placement label, preserving case. Only Inbox contributes to inbox_ratio.",
+            "type": "object",
+            "minProperties": 1,
+            "propertyNames": {
+              "pattern": "^([Ii][Nn][Bb][Oo][Xx]|[Ss][Pp][Aa][Mm]|[Mm][Ii][Ss][Ss][Ii][Nn][Gg]|[Pp][Rr][Oo][Mm][Oo][Tt][Ii][Oo][Nn][Ss]|[Uu][Pp][Dd][Aa][Tt][Ee][Ss]|[Nn][Ee][Ww][Ss][Ll][Ee][Tt][Tt][Ee][Rr])$"
+            },
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 1
+            }
           }
         }
       }

@@ -115,6 +115,31 @@ as individual URL path segments.
 Provider reference: <https://api.unspam.email/ext-api/openapi.json>, verified
 2026-10-17. See `docs/email-quality-implementation-plan.md` for the impact map.
 
+Placement compatibility (verified against public provider documentation on
+2026-10-19): per-mailbox `success` or `delivered` selects `tab`; legacy rows
+with the category in `status` remain supported. Mailbox status and category
+matching are case-insensitive. Supported categories are `Inbox`, `Spam`,
+`Missing`, `Promotions`, `Updates` and `Newsletter`. Unspam's
+[delivery-status guide](https://help.unspam.email/article/444-understanding-the-delivery-status)
+describes Newsletter as promotional placement; its
+[placement report](https://unspam.email/inbox-placement) distinguishes Updates
+from the primary inbox. The [API guide](https://unspam.email/inbox-placement-api)
+documents `delivered` with a separate `tab`. These sources establish category
+meaning; they are not a claim of a new live seed test.
+
+The acceptance policy is unchanged: `inbox_ratio` counts only case-insensitive
+`Inbox` over **all expected mailboxes**, including tabs, spam and explicit
+`Missing`. Tabs are recognized outcomes, not Inbox successes. Unknown labels,
+absent/malformed placements and mismatched test/mailbox identities still block
+with `PROVIDER_INVALID`; they are never coerced to Missing or Inbox.
+New completed inbox receipts add `placement_counts`, keyed by exact validated
+provider labels (including original case), without addresses or sender data.
+Different capitalizations remain separate keys. Existing cached receipts may
+omit this optional field and resume unchanged without another test or send.
+Consumers using a strict receipt validator must adopt the matching schema with
+the tooling pin. Offline conformance tests cover this correction; adopting a
+new pin and validating the consumer remain separate release steps.
+
 Sender hooks are trusted consumer code in the same OS trust domain as the CLI.
 Environment filtering reduces accidental exposure; it is not a sandbox against
 malicious same-user code reading process memory or local files. Never run an
