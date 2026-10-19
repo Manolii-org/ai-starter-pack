@@ -25,10 +25,15 @@ sole approved decision, attest its actor and exact scope in trusted execution;
 an automatically dispatched workflow or typed confirmation string is not human
 approval.
 
+The approval also names the exact predeclared recovery action, recovery artifact
+or deployment digest, and recovery migration set. A change to any of these
+recovery fields requires a new decision.
+
 Migrations and application activation belong to the same release plan. Complete
 preparation and dry-runs before approval; then execute the approved migration set
-and artifact in the declared compatibility order. Reuse that authorization for
-post-deploy smoke and the predeclared recovery action. Keep those jobs least
+and artifact in the declared compatibility order. Reuse that authorization only
+for post-deploy smoke and the named recovery action, artifacts and migrations.
+Keep those jobs least
 privileged and confined to the approved subject; do not trigger another manual
 approval merely to verify or recover that release. A destructive or out-of-plan
 recovery needs its own decision. Preserve existing independent manual migration
