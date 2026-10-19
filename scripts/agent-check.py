@@ -42,8 +42,21 @@ def encoded(value) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
 
 
+def git_environment(environ: dict | None = None) -> dict:
+    # Hooks can export the enclosing repository's locations. An explicit cwd
+    # must select this repository, while transport/proxy configuration stays.
+    locations = {
+        "GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE",
+        "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_GRAFT_FILE", "GIT_SHALLOW_FILE", "GIT_PREFIX", "GIT_INTERNAL_SUPER_PREFIX",
+        "GIT_QUARANTINE_PATH", "GIT_CONFIG",
+    }
+    source = os.environ if environ is None else environ
+    return {key: value for key, value in source.items() if key not in locations}
+
+
 def git(root: Path, *args: str) -> bytes:
-    result = subprocess.run(["git", *args], cwd=root, capture_output=True, check=True)
+    result = subprocess.run(["git", *args], cwd=root, env=git_environment(), capture_output=True, check=True)
     return result.stdout
 
 
@@ -153,7 +166,7 @@ def versions(root: Path, plan: dict) -> dict:
         key = name if cwd == "." and not declared_env else f"{name}@{cwd}"
         if declared_env:
             key += "#" + sha(env_json.encode())[:12]
-        env = {**os.environ, "CI": "true", "PYTHONDONTWRITEBYTECODE": "1", **declared_env}
+        env = {**git_environment(), "CI": "true", "PYTHONDONTWRITEBYTECODE": "1", **declared_env}
         try:
             proc = subprocess.run(TOOLS[name], cwd=inside(root, cwd), env=env,
                                   capture_output=True, text=True, timeout=15)
@@ -166,7 +179,7 @@ def versions(root: Path, plan: dict) -> dict:
 def execute(root: Path, item: dict) -> dict:
     start = time.monotonic()
     status, reason = "passed", "completed"
-    env = {**os.environ, "CI": "true", "PYTHONDONTWRITEBYTECODE": "1", **item.get("env", {})}
+    env = {**git_environment(), "CI": "true", "PYTHONDONTWRITEBYTECODE": "1", **item.get("env", {})}
     for command in item["commands"]:
         print(f"AGENT-CHECK {item['id']}: {json.dumps(command)}", flush=True)
         try:
@@ -210,17 +223,24 @@ def main(argv=None) -> int:
     parser.add_argument("--no-cache", action="store_true")
     args = parser.parse_args(argv)
     root = args.repo_root.resolve()
+    receipt_path = None
     try:
+        if not args.plan:
+            state = inside(root, STATE)
+            receipt_path = state / "receipt.json"
+            # Revoke old evidence before config, Git or setup can block this
+            # execution. Planning remains a read-only operation.
+            receipt_path.unlink(missing_ok=True)
         config = config_for(root)
         plan = plan_for(root, config, args.base)
         tools = versions(root, plan)
         if args.plan:
             print(json.dumps({**plan, "tool_versions": tools}, indent=2))
             return 0
-        state = inside(root, STATE)
         # Receipts must be ignored even before first use; never commit local
         # evidence or accidentally add it to its own cache fingerprint.
-        if subprocess.run(["git", "check-ignore", "-q", f"{STATE}/receipt.json"], cwd=root).returncode:
+        if subprocess.run(["git", "check-ignore", "-q", f"{STATE}/receipt.json"],
+                          cwd=root, env=git_environment()).returncode:
             raise ValueError(f"ignore {STATE}/ in .gitignore before executing")
         before = snapshot(root)
         results = []
@@ -303,6 +323,11 @@ def main(argv=None) -> int:
         print(f"AGENT-CHECK-{outcome.upper()} {candidate_digest[:12]}")
         return 0 if outcome == "passed" else 1
     except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+        if receipt_path is not None:
+            try:
+                receipt_path.unlink(missing_ok=True)
+            except OSError as cleanup_error:
+                print(f"AGENT-CHECK-BLOCKED: cannot revoke receipt: {cleanup_error}", file=sys.stderr)
         print(f"AGENT-CHECK-BLOCKED: {exc}", file=sys.stderr)
         return 2
 

@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 SCRIPTS = Path(__file__).resolve().parents[1]
 
@@ -47,7 +48,8 @@ class AgentCheckTests(unittest.TestCase):
         self.git("update-ref", "refs/remotes/origin/main", "HEAD")
 
     def git(self, *args):
-        return subprocess.check_output(["git", *args], cwd=self.root, stderr=subprocess.PIPE)
+        return subprocess.check_output(["git", *args], cwd=self.root, stderr=subprocess.PIPE,
+                                       env=load("agent-check").git_environment())
 
     def save_config(self):
         (self.root / "config/agent-checks.json").write_text(json.dumps(self.config))
@@ -55,7 +57,8 @@ class AgentCheckTests(unittest.TestCase):
     def run_check(self, *args, expected=0, env=None):
         result = subprocess.run([sys.executable, str(self.root / "scripts/agent-check.py"),
                                  "--repo-root", str(self.root), "--provider", "codex", *args],
-                                capture_output=True, text=True, env=env, timeout=30)
+                                capture_output=True, text=True,
+                                env=load("agent-check").git_environment() if env is None else env, timeout=30)
         self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
         return result
 
@@ -325,6 +328,67 @@ class AgentCheckTests(unittest.TestCase):
         (self.root / ".gitignore").write_text("")
         self.run_check(expected=2)
 
+    def test_inherited_git_locations_do_not_redirect_validation(self):
+        self.change_source()
+        with tempfile.TemporaryDirectory() as directory:
+            other = Path(directory).resolve()
+            (other / "other.txt").write_text("another repository\n")
+            for args in (("init", "-q"), ("config", "user.email", "fixture@example.invalid"),
+                         ("config", "user.name", "Fixture"), ("add", "."),
+                         ("commit", "-qm", "foreign fixture"),
+                         ("update-ref", "refs/remotes/origin/main", "HEAD")):
+                subprocess.run(["git", *args], cwd=other, check=True, capture_output=True,
+                               env=load("agent-check").git_environment())
+            index = (other / ".git/index").read_bytes()
+            inherited = {**os.environ, "GIT_DIR": str(other / ".git"),
+                         "GIT_COMMON_DIR": str(other / ".git"), "GIT_WORK_TREE": str(other),
+                         "GIT_INDEX_FILE": str(other / ".git/index"),
+                         "GIT_OBJECT_DIRECTORY": str(other / ".git/objects"),
+                         "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(other / ".git/objects")}
+            plan = json.loads(self.run_check("--plan", env=inherited).stdout)
+            self.assertEqual(plan["paths"], ["src/value.py"])
+            self.assertEqual(plan["base"], self.git("rev-parse", "HEAD").decode().strip())
+            self.run_check(env=inherited)
+            self.assertEqual(self.receipt()["snapshot"]["head"], plan["base"])
+            self.assertEqual((other / ".git/index").read_bytes(), index)
+
+    def test_blocked_execution_revokes_old_receipt_but_plan_does_not(self):
+        self.change_source()
+        runner = load("agent-check")
+        receipt = self.root / ".ai/agent-checks/receipt.json"
+        for failure in ("config", "base", "ignore", "snapshot", "cache-write"):
+            with self.subTest(failure=failure):
+                self.save_config()
+                (self.root / ".gitignore").write_text(".ai/agent-checks/\nnode_modules/\n")
+                self.run_check()
+                original = receipt.read_bytes()
+                self.run_check("--plan")
+                self.assertEqual(receipt.read_bytes(), original)
+                if failure == "config":
+                    (self.root / "config/agent-checks.json").write_text("{")
+                    self.run_check("--plan", expected=2)
+                    self.assertEqual(receipt.read_bytes(), original)
+                    self.run_check(expected=2)
+                elif failure == "base":
+                    self.run_check("--base", "refs/heads/fixture-missing-base", expected=2)
+                elif failure == "ignore":
+                    (self.root / ".gitignore").write_text("")
+                    self.run_check(expected=2)
+                elif failure == "snapshot":
+                    with mock.patch.object(runner, "snapshot", side_effect=OSError("fixture snapshot failure")):
+                        self.assertEqual(runner.main(["--repo-root", str(self.root)]), 2)
+                else:
+                    real_write = runner.write_json
+
+                    def fail_cache_write(path, value):
+                        if path.parent.name == "cache":
+                            raise OSError("fixture cache write failure")
+                        real_write(path, value)
+
+                    with mock.patch.object(runner, "write_json", side_effect=fail_cache_write):
+                        self.assertEqual(runner.main(["--repo-root", str(self.root), "--no-cache"]), 2)
+                self.assertFalse(receipt.exists(), "blocked execution retained an older PASS receipt")
+
     def test_ci_toolchain_mismatch_is_incomplete_validation(self):
         self.config["tool_requirements"] = {"python": "Python 0."}
         self.save_config()
@@ -339,7 +403,7 @@ class AgentCheckTests(unittest.TestCase):
 
 
 class SurfaceTests(unittest.TestCase):
-    def test_each_managed_input_selects_the_native_contract(self):
+    def test_each_managed_input_selects_an_owning_check(self):
         installed = SCRIPTS.parent
         config_path = installed / "config/agent-checks.json"
         if not config_path.is_file():
@@ -356,14 +420,21 @@ class SurfaceTests(unittest.TestCase):
             for args in (("init", "-q"), ("config", "user.email", "fixture@example.invalid"),
                          ("config", "user.name", "Fixture"), ("add", "."),
                          ("commit", "-qm", "managed input fixture")):
-                subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)
+                subprocess.run(["git", *args], cwd=root, check=True, capture_output=True,
+                               env=runner.git_environment())
             for rel in paths:
                 with self.subTest(path=rel):
                     path = root / rel
                     path.write_text("changed\n")
                     plan = runner.plan_for(root, config, "HEAD")
                     self.assertEqual(plan["paths"], [rel])
-                    self.assertIn("agent-validation-contract", [c["id"] for c in plan["checks"]])
+                    self.assertTrue(plan["checks"], f"no owning check covers {rel}")
+                    renamed = {**config, "checks": [{**c, "id": f"owner-check-{i}"}
+                                                     for i, c in enumerate(config["checks"])]}
+                    owner_plan = runner.plan_for(root, renamed, "HEAD")
+                    self.assertTrue(owner_plan["checks"], f"custom owner check ids lost coverage for {rel}")
+                    self.assertEqual([c["commands"] for c in owner_plan["checks"]],
+                                     [c["commands"] for c in plan["checks"]])
                     path.write_text("original\n")
 
     def test_installed_repository_surfaces_are_current(self):
