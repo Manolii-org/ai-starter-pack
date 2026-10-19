@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import re
+import runpy
 import subprocess
 import sys
 import tempfile
@@ -334,6 +335,38 @@ def test_branded_attribution(branded_render, default_render):
     assert "{{" not in default_text, "default canary.md contains unrendered Jinja"
 
 
+@pytest.mark.parametrize("base_ref", ["origin/trunk", "master"])
+def test_agent_validation_base_uses_owner_ref(tmp_path, default_render, base_ref):
+    """A real rendered CLI plans correctly with remote or local owner refs."""
+    canonical = json.loads((ROOT / "config/agent-checks.json").read_text())
+    assert json.loads((default_render / "config/agent-checks.json").read_text()) == canonical
+    dst = tmp_path / "custom-integration"
+    render(dst, agent_validation_base=base_ref)
+    assert json.loads((dst / "config/agent-checks.json").read_text()) == {**canonical, "base": base_ref}
+    assert not (dst / "config/agent-checks.json.jinja").exists()
+    env = runpy.run_path(str(ROOT / "scripts/agent-check.py"))["git_environment"]()
+    branch = base_ref.removeprefix("origin/")
+    for args in (("init", "-q", "--initial-branch=" + branch),
+                 ("config", "user.email", "fixture@example.invalid"),
+                 ("config", "user.name", "Fixture"), ("add", "."),
+                 ("commit", "-qm", "rendered integration fixture")):
+        subprocess.run(["git", *args], cwd=dst, env=env, check=True, capture_output=True)
+    expected = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=dst, env=env, text=True).strip()
+    if base_ref.startswith("origin/"):
+        subprocess.run(["git", "update-ref", "refs/remotes/" + base_ref, "HEAD"],
+                       cwd=dst, env=env, check=True)
+    else:
+        assert not subprocess.check_output(["git", "remote"], cwd=dst, env=env).strip()
+    policy = dst / "docs/agent-validation.md"
+    policy.write_text(policy.read_text() + "\nFixture policy change.\n")
+    result = subprocess.run([sys.executable, "scripts/agent-check.py", "--plan"],
+                            cwd=dst, env=env, check=True, capture_output=True, text=True)
+    plan = json.loads(result.stdout)
+    assert plan["base"] == expected
+    assert plan["paths"] == ["docs/agent-validation.md"]
+    assert [c["commands"] for c in plan["checks"]] == [c["commands"] for c in canonical["checks"]]
+
+
 def test_skip_if_exists_contract():
     """Verify _skip_if_exists in copier.yml and behavioural guarantee."""
     copier_config = yaml.safe_load((ROOT / "copier.yml").read_text())
@@ -371,6 +404,7 @@ def test_skip_if_exists_contract():
             "--quiet",
             "--overwrite",
             "--vcs-ref=HEAD",
+            "--data=agent_validation_base=origin/trunk",
             str(ROOT),
             str(dst),
         ]

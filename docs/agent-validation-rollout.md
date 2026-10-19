@@ -25,6 +25,13 @@ always-applied Cursor rule. Devin and Codex use repository AGENTS guidance; all
 four providers explicitly execute the same command and record their actual
 provider. Host hook execution must be demonstrated separately.
 
+For a new Copier instance, set `agent_validation_base` to the owning integration
+ref, for example `--data agent_validation_base=origin/trunk`, `origin/staging`,
+or a local `master` branch in a repository without a remote. Initialize or fetch
+that ref before validation. The default is `origin/main`; the runner never
+silently substitutes `HEAD` for a missing integration ref. Copier renders this
+answer into the initial owner recipe and preserves that recipe on later updates.
+
 Run `sync-agent-validation.py --check` and the portable tests inside an existing
 fast CI job. Avoid a standalone runner allocation for these small checks.
 Keep local receipts ignored. Run owner security and final-candidate CI

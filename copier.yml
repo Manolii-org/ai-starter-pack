@@ -86,6 +86,13 @@ cost_profile:
     - lean
   default: standard
 
+# The source pack uses origin/main; new instances choose their own existing
+# integration ref. Later updates preserve the repository-owned recipe.
+agent_validation_base:
+  type: str
+  help: Git integration ref for local agent checks (fetch or initialize it first; e.g. origin/staging, origin/trunk or local master)
+  default: origin/main
+
 # ── Instance identity (provenance — pack-components.yml, ADR-0023 Decision 4) ─
 instance_name:
   type: str
