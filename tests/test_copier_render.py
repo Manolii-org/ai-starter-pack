@@ -265,14 +265,14 @@ def test_cost_profile_lean_omits_measured_waste_callers(default_render):
 @pytest.mark.parametrize(
     ("flags", "expected"),
     [
-        ({}, {"Hooks": 5, "Commands": 51, "Skills": 35, "Agents": 27,
-              "Scripts": 51, "Husky": 3, "CI": 35, "Docs": 27}),
+        ({}, {"Hooks": 5, "Commands": 51, "Skills": 36, "Agents": 27,
+              "Scripts": 54, "Husky": 3, "CI": 35, "Docs": 29}),
         ({flag: "true" for flag in FEATURE_FLAGS},
-         {"Hooks": 5, "Commands": 54, "Skills": 39, "Agents": 28,
-              "Scripts": 51, "Husky": 3, "CI": 35, "Docs": 29}),
+         {"Hooks": 5, "Commands": 54, "Skills": 40, "Agents": 28,
+              "Scripts": 54, "Husky": 3, "CI": 35, "Docs": 31}),
         ({"cost_profile": "lean"},
-         {"Hooks": 5, "Commands": 51, "Skills": 35, "Agents": 27,
-              "Scripts": 51, "Husky": 3, "CI": 34, "Docs": 27}),
+         {"Hooks": 5, "Commands": 51, "Skills": 36, "Agents": 27,
+              "Scripts": 54, "Husky": 3, "CI": 34, "Docs": 29}),
     ],
 )
 def test_rendered_readme_counts_match_rendered_tree(flags, expected):
@@ -339,7 +339,7 @@ def test_skip_if_exists_contract():
     copier_config = yaml.safe_load((ROOT / "copier.yml").read_text())
     skip_if_exists = set(copier_config.get("_skip_if_exists", []))
 
-    expected = {"CLAUDE.md", ".claude/model-routing.json", ".claude/mcp.json", ".claude/hooks/session-start.sh", "ai-manifest.yaml"}
+    expected = {"CLAUDE.md", ".claude/model-routing.json", ".claude/mcp.json", ".claude/hooks/session-start.sh", "ai-manifest.yaml", "config/agent-checks.json"}
     assert skip_if_exists == expected, (
         f"_skip_if_exists mismatch.\n"
         f"Expected: {expected}\n"
@@ -356,6 +356,8 @@ def test_skip_if_exists_contract():
         claude_file.write_text("LOCAL\n")
         session_hook = dst / ".claude/hooks/session-start.sh"
         session_hook.write_text("#!/bin/sh\necho LOCAL\n")
+        recipes = dst / "config/agent-checks.json"
+        recipes.write_text('{"owner": "local"}\n')
         settings = dst / ".claude/settings.json"
         settings.write_text("{}\n")
 
@@ -377,6 +379,7 @@ def test_skip_if_exists_contract():
         # Sentinel should survive
         assert claude_file.read_text() == "LOCAL\n"
         assert session_hook.read_text() == "#!/bin/sh\necho LOCAL\n"
+        assert recipes.read_text() == '{"owner": "local"}\n'
         # The lifecycle migration is deliberately outside the instance-owned
         # hook, so an update still wires cleanup for existing consumers.
         assert "guard_check.py --clear-session-unfreezes" in settings.read_text()
