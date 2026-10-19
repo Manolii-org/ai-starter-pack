@@ -159,6 +159,70 @@ class AgentCheckTests(unittest.TestCase):
         self.assertEqual([r["id"] for r in self.receipt()["results"]], ["diff-check", "dependencies"])
         self.assertFalse((self.root / ".ai/agent-checks/environments").exists())
 
+    def test_all_environment_receipts_use_final_provisioned_tool_versions(self):
+        state = self.root / ".ai/agent-checks"
+        binaries = state / "bin"
+        binaries.mkdir(parents=True)
+        binary = binaries / "node"
+        binary.write_text(f"#!{sys.executable}\nfrom pathlib import Path\nimport sys\n"
+                          "ready=Path('.ai/agent-checks/tool-ready').exists()\n"
+                          "print('vfixture-1' if ready else 'not installed')\n"
+                          "sys.exit(0 if ready else 1)\n")
+        binary.chmod(0o755)
+        environments = []
+        checks = []
+        for name in ("first", "second"):
+            setup = ("from pathlib import Path; "
+                     f"p=Path('node_modules/{name}'); p.mkdir(parents=True,exist_ok=True); "
+                     "counter=p/'installs'; counter.write_text(counter.read_text()+'1' if counter.exists() else '1')")
+            if name == "second":
+                setup += "; Path('.ai/agent-checks/tool-ready').touch()"
+            environments.append({"id": name, "inputs": ["lock.json"], "tools": ["node"],
+                                 "ready_paths": [f"node_modules/{name}"],
+                                 "commands": [[sys.executable, "-c", setup]]})
+            checks.append({**self.config["checks"][0], "id": f"check-{name}", "environment": name, "tools": ["node"]})
+        self.config.update({"environments": environments, "checks": checks,
+                            "tool_requirements": {"node": "vfixture-1"}})
+        self.save_config()
+        env = {**os.environ, "PATH": str(binaries) + os.pathsep + os.environ["PATH"]}
+        self.run_check("--provision", env=env)
+        self.assertFalse(self.receipt()["cached"])
+        self.run_check("--provision", env=env)
+        self.assertTrue(self.receipt()["cached"])
+        self.run_check(env=env)
+        self.assertTrue(self.receipt()["cached"])
+        for name in ("first", "second"):
+            self.assertEqual((self.root / f"node_modules/{name}/installs").read_text(), "1")
+
+    def test_failed_reinstall_cannot_revive_receipt_for_restored_tool_version(self):
+        state = self.root / ".ai/agent-checks"
+        binaries = state / "bin"
+        binaries.mkdir(parents=True)
+        version = state / "tool-version"
+        version.write_text("vfixture-1")
+        binary = binaries / "node"
+        binary.write_text(f"#!{sys.executable}\nfrom pathlib import Path\n"
+                          "print(Path('.ai/agent-checks/tool-version').read_text())\n")
+        binary.chmod(0o755)
+        setup = ("from pathlib import Path; "
+                 "p=Path('node_modules'); p.mkdir(exist_ok=True); "
+                 "Path('.ai/agent-checks/tool-version').write_text('vfixture-1'); "
+                 "raise SystemExit(4 if Path('.ai/agent-checks/fail-install').exists() else 0)")
+        self.config["environments"] = [{"id": "dependencies", "tools": ["node"],
+                                        "ready_paths": ["node_modules"],
+                                        "commands": [[sys.executable, "-c", setup]]}]
+        self.config["checks"][0].update({"environment": "dependencies", "tools": ["node"]})
+        self.save_config()
+        env = {**os.environ, "PATH": str(binaries) + os.pathsep + os.environ["PATH"]}
+        self.run_check("--provision", env=env)
+        version.write_text("vfixture-2")
+        (state / "fail-install").touch()
+        self.run_check("--provision", expected=1, env=env)
+        self.assertEqual(version.read_text(), "vfixture-1")
+        self.assertTrue((self.root / "node_modules").is_dir())
+        self.run_check(expected=1, env=env)
+        self.assertFalse(self.receipt()["cached"])
+
     def test_reprovisioning_cannot_reuse_pass_after_mutating_checked_source(self):
         setup = (
             "from pathlib import Path; "

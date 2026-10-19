@@ -224,12 +224,23 @@ def main(argv=None) -> int:
             raise ValueError(f"ignore {STATE}/ in .gitignore before executing")
         before = snapshot(root)
         results = []
+        provisioned = []
         results.append(execute(root, {"id": "diff-check", "commands": [["git", "diff", "--check", plan["base"]]]}))
         for environment in plan["environments"]:
             env_digest = environment_digest(root, environment, tools)
-            env_receipt = state / "environments" / f"{env_digest}.json"
+            # One slot per environment prevents an earlier tool fingerprint
+            # from resurrecting success after a failed reinstall changes tools.
+            env_receipt = state / "environments" / f"environment-{sha(encoded(environment['id']))}.json"
             ready = all(inside(root, p).exists() for p in environment.get("ready_paths", []))
-            if env_receipt.is_file() and ready:
+            previous_environment = {}
+            if env_receipt.is_file():
+                try:
+                    previous_environment = json.loads(env_receipt.read_text())
+                except json.JSONDecodeError:
+                    print(f"AGENT-CHECK {environment['id']}: invalid environment receipt; frozen setup needs validation")
+            if (isinstance(previous_environment, dict) and previous_environment.get("digest") == env_digest
+                    and isinstance(previous_environment.get("result"), dict)
+                    and previous_environment["result"].get("status") == "passed" and ready):
                 continue
             if not args.provision:
                 results.append({"id": environment["id"], "status": "unavailable",
@@ -238,13 +249,20 @@ def main(argv=None) -> int:
             # An interrupted/failed reinstall must revoke the old success
             # before it can leave a partially populated dependency directory.
             env_receipt.unlink(missing_ok=True)
+            input_digest = environment_digest(root, environment, {})
             result = execute(root, environment)
             results.append(result)
-            if result["status"] == "passed" and environment_digest(root, environment, tools) == env_digest:
-                write_json(env_receipt, {"digest": env_digest, "result": result})
+            if result["status"] == "passed":
+                provisioned.append((environment, env_receipt, input_digest, result))
         # Provisioning may install tools. Missing tools must not be mistaken
         # for a source failure, or cached as a successful old fingerprint.
         tools = versions(root, plan)
+        # A later environment may install a tool used by an earlier one. Bind
+        # every new setup receipt to the final tool map and unchanged inputs.
+        for environment, env_receipt, input_digest, result in provisioned:
+            if environment_digest(root, environment, {}) == input_digest:
+                env_digest = environment_digest(root, environment, tools)
+                write_json(env_receipt, {"digest": env_digest, "result": result})
         identity = {"schema": SCHEMA, "source": sha(Path(__file__).read_bytes()),
                     "config": config, "plan": plan, "tools": tools, "snapshot": before}
         candidate_digest = sha(encoded(identity))
