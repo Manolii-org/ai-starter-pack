@@ -72,8 +72,11 @@ outcomes: executed, no changes, deferred, policy held and failed. A held or skip
 job is not a completed deployment.
 
 Derive a stable release identity from repository, target, source, artifact,
-migration set and policy. Append idempotent stage events, fence concurrent
-writers and deduplicate retries. A cancelled or expired approval cannot be
+migration set, policy and the exact named recovery action, recovery artifact or
+deployment digest, and recovery migration set. Bind each approval instance to
+that full identity and distinguish reissued approvals in existing receipts.
+Key idempotent stage events by release identity, approval instance and stage;
+fence concurrent writers and deduplicate retries. A cancelled or expired approval cannot be
 replayed for another candidate. Keep raw evidence and credentials entity-local;
 share portable contracts and explicitly allowed aggregate metrics.
 
