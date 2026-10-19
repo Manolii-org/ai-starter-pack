@@ -88,10 +88,13 @@ def assess(profile, kind, data):
             raise QualityError('PROVIDER_INVALID')
         return {'kind': kind, 'score': score, 'passed': score >= profile['minimum_score']}
     results = data.get('results')
-    if not isinstance(results, list) or not results:
+    if not isinstance(results, list) or not results or len(results) > 100:
         raise QualityError('PROVIDER_INVALID')
     statuses = []
     placement_counts = {}
+    normalized_counts = dict.fromkeys(('inbox', 'spam', 'missing', 'promotions',
+                                      'updates', 'newsletter'), 0)
+    placements = []
     for row in results:
         if not isinstance(row, dict):
             raise QualityError('PROVIDER_INVALID')
@@ -100,13 +103,22 @@ def assess(profile, kind, data):
         status = status.lower() if isinstance(status, str) else None
         value = row.get('tab') if status in ('success', 'delivered') else row.get('status')
         category = value.lower() if isinstance(value, str) else None
-        if category not in ('inbox', 'spam', 'missing', 'promotions', 'updates', 'newsletter'):
+        if category not in normalized_counts:
             raise QualityError('PROVIDER_INVALID')
         statuses.append(category)
         placement_counts[value] = placement_counts.get(value, 0) + 1
+        normalized_counts[category] += 1
+        placement = {'raw_placement': value, 'placement': category}
+        mailbox = row.get('mailbox')
+        if isinstance(mailbox, dict) and type(mailbox.get('id')) is int and mailbox['id'] > 0:
+            placement['mailbox_id'] = mailbox['id']
+        placements.append(placement)
     ratio = sum(s == 'inbox' for s in statuses) / len(statuses)
+    non_spam = sum(normalized_counts[c] for c in ('inbox', 'promotions', 'updates', 'newsletter'))
     return {'kind': kind, 'inbox_ratio': ratio, 'mailbox_count': len(statuses),
             'placement_counts': placement_counts,
+            'normalized_placement_counts': normalized_counts,
+            'placements': placements, 'non_spam_ratio': non_spam / len(statuses),
             'passed': ratio >= profile['minimum_inbox_ratio']}
 
 

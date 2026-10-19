@@ -1,0 +1,92 @@
+[
+  {
+    "name": "legacy",
+    "receipt": {
+      "schema_version": "1.0",
+      "provider": "unspam",
+      "operation": "run",
+      "outcome": "assertion_failed",
+      "duration_seconds": 0.01,
+      "results": [
+        {
+          "kind": "inbox",
+          "passed": false,
+          "inbox_ratio": 0.6666666666666666,
+          "mailbox_count": 3
+        }
+      ]
+    }
+  },
+  {
+    "name": "raw-counts",
+    "receipt": {
+      "schema_version": "1.0",
+      "provider": "unspam",
+      "operation": "run",
+      "outcome": "assertion_failed",
+      "duration_seconds": 0.01,
+      "results": [
+        {
+          "kind": "inbox",
+          "passed": false,
+          "inbox_ratio": 0.6666666666666666,
+          "mailbox_count": 3,
+          "placement_counts": {
+            "Inbox": 1,
+            "iNbOx": 1,
+            "Updates": 1
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "reporting",
+    "receipt": {
+      "schema_version": "1.0",
+      "provider": "unspam",
+      "operation": "run",
+      "outcome": "assertion_failed",
+      "duration_seconds": 0.01,
+      "results": [
+        {
+          "kind": "inbox",
+          "passed": false,
+          "inbox_ratio": 0.6666666666666666,
+          "mailbox_count": 3,
+          "placement_counts": {
+            "Inbox": 1,
+            "iNbOx": 1,
+            "Updates": 1
+          },
+          "normalized_placement_counts": {
+            "inbox": 2,
+            "spam": 0,
+            "missing": 0,
+            "promotions": 0,
+            "updates": 1,
+            "newsletter": 0
+          },
+          "non_spam_ratio": 1.0,
+          "placements": [
+            {
+              "raw_placement": "Inbox",
+              "placement": "inbox",
+              "mailbox_id": 1
+            },
+            {
+              "raw_placement": "iNbOx",
+              "placement": "inbox",
+              "mailbox_id": 2
+            },
+            {
+              "raw_placement": "Updates",
+              "placement": "updates",
+              "mailbox_id": 3
+            }
+          ]
+        }
+      ]
+    }
+  }
+]
