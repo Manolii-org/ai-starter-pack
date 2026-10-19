@@ -28,6 +28,7 @@ TOOLS = {
     "uv": ["uv", "--version"],
     "ruff": [sys.executable, "-m", "ruff", "--version"],
     "go": ["go", "version"],
+    "swift": ["swiftc", "--version"],
     "shellcheck": ["shellcheck", "--version"],
     "actionlint": ["actionlint", "--version"],
 }
@@ -137,19 +138,28 @@ def plan_for(root: Path, config: dict, base: str | None = None) -> dict:
             "review_paths": [p for p in paths if matches([p], config.get("review_paths", []))]}
 
 
-def versions(plan: dict) -> dict:
-    names = {"python"}
+def versions(root: Path, plan: dict) -> dict:
+    # Corepack/pyenv and similar shims select versions from their working
+    # directory. Probe each distinct execution context, never the caller's cwd.
+    contexts = {("python", ".", "{}")}
     for item in [*plan["checks"], *plan["environments"]]:
-        names.update(item.get("tools", []))
+        for name in item.get("tools", []):
+            contexts.add((name, str(Path(item.get("cwd", "."))), encoded(item.get("env", {})).decode()))
     result = {"platform": platform.platform()}
-    for name in sorted(names):
+    for name, cwd, env_json in sorted(contexts):
         if name not in TOOLS:
             raise ValueError(f"unknown tool fingerprint: {name}")
+        declared_env = json.loads(env_json)
+        key = name if cwd == "." and not declared_env else f"{name}@{cwd}"
+        if declared_env:
+            key += "#" + sha(env_json.encode())[:12]
+        env = {**os.environ, "CI": "true", "PYTHONDONTWRITEBYTECODE": "1", **declared_env}
         try:
-            proc = subprocess.run(TOOLS[name], capture_output=True, text=True, timeout=15)
-            result[name] = (proc.stdout or proc.stderr).strip() if proc.returncode == 0 else "unavailable"
+            proc = subprocess.run(TOOLS[name], cwd=inside(root, cwd), env=env,
+                                  capture_output=True, text=True, timeout=15)
+            result[key] = (proc.stdout or proc.stderr).strip() if proc.returncode == 0 else "unavailable"
         except (OSError, subprocess.TimeoutExpired):
-            result[name] = "unavailable"
+            result[key] = "unavailable"
     return result
 
 
@@ -203,7 +213,7 @@ def main(argv=None) -> int:
     try:
         config = config_for(root)
         plan = plan_for(root, config, args.base)
-        tools = versions(plan)
+        tools = versions(root, plan)
         if args.plan:
             print(json.dumps({**plan, "tool_versions": tools}, indent=2))
             return 0
@@ -234,7 +244,7 @@ def main(argv=None) -> int:
                 write_json(env_receipt, {"digest": env_digest, "result": result})
         # Provisioning may install tools. Missing tools must not be mistaken
         # for a source failure, or cached as a successful old fingerprint.
-        tools = versions(plan)
+        tools = versions(root, plan)
         identity = {"schema": SCHEMA, "source": sha(Path(__file__).read_bytes()),
                     "config": config, "plan": plan, "tools": tools, "snapshot": before}
         candidate_digest = sha(encoded(identity))
@@ -243,9 +253,10 @@ def main(argv=None) -> int:
         if unavailable:
             results.append({"id": "toolchain", "status": "unavailable", "reason": ",".join(unavailable)})
         for name, prefix in config.get("tool_requirements", {}).items():
-            if name in tools and not tools[name].startswith(prefix):
-                results.append({"id": f"toolchain-{name}", "status": "unavailable",
-                                "reason": f"requires {prefix}; provision the CI toolchain before validation"})
+            for context, version in tools.items():
+                if context.partition("@")[0] == name and not version.startswith(prefix):
+                    results.append({"id": f"toolchain-{context}", "status": "unavailable",
+                                    "reason": f"requires {prefix}; provision the CI toolchain before validation"})
         # Setup scripts can change tracked inputs (for example lifecycle
         # generators). Never return an earlier PASS for that changed tree.
         if snapshot(root) != before:

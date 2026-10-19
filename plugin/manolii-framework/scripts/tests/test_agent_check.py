@@ -205,20 +205,40 @@ class AgentCheckTests(unittest.TestCase):
     def test_tool_version_changes_invalidate_cached_pass(self):
         directory = self.root / "node_modules/bin"
         directory.mkdir(parents=True)
-        node = directory / "node"
-        node.write_text(f"#!{sys.executable}\nimport os\nprint(os.environ['FIXTURE_NODE_VERSION'])\n")
-        node.chmod(0o755)
-        self.config["checks"][0]["tools"] = ["node"]
+        for tool, executable, old, new in (("node", "node", "v22.1.0", "v22.2.0"),
+                                           ("swift", "swiftc", "Apple Swift version 6.2.0", "Apple Swift version 6.2.1")):
+            with self.subTest(tool=tool):
+                binary = directory / executable
+                binary.write_text(f"#!{sys.executable}\nimport os\nprint(os.environ['FIXTURE_TOOL_VERSION'])\n")
+                binary.chmod(0o755)
+                self.config["checks"][0]["tools"] = [tool]
+                self.save_config()
+                env = {**os.environ, "PATH": str(directory) + os.pathsep + os.environ["PATH"], "FIXTURE_TOOL_VERSION": old}
+                self.run_check(env=env)
+                first = self.receipt()["digest"]
+                self.run_check(env=env)
+                self.assertTrue(self.receipt()["cached"])
+                env["FIXTURE_TOOL_VERSION"] = new
+                self.run_check(env=env)
+                self.assertNotEqual(first, self.receipt()["digest"])
+                self.assertFalse(self.receipt()["cached"])
+
+        # A nested package's Corepack pin must be probed in that package,
+        # with the same declared environment as the validation command.
+        (self.root / "app").mkdir()
+        pnpm = directory / "pnpm"
+        pnpm.write_text(f"#!{sys.executable}\nimport os\nfrom pathlib import Path\n"
+                        "print(os.environ['PINNED_VERSION'] if Path.cwd().name == 'app' else '11.17.0')\n")
+        pnpm.chmod(0o755)
+        self.config["checks"][0].update({"tools": ["pnpm"], "cwd": "app",
+                                          "env": {"PINNED_VERSION": "11.5.2"},
+                                          "commands": [[sys.executable, "-c",
+                                                        "from pathlib import Path; assert 'value = 1' in Path('../src/value.py').read_text()"]]})
+        self.config["tool_requirements"] = {"pnpm": "11.5.2"}
         self.save_config()
-        env = {**os.environ, "PATH": str(directory) + os.pathsep + os.environ["PATH"], "FIXTURE_NODE_VERSION": "v22.1.0"}
-        self.run_check(env=env)
-        first = self.receipt()["digest"]
-        self.run_check(env=env)
-        self.assertTrue(self.receipt()["cached"])
-        env["FIXTURE_NODE_VERSION"] = "v22.2.0"
-        self.run_check(env=env)
-        self.assertNotEqual(first, self.receipt()["digest"])
-        self.assertFalse(self.receipt()["cached"])
+        self.run_check(env={**os.environ, "PATH": str(directory) + os.pathsep + os.environ["PATH"]})
+        versions = self.receipt()["tool_versions"]
+        self.assertEqual([v for k, v in versions.items() if k.startswith("pnpm@app#")], ["11.5.2"])
 
     def test_changed_inputs_during_execution_cannot_pass(self):
         self.config["checks"][0]["commands"] = [[sys.executable, "-c", "from pathlib import Path; Path('src/value.py').write_text('mutated')"]]
