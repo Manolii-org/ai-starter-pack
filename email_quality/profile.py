@@ -28,7 +28,7 @@ def load(path):
                 'account_mode', 'shared_account_acknowledged', 'checks',
                 'minimum_remaining', 'timeout_seconds', 'poll_seconds', 'minimum_score',
                 'minimum_inbox_ratio'}
-    if not isinstance(p, dict) or set(p) != required:
+    if not isinstance(p, dict) or not required <= set(p) or set(p) - required - {'minimum_non_spam_ratio'}:
         raise QualityError('CONFIG_INVALID')
     valid = (
         p['schema_version'] == '1.0' and p['provider'] == 'unspam'
@@ -46,6 +46,7 @@ def load(path):
         and type(p['minimum_remaining']) is int and 0 <= p['minimum_remaining'] <= 100000
         and number(p['timeout_seconds'], 1, 900) and number(p['poll_seconds'], 1, 60)
         and number(p['minimum_score'], 0, 100) and number(p['minimum_inbox_ratio'], 0, 1)
+        and number(p.get('minimum_non_spam_ratio', 0), 0, 1)
     )
     actual = os.environ.get('GITHUB_REPOSITORY')
     if not valid or (actual and actual.lower() != p['repository'].lower()):

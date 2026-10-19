@@ -348,6 +348,52 @@ class QualityTests(unittest.TestCase):
         finally:
             state.close()
 
+    def test_categories_are_reported_without_exposing_seed_addresses(self):
+        rows = [{'mailbox': {'id': i + 1, 'address': 'private-seed@example.test'},
+                 'status': 'success', 'tab': tab}
+                for i, tab in enumerate(['Inbox', 'Updates', 'Newsletter', 'Promotions', 'Spam'])]
+        result = assess(self.profile, 'inbox', {'status': 'success', 'results': rows})
+        self.assertEqual(result['inbox_ratio'], 0.2)
+        self.assertEqual(result['non_spam_ratio'], 0.8)
+        self.assertEqual(result['explicit_inbox_ratio'], 0.2)
+        self.assertFalse(result['passed'])  # Existing explicit-Inbox threshold stays strict.
+        self.assertEqual(result['placement_counts']['spam'], 1)
+        self.assertEqual(result['placements'][1], {'mailbox_id': 2, 'placement': 'updates'})
+        self.assertNotIn('private-seed', json.dumps(result))
+        jsonschema.validate(result, RECEIPT['properties']['results']['items'])
+
+    def test_delivery_errors_remain_provider_failures_not_assertion_results(self):
+        for status in ('error', 'failed', 'cancelled'):
+            with self.subTest(status=status), self.assertRaisesRegex(QualityError, 'PROVIDER_TEST_FAILED'):
+                assess(self.profile, 'inbox', {'status':'success','results':[{'status':status}]})
+        with self.assertRaisesRegex(QualityError, 'PROVIDER_INVALID'):
+            assess(self.profile,'inbox',{'status':'success','results':[{'status':'unexpected'}]})
+
+    def test_consumer_can_explicitly_require_non_spam_placement(self):
+        self.profile.update(minimum_inbox_ratio=0, minimum_non_spam_ratio=0.8)
+        self.profile_path.write_text(json.dumps(self.profile))
+        self.assertEqual(load(self.profile_path), self.profile)
+        result = assess(self.profile, 'inbox', {'status': 'success', 'results': [
+            {'status': 'success', 'tab': 'Updates'}, {'status': 'success', 'tab': 'Newsletter'}]})
+        self.assertTrue(result['passed'])
+        self.assertEqual(result['inbox_ratio'], 0)
+        self.assertEqual(result['non_spam_ratio'], 1)
+        result = assess(self.profile, 'inbox', {'status': 'success', 'results': [{'status':'success','tab':'unknown'}]})
+        self.assertFalse(result['passed'])
+
+    def test_oversized_provider_result_cannot_make_an_invalid_receipt(self):
+        with self.assertRaisesRegex(QualityError, 'PROVIDER_INVALID'):
+            assess(self.profile, 'inbox', {'status': 'success',
+                'results': [{'status': 'success', 'tab': 'Inbox'}] * 101})
+
+    def test_unknown_folder_is_visible_and_cannot_pass(self):
+        self.profile.update(minimum_inbox_ratio=0, minimum_non_spam_ratio=0)
+        result = assess(self.profile, 'inbox', {'status': 'success', 'results': [
+            {'status': 'success', 'tab': 'Unrecognised category'}]})
+        self.assertEqual(result['placement_counts']['unknown'], 1)
+        self.assertEqual(result['inbox_ratio'], 0)
+        self.assertFalse(result['passed'])
+
     def test_pending_poll_is_bounded(self):
         client = FakeClient()
         client.result = lambda *args: {'id': 'opaque-id', 'status': 'waiting'}

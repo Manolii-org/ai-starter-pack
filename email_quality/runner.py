@@ -88,20 +88,46 @@ def assess(profile, kind, data):
             raise QualityError('PROVIDER_INVALID')
         return {'kind': kind, 'score': score, 'passed': score >= profile['minimum_score']}
     results = data.get('results')
-    if not isinstance(results, list) or not results:
+    if not isinstance(results, list) or not results or len(results) > 100:
         raise QualityError('PROVIDER_INVALID')
-    statuses = []
+    # Preserve provider categories separately. Inbox placement includes legitimate
+    # inbox tabs; explicit Inbox remains independently visible in the receipt.
+    categories = ('inbox', 'updates', 'newsletter', 'promotions', 'social', 'forums',
+                  'spam', 'missing', 'unknown')
+    counts = dict.fromkeys(categories, 0)
+    placements = []
     for row in results:
         if not isinstance(row, dict):
             raise QualityError('PROVIDER_INVALID')
-        # Live API reports delivery status=success separately from placement tab.
-        value = row.get('tab') if row.get('status') == 'success' else row.get('status')
-        statuses.append(value.lower() if isinstance(value, str) else None)
-    if len(statuses) != len(results) or any(s not in ('inbox', 'spam', 'missing', 'promotions') for s in statuses):
-        raise QualityError('PROVIDER_INVALID')
-    ratio = sum(s == 'inbox' for s in statuses) / len(statuses)
-    return {'kind': kind, 'inbox_ratio': ratio, 'mailbox_count': len(statuses),
-            'passed': ratio >= profile['minimum_inbox_ratio']}
+        status = row.get('status')
+        if status in ('error', 'failed', 'cancelled'):
+            raise QualityError('PROVIDER_TEST_FAILED')
+        if status != 'success' and status not in categories[:-1]:
+            raise QualityError('PROVIDER_INVALID')
+        value = row.get('tab') if status == 'success' else status
+        if not isinstance(value, str) or not value.strip():
+            raise QualityError('PROVIDER_INVALID')
+        category = value.strip().lower()
+        category = {'primary': 'inbox', 'junk': 'spam'}.get(category, category)
+        if category not in counts:
+            category = 'unknown'
+        counts[category] += 1
+        placement = {'placement': category}
+        mailbox = row.get('mailbox')
+        if isinstance(mailbox, dict) and type(mailbox.get('id')) is int and mailbox['id'] > 0:
+            placement['mailbox_id'] = mailbox['id']
+        placements.append(placement)
+    explicit_ratio = counts['inbox'] / len(results)
+    inbox_count = sum(counts[c] for c in ('inbox', 'updates', 'newsletter',
+                                         'promotions', 'social', 'forums'))
+    ratio = inbox_count / len(results)
+    return {'kind': kind, 'inbox_ratio': explicit_ratio, 'explicit_inbox_ratio': explicit_ratio,
+            'non_spam_ratio': ratio,
+            'mailbox_count': len(results), 'placement_counts': counts,
+            'placements': placements,
+            'passed': counts['unknown'] == 0
+            and explicit_ratio >= profile['minimum_inbox_ratio']
+            and ratio >= profile.get('minimum_non_spam_ratio', 0)}
 
 
 def wait(client, state, profile, kind, deadline=None):

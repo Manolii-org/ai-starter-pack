@@ -107,7 +107,19 @@ provider failure from a product assertion. Do not reuse yesterday's result just
 because the source tree is unchanged.
 
 The live placement API uses overall `status=success` and per-mailbox
-`status=success` with `tab=Inbox|Spam` (observed 2026-10-17). Delivery success
+`status=success` with a placement tab (Inbox, Updates, Newsletter and Spam verified 2026-10-19). Receipts distinguish explicit Inbox,
+Updates, Newsletter, Promotions, Social, Forums, Spam, Missing and Unknown.
+`inbox_ratio` and `explicit_inbox_ratio` count only explicit Inbox, preserving
+existing thresholds. `non_spam_ratio` also includes the six recognised non-spam
+placements. Consumers can deliberately set `minimum_inbox_ratio: 0` together
+with the optional `minimum_non_spam_ratio: 0.8` to require 80% recognized non-spam placement across all expected mailboxes.
+Missing and Unknown remain in the denominator; Missing reduces the ratio and
+Unknown always prevents passing. Delivery-status errors remain provider failures,
+not product assertions.
+Without the optional setting, the existing explicit-Inbox threshold is unchanged. Unknown categories remain visible, are excluded from the inbox numerator and
+prevent a passing result. Results are bounded to 100 mailboxes. Per-mailbox metadata contains IDs and normalized placement,
+never seed addresses. The receipt expands reporting without silently relaxing existing thresholds.
+Delivery success
 is not inbox placement success: the CLI evaluates the tab and requires exactly
 the expected unique mailbox identities. IDs may contain colons and are encoded
 as individual URL path segments.

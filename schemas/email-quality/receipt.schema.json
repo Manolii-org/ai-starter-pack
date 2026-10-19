@@ -117,6 +117,99 @@
           "mailbox_count": {
             "type": "integer",
             "minimum": 1
+          },
+          "explicit_inbox_ratio": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "placement_counts": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "inbox": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "updates": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "newsletter": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "promotions": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "social": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "forums": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "spam": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "missing": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "unknown": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "inbox",
+              "updates",
+              "newsletter",
+              "promotions",
+              "social",
+              "forums",
+              "spam",
+              "missing",
+              "unknown"
+            ]
+          },
+          "placements": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "placement"
+              ],
+              "properties": {
+                "mailbox_id": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "placement": {
+                  "enum": [
+                    "inbox",
+                    "updates",
+                    "newsletter",
+                    "promotions",
+                    "social",
+                    "forums",
+                    "spam",
+                    "missing",
+                    "unknown"
+                  ]
+                }
+              }
+            }
+          },
+          "non_spam_ratio": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
           }
         }
       }
