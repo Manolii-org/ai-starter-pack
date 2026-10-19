@@ -275,6 +275,33 @@ class AgentCheckTests(unittest.TestCase):
 
 
 class SurfaceTests(unittest.TestCase):
+    def test_each_managed_input_selects_the_native_contract(self):
+        installed = SCRIPTS.parent
+        config_path = installed / "config/agent-checks.json"
+        if not config_path.is_file():
+            self.skipTest("plugin-only bundle has no repository-owned recipe")
+        config = json.loads(config_path.read_text())
+        runner = load("agent-check")
+        paths = (*load("install-agent-validation").FILES, "config/agent-checks.json")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            for rel in paths:
+                path = root / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("original\n")
+            for args in (("init", "-q"), ("config", "user.email", "fixture@example.invalid"),
+                         ("config", "user.name", "Fixture"), ("add", "."),
+                         ("commit", "-qm", "managed input fixture")):
+                subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)
+            for rel in paths:
+                with self.subTest(path=rel):
+                    path = root / rel
+                    path.write_text("changed\n")
+                    plan = runner.plan_for(root, config, "HEAD")
+                    self.assertEqual(plan["paths"], [rel])
+                    self.assertIn("agent-validation-contract", [c["id"] for c in plan["checks"]])
+                    path.write_text("original\n")
+
     def test_installed_repository_surfaces_are_current(self):
         root = SCRIPTS.parent
         if not (root / "config/agent-checks.json").is_file():

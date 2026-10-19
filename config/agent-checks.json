@@ -1,16 +1,49 @@
 {
   "schema_version": 1,
   "base": "origin/main",
-  "review_paths": [".github/workflows/*", "scripts/agent-check.py", "config/agent-checks.json", "scripts/sync-agent-validation.py"],
+  "review_paths": [
+    ".github/workflows/*",
+    "scripts/agent-check.py",
+    "config/agent-checks.json",
+    "scripts/sync-agent-validation.py",
+    "scripts/install-agent-validation.py"
+  ],
   "environments": [],
   "checks": [
     {
       "id": "agent-validation-contract",
-      "paths": ["scripts/agent-check.py", "scripts/sync-agent-validation.py", "scripts/tests/test_agent_check.py", "docs/agent-validation.md", "AGENTS.md", "CLAUDE.md", ".cursor/rules/agent-validation.mdc"],
-      "tools": ["python"],
+      "paths": [
+        "scripts/agent-check.py",
+        "scripts/sync-agent-validation.py",
+        "scripts/tests/test_agent_check.py",
+        "docs/agent-validation.md",
+        "AGENTS.md",
+        "CLAUDE.md",
+        ".cursor/rules/agent-validation.mdc",
+        "scripts/install-agent-validation.py",
+        "config/agent-checks.json",
+        ".claude/skills/agent-validation/SKILL.md"
+      ],
+      "tools": [
+        "python"
+      ],
       "commands": [
-        ["python3", "scripts/sync-agent-validation.py", "--check"],
-        ["python3", "-m", "unittest", "discover", "-s", "scripts/tests", "-p", "test_agent_check.py", "-v"]
+        [
+          "python3",
+          "scripts/sync-agent-validation.py",
+          "--check"
+        ],
+        [
+          "python3",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "scripts/tests",
+          "-p",
+          "test_agent_check.py",
+          "-v"
+        ]
       ]
     }
   ]

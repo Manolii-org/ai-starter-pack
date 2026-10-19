@@ -7,6 +7,7 @@ type: skill
 safety_tier: green
 requires_mcp: []
 required_entities: []
+tags: [ci, testing]
 ---
 
 Read `docs/agent-validation.md` and the repository's `config/agent-checks.json`.
