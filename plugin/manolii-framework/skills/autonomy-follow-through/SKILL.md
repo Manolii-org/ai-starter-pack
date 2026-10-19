@@ -1,6 +1,6 @@
 ---
 name: autonomy-follow-through
-version: 1.1.0
+version: 1.1.1
 description: "Shared termination + escalation loop for routine-native autonomy and /watch-pr. Stops on done/blocked_on_human/blocked_on_infra/superseded/gave_up; merges when safe."
 type: skill
 model: sonnet
@@ -182,9 +182,12 @@ Merge only when ALL true:
 - Review threads resolved (no open conversations)
 - No current-head review has state `CHANGES_REQUESTED`. A resolved conversation
   does not dismiss or override a formal blocking review.
-- The automated gate has a qualifying, non-blocking semantic review tied to the
-  current head SHA. A mere unclassified comment is not a qualifying signal.
-- Not guarded path (verify `.ai/guards.json`)
+- The automated gate verifies one of the qualifying semantic review legs above;
+  this is the same review requirement, not an additional reviewer or approval.
+- Guarded work meets the owning repository's authority and enforcement rules.
+  Reuse existing task authorization and its documented guard/audit mechanism;
+  preserve explicit restrictions and blocking guard decisions. A filename match
+  alone does not establish a new human decision.
 - Verify the controls actually consumed by the selected executor and merge
   controller, using the owning repository's documented configuration and
   defaults. For a controller that consumes `AUTO_MERGE_ENABLED`, verify that
