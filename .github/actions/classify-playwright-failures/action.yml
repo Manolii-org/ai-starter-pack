@@ -30,7 +30,7 @@ inputs:
     required: false
     default: ""
   job-status:
-    description: Pass `${{ job.status }}`; a red job with no evidence reports `unclassified` instead of `none`.
+    description: Pass the caller's job status; a red job with no evidence reports unclassified instead of none.
     required: false
     default: ""
   json-path:

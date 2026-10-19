@@ -298,6 +298,7 @@ _exclude:
 # `copier update` (report §4 Lever A / ADR-0023 Decision 1).
 _skip_if_exists:
   - CLAUDE.md
+  - config/agent-checks.json
   - .claude/model-routing.json
   - .claude/mcp.json
   - .claude/hooks/session-start.sh
