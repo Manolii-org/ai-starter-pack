@@ -91,16 +91,22 @@ def assess(profile, kind, data):
     if not isinstance(results, list) or not results:
         raise QualityError('PROVIDER_INVALID')
     statuses = []
+    placement_counts = {}
     for row in results:
         if not isinstance(row, dict):
             raise QualityError('PROVIDER_INVALID')
-        # Live API reports delivery status=success separately from placement tab.
-        value = row.get('tab') if row.get('status') == 'success' else row.get('status')
-        statuses.append(value.lower() if isinstance(value, str) else None)
-    if len(statuses) != len(results) or any(s not in ('inbox', 'spam', 'missing', 'promotions') for s in statuses):
-        raise QualityError('PROVIDER_INVALID')
+        # Delivery success is separate from placement; retain legacy status-only rows.
+        status = row.get('status')
+        status = status.lower() if isinstance(status, str) else None
+        value = row.get('tab') if status in ('success', 'delivered') else row.get('status')
+        category = value.lower() if isinstance(value, str) else None
+        if category not in ('inbox', 'spam', 'missing', 'promotions', 'updates', 'newsletter'):
+            raise QualityError('PROVIDER_INVALID')
+        statuses.append(category)
+        placement_counts[value] = placement_counts.get(value, 0) + 1
     ratio = sum(s == 'inbox' for s in statuses) / len(statuses)
     return {'kind': kind, 'inbox_ratio': ratio, 'mailbox_count': len(statuses),
+            'placement_counts': placement_counts,
             'passed': ratio >= profile['minimum_inbox_ratio']}
 
 

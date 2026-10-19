@@ -298,6 +298,104 @@ class QualityTests(unittest.TestCase):
             with self.subTest(data=data), self.assertRaises(QualityError):
                 assess(self.profile, 'inbox', data)
 
+    def test_placement_categories_preserve_raw_labels_and_inbox_policy(self):
+        # Synthetic contract fixture; no provider test or email is created.
+        labels = ['Inbox', 'iNbOx', 'Updates', 'Newsletter', 'Promotions', 'Spam', 'Missing']
+        for delivery_status in ('success', 'SuCcEsS', 'delivered', 'DeLiVeReD', None):
+            with self.subTest(delivery_status=delivery_status):
+                rows = [{'status': delivery_status, 'tab': label} if delivery_status else
+                        {'status': label} for label in labels]
+                payload = {'status': 'completed', 'results': rows}
+                original = copy.deepcopy(payload)
+                result = assess(self.profile, 'inbox', payload)
+                self.assertEqual(result['inbox_ratio'], 2 / 7)
+                self.assertEqual(result['mailbox_count'], 7)
+                self.assertEqual(result['placement_counts'], dict.fromkeys(labels, 1))
+                self.assertFalse(result['passed'])
+                self.assertEqual(payload, original)
+                self.assertTrue(assess(dict(self.profile, minimum_inbox_ratio=2 / 7),
+                                       'inbox', payload)['passed'])
+
+    def test_tabs_are_known_but_never_count_as_inbox(self):
+        for label in ('Updates', 'uPdAtEs', 'Newsletter', 'NEWSLETTER', 'Promotions'):
+            with self.subTest(label=label):
+                result = assess(self.profile, 'inbox', {'status': 'success', 'results': [
+                    {'status': 'success', 'tab': label}, {'status': 'success', 'tab': label}]})
+                self.assertEqual(result['placement_counts'], {label: 2})
+                self.assertEqual(result['inbox_ratio'], 0)
+                self.assertFalse(result['passed'])
+
+    def test_malformed_and_unknown_placements_fail_without_tab_fallback(self):
+        rows = [None, [], {}, {'status': 'unknown', 'tab': 'Inbox'},
+                {'status': 'pending', 'tab': 'Inbox'}]
+        for status in ('success', 'SuCcEsS', 'delivered'):
+            rows.append({'status': status})
+            rows.extend({'status': status, 'tab': value} for value in
+                        (None, '', 'unknown', ' Inbox ', 'Inbox\n', 1, True, [], {}))
+        for row in rows:
+            with self.subTest(row=row), self.assertRaisesRegex(QualityError, 'PROVIDER_INVALID'):
+                assess(self.profile, 'inbox', {'status': 'completed', 'results': [row]})
+
+    def test_category_receipt_resumes_without_creating_or_sending(self):
+        client = FakeClient()
+        state = self.state()
+        try:
+            start(client, state, self.profile, 'inbox')
+        finally:
+            state.close()
+        payload = {'id': 'opaque-id', 'status': 'success', 'results': [
+            {'mailbox': {'id': 1, 'address': 'private@example.test'},
+             'status': 'success', 'tab': 'Updates', 'sender': 'private@example.test'}]}
+        with patch('email_quality.cli.Unspam', return_value=client), \
+                patch('email_quality.cli.send') as sender, \
+                patch.object(client, 'result', return_value=payload) as result_read:
+            code, receipt = self.invoke('--kind', 'inbox', 'wait')
+            self.assertEqual((code, receipt['outcome']), (1, 'assertion_failed'))
+            self.assertEqual(receipt['results'][0]['placement_counts'], {'Updates': 1})
+            self.assertEqual(receipt['results'][0]['inbox_ratio'], 0)
+            self.assertNotIn('private@example.test', json.dumps(receipt))
+            _, resumed = self.invoke('--kind', 'inbox', 'wait')
+            self.assertEqual(resumed['results'], receipt['results'])
+            result_read.assert_called_once()
+            self.assertEqual(client.creates, 1)
+            sender.assert_not_called()
+
+    def test_legacy_completed_receipt_resumes_without_category_counts(self):
+        client = FakeClient()
+        state = self.state()
+        legacy = {'kind': 'inbox', 'inbox_ratio': 1, 'mailbox_count': 1, 'passed': True}
+        try:
+            record = start(client, state, self.profile, 'inbox')
+            record.update(phase='completed', result=legacy)
+            state.save()
+        finally:
+            state.close()
+        with patch('email_quality.cli.Unspam', return_value=client), \
+                patch.object(client, 'result') as result_read:
+            code, receipt = self.invoke('--kind', 'inbox', 'wait')
+            self.assertEqual((code, receipt['results']), (0, [legacy]))
+            result_read.assert_not_called()
+            self.assertEqual(client.creates, 1)
+
+    def test_category_results_still_require_exact_test_and_mailboxes(self):
+        client = FakeClient()
+        state = self.state()
+        try:
+            start(client, state, self.profile, 'inbox')
+            cases = [('wrong-test', [1]), ('opaque-id', []), ('opaque-id', [1, 1]),
+                     ('opaque-id', [2]), ('opaque-id', [True]), ('opaque-id', [None])]
+            for test_id, ids in cases:
+                with self.subTest(test_id=test_id, ids=ids):
+                    client.result = lambda *args: {'id': test_id, 'status': 'success',
+                        'results': [{'mailbox': {'id': i}, 'status': 'success', 'tab': 'Updates'}
+                                    for i in ids]}
+                    with self.assertRaisesRegex(QualityError, 'PROVIDER_INVALID'):
+                        wait(client, state, self.profile, 'inbox')
+                    self.assertEqual(state.data['checks']['inbox']['phase'], 'created')
+            self.assertEqual(client.creates, 1)
+        finally:
+            state.close()
+
     def test_delivery_rejects_path_injection_and_bad_recipients(self):
         for data in [{'id': '../status', 'inbox_address': 'safe@example.test'},
                      {'id': 'safe', 'inbox_address': 'bad\nBcc: victim@example.test'}]:
