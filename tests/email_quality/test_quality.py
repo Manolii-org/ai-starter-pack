@@ -396,6 +396,149 @@ class QualityTests(unittest.TestCase):
         finally:
             state.close()
 
+    def test_reporting_preserves_raw_categories_and_excludes_private_fields(self):
+        labels = ['Inbox', 'iNbOx', 'Updates', 'Newsletter', 'Promotions', 'Spam', 'Missing']
+        for status in ('success', 'SuCcEsS', 'delivered', 'DeLiVeReD', None):
+            with self.subTest(status=status):
+                rows = [{'status': status, 'tab': label} if status else {'status': label}
+                        for label in labels]
+                for i, row in enumerate(rows):
+                    row.update(mailbox={'id': i + 1, 'address': 'private-seed@example.test',
+                                        'name': 'private-provider-name'},
+                               sender='private-sender@example.test', sender_ip='192.0.2.1',
+                               report_url='https://example.test/private-report',
+                               extra='untrusted-private-data')
+                payload = {'status': 'success', 'results': rows}
+                before = copy.deepcopy(payload)
+                result = assess(self.profile, 'inbox', payload)
+                self.assertEqual(result['placement_counts'], dict.fromkeys(labels, 1))
+                self.assertEqual(result['normalized_placement_counts'], {
+                    'inbox': 2, 'updates': 1, 'newsletter': 1, 'promotions': 1,
+                    'spam': 1, 'missing': 1})
+                self.assertEqual(result['inbox_ratio'], 2 / 7)
+                self.assertEqual(result['non_spam_ratio'], 5 / 7)
+                self.assertFalse(result['passed'])
+                self.assertEqual(result['placements'], [
+                    {'mailbox_id': i + 1, 'raw_placement': label, 'placement': label.lower()}
+                    for i, label in enumerate(labels)])
+                self.assertNotIn('private', json.dumps(result))
+                self.assertNotIn('192.0.2.1', json.dumps(result))
+                self.assertEqual(payload, before)
+                jsonschema.validate(result, RECEIPT['properties']['results']['items'])
+
+    def test_reporting_does_not_change_configured_acceptance(self):
+        payload = {'status': 'success', 'results': [
+            {'status': 'Inbox'}, {'status': 'Updates'}, {'status': 'Missing'}]}
+        for threshold, passed in [(0, True), (1 / 3, True), (0.34, False), (1, False)]:
+            with self.subTest(threshold=threshold):
+                result = assess(dict(self.profile, minimum_inbox_ratio=threshold), 'inbox', payload)
+                self.assertEqual(result['inbox_ratio'], 1 / 3)
+                self.assertEqual(result['non_spam_ratio'], 2 / 3)
+                self.assertEqual(result['passed'], passed)
+        self.assertFalse(assess(self.profile, 'inbox', payload)['passed'])
+        profile = dict(self.profile, minimum_non_spam_ratio=0.8)
+        self.profile_path.write_text(json.dumps(profile))
+        with self.assertRaisesRegex(QualityError, 'CONFIG_INVALID'):
+            load(self.profile_path)
+        with self.assertRaises(jsonschema.ValidationError):
+            jsonschema.validate(profile, json.loads(
+                (ROOT / 'schemas/email-quality/profile.schema.json').read_text()))
+
+    def test_reporting_never_coerces_unknowns_or_unverified_aliases(self):
+        for label in ('primary', 'Primary', 'junk', 'Junk', 'Social', 'Forums',
+                      'Unknown', 'unrecognised', ' Inbox ', 'Inbox\n', 'Updates\t'):
+            for status in ('success', 'delivered', None):
+                with self.subTest(label=label, status=status):
+                    row = {'status': status, 'tab': label} if status else {'status': label}
+                    with self.assertRaisesRegex(QualityError, 'PROVIDER_INVALID'):
+                        assess(dict(self.profile, minimum_inbox_ratio=0), 'inbox',
+                               {'status': 'completed', 'results': [row]})
+
+    def test_reporting_keeps_provider_errors_blocked_with_existing_codes(self):
+        for status in ('error', 'failed', 'cancelled'):
+            with self.subTest(status=status):
+                with self.assertRaisesRegex(QualityError, 'PROVIDER_TEST_FAILED'):
+                    assess(self.profile, 'inbox', {'status': status})
+                # An undocumented mailbox failure is still malformed provider data,
+                # not a completed assertion or a new category.
+                with self.assertRaisesRegex(QualityError, 'PROVIDER_INVALID'):
+                    assess(self.profile, 'inbox', {'status': 'success', 'results': [
+                        {'status': status, 'tab': 'Inbox'}]})
+
+    def test_reporting_bound_matches_existing_delivery_limit(self):
+        rows = [{'status': 'success', 'tab': 'Inbox'}] * 100
+        result = assess(self.profile, 'inbox', {'status': 'success', 'results': rows})
+        self.assertEqual(len(result['placements']), 100)
+        self.assertEqual(result['normalized_placement_counts']['inbox'], 100)
+        jsonschema.validate(result, RECEIPT['properties']['results']['items'])
+        with self.assertRaisesRegex(QualityError, 'PROVIDER_INVALID'):
+            assess(self.profile, 'inbox', {'status': 'success', 'results': rows + rows[:1]})
+        mailboxes = [{'id': i + 1, 'address': f'seed-{i}@example.test'} for i in range(101)]
+        with self.assertRaisesRegex(QualityError, 'PROVIDER_INVALID'):
+            delivery('inbox', {'id': 'synthetic', 'mailboxes': mailboxes})
+
+    def test_completed_receipt_fixtures_round_trip_and_resume_without_replay(self):
+        fixtures = json.loads((ROOT / 'tests/email_quality/fixtures/completed-receipts.json').read_text())
+        self.profile['checks'] = ['inbox']
+        self.profile_path.write_text(json.dumps(self.profile))
+        for fixture in fixtures:
+            with self.subTest(fixture=fixture['name']):
+                receipt = fixture['receipt']
+                jsonschema.validate(receipt, RECEIPT)
+                self.assertEqual(json.loads(json.dumps(receipt)), receipt)
+                state = self.state()
+                try:
+                    state.data['checks']['inbox'] = {
+                        'phase': 'completed', 'result': copy.deepcopy(receipt['results'][0])}
+                    state.save()
+                finally:
+                    state.close()
+                before = (self.root / 'state/state.json').read_bytes()
+                client = FakeClient()
+                with patch('email_quality.cli.Unspam', return_value=client), \
+                        patch.object(client, 'status') as status, \
+                        patch.object(client, 'create') as create, \
+                        patch.object(client, 'result') as read, \
+                        patch('email_quality.runner.subprocess.Popen') as sender:
+                    for args in (('--kind', 'inbox', 'wait'), ('--sender', 'unused', 'run')):
+                        code, resumed = self.invoke(*args)
+                        self.assertEqual((code, resumed['outcome']), (1, 'assertion_failed'))
+                        self.assertEqual(resumed['results'], receipt['results'])
+                    status.assert_not_called()
+                    create.assert_not_called()
+                    read.assert_not_called()
+                    sender.assert_not_called()
+                self.assertEqual((self.root / 'state/state.json').read_bytes(), before)
+        expected = fixtures[-1]['receipt']['results'][0]
+        actual = assess(self.profile, 'inbox', {'status': 'completed', 'results': [
+            {'mailbox': {'id': i + 1}, 'status': 'delivered', 'tab': label}
+            for i, label in enumerate(('Inbox', 'iNbOx', 'Updates'))]})
+        self.assertEqual(actual, expected)
+
+    def test_reporting_schema_rejects_invalid_new_metadata(self):
+        result = assess(self.profile, 'inbox', {'status': 'success', 'results': [
+            {'mailbox': {'id': 1}, 'status': 'Inbox'}]})
+        for field, value in [('non_spam_ratio', -1), ('non_spam_ratio', 1.01),
+                             ('normalized_placement_counts', {'inbox': 1}),
+                             ('placements', []), ('placements', result['placements'] * 101),
+                             ('placements', [{'raw_placement': 'Inbox', 'placement': 'primary'}]),
+                             ('placements', [{'raw_placement': 'Inbox\n', 'placement': 'inbox'}]),
+                             ('placements', [{'raw_placement': ' Inbox ', 'placement': 'inbox'}]),
+                             ('placements', [{'raw_placement': 'primary', 'placement': 'inbox'}]),
+                             ('placements', [{'raw_placement': 'Inbox', 'placement': 'inbox',
+                                              'mailbox_id': True}]),
+                             ('placements', [{'raw_placement': 'Inbox', 'placement': 'inbox',
+                                              'address': 'seed@example.test'}])]:
+            with self.subTest(field=field, value=value), self.assertRaises(jsonschema.ValidationError):
+                jsonschema.validate(dict(result, **{field: value}), RECEIPT['properties']['results']['items'])
+
+    def test_receipt_schema_mirrors_match(self):
+        canonical = (ROOT / 'schemas/email-quality/receipt.schema.json').read_bytes()
+        for directory in ('registry/platform/framework', 'plugin/manolii-framework'):
+            with self.subTest(directory=directory):
+                self.assertEqual((ROOT / directory / 'schemas/email-quality/receipt.schema.json').read_bytes(),
+                                 canonical)
+
     def test_delivery_rejects_path_injection_and_bad_recipients(self):
         for data in [{'id': '../status', 'inbox_address': 'safe@example.test'},
                      {'id': 'safe', 'inbox_address': 'bad\nBcc: victim@example.test'}]:

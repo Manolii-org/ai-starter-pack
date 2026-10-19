@@ -140,6 +140,39 @@ Consumers using a strict receipt validator must adopt the matching schema with
 the tooling pin. Offline conformance tests cover this correction; adopting a
 new pin and validating the consumer remain separate release steps.
 
+### Descriptive placement reporting
+
+Newly completed inbox results also include optional reporting fields:
+
+- `normalized_placement_counts`: counts for all six supported lowercase categories
+  (`inbox`, `spam`, `missing`, `promotions`, `updates`, `newsletter`), including zeros.
+  This is separate from the unchanged sparse, case-preserving `placement_counts`.
+- `placements`: up to 100 entries in provider result order, with `raw_placement`
+  preserving the exact label, `placement` naming its lowercase category, and
+  `mailbox_id` when a valid positive integer ID is available. Normal CLI completion
+  still requires exactly the expected unique mailbox IDs. Addresses, provider
+  names, sender details, test IDs and report URLs are excluded.
+- `non_spam_ratio`: `(Inbox + Promotions + Updates + Newsletter) / mailbox_count`.
+  Spam and explicit Missing remain in the denominator. This is a descriptive
+  ratio only; it does not affect `passed`. `inbox_ratio` remains the primary-Inbox
+  ratio, with no duplicate alias or change to any configured acceptance threshold.
+
+These fields are optional for receipt compatibility. Completed checkpoints from
+older tooling retain their stored results exactly; resume does not backfill
+reporting fields, reread provider results, create tests or resend messages.
+Adopt the matching schema and immutable tooling pin together. Roll back that pin
+without deleting private checkpoints or changing their original profiles.
+
+The provider references above were rechecked on 2026-10-19. The OpenAPI describes
+`status` and `tab` as strings, without enumerating additional category aliases.
+The checked documentation does not establish `primary`/`junk` aliases or
+Social/Forums as supported API categories. Those labels remain invalid, as do
+unknown categories and whitespace-padded labels; there is no trimming or unknown
+bucket. A separate provider-contract change would be needed to accept them.
+Top-level provider test failures and malformed per-mailbox results retain their
+existing error codes. A non-spam acceptance threshold is a separate product-policy
+choice and is not a supported profile option in this reporting change.
+
 Sender hooks are trusted consumer code in the same OS trust domain as the CLI.
 Environment filtering reduces accidental exposure; it is not a sandbox against
 malicious same-user code reading process memory or local files. Never run an
