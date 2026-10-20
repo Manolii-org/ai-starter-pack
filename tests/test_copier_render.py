@@ -267,13 +267,13 @@ def test_cost_profile_lean_omits_measured_waste_callers(default_render):
     ("flags", "expected"),
     [
         ({}, {"Hooks": 5, "Commands": 51, "Skills": 36, "Agents": 27,
-              "Scripts": 54, "Husky": 3, "CI": 35, "Docs": 29}),
+              "Scripts": 54, "Husky": 3, "CI": 35, "Docs": 30}),
         ({flag: "true" for flag in FEATURE_FLAGS},
          {"Hooks": 5, "Commands": 54, "Skills": 40, "Agents": 28,
-              "Scripts": 54, "Husky": 3, "CI": 35, "Docs": 31}),
+              "Scripts": 54, "Husky": 3, "CI": 35, "Docs": 32}),
         ({"cost_profile": "lean"},
          {"Hooks": 5, "Commands": 51, "Skills": 36, "Agents": 27,
-              "Scripts": 54, "Husky": 3, "CI": 34, "Docs": 29}),
+              "Scripts": 54, "Husky": 3, "CI": 34, "Docs": 30}),
     ],
 )
 def test_rendered_readme_counts_match_rendered_tree(flags, expected):
@@ -364,7 +364,8 @@ def test_agent_validation_base_uses_owner_ref(tmp_path, default_render, base_ref
     plan = json.loads(result.stdout)
     assert plan["base"] == expected
     assert plan["paths"] == ["docs/agent-validation.md"]
-    assert [c["commands"] for c in plan["checks"]] == [c["commands"] for c in canonical["checks"]]
+    policy_check = next(c for c in canonical["checks"] if c["id"] == "agent-validation-contract")
+    assert [c["commands"] for c in plan["checks"]] == [policy_check["commands"]]
 
 
 def test_skip_if_exists_contract():

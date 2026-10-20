@@ -188,6 +188,14 @@ Wait for all results. Block commit if any CRITICAL or ERROR findings.
 
 ## Review Integration
 
+During an ongoing delivery task, a request to report the new head SHA is a
+progress update. Continue review, repair, merge and requested post-merge checks.
+A push or migration rename does not transfer ownership. Preserve unfinished
+commitments and verify a real wake or accepted durable handoff before claiming
+background monitoring. Honor explicit stop, handoff and implementation-only
+instructions. See `docs/agent-release-experience.md` for the target release
+contract; owning deployment controls remain in force until qualified adoption.
+
 For authorized agent-managed work, review publication format alone must not add a
 human gate. Apply `.claude/skills/autonomy-follow-through/review-evidence.md`:
 verified current-head independent automated review can satisfy review without a

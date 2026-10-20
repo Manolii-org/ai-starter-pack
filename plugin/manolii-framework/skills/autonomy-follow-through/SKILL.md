@@ -1,6 +1,6 @@
 ---
 name: autonomy-follow-through
-version: 1.1.1
+version: 1.1.2
 description: "Shared termination + escalation loop for routine-native autonomy and /watch-pr. Stops on done/blocked_on_human/blocked_on_infra/superseded/gave_up; merges when safe."
 type: skill
 model: sonnet
@@ -60,6 +60,34 @@ background execution from a local note. After merge, complete the parent task's
 authorized source/behavior verification and cleanup before declaring completion
 and retiring its monitor. Keep each repository's entity, provider, data and
 deployment boundaries; a shared policy is not authorization to cross them.
+
+## Ownership after a push or status reply
+
+A push, migration rename, new head SHA, or request to "reply with the new head
+SHA" is a progress update within an ongoing delivery task. Send the requested
+update and continue the existing review, repair, merge and verification loop.
+Only an explicit instruction to stop, hand off, or limit the task to
+implementation/publication narrows that scope.
+
+Keep separate commitments for the repair, merge and requested post-merge work.
+Completing the repair must not complete the merge commitment or clear the
+parent checkpoint. A changed head invalidates old review/check evidence; refresh
+the current head and continue under the existing authorization and repair budget.
+
+Retain one continuation owner. Before yielding an unfinished task, record its
+repository/PR, full head SHA, remaining commitments, next action, precise blocker
+if any, and a verified wake or accepted durable handoff receipt. A SHA, local
+checkpoint or proposed owner is not an accepted handoff. Without a working
+continuation route, report `blocked_on_infra`; keep the task unfinished and
+complete other authorized work. Production approval holds only production.
+
+## Examples
+
+- Valid: "Rename the migration and reply with the new head SHA." During an
+  existing delivery task, push the repair, report the SHA, then verify the new
+  head, handle review and follow through to merge and requested acceptance.
+- Invalid: mark the task done after printing the SHA while its PR remains open.
+  An explicit "push only; stop before merge" instead ends at that stated boundary.
 
 ## Inputs
 

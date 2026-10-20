@@ -8,7 +8,39 @@
     "scripts/sync-agent-validation.py",
     "scripts/install-agent-validation.py"
   ],
-  "environments": [],
+  "environments": [
+    {
+      "id": "python-types",
+      "inputs": [
+        "config/agent-checks.json"
+      ],
+      "ready_paths": [
+        ".ai/agent-checks/type-venv/pyvenv.cfg"
+      ],
+      "tools": [
+        "uv"
+      ],
+      "commands": [
+        [
+          "uv",
+          "venv",
+          "--clear",
+          "--python",
+          "3.14",
+          ".ai/agent-checks/type-venv"
+        ],
+        [
+          "uv",
+          "pip",
+          "install",
+          "--python",
+          ".ai/agent-checks/type-venv/bin/python",
+          "mypy==1.20.0"
+        ]
+      ],
+      "timeout_seconds": 600
+    }
+  ],
   "checks": [
     {
       "id": "agent-validation-contract",
@@ -43,6 +75,28 @@
           "-p",
           "test_agent_check.py",
           "-v"
+        ]
+      ]
+    },
+    {
+      "id": "shared-python-types",
+      "paths": [
+        "scripts/agent-check.py",
+        "scripts/install-agent-validation.py",
+        "config/agent-checks.json"
+      ],
+      "environment": "python-types",
+      "tools": [
+        "uv"
+      ],
+      "commands": [
+        [
+          ".ai/agent-checks/type-venv/bin/python",
+          "-m",
+          "mypy",
+          "--ignore-missing-imports",
+          "scripts/agent-check.py",
+          "scripts/install-agent-validation.py"
         ]
       ]
     }

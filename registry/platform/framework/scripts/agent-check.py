@@ -125,7 +125,7 @@ def matches(paths: list[str], patterns: list[str]) -> bool:
 def plan_for(root: Path, config: dict, base: str | None = None) -> dict:
     ref = base or config["base"]
     base_sha = git(root, "merge-base", ref, "HEAD").decode().strip()
-    changed = set()
+    changed: set[str] = set()
     for command in (("diff", "--no-renames", "--name-only", "-z", base_sha),
                     ("ls-files", "--others", "--exclude-standard", "-z")):
         changed.update(os.fsdecode(p) for p in git(root, *command).split(b"\0") if p)

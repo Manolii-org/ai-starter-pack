@@ -1,0 +1,13 @@
+{
+  "schema": "agent-validation-source/v1",
+  "source": "ai-starter-pack",
+  "files": {
+    "scripts/agent-check.py": "7f2f3d49391f1734fdb04a64d278d8fcad0cc3492435ac04306813396bef9688",
+    "scripts/sync-agent-validation.py": "ea7d7f703f4a6df4206c153e5c97d29fe00852740941ce31f5a9d018881ea542",
+    "scripts/install-agent-validation.py": "82ee06d18d6eb1c57d785d32f23cf6f6f32825e362e46f23e504e81b3b98b35b",
+    "scripts/tests/test_agent_check.py": "6b4a6b3c97a65629aca32ca8b368041c2093e15db5ff47339041fcc8e67b1403",
+    "docs/agent-validation.md": "22e2b3f1ae4db2c21c4efe4be3bc8dc7d7a2a71848aac9ac0d71ded3e799f97b",
+    ".claude/skills/agent-validation/SKILL.md": "da651e3ba6671d6e4cb1909d05bcae244244c1ddba8fc9fe61780c89ea82891f"
+  },
+  "recipes": "repository-owned"
+}

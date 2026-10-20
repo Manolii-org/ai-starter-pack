@@ -57,6 +57,8 @@ def main(argv=None) -> int:
                       "recipes": "repository-owned"}
         outputs[safe(root, ".ai/agent-validation-source.json")] = (json.dumps(provenance, indent=2) + "\n").encode()
         spec = importlib.util.spec_from_file_location("sync_agent_validation", SOURCE / "scripts/sync-agent-validation.py")
+        if spec is None or spec.loader is None:
+            raise ValueError("cannot load the canonical instruction generator")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         # Preflight ALL managed instruction surfaces before the first write.
