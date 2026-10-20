@@ -2,33 +2,135 @@
 # Stop hook — outputs session-ending reminder checklist.
 # Plain text stdout becomes additionalContext for Claude.
 
-# Opt-in: run reflection script automatically on session end.
-# Set CLAUDE_AUTO_REFLECT=1 in your shell environment to enable.
-# Default is OFF — runs fast (no API call) but writes staged files that
-# persist until /reflect is run to process them.
-if [ "${CLAUDE_AUTO_REFLECT:-0}" = "1" ]; then
-  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  python3 "${SCRIPT_DIR}/reflect-on-failures.py" > /dev/null 2>&1 || true
-fi
-
-# ── Session cost logger ───────────────────────────────────────────────────────
-# Parses the active session JSONL for token usage, estimates cost, and appends
-# one record to .ai/metrics/session-costs.jsonl. Silent on missing files.
+# ── Stop payload ─────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Extract session_id from the Stop hook JSON payload on stdin (consumed once here).
+# Consume stdin once. The sentinel preserves trailing newlines in string fields;
+# arrays below preserve each decoded argument without word splitting or eval.
 _HOOK_INPUT=$(cat)
-_SESSION_ID=$(printf '%s' "$_HOOK_INPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('session_id',''))" 2>/dev/null || true)
-python3 "${SCRIPT_DIR}/session-cost-logger.py" ${_SESSION_ID:+--session "$_SESSION_ID"} 2>/dev/null || true
-if [ -f "${SCRIPT_DIR}/rotate-jsonl-receipt.py" ]; then
-  if command -v timeout >/dev/null 2>&1; then
-    timeout 1 python3 "${SCRIPT_DIR}/rotate-jsonl-receipt.py" >/dev/null 2>&1 || true
-  else
-    perl -e 'alarm 1; exec @ARGV' python3 "${SCRIPT_DIR}/rotate-jsonl-receipt.py" >/dev/null 2>&1 || true
-  fi
-fi
-_SESSION_ID_FOR_RETRO="${_SESSION_ID:-}"
-unset _HOOK_INPUT _SESSION_ID
+_read_hook_string() {
+    printf '%s' "$_HOOK_INPUT" | python3 -c '
+import json, sys
+value = json.load(sys.stdin).get(sys.argv[1], "")
+if isinstance(value, str) and "\0" not in value:
+    sys.stdout.write(value)
+' "$1" 2>/dev/null || true
+    printf '.'
+}
+_SESSION_ID=$(_read_hook_string session_id)
+_TRANSCRIPT_PATH=$(_read_hook_string transcript_path)
+_SESSION_ID_FOR_RETRO="${_SESSION_ID%.}"
+_TRANSCRIPT_PATH_FOR_RETRO="${_TRANSCRIPT_PATH%.}"
+unset _HOOK_INPUT _SESSION_ID _TRANSCRIPT_PATH
 
+# ── Session retrospective (local durable write; KL optional/background) ───────
+# Synchronous-with-timeout for the local JSONL write (--local-only). Inner 8s is
+# below the Stop-hook timeout (10s; settings.json.jinja + plugin hooks.json).
+# On timeout/non-zero: write failure marker and still exit 0. KL network leg is
+# backgrounded below when MCP_API_KEY and KL_ENTITY/RETROSPECTIVE_ENTITY are set.
+_run_session_retrospective() {
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local retro="${script_dir}/session-retrospective.py"
+    [ -f "$retro" ] || return 0
+
+    local sid="${_RETRO_SESSION_ID:-}"
+    # Capture session_id once if not already set (stdin may already be consumed).
+    if [ -z "$sid" ] && [ -n "${_SESSION_ID_FOR_RETRO:-}" ]; then
+        sid="$_SESSION_ID_FOR_RETRO"
+    fi
+
+    local tpath="${_TRANSCRIPT_PATH_FOR_RETRO:-}"
+    local args=(--mode stop --local-only)
+    [ -z "$sid" ] || args+=(--session-id "$sid")
+    [ -z "$tpath" ] || args+=(--transcript "$tpath")
+    local rc=0
+    # LOCAL durable write only (sync-with-timeout). Inner 8s < outer Stop 10s.
+    # --local-only guarantees we do not burn the budget on KL HTTP.
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 8s python3 "$retro" "${args[@]}" \
+            >/dev/null 2>&1 || rc=$?
+    else
+        # Keep a parent alive to deliver the collector's rollback signal.
+        # An alarm inherited across exec sends SIGALRM, which skips rollback.
+        perl -e '
+            use Errno qw(EINTR);
+            use POSIX qw(:signal_h :sys_wait_h);
+            my $old = POSIX::SigSet->new;
+            sigprocmask(SIG_BLOCK, POSIX::SigSet->new(SIGALRM, SIGTERM, SIGINT), $old)
+                or exit 125;
+            my $pid = fork();
+            defined $pid or exit 125;
+            if ($pid == 0) {
+                $SIG{ALRM} = $SIG{TERM} = $SIG{INT} = "DEFAULT";
+                sigprocmask(SIG_SETMASK, $old) or exit 125;
+                exec @ARGV;
+                exit 127;
+            }
+            my ($reaped, $status, $timed_out, $cancelled) = (0, 0, 0, 0);
+            my $signal_child = sub {
+                local ($!, $?);
+                return 0 if $reaped;
+                my $done = waitpid($pid, WNOHANG);
+                if ($done == $pid) { $status = $?; $reaped = 1; return 0; }
+                return 0 if $done < 0;
+                return kill $_[0], $pid;
+            };
+            $SIG{ALRM} = sub {
+                if ($timed_out || $cancelled) { $signal_child->("KILL"); }
+                elsif ($signal_child->("TERM")) { $timed_out = 1; alarm 1; }
+            };
+            for my $sig ("TERM", "INT") {
+                my $name = $sig;
+                $SIG{$name} = sub {
+                    $cancelled = $name eq "TERM" ? 143 : 130;
+                    # The collector rolls back on TERM, including INT cancellation.
+                    alarm 1 if $signal_child->("TERM");
+                };
+            }
+            alarm 8;
+            sigprocmask(SIG_SETMASK, $old) or exit 125;
+            while (!$reaped) {
+                my $done = waitpid($pid, 0);
+                if ($done == $pid) { $status = $?; $reaped = 1; last; }
+                next if $done < 0 && $! == EINTR;
+                last;
+            }
+            alarm 0;
+            exit 124 if $timed_out;
+            exit $cancelled if $cancelled;
+            exit 125 unless $reaped;
+            exit(($status & 127) ? 128 + ($status & 127) : $status >> 8);
+        ' python3 "$retro" "${args[@]}" \
+            >/dev/null 2>&1 || rc=$?
+    fi
+
+    if [ "$rc" -ne 0 ]; then
+        mkdir -p .ai/memory/retrospectives
+        printf '{"timestamp":"%s","exit_code":%s,"event":"session-retrospective-capture-failed"}\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$rc" \
+            > .ai/memory/retrospectives/.last-capture-failed
+        echo "[session-stop] retrospective capture failed (rc=$rc); marker written" >&2
+    else
+        rm -f .ai/memory/retrospectives/.last-capture-failed 2>/dev/null || true
+    fi
+
+    # Drain only after the local step exits cleanly. Failed capture keeps its
+    # marker and pending records for a later retry. An unchanged-transcript
+    # rc=0 no-op may retry an older pending record without claiming fresh data.
+    if [ "$rc" -eq 0 ] && [ -n "${MCP_API_KEY:-}" ] \
+        && { [ -n "${KL_ENTITY:-}" ] || [ -n "${RETROSPECTIVE_ENTITY:-}" ]; }; then
+        local kl_args=(--mode kl-only)
+        [ -z "$sid" ] || kl_args+=(--session-id "$sid")
+        ( python3 "$retro" "${kl_args[@]}" ) </dev/null >/dev/null 2>&1 &
+        disown $! 2>/dev/null || true
+    fi
+    return 0
+}
+# Preserve the session id parsed from the Stop payload; else use the caller fallback.
+_RETRO_SESSION_ID="${_SESSION_ID_FOR_RETRO:-${_RETRO_SESSION_ID:-}}"
+_run_session_retrospective
+
+# Emit primary hook context before optional work can consume the host deadline.
 cat <<'EOF'
 Session ending checklist:
 - Run /extract-insights if decisions were made
@@ -37,6 +139,31 @@ Session ending checklist:
 - Check if .ai/memory/ changes should be committed
 - Check .ai/reflections/ for any pending-review reflection proposals (or run /reflect)
 EOF
+
+# Local capture has first use of the host's 10-second budget. Optional receipt
+# retention, reflection and doctor work may be interrupted afterward without
+# starving the durable collector's own bounded attempt.
+if [ -f "${SCRIPT_DIR}/rotate-jsonl-receipt.py" ]; then
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 1 python3 "${SCRIPT_DIR}/rotate-jsonl-receipt.py" >/dev/null 2>&1 || true
+  else
+    perl -e 'alarm 1; exec @ARGV' python3 "${SCRIPT_DIR}/rotate-jsonl-receipt.py" >/dev/null 2>&1 || true
+  fi
+fi
+
+# Redirect the entire background group: redirecting only Python leaves its
+# waiting shell holding Stop's output pipes. Host termination remains best effort.
+_cost_args=()
+[ -z "$_SESSION_ID_FOR_RETRO" ] || _cost_args+=(--session "$_SESSION_ID_FOR_RETRO")
+( python3 "${SCRIPT_DIR}/session-cost-logger.py" "${_cost_args[@]}" || true ) </dev/null >/dev/null 2>&1 &
+disown $! 2>/dev/null || true
+unset _RETRO_SESSION_ID _SESSION_ID_FOR_RETRO _TRANSCRIPT_PATH_FOR_RETRO _cost_args
+
+# Opt-in reflection still writes staged proposals for /reflect, after capture.
+if [ "${CLAUDE_AUTO_REFLECT:-0}" = "1" ]; then
+  python3 "${SCRIPT_DIR}/reflect-on-failures.py" >/dev/null 2>&1 || true
+fi
+
 
 # ── Branch fingerprint ───────────────────────────────────────────────────────
 # One-line visibility of what this branch has done relative to main: files
@@ -77,7 +204,7 @@ _branch_fingerprint
 # surfaces only warn-or-higher findings. Signals covered: edit-thrashing,
 # error-loop, repeated-instructions, correction-heavy, rapid-corrections.
 # Silent on clean sessions. Synchronous because doctor runs in <0.2s; capped
-# at 2s to leave headroom for retrospective within the Stop-hook timeout of 10s —
+# at 2s after the primary capture attempt; the host may interrupt optional work —
 # backgrounding with disown would lose stdout once the parent hook exits.
 _doctor_silent() {
     local script_dir
@@ -105,57 +232,6 @@ PYEOF
     unset _DOCTOR_SCRIPT
 }
 _doctor_silent
-
-# ── Session retrospective (local durable write; KL optional/background) ───────
-# Synchronous-with-timeout for the local JSONL write (--local-only). Inner 8s is
-# below the Stop-hook timeout (10s; settings.json.jinja + plugin hooks.json).
-# On timeout/non-zero: write failure marker and still exit 0. KL network leg is
-# backgrounded below when MCP_API_KEY and KL_ENTITY/RETROSPECTIVE_ENTITY are set.
-_run_session_retrospective() {
-    local script_dir
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    local retro="${script_dir}/session-retrospective.py"
-    [ -f "$retro" ] || return 0
-
-    local sid="${_RETRO_SESSION_ID:-}"
-    # Capture session_id once if not already set (stdin may already be consumed).
-    if [ -z "$sid" ] && [ -n "${_SESSION_ID_FOR_RETRO:-}" ]; then
-        sid="$_SESSION_ID_FOR_RETRO"
-    fi
-
-    local rc=0
-    # LOCAL durable write only (sync-with-timeout). Inner 8s < outer Stop 10s.
-    # --local-only guarantees we do not burn the budget on KL HTTP.
-    if command -v timeout >/dev/null 2>&1; then
-        timeout 8s python3 "$retro" --mode stop --local-only ${sid:+--session-id "$sid"} \
-            >/dev/null 2>&1 || rc=$?
-    else
-        perl -e 'alarm 8; exec @ARGV' python3 "$retro" --mode stop --local-only ${sid:+--session-id "$sid"} \
-            >/dev/null 2>&1 || rc=$?
-    fi
-
-    if [ "$rc" -ne 0 ]; then
-        mkdir -p .ai/memory/retrospectives
-        printf '{"timestamp":"%s","exit_code":%s,"event":"session-retrospective-capture-failed"}\n' \
-            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$rc" \
-            > .ai/memory/retrospectives/.last-capture-failed
-        echo "[session-stop] retrospective capture failed (rc=$rc); marker written" >&2
-    else
-        rm -f .ai/memory/retrospectives/.last-capture-failed 2>/dev/null || true
-    fi
-
-    # KL network leg only — backgrounded; never blocks Stop. Skipped if no creds.
-    # --kl-only flushes the just-written local record without a second JSONL append.
-    if [ -n "${MCP_API_KEY:-}" ] && { [ -n "${KL_ENTITY:-}" ] || [ -n "${RETROSPECTIVE_ENTITY:-}" ]; }; then
-        ( python3 "$retro" --mode kl-only ${sid:+--session-id "$sid"} >/dev/null 2>&1 ) &
-        disown $! 2>/dev/null || true
-    fi
-    return 0
-}
-# Preserve session id from cost-logger block if still in scope; else empty.
-_RETRO_SESSION_ID="${_SESSION_ID_FOR_RETRO:-${_RETRO_SESSION_ID:-}}"
-_run_session_retrospective
-unset _RETRO_SESSION_ID _SESSION_ID_FOR_RETRO
 
 # ── Intent-drift check ───────────────────────────────────────────────────────
 # Compares the session diff against the original user prompt (if available).

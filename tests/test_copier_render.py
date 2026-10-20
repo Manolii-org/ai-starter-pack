@@ -266,13 +266,13 @@ def test_cost_profile_lean_omits_measured_waste_callers(default_render):
     ("flags", "expected"),
     [
         ({}, {"Hooks": 5, "Commands": 51, "Skills": 35, "Agents": 27,
-              "Scripts": 51, "Husky": 3, "CI": 35, "Docs": 27}),
+              "Scripts": 51, "Husky": 3, "CI": 35, "Docs": 28}),
         ({flag: "true" for flag in FEATURE_FLAGS},
          {"Hooks": 5, "Commands": 54, "Skills": 39, "Agents": 28,
-              "Scripts": 51, "Husky": 3, "CI": 35, "Docs": 29}),
+              "Scripts": 51, "Husky": 3, "CI": 35, "Docs": 30}),
         ({"cost_profile": "lean"},
          {"Hooks": 5, "Commands": 51, "Skills": 35, "Agents": 27,
-              "Scripts": 51, "Husky": 3, "CI": 34, "Docs": 27}),
+              "Scripts": 51, "Husky": 3, "CI": 34, "Docs": 28}),
     ],
 )
 def test_rendered_readme_counts_match_rendered_tree(flags, expected):
