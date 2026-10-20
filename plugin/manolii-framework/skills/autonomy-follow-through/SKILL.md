@@ -1,6 +1,6 @@
 ---
 name: autonomy-follow-through
-version: 1.1.1
+version: 1.1.3
 description: "Shared termination + escalation loop for routine-native autonomy and /watch-pr. Stops on done/blocked_on_human/blocked_on_infra/superseded/gave_up; merges when safe."
 type: skill
 model: sonnet
@@ -61,6 +61,34 @@ authorized source/behavior verification and cleanup before declaring completion
 and retiring its monitor. Keep each repository's entity, provider, data and
 deployment boundaries; a shared policy is not authorization to cross them.
 
+## Ownership after a push or status reply
+
+A push, migration rename, new head SHA, or request to "reply with the new head
+SHA" is a progress update within an ongoing delivery task. Send the requested
+update and continue the existing review, repair, merge and verification loop.
+Only an explicit instruction to stop, hand off, or limit the task to
+implementation/publication narrows that scope.
+
+Keep separate commitments for the repair, merge and requested post-merge work.
+Completing the repair must not complete the merge commitment or clear the
+parent checkpoint. A changed head invalidates old review/check evidence; refresh
+the current head and continue under the existing authorization and repair budget.
+
+Retain one continuation owner. Before yielding an unfinished task, record its
+repository/PR, full head SHA, remaining commitments, next action, precise blocker
+if any, and a verified wake or accepted durable handoff receipt. A SHA, local
+checkpoint or proposed owner is not an accepted handoff. Without a working
+continuation route, report `blocked_on_infra`; keep the task unfinished and
+complete other authorized work. Production approval holds only production.
+
+## Examples
+
+- Valid: "Rename the migration and reply with the new head SHA." During an
+  existing delivery task, push the repair, report the SHA, then verify the new
+  head, handle review and follow through to merge and requested acceptance.
+- Invalid: mark the task done after printing the SHA while its PR remains open.
+  An explicit "push only; stop before merge" instead ends at that stated boundary.
+
 ## Inputs
 
 - **PR number** (required) — GitHub PR for autonomy output
@@ -96,17 +124,19 @@ that state's incident/escalation actions below; report monitoring as unavailable
 with the pending-work evidence. Resume active work on a substantive new event
 or decisive evidence under the existing retry rules.
 
-Before the first round, dispatch one persistent opus-pinned named `infra` agent
-with `model=` omitted to own the bounded authenticated read loop. Reuse that
-same agent for every wake; do not create an N-call credential-bearing fan-out.
-The deterministic broker is preferred when it covers the operation.
+Use the owning repository's runtime dispatch policy for the authenticated read
+loop. Where that policy uses a persistent named `infra` agent, reuse it with the
+required model/plane binding; do not create one per wake. Where the runtime uses
+a deterministic broker or a batched main-thread read, use that existing route.
+An unavailable agent type is not a reason to add a supervisor or stop an
+otherwise authorised supported route. Preserve secret-handling and sensitivity
+boundaries; a model alias is not proof of its actual provider.
 
 Each round:
-1. Ask the persistent `infra` agent to fetch PR metadata + CI status + review
-   state + issue threads + the complete current label array in one credential-
-   bearing batch. The skill receives only its sanitised receipt; it never
-   carries `GH_TOKEN`, auth headers, or raw authenticated payloads through the
-   Sonnet execution path.
+1. Fetch PR metadata + CI status + review state + issue threads + the complete
+   current label array through that existing authorised route in one bounded
+   batch. Keep credentials and raw authenticated payloads out of delegated
+   model context; return only the permitted sanitised evidence.
 2. Run `check-amber-labels` against that complete label array. A Red result
    first disables any auto-merge request armed by an earlier wake, then vetoes
    all mutation and terminates `blocked_on_human`.
@@ -180,10 +210,24 @@ Merge only when ALL true:
 - Review threads resolved (no open conversations)
 - No current-head review has state `CHANGES_REQUESTED`. A resolved conversation
   does not dismiss or override a formal blocking review.
-- The automated gate has a qualifying, non-blocking semantic review tied to the
-  current head SHA. A mere unclassified comment is not a qualifying signal.
-- Not guarded path (verify `.ai/guards.json`)
-- Policy kill switches enabled (verify the `autonomy.follow_through.enabled` policy flag)
+- The automated gate verifies one of the qualifying semantic review legs above;
+  this is the same review requirement, not an additional reviewer or approval.
+- Guarded work meets the owning repository's authority and enforcement rules.
+  Reuse existing task authorization and its documented guard/audit mechanism;
+  preserve explicit restrictions and blocking guard decisions. A filename match
+  alone does not establish a new human decision.
+- Verify the controls actually consumed by the selected executor and merge
+  controller, using the owning repository's documented configuration and
+  defaults. For a controller that consumes `AUTO_MERGE_ENABLED`, verify that
+  control; do not add a separate `autonomy.follow_through.enabled` requirement
+  merely because this shared skill previously named it. Executor switches
+  apply only to their actual consumers. An absent value means enabled only
+  where the consuming implementation explicitly defines that default.
+  Unreadable control state is unavailable, not disabled or missing user consent.
+  Hold the affected mutation unless the existing trusted controller has a
+  verified applicable job-level decision and explicitly supports that fallback.
+  Never invent a flag, broaden credentials, spoof a hosted context or bypass
+  a denied permission to satisfy this check.
 - Immediately before enabling auto-merge or merging, refresh the complete label
   array and rerun `check-amber-labels`. A Red result disables any armed
   auto-merge request and terminates `blocked_on_human` without further mutation.

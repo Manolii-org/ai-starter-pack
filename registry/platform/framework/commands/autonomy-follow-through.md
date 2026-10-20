@@ -1,6 +1,6 @@
 ---
 name: autonomy-follow-through
-version: 1.0.3
+version: 1.0.4
 description: "Invoke autonomy follow-through skill — termination + escalation loop for routine autonomy and /watch-pr."
 type: command
 requires_mcp: []
@@ -31,12 +31,12 @@ Invoke the shared follow-through loop for autonomous PR work.
 Executes `.claude/skills/autonomy-follow-through/SKILL.md`:
 
 1. Runs pre-process QA (assumptions, errors, opportunities, continuity)
-2. Uses one persistent opus-pinned `infra` agent (`model=` omitted) for the
-   bounded credential-bearing read loop; consumes only sanitised receipts
+2. Uses the owning runtime's supported bounded read route under the skill's
+   model/plane and credential rules
 3. Detects terminal conditions (done, blocked_on_human, blocked_on_infra, superseded, gave_up)
 4. Escalates with evidence JSON in PR comment
 5. Merges when safe (named required checks green on the current SHA, qualifying
-   current-head review present, threads resolved, not guarded); otherwise retains
+   current-head review present, threads resolved, guard/authority rules met); otherwise retains
    the actual pending, infrastructure or specific human-decision state.
    Leftover-Act **trusted-packet squash** is
    `docs/runbooks/daily-leftover-act.md` only — `/watch-pr` never inherits it.
