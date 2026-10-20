@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Install/update the bounded validation capability from a reviewed pack checkout.
 
-This performs no Git/network operations and never updates settings or secrets.
+This reads the local branch to reject protected branches, performs no Git
+mutations or network operations, and never updates settings or secrets.
 Repository owners supply recipes once; later updates preserve those recipes.
 """
 from __future__ import annotations
@@ -62,14 +63,19 @@ def main(argv=None) -> int:
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         # Preflight ALL managed instruction surfaces before the first write.
-        for path, text in module.outputs(root, (SOURCE / "docs/agent-validation.md").read_text()).items():
+        for path, text in module.outputs(root, (SOURCE / "docs/agent-validation.md").read_text(encoding="utf-8")).items():
             outputs[path] = text.encode()
         stale = [p for p, data in outputs.items() if not p.is_file() or p.read_bytes() != data]
         if args.check or args.dry_run:
             for path in stale:
                 print(f"{'STALE' if args.check else 'UPDATE'} {path.relative_to(root)}")
             return int(args.check and bool(stale))
-        branch = subprocess.check_output(["git", "branch", "--show-current"], cwd=root, text=True).strip()
+        runner_spec = importlib.util.spec_from_file_location("agent_check", SOURCE / "scripts/agent-check.py")
+        if runner_spec is None or runner_spec.loader is None:
+            raise ValueError("cannot load the canonical Git context helper")
+        runner = importlib.util.module_from_spec(runner_spec)
+        runner_spec.loader.exec_module(runner)
+        branch = runner.git(root, "branch", "--show-current").decode("utf-8").strip()
         if not branch or branch in {"main", "master", "staging", "prod", "develop", "work"}:
             raise ValueError("install on an isolated task branch")
         # Validate every destination before writing; keep other local surfaces

@@ -23,6 +23,13 @@ def load(name):
     return module
 
 
+def ascii_environment():
+    return load("agent-check").git_environment({
+        **os.environ, "LC_ALL": "C", "LANG": "C",
+        "PYTHONUTF8": "0", "PYTHONCOERCECLOCALE": "0",
+    })
+
+
 class AgentCheckTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -67,6 +74,45 @@ class AgentCheckTests(unittest.TestCase):
 
     def change_source(self):
         (self.root / "src/value.py").write_text("value = 1\n# changed\n")
+
+    def test_utf8_repository_and_receipts_ignore_default_locale(self):
+        self.config["note"] = "Café validation"
+        (self.root / "workflow.yml").write_text("# Café validation\n", encoding="utf-8")
+        self.config["checks"][0]["ci_sources"] = [{"path": "workflow.yml", "contains": "Café validation"}]
+        setup = ("from pathlib import Path; p=Path('node_modules'); p.mkdir(exist_ok=True); "
+                 "c=p/'installs'; c.write_text(c.read_text()+'1' if c.exists() else '1')")
+        self.config["environments"] = [{"id": "dependencies", "ready_paths": ["node_modules"],
+                                        "commands": [[sys.executable, "-c", setup]]}]
+        self.config["checks"][0]["environment"] = "dependencies"
+        (self.root / "config/agent-checks.json").write_text(json.dumps(self.config, ensure_ascii=False), encoding="utf-8")
+        env = ascii_environment()
+        self.run_check("--provision", env=env)
+        state = self.root / ".ai/agent-checks"
+        for path in [*state.glob("environments/*.json"), *state.glob("cache/*.json")]:
+            value = json.loads(path.read_text(encoding="utf-8"))
+            value["note"] = "Café metadata"
+            path.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+        self.run_check("--provision", env=env)
+        self.assertTrue(self.receipt()["cached"])
+        self.assertEqual((self.root / "node_modules/installs").read_text(), "1")
+
+    def test_invalid_utf8_environment_receipt_requires_fresh_setup(self):
+        setup = ("from pathlib import Path; p=Path('node_modules'); p.mkdir(exist_ok=True); "
+                 "c=p/'installs'; c.write_text(c.read_text()+'1' if c.exists() else '1')")
+        self.config["environments"] = [{"id": "dependencies", "ready_paths": ["node_modules"],
+                                        "commands": [[sys.executable, "-c", setup]]}]
+        self.config["checks"][0]["environment"] = "dependencies"
+        self.save_config()
+        env = ascii_environment()
+        self.run_check("--provision", env=env)
+        receipt = next((self.root / ".ai/agent-checks/environments").glob("*.json"))
+        receipt.write_bytes(b"\xff")
+        self.run_check(expected=1, env=env)
+        self.assertEqual(self.receipt()["outcome"], "failed")
+        self.assertEqual((self.root / "node_modules/installs").read_text(), "1")
+        self.run_check("--provision", env=env)
+        self.assertEqual((self.root / "node_modules/installs").read_text(), "11")
+        self.assertEqual(json.loads(receipt.read_text())["result"]["status"], "passed")
 
     def test_python_check_does_not_create_untracked_bytecode(self):
         self.config["checks"][0]["commands"] = [[sys.executable, "-c", "import src.value"]]
@@ -403,6 +449,75 @@ class AgentCheckTests(unittest.TestCase):
 
 
 class SurfaceTests(unittest.TestCase):
+    def test_installer_uses_target_branch_under_foreign_git_context(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            root, foreign = base / "target", base / "foreign"
+            (root / "config").mkdir(parents=True)
+            foreign.mkdir()
+            recipe = json.dumps({"schema_version": 1, "base": "origin/main", "checks": []})
+            (root / "config/agent-checks.json").write_text(recipe)
+            (root / "AGENTS.md").write_text("Local owner rules\n")
+            clean_env = load("agent-check").git_environment()
+            for repo, branch in ((root, "main"), (foreign, "codex/foreign-task")):
+                for args in (("init", "-q"), ("checkout", "-qb", branch)):
+                    subprocess.run(["git", *args], cwd=repo, env=clean_env, check=True, capture_output=True)
+            env = {**clean_env, "GIT_DIR": str(foreign / ".git"), "GIT_WORK_TREE": str(foreign),
+                   "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "fixture.transport", "GIT_CONFIG_VALUE_0": "preserved"}
+            command = [sys.executable, str(SCRIPTS / "install-agent-validation.py"), "--repo-root", str(root)]
+            result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertFalse((root / "scripts").exists())
+            self.assertFalse((root / ".ai/agent-validation-source.json").exists())
+            self.assertEqual((root / "AGENTS.md").read_text(), "Local owner rules\n")
+            self.assertEqual((root / "config/agent-checks.json").read_text(), recipe)
+            for repo, branch in ((root, "codex/target-task"), (foreign, "main")):
+                subprocess.run(["git", "checkout", "-qb", branch], cwd=repo, env=clean_env,
+                               check=True, capture_output=True)
+            result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue((root / "scripts/agent-check.py").is_file())
+            self.assertIn("Local owner rules", (root / "AGENTS.md").read_text())
+
+    def test_utf8_adoption_and_surfaces_preserve_owner_prose_in_ascii_locale(self):
+        installer = load("install-agent-validation")
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            pack, root = base / "pack", base / "repo"
+            for rel in installer.FILES:
+                original = SCRIPTS.parent / rel
+                if not original.is_file():
+                    original = SCRIPTS.parent / rel.removeprefix(".claude/")
+                destination = pack / rel
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(original, destination)
+            policy = "# Café validation\n\nExecute the local check.\n"
+            (pack / "docs/agent-validation.md").write_text(policy, encoding="utf-8")
+            (root / "config").mkdir(parents=True)
+            (root / "config/agent-checks.json").write_text(json.dumps({"schema_version": 1, "base": "origin/main", "checks": []}))
+            owner = "---\ntitle: Café owner\n---\n\nLocal résumé rules.\n"
+            (root / "AGENTS.md").write_text(owner, encoding="utf-8")
+            (root / ".gitignore").write_text("# Café local ignores\n", encoding="utf-8")
+            env = ascii_environment()
+            for args in (("init", "-q"), ("checkout", "-qb", "codex/utf8-fixture")):
+                subprocess.run(["git", *args], cwd=root, env=env, check=True, capture_output=True)
+            def run(script, *args):
+                result = subprocess.run([sys.executable, str(script), "--repo-root", str(root), *args],
+                                        env=env, text=True, capture_output=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            run(pack / "scripts/install-agent-validation.py")
+            run(pack / "scripts/install-agent-validation.py", "--check")
+            self.assertIn("Local résumé rules.", (root / "AGENTS.md").read_text(encoding="utf-8"))
+            self.assertTrue((root / "AGENTS.md").read_text(encoding="utf-8").startswith("---\ntitle: Café owner\n---\n"))
+            self.assertTrue((root / ".gitignore").read_text(encoding="utf-8").startswith("# Café local ignores\n"))
+            new_policy = "# Updated café validation\n"
+            (root / "docs/agent-validation.md").write_text(new_policy, encoding="utf-8")
+            run(root / "scripts/sync-agent-validation.py")
+            run(root / "scripts/sync-agent-validation.py", "--check")
+            for rel in ("AGENTS.md", ".claude/CLAUDE.md", ".cursor/rules/agent-validation.mdc"):
+                self.assertIn(new_policy.strip(), (root / rel).read_text(encoding="utf-8"))
+            self.assertIn("Local résumé rules.", (root / "AGENTS.md").read_text(encoding="utf-8"))
+
     def test_each_managed_input_selects_an_owning_check(self):
         installed = SCRIPTS.parent
         config_path = installed / "config/agent-checks.json"

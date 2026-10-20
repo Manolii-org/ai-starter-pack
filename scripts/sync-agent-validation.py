@@ -15,7 +15,7 @@ END = "<!-- agent-validation:end -->"
 
 
 def outputs(root: Path, policy: str | None = None) -> dict[Path, str]:
-    policy = (policy if policy is not None else (root / "docs/agent-validation.md").read_text()).strip()
+    policy = (policy if policy is not None else (root / "docs/agent-validation.md").read_text(encoding="utf-8")).strip()
     block = f"{BEGIN}\n{policy}\n{END}"
     claude = Path("CLAUDE.md") if (root / "CLAUDE.md").is_file() else Path(".claude/CLAUDE.md")
     paths = [Path("AGENTS.md"), claude, Path(".cursor/rules/agent-validation.mdc")]
@@ -24,7 +24,7 @@ def outputs(root: Path, policy: str | None = None) -> dict[Path, str]:
         path = root / rel
         if path.resolve() != path or path.is_symlink():
             raise ValueError(f"linked instruction surface: {rel}")
-        old = path.read_text() if path.is_file() else ""
+        old = path.read_text(encoding="utf-8") if path.is_file() else ""
         if old.count(BEGIN) != old.count(END) or old.count(BEGIN) > 1:
             raise ValueError(f"incomplete/duplicate managed block: {rel}")
         if BEGIN in old:
@@ -49,7 +49,7 @@ def outputs(root: Path, policy: str | None = None) -> dict[Path, str]:
     ignore = root / ".gitignore"
     if ignore.is_symlink() or ignore.resolve() != ignore:
         raise ValueError("linked .gitignore")
-    text = ignore.read_text() if ignore.is_file() else ""
+    text = ignore.read_text(encoding="utf-8") if ignore.is_file() else ""
     if ".ai/agent-checks/" not in text.splitlines():
         result[ignore] = text.rstrip() + "\n\n# Local agent validation receipts and dependency state\n.ai/agent-checks/\n"
     return result
@@ -64,14 +64,14 @@ def main(argv=None) -> int:
     root = args.repo_root.resolve()
     try:
         planned = outputs(root)  # validate the entire batch before writes
-        stale = [p for p, data in planned.items() if not p.is_file() or p.read_text() != data]
+        stale = [p for p, data in planned.items() if not p.is_file() or p.read_text(encoding="utf-8") != data]
         for path in stale:
             print(f"{'STALE' if args.check else 'UPDATE'} {path.relative_to(root)}")
         if args.check or args.dry_run:
             return int(args.check and bool(stale))
         for path in stale:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(planned[path])
+            path.write_text(planned[path], encoding="utf-8")
         return 0
     except (OSError, ValueError) as exc:
         print(f"AGENT-VALIDATION-BLOCKED: {exc}", file=sys.stderr)

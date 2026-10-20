@@ -89,7 +89,7 @@ def snapshot(root: Path) -> dict:
 
 
 def config_for(root: Path) -> dict:
-    config = json.loads(inside(root, "config/agent-checks.json").read_text())
+    config = json.loads(inside(root, "config/agent-checks.json").read_text(encoding="utf-8"))
     if config.get("schema_version") != 1 or not config.get("base"):
         raise ValueError("config/agent-checks.json requires schema_version=1 and base")
     identifiers = set()
@@ -112,7 +112,7 @@ def config_for(root: Path) -> dict:
         if check.get("environment") and check["environment"] not in environments:
             raise ValueError(f"unknown environment for {check['id']}")
         for source in check.get("ci_sources", []):
-            text = inside(root, source["path"]).read_text()
+            text = inside(root, source["path"]).read_text(encoding="utf-8")
             if source["contains"] not in text:
                 raise ValueError(f"{check['id']}: CI command changed in {source['path']}; reconcile the local recipe")
     return config
@@ -255,8 +255,8 @@ def main(argv=None) -> int:
             previous_environment = {}
             if env_receipt.is_file():
                 try:
-                    previous_environment = json.loads(env_receipt.read_text())
-                except json.JSONDecodeError:
+                    previous_environment = json.loads(env_receipt.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, UnicodeDecodeError):
                     print(f"AGENT-CHECK {environment['id']}: invalid environment receipt; frozen setup needs validation")
             if (isinstance(previous_environment, dict) and previous_environment.get("digest") == env_digest
                     and isinstance(previous_environment.get("result"), dict)
@@ -301,7 +301,7 @@ def main(argv=None) -> int:
             results.append({"id": "input-stability", "status": "failed",
                             "reason": "inputs changed during provisioning; inspect diff and rerun"})
         if all(r["status"] == "passed" for r in results) and cache.is_file() and not args.no_cache:
-            previous = json.loads(cache.read_text())
+            previous = json.loads(cache.read_text(encoding="utf-8"))
             if previous.get("digest") == candidate_digest and previous.get("outcome") == "passed":
                 previous = {**previous, "provider": args.provider, "cached": True}
                 write_json(state / "receipt.json", previous)
