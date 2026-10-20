@@ -43,8 +43,9 @@ Executes `.claude/skills/autonomy-follow-through/SKILL.md`:
 6. Enforces repair budgets and infrastructure retry limits; passive CI/review
    waits and duplicate informational events do not consume repair budgets
 7. Allows author-controlled readiness after complete initial scope, deterministic
-   and user verification, current-head required fast/secret checks and no HIGH
-   defect or input/security refusal; independent merge review remains required
+   and user verification, current-head required fast/secret checks and no
+   Critical/P0 or HIGH/P1 defect or input/security refusal; independent merge
+   review remains required
 8. Preserves authorization and actual review outcomes through repairs, keeps one
    real monitor and completes authorized parent-task verification after merge
 

@@ -1,6 +1,6 @@
 ---
 name: autonomy-follow-through
-version: 1.1.2
+version: 1.1.3
 description: "Shared termination + escalation loop for routine-native autonomy and /watch-pr. Stops on done/blocked_on_human/blocked_on_infra/superseded/gave_up; merges when safe."
 type: skill
 model: sonnet
@@ -36,8 +36,9 @@ Before PR follow-through, reconcile every session commitment as `DONE`,
 The author or authorized agent may mark a PR ready once its complete assigned
 initial scope and commitment ledger are satisfied, deterministic checks and
 user-facing verification pass, required fast checks and secret scanning pass on
-the current head, and no demonstrated HIGH defect or input/security refusal
-remains. Another person's approval is not a prerequisite to marking ready.
+the current head, and no demonstrated Critical/P0 or HIGH/P1 defect or
+input/security refusal remains. Another person's approval is not a prerequisite
+to marking ready.
 Review workflows may run after readiness. Existing independent current-head
 MERGE review, CHANGES_REQUESTED vetoes, guarded paths, kill switches, native
 protections and Merge-When-Safe rules below remain unchanged.
@@ -124,13 +125,14 @@ that state's incident/escalation actions below; report monitoring as unavailable
 with the pending-work evidence. Resume active work on a substantive new event
 or decisive evidence under the existing retry rules.
 
-Use the owning repository's runtime dispatch policy for the authenticated read
-loop. Where that policy uses a persistent named `infra` agent, reuse it with the
-required model/plane binding; do not create one per wake. Where the runtime uses
-a deterministic broker or a batched main-thread read, use that existing route.
-An unavailable agent type is not a reason to add a supervisor or stop an
-otherwise authorised supported route. Preserve secret-handling and sensitivity
-boundaries; a model alias is not proof of its actual provider.
+Use the owning repository's approved main-thread or process-local broker route
+for the authenticated read loop. Keep credentials and raw authenticated responses
+out of delegated model context; never send them through a model sub-agent,
+including a persistent named `infra` agent. Preserve required provider/plane
+verification: a model alias is not proof of its actual provider. Reuse an
+approved deterministic broker or batched main-thread read rather than creating
+one per wake. If no approved route preserves these boundaries, terminate
+`blocked_on_infra`; do not select an unverified fallback.
 
 Each round:
 1. Fetch PR metadata + CI status + review state + issue threads + the complete
