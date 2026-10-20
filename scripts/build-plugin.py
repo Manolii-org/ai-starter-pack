@@ -295,6 +295,10 @@ def assemble_hooks_and_scripts(rendered: Path, out: Path) -> dict:
     are copied verbatim — no per-file path rewriting in the artifact."""
     counts: dict[str, int] = {}
 
+    # Policy travels with the runner for plugin-only sessions too; check
+    # recipes remain repository-owned and are never silently installed.
+    (out / "docs").mkdir(exist_ok=True)
+    shutil.copy2(rendered / "docs/agent-validation.md", out / "docs/agent-validation.md")
     rsrc = rendered / "scripts"
     if rsrc.is_dir():
         # Pack-dev tests live under scripts/tests/ but must not ship in the
@@ -304,6 +308,10 @@ def assemble_hooks_and_scripts(rendered: Path, out: Path) -> dict:
             out / "scripts",
             ignore=shutil.ignore_patterns("tests", "__pycache__", "*.pyc"),
         )
+        # This small stdlib execution suite is part of the installed gate's
+        # contract, unlike pack-development tests excluded above.
+        (out / "scripts/tests").mkdir(exist_ok=True)
+        shutil.copy2(rsrc / "tests/test_agent_check.py", out / "scripts/tests/test_agent_check.py")
         counts["scripts"] = sum(1 for p in (out / "scripts").rglob("*") if p.is_file())
 
     # JSON Schemas travel with the artifact: the bundled validators resolve

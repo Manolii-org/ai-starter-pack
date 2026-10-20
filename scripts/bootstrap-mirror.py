@@ -152,7 +152,8 @@ permissions:
 
 jobs:
   registry-gate:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
+    timeout-minutes: 14
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -160,6 +161,12 @@ jobs:
           python-version: '3.12'
       - name: Install deps
         run: timeout 120 pip install pyyaml jsonschema
+      - name: Validate shared agent surfaces
+        run: |
+          if [ -f scripts/sync-agent-validation.py ]; then
+            python3 scripts/sync-agent-validation.py --check
+            python3 -m unittest discover -s scripts/tests -p test_agent_check.py -q
+          fi
       # Mirror mode in the lint verifies visibility itself via `gh api`
       # on every run — a mirror flipped public after seeding drops back
       # to the full pattern set and the boundary re-engages. The lookup
