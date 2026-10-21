@@ -20,6 +20,8 @@ Reuse requires matching execution inputs, including a private environment
 fingerprint. Keep ignored cache keys, receipts and dependency state local.
 Successful setup must create every declared readiness path. Preserve owner
 integration/protected branches and reconcile all existing managed surfaces.
+Tracked Git filter attributes block validation until a raw-input adapter exists;
+keep filter configuration intact and retain this incomplete result.
 
 For a plugin-only install, bundled code and policy live under
 `${CLAUDE_PLUGIN_ROOT}/scripts/` and `${CLAUDE_PLUGIN_ROOT}/docs/`.

@@ -59,6 +59,9 @@ def git_environment(environ: dict | None = None) -> dict:
 
 
 def git(root: Path, *args: str) -> bytes:
+    if args and args[0] == "diff":
+        # Evidence must describe bytes, independently of display-only drivers.
+        args = (args[0], "--no-ext-diff", "--no-textconv", "--no-color", *args[1:])
     result = subprocess.run(["git", *args], cwd=root, env=git_environment(), capture_output=True, check=True)
     return result.stdout
 
@@ -124,7 +127,24 @@ def inside(root: Path, value: str) -> Path:
     return path
 
 
+def require_unfiltered_tracked_inputs(root: Path) -> None:
+    """Git clean/smudge filters can conceal raw working-file changes."""
+    names = subprocess.run(["git", "ls-files", "-z"], cwd=root,
+                           env=git_environment(), capture_output=True, check=True).stdout
+    attributes = subprocess.run(["git", "check-attr", "--all", "-z", "--stdin"],
+                                input=names, cwd=root, env=git_environment(),
+                                capture_output=True, check=True).stdout.split(b"\0")
+    if attributes[-1:] == [b""]:
+        attributes.pop()
+    if len(attributes) % 3:
+        raise ValueError("cannot determine tracked Git filter attributes")
+    if any(attributes[i + 1] == b"filter" for i in range(0, len(attributes), 3)):
+        raise ValueError("Git filter attributes are unsupported for local validation; "
+                         "filtered working files need a raw-input validation adapter")
+
+
 def snapshot(root: Path) -> dict:
+    require_unfiltered_tracked_inputs(root)
     # Include staged AND unstaged edits, additions and deletions. Generated
     # ignored files are not evidence inputs; declare their source/config.
     untracked = {}
@@ -186,6 +206,7 @@ def matches(paths: list[str], patterns: list[str]) -> bool:
 
 
 def plan_for(root: Path, config: dict, base: str | None = None) -> dict:
+    require_unfiltered_tracked_inputs(root)
     ref = base or config["base"]
     base_sha = git(root, "merge-base", ref, "HEAD").decode().strip()
     changed: set[str] = set()

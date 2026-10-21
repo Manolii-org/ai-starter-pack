@@ -77,6 +77,83 @@ class AgentCheckTests(unittest.TestCase):
     def change_source(self):
         (self.root / "src/value.py").write_text("value = 1\n# changed\n")
 
+    def test_external_diff_cannot_hide_a_failing_edit_from_cached_validation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            driver = Path(temp) / "display-diff"
+            driver.write_text("#!/bin/sh\nprintf 'display only\\n'\n")
+            driver.chmod(0o755)
+            env = {**os.environ, "GIT_EXTERNAL_DIFF": str(driver)}
+            self.change_source()
+            first = self.run_check(env=env)
+            self.assertIn("AGENT-CHECK test:", first.stdout)
+            (self.root / "src/value.py").write_text("value = 0\n# changed\n")
+            self.run_check(expected=1, env=env)
+            self.assertFalse(self.receipt()["cached"])
+
+    def test_textconv_cannot_hide_a_failing_edit_from_cached_validation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            driver = Path(temp) / "textconv"
+            driver.write_text("#!/bin/sh\nprintf 'display only\\n'\n")
+            driver.chmod(0o755)
+            (self.root / ".gitattributes").write_text("src/value.py diff=display\n")
+            self.git("add", ".gitattributes")
+            self.git("commit", "-qm", "fixture attributes")
+            self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+            self.git("config", "diff.display.textconv", str(driver))
+            self.change_source()
+            first = self.run_check()
+            self.assertIn("AGENT-CHECK test:", first.stdout)
+            (self.root / "src/value.py").write_text("value = 0\n# changed\n")
+            self.run_check(expected=1)
+            self.assertFalse(self.receipt()["cached"])
+
+    def test_git_color_configuration_does_not_invalidate_a_valid_cache(self):
+        self.change_source()
+        self.run_check()
+        self.git("config", "color.ui", "always")
+        self.run_check()
+        self.assertTrue(self.receipt()["cached"])
+
+    def test_clean_filter_cannot_hide_a_failing_working_file(self):
+        driver = self.root / ".git/clean-source"
+        driver.write_text("#!" + sys.executable + "\nimport sys\nbody=sys.stdin.read()\n"
+                          "print('candidate' if '# changed' in body else 'base')\n")
+        driver.chmod(0o755)
+        (self.root / ".gitattributes").write_text("src/value.py filter=constant\n")
+        self.git("config", "filter.constant.clean", str(driver))
+        self.git("add", ".gitattributes", "src/value.py")
+        self.git("commit", "-qm", "fixture filter")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        self.change_source()
+        normalized = self.git("diff", "--binary", "HEAD")
+        (self.root / "src/value.py").write_text("value = 0\n# changed\n")
+        self.assertEqual(normalized, self.git("diff", "--binary", "HEAD"))
+        actual = subprocess.run(self.config["checks"][0]["commands"][0], cwd=self.root,
+                                capture_output=True)
+        self.assertNotEqual(actual.returncode, 0)
+        for args in ((), ("--no-cache",), ("--plan",)):
+            with self.subTest(args=args):
+                result = self.run_check(*args, expected=2)
+                self.assertIn("Git filter attributes are unsupported", result.stderr)
+                self.assertNotIn("AGENT-CHECK-CACHED", result.stdout)
+                self.assertFalse((self.root / ".ai/agent-checks/receipt.json").exists())
+
+    def test_enabling_local_filter_revokes_warm_validation_before_selection(self):
+        self.change_source()
+        self.run_check()
+        (self.root / ".git/info/attributes").write_text("src/value.py filter=local\n")
+        result = self.run_check(expected=2)
+        self.assertIn("Git filter attributes are unsupported", result.stderr)
+        self.assertNotIn("AGENT-CHECK test:", result.stdout)
+        self.assertFalse((self.root / ".ai/agent-checks/receipt.json").exists())
+
+    def test_filter_driver_names_cannot_masquerade_as_attribute_sentinels(self):
+        for value in ("unspecified", "unset", "set"):
+            with self.subTest(value=value):
+                (self.root / ".git/info/attributes").write_text(f"src/value.py filter={value}\n")
+                result = self.run_check(expected=2)
+                self.assertIn("Git filter attributes are unsupported", result.stderr)
+
     def test_concurrent_key_reader_waits_for_publisher_to_remove_temporary_link(self):
         runner = load("agent-check")
         published, release, waiting = threading.Event(), threading.Event(), threading.Event()
