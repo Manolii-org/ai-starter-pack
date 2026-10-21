@@ -10,10 +10,13 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
 import platform
+import secrets
+import stat
 import subprocess
 import sys
 import time
@@ -60,6 +63,51 @@ def git(root: Path, *args: str) -> bytes:
     return result.stdout
 
 
+def execution_environment(item: dict, inherited: dict | None = None) -> dict:
+    """Use the same effective environment for execution, probes and identity."""
+    return {**git_environment(inherited), "CI": "true", "PYTHONDONTWRITEBYTECODE": "1", **item.get("env", {})}
+
+
+def private_cache_key(root: Path) -> bytes:
+    """Create one ignored private key without exposing inherited secret values."""
+    path = inside(root, f"{STATE}/environment.key")
+    if subprocess.run(["git", "check-ignore", "-q", str(path.relative_to(root))],
+                      cwd=root, env=git_environment()).returncode:
+        raise ValueError(f"ignore {STATE}/environment.key before executing")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Link a complete private temporary file into place atomically. A competing
+    # invocation uses the existing key; an unsafe existing path is never replaced.
+    if not path.exists() and not path.is_symlink():
+        temporary = path.parent / f".environment-key-{os.getpid()}-{secrets.token_hex(8)}"
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(secrets.token_bytes(32))
+            try:
+                os.link(temporary, path, follow_symlinks=False)
+            except FileExistsError:
+                print("AGENT-CHECK: reusing concurrently created private cache key")
+        finally:
+            temporary.unlink(missing_ok=True)
+    if path.is_symlink():
+        raise ValueError("environment cache key must be a private regular file")
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    with os.fdopen(fd, "rb") as stream:
+        details = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(details.st_mode) or stat.S_IMODE(details.st_mode) != 0o600
+                or details.st_uid != os.getuid() or details.st_nlink != 1):
+            raise ValueError("environment cache key must be an owned private regular file with mode 0600")
+        key = stream.read(33)
+    if len(key) != 32:
+        raise ValueError("environment cache key is invalid")
+    return key
+
+
+def environment_fingerprint(key: bytes, environ: dict) -> str:
+    """Only an aggregate keyed digest may appear in local evidence."""
+    return hmac.new(key, encoded(environ), hashlib.sha256).hexdigest()
+
+
 def inside(root: Path, value: str) -> Path:
     path = root / value
     if Path(value).is_absolute() or not path.resolve().is_relative_to(root):
@@ -77,14 +125,20 @@ def snapshot(root: Path) -> dict:
         name = os.fsdecode(raw)
         path = root / name
         if path.is_symlink():
-            untracked[name] = sha(os.fsencode(os.readlink(path)))
+            untracked[name] = sha(b"symlink\0" + os.fsencode(os.readlink(path)))
         elif path.is_file():
-            untracked[name] = sha(path.read_bytes())
+            untracked[name] = sha(b"regular\0" + path.read_bytes())
+    # Git records link text, not mutable target contents. Keep normal check
+    # execution for linked candidates, but never reuse or save a cached PASS.
+    names = set(untracked)
+    names.update(os.fsdecode(p) for p in git(root, "ls-files", "-z").split(b"\0") if p)
+    symlinks = sorted(name for name in names if (root / name).is_symlink())
     return {
         "head": git(root, "rev-parse", "HEAD").decode().strip(),
         "tree": git(root, "rev-parse", "HEAD^{tree}").decode().strip(),
         "diff": sha(git(root, "diff", "--binary", "HEAD")),
         "untracked": untracked,
+        "symlinks": symlinks,
     }
 
 
@@ -151,7 +205,7 @@ def plan_for(root: Path, config: dict, base: str | None = None) -> dict:
             "review_paths": [p for p in paths if matches([p], config.get("review_paths", []))]}
 
 
-def versions(root: Path, plan: dict) -> dict:
+def versions(root: Path, plan: dict, inherited: dict | None = None) -> dict:
     # Corepack/pyenv and similar shims select versions from their working
     # directory. Probe each distinct execution context, never the caller's cwd.
     contexts = {("python", ".", "{}")}
@@ -166,7 +220,7 @@ def versions(root: Path, plan: dict) -> dict:
         key = name if cwd == "." and not declared_env else f"{name}@{cwd}"
         if declared_env:
             key += "#" + sha(env_json.encode())[:12]
-        env = {**git_environment(), "CI": "true", "PYTHONDONTWRITEBYTECODE": "1", **declared_env}
+        env = execution_environment({"env": declared_env}, inherited)
         try:
             proc = subprocess.run(TOOLS[name], cwd=inside(root, cwd), env=env,
                                   capture_output=True, text=True, timeout=15)
@@ -176,10 +230,10 @@ def versions(root: Path, plan: dict) -> dict:
     return result
 
 
-def execute(root: Path, item: dict) -> dict:
+def execute(root: Path, item: dict, inherited: dict | None = None) -> dict:
     start = time.monotonic()
     status, reason = "passed", "completed"
-    env = {**git_environment(), "CI": "true", "PYTHONDONTWRITEBYTECODE": "1", **item.get("env", {})}
+    env = execution_environment(item, inherited)
     for command in item["commands"]:
         print(f"AGENT-CHECK {item['id']}: {json.dumps(command)}", flush=True)
         try:
@@ -198,12 +252,17 @@ def execute(root: Path, item: dict) -> dict:
             "duration_ms": round((time.monotonic() - start) * 1000)}
 
 
-def environment_digest(root: Path, item: dict, tools: dict) -> str:
+def environment_digest(root: Path, item: dict, tools: dict, key: bytes, inherited: dict) -> str:
     inputs = {}
     for name in item.get("inputs", []):
         path = inside(root, name)
         inputs[name] = sha(path.read_bytes()) if path.is_file() else None
-    return sha(encoded({"recipe": item, "inputs": inputs, "tools": tools}))
+    return sha(encoded({"recipe": item, "inputs": inputs, "tools": tools,
+                        "execution_environment": environment_fingerprint(key, execution_environment(item, inherited))}))
+
+
+def missing_ready_paths(root: Path, item: dict) -> list[str]:
+    return [p for p in item.get("ready_paths", []) if not inside(root, p).exists()]
 
 
 def write_json(path: Path, value: dict) -> None:
@@ -223,6 +282,7 @@ def main(argv=None) -> int:
     parser.add_argument("--no-cache", action="store_true")
     args = parser.parse_args(argv)
     root = args.repo_root.resolve()
+    inherited = git_environment()
     receipt_path = None
     try:
         if not args.plan:
@@ -233,7 +293,7 @@ def main(argv=None) -> int:
             receipt_path.unlink(missing_ok=True)
         config = config_for(root)
         plan = plan_for(root, config, args.base)
-        tools = versions(root, plan)
+        tools = versions(root, plan, inherited)
         if args.plan:
             print(json.dumps({**plan, "tool_versions": tools}, indent=2))
             return 0
@@ -242,16 +302,18 @@ def main(argv=None) -> int:
         if subprocess.run(["git", "check-ignore", "-q", f"{STATE}/receipt.json"],
                           cwd=root, env=git_environment()).returncode:
             raise ValueError(f"ignore {STATE}/ in .gitignore before executing")
+        key = private_cache_key(root)
         before = snapshot(root)
+        cache_reusable = not before["symlinks"]
         results = []
         provisioned = []
-        results.append(execute(root, {"id": "diff-check", "commands": [["git", "diff", "--check", plan["base"]]]}))
+        results.append(execute(root, {"id": "diff-check", "commands": [["git", "diff", "--check", plan["base"]]]}, inherited))
         for environment in plan["environments"]:
-            env_digest = environment_digest(root, environment, tools)
+            env_digest = environment_digest(root, environment, tools, key, inherited)
             # One slot per environment prevents an earlier tool fingerprint
             # from resurrecting success after a failed reinstall changes tools.
             env_receipt = state / "environments" / f"environment-{sha(encoded(environment['id']))}.json"
-            ready = all(inside(root, p).exists() for p in environment.get("ready_paths", []))
+            ready = not missing_ready_paths(root, environment)
             previous_environment = {}
             if env_receipt.is_file():
                 try:
@@ -269,22 +331,41 @@ def main(argv=None) -> int:
             # An interrupted/failed reinstall must revoke the old success
             # before it can leave a partially populated dependency directory.
             env_receipt.unlink(missing_ok=True)
-            input_digest = environment_digest(root, environment, {})
-            result = execute(root, environment)
+            input_digest = environment_digest(root, environment, {}, key, inherited)
+            result = execute(root, environment, inherited)
+            missing = missing_ready_paths(root, environment)
+            if result["status"] == "passed" and missing:
+                result.update(status="failed", reason="declared ready paths missing: " + ",".join(missing))
             results.append(result)
             if result["status"] == "passed":
                 provisioned.append((environment, env_receipt, input_digest, result))
         # Provisioning may install tools. Missing tools must not be mistaken
         # for a source failure, or cached as a successful old fingerprint.
-        tools = versions(root, plan)
+        tools = versions(root, plan, inherited)
+        # A later setup may remove an earlier environment's readiness output.
+        # Recheck all selected environments before recording setup or candidate PASS.
+        for environment in plan["environments"]:
+            missing = missing_ready_paths(root, environment)
+            if missing:
+                matching = next((r for r in results if r["id"] == environment["id"]), None)
+                if matching is None:
+                    results.append({"id": environment["id"], "status": "failed",
+                                    "reason": "declared ready paths missing: " + ",".join(missing)})
+                elif matching["status"] == "passed":
+                    matching.update(status="failed", reason="declared ready paths missing: " + ",".join(missing))
+                (state / "environments" / f"environment-{sha(encoded(environment['id']))}.json").unlink(missing_ok=True)
         # A later environment may install a tool used by an earlier one. Bind
         # every new setup receipt to the final tool map and unchanged inputs.
         for environment, env_receipt, input_digest, result in provisioned:
-            if environment_digest(root, environment, {}) == input_digest:
-                env_digest = environment_digest(root, environment, tools)
+            if result["status"] == "passed" and environment_digest(root, environment, {}, key, inherited) == input_digest:
+                env_digest = environment_digest(root, environment, tools, key, inherited)
                 write_json(env_receipt, {"digest": env_digest, "result": result})
         identity = {"schema": SCHEMA, "source": sha(Path(__file__).read_bytes()),
-                    "config": config, "plan": plan, "tools": tools, "snapshot": before}
+                    "config": config, "plan": plan, "tools": tools, "snapshot": before,
+                    "execution_environment": environment_fingerprint(key, {
+                        "default": execution_environment({}, inherited),
+                        "checks": {item["id"]: execution_environment(item, inherited) for item in plan["checks"]},
+                        "environments": {item["id"]: execution_environment(item, inherited) for item in plan["environments"]}})}
         candidate_digest = sha(encoded(identity))
         cache = state / "cache" / f"{candidate_digest}.json"
         unavailable = [name for name, version in tools.items() if version == "unavailable"]
@@ -300,7 +381,7 @@ def main(argv=None) -> int:
         if snapshot(root) != before:
             results.append({"id": "input-stability", "status": "failed",
                             "reason": "inputs changed during provisioning; inspect diff and rerun"})
-        if all(r["status"] == "passed" for r in results) and cache.is_file() and not args.no_cache:
+        if cache_reusable and all(r["status"] == "passed" for r in results) and cache.is_file() and not args.no_cache:
             previous = json.loads(cache.read_text(encoding="utf-8"))
             if previous.get("digest") == candidate_digest and previous.get("outcome") == "passed":
                 previous = {**previous, "provider": args.provider, "cached": True}
@@ -308,17 +389,18 @@ def main(argv=None) -> int:
                 print(f"AGENT-CHECK-CACHED {candidate_digest[:12]}")
                 return 0
         if all(r["status"] == "passed" for r in results):
-            results.extend(execute(root, check) for check in plan["checks"])
+            results.extend(execute(root, check, inherited) for check in plan["checks"])
         # Formatters, generators or concurrent edits invalidate the result.
         if snapshot(root) != before and not any(r["id"] == "input-stability" for r in results):
             results.append({"id": "input-stability", "status": "failed", "reason": "inputs changed while checks ran; inspect diff and rerun"})
         outcome = "passed" if all(r["status"] == "passed" for r in results) else "failed"
         receipt = {"schema": SCHEMA, "digest": candidate_digest, "provider": args.provider, "cached": False,
+                   "cache_reusable": cache_reusable,
                    "created_at": time.time(), "outcome": outcome, "snapshot": before,
                    "base": plan["base"], "tool_versions": tools, "results": results,
                    "review_paths": plan["review_paths"], "merge_authority": False}
         write_json(state / "receipt.json", receipt)
-        if outcome == "passed":
+        if outcome == "passed" and cache_reusable:
             write_json(cache, receipt)
         print(f"AGENT-CHECK-{outcome.upper()} {candidate_digest[:12]}")
         return 0 if outcome == "passed" else 1

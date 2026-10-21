@@ -30,6 +30,38 @@ def safe(root: Path, rel: str) -> Path:
     return path
 
 
+def protected_branches(configs: list[dict], remotes: set[str], resolve=None) -> set[str]:
+    """Keep both current and proposed owner integration/release names guarded."""
+    protected = {"main", "master", "staging", "prod", "develop", "work"}
+    for config in configs:
+        base = config.get("base")
+        extra = config.get("protected_branches", [])
+        if (not isinstance(base, str) or not base or not isinstance(extra, list)
+                or any(not isinstance(name, str) or not name for name in extra)):
+            raise ValueError("owner base and protected_branches must contain branch names")
+        for original in [base, *extra]:
+            ref = resolve(original) if resolve else original
+            if ref.startswith("refs/heads/"):
+                protected.add(ref.removeprefix("refs/heads/"))
+            else:
+                # Preserve slash-containing local branch names. Strip a remote
+                # by longest configured prefix: remote names may contain '/'.
+                remote_ref = ref.removeprefix("refs/remotes/")
+                protected.add(remote_ref)
+                prefixes = sorted(remotes | {"origin", "upstream"}, key=len, reverse=True)
+                remote = next((name for name in prefixes if remote_ref.startswith(name + "/")), None)
+                if remote:
+                    protected.add(remote_ref[len(remote) + 1:])
+                elif ref.startswith("refs/remotes/"):
+                    # A retained remote ref need not still have a configured
+                    # remote. Guard every possible branch suffix conservatively.
+                    parts = remote_ref.split("/")
+                    if len(parts) < 2:
+                        raise ValueError("invalid owner remote branch reference")
+                    protected.update("/".join(parts[i:]) for i in range(1, len(parts)))
+    return protected
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, required=True)
@@ -76,7 +108,28 @@ def main(argv=None) -> int:
         runner = importlib.util.module_from_spec(runner_spec)
         runner_spec.loader.exec_module(runner)
         branch = runner.git(root, "branch", "--show-current").decode("utf-8").strip()
-        if not branch or branch in {"main", "master", "staging", "prod", "develop", "work"}:
+        owner_configs = [config]
+        if args.recipes and owned.is_file():
+            owner_configs.append(json.loads(owned.read_text(encoding="utf-8")))
+        remotes = set(runner.git(root, "remote").decode("utf-8").splitlines())
+        def owner_branch_ref(ref):
+            resolved = subprocess.run([b"git", b"rev-parse", b"--symbolic-full-name", b"--verify", b"--end-of-options", ref.encode("utf-8")],
+                                      cwd=root, env=runner.git_environment(), capture_output=True)
+            canonical = resolved.stdout.decode("utf-8").strip()
+            if resolved.returncode == 0:
+                if canonical.startswith(("refs/heads/", "refs/remotes/")) and "\n" not in canonical:
+                    return canonical
+                raise ValueError("owner base/protected references must identify branches, not revisions or tags")
+            # Initial adoption may name a branch whose ref is not present yet.
+            # Accept only literal branch names, never revision/symbolic aliases.
+            literal = subprocess.run([b"git", b"check-ref-format", b"--branch", ref.encode("utf-8")], cwd=root,
+                                     env=runner.git_environment(), capture_output=True)
+            if (ref == "@" or ref.startswith("refs/tags/") or literal.returncode
+                    or literal.stdout.decode("utf-8").strip() != ref):
+                raise ValueError("owner base/protected references must be literal branch names")
+            return ref
+
+        if not branch or branch in protected_branches(owner_configs, remotes, owner_branch_ref):
             raise ValueError("install on an isolated task branch")
         # Validate every destination before writing; keep other local surfaces
         # untouched. Callers must keep these bounded paths quiescent.
