@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Coordinated release qualification
+
+- Add an offline, provider-neutral qualification action binding the full release
+  plan and evidence to one production decision. Separate dormant preparation,
+  behavior changes and activation; require installed-client behavior coverage,
+  verified version targeting and exact component readiness. Existing adapters
+  keep provider execution, credentials, receipts and approval authority.
+- Extend migration review guidance and existing CI with behavioral regressions.
+  Source publication does not install the release boundary in consumers.
+
 ### Added
 
 - **`secret-scan-reusable` gains opt-in `npm_audit_omit_dev` input** (default

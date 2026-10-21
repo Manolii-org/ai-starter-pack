@@ -199,6 +199,18 @@ class CoordinatedReleaseTests(unittest.TestCase):
         feature(data)
         self.assertNotEqual(identity, release.release_identity(data))
 
+    def test_one_approved_identity_survives_preparation_readiness_and_activation(self):
+        data = bundle()
+        feature(data, requires=["web"])
+        qualified = self.validate(data)
+        approved = qualified["release_id"]
+        prepared = self.validate(data, "prepare", approved=approved)
+        # The original baseline/plan remains immutable. Fresh progress is
+        # checked separately, rather than rebuilding the approved subject.
+        data["evidence"]["ready_components"] = {"web": data["subject"]["sources"]["web"]}
+        activated = self.validate(data, "activate", approved=approved)
+        self.assertEqual({qualified["release_id"], prepared["release_id"], activated["release_id"]}, {approved})
+
     def test_cli_dry_run_is_read_only(self):
         data = bundle()
         data["evidence"]["completed_at"] = datetime.now(timezone.utc).isoformat()

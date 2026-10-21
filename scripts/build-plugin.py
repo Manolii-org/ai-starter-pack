@@ -298,7 +298,13 @@ def assemble_hooks_and_scripts(rendered: Path, out: Path) -> dict:
     # Policy travels with the runner for plugin-only sessions too; check
     # recipes remain repository-owned and are never silently installed.
     (out / "docs").mkdir(exist_ok=True)
-    shutil.copy2(rendered / "docs/agent-validation.md", out / "docs/agent-validation.md")
+    for name in ("agent-validation.md", "agent-release-experience.md"):
+        shutil.copy2(rendered / "docs" / name, out / "docs" / name)
+    # Keep the installed release guidance and offline contract together. The
+    # provider adapter still owns authorization; this is the same canonical
+    # action source, generated here rather than maintained as another copy.
+    release_action = Path(".github/actions/qualify-coordinated-release")
+    shutil.copytree(rendered / release_action, out / release_action)
     rsrc = rendered / "scripts"
     if rsrc.is_dir():
         # Pack-dev tests live under scripts/tests/ but must not ship in the
