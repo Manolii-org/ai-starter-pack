@@ -2,10 +2,10 @@
   "schema": "agent-validation-source/v1",
   "source": "ai-starter-pack",
   "files": {
-    "scripts/agent-check.py": "1fdb6a15f079e0c636d9f97831bc8e2f069cf84434c6317ac6349169487380ac",
+    "scripts/agent-check.py": "93ac2363b02047762123ec5115f243c53815a7e2d69b9171895e20c476e0df12",
     "scripts/sync-agent-validation.py": "c58c5b98230fdd10be6fb7f5f18593530cf553bb5e2284f0498112d5a63c84d6",
     "scripts/install-agent-validation.py": "e743d23c3f701a5de71c50583c2c3dc03ce8c139adb718064bd2dd9062ab0bc2",
-    "scripts/tests/test_agent_check.py": "86adade1f7a0461d7bccb7c6161da95ed253c1d5e19016bbe90548e3b7b4bd10",
+    "scripts/tests/test_agent_check.py": "23f6ce18b81e782ca8e33692b9d436945ded77488b9b78c874492dfc5c9b411f",
     "docs/agent-validation.md": "85444a66cd9bff2c0d83b65d2fa4189a2110674320ff2435998f658aded0141b",
     ".claude/skills/agent-validation/SKILL.md": "3e4a8fc344c16f9980e0bb392a34f05100c24c24924eb5298d3695fc178db486"
   },

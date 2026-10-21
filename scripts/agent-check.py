@@ -93,10 +93,20 @@ def private_cache_key(root: Path) -> bytes:
         raise ValueError("environment cache key must be a private regular file")
     fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
     with os.fdopen(fd, "rb") as stream:
-        details = os.fstat(stream.fileno())
-        if (not stat.S_ISREG(details.st_mode) or stat.S_IMODE(details.st_mode) != 0o600
-                or details.st_uid != os.getuid() or details.st_nlink != 1):
-            raise ValueError("environment cache key must be an owned private regular file with mode 0600")
+        # Another creator may have published the complete inode but not yet
+        # removed its temporary name. Inspect this same descriptor while that
+        # two-link window closes; never read or relax any private-file invariant.
+        deadline = time.monotonic() + 1.0
+        while True:
+            details = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(details.st_mode) or stat.S_IMODE(details.st_mode) != 0o600
+                    or details.st_uid != os.getuid()):
+                raise ValueError("environment cache key must be an owned private regular file with mode 0600")
+            if details.st_nlink == 1:
+                break
+            if details.st_nlink != 2 or time.monotonic() >= deadline:
+                raise ValueError("environment cache key must be an owned private regular file with mode 0600")
+            time.sleep(0.01)
         key = stream.read(33)
     if len(key) != 32:
         raise ValueError("environment cache key is invalid")
