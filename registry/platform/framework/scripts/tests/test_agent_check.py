@@ -668,6 +668,70 @@ class SurfaceTests(unittest.TestCase):
             self.assertIn("New root owner prose", (root / "CLAUDE.md").read_text())
             self.assertEqual(module.main(["--repo-root", str(root), "--check"]), 0)
 
+    def test_primary_claude_alias_updates_without_writing_through_link(self):
+        module = load("sync-agent-validation")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            (root / "docs").mkdir()
+            (root / ".claude").mkdir()
+            (root / "docs/agent-validation.md").write_text("Current policy\n")
+            primary = root / "CLAUDE.md"
+            primary.write_text("Owner prose\n")
+            alias = root / ".claude/CLAUDE.md"
+            alias.symlink_to("../CLAUDE.md")
+            planned = module.outputs(root)
+            self.assertIn(primary, planned)
+            self.assertNotIn(alias, planned)
+            self.assertEqual(module.main(["--repo-root", str(root)]), 0)
+            self.assertTrue(alias.is_symlink())
+            self.assertEqual(os.readlink(alias), "../CLAUDE.md")
+            self.assertIn("Current policy", alias.read_text())
+            self.assertIn("Owner prose", primary.read_text())
+            self.assertEqual(module.main(["--repo-root", str(root), "--check"]), 0)
+            (root / "config").mkdir()
+            (root / "config/agent-checks.json").write_text(json.dumps(
+                {"schema_version": 1, "base": "origin/main", "checks": []}))
+            for args in (("init", "-q"), ("checkout", "-qb", "codex/alias-fixture")):
+                subprocess.run(["git", *args], cwd=root, check=True, capture_output=True,
+                               env=load("agent-check").git_environment())
+            installer = load("install-agent-validation")
+            self.assertEqual(installer.main(["--repo-root", str(root)]), 0)
+            self.assertTrue(alias.is_symlink())
+            self.assertEqual(os.readlink(alias), "../CLAUDE.md")
+            self.assertIn("Owner prose", primary.read_text())
+            self.assertEqual(installer.main(["--repo-root", str(root), "--check"]), 0)
+
+    def test_other_claude_links_still_refuse_entire_write_batch(self):
+        module = load("sync-agent-validation")
+        for kind in ("other-local", "external", "linked-primary", "dangling", "linked-parent"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory).resolve()
+                root = base / "repo"
+                (root / "docs").mkdir(parents=True)
+                (root / ".claude").mkdir()
+                (root / "docs/agent-validation.md").write_text("Current policy\n")
+                target = base / "outside.md" if kind == "external" else root / "other.md"
+                if kind != "dangling":
+                    target.write_text("Unchanged target\n")
+                primary = root / "CLAUDE.md"
+                if kind == "linked-primary":
+                    primary.symlink_to(target)
+                else:
+                    primary.write_text("Owner prose\n")
+                if kind == "linked-parent":
+                    (root / ".claude").rename(root / "actual-claude")
+                    (root / ".claude").symlink_to("actual-claude", target_is_directory=True)
+                    target = primary
+                (root / ".claude/CLAUDE.md").symlink_to(target)
+                self.assertEqual(module.main(["--repo-root", str(root)]), 2)
+                if kind == "dangling":
+                    self.assertFalse(target.exists())
+                else:
+                    self.assertEqual(target.read_text(), "Owner prose\n" if kind == "linked-parent"
+                                     else "Unchanged target\n")
+                self.assertFalse((root / "AGENTS.md").exists())
+                self.assertFalse((root / ".gitignore").exists())
+
     def test_installer_resolves_utf8_owner_branch_refs_in_an_ascii_locale(self):
         for base in ["origin/HEAD", "origin/intégration"]:
             with self.subTest(base=base), tempfile.TemporaryDirectory() as directory:

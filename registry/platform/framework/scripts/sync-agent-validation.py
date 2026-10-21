@@ -21,9 +21,16 @@ def outputs(root: Path, policy: str | None = None) -> dict[Path, str]:
     claude_paths = [claude]
     for rel in (Path("CLAUDE.md"), Path(".claude/CLAUDE.md")):
         path = root / rel
-        if rel == claude or not path.exists():
+        if rel == claude or (not path.exists() and not path.is_symlink()):
             continue
         if path.resolve() != path or path.is_symlink():
+            # An alias of the regular primary receives the same update without
+            # any write through the link. Every other linked surface is refused.
+            primary = root / claude
+            if (path.is_symlink() and path.parent.resolve() == path.parent
+                    and primary.is_file() and not primary.is_symlink()
+                    and primary.resolve() == primary and path.resolve() == primary):
+                continue
             raise ValueError(f"linked instruction surface: {rel}")
         previous = path.read_text(encoding="utf-8")
         if BEGIN in previous or END in previous:
