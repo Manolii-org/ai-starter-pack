@@ -32,7 +32,9 @@ than repeated code pushes. Measure total agent, workspace and CI cost.
 Reusable results also bind the effective execution environment without recording
 its values. Keep the ignored private cache key and dependency state local; do
 not upload them. Candidates containing symlinks still run their checks, but
-cannot reuse or save a cached PASS based only on Git's link text.
+cannot reuse or save a cached PASS based only on Git's link text. Tracked files
+with Git filter attributes block local validation before selection or cache reuse;
+filtered working files require a raw-input adapter to validate their actual bytes.
 
 Install only on an isolated task branch. The installer preserves the owner's
 integration `base` and optional `protected_branches`, including the current
