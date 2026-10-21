@@ -133,6 +133,141 @@ class AgentCheckTests(unittest.TestCase):
         self.run_check(expected=1)
         self.assertNotEqual(first["digest"], self.receipt()["digest"])
 
+    def test_inherited_execution_environment_invalidates_cached_pass_without_recording_values(self):
+        self.config["checks"][0]["commands"] = [[sys.executable, "-c",
+            "import os; assert os.environ['AGENT_CHECK_FIXTURE_MODE'] == 'good'"]]
+        self.save_config()
+        env = {**load("agent-check").git_environment(), "AGENT_CHECK_FIXTURE_MODE": "good",
+               "AGENT_CHECK_PRIVATE_FIXTURE": "private-fixture-value-not-a-credential"}
+        self.run_check(env=env)
+        before = self.receipt()["digest"]
+        self.run_check(env=env)
+        self.assertTrue(self.receipt()["cached"])
+        env["AGENT_CHECK_FIXTURE_MODE"] = "bad"
+        self.run_check(env=env, expected=1)
+        self.assertNotEqual(before, self.receipt()["digest"])
+        self.assertFalse(self.receipt()["cached"])
+        for path in (self.root / ".ai/agent-checks").rglob("*.json"):
+            self.assertNotIn(env["AGENT_CHECK_PRIVATE_FIXTURE"], path.read_text())
+
+    def test_provisioning_must_create_every_declared_ready_path(self):
+        self.config["environments"] = [{"id": "dependencies",
+            "ready_paths": ["node_modules", "node_modules/installed"],
+            "commands": [[sys.executable, "-c", "from pathlib import Path; Path('node_modules').mkdir(exist_ok=True)"]]}]
+        self.config["checks"][0]["environment"] = "dependencies"
+        self.save_config()
+        self.run_check("--provision", expected=1)
+        result = next(r for r in self.receipt()["results"] if r["id"] == "dependencies")
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("ready", result["reason"])
+        self.assertFalse((self.root / ".ai/agent-checks/environments").exists())
+
+    def test_setup_cache_tracks_its_effective_inherited_environment(self):
+        self.config["environments"] = [{"id": "dependencies", "ready_paths": ["node_modules/setting"],
+            "commands": [[sys.executable, "-c", "import os; from pathlib import Path; "
+                          "p=Path('node_modules'); p.mkdir(exist_ok=True); "
+                          "(p/'setting').write_text(os.environ['AGENT_CHECK_FIXTURE_MODE'])"]]}]
+        self.config["checks"][0].update(environment="dependencies", commands=[[sys.executable, "-c",
+            "import os; from pathlib import Path; assert Path('node_modules/setting').read_text() == os.environ['AGENT_CHECK_FIXTURE_MODE']"]])
+        self.save_config()
+        env = {**load("agent-check").git_environment(), "AGENT_CHECK_FIXTURE_MODE": "first"}
+        self.run_check("--provision", env=env)
+        env["AGENT_CHECK_FIXTURE_MODE"] = "second"
+        self.run_check(env=env, expected=1)
+        self.run_check("--provision", env=env)
+        self.assertEqual((self.root / "node_modules/setting").read_text(), "second")
+
+    def test_later_setup_cannot_remove_an_earlier_readiness_postcondition(self):
+        self.config["environments"] = [
+            {"id": "first", "ready_paths": ["node_modules/first"], "commands": [[sys.executable, "-c",
+                "from pathlib import Path; p=Path('node_modules'); p.mkdir(exist_ok=True); (p/'first').touch()"]]},
+            {"id": "second", "ready_paths": ["node_modules/second"], "commands": [[sys.executable, "-c",
+                "from pathlib import Path; p=Path('node_modules'); (p/'first').unlink(); (p/'second').touch()"]]},
+        ]
+        command = [[sys.executable, "-c", "from pathlib import Path; Path('.ai/agent-checks/application-ran').touch()"]]
+        self.config["checks"] = [{"id": "check-first", "paths": ["config/*"], "environment": "first", "commands": command},
+                                 {"id": "check-second", "paths": ["config/*"], "environment": "second", "commands": command}]
+        self.save_config()
+        self.run_check("--provision", expected=1)
+        self.assertFalse((self.root / ".ai/agent-checks/application-ran").exists())
+        setup_results = [json.loads(p.read_text()) for p in (self.root / ".ai/agent-checks/environments").glob("*.json")]
+        self.assertFalse(any(x["result"]["id"] == "first" for x in setup_results))
+
+    def test_private_environment_key_is_lazy_and_rejects_unsafe_permissions(self):
+        state = self.root / ".ai/agent-checks"
+        self.change_source()
+        self.run_check("--plan")
+        self.assertFalse(state.exists())
+        self.run_check()
+        key = state / "environment.key"
+        self.assertEqual(key.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(len(key.read_bytes()), 32)
+        key.chmod(0o644)
+        self.run_check(expected=2)
+        self.assertFalse((state / "receipt.json").exists())
+
+    def test_untracked_file_to_symlink_cannot_reuse_the_regular_file_pass(self):
+        target = self.root / "node_modules/value.txt"
+        target.parent.mkdir()
+        target.write_text("bad")
+        link = self.root / "src/link.txt"
+        link.write_text("../node_modules/value.txt")
+        self.config["checks"][0]["commands"] = [[sys.executable, "-c",
+            "from pathlib import Path; assert Path('src/link.txt').read_text() == '../node_modules/value.txt'"]]
+        self.save_config()
+        self.run_check()
+        before = self.receipt()["snapshot"]
+        link.unlink()
+        link.symlink_to("../node_modules/value.txt")
+        self.run_check(expected=1)
+        self.assertNotEqual(before, self.receipt()["snapshot"])
+
+    def test_untracked_symlink_target_changes_never_reuse_a_cached_pass(self):
+        target = self.root / "node_modules/value.txt"
+        target.parent.mkdir()
+        target.write_text("good")
+        (self.root / "src/link.txt").symlink_to("../node_modules/value.txt")
+        self.config["checks"][0]["commands"] = [[sys.executable, "-c",
+            "from pathlib import Path; assert Path('src/link.txt').read_text() == 'good'"]]
+        self.save_config()
+        self.run_check()
+        target.write_text("bad")
+        self.run_check(expected=1)
+        self.assertFalse(self.receipt()["cached"])
+
+    def test_tracked_symlink_target_changes_never_reuse_a_cached_pass(self):
+        target = self.root / "node_modules/value.txt"
+        target.parent.mkdir()
+        target.write_text("good")
+        (self.root / "src/link.txt").symlink_to("../node_modules/value.txt")
+        self.config["checks"][0]["commands"] = [[sys.executable, "-c",
+            "from pathlib import Path; assert Path('src/link.txt').read_text() == 'good'"]]
+        self.save_config()
+        self.git("add", "src/link.txt", "config/agent-checks.json")
+        self.git("commit", "-qm", "linked fixture")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        self.change_source()
+        self.run_check()
+        self.assertFalse(self.receipt()["cache_reusable"])
+        target.write_text("bad")
+        self.run_check(expected=1)
+        self.assertFalse(self.receipt()["cached"])
+
+    def test_root_tool_requirement_still_applies_with_a_declared_environment(self):
+        binaries = self.root / "node_modules/bin"
+        binaries.mkdir(parents=True)
+        binary = binaries / "node"
+        binary.write_text(f"#!{sys.executable}\nimport os\nprint(os.environ['AGENT_CHECK_TOOL_VERSION'])\n")
+        binary.chmod(0o755)
+        self.config["checks"][0].update(tools=["node"], env={"AGENT_CHECK_TOOL_VERSION": "vfixture-wrong"})
+        self.config["tool_requirements"] = {"node": "vfixture-required"}
+        self.save_config()
+        self.run_check(expected=1, env={**load("agent-check").git_environment(),
+            "PATH": str(binaries) + os.pathsep + os.environ["PATH"]})
+        self.assertTrue(any(k.startswith("node@.#") for k in self.receipt()["tool_versions"]))
+        self.assertTrue(any(r["id"].startswith("toolchain-node@.#") and r["status"] == "unavailable"
+                            for r in self.receipt()["results"]))
+
     def test_staged_untracked_and_deleted_paths_count(self):
         self.change_source()
         self.git("add", "src/value.py")
@@ -449,6 +584,123 @@ class AgentCheckTests(unittest.TestCase):
 
 
 class SurfaceTests(unittest.TestCase):
+    def test_replacement_recipe_cannot_unguard_the_existing_owner_integration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            (root / "config").mkdir()
+            original = json.dumps({"schema_version": 1, "base": "origin/trunk", "checks": []})
+            (root / "config/agent-checks.json").write_text(original)
+            replacement = root / "replacement.json"
+            replacement.write_text(json.dumps({"schema_version": 1, "base": "origin/main", "checks": []}))
+            env = load("agent-check").git_environment()
+            for cmd in [("init", "-q"), ("checkout", "-qb", "trunk")]:
+                subprocess.run(["git", *cmd], cwd=root, env=env, check=True, capture_output=True)
+            result = subprocess.run([sys.executable, str(SCRIPTS / "install-agent-validation.py"),
+                "--repo-root", str(root), "--recipes", str(replacement)], env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertEqual((root / "config/agent-checks.json").read_text(), original)
+            self.assertFalse((root / "scripts").exists())
+
+    def test_installer_rejects_owner_integration_and_protected_branches_before_writes(self):
+        for branch, base, extra in [("trunk", "origin/trunk", []),
+                                   ("trunk", "team/upstream/trunk", []),
+                                   ("trunk", "refs/remotes/team/upstream/trunk", []),
+                                   ("release/stable", "refs/remotes/upstream/release/stable", []),
+                                   ("production", "refs/heads/trunk", ["production"])]:
+            with self.subTest(branch=branch), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                (root / "config").mkdir()
+                original = json.dumps({"schema_version": 1, "base": base, "checks": [],
+                                       "protected_branches": extra})
+                (root / "config/agent-checks.json").write_text(original)
+                (root / "AGENTS.md").write_text("Owner prose\n")
+                env = load("agent-check").git_environment()
+                for cmd in [("init", "-q"), ("checkout", "-qb", branch),
+                            ("remote", "add", "team/upstream", "https://example.invalid/fixture.git")]:
+                    subprocess.run(["git", *cmd], cwd=root, env=env, check=True, capture_output=True)
+                result = subprocess.run([sys.executable, str(SCRIPTS / "install-agent-validation.py"),
+                    "--repo-root", str(root)], env=env, capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertEqual((root / "AGENTS.md").read_text(), "Owner prose\n")
+                self.assertEqual((root / "config/agent-checks.json").read_text(), original)
+                self.assertFalse((root / "scripts").exists())
+
+    def test_installer_resolves_symbolic_bases_and_refuses_revision_or_tag_bases_without_writes(self):
+        for base in ["HEAD", "origin/HEAD", "HEAD~0", "integration-tag", "refs/tags/integration-tag"]:
+            with self.subTest(base=base), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                (root / "config").mkdir()
+                original = json.dumps({"schema_version": 1, "base": base, "checks": []})
+                (root / "config/agent-checks.json").write_text(original)
+                (root / "AGENTS.md").write_text("Owner prose\n")
+                env = load("agent-check").git_environment()
+                commands = [("init", "-q"), ("checkout", "-qb", "trunk"),
+                            ("config", "user.email", "fixture@example.invalid"),
+                            ("config", "user.name", "Fixture"), ("add", "."),
+                            ("commit", "-qm", "fixture"), ("tag", "integration-tag"),
+                            ("update-ref", "refs/remotes/origin/trunk", "HEAD"),
+                            ("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")]
+                for command in commands:
+                    subprocess.run(["git", *command], cwd=root, env=env, check=True, capture_output=True)
+                result = subprocess.run([sys.executable, str(SCRIPTS / "install-agent-validation.py"),
+                    "--repo-root", str(root)], env=env, capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertEqual((root / "AGENTS.md").read_text(), "Owner prose\n")
+                self.assertEqual((root / "config/agent-checks.json").read_text(), original)
+                self.assertFalse((root / "scripts").exists())
+
+    def test_sync_updates_previously_managed_claude_surface_after_root_file_appears(self):
+        module = load("sync-agent-validation")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            (root / "docs").mkdir()
+            (root / "docs/agent-validation.md").write_text("Previous policy\n")
+            self.assertEqual(module.main(["--repo-root", str(root)]), 0)
+            previous = root / ".claude/CLAUDE.md"
+            previous.write_text(previous.read_text() + "\nOwner nested prose\n")
+            (root / "CLAUDE.md").write_text("New root owner prose\n")
+            (root / "docs/agent-validation.md").write_text("Current policy\n")
+            self.assertEqual(module.main(["--repo-root", str(root), "--check"]), 1)
+            self.assertEqual(module.main(["--repo-root", str(root)]), 0)
+            self.assertIn("Current policy", previous.read_text())
+            self.assertNotIn("Previous policy", previous.read_text())
+            self.assertIn("Owner nested prose", previous.read_text())
+            self.assertIn("New root owner prose", (root / "CLAUDE.md").read_text())
+            self.assertEqual(module.main(["--repo-root", str(root), "--check"]), 0)
+
+    def test_installer_resolves_utf8_owner_branch_refs_in_an_ascii_locale(self):
+        for base in ["origin/HEAD", "origin/intégration"]:
+            with self.subTest(base=base), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                (root / "config").mkdir()
+                (root / "config/agent-checks.json").write_text(json.dumps(
+                    {"schema_version": 1, "base": base, "checks": []}), encoding="utf-8")
+                env = load("agent-check").git_environment()
+                commands = [("init", "-q"), ("checkout", "-qb", "intégration"),
+                            ("config", "user.email", "fixture@example.invalid"),
+                            ("config", "user.name", "Fixture"), ("add", "."),
+                            ("commit", "-qm", "fixture"),
+                            ("update-ref", "refs/remotes/origin/intégration", "HEAD"),
+                            ("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/intégration"),
+                            ("checkout", "-qb", "codex/isolated")]
+                for command in commands:
+                    subprocess.run(["git", *command], cwd=root, env=env, check=True, capture_output=True)
+                result = subprocess.run([sys.executable, str(SCRIPTS / "install-agent-validation.py"),
+                    "--repo-root", str(root)], env=ascii_environment(), capture_output=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertTrue((root / "scripts/agent-check.py").is_file())
+
+    def test_new_root_claude_does_not_hide_a_malformed_previously_managed_surface(self):
+        module = load("sync-agent-validation")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            (root / ".claude").mkdir()
+            (root / ".claude/CLAUDE.md").write_text(module.BEGIN + "\nUnclosed old block\n")
+            (root / "CLAUDE.md").write_text("New root owner prose\n")
+            with self.assertRaises(ValueError):
+                module.outputs(root, "Current policy")
+            self.assertEqual((root / "CLAUDE.md").read_text(), "New root owner prose\n")
+
     def test_installer_uses_target_branch_under_foreign_git_context(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory).resolve()

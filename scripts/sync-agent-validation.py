@@ -18,7 +18,17 @@ def outputs(root: Path, policy: str | None = None) -> dict[Path, str]:
     policy = (policy if policy is not None else (root / "docs/agent-validation.md").read_text(encoding="utf-8")).strip()
     block = f"{BEGIN}\n{policy}\n{END}"
     claude = Path("CLAUDE.md") if (root / "CLAUDE.md").is_file() else Path(".claude/CLAUDE.md")
-    paths = [Path("AGENTS.md"), claude, Path(".cursor/rules/agent-validation.mdc")]
+    claude_paths = [claude]
+    for rel in (Path("CLAUDE.md"), Path(".claude/CLAUDE.md")):
+        path = root / rel
+        if rel == claude or not path.exists():
+            continue
+        if path.resolve() != path or path.is_symlink():
+            raise ValueError(f"linked instruction surface: {rel}")
+        previous = path.read_text(encoding="utf-8")
+        if BEGIN in previous or END in previous:
+            claude_paths.append(rel)
+    paths = [Path("AGENTS.md"), *claude_paths, Path(".cursor/rules/agent-validation.mdc")]
     result = {}
     for rel in paths:
         path = root / rel
