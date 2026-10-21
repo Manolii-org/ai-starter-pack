@@ -3,9 +3,9 @@
   "source": "ai-starter-pack",
   "files": {
     "scripts/agent-check.py": "2678f3c7185811da31a86b69c00ab64673dc5ea7a654aa9a7ee935d09ce88881",
-    "scripts/sync-agent-validation.py": "80a8f676de2f4ce31b70545eb93a51c69f4e76c3b50f1fbcacb76657d5b8d233",
+    "scripts/sync-agent-validation.py": "c58c5b98230fdd10be6fb7f5f18593530cf553bb5e2284f0498112d5a63c84d6",
     "scripts/install-agent-validation.py": "e743d23c3f701a5de71c50583c2c3dc03ce8c139adb718064bd2dd9062ab0bc2",
-    "scripts/tests/test_agent_check.py": "03050d5431d9eebefcee656bdb051b6ab6cd6c6da258b3354b3073a5fc0affb8",
+    "scripts/tests/test_agent_check.py": "38efcffeaeaae1db1d4108f285bfe1451fea1cbe0d584fb79cd4b1762953f707",
     "docs/agent-validation.md": "85444a66cd9bff2c0d83b65d2fa4189a2110674320ff2435998f658aded0141b",
     ".claude/skills/agent-validation/SKILL.md": "3e4a8fc344c16f9980e0bb392a34f05100c24c24924eb5298d3695fc178db486"
   },
