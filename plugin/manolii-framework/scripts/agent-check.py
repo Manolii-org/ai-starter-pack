@@ -307,6 +307,7 @@ def main(argv=None) -> int:
         cache_reusable = not before["symlinks"]
         results = []
         provisioned = []
+        reused_environments = []
         results.append(execute(root, {"id": "diff-check", "commands": [["git", "diff", "--check", plan["base"]]]}, inherited))
         for environment in plan["environments"]:
             env_digest = environment_digest(root, environment, tools, key, inherited)
@@ -323,6 +324,7 @@ def main(argv=None) -> int:
             if (isinstance(previous_environment, dict) and previous_environment.get("digest") == env_digest
                     and isinstance(previous_environment.get("result"), dict)
                     and previous_environment["result"].get("status") == "passed" and ready):
+                reused_environments.append((environment, env_receipt, env_digest))
                 continue
             if not args.provision:
                 results.append({"id": environment["id"], "status": "unavailable",
@@ -338,7 +340,11 @@ def main(argv=None) -> int:
                 result.update(status="failed", reason="declared ready paths missing: " + ",".join(missing))
             results.append(result)
             if result["status"] == "passed":
-                provisioned.append((environment, env_receipt, input_digest, result))
+                # Bind setup to the tools it actually left ready, before a
+                # later selected environment can replace any of those tools.
+                tools = versions(root, plan, inherited)
+                validated_digest = environment_digest(root, environment, tools, key, inherited)
+                provisioned.append((environment, env_receipt, input_digest, validated_digest, result))
         # Provisioning may install tools. Missing tools must not be mistaken
         # for a source failure, or cached as a successful old fingerprint.
         tools = versions(root, plan, inherited)
@@ -354,12 +360,26 @@ def main(argv=None) -> int:
                 elif matching["status"] == "passed":
                     matching.update(status="failed", reason="declared ready paths missing: " + ",".join(missing))
                 (state / "environments" / f"environment-{sha(encoded(environment['id']))}.json").unlink(missing_ok=True)
-        # A later environment may install a tool used by an earlier one. Bind
-        # every new setup receipt to the final tool map and unchanged inputs.
-        for environment, env_receipt, input_digest, result in provisioned:
-            if result["status"] == "passed" and environment_digest(root, environment, {}, key, inherited) == input_digest:
-                env_digest = environment_digest(root, environment, tools, key, inherited)
-                write_json(env_receipt, {"digest": env_digest, "result": result})
+        # A cache hit was proved against the initial tools. Later setup can
+        # change a shared tool, so it must still match before checks can run.
+        # Revoke stale setup evidence and require a bounded fresh invocation.
+        for environment, env_receipt, reused_digest in reused_environments:
+            if environment_digest(root, environment, tools, key, inherited) != reused_digest:
+                env_receipt.unlink(missing_ok=True)
+                results.append({"id": environment["id"], "status": "failed",
+                                "reason": "cached environment invalidated by later provisioning; rerun with --provision"})
+        # New setups also keep their actual validated context. Never re-key an
+        # earlier setup as compatible with a tool installed by a later one.
+        for environment, env_receipt, input_digest, validated_digest, result in provisioned:
+            if result["status"] != "passed":
+                continue
+            if (environment_digest(root, environment, {}, key, inherited) != input_digest
+                    or environment_digest(root, environment, tools, key, inherited) != validated_digest):
+                env_receipt.unlink(missing_ok=True)
+                result.update(status="failed",
+                              reason="provisioned environment invalidated by later provisioning or changed inputs; rerun with --provision")
+            else:
+                write_json(env_receipt, {"digest": validated_digest, "result": result})
         identity = {"schema": SCHEMA, "source": sha(Path(__file__).read_bytes()),
                     "config": config, "plan": plan, "tools": tools, "snapshot": before,
                     "execution_environment": environment_fingerprint(key, {
