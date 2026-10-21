@@ -2,8 +2,8 @@
 """Exercise local execution, invalidation and native-surface delivery."""
 from __future__ import annotations
 
+import concurrent.futures
 import importlib.util
-from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -76,6 +76,48 @@ class AgentCheckTests(unittest.TestCase):
 
     def change_source(self):
         (self.root / "src/value.py").write_text("value = 1\n# changed\n")
+
+    def test_concurrent_key_reader_waits_for_publisher_to_remove_temporary_link(self):
+        runner = load("agent-check")
+        published, release, waiting = threading.Event(), threading.Event(), threading.Event()
+        original_link, original_sleep = runner.os.link, runner.time.sleep
+
+        def paused_link(*args, **kwargs):
+            original_link(*args, **kwargs)
+            published.set()
+            if not release.wait(5):
+                raise RuntimeError("Fixture publisher was not released")
+
+        def observed_wait(seconds):
+            waiting.set()
+            original_sleep(seconds)
+
+        with mock.patch.object(runner.os, "link", side_effect=paused_link), mock.patch.object(
+            runner.time, "sleep", side_effect=observed_wait
+        ), concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            writer = pool.submit(runner.private_cache_key, self.root)
+            try:
+                self.assertTrue(published.wait(5))
+                reader = pool.submit(runner.private_cache_key, self.root)
+                self.assertTrue(waiting.wait(1), "reader must observe the two-link publication window")
+            finally:
+                release.set()
+            self.assertTrue(writer.result(timeout=5) == reader.result(timeout=5))
+        path = self.root / ".ai/agent-checks/environment.key"
+        self.assertEqual(len(path.read_bytes()), 32)
+        self.assertEqual(path.stat().st_nlink, 1)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_persistent_cache_key_links_remain_rejected_with_a_bounded_wait(self):
+        runner = load("agent-check")
+        runner.private_cache_key(self.root)
+        path = self.root / ".ai/agent-checks/environment.key"
+        os.link(path, path.with_name("unexpected-link"))
+        with mock.patch.object(runner.time, "sleep") as delay:
+            with self.assertRaisesRegex(ValueError, "private regular file"):
+                runner.private_cache_key(self.root)
+            self.assertLessEqual(delay.call_count, 20)
+        self.assertEqual(path.stat().st_nlink, 2, "an unsafe key must not be repaired or replaced")
 
     def test_utf8_repository_and_receipts_ignore_default_locale(self):
         self.config["note"] = "Café validation"
@@ -208,44 +250,7 @@ class AgentCheckTests(unittest.TestCase):
         self.run_check(expected=2)
         self.assertFalse((state / "receipt.json").exists())
 
-    def test_concurrent_key_creation_waits_for_winners_temporary_link(self):
-        runner = load("agent-check")
-        linked, observed, release = threading.Event(), threading.Event(), threading.Event()
-        original_link, original_fstat = os.link, os.fstat
 
-        def delayed_link(*args, **kwargs):
-            original_link(*args, **kwargs)
-            linked.set()
-            if not release.wait(5):
-                raise RuntimeError("fixture creator was not released")
-
-        def observed_stat(fd):
-            result = original_fstat(fd)
-            if result.st_nlink == 2:
-                observed.set()
-            return result
-
-        with mock.patch.object(runner.os, "link", side_effect=delayed_link), \
-                mock.patch.object(runner.os, "fstat", side_effect=observed_stat), \
-                ThreadPoolExecutor(max_workers=2) as pool:
-            creator = pool.submit(runner.private_cache_key, self.root)
-            try:
-                self.assertTrue(linked.wait(5), "creator did not publish the fixture key")
-                follower = pool.submit(runner.private_cache_key, self.root)
-                self.assertTrue(observed.wait(5), "follower did not observe the real two-link window")
-            finally:
-                release.set()
-            self.assertEqual(creator.result(timeout=5), follower.result(timeout=5))
-        self.assertEqual((self.root / ".ai/agent-checks/environment.key").stat().st_nlink, 1)
-
-    def test_persistent_extra_cache_key_link_remains_rejected(self):
-        runner = load("agent-check")
-        runner.private_cache_key(self.root)
-        path = self.root / ".ai/agent-checks/environment.key"
-        os.link(path, path.with_name("unexpected-hard-link"))
-        with self.assertRaisesRegex(ValueError, "owned private regular file"):
-            runner.private_cache_key(self.root)
-        self.assertEqual(path.stat().st_nlink, 2)
 
     def test_key_permissions_are_rechecked_after_creator_link_wait(self):
         runner = load("agent-check")
