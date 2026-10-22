@@ -1,394 +1,118 @@
+# Credential-free review requests / authenticated coverage and recovery.
 name: Codex Security Diff Scan (advisory)
-# GitHub Actions steps legitimately mix uses/run/with shapes within one job.
-# config-completeness-ignore: uses
-# config-completeness-ignore: with
-# config-completeness-ignore: id
-# config-completeness-ignore: name
-# config-completeness-ignore: run
-#
-# ADVISORY tier: scans the PR diff with codex-security and reports findings in
-# a step summary + upserted PR comment. This job NEVER blocks a merge — the
-# job is continue-on-error, every failure path exits 0 or reports, and it must
-# never be added to required status checks.
-#
-# Trigger shape (pull_request ONLY — never pull_request_target):
-#   This job pulls CODEX_SUBSCRIPTION_AUTH_JSON live from Doppler
-#   (master/prd_codex — a dedicated config holding ONLY this secret) via
-#   secrets.DOPPLER_TOKEN_CODEX — a read-only service token whose blast
-#   radius is this one credential even if a same-repo PR edits this job. On
-#   pull_request_target the workflow runs from the trusted base ref while the
-#   secrets context is live — any base-ref workflow edit would then execute
-#   under a real credential. pull_request runs the PR's own copy of this file;
-#   the job-level same-repo `if:` gate bounds that to members who can already
-#   push branches, and GitHub additionally withholds secrets from fork PRs
-#   natively. Fork PRs therefore skip silently: never fail, never see the
-#   secret.
-#
-# Draft policy: drafts skip (the `pull_request.draft != true` gate) so a WIP
-# branch does not spend scan budget. ready_for_review runs the first scan;
-# converted_to_draft is a trigger only so concurrency cancel-in-progress can
-# abort an in-flight scan.
-#
-# Scope: `codex-security scan . --diff <base> --head <head>` reviews the
-# committed changes between the PR base and head (target kind "refs" in the
-# CLI). Standard mode only — deep mode is repo/path-scoped and far too slow
-# for a PR lane. Limitation: the scan sees the changed commits plus their
-# file context; regressions that only become visible across unchanged files
-# are out of scope. Acceptable for an advisory tier.
-#
-# No repository code executes in this job: the checkout is scan input only,
-# npm runs with --ignore-scripts, and no repo script is invoked. Scan output
-# is model-generated data — treat findings as untrusted text.
-
-on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
-
 concurrency:
   group: codex-security-diff-scan-${{ github.ref }}
   cancel-in-progress: true
-
 permissions:
   contents: read
-  pull-requests: write # upsert the advisory findings comment
-
+  pull-requests: read
+  actions: read
 jobs:
   scan:
     name: Advisory diff scan
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    runs-on: ubuntu-slim
+    timeout-minutes: 1
     continue-on-error: true
-    # Hard gate: same-repo PRs only. Drafts skip. Both conditions are silent
-    # skips — the job reports "Skipped", never a failure.
-    if: >-
-      github.event.pull_request.head.repo.full_name == github.repository
-      && github.event.pull_request.draft != true
+    if: github.event.pull_request.draft != true
     steps:
-      # The default pull_request checkout is the merge commit, whose parents
-      # are the base tip and the PR head — so with fetch-depth: 0 both
-      # pull_request base and head SHAs resolve locally with no extra fetch
-      # and no credentials (persist-credentials stays off).
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Resolve diff range
-        id: range
-        run: |
-          set -euo pipefail
-          BASE="${{ github.event.pull_request.base.sha }}"
-          HEAD="${{ github.event.pull_request.head.sha }}"
-          # Base tip can drift between merge-commit creation and this run;
-          # try a shallow fetch, then skip softly if still unresolvable
-          # (fetch is anonymous — private-repo checkouts rely on the merge
-          # commit already carrying the base parent).
-          if ! git cat-file -e "$BASE" 2>/dev/null; then
-            git fetch --no-tags --depth=1 origin "$BASE" 2>/dev/null || true
-          fi
-          if ! git cat-file -e "$BASE" 2>/dev/null || ! git cat-file -e "$HEAD" 2>/dev/null; then
-            {
-              echo "### Codex Security diff scan"
-              echo "Advisory scan skipped: could not resolve the PR diff range locally."
-            } >> "$GITHUB_STEP_SUMMARY"
-            echo "scannable=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          CHANGED="$(git diff --name-only "$BASE...$HEAD" | wc -l | tr -d ' ')"
-          echo "changed_files=$CHANGED" >> "$GITHUB_OUTPUT"
-          if [ "$CHANGED" = "0" ]; then
-            {
-              echo "### Codex Security diff scan"
-              echo "Advisory scan skipped: empty diff (merge-only or already-merged content)."
-            } >> "$GITHUB_STEP_SUMMARY"
-            echo "scannable=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "scannable=true" >> "$GITHUB_OUTPUT"
-          echo "Diff range: $BASE...$HEAD ($CHANGED files)"
-
-      - name: Materialize Codex subscription credential
-        id: auth
-        env:
-          DOPPLER_TOKEN_CODEX: ${{ secrets.DOPPLER_TOKEN_CODEX }}
-        run: |
-          set -euo pipefail
-          # Subscription auth lives in CODEX_HOME/auth.json, pulled LIVE from
-          # Doppler master/prd_codex — a dedicated config holding ONLY this
-          # secret, so the read-only service token's blast radius is the codex
-          # credential alone (never master/prd). An API key env var
-          # would force usage-priced billing — always unset both.
-          unset OPENAI_API_KEY CODEX_API_KEY
-          echo "CODEX_HOME=$RUNNER_TEMP/codex-home" >> "$GITHUB_ENV"
-          if [ -z "${DOPPLER_TOKEN_CODEX:-}" ]; then
-            {
-              echo "### Codex Security diff scan"
-              echo "Advisory scan skipped: repository secret \`DOPPLER_TOKEN_CODEX\` is not provisioned."
-              echo "Provision a read-only Doppler service token scoped to master/prd_codex, then re-run this job."
-            } >> "$GITHUB_STEP_SUMMARY"
-            echo "::notice::DOPPLER_TOKEN_CODEX not provisioned — advisory diff scan skipped"
-            echo "present=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          install -d -m 700 "$RUNNER_TEMP/codex-home"
-          # Any fetch/parse/shape failure emits present=failed (never a silent
-          # step exit) so the report step can publish 'did not run' and replace
-          # any stale clean comment on this head.
-          if ! curl -fsS --max-time 30 --connect-timeout 10 \
-            -H "Authorization: Bearer ${DOPPLER_TOKEN_CODEX}" \
-            "https://api.doppler.com/v3/configs/config/secret?project=master&config=prd_codex&name=CODEX_SUBSCRIPTION_AUTH_JSON" \
-            | python3 -c 'import json,sys;v=json.load(sys.stdin)["value"];r=v.get("computed") or v.get("raw");assert r, "Doppler response has neither value.computed nor value.raw";d=json.loads(r);assert "tokens" in d and "access_token" in d["tokens"], "unexpected auth.json shape";print(r)' \
-            > "$RUNNER_TEMP/codex-home/auth.json"; then
-            {
-              echo "### Codex Security diff scan"
-              echo "Scan did not run: Doppler credential fetch failed (timeout, non-2xx, or malformed auth payload)."
-            } >> "$GITHUB_STEP_SUMMARY"
-            echo "::warning::Doppler credential fetch failed — advisory diff scan did not run"
-            echo "present=failed" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          chmod 600 "$RUNNER_TEMP/codex-home/auth.json"
-          unset DOPPLER_TOKEN_CODEX
-          echo "present=true" >> "$GITHUB_OUTPUT"
-
-      - name: Set up Node
-        if: steps.range.outputs.scannable == 'true' && steps.auth.outputs.present == 'true'
-        continue-on-error: true
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
-        with:
-          node-version: "24"
-
-      - name: Install codex-security package
-        id: install
-        if: steps.range.outputs.scannable == 'true' && steps.auth.outputs.present == 'true'
-        continue-on-error: true
-        run: |
-          set -euo pipefail
-          # Pinned version + --ignore-scripts: no lifecycle code runs on a
-          # secret-bearing runner. Bump deliberately after a local --dry-run.
-          npm install --prefix "$RUNNER_TEMP/codex-security-cli" --no-save --ignore-scripts \
-            @openai/codex-security@0.2.0
-          echo "$RUNNER_TEMP/codex-security-cli/node_modules/.bin" >> "$GITHUB_PATH"
-          # Verify via absolute path: GITHUB_PATH only applies to later steps,
-          # so `codex-security` is not resolvable inside THIS step.
-          "$RUNNER_TEMP/codex-security-cli/node_modules/.bin/codex-security" --version
-
-      - name: Run codex-security on the PR diff
-        id: scan
-        if: steps.range.outputs.scannable == 'true' && steps.auth.outputs.present == 'true' && steps.install.outcome != 'failure'
-        continue-on-error: true
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          set -euo pipefail
-          unset OPENAI_API_KEY CODEX_API_KEY
-          OUT_DIR="$RUNNER_TEMP/codex-security-diff"
-          install -d -m 700 "$OUT_DIR"
-          # The pull_request checkout is the merge commit; committed-diff
-          # scans require checkout HEAD to equal the requested head SHA.
-          git checkout "$HEAD_SHA"
-          # Codex's Bubblewrap sandbox needs unprivileged user namespaces;
-          # Ubuntu 24.04+ runners restrict them by default. Scoped to this
-          # ephemeral job runner.
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          # No --safety-identifier: it requires API-key auth and is rejected
-          # under --auth chatgpt (subscription mode).
-          codex-security scan . \
-            --diff "$BASE_SHA" \
-            --head "$HEAD_SHA" \
-            --auth chatgpt \
-            --headless \
-            --verbose \
-            --output-dir "$OUT_DIR"
-
-      - name: Summarise findings
-        id: report
-        if: always() && steps.range.outputs.scannable == 'true' && (steps.auth.outputs.present == 'true' || steps.auth.outputs.present == 'failed')
-        env:
-          OUT_DIR: ${{ runner.temp }}/codex-security-diff
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          SCAN_OUTCOME: ${{ steps.scan.outcome }}
-          AUTH_PRESENT: ${{ steps.auth.outputs.present }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          python3 - <<'PY'
-          import json, os, re
-          from pathlib import Path
-
-          out_dir = Path(os.environ["OUT_DIR"])
-          findings_file = out_dir / "findings.json"
-          body_path = Path(os.environ["RUNNER_TEMP"]) / "codex-diff-scan-comment.md"
-          head = os.environ["HEAD_SHA"][:10]
-          base = os.environ["BASE_SHA"][:10]
-          run_url = os.environ["RUN_URL"]
-
-          def esc(text, cap=160):
-              t = re.sub(r"\s+", " ", str(text or "")).strip()
-              t = t.replace("|", "\\|").replace("@", "@\u200b")
-              return t[:cap]
-
-          findings = []
-          if findings_file.exists():
-              try:
-                  data = json.loads(findings_file.read_text(encoding="utf-8"))
-                  findings = data.get("findings", []) if isinstance(data, dict) else list(data)
-              except Exception as exc:
-                  print(f"could not parse findings.json: {exc}")
-
-          order = ["critical", "high", "medium", "low"]
-          counts = {level: 0 for level in order}
-          other = 0
-          for f in findings:
-              level = str((f.get("severity") or {}).get("level") or "").lower()
-              if level in counts:
-                  counts[level] += 1
-              else:
-                  other += 1
-
-          lines = ["### Codex Security diff scan (advisory)", ""]
-          if os.environ.get("AUTH_PRESENT") == "failed":
-              lines.append(
-                  f"Scan did not run: Doppler credential fetch failed "
-                  f"(timeout, non-2xx, or malformed payload; see [run logs]({run_url})). "
-                  "Nothing was scanned — this is advisory only."
-              )
-          elif os.environ["SCAN_OUTCOME"] != "success":
-              # 'failure', 'skipped' (e.g. install failed), or 'cancelled' all
-              # mean nothing was scanned — never report that as clean.
-              lines.append(
-                  f"Scan did not run to completion (outcome: "
-                  f"{os.environ['SCAN_OUTCOME']}; see [run logs]({run_url})). "
-                  "Nothing was scanned — this is advisory only."
-              )
-              # A scan can still validate candidates before dying (observed:
-              # exit 2 on cloud draft-save/cyber-safeguard failures AFTER
-              # reproducing an RCE). Surface them so the advisory never
-              # under-signals a dangerous diff.
-              try:
-                  cov = json.loads((out_dir / "coverage.json").read_text(encoding="utf-8"))
-              except Exception:
-                  cov = {}
-              seen, flagged = set(), []
-              for item in cov.get("deferred", []) if isinstance(cov, dict) else []:
-                  r = str(item.get("reason") or "").strip()
-                  m = re.search(r"Candidate `([^`]+)`", r)
-                  key = m.group(1) if m else r[:80]
-                  if not r or key in seen:
-                      continue
-                  seen.add(key)
-                  flagged.append(r)
-              if flagged:
-                  lines.append("")
-                  lines.append("Flagged before it stopped (validated candidates, not recorded findings):")
-                  for r in flagged[:5]:
-                      lines.append(f"- {esc(r, 220)}")
-          elif not findings_file.exists():
-              lines.append("Scan produced no findings file — treated as clean for advisory purposes.")
-          elif not findings:
-              lines.append(f"No findings in diff `{base}...{head}`.")
-          else:
-              lines.append(f"Diff `{base}...{head}` — **{len(findings)} finding(s)**: "
-                           + ", ".join(f"{counts[l]} {l}" for l in order if counts[l])
-                           + (f", {other} unclassified" if other else ""))
-              lines.append("")
-              lines.append("| Severity | Finding | Location |")
-              lines.append("|---|---|---|")
-              for f in sorted(
-                  findings,
-                  key=lambda x: order.index(str((x.get("severity") or {}).get("level") or "").lower())
-                  if str((x.get("severity") or {}).get("level") or "").lower() in order else len(order),
-              )[:12]:
-                  level = str((f.get("severity") or {}).get("level") or "?").upper()
-                  loc = (f.get("locations") or [{}])[0]
-                  path = esc(loc.get("path"), 80)
-                  line = loc.get("startLine") or ""
-                  where = f"`{path}:{line}`" if path else "—"
-                  lines.append(f"| {level} | {esc(f.get('title') or f.get('ruleId'))} | {where} |")
-              if len(findings) > 12:
-                  lines.append(f"\n…{len(findings) - 12} more in the run artifact.")
-          lines.append("")
-          lines.append(
-              "_Advisory only — never a required check. Findings are model output: "
-              "verify before acting._"
-          )
-          text = "\n".join(lines)
-          Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text(text + "\n", encoding="utf-8")
-          body_path.write_text(text, encoding="utf-8")
-          print(text)
-          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
-              fh.write(f"post_comment=true\nfindings={len(findings)}\n")
-          PY
-
-      - name: Upsert advisory PR comment
-        if: steps.report.outputs.post_comment == 'true'
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUM: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          BODY_FILE: ${{ runner.temp }}/codex-diff-scan-comment.md
-        run: |
-          python3 - <<'PY'
-          import json, os, sys, urllib.request
-
-          repo = os.environ["GITHUB_REPOSITORY"]
-          pr = os.environ["PR_NUM"]
-          body = open(os.environ["BODY_FILE"], encoding="utf-8").read()
-          marker = "<!-- codex-security-diff-scan:v1 -->"
-          body = f"{marker}\n{body}\n\n<sub>head `{os.environ['HEAD_SHA'][:10]}`</sub>"
-          headers = {
-              "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
-              "Accept": "application/vnd.github+json",
+    - name: Request trusted default-branch review
+      run: echo "Review requested. Model execution occurs only in the trusted default-branch worker; this PR job has no subscription
+        credentials."
+  completion:
+    name: Codex security coverage
+    if: always() && github.event.pull_request.draft != true
+    needs: scan
+    runs-on: ubuntu-slim
+    timeout-minutes: 2
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    steps:
+    - name: Require authenticated native review evidence
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+      env:
+        EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+      with:
+        script: |
+          const {owner, repo} = context.repo;
+          const pull_number = context.payload.pull_request.number;
+          const head = process.env.EXPECTED_HEAD;
+          const live = await github.rest.pulls.get({owner, repo, pull_number});
+          if (live.data.head.sha !== head) {
+            core.setFailed('Superseded revision; a later head must have its own review.');
+            return;
           }
-          try:
-              page = 1
-              existing = None
-              while True:
-                  req = urllib.request.Request(
-                      f"https://api.github.com/repos/{repo}/issues/{pr}/comments?per_page=100&page={page}",
-                      headers=headers,
-                  )
-                  comments = json.loads(urllib.request.urlopen(req, timeout=30).read())
-                  existing = next(
-                      (
-                          c for c in comments
-                          if (c.get("body") or "").startswith(marker)
-                          and (c.get("user") or {}).get("login") == "github-actions[bot]"
-                      ),
-                      None,
-                  )
-                  if existing or len(comments) < 100:
-                      break
-                  page += 1
-              if existing and (existing.get("body") or "") == body:
-                  print("comment already current — skipping")
-                  sys.exit(0)
-              endpoint = (
-                  f"https://api.github.com/repos/{repo}/issues/comments/{existing['id']}"
-                  if existing
-                  else f"https://api.github.com/repos/{repo}/issues/{pr}/comments"
-              )
-              req = urllib.request.Request(
-                  endpoint,
-                  data=json.dumps({"body": body}).encode(),
-                  headers={**headers, "Content-Type": "application/json"},
-                  method="PATCH" if existing else "POST",
-              )
-              urllib.request.urlopen(req, timeout=30)
-              print("advisory comment " + ("updated" if existing else "posted"))
-          except Exception as exc:
-              # Advisory: a comment failure must not surface as a job failure.
-              print(f"comment upsert failed (advisory, non-fatal): {exc}")
-          PY
-
-      - name: Upload findings artifact
-        if: always() && steps.auth.outputs.present == 'true'
-        continue-on-error: true
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: codex-security-diff-${{ github.run_id }}
-          path: ${{ runner.temp }}/codex-security-diff/
-          retention-days: 14
-          if-no-files-found: ignore
+          // Native security completion is published as a summary row, not
+          // as a formal code review. Do not conflate these protocol objects.
+          const comments = await github.paginate(github.rest.issues.listComments, {
+            owner, repo, issue_number: pull_number, per_page: 100,
+          });
+          const bot = item => item.user && item.user.login === 'chatgpt-codex-connector[bot]';
+          const bound = async prefix => {
+            if (typeof prefix !== 'string' || !/^[0-9a-f]{7,40}$/i.test(prefix)
+                || !head.toLowerCase().startsWith(prefix.toLowerCase())) return false;
+            if (prefix.length === 40) return true;
+            // Native summary tables abbreviate SHAs. GitHub must resolve the
+            // prefix uniquely; an ambiguous or stale prefix is never proof.
+            try {
+              const resolved = await github.rest.repos.getCommit({owner, repo, ref: prefix});
+              return resolved.data.sha === head;
+            } catch (error) {
+              core.info('Native abbreviated commit could not be uniquely resolved.');
+              return false;
+            }
+          };
+          const prefixes = new Set();
+          for (const item of comments.filter(bot)) {
+            const body = item.body || '';
+            for (const line of body.split('\n')) {
+              const cells = line.split('|').map(cell => cell.trim());
+              // Match the status cell, not a word in another column/lane.
+              if (!/\*\*Security Review\*\*/i.test(cells[1] || '')
+                  || !/^✅\s*\*\*Completed\*\*(?:\s*<relative-time[^>]*>[^<]*<\/relative-time>)?$/i.test(cells[2] || '')) continue;
+              const commit = (cells[3] || '').match(/^`([0-9a-f]{7,40})`$/i);
+              if (commit) prefixes.add(commit[1]);
+            }
+          }
+          let native = false;
+          for (const prefix of prefixes) {
+            if (native) break;
+            native = await bound(prefix);
+          }
+          if (native) {
+            core.info('security review coverage completed through authenticated native Codex evidence for ' + head);
+            return;
+          }
+          core.setFailed('security review coverage incomplete (' + 'awaiting trusted worker' + '). No current-head CLI or native completion proof.');
+      id: native
+      continue-on-error: true
+    - name: Check out immutable base proof reader
+      if: steps.native.outcome != 'success'
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      with:
+        ref: ${{ github.event.pull_request.base.sha }}
+        path: trusted
+        persist-credentials: false
+        sparse-checkout: scripts/ci
+        sparse-checkout-cone-mode: true
+    - name: Validate authenticated worker artifact
+      id: proof
+      if: steps.native.outcome != 'success'
+      continue-on-error: true
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: python3 -I trusted/scripts/ci/codex_review_worker.py coverage --lane security
+    - name: Require completed review coverage
+      if: always() && steps.native.outcome != 'success' && steps.proof.outcome != 'success'
+      run: |
+        echo "::error::No current-revision authenticated native or trusted worker proof. Review coverage is incomplete."
+        exit 1
+'on':
+  pull_request:
+    types:
+    - opened
+    - synchronize
+    - reopened
+    - ready_for_review
+    - converted_to_draft

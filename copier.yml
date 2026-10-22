@@ -57,7 +57,7 @@ langfuse_telemetry:
 
 codex_adversarial:
   type: bool
-  help: Cross-provider adversarial PR review agent. Requires OPENAI_API_KEY.
+  help: Optional native Codex MCP adversarial agent; separate from subscription CLI review. Configure its MCP provider credentials separately.
   default: false
 
 mesh_telemetry:
@@ -162,6 +162,10 @@ _exclude:
   - .svn
   - .svn/**
   # Pack-internal scaffolding (never ships)
+  # Synthetic qualification is source-repository CI, not a consumer workflow.
+  - .github/workflows/codex-review-isolation-proof.yml
+  - tests/codex_review_isolation_probe.py
+  - tests/test_codex_review_isolation_probe.py
   # Renovate preset: consumers extend it remotely via
   # "github>Manolii-org/ai-starter-pack" — copying it into a rendered repo
   # would shadow the shared preset with a stale local snapshot.
@@ -304,6 +308,7 @@ _exclude:
 # Instance-owned files: written on first copy, never overwritten by
 # `copier update` (report §4 Lever A / ADR-0023 Decision 1).
 _skip_if_exists:
+  - scripts/ci/codex-review-worker.json
   - CLAUDE.md
   - config/agent-checks.json
   - .claude/model-routing.json

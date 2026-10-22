@@ -1,0 +1,113 @@
+# Credential-free review requests / authenticated coverage and recovery.
+name: Codex Review Coverage Recovery
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+  actions: write
+concurrency:
+  group: codex-review-recovery-${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.id
+    }}
+  cancel-in-progress: false
+jobs:
+  recover:
+    if: github.event_name == 'workflow_run' || (github.actor == 'chatgpt-codex-connector[bot]' && (github.event_name == 'pull_request_review'
+      || github.event_name == 'pull_request_review_comment' || github.event.issue.pull_request))
+    runs-on: ubuntu-slim
+    timeout-minutes: 3
+    steps:
+    - name: Retry only failed completion jobs for the live PR revision
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+      with:
+        script: |
+          const {owner, repo} = context.repo;
+          const pull_number = context.payload.pull_request?.number || context.payload.issue?.number;
+          const pull = (await github.rest.pulls.get({owner, repo, pull_number})).data;
+          if (pull.state !== 'open' || pull.draft) return;
+          const event = context.payload.review || context.payload.comment || {};
+          const body = event.body || '';
+          const prefixMatches = prefix => /^[0-9a-f]{7,40}$/i.test(prefix || '')
+            && pull.head.sha.toLowerCase().startsWith(prefix.toLowerCase());
+          if (/(?:^|\n)(?:you have reached your Codex usage limits|Codex usage limits have been reached)|connect to github|create a Codex account/i.test(body)) return;
+          const formal = Boolean(context.payload.review) && event.commit_id === pull.head.sha
+            && ['APPROVED','COMMENTED','CHANGES_REQUESTED','DISMISSED'].includes(String(event.state || '').toUpperCase())
+            && /codex review/i.test(body)
+            && !/codex-security-review|codex security review/i.test(body);
+          let inline = event.commit_id === pull.head.sha && event.original_commit_id === pull.head.sha && event.path
+            && !event.in_reply_to_id && Number(event.pull_request_review_id) > 0
+            && /<!-- codex-code-review-finding:v1 -->\s*$/.test(body);
+          if (inline) {
+            const parent = (await github.rest.pulls.getReview({owner, repo, pull_number,
+              review_id: Number(event.pull_request_review_id)})).data;
+            inline = parent.commit_id === pull.head.sha
+              && parent.user?.login === 'chatgpt-codex-connector[bot]'
+              && ['APPROVED','COMMENTED','CHANGES_REQUESTED','DISMISSED'].includes(String(parent.state || '').toUpperCase());
+          }
+          const issueProof = Boolean(context.payload.issue?.pull_request && context.payload.comment);
+          const clean = issueProof && body.match(/codex review:[^\n]*didn.?t find any major issues[\s\S]*?reviewed commit:[^0-9a-f]*([0-9a-f]{7,40})/i);
+          const summary = lane => issueProof && body.split('\n').some(line => {
+            const cells = line.split('|').map(cell => cell.trim());
+            const commit = (cells[3] || '').match(/^`([0-9a-f]{7,40})`$/i);
+            return (cells[1] || '').includes('**' + lane + ' Review**')
+              && /^✅\s*\*\*Completed\*\*(?:\s*<relative-time[^>]*>[^<]*<\/relative-time>)?$/i.test(cells[2] || '')
+              && commit && prefixMatches(commit[1]);
+          });
+          // Only a matching lane is rechecked. Inline code findings must
+          // not spend another job rechecking an unfinished security lane.
+          const lanes = [];
+          if (formal || inline || (clean && prefixMatches(clean[1])) || summary('Code')) {
+            lanes.push(['codex-pr-review.yml', 'Codex review coverage']);
+          }
+          if (summary('Security')) {
+            lanes.push(['codex-security-diff-scan.yml', 'Codex security coverage']);
+          }
+          for (const [workflow_id, jobName] of lanes) {
+            const response = await github.rest.actions.listWorkflowRuns({
+              owner, repo, workflow_id, event: 'pull_request', head_sha: pull.head.sha,
+              per_page: 10,
+            });
+            const run = response.data.workflow_runs.find(item =>
+              item.head_sha === pull.head.sha && item.path === '.github/workflows/' + workflow_id
+              && (item.pull_requests || []).some(pr => pr.number === pull_number));
+            if (!run || run.conclusion !== 'failure') continue;
+            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+              owner, repo, run_id: run.id, per_page: 100,
+            });
+            const job = jobs.find(item => item.name === jobName && item.conclusion === 'failure');
+            if (!job) continue;
+            // Recheck after reads: never restart a superseded revision.
+            const live = (await github.rest.pulls.get({owner, repo, pull_number})).data;
+            if (live.head.sha !== pull.head.sha || live.draft || live.state !== 'open') return;
+            await github.rest.actions.reRunJobForWorkflowRun({owner, repo, job_id: job.id});
+            core.info('Retried completion job ' + job.id + ' for ' + pull.head.sha + '; no model rerun.');
+          }
+      if: github.event_name != 'workflow_run'
+    - name: Check out trusted recovery reader
+      if: github.event_name == 'workflow_run'
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      with:
+        ref: ${{ github.workflow_sha }}
+        path: trusted
+        persist-credentials: false
+        sparse-checkout: scripts/ci
+    - name: Recover only completed trusted worker coverage
+      if: github.event_name == 'workflow_run'
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: python3 -I trusted/scripts/ci/codex_review_worker.py recover
+'on':
+  pull_request_review:
+    types:
+    - submitted
+  pull_request_review_comment:
+    types:
+    - created
+  issue_comment:
+    types:
+    - created
+    - edited
+  workflow_run:
+    workflows:
+    - Codex Trusted Review Worker
+    types:
+    - completed

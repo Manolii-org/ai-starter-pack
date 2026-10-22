@@ -1,0 +1,70 @@
+name: Codex Trusted Review Worker
+# Only GitHub's default-branch workflow_run implementation can obtain OIDC auth.
+# PR request workflows carry no subscription or Doppler credentials.
+on:
+  workflow_run:
+    workflows: ["Codex PR Review (advisory)", "Codex Security Diff Scan (advisory)"]
+    types: [completed]
+permissions:
+  contents: read
+  pull-requests: write
+  issues: read
+  actions: write
+  id-token: write
+concurrency:
+  group: codex-trusted-${{ github.event.workflow_run.pull_requests[0].number || github.event.workflow_run.id }}-${{ github.event.workflow_run.workflow_id }}-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+jobs:
+  execute:
+    name: Trusted subscription review (advisory findings)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    continue-on-error: true
+    steps:
+      - name: Check out trusted controller revision
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: trusted
+          persist-credentials: false
+          sparse-checkout: scripts/ci
+      - name: Admit exact revision and reserve the model attempt
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CODEX_REVIEW_ENABLED: ${{ vars.CODEX_REVIEW_ENABLED }}
+          CODEX_SECURITY_ENABLED: ${{ vars.CODEX_SECURITY_ENABLED }}
+        run: python3 -I trusted/scripts/ci/codex_review_worker.py prepare
+      - name: Persist attempt before any model invocation
+        id: reserve
+        if: steps.prepare.outputs.needed == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.prepare.outputs.artifact }}
+          path: ${{ runner.temp }}/codex-trusted-attempt/receipt.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Run bounded trusted worker
+        id: worker
+        if: steps.prepare.outputs.needed == 'true' && steps.reserve.outcome == 'success'
+        env:
+          ATTEMPT_ARTIFACT_ID: ${{ steps.reserve.outputs.artifact-id }}
+          GH_TOKEN: ${{ github.token }}
+          CODEX_REVIEW_ENABLED: ${{ vars.CODEX_REVIEW_ENABLED }}
+          CODEX_SECURITY_ENABLED: ${{ vars.CODEX_SECURITY_ENABLED }}
+        run: python3 -I trusted/scripts/ci/codex_review_worker.py run
+      - name: Upload inert execution receipt
+        if: always() && steps.worker.outputs.artifact != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.worker.outputs.artifact }}
+          path: ${{ runner.temp }}/codex-trusted-result
+          if-no-files-found: error
+          retention-days: 30
+      - name: Publish advisory output after artifact retention
+        if: steps.worker.outputs.artifact != '' && success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CODEX_REVIEW_ENABLED: ${{ vars.CODEX_REVIEW_ENABLED }}
+          CODEX_SECURITY_ENABLED: ${{ vars.CODEX_SECURITY_ENABLED }}
+        run: python3 -I trusted/scripts/ci/codex_review_worker.py publish

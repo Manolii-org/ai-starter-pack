@@ -267,13 +267,13 @@ def test_cost_profile_lean_omits_measured_waste_callers(default_render):
     ("flags", "expected"),
     [
         ({}, {"Hooks": 5, "Commands": 51, "Skills": 36, "Agents": 27,
-              "Scripts": 54, "Husky": 3, "CI": 35, "Docs": 30}),
+              "Scripts": 54, "Husky": 3, "CI": 37, "Docs": 31}),
         ({flag: "true" for flag in FEATURE_FLAGS},
          {"Hooks": 5, "Commands": 54, "Skills": 40, "Agents": 28,
-              "Scripts": 54, "Husky": 3, "CI": 35, "Docs": 32}),
+              "Scripts": 54, "Husky": 3, "CI": 37, "Docs": 33}),
         ({"cost_profile": "lean"},
          {"Hooks": 5, "Commands": 51, "Skills": 36, "Agents": 27,
-              "Scripts": 54, "Husky": 3, "CI": 34, "Docs": 30}),
+              "Scripts": 54, "Husky": 3, "CI": 36, "Docs": 31}),
     ],
 )
 def test_rendered_readme_counts_match_rendered_tree(flags, expected):
@@ -373,7 +373,7 @@ def test_skip_if_exists_contract():
     copier_config = yaml.safe_load((ROOT / "copier.yml").read_text())
     skip_if_exists = set(copier_config.get("_skip_if_exists", []))
 
-    expected = {"CLAUDE.md", ".claude/model-routing.json", ".claude/mcp.json", ".claude/hooks/session-start.sh", "ai-manifest.yaml", "config/agent-checks.json"}
+    expected = {"CLAUDE.md", ".claude/model-routing.json", ".claude/mcp.json", ".claude/hooks/session-start.sh", "ai-manifest.yaml", "scripts/ci/codex-review-worker.json", "config/agent-checks.json"}
     assert skip_if_exists == expected, (
         f"_skip_if_exists mismatch.\n"
         f"Expected: {expected}\n"
@@ -394,6 +394,8 @@ def test_skip_if_exists_contract():
         recipes.write_text('{"owner": "local"}\n')
         settings = dst / ".claude/settings.json"
         settings.write_text("{}\n")
+        review_policy = dst / "scripts/ci/codex-review-worker.json"
+        review_policy.write_text('{"enabled":true,"identity":"instance-owned-fixture"}\n')
 
         # Re-render with --overwrite
         cmd = [
@@ -412,12 +414,14 @@ def test_skip_if_exists_contract():
         subprocess.run(cmd, check=True)
 
         # Sentinel should survive
+        assert review_policy.read_text() == '{"enabled":true,"identity":"instance-owned-fixture"}\n'
         assert claude_file.read_text() == "LOCAL\n"
         assert session_hook.read_text() == "#!/bin/sh\necho LOCAL\n"
         assert recipes.read_text() == '{"owner": "local"}\n'
         # The lifecycle migration is deliberately outside the instance-owned
         # hook, so an update still wires cleanup for existing consumers.
         assert "guard_check.py --clear-session-unfreezes" in settings.read_text()
+        assert review_policy.read_text() == '{"enabled":true,"identity":"instance-owned-fixture"}\n'
         assert claude_file.read_text() == "LOCAL\n", "CLAUDE.md was overwritten"
 
         # But other files should be updated
@@ -519,7 +523,7 @@ def test_pack_components_contract(default_render):
     required_secrets = instance.get("required_secrets", {})
     github_secrets = required_secrets.get("github", [])
     assert github_secrets == ["ANTHROPIC_API_KEY"], (
-        f"required_secrets.github: expected ['ANTHROPIC_API_KEY'], got {github_secrets}"
+        f"required_secrets.github: expected direct-provider credential, got {github_secrets}"
     )
 
     doppler_secrets = required_secrets.get("doppler", {})
@@ -545,7 +549,7 @@ def test_pack_components_flags(tmp_path):
     """Verify pack-components.yml with oss_routing and mesh_telemetry flags."""
     dst = tmp_path / "flags_render"
     dst.mkdir()
-    render(dst, oss_routing="true", mesh_telemetry="true")
+    render(dst, oss_routing="true", mesh_telemetry="true", codex_adversarial="true")
 
     pack_file = dst / "pack-components.yml"
     assert pack_file.exists(), "pack-components.yml missing"
@@ -587,6 +591,20 @@ def test_pack_components_flags(tmp_path):
     assert litellm_proxy.get("enabled") is True, (
         f"components.litellm_proxy.enabled: expected True, got {litellm_proxy.get('enabled')}"
     )
+
+
+def test_native_codex_agent_does_not_impose_static_review_credentials(tmp_path):
+    """Native MCP onboarding must not require the unrelated worker's old token."""
+    dst = tmp_path / "native_codex_render"
+    render(dst, codex_adversarial="true")
+    required = yaml.safe_load((dst / "pack-components.yml").read_text())["instance"]["required_secrets"]
+    assert required["github"] == ["ANTHROPIC_API_KEY"]
+    assert required["doppler"]["keys"] == []
+    assert (dst / ".claude/agents/codex-adversarial.md").exists()
+    for workflow in ["codex-pr-review.yml", "codex-security-diff-scan.yml", "codex-review-worker.yml"]:
+        content = (dst / ".github/workflows" / workflow).read_text()
+        assert "DOPPLER_TOKEN_CODEX" not in content
+        assert "OPENAI_API_KEY" not in content
 
 
 def test_otel_endpoint_answer(default_render, tmp_path):

@@ -1966,7 +1966,8 @@ def _bootstrap_env(tmp_path):
     empty_cfg.write_text("")
     return dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}",
                 GIT_CONFIG_GLOBAL=str(empty_cfg),
-                MIRROR_TRUST_DIRS=str(bin_dir))
+                MIRROR_TRUST_DIRS=os.pathsep.join(filter(None,
+                    (str(bin_dir), os.environ.get("MIRROR_TRUST_DIRS", "")))))
 
 def test_bootstrap_mirror_seed(tmp_path):
     """bootstrap-mirror.py seeds a complete lint-clean mirror scaffold:
@@ -3556,6 +3557,11 @@ def test_bootstrap_mirror_refresh_preserves_owned_state(tmp_path):
     al = root / "registry/pack-surface-allowlist.txt"
     al.write_text(al.read_text() + keep_key + "\n")
 
+    # ORG-LEAK uses registry-relative paths, unlike PACK-SURFACE above.
+    leak_al = root / "registry/leak-allowlist.txt"
+    leak_keep = "cpdcheck/keep.md#" + hashlib.sha256(keep_line.lower().encode()).hexdigest()[:8]
+    leak_al.write_text(leak_al.read_text() + leak_keep + "\n")
+
     # A NEW mirror-owned violation that was never ratcheted.
     (root / "registry/cpdcheck/new.md").write_text(
         "also see Manolii-org/master\n")
@@ -3575,6 +3581,14 @@ def test_bootstrap_mirror_refresh_preserves_owned_state(tmp_path):
         "live mirror-owned ratchet entry dropped on refresh"
     assert "registry/cpdcheck/new.md" not in entries, \
         "refresh ratcheted a new mirror-owned violation"
+    leak_entries = {line for line in leak_al.read_text().splitlines()
+                    if line.strip() and not line.startswith("#")}
+    assert any(line.startswith("platform/") for line in leak_entries), \
+        "refresh discarded canonical registry-relative platform ratchets"
+    assert leak_keep in leak_entries, "existing owned ORG-LEAK entry was lost"
+    assert not any(line.startswith("cpdcheck/new.md#") for line in leak_entries), \
+        "refresh must not ratchet new owned ORG-LEAK violations"
+
 def test_pack_surface_scans_tracked_skip_dir(tmp_path):
     """A slug committed under a skip-listed dir is still published —
     the scan enumerates tracked files, not directory names."""
@@ -5842,7 +5856,7 @@ def test_dirfd_apply_writes_through_planted_parent_symlink(tmp_path):
     """An --apply that prefetched a dir_fd must write beneath the real
     directory even if the parent path is swapped for a symlink between
     planning and apply."""
-    mod = load_resolve_module()
+    load_resolve_module()
     reg_root = make_registry(tmp_path / "src", {
         "platform/framework": [("skills/demo/SKILL.md",
                                 "---\nname: demo\ndescription: d\n---\nv1")],
@@ -6181,18 +6195,22 @@ def test_stale_skip_recheck(tmp_path):
         resolved=[{"files": {".claude/agents/a.md":
                              _hl.sha256(b"same").hexdigest()},
                    "exec": {".claude/agents/a.md": 0o644}}])
-    ok_snap = lambda p: (b"same", 0o644, (1, 2))
+    def ok_snap(p):
+        return (b"same", 0o644, (1, 2))
     assert mod._stale_skip(root, plan, ok_snap) is None
     # changed bytes -> stale
-    bad_snap = lambda p: (b"changed", 0o644, (1, 2))
+    def bad_snap(p):
+        return (b"changed", 0o644, (1, 2))
     assert mod._stale_skip(
         root, plan, bad_snap) == ".claude/agents/a.md"
     # vanished -> stale
-    gone_snap = lambda p: None
+    def gone_snap(p):
+        return None
     assert mod._stale_skip(
         root, plan, gone_snap) == ".claude/agents/a.md"
     # mode drift -> stale
-    mode_snap = lambda p: (b"same", 0o755, (1, 2))
+    def mode_snap(p):
+        return (b"same", 0o755, (1, 2))
     assert mod._stale_skip(
         root, plan, mode_snap) == ".claude/agents/a.md"
     # and the reverse: bundled path + declared module still blocks
@@ -6578,7 +6596,7 @@ def test_prune_type_change_fails_closed(tmp_path):
     """A prune candidate swapped for a symlink/dir after planning fails the
     apply (rollback) instead of being silently skipped while its lock entry
     drops (Codex on #1953)."""
-    import os, subprocess, json
+    import json
     repo = tmp_path / "repo"
     (repo / ".claude" / "skills" / "old-skill").mkdir(parents=True)
     stale = repo / ".claude" / "skills" / "old-skill" / "SKILL.md"
@@ -6645,7 +6663,8 @@ def test_line_continuation_script_dep(tmp_path):
 def test_prune_missing_parent_dir_noop(tmp_path):
     """An orphan whose parent dir was deleted — under a read-only ancestor —
     is a no-op lock clear, never a mkdir failure (Devin on #123)."""
-    import os, json
+    import os
+    import json
     repo = tmp_path / "repo"
     skills = repo / ".claude" / "skills"
     skills.mkdir(parents=True)
@@ -6969,7 +6988,8 @@ def test_script_dep_redirect_targets_and_bare_module(tmp_path):
     dependencies; input redirects (`<`, `<>`) still are — and a bare
     `python -m scripts` probes scripts/__main__.py."""
     mod = load_resolve_module()
-    dep = lambda b: mod.script_dep_block(tmp_path, b.encode())
+    def dep(b):
+        return mod.script_dep_block(tmp_path, b.encode())
     # output / fd / heredoc / here-string targets — created, not read
     for body in [
         "python run.py > scripts/out.py",
@@ -7010,7 +7030,8 @@ def test_script_dep_extensionless_option_values(tmp_path):
     argument value (`--directory scripts/site`), not an invocation;
     after a bare `--` or a short flag it still gates (Codex on #1344)."""
     mod = load_resolve_module()
-    dep = lambda b: mod.script_dep_block(tmp_path, b.encode())
+    def dep(b):
+        return mod.script_dep_block(tmp_path, b.encode())
     assert not dep("python -m http.server --directory scripts/site")
     assert not dep("python -m http.server --directory=scripts/site")
     assert not dep("python -m http.server -d scripts/site")
@@ -7525,7 +7546,7 @@ def test_prune_cleanup_revalidates_ancestor_chain(tmp_path):
     real = consumer / ".claude-real"
     claude.rename(real)
     claude.symlink_to(external)
-    r = run_resolver(m, reg_root, consumer, "--apply", "--prune")
+    run_resolver(m, reg_root, consumer, "--apply", "--prune")
     # the external commands dir must survive the cleanup sweep
     assert (external / "commands").is_dir()
 
@@ -14657,3 +14678,24 @@ def test_script_dep_round93_date_option_classes(tmp_path):
     assert mod.script_dep_block(
         pdir, b"(date --rfc-3339=s '+x'; echo -n 'sh s'; "
               b"echo cripts/x.sh) | sh\n")
+
+
+def test_bootstrap_ratchet_coordinate_spaces():
+    mod = _load_bootstrap()
+    cases = [
+        ("registry/leak-allowlist.txt", "platform/framework/a.md", True),
+        ("registry/leak-allowlist.txt", "platform-other/a.md", False),
+        ("registry/leak-allowlist.txt", "manolii/a.md", False),
+        ("registry/leak-allowlist.txt", "cpdcheck/a.md", False),
+        ("registry/leak-allowlist.txt", "plugins.json", False),
+        ("registry/leak-allowlist.txt", "README.md", False),
+        ("registry/pack-surface-allowlist.txt", "registry/platform/framework/a.md", True),
+        ("registry/pack-surface-allowlist.txt", "registry/platform-other/a.md", False),
+        ("registry/pack-surface-allowlist.txt", "registry/manolii/a.md", False),
+        ("registry/pack-surface-allowlist.txt", "registry/plugins.json", False),
+        ("registry/pack-surface-allowlist.txt", "platform/framework/a.md", False),
+        ("registry/pack-surface-allowlist.txt", "README.md", True),
+        ("registry/unknown-allowlist.txt", "registry/platform/framework/a.md", False),
+    ]
+    for allowlist, path, expected in cases:
+        assert mod._ratchet_vendored(allowlist, path) is expected, (allowlist, path)
