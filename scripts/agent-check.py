@@ -143,6 +143,69 @@ def require_unfiltered_tracked_inputs(root: Path) -> None:
                          "filtered working files need a raw-input validation adapter")
 
 
+def tracked_working_inputs(root: Path) -> dict:
+    """Read raw tracked inputs even when Git conversions or index flags hide edits."""
+    entries = subprocess.run(["git", "ls-files", "--stage", "-z"], cwd=root,
+                             env=git_environment(), capture_output=True, check=True).stdout
+    files: dict[str, dict[str, str | int]] = {}
+    changed: list[str] = []
+    gitlinks: list[str] = []
+    for entry in entries.split(b"\0"):
+        if not entry:
+            continue
+        metadata, raw_name = entry.split(b"\t", 1)
+        mode, object_id, stage = metadata.split()
+        name = os.fsdecode(raw_name)
+        if stage != b"0":
+            raise ValueError("resolve unmerged tracked inputs before local validation")
+        path = root / name
+        if any(parent.is_symlink() for parent in path.parents if parent != root and parent.is_relative_to(root)):
+            raise ValueError("linked tracked parent directories are unsupported for local validation")
+        if mode == b"160000":
+            # Gitlink text cannot bind mutable nested working files.
+            files[name] = {"kind": "gitlink", "object": object_id.decode()}
+            changed.append(name)
+            gitlinks.append(name)
+            continue
+        try:
+            details = path.lstat()
+        except FileNotFoundError:
+            files[name] = {"kind": "missing"}
+            changed.append(name)
+            continue
+        if stat.S_ISLNK(details.st_mode):
+            content = os.fsencode(os.readlink(path))
+            raw_digest = hashlib.sha256(content).hexdigest()
+            blob_digest = hashlib.new("sha1" if len(object_id) == 40 else "sha256",
+                                      b"blob " + str(len(content)).encode() + b"\0" + content).hexdigest()
+            actual_mode = b"120000"
+        elif stat.S_ISREG(details.st_mode):
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+            with os.fdopen(fd, "rb") as stream:
+                details = os.fstat(stream.fileno())
+                if not stat.S_ISREG(details.st_mode):
+                    raise ValueError("tracked validation inputs must remain regular files")
+                raw_hash = hashlib.sha256()
+                blob_hash = hashlib.new("sha1" if len(object_id) == 40 else "sha256")
+                blob_hash.update(b"blob " + str(details.st_size).encode() + b"\0")
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    raw_hash.update(chunk)
+                    blob_hash.update(chunk)
+            raw_digest, blob_digest = raw_hash.hexdigest(), blob_hash.hexdigest()
+            actual_mode = b"100755" if details.st_mode & 0o100 else b"100644"
+        else:
+            raise ValueError("tracked validation inputs must be regular files or symlinks")
+        files[name] = {"kind": "symlink" if actual_mode == b"120000" else "file",
+                       "sha256": raw_digest, "mode": actual_mode.decode(),
+                       "execute_bits": details.st_mode & 0o111}
+        expected_execute_bits = 0o111 if mode == b"100755" else 0
+        noncanonical_execute_bits = (actual_mode != b"120000"
+                                     and details.st_mode & 0o111 != expected_execute_bits)
+        if blob_digest != object_id.decode() or actual_mode != mode or noncanonical_execute_bits:
+            changed.append(name)
+    return {"files": files, "changed_paths": sorted(changed), "gitlinks": sorted(gitlinks)}
+
+
 def snapshot(root: Path) -> dict:
     require_unfiltered_tracked_inputs(root)
     # Include staged AND unstaged edits, additions and deletions. Generated
@@ -159,6 +222,7 @@ def snapshot(root: Path) -> dict:
             untracked[name] = sha(b"regular\0" + path.read_bytes())
     # Git records link text, not mutable target contents. Keep normal check
     # execution for linked candidates, but never reuse or save a cached PASS.
+    tracked = tracked_working_inputs(root)
     names = set(untracked)
     names.update(os.fsdecode(p) for p in git(root, "ls-files", "-z").split(b"\0") if p)
     symlinks = sorted(name for name in names if (root / name).is_symlink())
@@ -167,6 +231,8 @@ def snapshot(root: Path) -> dict:
         "tree": git(root, "rev-parse", "HEAD^{tree}").decode().strip(),
         "diff": sha(git(root, "diff", "--binary", "HEAD")),
         "untracked": untracked,
+        "tracked": sha(encoded(tracked["files"])),
+        "gitlinks": tracked["gitlinks"],
         "symlinks": symlinks,
     }
 
@@ -213,6 +279,7 @@ def plan_for(root: Path, config: dict, base: str | None = None) -> dict:
     for command in (("diff", "--no-renames", "--name-only", "-z", base_sha),
                     ("ls-files", "--others", "--exclude-standard", "-z")):
         changed.update(os.fsdecode(p) for p in git(root, *command).split(b"\0") if p)
+    changed.update(tracked_working_inputs(root)["changed_paths"])
     paths = sorted(changed)
     # Owners explicitly declare global inputs in each recipe. Framework-only
     # changes must not implicitly install/build every application in the repo.
@@ -334,7 +401,7 @@ def main(argv=None) -> int:
             raise ValueError(f"ignore {STATE}/ in .gitignore before executing")
         key = private_cache_key(root)
         before = snapshot(root)
-        cache_reusable = not before["symlinks"]
+        cache_reusable = not before["symlinks"] and not before["gitlinks"]
         results = []
         provisioned = []
         reused_environments = []

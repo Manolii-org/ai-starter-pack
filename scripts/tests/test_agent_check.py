@@ -114,6 +114,113 @@ class AgentCheckTests(unittest.TestCase):
         self.run_check()
         self.assertTrue(self.receipt()["cached"])
 
+    def assert_line_ending_edit_is_validated(self, attribute=False):
+        self.config['checks'][0]['commands'] = [[sys.executable, '-c',
+            "from pathlib import Path; assert bytes([13]) not in Path('src/value.py').read_bytes()"]]
+        self.save_config()
+        if attribute:
+            (self.root / '.gitattributes').write_text('src/value.py text eol=lf\n')
+        else:
+            self.git('config', 'core.autocrlf', 'input')
+        self.git('add', '.')
+        self.git('commit', '-qm', 'line-ending fixture')
+        self.git('update-ref', 'refs/remotes/origin/main', 'HEAD')
+        self.change_source()
+        self.run_check()
+        prior = self.git('diff', '--binary', 'HEAD')
+        (self.root / 'src/value.py').write_bytes(b'value = 1\r\n# changed\r\n')
+        self.assertEqual(prior, self.git('diff', '--binary', 'HEAD'))
+        self.run_check(expected=1)
+        self.assertFalse(self.receipt()['cached'])
+
+    def test_text_attributes_cannot_hide_a_failing_raw_line_ending_edit(self):
+        self.assert_line_ending_edit_is_validated(attribute=True)
+
+    def test_autocrlf_cannot_hide_a_failing_raw_line_ending_edit(self):
+        self.assert_line_ending_edit_is_validated()
+
+    def test_working_tree_encoding_cannot_hide_failing_raw_bytes(self):
+        self.change_source()
+        attributes = self.root / '.git/info/attributes'
+        attributes.write_text('src/value.py working-tree-encoding=UTF-8\n')
+        self.run_check()
+        before = self.git('diff', '--binary', 'HEAD')
+        attributes.write_text('src/value.py working-tree-encoding=UTF-16LE\n')
+        (self.root / 'src/value.py').write_bytes('value = 1\n# changed\n'.encode('utf-16-le'))
+        self.assertEqual(before, self.git('diff', '--binary', 'HEAD'))
+        self.run_check(expected=1)
+        self.assertFalse(self.receipt()['cached'])
+
+    def test_index_visibility_flags_cannot_hide_a_failing_edit(self):
+        for flag in ('assume-unchanged', 'skip-worktree'):
+            with self.subTest(flag=flag):
+                self.change_source()
+                self.run_check()
+                self.git('update-index', '--' + flag, 'src/value.py')
+                (self.root / 'src/value.py').write_text('value = 0\n# changed\n')
+                self.assertNotIn(b'src/value.py', self.git('diff', '--name-only', 'HEAD'))
+                self.run_check(expected=1)
+                self.assertFalse(self.receipt()['cached'])
+                self.assertIn('test', [r['id'] for r in self.receipt()['results']])
+                self.git('update-index', '--no-' + flag, 'src/value.py')
+
+    def test_ignored_executable_mode_change_is_validated(self):
+        self.git('config', 'core.filemode', 'false')
+        self.config['checks'][0]['commands'] = [[sys.executable, '-c',
+            "from pathlib import Path; assert not (Path('src/value.py').stat().st_mode & 0o111)"]]
+        self.save_config()
+        self.change_source()
+        self.run_check()
+        prior = self.git('diff', '--binary', 'HEAD')
+        (self.root / 'src/value.py').chmod(0o755)
+        self.assertEqual(prior, self.git('diff', '--binary', 'HEAD'))
+        self.run_check(expected=1)
+
+    def test_execute_permission_mask_changes_cannot_reuse_a_pass(self):
+        path = self.root / 'src/run.sh'
+        path.write_text('#!/bin/sh\nexit 0\n')
+        path.chmod(0o755)
+        self.config['checks'][0]['commands'] = [[str(path)]]
+        self.save_config()
+        self.git('add', '.')
+        self.git('commit', '-qm', 'executable fixture')
+        self.git('update-ref', 'refs/remotes/origin/main', 'HEAD')
+        self.git('config', 'core.filemode', 'false')
+        (self.root / 'lock.json').write_text('{"candidate":1}\n')
+        self.run_check()
+        before = self.git('diff', '--binary', 'HEAD')
+        path.chmod(0o655)
+        self.assertEqual(before, self.git('diff', '--binary', 'HEAD'))
+        result = self.run_check(expected=2)
+        self.assertIn("Permission denied", result.stderr)
+        self.assertFalse((self.root / ".ai/agent-checks/receipt.json").exists())
+
+    def test_group_execute_change_selects_an_otherwise_clean_path(self):
+        path = self.root / 'src/value.py'
+        path.chmod(0o755)
+        self.config['checks'][0]['commands'] = [[sys.executable, '-c',
+            "from pathlib import Path; assert Path('src/value.py').stat().st_mode & 0o010"]]
+        self.save_config()
+        self.git('add', '.')
+        self.git('commit', '-qm', 'group executable fixture')
+        self.git('update-ref', 'refs/remotes/origin/main', 'HEAD')
+        self.run_check()
+        path.chmod(0o745)
+        self.assertEqual(self.git('diff', '--name-only', 'HEAD'), b'')
+        result = self.run_check(expected=1)
+        self.assertIn('AGENT-CHECK test:', result.stdout)
+        self.assertFalse(self.receipt()['cached'])
+
+    def test_linked_tracked_parent_blocks_without_retaining_a_pass(self):
+        self.change_source()
+        self.run_check()
+        saved = self.root / '.git/saved-source'
+        (self.root / 'src').rename(saved)
+        (self.root / 'src').symlink_to(saved, target_is_directory=True)
+        result = self.run_check(expected=2)
+        self.assertIn('linked tracked parent', result.stderr)
+        self.assertFalse((self.root / '.ai/agent-checks/receipt.json').exists())
+
     def test_clean_filter_cannot_hide_a_failing_working_file(self):
         driver = self.root / ".git/clean-source"
         driver.write_text("#!" + sys.executable + "\nimport sys\nbody=sys.stdin.read()\n"
@@ -781,8 +888,9 @@ class AgentCheckTests(unittest.TestCase):
                     (self.root / ".gitignore").write_text("")
                     self.run_check(expected=2)
                 elif failure == "snapshot":
-                    with mock.patch.object(runner, "snapshot", side_effect=OSError("fixture snapshot failure")):
-                        self.assertEqual(runner.main(["--repo-root", str(self.root)]), 2)
+                    with mock.patch.object(runner, "snapshot", side_effect=OSError("fixture snapshot failure")) as injected:
+                        self.assertEqual(runner.main(["--repo-root", str(self.root), "--provider", "codex"]), 2)
+                        injected.assert_called()
                 else:
                     real_write = runner.write_json
 
@@ -791,8 +899,9 @@ class AgentCheckTests(unittest.TestCase):
                             raise OSError("fixture cache write failure")
                         real_write(path, value)
 
-                    with mock.patch.object(runner, "write_json", side_effect=fail_cache_write):
-                        self.assertEqual(runner.main(["--repo-root", str(self.root), "--no-cache"]), 2)
+                    with mock.patch.object(runner, "write_json", side_effect=fail_cache_write) as injected:
+                        self.assertEqual(runner.main(["--repo-root", str(self.root), "--provider", "codex", "--no-cache"]), 2)
+                        self.assertTrue(any(call.args[0].parent.name == 'cache' for call in injected.call_args_list))
                 self.assertFalse(receipt.exists(), "blocked execution retained an older PASS receipt")
 
     def test_ci_toolchain_mismatch_is_incomplete_validation(self):
@@ -895,36 +1004,38 @@ class SurfaceTests(unittest.TestCase):
 
     def test_primary_claude_alias_updates_without_writing_through_link(self):
         module = load("sync-agent-validation")
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory).resolve()
-            (root / "docs").mkdir()
-            (root / ".claude").mkdir()
-            (root / "docs/agent-validation.md").write_text("Current policy\n")
-            primary = root / "CLAUDE.md"
-            primary.write_text("Owner prose\n")
-            alias = root / ".claude/CLAUDE.md"
-            alias.symlink_to("../CLAUDE.md")
-            planned = module.outputs(root)
-            self.assertIn(primary, planned)
-            self.assertNotIn(alias, planned)
-            self.assertEqual(module.main(["--repo-root", str(root)]), 0)
-            self.assertTrue(alias.is_symlink())
-            self.assertEqual(os.readlink(alias), "../CLAUDE.md")
-            self.assertIn("Current policy", alias.read_text())
-            self.assertIn("Owner prose", primary.read_text())
-            self.assertEqual(module.main(["--repo-root", str(root), "--check"]), 0)
-            (root / "config").mkdir()
-            (root / "config/agent-checks.json").write_text(json.dumps(
-                {"schema_version": 1, "base": "origin/main", "checks": []}))
-            for args in (("init", "-q"), ("checkout", "-qb", "codex/alias-fixture")):
-                subprocess.run(["git", *args], cwd=root, check=True, capture_output=True,
-                               env=load("agent-check").git_environment())
-            installer = load("install-agent-validation")
-            self.assertEqual(installer.main(["--repo-root", str(root)]), 0)
-            self.assertTrue(alias.is_symlink())
-            self.assertEqual(os.readlink(alias), "../CLAUDE.md")
-            self.assertIn("Owner prose", primary.read_text())
-            self.assertEqual(installer.main(["--repo-root", str(root), "--check"]), 0)
+        for reverse in (False, True):
+            with self.subTest(reverse=reverse), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                (root / "docs").mkdir()
+                (root / ".claude").mkdir()
+                (root / "docs/agent-validation.md").write_text("Current policy\n")
+                primary = root / (".claude/CLAUDE.md" if reverse else "CLAUDE.md")
+                primary.write_text("Owner prose\n")
+                alias = root / ("CLAUDE.md" if reverse else ".claude/CLAUDE.md")
+                alias_text = ".claude/CLAUDE.md" if reverse else "../CLAUDE.md"
+                alias.symlink_to(alias_text)
+                planned = module.outputs(root)
+                self.assertIn(primary, planned)
+                self.assertNotIn(alias, planned)
+                self.assertEqual(module.main(["--repo-root", str(root)]), 0)
+                self.assertTrue(alias.is_symlink())
+                self.assertEqual(os.readlink(alias), alias_text)
+                self.assertIn("Current policy", alias.read_text())
+                self.assertIn("Owner prose", primary.read_text())
+                self.assertEqual(module.main(["--repo-root", str(root), "--check"]), 0)
+                (root / "config").mkdir()
+                (root / "config/agent-checks.json").write_text(json.dumps(
+                    {"schema_version": 1, "base": "origin/main", "checks": []}))
+                for args in (("init", "-q"), ("checkout", "-qb", "codex/alias-fixture")):
+                    subprocess.run(["git", *args], cwd=root, check=True, capture_output=True,
+                                   env=load("agent-check").git_environment())
+                installer = load("install-agent-validation")
+                self.assertEqual(installer.main(["--repo-root", str(root)]), 0)
+                self.assertTrue(alias.is_symlink())
+                self.assertEqual(os.readlink(alias), alias_text)
+                self.assertIn("Owner prose", primary.read_text())
+                self.assertEqual(installer.main(["--repo-root", str(root), "--check"]), 0)
 
     def test_other_claude_links_still_refuse_entire_write_batch(self):
         module = load("sync-agent-validation")

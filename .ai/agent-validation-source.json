@@ -2,12 +2,12 @@
   "schema": "agent-validation-source/v1",
   "source": "ai-starter-pack",
   "files": {
-    "scripts/agent-check.py": "57acbfd6dc93b1945ac41ab783d7233ffee0cbdf91de3136b67431b36192f293",
-    "scripts/sync-agent-validation.py": "c58c5b98230fdd10be6fb7f5f18593530cf553bb5e2284f0498112d5a63c84d6",
+    "scripts/agent-check.py": "3fbef8662206bfe85abd2bc826903ac1592fcaf1063d701f9f535767580b356b",
+    "scripts/sync-agent-validation.py": "f299f8c0a9f57dbc437e50b9980e090c234c1fb7414d343236b392113bc59334",
     "scripts/install-agent-validation.py": "e743d23c3f701a5de71c50583c2c3dc03ce8c139adb718064bd2dd9062ab0bc2",
-    "scripts/tests/test_agent_check.py": "7f26001f30f47461bff782015a60d74f9e31e2bcfb0ffb61a02d7d663335844c",
-    "docs/agent-validation.md": "e7705223aea446f89c27a38e8440cc07e4cc24fdd16dbed57d6680a2e4eba960",
-    ".claude/skills/agent-validation/SKILL.md": "26e110160299e9c42c2a8b1eac69545e279c6ccd43ef71088c84345fc2139fec"
+    "scripts/tests/test_agent_check.py": "77be4486c40881c2334c07e1648ac9e160d43ccb728e7085f9ba47cc96b478c1",
+    "docs/agent-validation.md": "8a3386ca97bfd232d4b0acfaf7094e376cbe35745d6ba19bbc5f4a5d0c5ffd2a",
+    ".claude/skills/agent-validation/SKILL.md": "a7b3beb46b4ec129aaf78fb7202438ee282aa25916fa74c6d83468a7f357f3cb"
   },
   "recipes": "repository-owned"
 }
