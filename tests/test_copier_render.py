@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import re
+import runpy
 import subprocess
 import sys
 import tempfile
@@ -265,14 +266,14 @@ def test_cost_profile_lean_omits_measured_waste_callers(default_render):
 @pytest.mark.parametrize(
     ("flags", "expected"),
     [
-        ({}, {"Hooks": 5, "Commands": 51, "Skills": 35, "Agents": 27,
-              "Scripts": 51, "Husky": 3, "CI": 37, "Docs": 28}),
+        ({}, {"Hooks": 5, "Commands": 51, "Skills": 36, "Agents": 27,
+              "Scripts": 54, "Husky": 3, "CI": 37, "Docs": 31}),
         ({flag: "true" for flag in FEATURE_FLAGS},
-         {"Hooks": 5, "Commands": 54, "Skills": 39, "Agents": 28,
-              "Scripts": 51, "Husky": 3, "CI": 37, "Docs": 30}),
+         {"Hooks": 5, "Commands": 54, "Skills": 40, "Agents": 28,
+              "Scripts": 54, "Husky": 3, "CI": 37, "Docs": 33}),
         ({"cost_profile": "lean"},
-         {"Hooks": 5, "Commands": 51, "Skills": 35, "Agents": 27,
-              "Scripts": 51, "Husky": 3, "CI": 36, "Docs": 28}),
+         {"Hooks": 5, "Commands": 51, "Skills": 36, "Agents": 27,
+              "Scripts": 54, "Husky": 3, "CI": 36, "Docs": 31}),
     ],
 )
 def test_rendered_readme_counts_match_rendered_tree(flags, expected):
@@ -334,12 +335,45 @@ def test_branded_attribution(branded_render, default_render):
     assert "{{" not in default_text, "default canary.md contains unrendered Jinja"
 
 
+@pytest.mark.parametrize("base_ref", ["origin/trunk", "master"])
+def test_agent_validation_base_uses_owner_ref(tmp_path, default_render, base_ref):
+    """A real rendered CLI plans correctly with remote or local owner refs."""
+    canonical = json.loads((ROOT / "config/agent-checks.json").read_text())
+    assert json.loads((default_render / "config/agent-checks.json").read_text()) == canonical
+    dst = tmp_path / "custom-integration"
+    render(dst, agent_validation_base=base_ref)
+    assert json.loads((dst / "config/agent-checks.json").read_text()) == {**canonical, "base": base_ref}
+    assert not (dst / "config/agent-checks.json.jinja").exists()
+    env = runpy.run_path(str(ROOT / "scripts/agent-check.py"))["git_environment"]()
+    branch = base_ref.removeprefix("origin/")
+    for args in (("init", "-q", "--initial-branch=" + branch),
+                 ("config", "user.email", "fixture@example.invalid"),
+                 ("config", "user.name", "Fixture"), ("add", "."),
+                 ("commit", "-qm", "rendered integration fixture")):
+        subprocess.run(["git", *args], cwd=dst, env=env, check=True, capture_output=True)
+    expected = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=dst, env=env, text=True).strip()
+    if base_ref.startswith("origin/"):
+        subprocess.run(["git", "update-ref", "refs/remotes/" + base_ref, "HEAD"],
+                       cwd=dst, env=env, check=True)
+    else:
+        assert not subprocess.check_output(["git", "remote"], cwd=dst, env=env).strip()
+    policy = dst / "docs/agent-validation.md"
+    policy.write_text(policy.read_text() + "\nFixture policy change.\n")
+    result = subprocess.run([sys.executable, "scripts/agent-check.py", "--plan"],
+                            cwd=dst, env=env, check=True, capture_output=True, text=True)
+    plan = json.loads(result.stdout)
+    assert plan["base"] == expected
+    assert plan["paths"] == ["docs/agent-validation.md"]
+    policy_check = next(c for c in canonical["checks"] if c["id"] == "agent-validation-contract")
+    assert [c["commands"] for c in plan["checks"]] == [policy_check["commands"]]
+
+
 def test_skip_if_exists_contract():
     """Verify _skip_if_exists in copier.yml and behavioural guarantee."""
     copier_config = yaml.safe_load((ROOT / "copier.yml").read_text())
     skip_if_exists = set(copier_config.get("_skip_if_exists", []))
 
-    expected = {"CLAUDE.md", ".claude/model-routing.json", ".claude/mcp.json", ".claude/hooks/session-start.sh", "ai-manifest.yaml", "scripts/ci/codex-review-worker.json"}
+    expected = {"CLAUDE.md", ".claude/model-routing.json", ".claude/mcp.json", ".claude/hooks/session-start.sh", "ai-manifest.yaml", "scripts/ci/codex-review-worker.json", "config/agent-checks.json"}
     assert skip_if_exists == expected, (
         f"_skip_if_exists mismatch.\n"
         f"Expected: {expected}\n"
@@ -356,6 +390,8 @@ def test_skip_if_exists_contract():
         claude_file.write_text("LOCAL\n")
         session_hook = dst / ".claude/hooks/session-start.sh"
         session_hook.write_text("#!/bin/sh\necho LOCAL\n")
+        recipes = dst / "config/agent-checks.json"
+        recipes.write_text('{"owner": "local"}\n')
         settings = dst / ".claude/settings.json"
         settings.write_text("{}\n")
         review_policy = dst / "scripts/ci/codex-review-worker.json"
@@ -371,6 +407,7 @@ def test_skip_if_exists_contract():
             "--quiet",
             "--overwrite",
             "--vcs-ref=HEAD",
+            "--data=agent_validation_base=origin/trunk",
             str(ROOT),
             str(dst),
         ]
@@ -380,6 +417,7 @@ def test_skip_if_exists_contract():
         assert review_policy.read_text() == '{"enabled":true,"identity":"instance-owned-fixture"}\n'
         assert claude_file.read_text() == "LOCAL\n"
         assert session_hook.read_text() == "#!/bin/sh\necho LOCAL\n"
+        assert recipes.read_text() == '{"owner": "local"}\n'
         # The lifecycle migration is deliberately outside the instance-owned
         # hook, so an update still wires cleanup for existing consumers.
         assert "guard_check.py --clear-session-unfreezes" in settings.read_text()

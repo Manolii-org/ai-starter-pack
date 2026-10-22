@@ -1,0 +1,2 @@
+{% set canonical %}{% include "config/agent-checks.json" %}{% endset %}
+{{ dict(canonical | from_json, base=agent_validation_base) | tojson(indent=2) }}

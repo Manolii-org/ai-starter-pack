@@ -53,6 +53,58 @@ def test_actual_clean_summary_requires_no_synthetic_approval():
                                        "state": "COMMENTED", "body": ""}], SHA) == "none"
 
 
+def test_generated_header_preserves_raw_body_provenance():
+    wrapped = with_provenance(dict(COMMENT, body=module.GENERATED_HEADER + BODY))
+    assert module.coderabbit_clean_summary([wrapped], SHA, REPO, 201)
+    wrapped["review_provenance"]["body"] = BODY
+    assert not module.coderabbit_clean_summary([wrapped], SHA, REPO, 201)
+
+
+@pytest.mark.parametrize("body", [
+    module.GENERATED_HEADER + BODY.replace(SHA, "b" * 40),
+    module.GENERATED_HEADER + BODY.replace("No actionable", "Review in progress. No actionable"),
+    module.GENERATED_HEADER + BODY.replace("No actionable", "Rate limit exceeded. No actionable"),
+    module.GENERATED_HEADER + module.GENERATED_HEADER + BODY,
+    module.GENERATED_HEADER.replace(":v1", ":v2") + BODY,
+    module.GENERATED_HEADER + "\n" + BODY,
+    "\n" + module.GENERATED_HEADER + BODY.replace("No actionable", "Review in progress. No actionable"),
+    " " + module.GENERATED_HEADER + BODY.replace("No actionable", "Review in progress. No actionable"),
+    "\n" + BODY.replace("No actionable", "Review in progress. No actionable"),
+])
+def test_new_generated_attempt_never_reuses_an_older_clean_summary(body):
+    newer = with_provenance(dict(COMMENT, id=43, node_id="IC_43",
+        updated_at="2026-10-17T16:14:00Z", body=body))
+    assert not module.coderabbit_clean_summary([COMMENT, newer], SHA, REPO, 201)
+
+
+def test_generated_reply_remains_an_authenticated_acknowledgement():
+    reply = with_provenance(dict(COMMENT, id=43, node_id="IC_43",
+        updated_at="2026-10-17T16:14:00Z",
+        body=module.GENERATED_HEADER + module.REPLY_PREFIX + "\nReview finished."))
+    assert module.coderabbit_clean_summary([COMMENT, reply], SHA, REPO, 201)
+    reply["review_provenance"]["userContentEdits"]["nodes"][0]["editor"] = {
+        "login": "writer", "__typename": "User"}
+    assert not module.coderabbit_clean_summary([COMMENT, reply], SHA, REPO, 201)
+
+
+@pytest.mark.parametrize("leading", ["\n", " ", "\t"])
+def test_fetcher_does_not_fall_back_past_a_malformed_newer_generated_attempt(monkeypatch, leading):
+    import json
+    newer = with_provenance(dict(COMMENT, id=43, node_id="IC_43",
+        updated_at="2026-10-17T16:14:00Z",
+        body=leading + module.GENERATED_HEADER + BODY.replace(
+            "No actionable", "Review in progress. No actionable")))
+    requested = []
+    def gh(arguments, payload=None):
+        requested.append(arguments[0])
+        assert arguments[0] != "graphql", "the newer incomplete attempt must stop fetch planning"
+        return json.dumps([COMMENT, newer])
+    monkeypatch.setattr(module, "gh_read", gh)
+    result = module.fetch_comments(REPO, 201, SHA)
+    assert len(requested) == 1
+    assert not module.coderabbit_clean_summary(result, SHA, REPO, 201)
+
+
 @pytest.mark.parametrize("body", [
     "", "Thanks, addressed.", BODY.replace(SHA, "b" * 40), BODY.replace(SHA, SHA[:7]),
     BODY.replace('"kind":"reviewed"', '"kind":"skipped"'),
@@ -203,17 +255,19 @@ def test_older_unused_history_does_not_block_a_current_authenticated_review():
     assert module.coderabbit_clean_summary([older, COMMENT], SHA, REPO, 201)
 
 
-def test_fetcher_authenticates_newer_acknowledgements_but_not_unused_old_history(monkeypatch):
+@pytest.mark.parametrize("header", ["", module.GENERATED_HEADER])
+def test_fetcher_authenticates_newer_acknowledgements_but_not_unused_old_history(monkeypatch, header):
     import json
+    current = with_provenance(dict(COMMENT, body=header + BODY))
     newer = with_provenance(dict(COMMENT, id=43, node_id="IC_43",
-        updated_at="2026-10-17T16:14:00Z", body="Thanks, addressed."))
+        updated_at="2026-10-17T16:14:00Z", body=header + module.REPLY_PREFIX + "\nThanks, addressed."))
     older = with_provenance(dict(COMMENT, id=41, node_id="IC_41",
         updated_at="2026-10-17T16:10:00Z"))
-    snapshots = {c["node_id"]: copy.deepcopy(c["review_provenance"]) for c in (COMMENT, newer)}
+    snapshots = {c["node_id"]: copy.deepcopy(c["review_provenance"]) for c in (current, newer)}
     requested = []
     def gh(arguments, payload=None):
         if arguments[0] != "graphql":
-            return json.dumps([older, COMMENT, newer])
+            return json.dumps([older, current, newer])
         ident = json.loads(payload)["variables"]["id"]
         requested.append(ident)
         assert ident != "IC_41", "unused history must not add calls or block this review"
@@ -221,6 +275,7 @@ def test_fetcher_authenticates_newer_acknowledgements_but_not_unused_old_history
     monkeypatch.setattr(module, "gh_read", gh)
     result = module.fetch_comments(REPO, 201, SHA)
     assert requested == ["IC_43", "IC_42"]
+    assert result[1]["body"] == header + BODY
     assert module.coderabbit_clean_summary(result, SHA, REPO, 201)
 
 

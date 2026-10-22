@@ -117,6 +117,97 @@
           "mailbox_count": {
             "type": "integer",
             "minimum": 1
+          },
+          "placement_counts": {
+            "description": "Counts by exact validated provider placement label, preserving case. Only Inbox contributes to inbox_ratio.",
+            "type": "object",
+            "minProperties": 1,
+            "propertyNames": {
+              "pattern": "^([Ii][Nn][Bb][Oo][Xx]|[Ss][Pp][Aa][Mm]|[Mm][Ii][Ss][Ss][Ii][Nn][Gg]|[Pp][Rr][Oo][Mm][Oo][Tt][Ii][Oo][Nn][Ss]|[Uu][Pp][Dd][Aa][Tt][Ee][Ss]|[Nn][Ee][Ww][Ss][Ll][Ee][Tt][Tt][Ee][Rr])$"
+            },
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "normalized_placement_counts": {
+            "description": "Descriptive counts by lowercase category, separate from exact raw placement_counts. Does not affect acceptance.",
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "inbox": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "spam": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "missing": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "promotions": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "updates": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "newsletter": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "inbox",
+              "spam",
+              "missing",
+              "promotions",
+              "updates",
+              "newsletter"
+            ]
+          },
+          "placements": {
+            "description": "Validated category labels and optional mailbox IDs only; no addresses or sender data.",
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "raw_placement",
+                "placement"
+              ],
+              "properties": {
+                "raw_placement": {
+                  "type": "string",
+                  "pattern": "^([Ii][Nn][Bb][Oo][Xx]|[Ss][Pp][Aa][Mm]|[Mm][Ii][Ss][Ss][Ii][Nn][Gg]|[Pp][Rr][Oo][Mm][Oo][Tt][Ii][Oo][Nn][Ss]|[Uu][Pp][Dd][Aa][Tt][Ee][Ss]|[Nn][Ee][Ww][Ss][Ll][Ee][Tt][Tt][Ee][Rr])(?![\\s\\S])"
+                },
+                "placement": {
+                  "enum": [
+                    "inbox",
+                    "spam",
+                    "missing",
+                    "promotions",
+                    "updates",
+                    "newsletter"
+                  ]
+                },
+                "mailbox_id": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "non_spam_ratio": {
+            "description": "Inbox plus Promotions, Updates and Newsletter over all expected mailboxes. Reporting only; never a pass/fail threshold.",
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
           }
         }
       }
