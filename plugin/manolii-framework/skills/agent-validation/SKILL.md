@@ -17,7 +17,10 @@ provider before pushing; retain failed/unavailable results and satisfy the
 owning repository's independent review and release rules.
 
 Reuse requires matching execution inputs, including a private environment
-fingerprint. Keep ignored cache keys, receipts and dependency state local.
+fingerprint. Raw tracked bytes and execute permissions bind selection and reuse,
+including files hidden by Git conversions or index flags. Linked parent
+directories block validation; symlinks and Gitlinks cannot reuse a cached PASS.
+Keep ignored cache keys, receipts and dependency state local.
 Successful setup must create every declared readiness path. Preserve owner
 integration/protected branches and reconcile all existing managed surfaces.
 Tracked Git filter attributes block validation until a raw-input adapter exists;
