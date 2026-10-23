@@ -299,6 +299,7 @@ def assemble_hooks_and_scripts(rendered: Path, out: Path) -> dict:
     # recipes remain repository-owned and are never silently installed.
     (out / "docs").mkdir(exist_ok=True)
     shutil.copy2(rendered / "docs/agent-validation.md", out / "docs/agent-validation.md")
+    shutil.copy2(rendered / "docs/agent-release-experience.md", out / "docs/agent-release-experience.md")
     rsrc = rendered / "scripts"
     if rsrc.is_dir():
         # Pack-dev tests live under scripts/tests/ but must not ship in the
