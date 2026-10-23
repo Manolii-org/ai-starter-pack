@@ -45,6 +45,12 @@ the existing release lane for `v2.0.0` with its full SHA. The lane also moves
 the matching `v2` alias; it must not move `v1` or rewrite released tags.
 No production consumer should adopt a floating global ref.
 
+New scaffolds pin `ai-manifest.yaml` to `2.0.0`. Copier excludes the Pack's
+native-guidance installation receipt and preserves existing consumer manifests
+and receipts. A missing receipt stays absent until explicit native adoption;
+update the manifest and use the normal native-guidance resolver to create or
+refresh a receipt for the consumer's selected version.
+
 Each consumer opens its own PR pinned to the release commit or immutable tag.
 For Playwright also set `pack_ref` to that same immutable release, since the
 workflow cannot discover its own ref. Example after publication:

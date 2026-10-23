@@ -203,6 +203,9 @@ _exclude:
   - tests/test_copier_render.py
   # Pack-only runtime contract reads maintainer manifests and generated mirrors.
   - tests/test_node_runtime_contract.py
+  # A native installation receipt belongs to the consumer's explicit resolver
+  # adoption. Never copy the maintainer's receipt into another repository.
+  - .ai/native-guidance-lock.json
   # Template-repo-only test: asserts on default.json and the maintainer-only
   # renovate.json, both excluded from rendered consumers.
   - tests/test_renovate_config.py

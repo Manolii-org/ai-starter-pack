@@ -369,7 +369,8 @@ def test_agent_validation_base_uses_owner_ref(tmp_path, default_render, base_ref
     assert [c["commands"] for c in plan["checks"]] == [policy_check["commands"]]
 
 
-def test_skip_if_exists_contract():
+@pytest.mark.parametrize("has_native_lock", [True, False])
+def test_skip_if_exists_contract(has_native_lock):
     """Verify _skip_if_exists in copier.yml and behavioural guarantee."""
     copier_config = yaml.safe_load((ROOT / "copier.yml").read_text())
     skip_if_exists = set(copier_config.get("_skip_if_exists", []))
@@ -393,6 +394,13 @@ def test_skip_if_exists_contract():
         session_hook.write_text("#!/bin/sh\necho LOCAL\n")
         recipes = dst / "config/agent-checks.json"
         recipes.write_text('{"owner": "local"}\n')
+        manifest = dst / "ai-manifest.yaml"
+        manifest.write_text('requires: [{plugin: platform/framework, ref: "1.14.0"}]\n')
+        native_lock = dst / ".ai/native-guidance-lock.json"
+        if has_native_lock:
+            native_lock.write_text('{"ref":"1.14.0","resolved_version":"1.14.0"}\n')
+        else:
+            native_lock.unlink(missing_ok=True)
         settings = dst / ".claude/settings.json"
         settings.write_text("{}\n")
 
@@ -416,6 +424,11 @@ def test_skip_if_exists_contract():
         assert claude_file.read_text() == "LOCAL\n"
         assert session_hook.read_text() == "#!/bin/sh\necho LOCAL\n"
         assert recipes.read_text() == '{"owner": "local"}\n'
+        assert manifest.read_text() == 'requires: [{plugin: platform/framework, ref: "1.14.0"}]\n'
+        if has_native_lock:
+            assert native_lock.read_text() == '{"ref":"1.14.0","resolved_version":"1.14.0"}\n'
+        else:
+            assert not native_lock.exists()
         # The lifecycle migration is deliberately outside the instance-owned
         # hook, so an update still wires cleanup for existing consumers.
         assert "guard_check.py --clear-session-unfreezes" in settings.read_text()
@@ -424,6 +437,59 @@ def test_skip_if_exists_contract():
         # But other files should be updated
         agents_file = dst / ".claude" / "agents" / "architecture-impact.md"
         assert agents_file.exists(), "AGENTS.md-like file missing after overwrite"
+
+
+def test_scaffold_does_not_copy_maintainer_native_receipt(default_render):
+    """Native installation evidence is created by the consumer's resolver."""
+    assert not (default_render / ".ai/native-guidance-lock.json").exists()
+
+
+@pytest.mark.parametrize("has_native_lock", [True, False])
+def test_copier_update_preserves_consumer_native_receipt_state(tmp_path, has_native_lock):
+    """An actual local tagged-template update preserves optional native adoption."""
+    template = tmp_path / "template"
+    template.mkdir()
+    env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+           "GIT_AUTHOR_NAME": "Fixture", "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+           "GIT_COMMITTER_NAME": "Fixture", "GIT_COMMITTER_EMAIL": "fixture@example.invalid"}
+
+    def git_at(path, *args):
+        return subprocess.check_output(["git", "-C", str(path), *args], env=env)
+
+    # The fixture contains only source-owned configuration and dependency state;
+    # no install hooks, network remotes, workflows or runtime services are used.
+    paths = ("copier.yml", ".copier-answers.yml.jinja", "ai-manifest.yaml", ".ai/native-guidance-lock.json")
+    for name in paths:
+        target = template / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(git_at(ROOT, "show", f"2bea23fcaf4d976c30bd8f499cd209649f361867:{name}"))
+    git_at(template, "init", "-b", "main")
+    git_at(template, "add", ".")
+    git_at(template, "commit", "-m", "Fixture old template")
+    git_at(template, "tag", "v1.0.0")
+    destination = tmp_path / "consumer"
+    subprocess.run([sys.executable, "-m", "copier", "copy", "--defaults", "--quiet",
+                    "--vcs-ref=v1.0.0", str(template), str(destination)], check=True, env=env)
+    lock = destination / ".ai/native-guidance-lock.json"
+    if not has_native_lock:
+        lock.unlink()
+    original_lock = lock.read_bytes() if has_native_lock else None
+    original_manifest = (destination / "ai-manifest.yaml").read_bytes()
+    git_at(destination, "init", "-b", "main")
+    git_at(destination, "add", ".")
+    git_at(destination, "commit", "-m", "Fixture consumer adoption state")
+    for name in paths:
+        (template / name).write_bytes((ROOT / name).read_bytes())
+    git_at(template, "add", ".")
+    git_at(template, "commit", "-m", "Fixture new template")
+    git_at(template, "tag", "v2.0.0")
+    subprocess.run([sys.executable, "-m", "copier", "update", "--defaults", "--quiet",
+                    "--vcs-ref=v2.0.0"], cwd=destination, check=True, env=env)
+    assert (destination / "ai-manifest.yaml").read_bytes() == original_manifest
+    assert (lock.read_bytes() if lock.exists() else None) == original_lock
+    answers = yaml.safe_load((destination / ".copier-answers.yml").read_text())
+    assert answers["_commit"] == "v2.0.0"
+    assert not list(destination.rglob("*.rej"))
 
 
 def test_exec_bits_preserved(default_render):
