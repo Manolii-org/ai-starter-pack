@@ -190,6 +190,7 @@ def test_default_render_clean(default_render):
         "scripts/render-pack.py",
         "copier.yml",
         ".copier-answers.yml.jinja",
+        "tests/test_node_runtime_contract.py",
     }
     for scaffold in scaffolding:
         assert not (default_render / scaffold).exists(), f"Scaffolding leaked: {scaffold}"
@@ -267,13 +268,13 @@ def test_cost_profile_lean_omits_measured_waste_callers(default_render):
     ("flags", "expected"),
     [
         ({}, {"Hooks": 5, "Commands": 51, "Skills": 36, "Agents": 27,
-              "Scripts": 54, "Husky": 3, "CI": 35, "Docs": 30}),
+              "Scripts": 54, "Husky": 3, "CI": 35, "Docs": 31}),
         ({flag: "true" for flag in FEATURE_FLAGS},
          {"Hooks": 5, "Commands": 54, "Skills": 40, "Agents": 28,
-              "Scripts": 54, "Husky": 3, "CI": 35, "Docs": 32}),
+              "Scripts": 54, "Husky": 3, "CI": 35, "Docs": 33}),
         ({"cost_profile": "lean"},
          {"Hooks": 5, "Commands": 51, "Skills": 36, "Agents": 27,
-              "Scripts": 54, "Husky": 3, "CI": 34, "Docs": 30}),
+              "Scripts": 54, "Husky": 3, "CI": 34, "Docs": 31}),
     ],
 )
 def test_rendered_readme_counts_match_rendered_tree(flags, expected):

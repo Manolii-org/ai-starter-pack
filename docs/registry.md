@@ -128,7 +128,7 @@ version: 1
 universe: buro            # your universe id; unregistered repos still get platform/*
 requires:
   - plugin: platform/framework
-    ref: "^1.14"          # exact semver | ^major | tag:vX.Y.Z | sha:<hex>
+    ref: "2.0.0"          # exact semver | ^major | tag:vX.Y.Z | sha:<hex>
 feature_flags: {}
 surfaces: [claude-code]
 ```

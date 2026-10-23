@@ -25,6 +25,11 @@ Legacy `manolii-org/master@v1` still serves `routing-lint` / `shared-config` unt
 
 Standalone by default: all external integrations (OSS routing, remote memory, browser automation, telemetry, cross-provider review) are feature-flagged off.
 
+The next major line prepares Node 24 workflow defaults for an immutable
+`v2.0.0` release. Publication and consumer adoption remain gated; the example
+pins above are unchanged. See [Node runtime support](docs/node-runtime-support.md)
+for compatibility, explicit Node 22 overrides and qualification steps.
+
 ## Hermetic virtual inbox
 
 `bin/email-capture` is the single portable, backend-neutral executable for Mailpit (default), MailDev, Inbucket, an in-memory conformance backend, and an optional hosted HTTPS capture API. It provides `allocate`, `await`, `assert`, `release`, `capabilities`, `doctor`, and `canary`; all input can be inline JSON or `@mode-0600-file`. See `schemas/email-capture/` for the Draft 2020-12 v1 contract, `docs/adr/ADR-0010-hermetic-virtual-inbox.md` for the hermetic lock, and `docs/adr/ADR-0010b-hosted-capture-lane.md` for hosted bounds.

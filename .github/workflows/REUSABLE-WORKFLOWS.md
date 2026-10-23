@@ -114,7 +114,7 @@ env:
 | Workflow | Inputs | Secrets |
 |----------|--------|---------|
 | **ci-reusable** | `runs_on`, `node_version=24` | none |
-| **secret-scan-reusable** | `runs_on`, `node_version=22`, `python_version=3.12`, `require_gitleaks_license=false`, `npm_audit_omit_dev=false` | `GITLEAKS_LICENSE` (optional) |
+| **secret-scan-reusable** | `runs_on`, `node_version=24` (v2), `python_version=3.12`, `require_gitleaks_license=false`, `npm_audit_omit_dev=false` | `GITLEAKS_LICENSE` (optional) |
 | **static-review-reusable** | `runs_on`, `node_version=24`, `python_version=3.14`, `paths_ignore` | none |
 | **claude-md-contract-reusable** | `runs_on`, `python_version=3.12`, `require_contract=false` | none |
 | **pr-assessment-reusable** | `provider_mode=anthropic`, `litellm_proxy_url`, `model`, `runs_on`, `pack_ref=v1`, `trusted_sync_author_id`, `jev_judge_shadow=off`, `jev_entity` | `ANTHROPIC_API_KEY` (anthropic mode) or `LITELLM_MASTER_KEY` (proxy mode); optional entity-scoped `JEV_TYPESAFE_API_KEY` (see `docs/jev-judge-shadow.md`) |
@@ -255,11 +255,16 @@ Auto-bump reusable-workflow pins via this custom manager:
 }
 ```
 
-Tag strategy: immutable vX.Y.Z + moving `v1` major alias (regex tracks the moving tag).
-The alias is moved by `release-tag.yml` on every release. It was documented as
-moving long before anything moved it — `v1` sat on v1.7.2 while releases ran to
-v1.8.0, so anyone extending the alias silently got stale content. Treat a `v1`
-that lags the newest vX.Y.Z as a release-workflow bug, not as intended pinning.
+Tag strategy: immutable vX.Y.Z plus a moving alias within the matching major.
+`release-tag.yml` derives that alias from the released tag: a v2 release moves
+only `v2`; it must leave `v1` and all immutable tags unchanged. Production
+consumers adopt an exact version or commit in their own PRs. A floating alias
+does not establish independent consumer qualification.
+
+The v2 line changes the Playwright and secret-scan Node defaults from 22 to 24;
+`ci-reusable` already used 24. All three retain explicit `node_version` overrides.
+See [Node runtime support](../../docs/node-runtime-support.md) for the release,
+supported Node 22 overrides, library floors and pinned consumer qualification.
 
 ## Decision Log
 
