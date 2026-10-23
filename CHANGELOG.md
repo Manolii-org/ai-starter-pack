@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.0.0] — pending qualification
+
+### Changed
+
+- Playwright and reusable secret-scan default to Node 24. `ci-reusable` already
+  defaulted to 24. Explicit `node_version` overrides remain supported, including
+  Node 22 while it is maintained. This default change requires the v2 release
+  line; existing v1 tags and the v1 alias retain their meaning.
+- The standalone secret-scan selects Node 24. CI dependency caches bind the
+  resolved Node patch, ABI, architecture, package manager and lockfiles, so a
+  runtime change cannot restore native dependencies from an older runtime.
+- Public package engine floors remain compatibility floors. No consumer,
+  application runtime, framework major or provider configuration is upgraded
+  by this source change. See `docs/node-runtime-support.md` for qualification.
+
 ## Unreleased
 
 ### Added

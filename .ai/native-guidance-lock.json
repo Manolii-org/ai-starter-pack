@@ -39,8 +39,8 @@
   },
   "plugin": "platform/framework",
   "policy_version": "1.0.1",
-  "ref": "^1.14",
-  "resolved_version": "1.14.0",
+  "ref": "2.0.0",
+  "resolved_version": "2.0.0",
   "schema": "native-guidance/v1",
   "source_sha256": "e065684e4ad947ac3b6b8fdac475b4ba2ad80bdb37e40d8ea376b0c6d66b7371",
   "surfaces": [
