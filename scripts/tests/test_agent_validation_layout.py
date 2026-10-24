@@ -483,6 +483,73 @@ def test_cleanup_failure_retains_primary_error_and_closes_parent(
     assert closed.value.errno == errno.EBADF
 
 
+@pytest.mark.parametrize("kind", ["source", "plugin", "registry"])
+@pytest.mark.parametrize("explicit", [False, True])
+def test_execute_only_ancestor_preserves_cli_modes(producers, consumer, tmp_path, kind, explicit):
+    """A caller-selected ancestor needs search permission, not enumeration."""
+    if not explicit:
+        for alias in LAYOUT["aliases"]:
+            (consumer / alias).unlink()
+        commit(consumer)
+    ancestor = tmp_path / "search-only"
+    ancestor.mkdir()
+    target = ancestor / "consumer"
+    consumer.rename(target)
+    source, _ = producers[kind]
+    before = snapshot(target)
+    ancestor.chmod(0o111)
+    try:
+        assert not os.access(ancestor, os.R_OK), "fixture must actually deny enumeration"
+        with pytest.raises(PermissionError):
+            list(ancestor.iterdir())
+        for flag, expected in [("--dry-run", 0), ("--check", 1)]:
+            result = invoke(source, target, flag, layout=explicit)
+            assert result.returncode == expected, result.stderr
+            assert snapshot(target) == before
+        result = invoke(source, target, layout=explicit)
+        assert result.returncode == 0, result.stderr
+        after = snapshot(target)
+        for flag in ["--check", "--dry-run"]:
+            result = invoke(source, target, flag, layout=explicit)
+            assert result.returncode == 0, result.stderr
+            assert snapshot(target) == after
+    finally:
+        ancestor.chmod(0o700)
+
+
+@pytest.mark.parametrize("error", ["timeout", "failed-git"])
+def test_git_validation_failure_reports_partial_batch(
+        replacement_kernel, tmp_path, capsys, error):
+    """A bounded Git failure reports known writes without clobbering later files."""
+    module = replacement_kernel
+    root = tmp_path / "partial-batch"
+    root.mkdir()
+    first, later = root / "first.txt", root / "later.txt"
+    first.write_bytes(b"First owner bytes.\n")
+    later.write_bytes(b"Later owner bytes.\n")
+    plan = module.OutputPlan(root)
+    plan.add(first, b"Qualified first replacement.\n", "fixture:first")
+    plan.add(later, b"Unapplied later replacement.\n", "fixture:later")
+    failure = (subprocess.TimeoutExpired(["git", "status"], 15) if error == "timeout"
+               else subprocess.CalledProcessError(1, ["git", "status"]))
+
+    def fail_after_first():
+        if plan.completed:
+            raise failure
+
+    plan.validators.append(fail_after_first)
+    with pytest.raises(subprocess.SubprocessError) as caught:
+        plan.apply([first, later])
+    assert caught.value is failure
+    assert first.read_bytes() == b"Qualified first replacement.\n"
+    assert later.read_bytes() == b"Later owner bytes.\n"
+    assert plan.completed == ["first.txt"]
+    report = json.loads(capsys.readouterr().err.split("AGENT-VALIDATION-RECOVERY: ", 1)[1])
+    assert report["completed"] == plan.completed
+    assert report["reason"] == str(failure)
+    assert not list(root.glob(".agent-validation-*"))
+
+
 def test_case_ambiguity_added_after_planning_refuses(producers, consumer, monkeypatch):
     module = imported(producers["source"][0])
     original = module.build_plan

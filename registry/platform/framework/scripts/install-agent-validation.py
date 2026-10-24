@@ -173,7 +173,10 @@ def state(path: Path):
     return ("file", identity, info.st_mtime_ns, info.st_ctime_ns, data)
 
 
-def require_exact_case(path: Path):
+def require_exact_case(path: Path, root: Path):
+    """Check repository-internal casing without enumerating caller ancestors."""
+    if path == root or not path.is_relative_to(root):
+        return
     if path != path.parent and path.parent.is_dir():
         names = [entry.name for entry in path.parent.iterdir()
                  if entry.name.casefold() == path.name.casefold()]
@@ -205,12 +208,12 @@ class OutputPlan:
         return current
 
     def regular_path(self, path: Path, *, directory=False):
-        """Check every existing parent and reject case-ambiguous spellings."""
+        """Check every parent identity and repository-internal path casing."""
         if not path.is_absolute() or ".." in path.parts:
             raise ValueError("installation paths must retain the original canonical root")
         chain = [*reversed(path.parents), path]
         for item in chain:
-            require_exact_case(item)
+            require_exact_case(item, self.root)
             current = self.watch(item)
             wanted = "directory" if item != path or directory else "file"
             if current is not None and current[0] != wanted:
@@ -235,7 +238,7 @@ class OutputPlan:
         for validate in self.validators:
             validate()
         for path, expected in self.watched.items():
-            require_exact_case(path)
+            require_exact_case(path, self.root)
             if state(path) != expected:
                 raise ValueError(f"input changed; reconcile before retry: {path}")
 
@@ -337,7 +340,7 @@ class OutputPlan:
             recovery["status"] = "complete"
             if self.journal:
                 self.replace(self.journal, encoded(recovery), 0o600)
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
             # Keep prepared/per-file evidence; never auto-restore over a writer.
             print("AGENT-VALIDATION-RECOVERY: " + json.dumps({
                 "journal": str(self.journal) if self.journal else None,
