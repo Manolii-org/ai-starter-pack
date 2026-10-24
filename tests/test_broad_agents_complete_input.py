@@ -355,7 +355,10 @@ def deep_repo(tmp_path, runner, monkeypatch):
     root = tmp_path / 'repo'
     root.mkdir()
     def git(*args):
-        return subprocess.check_output(['git', '-C', str(root), *args]).decode().strip()
+        import os
+        env = {"PATH": os.defpath, "GIT_CONFIG_NOSYSTEM": "1",
+               "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0"}
+        return subprocess.check_output(['git', '-C', str(root), *args], env=env, timeout=15).decode().strip()
     git('init', '-q')
     git('config', 'user.name', 'Offline fixture')
     git('config', 'user.email', 'fixture@example.invalid')
@@ -789,5 +792,54 @@ def test_deep_recomputed_packet_hash_cannot_bless_inconsistent_source_bytes(runn
         packet['sources'].remove(source)
     packet['input_sha256'] = runner._deep_digest({k: v for k, v in packet.items() if k != 'input_sha256'})
     answer['input_sha256'] = packet['input_sha256']
+    with pytest.raises(ValueError):
+        runner.parse_security_deep_dive_output(json.dumps(answer), packet, stop_reason='end_turn')
+
+
+@pytest.mark.parametrize('malformation', ['decision_list', 'decision_dict', 'absent_citation'])
+def test_deep_malformed_decisions_and_absent_citations_raise_value_error(runner, deep_repo, malformation):
+    if malformation == 'absent_citation':
+        root, git, args = deep_repo
+        (root / 'validation.py').unlink()
+        git('add', '-A')
+        git('commit', '-qm', 'deleted context fixture')
+        args['head'] = git('rev-parse', 'HEAD')
+        args['sast_binding']['head'] = args['head']
+        args['evidence_paths'] = []
+    packet = deep_packet(runner, deep_repo)
+    answer = deep_output(packet)
+    if malformation.startswith('decision'):
+        answer['entries'][0]['decision'] = [] if malformation == 'decision_list' else {}
+    else:
+        answer['entries'][0]['validation'] = dict(summary='Unavailable source', citations=[
+            dict(path='validation.py', side='head', blob=None, start=1, end=1)])
+    with pytest.raises(ValueError):
+        runner.parse_security_deep_dive_output(json.dumps(answer), packet, stop_reason='end_turn')
+
+
+def test_deep_bom_sast_roundtrip_preserves_exact_bytes_and_hash(runner, deep_repo):
+    import hashlib
+    args = deep_repo[2]
+    args['sast'] = b'\xef\xbb\xbf' + args['sast']
+    args['sast_binding']['sast_sha256'] = hashlib.sha256(args['sast']).hexdigest()
+    packet = deep_packet(runner, deep_repo)
+    assert packet['sast_utf8'].encode('utf-8') == args['sast']
+    assert packet['sast_sha256'] == hashlib.sha256(args['sast']).hexdigest()
+    result = runner.parse_security_deep_dive_output(json.dumps(deep_output(packet)), packet, stop_reason='end_turn')
+    assert result['status'] == 'provisional_complete'
+
+
+def test_deep_fixture_git_ignores_inherited_outer_repository_variables(deep_repo, monkeypatch):
+    root, git, args = deep_repo
+    monkeypatch.setenv('GIT_DIR', str(root / 'not-a-repository'))
+    monkeypatch.setenv('GIT_WORK_TREE', str(root / 'not-a-worktree'))
+    monkeypatch.setenv('GIT_INDEX_FILE', str(root / 'not-an-index'))
+    assert git('rev-parse', 'HEAD') == args['head']
+
+
+def test_deep_huge_numeric_likelihood_stays_on_value_error_path(runner, deep_repo):
+    packet = deep_packet(runner, deep_repo)
+    answer = deep_output(packet)
+    answer['entries'][0]['true_positive_likelihood'] = 10 ** 1000
     with pytest.raises(ValueError):
         runner.parse_security_deep_dive_output(json.dumps(answer), packet, stop_reason='end_turn')

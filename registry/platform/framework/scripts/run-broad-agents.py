@@ -271,6 +271,10 @@ def _deep_json(raw: str | bytes):
     def invalid(_):
         raise ValueError("nonfinite deep-dive JSON value")
 
+    # JSON bytes already accept a UTF-8 BOM. Match that parsing for retained
+    # text without changing the original bytes, packet text or identity hash.
+    if isinstance(raw, str) and raw.startswith("\ufeff"):
+        raw = raw[1:]
     return json.loads(raw, object_pairs_hook=pairs, parse_constant=invalid)
 
 
@@ -367,7 +371,11 @@ def build_security_deep_dive_input(
                 "sast_sha256": sast_hash}
     if sast_binding != identity:
         raise ValueError("missing or stale deep-dive SAST binding")
-    findings = _deep_json(sast)
+    try:
+        sast_text = sast.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ValueError("invalid deep-dive SAST encoding") from None
+    findings = _deep_json(sast_text)
     if not isinstance(findings, list) or not findings:
         raise ValueError("missing deep-dive SAST entries")
     guard = _deep_screen_helpers()
@@ -427,7 +435,7 @@ def build_security_deep_dive_input(
     packet = {"version": _DEEP_DIVE_VERSION, **identity,
               "provenance": "caller-bound; producer authenticity not established",
               "scope": "complete requested blobs; flow/validation completeness requires verification",
-              "sast_utf8": sast.decode("utf-8"), "entries": entries, "sources": sources,
+              "sast_utf8": sast_text, "entries": entries, "sources": sources,
               "diff": {"text": raw_diff.decode("utf-8"), "sha256": hashlib.sha256(raw_diff).hexdigest()}}
     guard._require_safe_packet(packet)
     packet["input_sha256"] = _deep_digest(packet)
@@ -472,7 +480,7 @@ def parse_security_deep_dive_output(raw: str, packet: dict, *, stop_reason: str)
         if not isinstance(source, dict):
             raise ValueError("invalid deep-dive source evidence")
         side, path = source.get("side"), source.get("path")
-        if (side not in {"base", "head"} or _deep_path(path) != path
+        if (not isinstance(side, str) or side not in {"base", "head"} or _deep_path(path) != path
                 or source.get("commit") != packet.get(side) or (side, path) in seen_sources):
             raise ValueError("inconsistent deep-dive source identity")
         seen_sources.add((side, path))
@@ -513,6 +521,8 @@ def parse_security_deep_dive_output(raw: str, packet: dict, *, stop_reason: str)
         if not isinstance(identifier, str) or identifier not in expected or identifier in seen:
             raise ValueError("unknown or repeated deep-dive entry")
         seen.add(identifier)
+        if not isinstance(row["decision"], str):
+            raise ValueError("invalid deep-dive decision")
         likelihood = row["true_positive_likelihood"]
         missing = row["missing_context"]
         if (not isinstance(missing, list) or any(not isinstance(x, str) or not x.strip() for x in missing)
@@ -524,8 +534,8 @@ def parse_security_deep_dive_output(raw: str, packet: dict, *, stop_reason: str)
             incomplete.append(row)
             continue
         if (row["decision"] not in {"promote", "dismiss"} or missing
-                or type(likelihood) not in {float, int} or not math.isfinite(likelihood)
-                or not 0 <= likelihood <= 1
+                or type(likelihood) not in {float, int} or not 0 <= likelihood <= 1
+                or not math.isfinite(likelihood)
                 or (row["decision"] == "promote") != (likelihood >= 0.7)):
             raise ValueError("invalid deep-dive likelihood or disposition")
         triggered_source_cited = False
@@ -538,7 +548,9 @@ def parse_security_deep_dive_output(raw: str, packet: dict, *, stop_reason: str)
             for citation in evidence["citations"]:
                 if not isinstance(citation, dict) or set(citation) != {"path", "side", "blob", "start", "end"}:
                     raise ValueError("invalid deep-dive citation")
-                matches = [source for source in packet["sources"] if all(
+                if not all(isinstance(citation[field], str) for field in ("path", "side", "blob")):
+                    raise ValueError("invalid deep-dive citation identity")
+                matches = [source for source in packet["sources"] if source["status"] == "available" and all(
                     source.get(field) == citation[field] for field in ("path", "side", "blob"))]
                 if (len(matches) != 1 or type(citation["start"]) is not int
                         or type(citation["end"]) is not int
