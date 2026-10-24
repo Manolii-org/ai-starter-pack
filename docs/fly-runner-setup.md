@@ -1,9 +1,11 @@
 # Fly.io Self-Hosted GitHub Actions Runners
 
-GitHub-hosted `ubuntu-latest` runners are capped at 6 hours and charged per
-minute. Fly.io self-hosted runners are useful for **heavy CI** (long test
-matrices, large builds). They are **not** the default for Autofix control-plane
-jobs.
+Standard GitHub-hosted `ubuntu-latest` jobs are capped at 6 hours. Runner minutes
+are free for public repositories; private repositories have plan allowances and
+usage charges. This does not make provider calls or all storage free. See
+[GitHub Actions billing](https://docs.github.com/en/billing/concepts/product-billing/github-actions).
+Fly.io self-hosted runners are useful for **heavy CI** (long test matrices, large
+builds). They are **not** the default for Autofix control-plane jobs.
 
 ## Autofix control-plane (required hosted)
 
@@ -99,9 +101,22 @@ runs-on: >-
 ```
 
 **Kill-switch:** set `CI_RUNNER_OVERRIDE=["ubuntu-latest"]`. Never invert the
-fallback. Do **not** set override to Fly repo-wide (quality/autofix often prefer
+fallback for fleet product CI. Do **not** set override to Fly repo-wide (quality/autofix often prefer
 OVERRIDE first). Register paths in `manolii-org/master`
 `config/fleet-consumer-product-ci.yaml` for the scheduled canary.
+
+The standalone `pr-assessment.yml` has one public Pack maintenance exception
+(see `docs/ci-cost-conventions.md` R2). Only repository ID `1268261727`, full name
+`Manolii-org/ai-starter-pack`, and explicit `public` visibility together select
+`["ubuntu-latest"]` when `CI_RUNNER_OVERRIDE` is unset/empty. The explicit override
+and outer fork guard retain precedence. Copier copies this workflow verbatim:
+copied consumers, a different ID, renamed/transferred or private repositories,
+and missing/uncertain identity or visibility retain `["self-hosted","fly"]`.
+This exception does not change heavy product CI, review/provider/data policy,
+permissions, budgets or required checks. It does not read or alter the override.
+A source-policy revert rolls back this exception without changing settings or
+retargeting already-created jobs; existing PRs need normal qualified base
+integration and a new event, not an old-event rerun, to adopt the workflow.
 
 `ci-reusable.yml` still defaults `runs_on: ubuntu-latest` for non-fleet pack
 consumers — fleet tenants must pass a Fly house-guard expression (or migrate to
