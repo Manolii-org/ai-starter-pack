@@ -71,3 +71,21 @@ Both security roles require accepted task/producer/route evidence before recover
 `shell-security` remains required when selected, and neither it nor `sast-scan`
 is qualified by this preparation. Rollback reverts these canonical/generated
 source changes together and does not reinterpret old incomplete artifacts.
+
+The dormant `build_security_deep_dive_requests` and
+`parse_security_deep_dive_responses` interfaces adapt this same packet/parser to
+the existing independent-leg Messages shapes. Both legs receive the entire same
+packet and the canonical v1 API instructions. Transport bytes, initial output
+slot and timeout retain the existing bounds; supplied capacities require trusted
+launcher evidence. Responses are parsed separately, retaining disagreement,
+dismissals, missing context and escalation. Missing, invalid, truncated or unknown
+observations remain incomplete. Physical attempts and provider execution remain
+unknown; request hashes are content bindings, not invocation receipts.
+
+There is no production dispatcher or retry in this adapter. Offline tests inject
+a dispatcher outside the production module. Live selectors, workflows,
+boundary-only admission and Judge receipts are unchanged. Future live wiring
+still requires trusted launcher/SAST/source provenance, complete source scope,
+accepted capability/policy for every selected role, permitted routes and actual
+receipt behavior, plus a fresh coordinated recovery identity with prior uncertain
+outcomes reconciled. These source interfaces establish none of those gates.
