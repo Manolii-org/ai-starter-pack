@@ -309,6 +309,22 @@ def _parse_findings(raw: str) -> dict[str, Any]:
     return result
 
 
+def _api_instructions(instructions: str) -> str:
+    """Omit explicitly marked interactive setup, preserving every check/output.
+
+    Unmarked legacy roles remain unchanged. Mismatched markers fail before a
+    request rather than accidentally discarding the rest of a review prompt.
+    """
+    start, end = "<!-- api-interactive:start -->", "<!-- api-interactive:end -->"
+    if start not in instructions and end not in instructions:
+        return instructions
+    if instructions.count(start) != 1 or instructions.count(end) != 1:
+        raise ValueError("invalid API instruction boundaries")
+    before, body = instructions.split(start)
+    interactive, after = body.split(end)
+    return before + "API execution: no tools or file writes are available.\n" + after
+
+
 def invoke_agent(
     agent_config: AgentConfig,
     api_key: str,
@@ -471,7 +487,7 @@ def invoke_agent(
             "messages": [
                 {
                     "role": "user",
-                    "content": f"{agent_config.instructions}\n\n{user_message}",
+                    "content": f"{_api_instructions(agent_config.instructions)}\n\n{user_message}",
                 }
             ],
         }
@@ -645,9 +661,9 @@ def run_broad_agents(
         if not config:
             # Unknown capability on failed load is conservative missing coverage,
             # never permission to run an ordinary/proxy replacement.
-            (output_dir / f"{agent_name}.json").write_text(json.dumps({
+            (output_dir / f"{agent_name}.json").write_text(json.dumps(_policy_module.bind_review_candidate({
                 "source": agent_name, "findings": [], "skipped": "load_error",
-                "first_party": True}, indent=2), encoding="utf-8")
+                "first_party": True}), indent=2), encoding="utf-8")
             continue
 
         agents_to_run.append(config)
@@ -663,7 +679,7 @@ def run_broad_agents(
         logger.error("Complete diff exceeds explicit owner limit; no agent dispatched")
         for agent in agents_to_run:
             (output_dir / f"{agent.name}.json").write_text(
-                json.dumps(_incomplete(agent, "input_limit"), indent=2), encoding="utf-8")
+                json.dumps(_policy_module.bind_review_candidate(_incomplete(agent, "input_limit")), indent=2), encoding="utf-8")
         return 0  # Durable incomplete markers, never a completed review.
 
     runnable = agents_to_run
@@ -698,7 +714,7 @@ def run_broad_agents(
             results[agent_name] = findings
             out_file = output_dir / f"{agent_name}.json"
             out_file.write_text(
-                json.dumps(findings, indent=2),
+                json.dumps(_policy_module.bind_review_candidate(findings), indent=2),
                 encoding="utf-8",
             )
             logger.info(f"Wrote {agent_name} findings to {out_file}")
@@ -747,12 +763,12 @@ def main():
     tmp_manifest = args.candidates_dir / "_agents-manifest.json"
     tmp_manifest.write_text(json.dumps(manifest), encoding="utf-8")
 
-    return run_broad_agents(
-        tmp_manifest,
-        args.diff,
-        args.candidates_dir,
-        Path(".claude/agents"),
-    )
+    try:
+        return run_broad_agents(
+            tmp_manifest, args.diff, args.candidates_dir, Path(".claude/agents"),
+        )
+    finally:
+        tmp_manifest.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

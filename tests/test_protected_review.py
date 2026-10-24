@@ -29,6 +29,8 @@ def deny_unmocked_network(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def estate(monkeypatch):
+    # Unit fixtures must not inherit the CI launcher; hosted cases set explicit context.
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
     monkeypatch.setenv("SECURITY_REVIEW_MODE", "estate-ci-v1")
     monkeypatch.setenv("PR_HEAD_SHA", HEAD)
     monkeypatch.setenv("REQUIRED_SECURITY_ROLES", "security-boundary-test")
