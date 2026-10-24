@@ -14,6 +14,10 @@ Usage:
 
 import argparse
 import importlib.util
+import hashlib
+import math
+import subprocess
+import tempfile
 import json
 import logging
 import os
@@ -247,6 +251,424 @@ def build_user_message(diff: str, changed_files: list[str]) -> str:
         files_str = "\n".join(f"  - {_neutralize(f)}" for f in changed_files)
         diff = f"{diff}\n<changed_paths>\n{files_str}\n</changed_paths>"
     return f"<untrusted_diff>\n{diff}\n</untrusted_diff>"
+
+
+# Provider-free preparation only. No caller in run_broad_agents/invoke_agent is
+# changed to dispatch this contract or turn it into accepted protected coverage.
+_DEEP_DIVE_VERSION = "security-deep-dive-input-v1"
+
+
+def _deep_json(raw: str | bytes):
+    """One strict JSON value; duplicate fields/NaN are never coverage evidence."""
+    def pairs(rows):
+        result = {}
+        for key, value in rows:
+            if key in result:
+                raise ValueError("duplicate deep-dive JSON field")
+            result[key] = value
+        return result
+
+    def invalid(_):
+        raise ValueError("nonfinite deep-dive JSON value")
+
+    # JSON bytes already accept a UTF-8 BOM. Match that parsing for retained
+    # text without changing the original bytes, packet text or identity hash.
+    if isinstance(raw, str) and raw.startswith("\ufeff"):
+        raw = raw[1:]
+    try:
+        return json.loads(raw, object_pairs_hook=pairs, parse_constant=invalid)
+    except RecursionError:
+        raise ValueError("deep-dive JSON nesting too deep") from None
+
+
+def _deep_digest(value) -> str:
+    try:
+        return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=True,
+                                         separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+    except RecursionError:
+        raise ValueError("deep-dive identity nesting too deep") from None
+
+
+def _deep_path(value: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError("invalid deep-dive source path")
+    # Bandit's real producer uses ./ prefixes. Retain the original finding,
+    # but use one canonical repository-relative path for immutable lookup.
+    path = value[2:] if value.startswith("./") else value
+    if (not path or path.startswith("/") or "\\" in path
+            or any(part in {"", ".", ".."} for part in path.split("/"))
+            or any(ord(char) < 32 or ord(char) == 127 for char in path)
+            or any(char in path for char in "\x85\u2028\u2029")):
+        raise ValueError("invalid deep-dive source path")
+    return path
+
+
+def _deep_git(root: Path, *args: str, limit: int) -> bytes:
+    """Local immutable objects only; no inherited Git redirects or credentials.
+
+    Spool output under a bounded execution timeout, then refuse excess rather
+    than return a prefix. No filters, remote fetching, hooks or candidate code.
+    """
+    with tempfile.TemporaryFile() as output:
+        try:
+            completed = subprocess.run(
+                ["git", "--no-pager", "--no-replace-objects", "--no-lazy-fetch",
+                 "--literal-pathspecs", "-C", str(root), "-c", "core.fsmonitor=false",
+                 *args], stdout=output, stderr=subprocess.DEVNULL, timeout=15,
+                env={"PATH": os.defpath, "GIT_CONFIG_NOSYSTEM": "1",
+                     "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0"})
+            size = output.tell()
+            if completed.returncode or size > limit:
+                raise ValueError("deep-dive immutable evidence unavailable or over budget")
+            output.seek(0)
+            return output.read()
+        except (OSError, subprocess.SubprocessError):
+            raise ValueError("deep-dive immutable evidence unavailable") from None
+
+
+def _deep_screen_helpers():
+    # Reuse the existing canonical Judge source/privacy guard. Its modules are
+    # already part of the hydrated broad/Judge runtime. Do not execute Git blobs.
+    path = Path(__file__).resolve().with_name("run-judge.py")
+    spec = importlib.util.spec_from_file_location("_deep_dive_source_guard", path)
+    if spec is None or spec.loader is None:
+        raise ValueError("deep-dive source guard unavailable")
+    module = importlib.util.module_from_spec(spec)
+    exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)
+    return module
+
+
+def _deep_require_safe(guard, value) -> None:
+    """Retain canonical refusal, including its Python traversal depth failure."""
+    try:
+        guard._require_safe_packet(value)
+    except RecursionError:
+        raise ValueError("deep-dive evidence nesting too deep") from None
+
+
+def _deep_entries(sast_hash: str, findings: list) -> list[dict]:
+    entries = []
+    for position, finding in enumerate(findings):
+        if (not isinstance(finding, dict)
+                or any(not isinstance(finding.get(k), str) or not finding[k].strip()
+                       for k in ("finding_id", "rule", "file", "message", "severity"))
+                or type(finding.get("line")) is not int or finding["line"] < 1):
+            raise ValueError("invalid deep-dive SAST entry")
+        entries.append({"entry_id": _deep_digest({"sast_sha256": sast_hash,
+                        "position": position, "finding": finding}),
+                        "position": position, "finding": finding,
+                        "path": _deep_path(finding["file"])})
+    return entries
+
+
+def _deep_diff_sources(text: str, sources: list[dict]) -> None:
+    """Reconcile no-renames/full-index Git headers with BOTH source records.
+
+    Match Git's path spelling rather than splitting space-containing paths or
+    trusting a caller-recomputed changed-path list. A retained section without
+    its old/new records, or with contradictory modes/OIDs, is incomplete.
+    This proves internal consistency only, not trusted producer provenance.
+    """
+    def spelling(path, quote_high):
+        encoded = ''.join('\\"' if c == '"' else
+                          ''.join(f'\\{b:03o}' for b in c.encode('utf-8'))
+                          if quote_high and ord(c) >= 128 else c for c in path)
+        return '"' + encoded + '"' if encoded != path else path
+
+    records = {(s['side'], s['path']): s for s in sources}
+    headers = {}
+    for path in {s['path'] for s in sources}:
+        for quote_high in (False, True):
+            old, new = (spelling(prefix + path, quote_high) for prefix in ('a/', 'b/'))
+            headers[f'diff --git {old} {new}'] = (path, old, new)
+    sections = []
+    for line in text.split('\n'):
+        if line.startswith('diff --git '):
+            sections.append([line])
+        elif sections:
+            sections[-1].append(line)
+        elif line:
+            raise ValueError('invalid deep-dive source diff header')
+    seen = set()
+    for section in sections:
+        identity = headers.get(section[0])
+        if identity is None or identity[0] in seen:
+            raise ValueError('missing or ambiguous deep-dive changed source')
+        path, old_path, new_path = identity
+        seen.add(path)
+        old, new = (records.get((side, path)) for side in ('base', 'head'))
+        if old is None or new is None:
+            raise ValueError('missing deep-dive changed source side')
+        old_available, new_available = (s['status'] == 'available' for s in (old, new))
+        if not old_available and not new_available:
+            raise ValueError('absent deep-dive changed source')
+        zero = '0' * 40
+        if not old_available:
+            metadata = [f'new file mode {new["mode"]}', f'index {zero}..{new["blob"]}']
+        elif not new_available:
+            metadata = [f'deleted file mode {old["mode"]}', f'index {old["blob"]}..{zero}']
+        else:
+            changed_mode = old['mode'] != new['mode']
+            metadata = [f'old mode {old["mode"]}', f'new mode {new["mode"]}'] if changed_mode else []
+            if old['blob'] != new['blob']:
+                suffix = '' if changed_mode else ' ' + old['mode']
+                metadata.append(f'index {old["blob"]}..{new["blob"]}{suffix}')
+            elif not changed_mode:
+                raise ValueError('unchanged deep-dive source in retained diff')
+        if section[1:1 + len(metadata)] != metadata:
+            raise ValueError('deep-dive source diff mode or blob mismatch')
+        tail = section[1 + len(metadata):]
+        if tail and tail[-1] == '':
+            tail = tail[:-1]
+        if tail:
+            expected_old = old_path if old_available else '/dev/null'
+            expected_new = new_path if new_available else '/dev/null'
+            # Git appends a tab to unquoted space-containing ---/+++ paths.
+            if (len(tail) < 3 or tail[0].removesuffix('\t') != '--- ' + expected_old
+                    or tail[1].removesuffix('\t') != '+++ ' + expected_new
+                    or not tail[2].startswith('@@ ')):
+                raise ValueError('inconsistent deep-dive source diff paths')
+        elif old.get('text', '') != new.get('text', ''):
+            raise ValueError('missing deep-dive source diff body')
+    # A path omitted from the retained diff is unchanged, not an opportunity
+    # to substitute a self-consistent but different head blob or drop one side.
+    for path in {s['path'] for s in sources} - seen:
+        old, new = (records.get((side, path)) for side in ('base', 'head'))
+        if (old is None or new is None
+                or old['status'] != 'available' or new['status'] != 'available'
+                or old['mode'] != new['mode'] or old['blob'] != new['blob']):
+            raise ValueError('inconsistent unchanged deep-dive source pair')
+
+
+def build_security_deep_dive_input(
+    root: Path, *, repository: str, head: str, base: str, sast: bytes,
+    sast_binding: dict, evidence_paths: list[str], max_bytes: int = _MAX_REQUEST_BYTES,
+) -> dict:
+    """Prepare complete local evidence, NOT an authenticated/accepted review.
+
+    Bind supplied SAST bytes to caller control metadata, every entry's position
+    and content, full base-to-head diff and complete old/new requested blobs.
+    Caller metadata/hashes do not prove SAST producer authenticity or data-flow
+    completeness. A future owning launcher must establish those independently.
+    Exceptions mean incomplete preparation; never silently omit unavailable data.
+    """
+    if (not isinstance(repository, str)
+            or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)
+            or not all(isinstance(ref, str) and re.fullmatch(r"[0-9a-f]{40}", ref)
+                       for ref in (head, base))
+            or type(max_bytes) is not int or not 0 < max_bytes <= _MAX_REQUEST_BYTES
+            or not isinstance(sast, bytes) or len(sast) > max_bytes):
+        raise ValueError("invalid deep-dive input binding or budget")
+    sast_hash = hashlib.sha256(sast).hexdigest()
+    identity = {"repository": repository, "head": head, "base": base,
+                "sast_sha256": sast_hash}
+    if sast_binding != identity:
+        raise ValueError("missing or stale deep-dive SAST binding")
+    try:
+        sast_text = sast.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ValueError("invalid deep-dive SAST encoding") from None
+    findings = _deep_json(sast_text)
+    if not isinstance(findings, list) or not findings:
+        raise ValueError("missing deep-dive SAST entries")
+    guard = _deep_screen_helpers()
+    entries = _deep_entries(sast_hash, findings)
+    if not isinstance(evidence_paths, list):
+        raise ValueError("missing deep-dive source scope")
+    paths = sorted({entry["path"] for entry in entries}
+                   | {_deep_path(path) for path in evidence_paths})
+    if any(guard._sensitive_evidence_path(path) for path in paths):
+        raise ValueError("sensitive deep-dive evidence path")
+    for ref in (head, base):
+        if _deep_git(root, "rev-parse", "--verify", ref + "^{commit}", limit=64).decode().strip() != ref:
+            raise ValueError("deep-dive commit identity mismatch")
+    raw_diff = _deep_git(root, "diff", "--no-ext-diff", "--no-textconv", "--no-renames",
+                         "--binary", "--full-index", base, head, "--", limit=max_bytes)
+    changed = _deep_git(root, "diff", "--no-ext-diff", "--no-textconv", "--no-renames",
+                        "--name-only", "-z", base, head, "--", limit=max_bytes)
+    changed_paths = [_deep_path(path.decode("utf-8")) for path in changed.split(b"\0") if path]
+    if any(guard._sensitive_evidence_path(path) for path in changed_paths):
+        raise ValueError("sensitive deep-dive diff path")
+    # Git's binary patch is encoded data, not plaintext admission. Inspect the
+    # complete old/new blobs of EVERY changed path, not only SAST locations.
+    paths = sorted(set(paths) | set(changed_paths))
+    # Raw bytes and JSON strings both remain intact. No AST source exceptions
+    # are invented for a diff or a caller-supplied evidence document.
+    _deep_require_safe(guard, raw_diff.decode("utf-8"))
+    sources = []
+    used = len(sast) + len(raw_diff)
+    for path in paths:
+        for side, ref in (("base", base), ("head", head)):
+            row = _deep_git(root, "ls-tree", "-z", ref, "--", path, limit=max_bytes)
+            if not row:
+                if path not in changed_paths and side == "head":
+                    raise ValueError("deep-dive candidate source missing")
+                sources.append({"side": side, "path": path, "status": "absent", "commit": ref})
+                continue
+            metadata, actual = row.rstrip(b"\0").split(b"\t", 1)
+            mode, kind, blob = metadata.decode("ascii").split()
+            if (actual.decode("utf-8") != path or mode not in {"100644", "100755"}
+                    or kind != "blob" or not re.fullmatch(r"[0-9a-f]{40}", blob)):
+                raise ValueError("nonregular or ambiguous deep-dive source")
+            body = _deep_git(root, "cat-file", "blob", blob, limit=max(0, max_bytes - used))
+            if b"\0" in body:
+                raise ValueError("binary deep-dive source")
+            text = body.decode("utf-8")
+            if any(char in text for char in "\v\f\x1c\x1d\x1e\x85\u2028\u2029"):
+                raise ValueError("ambiguous deep-dive physical source lines")
+            _deep_require_safe(guard, text)
+            used += len(body)
+            sources.append({"side": side, "path": path, "status": "available", "commit": ref,
+                            "mode": mode, "blob": blob, "sha256": hashlib.sha256(body).hexdigest(),
+                            "text": text})
+    for entry in entries:
+        source = next(s for s in sources if s["side"] == "head" and s["path"] == entry["path"])
+        if source["status"] != "available" or entry["finding"]["line"] > len(source["text"].splitlines()):
+            raise ValueError("deep-dive SAST location not in candidate source")
+    packet = {"version": _DEEP_DIVE_VERSION, **identity,
+              "provenance": "caller-bound; producer authenticity not established",
+              "scope": "complete requested blobs; flow/validation completeness requires verification",
+              "sast_utf8": sast_text, "entries": entries, "sources": sources,
+              "diff": {"text": raw_diff.decode("utf-8"), "sha256": hashlib.sha256(raw_diff).hexdigest()}}
+    _deep_require_safe(guard, packet)
+    packet["input_sha256"] = _deep_digest(packet)
+    # Include every JSON wrapper/escape in this existing conservative ceiling.
+    if len(json.dumps(packet, ensure_ascii=True).encode()) > max_bytes:
+        raise ValueError("complete deep-dive input exceeds budget")
+    return packet
+
+
+def parse_security_deep_dive_output(raw: str, packet: dict, *, stop_reason: str) -> dict:
+    """Account for ALL entries; return provisional data, never a Judge candidate.
+
+    References demonstrate supplied evidence was addressed, not that a model's
+    reasoning is sound. Even a valid result is not protected-route qualification,
+    a provider receipt or accepted runtime coverage. Independent legs must each
+    account for every entry; disagreement is retained, never voted away.
+    """
+    if not isinstance(packet, dict) or not isinstance(raw, str) or len(raw.encode("utf-8")) > _MAX_REQUEST_BYTES:
+        raise ValueError("invalid deep-dive output or input")
+    binding = packet.get("input_sha256")
+    if binding != _deep_digest({key: value for key, value in packet.items() if key != "input_sha256"}):
+        raise ValueError("changed deep-dive input")
+    if packet.get("version") != _DEEP_DIVE_VERSION or stop_reason != "end_turn":
+        raise ValueError("incomplete deep-dive output")
+    # A digest binds bytes, not authority. Reconcile retained producer bytes
+    # with every position/content identity before trusting even local accounting.
+    sast_text = packet.get("sast_utf8")
+    if not isinstance(sast_text, str):
+        raise ValueError("missing retained deep-dive SAST")
+    sast_hash = hashlib.sha256(sast_text.encode("utf-8")).hexdigest()
+    findings = _deep_json(sast_text)
+    if (sast_hash != packet.get("sast_sha256") or not isinstance(findings, list)
+            or not findings or packet.get("entries") != _deep_entries(sast_hash, findings)):
+        raise ValueError("inconsistent deep-dive SAST accounting")
+    # Recomputed outer hashes cannot bless internally contradictory immutable
+    # evidence. Git OIDs here are byte identities, never approval authority.
+    sources = packet.get("sources")
+    if not isinstance(sources, list) or not sources:
+        raise ValueError("missing deep-dive source evidence")
+    seen_sources = set()
+    for source in sources:
+        if not isinstance(source, dict):
+            raise ValueError("invalid deep-dive source evidence")
+        side, path = source.get("side"), source.get("path")
+        if (not isinstance(side, str) or side not in {"base", "head"} or _deep_path(path) != path
+                or source.get("commit") != packet.get(side) or (side, path) in seen_sources):
+            raise ValueError("inconsistent deep-dive source identity")
+        seen_sources.add((side, path))
+        if source.get("status") == "absent":
+            if set(source) != {"side", "path", "status", "commit"}:
+                raise ValueError("invalid absent deep-dive source")
+            continue
+        if (source.get("status") != "available" or not isinstance(source.get("mode"), str)
+                or source["mode"] not in {"100644", "100755"}
+                or not isinstance(source.get("text"), str)):
+            raise ValueError("invalid available deep-dive source")
+        body = source["text"].encode("utf-8")
+        blob = hashlib.sha1(b"blob " + str(len(body)).encode() + b"\0" + body,
+                            usedforsecurity=False).hexdigest()
+        if (source.get("sha256") != hashlib.sha256(body).hexdigest() or source.get("blob") != blob):
+            raise ValueError("deep-dive immutable source bytes mismatch")
+    for entry in packet["entries"]:
+        matches = [s for s in sources if s["side"] == "head" and s["path"] == entry["path"]]
+        if (len(matches) != 1 or matches[0]["status"] != "available"
+                or entry["finding"]["line"] > len(matches[0]["text"].splitlines())):
+            raise ValueError("missing deep-dive triggering source")
+    diff = packet.get("diff")
+    if (not isinstance(diff, dict) or not isinstance(diff.get("text"), str)
+            or hashlib.sha256(diff["text"].encode("utf-8")).hexdigest() != diff.get("sha256")):
+        raise ValueError("deep-dive retained diff mismatch")
+    _deep_diff_sources(diff["text"], sources)
+    result = _deep_json(raw)
+    if (not isinstance(result, dict) or set(result) != {"input_sha256", "entries"}
+            or result["input_sha256"] != binding or not isinstance(result["entries"], list)):
+        raise ValueError("invalid deep-dive output binding")
+    _deep_require_safe(_deep_screen_helpers(), result)
+    expected = {entry["entry_id"]: entry for entry in packet["entries"]}
+    seen, promoted, dismissed, incomplete = set(), [], [], []
+    for row in result["entries"]:
+        if not isinstance(row, dict) or set(row) != {
+                "entry_id", "decision", "true_positive_likelihood", "data_flow",
+                "validation", "exploitability", "missing_context", "message", "fix"}:
+            raise ValueError("invalid deep-dive triage entry")
+        identifier = row["entry_id"]
+        if not isinstance(identifier, str) or identifier not in expected or identifier in seen:
+            raise ValueError("unknown or repeated deep-dive entry")
+        seen.add(identifier)
+        if not isinstance(row["decision"], str):
+            raise ValueError("invalid deep-dive decision")
+        likelihood = row["true_positive_likelihood"]
+        missing = row["missing_context"]
+        if (not isinstance(missing, list) or any(not isinstance(x, str) or not x.strip() for x in missing)
+                or any(not isinstance(row[k], str) or not row[k].strip() for k in ("message", "fix"))):
+            raise ValueError("invalid deep-dive triage detail")
+        if row["decision"] == "incomplete":
+            if not missing or likelihood is not None:
+                raise ValueError("incomplete deep-dive requires explicit unknown context")
+            incomplete.append(row)
+            continue
+        if (row["decision"] not in {"promote", "dismiss"} or missing
+                or type(likelihood) not in {float, int} or not 0 <= likelihood <= 1
+                or not math.isfinite(likelihood)
+                or (row["decision"] == "promote") != (likelihood >= 0.7)):
+            raise ValueError("invalid deep-dive likelihood or disposition")
+        triggered_source_cited = False
+        for key in ("data_flow", "validation", "exploitability"):
+            evidence = row[key]
+            if (not isinstance(evidence, dict) or set(evidence) != {"summary", "citations"}
+                    or not isinstance(evidence["summary"], str) or not evidence["summary"].strip()
+                    or not isinstance(evidence["citations"], list) or not evidence["citations"]):
+                raise ValueError("missing deep-dive reasoning evidence")
+            for citation in evidence["citations"]:
+                if not isinstance(citation, dict) or set(citation) != {"path", "side", "blob", "start", "end"}:
+                    raise ValueError("invalid deep-dive citation")
+                if not all(isinstance(citation[field], str) for field in ("path", "side", "blob")):
+                    raise ValueError("invalid deep-dive citation identity")
+                matches = [source for source in packet["sources"] if source["status"] == "available" and all(
+                    source.get(field) == citation[field] for field in ("path", "side", "blob"))]
+                if (len(matches) != 1 or type(citation["start"]) is not int
+                        or type(citation["end"]) is not int
+                        or not 1 <= citation["start"] <= citation["end"] <= len(matches[0]["text"].splitlines())):
+                    raise ValueError("deep-dive evidence mismatch")
+                entry = expected[identifier]
+                if (key == "data_flow" and citation["side"] == "head"
+                        and citation["path"] == entry["path"]
+                        and citation["start"] <= entry["finding"]["line"] <= citation["end"]):
+                    triggered_source_cited = True
+        if not triggered_source_cited:
+            raise ValueError("deep-dive triggering source not traced")
+        (promoted if likelihood >= 0.7 else dismissed).append(row)
+    if seen != set(expected):
+        raise ValueError("unaccounted deep-dive SAST entries")
+    # No source/findings/protected_review/first_party receipt fields: this object
+    # cannot satisfy the existing Judge's candidate schema or protected adapter.
+    return {"kind": "security-deep-dive-preparation", "input_sha256": binding,
+            "status": "incomplete" if incomplete else "provisional_complete",
+            "promoted": promoted, "dismissed": dismissed, "incomplete": incomplete,
+            "escalation_required": [row["entry_id"] for row in promoted
+                                    if row["true_positive_likelihood"] >= 0.9],
+            "provider_execution": "unknown", "effectiveness": "unknown"}
 
 
 def _incomplete(agent: AgentConfig, reason: str) -> dict[str, Any]:
