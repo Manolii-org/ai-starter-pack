@@ -499,7 +499,8 @@ def test_execute_only_ancestor_preserves_cli_modes(producers, consumer, tmp_path
     before = snapshot(target)
     ancestor.chmod(0o111)
     try:
-        assert not os.access(ancestor, os.R_OK), "fixture must actually deny enumeration"
+        if os.access(ancestor, os.R_OK):
+            pytest.skip("permission bits cannot deny enumeration for this user")
         with pytest.raises(PermissionError):
             list(ancestor.iterdir())
         for flag, expected in [("--dry-run", 0), ("--check", 1)]:
@@ -515,6 +516,18 @@ def test_execute_only_ancestor_preserves_cli_modes(producers, consumer, tmp_path
             assert snapshot(target) == after
     finally:
         ancestor.chmod(0o700)
+
+
+def test_unavailable_permission_precondition_skips_without_installing(
+        producers, consumer, tmp_path, monkeypatch):
+    """Unavailable permission isolation is a skip, with ancestor mode restored."""
+    monkeypatch.setattr(os, "access", lambda *args, **kwargs: True)
+    monkeypatch.setitem(globals(), "invoke", lambda *args, **kwargs: pytest.fail(
+        "installer must not run when permission isolation is unavailable"))
+    with pytest.raises(pytest.skip.Exception, match="permission bits cannot deny"):
+        test_execute_only_ancestor_preserves_cli_modes(
+            producers, consumer, tmp_path, "source", True)
+    assert (tmp_path / "search-only").stat().st_mode & 0o777 == 0o700
 
 
 @pytest.mark.parametrize("error", ["timeout", "failed-git"])
