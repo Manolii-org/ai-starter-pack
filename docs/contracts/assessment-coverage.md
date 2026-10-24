@@ -81,6 +81,8 @@ launcher evidence. Responses are parsed separately, retaining disagreement,
 dismissals, missing context and escalation. Missing, invalid, truncated or unknown
 observations remain incomplete. Physical attempts and provider execution remain
 unknown; request hashes are content bindings, not invocation receipts.
+Disagreement compares disposition, likelihood and missing-context state; prose
+variation is retained in full under each leg. Reasoning agreement remains unknown.
 
 There is no production dispatcher or retry in this adapter. Offline tests inject
 a dispatcher outside the production module. Live selectors, workflows,

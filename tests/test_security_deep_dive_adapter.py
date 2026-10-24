@@ -113,7 +113,7 @@ def test_disagreement_and_missing_context_are_not_voted_away(interface, deep_rep
 
 @pytest.mark.parametrize('mutation', ['missing', 'unknown', 'not_attempted', 'truncated', 'missing_stop',
                                     'omitted_entry', 'wrong_binding', 'malformed', 'empty', 'tool_block',
-                                    'duplicate_key', 'error_envelope', 'error_type'])
+                                    'duplicate_key', 'error_envelope', 'error_type', 'lone_surrogate'])
 def test_incomplete_leg_retains_other_leg_without_retry(interface, deep_repo, mutation, capsys):
     module, role, capacities = interface
     packet = packet_for(interface, deep_repo)
@@ -137,6 +137,8 @@ def test_incomplete_leg_retains_other_leg_without_retry(interface, deep_repo, mu
         response['error'] = {'message': 'Untrusted diagnostic that must not be logged'}
     elif mutation == 'error_type':
         response['type'] = 'error'
+    elif mutation == 'lone_surrogate':
+        response['content'][0]['text'] = '\ud800'
     else:
         answer = deep_output(packet)
         if mutation == 'omitted_entry':
@@ -250,3 +252,43 @@ def test_preparation_does_not_wire_or_weaken_live_admission(interface, deep_repo
     assert result['first_party'] is True and result['findings'] == []
     assert result['skipped'] == ('route_policy_denied' if client_policy else 'protected_review_incomplete')
     assert module._deep_leg_contract().QUALIFICATION_ROLES == {'security-boundary-test'}
+
+
+@pytest.mark.parametrize('variation', ['prose', 'number_representation'])
+def test_equivalent_decisions_do_not_create_security_disagreement(interface, deep_repo, variation):
+    module, role, capacities = interface
+    packet = packet_for(interface, deep_repo)
+    requests = module.build_security_deep_dive_requests(packet, role, capacities=capacities)
+    replies = [observed(row, packet) for row in requests]
+    answer = deep_output(packet, (0.95, 0.3))
+    if variation == 'prose':
+        for row in answer['entries']:
+            row['message'] = 'Equivalent verdict expressed differently'
+            row['fix'] = 'Equivalent remediation expressed differently'
+            for field in ('data_flow', 'validation', 'exploitability'):
+                row[field]['summary'] = 'Equivalent cited analysis phrased differently'
+    else:
+        original = deep_output(packet, (1, 0.3))
+        replies[0]['response']['content'][0]['text'] = json.dumps(original)
+        answer['entries'][0]['true_positive_likelihood'] = 1.0
+    replies[1]['response']['content'][0]['text'] = json.dumps(answer)
+    result = module.parse_security_deep_dive_responses(packet, role, replies, capacities=capacities)
+    assert result['status'] == 'provisional_complete' and result['disagreements'] == []
+    assert result['reasoning_agreement'] == 'unknown'
+    left, right = (leg['result']['promoted'] for leg in result['legs'])
+    if variation == 'prose':
+        assert left != right
+    else:
+        assert type(left[0]['true_positive_likelihood']) is int
+        assert type(right[0]['true_positive_likelihood']) is float
+
+
+def test_likelihood_difference_within_same_disposition_remains_visible(interface, deep_repo):
+    module, role, capacities = interface
+    packet = packet_for(interface, deep_repo)
+    requests = module.build_security_deep_dive_requests(packet, role, capacities=capacities)
+    replies = [observed(requests[0], packet, (0.95, 0.3)), observed(requests[1], packet, (0.85, 0.3))]
+    result = module.parse_security_deep_dive_responses(packet, role, replies, capacities=capacities)
+    assert result['disagreements'] == [packet['entries'][0]['entry_id']]
+    assert result['escalation_required'] == [packet['entries'][0]['entry_id']]
+    assert [leg['result']['promoted'][0]['true_positive_likelihood'] for leg in result['legs']] == [0.95, 0.85]

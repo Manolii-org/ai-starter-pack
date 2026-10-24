@@ -796,8 +796,10 @@ def parse_security_deep_dive_responses(packet: dict, agent: AgentConfig, outcome
     return {"kind": "security-deep-dive-leg-preparation", "input_sha256": packet["input_sha256"],
             "status": "provisional_complete" if all(leg["status"] == "provisional_complete" for leg in legs) else "incomplete",
             "legs": legs, "disagreements": sorted(key for key, value in decisions.items()
-                if len({_deep_digest(row) for row in value.values()}) > 1),
-            "escalation_required": sorted(escalation), "provider_execution": "unknown", "effectiveness": "unknown"}
+                if len({(row["decision"], row["true_positive_likelihood"], bool(row["missing_context"]))
+                        for row in value.values()}) > 1),
+            "reasoning_agreement": "unknown", "escalation_required": sorted(escalation),
+            "provider_execution": "unknown", "effectiveness": "unknown"}
 
 
 def _incomplete(agent: AgentConfig, reason: str) -> dict[str, Any]:
