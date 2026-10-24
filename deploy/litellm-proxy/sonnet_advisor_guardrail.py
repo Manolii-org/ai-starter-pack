@@ -30,6 +30,7 @@ See .claude/model-routing.json proxy_intercepted_models.sonnet.advisor_guardrail
 for the governance spec.
 """
 
+import copy
 import json
 import logging
 import os
@@ -269,6 +270,88 @@ def _write_response_content(response, new_content: str) -> None:
     raise AttributeError("response has neither choices nor content attribute")
 
 
+def _field(value, name, default=None):
+    return value.get(name, default) if isinstance(value, dict) else getattr(value, name, default)
+
+
+def _write_fallback_response(response, fallback) -> str:
+    """Replace generation provenance with the observed replacement envelope.
+
+    Usage describes the replacement generation, never total physical-call cost.
+    Unknown usage/model/id remain unknown; a missing stop reason cannot prove
+    completion. A real length stop remains truncated for the caller to reject.
+    No route admission, fallback enablement or call budget is changed here.
+    """
+    choices = _field(fallback, "choices")
+    if choices:
+        if len(choices) != 1:
+            raise ValueError("ambiguous replacement choices")
+        stop = {"stop": "end_turn", "length": "max_tokens"}.get(_field(choices[0], "finish_reason"))
+    else:
+        stop = _field(fallback, "stop_reason")
+    if stop not in {"end_turn", "max_tokens", "stop_sequence"}:
+        raise ValueError("replacement completion provenance unavailable")
+    text = _read_response_content(fallback)
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("replacement text unavailable")
+    raw_usage = _field(fallback, "usage")
+    input_tokens = _field(raw_usage, "prompt_tokens" if choices else "input_tokens")
+    output_tokens = _field(raw_usage, "completion_tokens" if choices else "output_tokens")
+    known_usage = all(type(n) is int and n >= 0 for n in (input_tokens, output_tokens))
+    target_choices = _field(response, "choices")
+    if target_choices is not None:
+        if not isinstance(target_choices, list) or len(target_choices) != 1:
+            raise ValueError("unsupported replacement destination choices")
+    elif not isinstance(_field(response, "content"), (list, str, dict)):
+        raise ValueError("unsupported replacement destination content")
+    usage = None
+    if known_usage:
+        total = _field(raw_usage, "total_tokens")
+        if total is not None and (type(total) is not int or total != input_tokens + output_tokens):
+            raise ValueError("replacement usage counters conflict")
+        if target_choices:
+            # This total is determined by observed input/output counters, not a
+            # model default (which may silently manufacture zero).
+            usage = {"prompt_tokens": input_tokens, "completion_tokens": output_tokens,
+                     "total_tokens": input_tokens + output_tokens}
+        else:
+            usage = {"input_tokens": input_tokens, "output_tokens": output_tokens}
+    # Prepare the entire replacement before touching the original. Pydantic
+    # envelopes must revalidate nested content/usage rather than retain dicts
+    # inside fields whose callers expect typed attribute access.
+    typed = callable(getattr(type(response), "model_validate", None)) and callable(getattr(response, "model_dump", None))
+    prepared = response.model_dump() if typed else copy.deepcopy(response)
+    prepared_choices = _field(prepared, "choices")
+    _write_response_content(prepared, text)
+    def put(obj, name, value):
+        if isinstance(obj, dict):
+            obj[name] = value
+        else:
+            _safe_setattr(obj, name, value)
+    if prepared_choices:
+        put(prepared_choices[0], "finish_reason", "length" if stop == "max_tokens" else "stop")
+    else:
+        put(prepared, "stop_reason", stop)
+        put(prepared, "stop_sequence", _field(fallback, "stop_sequence") if stop == "stop_sequence" else None)
+    for name, value in (("usage", usage), ("model", _field(fallback, "model")), ("id", _field(fallback, "id"))):
+        put(prepared, name, value)
+    if typed:
+        prepared = type(response).model_validate(prepared)
+    elif usage is not None and not isinstance(response, dict):
+        old_usage = _field(response, "usage")
+        if old_usage is not None and not isinstance(old_usage, dict):
+            put(prepared, "usage", type(old_usage)(**usage))
+    for name in ("choices", "content", "stop_reason", "stop_sequence", "usage", "model", "id"):
+        if ((isinstance(prepared, dict) and name in prepared)
+                or (not isinstance(prepared, dict) and hasattr(prepared, name))):
+            put(response, name, _field(prepared, name))
+    if _field(response, "_hidden_params") is not None:
+        # Primary deployment/cost internals do not describe this generation.
+        # Empty metadata means unavailable, not zero usage or zero invoice cost.
+        put(response, "_hidden_params", {})
+    return text
+
+
 class SonnetAdvisorGuardrail(CustomLogger):
     """Fail-closed post-call advisor for model_name='sonnet' proxy-intercepted requests."""
 
@@ -411,7 +494,7 @@ class SonnetAdvisorGuardrail(CustomLogger):
                 temperature=data.get("temperature", 0),
                 timeout=120,
             )
-            fb_content = (fb.choices[0].message.content or "").strip()
+            fb_content = _read_response_content(fb)
         except Exception:
             logger.exception("SonnetAdvisorGuardrail: inline fallback call failed")
             raise litellm.ServiceUnavailableError(
@@ -437,7 +520,7 @@ class SonnetAdvisorGuardrail(CustomLogger):
         # _write_response_content handles OpenAI-style ModelResponse, dict responses, and
         # Anthropic-format responses (top-level `content` array from /v1/messages).
         try:
-            _write_response_content(response, fb_content)
+            fb_content = _write_fallback_response(response, fb)
         except (AttributeError, IndexError, TypeError, KeyError, ValueError) as e:
             # Fail closed: if the patch fails the caller receives the original empty
             # response while the advisor has reviewed different (fallback) content.

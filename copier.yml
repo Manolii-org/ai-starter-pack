@@ -209,6 +209,9 @@ _exclude:
   # also carries its own skipif guard, so an instance that already has a copy
   # skips rather than fails.
   - tests/test_hydrate_assessment.py
+  # Pack proxy callback SDK-shape regressions use the owning CI test dependency.
+  # Consumer applications own their deployed proxy SDK and its integration tests.
+  - tests/test_advisor_fallback_envelope.py
   # Template-repo-only test: asserts on plugin/manolii-framework/, a build
   # artifact excluded below. Shipping it would require guessing at runtime
   # whether a checkout is the pack or a consumer; every filename signal

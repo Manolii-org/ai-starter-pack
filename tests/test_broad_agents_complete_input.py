@@ -302,3 +302,38 @@ def test_unknown_role_fails_instead_of_creating_an_empty_review(runner, monkeypa
     monkeypatch.setattr(runner, '_urlopen_https', lambda *a, **k: pytest.fail('provider dispatch'))
     assert runner.run_broad_agents(manifest, diff, tmp_path / 'out', tmp_path) == 1
     assert not (tmp_path / 'escape.json').exists()
+
+
+def test_api_prompt_adaptation_preserves_all_checks_and_interactive_source(runner, monkeypatch):
+    source = ROOT / '.claude/agents/systems-consistency.md'
+    agent = runner.parse_agent_file(source)
+    rendered = runner._api_instructions(agent.instructions)
+    assert 'Bash("mkdir' in agent.instructions and 'Bash("mkdir' not in rendered
+    checks = agent.instructions.split('## Checks', 1)[1]
+    assert checks in rendered
+    for required in ('fly.toml', 'deploy.sh', '.github/workflows/**', 'config.yaml',
+                     'exit 1', 'ALL config files', 'advisor_confidence', 'missing_context'):
+        assert required in rendered
+    sent = replies(monkeypatch, runner, [response()])
+    result = runner.invoke_agent(agent, '', 'FULL_SOURCE_TAIL')
+    assert 'skipped' not in result
+    message = sent[0][0]['messages'][0]['content']
+    assert rendered in message and 'FULL_SOURCE_TAIL' in message
+    assert 'Return every confirmed finding' in message
+
+
+@pytest.mark.parametrize('text', ['before <!-- api-interactive:start --> rest',
+                                 '<!-- api-interactive:end --> rest',
+                                 '<!-- api-interactive:start --><!-- api-interactive:start --><!-- api-interactive:end -->'])
+def test_invalid_api_boundaries_never_drop_review_checks(runner, text):
+    with pytest.raises(ValueError):
+        runner._api_instructions(text)
+
+
+def test_many_parseable_findings_at_limit_remain_incomplete(runner, monkeypatch):
+    findings = {'findings': [{'file': 'deploy.sh', 'line': n + 1, 'message': 'Retain this distinct finding'} for n in range(100)]}
+    sent = replies(monkeypatch, runner, [response(json.dumps(findings), 'max_tokens')]*2)
+    result = runner.invoke_agent(config(runner), '', 'FULL_INPUT')
+    assert result['skipped'] == 'output_limit'
+    assert [body['max_tokens'] for body, _, _ in sent] == [2400, 4448]
+    assert all('FULL_INPUT' in body['messages'][0]['content'] for body, _, _ in sent)
