@@ -116,16 +116,16 @@ exercise all three layouts without the original producer checkout. The new
 guide is a Pack reference document; runtime code does not read it. Default
 source-file selection and the installed six-file bundle remain unchanged.
 
-Before publication, the `copier.yml` owner must add precisely this Pack-only test
-exclusion to `_exclude`:
+`copier.yml` excludes this Pack-only synthetic suite from consumer output:
 
 ```yaml
   - scripts/tests/test_agent_validation_layout.py
 ```
 
-This candidate does not include the separate proposal directory, so it needs no
-proposal-directory exclusion. Do not change the builders or another owner's
-branch merely to bundle that edit. Regeneration may expose unrelated managed
+Actual default and branded render regressions verify the exclusion and exact
+installer/guide bytes; the existing default validation suite still ships.
+The separate proposal directory is absent, so no proposal exclusion is needed.
+Regeneration may expose unrelated managed
 drift; retain only byte-identical matching installer copies after inspecting
 the complete delta and verifying import closure. No other generated change is
 qualified by this source slice.
