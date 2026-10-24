@@ -47,6 +47,69 @@ Rollback reverts the owning source commit and its generated outputs together.
 It does not change credentials, policy admission, deployment or review history.
 No rollout should reinterpret old incomplete artifacts as successful evidence.
 
+## SAST producer completion and adoption
+
+Both direct and reusable assessment workflows execute the same
+`scripts/lib/sast_evidence.py` producer before accepting SAST input. The direct
+job loads that helper from the immutable PR base; the reusable job loads only
+that file from its existing trusted `pack_ref`. Neither executes a candidate's
+normalizer. The scanner checkout is the exact PR head, with every tracked
+regular file checked against its Git blob before and after scanning. Redirected,
+missing, changed or unsupported source objects fail closed. Runtime restoration
+for model jobs remains separate and does not alter the bytes being scanned.
+
+The old pinned Semgrep action does not declare the `output` or `json` inputs
+previously supplied by these jobs. The producer uses the supported Semgrep JSON
+CLI with the existing `auto` configuration, plus the existing recursive Bandit
+configuration. It observes scanner versions, return codes, report hashes,
+reported targets/errors and immutable configuration-file content identities.
+The resolved remote `auto` rule-set identity remains unknown; this evidence does
+not claim immutable external rules, whole-repository language coverage or
+complete data-flow analysis. Scanner package installation remains CI-local and
+uses a job-temporary virtual environment and no model credential; shared runner
+Python dependencies are not modified. The existing 15-minute SAST job limit is unchanged.
+
+An empty findings list is clean input only when both applicable scanner reports
+are structurally complete, have no execution/report errors and record observed
+targets. Exit 1 with actual findings is a findings result, not an execution
+failure. Missing, malformed, truncated or partial reports, unknown versions,
+source mismatches, execution failure and cancellation remain incomplete. Valid
+normalized findings before and after a malformed entry are retained; that entry
+still invalidates completion. Repeated legacy finding IDs retain multiplicity
+and position/content accounting. Zero retained findings on an incomplete record
+does not mean zero scanner findings. No scanner is retried by this producer.
+
+Bandit with no immutable Python source is explicitly unexecuted/skipped, not a
+successful Python scan. The existing empty-diff SAST job skip remains; consumers
+validate that the immutable base...head diff really is empty. They reject other
+skipped required SAST jobs. Depth-none classification keeps its existing
+separate workflow path.
+
+The SAST job uploads normalized findings and a completion sidecar. All three
+consumers clear committed SAST scratch files, download the producer's exact
+artifact ID within the current run, and validate its source/run/attempt and
+runtime binding against trusted producer job-output digests **before** specialist,
+broad or Judge execution. Only then are the unchanged findings bytes exposed at
+the compatible `.ai/sast-findings.json` path. Existing upstream failure/cancellation
+and selected-role guards remain mandatory. Failed validation cannot fall through
+to a clean Judge review or model invocation.
+
+These hashes and local checks are not independent authentication. Authority is
+the existing accepted workflow/runtime, runner event controls, producer job
+outputs and run-scoped GitHub artifact transfer together. Model fields, candidate
+files, caller-provided hashes or a standalone CLI cannot establish that authority.
+The sidecar is not a protected-role receipt, scanner effectiveness proof or an
+export approval. Live deep-dive dispatch and protected-role admission stay dormant.
+
+Adopt the helper and workflow changes together. A trusted base or reusable
+`pack_ref` missing the helper must fail, never execute a candidate substitute.
+Source review of the adoption PR is not an in-place execution test of its new
+trusted-base runtime. Rendered/plugin/registry helpers are generated from the
+canonical file; the reusable hydration list includes its consumer dependency.
+Rollback reverts these source and generated changes together; old findings-only
+artifacts cannot satisfy this new completion protocol. No release tag, consumer
+installation, proxy deployment or role activation follows from source integration.
+
 ## Security deep-dive source readiness
 
 The provider-free v1 builder/parser in `scripts/run-broad-agents.py` binds complete
