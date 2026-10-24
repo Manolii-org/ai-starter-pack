@@ -23,6 +23,8 @@ def load(name):
 @pytest.fixture
 def runner(monkeypatch):
     """Use a fake proxy credential with an in-memory HTTP response boundary."""
+    # Library fixtures model local execution; hosted integration supplies its own event.
+    monkeypatch.delenv('GITHUB_ACTIONS', raising=False)
     monkeypatch.delenv('BROAD_AGENTS_MAX_DIFF_CHARS', raising=False)
     monkeypatch.delenv('CLIENT_AI_POLICY', raising=False)
     monkeypatch.setenv('LITELLM_PROXY_URL', 'https://proxy.example')
