@@ -757,3 +757,37 @@ def test_deep_generated_runtime_has_real_builder_parser_and_guard_closure(runner
     assert parsed['status'] == 'provisional_complete'
     assert parsed['provider_execution'] == 'unknown'
     assert len(parsed['promoted']) == len(parsed['dismissed']) == 1
+
+
+@pytest.mark.parametrize('mutation', ['text', 'sha256', 'blob', 'side', 'commit', 'mode', 'duplicate',
+    'path', 'absent_shape', 'diff', 'missing_trigger'])
+def test_deep_recomputed_packet_hash_cannot_bless_inconsistent_source_bytes(runner, deep_repo, mutation):
+    packet = deep_packet(runner, deep_repo)
+    answer = deep_output(packet)
+    source = next(s for s in packet['sources'] if s['side'] == 'head' and s['path'] == 'flow.py')
+    if mutation == 'text':
+        source['text'] += 'altered context\n'
+    elif mutation == 'sha256':
+        source['sha256'] = '0' * 64
+    elif mutation == 'blob':
+        source['blob'] = '0' * 40
+    elif mutation == 'side':
+        source['side'] = 'wrong'
+    elif mutation == 'commit':
+        source['commit'] = packet['base']
+    elif mutation == 'mode':
+        source['mode'] = '120000'
+    elif mutation == 'duplicate':
+        packet['sources'].append(source.copy())
+    elif mutation == 'path':
+        source['path'] = './flow.py'
+    elif mutation == 'absent_shape':
+        source['status'] = 'absent'
+    elif mutation == 'diff':
+        packet['diff']['text'] += 'altered diff'
+    elif mutation == 'missing_trigger':
+        packet['sources'].remove(source)
+    packet['input_sha256'] = runner._deep_digest({k: v for k, v in packet.items() if k != 'input_sha256'})
+    answer['input_sha256'] = packet['input_sha256']
+    with pytest.raises(ValueError):
+        runner.parse_security_deep_dive_output(json.dumps(answer), packet, stop_reason='end_turn')

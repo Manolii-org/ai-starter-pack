@@ -462,6 +462,41 @@ def parse_security_deep_dive_output(raw: str, packet: dict, *, stop_reason: str)
     if (sast_hash != packet.get("sast_sha256") or not isinstance(findings, list)
             or not findings or packet.get("entries") != _deep_entries(sast_hash, findings)):
         raise ValueError("inconsistent deep-dive SAST accounting")
+    # Recomputed outer hashes cannot bless internally contradictory immutable
+    # evidence. Git OIDs here are byte identities, never approval authority.
+    sources = packet.get("sources")
+    if not isinstance(sources, list) or not sources:
+        raise ValueError("missing deep-dive source evidence")
+    seen_sources = set()
+    for source in sources:
+        if not isinstance(source, dict):
+            raise ValueError("invalid deep-dive source evidence")
+        side, path = source.get("side"), source.get("path")
+        if (side not in {"base", "head"} or _deep_path(path) != path
+                or source.get("commit") != packet.get(side) or (side, path) in seen_sources):
+            raise ValueError("inconsistent deep-dive source identity")
+        seen_sources.add((side, path))
+        if source.get("status") == "absent":
+            if set(source) != {"side", "path", "status", "commit"}:
+                raise ValueError("invalid absent deep-dive source")
+            continue
+        if (source.get("status") != "available" or source.get("mode") not in {"100644", "100755"}
+                or not isinstance(source.get("text"), str)):
+            raise ValueError("invalid available deep-dive source")
+        body = source["text"].encode("utf-8")
+        blob = hashlib.sha1(b"blob " + str(len(body)).encode() + b"\0" + body,
+                            usedforsecurity=False).hexdigest()
+        if (source.get("sha256") != hashlib.sha256(body).hexdigest() or source.get("blob") != blob):
+            raise ValueError("deep-dive immutable source bytes mismatch")
+    for entry in packet["entries"]:
+        matches = [s for s in sources if s["side"] == "head" and s["path"] == entry["path"]]
+        if (len(matches) != 1 or matches[0]["status"] != "available"
+                or entry["finding"]["line"] > len(matches[0]["text"].splitlines())):
+            raise ValueError("missing deep-dive triggering source")
+    diff = packet.get("diff")
+    if (not isinstance(diff, dict) or not isinstance(diff.get("text"), str)
+            or hashlib.sha256(diff["text"].encode("utf-8")).hexdigest() != diff.get("sha256")):
+        raise ValueError("deep-dive retained diff mismatch")
     result = _deep_json(raw)
     if (not isinstance(result, dict) or set(result) != {"input_sha256", "entries"}
             or result["input_sha256"] != binding or not isinstance(result["entries"], list)):
