@@ -589,3 +589,93 @@ def test_owner_branch_probe_timeout_is_bounded_and_prewrite(producers, consumer,
     assert len(calls) == 1
     assert "AGENT-VALIDATION-INSTALL-BLOCKED" in capsys.readouterr().err
     assert snapshot(consumer) == before
+
+
+@pytest.mark.parametrize("case", ["source", "installed-uncommitted", "installed-committed", "layout"])
+@pytest.mark.parametrize("mode", [0o755, 0o655])
+@pytest.mark.parametrize("flags", [(), ("--check",), ("--dry-run",)])
+def test_owner_execute_mode_contract(producers, consumer, case, mode, flags):
+    source, top = producers["source"]
+    unavailable = None
+    if case.startswith("installed"):
+        result = invoke(source, consumer)
+        assert result.returncode == 0, result.stderr
+        if case == "installed-committed":
+            commit(consumer, "installed bundle")
+        unavailable = top.with_name(top.name + "-mode-unavailable")
+        top.rename(unavailable)
+        source = consumer
+        changed = consumer / "scripts/agent-check.py"
+    elif case == "layout":
+        changed = consumer / LAYOUT_NAME
+        changed.chmod(0o755)
+        commit(consumer, "executable owner layout")
+    else:
+        changed = source / "scripts/agent-check.py"
+    original_mode = changed.stat().st_mode & 0o777
+    changed.chmod(mode)
+    before = snapshot(consumer)
+    source_before = snapshot(unavailable if unavailable else top)
+    try:
+        result = invoke(source, consumer, *flags)
+        expected = 2 if mode == 0o655 else int(flags == ("--check",) and not case.startswith("installed"))
+        assert result.returncode == expected, result.stderr
+        if mode == 0o655 or flags:
+            assert snapshot(consumer) == before
+        assert snapshot(unavailable if unavailable else top) == source_before
+    finally:
+        changed.chmod(original_mode)
+        if unavailable:
+            unavailable.rename(top)
+
+
+@pytest.mark.parametrize("kind", ["plugin", "registry"])
+def test_packaged_source_owner_execute_refusal(producers, consumer, kind):
+    source, top = producers[kind]
+    path = source / "scripts/agent-check.py"
+    original_mode = path.stat().st_mode & 0o777
+    path.chmod(0o655)
+    before, source_before = snapshot(consumer), snapshot(top)
+    try:
+        result = invoke(source, consumer)
+        assert result.returncode == 2, result.stderr
+        assert snapshot(consumer) == before
+        assert snapshot(top) == source_before
+    finally:
+        path.chmod(original_mode)
+
+
+@pytest.mark.parametrize("changed", ["source-mode", "source-index", "installed-mode", "installed-index", "layout-mode"])
+def test_mode_or_index_change_after_planning_is_prewrite(producers, consumer, monkeypatch, changed):
+    source, top = producers["source"]
+    if changed.startswith("installed"):
+        assert invoke(source, consumer).returncode == 0
+        commit(consumer, "installed bundle")
+    if changed == "layout-mode":
+        (consumer / LAYOUT_NAME).chmod(0o755)
+        commit(consumer, "executable owner layout")
+    module = imported(source)
+    original = module.build_plan
+    observed = {}
+    index_before = (top / ".git/index").read_bytes()
+    path = (source / "scripts/agent-check.py" if changed.startswith("source") else
+            consumer / (LAYOUT_NAME if changed == "layout-mode" else "scripts/agent-check.py"))
+    original_mode = path.stat().st_mode & 0o777
+    def altered(args):
+        plan = original(args)
+        if changed.endswith("index"):
+            git(top if changed.startswith("source") else consumer,
+                "update-index", "--chmod=-x", "scripts/agent-check.py")
+        else:
+            path.chmod(0o655)
+        observed["target"] = snapshot(consumer)
+        observed["source"] = snapshot(top)
+        return plan
+    monkeypatch.setattr(module, "build_plan", altered)
+    try:
+        assert module.main(["--repo-root", str(consumer), "--layout", LAYOUT_NAME]) == 2
+        assert snapshot(consumer) == observed["target"]
+        assert snapshot(top) == observed["source"]
+    finally:
+        path.chmod(original_mode)
+        (top / ".git/index").write_bytes(index_before)

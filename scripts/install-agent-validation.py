@@ -94,6 +94,13 @@ def local_git(root: Path, *args: str, input_data=None) -> bytes:
                                    env=env, input=input_data, stderr=subprocess.PIPE, timeout=15)
 
 
+def regular_git_mode(path: Path) -> str:
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError(f"mode identity requires a regular file: {path}")
+    return "100755" if info.st_mode & stat.S_IXUSR else "100644"
+
+
 def tracked(root: Path, rel: str, raw: bytes, modes: tuple[str, ...]) -> dict:
     """Require exact HEAD/index/worktree bytes and mode for one tracked path."""
     index = local_git(root, "ls-files", "--stage", "-z", "--", rel).split(b"\0")
@@ -104,11 +111,44 @@ def tracked(root: Path, rel: str, raw: bytes, modes: tuple[str, ...]) -> dict:
     hmeta, hname = head[0].decode().split("\t", 1)
     mode, oid, stage = imeta.split()
     hmode, kind, hoid = hmeta.split()
+    if mode in ("100644", "100755") and regular_git_mode(root / rel) != mode:
+        raise ValueError(f"HEAD/index/worktree mode mismatch: {rel}")
     if (iname != rel or hname != rel or mode not in modes or mode != hmode
             or stage != "0" or kind != "blob" or oid != hoid
             or local_git(root, "hash-object", "--no-filters", "--stdin", input_data=raw).strip() != oid.encode()):
         raise ValueError(f"HEAD/index/worktree layout mismatch: {rel}")
     return {"mode": mode, "blob": oid, "sha256": digest(raw)}
+
+
+def watch_installed_mode(plan, logical: str, path: Path):
+    """Bind existing tracked modes without requiring an immediate target commit."""
+    rel = path.relative_to(plan.root).as_posix()
+
+    def identity():
+        mode = regular_git_mode(path)
+        if Path(logical).parent == Path("scripts") and mode != "100755":
+            raise ValueError(f"installed entrypoint lost owner execute: {logical}")
+        rows = (local_git(plan.root, "ls-tree", "-z", "HEAD", "--", rel),
+                local_git(plan.root, "ls-files", "--stage", "-z", "--", rel))
+        for index, raw in enumerate(rows):
+            if not raw:
+                continue  # Immediate installed checks may precede add/commit.
+            entries = raw.split(b"\0")
+            if len(entries) != 2 or not entries[0] or entries[1]:
+                raise ValueError(f"ambiguous installed Git identity: {logical}")
+            meta, name = entries[0].split(b"\t", 1)
+            fields = meta.split()
+            if (name != rel.encode() or len(fields) != 3 or fields[0] != mode.encode()
+                    or (index == 0 and fields[1] != b"blob") or (index == 1 and fields[2] != b"0")):
+                raise ValueError(f"installed HEAD/index/worktree mode mismatch: {logical}")
+        return mode, rows
+
+    expected = identity()
+
+    def unchanged():
+        if identity() != expected:
+            raise ValueError(f"installed mode/index identity changed: {logical}")
+    plan.validators.append(unchanged)
 
 
 def state(path: Path):
@@ -352,8 +392,6 @@ def layout_context(plan: OutputPlan, argument: Path) -> tuple[dict, dict]:
             or layout["schema"] != "agent-validation-layout/v1" or layout["aliases"] != ALIASES):
         raise ValueError("layout must declare exactly the two supported skills aliases")
     identity = tracked(root, rel, raw, ("100644", "100755"))
-    if bool(path.stat().st_mode & 0o111) != (identity["mode"] == "100755"):
-        raise ValueError("layout file mode differs from Git")
     aliases = {}
     for alias, target in ALIASES.items():
         link = root / alias
@@ -444,14 +482,19 @@ def source_identity(plan: OutputPlan, paths: dict, hashes: dict, previous) -> di
     commit = local_git(SOURCE, "rev-parse", "HEAD").decode().strip()
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
         raise ValueError("source must identify an immutable Git commit")
+    identities = {}
     for logical, path in paths.items():
         plan.regular_path(path)
         rel = path.relative_to(top).as_posix()
         if local_git(top, "show", f"{commit}:{rel}") != plan.read(path):
             raise ValueError(f"source differs from its immutable commit: {logical}")
+        identities[path] = tracked(top, rel, plan.read(path), ("100644", "100755"))
     def unchanged():
         if local_git(SOURCE, "rev-parse", "HEAD").decode().strip() != commit:
             raise ValueError("immutable source commit changed")
+        for path, expected in identities.items():
+            if tracked(top, path.relative_to(top).as_posix(), plan.read(path), ("100644", "100755")) != expected:
+                raise ValueError("immutable source mode/index identity changed")
     plan.validators.append(unchanged)
     return {"commit": commit, "subdir": SOURCE.relative_to(top).as_posix(),
             "bundle_sha256": digest(encoded(hashes))}
@@ -531,6 +574,7 @@ def build_plan(args):
             installed = plan.regular_path(destination(root, logical, True))
             if not installed.is_file() or digest(plan.read(installed)) != expected:
                 raise ValueError(f"installed file differs from provenance: {logical}")
+            watch_installed_mode(plan, logical, installed)
     hashes, sources = {}, {}
     for logical in FILES:
         direct = SOURCE / logical
