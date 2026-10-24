@@ -45,6 +45,15 @@ def snapshot(root):
     return result
 
 
+def make_case_variant(root):
+    """Require distinct case-only siblings without adding a planning probe."""
+    original, variant = root / ".github/skills", root / ".github/Skills"
+    if variant.exists() and not variant.is_symlink() and variant.samefile(original):
+        pytest.skip("filesystem cannot represent case-ambiguous siblings")
+    variant.mkdir()
+    return variant
+
+
 @pytest.fixture(scope="module")
 def producers(tmp_path_factory):
     """Immutable minimal source/plugin/registry producer Git checkouts."""
@@ -168,7 +177,7 @@ def test_unsafe_layout_refuses_without_writes(producers, consumer, tmp_path, bad
         (consumer / ".github/skills").rename(consumer / ".github/original")
         (consumer / ".github/skills").symlink_to("original", target_is_directory=True)
     elif bad == "case":
-        (consumer / ".github/Skills").mkdir()
+        make_case_variant(consumer)
     elif bad == "root-link":
         root = tmp_path / "root-alias"
         root.symlink_to(consumer, target_is_directory=True)
@@ -569,12 +578,48 @@ def test_case_ambiguity_added_after_planning_refuses(producers, consumer, monkey
 
     def altered(args):
         plan = original(args)
-        (consumer / ".github/Skills").mkdir()
+        make_case_variant(consumer)
         return plan
     monkeypatch.setattr(module, "build_plan", altered)
     assert module.main(["--repo-root", str(consumer), "--layout", LAYOUT_NAME]) == 2
     assert not (consumer / "scripts").exists()
     assert not (consumer / RECOVERY).exists()
+
+
+@pytest.mark.parametrize("phase", ["before-plan", "after-plan"])
+def test_unavailable_case_fixture_skips_without_writes(
+        producers, consumer, tmp_path, monkeypatch, phase):
+    """Model case-folding host APIs through each actual fixture caller."""
+    original = consumer / ".github/skills"
+    variant = consumer / ".github/Skills"
+    exists, samefile, mkdir = Path.exists, Path.samefile, Path.mkdir
+    monkeypatch.setattr(Path, "exists", lambda path: True if path == variant else exists(path))
+    monkeypatch.setattr(Path, "samefile", lambda path, other:
+                        True if path == variant and Path(other) == original else samefile(path, other))
+
+    def reject_duplicate(path, *args, **kwargs):
+        if path == variant:
+            raise FileExistsError(errno.EEXIST, "case-folded fixture already exists", str(path))
+        return mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", reject_duplicate)
+    before = snapshot(consumer)
+    with pytest.raises(pytest.skip.Exception, match="case-ambiguous siblings"):
+        if phase == "before-plan":
+            test_unsafe_layout_refuses_without_writes(producers, consumer, tmp_path, "case")
+        else:
+            test_case_ambiguity_added_after_planning_refuses(producers, consumer, monkeypatch)
+    assert snapshot(consumer) == before
+
+
+def test_existing_distinct_case_sibling_is_not_an_unavailable_precondition(consumer):
+    """A real existing sibling remains a fixture error, with its bytes intact."""
+    variant = make_case_variant(consumer)
+    (variant / "owner.txt").write_bytes(b"Existing sibling owner bytes.\n")
+    before = snapshot(consumer)
+    with pytest.raises(FileExistsError):
+        make_case_variant(consumer)
+    assert snapshot(consumer) == before
 
 
 def test_malformed_managed_block_is_a_prewrite_hold(producers, consumer):
