@@ -1,4 +1,5 @@
 """Synthetic execution acceptance for the opt-in layout contract; no real repos."""
+import errno
 import hashlib
 import importlib.util
 import json
@@ -376,6 +377,110 @@ def test_atomic_replacement_failure_retains_original_and_recovery(producers, con
     assert not list(consumer.rglob(".agent-validation-*"))
     git(consumer, "add", ".")
     assert not git(consumer, "ls-files", "--", RECOVERY)
+
+
+@pytest.fixture(params=["source", "plugin", "registry"])
+def replacement_kernel(producers, request):
+    source = producers[request.param][0]
+    spec = importlib.util.spec_from_file_location(
+        "replacement_installer", source / "scripts/install-agent-validation.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    if not module.DIRFD_ATOMIC:
+        pytest.skip("directory-descriptor replacement unavailable")
+    return module
+
+
+@pytest.mark.parametrize("code", [errno.EACCES, errno.ENOSPC, errno.EROFS, errno.EDQUOT])
+def test_temp_creation_failure_preserves_original_error_and_destination(
+        replacement_kernel, tmp_path, monkeypatch, capsys, code):
+    module = replacement_kernel
+    root = tmp_path / "replacement"
+    root.mkdir()
+    path = root / "owner.txt"
+    path.write_bytes(b"Owner bytes.\n")
+    plan = module.OutputPlan(root)
+    plan.add(path, b"Replacement.\n", "fixture")
+    before = snapshot(root)
+    original = module.os.open
+    failure = OSError(code, "synthetic temporary-file creation failure")
+    descriptors = []
+
+    def fail(name, flags, *args, **kwargs):
+        if flags & os.O_EXCL and str(name).startswith(".agent-validation-"):
+            descriptors.append(kwargs["dir_fd"])
+            raise failure
+        return original(name, flags, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "open", fail)
+    with pytest.raises(OSError) as caught:
+        plan.apply([path])
+    assert caught.value is failure
+    assert snapshot(root) == before
+    assert plan.completed == []
+    report = capsys.readouterr().err.split("AGENT-VALIDATION-RECOVERY: ", 1)[1]
+    assert json.loads(report)["reason"] == str(failure)
+    assert len(descriptors) == 1
+    with pytest.raises(OSError) as closed:
+        os.fstat(descriptors[0])
+    assert closed.value.errno == errno.EBADF
+
+
+def test_temp_name_collision_preserves_other_writer_file(
+        replacement_kernel, tmp_path, monkeypatch):
+    module = replacement_kernel
+    root = tmp_path / "collision"
+    root.mkdir()
+    path = root / "owner.txt"
+    path.write_bytes(b"Owner bytes.\n")
+    collision = root / (".agent-validation-" + bytes([17] * 16).hex())
+    collision.write_bytes(b"Other writer's temporary bytes.\n")
+    plan = module.OutputPlan(root)
+    plan.add(path, b"Replacement.\n", "fixture")
+    before = snapshot(root)
+    monkeypatch.setattr(module.os, "urandom", lambda count: bytes([17] * count))
+    with pytest.raises(FileExistsError):
+        plan.apply([path])
+    assert snapshot(root) == before
+    assert plan.completed == []
+
+
+def test_cleanup_failure_retains_primary_error_and_closes_parent(
+        replacement_kernel, tmp_path, monkeypatch, capsys):
+    module = replacement_kernel
+    root = tmp_path / "cleanup"
+    root.mkdir()
+    path = root / "owner.txt"
+    path.write_bytes(b"Owner bytes.\n")
+    plan = module.OutputPlan(root)
+    plan.add(path, b"Replacement.\n", "fixture")
+    primary = OSError(errno.ENOSPC, "synthetic replacement failure")
+    descriptors = []
+
+    def fail_replace(*args, **kwargs):
+        descriptors.append(kwargs["src_dir_fd"])
+        raise primary
+
+    def fail_unlink(*args, **kwargs):
+        raise PermissionError(errno.EACCES, "synthetic temporary cleanup denial")
+
+    monkeypatch.setattr(module.os, "replace", fail_replace)
+    monkeypatch.setattr(module.os, "unlink", fail_unlink)
+    with pytest.raises(OSError) as caught:
+        plan.apply([path])
+    assert caught.value is primary
+    assert path.read_bytes() == b"Owner bytes.\n"
+    assert plan.completed == []
+    error = capsys.readouterr().err
+    assert "AGENT-VALIDATION-CLEANUP:" in error
+    assert "synthetic temporary cleanup denial" in error
+    assert json.loads(error.split("AGENT-VALIDATION-RECOVERY: ", 1)[1])["reason"] == str(primary)
+    leftovers = list(root.glob(".agent-validation-*"))
+    assert len(leftovers) == 1
+    assert leftovers[0].stat().st_mode & 0o777 == 0o600
+    with pytest.raises(OSError) as closed:
+        os.fstat(descriptors[0])
+    assert closed.value.errno == errno.EBADF
 
 
 def test_case_ambiguity_added_after_planning_refuses(producers, consumer, monkeypatch):

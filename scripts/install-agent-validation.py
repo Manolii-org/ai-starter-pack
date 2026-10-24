@@ -260,9 +260,10 @@ class OutputPlan:
             parent = os.fstat(descriptor)
             if (parent.st_dev, parent.st_ino, parent.st_mode) != self.watched[path.parent][1]:
                 raise ValueError(f"parent changed before replacement: {path}")
-            temporary = ".agent-validation-" + os.urandom(16).hex()
-            handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            name = ".agent-validation-" + os.urandom(16).hex()
+            handle = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                              0o600, dir_fd=descriptor)
+            temporary = name
             with os.fdopen(handle, "wb") as stream:
                 stream.write(data)
                 os.fchmod(stream.fileno(), mode)
@@ -277,9 +278,17 @@ class OutputPlan:
                 raise ValueError(f"replacement outcome changed; reconcile: {path}")
             self.watched[path] = current
         finally:
-            if temporary is not None:
-                os.unlink(temporary, dir_fd=descriptor)
-            os.close(descriptor)
+            primary_error = sys.exc_info()[1]
+            try:
+                if temporary is not None:
+                    try:
+                        os.unlink(temporary, dir_fd=descriptor)
+                    except OSError as cleanup_error:
+                        if primary_error is None:
+                            raise
+                        print(f"AGENT-VALIDATION-CLEANUP: {cleanup_error}", file=sys.stderr)
+            finally:
+                os.close(descriptor)
 
     def portable_replace(self, path: Path, data: bytes, mode: int):
         """Retain regular-layout support where directory descriptors are absent."""
