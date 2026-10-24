@@ -244,6 +244,13 @@ def test_feature_flags_gate_optional_surfaces(default_render):
         assert flags_files - default_files == optional
 
 
+def test_pack_terminal_fixture_suite_is_not_rendered(default_render):
+    """Producer parity fixtures need artifact trees that consumers do not ship."""
+    assert not (default_render / "tests/test_session_terminal_callers.py").exists()
+    assert (default_render / "scripts/session-unfinished-work-check.py").read_bytes() == (
+        ROOT / "scripts/session-unfinished-work-check.py").read_bytes()
+
+
 def test_cost_profile_lean_omits_measured_waste_callers(default_render):
     """cost_profile=lean drops the two callers measured as pure spend (L-3/L-7)
     while keeping the rest of the CI surface byte-identical to standard."""
