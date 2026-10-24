@@ -16,7 +16,7 @@ END = "<!-- agent-validation:end -->"
 
 def outputs(root: Path, policy: str | None = None) -> dict[Path, str]:
     policy = (policy if policy is not None else (root / "docs/agent-validation.md").read_text(encoding="utf-8")).strip()
-    block = f"{BEGIN}\n{policy}\n{END}"
+    block = f"{BEGIN}\n\n{policy}\n\n{END}"
     claude = Path("CLAUDE.md") if (root / "CLAUDE.md").is_file() else Path(".claude/CLAUDE.md")
     claude_paths = [claude]
     for rel in (Path("CLAUDE.md"), Path(".claude/CLAUDE.md")):
