@@ -487,3 +487,105 @@ def test_unrepresentable_source_subdirectory_refuses_before_writes(producers, co
     result = invoke(source, consumer)
     assert result.returncode == 2, result.stderr
     assert snapshot(consumer) == before
+
+
+@pytest.mark.parametrize("kind", ["ancestor", "leaf"])
+def test_default_explicit_recipe_input_retains_link_compatibility(producers, consumer, tmp_path, kind):
+    for rel in (".claude/skills", ".cursor/skills"):
+        (consumer / rel).unlink()
+        (consumer / rel).mkdir()
+    recipes = tmp_path / "owner-recipes"
+    recipes.mkdir()
+    raw = b'{"schema_version":1,"base":"origin/main","checks":[]}\n'
+    (recipes / "checks.json").write_bytes(raw)
+    alias = tmp_path / "recipe-input"
+    alias.symlink_to(recipes if kind == "ancestor" else recipes / "checks.json")
+    supplied = alias / "checks.json" if kind == "ancestor" else alias
+    source = producers["source"][0]
+    before = snapshot(consumer)
+    flags = ("--recipes", str(supplied))
+    assert invoke(source, consumer, *flags, "--dry-run", layout=False).returncode == 0
+    assert invoke(source, consumer, *flags, "--check", layout=False).returncode == 1
+    assert snapshot(consumer) == before
+    result = invoke(source, consumer, *flags, layout=False)
+    assert result.returncode == 0, result.stderr
+    assert (consumer / "config/agent-checks.json").read_bytes() == raw
+    after = snapshot(consumer)
+    for extra in [("--check",), ("--dry-run",), ()]:
+        result = invoke(source, consumer, *flags, *extra, layout=False)
+        assert result.returncode == 0, result.stderr
+        assert snapshot(consumer) == after
+    assert alias.is_symlink()
+
+
+@pytest.mark.parametrize("flags", [(), ("--check",), ("--dry-run",)])
+def test_explicit_layout_still_rejects_linked_recipe_input(producers, consumer, tmp_path, flags):
+    recipes = tmp_path / "recipes"
+    recipes.mkdir()
+    (recipes / "checks.json").write_bytes((consumer / "config/agent-checks.json").read_bytes())
+    alias = tmp_path / "recipe-input"
+    alias.symlink_to(recipes, target_is_directory=True)
+    before = snapshot(consumer)
+    result = invoke(producers["source"][0], consumer, "--recipes", str(alias / "checks.json"), *flags)
+    assert result.returncode == 2, result.stderr
+    assert snapshot(consumer) == before
+
+
+@pytest.mark.parametrize("changed", ["alias", "canonical"])
+def test_default_recipe_mapping_and_bytes_are_revalidated(producers, consumer, tmp_path, monkeypatch, changed):
+    for rel in (".claude/skills", ".cursor/skills"):
+        (consumer / rel).unlink()
+        (consumer / rel).mkdir()
+    recipes = tmp_path / "recipes"
+    recipes.mkdir()
+    recipe = recipes / "checks.json"
+    recipe.write_bytes((consumer / "config/agent-checks.json").read_bytes())
+    alias = tmp_path / "recipe-input"
+    alias.symlink_to(recipes, target_is_directory=True)
+    module = imported(producers["source"][0])
+    original = module.build_plan
+    altered_inputs = []
+    def altered(args):
+        plan = original(args)
+        if changed == "alias":
+            other = tmp_path / "other-recipes"
+            other.mkdir()
+            (other / "checks.json").write_bytes(recipe.read_bytes())
+            alias.unlink()
+            alias.symlink_to(other, target_is_directory=True)
+        else:
+            recipe.write_bytes(recipe.read_bytes() + b"\n")
+        altered_inputs.append(changed)
+        return plan
+    monkeypatch.setattr(module, "build_plan", altered)
+    before = snapshot(consumer)
+    assert module.main(["--repo-root", str(consumer), "--recipes", str(alias / "checks.json")]) == 2
+    assert altered_inputs == [changed]
+    assert snapshot(consumer) == before
+
+
+@pytest.mark.parametrize("probe", [b"rev-parse", b"check-ref-format"])
+@pytest.mark.parametrize("explicit", [False, True])
+def test_owner_branch_probe_timeout_is_bounded_and_prewrite(producers, consumer, monkeypatch, capsys, probe, explicit):
+    if not explicit:
+        for rel in (".claude/skills", ".cursor/skills"):
+            (consumer / rel).unlink()
+            (consumer / rel).mkdir()
+    module = imported(producers["source"][0])
+    original = module.subprocess.run
+    calls = []
+    def timeout(command, *args, **kwargs):
+        if command[:2] == [b"git", probe]:
+            calls.append(command)
+            assert kwargs["timeout"] == 15
+            assert kwargs["cwd"] == consumer and kwargs["capture_output"] is True
+            assert "GIT_DIR" not in kwargs["env"]
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+        return original(command, *args, **kwargs)
+    monkeypatch.setattr(module.subprocess, "run", timeout)
+    before = snapshot(consumer)
+    flags = ["--layout", LAYOUT_NAME] if explicit else []
+    assert module.main(["--repo-root", str(consumer), *flags]) == 2
+    assert len(calls) == 1
+    assert "AGENT-VALIDATION-INSTALL-BLOCKED" in capsys.readouterr().err
+    assert snapshot(consumer) == before

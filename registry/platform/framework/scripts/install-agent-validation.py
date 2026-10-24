@@ -508,6 +508,12 @@ def build_plan(args):
         _, context = layout_context(plan, args.layout)
     owned = plan.regular_path(safe(root, "config/agent-checks.json"))
     recipe_path = args.recipes.absolute() if args.recipes else owned
+    if args.recipes and not explicit:
+        # Legacy explicit recipe inputs may traverse links. Watch that mapping
+        # as well as the canonical regular input; destinations stay strict.
+        for path in [*reversed(recipe_path.parents), recipe_path]:
+            plan.watch(path)
+        recipe_path = recipe_path.resolve(strict=True)
     plan.regular_path(recipe_path)
     recipe = plan.read(recipe_path)
     config = strict_json(recipe)
@@ -587,14 +593,14 @@ def require_task_branch(root: Path, config: dict, owned: Path, replacing_recipe:
 
     def owner_branch_ref(ref):
         resolved = subprocess.run([b"git", b"rev-parse", b"--symbolic-full-name", b"--verify", b"--end-of-options", ref.encode("utf-8")],
-                                  cwd=root, env=runner.git_environment(), capture_output=True)
+                                  cwd=root, env=runner.git_environment(), capture_output=True, timeout=15)
         canonical = resolved.stdout.decode("utf-8").strip()
         if resolved.returncode == 0:
             if canonical.startswith(("refs/heads/", "refs/remotes/")) and "\n" not in canonical:
                 return canonical
             raise ValueError("owner base/protected references must identify branches, not revisions or tags")
         literal = subprocess.run([b"git", b"check-ref-format", b"--branch", ref.encode("utf-8")], cwd=root,
-                                 env=runner.git_environment(), capture_output=True)
+                                 env=runner.git_environment(), capture_output=True, timeout=15)
         if (ref == "@" or ref.startswith("refs/tags/") or literal.returncode
                 or literal.stdout.decode("utf-8").strip() != ref):
             raise ValueError("owner base/protected references must be literal branch names")
