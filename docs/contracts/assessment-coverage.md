@@ -46,3 +46,28 @@ deployment acceptance.
 Rollback reverts the owning source commit and its generated outputs together.
 It does not change credentials, policy admission, deployment or review history.
 No rollout should reinterpret old incomplete artifacts as successful evidence.
+
+## Security deep-dive source readiness
+
+The provider-free v1 builder/parser in `scripts/run-broad-agents.py` binds complete
+supplied SAST bytes, repeated legacy finding IDs with position/content entry IDs,
+full base/head diff and complete immutable old/new blobs for every changed and requested source path. It
+reuses the existing Judge privacy screen. It refuses missing or sensitive evidence
+and serialized input over the existing transport ceiling instead of truncating.
+Caller-supplied SAST/repository bindings and content hashes establish consistency,
+not authenticated producer identity or completeness of the requested source scope.
+The producer must still establish SAST provenance; reviewers must explicitly
+identify missing data-flow/validation/exploitability dependencies. Every entry
+requires a promotion, documented dismissal or incomplete disposition. Thresholds
+and cited evidence are checked without claiming the reasoning is effective.
+
+These functions are deliberately not wired into live dispatch, the protected
+adapter or Judge acceptance. Their provisional output cannot satisfy the existing
+candidate/receipt schema. No credential, provider or network call is made by
+preparation. Source tests do not qualify a live reviewer, physical-call cost or
+any deployed SDK. Existing selected-role coverage, `first_party`, direct/client
+admission and the boundary-only estate qualification allowlist remain unchanged.
+Both security roles require accepted task/producer/route evidence before recovery;
+`shell-security` remains required when selected, and neither it nor `sast-scan`
+is qualified by this preparation. Rollback reverts these canonical/generated
+source changes together and does not reinterpret old incomplete artifacts.
