@@ -123,6 +123,11 @@ The builder takes normalized SAST bytes and explicit repository, full head/base
 commit IDs and SAST hash binding. It retains every supplied entry, the complete
 binary/full-index base-to-head diff, and complete old/new Git blobs for every changed and requested evidence path.
 Additional cross-file flow and validation dependencies belong in `evidence_paths`.
+For API triage, inspect each supplied finding and surrounding immutable source,
+trace whether the triggering value is user-controlled, configuration-derived or
+hardcoded, compare supplied validation patterns and evaluate reachable exploitation.
+Challenge each draft exploit path and additional validation layers before scoring.
+Tools and file writes are unavailable; explicitly report missing dependencies.
 Working-tree files are never evidence. Missing, sensitive, nonregular, binary,
 stale or over-budget evidence is incomplete, not an invitation to omit it.
 SAST's legacy `finding_id` can repeat for the same rule/file: each entry also has
