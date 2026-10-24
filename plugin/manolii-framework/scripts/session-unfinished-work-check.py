@@ -90,16 +90,25 @@ def _default_branch() -> str:
         first_error = exc
 
     for candidate in ("main", "master"):
-        try:
-            _git(["rev-parse", "--verify", candidate])
-            return candidate
-        except LookupError:
-            continue
+        # A shallow/task-only checkout may retain only the fetched tracking
+        # branch. Verify branch refs explicitly; a same-named tag is not one.
+        for ref in (f"refs/remotes/origin/{candidate}", f"refs/heads/{candidate}"):
+            try:
+                _git(["rev-parse", "--verify", f"{ref}^{{commit}}"])
+                return candidate
+            except LookupError:
+                continue
 
     try:
         configured = _git(["config", "--get", "init.defaultBranch"])
         if configured:
-            return configured
+            _git(["check-ref-format", f"refs/heads/{configured}"])
+            for ref in (f"refs/remotes/origin/{configured}", f"refs/heads/{configured}"):
+                try:
+                    _git(["rev-parse", "--verify", f"{ref}^{{commit}}"])
+                    return configured
+                except LookupError:
+                    continue
     except LookupError:
         if first_error is not None:
             raise first_error
@@ -122,7 +131,7 @@ def _working_tree_changes() -> int:
 
 def _unique_commit_count(base: str) -> int:
     errors: list[Exception] = []
-    for ref in (f"origin/{base}", base):
+    for ref in (f"refs/remotes/origin/{base}", f"refs/heads/{base}"):
         try:
             count = _git(["rev-list", "--count", f"{ref}..HEAD"])
             return int(count or "0")
