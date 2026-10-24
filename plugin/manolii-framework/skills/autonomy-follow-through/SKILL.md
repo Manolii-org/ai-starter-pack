@@ -1,6 +1,6 @@
 ---
 name: autonomy-follow-through
-version: 1.1.2
+version: 1.1.3
 description: "Shared termination + escalation loop for routine-native autonomy and /watch-pr. Stops on done/blocked_on_human/blocked_on_infra/superseded/gave_up; merges when safe."
 type: skill
 model: sonnet
@@ -19,6 +19,21 @@ tags:
 ---
 
 # Skill: Autonomy Follow-Through
+
+## Exact production candidates
+
+Before requesting production approval, prepare the complete subject described in
+`docs/agent-release-experience.md`. The portable `scripts/lib/release_subject.py`
+helper binds source/artifact, ordered migrations/compatibility, verification,
+trusted policy/workflow revisions and exact permitted recovery. A changed subject,
+rejected/cancelled decision or expired approval retains the production hold.
+
+Scope comparison is evidence only. A local document, actor string, PR-modified
+policy or automatically dispatched workflow cannot grant production authority.
+Use the owner's authenticated native approval and trusted production controller.
+Retain pre-merge acknowledgements until every relevant writer is demonstrably
+confined. If the helper or owning adapter is absent, record adoption as pending;
+do not claim this instruction installed a boundary or resumed an executor.
 
 ## Standing Grant Entry
 
