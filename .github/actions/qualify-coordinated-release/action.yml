@@ -1,0 +1,30 @@
+name: Qualify coordinated release
+description: Offline release-plan and client-behavior checks; grants no production authority
+inputs:
+  bundle:
+    description: Entity-local release plan and authenticated executable evidence JSON
+    required: true
+  expected_subject:
+    description: Fresh subject observed by the trusted owning adapter
+    required: true
+  phase:
+    description: qualify, prepare, or activate
+    required: true
+  approved_release_id:
+    description: Exact plan identity bound by production approval; required for prepare/activate
+    required: false
+    default: ''
+runs:
+  using: composite
+  steps:
+    - name: Check exact release and behavioral compatibility
+      shell: bash
+      env:
+        RELEASE_BUNDLE: ${{ inputs.bundle }}
+        RELEASE_SUBJECT: ${{ inputs.expected_subject }}
+        RELEASE_PHASE: ${{ inputs.phase }}
+        APPROVED_RELEASE_ID: ${{ inputs.approved_release_id }}
+      run: |
+        python3 "$GITHUB_ACTION_PATH/validate.py" --bundle "$RELEASE_BUNDLE" \
+          --expected-subject "$RELEASE_SUBJECT" --phase "$RELEASE_PHASE" \
+          --approved-release-id "$APPROVED_RELEASE_ID"
