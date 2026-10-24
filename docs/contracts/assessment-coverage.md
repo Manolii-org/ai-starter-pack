@@ -101,3 +101,8 @@ workflow wiring needs an accepted helper-containing base or trusted `pack_ref`,
 plus fresh exact-head reviews and checks. This slice does not resolve existing
 assessment failures or authorize release, consumer installation, deployment or
 protected-role activation.
+
+The dormant helper retains inline-suppressed findings and refuses changed,
+removed, added or untracked scanner configuration before scanning. Its consumer
+rechecks immutable base/head configuration, relevant index entries and working bytes before publication;
+configuration hashes alone do not authorize candidate-controlled policy.

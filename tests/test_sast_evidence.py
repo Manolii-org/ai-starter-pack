@@ -309,3 +309,177 @@ def test_semgrep_warning_level_partial_parse_is_incomplete_without_omitting_find
     state, rows = module.normalize('semgrep', module.encoded(data), 0, '1.100.0')
     assert state['status'] == 'incomplete' and state['reason'] == 'scanner_reported_errors'
     assert len(rows) == 2
+
+
+def update_event_head(env, git, *, base=None):
+    event = json.loads(Path(env['GITHUB_EVENT_PATH']).read_text())
+    event['pull_request']['head']['sha'] = git('rev-parse', 'HEAD')
+    if base is not None:
+        event['pull_request']['base']['sha'] = base
+    Path(env['GITHUB_EVENT_PATH']).write_text(json.dumps(event))
+
+
+def test_inline_suppression_cannot_drop_findings_from_producer_contract(source, tmp_path):
+    root, env, git = source
+    module = load()
+    (root/'app.py').write_text('assert False  # nosec B101; nosemgrep\n')
+    git('add', '.')
+    git('commit', '-qm', 'inline suppression fixture')
+    update_event_head(env, git)
+    calls = []
+    def scanner(command, **kwargs):
+        calls.append(command)
+        name = command[0]
+        if '--version' in command:
+            return subprocess.CompletedProcess(command, 0, b'1.100.0\n', b'')
+        flag = '--disable-nosem' if name == 'semgrep' else '--ignore-nosec'
+        unsuppressed = flag in command
+        path = Path(command[command.index('--output' if name == 'semgrep' else '-o')+1])
+        path.write_bytes(module.encoded(report(name, unsuppressed)))
+        return subprocess.CompletedProcess(command, 1 if unsuppressed else 0)
+    artifact = tmp_path/'artifact'
+    evidence = module.produce(root, artifact, env, run=scanner)
+    assert evidence['complete'] and len(evidence['entries']) == 4
+    assert len(calls) == 4
+    verified = module.verify(root, artifact, env,
+                             module.digest((artifact/'sast-evidence.json').read_bytes()),
+                             evidence['findings_sha256'], 'success')
+    assert verified == evidence
+
+
+@pytest.mark.parametrize('relative', ['.bandit', '.semgrepignore', 'nested/.gitignore', '.semgrep/rule.yaml'])
+@pytest.mark.parametrize('change', ['unchanged', 'added', 'modified', 'removed', 'mode'])
+def test_scanner_configuration_requires_unchanged_trusted_base(source, tmp_path, relative, change):
+    root, env, git = source
+    module = load()
+    target = root/relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if change != 'added':
+        target.write_text('accepted configuration\n')
+    git('add', '.')
+    git('commit', '-qm', 'accepted configuration', '--allow-empty')
+    base = git('rev-parse', 'HEAD')
+    if change == 'added':
+        target.write_text('candidate configuration\n')
+    elif change == 'modified':
+        target.write_text('changed configuration\n')
+    elif change == 'removed':
+        target.unlink()
+    elif change == 'mode':
+        target.chmod(0o755)
+    git('add', '.')
+    git('commit', '-qm', 'candidate configuration', '--allow-empty')
+    update_event_head(env, git, base=base)
+    run, calls = fake_run(module)
+    if change == 'unchanged':
+        artifact = tmp_path/'artifact'
+        evidence = module.produce(root, artifact, env, run=run)
+        assert evidence['complete'] and len(calls) == 4
+        assert evidence['configuration_inputs'] == [{'path': relative, 'sha256': module.digest(target.read_bytes())}]
+        assert module.verify(root, artifact, env,
+                             module.digest((artifact/'sast-evidence.json').read_bytes()),
+                             evidence['findings_sha256'], 'success') == evidence
+    else:
+        with pytest.raises(ValueError, match='configuration'):
+            module.produce(root, tmp_path/'artifact', env, run=run)
+        assert calls == [] and not (tmp_path/'artifact').exists()
+
+
+@pytest.mark.parametrize('relative', ['.bandit', '.semgrepignore', 'nested/.gitignore', '.semgrep/rule.yaml'])
+@pytest.mark.parametrize('redirect', [False, True])
+def test_untracked_configuration_never_reaches_scanners(source, tmp_path, relative, redirect):
+    root, env, _ = source
+    module = load()
+    target = root/relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if redirect:
+        target.symlink_to(tmp_path/'unavailable')
+    else:
+        target.write_text('untrusted local configuration\n')
+    run, calls = fake_run(module)
+    with pytest.raises(ValueError, match='configuration'):
+        module.produce(root, tmp_path/'artifact', env, run=run)
+    assert calls == [] and not (tmp_path/'artifact').exists()
+
+
+@pytest.mark.parametrize('mutation', ['omitted', 'altered', 'changed-source', 'untracked', 'working-bytes'])
+def test_consumer_rechecks_configuration_before_publishing(source, tmp_path, mutation):
+    root, env, git = source
+    module = load()
+    (root/'.bandit').write_text('accepted configuration\n')
+    git('add', '.')
+    git('commit', '-qm', 'accepted configuration')
+    update_event_head(env, git, base=git('rev-parse', 'HEAD'))
+    run, _ = fake_run(module)
+    artifact = tmp_path/'artifact'
+    evidence = module.produce(root, artifact, env, run=run)
+    if mutation == 'changed-source':
+        (root/'.bandit').write_text('changed configuration\n')
+        git('add', '.')
+        git('commit', '-qm', 'changed configuration')
+        update_event_head(env, git)
+        evidence['identity'] = module.identity(root, env)
+        evidence['configuration_inputs'] = [{'path': '.bandit', 'sha256': module.digest((root/'.bandit').read_bytes())}]
+    elif mutation == 'untracked':
+        (root/'.semgrepignore').write_text('app.py\n')
+    elif mutation == 'working-bytes':
+        (root/'.bandit').write_text('changed working configuration\n')
+    else:
+        evidence['configuration_inputs'] = [] if mutation == 'omitted' else [{'path': '.bandit', 'sha256': '0'*64}]
+    (artifact/'sast-evidence.json').write_bytes(module.encoded(evidence))
+    (root/'.ai').mkdir(exist_ok=True)
+    with pytest.raises(ValueError, match='configuration'):
+        module.verify(root, artifact, env, module.digest((artifact/'sast-evidence.json').read_bytes()),
+                      evidence['findings_sha256'], 'success', publish=True)
+    assert not (root/'.ai/sast-findings.json').exists()
+
+
+def test_scanner_cannot_introduce_untracked_configuration_during_execution(source, tmp_path):
+    root, env, _ = source
+    module = load()
+    run, calls = fake_run(module)
+    def mutating_scan(command, **kwargs):
+        observed = run(command, **kwargs)
+        if '--output' in command:
+            (root/'.bandit').write_text('unexpected scanner configuration\n')
+        return observed
+    artifact = tmp_path/'artifact'
+    with pytest.raises(ValueError, match='configuration'):
+        module.produce(root, artifact, env, run=mutating_scan)
+    assert len(calls) == 4
+    assert not (artifact/'sast-evidence.json').exists()
+
+
+@pytest.mark.parametrize('phase', ['produce', 'verify'])
+@pytest.mark.parametrize('mutation', ['added', 'modified', 'removed'])
+def test_index_configuration_must_match_immutable_head(source, tmp_path, phase, mutation):
+    root, env, git = source
+    module = load()
+    target = root/'.bandit'
+    if mutation != 'added':
+        target.write_text('accepted configuration\n')
+        git('add', '.')
+        git('commit', '-qm', 'accepted configuration')
+        update_event_head(env, git, base=git('rev-parse', 'HEAD'))
+    artifact = tmp_path/'artifact'
+    run, calls = fake_run(module)
+    if phase == 'verify':
+        evidence = module.produce(root, artifact, env, run=run)
+        calls.clear()
+    if mutation == 'added':
+        target.write_text('candidate configuration\n')
+        git('add', '.bandit')
+    elif mutation == 'modified':
+        blob = subprocess.check_output(['git', 'hash-object', '-w', '--stdin'],
+                                       input=b'changed index configuration\n', cwd=root).decode().strip()
+        git('update-index', '--cacheinfo', '100644', blob, '.bandit')
+    else:
+        git('update-index', '--force-remove', '.bandit')
+    with pytest.raises(ValueError, match='configuration'):
+        if phase == 'produce':
+            module.produce(root, artifact, env, run=run)
+        else:
+            (root/'.ai').mkdir(exist_ok=True)
+            module.verify(root, artifact, env, module.digest((artifact/'sast-evidence.json').read_bytes()),
+                          evidence['findings_sha256'], 'success', publish=True)
+    assert calls == [] and not (root/'.ai/sast-findings.json').exists()

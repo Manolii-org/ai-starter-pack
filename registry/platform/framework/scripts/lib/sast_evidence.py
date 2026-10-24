@@ -20,8 +20,8 @@ import sys
 
 LIMIT = 32 * 1024 * 1024
 CONFIG = {
-    "semgrep": ["semgrep", "scan", "--config", "auto", "--json"],
-    "bandit": ["bandit", "-r", ".", "-f", "json", "--exclude", "./.venv,./node_modules"],
+    "semgrep": ["semgrep", "scan", "--config", "auto", "--json", "--disable-nosem"],
+    "bandit": ["bandit", "-r", ".", "-f", "json", "--ignore-nosec", "--exclude", "./.venv,./node_modules"],
 }
 
 
@@ -193,9 +193,56 @@ def _source_path(value: str) -> str:
     return str(path)
 
 
+def _configuration_inputs(root: Path, source: dict) -> list[dict]:
+    """Candidate configuration cannot select its own successful scan policy."""
+    def relevant(name):
+        path = PurePosixPath(name)
+        return path.name in (".bandit", ".semgrepignore", ".gitignore") or ".semgrep" in path.parts
+
+    versions = []
+    for ref in (source["base"], source["head"]):
+        entries = {}
+        for row in git(root, "ls-tree", "-rz", ref).split(b"\0"):
+            if row:
+                metadata, raw_name = row.split(b"\t", 1)
+                name = raw_name.decode("utf-8")
+                if relevant(name):
+                    entries[name] = metadata.split()
+        versions.append(entries)
+    if versions[0] != versions[1]:
+        raise ValueError("scanner configuration differs from trusted base")
+    index = {}
+    for row in git(root, "ls-files", "--stage", "-z").split(b"\0"):
+        if row:
+            metadata, raw_name = row.split(b"\t", 1)
+            name = raw_name.decode("utf-8")
+            if relevant(name):
+                mode, blob, stage = metadata.split()
+                if stage != b"0" or name in index:
+                    raise ValueError("ambiguous scanner configuration index")
+                index[name] = [mode, b"blob", blob]
+    if index != versions[1]:
+        raise ValueError("scanner configuration index differs from immutable source")
+    if any(relevant(name.decode("utf-8"))
+           for name in git(root, "ls-files", "--others", "-z").split(b"\0") if name):
+        raise ValueError("untracked scanner configuration")
+    result = []
+    for name, (mode, kind, blob) in versions[1].items():
+        if mode not in (b"100644", b"100755") or kind != b"blob" or _source_path(name) != name:
+            raise ValueError("unsupported scanner configuration")
+        raw = regular(root / name)
+        observed = hashlib.sha1(b"blob " + str(len(raw)).encode() + b"\0" + raw, usedforsecurity=False).hexdigest()
+        if observed != blob.decode():
+            raise ValueError("scanner configuration differs from immutable source")
+        result.append({"path": name, "sha256": digest(raw)})
+    return result
+
+
 def produce(root: Path, output: Path, env: dict, run=subprocess.run) -> dict:
     source = identity(root, env)
     paths = source_files(root, source)
+    tracked = frozenset(paths)
+    configuration_inputs = _configuration_inputs(root, source)
     if output.exists() or any(p.is_symlink() for p in output.parents):
         raise ValueError("SAST output must be a fresh nonredirected directory")
     output.mkdir(parents=True)
@@ -235,11 +282,11 @@ def produce(root: Path, output: Path, env: dict, run=subprocess.run) -> dict:
             record.update(status="incomplete", reason="scanner_unavailable")
         try:
             observed_paths = [_source_path(p) for p in record.get("scanned_paths", [])]
-            if any(p not in paths for p in observed_paths):
+            if any(p not in tracked for p in observed_paths):
                 raise ValueError("scanner scope outside immutable source")
             for row in rows:
                 path = _source_path(row["file"])
-                if path not in paths or row["line"] > len(regular(root / path).splitlines()):
+                if path not in tracked or row["line"] > len(regular(root / path).splitlines()):
                     raise ValueError("finding outside immutable source")
         except (ValueError, OSError):
             record.update(status="incomplete", reason="source_scope_mismatch")
@@ -250,11 +297,11 @@ def produce(root: Path, output: Path, env: dict, run=subprocess.run) -> dict:
         if report_path.exists() and not report_path.is_symlink():
             report_path.unlink()
     source_files(root, source)  # scanner-side source mutation invalidates completion
+    if _configuration_inputs(root, source) != configuration_inputs:
+        raise ValueError("scanner configuration changed during execution")
     raw = encoded(findings)
-    config_names = [p for p in paths if PurePosixPath(p).name in (".bandit", ".semgrepignore", ".gitignore")
-                    or p.startswith(".semgrep/")]
     evidence = {"schema_version": 1, "identity": source, "runtime_sha256": digest(Path(__file__).read_bytes()),
-                "configuration_inputs": [{"path": p, "sha256": digest(regular(root / p))} for p in config_names],
+                "configuration_inputs": configuration_inputs,
                 "scanners": scanners, "findings_sha256": digest(raw),
                 "entries": [{"position": n, "sha256": digest(encoded(row))} for n, row in enumerate(findings)],
                 "complete": all(s["status"] == "complete" or s.get("reason") == "no_python_sources" for s in scanners)}
@@ -291,6 +338,8 @@ def verify(root: Path, directory: Path, env: dict, evidence_hash: str, findings_
         raise ValueError("required SAST producer unavailable")
     raw, findings = regular(directory / "sast-evidence.json"), regular(directory / "sast-findings.json")
     evidence, rows = decode(raw), decode(findings)
+    if evidence.get("configuration_inputs") != _configuration_inputs(root, source):
+        raise ValueError("incomplete or mismatched scanner configuration")
     if (digest(raw) != evidence_hash or digest(findings) != findings_hash
             or evidence.get("schema_version") != 1 or evidence.get("identity") != source
             or evidence.get("runtime_sha256") != digest(Path(__file__).read_bytes())
