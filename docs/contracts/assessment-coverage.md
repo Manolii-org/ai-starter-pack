@@ -91,3 +91,18 @@ still requires trusted launcher/SAST/source provenance, complete source scope,
 accepted capability/policy for every selected role, permitted routes and actual
 receipt behavior, plus a fresh coordinated recovery identity with prior uncertain
 outcomes reconciled. These source interfaces establish none of those gates.
+
+## Staged SAST helper source
+
+The SAST evidence helper and generated copies are dormant source. Existing
+assessment workflows remain unchanged. Local synthetic helper tests do not
+establish hosted scanner completion or authenticated producer provenance. Later
+workflow wiring needs an accepted helper-containing base or trusted `pack_ref`,
+plus fresh exact-head reviews and checks. This slice does not resolve existing
+assessment failures or authorize release, consumer installation, deployment or
+protected-role activation.
+
+The dormant helper retains inline-suppressed findings and refuses changed,
+removed, added or untracked scanner configuration before scanning. Its consumer
+rechecks immutable base/head configuration, relevant index entries and working bytes before publication;
+configuration hashes alone do not authorize candidate-controlled policy.
