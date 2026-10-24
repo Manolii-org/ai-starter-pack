@@ -1,14 +1,18 @@
 ---
 name: agent-validation
 description: Run affected CI checks in the coding session and batch settled candidates before pushing.
-version: 1.0.1
+version: 1.0.2
 scope: platform
+author: AI Starter Pack contributors
+license: Apache-2.0
 type: skill
 safety_tier: green
 requires_mcp: []
 required_entities: []
 tags: [ci, testing]
 ---
+
+# Agent Validation
 
 Read `docs/agent-validation.md` and the repository's `config/agent-checks.json`.
 Run `python3 scripts/agent-check.py --plan` early to inspect selected checks,
