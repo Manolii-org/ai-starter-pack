@@ -274,13 +274,13 @@ def test_cost_profile_lean_omits_measured_waste_callers(default_render):
     ("flags", "expected"),
     [
         ({}, {"Hooks": 5, "Commands": 51, "Skills": 36, "Agents": 27,
-              "Scripts": 54, "Husky": 3, "CI": 35, "Docs": 30}),
+              "Scripts": 54, "Husky": 3, "CI": 35, "Docs": 31}),
         ({flag: "true" for flag in FEATURE_FLAGS},
          {"Hooks": 5, "Commands": 54, "Skills": 40, "Agents": 28,
-              "Scripts": 54, "Husky": 3, "CI": 35, "Docs": 32}),
+              "Scripts": 54, "Husky": 3, "CI": 35, "Docs": 33}),
         ({"cost_profile": "lean"},
          {"Hooks": 5, "Commands": 51, "Skills": 36, "Agents": 27,
-              "Scripts": 54, "Husky": 3, "CI": 34, "Docs": 30}),
+              "Scripts": 54, "Husky": 3, "CI": 34, "Docs": 31}),
     ],
 )
 def test_rendered_readme_counts_match_rendered_tree(flags, expected):
@@ -306,6 +306,16 @@ def test_rendered_readme_counts_match_rendered_tree(flags, expected):
             actual = sum(p.is_dir() if unit == "dirs" else p.is_file() for p in entries)
             assert actual == count, f"test expectation drift for {label}"
             assert re.search(rf"\*\*{label}\*\*.*\({actual} {unit}\)", readme)
+
+
+def test_validation_layout_distribution_boundary(default_render, branded_render):
+    """Ship the opt-in installer/guide, without its Pack-only synthetic suite."""
+    for rendered in (default_render, branded_render):
+        for rel in ("scripts/install-agent-validation.py", "docs/agent-validation-layout.md"):
+            assert (rendered / rel).read_bytes() == (ROOT / rel).read_bytes()
+        assert not (rendered / "scripts/tests/test_agent_validation_layout.py").exists()
+        # The existing default validation bundle remains available to callers.
+        assert (rendered / "scripts/tests/test_agent_check.py").is_file()
 
 
 def test_brand_answers_match_overlays(branded_render, default_render):
