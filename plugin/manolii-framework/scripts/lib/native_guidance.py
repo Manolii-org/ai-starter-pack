@@ -301,8 +301,8 @@ def _resolve(args, root, resolver, manifest, registry, index):
     if not 250 <= len(policy.split()) <= 350:
         raise ValueError("standing policy must remain 250–350 words")
     wanted = BEGIN + b"\n" + (
-        f"<!-- Generated from platform/framework/skills/adaptable-development/SKILL.md; policy {version}; sha256 {digest(sources[NAMES[0]])}. -->\n"
-    ).encode() + policy + END
+        f"<!-- Generated from platform/framework/skills/adaptable-development/SKILL.md; policy {version}; sha256 {digest(sources[NAMES[0]])}. -->\n\n"
+    ).encode() + policy + b"\n" + END
 
     def snapshot(rel):
         return file_snapshot(root, rel, resolver)
@@ -342,7 +342,7 @@ def _resolve(args, root, resolver, manifest, registry, index):
         previous = snapshot(rel)
         loaded = previous and (live_import(previous[0], target) or live_import(previous[0], legacy_target))
         if not loaded or block(previous[0]):
-            add(rel, BEGIN + b"\n" + target + b"\n" + END, "block")
+            add(rel, BEGIN + b"\n\n" + target + b"\n\n" + END, "block")
     if "cursor" in surfaces:
         add(".cursor/rules/adaptable-development.mdc", b"---\ndescription: Apply the shared development policy and select the relevant task procedure.\nalwaysApply: true\n---\n\nEssential policy is in the discovered root AGENTS.md. Before design handoffs, new features or substantial redesigns read `.claude/skills/design-feature-adoption/SKILL.md`. Before existing-app refactoring read `.claude/skills/compatibility-improvement/SKILL.md`. Keep trivial unrelated edits proportionate. Referenced procedure contents require an explicit read.\n")
     for name, data in sources.items():
