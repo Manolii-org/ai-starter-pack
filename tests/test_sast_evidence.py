@@ -8,7 +8,6 @@ from pathlib import Path
 import shutil
 import socket
 import subprocess
-import sys
 
 import pytest
 import yaml
@@ -341,9 +340,11 @@ def test_real_workflow_producer_cli_and_all_consumer_gates(source, tmp_path, wor
         assert steps.index(download) < steps.index(validation)
         assert steps.index(validation) < next(i for i,s in enumerate(steps) if s.get('name') == {'specialists':'Run specialist skills','broad-agents':'Run broad agents','judge':'Run judge'}[job])
         destination = root/'.ai/sast'
-        helper = root/'scripts/lib/sast_evidence.py'
-        prepared = subprocess.run([sys.executable, '-I', str(helper), 'prepare', '--directory', str(destination)], cwd=root, env=env, capture_output=True)
-        assert prepared.returncode == 0
+        prepare = next(s for s in steps if s.get('name') == 'Drop committed SAST evidence before download')
+        assert prepare['env']['SAST_ARTIFACT_ID'] == '${{ needs.sast.outputs.artifact_id }}'
+        prepared = subprocess.run(['bash','-e','-c',prepare['run']], cwd=root,
+                                  env={**env,'SAST_RESULT':'success','SAST_ARTIFACT_ID':'123'},capture_output=True)
+        assert prepared.returncode == 0, prepared.stderr.decode()
         shutil.copytree(runtime/'sast-output', destination, dirs_exist_ok=True)
         checked_env = {**env, 'SAST_RESULT':'success', 'SAST_EVIDENCE_SHA256':outputs['evidence_sha256'],
                        'SAST_FINDINGS_SHA256':outputs['findings_sha256']}
@@ -515,3 +516,54 @@ def test_real_restore_fetch_keeps_merge_base_when_empty_head_forks_behind_base(s
         else:
             result = module.verify(checkout,tmp_path,env,'','','skipped')
             assert result['status'] == 'skipped' and result['reason'] == 'empty_diff'
+
+
+@pytest.mark.parametrize('workflow', ['pr-assessment.yml', 'pr-assessment-reusable.yml'])
+@pytest.mark.parametrize('job', ['specialists', 'broad-agents', 'judge'])
+@pytest.mark.parametrize('result,artifact_id', [('success',''),('success','0'),('success','unknown'),
+                                               ('success','123,456'),('success',' 123'),('failure','123')])
+def test_actual_consumer_stops_missing_or_unqualified_id_before_download(source, workflow, job, result, artifact_id):
+    root, env, _ = source
+    path = ROOT/'.github/workflows'/workflow
+    if not path.exists():
+        pytest.skip('Pack-only workflow')
+    document = yaml.safe_load(path.read_text())
+    if job not in document['jobs']:
+        pytest.skip('consumer delegates assessment to its reusable')
+    prepare = next(s for s in document['jobs'][job]['steps'] if s.get('name') == 'Drop committed SAST evidence before download')
+    marker = root/'.ai/sast/cache'
+    marker.parent.mkdir(parents=True)
+    marker.write_text('untrusted old scratch')
+    checked = subprocess.run(['bash','-e','-c',prepare['run']],cwd=root,
+                             env={**env,'SAST_RESULT':result,'SAST_ARTIFACT_ID':artifact_id},capture_output=True)
+    assert checked.returncode == 1
+    assert checked.stderr == b'::error::Qualified SAST artifact ID is required\n'
+    assert marker.read_text() == 'untrusted old scratch'  # fails before any subsequent step
+
+
+@pytest.mark.parametrize('workflow', ['pr-assessment.yml', 'pr-assessment-reusable.yml'])
+@pytest.mark.parametrize('job', ['specialists', 'broad-agents', 'judge'])
+def test_actual_empty_diff_skip_needs_no_artifact_but_still_checks_source(source, workflow, job):
+    root, env, _ = source
+    path = ROOT/'.github/workflows'/workflow
+    if not path.exists():
+        pytest.skip('Pack-only workflow')
+    document = yaml.safe_load(path.read_text())
+    if job not in document['jobs']:
+        pytest.skip('consumer delegates assessment to its reusable')
+    steps = document['jobs'][job]['steps']
+    prepare = next(s for s in steps if s.get('name') == 'Drop committed SAST evidence before download')
+    check = next(s for s in steps if s.get('name') == 'Validate SAST producer evidence')
+    download = next(s for s in steps if s.get('with',{}).get('artifact-ids'))
+    assert download['if'] == "needs.sast.result != 'skipped'"
+    controls = {**env,'SAST_RESULT':'skipped','SAST_ARTIFACT_ID':'',
+                'SAST_EVIDENCE_SHA256':'','SAST_FINDINGS_SHA256':''}
+    prepared = subprocess.run(['bash','-e','-c',prepare['run']],cwd=root,env=controls,capture_output=True)
+    assert prepared.returncode == 0
+    not_empty = subprocess.run(['bash','-e','-c',check['run']],cwd=root,env=controls,capture_output=True)
+    assert not_empty.returncode == 1 and not (root/'.ai/sast-findings.json').exists()
+    event = json.loads(Path(env['GITHUB_EVENT_PATH']).read_text())
+    event['pull_request']['base']['sha'] = event['pull_request']['head']['sha']
+    Path(env['GITHUB_EVENT_PATH']).write_text(json.dumps(event))
+    empty = subprocess.run(['bash','-e','-c',check['run']],cwd=root,env=controls,capture_output=True)
+    assert empty.returncode == 0 and not (root/'.ai/sast-findings.json').exists()
