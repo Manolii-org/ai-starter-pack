@@ -57,6 +57,7 @@ env:
     scripts/run-broad-agents.py
     scripts/run-judge.py
     scripts/lib/agent_capabilities.py
+    scripts/lib/sast_evidence.py
     scripts/lib/protected_review.py
     .ai/security/token-shapes.json
     .claude/agents/pr-classifier.md
@@ -435,52 +436,65 @@ jobs:
     # diff_files == '0' = empty-diff manifest route (scope-adherence only) —
     # a whole-repo Semgrep+Bandit pass on zero changed lines is pure spend.
     if: needs.classify.result == 'success' && needs.classify.outputs.depth != 'none' && needs.classify.outputs.diff_files != '0'
+    outputs:
+      artifact_id: ${{ steps.artifact.outputs.artifact-id }}
+      evidence_sha256: ${{ steps.scan.outputs.evidence_sha256 }}
+      findings_sha256: ${{ steps.scan.outputs.findings_sha256 }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Run Semgrep
-        uses: returntocorp/semgrep-action@713efdd345f3035192eaa63f56867b88e63e4e5d # v1
-        continue-on-error: true
+      - name: Require fresh SAST runtime checkout
+        shell: bash
+        run: |
+          if [[ -e .pack-sast || -L .pack-sast ]]; then
+            echo "::error::SAST runtime checkout must be fresh" >&2
+            exit 1
+          fi
+
+      - name: Check out trusted SAST runtime
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
-          config: auto
-          output: /tmp/semgrep-results.json
-          json: true
+          repository: Manolii-org/ai-starter-pack
+          ref: ${{ inputs.pack_ref }}
+          path: .pack-sast
+          persist-credentials: false
+          sparse-checkout: scripts/lib/sast_evidence.py
+          sparse-checkout-cone-mode: false
 
-      - name: Run Bandit (Python)
-        if: hashFiles('**/*.py') != ''
+      - name: Load trusted SAST normalizer
         run: |
-          pip install bandit -q
-          bandit -r . -f json -o /tmp/bandit-results.json --exclude ./.venv,./node_modules || true
+          set -euo pipefail
+          # Match the existing pinned hydration trust boundary; no PR helper.
+          git -C .pack-sast show HEAD:scripts/lib/sast_evidence.py > "$RUNNER_TEMP/sast-evidence.py"
+          rm -rf .pack-sast
 
-      - name: Merge SAST findings
+      - name: Install scanner CLIs
         run: |
-          mkdir -p .ai
-          python3 -c "
-          import json, os
-          findings = []
-          for path in ['/tmp/semgrep-results.json', '/tmp/bandit-results.json']:
-              if os.path.exists(path):
-                  try:
-                      data = json.load(open(path))
-                      # Normalise to common schema
-                      if 'results' in data and data['results'] and 'check_id' in data['results'][0]:  # semgrep
-                          for r in data['results']:
-                              findings.append({'finding_id': f'semgrep-{r[\"check_id\"]}-{r[\"path\"]}', 'rule': r['check_id'], 'file': r['path'], 'line': r['start']['line'], 'message': r['extra']['message'], 'severity': r['extra']['severity'].upper()})
-                      elif 'results' in data:  # bandit
-                          for r in data.get('results', []):
-                              findings.append({'finding_id': f'bandit-{r[\"test_id\"]}-{r[\"filename\"]}', 'rule': r['test_id'], 'file': r['filename'], 'line': r['line_number'], 'message': r['issue_text'], 'severity': r['issue_severity'].upper()})
-                  except Exception as e:
-                      print(f'Warning: could not parse {path}: {e}')
-          json.dump(findings, open('.ai/sast-findings.json', 'w'), indent=2)
-          print(f'Merged {len(findings)} SAST findings')
-          "
+          set -euo pipefail
+          SCANNER_ENV="$RUNNER_TEMP/sast-scanners"
+          python3 -m venv "$SCANNER_ENV"
+          "$SCANNER_ENV/bin/python" -m pip install --quiet --disable-pip-version-check semgrep bandit
+          echo "$SCANNER_ENV/bin" >> "$GITHUB_PATH"
+
+      - name: Run SAST and normalize evidence
+        id: scan
+        run: |
+          set -euo pipefail
+          # A new per-job directory prevents stale reports being mistaken for output.
+          SAST_OUTPUT="$RUNNER_TEMP/sast-output"
+          python3 -I "$RUNNER_TEMP/sast-evidence.py" produce --directory "$SAST_OUTPUT"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        id: artifact
+        if: always()
         with:
           name: sast-findings
-          path: .ai/sast-findings.json
+          path: ${{ runner.temp }}/sast-output/
+          if-no-files-found: error
 
   specialists:
     name: Specialist Skills
@@ -622,11 +636,37 @@ jobs:
           # artifact globs) and by the caller's own tooling.
           rm -rf .pack-hydrate
 
+      - name: Drop committed SAST evidence before download
+        shell: bash
+        env:
+          SAST_RESULT: ${{ needs.sast.result }}
+          SAST_ARTIFACT_ID: ${{ needs.sast.outputs.artifact_id }}
+        run: |
+          if [[ "$SAST_RESULT" != 'skipped' ]]; then
+            if [[ "$SAST_RESULT" != 'success' || ! "$SAST_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]; then
+              echo "::error::Qualified SAST artifact ID is required" >&2
+              exit 1
+            fi
+          fi
+          python3 -I scripts/lib/sast_evidence.py prepare --directory .ai/sast
+
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         if: needs.sast.result != 'skipped'
         with:
-          name: sast-findings
-          path: .ai/
+          artifact-ids: ${{ needs.sast.outputs.artifact_id }}
+          path: .ai/sast/
+          merge-multiple: true
+
+      - name: Validate SAST producer evidence
+        env:
+          SAST_RESULT: ${{ needs.sast.result }}
+          SAST_EVIDENCE_SHA256: ${{ needs.sast.outputs.evidence_sha256 }}
+          SAST_FINDINGS_SHA256: ${{ needs.sast.outputs.findings_sha256 }}
+        run: |
+          python3 -I scripts/lib/sast_evidence.py verify --directory .ai/sast \
+            --sast-result "$SAST_RESULT" \
+            --evidence-sha256 "$SAST_EVIDENCE_SHA256" \
+            --findings-sha256 "$SAST_FINDINGS_SHA256"
 
       - name: Run specialist skills
         env:
@@ -778,11 +818,37 @@ jobs:
           # artifact globs) and by the caller's own tooling.
           rm -rf .pack-hydrate
 
+      - name: Drop committed SAST evidence before download
+        shell: bash
+        env:
+          SAST_RESULT: ${{ needs.sast.result }}
+          SAST_ARTIFACT_ID: ${{ needs.sast.outputs.artifact_id }}
+        run: |
+          if [[ "$SAST_RESULT" != 'skipped' ]]; then
+            if [[ "$SAST_RESULT" != 'success' || ! "$SAST_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]; then
+              echo "::error::Qualified SAST artifact ID is required" >&2
+              exit 1
+            fi
+          fi
+          python3 -I scripts/lib/sast_evidence.py prepare --directory .ai/sast
+
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         if: needs.sast.result != 'skipped'
         with:
-          name: sast-findings
-          path: .ai/
+          artifact-ids: ${{ needs.sast.outputs.artifact_id }}
+          path: .ai/sast/
+          merge-multiple: true
+
+      - name: Validate SAST producer evidence
+        env:
+          SAST_RESULT: ${{ needs.sast.result }}
+          SAST_EVIDENCE_SHA256: ${{ needs.sast.outputs.evidence_sha256 }}
+          SAST_FINDINGS_SHA256: ${{ needs.sast.outputs.findings_sha256 }}
+        run: |
+          python3 -I scripts/lib/sast_evidence.py verify --directory .ai/sast \
+            --sast-result "$SAST_RESULT" \
+            --evidence-sha256 "$SAST_EVIDENCE_SHA256" \
+            --findings-sha256 "$SAST_FINDINGS_SHA256"
 
       - name: Run broad agents
         env:
@@ -965,6 +1031,38 @@ jobs:
           pattern: '*-candidates'
           path: .ai/candidates/
           merge-multiple: true
+
+      - name: Drop committed SAST evidence before download
+        shell: bash
+        env:
+          SAST_RESULT: ${{ needs.sast.result }}
+          SAST_ARTIFACT_ID: ${{ needs.sast.outputs.artifact_id }}
+        run: |
+          if [[ "$SAST_RESULT" != 'skipped' ]]; then
+            if [[ "$SAST_RESULT" != 'success' || ! "$SAST_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]; then
+              echo "::error::Qualified SAST artifact ID is required" >&2
+              exit 1
+            fi
+          fi
+          python3 -I scripts/lib/sast_evidence.py prepare --directory .ai/sast
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: needs.sast.result != 'skipped'
+        with:
+          artifact-ids: ${{ needs.sast.outputs.artifact_id }}
+          path: .ai/sast/
+          merge-multiple: true
+
+      - name: Validate SAST producer evidence
+        env:
+          SAST_RESULT: ${{ needs.sast.result }}
+          SAST_EVIDENCE_SHA256: ${{ needs.sast.outputs.evidence_sha256 }}
+          SAST_FINDINGS_SHA256: ${{ needs.sast.outputs.findings_sha256 }}
+        run: |
+          python3 -I scripts/lib/sast_evidence.py verify --directory .ai/sast \
+            --sast-result "$SAST_RESULT" \
+            --evidence-sha256 "$SAST_EVIDENCE_SHA256" \
+            --findings-sha256 "$SAST_FINDINGS_SHA256"
 
       - name: Run judge
         env:

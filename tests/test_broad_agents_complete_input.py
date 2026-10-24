@@ -421,34 +421,21 @@ def test_deep_input_retains_multiplicity_full_diff_old_new_and_untrusted_bytes(r
     assert packet['provenance'] == 'caller-bound; producer authenticity not established'
 
 
-def test_actual_sast_normalizer_preserves_duplicate_bandit_ids(runner, deep_repo, monkeypatch):
-    """Execute the published direct workflow's actual normalizer, no tools."""
-    import builtins
+def test_actual_sast_normalizer_preserves_duplicate_bandit_ids(runner, deep_repo):
+    """Use the same producer normalizer both trusted workflow paths execute."""
     import copy
-    import yaml
-
-    document = yaml.safe_load((ROOT / '.github/workflows/pr-assessment.yml').read_text())
-    step = next(s for s in document['jobs']['sast']['steps'] if s.get('name') == 'Merge SAST findings')
-    shell = step['run']
-    # Extract only the existing double-quoted Python literal; no shell launch.
-    code = shell.split('python3 -c "', 1)[1].rsplit('"', 1)[0].replace('\\"', '"')
-    code = __import__('textwrap').dedent(code)
+    import importlib.util
+    path = ROOT / 'scripts/lib/sast_evidence.py'
+    spec = importlib.util.spec_from_file_location('deep_sast_producer', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
     rows = [{'test_id': 'B101', 'filename': './flow.py', 'line_number': n,
              'issue_text': 'Review flow', 'issue_severity': 'LOW'} for n in (1, 2)]
-    output = io.StringIO()
-    def fake_open(path, mode='r', *a, **k):
-        if path == '.ai/sast-findings.json' and mode == 'w':
-            return output
-        else:
-            assert path == '/tmp/bandit-results.json'
-            return io.StringIO(json.dumps({'results': rows}))
-    real_open = builtins.open
-    monkeypatch.setattr(builtins, 'open', fake_open)
-    monkeypatch.setattr(__import__('os').path, 'exists', lambda p: p == '/tmp/bandit-results.json')
-    exec(compile(code, '<published-sast-normalizer>', 'exec'), {})
-    monkeypatch.setattr(builtins, 'open', real_open)
+    state, findings = module.normalize('bandit', module.encoded({'results': rows, 'errors': [],
+                                      'metrics': {'_totals': {'loc': 2}, './flow.py': {'loc': 2}}}), 1, '1.100.0')
+    assert state['status'] == 'complete'
     args = copy.deepcopy(deep_repo[2])
-    args['sast'] = output.getvalue().encode()
+    args['sast'] = module.encoded(findings)
     args['sast_binding']['sast_sha256'] = __import__('hashlib').sha256(args['sast']).hexdigest()
     packet = runner.build_security_deep_dive_input(deep_repo[0], **args)
     assert len(packet['entries']) == 2
