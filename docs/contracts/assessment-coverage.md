@@ -85,11 +85,13 @@ validate that the immutable base...head diff really is empty. They reject other
 skipped required SAST jobs. Depth-none classification keeps its existing
 separate workflow path.
 
-The SAST job uploads normalized findings and a completion sidecar. All three
-consumers clear committed SAST scratch files, download the producer's exact
-artifact ID within the current run, and validate its source/run/attempt and
-runtime binding against trusted producer job-output digests **before** specialist,
-broad or Judge execution. Only then are the unchanged findings bytes exposed at
+The SAST job uploads normalized findings and a completion sidecar. Before
+accepting SAST input, consumers clear committed scratch files. When SAST was
+not skipped, they download the producer's exact artifact ID within the current
+run and validate its source/run/attempt and runtime binding against trusted
+producer job-output digests **before** specialist, broad or Judge execution.
+For a skipped SAST job they instead verify the designed immutable empty-diff
+condition without downloading an artifact. Only verified findings are exposed at
 the compatible `.ai/sast-findings.json` path. Existing upstream failure/cancellation
 and selected-role guards remain mandatory. Failed validation cannot fall through
 to a clean Judge review or model invocation.

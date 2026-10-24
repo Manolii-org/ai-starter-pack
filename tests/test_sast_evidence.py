@@ -466,3 +466,52 @@ def test_actual_installer_is_job_temporary_not_global(tmp_path, workflow):
     assert run.returncode == 0, run.stderr.decode()
     assert (tmp_path/'path-output').read_text() == str(tmp_path/'sast-scanners/bin')+'\n'
     assert (tmp_path/'install-args').read_text().splitlines() == ['-m','pip','install','--quiet','--disable-pip-version-check','semgrep','bandit']
+
+
+def test_semgrep_warning_level_partial_parse_is_incomplete_without_omitting_findings():
+    module = load()
+    data = report('semgrep', True)
+    data['errors'] = [{'code': 3, 'level': 'warn', 'type': ['PartialParsing', []],
+                       'message': 'Partial analysis', 'path': 'app.py'}]
+    state, rows = module.normalize('semgrep', module.encoded(data), 0, '1.100.0')
+    assert state['status'] == 'incomplete' and state['reason'] == 'scanner_reported_errors'
+    assert len(rows) == 2
+
+
+@pytest.mark.parametrize('job', ['classify', 'specialists', 'broad-agents'])
+def test_real_restore_fetch_keeps_merge_base_when_empty_head_forks_behind_base(source, tmp_path, job):
+    path = ROOT/'.github/workflows/pr-assessment.yml'
+    document = yaml.safe_load(path.read_text())
+    if job not in document['jobs']:
+        pytest.skip('consumer delegates assessment to its reusable')
+    root, env, git = source
+    event = json.loads(Path(env['GITHUB_EVENT_PATH']).read_text())
+    fork = event['pull_request']['base']['sha']
+    git('checkout','-q','--detach',fork)
+    git('checkout','-qb','empty-review')
+    git('commit','-qm','empty metadata commit','--allow-empty')
+    head = git('rev-parse','HEAD')
+    git('checkout','-q','--detach',fork)
+    git('checkout','-qb','moved-base')
+    (root/'base-only.txt').write_text('base advanced\n')
+    git('add','.')
+    git('commit','-qm','advance base')
+    base = git('rev-parse','HEAD')
+    event['pull_request']['base']['sha'] = base
+    event['pull_request']['head']['sha'] = head
+    Path(env['GITHUB_EVENT_PATH']).write_text(json.dumps(event))
+    module = load()
+    restore = next(s for s in document['jobs'][job]['steps'] if s.get('name') == 'Restore trusted runtime from PR base')
+    actual_fetch = next(line.strip() for line in restore['run'].splitlines() if line.strip().startswith('git fetch '))
+    for label, command in [('negative-control','git fetch --depth=1 origin "$BASE_SHA"'), ('actual',actual_fetch)]:
+        checkout = tmp_path/label
+        subprocess.run(['git','clone','-q',root.as_uri(),str(checkout)],check=True,capture_output=True)
+        subprocess.run(['git','checkout','-q','--detach',head],cwd=checkout,check=True,capture_output=True)
+        fetched = subprocess.run(['bash','-e','-c',command],cwd=checkout,env={**env,'BASE_SHA':base},capture_output=True)
+        assert fetched.returncode == 0
+        if label == 'negative-control':
+            with pytest.raises(subprocess.CalledProcessError):
+                module.verify(checkout,tmp_path,env,'','','skipped')
+        else:
+            result = module.verify(checkout,tmp_path,env,'','','skipped')
+            assert result['status'] == 'skipped' and result['reason'] == 'empty_diff'
