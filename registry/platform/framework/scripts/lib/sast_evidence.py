@@ -167,7 +167,9 @@ def normalize(name: str, raw: bytes, exit_code: int | None, version: str | None)
             record["reason"] = "scanner_reported_errors"
         elif not scanned:
             record["reason"] = "no_observed_targets"
-        elif exit_code not in (0, 1) or (exit_code == 1 and not rows):
+        # Semgrep scan does not use --error: its successful findings exit is 0.
+        # Only Bandit's configured invocation documents a findings-only exit 1.
+        elif exit_code != 0 and not (name == "bandit" and exit_code == 1 and rows):
             record["reason"] = "execution_failed"
         elif not version:
             record["reason"] = "scanner_identity_unavailable"

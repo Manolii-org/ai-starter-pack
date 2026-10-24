@@ -40,13 +40,14 @@ def report(scanner, findings=False):
 
 @pytest.mark.parametrize('scanner', ['semgrep', 'bandit'])
 @pytest.mark.parametrize('exit_code,has_findings,complete', [(0, False, True), (0, True, True),
-                                                         (1, True, True), (1, False, False),
+                                                         (1, True, {'semgrep': False, 'bandit': True}), (1, False, False),
                                                          (2, True, False), (130, True, False),
                                                          (-15, True, False), (None, True, False)])
 def test_observed_execution_and_findings_exits(scanner, exit_code, has_findings, complete):
     module = load()
     state, rows = module.normalize(scanner, module.encoded(report(scanner, has_findings)), exit_code, '1.100.0')
-    assert (state['status'] == 'complete') is complete
+    expected = complete[scanner] if isinstance(complete, dict) else complete
+    assert (state['status'] == 'complete') is expected
     assert len(rows) == (2 if has_findings else 0)
     if has_findings:
         assert rows[0]['finding_id'] == rows[1]['finding_id']  # legitimate legacy duplicates
@@ -128,7 +129,7 @@ def fake_run(module, *, findings=False, failure=None):
         path.write_bytes(module.encoded(report(scanner, findings)))
         if failure == 'timeout':
             raise subprocess.TimeoutExpired(command, 600)
-        return subprocess.CompletedProcess(command, 130 if failure == 'cancel' else 1 if findings else 0)
+        return subprocess.CompletedProcess(command, 130 if failure == 'cancel' else 1 if findings and scanner == 'bandit' else 0)
     return run, calls
 
 
@@ -336,7 +337,7 @@ def test_inline_suppression_cannot_drop_findings_from_producer_contract(source, 
         unsuppressed = flag in command
         path = Path(command[command.index('--output' if name == 'semgrep' else '-o')+1])
         path.write_bytes(module.encoded(report(name, unsuppressed)))
-        return subprocess.CompletedProcess(command, 1 if unsuppressed else 0)
+        return subprocess.CompletedProcess(command, 1 if unsuppressed and name == 'bandit' else 0)
     artifact = tmp_path/'artifact'
     evidence = module.produce(root, artifact, env, run=scanner)
     assert evidence['complete'] and len(evidence['entries']) == 4
@@ -483,3 +484,24 @@ def test_index_configuration_must_match_immutable_head(source, tmp_path, phase, 
             module.verify(root, artifact, env, module.digest((artifact/'sast-evidence.json').read_bytes()),
                           evidence['findings_sha256'], 'success', publish=True)
     assert calls == [] and not (root/'.ai/sast-findings.json').exists()
+
+
+def test_semgrep_exit_one_retains_findings_but_never_certifies_default_command(source, tmp_path):
+    root, env, _ = source
+    module = load()
+    assert '--error' not in module.CONFIG['semgrep']
+    run, calls = fake_run(module, findings=True)
+    def unexplained_exit(command, **kwargs):
+        observed = run(command, **kwargs)
+        if command[0] == 'semgrep' and '--output' in command:
+            return subprocess.CompletedProcess(command, 1)
+        return observed
+    artifact = tmp_path/'artifact'
+    evidence = module.produce(root, artifact, env, run=unexplained_exit)
+    assert not evidence['complete'] and len(evidence['entries']) == 4 and len(calls) == 4
+    assert evidence['scanners'][0]['status'] == 'incomplete'
+    assert evidence['scanners'][0]['reason'] == 'execution_failed'
+    assert evidence['scanners'][1]['status'] == 'complete'
+    with pytest.raises(ValueError, match='artifact'):
+        module.verify(root, artifact, env, module.digest((artifact/'sast-evidence.json').read_bytes()),
+                      evidence['findings_sha256'], 'success')
