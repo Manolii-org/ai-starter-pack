@@ -361,6 +361,77 @@ def _deep_entries(sast_hash: str, findings: list) -> list[dict]:
     return entries
 
 
+def _deep_diff_sources(text: str, sources: list[dict]) -> None:
+    """Reconcile no-renames/full-index Git headers with BOTH source records.
+
+    Match Git's path spelling rather than splitting space-containing paths or
+    trusting a caller-recomputed changed-path list. A retained section without
+    its old/new records, or with contradictory modes/OIDs, is incomplete.
+    This proves internal consistency only, not trusted producer provenance.
+    """
+    def spelling(path, quote_high):
+        encoded = ''.join('\\"' if c == '"' else
+                          ''.join(f'\\{b:03o}' for b in c.encode('utf-8'))
+                          if quote_high and ord(c) >= 128 else c for c in path)
+        return '"' + encoded + '"' if encoded != path else path
+
+    records = {(s['side'], s['path']): s for s in sources}
+    headers = {}
+    for path in {s['path'] for s in sources}:
+        for quote_high in (False, True):
+            old, new = (spelling(prefix + path, quote_high) for prefix in ('a/', 'b/'))
+            headers[f'diff --git {old} {new}'] = (path, old, new)
+    sections = []
+    for line in text.split('\n'):
+        if line.startswith('diff --git '):
+            sections.append([line])
+        elif sections:
+            sections[-1].append(line)
+        elif line:
+            raise ValueError('invalid deep-dive source diff header')
+    seen = set()
+    for section in sections:
+        identity = headers.get(section[0])
+        if identity is None or identity[0] in seen:
+            raise ValueError('missing or ambiguous deep-dive changed source')
+        path, old_path, new_path = identity
+        seen.add(path)
+        old, new = (records.get((side, path)) for side in ('base', 'head'))
+        if old is None or new is None:
+            raise ValueError('missing deep-dive changed source side')
+        old_available, new_available = (s['status'] == 'available' for s in (old, new))
+        if not old_available and not new_available:
+            raise ValueError('absent deep-dive changed source')
+        zero = '0' * 40
+        if not old_available:
+            metadata = [f'new file mode {new["mode"]}', f'index {zero}..{new["blob"]}']
+        elif not new_available:
+            metadata = [f'deleted file mode {old["mode"]}', f'index {old["blob"]}..{zero}']
+        else:
+            changed_mode = old['mode'] != new['mode']
+            metadata = [f'old mode {old["mode"]}', f'new mode {new["mode"]}'] if changed_mode else []
+            if old['blob'] != new['blob']:
+                suffix = '' if changed_mode else ' ' + old['mode']
+                metadata.append(f'index {old["blob"]}..{new["blob"]}{suffix}')
+            elif not changed_mode:
+                raise ValueError('unchanged deep-dive source in retained diff')
+        if section[1:1 + len(metadata)] != metadata:
+            raise ValueError('deep-dive source diff mode or blob mismatch')
+        tail = section[1 + len(metadata):]
+        if tail and tail[-1] == '':
+            tail = tail[:-1]
+        if tail:
+            expected_old = old_path if old_available else '/dev/null'
+            expected_new = new_path if new_available else '/dev/null'
+            # Git appends a tab to unquoted space-containing ---/+++ paths.
+            if (len(tail) < 3 or tail[0].removesuffix('\t') != '--- ' + expected_old
+                    or tail[1].removesuffix('\t') != '+++ ' + expected_new
+                    or not tail[2].startswith('@@ ')):
+                raise ValueError('inconsistent deep-dive source diff paths')
+        elif old.get('text', '') != new.get('text', ''):
+            raise ValueError('missing deep-dive source diff body')
+
+
 def build_security_deep_dive_input(
     root: Path, *, repository: str, head: str, base: str, sast: bytes,
     sast_binding: dict, evidence_paths: list[str], max_bytes: int = _MAX_REQUEST_BYTES,
@@ -520,6 +591,7 @@ def parse_security_deep_dive_output(raw: str, packet: dict, *, stop_reason: str)
     if (not isinstance(diff, dict) or not isinstance(diff.get("text"), str)
             or hashlib.sha256(diff["text"].encode("utf-8")).hexdigest() != diff.get("sha256")):
         raise ValueError("deep-dive retained diff mismatch")
+    _deep_diff_sources(diff["text"], sources)
     result = _deep_json(raw)
     if (not isinstance(result, dict) or set(result) != {"input_sha256", "entries"}
             or result["input_sha256"] != binding or not isinstance(result["entries"], list)):

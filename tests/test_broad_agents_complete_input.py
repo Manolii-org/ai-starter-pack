@@ -894,3 +894,103 @@ def test_deep_malformed_source_mode_is_controlled_value_error(runner, deep_repo)
     packet['input_sha256'] = runner._deep_digest({k: v for k, v in packet.items() if k != 'input_sha256'})
     with pytest.raises(ValueError):
         runner.parse_security_deep_dive_output(json.dumps(deep_output(packet)), packet, stop_reason='end_turn')
+
+
+@pytest.mark.parametrize('directory', ['', 'plugin/manolii-framework', 'registry/platform/framework'])
+@pytest.mark.parametrize('change', ['modify', 'add', 'delete', 'quoted', 'unicode', 'raw_unicode',
+                                   'empty_add', 'mode_only', 'rename'])
+def test_deep_retained_diff_requires_nontriggering_old_and_new_sources(runner, deep_repo, monkeypatch,
+                                                                    directory, change):
+    """Real producer/parser: recomputed digests cannot hide a changed path."""
+    root, git, args = deep_repo
+    if change == 'modify':
+        (root / 'validation.py').write_text('def validate(value):\n    return str(value).strip()\n')
+        target = 'validation.py'
+    elif change == 'delete':
+        (root / 'validation.py').unlink()
+        target = 'validation.py'
+    elif change == 'mode_only':
+        (root / 'validation.py').chmod(0o755)
+        target = 'validation.py'
+    elif change == 'rename':
+        (root / 'validation.py').rename(root / 'renamed validation.py')
+        target = 'renamed validation.py'
+    else:
+        target = {'add': 'other.py', 'quoted': 'other "quoted" file.py', 'unicode': 'other café.py',
+                  'raw_unicode': 'other café "quoted".py', 'empty_add': 'empty.py'}[change]
+        (root / target).write_text('' if change == 'empty_add' else 'def validate(value):\n    return str(value)\n')
+        if change == 'raw_unicode':
+            git('config', 'core.quotePath', 'false')
+    git('add', '-A')
+    git('commit', '-qm', 'non-triggering changed source')
+    args['head'] = git('rev-parse', 'HEAD')
+    args['sast_binding']['head'] = args['head']
+    args['evidence_paths'] = []
+    module = runner
+    if directory:
+        spec = importlib.util.spec_from_file_location('p2_' + directory.replace('/', '_'),
+                                                    ROOT / directory / 'scripts/run-broad-agents.py')
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+    for name in ('get_api_key', '_proxy_base', '_urlopen_https'):
+        monkeypatch.setattr(module, name, lambda *a, **k: pytest.fail('provider/credential attempted'))
+    packet = module.build_security_deep_dive_input(root, **args)
+    answer = deep_output(packet)
+    assert module.parse_security_deep_dive_output(json.dumps(answer), packet,
+                                                stop_reason='end_turn')['status'] == 'provisional_complete'
+    retained_diff = packet['diff'].copy()
+    assert {s['side'] for s in packet['sources'] if s['path'] == target} == {'base', 'head'}
+    packet['sources'] = [s for s in packet['sources'] if s['path'] != target]
+    packet['input_sha256'] = module._deep_digest({k: v for k, v in packet.items() if k != 'input_sha256'})
+    answer['input_sha256'] = packet['input_sha256']
+    assert packet['diff'] == retained_diff
+    with pytest.raises(ValueError, match='deep-dive.*source'):
+        module.parse_security_deep_dive_output(json.dumps(answer), packet, stop_reason='end_turn')
+
+
+@pytest.mark.parametrize('mutation', ['missing_base', 'missing_head', 'false_absent', 'mode',
+                                    'wrong_path', 'duplicate_section', 'missing_index', 'wrong_index',
+                                    'wrong_marker', 'preamble', 'missing_body'])
+def test_deep_diff_reconciles_nontriggering_source_sides_and_git_identity(runner, deep_repo, mutation):
+    root, git, args = deep_repo
+    (root / 'validation.py').write_text('def validate(value):\n    return str(value).strip()\n')
+    git('add', '-A')
+    git('commit', '-qm', 'changed validation fixture')
+    args['head'] = git('rev-parse', 'HEAD')
+    args['sast_binding']['head'] = args['head']
+    packet = deep_packet(runner, deep_repo)
+    answer = deep_output(packet)
+    source = next(s for s in packet['sources'] if s['path'] == 'validation.py' and s['side'] == 'head')
+    if mutation.startswith('missing_') and mutation in {'missing_base', 'missing_head'}:
+        packet['sources'] = [s for s in packet['sources']
+                             if not (s['path'] == 'validation.py' and s['side'] == mutation[8:])]
+    elif mutation == 'false_absent':
+        source.clear()
+        source.update(side='head', path='validation.py', status='absent', commit=packet['head'])
+    elif mutation == 'mode':
+        source['mode'] = '100755'
+    elif mutation == 'wrong_path':
+        for s in packet['sources']:
+            if s['path'] == 'validation.py':
+                s['path'] = 'different.py'
+    else:
+        text = packet['diff']['text']
+        section = text[text.index('diff --git a/validation.py b/validation.py'):]
+        if mutation == 'duplicate_section':
+            text += section
+        elif mutation == 'missing_index':
+            text = text.replace(next(line for line in section.splitlines() if line.startswith('index ')) + '\n', '')
+        elif mutation == 'wrong_index':
+            text = text.replace(source['blob'], 'f' * 40)
+        elif mutation == 'wrong_marker':
+            text = text.replace('+++ b/validation.py', '+++ b/other.py')
+        elif mutation == 'preamble':
+            text = 'unbound preamble\n' + text
+        else:
+            text = text[:text.index('--- a/validation.py')]
+        packet['diff'] = {'text': text, 'sha256': __import__('hashlib').sha256(text.encode()).hexdigest()}
+    packet['input_sha256'] = runner._deep_digest({k: v for k, v in packet.items() if k != 'input_sha256'})
+    answer['input_sha256'] = packet['input_sha256']
+    with pytest.raises(ValueError, match='deep-dive.*source'):
+        runner.parse_security_deep_dive_output(json.dumps(answer), packet, stop_reason='end_turn')
