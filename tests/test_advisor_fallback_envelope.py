@@ -234,3 +234,15 @@ def test_owning_ci_installs_bounded_typed_envelope_dependency():
     assert any('pip install' in command and '"pydantic>=2,<3"' in command for command in commands)
     config = yaml.safe_load((ROOT / 'copier.yml').read_text())
     assert 'tests/test_advisor_fallback_envelope.py' in config['_exclude']
+
+
+@pytest.mark.parametrize('entry', [None, 'legacy-invalid-entry'])
+@pytest.mark.parametrize('reason', ['stop', 'length'])
+def test_rebuilt_legacy_choice_uses_new_list_for_replacement_metadata(guard, monkeypatch, entry, reason):
+    dest = primary('chat')
+    dest['choices'] = [entry]
+    assert invoke(guard, monkeypatch, dest, objectify(replacement(reason))) == '{"findings":[]}'
+    assert dest['choices'] == [{'message': {'role': 'assistant', 'content': '{"findings":[]}'},
+                                'finish_reason': reason}]
+    assert dest['model'] == 'observed-replacement-model' and dest['id'] == 'replacement-response'
+    assert dest['usage'] == {'prompt_tokens': 17, 'completion_tokens': 8, 'total_tokens': 25}

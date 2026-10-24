@@ -321,8 +321,8 @@ def _write_fallback_response(response, fallback) -> str:
     # inside fields whose callers expect typed attribute access.
     typed = callable(getattr(type(response), "model_validate", None)) and callable(getattr(response, "model_dump", None))
     prepared = response.model_dump() if typed else copy.deepcopy(response)
-    prepared_choices = _field(prepared, "choices")
     _write_response_content(prepared, text)
+    prepared_choices = _field(prepared, "choices")
     def put(obj, name, value):
         if isinstance(obj, dict):
             obj[name] = value
