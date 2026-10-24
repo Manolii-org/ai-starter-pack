@@ -761,13 +761,18 @@ def parse_security_deep_dive_responses(packet: dict, agent: AgentConfig, outcome
         leg = {"leg": alias, "request_sha256": request["request_sha256"],
                "status": "incomplete", "result": None,
                "supplied_state": observation["state"] if observation else "missing",
+               "stop_reason": None,
                "physical_attempts": None, "provider_execution": "unknown"}
         if observation is None or observation["state"] != "response":
             leg["reason"] = "remote_outcome_unknown" if observation and observation["state"] == "unknown" else "response_unavailable"
         else:
             response = observation["response"]
+            stop = response.get("stop_reason") if isinstance(response, dict) else None
+            leg["stop_reason"] = stop if isinstance(stop, str) and stop in {"end_turn", "max_tokens"} else None
             try:
-                if (not isinstance(response, dict) or not isinstance(response.get("content"), list)
+                if (not isinstance(response, dict) or "error" in response
+                        or response.get("type", "message") != "message"
+                        or not isinstance(response.get("content"), list)
                         or not response["content"] or any(not isinstance(block, dict)
                             or block.get("type") not in {"text", "thinking"}
                             or (block["type"] == "text" and not isinstance(block.get("text"), str))

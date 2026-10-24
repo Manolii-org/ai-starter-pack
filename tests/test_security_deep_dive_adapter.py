@@ -48,7 +48,7 @@ def packet_for(interface, deep_repo):
 
 def observed(request, packet, scores=(0.95, 0.3), *, stop='end_turn'):
     return {'leg': request['leg'], 'request_sha256': request['request_sha256'], 'state': 'response',
-            'response': {'content': [{'type': 'text', 'text': json.dumps(deep_output(packet, scores))}],
+            'response': {'type': 'message', 'content': [{'type': 'text', 'text': json.dumps(deep_output(packet, scores))}],
                          'stop_reason': stop}}
 
 
@@ -82,6 +82,7 @@ def test_real_seam_delivers_identical_complete_packet_and_preserves_each_leg(int
     assert result['escalation_required'] == [packet['entries'][0]['entry_id']]
     for leg in result['legs']:
         assert len(leg['result']['promoted']) == len(leg['result']['dismissed']) == 1
+        assert leg['stop_reason'] == 'end_turn'
         assert leg['physical_attempts'] is None and leg['provider_execution'] == 'unknown'
         assert not {'source', 'findings', 'first_party', 'protected_review'} & leg.keys()
     assert result['provider_execution'] == result['effectiveness'] == 'unknown'
@@ -111,7 +112,8 @@ def test_disagreement_and_missing_context_are_not_voted_away(interface, deep_rep
 
 
 @pytest.mark.parametrize('mutation', ['missing', 'unknown', 'not_attempted', 'truncated', 'missing_stop',
-                                    'omitted_entry', 'wrong_binding', 'malformed', 'empty', 'tool_block', 'duplicate_key'])
+                                    'omitted_entry', 'wrong_binding', 'malformed', 'empty', 'tool_block',
+                                    'duplicate_key', 'error_envelope', 'error_type'])
 def test_incomplete_leg_retains_other_leg_without_retry(interface, deep_repo, mutation, capsys):
     module, role, capacities = interface
     packet = packet_for(interface, deep_repo)
@@ -131,6 +133,10 @@ def test_incomplete_leg_retains_other_leg_without_retry(interface, deep_repo, mu
         response['content'] = []
     elif mutation == 'tool_block':
         response['content'] = [{'type': 'tool_use', 'name': 'unavailable'}]
+    elif mutation == 'error_envelope':
+        response['error'] = {'message': 'Untrusted diagnostic that must not be logged'}
+    elif mutation == 'error_type':
+        response['type'] = 'error'
     else:
         answer = deep_output(packet)
         if mutation == 'omitted_entry':
@@ -149,6 +155,8 @@ def test_incomplete_leg_retains_other_leg_without_retry(interface, deep_repo, mu
     assert result['legs'][0]['result'] is None
     assert result['legs'][1]['result']['status'] == 'provisional_complete'
     assert all(leg['physical_attempts'] is None for leg in result['legs'])
+    if mutation == 'truncated':
+        assert result['legs'][0]['stop_reason'] == 'max_tokens'
     captured = capsys.readouterr()
     assert 'Untrusted diagnostic' not in json.dumps(result) + captured.out + captured.err
 
