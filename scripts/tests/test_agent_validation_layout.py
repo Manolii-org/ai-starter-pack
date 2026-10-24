@@ -5,11 +5,13 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 LAYOUT = {"schema": "agent-validation-layout/v1", "aliases": {
@@ -909,3 +911,75 @@ def test_mode_or_index_change_after_planning_is_prewrite(producers, consumer, mo
     finally:
         path.chmod(original_mode)
         (top / ".git/index").write_bytes(index_before)
+
+
+def consumer_skill_contract(path):
+    """Generic consumer discovery contract, independent of Pack's registry lint."""
+    text = path.read_text(encoding="utf-8")
+    assert text.startswith("---\n")
+    _, frontmatter, body = text.split("---\n", 2)
+    metadata = yaml.safe_load(frontmatter)
+    for field in ("name", "description", "author", "version", "license"):
+        assert isinstance(metadata.get(field), str) and metadata[field].strip(), field
+    assert re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", metadata["name"])
+    assert metadata["name"] == path.parent.name
+    assert re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", metadata["version"])
+    assert re.search(r"^# \S.*$", body, re.MULTILINE)
+    return metadata, body
+
+
+@pytest.mark.parametrize("kind", ["source", "plugin", "registry"])
+def test_consumer_skill_metadata_and_installed_origin(producers, consumer, kind):
+    """The authored/rendered/installed skill satisfies discovery without byte edits."""
+    source, top = producers[kind]
+    logical = ".claude/skills/agent-validation/SKILL.md"
+    skill = source / (logical if kind == "source" else logical.removeprefix(".claude/"))
+    metadata, body = consumer_skill_contract(skill)
+    assert metadata["author"] == "AI Starter Pack contributors"
+    assert metadata["license"] == "Apache-2.0"
+    assert body.lstrip().startswith("# Agent Validation\n")
+    # Metadata and discovery heading must not change the existing instructions.
+    expected = (ROOT / ".claude/skills/agent-validation/SKILL.md").read_text()
+    assert skill.read_text() == expected
+    before = snapshot(consumer)
+    assert invoke(source, consumer, "--dry-run").returncode == 0
+    assert snapshot(consumer) == before
+    applied = invoke(source, consumer)
+    assert applied.returncode == 0, applied.stderr
+    installed = consumer / ".github/skills/agent-validation/SKILL.md"
+    assert consumer_skill_contract(installed) == (metadata, body)
+    assert installed.read_bytes() == skill.read_bytes()
+    receipt = json.loads((consumer / RECEIPT).read_text())
+    assert set(receipt["files"]) == set(NAMES)
+    assert receipt["files"][logical] == hashlib.sha256(installed.read_bytes()).hexdigest()
+    after = snapshot(consumer)
+    unavailable = top.with_name(top.name + "-unavailable")
+    top.rename(unavailable)
+    try:
+        for flag in ("--check", "--dry-run"):
+            checked = invoke(consumer, consumer, flag)
+            assert checked.returncode == 0, checked.stderr
+            assert snapshot(consumer) == after
+    finally:
+        unavailable.rename(top)
+
+
+@pytest.mark.parametrize("bad", ["name", "description", "author", "version", "license", "h1", "directory", "semver"])
+def test_consumer_skill_contract_rejects_missing_requirements(tmp_path, bad):
+    """Warnings about optional examples/evals do not waive discovery requirements."""
+    source = (ROOT / ".claude/skills/agent-validation/SKILL.md").read_text()
+    _, frontmatter, body = source.split("---\n", 2)
+    metadata = yaml.safe_load(frontmatter)
+    if bad in metadata:
+        del metadata[bad]
+    elif bad == "h1":
+        body = body.replace("# Agent Validation\n", "")
+    elif bad == "directory":
+        metadata["name"] = "another-skill"
+    elif bad == "semver":
+        metadata["version"] = "1.0"
+    path = tmp_path / "agent-validation/SKILL.md"
+    path.parent.mkdir()
+    path.write_text("---\n" + yaml.safe_dump(metadata) + "---\n" + body)
+    with pytest.raises(AssertionError):
+        consumer_skill_contract(path)
