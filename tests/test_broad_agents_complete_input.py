@@ -951,7 +951,8 @@ def test_deep_retained_diff_requires_nontriggering_old_and_new_sources(runner, d
 
 @pytest.mark.parametrize('mutation', ['missing_base', 'missing_head', 'false_absent', 'mode',
                                     'wrong_path', 'duplicate_section', 'missing_index', 'wrong_index',
-                                    'wrong_marker', 'preamble', 'missing_body'])
+                                    'wrong_marker', 'preamble', 'missing_body', 'drop_section',
+                                    'drop_trigger_section'])
 def test_deep_diff_reconciles_nontriggering_source_sides_and_git_identity(runner, deep_repo, mutation):
     root, git, args = deep_repo
     (root / 'validation.py').write_text('def validate(value):\n    return str(value).strip()\n')
@@ -987,6 +988,10 @@ def test_deep_diff_reconciles_nontriggering_source_sides_and_git_identity(runner
             text = text.replace('+++ b/validation.py', '+++ b/other.py')
         elif mutation == 'preamble':
             text = 'unbound preamble\n' + text
+        elif mutation == 'drop_section':
+            text = text.replace(section, '')
+        elif mutation == 'drop_trigger_section':
+            text = section
         else:
             text = text[:text.index('--- a/validation.py')]
         packet['diff'] = {'text': text, 'sha256': __import__('hashlib').sha256(text.encode()).hexdigest()}
@@ -994,3 +999,51 @@ def test_deep_diff_reconciles_nontriggering_source_sides_and_git_identity(runner
     answer['input_sha256'] = packet['input_sha256']
     with pytest.raises(ValueError, match='deep-dive.*source'):
         runner.parse_security_deep_dive_output(json.dumps(answer), packet, stop_reason='end_turn')
+
+
+@pytest.mark.parametrize('directory', ['', 'plugin/manolii-framework', 'registry/platform/framework'])
+@pytest.mark.parametrize('mutation', ['fabricated_head', 'missing_base', 'missing_head', 'false_absent',
+                                    'mode', 'both_absent'])
+def test_deep_unchanged_evidence_requires_identical_source_pairs(runner, deep_repo, monkeypatch,
+                                                               directory, mutation):
+    """A retained diff with no section for a path asserts it did not change."""
+    import hashlib
+    module = runner
+    if directory:
+        spec = importlib.util.spec_from_file_location('unchanged_' + directory.replace('/', '_'),
+                                                    ROOT / directory / 'scripts/run-broad-agents.py')
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+    for name in ('get_api_key', '_proxy_base', '_urlopen_https'):
+        monkeypatch.setattr(module, name, lambda *a, **k: pytest.fail('provider/credential attempted'))
+    packet = module.build_security_deep_dive_input(deep_repo[0], **deep_repo[2])
+    answer = deep_output(packet)
+    assert module.parse_security_deep_dive_output(json.dumps(answer), packet,
+                                                stop_reason='end_turn')['status'] == 'provisional_complete'
+    source = next(s for s in packet['sources'] if s['side'] == 'head' and s['path'] == 'validation.py')
+    assert 'diff --git a/validation.py' not in packet['diff']['text']
+    if mutation == 'fabricated_head':
+        source['text'] = 'def validate(value):\n    return value\n'
+        body = source['text'].encode()
+        source['sha256'] = hashlib.sha256(body).hexdigest()
+        source['blob'] = hashlib.sha1(b'blob ' + str(len(body)).encode() + b'\0' + body,
+                                      usedforsecurity=False).hexdigest()
+        for row in answer['entries']:
+            row['validation']['citations'] = [{'path': source['path'], 'side': 'head', 'blob': source['blob'],
+                                              'start': 1, 'end': 2}]
+    elif mutation in {'missing_base', 'missing_head'}:
+        packet['sources'] = [s for s in packet['sources']
+                             if not (s['path'] == 'validation.py' and s['side'] == mutation[8:])]
+    elif mutation == 'mode':
+        source['mode'] = '100755'
+    else:
+        for s in packet['sources']:
+            if s['path'] == 'validation.py' and (mutation == 'both_absent' or s['side'] == 'head'):
+                side, commit = s['side'], s['commit']
+                s.clear()
+                s.update(side=side, path='validation.py', status='absent', commit=commit)
+    packet['input_sha256'] = module._deep_digest({k: v for k, v in packet.items() if k != 'input_sha256'})
+    answer['input_sha256'] = packet['input_sha256']
+    with pytest.raises(ValueError, match='deep-dive.*source'):
+        module.parse_security_deep_dive_output(json.dumps(answer), packet, stop_reason='end_turn')

@@ -430,6 +430,14 @@ def _deep_diff_sources(text: str, sources: list[dict]) -> None:
                 raise ValueError('inconsistent deep-dive source diff paths')
         elif old.get('text', '') != new.get('text', ''):
             raise ValueError('missing deep-dive source diff body')
+    # A path omitted from the retained diff is unchanged, not an opportunity
+    # to substitute a self-consistent but different head blob or drop one side.
+    for path in {s['path'] for s in sources} - seen:
+        old, new = (records.get((side, path)) for side in ('base', 'head'))
+        if (old is None or new is None
+                or old['status'] != 'available' or new['status'] != 'available'
+                or old['mode'] != new['mode'] or old['blob'] != new['blob']):
+            raise ValueError('inconsistent unchanged deep-dive source pair')
 
 
 def build_security_deep_dive_input(
