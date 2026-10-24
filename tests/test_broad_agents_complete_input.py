@@ -843,3 +843,54 @@ def test_deep_huge_numeric_likelihood_stays_on_value_error_path(runner, deep_rep
     answer['entries'][0]['true_positive_likelihood'] = 10 ** 1000
     with pytest.raises(ValueError):
         runner.parse_security_deep_dive_output(json.dumps(answer), packet, stop_reason='end_turn')
+
+
+@pytest.mark.parametrize('phase', ['input', 'output', 'identity'])
+def test_deep_excessive_json_nesting_is_controlled_incomplete(runner, deep_repo, phase):
+    import hashlib
+    depth = 10000  # Exceeds both Python and modern C JSON recursion guards.
+    nested = '[' * depth + '0' + ']' * depth
+    with pytest.raises(ValueError, match='nesting'):
+        if phase == 'input':
+            args = deep_repo[2]
+            args['sast'] = nested.encode()
+            args['sast_binding']['sast_sha256'] = hashlib.sha256(args['sast']).hexdigest()
+            runner.build_security_deep_dive_input(deep_repo[0], **args)
+        elif phase == 'output':
+            runner.parse_security_deep_dive_output(nested, deep_packet(runner, deep_repo), stop_reason='end_turn')
+        else:
+            value = 0
+            for _ in range(depth):
+                value = [value]
+            runner._deep_digest(value)
+
+
+@pytest.mark.parametrize('phase', ['input', 'output'])
+def test_deep_valid_json_guard_traversal_depth_is_controlled(runner, deep_repo, phase):
+    import hashlib
+    # Below the modern C JSON limit, above Python's recursive guard traversal.
+    # Construct JSON text directly so the test itself never needs deep recursion.
+    nested = '[' * 1100 + '0' + ']' * 1100
+    with pytest.raises(ValueError, match='nesting'):
+        if phase == 'input':
+            args = deep_repo[2]
+            rows = json.loads(args['sast'])
+            first = json.dumps(rows[0])[:-1] + ',"extra":' + nested + '}'
+            args['sast'] = ('[' + first + ',' + json.dumps(rows[1]) + ']').encode()
+            args['sast_binding']['sast_sha256'] = hashlib.sha256(args['sast']).hexdigest()
+            runner.build_security_deep_dive_input(deep_repo[0], **args)
+        else:
+            packet = deep_packet(runner, deep_repo)
+            answer = deep_output(packet)
+            first = json.dumps(answer['entries'][0])[:-1] + ',"extra":' + nested + '}'
+            raw = ('{"input_sha256":' + json.dumps(packet['input_sha256']) + ',"entries":['
+                   + first + ',' + json.dumps(answer['entries'][1]) + ']}')
+            runner.parse_security_deep_dive_output(raw, packet, stop_reason='end_turn')
+
+
+def test_deep_malformed_source_mode_is_controlled_value_error(runner, deep_repo):
+    packet = deep_packet(runner, deep_repo)
+    packet['sources'][0]['mode'] = {}
+    packet['input_sha256'] = runner._deep_digest({k: v for k, v in packet.items() if k != 'input_sha256'})
+    with pytest.raises(ValueError):
+        runner.parse_security_deep_dive_output(json.dumps(deep_output(packet)), packet, stop_reason='end_turn')

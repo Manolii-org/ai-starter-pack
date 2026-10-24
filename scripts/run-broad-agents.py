@@ -275,12 +275,18 @@ def _deep_json(raw: str | bytes):
     # text without changing the original bytes, packet text or identity hash.
     if isinstance(raw, str) and raw.startswith("\ufeff"):
         raw = raw[1:]
-    return json.loads(raw, object_pairs_hook=pairs, parse_constant=invalid)
+    try:
+        return json.loads(raw, object_pairs_hook=pairs, parse_constant=invalid)
+    except RecursionError:
+        raise ValueError("deep-dive JSON nesting too deep") from None
 
 
 def _deep_digest(value) -> str:
-    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=True,
-                                     separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+    try:
+        return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=True,
+                                         separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+    except RecursionError:
+        raise ValueError("deep-dive identity nesting too deep") from None
 
 
 def _deep_path(value: str) -> str:
@@ -330,6 +336,14 @@ def _deep_screen_helpers():
     module = importlib.util.module_from_spec(spec)
     exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)
     return module
+
+
+def _deep_require_safe(guard, value) -> None:
+    """Retain canonical refusal, including its Python traversal depth failure."""
+    try:
+        guard._require_safe_packet(value)
+    except RecursionError:
+        raise ValueError("deep-dive evidence nesting too deep") from None
 
 
 def _deep_entries(sast_hash: str, findings: list) -> list[dict]:
@@ -401,7 +415,7 @@ def build_security_deep_dive_input(
     paths = sorted(set(paths) | set(changed_paths))
     # Raw bytes and JSON strings both remain intact. No AST source exceptions
     # are invented for a diff or a caller-supplied evidence document.
-    guard._require_safe_packet(raw_diff.decode("utf-8"))
+    _deep_require_safe(guard, raw_diff.decode("utf-8"))
     sources = []
     used = len(sast) + len(raw_diff)
     for path in paths:
@@ -423,7 +437,7 @@ def build_security_deep_dive_input(
             text = body.decode("utf-8")
             if any(char in text for char in "\v\f\x1c\x1d\x1e\x85\u2028\u2029"):
                 raise ValueError("ambiguous deep-dive physical source lines")
-            guard._require_safe_packet(text)
+            _deep_require_safe(guard, text)
             used += len(body)
             sources.append({"side": side, "path": path, "status": "available", "commit": ref,
                             "mode": mode, "blob": blob, "sha256": hashlib.sha256(body).hexdigest(),
@@ -437,7 +451,7 @@ def build_security_deep_dive_input(
               "scope": "complete requested blobs; flow/validation completeness requires verification",
               "sast_utf8": sast_text, "entries": entries, "sources": sources,
               "diff": {"text": raw_diff.decode("utf-8"), "sha256": hashlib.sha256(raw_diff).hexdigest()}}
-    guard._require_safe_packet(packet)
+    _deep_require_safe(guard, packet)
     packet["input_sha256"] = _deep_digest(packet)
     # Include every JSON wrapper/escape in this existing conservative ceiling.
     if len(json.dumps(packet, ensure_ascii=True).encode()) > max_bytes:
@@ -488,7 +502,8 @@ def parse_security_deep_dive_output(raw: str, packet: dict, *, stop_reason: str)
             if set(source) != {"side", "path", "status", "commit"}:
                 raise ValueError("invalid absent deep-dive source")
             continue
-        if (source.get("status") != "available" or source.get("mode") not in {"100644", "100755"}
+        if (source.get("status") != "available" or not isinstance(source.get("mode"), str)
+                or source["mode"] not in {"100644", "100755"}
                 or not isinstance(source.get("text"), str)):
             raise ValueError("invalid available deep-dive source")
         body = source["text"].encode("utf-8")
@@ -509,7 +524,7 @@ def parse_security_deep_dive_output(raw: str, packet: dict, *, stop_reason: str)
     if (not isinstance(result, dict) or set(result) != {"input_sha256", "entries"}
             or result["input_sha256"] != binding or not isinstance(result["entries"], list)):
         raise ValueError("invalid deep-dive output binding")
-    _deep_screen_helpers()._require_safe_packet(result)
+    _deep_require_safe(_deep_screen_helpers(), result)
     expected = {entry["entry_id"]: entry for entry in packet["entries"]}
     seen, promoted, dismissed, incomplete = set(), [], [], []
     for row in result["entries"]:
