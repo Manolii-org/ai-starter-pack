@@ -11,16 +11,17 @@ import argparse
 import hashlib
 import json
 import os
-from pathlib import Path, PurePosixPath
 import re
 import shutil
 import stat
 import subprocess
 import sys
+from pathlib import Path, PurePosixPath
 
 LIMIT = 32 * 1024 * 1024
+SCANNER_VERSIONS = {"semgrep": "1.182.1", "bandit": "1.9.4"}
 CONFIG = {
-    "semgrep": ["semgrep", "scan", "--config", "auto", "--json", "--disable-nosem"],
+    "semgrep": ["semgrep", "scan", "--config", "auto", "--json", "--disable-nosem", "--metrics=off", "--disable-version-check", "--verbose"],
     "bandit": ["bandit", "-r", ".", "-f", "json", "--ignore-nosec", "--exclude", "./.venv,./node_modules"],
 }
 
@@ -144,7 +145,9 @@ def normalize(name: str, raw: bytes, exit_code: int | None, version: str | None)
             raise ValueError("missing scanner completion fields")
         if name == "semgrep":
             scanned = report["paths"]["scanned"]
-            if report.get("skipped_rules"):
+            if report.get("version") != version:
+                raise ValueError("report scanner version differs from observed binary")
+            if not isinstance(report.get("skipped_rules"), list) or report["skipped_rules"]:
                 raise ValueError("incomplete scanner rules")
         else:
             metrics = report["metrics"]
@@ -240,16 +243,79 @@ def _configuration_inputs(root: Path, source: dict) -> list[dict]:
     return result
 
 
+def scanner_contract(root: Path, env: dict) -> tuple[dict, Path]:
+    """Read the trusted installation step's exact auto-rule/catalog snapshot.
+
+    These bytes do not authorize themselves. Authority is the pinned base/pack
+    workflow, isolated installer and same-run producer outputs, as for reports.
+    """
+    directory = Path(env["RUNNER_TEMP"])
+    if directory.resolve().is_relative_to(root.resolve()):
+        raise ValueError("scanner contract must be outside candidate source")
+    contract = decode(regular(directory / "scanner-contract.json"))
+    rules_path = directory / "scanner-rules.json"
+    if (not isinstance(contract, dict) or contract.get("versions") != SCANNER_VERSIONS
+            or contract.get("registry") != "https://semgrep.dev/c/auto"
+            or contract.get("rules_sha256") != digest(regular(rules_path))
+            or not isinstance(contract.get("languages"), list)):
+        raise ValueError("scanner installation/rule contract unavailable")
+    rules_document = decode(regular(rules_path))
+    if not isinstance(rules_document, dict):
+        raise ValueError("resolved rule document must be an object")
+    rules = rules_document.get("rules")
+    if (not isinstance(rules, list) or not rules
+            or any(not isinstance(rule, dict) or not isinstance(rule.get("id"), str)
+                   or not isinstance(rule.get("languages"), list) or not rule["languages"] for rule in rules)
+            or len({rule["id"] for rule in rules}) != len(rules)):
+        raise ValueError("resolved rule inventory is incomplete")
+    contract["rules"] = rules
+    return contract, rules_path
+
+
+def expected_targets(root: Path, paths: list[str], contract: dict, scanner: str) -> list[str]:
+    if scanner == "bandit":
+        return [p for p in paths if p.endswith(".py") and not p.startswith((".venv/", "node_modules/"))]
+    aliases = {}
+    for language in contract["languages"]:
+        if (not isinstance(language, dict) or not isinstance(language.get("keys"), list)
+                or not isinstance(language.get("exts"), list) or not isinstance(language.get("shebangs", []), list)):
+            raise ValueError("scanner language catalog unavailable")
+        for key in language["keys"]:
+            if not isinstance(key, str) or key in aliases:
+                raise ValueError("ambiguous scanner language catalog")
+            aliases[key] = language
+    selected = {name for rule in contract["rules"] for name in rule["languages"]}
+    if not selected or not selected <= aliases.keys():
+        raise ValueError("unknown resolved rule language")
+    broad = bool(selected & {"generic", "regex", "none", "spacegrep"})
+    extensions = {ext for name in selected for ext in aliases[name]["exts"] if ext}
+    shebangs = {name for lang in selected for name in aliases[lang].get("shebangs", [])}
+    result = []
+    for path in paths:
+        first = regular(root / path).split(b"\n", 1)[0].decode("utf-8", errors="replace")
+        executable = first.removeprefix("#!").strip().split() if first.startswith("#!") else []
+        if broad or any(path.endswith(ext) for ext in extensions) or any(word.rsplit("/", 1)[-1] in shebangs for word in executable):
+            result.append(path)
+    return result
+
+
 def produce(root: Path, output: Path, env: dict, run=subprocess.run) -> dict:
     source = identity(root, env)
     paths = source_files(root, source)
     tracked = frozenset(paths)
     configuration_inputs = _configuration_inputs(root, source)
+    contract, rules_path = scanner_contract(root, env)
+    contract_hash = digest(regular(Path(env["RUNNER_TEMP"]) / "scanner-contract.json"))
     if output.exists() or any(p.is_symlink() for p in output.parents):
         raise ValueError("SAST output must be a fresh nonredirected directory")
     output.mkdir(parents=True)
     scanners, findings = [], []
     for name in CONFIG:
+        expected = expected_targets(root, paths, contract, name)
+        if name == "semgrep" and not expected:
+            scanners.append(dict(scanner=name, configuration=CONFIG[name], version=None, exit_code=None,
+                                 report_sha256=None, status="skipped", reason="no_applicable_language", count=0, expected_paths=[]))
+            continue
         if name == "bandit" and not any(p.endswith(".py") for p in paths):
             scanners.append(dict(scanner=name, configuration=CONFIG[name], version=None, exit_code=None,
                                  report_sha256=None, status="skipped", reason="no_python_sources", count=0))
@@ -265,7 +331,10 @@ def produce(root: Path, output: Path, env: dict, run=subprocess.run) -> dict:
                 # Only the bounded scanner version, never arbitrary process text.
                 matched = re.search(r"(?:^|\s)([0-9]+\.[0-9]+(?:\.[0-9]+)?(?:[a-zA-Z0-9.+-]*))(?=\s|$)", text)
                 version = matched.group(1) if matched else None
-            command = CONFIG[name] + (["--output", str(report_path), "."] if name == "semgrep" else ["-o", str(report_path)])
+            configured = list(CONFIG[name])
+            if name == "semgrep":
+                configured[configured.index("--config") + 1] = str(rules_path)
+            command = configured + (["--output", str(report_path), "--", *paths] if name == "semgrep" else ["-o", str(report_path)])
             observed = run(command, cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                            timeout=600, check=False)
             exit_code = observed.returncode
@@ -292,6 +361,13 @@ def produce(root: Path, output: Path, env: dict, run=subprocess.run) -> dict:
                     raise ValueError("finding outside immutable source")
         except (ValueError, OSError):
             record.update(status="incomplete", reason="source_scope_mismatch")
+        expected = expected_targets(root, paths, contract, name)
+        record["expected_paths"] = expected
+        record["resolved_rules_identity"] = contract["rules_sha256"] if name == "semgrep" else "bandit-builtin:" + SCANNER_VERSIONS[name]
+        if version != SCANNER_VERSIONS[name]:
+            record.update(status="incomplete", reason="scanner_version_mismatch")
+        elif record["status"] == "complete" and set(observed_paths) != set(expected):
+            record.update(status="incomplete", reason="incomplete_target_inventory")
         scanners.append(record)
         findings.extend(rows)
         # Raw code excerpts stay runner-local; the existing normalized fields
@@ -299,14 +375,19 @@ def produce(root: Path, output: Path, env: dict, run=subprocess.run) -> dict:
         if report_path.exists() and not report_path.is_symlink():
             report_path.unlink()
     source_files(root, source)  # scanner-side source mutation invalidates completion
+    if (scanner_contract(root, env)[0] != contract
+            or digest(regular(Path(env["RUNNER_TEMP"]) / "scanner-contract.json")) != contract_hash):
+        raise ValueError("scanner rule/catalog snapshot changed during execution")
     if _configuration_inputs(root, source) != configuration_inputs:
         raise ValueError("scanner configuration changed during execution")
     raw = encoded(findings)
     evidence = {"schema_version": 1, "identity": source, "runtime_sha256": digest(Path(__file__).read_bytes()),
                 "configuration_inputs": configuration_inputs,
+                "scanner_contract_sha256": contract_hash,
+                "source_inventory": paths,
                 "scanners": scanners, "findings_sha256": digest(raw),
                 "entries": [{"position": n, "sha256": digest(encoded(row))} for n, row in enumerate(findings)],
-                "complete": all(s["status"] == "complete" or s.get("reason") == "no_python_sources" for s in scanners)}
+                "complete": all(s["status"] == "complete" or s.get("reason") in {"no_python_sources", "no_applicable_language"} for s in scanners)}
     if len(raw) > LIMIT or len(encoded(evidence)) > LIMIT:
         raise ValueError("SAST artifact exceeds input bound")
     (output / "sast-findings.json").write_bytes(raw)
@@ -340,7 +421,7 @@ def verify(root: Path, directory: Path, env: dict, evidence_hash: str, findings_
         raise ValueError("required SAST producer unavailable")
     raw, findings = regular(directory / "sast-evidence.json"), regular(directory / "sast-findings.json")
     evidence, rows = decode(raw), decode(findings)
-    if evidence.get("configuration_inputs") != _configuration_inputs(root, source):
+    if not isinstance(evidence, dict) or evidence.get("configuration_inputs") != _configuration_inputs(root, source):
         raise ValueError("incomplete or mismatched scanner configuration")
     if (digest(raw) != evidence_hash or digest(findings) != findings_hash
             or evidence.get("schema_version") != 1 or evidence.get("identity") != source
@@ -349,12 +430,18 @@ def verify(root: Path, directory: Path, env: dict, evidence_hash: str, findings_
             or not isinstance(rows, list)
             or evidence.get("entries") != [{"position": n, "sha256": digest(encoded(row))} for n, row in enumerate(rows)]):
         raise ValueError("incomplete or mismatched SAST artifact")
+    immutable_paths = [row.split(b"\t", 1)[1].decode("utf-8") for row in git(root, "ls-tree", "-rz", source["head"]).split(b"\0") if row]
+    if evidence.get("source_inventory") != immutable_paths or not re.fullmatch(r"[0-9a-f]{64}", evidence.get("scanner_contract_sha256", "")):
+        raise ValueError("incomplete SAST target inventory")
     scanners = evidence.get("scanners")
     if (not isinstance(scanners, list) or [s.get("scanner") for s in scanners] != list(CONFIG)
             or sum(s.get("count", -1) for s in scanners) != len(rows)
-            or any(s.get("configuration") != CONFIG[s["scanner"]] or
+            or any((s.get("status") == "complete" and (s.get("version") != SCANNER_VERSIONS[s["scanner"]] or not s.get("resolved_rules_identity") or
+                    not isinstance(s.get("expected_paths"), list) or set(s.get("scanned_paths", [])) != {p if s["scanner"] == "semgrep" else "./" + p for p in s["expected_paths"]})) or
+                   s.get("configuration") != CONFIG[s["scanner"]] or
                    not (s.get("status") == "complete" or
-                        (s["scanner"] == "bandit" and s.get("status") == "skipped" and s.get("reason") == "no_python_sources"))
+                        (s.get("status") == "skipped" and ((s["scanner"] == "bandit" and s.get("reason") == "no_python_sources") or
+                          (s["scanner"] == "semgrep" and s.get("reason") == "no_applicable_language" and s.get("expected_paths") == []))))
                    for s in scanners)):
         raise ValueError("incomplete SAST scanners")
     if publish:
