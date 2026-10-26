@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "base": "origin/main",
+  "review_paths": [
+    ".github/workflows/*",
+    "scripts/agent-check.py",
+    "config/agent-checks.json",
+    "scripts/sync-agent-validation.py",
+    "scripts/install-agent-validation.py"
+  ],
+  "environments": [
+    {
+      "id": "python-types",
+      "inputs": [
+        "config/agent-checks.json"
+      ],
+      "ready_paths": [
+        ".ai/agent-checks/type-venv/pyvenv.cfg"
+      ],
+      "tools": [
+        "uv"
+      ],
+      "commands": [
+        [
+          "uv",
+          "venv",
+          "--clear",
+          "--python",
+          "3.14",
+          ".ai/agent-checks/type-venv"
+        ],
+        [
+          "uv",
+          "pip",
+          "install",
+          "--python",
+          ".ai/agent-checks/type-venv/bin/python",
+          "mypy==1.20.0"
+        ]
+      ],
+      "timeout_seconds": 600
+    }
+  ],
+  "checks": [
+    {
+      "id": "agent-validation-contract",
+      "paths": [
+        "scripts/agent-check.py",
+        "scripts/sync-agent-validation.py",
+        "scripts/tests/test_agent_check.py",
+        "docs/agent-validation.md",
+        "AGENTS.md",
+        "CLAUDE.md",
+        ".cursor/rules/agent-validation.mdc",
+        "scripts/install-agent-validation.py",
+        "config/agent-checks.json",
+        ".claude/skills/agent-validation/SKILL.md"
+      ],
+      "tools": [
+        "python"
+      ],
+      "commands": [
+        [
+          "python3",
+          "scripts/sync-agent-validation.py",
+          "--check"
+        ],
+        [
+          "python3",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "scripts/tests",
+          "-p",
+          "test_agent_check.py",
+          "-v"
+        ]
+      ]
+    },
+    {
+      "id": "shared-python-types",
+      "paths": [
+        "scripts/agent-check.py",
+        "scripts/install-agent-validation.py",
+        "config/agent-checks.json"
+      ],
+      "environment": "python-types",
+      "tools": [
+        "uv"
+      ],
+      "commands": [
+        [
+          ".ai/agent-checks/type-venv/bin/python",
+          "-m",
+          "mypy",
+          "--ignore-missing-imports",
+          "scripts/agent-check.py",
+          "scripts/install-agent-validation.py"
+        ]
+      ]
+    }
+  ]
+}

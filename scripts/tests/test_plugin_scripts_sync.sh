@@ -3,6 +3,8 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 PAIRS=(
+  agent-check.py
+  sync-agent-validation.py
   session-retrospective.py
   session-stop-checklist.sh
   guard_check.py

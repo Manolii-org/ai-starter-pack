@@ -246,6 +246,70 @@ class Controls:
         self.writes += 1
         return True
 
+@pytest.mark.parametrize("action", ["release", "kill"])
+@pytest.mark.parametrize("boundary", ["verifier", "read"])
+def test_publication_samples_implicit_clock_after_io(monkeypatch, action, boundary):
+    now = NOW
+    advanced = False
+    monkeypatch.setattr("feature_controls.lifecycle.time.time", lambda: now / 1000)
+    controls = Controls()
+    key = json.dumps(GOLDEN["scope"], sort_keys=True)
+    def advance():
+        nonlocal now, advanced
+        now += 10
+        advanced = True
+        controls.values[key] = {"bundle": None, "kill": None, "time_highwater": now}
+    read = controls.read
+    def io_read(scope):
+        if boundary == "read" and not advanced:
+            advance()
+        return read(scope)
+    controls.read = io_read
+    class Verifier:
+        def verify(self, *args):
+            if boundary == "verifier":
+                advance()
+            return True
+    runtime = FeatureRuntime(GOLDEN["catalog"], controls=controls, verifier=Verifier())
+    if action == "release":
+        runtime.activate(bundle(), 0)
+    else:
+        runtime.update_kills(kill(), "local-fixture")
+    state = read(GOLDEN["scope"])
+    assert state["time_highwater"] == NOW + 10
+    assert (state["bundle"]["revision"] if action == "release" else state["kill"]["generation"]) == 1
+
+@pytest.mark.parametrize("action", ["release", "kill"])
+def test_publication_rechecks_expiry_and_retains_clock_rejection(monkeypatch, action):
+    now = NOW
+    expire = True
+    monkeypatch.setattr("feature_controls.lifecycle.time.time", lambda: now / 1000)
+    controls = Controls()
+    class Verifier:
+        def verify(self, *args):
+            nonlocal now
+            if expire:
+                now = GOLDEN["expires_at"]
+            return True
+    runtime = FeatureRuntime(GOLDEN["catalog"], controls=controls, verifier=Verifier())
+    def apply(explicit=None):
+        if action == "release":
+            runtime.activate(bundle(), 0, explicit)
+        else:
+            runtime.update_kills(kill(), "local-fixture", explicit)
+    with pytest.raises(ValueError, match="stale bundle" if action == "release" else "invalid kill binding"):
+        apply()
+    assert controls.writes == 0
+    now, expire = NOW, False
+    controls.values[json.dumps(GOLDEN["scope"], sort_keys=True)] = {"bundle": None, "kill": None, "time_highwater": NOW + 1}
+    for explicit in (None, NOW):
+        with pytest.raises(ValueError, match="clock rollback"):
+            apply(explicit)
+    for invalid in (True, 1.5, -1):
+        with pytest.raises(ValueError, match="invalid clock"):
+            apply(invalid)
+    assert controls.writes == 0
+
 def setup(**options):
     r = FeatureRuntime(deepcopy(GOLDEN["catalog"]), trust_policy="local-test", **options)
     r.activate(bundle(), 0, NOW)

@@ -849,6 +849,15 @@ def _validate_judge_decisions(
     }
 
 
+def _unique_candidate_fields(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate assessment field")
+        result[key] = value
+    return result
+
+
 class Judge:
     """PR assessment judge: loads candidates, applies filters, posts review."""
 
@@ -917,6 +926,15 @@ class Judge:
             & protected_review.ROLES
         )
         seen_security = set()
+        seen_roles = set()
+        expected_roles = context = None
+        try:
+            expected_roles = _policy_module.selected_review_roles()
+            context = _policy_module.assessment_context()
+            if context is not None and context["head"] != self.sha:
+                raise ValueError("assessment head mismatch")
+        except (AttributeError, ValueError):
+            self._candidate_load_errors += 1
 
         if not self.candidates_dir.is_dir():
             logger.warning(f"Candidates directory not found: {self.candidates_dir}")
@@ -928,10 +946,15 @@ class Judge:
 
             try:
                 with open(candidate_file) as f:
-                    data = json.load(f)
+                    data = json.load(f, object_pairs_hook=_unique_candidate_fields)
 
                 source = data.get("source", candidate_file.stem)
                 candidate_findings = data.get("findings", [])
+                if expected_roles is not None:
+                    if (source not in expected_roles or source != candidate_file.stem
+                            or data.get("_assessment") != context):
+                        raise ValueError("assessment artifact provenance invalid")
+                    seen_roles.add(source)
                 estate_security = (
                     protected_review.enabled() and source in protected_review.ROLES
                 )
@@ -939,8 +962,12 @@ class Judge:
                     if source != candidate_file.stem or source not in expected_security:
                         raise ValueError("unexpected protected review source")
                     seen_security.add(source)
-                if not isinstance(candidate_findings, list):
-                    raise ValueError("candidate findings must be a list")
+                if "findings" not in data or not isinstance(candidate_findings, list):
+                    raise ValueError("assessment findings unavailable")
+                if "skipped" in data and (not isinstance(data["skipped"], str) or not data["skipped"].strip()):
+                    raise ValueError("assessment skip marker invalid")
+                if data.get("status", "complete") not in {"complete", "completed", "success", "ok"}:
+                    raise ValueError("assessment artifact incomplete")
                 # Validate an entire artifact before admitting any observations
                 # or candidates; a malformed late row must not poison a batch.
                 artifact_findings = [Finding.from_record(source, row) for row in candidate_findings]
@@ -1024,6 +1051,8 @@ class Judge:
                 logger.error(f"Failed to load {candidate_file}: {e}")
                 self._candidate_load_errors += 1
 
+        if expected_roles is not None:
+            self._candidate_load_errors += len(expected_roles - seen_roles)
         if protected_review.enabled():
             self._candidate_load_errors += len(expected_security - seen_security)
         return findings

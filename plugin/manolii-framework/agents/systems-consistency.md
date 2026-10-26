@@ -25,6 +25,7 @@ Broad Stage 2 agent. Triggered by `pr-classifier` when `depth: broad` AND change
 | Claude-only | sonnet → claude-sonnet-4-6 | $3.00 / $15.00 |
 | Claude + OSS | tier-2-agentic → Kimi K2.5 via Together (262K ctx) | $0.50 / $2.80 |
 
+<!-- api-interactive:start -->
 ## Tools
 
 Read, Grep, Glob, Bash
@@ -34,6 +35,8 @@ Read, Grep, Glob, Bash
 ```
 Bash("mkdir -p .ai/candidates")
 ```
+
+<!-- api-interactive:end -->
 
 ## Checks
 
@@ -77,7 +80,12 @@ Output: confirmed findings only, each with `advisor_confidence: high|medium|low`
 
 ## Output
 
-Write findings to `.ai/candidates/systems-consistency.json`:
+Return every confirmed finding in the following JSON structure. In interactive
+tool-enabled sessions, write it to `.ai/candidates/systems-consistency.json`.
+In API sessions, return the JSON response directly; the caller writes that file.
+Use all supplied diff and context; do not omit findings to fit an output budget.
+If required evidence is unavailable, retain the missing-file finding and add
+`"skipped": "missing_context"` so absence cannot become a clean result:
 
 ```json
 {
@@ -95,10 +103,12 @@ Write findings to `.ai/candidates/systems-consistency.json`:
 }
 ```
 
-Write `{"source": "systems-consistency", "findings": []}` if no issues found.
+Return `{"source": "systems-consistency", "findings": []}` only if all checks
+completed and no issues were found.
 
 ## Stop Conditions
 
 - Return findings after checking the declared deployment surface — do NOT expand to adjacent repos.
 - If a required file (fly.toml, deploy.sh, config.yaml) is missing, note its absence as a finding.
-- Maximum 15 file reads per run.
+- Interactive sessions: maximum 15 file reads per run. API sessions have no tools;
+  assess the complete supplied diff/context and report missing required context.

@@ -75,7 +75,7 @@ jobs:
 
 
       - name: Install pytest
-        run: python3 -m pip install --quiet pytest jsonschema pyyaml
+        run: python3 -m pip install --quiet pytest jsonschema pyyaml "pydantic>=2,<3"
 
       - name: Retrospective + memory path tests
         run: |
@@ -125,6 +125,17 @@ jobs:
         # plugin/manolii-framework/telemetry/tests/test_heartbeat.py and the
         # duplicate basename breaks pytest's rootdir collection. Stdlib only.
         run: python3 telemetry/tests/test_heartbeat.py
+
+      - name: Local agent validation contract
+        run: |
+          python3 scripts/sync-agent-validation.py --check
+          python3 -m unittest discover -s scripts/tests -p test_agent_check.py -v
+
+      - name: Load the advisory classifier action natively
+        uses: ./.github/actions/classify-playwright-failures
+        with:
+          results: scripts/tests/fixtures/agent-validation-no-results
+          job-status: ${{ job.status }}
 
       - name: Routing lint
         run: python3 scripts/lint-agent-routing.py

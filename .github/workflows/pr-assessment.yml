@@ -16,9 +16,10 @@ name: PR Assessment
 # Downstream jobs require needs.classify.result == 'success' so Semgrep/Bandit
 # cannot start when classify is skipped (empty depth is not the string 'none').
 #
-# Fleet tenants: LLM jobs use Fly house-guard; SAST stays ubuntu-latest.
-# Kill-switch: CI_RUNNER_OVERRIDE=["ubuntu-latest"]. Non-fleet: set OVERRIDE
-# to ubuntu or leave without fly-labeled runners.
+# Fleet tenants keep the Fly house-guard; SAST stays ubuntu-latest.
+# Only this exact public Pack identity defaults LLM jobs to standard Ubuntu.
+# CI_RUNNER_OVERRIDE remains first; forks always use hosted isolation.
+# See docs/ci-cost-conventions.md R2 for this narrow maintenance exception.
 #
 # Requires:
 #   LLM_API_KEY or LITELLM_MASTER_KEY or ANTHROPIC_API_KEY — for API calls
@@ -45,7 +46,11 @@ jobs:
     name: Classify PR
     runs-on: >-
       ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-          && fromJSON(vars.CI_RUNNER_OVERRIDE || '["self-hosted","fly"]')
+          && fromJSON(vars.CI_RUNNER_OVERRIDE || (
+              github.repository_id == '1268261727'
+              && github.repository == 'Manolii-org/ai-starter-pack'
+              && github.event.repository.visibility == 'public'
+              && '["ubuntu-latest"]' || '["self-hosted","fly"]'))
           || 'ubuntu-latest' }}
     timeout-minutes: 10
     if: |
@@ -378,7 +383,11 @@ jobs:
     name: Specialist Skills
     runs-on: >-
       ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-          && fromJSON(vars.CI_RUNNER_OVERRIDE || '["self-hosted","fly"]')
+          && fromJSON(vars.CI_RUNNER_OVERRIDE || (
+              github.repository_id == '1268261727'
+              && github.repository == 'Manolii-org/ai-starter-pack'
+              && github.event.repository.visibility == 'public'
+              && '["ubuntu-latest"]' || '["self-hosted","fly"]'))
           || 'ubuntu-latest' }}
     timeout-minutes: 15
     needs: [classify, sast]
@@ -474,7 +483,11 @@ jobs:
     name: Broad Agents
     runs-on: >-
       ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-          && fromJSON(vars.CI_RUNNER_OVERRIDE || '["self-hosted","fly"]')
+          && fromJSON(vars.CI_RUNNER_OVERRIDE || (
+              github.repository_id == '1268261727'
+              && github.repository == 'Manolii-org/ai-starter-pack'
+              && github.event.repository.visibility == 'public'
+              && '["ubuntu-latest"]' || '["self-hosted","fly"]'))
           || 'ubuntu-latest' }}
     timeout-minutes: 20
     needs: [classify, sast]
@@ -560,7 +573,11 @@ jobs:
     name: Judge
     runs-on: >-
       ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-          && fromJSON(vars.CI_RUNNER_OVERRIDE || '["self-hosted","fly"]')
+          && fromJSON(vars.CI_RUNNER_OVERRIDE || (
+              github.repository_id == '1268261727'
+              && github.repository == 'Manolii-org/ai-starter-pack'
+              && github.event.repository.visibility == 'public'
+              && '["ubuntu-latest"]' || '["self-hosted","fly"]'))
           || 'ubuntu-latest' }}
     timeout-minutes: 30
     needs: [classify, sast, specialists, broad-agents]
@@ -638,6 +655,8 @@ jobs:
 
       - name: Run judge
         env:
+          REVIEW_SKILLS: ${{ needs.classify.outputs.invoke_skills }}
+          REVIEW_AGENTS: ${{ needs.classify.outputs.invoke_agents }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           # The runners parse ANTHROPIC_BASE_URL's hostname and pick the
           # credential themselves — export every name, never coalesce here

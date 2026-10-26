@@ -17,6 +17,8 @@ from pathlib import Path
 
 BOTS = {"coderabbitai[bot]", "chatgpt-codex-connector[bot]"}
 PREFIX = "<!-- This is an auto-generated comment: summarize by coderabbit.ai -->"
+GENERATED_HEADER = "<!-- coderabbit-ai-generated:v1 -->\n\n"
+REPLY_PREFIX = "<!-- This is an auto-generated reply by CodeRabbit -->"
 PROVENANCE_FIELDS = """id databaseId body createdAt updatedAt lastEditedAt includesCreatedEdit
 author { login __typename } editor { login __typename }
 userContentEdits(first:100, after:$cursor) { totalCount
@@ -101,7 +103,7 @@ def fetch_comments(repo: str, pr: int, head: str) -> list:
     recent = ordered_comments(comments, "coderabbitai[bot]",
                               f"https://api.github.com/repos/{repo}/issues/{pr}")
     for index, comment in enumerate(recent):
-        if comment["body"].startswith("<!-- This is an auto-generated comment:"):
+        if coderabbit_summary_candidate(comment["body"]):
             if clean_coderabbit_body(comment["body"], head):
                 needed.extend(recent[:index + 1])
             break
@@ -249,15 +251,32 @@ def coderabbit_clean_summary(comments: object, head: str, repo: str, pr: int) ->
             # treating a newer bot body as an unrelated acknowledgement.
             if not trusted_comment(comment):
                 return False
-            if comment["body"].startswith("<!-- This is an auto-generated comment:"):
+            if coderabbit_summary_candidate(comment["body"]):
                 return clean_coderabbit_body(comment["body"], head)
     except (KeyError, TypeError, ValueError, AttributeError):
         return False
     return False
 
 
+def coderabbit_body(body):
+    """Normalize only the known generated header; authenticate the raw body."""
+    return body.removeprefix(GENERATED_HEADER)
+
+
+def coderabbit_summary_candidate(body):
+    """Unknown or repeated generated envelopes cannot hide a newer attempt."""
+    # Be conservative when selecting attempts: malformed leading whitespace
+    # must not turn a newer pending review into an unrelated acknowledgement.
+    # The clean parser below still requires the exact envelope and prefix.
+    normalized = coderabbit_body(body).lstrip()
+    return (normalized.startswith("<!-- This is an auto-generated comment:")
+            or (body.lstrip().startswith("<!-- coderabbit-ai-generated:")
+                and not normalized.startswith(REPLY_PREFIX)))
+
+
 def clean_coderabbit_body(body, head):
     """Pure shape check, used for fetch planning only until provenance passes."""
+    body = coderabbit_body(body)
     if not body.startswith(PREFIX):
         return False
     # Remove fenced examples before recognizing generated top-level markers.
