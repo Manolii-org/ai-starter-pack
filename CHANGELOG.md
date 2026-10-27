@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Public-repo hygiene
+
+- `docs/email-capture-journeys.md` no longer carries any consumer's routes,
+  endpoints, mail paths or repository names; it now holds the lane model, a
+  generic example journey table to adapt in the consumer's own repository, the
+  shared playbook patterns, and the allocation-registry rule (`await` /
+  `assert` / `release` must run against the registry `allocate` wrote).
+  Consumer-specific review notes under `.claude/forge/reviews/` are redacted.
+
 ### Added
 
 - **`secret-scan-reusable` gains opt-in `npm_audit_omit_dev` input** (default
