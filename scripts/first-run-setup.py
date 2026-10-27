@@ -75,6 +75,24 @@ def _parse_components_fallback(text: str) -> dict:
     return {"instance": instance}
 
 
+# Features copier.yml refuses under isolation_profile=strict; their assets
+# (e.g. scripts/setup-litellm.sh) are not rendered, so setup must not offer them.
+STRICT_REFUSED = ("oss_routing", "langfuse_telemetry", "kl_integration")
+
+
+def is_strict_profile(path: Path = COMPONENTS_FILE) -> bool:
+    """True when the rendered pack-components.yml records isolation_profile=strict."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if stripped.startswith("isolation_profile:"):
+            return stripped.split(":", 1)[1].strip().strip("\"'") == "strict"
+    return False
+
+
 def ask_yn(prompt: str, default: bool = False) -> bool:
     """Prompt for a yes/no answer. Returns True for yes."""
     suffix = " [Y/n]" if default else " [y/N]"
@@ -294,33 +312,41 @@ def run_setup() -> dict:
     print()
 
     choices = {}
+    strict = is_strict_profile()
+    if strict:
+        print("isolation_profile=strict: OSS routing, Langfuse telemetry and the")
+        print("remote memory backend are not available in this instance and stay off.")
+        print()
+        choices.update({key: False for key in STRICT_REFUSED})
 
     # --- OSS routing ---
-    print_separator()
-    print("1/4  OSS MODEL ROUTING")
-    print()
-    print("  Routes haiku/sonnet-class tasks to open-source models via a")
-    print("  LiteLLM proxy (Fireworks / Together / Groq). Saves 60-80% on")
-    print("  API costs for non-sensitive tasks. Requires deploying a proxy")
-    print("  (scripts/setup-litellm.sh) and adding LITELLM_PROXY_URL to .env.")
-    print()
-    choices["oss_routing"] = ask_yn(
-        "  Enable OSS model routing?", default=False
-    )
-    print()
+    if not strict:
+        print_separator()
+        print("1/4  OSS MODEL ROUTING")
+        print()
+        print("  Routes haiku/sonnet-class tasks to open-source models via a")
+        print("  LiteLLM proxy (Fireworks / Together / Groq). Saves 60-80% on")
+        print("  API costs for non-sensitive tasks. Requires deploying a proxy")
+        print("  (scripts/setup-litellm.sh) and adding LITELLM_PROXY_URL to .env.")
+        print()
+        choices["oss_routing"] = ask_yn(
+            "  Enable OSS model routing?", default=False
+        )
+        print()
 
     # --- Langfuse telemetry ---
-    print_separator()
-    print("2/4  LANGFUSE OTEL TELEMETRY")
-    print()
-    print("  Sends session traces to Langfuse for cost/latency dashboards.")
-    print("  Requires LANGFUSE_PUBLIC_KEY + LANGFUSE_SECRET_KEY in your env.")
-    print("  The otelHeadersHelper in settings.json auto-generates auth headers.")
-    print()
-    choices["langfuse_telemetry"] = ask_yn(
-        "  Enable Langfuse OTEL telemetry?", default=False
-    )
-    print()
+    if not strict:
+        print_separator()
+        print("2/4  LANGFUSE OTEL TELEMETRY")
+        print()
+        print("  Sends session traces to Langfuse for cost/latency dashboards.")
+        print("  Requires LANGFUSE_PUBLIC_KEY + LANGFUSE_SECRET_KEY in your env.")
+        print("  The otelHeadersHelper in settings.json auto-generates auth headers.")
+        print()
+        choices["langfuse_telemetry"] = ask_yn(
+            "  Enable Langfuse OTEL telemetry?", default=False
+        )
+        print()
 
     # --- Browserbase ---
     print_separator()
@@ -337,18 +363,19 @@ def run_setup() -> dict:
     print()
 
     # --- Remote memory backend ---
-    print_separator()
-    print("4/4  REMOTE MEMORY BACKEND")
-    print()
-    print("  Replaces local JSONL memory with a KL-compatible MCP server")
-    print("  (Supabase-backed) for semantic search, cross-session persistence,")
-    print("  and multi-device access. Requires MCP_API_KEY and a KL server URL")
-    print("  added to .mcp.json.")
-    print()
-    choices["kl_integration"] = ask_yn(
-        "  Enable remote memory backend?", default=False
-    )
-    print()
+    if not strict:
+        print_separator()
+        print("4/4  REMOTE MEMORY BACKEND")
+        print()
+        print("  Replaces local JSONL memory with a KL-compatible MCP server")
+        print("  (Supabase-backed) for semantic search, cross-session persistence,")
+        print("  and multi-device access. Requires MCP_API_KEY and a KL server URL")
+        print("  added to .mcp.json.")
+        print()
+        choices["kl_integration"] = ask_yn(
+            "  Enable remote memory backend?", default=False
+        )
+        print()
 
     return choices
 
