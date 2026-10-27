@@ -237,6 +237,10 @@ _exclude:
   # also carries its own skipif guard, so an instance that already has a copy
   # skips rather than fails.
   - tests/test_hydrate_assessment.py
+  # Template-repo-only test: asserts on the pack root's .devin-plugin/plugin.json
+  # meta-plugin, which is not rendered; shipping it aborts the instance's pytest
+  # at collection.
+  - tests/test_devin_meta_plugin.py
   # Pack proxy callback SDK-shape regressions use the owning CI test dependency.
   # Consumer applications own their deployed proxy SDK and its integration tests.
   - tests/test_advisor_fallback_envelope.py

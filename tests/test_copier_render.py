@@ -786,6 +786,27 @@ def test_telemetry_keys_follow_the_flag(default_render, tmp_path):
         {k: v for k, v in default.items() if k not in ("env", "otelHeadersHelper")}
 
 
+@pytest.mark.parametrize("render_fixture", ["default_render", "strict_render"])
+def test_rendered_test_suite_collects(render_fixture, request):
+    """A pack-only test that ships into a render aborts the instance's whole
+    pytest run at collection (tests/test_devin_meta_plugin.py did, v1.23.0
+    cycle). Collection must succeed in every profile."""
+    dst = request.getfixturevalue(render_fixture)
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider"],
+        cwd=dst, capture_output=True, text=True, timeout=600,
+        # The renders are shared session fixtures: leave no __pycache__ behind
+        # for the file-set comparisons in other tests.
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+    )
+    errors = [line for line in proc.stdout.splitlines() if line.startswith("ERROR ")]
+    assert not errors, "\n".join(errors)
+    # A conftest import error reports on stderr with a nonzero exit and no
+    # `ERROR ` line on stdout (CodeRabbit review, PR #247).
+    assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-2000:]
+    assert "tests/test_devin_meta_plugin.py" not in proc.stdout
+
+
 def test_strict_settings_are_hooks_and_deny_only(strict_render, default_render):
     strict = json.loads((strict_render / ".claude/settings.json").read_text())
     default = json.loads((default_render / ".claude/settings.json").read_text())
