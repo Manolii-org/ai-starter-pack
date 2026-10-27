@@ -23,6 +23,23 @@ Renovate preset: `extends: ["github>Manolii-org/ai-starter-pack"]` (optionally p
 
 Legacy `manolii-org/master@v1` still serves `routing-lint` / `shared-config` until those move to the pack — dual Renovate extends are expected during dual-run.
 
+### Tag namespaces
+
+- **Pack releases** are bare `vX.Y.Z` annotated tags, cut only through
+  `.github/workflows/release-tag.yml` (workflow dispatch); that workflow also
+  moves the floating `v1` alias. Never hand-create or move a release tag —
+  consumers pin them, including by mutable tag checkout.
+- **Component releases** use prefixed tags: `email-capture-vX.Y.Z` for the
+  email-capture CLI and `feature-controls-vX.Y.Z` for the feature-control SDK
+  (cut through the same workflow; they never move `v1`). Copier, Renovate and
+  semver tooling ignore prefixed tags, so a component version never reads as a
+  pack release.
+- The bare `v0.1.x`–`v0.2.x` tags are legacy email-capture tags and stay in
+  place (some lanes check out `ref: v0.2.3`). New email-capture releases use the
+  prefixed form only. Since `v0.2.4`, `await` and `release` must find the
+  allocation in the same local registry `allocate` wrote — keep those steps in
+  one job (`docs/email-capture.md`).
+
 Standalone by default: all external integrations (OSS routing, remote memory, browser automation, telemetry, cross-provider review) are feature-flagged off.
 
 ## Hermetic virtual inbox

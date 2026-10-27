@@ -90,6 +90,27 @@
   untrusted CI-log rule now matches the standalone. The restore body is
   byte-identical in both workflows (`tests/test_autofix_hardening.py`).
 
+### Tag namespaces
+
+- Component releases now use prefixed tags: `email-capture-vX.Y.Z`,
+  `feature-controls-vX.Y.Z` (plus `-alpha|beta|rc.N`). `release-tag.yml`
+  accepts them, never moves `v1` for them, and takes an optional `notes`
+  input for the annotated tag message. Existing bare `v0.x` tags are kept.
+- `release-tag.yml` now validates the whole input string (a multi-line value
+  used to pass the per-line `grep` check).
+- Docs: tag namespaces (README), email-capture allocation ownership for lanes
+  that split `allocate`/`await` across jobs (`docs/email-capture.md`);
+  `packages/feature-controls` is marked unreleased.
+
+### Renovate preset
+
+- New `packageRules` entry groups every `Manolii-org/ai-starter-pack`
+  dependency (SHA pins with `# vX.Y.Z` comments, preset pin,
+  `.starter-pack-source`) into one `manolii-ai-starter-pack` PR, never
+  automerged; `allowedVersions` restricts lookups to plain `vX.Y.Z` release
+  tags so component tags (`email-capture-v*`, `feature-controls-v*`), bare
+  `v0.x` and the `v1` alias are never proposed.
+
 ### Added
 
 - **`secret-scan-reusable` gains opt-in `npm_audit_omit_dev` input** (default
