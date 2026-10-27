@@ -800,7 +800,10 @@ def test_rendered_test_suite_collects(render_fixture, request):
         env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
     )
     errors = [line for line in proc.stdout.splitlines() if line.startswith("ERROR ")]
-    assert not errors, "\n".join(errors) or proc.stdout[-2000:]
+    assert not errors, "\n".join(errors)
+    # A conftest import error reports on stderr with a nonzero exit and no
+    # `ERROR ` line on stdout (CodeRabbit review, PR #247).
+    assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-2000:]
     assert "tests/test_devin_meta_plugin.py" not in proc.stdout
 
 
