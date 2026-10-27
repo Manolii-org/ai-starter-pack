@@ -23,5 +23,7 @@ the local registry that `allocate` wrote — by default
 `EMAIL_CAPTURE_PRIVATE_DIR` or `EMAIL_CAPTURE_ALLOCATION_REGISTRY` — and refuse
 anything else with `AUTHORIZATION_DENIED`. A lane that runs `allocate` in one job
 and `await`/`release` in another must move those steps into one job
-(or carry the registry file between jobs as a private artifact). `assert` reads only
-`--messages` and `--rules` and can run in any job.
+(or carry the registry file between jobs as a private artifact). `assert` does
+not consult the allocation registry, so it can run in another job, but like every
+subcommand it first loads the capture profile and refuses `mode=off`
+(`CAPABILITY_UNSUPPORTED`).

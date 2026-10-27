@@ -36,7 +36,8 @@ def test_defaults_are_rendered_in_full() -> None:
     render = _module()._default
     long_value = "a" * 64 + "Z"
     assert render(long_value) == long_value
-    assert render("one/\ntwo/\n") == "one/\\ntwo/"
+    assert render("one/\ntwo/\n") == "one/\\ntwo/\\n"
+    assert render("one") != render("one\n")  # CodeRabbit, PR #245
     assert render("a|b") == "a\\|b"
     assert render("${{ github.sha }}") == "${{ github.sha }}"
     assert render(False) == "false"
