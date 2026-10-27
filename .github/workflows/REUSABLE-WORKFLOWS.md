@@ -597,6 +597,27 @@ jobs:
 Product repos that deliberately keep Autofix off (e.g. Buro `bcp-core` ADR-0006)
 should not add this caller.
 
+**Agent-step contract.** The pinned `anthropics/claude-code-action` (v1) takes
+`prompt` and `claude_args`; the reusable passes `--allowedTools` and, when the
+`model` input is non-empty, `--model`. Releases before this fix passed v0
+inputs that the action ignored, so Autofix never ran — after upgrading it
+pushes `[autofix]` commits and spends tokens. A dispatched agent step that
+produces no `execution_file` fails the job; skips (loop-break, budget,
+`skip-ai-review`, bot actors other than the relay, actors without write
+access) stay green. `GH_PAT` is optional; pushes made with `github.token` do
+not re-trigger PR checks.
+
+**Instruction-surface hardening.** Before the agent runs, the checkout is
+pinned to the PR head SHA and `.claude/`, `.mcp.json`, `.claude.json`,
+`.gitmodules`, `.ripgreprc`, `.husky/`, `CLAUDE.md`, `CLAUDE.local.md` and
+`AGENTS.md` (root and nested) are restored from the PR base SHA, so a PR
+cannot change the agent's instructions, settings, hooks configuration or MCP
+servers. A trusted pre-commit hook outside the checkout refuses `[autofix]`
+commits that touch those paths (it replaces the repository's own git hooks
+for agent commits), and a final step fails the job if one was pushed anyway.
+Code at the PR head — tests, scripts and anything the base hooks call — still
+runs, as it must for Autofix to run the PR's own checks.
+
 
 ## bot-review-relay
 
