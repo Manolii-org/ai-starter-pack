@@ -38,7 +38,7 @@ RUNNERS = [
 ]
 
 # Jobs that execute a runner script and therefore need the runtime present.
-# `sast` runs Semgrep/Bandit only and must stay un-hydrated.
+# SAST loads only its trusted pinned producer, not the model/prompt runtime.
 RUNNER_JOBS = {"classify", "specialists", "broad-agents", "judge"}
 
 
@@ -111,10 +111,14 @@ def test_runner_jobs_hydrate(job: str) -> None:
 
 
 def test_sast_job_is_not_hydrated() -> None:
-    """sast runs no runner; hydrating it would fetch the pack for nothing."""
+    """SAST needs its pinned normalizer, never model runners or prompts."""
     steps = _workflow()["jobs"]["sast"]["steps"]
     names = [str(s.get("name", "")) for s in steps]
     assert "Hydrate assessment runtime" not in names
+    checkout = next(s for s in steps if s.get('name') == 'Check out trusted SAST runtime')
+    assert checkout['with']['ref'] == '${{ inputs.pack_ref }}'
+    assert checkout['with']['sparse-checkout'] == 'scripts/lib/sast_evidence.py'
+    assert 'scripts/lib/sast_evidence.py' in _hydration_list()
 
 
 def test_hydration_never_overwrites_caller_files() -> None:
