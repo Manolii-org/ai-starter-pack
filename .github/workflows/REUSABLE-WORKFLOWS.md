@@ -123,7 +123,7 @@ env:
 | **integration-admission-reusable** | `config_path`, `base_sha`, `head_sha`, `installation_id`, `accepted_producer`, `pack_ref=v1`, `evidence_bundle_json=[]`, `runs_on`, `shadow=true`, `timeout_minutes=15` | none |
 | **pre-production-tier-reusable** | `gates` (JSON, required), `budget_minutes=45`, `job_timeout_minutes=60`, `runs_on`, `max_parallel=4`, `environment`, `checkout_fetch_depth=0`, `open_issue_on_failure=false` | `GATE_SECRETS` (optional) |
 | **tier-gate-summary-reusable** | `gate_name` (required), `applies` (required), `tier=fast`, `command`, `skip_reason`, `setup_command`, `runs_on`, `working_directory`, `timeout_minutes=10`, `checkout_fetch_depth=0` | none |
-| **coverage-ratchet-reusable** | `runs_on`, `node_version`, `python_version`, `setup_command`, `install_command`, `coverage_command` (req), `metric_command` (req), `baseline_file`, `mode=enforce`, `auto_commit_baseline=false`, `cache_path`, `cache_key`, `timeout_minutes=30`, `job_timeout_minutes=65` (validated ≥ timeout+25, +35 with `setup_command`) | `GH_PAT` (optional, for baseline auto-commit) |
+| **coverage-ratchet-reusable** | `runs_on`, `node_version`, `python_version`, `setup_command`, `install_command`, `coverage_command` (req), `metric_command` (req), `baseline_file`, `mode=enforce`, `require_baseline=false`, `auto_commit_baseline=false`, `cache_path`, `cache_key`, `timeout_minutes=30`, `job_timeout_minutes=65` (validated ≥ timeout+25, +35 with `setup_command`) | `GH_PAT` (optional, for baseline auto-commit) |
 | **restore-drill-reusable** | `resource_group`, `sql_server`, `source_database` (req), `sanity_queries`, `db_auth=sql-auth`, `sqlcmd_version`, `timeout_minutes=45` | `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `DRILL_SQL_USER`, `DRILL_SQL_PASSWORD` |
 
 **Notes:**
@@ -713,12 +713,23 @@ classifier never guesses.
 ## coverage-ratchet (v1.19.0+)
 
 Reusable coverage gate: runs the suite, extracts a float metric, compares
-against an in-repo baseline file. Absent baseline = measure-and-report
-(exits 0, prints the number to seed with); below baseline = fail in
-`enforce` mode, warn in `report` mode. The job has no `name:` — with the
-caller below the reported check context is `coverage / coverage`
-(`<caller job id> / <called job name>`); required-check contracts must
-bind that composite string, not bare `coverage`.
+against an in-repo baseline file. Below baseline = fail in `enforce` mode,
+warn in `report` mode.
+
+**Absent baseline = INERT.** The run passes, emits
+`::warning::coverage-ratchet INERT: no baseline at <path>; this required check
+cannot fail`, prints the measured number to seed with, and sets the workflow
+output `activation=inert` (`active` once a baseline is compared). A required
+check bound to an inert ratchet can never fail. Set `require_baseline: true`
+(opt-in in v1, planned default in v2) to fail instead; a default-branch push
+that seeds the baseline via `auto_commit_baseline` is exempt (and that run
+fails if the seeding step cannot write the baseline).
+
+**Check name.** The called job id is `coverage` and has no `name:`, so the
+reported check is `<caller job name> / coverage`, where the caller job name
+is its `name:` when set and its job id otherwise — `coverage / coverage` with
+the caller below. Bind required checks to that full string, not bare
+`coverage`.
 
 ```yaml
 jobs:
@@ -733,10 +744,12 @@ jobs:
 ```
 
 `setup_command` is the escape hatch for toolchains node/python don't cover
-(e.g. Go from the hosted toolcache). `auto_commit_baseline` raises the
-baseline on default-branch pushes via a signed gh-api commit — requires a
-write-capable `GH_PAT` secret (the reusable's `permissions: contents: read`
-caps the caller token, so the option is rejected without GH_PAT).
+(e.g. Go from the hosted toolcache). `auto_commit_baseline` raises (or first
+seeds) the baseline on default-branch pushes via a signed gh-api commit. The
+only permission that matters is a write-capable `GH_PAT` secret
+(`contents: write` on the repository): the reusable's `permissions: contents:
+read` caps `github.token`, a caller's `permissions:` block cannot raise it,
+and the step fails without `GH_PAT`.
 
 ## restore-drill (v1.19.0+)
 
