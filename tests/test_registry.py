@@ -1295,9 +1295,8 @@ def test_shipped_caret_ref_resolves_to_the_current_pack_version():
     assert framework["version"] == version
     ref = next(r["ref"] for r in yaml.safe_load((REPO / "ai-manifest.yaml").read_text())["requires"]
                if r["plugin"] == "platform/framework")
-    major, minor = (int(x) for x in ref.lstrip("^").split(".")[:2])
-    v_major, v_minor = (int(x) for x in version.split(".")[:2])
-    assert ref.startswith("^") and v_major == major and v_minor >= minor, (ref, version)
+    # The resolver's own range check, not a re-derivation of caret semantics.
+    assert ref.startswith("^") and load_resolve_module().version_satisfies(version, ref), (ref, version)
     lock = json.loads((REPO / ".ai/native-guidance-lock.json").read_text())
     assert lock["ref"] == ref and lock["resolved_version"] == version
 

@@ -22,6 +22,9 @@ uses: Manolii-org/ai-starter-pack/.github/workflows/ci-reusable.yml@v1.23.0
 Prefer pinning the release commit SHA with a `# v1.23.0` comment
 (`uses: …/ci-reusable.yml@<commit-sha> # v1.23.0`); the Renovate preset's
 `manolii-ai-starter-pack` group proposes every pack bump as one reviewed PR.
+That PR updates `uses:` pins but not `pack_ref` inputs: where a caller passes
+`pack_ref` (for example `backup-kernel-validate-reusable`), change it to the
+same release in that PR, or the workflow keeps loading the previous one.
 
 Renovate preset: `extends: ["github>Manolii-org/ai-starter-pack"]` (optionally pin `#v1.23.0`).
 

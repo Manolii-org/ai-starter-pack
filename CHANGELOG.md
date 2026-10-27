@@ -29,8 +29,10 @@ Upgrade order for consumers:
     plus `--model` when the reusable's `model` input is set).
   - **After upgrading, Autofix WILL push `[autofix]` commits and spend model
     tokens.**
-  - Callers that use `secrets.GITHUB_TOKEN` instead of `GH_PAT` will not
-    re-trigger PR checks after an autofix push.
+  - Pushes made with `GITHUB_TOKEN` do not re-trigger PR checks. Reusable
+    callers pass `GH_PAT`; standalone instances set the
+    `MN_GH_AUTOMATION_TOKEN` secret. Without it, Autofix falls back to
+    `GITHUB_TOKEN`.
   - Standalone instances receive this on `copier update`.
 - **Autofix fails loudly instead of passing silently.**
   - A dispatched agent step that produces no execution file now fails the
@@ -46,10 +48,12 @@ Upgrade order for consumers:
   - Agent commits that touch those paths are refused.
 - **coverage-ratchet INERT warning.** An absent `baseline_file` now emits
   `::warning::coverage-ratchet INERT: no baseline at <path>; this required
-  check cannot fail` and sets `activation=inert`. The run still passes.
+  check cannot fail` and sets `activation=inert`. The run passes by
+  default; `require_baseline: true` or `fail_on_inert: true` makes it fail.
 - **e2e-playwright INERT warning.** A run where Playwright executed no test
   (all skipped, or none found) emits `::warning::e2e-playwright INERT …` and
-  sets `activation=inert`. It still passes.
+  sets `activation=inert`. It passes by default; `fail_on_inert: true`
+  makes it fail.
 - **Devin meta-plugin:** `registry/platform/om` moved from `requiredPlugins`
   to `optionalPlugins` in the root `.devin-plugin/plugin.json`.
   - Tenants without a Knowledge Layer backend can now install the baseline.
