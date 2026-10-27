@@ -52,6 +52,14 @@
       "platformAutomerge": false,
       "ignoreUnstable": true,
       "dependencyDashboardApproval": true
+    },
+    {
+      "description": "Group every AI Starter Pack pin (reusable-workflow and action SHA pins with a `# vX.Y.Z` comment, preset pins, .starter-pack-source) into ONE reviewed PR per release, so a consumer never runs a mix of pack versions. Never automerged, including digest-only rotations. allowedVersions keeps lookups on plain vX.Y.Z release tags: component tags (email-capture-v*, feature-controls-v*), the legacy bare v0.x component tags and the moving v1 alias are never proposed.",
+      "matchPackageNames": ["/^manolii-org\\/ai-starter-pack$/i"],
+      "groupName": "manolii-ai-starter-pack",
+      "allowedVersions": "/^v?[1-9][0-9]*\\.[0-9]+\\.[0-9]+$/",
+      "automerge": false,
+      "platformAutomerge": false
     }
   ]
 }

@@ -43,3 +43,27 @@ def test_preset_pin_manager_extracts_supported_consumer_pins() -> None:
     assert pattern.search(
         '{"extends":["github>Manolii-org/ai-starter-pack"]}'
     ) is None
+
+
+def test_pack_pins_are_grouped_into_one_reviewed_pr() -> None:
+    rules = json.loads((ROOT / "default.json").read_text())["packageRules"]
+    index, rule = next(
+        (i, r) for i, r in enumerate(rules) if r.get("groupName") == "manolii-ai-starter-pack"
+    )
+    # Later packageRules win: the group must come after the digest automerge rule.
+    automerge_index = next(i for i, r in enumerate(rules) if r.get("automerge") is True)
+    assert index > automerge_index
+    assert rule["automerge"] is False and rule["platformAutomerge"] is False
+
+    # Renovate regex form "/<re>/i" — exercise the shipped expression.
+    body, flags = rule["matchPackageNames"][0][1:].rsplit("/", 1)
+    name = re.compile(body, re.IGNORECASE if "i" in flags else 0)
+    for dep in ("Manolii-org/ai-starter-pack", "manolii-org/ai-starter-pack"):
+        assert name.search(dep)
+    assert not name.search("Manolii-org/ai-starter-pack-fork")
+
+    allowed = re.compile(rule["allowedVersions"].strip("/"))
+    for tag in ("v1.23.0", "1.23.0", "v2.0.0"):
+        assert allowed.search(tag), tag
+    for tag in ("v1", "email-capture-v0.2.6", "feature-controls-v0.1.0", "v0.2.6"):
+        assert not allowed.search(tag), tag
