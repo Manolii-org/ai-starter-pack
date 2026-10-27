@@ -1,8 +1,10 @@
 name: Autofix acceptance (probe, never merged)
 # Throwaway caller for the v1.23.0 acceptance run on the probe PR only.
+# Probe-only: this branch's copy of the reusable also accepts pull_request,
+# because review events from this account arrive as CONTRIBUTOR.
 on:
-  pull_request_review:
-    types: [submitted]
+  pull_request:
+    types: [synchronize]
 permissions:
   contents: write
   pull-requests: write
@@ -26,6 +28,4 @@ jobs:
       - env:
           EV: ${{ github.event_name }}
           ACTOR: ${{ github.actor }}
-          ASSOC: ${{ github.event.review.author_association }}
-          STATE: ${{ github.event.review.state }}
-        run: echo "event=$EV actor=$ACTOR review.author_association=$ASSOC state=$STATE"
+        run: echo "event=$EV actor=$ACTOR"

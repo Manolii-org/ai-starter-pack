@@ -52,6 +52,7 @@ jobs:
     # Do NOT blanket-exclude github-actions[bot] — that is the relay author.
     if: |
       (
+        github.event_name == 'pull_request' ||
         (
           github.event_name == 'pull_request_review' &&
           contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.review.author_association) &&
