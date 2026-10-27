@@ -85,6 +85,15 @@
   that split `allocate`/`await` across jobs (`docs/email-capture.md`);
   `packages/feature-controls` is marked unreleased.
 
+### Renovate preset
+
+- New `packageRules` entry groups every `Manolii-org/ai-starter-pack`
+  dependency (SHA pins with `# vX.Y.Z` comments, preset pin,
+  `.starter-pack-source`) into one `manolii-ai-starter-pack` PR, never
+  automerged; `allowedVersions` restricts lookups to plain `vX.Y.Z` release
+  tags so component tags (`email-capture-v*`, `feature-controls-v*`), bare
+  `v0.x` and the `v1` alias are never proposed.
+
 ### Added
 
 - **`secret-scan-reusable` gains opt-in `npm_audit_omit_dev` input** (default
