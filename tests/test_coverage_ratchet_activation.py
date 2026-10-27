@@ -68,11 +68,38 @@ def test_require_baseline_fails_when_absent(tmp_path: Path, mode: str) -> None:
     assert proc.returncode == 1
     assert outputs["activation"] == "inert"
     assert "::error::require_baseline is true" in proc.stdout
+    assert "cannot fail" not in proc.stdout, "a failing run must not claim it cannot fail"
 
 
 def test_require_baseline_lets_auto_commit_seed(tmp_path: Path) -> None:
     proc, _ = _compare(tmp_path, baseline=None, require="true", seeding="true")
     assert proc.returncode == 0, proc.stdout
+    assert "coverage-ratchet INERT" in proc.stdout
+
+
+def _auto_commit(tmp_path: Path, *, require: str, activation: str):
+    """Run the auto-commit step with a fake gh whose branch head has moved."""
+    steps = _spec()["jobs"]["coverage"]["steps"]
+    run = next(s for s in steps if str(s.get("name", "")).startswith("Auto-commit"))["run"]
+    script = run.split("<<'PY'\n", 1)[1].rsplit("PY", 1)[0]
+    gh = tmp_path / "gh"
+    gh.write_text('#!/bin/sh\necho \'{"object": {"sha": "%s"}}\'\n' % ("b" * 40), encoding="utf-8")
+    gh.chmod(0o755)
+    env = {**os.environ, "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}", "CURRENT": "71.5",
+           "BASELINE_FILE": ".ci/coverage-baseline.txt", "REPO": "example/repo", "BRANCH": "main",
+           "TRIGGER_SHA": "a" * 40, "REQUIRE_BASELINE": require, "ACTIVATION": activation}
+    return subprocess.run(["python3", "-c", script], cwd=tmp_path, env=env, capture_output=True, text=True)
+
+
+def test_seeding_exemption_fails_when_the_seed_is_not_written(tmp_path: Path) -> None:
+    proc = _auto_commit(tmp_path, require="true", activation="inert")
+    assert proc.returncode != 0
+    assert "did not seed the baseline" in proc.stderr
+
+
+def test_head_move_still_passes_without_the_exemption(tmp_path: Path) -> None:
+    assert _auto_commit(tmp_path, require="false", activation="inert").returncode == 0
+    assert _auto_commit(tmp_path, require="true", activation="active").returncode == 0
 
 
 def test_present_baseline_is_active_and_still_enforces(tmp_path: Path) -> None:

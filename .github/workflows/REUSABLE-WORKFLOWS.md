@@ -714,10 +714,12 @@ cannot fail`, prints the measured number to seed with, and sets the workflow
 output `activation=inert` (`active` once a baseline is compared). A required
 check bound to an inert ratchet can never fail. Set `require_baseline: true`
 (opt-in in v1, planned default in v2) to fail instead; a default-branch push
-that seeds the baseline via `auto_commit_baseline` is exempt.
+that seeds the baseline via `auto_commit_baseline` is exempt (and that run
+fails if the seeding step cannot write the baseline).
 
 **Check name.** The called job id is `coverage` and has no `name:`, so the
-reported check is `<caller job id> / coverage` — `coverage / coverage` with
+reported check is `<caller job name> / coverage`, where the caller job name
+is its `name:` when set and its job id otherwise — `coverage / coverage` with
 the caller below. Bind required checks to that full string, not bare
 `coverage`.
 

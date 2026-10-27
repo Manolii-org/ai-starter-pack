@@ -11,10 +11,11 @@
   (`active` once a baseline is compared). The run still passes by default.
 - New opt-in input `require_baseline` (boolean, default `false`): fail when the
   baseline is absent, in either mode. A default-branch push that seeds the
-  baseline via `auto_commit_baseline` is exempt.
+  baseline via `auto_commit_baseline` is exempt, and fails if it cannot seed
+  it.
 - Docs: auto-commit needs a write-capable `GH_PAT` (caller `permissions:`
   cannot raise the reusable's `contents: read`); the check name is
-  `<caller job id> / coverage`.
+  `<caller job name, or job id when unnamed> / coverage`.
 - **Planned for v2:** `require_baseline` defaults to `true`.
 
 ### Added
