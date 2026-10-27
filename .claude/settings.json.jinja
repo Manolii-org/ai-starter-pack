@@ -83,6 +83,16 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "matcher": "Bash|mcp__github__create_pull_request",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "_R=$(git rev-parse --show-toplevel 2>/dev/null || echo \"$PWD\"); sh \"$_R/scripts/qa/finalise-gate.sh\" claude",
+            "timeout": 1200
+          }
+        ]
       }
     ],
     "SessionStart": [

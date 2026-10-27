@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "finalise_gate": {
+    "mode": "block",
+    "timeout_seconds": 1100,
+    "replace_legacy_pre_push": false
+  },
+  "ui_smoke": {
+    "base_url": "http://localhost:3000",
+    "start_command": null,
+    "ready_timeout_seconds": 90,
+    "always_routes": ["/"],
+    "routes": [],
+    "infer_next_routes": true,
+    "dynamic_samples": {},
+    "max_routes": 6,
+    "viewports": [
+      { "name": "mobile", "width": 375, "height": 812 },
+      { "name": "desktop", "width": 1280, "height": 800 }
+    ],
+    "overflow_check": true,
+    "axe": {
+      "enabled": true,
+      "required": true,
+      "impacts": ["critical", "serious"],
+      "tags": ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"]
+    },
+    "ignore_console": [],
+    "ignore_requests": [],
+    "headers_from_env": {
+      "x-vercel-protection-bypass": "VERCEL_AUTOMATION_BYPASS_SECRET"
+    },
+    "storage_state": null,
+    "on_unavailable": "fail",
+    "launch": {
+      "network": "slow-3g",
+      "cpu_throttle": 4,
+      "max_dom_content_loaded_ms": 10000
+    }
+  }
+}

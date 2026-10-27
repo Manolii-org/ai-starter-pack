@@ -367,6 +367,11 @@ _exclude:
 _skip_if_exists:
   - CLAUDE.md
   - config/agent-checks.json
+  # QA framework owner config + host hook files a consumer may already own
+  # (docs/qa-framework.md § Adopting). Written on first copy only.
+  - config/qa.json
+  - .cursor/hooks.json
+  - .codex/hooks.json
   - .claude/model-routing.json
   - .claude/mcp.json
   - .claude/hooks/session-start.sh

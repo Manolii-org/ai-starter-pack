@@ -143,6 +143,7 @@ table.
 | **secret-scan-reusable** | `runs_on=ubuntu-latest`, `node_version=22`, `python_version=3.12`, `require_gitleaks_license=false: boolean`, `npm_audit_omit_dev=false: boolean`, `gitleaks_version=8.30.0` | `GITLEAKS_LICENSE` | none |
 | **static-review-reusable** | `runs_on=ubuntu-latest`, `node_version=24`, `python_version=3.14` | none | none |
 | **tier-gate-summary-reusable** | `gate_name` (req), `tier=fast`, `applies: boolean` (req), `skip_reason=no files in scope changed`, `command=''`, `runs_on=ubuntu-latest`, `working_directory=.`, `timeout_minutes=10: number`, `setup_command=''`, `checkout_fetch_depth=0: number` | none | `verdict`, `applied` |
+| **ui-smoke-reusable** | `base_url` (req), `routes=''`, `profile=default`, `config_path=config/qa.json`, `pack_ref=v1`, `playwright_version=1.63.0`, `axe_core_version=4.10.3`, `node_version=22`, `runs_on=ubuntu-latest`, `timeout_minutes=10: number`, `artifact_name=''` | `VERCEL_BYPASS_SECRET` | `status` |
 
 <!-- reusable-matrix:end -->
 
@@ -735,6 +736,35 @@ for example because `E2E_TEST_USER_*` secrets are absent, or no test matched
 reporter). An inert run emits `::warning::e2e-playwright INERT …` and still
 passes unless the caller sets `fail_on_inert: true` (default `false` in v1).
 See `docs/workflow-outcome-convention.md` § Activation contract.
+
+## ui-smoke (v1.23.0+)
+
+Runs the pack's `scripts/qa/ui-smoke.mjs` — the same script the agent
+finalise gate runs locally — against a deployed URL: HTTP status,
+runtime/console errors, broken same-origin assets, mobile overflow /
+missing responsive viewport, and serious/critical axe violations at 375px
+and 1280px; `profile: launch` adds a slow-3G + 4x CPU mobile budget. It
+installs only `playwright` + `axe-core` into a temp prefix (Chromium cached)
+and never installs or builds the app, so a run takes about 2-3 minutes.
+Routes come from the caller's `config/qa.json` `ui_smoke` section
+(`routes` input overrides). Full model: `docs/qa-framework.md`.
+
+```yaml
+on: deployment_status
+jobs:
+  ui-smoke:
+    if: github.event.deployment_status.state == 'success'
+    uses: Manolii-org/ai-starter-pack/.github/workflows/ui-smoke-reusable.yml@v1.23.0
+    with:
+      base_url: ${{ github.event.deployment_status.environment_url }}
+      pack_ref: v1.23.0
+    secrets:
+      VERCEL_BYPASS_SECRET: ${{ secrets.VERCEL_BYPASS_SECRET }}
+```
+
+The same caller on `schedule` with the production URL is the production
+synthetic monitor. The bypass secret is sent only to the base URL's origin.
+Output `status` is `passed`, `failed` or `unavailable`.
 
 ## classify-playwright-failures action (v1.20.0+)
 
