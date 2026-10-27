@@ -22,7 +22,8 @@ def _validate(tag: str) -> int:
 
 @pytest.mark.parametrize("tag", [
     "v1.23.0", "v2.0.0", "email-capture-v0.2.6", "feature-controls-v0.1.0",
-    "feature-controls-v0.2.0-rc.1", "email-capture-v1.0.0-beta.2",
+    "feature-controls-v0.2.0-rc.1", "email-capture-v1.0.0-beta.2", "v10.0.0",
+    "feature-controls-v1.0.0-rc.0",
 ])
 def test_accepts_pack_and_component_tags(tag: str) -> None:
     assert _validate(tag) == 0
@@ -31,6 +32,9 @@ def test_accepts_pack_and_component_tags(tag: str) -> None:
 @pytest.mark.parametrize("tag", [
     "v1", "v1.23", "1.23.0", "v1.23.0-rc.1", "email-capture-0.2.6", "other-v1.0.0",
     "email-capture-v0.2", "feature-controls-v0.1.0-dev.1", "v1.23.0\nv2", "",
+    # Non-canonical numbers (Codex review, PR #237): the component release
+    # tooling's semver regex rejects leading zeroes, so the tag must too.
+    "feature-controls-v01.2.3", "feature-controls-v1.2.3-rc.01", "email-capture-v0.02.6", "v01.23.0",
 ])
 def test_refuses_everything_else(tag: str) -> None:
     assert _validate(tag) != 0

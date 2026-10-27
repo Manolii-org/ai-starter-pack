@@ -43,8 +43,8 @@ jobs:
           # for (or sort among) pack releases; bare v0.x tags are legacy.
           # Whole-string bash regex: grep matches per line, so a multi-line
           # input would pass a grep check on its first line.
-          PACK_RE='^v[0-9]+\.[0-9]+\.[0-9]+$'
-          COMPONENT_RE='^(email-capture|feature-controls)-v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$'
+          PACK_RE='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          COMPONENT_RE='^(email-capture|feature-controls)-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)\.(0|[1-9][0-9]*))?$'
           if [[ "$TAG" =~ $PACK_RE ]]; then
             echo "Pack release tag $TAG"
           elif [[ "$TAG" =~ $COMPONENT_RE ]]; then
@@ -124,7 +124,7 @@ jobs:
           set -euo pipefail
           # Pack releases only: a component tag (email-capture-v*,
           # feature-controls-v*) must never move the pack's major alias.
-          PACK_RE='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          PACK_RE='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
           if [[ "$TAG" =~ $PACK_RE ]]; then
             MAJOR="${TAG%%.*}"          # v1.9.0 -> v1
             # inputs.sha is empty when the caller defaulted to main HEAD, so take
