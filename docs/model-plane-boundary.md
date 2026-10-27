@@ -53,7 +53,7 @@ Trade-off: you give up in-session `Agent()` orchestration (context passing, inte
 Verified via `GET /model/info` on a deployed LiteLLM router — the router
 reporting its own backends:
 
-```
+```text
 claude-sonnet-4-6         ->  fireworks_ai/accounts/fireworks/models/deepseek-v4-flash-0731
 claude-sonnet-4-6         ->  together_ai/deepseek-ai/DeepSeek-V4-Pro
 claude-haiku-4-5-20251001 ->  fireworks_ai/accounts/fireworks/models/deepseek-v4-flash-0731
@@ -320,4 +320,5 @@ Referenced above but not shipped by the pack (`tests/test_doc_path_references.py
   - `scripts/tests/test_lint_agent_routing.py`
   - `scripts/tests/test_session_integrity.py`
   - `scripts/tests/test_session_start_plane_separation.py`
+  - `scripts/verify-model-plane.py`
   - `templates/ai-starter-pack/`

@@ -39,8 +39,7 @@ def _default(value) -> str:
     """
     if isinstance(value, bool):
         return "true" if value else "false"
-    text = str(value).rstrip("\n")
-    return text.replace("\\", "\\\\").replace("\n", "\\n").replace("|", "\\|")
+    return str(value).replace("\\", "\\\\").replace("\n", "\\n").replace("|", "\\|")
 
 
 def _input(name: str, spec: dict) -> str:

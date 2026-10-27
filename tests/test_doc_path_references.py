@@ -17,17 +17,29 @@ DOCS = ("docs/ai-runtime-policy.md", "docs/model-plane-boundary.md")
 FILE_RE = re.compile(r"[A-Za-z0-9_.-]+\.(?:py|md|mdc|ya?ml|json|sh|ts|toml)")
 # Line (`x.py:18,60`) and symbol (`x.py::fn`) suffixes are not part of the path.
 SUFFIX_RE = re.compile(r"(?:::[A-Za-z_][\w.]*|:[0-9][0-9,-]*)$")
+FENCE_RE = re.compile(r"^```([^\n`]*)\n(.*?)^```[ \t]*$", re.M | re.S)
+# A fence tagged `text` holds data (e.g. route-table output), not paths.
+DATA_FENCES = {"text"}
+
+
+def fences(body: str):
+    """(info string, content) of every fenced code block."""
+    return [(m.group(1).strip(), m.group(2)) for m in FENCE_RE.finditer(body)]
 
 
 def references(body: str):
     """Every repository path in a code span or Markdown link.
 
     The input space is each whitespace-separated token of every code span (so
-    paths inside commands count) and every link target. A token is a path when
-    it contains `/` or is a bare `name.ext`; API paths and slash commands
-    (leading `/`), URLs, placeholders (`<...>`, `$...`) and flags are not.
+    paths inside commands count), every line of a fenced block not tagged as
+    data, and every link target. A token is a path when it contains `/` or is
+    a bare `name.ext`; API paths and slash commands (leading `/`), URLs,
+    placeholders (`<...>`, `$...`) and flags are not.
     """
-    spans = re.findall(r"`([^`\n]+)`", body) + re.findall(r"\]\(([^)\s#]+)", body)
+    fenced = [line for info, content in fences(body) if info not in DATA_FENCES
+              for line in content.splitlines()]
+    prose = FENCE_RE.sub("", body)
+    spans = re.findall(r"`([^`\n]+)`", prose) + re.findall(r"\]\(([^)\s#]+)", prose) + fenced
     for span in spans:
         for token in span.split():
             token = SUFFIX_RE.sub("", token.strip("\"'(),;"))
@@ -49,11 +61,22 @@ def _exists(doc: Path, ref: str) -> bool:
 def test_extraction_covers_commands_directories_globs_and_suffixes() -> None:
     body = ("`python3 scripts/a.py --repo <owner/name>` `scripts/hooks/` `.cursor/rules/*.mdc` "
             "`scripts/b.py:18,60` `scripts/c.py::fn` `/model/info` `/unfreeze` `CLAUDE.md` "
-            "[link](docs/d.md#sec) [anchor](#here) `https://example.com/x`")
+            "[link](docs/d.md#sec) [anchor](#here) `https://example.com/x`\n"
+            "```bash\npython3 scripts/e.py  # comment\n```\n"
+            "```text\nhaiku -> provider/model\n```\n")
     assert list(references(body)) == [
         "scripts/a.py", "scripts/hooks/", ".cursor/rules/*.mdc", "scripts/b.py",
-        "scripts/c.py", "CLAUDE.md", "docs/d.md",
+        "scripts/c.py", "CLAUDE.md", "docs/d.md", "scripts/e.py",
     ]
+
+
+@pytest.mark.parametrize("name", DOCS)
+def test_every_fence_declares_whether_it_holds_paths(name: str) -> None:
+    """Codex review, PR #245: fenced commands were not scanned. Every fence is
+    now scanned unless tagged as data, so an untagged fence must choose."""
+    untagged = [content for info, content in fences((ROOT / name).read_text(encoding="utf-8"))
+                if not info]
+    assert not untagged, f"{name}: tag each fence (e.g. bash, or text for data): {untagged}"
 
 
 @pytest.mark.parametrize("name", DOCS)

@@ -13,7 +13,7 @@ repository is public.
 
 | Lane | What it proves | Required before production go-live |
 |---|---|---|
-| Hermetic Mailpit/MailDev/Inbucket | Job-local SMTP + capture CLI (profiles: `off` or `hermetic`) | Yes, for every evidenced sender |
+| Hermetic Mailpit/MailDev/Inbucket | Job-local SMTP + capture CLI (profile `mode=hermetic`; `off` refuses every subcommand) | Yes, for every evidenced sender |
 | Hosted capture | Pack SPI `mode=hosted` (v0.2.0): HTTPS `/health` + `/messages`, env-only token, fail-closed production. Consumer canary only when a dedicated capture inbox and `EMAIL_CAPTURE_HOSTED_*` secrets exist. Not a substitute for hermetic evidenced-sender jobs. | No |
 | Real-delivery canary | DNS/provider receipt to an entity mailbox | Separate from capture; still denied from KL |
 
@@ -68,7 +68,8 @@ as gaps, not tested.
   `EMAIL_CAPTURE_PRIVATE_DIR` / `EMAIL_CAPTURE_ALLOCATION_REGISTRY`). A lane
   that splits these steps across jobs must run them in one job (or carry the
   registry between jobs); otherwise they fail with `AUTHORIZATION_DENIED`.
-  `assert` reads only `--messages` / `--rules` and can run in any job.
+  `assert` does not consult the registry, so it can run in another job, but
+  it still needs a valid non-`off` capture profile like every subcommand.
 
 ## Knowledge Layer
 
