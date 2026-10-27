@@ -679,6 +679,14 @@ keep identical to your `uses:` pin). It never changes the job conclusion. Downst
 retry `retryable == 'true'`, hand `autofix_eligible == 'true'` to code
 fixers, and escalate `environment` to whoever owns the secret/seed/config.
 
+Activation (v1.23.0+): the `activation` output is `active` when Playwright
+executed at least one test, `inert` when it executed none (every test skipped,
+for example because `E2E_TEST_USER_*` secrets are absent, or no test matched
+`--grep`), and `unknown` when no reporter summary is readable (a JSON-only
+reporter). An inert run emits `::warning::e2e-playwright INERT …` and still
+passes unless the caller sets `fail_on_inert: true` (default `false` in v1).
+See `docs/workflow-outcome-convention.md` § Activation contract.
+
 ## classify-playwright-failures action (v1.20.0+)
 
 The same classifier as a composite action for repos that run Playwright
