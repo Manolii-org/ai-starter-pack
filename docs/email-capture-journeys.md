@@ -62,12 +62,13 @@ as gaps, not tested.
 - Frontend specs live in a dedicated Playwright project (`email-capture`)
   with an empty storage state; the default project ignores them, keeping any
   post-deploy UAT suite untouched.
-- Allocation ownership (email-capture `v0.2.4`+): `await` / `assert` /
-  `release` must find the allocation in the same local registry that
+- Allocation ownership (email-capture `v0.2.4`+): `await` and `release`
+  must find the allocation in the same local registry that
   `allocate` wrote (`$RUNNER_TEMP/email-capture/allocations.json`, or
   `EMAIL_CAPTURE_PRIVATE_DIR` / `EMAIL_CAPTURE_ALLOCATION_REGISTRY`). A lane
   that splits these steps across jobs must run them in one job (or carry the
   registry between jobs); otherwise they fail with `AUTHORIZATION_DENIED`.
+  `assert` reads only `--messages` / `--rules` and can run in any job.
 
 ## Knowledge Layer
 
