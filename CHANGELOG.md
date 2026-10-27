@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Supply chain
+
+- **SHA-pinned the remaining tag-pinned actions** in `migration-run-gate-reusable`,
+  `plugin-eval-gate`, `registry-lint` and the email-capture conformance
+  workflows (`actions/checkout` v4 → `11d5960a…` v4.4.0, `actions/setup-python`
+  v5 → `a26af69b…` v5.6.0 — the commits those floating tags resolved to, so
+  behaviour is unchanged).
+- New lint `tests/test_action_pins.py`: every remote `uses:` in
+  `.github/workflows/`, `.github/actions/` and `actions/` must be a 40-hex SHA
+  (Docker refs need a `sha256` digest); only local `./` paths are exempt.
+
 ### Devin meta-plugin
 
 - `registry/platform/om` moved from `requiredPlugins` to `optionalPlugins` in
