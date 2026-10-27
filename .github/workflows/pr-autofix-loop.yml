@@ -301,7 +301,29 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      # Preflight ran before this job waited for the lock. If an earlier
+      # autofix (or anyone) pushed meanwhile, its loop-break, budget and head
+      # SHA are stale: skip, and let a newer event judge the new head. An
+      # unchanged head means unchanged commits, so the gates still hold.
+      - name: Re-check the PR head after acquiring the lock
+        id: lock
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUM: ${{ needs.preflight.outputs.pr_number }}
+          VALIDATED: ${{ needs.preflight.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          CURRENT=$(timeout -k 5 30 gh api "repos/${REPOSITORY}/pulls/${PR_NUM}" --jq '.head.sha' 2>/dev/null || echo '')
+          if [[ -z "$VALIDATED" || -z "$CURRENT" || "$CURRENT" != "$VALIDATED" ]]; then
+            echo "go=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::PR head is ${CURRENT:-unreadable}, not the validated ${VALIDATED:-<none>}; skipping this queued autofix"
+            exit 0
+          fi
+          echo "go=true" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        if: steps.lock.outputs.go == 'true'
         with:
           persist-credentials: false
           fetch-depth: 0
@@ -317,6 +339,7 @@ jobs:
       # PR branch would fail with "not currently on a branch". Re-attach a
       # local branch named after the PR head at the validated SHA.
       - name: Attach PR branch at validated SHA
+        if: steps.lock.outputs.go == 'true'
         env:
           # head_ref is attacker-controlled metadata (a same-repo branch name
           # may embed shell substitutions). It must reach the shell only as a
@@ -334,6 +357,7 @@ jobs:
       # the PR's own tests and tools; every tool call is already gated by the
       # prompt's untrusted-data framing).
       - name: Restore trusted instruction surface from PR base
+        if: steps.lock.outputs.go == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPOSITORY: ${{ github.repository }}
@@ -413,6 +437,7 @@ jobs:
           echo "Restored ${#PATHS[@]} instruction-surface path(s) from base ${BASE_SHA}"
 
       - name: Warn when elevated push token is absent
+        if: steps.lock.outputs.go == 'true'
         env:
           AUTOFIX_PUSH_TOKEN: ${{ secrets.MN_GH_AUTOMATION_TOKEN }}
         run: |
@@ -421,6 +446,7 @@ jobs:
           fi
 
       - name: Resolve Anthropic credential
+        if: steps.lock.outputs.go == 'true'
         id: cred
         env:
           BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
@@ -446,6 +472,7 @@ jobs:
           echo "key_source=$SOURCE" >> "$GITHUB_OUTPUT"
 
       - name: Run autofix with Claude Code
+        if: steps.lock.outputs.go == 'true'
         id: claude
         env:
           # Trusted pre-commit hook (written by the restore step, outside the

@@ -115,6 +115,45 @@ def test_standalone_lock_is_on_the_agent_job_and_never_cancels() -> None:
     assert "needs.preflight.outputs.pr_number" in lock["group"]
 
 
+LOCK_CHECK = "Re-check the PR head after acquiring the lock"
+GO = "steps.lock.outputs.go == 'true'"
+
+
+def test_standalone_rechecks_the_head_before_any_queued_work() -> None:
+    """Codex review, PR #251: preflight runs before the job waits for the lock,
+    so a queued run must re-check the head before checking out or dispatching."""
+    steps = yaml.safe_load(WORKFLOWS["standalone"].read_text(encoding="utf-8"))["jobs"]["autofix"]["steps"]
+    assert steps[0]["name"] == LOCK_CHECK and steps[0]["id"] == "lock"
+    assert steps[0]["env"]["VALIDATED"] == "${{ needs.preflight.outputs.head_sha }}"
+    agent = next(i for i, s in enumerate(steps) if str(s.get("uses", "")).startswith(ACTION))
+    for step in steps[1:agent + 1]:
+        assert step.get("if") == GO, step.get("name") or step.get("uses")
+    for step in steps[agent + 1:]:
+        assert "steps.claude.outcome" in step["if"]
+
+
+@pytest.mark.parametrize(("current", "validated", "gh_ok", "go"), [
+    ("abc123", "abc123", True, "true"),
+    ("def456", "abc123", True, "false"),   # an earlier autofix pushed while queued
+    ("", "abc123", False, "false"),        # unreadable head fails closed
+    ("abc123", "", True, "false"),         # preflight never validated a SHA
+])
+def test_lock_check_skips_unless_the_validated_head_is_current(
+        tmp_path: Path, current: str, validated: str, gh_ok: bool, go: str) -> None:
+    step = next(s for s in _steps("standalone") if s.get("name") == LOCK_CHECK)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    gh = bin_dir / "gh"
+    gh.write_text("#!/usr/bin/env bash\n" + (f"echo {current}\n" if gh_ok else "exit 1\n"))
+    gh.chmod(0o755)
+    out = tmp_path / "out"
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "GITHUB_OUTPUT": str(out),
+           "GH_TOKEN": "x", "REPOSITORY": "o/r", "PR_NUM": "1", "VALIDATED": validated}
+    result = subprocess.run(["bash", "-c", step["run"]], env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert out.read_text().strip() == f"go={go}"
+
+
 def test_documented_caller_never_cancels_an_agent_in_progress() -> None:
     doc = (ROOT / ".github/workflows/REUSABLE-WORKFLOWS.md").read_text(encoding="utf-8")
     blocks = [b.split("```", 1)[0] for b in doc.split("```yaml\n")[1:]]
