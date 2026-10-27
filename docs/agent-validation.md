@@ -1,4 +1,4 @@
-## Validate candidates in the coding session
+# Validate candidates in the coding session
 
 Before the first edit, inspect the integration branch, owning instructions,
 guarded paths, generators and affected callers. Keep required CI names,
@@ -7,7 +7,7 @@ fork isolation, secret scanning and production approvals intact.
 Before pushing a candidate, run:
 
 ```bash
-python3 scripts/agent-check.py --provision --provider codex
+python3 scripts/agent-check.py --provision --provider "${AGENT_PROVIDER:?Set AGENT_PROVIDER to your actual coding provider}"
 ```
 
 Use your actual provider (`claude`, `cursor`, `codex` or `devin`). The
@@ -31,7 +31,13 @@ than repeated code pushes. Measure total agent, workspace and CI cost.
 Reusable results also bind the effective execution environment without recording
 its values. Keep the ignored private cache key and dependency state local; do
 not upload them. Candidates containing symlinks still run their checks, but
-cannot reuse or save a cached PASS based only on Git's link text.
+cannot reuse or save a cached PASS based only on Git's link text. Tracked files
+with Git filter attributes block local validation before selection or cache reuse;
+filtered working files require a raw-input adapter to validate their actual bytes.
+
+Tracked working bytes and executable state bind both check selection and cached
+results directly. Git line-ending/encoding conversions and index visibility flags
+cannot hide a changed input. Gitlinks, like symlinks, cannot reuse a cached PASS.
 
 Install only on an isolated task branch. The installer preserves the owner's
 integration `base` and optional `protected_branches`, including the current
