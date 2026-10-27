@@ -50,7 +50,8 @@ def test_pack_pins_are_grouped_into_one_reviewed_pr() -> None:
     index, rule = next(
         (i, r) for i, r in enumerate(rules) if r.get("groupName") == "manolii-ai-starter-pack"
     )
-    # Later packageRules win: the group must come after the digest automerge rule.
+    # Later packageRules win: the group must come after the digest automerge
+    # rule (the feature-control SDK rule stays last; see its own test).
     automerge_index = next(i for i, r in enumerate(rules) if r.get("automerge") is True)
     assert index > automerge_index
     assert rule["automerge"] is False and rule["platformAutomerge"] is False
@@ -60,7 +61,7 @@ def test_pack_pins_are_grouped_into_one_reviewed_pr() -> None:
     name = re.compile(body, re.IGNORECASE if "i" in flags else 0)
     for dep in ("Manolii-org/ai-starter-pack", "manolii-org/ai-starter-pack"):
         assert name.search(dep)
-    assert not name.search("Manolii-org/ai-starter-pack-fork")
+    assert not name.search("example/ai-starter-pack")
 
     allowed = re.compile(rule["allowedVersions"].strip("/"))
     for tag in ("v1.23.0", "1.23.0", "v2.0.0"):
