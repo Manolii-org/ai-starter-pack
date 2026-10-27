@@ -26,7 +26,7 @@ features:
   mesh_telemetry: false     # Agent-mesh contract telemetry (mesh-contract.yaml.template). Requires MESH_ENABLED wiring.
   codex_review: true        # Codex PR review + security diff scan workflows (Doppler master/prd_codex). Default false under isolation_profile=strict.
 
-isolation_profile: standard # standard | strict — strict: hooks-only settings.json, no Manolii-hosted service coupling
+isolation_profile: standard # standard | strict — strict: hooks-only settings.json, no maintainer-hosted service coupling
 
 install_mode: unbranded     # branded | unbranded
 

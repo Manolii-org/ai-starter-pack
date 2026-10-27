@@ -88,21 +88,21 @@ cost_profile:
 
 # ── Isolation profile (D-c / D-f: opt-in in v1) ────────────────────────────
 # 'standard' renders exactly what earlier releases rendered. 'strict' is for
-# tenants that cannot use Manolii-hosted services (LiteLLM proxy, Knowledge
-# Layer, Langfuse, Manolii Doppler, mesh telemetry): hooks-only
+# tenants that cannot use maintainer-hosted services (LiteLLM proxy, Knowledge
+# Layer, Langfuse, the maintainer's Doppler, mesh telemetry): hooks-only
 # .claude/settings.json (no bypassPermissions, no
 # skipDangerousModePermissionPrompt, no model/env/telemetry keys) and none of
-# the Manolii-coupled CI callers or LiteLLM deploy/publish files.
+# the maintainer-coupled CI callers or LiteLLM deploy/publish files.
 isolation_profile:
   type: str
-  help: "'standard' (default, unchanged) or 'strict' (no Manolii-hosted service coupling, hooks-only settings.json)"
+  help: "'standard' (default, unchanged) or 'strict' (no maintainer-hosted service coupling, hooks-only settings.json)"
   choices:
     - standard
     - strict
   default: standard
   validator: >-
     {% if isolation_profile == 'strict' and (oss_routing or kl_integration or langfuse_telemetry or mesh_telemetry) %}
-    isolation_profile=strict excludes Manolii-hosted services: set oss_routing, kl_integration, langfuse_telemetry and mesh_telemetry to false
+    isolation_profile=strict excludes maintainer-hosted services: set oss_routing, kl_integration, langfuse_telemetry and mesh_telemetry to false
     {% endif %}
 
 codex_review:
@@ -330,7 +330,7 @@ _exclude:
   - "{% if cost_profile == 'lean' %}.github/workflows/monitor-litellm.yml{% endif %}"
   - "{% if not codex_review %}.github/workflows/codex-pr-review.yml{% endif %}"
   - "{% if not codex_review %}.github/workflows/codex-security-diff-scan.yml{% endif %}"
-  # isolation_profile=strict: Manolii Doppler / LiteLLM / fleet-coupled files.
+  # isolation_profile=strict: the maintainer's Doppler / LiteLLM / fleet-coupled files.
   - "{% if isolation_profile == 'strict' %}.github/workflows/setup-env-secret.yml{% endif %}"
   - "{% if isolation_profile == 'strict' %}.github/workflows/dependabot-manual-automerge.yml{% endif %}"
   - "{% if isolation_profile == 'strict' %}.github/workflows/monitor-litellm.yml{% endif %}"
