@@ -123,7 +123,7 @@ env:
 | **integration-admission-reusable** | `config_path`, `base_sha`, `head_sha`, `installation_id`, `accepted_producer`, `pack_ref=v1`, `evidence_bundle_json=[]`, `runs_on`, `shadow=true`, `timeout_minutes=15` | none |
 | **pre-production-tier-reusable** | `gates` (JSON, required), `budget_minutes=45`, `job_timeout_minutes=60`, `runs_on`, `max_parallel=4`, `environment`, `checkout_fetch_depth=0`, `open_issue_on_failure=false` | `GATE_SECRETS` (optional) |
 | **tier-gate-summary-reusable** | `gate_name` (required), `applies` (required), `tier=fast`, `command`, `skip_reason`, `setup_command`, `runs_on`, `working_directory`, `timeout_minutes=10`, `checkout_fetch_depth=0` | none |
-| **coverage-ratchet-reusable** | `runs_on`, `node_version`, `python_version`, `setup_command`, `install_command`, `coverage_command` (req), `metric_command` (req), `baseline_file`, `mode=enforce`, `require_baseline=false`, `auto_commit_baseline=false`, `cache_path`, `cache_key`, `timeout_minutes=30`, `job_timeout_minutes=65` (validated ≥ timeout+25, +35 with `setup_command`) | `GH_PAT` (optional, for baseline auto-commit) |
+| **coverage-ratchet-reusable** | `runs_on`, `node_version`, `python_version`, `setup_command`, `install_command`, `coverage_command` (req), `metric_command` (req), `baseline_file`, `mode=enforce`, `require_baseline=false`, `fail_on_inert=false`, `auto_commit_baseline=false`, `cache_path`, `cache_key`, `timeout_minutes=30`, `job_timeout_minutes=65` (validated ≥ timeout+25, +35 with `setup_command`) | `GH_PAT` (optional, for baseline auto-commit) |
 | **restore-drill-reusable** | `resource_group`, `sql_server`, `source_database` (req), `sanity_queries`, `db_auth=sql-auth`, `sqlcmd_version`, `timeout_minutes=45` | `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `DRILL_SQL_USER`, `DRILL_SQL_PASSWORD` |
 
 **Notes:**
@@ -721,7 +721,8 @@ warn in `report` mode.
 cannot fail`, prints the measured number to seed with, and sets the workflow
 output `activation=inert` (`active` once a baseline is compared). A required
 check bound to an inert ratchet can never fail. Set `require_baseline: true`
-(opt-in in v1, planned default in v2) to fail instead; a default-branch push
+(or its activation-contract name `fail_on_inert: true`; opt-in in v1, planned
+default in v2) to fail instead; a default-branch push
 that seeds the baseline via `auto_commit_baseline` is exempt (and that run
 fails if the seeding step cannot write the baseline).
 
