@@ -23,3 +23,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: echo "activation=${{ needs.autofix.outputs.activation }} result=${{ needs.autofix.result }}"
+      - env:
+          EV: ${{ github.event_name }}
+          ACTOR: ${{ github.actor }}
+          ASSOC: ${{ github.event.review.author_association }}
+          STATE: ${{ github.event.review.state }}
+        run: echo "event=$EV actor=$ACTOR review.author_association=$ASSOC state=$STATE"
