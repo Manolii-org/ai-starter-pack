@@ -14,7 +14,9 @@
 //   node scripts/qa/ui-smoke.mjs [--config config/qa.json] [--base-url URL]
 //        [--all | --routes /a,/b] [--profile default|launch] [changed paths...]
 //
-// Exit: 0 passed, 1 failed (or unavailable with on_unavailable=fail), 2 config error.
+// Exit: 0 passed, 1 failed, 2 config error, 3 unavailable (no browser or
+// server; with on_unavailable=skip it is 0). The finalise gate reads 3 as
+// incomplete validation, never as a source failure; CI fails on it.
 // Artifacts (screenshots, ARIA snapshots, report.json) go to the ignored
 // .ai/agent-checks/ui-smoke/ so they never alter the validated tree.
 
@@ -27,6 +29,10 @@ import { fileURLToPath } from 'node:url';
 const ARTIFACT_DIR = '.ai/agent-checks/ui-smoke';
 const MAX_ISSUES_PER_PAGE = 5;
 const ISSUE_CHARS = 200;
+const UNAVAILABLE_EXIT = 3;
+// A Next.js dev server compiles a route on first request; a slow answer is
+// still an answer, so the probe waits long enough for that compile.
+const PROBE_TIMEOUT_MS = 20000;
 const DEFAULTS = {
   base_url: 'http://localhost:3000',
   start_command: null,
@@ -62,6 +68,19 @@ const NETWORKS = {
 
 class ConfigError extends Error {}
 class Unavailable extends Error {}
+
+const WATCHDOG = `
+const [parent, server] = process.argv.slice(1).map(Number);
+const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+const timer = setInterval(() => {
+  if (!alive(server)) { clearInterval(timer); return; }
+  if (!alive(parent)) {
+    try { process.kill(-server, 'SIGTERM'); } catch {}
+    setTimeout(() => { try { process.kill(-server, 'SIGKILL'); } catch {} process.exit(0); }, 1000);
+    clearInterval(timer);
+  }
+}, 500);
+`;
 
 function parseArgs(argv) {
   const args = { config: 'config/qa.json', baseUrl: null, all: false, routes: null, profile: 'default', changed: [] };
@@ -127,7 +146,7 @@ export function globToRegExp(glob) {
   return new RegExp(`^${out}$`); // nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp
 }
 
-const NEXT_APP = /^(?:.*\/)?(?:src\/)?app\/(.*?)(?:^|\/)?(page|layout|template|loading|error|not-found)\.(?:[cm]?[jt]sx?|mdx)$/;
+const NEXT_APP = /^(?:.*\/)?(?:src\/)?app\/((?:[^/]+\/)*)(page|layout|template|loading|error|not-found)\.(?:[cm]?[jt]sx?|mdx)$/;
 const NEXT_PAGES = /^(?:.*\/)?(?:src\/)?pages\/(.*)\.(?:[cm]?[jt]sx?|mdx)$/;
 
 // Map a Next.js file to the route it renders, or null when it is not a
@@ -136,9 +155,10 @@ export function inferNextRoute(file, samples = {}) {
   let segments;
   const app = file.match(NEXT_APP);
   if (app) {
-    segments = app[1].split('/').filter(Boolean)
-      .filter((s) => !(s.startsWith('(') && s.endsWith(')')) && !s.startsWith('@'));
-    if (segments.some((s) => s.startsWith('(.'))) return null; // intercepting route
+    segments = app[1].split('/').filter(Boolean);
+    // `_private` folders are not routable; `(.)` marks an intercepting route.
+    if (segments.some((s) => s.startsWith('_') || s.startsWith('(.'))) return null;
+    segments = segments.filter((s) => !(s.startsWith('(') && s.endsWith(')')) && !s.startsWith('@'));
   } else {
     const pages = file.match(NEXT_PAGES);
     if (!pages) return null;
@@ -203,7 +223,7 @@ function requireFrom(root, names) {
 
 async function reachable(url) {
   try {
-    await fetch(url, { signal: AbortSignal.timeout(3000), redirect: 'manual' });
+    await fetch(url, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS), redirect: 'manual' });
     return true;
   } catch {
     return false;
@@ -220,12 +240,22 @@ async function ensureServer(root, config, baseUrl) {
   let exited = false;
   child.on('exit', () => { exited = true; });
   child.on('error', () => { exited = true; });
+  // Watchdog: if this process dies uncatchably (SIGKILL from a recipe
+  // timeout), a detached sibling still stops the server's process group.
+  if (child.pid) {
+    spawn(process.execPath, ['-e', WATCHDOG, String(process.pid), String(child.pid)],
+      { detached: true, stdio: 'ignore' }).unref();
+  }
+  const killGroup = (signal) => { try { process.kill(-child.pid, signal); } catch { /* already gone */ } };
   const stop = async () => {
     if (exited) return;
-    try { process.kill(-child.pid, 'SIGTERM'); } catch { /* already gone */ }
+    killGroup('SIGTERM');
     await new Promise((resolve) => setTimeout(resolve, 500));
-    try { process.kill(-child.pid, 'SIGKILL'); } catch { /* already gone */ }
+    killGroup('SIGKILL');
   };
+  for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
+    process.once(signal, () => { killGroup('SIGTERM'); setTimeout(() => { killGroup('SIGKILL'); process.exit(130); }, 300); });
+  }
   const deadline = Date.now() + config.ready_timeout_seconds * 1000;
   while (Date.now() < deadline) {
     if (exited) throw new Unavailable(`start_command exited before ${baseUrl} was reachable`);
@@ -366,7 +396,7 @@ async function main() {
     writeReport(root, report);
     const verdict = config.on_unavailable === 'skip' ? 'UI-SMOKE-INCOMPLETE' : 'UI-SMOKE-UNAVAILABLE';
     console.log(`${verdict}: ${reason}`);
-    return config.on_unavailable === 'skip' ? 0 : 1;
+    return config.on_unavailable === 'skip' ? 0 : UNAVAILABLE_EXIT;
   };
 
   const pw = requireFrom(root, ['playwright', '@playwright/test', 'playwright-core']);
@@ -421,8 +451,25 @@ async function main() {
         // Never extraHTTPHeaders: that would hand a bypass secret to every
         // third-party origin the page loads (CDN, analytics, identity).
         const origin = new URL(baseUrl).origin;
-        await context.route((url) => url.origin === origin,
-          (route) => route.continue({ headers: { ...route.request().headers(), ...headers } }));
+        // fetch + fulfill with maxRedirects 0 (not route.continue): continue()
+        // keeps the injected headers on redirect hops, so a 302 to an SSO or
+        // CDN origin would receive the secret. Each hop re-enters this
+        // predicate instead, and only same-origin hops get the headers.
+        // A fulfilled document loses its address space, and Chromium's
+        // Private Network Access then blocks its localhost subresources, so
+        // a document is only fulfilled when it is a redirect. Otherwise the
+        // browser's own request goes out (one extra same-origin GET).
+        await context.route((url) => url.origin === origin, async (route) => {
+          const request = route.request();
+          const merged = { ...request.headers(), ...headers };
+          const response = await route.fetch({ headers: merged, maxRedirects: 0 });
+          const redirect = response.status() >= 300 && response.status() < 400;
+          if (request.isNavigationRequest() && !redirect && request.method() === 'GET') {
+            await route.continue({ headers: merged });
+          } else {
+            await route.fulfill({ response });
+          }
+        });
       }
       const result = await checkPage(context, { ...item, baseUrl, config, axeSource, outDir });
       await context.close().catch(() => {});
