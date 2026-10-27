@@ -809,6 +809,18 @@ def test_strict_excludes_manolii_coupled_files(strict_render, default_render):
     assert components["instance"]["isolation_profile"] == "strict"
 
 
+def test_strict_readme_does_not_point_at_unrendered_proxy_assets(strict_render, default_render):
+    """Codex review, PR #238: strict renders must not instruct users to run or
+    read the LiteLLM files the strict profile excludes."""
+    strict = (strict_render / "README-STARTER-PACK.md").read_text()
+    for ref in ("setup-litellm.sh", "litellm-product/README.md", "deploy/litellm-proxy",
+                "config/litellm-product-profile.example.json"):
+        assert ref not in strict, ref
+    assert "isolation_profile=strict" in strict
+    default = (default_render / "README-STARTER-PACK.md").read_text()
+    assert "bash scripts/setup-litellm.sh" in default and "deploy/litellm-proxy/" in default
+
+
 def test_standard_keeps_codex_review_unless_opted_out(default_render, tmp_path):
     codex = {".github/workflows/codex-pr-review.yml", ".github/workflows/codex-security-diff-scan.yml"}
     assert codex <= file_set(default_render)
