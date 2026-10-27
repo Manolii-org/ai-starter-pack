@@ -1,6 +1,6 @@
 # Review — diff 9fd6a99f41eddfb8
 
-Task: email-capture-hermetic-cpdcheck
+Task: email-capture-hermetic-consumer
 verdict: clear
 
 ## Scope
