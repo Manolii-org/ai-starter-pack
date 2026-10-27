@@ -1,6 +1,6 @@
 # Agent release experience
 
-**Contract version:** 1.0.0. **Status:** target contract for qualified adoption.
+**Contract version:** 1.1.0. **Status:** target contract with an executable qualification validator; consumer adoption requires evidence.
 This document does not change a repository's installed approval gates or authorize
 production execution. Its owning release contract and platform controls apply.
 
@@ -45,6 +45,41 @@ alternate dispatches, scripts, schema auto-apply and workflow changes. Merging
 must not itself bypass the boundary. Do not remove reviewers from a shared
 environment as a shortcut. Keep source-policy changes reviewed, protected and
 evaluated from trusted code.
+
+## Schema preparation, behavior and activation
+
+Classify the actual database effects. Additive DDL may still change behavior
+through a function, trigger, seed, default, scheduler or feature flag. Review
+and bind every pending migration; unclassified changes hold the release.
+Prepare compatible dormant schema before dependent apps, without an extra
+approval. Enable features only as explicitly named in the approved release,
+after exact dependent components are ready and their behavior is verified.
+An all-pending applier must not mix activation SQL into preparation. Split the
+authored change safely; never rewrite historical migrations or skip dependencies.
+
+Check existing behavior as well as newly activated features against the deployed
+web/worker source and every protected installed-client cohort. Exercise affected
+notification links, badge/count semantics, writes, errors, jobs and queued work;
+schema/API/decoder checks alone are insufficient. Keep old clients supported by
+default. A minimum-version or targeted policy needs executable enforcement tests,
+including mixed installations and missing/stale/unknown client versions. A build
+being available, signed, uploaded or store-approved never proves user adoption.
+
+The portable implementation is
+`.github/actions/qualify-coordinated-release/validate.py` and its composite action.
+It binds the release plan, source/artifact/migration/policy/recovery identities,
+fresh executable evidence, supported cohorts and activation readiness. It holds
+missing/failed/skipped coverage and rejects activation during an all-pending
+preparation phase. Qualification is not approval: the trusted provider adapter
+authenticates evidence, observes current state and confines mutations to the
+existing single protected production decision. See the action README for its
+versioned JSON contract and executable examples/tests.
+
+Keep mobile delivery asynchronous: verify the backend before upload, keep native
+features dormant or safely targeted while users update, and recheck prerequisites
+before activation. A failed app promote/upload leaves already-committed database
+behavior live; preserve data and fix forward. A later smoke failure cannot undo
+already delivered notifications or external side effects.
 
 ## Ownership through completion
 

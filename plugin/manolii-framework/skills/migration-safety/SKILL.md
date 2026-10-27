@@ -1,7 +1,7 @@
 ---
 name: migration-safety
-version: 2.0.0
-description: "Checks SQL migration diffs for NOT NULL without DEFAULT, missing IF EXISTS guards, irreversible DDL without down-migration, and missing transaction wrappers."
+version: 2.1.0
+description: "Checks SQL migration safety, runtime behavior changes, activation sequencing and installed-client compatibility."
 type: skill
 disable-model-invocation: true  # slash/CI-invoked checklist — removed from model-facing catalogue to cut per-session tokens (2026-07-06); delete this line to restore auto-invocation
 model: haiku
@@ -42,6 +42,10 @@ Narrow specialist for `migrations/**/*.sql` diffs. Invoked by `pr-classifier` wh
 3. **Non-reversible operations without a down-migration in the same PR** — `DROP TABLE`, `DROP COLUMN`, or `TRUNCATE` in an `up` migration with no corresponding `down` migration file in the PR. Flag as ERROR if no `down`/`rollback` file is present in the changed file list.
 
 4. **Missing transaction wrapper** — Migration SQL that contains multiple DML/DDL statements but no `BEGIN`/`COMMIT` (or `START TRANSACTION`/`COMMIT`) wrapper. Without a transaction, a mid-migration failure leaves the database in a partially-applied state.
+
+5. **Feature activation disguised as preparation** — inspect DML, function/trigger replacement, seeds, worker/job scheduling and configuration defaults. Classify inert schema preparation, behavior change and feature activation separately. A preserved signature does not prove preserved behavior. Flag missing explicit release intent, or app-dependent behavior enabled before the dependent artifact is ready. Compatible dormant schema may precede app deployment under the same production decision.
+
+6. **Installed-client behavior omitted** — require executable checks for every supported installed client and deployed web/worker version, including routes, badges/counts, notifications, writes, errors and queued work affected by the change. An uploaded/released mobile version does not prove adoption. Targeting/minimum-version policies need verified enforcement and safe handling of unknown/stale versions. Do not infer support retirement from release availability. See `docs/agent-release-experience.md` and the pack's `qualify-coordinated-release` action; adapter evidence and checks remain entity-local.
 
 ## Output Schema
 

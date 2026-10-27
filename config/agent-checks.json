@@ -43,6 +43,12 @@
   ],
   "checks": [
     {
+      "id": "coordinated-release-contract",
+      "paths": [".github/actions/qualify-coordinated-release/*", "scripts/tests/test_coordinated_release.py"],
+      "tools": ["python"],
+      "commands": [["python3", "-m", "unittest", "discover", "-s", "scripts/tests", "-p", "test_coordinated_release.py", "-q"]]
+    },
+    {
       "id": "agent-validation-contract",
       "paths": [
         "scripts/agent-check.py",

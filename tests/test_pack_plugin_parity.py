@@ -101,3 +101,14 @@ def test_review_evidence_and_companion_ship_without_drift():
         assert (root / prefix / "scripts/ci/review_evidence.py").read_bytes() == (root / "scripts/ci/review_evidence.py").read_bytes()
         assert (root / prefix / "skills/autonomy-follow-through/review-evidence.md").read_bytes() == (root / ".claude/skills/autonomy-follow-through/review-evidence.md").read_bytes()
         assert (root / prefix / "skills/autonomy-follow-through/SKILL.md").read_bytes() == (root / ".claude/skills/autonomy-follow-through/SKILL.md").read_bytes()
+
+
+def test_release_guidance_and_contract_ship_together_without_drift():
+    for prefix in ("plugin/manolii-framework", "registry/platform/framework"):
+        for relative in (
+            "docs/agent-release-experience.md",
+            ".github/actions/qualify-coordinated-release/action.yml",
+            ".github/actions/qualify-coordinated-release/README.md",
+            ".github/actions/qualify-coordinated-release/validate.py",
+        ):
+            assert (ROOT / prefix / relative).read_bytes() == (ROOT / relative).read_bytes()
