@@ -13,6 +13,96 @@
   `.github/workflows/`, `.github/actions/` and `actions/` must be a 40-hex SHA
   (Docker refs need a `sha256` digest); only local `./` paths are exempt.
 
+### Devin meta-plugin
+
+- `registry/platform/om` moved from `requiredPlugins` to `optionalPlugins` in
+  the root `.devin-plugin/plugin.json`, so tenants without a Knowledge Layer
+  backend can install the baseline (`registry/platform/framework`). **Behaviour
+  change for KL tenants:** `om` is no longer auto-installed by the meta-plugin —
+  add its `git-subdir` entry to your org manifest's `requiredPlugins`
+  (`docs/registry.md` § Install paths per surface).
+
+### Coverage ratchet honesty
+
+- **`coverage-ratchet-reusable` no longer passes silently without a
+  baseline.** An absent `baseline_file` now emits
+  `::warning::coverage-ratchet INERT: no baseline at <path>; this required
+  check cannot fail` and sets the new workflow output `activation=inert`
+  (`active` once a baseline is compared). The run still passes by default.
+- New opt-in input `require_baseline` (boolean, default `false`): fail when the
+  baseline is absent, in either mode. A default-branch push that seeds the
+  baseline via `auto_commit_baseline` is exempt, and fails if it cannot seed
+  it.
+- Docs: auto-commit needs a write-capable `GH_PAT` (caller `permissions:`
+  cannot raise the reusable's `contents: read`); the check name is
+  `<caller job name, or job id when unnamed> / coverage`.
+- **Planned for v2:** `require_baseline` defaults to `true`.
+
+### Behaviour change — Autofix now acts
+
+- **`pr-autofix-loop` (reusable and standalone) was a silent no-op** since the
+  claude-code-action v1 pin: the step passed v0 inputs (`direct_prompt`,
+  `model`, `allowed_tools`), the action saw no prompt, logged `No trigger
+  found` and the job went green. Both workflows now pass `prompt` and
+  `claude_args` (`--allowedTools`, plus `--model` when the reusable's `model`
+  input is set). **After upgrading, Autofix WILL push `[autofix]` commits and
+  spend model tokens.** Callers that use `secrets.GITHUB_TOKEN` instead of
+  `GH_PAT` will not re-trigger PR checks after an autofix push. Standalone
+  instances receive the fix on `copier update`.
+- A dispatched agent step that produces no execution file now **fails the
+  job** instead of passing. Skip paths (loop-break, budget, opt-out label,
+  bot actors) stay green; actors without write access and bot actors other
+  than the `github-actions[bot]` review relay are now skipped before dispatch
+  (the action would otherwise fail the job for them). The relay is allowed via
+  `allowed_bots: github-actions`.
+
+### Security
+
+- **#169 hardening ported to `pr-autofix-loop-reusable`** (and extended in
+  both workflows): the checkout is pinned to the validated head SHA, the head ref passes `git check-ref-format`
+  before `git checkout -B`, and the instruction surface (`.claude/`,
+  `.mcp.json`, `.claude.json`, `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`,
+  plus nested copies on either side) is restored from the PR base SHA before
+  the agent runs (`.gitmodules`, `.ripgreprc`, `.husky/` too, matching the
+  action's own list). A trusted pre-commit hook outside the checkout (wired via
+  `GIT_CONFIG_*` env, so a PR's husky `core.hooksPath` cannot displace it)
+  refuses agent commits that touch those paths, replacing the repository's own
+  git hooks for agent commits; a final step fails the job if an `[autofix]`
+  commit touched them anyway. Consumers whose PRs edit `CLAUDE.md` will see
+  Autofix use the base copy. The prompt now forbids force-pushes. The prompt's capped,
+  untrusted CI-log rule now matches the standalone. The restore body is
+  byte-identical in both workflows (`tests/test_autofix_hardening.py`).
+
+### Tag namespaces
+
+- Component releases now use prefixed tags: `email-capture-vX.Y.Z`,
+  `feature-controls-vX.Y.Z` (plus `-alpha|beta|rc.N`). `release-tag.yml`
+  accepts them, never moves `v1` for them, and takes an optional `notes`
+  input for the annotated tag message. Existing bare `v0.x` tags are kept.
+- `release-tag.yml` now validates the whole input string (a multi-line value
+  used to pass the per-line `grep` check).
+- Docs: tag namespaces (README), email-capture allocation ownership for lanes
+  that split `allocate`/`await` across jobs (`docs/email-capture.md`);
+  `packages/feature-controls` is marked unreleased.
+
+### Renovate preset
+
+- New `packageRules` entry groups every `Manolii-org/ai-starter-pack`
+  dependency (SHA pins with `# vX.Y.Z` comments, preset pin,
+  `.starter-pack-source`) into one `manolii-ai-starter-pack` PR, never
+  automerged; `allowedVersions` restricts lookups to plain `vX.Y.Z` release
+  tags so component tags (`email-capture-v*`, `feature-controls-v*`), bare
+  `v0.x` and the `v1` alias are never proposed.
+
+### Public-repo hygiene
+
+- `docs/email-capture-journeys.md` no longer carries any consumer's routes,
+  endpoints, mail paths or repository names; it now holds the lane model, a
+  generic example journey table to adapt in the consumer's own repository, the
+  shared playbook patterns, and the allocation-registry rule (`await` and
+  `release` must run against the registry `allocate` wrote).
+  Consumer-specific review notes under `.claude/forge/reviews/` are redacted.
+
 ### Isolation-safe render
 
 - New Copier question **`isolation_profile`** (`standard` | `strict`, default
