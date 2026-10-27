@@ -32,13 +32,15 @@ def _call(path: Path) -> dict | None:
 
 
 def _default(value) -> str:
+    """Render a default in full so `--check` sees every change to it.
+
+    Newlines become a literal `\\n` and pipes are escaped, so a multi-line or
+    piped default stays on one Markdown table row without changing meaning.
+    """
     if isinstance(value, bool):
         return "true" if value else "false"
-    text = str(value)
-    if "${{" in text:
-        return "(expr)"
-    text = " ".join(text.split())
-    return text if len(text) <= 40 else text[:37] + "..."
+    text = str(value).rstrip("\n")
+    return text.replace("\\", "\\\\").replace("\n", "\\n").replace("|", "\\|")
 
 
 def _inputs(call: dict) -> str:

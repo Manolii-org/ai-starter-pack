@@ -4,7 +4,7 @@
 >
 > If this conflicts with another surface, the lower-numbered layer wins. See `.ai/knowledge-map.md` for the full hierarchy.
 >
-> **Scope in this pack:** this document was carried over from the Manolii orchestrator repository. Paths listed under [Paths outside this pack](#paths-outside-this-pack) are not shipped here; treat them as references to that ecosystem, not files to look for in a rendered instance.
+> **Scope in this pack:** this document was carried over from the orchestrator repository this pack was extracted from. Paths listed under [Paths outside this pack](#paths-outside-this-pack) are not shipped here; treat them as references to that ecosystem, not files to look for in a rendered instance.
 
 
 This document is the **shared policy contract** for AI coding tools in this repo
@@ -85,6 +85,7 @@ Referenced above but not shipped by the pack (`tests/test_doc_path_references.py
 
 - Orchestrator repository only:
   - `.ai/cursor-session-stub.md`
+  - `.cursor/rules/claude-md-parity.mdc`
   - `.ai/knowledge-map.md`
   - `.devin/hooks.v1.json`
   - `docs/agent-context-architecture.md`

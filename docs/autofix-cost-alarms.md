@@ -46,9 +46,13 @@ jobs:
       LITELLM_MASTER_KEY: ${{ secrets.OPENROUTER_API_KEY }}  # the endpoint's key
 ```
 
-Data boundary: in proxy mode the PR diff, review comments and CI log excerpts
-the agent reads are sent to that endpoint (and its upstream providers). Check
-the endpoint's retention and region policy before enabling it.
+Data boundary: in proxy mode, everything the agent puts into a model request
+goes to that endpoint. At minimum that includes the PR diff and body, review
+comments, CI log excerpts, repository files the agent reads, GitHub metadata,
+and the output of commands and tools it runs. Whether the endpoint forwards
+requests to upstream providers, and which ones, depends on the endpoint and its
+routing settings. Check its retention, region and provider-routing policy
+before enabling it.
 
 ## Tenants without LiteLLM / Langfuse
 

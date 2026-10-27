@@ -14,7 +14,12 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCS = ("docs/ai-runtime-policy.md", "docs/model-plane-boundary.md")
-PATH_RE = re.compile(r"`([A-Za-z0-9_./-]+\.(?:py|md|ya?ml|json|sh|ts|toml))`|\]\(([A-Za-z0-9_./-]+)\)")
+# A backticked path may carry a line suffix (`scripts/x.py:18,60`); the suffix is
+# not part of the path.
+PATH_RE = re.compile(
+    r"`([A-Za-z0-9_./-]+\.(?:py|md|mdc|ya?ml|json|sh|ts|toml))(?::[0-9][0-9,-]*)?`"
+    r"|\]\(([A-Za-z0-9_./-]+)\)"
+)
 
 
 def _exists(doc: Path, ref: str) -> bool:
