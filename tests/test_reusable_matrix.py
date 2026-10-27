@@ -41,3 +41,19 @@ def test_defaults_are_rendered_in_full() -> None:
     assert render("${{ github.sha }}") == "${{ github.sha }}"
     assert render(False) == "false"
     assert render("one\ntwo") != render("one two")
+
+
+def test_every_input_attribute_reaches_the_matrix() -> None:
+    """Required inputs keep their defaults, empty defaults are visible, and a
+    non-string type is named (Codex review, PR #245): a change to any of them
+    must change the rendered row."""
+    entry = _module()._input
+    assert entry("a", {"required": True, "default": "x"}) == "`a=x` (req)"
+    assert entry("a", {"required": True}) == "`a` (req)"
+    assert entry("a", {"default": ""}) == "`a=''`"
+    assert entry("a", {}) == "`a`"
+    assert entry("a", {"type": "boolean", "default": False}) == "`a=false: boolean`"
+    assert entry("a", {"type": "number", "default": 5}) == "`a=5: number`"
+    variants = [{}, {"default": ""}, {"default": "x"}, {"required": True},
+                {"required": True, "default": "x"}, {"type": "boolean"}, {"type": "number"}]
+    assert len({entry("a", v) for v in variants}) == len(variants)

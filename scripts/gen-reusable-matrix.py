@@ -43,16 +43,26 @@ def _default(value) -> str:
     return text.replace("\\", "\\\\").replace("\n", "\\n").replace("|", "\\|")
 
 
+def _input(name: str, spec: dict) -> str:
+    """One input's full contract: name, declared default, type, required.
+
+    Every attribute a caller depends on is rendered independently, so `--check`
+    sees a change to any of them: a default is shown whenever one is declared
+    (`=''` for an empty string, even on a required input); a non-string type is
+    named; `(req)` marks required inputs.
+    """
+    entry = name
+    if "default" in spec and spec["default"] is not None:
+        value = _default(spec["default"])
+        entry += f"={value}" if value else "=''"
+    if spec.get("type", "string") != "string":
+        entry += f": {spec['type']}"
+    entry = f"`{entry}`"
+    return entry + " (req)" if spec.get("required") else entry
+
+
 def _inputs(call: dict) -> str:
-    items = []
-    for name, spec in (call.get("inputs") or {}).items():
-        spec = spec or {}
-        if spec.get("required"):
-            items.append(f"`{name}` (req)")
-        elif "default" in spec and spec["default"] not in ("", None):
-            items.append(f"`{name}={_default(spec['default'])}`")
-        else:
-            items.append(f"`{name}`")
+    items = [_input(name, spec or {}) for name, spec in (call.get("inputs") or {}).items()]
     return ", ".join(items) or "none"
 
 
@@ -70,7 +80,7 @@ def render() -> str:
     rows = [
         BEGIN,
         "",
-        "| Workflow | Inputs (`name=default`, `(req)` = required) | Secrets | Outputs |",
+        "| Workflow | Inputs (`name=default: type`; type shown when not string; `(req)` = required) | Secrets | Outputs |",
         "|----------|--------|---------|---------|",
     ]
     for path in sorted(WORKFLOWS.glob("*-reusable.yml")):
