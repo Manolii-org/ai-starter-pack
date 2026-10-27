@@ -302,7 +302,7 @@ jobs:
           counts = {}
           for m in re.finditer(r"^\s*(\d+) (passed|failed|flaky|skipped|did not run|interrupted)\b", text, re.M):
               counts[m.group(2)] = counts.get(m.group(2), 0) + int(m.group(1))
-          executed = sum(counts.get(k, 0) for k in ("passed", "failed", "flaky"))
+          executed = sum(counts.get(k, 0) for k in ("passed", "failed", "flaky", "interrupted"))
           if re.search(r"^\s*No tests found", text, re.M) or (counts and executed == 0):
               activation = "inert"
           elif counts:

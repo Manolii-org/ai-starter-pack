@@ -67,6 +67,8 @@ def test_contract_shape() -> None:
     ("  1 failed\n  2 passed (3.0s)\n", "active"),
     ("  \x1b[33m4 skipped\x1b[39m\n", "inert"),
     ("  2 skipped\n  1 did not run\n", "inert"),
+    # Interrupted tests began executing (Codex review, PR #246).
+    ("  1 interrupted\n  3 did not run\n", "active"),
     ("No tests found.\n", "inert"),
     ("{\"suites\": []}\n", "unknown"),
 ])

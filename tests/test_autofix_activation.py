@@ -29,8 +29,13 @@ def test_activation_covers_the_agent_step_and_every_skip_gate() -> None:
     job = _spec()["jobs"]["autofix"]
     expr = job["outputs"]["activation"]
     steps = job["steps"]
-    assert any(s.get("id") == "claude" for s in steps)
-    assert "steps.claude.outcome == 'success' && 'active'" in expr
+    verify = next(s for s in steps if s.get("id") == "verify_exec")
+    # `active` must mean the execution file was verified, not merely that the
+    # action step exited 0 (Codex review, PR #246).
+    assert verify["if"] == "steps.claude.outcome == 'success'"
+    assert "EXECUTION_FILE" in verify["env"]
+    assert "steps.verify_exec.outcome == 'success' && 'active'" in expr
+    assert "steps.claude.outcome" not in expr
     gates = [s["id"] for s in steps if 'echo "skip=true"' in s.get("run", "")]
     assert gates, "expected skip gates in the autofix job"
     for gate in gates:

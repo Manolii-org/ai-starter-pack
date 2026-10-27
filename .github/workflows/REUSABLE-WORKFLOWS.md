@@ -623,7 +623,7 @@ Code at the PR head — tests, scripts and anything the base hooks call — stil
 runs, as it must for Autofix to run the PR's own checks.
 
 **Activation (v1.23.0+).** Workflow output `activation` is `active` when the
-agent step ran and `skipped` when a gate declined the event. It is empty when
+agent step ran and its execution file was verified, and `skipped` when a gate declined the event. It is empty when
 the job did not run (the event failed the job `if:`) or failed before the
 agent step. Autofix has no inert state, so there is no `fail_on_inert` input:
 a missing credential, or an agent step with no execution file, fails the job.

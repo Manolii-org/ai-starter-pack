@@ -61,7 +61,8 @@ Rules:
   budget, actor, stale head), not an inert gate.
 - A caller that publishes an outcome check maps `activation=inert` to the
   `INERT` state of `outcome-check-reusable` (neutral check-run, never
-  success).
+  success). A failed job is `FAILED` whatever its activation: check the job
+  result first.
 
 ```yaml
   report:
@@ -70,6 +71,6 @@ Rules:
     uses: Manolii-org/ai-starter-pack/.github/workflows/outcome-check-reusable.yml@<sha> # vX.Y.Z
     with:
       operation: coverage ratchet
-      outcome: ${{ needs.coverage.outputs.activation == 'inert' && 'INERT' || (needs.coverage.result == 'success' && 'EXECUTED' || 'FAILED') }}
+      outcome: ${{ needs.coverage.result != 'success' && 'FAILED' || (needs.coverage.outputs.activation == 'inert' && 'INERT' || 'EXECUTED') }}
       summary: activation=${{ needs.coverage.outputs.activation }}
 ```
