@@ -591,10 +591,13 @@ on:
 
 # workflow_run payloads carry no pull_request/issue context — fall through to
 # the completed run's PR number, else its run id, so completions for different
-# PRs do not share a group and cancel each other.
+# PRs do not share a group. Never cancel in progress: every PR comment
+# (review bots, deploy bots, the relay) starts this workflow, and with
+# cancel-in-progress a comment the reusable then skips would cancel an agent
+# mid-fix. Queued runs re-check the loop-break and budget gates when they start.
 concurrency:
   group: pr-autofix-${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number || format('run-{0}', github.event.workflow_run.id) || github.run_id }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -627,6 +630,10 @@ produces no `execution_file` fails the job; skips (loop-break, budget,
 `skip-ai-review`, bot actors other than the relay, actors without write
 access) stay green. `GH_PAT` is optional; pushes made with `github.token` do
 not re-trigger PR checks.
+The standalone `pr-autofix-loop.yml` passes `--model` from the optional
+repository variable `AUTOFIX_MODEL`. Set it whenever `LITELLM_PROXY_URL`
+(or `ANTHROPIC_BASE_URL`) points at a proxy: a proxy serves only the model
+ids it routes, and without one the agent requests the CLI default model.
 
 **Instruction-surface hardening.** Before the agent runs, the checkout is
 pinned to the PR head SHA and `.claude/`, `.mcp.json`, `.claude.json`,
