@@ -123,7 +123,8 @@ export function globToRegExp(glob) {
     } else if (c === '?') out += '[^/]';
     else out += c.replace(/[.+^${}()|[\]\\]/g, '\\$&');
   }
-  return new RegExp(`^${out}$`);
+  // Owner-authored glob with every regex metacharacter escaped above.
+  return new RegExp(`^${out}$`); // nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp
 }
 
 const NEXT_APP = /^(?:.*\/)?(?:src\/)?app\/(.*?)(?:^|\/)?(page|layout|template|loading|error|not-found)\.(?:[cm]?[jt]sx?|mdx)$/;
@@ -244,8 +245,10 @@ async function checkPage(context, { route, viewport, baseUrl, config, axeSource,
   const page = await context.newPage();
   const issues = [];
   const origin = new URL(baseUrl).origin;
-  const ignoredConsole = config.ignore_console.map((r) => new RegExp(r));
-  const ignoredRequests = config.ignore_requests.map((r) => new RegExp(r));
+  // Patterns come from the repository's own config/qa.json (trusted, like
+  // package.json scripts), never from page or network content.
+  const ignoredConsole = config.ignore_console.map((r) => new RegExp(r)); // nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp
+  const ignoredRequests = config.ignore_requests.map((r) => new RegExp(r)); // nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp
   const sameOrigin = (url) => { try { return new URL(url).origin === origin; } catch { return false; } };
   const requestIgnored = (url) => ignoredRequests.some((r) => r.test(url));
   page.on('pageerror', (error) => issues.push(`runtime error: ${trim(error.message)}`));
