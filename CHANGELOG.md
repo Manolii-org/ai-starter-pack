@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+### Isolation-safe render
+
+- New Copier question **`isolation_profile`** (`standard` | `strict`, default
+  `standard`). `standard` renders what earlier releases rendered. `strict`
+  renders a hooks-and-deny-only `.claude/settings.json` (no
+  `bypassPermissions`, no `skipDangerousModePermissionPrompt`, no
+  model/env/telemetry keys) and omits `codex-pr-review.yml`,
+  `codex-security-diff-scan.yml`, `setup-env-secret.yml`,
+  `dependabot-manual-automerge.yml`, `monitor-litellm.yml`,
+  `publish-litellm-product-release.yml`, `deploy/litellm-proxy/`,
+  `litellm-product/` and the LiteLLM product scripts/tests. `strict` refuses
+  `oss_routing`, `kl_integration`, `langfuse_telemetry` and `mesh_telemetry`.
+- New Copier question **`codex_review`** (bool; default `true` for `standard`,
+  `false` for `strict`) gates the two Codex workflows, which read a Doppler
+  `master/prd_codex` service token. Existing instances keep them on update.
+- **Behaviour change (standard profile):** Claude Code telemetry keys
+  (`CLAUDE_CODE_ENABLE_TELEMETRY`, `OTEL_*`, `otelHeadersHelper`) now follow
+  `langfuse_telemetry`. Instances rendered with `langfuse_telemetry=false` lose
+  them on `copier update` (previously they were always written, pointing at
+  Langfuse cloud). An instance that relied on telemetry without the flag runs
+  `copier update --data langfuse_telemetry=true`.
+- Unchanged: PR Assessment's LLM jobs still default to `["self-hosted","fly"]`
+  outside the public pack; a strict instance sets `CI_RUNNER_OVERRIDE`.
+
 ### Added
 
 - **`secret-scan-reusable` gains opt-in `npm_audit_omit_dev` input** (default
