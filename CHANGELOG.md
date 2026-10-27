@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Docs: shared rollout and runner-version practice
+
+- `docs/issue-lifecycle.md` § *Pending state as a retry queue*: use the closed-loop issue
+  as the retry queue for deferred/blocked work (edit in place, bounded quiet, loud when
+  stuck or untracked).
+- `docs/workflow-outcome-convention.md` § *Retry polls for `DEFERRED` work*: how a poll
+  may pass quietly without breaking the "deferred is not success" rule.
+- `docs/fly-runner-setup.md` § *Runner version policy*: what a fleet that disables runner
+  auto-update must provide to stay inside GitHub's 30-day window.
+
 ### Activation contract
 
 - New outcome state **`INERT`** in `outcome-check-reusable` and

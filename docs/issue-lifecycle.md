@@ -23,6 +23,26 @@ python3 scripts/issue_lifecycle.py recover \
 
 The helper embeds `issue-lifecycle:v1` plus the stable key, comments on the existing canonical issue, and closes only machine-authored, unassigned issues. A human-authored or human-assigned issue is never auto-closed.
 
+## Pending state as a retry queue
+
+A condition that is expected to clear on its own (a deployment deferred because the
+target was busy, an owner-gated block) can use its issue as the queue for automatic
+retries instead of a separate store:
+
+1. The first failing attempt opens the issue (loud: the producing run fails).
+2. A cheap scheduled poll lists the open issues for its key prefix and re-attempts only
+   those targets. With nothing open the poll costs one short discovery job and starts
+   no work job.
+3. Each attempt **edits the issue in place** (state, last attempt, first-seen date)
+   rather than commenting, so a condition that persists for days does not notify
+   anyone repeatedly.
+4. A verified recovery closes the issue, which ends the polling. A person closing it
+   early stops the polling too.
+5. Quiet is bounded: a poll that repeats an already-tracked, expected state may pass,
+   but it must fail loudly once the state has been pending longer than a stated
+   threshold, and whenever the tracking issue cannot be read or written. See
+   `docs/workflow-outcome-convention.md` § Retry polls for `DEFERRED` work.
+
 ## Ownership boundaries
 
 This helper is ecosystem framework code. Consumer repositories configure their own condition keys, labels, impact text, health check, and recovery evidence. Product decisions, production mutations, and human-gated work remain entity-owned; the framework does not infer recovery from age or a merged PR.
