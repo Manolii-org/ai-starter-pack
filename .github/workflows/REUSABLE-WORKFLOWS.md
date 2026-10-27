@@ -150,7 +150,7 @@ table.
 - `GITHUB_TOKEN` auto-injected by workflow_call (never declare).
 - Secrets are optional unless the matrix marks them `(req)` (callers gate optional ones with conditionals).
 - `node_version` / `python_version` parameterized; defaults are CI best-practice.
-- Path filtering is the caller's: put `paths` / `paths-ignore` under the caller's event, e.g. `on.pull_request.paths` or `on.push.paths-ignore` (static-review has no `paths_ignore` input).
+- Path filtering is the caller's: put `paths` / `paths-ignore` under the caller's event, e.g. `on.pull_request.paths` or `on.push.paths-ignore` (static-review has no `paths_ignore` input). Exception: `pr-assessment-reusable` callers must not path-filter, or a `converted_to_draft` event can fail to cancel an in-flight assessment.
 - Proxy mode accepts any Anthropic-compatible endpoint (e.g. an OpenRouter base URL); `LITELLM_MASTER_KEY` is just the proxy key slot — see `docs/autofix-cost-alarms.md` § Proxy mode without LiteLLM.
 - Concurrency is the **caller's** responsibility — reusables declare none (a reusable-level concurrency block resolves the caller's github.workflow and self-cancels the caller run).
 
