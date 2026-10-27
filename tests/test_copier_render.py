@@ -795,6 +795,9 @@ def test_rendered_test_suite_collects(render_fixture, request):
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider"],
         cwd=dst, capture_output=True, text=True, timeout=600,
+        # The renders are shared session fixtures: leave no __pycache__ behind
+        # for the file-set comparisons in other tests.
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
     )
     errors = [line for line in proc.stdout.splitlines() if line.startswith("ERROR ")]
     assert not errors, "\n".join(errors) or proc.stdout[-2000:]
