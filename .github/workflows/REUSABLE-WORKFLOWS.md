@@ -8,6 +8,10 @@ uses: manolii-org/ai-starter-pack/.github/workflows/<name>-reusable.yml@v1.14.0
 
 Frozen at v1 (additive=non-breaking; rename/remove/default-change=v2).
 
+Pin pack releases (`vX.Y.Z`, full commit SHA preferred). Component tags
+(`email-capture-vX.Y.Z`, `feature-controls-vX.Y.Z`) are not pack releases and
+never move `v1`; see README § Tag namespaces.
+
 ## Runner selection — opt into `ubuntu-slim` for light jobs
 
 Every `runs_on` input defaults to `ubuntu-latest` and changing that default is a
