@@ -15,18 +15,25 @@
   instances receive the fix on `copier update`.
 - A dispatched agent step that produces no execution file now **fails the
   job** instead of passing. Skip paths (loop-break, budget, opt-out label,
-  bot actors) are unchanged and stay green.
+  bot actors) stay green; actors without write access and bot actors other
+  than the `github-actions[bot]` review relay are now skipped before dispatch
+  (the action would otherwise fail the job for them). The relay is allowed via
+  `allowed_bots: github-actions`.
 
 ### Security
 
-- **#169 hardening ported to `pr-autofix-loop-reusable`**: the checkout is
-  pinned to the validated head SHA, the head ref passes `git check-ref-format`
+- **#169 hardening ported to `pr-autofix-loop-reusable`** (and extended in
+  both workflows): the checkout is pinned to the validated head SHA, the head ref passes `git check-ref-format`
   before `git checkout -B`, and the instruction surface (`.claude/`,
   `.mcp.json`, `.claude.json`, `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`,
   plus nested copies on either side) is restored from the PR base SHA before
-  the agent runs. The restore is marked skip-worktree / excluded so `git add
-  -A` can never commit the base copy over a PR's own changes. Consumers whose
-  PRs edit `CLAUDE.md` will see Autofix use the base copy. The prompt's capped,
+  the agent runs (`.gitmodules`, `.ripgreprc`, `.husky/` too, matching the
+  action's own list). A trusted pre-commit hook outside the checkout (wired via
+  `GIT_CONFIG_*` env, so a PR's husky `core.hooksPath` cannot displace it)
+  refuses agent commits that touch those paths, replacing the repository's own
+  git hooks for agent commits; a final step fails the job if an `[autofix]`
+  commit touched them anyway. Consumers whose PRs edit `CLAUDE.md` will see
+  Autofix use the base copy. The prompt now forbids force-pushes. The prompt's capped,
   untrusted CI-log rule now matches the standalone. The restore body is
   byte-identical in both workflows (`tests/test_autofix_hardening.py`).
 

@@ -154,6 +154,7 @@ jobs:
           COMMENT_BODY: ${{ github.event.comment.body || github.event.review.body || '' }}
           PR_NUM: ${{ steps.ref.outputs.pr_number }}
           ACTOR: ${{ github.actor }}
+          WR_ACTOR: ${{ github.event.workflow_run.actor.login || '' }}
           WR_NAME: ${{ github.event.workflow_run.name || '' }}
           WR_URL: ${{ github.event.workflow_run.html_url || '' }}
         run: |
@@ -221,6 +222,25 @@ jobs:
               exit 0
             fi
           fi
+
+          # claude-code-action fails the job (rather than skipping) for bot
+          # actors outside allowed_bots and for actors without write access.
+          # Only the relay bot is allowed; skip everything else before dispatch.
+          for who in "$ACTOR" "${WR_ACTOR:-}"; do
+            [[ -z "$who" ]] && continue
+            if [[ "$who" == "github-actions[bot]" && "$EVENT_NAME" == "issue_comment" && "$COMMENT_BODY" == '**[@'* ]]; then
+              continue
+            fi
+            PERM=$(timeout -k 5 30 gh api "repos/${{ github.repository }}/collaborators/${who}/permission" --jq '.permission' 2>/dev/null || echo unknown)
+            case "$PERM" in
+              admin|write) ;;
+              *)
+                echo "skip=true" >> "$GITHUB_OUTPUT"
+                echo "Actor ${who} has no write access or is a non-relay bot (permission=${PERM}); skipping"
+                exit 0
+                ;;
+            esac
+          done
 
           # --repo required: this step runs with no checkout, so gh would
           # resolve the repo from cwd and fail. Failure must fail closed —
@@ -337,7 +357,8 @@ jobs:
           fi
           # Root surface plus every nested instruction file or .claude/ tree on either
           # side (PR-added ones are dropped, base ones restored).
-          PATHS=(.claude .mcp.json .claude.json CLAUDE.md CLAUDE.local.md AGENTS.md)
+          # Root list mirrors claude-code-action restore-config.ts SENSITIVE_PATHS + AGENTS.md.
+          PATHS=(.claude .mcp.json .claude.json .gitmodules .ripgreprc .husky CLAUDE.md CLAUDE.local.md AGENTS.md)
           while IFS= read -r -d '' f; do
             PATHS+=("${f#./}")
           done < <(find . \( -path ./.git -o -path ./.claude \) -prune -o \
@@ -358,7 +379,10 @@ jobs:
             fi
           done
           # Keep the restore out of autofix commits: `git add -A` / `commit -a` must
-          # never stage the base copy over the PR's own changes to these files.
+          # never stage the base copy over the PR's own changes to these files. The
+          # action re-restores (and re-stages) some of them itself, so the bits below are
+          # backed by a trusted pre-commit hook outside the checkout (wired via
+          # GIT_CONFIG_* env on the agent step, which outranks a .git/config hooksPath).
           git ls-files -z -- "${PATHS[@]}" | xargs -0 -r git update-index --skip-worktree --
           EXCLUDE=$(git rev-parse --git-path info/exclude)
           mkdir -p "$(dirname "$EXCLUDE")"
@@ -366,6 +390,22 @@ jobs:
           while IFS= read -r -d '' f; do
             printf '/%s\n' "$f" | sed 's/[][*?\\]/\\&/g' >> "$EXCLUDE"
           done
+          HOOKS="${RUNNER_TEMP:?}/autofix-git-hooks"
+          mkdir -p "$HOOKS"
+          cat > "$HOOKS/pre-commit" <<'HOOK'
+          #!/usr/bin/env bash
+          # Installed by the autofix workflow (outside the checkout): autofix commits
+          # must never carry instruction-surface files.
+          bad=$(git diff --cached --name-only |
+            grep -E '(^|/)(\.claude/|CLAUDE\.md$|CLAUDE\.local\.md$|AGENTS\.md$)|^(\.mcp\.json|\.claude\.json|\.gitmodules|\.ripgreprc)$|^\.husky/' || true)
+          if [ -n "$bad" ]; then
+            echo "autofix: refusing to commit instruction-surface files (restored from the PR base, not part of the fix):" >&2
+            printf '%s\n' "$bad" | sed 's/^/  /' >&2
+            echo "Unstage them with 'git restore --staged -- <path>' and commit only the fix." >&2
+            exit 1
+          fi
+          HOOK
+          chmod +x "$HOOKS/pre-commit"
           echo "Restored ${#PATHS[@]} instruction-surface path(s) from base ${BASE_SHA}"
 
       - name: Warn when elevated push token is absent
@@ -404,6 +444,12 @@ jobs:
       - name: Run autofix with Claude Code
         id: claude
         env:
+          # Trusted pre-commit hook (written by the restore step, outside the
+          # checkout). Env config outranks a hooksPath a PR's tooling writes
+          # into .git/config (e.g. husky on npm install).
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: core.hooksPath
+          GIT_CONFIG_VALUE_0: ${{ runner.temp }}/autofix-git-hooks
           REVIEW_BODY: ${{ github.event.review.body || github.event.comment.body || 'No body' }}
           EVENT_NAME: ${{ github.event_name }}
           WR_NAME: ${{ needs.preflight.outputs.trigger_workflow }}
@@ -418,6 +464,9 @@ jobs:
         # Enforced by tests/test_autofix_hardening.py.
         with:
           anthropic_api_key: ${{ steps.cred.outputs.key_source == 'proxy' && (secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY) || secrets.ANTHROPIC_API_KEY }}
+          # The bot-review relay comments as github-actions[bot]; agent mode
+          # rejects non-human actors unless listed here.
+          allowed_bots: github-actions
           github_token: ${{ secrets.MN_GH_AUTOMATION_TOKEN || secrets.GITHUB_TOKEN }}
           claude_args: |
             --allowedTools "Bash,Edit,Write,Read,Glob,Grep"
@@ -443,7 +492,10 @@ jobs:
             5. Make the minimal fix for each actionable finding
             6. If architectural / ambiguous, post `gh pr comment` and STOP — do not guess
             7. Commit with message "[autofix] <what was fixed>" and push to the PR branch
-            8. Do NOT push to main/master. Do NOT merge the PR.
+            8. Do NOT push to main/master. Do NOT merge the PR. Never force-push or
+               rewrite history; if the push is rejected, comment and STOP.
+            9. Do not modify or commit .claude/, CLAUDE.md, AGENTS.md, .mcp.json or
+               .husky/ — if a finding needs that, comment and STOP.
 
             X-Originating-Agent: claude-cli
 
@@ -461,3 +513,34 @@ jobs:
             exit 1
           fi
           echo "Agent executed (execution file present)."
+
+      # Detection backstop for the pre-commit hook: an [autofix] commit that
+      # touches the instruction surface reverted the PR's own files.
+      - name: Verify autofix commits left the instruction surface alone
+        if: always() && steps.claude.outcome != 'skipped' && steps.claude.outcome != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          HEAD_SHA: ${{ needs.preflight.outputs.head_sha }}
+          HEAD_REF: ${{ needs.preflight.outputs.head_ref }}
+        run: |
+          set -euo pipefail
+          HEAD_ENC=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe="/"))' "$HEAD_REF")
+          if ! SHAS=$(timeout -k 5 30 gh api "repos/${REPOSITORY}/compare/${HEAD_SHA}...${HEAD_ENC}" \
+              --jq '.commits[] | select(.commit.message | startswith("[autofix]")) | .sha'); then
+            echo "::warning::Could not list autofix commits; instruction-surface check not performed"
+            exit 0
+          fi
+          bad=""
+          for sha in $SHAS; do
+            files=$(timeout -k 5 30 gh api "repos/${REPOSITORY}/commits/${sha}" --jq '.files[].filename')
+            hit=$(printf '%s\n' "$files" |
+              grep -E '(^|/)(\.claude/|CLAUDE\.md$|CLAUDE\.local\.md$|AGENTS\.md$)|^(\.mcp\.json|\.claude\.json|\.gitmodules|\.ripgreprc)$|^\.husky/' || true)
+            [[ -n "$hit" ]] && bad+="${sha}: ${hit//$'\n'/, }"$'\n'
+          done
+          if [[ -n "$bad" ]]; then
+            echo "::error::[autofix] commit(s) changed instruction-surface files; review and revert them:"
+            printf '%s' "$bad"
+            exit 1
+          fi
+          echo "No [autofix] commit touched the instruction surface."

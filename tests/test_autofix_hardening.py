@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -25,7 +26,11 @@ WORKFLOWS = {
 FIXTURES = ROOT / "tests/fixtures/claude-code-action"
 ACTION = "anthropics/claude-code-action@"
 RESTORE_STEP = "Restore trusted instruction surface from PR base"
-SURFACE = {".claude", ".mcp.json", ".claude.json", "CLAUDE.md", "CLAUDE.local.md", "AGENTS.md"}
+# claude-code-action restore-config.ts SENSITIVE_PATHS + AGENTS.md
+SURFACE = {".claude", ".mcp.json", ".claude.json", ".gitmodules", ".ripgreprc", ".husky",
+           "CLAUDE.md", "CLAUDE.local.md", "AGENTS.md"}
+SURFACE_CHECK = "Verify autofix commits left the instruction surface alone"
+GATE = "steps.ref.outputs.skip != 'true' && steps.pr.outputs.skip != 'true' && steps.budget.outputs.skip != 'true'"
 
 
 def _steps(name: str) -> list[dict]:
@@ -76,13 +81,50 @@ def test_execution_file_is_a_declared_action_output() -> None:
     assert "execution_file" in outputs
 
 
-def test_model_input_reaches_claude_args_only_when_set() -> None:
+def _render_claude_args(model: str) -> list[str]:
+    """Render the GitHub expression, then tokenise like the action (shell-quote)."""
     args = _step("reusable", uses=ACTION)["with"]["claude_args"]
-    assert "inputs.model != '' && format('--model \"{0}\"', inputs.model) || ''" in args
+    expr = "${{ inputs.model != '' && format('--model \"{0}\"', inputs.model) || '' }}"
+    assert expr in args
+    rendered = args.replace(expr, f'--model "{model}"' if model else "")
+    return shlex.split(rendered)
+
+
+def test_claude_args_tokenise_with_and_without_model() -> None:
+    assert _render_claude_args("") == ["--allowedTools", "Bash,Edit,Write,Read,Glob,Grep"]
+    assert _render_claude_args("anthropic/claude-sonnet-4.5") == [
+        "--allowedTools", "Bash,Edit,Write,Read,Glob,Grep", "--model", "anthropic/claude-sonnet-4.5"]
+
+
+@pytest.mark.parametrize("name", sorted(WORKFLOWS))
+def test_relay_bot_is_allowed_and_other_actors_skip_before_dispatch(name: str) -> None:
+    step = _step(name, uses=ACTION)
+    assert step["with"]["allowed_bots"] == "github-actions"
+    gate = _step(name, title="Determine skip conditions")
+    assert gate["env"]["WR_ACTOR"] == "${{ github.event.workflow_run.actor.login || '' }}"
+    run = gate["run"]
+    assert '"$who" == "github-actions[bot]" && "$EVENT_NAME" == "issue_comment"' in run
+    assert "collaborators/${who}/permission" in run and "admin|write) ;;" in run
+
+
+def test_reusable_restores_only_after_every_skip_gate() -> None:
+    for title in ("Attach PR branch at validated SHA", RESTORE_STEP):
+        assert _step("reusable", title=title)["if"] == GATE
+    titles = [s.get("name") for s in _steps("reusable")]
+    assert titles.index("Enforce per-PR successful-fix budget") < titles.index("Attach PR branch at validated SHA")
+
+
+@pytest.mark.parametrize("name", sorted(WORKFLOWS))
+def test_agent_step_uses_the_trusted_hooks_dir(name: str) -> None:
+    env = _step(name, uses=ACTION)["env"]
+    assert env["GIT_CONFIG_COUNT"] == "1"
+    assert env["GIT_CONFIG_KEY_0"] == "core.hooksPath"
+    assert env["GIT_CONFIG_VALUE_0"] == "${{ runner.temp }}/autofix-git-hooks"
+    assert "Never force-push" in _step(name, uses=ACTION)["with"]["prompt"]
 
 
 def test_hardening_steps_are_identical_in_both_workflows() -> None:
-    for title in (RESTORE_STEP, "Attach PR branch at validated SHA"):
+    for title in (RESTORE_STEP, "Attach PR branch at validated SHA", SURFACE_CHECK):
         bodies = {name: _step(name, title=title)["run"] for name in WORKFLOWS}
         assert bodies["standalone"] == bodies["reusable"], f"{title!r} drifted between workflows"
 
@@ -158,6 +200,7 @@ def _run_restore(work: Path, bin_dir: Path) -> subprocess.CompletedProcess[str]:
         **os.environ,
         "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
         "GH_TOKEN": "unused",
+        "RUNNER_TEMP": str(work.parent / "runner-temp"),
         "REPOSITORY": "example/repo",
         "PR_NUMBER": "1",
     }
@@ -201,3 +244,44 @@ def test_restore_list_covers_the_documented_surface() -> None:
     body = _step("reusable", title=RESTORE_STEP)["run"]
     line = next(l for l in body.splitlines() if l.startswith("PATHS=("))
     assert set(line[len("PATHS=("):-1].split()) == SURFACE
+
+
+def _replay_action_restore(work: Path) -> None:
+    """claude-code-action restore-config.ts: rm, fetch, checkout base, reset."""
+    paths = [".claude", ".mcp.json", ".claude.json", ".gitmodules", ".ripgreprc",
+             "CLAUDE.md", "CLAUDE.local.md", ".husky"]
+    for rel in paths:
+        target = work / rel
+        if target.is_dir():
+            shutil.rmtree(target)
+        elif target.exists():
+            target.unlink()
+    _git(work, "fetch", "-q", "origin", "main", "--depth=1", "--no-recurse-submodules")
+    for rel in paths:
+        subprocess.run(["git", "checkout", "origin/main", "--", rel], cwd=work, capture_output=True)
+    subprocess.run(["git", "reset", "-q", "--", *paths], cwd=work, capture_output=True)
+
+
+def test_trusted_hook_blocks_surface_commits_after_the_action_restore(pr_checkout) -> None:
+    work, _base, bin_dir = pr_checkout
+    assert _run_restore(work, bin_dir).returncode == 0
+    _replay_action_restore(work)
+    _git(work, "config", "user.email", "t@example.invalid")
+    _git(work, "config", "user.name", "t")
+    _git(work, "config", "core.hooksPath", ".husky/_")  # what a PR's husky install writes
+    _write(work, "src/a.py", "x = 3\n")
+    _git(work, "add", "-A")
+    hooks = work.parent / "runner-temp/autofix-git-hooks"
+    env = {**os.environ, "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.hooksPath",
+           "GIT_CONFIG_VALUE_0": str(hooks)}
+    blocked = subprocess.run(["git", "commit", "-qm", "[autofix] fix"], cwd=work, env=env,
+                             capture_output=True, text=True)
+    assert blocked.returncode != 0
+    assert "refusing to commit instruction-surface files" in blocked.stderr
+    assert "CLAUDE.md" in blocked.stderr and ".claude/settings.json" in blocked.stderr
+    _git(work, "reset", "-q")
+    _git(work, "add", "src/a.py")
+    ok = subprocess.run(["git", "commit", "-qm", "[autofix] fix"], cwd=work, env=env,
+                        capture_output=True, text=True)
+    assert ok.returncode == 0, ok.stderr
+    assert _git(work, "show", "--name-only", "--format=", "HEAD").split() == ["src/a.py"]
