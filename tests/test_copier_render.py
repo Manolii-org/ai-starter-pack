@@ -851,7 +851,8 @@ def test_standard_keeps_codex_review_unless_opted_out(default_render, tmp_path):
     assert file_set(default_render) - file_set(dst) == codex
 
 
-@pytest.mark.parametrize("flag", ["oss_routing", "kl_integration", "langfuse_telemetry", "mesh_telemetry"])
+@pytest.mark.parametrize("flag", ["oss_routing", "kl_integration", "langfuse_telemetry", "mesh_telemetry",
+                                  "codex_review"])
 def test_strict_refuses_manolii_hosted_services(tmp_path, flag):
     with pytest.raises(subprocess.CalledProcessError):
         render(tmp_path / "bad", isolation_profile="strict", **{flag: "true"})
