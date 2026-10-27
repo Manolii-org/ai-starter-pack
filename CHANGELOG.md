@@ -2,269 +2,420 @@
 
 ## Unreleased
 
-### Activation contract
+## 1.23.0 — 2026-10-27
 
-- New outcome state **`INERT`** in `outcome-check-reusable` and
-  `scripts/lint-workflow-outcomes.py`: the check ran but could not detect the
-  failure it exists to catch. It publishes a neutral check-run and never
-  counts as success.
-- New workflow output **`activation`** on `coverage-ratchet-reusable`
-  (`active`/`inert`), `e2e-playwright-reusable` (`active`/`inert`/`unknown`:
-  inert when Playwright executed no test) and `pr-autofix-loop-reusable`
-  (`active`/`skipped`).
-- New opt-in input **`fail_on_inert`** (default `false`) on
-  `coverage-ratchet-reusable` (same effect as `require_baseline`) and
-  `e2e-playwright-reusable`. Inert e2e runs now emit
-  `::warning::e2e-playwright INERT …` and still pass by default. The default
-  is planned to flip to `true` in v2. Contract:
-  `docs/workflow-outcome-convention.md` § Activation contract.
+Upgrade order for consumers:
 
-### Supply chain
+1. Pin every pack `uses:` to the v1.23.0 commit SHA (with a `# v1.23.0`
+   comment) in one PR. The Renovate preset's `manolii-ai-starter-pack` group
+   does this for you once your preset pin is bumped.
+2. Then enable or re-enable Autofix on one repository first, and watch its
+   first `[autofix]` commit before rolling out further.
 
-- **SHA-pinned the remaining tag-pinned actions** in `migration-run-gate-reusable`,
-  `plugin-eval-gate`, `registry-lint` and the email-capture conformance
-  workflows (`actions/checkout` v4 → `11d5960a…` v4.4.0, `actions/setup-python`
-  v5 → `a26af69b…` v5.6.0 — the commits those floating tags resolved to, so
-  behaviour is unchanged).
-- New lint `tests/test_action_pins.py`: every remote `uses:` in
-  `.github/workflows/`, `.github/actions/` and `actions/` must be a 40-hex SHA
-  (Docker refs need a `sha256` digest); only local `./` paths are exempt.
+### Behaviour changes
 
-### Devin meta-plugin
-
-- `registry/platform/om` moved from `requiredPlugins` to `optionalPlugins` in
-  the root `.devin-plugin/plugin.json`, so tenants without a Knowledge Layer
-  backend can install the baseline (`registry/platform/framework`). **Behaviour
-  change for KL tenants:** `om` is no longer auto-installed by the meta-plugin —
-  add its `git-subdir` entry to your org manifest's `requiredPlugins`
-  (`docs/registry.md` § Install paths per surface).
-
-### Coverage ratchet honesty
-
-- **`coverage-ratchet-reusable` no longer passes silently without a
-  baseline.** An absent `baseline_file` now emits
+- **The floating `v1` alias moves from v1.21.0 to v1.23.0.** `v1.22.0` was cut
+  outside `release-tag.yml`, so `v1` never moved for it. Every caller that
+  relies on `pack_ref: v1` loads v1.23.0 code on release. That covers
+  `pr-assessment-reusable`'s runner/classifier checkout, the
+  `e2e-playwright-reusable` failure classifier and
+  `integration-admission-reusable` (all default `pack_ref: v1`), and also
+  anything pinned to `@v1`.
+- **Autofix now acts (`pr-autofix-loop`, reusable and standalone).** Since the
+  claude-code-action v1 pin, Autofix was a silent no-op. The step passed v0
+  inputs (`direct_prompt`, `model`, `allowed_tools`), the action saw no
+  prompt, logged `No trigger found`, and the job went green.
+  - Both workflows now pass `prompt` and `claude_args` (`--allowedTools`,
+    plus `--model` when the reusable's `model` input is set).
+  - **After upgrading, Autofix WILL push `[autofix]` commits and spend model
+    tokens.**
+  - Callers that use `secrets.GITHUB_TOKEN` instead of `GH_PAT` will not
+    re-trigger PR checks after an autofix push.
+  - Standalone instances receive this on `copier update`.
+- **Autofix fails loudly instead of passing silently.**
+  - A dispatched agent step that produces no execution file now fails the
+    job.
+  - Skip paths (loop-break, fix cap, budget, opt-out label) stay green.
+  - Actors without write access, and bot actors other than the
+    `github-actions[bot]` review relay, are now skipped before dispatch. The
+    action would otherwise fail the job for them. The relay is allowed via
+    `allowed_bots: github-actions`.
+- **Autofix uses the base copy of the instruction surface.**
+  - A PR that edits `CLAUDE.md`, `AGENTS.md`, `.claude/`, `.mcp.json` and
+    related files no longer changes the agent's instructions; see Security.
+  - Agent commits that touch those paths are refused.
+- **coverage-ratchet INERT warning.** An absent `baseline_file` now emits
   `::warning::coverage-ratchet INERT: no baseline at <path>; this required
-  check cannot fail` and sets the new workflow output `activation=inert`
-  (`active` once a baseline is compared). The run still passes by default.
-- New opt-in input `require_baseline` (boolean, default `false`): fail when the
-  baseline is absent, in either mode. A default-branch push that seeds the
-  baseline via `auto_commit_baseline` is exempt, and fails if it cannot seed
-  it.
-- Docs: auto-commit needs a write-capable `GH_PAT` (caller `permissions:`
-  cannot raise the reusable's `contents: read`); the check name is
-  `<caller job name, or job id when unnamed> / coverage`.
-- **Planned for v2:** `require_baseline` defaults to `true`.
+  check cannot fail` and sets `activation=inert`. The run still passes.
+- **e2e-playwright INERT warning.** A run where Playwright executed no test
+  (all skipped, or none found) emits `::warning::e2e-playwright INERT …` and
+  sets `activation=inert`. It still passes.
+- **Devin meta-plugin:** `registry/platform/om` moved from `requiredPlugins`
+  to `optionalPlugins` in the root `.devin-plugin/plugin.json`.
+  - Tenants without a Knowledge Layer backend can now install the baseline.
+  - KL tenants: `om` is no longer auto-installed. Add its `git-subdir` entry
+    to your org manifest's `requiredPlugins` (`docs/registry.md` § Install
+    paths per surface).
+- **Copier: telemetry keys follow `langfuse_telemetry`.**
+  `CLAUDE_CODE_ENABLE_TELEMETRY`, `OTEL_*` and `otelHeadersHelper` are written
+  to `.claude/settings.json` only when `langfuse_telemetry` is on.
+  - Earlier releases always wrote them, pointing at Langfuse cloud.
+    Instances that ran telemetry without the flag lose those keys on
+    `copier update`; to keep them, run
+    `copier update --data langfuse_telemetry=true`.
+  - Instance answer files were not available to enumerate affected instances.
+- **Copier: the Codex review workflows follow the new `codex_review`
+  question** (default `true` for `isolation_profile=standard`, so standard
+  instances keep them).
 
-### Behaviour change — Autofix now acts
+### New opt-in inputs and outputs
 
-- **`pr-autofix-loop` (reusable and standalone) was a silent no-op** since the
-  claude-code-action v1 pin: the step passed v0 inputs (`direct_prompt`,
-  `model`, `allowed_tools`), the action saw no prompt, logged `No trigger
-  found` and the job went green. Both workflows now pass `prompt` and
-  `claude_args` (`--allowedTools`, plus `--model` when the reusable's `model`
-  input is set). **After upgrading, Autofix WILL push `[autofix]` commits and
-  spend model tokens.** Callers that use `secrets.GITHUB_TOKEN` instead of
-  `GH_PAT` will not re-trigger PR checks after an autofix push. Standalone
-  instances receive the fix on `copier update`.
-- A dispatched agent step that produces no execution file now **fails the
-  job** instead of passing. Skip paths (loop-break, budget, opt-out label,
-  bot actors) stay green; actors without write access and bot actors other
-  than the `github-actions[bot]` review relay are now skipped before dispatch
-  (the action would otherwise fail the job for them). The relay is allowed via
-  `allowed_bots: github-actions`.
+| Workflow | Name | Kind | Default |
+|---|---|---|---|
+| `coverage-ratchet-reusable` | `require_baseline` | input | `false` |
+| `coverage-ratchet-reusable` | `fail_on_inert` | input | `false` |
+| `coverage-ratchet-reusable` | `activation` (`active`/`inert`) | output | — |
+| `e2e-playwright-reusable` | `fail_on_inert` | input | `false` |
+| `e2e-playwright-reusable` | `activation` (`active`/`inert`/`unknown`) | output | — |
+| `pr-autofix-loop-reusable` | `activation` (`active`/`skipped`) | output | — |
+| `outcome-check-reusable` | `outcome: INERT` | accepted value | — |
+| `release-tag.yml` | `notes` | dispatch input | `''` |
+| Copier | `isolation_profile` (`standard`/`strict`) | question | `standard` |
+| Copier | `codex_review` | question | `true` (standard) |
+
+- `isolation_profile=strict` renders a hooks-only `.claude/settings.json`
+  with no telemetry keys and no `bypassPermissions` /
+  `skipDangerousModePermissionPrompt`.
+  - It excludes the Codex review workflows, `setup-env-secret`,
+    `dependabot-manual-automerge`, `monitor-litellm` and the LiteLLM
+    deploy/publish files.
+  - It refuses `oss_routing`, `kl_integration`, `langfuse_telemetry` and
+    `mesh_telemetry`. `scripts/first-run-setup.py` does not offer them.
+  - The rendered `pr-assessment.yml` still defaults its LLM jobs to
+    self-hosted `fly` runners (unchanged in v1). Instances without that
+    fleet must set the repository variable `CI_RUNNER_OVERRIDE` to
+    `["ubuntu-latest"]`, or those jobs queue indefinitely.
+- Activation contract: `docs/workflow-outcome-convention.md` § Activation
+  contract.
+- **Planned for v2:** `require_baseline` and `fail_on_inert` default to
+  `true`.
 
 ### Security
 
-- **#169 hardening ported to `pr-autofix-loop-reusable`** (and extended in
-  both workflows): the checkout is pinned to the validated head SHA, the head ref passes `git check-ref-format`
-  before `git checkout -B`, and the instruction surface (`.claude/`,
-  `.mcp.json`, `.claude.json`, `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`,
-  plus nested copies on either side) is restored from the PR base SHA before
-  the agent runs (`.gitmodules`, `.ripgreprc`, `.husky/` too, matching the
-  action's own list). A trusted pre-commit hook outside the checkout (wired via
-  `GIT_CONFIG_*` env, so a PR's husky `core.hooksPath` cannot displace it)
-  refuses agent commits that touch those paths, replacing the repository's own
-  git hooks for agent commits; a final step fails the job if an `[autofix]`
-  commit touched them anyway. Consumers whose PRs edit `CLAUDE.md` will see
-  Autofix use the base copy. The prompt now forbids force-pushes. The prompt's capped,
-  untrusted CI-log rule now matches the standalone. The restore body is
-  byte-identical in both workflows (`tests/test_autofix_hardening.py`).
+- **#169 hardening ported to `pr-autofix-loop-reusable`** and extended in both
+  workflows.
+  - The checkout is pinned to the validated head SHA, and the head ref passes
+    `git check-ref-format`.
+  - Before the agent runs, the instruction surface is restored from the PR
+    base SHA, including nested copies on either side: `.claude/`,
+    `.mcp.json`, `.claude.json`, `.gitmodules`, `.ripgreprc`, `.husky/`,
+    `CLAUDE.md`, `CLAUDE.local.md` and `AGENTS.md`.
+  - A trusted pre-commit hook outside the checkout refuses agent commits
+    that touch those paths, including renames and quoted paths. It is wired
+    via `GIT_CONFIG_*` env, so a PR's `core.hooksPath` cannot displace it.
+  - A final step fails the job if an `[autofix]` commit touched them anyway.
+    It fails closed if the commit list cannot be read.
+  - CI-log reads are capped and treated as untrusted; force-pushes are
+    forbidden.
+- **Supply chain:** the remaining tag-pinned third-party actions are
+  SHA-pinned to the commits their tags resolved to, so behaviour is
+  unchanged:
+  - `migration-run-gate-reusable`, `plugin-eval-gate`, `registry-lint` and
+    the email-capture conformance workflows;
+  - `actions/checkout` v4.4.0 and `actions/setup-python` v5.6.0.
+  - New lint `tests/test_action_pins.py`: every remote `uses:` must be a
+    40-hex SHA (Docker refs a `sha256` digest); only local `./` paths are
+    exempt.
+
+### Per-workflow input diff since v1.17.0
+
+Every reusable's `workflow_call` inputs, outputs and secrets were diffed
+against v1.17.0, v1.18.0, v1.19.0, v1.20.0, v1.21.0 and v1.22.0. **No input,
+output or secret was removed or renamed, none changed type or default, and
+none became required.** Added since v1.22.0:
+
+- `coverage-ratchet-reusable`: inputs `require_baseline`, `fail_on_inert`;
+  output `activation`.
+- `e2e-playwright-reusable`: input `fail_on_inert`; output `activation`;
+  secret `VERCEL_BYPASS_SECRET` (optional; lands as
+  `VERCEL_AUTOMATION_BYPASS_SECRET`).
+- `email-quality-reusable`: inputs `pack_ref`, `profile_path`,
+  `sender_path`; secrets `UNSPAM_API_TOKEN`, `SENDER_TOKEN`.
+- `pr-autofix-loop-reusable`: output `activation`.
+
+The input matrix in `REUSABLE-WORKFLOWS.md` is now generated from these
+schemas (`scripts/gen-reusable-matrix.py`; CI fails on drift). It gains an
+Outputs column and renders every input's default, type and required flag in
+full. That removes the phantom `paths_ignore` input on static-review and adds
+the missing rows (backup-kernel, e2e-playwright, email-quality,
+migration-run-gate, outcome-check).
 
 ### Tag namespaces
 
-- Component releases now use prefixed tags: `email-capture-vX.Y.Z`,
-  `feature-controls-vX.Y.Z` (plus `-alpha|beta|rc.N`). `release-tag.yml`
-  accepts them, never moves `v1` for them, and takes an optional `notes`
-  input for the annotated tag message. Existing bare `v0.x` tags are kept.
-- `release-tag.yml` now validates the whole input string (a multi-line value
-  used to pass the per-line `grep` check).
-- Docs: tag namespaces (README), email-capture allocation ownership for lanes
-  that split `allocate`/`await` across jobs (`docs/email-capture.md`);
-  `packages/feature-controls` is marked unreleased.
+- Component releases now use prefixed tags: `email-capture-vX.Y.Z` and
+  `feature-controls-vX.Y.Z`, plus `-alpha|beta|rc.N`.
+  - `release-tag.yml` validates them, with canonical numbers only. It now
+    checks the whole input string; a multi-line value used to pass the
+    per-line check.
+  - It never moves `v1` for them.
+  - It takes an optional `notes` input for the annotated message.
+- **`email-capture-v0.2.6`** is cut on the same commit as the bare `v0.2.6`
+  (`a00b825`). Bare `v0.x` tags are kept.
+  - Since the allocation-ownership fix, `await`, `assert` and `release` must
+    find the allocation in the registry `allocate` wrote.
+  - Lanes that split those steps across jobs must share that registry or
+    they get `AUTHORIZATION_DENIED` (`docs/email-capture.md` § Versions and
+    allocation ownership).
+- `packages/feature-controls` stays unreleased.
+- Release tags are cut only by `release-tag.yml`; never hand-create one.
 
 ### Renovate preset
 
 - New `packageRules` entry groups every `Manolii-org/ai-starter-pack`
-  dependency (SHA pins with `# vX.Y.Z` comments, preset pin,
-  `.starter-pack-source`) into one `manolii-ai-starter-pack` PR, never
-  automerged; `allowedVersions` restricts lookups to plain `vX.Y.Z` release
-  tags so component tags (`email-capture-v*`, `feature-controls-v*`), bare
-  `v0.x` and the `v1` alias are never proposed.
+  dependency into one `manolii-ai-starter-pack` PR, never automerged. That
+  covers SHA pins with `# vX.Y.Z` comments, the preset pin and
+  `.starter-pack-source`.
+- `allowedVersions` restricts lookups to plain `vX.Y.Z` release tags, so
+  component tags, bare `v0.x` and the `v1` alias are never proposed.
+- Consumers pick the rule up when they bump their preset pin.
 
-### Public-repo hygiene
+### Docs
 
-- `docs/email-capture-journeys.md` no longer carries any consumer's routes,
-  endpoints, mail paths or repository names; it now holds the lane model, a
-  generic example journey table to adapt in the consumer's own repository, the
-  shared playbook patterns, and the allocation-registry rule (`await` and
-  `release` must run against the registry `allocate` wrote).
-  Consumer-specific review notes under `.claude/forge/reviews/` are redacted.
-
-### Isolation-safe render
-
-- New Copier question **`isolation_profile`** (`standard` | `strict`, default
-  `standard`). `standard` renders what earlier releases rendered. `strict`
-  renders a hooks-and-deny-only `.claude/settings.json` (no
-  `bypassPermissions`, no `skipDangerousModePermissionPrompt`, no
-  model/env/telemetry keys) and omits `codex-pr-review.yml`,
-  `codex-security-diff-scan.yml`, `setup-env-secret.yml`,
-  `dependabot-manual-automerge.yml`, `monitor-litellm.yml`,
-  `publish-litellm-product-release.yml`, `deploy/litellm-proxy/`,
-  `litellm-product/` and the LiteLLM product scripts/tests. `strict` refuses
-  `oss_routing`, `kl_integration`, `langfuse_telemetry` and `mesh_telemetry`.
-- New Copier question **`codex_review`** (bool; default `true` for `standard`,
-  `false` for `strict`) gates the two Codex workflows, which read a Doppler
-  `master/prd_codex` service token. Existing instances keep them on update.
-- **Behaviour change (standard profile):** Claude Code telemetry keys
-  (`CLAUDE_CODE_ENABLE_TELEMETRY`, `OTEL_*`, `otelHeadersHelper`) now follow
-  `langfuse_telemetry`. Instances rendered with `langfuse_telemetry=false` lose
-  them on `copier update` (previously they were always written, pointing at
-  Langfuse cloud). An instance that relied on telemetry without the flag runs
-  `copier update --data langfuse_telemetry=true`.
-- Unchanged: PR Assessment's LLM jobs still default to `["self-hosted","fly"]`
-  outside the public pack; a strict instance sets `CI_RUNNER_OVERRIDE`.
-
-### Docs accuracy
-
-- The Input/Secret matrix in `REUSABLE-WORKFLOWS.md` is now generated from
-  every `*-reusable.yml` `workflow_call` schema (`scripts/gen-reusable-matrix.py`;
-  `tests/test_reusable_matrix.py` fails on drift) and gains an Outputs column.
-  This removes the phantom `paths_ignore` input on static-review and adds the
-  missing rows (backup-kernel, e2e-playwright, email-quality,
-  migration-run-gate, outcome-check) and inputs (`gitleaks_version`,
-  `runs_on`, `sqlcmd_sha256`, …).
+- `docs/email-capture-journeys.md` is now generic, with no consumer routes,
+  endpoints, mail paths or repository names. Consumer-specific review notes
+  under `.claude/forge/reviews/` are redacted.
 - `docs/ai-runtime-policy.md` and `docs/model-plane-boundary.md` list the
-  orchestrator-only and runtime-generated paths they reference
-  (`tests/test_doc_path_references.py` keeps the list exhaustive).
-- `docs/autofix-cost-alarms.md`: proxy mode with a non-LiteLLM
-  Anthropic-compatible endpoint (`LITELLM_MASTER_KEY` is the proxy key slot)
-  and provider-side spend alarms for tenants without LiteLLM/Langfuse.
+  orchestrator-only and runtime-generated paths they reference.
+- `docs/autofix-cost-alarms.md` covers two things:
+  - proxy mode with a non-LiteLLM Anthropic-compatible endpoint (for
+    example an OpenRouter base URL; `LITELLM_MASTER_KEY` is just the proxy
+    key slot);
+  - provider-side spend alarms for tenants without LiteLLM/Langfuse.
+- Coverage ratchet:
+  - auto-commit needs a write-capable `GH_PAT`;
+  - the required check is `<caller job name, or its id when unnamed> /
+    coverage`.
+
+### Fixed
+
+- Rendered instances no longer ship the pack-only
+  `tests/test_devin_meta_plugin.py`, which aborted their pytest run at
+  collection. A render-collection test guards the class.
 
 ### Recorded v1 removals
 
-- `tia-shadow` and `mutation-testing-diff` workflows were removed inside v1
-  (`857e672`, "retire mutation-diff + tia-shadow workflows estate-wide"). Under
-  the v1 contract (rename/remove = v2) this should have waited for v2; there
-  were no callers at removal. Recorded here for the record; no restoration.
+- `tia-shadow` and `mutation-testing-diff` were removed inside v1 in 1.22.0
+  (#157, `857e672`). Under the v1 contract (rename/remove = v2) this should have waited
+  for v2. There were no callers at removal, and they are not restored.
+
+## 1.22.0 — 2026-10-07
+
+> Tag `v1.22.0` (`5a4538e`) is lightweight and was created outside
+> `release-tag.yml`, so the floating `v1` alias was not moved (it stayed on
+> v1.21.0 until v1.23.0). Release tags are now cut only through
+> `release-tag.yml`.
+
+### Fixed
+
+- **`secret-scan-reusable` audits `uv.lock` projects** instead of the job's
+  own environment. Repositories with only `pyproject.toml` + `uv.lock` used to
+  fall through to a bare `pip-audit` that could never see lockfile CVEs. The
+  audit now runs with `--locked`, plus `--all-packages` for uv workspaces
+  (#158).
+- `pr-autofix-loop` prefers an elevated PAT for checkout and the action token,
+  so autofix pushes re-trigger PR checks when a PAT is provisioned (#149).
+
+### Removed
+
+- **tia-shadow-reusable** and **mutation-testing-diff-reusable**, plus the
+  diff caller `mutation-testing-diff.yml`, were retired estate-wide on
+  2026-10-05 (#157). A CI-cost audit found observe-only lanes burning runner
+  minutes with zero caught defects. Consumers that still reference either
+  workflow must drop those `uses:` blocks. No v1 callers remained at removal
+  time. Under the v1 contract this should have waited for v2; see the v1.23.0
+  note.
+
+## 1.21.0 — 2026-10-05
 
 ### Added
 
 - **`secret-scan-reusable` gains opt-in `npm_audit_omit_dev` input** (default
-  `false`). When `true`, the npm audit job scopes to production dependencies
-  (`--omit=dev` on npm >= 7, `--only=prod` on npm 6). Rationale: dev-only
-  advisories in build/lint tooling chains frequently have no patched release
-  (the affected range covers every published version), which makes a required
-  audit check permanently red and unmergeable for every PR. The default keeps
-  the v1 whole-tree audit contract; callers opt in per-repo.
+  `false`, #156). When `true`, the npm audit job scopes to production
+  dependencies (`--omit=dev` on npm >= 7, `--only=prod` on npm 6).
+  - Rationale: dev-only advisories in build/lint tooling chains frequently
+    have no patched release (the affected range covers every published
+    version). That makes a required audit check permanently red and
+    unmergeable for every PR.
+  - The default keeps the v1 whole-tree audit contract; callers opt in
+    per-repo.
+- Copier `cost_profile=lean` drops measured-waste CI callers
+  (`monitor-litellm.yml`) (#147).
+- `exploratory-bug-bash` weekly-lane operationalisation (calibration, ledger,
+  stop rule) (#146).
 
-### Security
+### Changed
 
-- **Jev judge shadow hardening**: the secret-bearing runner checkout now only
-  accepts a release-tag `pack_ref` (`vN`, `vN.N`, `vN.N.N`) and checks out
-  `refs/tags/<pack_ref>`, so a caller can't point it at contributor-controlled
-  code; any other ref skips the shadow. The runner also refuses HTTP redirects
-  so the TypeSafe `Authorization` header is never forwarded.
+- `pr-autofix-loop` standalone: slim preflight job; only dispatched runs use
+  `ubuntu-latest` (#148).
+
+### Fixed
+
+- `pr-autofix-loop`: `--repo` on budget-comment and label lookups; head ref
+  resolved with `--repo` and fails closed when empty (#154, #155).
+- `pr-classifier` manifest parsing hardening (#152, #153); `run-judge`
+  candidate guards (#150).
+
+## 1.20.0 — 2026-10-02
 
 ### Added
 
-- **Playwright failure classification (advisory)**: `failure_class.py` gains a
-  separate `test_failure_class` vocabulary — `product`, `test-defect`,
-  `environment`, `external-dependency`, `unclassified` (the last three shared
-  with the session taxonomy) — plus Playwright JSON-report and stdout
-  parsers. New composite action `classify-playwright-failures`, and
-  `e2e-playwright-reusable` now runs it after every suite and exposes
-  `test_failure_class` / `autofix_eligible` / `retryable` workflow outputs.
-  Never changes a job conclusion. See `REUSABLE-WORKFLOWS.md`.
-- **`exploratory-bug-bash` skill (advisory)**: charter-driven AI exploratory
-  testing via pinned `tester-army/e2e` through LiteLLM, with planted-bug
-  calibration; a candidate counts only once a deterministic test reproduces
-  it. `fanout.sh` exits nonzero when any charter hits a harness error (exit
-  `>1`; `run.py` exits `2` on missing env) while exit `1` (candidate) stays
-  advisory; `BB_ACCOUNTS` must map every charter session.
 - **Jev judge shadow (opt-in, observe-only)**: `pr-assessment-reusable` gains
-  the `jev_judge_shadow` (`'off'`/`'on'`) and `jev_entity` inputs plus an optional
-  entity-scoped `JEV_TYPESAFE_API_KEY`.
+  the `jev_judge_shadow` (`'off'`/`'on'`) and `jev_entity` inputs plus an
+  optional entity-scoped `JEV_TYPESAFE_API_KEY` (#141).
   - When the caller passes `'on'` and the repo variable
     `JEV_ENABLED_JUDGE_FINDING_SHADOW` is `'true'`, the Judge job re-asks its
     four gates of pinned `jev-1.13.0`.
   - It uploads payload-free `judge-jev-shadow` receipts.
   - It never changes the verdict, and it is fail-open.
-  - It is refused under `CLIENT_AI_POLICY` and for the `cpdcheck` owner.
+  - It is refused under `CLIENT_AI_POLICY` and for owners on its denial list.
   - See `docs/jev-judge-shadow.md`.
-- **merge danger on PR assessment** — pr-classifier now emits optional
-  `door` (`one-way`/`two-way`), `blast_radius` (`small`/`medium`/`large`),
-  and `danger_reason` fields; the judge renders them as a `**Merge danger:**`
-  line in the posted review. `unknown` means unclassified — never rendered
-  as a safe verdict. The PR template gains a matching author-filled
-  `## Merge danger` section so disagreement with the classifier is visible.
-- **pr-standards-checker agent** — validates a PR diff against the repo-owned
+- **Playwright failure classification (advisory)** (#143).
+  - `failure_class.py` gains a separate `test_failure_class` vocabulary:
+    `product`, `test-defect`, `environment`, `external-dependency`,
+    `unclassified` (the last three shared with the session taxonomy). It also
+    gains Playwright JSON-report and stdout parsers.
+  - New composite action `classify-playwright-failures`.
+  - `e2e-playwright-reusable` now runs it after every suite and exposes
+    `test_failure_class` / `autofix_eligible` / `retryable` workflow outputs.
+  - It never changes a job conclusion. See `REUSABLE-WORKFLOWS.md`.
+- **`exploratory-bug-bash` skill (advisory)** (#144, #145).
+  - Charter-driven AI exploratory testing via pinned `tester-army/e2e`
+    through LiteLLM, with planted-bug calibration. A candidate counts only
+    once a deterministic test reproduces it.
+  - `fanout.sh` exits nonzero when any charter hits a harness error (exit
+    `>1`; `run.py` exits `2` on missing env). Exit `1` (candidate) stays
+    advisory.
+  - `BB_ACCOUNTS` must map every charter session.
+- **Merge danger on PR assessment** (#131).
+  - pr-classifier now emits optional `door` (`one-way`/`two-way`),
+    `blast_radius` (`small`/`medium`/`large`) and `danger_reason` fields.
+  - The judge renders them as a `**Merge danger:**` line in the posted
+    review. `unknown` means unclassified and is never rendered as a safe
+    verdict.
+  - The PR template gains a matching author-filled `## Merge danger` section,
+    so disagreement with the classifier is visible.
+- **pr-standards-checker agent** validates a PR diff against the repo-owned
   `.ai/pr-standards.yaml` manifest (seeded as a starter file; customize per
-  repo). Includes a `testing` section that flags tautological tests
-  (assertions that re-derive the expected value from the code under test).
-- **scope-adherence under-delivery check** — the skill is now bidirectional:
-  it also flags concrete promises in the PR title/description that the diff
-  does not deliver (the spec axis), not just scope creep.
-
-- **coverage-ratchet-reusable** — shared coverage gate: runs a suite, extracts
-  a float metric, and compares against an in-repo baseline file. Absent
-  baseline = measure-and-report (exits 0); below baseline = fail (enforce)
-  or warn (report). Optional `setup_command` for non-node/python toolchains,
-  `cache_path`/`cache_key`, and `auto_commit_baseline` for default-branch
-  pushes. Job is intentionally unnamed so required-check contracts bind to
-  the `coverage` job id.
-- **restore-drill-reusable** — scheduled Azure SQL restore drill:
-  `az sql db restore` (PITR) into a throwaway database, SELECT-only sanity
-  queries, JSONL + report artifacts, then deletes the drill DB even on
-  failure.
-- **check-branch-protection.py** — audits `deployment-contracts.yaml`
-  `required_checks` (repo-level and per-lane overrides) against live
-  `branches/{b}/protection` required status checks via `gh api`. Warn-only
-  without a PAT; `--emit-fixes` writes ready-to-run `gh api -X PUT`
-  payloads — it never applies changes itself.
-- **deployment-contract schema fields** — repo-level `protected_branches`
-  and `required_checks`, plus lane-level `required_checks` overrides, now
-  validate in `check-deployment-contract.py` and
-  `schemas/deployment-contract.schema.json`.
-
-### Removed
-
-- **tia-shadow-reusable** and **mutation-testing-diff-reusable** — retired
-  estate-wide 2026-10-05 (CI-cost audit: observe-only lanes burning runner
-  minutes with zero caught defects). The diff caller
-  `mutation-testing-diff.yml` is also removed; consumers that still
-  reference either workflow must drop those `uses:` blocks — no v1
-  callers remained at removal time.
+  repo). Its `testing` section flags tautological tests: assertions that
+  re-derive the expected value from the code under test.
+- **scope-adherence under-delivery check.** The skill is now bidirectional:
+  besides scope creep, it flags concrete promises in the PR title/description
+  that the diff does not deliver (the spec axis).
+- CI cost policy, relevance-gate component and cost sampler (#138, #139,
+  #140).
 
 ### Changed
 
-- **`/watch-pr` subscribe split (v2.1.0).** Docs/CI auto-merge PRs (paths ⊆
-  `reports/**`, `docs/**`, `reports/INDEX.md`,
-  `.github/pull_request_template.md`, `.github/PULL_REQUEST_TEMPLATE.md`)
-  must not call `subscribe_github_pr` / `subscribe_pr_activity`. Optional CI
-  subscribe; ≥20-minute heartbeat only if CI subscribe is on. Product-red
-  keeps PR+CI subscribe and the ≥20-minute heartbeat. No 60s poll loop; do
-  not invent `mcp__github__subscribe_ci`. Template:
-  `.claude/commands/watch-pr.md.jinja`. Plugin command rebuilt from it.
+- Latest-generation sync: proxy-aware `run-*.py`, tier migration, ported
+  surfaces (#134). This includes the email-capture allocation-ownership fix,
+  later tagged for the email-capture lane as bare `v0.2.4`+ and now
+  `email-capture-v0.2.6`.
+
+### Security
+
+- **Jev judge shadow hardening** (#142).
+  - The secret-bearing runner checkout now accepts only a release-tag
+    `pack_ref` (`vN`, `vN.N`, `vN.N.N`) and checks out
+    `refs/tags/<pack_ref>`, so a caller can't point it at
+    contributor-controlled code. Any other ref skips the shadow.
+  - The runner refuses HTTP redirects, so the TypeSafe `Authorization` header
+    is never forwarded.
+
+### Fixed
+
+- Review follow-ups: restore-drill whitespace, proxy key guard (#135);
+  bot-review churn throttling (#136); superseded/quota guards (#137);
+  `ai-resolve` parser rounds (#128, #130, #132, #133).
+
+## 1.19.0 — 2026-09-25
+
+### Added
+
+- **coverage-ratchet-reusable**: shared coverage gate (#126).
+  - Runs a suite, extracts a float metric, and compares it against an
+    in-repo baseline file.
+  - Absent baseline = measure-and-report (exits 0; see the 1.23.0 activation
+    change). Below baseline = fail (enforce) or warn (report).
+  - Optional `setup_command` for non-node/python toolchains,
+    `cache_path`/`cache_key`, and `auto_commit_baseline` for default-branch
+    pushes.
+  - The job is intentionally unnamed, so required-check contracts bind to
+    the `coverage` job id.
+- **restore-drill-reusable**: scheduled Azure SQL restore drill (#126).
+  `az sql db restore` (PITR) restores into a throwaway database, runs
+  SELECT-only sanity queries, writes JSONL + report artifacts, then deletes
+  the drill DB even on failure.
+- **check-branch-protection.py** audits `deployment-contracts.yaml`
+  `required_checks` (repo-level and per-lane overrides) against live
+  `branches/{b}/protection` required status checks via `gh api`. It is
+  warn-only without a PAT. `--emit-fixes` writes ready-to-run `gh api -X PUT`
+  payloads; it never applies changes itself.
+- **Deployment-contract schema fields**: repo-level `protected_branches` and
+  `required_checks`, plus lane-level `required_checks` overrides, now
+  validate in `check-deployment-contract.py` and
+  `schemas/deployment-contract.schema.json`.
+- TIA shadow lane (#129; retired in 1.22.0).
+- Private-mirror trust for a seeded universe mirror (#122).
+
+### Fixed
+
+- `ai-resolve` robustness rounds (#123, #125, #127).
+
+## 1.18.0 — 2026-09-24
+
+### Added
+
+- `e2e-playwright-reusable`: PR-time Playwright with screenshot artifacts
+  (#124).
+- Registry trust for three seeded private mirrors (#120).
+
+### Changed
+
+- Light CI legs moved to `ubuntu-slim` (#119).
+
+### Fixed
+
+- Mirror bootstrap validates effective push targets and bounds `gh api`
+  (#118).
+
+## 1.17.0 — 2026-09-24
+
+### Added
+
+- `migration-run-gate-reusable`, the `check-guarded-paths` CI action,
+  registry and contract schemas (#115).
+- Capability registry scaffold: scopes, resolver, lint gate (P0) (#112);
+  private-mirror bootstrap and mirror-mode PACK-SURFACE (#116).
+
+### Fixed
+
+- `pr-autofix-loop` skips stale `workflow_run` events before dispatch (#113).
+- `ai-resolve` nested script dependency detection (#117).
+
+### Docs
+
+- `ubuntu-slim` opt-in for reusable-workflow callers (#114).
+
+## 1.16.0 — 2026-09-20
+
+### Added
+
+- Closed-loop issue lifecycle helper (#111).
+- G-P4 feature-train language (#109).
+
+### Security
+
+- OpenRouter zero-retention enforced on every OpenRouter hop (#110).
 
 ## 1.15.1 — 2026-09-14
 
@@ -277,6 +428,23 @@
   on pin drafts. Optional `_sync_metadata` is now ignored for scaffold
   classification. Adopted (non-empty `workflows`) and other extra keys are
   unchanged. Does not weaken adopted-contract lint.
+
+## 1.15.0 — 2026-09-13
+
+> Reconstructed in the v1.23.0 release from the commits tagged
+> `v1.15.0`; earlier releases (1.12.x, 1.13.x) still have no
+> CHANGELOG section.
+
+### Changed
+
+- **`/watch-pr` subscribe split (v2.1.0).** Docs/CI auto-merge PRs (paths ⊆
+  `reports/**`, `docs/**`, `reports/INDEX.md`,
+  `.github/pull_request_template.md`, `.github/PULL_REQUEST_TEMPLATE.md`)
+  must not call `subscribe_github_pr` / `subscribe_pr_activity`. Optional CI
+  subscribe; ≥20-minute heartbeat only if CI subscribe is on. Product-red
+  keeps PR+CI subscribe and the ≥20-minute heartbeat. No 60s poll loop; do
+  not invent `mcp__github__subscribe_ci`. Template:
+  `.claude/commands/watch-pr.md.jinja`. Plugin command rebuilt from it.
 
 ## 1.14.0 — 2026-09-12
 
