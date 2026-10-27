@@ -9,12 +9,13 @@ WORKFLOW = ROOT / ".github/workflows/outcome-check-reusable.yml"
 
 def test_reusable_exposes_all_terminal_outcomes_and_neutral_holds() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
-    for outcome in ("EXECUTED", "NO_CHANGES", "DEFERRED", "POLICY_HELD", "FAILED"):
+    for outcome in ("EXECUTED", "NO_CHANGES", "DEFERRED", "POLICY_HELD", "INERT", "FAILED"):
         assert outcome in text
     assert "DEFERRED: 'neutral'" in text
     assert "POLICY_HELD: 'neutral'" in text
+    assert "INERT: 'neutral'" in text
     assert "FAILED: 'failure'" in text
-    assert "['DEFERRED', 'POLICY_HELD', 'FAILED'].includes" in text
+    assert "['DEFERRED', 'POLICY_HELD', 'INERT', 'FAILED'].includes" in text
     assert "request: { timeout: 20000 }" in text
     assert "summary: `${process.env.OUTCOME}: ${process.env.SUMMARY}`,\n              },\n              request:" in text
 

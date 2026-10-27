@@ -59,6 +59,29 @@ def test_accepts_structured_publisher(tmp_path):
     assert LINT.lint(tmp_path, write(tmp_path)) == []
 
 
+def _with_inert(tmp_path: Path, conclusion: str) -> Path:
+    config = write(tmp_path)
+    workflow = tmp_path / ".github/workflows/deploy.yml"
+    workflow.write_text(
+        workflow.read_text()
+        .replace("condition2 ? 'POLICY_HELD'", "condition2 ? 'POLICY_HELD' : condition3 ? 'INERT'")
+        .replace("POLICY_HELD: 'neutral',", f"POLICY_HELD: 'neutral', INERT: '{conclusion}',")
+    )
+    data = json.loads(config.read_text())
+    data["workflows"][".github/workflows/deploy.yml"]["outcomes"].insert(2, "INERT")
+    config.write_text(json.dumps(data))
+    return config
+
+
+def test_inert_is_a_declarable_neutral_outcome(tmp_path):
+    assert LINT.lint(tmp_path, _with_inert(tmp_path, "neutral")) == []
+
+
+def test_inert_must_not_publish_success(tmp_path):
+    errors = LINT.lint(tmp_path, _with_inert(tmp_path, "success"))
+    assert any("conclusions must explicitly map" in e for e in errors)
+
+
 @pytest.mark.parametrize(
     "command",
     [
