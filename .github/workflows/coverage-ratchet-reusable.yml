@@ -10,7 +10,9 @@ name: Coverage Ratchet (Reusable)
 #     output activation=inert and exits 0 — this required check cannot fail
 #     until the baseline is seeded (commit the printed number in a PR, or let
 #     auto_commit_baseline seed it). `require_baseline: true` makes an absent
-#     baseline fail instead (opt-in in v1; planned default in v2).
+#     baseline fail instead (opt-in in v1; planned default in v2);
+#     `fail_on_inert: true` is the contract-wide name for the same switch
+#     (docs/workflow-outcome-convention.md § Activation contract).
 #   - current <  baseline   -> fails in `enforce` mode; warns in `report`.
 #   - current >= baseline   -> prints the delta; a maintainer raises the
 #     baseline file in the same PR to lock the gain — or set
@@ -94,6 +96,14 @@ on:
           mode). A default-branch push that will seed the baseline via
           auto_commit_baseline is exempt. Default false in v1; planned to
           become true in v2.
+      fail_on_inert:
+        type: boolean
+        required: false
+        default: false
+        description: >-
+          Activation-contract name for require_baseline: either one fails an
+          inert run (absent baseline) with the same seeding exemption.
+          Default false in v1.
       auto_commit_baseline:
         type: boolean
         required: false
@@ -242,7 +252,7 @@ jobs:
           CURRENT: ${{ steps.metric.outputs.value }}
           BASELINE_FILE: ${{ inputs.baseline_file }}
           MODE: ${{ inputs.mode }}
-          REQUIRE_BASELINE: ${{ inputs.require_baseline }}
+          REQUIRE_BASELINE: ${{ inputs.require_baseline || inputs.fail_on_inert }}
           # Mirrors the auto-commit step's gate: this run will seed the baseline.
           SEEDING: >-
             ${{ inputs.auto_commit_baseline && github.event_name == 'push' &&
@@ -309,7 +319,7 @@ jobs:
           TRIGGER_SHA: ${{ github.sha }}
           # A require_baseline run that passed only because this step seeds
           # the baseline must fail if it ends up not seeding it.
-          REQUIRE_BASELINE: ${{ inputs.require_baseline }}
+          REQUIRE_BASELINE: ${{ inputs.require_baseline || inputs.fail_on_inert }}
           ACTIVATION: ${{ steps.compare.outputs.activation }}
         run: |
           set -euo pipefail

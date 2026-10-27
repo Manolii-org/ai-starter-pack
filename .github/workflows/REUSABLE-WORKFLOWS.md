@@ -127,7 +127,7 @@ env:
 | **integration-admission-reusable** | `config_path`, `base_sha`, `head_sha`, `installation_id`, `accepted_producer`, `pack_ref=v1`, `evidence_bundle_json=[]`, `runs_on`, `shadow=true`, `timeout_minutes=15` | none |
 | **pre-production-tier-reusable** | `gates` (JSON, required), `budget_minutes=45`, `job_timeout_minutes=60`, `runs_on`, `max_parallel=4`, `environment`, `checkout_fetch_depth=0`, `open_issue_on_failure=false` | `GATE_SECRETS` (optional) |
 | **tier-gate-summary-reusable** | `gate_name` (required), `applies` (required), `tier=fast`, `command`, `skip_reason`, `setup_command`, `runs_on`, `working_directory`, `timeout_minutes=10`, `checkout_fetch_depth=0` | none |
-| **coverage-ratchet-reusable** | `runs_on`, `node_version`, `python_version`, `setup_command`, `install_command`, `coverage_command` (req), `metric_command` (req), `baseline_file`, `mode=enforce`, `require_baseline=false`, `auto_commit_baseline=false`, `cache_path`, `cache_key`, `timeout_minutes=30`, `job_timeout_minutes=65` (validated ≥ timeout+25, +35 with `setup_command`) | `GH_PAT` (optional, for baseline auto-commit) |
+| **coverage-ratchet-reusable** | `runs_on`, `node_version`, `python_version`, `setup_command`, `install_command`, `coverage_command` (req), `metric_command` (req), `baseline_file`, `mode=enforce`, `require_baseline=false`, `fail_on_inert=false`, `auto_commit_baseline=false`, `cache_path`, `cache_key`, `timeout_minutes=30`, `job_timeout_minutes=65` (validated ≥ timeout+25, +35 with `setup_command`) | `GH_PAT` (optional, for baseline auto-commit) |
 | **restore-drill-reusable** | `resource_group`, `sql_server`, `source_database` (req), `sanity_queries`, `db_auth=sql-auth`, `sqlcmd_version`, `timeout_minutes=45` | `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `DRILL_SQL_USER`, `DRILL_SQL_PASSWORD` |
 
 **Notes:**
@@ -622,6 +622,13 @@ for agent commits), and a final step fails the job if one was pushed anyway.
 Code at the PR head — tests, scripts and anything the base hooks call — still
 runs, as it must for Autofix to run the PR's own checks.
 
+**Activation (v1.23.0+).** Workflow output `activation` is `active` when the
+agent step ran and its execution file was verified, and `skipped` when a gate declined the event. It is empty when
+the job did not run (the event failed the job `if:`) or failed before the
+agent step. Autofix has no inert state, so there is no `fail_on_inert` input:
+a missing credential, or an agent step with no execution file, fails the job.
+See `docs/workflow-outcome-convention.md` § Activation contract.
+
 
 ## bot-review-relay
 
@@ -704,6 +711,14 @@ keep identical to your `uses:` pin). It never changes the job conclusion. Downst
 retry `retryable == 'true'`, hand `autofix_eligible == 'true'` to code
 fixers, and escalate `environment` to whoever owns the secret/seed/config.
 
+Activation (v1.23.0+): the `activation` output is `active` when Playwright
+executed at least one test, `inert` when it executed none (every test skipped,
+for example because `E2E_TEST_USER_*` secrets are absent, or no test matched
+`--grep`), and `unknown` when no reporter summary is readable (a JSON-only
+reporter). An inert run emits `::warning::e2e-playwright INERT …` and still
+passes unless the caller sets `fail_on_inert: true` (default `false` in v1).
+See `docs/workflow-outcome-convention.md` § Activation contract.
+
 ## classify-playwright-failures action (v1.20.0+)
 
 The same classifier as a composite action for repos that run Playwright
@@ -738,7 +753,8 @@ warn in `report` mode.
 cannot fail`, prints the measured number to seed with, and sets the workflow
 output `activation=inert` (`active` once a baseline is compared). A required
 check bound to an inert ratchet can never fail. Set `require_baseline: true`
-(opt-in in v1, planned default in v2) to fail instead; a default-branch push
+(or its activation-contract name `fail_on_inert: true`; opt-in in v1, planned
+default in v2) to fail instead; a default-branch push
 that seeds the baseline via `auto_commit_baseline` is exempt (and that run
 fails if the seeding step cannot write the baseline).
 
