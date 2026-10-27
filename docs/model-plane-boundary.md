@@ -308,6 +308,7 @@ Referenced above but not shipped by the pack (`tests/test_doc_path_references.py
   - `config/model-routing.source.yaml`
   - `deploy/openhands/openhands-system-prompt.md`
   - `scripts/assessment/sdk_runner.py`
+  - `scripts/bootstrap_env.py`
   - `scripts/check-model-plane-premise.py`
   - `scripts/check-session-integrity.py`
   - `scripts/claude-session-start.sh`
@@ -319,3 +320,4 @@ Referenced above but not shipped by the pack (`tests/test_doc_path_references.py
   - `scripts/tests/test_lint_agent_routing.py`
   - `scripts/tests/test_session_integrity.py`
   - `scripts/tests/test_session_start_plane_separation.py`
+  - `templates/ai-starter-pack/`

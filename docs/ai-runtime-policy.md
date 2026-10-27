@@ -85,8 +85,8 @@ Referenced above but not shipped by the pack (`tests/test_doc_path_references.py
 
 - Orchestrator repository only:
   - `.ai/cursor-session-stub.md`
-  - `.cursor/rules/claude-md-parity.mdc`
   - `.ai/knowledge-map.md`
+  - `.cursor/rules/claude-md-parity.mdc`
   - `.devin/hooks.v1.json`
   - `docs/agent-context-architecture.md`
   - `docs/codex-web-parity.md`
@@ -94,7 +94,10 @@ Referenced above but not shipped by the pack (`tests/test_doc_path_references.py
   - `docs/cursor-hooks-parity.md`
   - `docs/devin-parity.md`
   - `docs/mesh-cross-ide-setup.md`
+  - `scripts/build-context-bundle.py`
+  - `scripts/cursor-hooks/`
   - `scripts/cursor-session-bootstrap.sh`
+  - `scripts/devin-hooks/`
   - `scripts/devin-session-bootstrap.sh`
   - `scripts/generate-devin-hooks.py`
   - `scripts/hook-dispatch.sh`
