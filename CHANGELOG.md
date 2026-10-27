@@ -93,8 +93,9 @@ Upgrade order for consumers:
   - It excludes the Codex review workflows, `setup-env-secret`,
     `dependabot-manual-automerge`, `monitor-litellm` and the LiteLLM
     deploy/publish files.
-  - It refuses `oss_routing`, `kl_integration`, `langfuse_telemetry` and
-    `mesh_telemetry`. `scripts/first-run-setup.py` does not offer them.
+  - It refuses `oss_routing`, `kl_integration`, `langfuse_telemetry`,
+    `mesh_telemetry` and an explicit `codex_review=true`.
+    `scripts/first-run-setup.py` does not offer them.
   - The rendered `pr-assessment.yml` still defaults its LLM jobs to
     self-hosted `fly` runners (unchanged in v1). Instances without that
     fleet must set the repository variable `CI_RUNNER_OVERRIDE` to
@@ -165,8 +166,10 @@ migration-run-gate, outcome-check).
   - It takes an optional `notes` input for the annotated message.
 - **`email-capture-v0.2.6`** is cut on the same commit as the bare `v0.2.6`
   (`a00b825`). Bare `v0.x` tags are kept.
-  - Since the allocation-ownership fix, `await`, `assert` and `release` must
-    find the allocation in the registry `allocate` wrote.
+  - Since the allocation-ownership fix, `await` and `release` must find the
+    allocation in the registry `allocate` wrote. `assert` does not consult
+    the registry, but every subcommand still needs a valid non-`off`
+    capture profile.
   - Lanes that split those steps across jobs must share that registry or
     they get `AUTHORIZATION_DENIED` (`docs/email-capture.md` § Versions and
     allocation ownership).
