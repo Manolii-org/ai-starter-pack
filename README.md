@@ -36,7 +36,7 @@ Legacy `manolii-org/master@v1` still serves `routing-lint` / `shared-config` unt
   pack release.
 - The bare `v0.1.x`–`v0.2.x` tags are legacy email-capture tags and stay in
   place (some lanes check out `ref: v0.2.3`). New email-capture releases use the
-  prefixed form only. Since `v0.2.4`, `await`/`assert`/`release` must find the
+  prefixed form only. Since `v0.2.4`, `await` and `release` must find the
   allocation in the same local registry `allocate` wrote — keep those steps in
   one job (`docs/email-capture.md`).
 
