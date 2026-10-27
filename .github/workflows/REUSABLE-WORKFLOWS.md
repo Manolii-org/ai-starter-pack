@@ -8,6 +8,10 @@ uses: manolii-org/ai-starter-pack/.github/workflows/<name>-reusable.yml@v1.14.0
 
 Frozen at v1 (additive=non-breaking; rename/remove/default-change=v2).
 
+Pin pack releases (`vX.Y.Z`, full commit SHA preferred). Component tags
+(`email-capture-vX.Y.Z`, `feature-controls-vX.Y.Z`) are not pack releases and
+never move `v1`; see README § Tag namespaces.
+
 ## Runner selection — opt into `ubuntu-slim` for light jobs
 
 Every `runs_on` input defaults to `ubuntu-latest` and changing that default is a
@@ -123,7 +127,7 @@ when it drifts. Edit the workflow, then regenerate — never this table.
 | **backup-kernel-validate-reusable** | `manifest_path` (req), `pack_ref` | none | none |
 | **ci-reusable** | `runs_on=ubuntu-latest`, `node_version=24`, `package_manager=npm`, `pnpm_version`, `install_command`, `lint_command=npx eslint .`, `typecheck_command=npx tsc --noEmit`, `test_command=npm test -- --coverage`, `test_timeout_minutes=15`, `build_command=npm run build`, `build_timeout_minutes=15`, `audit_command`, `skip_lint=false`, `skip_typecheck=false`, `skip_test=false`, `skip_build=false`, `skip_security_audit=false` | none | none |
 | **claude-md-contract-reusable** | `runs_on=ubuntu-latest`, `python_version=3.12`, `require_contract=false` | none | none |
-| **coverage-ratchet-reusable** | `runs_on=ubuntu-latest`, `node_version`, `python_version`, `setup_command`, `install_command=npm ci`, `coverage_command` (req), `metric_command` (req), `baseline_file=.ci/coverage-baseline.txt`, `mode=enforce`, `auto_commit_baseline=false`, `cache_path`, `cache_key`, `timeout_minutes=30`, `job_timeout_minutes=65` | `GH_PAT` | none |
+| **coverage-ratchet-reusable** | `runs_on=ubuntu-latest`, `node_version`, `python_version`, `setup_command`, `install_command=npm ci`, `coverage_command` (req), `metric_command` (req), `baseline_file=.ci/coverage-baseline.txt`, `mode=enforce`, `require_baseline=false`, `auto_commit_baseline=false`, `cache_path`, `cache_key`, `timeout_minutes=30`, `job_timeout_minutes=65` | `GH_PAT` | `activation` |
 | **e2e-playwright-reusable** | `runs_on=ubuntu-latest`, `node_version=22`, `workdir=.`, `install_command=npm ci`, `build_command`, `browsers=chromium`, `playwright_args_json=[]`, `test_env`, `artifact_name`, `artifact_paths=playwright-report/ test-results/ e2e-...`, `retention_days=14`, `timeout_minutes=30`, `job_timeout_minutes=90`, `pack_ref=v1`, `classify_results=test-results/` | `E2E_TEST_USER_EMAIL`, `E2E_TEST_USER_PASSWORD`, `VERCEL_BYPASS_SECRET` | `test_failure_class`, `autofix_eligible`, `retryable` |
 | **email-quality-reusable** | `pack_ref` (req), `profile_path=config/email-quality.json`, `sender_path` (req) | `UNSPAM_API_TOKEN` (req), `SENDER_TOKEN` | none |
 | **fast-tier-reusable** | `gates` (req), `budget_minutes=5`, `job_timeout_minutes=15`, `runs_on=ubuntu-latest`, `max_parallel=10`, `checkout_fetch_depth=0` | none | `verdict`, `breakdown` |
@@ -612,6 +616,27 @@ jobs:
 Product repos that deliberately keep Autofix off (e.g. Buro `bcp-core` ADR-0006)
 should not add this caller.
 
+**Agent-step contract.** The pinned `anthropics/claude-code-action` (v1) takes
+`prompt` and `claude_args`; the reusable passes `--allowedTools` and, when the
+`model` input is non-empty, `--model`. Releases before this fix passed v0
+inputs that the action ignored, so Autofix never ran — after upgrading it
+pushes `[autofix]` commits and spends tokens. A dispatched agent step that
+produces no `execution_file` fails the job; skips (loop-break, budget,
+`skip-ai-review`, bot actors other than the relay, actors without write
+access) stay green. `GH_PAT` is optional; pushes made with `github.token` do
+not re-trigger PR checks.
+
+**Instruction-surface hardening.** Before the agent runs, the checkout is
+pinned to the PR head SHA and `.claude/`, `.mcp.json`, `.claude.json`,
+`.gitmodules`, `.ripgreprc`, `.husky/`, `CLAUDE.md`, `CLAUDE.local.md` and
+`AGENTS.md` (root and nested) are restored from the PR base SHA, so a PR
+cannot change the agent's instructions, settings, hooks configuration or MCP
+servers. A trusted pre-commit hook outside the checkout refuses `[autofix]`
+commits that touch those paths (it replaces the repository's own git hooks
+for agent commits), and a final step fails the job if one was pushed anyway.
+Code at the PR head — tests, scripts and anything the base hooks call — still
+runs, as it must for Autofix to run the PR's own checks.
+
 
 ## bot-review-relay
 
@@ -720,12 +745,23 @@ classifier never guesses.
 ## coverage-ratchet (v1.19.0+)
 
 Reusable coverage gate: runs the suite, extracts a float metric, compares
-against an in-repo baseline file. Absent baseline = measure-and-report
-(exits 0, prints the number to seed with); below baseline = fail in
-`enforce` mode, warn in `report` mode. The job has no `name:` — with the
-caller below the reported check context is `coverage / coverage`
-(`<caller job id> / <called job name>`); required-check contracts must
-bind that composite string, not bare `coverage`.
+against an in-repo baseline file. Below baseline = fail in `enforce` mode,
+warn in `report` mode.
+
+**Absent baseline = INERT.** The run passes, emits
+`::warning::coverage-ratchet INERT: no baseline at <path>; this required check
+cannot fail`, prints the measured number to seed with, and sets the workflow
+output `activation=inert` (`active` once a baseline is compared). A required
+check bound to an inert ratchet can never fail. Set `require_baseline: true`
+(opt-in in v1, planned default in v2) to fail instead; a default-branch push
+that seeds the baseline via `auto_commit_baseline` is exempt (and that run
+fails if the seeding step cannot write the baseline).
+
+**Check name.** The called job id is `coverage` and has no `name:`, so the
+reported check is `<caller job name> / coverage`, where the caller job name
+is its `name:` when set and its job id otherwise — `coverage / coverage` with
+the caller below. Bind required checks to that full string, not bare
+`coverage`.
 
 ```yaml
 jobs:
@@ -740,10 +776,12 @@ jobs:
 ```
 
 `setup_command` is the escape hatch for toolchains node/python don't cover
-(e.g. Go from the hosted toolcache). `auto_commit_baseline` raises the
-baseline on default-branch pushes via a signed gh-api commit — requires a
-write-capable `GH_PAT` secret (the reusable's `permissions: contents: read`
-caps the caller token, so the option is rejected without GH_PAT).
+(e.g. Go from the hosted toolcache). `auto_commit_baseline` raises (or first
+seeds) the baseline on default-branch pushes via a signed gh-api commit. The
+only permission that matters is a write-capable `GH_PAT` secret
+(`contents: write` on the repository): the reusable's `permissions: contents:
+read` caps `github.token`, a caller's `permissions:` block cannot raise it,
+and the step fails without `GH_PAT`.
 
 ## restore-drill (v1.19.0+)
 

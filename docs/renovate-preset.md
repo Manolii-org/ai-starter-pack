@@ -47,6 +47,34 @@ cannot discover that the pin itself is a dependency to update.
   the `starter-pack` label and their existing commit-message topic; those
   metadata rules do not alter the semver manual-review policy.
 
+## Pack pins: one grouped, reviewed PR
+
+Consumers pin pack reusables and actions by full commit SHA with a version
+comment:
+
+```yaml
+uses: Manolii-org/ai-starter-pack/.github/workflows/secret-scan-reusable.yml@<40-hex-sha> # v1.23.0
+```
+
+Renovate's built-in `github-actions` manager already updates these pins (SHA
+and comment together) — no regex manager is needed. The preset's
+`manolii-ai-starter-pack` rule groups **every** pack dependency (workflow and
+action pins, the `renovate.json` preset pin and `.starter-pack-source`) into
+one PR per release, so a repository never runs a mix of pack versions, and
+never automerges it — digest-only rotations of a pack pin included. It matches
+the owner case-insensitively (`Manolii-org` and `manolii-org`).
+
+**Tag namespaces.** The pack also publishes component tags
+(`email-capture-vX.Y.Z`, `feature-controls-vX.Y.Z`), legacy bare `v0.x`
+email-capture tags and the moving `v1` alias. Renovate must only ever propose
+plain `vX.Y.Z` pack releases. The `github-actions` manager's default `docker`
+versioning already treats the prefixed tags as invalid and `v1` as
+incompatible with a `vX.Y.Z` pin, and bare `v0.x` tags sort below every `v1`
+release; the rule's `allowedVersions` (`/^v?[1-9][0-9]*\.[0-9]+\.[0-9]+$/`)
+enforces the same independently of versioning. Consumers pick the rule up when
+they next bump their preset pin (or immediately, when extending the unpinned
+preset).
+
 ## Precedence
 
 Renovate merges configs with the consumer's own `renovate.json` last — but
