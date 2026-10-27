@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Tag namespaces
+
+- Component releases now use prefixed tags: `email-capture-vX.Y.Z`,
+  `feature-controls-vX.Y.Z` (plus `-alpha|beta|rc.N`). `release-tag.yml`
+  accepts them, never moves `v1` for them, and takes an optional `notes`
+  input for the annotated tag message. Existing bare `v0.x` tags are kept.
+- `release-tag.yml` now validates the whole input string (a multi-line value
+  used to pass the per-line `grep` check).
+- Docs: tag namespaces (README), email-capture allocation ownership for lanes
+  that split `allocate`/`await` across jobs (`docs/email-capture.md`);
+  `packages/feature-controls` is marked unreleased.
+
 ### Added
 
 - **`secret-scan-reusable` gains opt-in `npm_audit_omit_dev` input** (default

@@ -9,10 +9,14 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag name (vX.Y.Z)"
+        description: "Tag name: pack release vX.Y.Z, or component email-capture-vX.Y.Z / feature-controls-vX.Y.Z[-alpha|beta|rc.N]"
         required: true
       sha:
         description: "Commit SHA to tag (defaults to main HEAD)"
+        required: false
+        default: ""
+      notes:
+        description: "Annotated tag message (defaults to 'Release <tag>')"
         required: false
         default: ""
 
@@ -34,8 +38,19 @@ jobs:
           TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "Refusing tag '$TAG' — must match vX.Y.Z" >&2
+          # Pack releases are bare vX.Y.Z. Components release under their own
+          # prefixed namespace so a component version can never be mistaken
+          # for (or sort among) pack releases; bare v0.x tags are legacy.
+          # Whole-string bash regex: grep matches per line, so a multi-line
+          # input would pass a grep check on its first line.
+          PACK_RE='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          COMPONENT_RE='^(email-capture|feature-controls)-v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$'
+          if [[ "$TAG" =~ $PACK_RE ]]; then
+            echo "Pack release tag $TAG"
+          elif [[ "$TAG" =~ $COMPONENT_RE ]]; then
+            echo "Component release tag $TAG (major alias is never moved)"
+          else
+            echo "Refusing tag '$TAG' — must match vX.Y.Z or <component>-vX.Y.Z" >&2
             exit 1
           fi
       - name: Create tag ref
@@ -44,6 +59,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag }}
           SHA: ${{ inputs.sha }}
+          NOTES: ${{ inputs.notes }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
@@ -66,7 +82,7 @@ jobs:
           # silently broke the stated convention. Creating the tag OBJECT first
           # and pointing the ref at it restores it.
           echo "Creating annotated tag object for $SHA as $TAG"
-          TAG_PAYLOAD=$(TAG="$TAG" SHA="$SHA" python3 -c "import json,os; print(json.dumps({'tag': os.environ['TAG'], 'message': 'Release ' + os.environ['TAG'], 'object': os.environ['SHA'], 'type': 'commit'}))")
+          TAG_PAYLOAD=$(TAG="$TAG" SHA="$SHA" NOTES="$NOTES" python3 -c "import json,os; print(json.dumps({'tag': os.environ['TAG'], 'message': os.environ['NOTES'] or 'Release ' + os.environ['TAG'], 'object': os.environ['SHA'], 'type': 'commit'}))")
           TAG_SHA=$(printf 'Authorization: Bearer %s\n' "$GH_TOKEN" | curl -sf --max-time 30 -X POST \
             -H @- \
             -H "Accept: application/vnd.github+json" \
@@ -99,6 +115,8 @@ jobs:
       # silently got stale content. Move it here so the documented contract is
       # the enforced one.
       - name: Move major-version alias
+        # Pack releases only: a component tag must never move the pack's v1.
+        if: ${{ startsWith(inputs.tag, 'v') }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag }}

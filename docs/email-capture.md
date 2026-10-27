@@ -11,3 +11,16 @@ Consumer journey coverage (which product paths actually send mail) is documented
 Live spam/inbox-placement checks use the separate `bin/email-quality` contract;
 see `docs/email-quality.md`. Capture modes, receivers and existing pins retain
 their current semantics.
+
+## Versions and allocation ownership
+
+Email-capture releases are tagged `email-capture-vX.Y.Z` (README § Tag
+namespaces). The legacy bare `v0.1.x`–`v0.2.x` tags remain for lanes that
+already check them out. From `v0.2.4` (`email-capture-v0.2.6` is the first
+prefixed tag), `await`, `assert` and `release` resolve the allocation against
+the local registry that `allocate` wrote — by default
+`$RUNNER_TEMP/email-capture/allocations.json`, overridable with
+`EMAIL_CAPTURE_PRIVATE_DIR` or `EMAIL_CAPTURE_ALLOCATION_REGISTRY` — and refuse
+anything else with `AUTHORIZATION_DENIED`. A lane that runs `allocate` in one job
+and `await`/`assert`/`release` in another must move those steps into one job
+(or carry the registry file between jobs as a private artifact).
