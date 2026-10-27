@@ -1,0 +1,25 @@
+name: Autofix acceptance (probe, never merged)
+# Throwaway caller for the v1.23.0 acceptance run on the probe PR only.
+on:
+  pull_request_review:
+    types: [submitted]
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+jobs:
+  autofix:
+    uses: ./.github/workflows/pr-autofix-loop-reusable.yml
+    with:
+      provider_mode: proxy
+      litellm_proxy_url: ${{ vars.LITELLM_PROXY_URL }}
+      model: claude-sonnet-4-6
+    secrets:
+      LITELLM_MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY }}
+      GH_PAT: ${{ secrets.MN_GH_AUTOMATION_TOKEN }}
+  report:
+    needs: autofix
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "activation=${{ needs.autofix.outputs.activation }} result=${{ needs.autofix.result }}"
