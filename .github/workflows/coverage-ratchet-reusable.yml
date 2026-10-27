@@ -6,14 +6,22 @@ name: Coverage Ratchet (Reusable)
 # via `metric_command` (a shell command whose stdout is parsed as a float),
 # and compares it against the in-repo baseline file.
 #
-#   - baseline file absent  -> prints measured value and exits 0 (seed it in
-#     a PR once a green run prints the number).
+#   - baseline file absent  -> INERT: warns `coverage-ratchet INERT`, sets
+#     output activation=inert and exits 0 — this required check cannot fail
+#     until the baseline is seeded (commit the printed number in a PR, or let
+#     auto_commit_baseline seed it). `require_baseline: true` makes an absent
+#     baseline fail instead (opt-in in v1; planned default in v2).
 #   - current <  baseline   -> fails in `enforce` mode; warns in `report`.
 #   - current >= baseline   -> prints the delta; a maintainer raises the
 #     baseline file in the same PR to lock the gain — or set
 #     `auto_commit_baseline: true` to have pushes to the default branch
-#     commit the raised baseline via a signed gh-api commit (requires the
-#     caller to grant `permissions: contents: write`).
+#     commit the raised (or first) baseline via a signed gh-api commit. This
+#     needs a write-capable GH_PAT secret: this workflow's `permissions:
+#     contents: read` caps github.token and a caller cannot raise it.
+#
+# Check name: the job id is `coverage` with no `name:`, so a caller job
+# `<caller job id>` reports `<caller job id> / coverage` (e.g.
+# `coverage / coverage`). Bind required checks to that full string.
 #
 # Caller example:
 #
@@ -77,6 +85,15 @@ on:
         required: false
         default: 'enforce'
         description: 'enforce fails when coverage < baseline; report only warns.'
+      require_baseline:
+        type: boolean
+        required: false
+        default: false
+        description: >-
+          Fail when baseline_file is absent instead of passing inert (any
+          mode). A default-branch push that will seed the baseline via
+          auto_commit_baseline is exempt. Default false in v1; planned to
+          become true in v2.
       auto_commit_baseline:
         type: boolean
         required: false
@@ -113,6 +130,13 @@ on:
       GH_PAT:
         required: false
         description: Optional elevated token for the baseline auto-commit on branches where GITHUB_TOKEN cannot push.
+    outputs:
+      activation:
+        description: >-
+          active when a baseline was compared; inert when baseline_file is
+          absent (the check could not fail). Empty if the job stopped before
+          the comparison.
+        value: ${{ jobs.coverage.outputs.activation }}
 
 permissions:
   contents: read
@@ -123,6 +147,8 @@ jobs:
   coverage:
     runs-on: ${{ inputs.runs_on }}
     timeout-minutes: ${{ inputs.job_timeout_minutes }}
+    outputs:
+      activation: ${{ steps.compare.outputs.activation }}
     steps:
       - name: Validate inputs
         shell: bash
@@ -210,15 +236,24 @@ jobs:
           echo "value=$RAW" >> "$GITHUB_OUTPUT"
 
       - name: Compare against baseline
+        id: compare
         shell: bash
         env:
           CURRENT: ${{ steps.metric.outputs.value }}
           BASELINE_FILE: ${{ inputs.baseline_file }}
           MODE: ${{ inputs.mode }}
+          REQUIRE_BASELINE: ${{ inputs.require_baseline }}
+          # Mirrors the auto-commit step's gate: this run will seed the baseline.
+          SEEDING: >-
+            ${{ inputs.auto_commit_baseline && github.event_name == 'push' &&
+                github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
         run: |
           python3 - <<'PY'
           import math, os, sys
           from pathlib import Path
+          def output(key, value):
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+                  fh.write(f"{key}={value}\n")
           # Compare unrounded — rounding to 0.1 first lets small regressions pass.
           current = float(os.environ["CURRENT"])
           cur_d = round(current, 1)
@@ -229,9 +264,20 @@ jobs:
               print(f"::error::baseline file {base_path} is a symlink — baseline must be a regular file")
               sys.exit(1)
           if not base_path.exists():
-              print(f"coverage-ratchet: no baseline at {base_path} — "
-                    f"this run measures {cur_d}%. Seed the baseline file to activate.")
+              output("activation", "inert")
+              print(f"::warning::coverage-ratchet INERT: no baseline at {base_path}; "
+                    "this required check cannot fail")
+              print(f"coverage-ratchet: this run measures {cur_d}%. "
+                    "Seed the baseline file to activate.")
+              if os.environ["REQUIRE_BASELINE"] == "true":
+                  if os.environ["SEEDING"].strip() == "true":
+                      print("require_baseline: exempt — auto_commit_baseline seeds it on this push")
+                  else:
+                      print(f"::error::require_baseline is true and {base_path} is absent — "
+                            f"commit {cur_d} (this run's measurement) to {base_path} to activate the gate")
+                      sys.exit(1)
               sys.exit(0)
+          output("activation", "active")
           baseline = float(base_path.read_text().strip())
           if not math.isfinite(baseline) or not 0 <= baseline <= 100:
               print(f"::error::baseline file {base_path} is not a finite 0-100 percentage: '{baseline}'")

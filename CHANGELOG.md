@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Coverage ratchet honesty
+
+- **`coverage-ratchet-reusable` no longer passes silently without a
+  baseline.** An absent `baseline_file` now emits
+  `::warning::coverage-ratchet INERT: no baseline at <path>; this required
+  check cannot fail` and sets the new workflow output `activation=inert`
+  (`active` once a baseline is compared). The run still passes by default.
+- New opt-in input `require_baseline` (boolean, default `false`): fail when the
+  baseline is absent, in either mode. A default-branch push that seeds the
+  baseline via `auto_commit_baseline` is exempt.
+- Docs: auto-commit needs a write-capable `GH_PAT` (caller `permissions:`
+  cannot raise the reusable's `contents: read`); the check name is
+  `<caller job id> / coverage`.
+- **Planned for v2:** `require_baseline` defaults to `true`.
+
 ### Added
 
 - **`secret-scan-reusable` gains opt-in `npm_audit_omit_dev` input** (default
