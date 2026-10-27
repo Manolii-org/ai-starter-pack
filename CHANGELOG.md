@@ -42,6 +42,12 @@ Upgrade order for consumers:
     `github-actions[bot]` review relay, are now skipped before dispatch. The
     action would otherwise fail the job for them. The relay is allowed via
     `allowed_bots: github-actions`.
+- **Autofix runs are no longer cancelled by later PR comments.** The
+  standalone workflow held a workflow-level lock with `cancel-in-progress:
+  true`, so a review-bot comment that Autofix then skipped cancelled an agent
+  mid-fix. The lock is now on the agent job and queues instead of cancelling.
+  Reusable callers that copied the documented example should change their
+  `concurrency` to `cancel-in-progress: false`.
 - **Autofix uses the base copy of the instruction surface.**
   - A PR that edits `CLAUDE.md`, `AGENTS.md`, `.claude/`, `.mcp.json` and
     related files no longer changes the agent's instructions; see Security.
@@ -86,6 +92,7 @@ Upgrade order for consumers:
 | `release-tag.yml` | `notes` | dispatch input | `''` |
 | Copier | `isolation_profile` (`standard`/`strict`) | question | `standard` |
 | Copier | `codex_review` | question | `true` (standard) |
+| `pr-autofix-loop` (standalone) | `AUTOFIX_MODEL` | repository variable | unset |
 
 - `isolation_profile=strict` renders a hooks-only `.claude/settings.json`
   with no telemetry keys and no `bypassPermissions` /
@@ -100,6 +107,9 @@ Upgrade order for consumers:
     self-hosted `fly` runners (unchanged in v1). Instances without that
     fleet must set the repository variable `CI_RUNNER_OVERRIDE` to
     `["ubuntu-latest"]`, or those jobs queue indefinitely.
+- Standalone Autofix through a proxy (`LITELLM_PROXY_URL`) needs
+  `AUTOFIX_MODEL` set to a model id the proxy routes. Without it the agent
+  requests the CLI default model and the job fails.
 - Activation contract: `docs/workflow-outcome-convention.md` § Activation
   contract.
 - **Planned for v2:** `require_baseline` and `fail_on_inert` default to
