@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -68,6 +69,23 @@ class ClassifyCommandTests(unittest.TestCase):
 
     def test_unparseable_shell_falls_back_to_triggering(self):
         self.assertEqual(self.trigger("git push 'unterminated"), "push")
+
+    def test_quoted_and_heredoc_text_is_data_not_a_command(self):
+        commit = ('git commit -m "$(cat <<\'EOF\'\nfeat: gate\n\n'
+                  'git push now runs the gate; gh pr create too\nEOF\n)"')
+        for command in (commit, 'grep -n "a|git push" docs/x.md', "cat <<EOF > f\ngit push\nEOF",
+                        "echo 'git push; gh pr create'", "git commit -m 'x; git push'"):
+            self.assertIsNone(self.trigger(command), command)
+
+    def test_wrappers_subshells_and_nested_shells_are_followed(self):
+        for command in ("(cd sub && git push)", 'bash -c "git push"', "env X=1 git push",
+                        "timeout 60 git push", "sudo -u me git push", "git --git-dir .git push",
+                        "nohup git push origin x &", "git push 2>&1 | tail -3"):
+            self.assertEqual(self.trigger(command), "push", command)
+
+    def test_cd_selects_the_repository_that_is_pushed(self):
+        self.assertEqual(self.classify("cd repoB && git push")["repo_dir"], "repoB")
+        self.assertEqual(self.classify("cd a; cd b && git -C c push")["repo_dir"], os.path.join("a", "b", "c"))
 
 
 class GateRepo(unittest.TestCase):
@@ -157,13 +175,60 @@ class FinaliseGateTests(GateRepo):
         self.assertEqual(proc.returncode, 0)
         self.assertFalse((self.root / ".ai/agent-checks/finalise-gate.log").exists())
 
-    def test_missing_config_defaults_to_warn(self):
+    def test_missing_config_defaults_to_warn_with_model_visible_context(self):
+        self.break_source()
+        for adapter in ("claude", "codex"):
+            proc = self.run_hook(adapter)
+            self.assertEqual(proc.returncode, 0, adapter)
+            context = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+            self.assertIn("FINALISE-GATE FAIL", context)
+            self.assertIn("mode=warn", context)
+
+    def test_shipped_config_is_warn(self):
+        shipped = json.loads((ROOT / "config" / "qa.json").read_text())
+        self.assertEqual(shipped["finalise_gate"]["mode"], "warn")
+
+    def test_environment_setup_failure_is_incomplete(self):
+        self.write_qa(mode="block")
+        config = json.loads((self.root / "config/agent-checks.json").read_text())
+        config["environments"] = [{"id": "deps", "commands": [[sys.executable, "-c", "raise SystemExit(1)"]]}]
+        config["checks"][0]["environment"] = "deps"
+        (self.root / "config/agent-checks.json").write_text(json.dumps(config))
         self.break_source()
         proc = self.run_hook("claude")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("INCOMPLETE", proc.stdout)
+
+    def test_check_timeout_and_exit_3_are_incomplete(self):
+        self.write_qa(mode="block")
+        for command in ([sys.executable, "-c", "raise SystemExit(3)"],
+                        [sys.executable, "-c", "import time; time.sleep(30)"]):
+            config = {"schema_version": 1, "base": "main", "environments": [],
+                      "checks": [{"id": "slow", "paths": ["src/*"], "tools": ["python"],
+                                  "timeout_seconds": 1, "commands": [command]}]}
+            (self.root / "config/agent-checks.json").write_text(json.dumps(config))
+            self.break_source()
+            proc = self.run_hook("claude")
+            self.assertEqual(proc.returncode, 0, command)
+            self.assertIn("INCOMPLETE", proc.stdout)
+
+    def test_repository_outside_the_workspace_is_not_run(self):
+        self.write_qa(mode="block")
+        self.break_source()
+        elsewhere = Path(self.temp.name) / "workspace"
+        elsewhere.mkdir()
+        proc = self.run_hook("claude", CLAUDE_PROJECT_DIR=str(elsewhere))
         self.assertEqual(proc.returncode, 0)
-        self.assertIn("FINALISE-GATE FAIL", proc.stderr)
-        self.assertIn("mode=warn", proc.stderr)
-        self.assertIn("systemMessage", proc.stdout)
+        self.assertFalse((self.root / ".ai/agent-checks/finalise-gate.log").exists())
+        inside = self.run_hook("claude", CLAUDE_PROJECT_DIR=str(self.root.parent))
+        self.assertEqual(inside.returncode, 2)
+
+    def test_cursor_root_cwd_falls_back_to_workspace_root(self):
+        self.write_qa(mode="block")
+        self.break_source()
+        cursor = self.run_hook("cursor", {"command": "git push", "cwd": "/",
+                                          "workspace_roots": [str(self.root)]})
+        self.assertEqual(json.loads(cursor.stdout)["permission"], "deny")
 
     def test_bypass_is_allowed_and_audited(self):
         self.write_qa(mode="block")
@@ -181,7 +246,7 @@ class FinaliseGateTests(GateRepo):
         self.break_source()
         proc = self.run_hook("codex")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("FINALISE-GATE INCOMPLETE", proc.stderr)
+        self.assertIn("FINALISE-GATE INCOMPLETE", proc.stdout)
 
     def test_blocked_runner_is_incomplete_not_blocking(self):
         self.write_qa(mode="block")
@@ -189,7 +254,7 @@ class FinaliseGateTests(GateRepo):
             {"schema_version": 1, "base": "origin/does-not-exist", "checks": []}))
         proc = self.run_hook("claude")
         self.assertEqual(proc.returncode, 0)
-        self.assertIn("INCOMPLETE", proc.stderr)
+        self.assertIn("INCOMPLETE", proc.stdout)
 
     def test_unadopted_repository_is_a_no_op(self):
         (self.root / "config" / "agent-checks.json").unlink()
@@ -272,7 +337,9 @@ class UiSmokeSelectionTests(unittest.TestCase):
             "app/(marketing)/pricing/page.mdx": "/pricing", "app/dashboard/layout.tsx": "/dashboard",
             "pages/index.tsx": "/", "pages/about/team.tsx": "/about/team",
             "pages/api/health.ts": None, "pages/_app.tsx": None, "app/blog/[slug]/page.tsx": None,
-            "src/components/Button.tsx": None,
+            "src/components/Button.tsx": None, "app/global-error.tsx": None,
+            "app/ui/landing-page.tsx": None, "app/x/_components/page.tsx": None,
+            "app/(.)photo/page.tsx": None, "app/@modal/settings/page.tsx": "/settings",
         }
         got = self.node("Object.fromEntries(" + json.dumps(list(cases)) +
                         ".map((f) => [f, m.inferNextRoute(f)]))")
@@ -323,12 +390,18 @@ PAGES = {
 
 
 SEEN_HEADERS: list[tuple[int, str, str | None]] = []
+REDIRECTS: dict[str, str] = {}
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802 - http.server API
         SEEN_HEADERS.append((self.server.server_address[1], self.path,
                              self.headers.get("x-vercel-protection-bypass")))
+        if self.path in REDIRECTS:
+            self.send_response(302)
+            self.send_header("Location", REDIRECTS[self.path])
+            self.end_headers()
+            return
         body = PAGES.get(self.path)
         self.send_response(200 if body else 404)
         self.send_header("Content-Type", "text/html")
@@ -408,8 +481,60 @@ class UiSmokeBrowserTests(unittest.TestCase):
     def test_unreachable_server_is_reported_unavailable(self):
         proc = subprocess.run(["node", str(SMOKE), "--base-url", "http://127.0.0.1:9", "--routes", "/"],
                               cwd=self.work, capture_output=True, text=True, timeout=60)
-        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(proc.returncode, 3)
         self.assertIn("UI-SMOKE-UNAVAILABLE", proc.stdout)
+
+    def test_bypass_header_never_follows_a_cross_origin_redirect(self):
+        other = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        threading.Thread(target=other.serve_forever, daemon=True).start()
+        self.addCleanup(other.shutdown)
+        other_port = other.server_address[1]
+        REDIRECTS["/sso"] = f"http://127.0.0.1:{other_port}/"
+        self.addCleanup(REDIRECTS.pop, "/sso")
+        SEEN_HEADERS.clear()
+        subprocess.run(["node", str(SMOKE), "--base-url", self.base, "--routes", "/sso"],
+                       cwd=self.work, capture_output=True, text=True, timeout=120,
+                       env={**os.environ, "VERCEL_AUTOMATION_BYPASS_SECRET": "s3cret"})
+        hops = [h for port, _, h in SEEN_HEADERS if port == other_port]
+        self.assertTrue(hops, SEEN_HEADERS)
+        self.assertTrue(all(h is None for h in hops), SEEN_HEADERS)
+
+    def test_started_server_is_stopped_when_smoke_is_killed(self):
+        marker = self.work / "server.pid"
+        server = self.work / "srv.py"
+        server.write_text("import http.server, os, pathlib, sys\n"
+                          f"pathlib.Path({str(marker)!r}).write_text(str(os.getpid()))\n"
+                          "class H(http.server.BaseHTTPRequestHandler):\n"
+                          "    def do_GET(self):\n"
+                          "        import time; time.sleep(60)\n"
+                          "http.server.HTTPServer(('127.0.0.1', int(sys.argv[1])), H).serve_forever()\n")
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+        (self.work / "config/qa.json").write_text(json.dumps({"schema_version": 1, "ui_smoke": {
+            "axe": {"enabled": False}, "start_command": [sys.executable, str(server), str(port)],
+            "viewports": [{"name": "desktop", "width": 1280, "height": 800}]}}))
+        proc = subprocess.Popen(["node", str(SMOKE), "--base-url", f"http://127.0.0.1:{port}", "--routes", "/"],
+                                cwd=self.work, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        deadline = time.time() + 30
+        while not marker.exists() and time.time() < deadline:
+            time.sleep(0.2)
+        self.assertTrue(marker.exists(), "start_command never ran")
+        pid = int(marker.read_text())
+        time.sleep(1)
+        proc.kill()  # SIGKILL: no handler runs, only the watchdog can clean up
+        proc.wait()
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.2)
+        else:
+            os.kill(pid, 9)
+            self.fail("dev server outlived a SIGKILLed ui-smoke")
 
 
 if __name__ == "__main__":

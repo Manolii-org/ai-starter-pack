@@ -89,7 +89,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "_R=$(git rev-parse --show-toplevel 2>/dev/null || echo \"$PWD\"); sh \"$_R/scripts/qa/finalise-gate.sh\" claude",
+            "command": "_G=\"${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || echo \"$PWD\")}/scripts/qa/finalise-gate.sh\"; [ -f \"$_G\" ] || exit 0; sh \"$_G\" claude",
             "timeout": 1200
           }
         ]

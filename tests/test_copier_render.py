@@ -399,7 +399,9 @@ def test_skip_if_exists_contract():
     copier_config = yaml.safe_load((ROOT / "copier.yml").read_text())
     skip_if_exists = set(copier_config.get("_skip_if_exists", []))
 
-    expected = {"CLAUDE.md", ".claude/model-routing.json", ".claude/mcp.json", ".claude/hooks/session-start.sh", "ai-manifest.yaml", "config/agent-checks.json"}
+    expected = {"CLAUDE.md", ".claude/model-routing.json", ".claude/mcp.json", ".claude/hooks/session-start.sh", "ai-manifest.yaml", "config/agent-checks.json",
+                # QA framework owner config + host hook files (docs/qa-framework.md)
+                "config/qa.json", ".cursor/hooks.json", ".codex/hooks.json"}
     assert skip_if_exists == expected, (
         f"_skip_if_exists mismatch.\n"
         f"Expected: {expected}\n"

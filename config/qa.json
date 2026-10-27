@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "finalise_gate": {
-    "mode": "block",
+    "mode": "warn",
     "timeout_seconds": 1100,
     "replace_legacy_pre_push": false
   },

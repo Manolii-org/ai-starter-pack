@@ -37,12 +37,22 @@ Behaviour:
 - **Pass** → silent; the host's normal permission flow continues. Cursor
   receives `allow` because its permission hooks need an answer; the matcher
   limits that to push/PR commands.
-- **Check failure** → blocked (`mode: block`) with the failing check ids and
-  the last 30 log lines. The full log stays in `.ai/agent-checks/finalise-gate.log`,
-  so the agent pays tokens for the summary only.
-- **Incomplete** (no integration ref, missing toolchain, timeout, runner
-  blocked) → allowed with a warning. That is an environment fault for its
-  owner to fix once, not a source defect to retry around; CI stays the authority.
+- **Check failure** → the failing check ids and the last 30 log lines go to
+  the agent as model-visible context (`additionalContext` / `agent_message`).
+  In `mode: warn` (the shipped default) the hand-off proceeds; in
+  `mode: block` it is denied. The full log stays in
+  `.ai/agent-checks/finalise-gate.log`, so the agent pays tokens for the
+  summary only.
+- **Incomplete** → allowed with the same context, in either mode. This covers
+  a missing integration ref, a missing toolchain, a failed environment setup
+  such as `npm ci` on a network error, a per-check timeout, a recipe that
+  exits `3` ("could not run here", which is what `ui-smoke` uses when there is
+  no browser or server), and a blocked runner. That is an environment fault
+  for its owner to fix once, not a source defect to retry around; CI stays
+  the authority.
+- **Trust boundary**: the gate only runs recipes for a repository inside the
+  opened workspace (`CLAUDE_PROJECT_DIR`, Cursor `workspace_roots`). Hook
+  commands are anchored to the project, and a missing gate script exits 0.
 - **Bypass**: `AGENT_FINALISE_GATE=off` (environment or command prefix) is
   allowed and appended to `.ai/bypass-log.jsonl`, which the pre-PR gate step 0 reads.
 - **Cost**: one row per run in `.ai/agent-checks/finalise-gate.jsonl`
@@ -52,11 +62,14 @@ Configuration lives in `config/qa.json` (owner-owned, never overwritten by
 `copier update`):
 
 ```json
-"finalise_gate": { "mode": "block", "timeout_seconds": 1100, "replace_legacy_pre_push": false }
+"finalise_gate": { "mode": "warn", "timeout_seconds": 1100, "replace_legacy_pre_push": false }
 ```
 
-Without `config/qa.json` the mode is `warn`, so a silent plugin upgrade never
-starts blocking pushes. `replace_legacy_pre_push: true` makes `.husky/pre-push`
+`warn` ships as the default, and it is also the mode when `config/qa.json`
+is absent, so neither `copier update` nor a plugin upgrade starts blocking
+an existing repository's pushes. Set `mode: block` once your recipes pass
+on `main`. This is a one-line opt-in, reviewed in your own PR, and is
+planned to become the default in v2, like `fail_on_inert`. `replace_legacy_pre_push: true` makes `.husky/pre-push`
 skip its full-repo typecheck/lint/test phases once your recipes cover them.
 
 ## Recipes
@@ -92,7 +105,10 @@ capped at `max_routes`, 6 by default.
 **Server.** It uses `base_url` when that URL responds. Otherwise it runs
 `start_command`, waits up to `ready_timeout_seconds` and stops the process
 group afterwards. If neither works, the result is `UI-SMOKE-UNAVAILABLE`, a
-failure while `on_unavailable` is `fail`.
+failure while `on_unavailable` is `fail`. That failure exits `3`: CI fails on
+it, and the finalise gate reports it as incomplete rather than blocking. The
+dev server's process group is stopped on exit, on a signal, and by a
+watchdog if the run is killed outright.
 
 **Dependencies.** The app needs `playwright` and `axe-core` as
 devDependencies, plus `npx playwright install chromium`. When axe is not
@@ -103,7 +119,9 @@ it.
 synthetic account. Never use real accounts.
 
 **Secrets.** Each `headers_from_env` header is sent only to the base URL's
-origin, never to a CDN or analytics host. By default this maps
+origin, never to a CDN or analytics host. Every redirect hop is re-checked,
+so a redirect to another origin, such as an SSO page, never carries the
+header. By default this maps
 `VERCEL_AUTOMATION_BYPASS_SECRET` to `x-vercel-protection-bypass`.
 
 ## L2 / L5 — `ui-smoke-reusable.yml`

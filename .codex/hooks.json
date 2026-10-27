@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/scripts/qa/finalise-gate.sh\" codex",
+            "command": "_G=\"$(git rev-parse --show-toplevel 2>/dev/null)/scripts/qa/finalise-gate.sh\"; [ -f \"$_G\" ] || exit 0; sh \"$_G\" codex",
             "timeout": 1200,
             "statusMessage": "Finalise gate: running affected agent checks"
           }

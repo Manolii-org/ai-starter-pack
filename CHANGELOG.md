@@ -22,13 +22,20 @@
     `.ai/bypass-log.jsonl`.
   - Each run appends a cost/outcome row to `.ai/agent-checks/finalise-gate.jsonl`.
   - It is a no-op without `config/agent-checks.json`.
-- **Behaviour change for adopters.** A new `config/qa.json` (owner-owned, in
-  `_skip_if_exists`) sets `finalise_gate.mode: block`. A failing affected
-  recipe now blocks the agent's push or PR, where before it only went
-  through when the agent chose to run the checks. Without `config/qa.json`
-  (plugin-only installs) the gate warns and never blocks. `.cursor/hooks.json`
-  and `.codex/hooks.json` are also `_skip_if_exists`: an existing file is
-  kept, so add the gate entry by hand.
+- **Behaviour for adopters.** A new owner-owned `config/qa.json` (in
+  `_skip_if_exists`) ships `finalise_gate.mode: warn`. Failures and
+  incomplete validation reach the agent as model-visible context, and the
+  push or PR proceeds. `copier update` and plugin upgrades therefore never
+  start blocking an existing repository. Set `mode: block` once your recipes
+  pass; `block` is planned as the v2 default. `.cursor/hooks.json` and
+  `.codex/hooks.json` are also `_skip_if_exists`: an existing file is kept,
+  so add the gate entry by hand.
+- These are not source failures, so the gate never blocks on them:
+  - environment setup failures;
+  - per-check timeouts;
+  - recipes exiting `3` ("could not run here").
+
+  The gate only runs recipes for repositories inside the opened workspace.
 - `.husky/pre-push` runs the gate first. It skips its full-repo
   typecheck/lint/test phases only when
   `finalise_gate.replace_legacy_pre_push: true`. The default keeps the
@@ -43,7 +50,9 @@
   the dev server from `start_command`, and writes screenshots and ARIA
   snapshots to the ignored `.ai/agent-checks/ui-smoke/`. `--profile launch`
   adds a slow-3G + 4x CPU mobile budget. A bypass header is sent only to the
-  app's origin.
+  app's origin, re-checked on every redirect hop. The run exits `3` when no browser
+  or server is available, and a watchdog stops the dev server even if the
+  run is killed.
 - **`ui-smoke-reusable.yml`** runs the same script against a preview
   (`deployment_status`) or production (schedule) URL. It installs no app and
   runs no build. Its output is `status`.

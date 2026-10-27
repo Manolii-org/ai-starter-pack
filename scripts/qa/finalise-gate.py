@@ -32,6 +32,7 @@ import json
 import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -45,6 +46,9 @@ MODES = ("block", "warn", "off")
 # Absent config means the repository never opted in explicitly. A plugin-only
 # or silently upgraded consumer must not start blocking pushes without review.
 DEFAULT_MODE_WITHOUT_CONFIG = "warn"
+# Recipe exit code for "this check could not run here" (no browser, no dev
+# server): incomplete validation, never a source failure (docs/qa-framework.md).
+UNAVAILABLE_EXIT = 3
 DEFAULT_TIMEOUT_SECONDS = 1100  # below the 1200s host hook timeout
 TAIL_LINES = 30
 TAIL_LINE_CHARS = 240
@@ -54,50 +58,104 @@ BYPASS_ENV = "AGENT_FINALISE_GATE"
 
 # ── command classification ──────────────────────────────────────────────────
 
-_SEGMENT_SPLIT = re.compile(r"&&|\|\||[;|\n]")
+_SEPARATORS = "();<>|&\n"
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-_FALLBACK = re.compile(r"\bgit\b[^;&|\n]*\bpush\b|\bgh\s+pr\s+create\b")
+# Heredoc bodies are data (commit messages, fixtures), never commands.
+_HEREDOC = re.compile(r"<<-?[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1[^\n]*\n.*?\n[ \t]*\2[ \t]*(?=\n|$)", re.S)
+# Last resort for unbalanced quoting: only a git/gh word at a command start.
+_FALLBACK = re.compile(r"(?:^|[;&|(\n])\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:\S*/)?"
+                       r"(?:git\s(?:[^;&|\n'\"]*\s)?push\b|gh\s+pr\s+create\b)")
+_WRAPPERS = {"env", "sudo", "doas", "command", "exec", "time", "nice", "nohup", "timeout", "xargs"}
+_WRAPPER_VALUE_OPTS = {"sudo": {"-u", "-g", "-C", "-h", "-p"}, "env": {"-u", "-C", "-S"},
+                       "timeout": {"-s", "-k", "--signal", "--kill-after"}, "nice": {"-n"}}
+_SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
+_GIT_VALUE_OPTS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path",
+                   "--super-prefix", "--config-env"}
 
 
-def classify_command(command: str) -> dict:
-    """Return {"trigger": None|"push"|"pr", "repo_dir": str|None, "bypass": bool}.
+def _tokens(command: str) -> list[str]:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=_SEPARATORS)
+    lexer.whitespace = " \t\r"
+    lexer.whitespace_split = True
+    return list(lexer)
 
-    Only a real hand-off triggers the gate: dry runs and ref deletions do not.
-    Unparseable shell falls back to a conservative regex so quoting tricks
-    cannot silently skip validation.
-    """
-    result = {"trigger": None, "repo_dir": None, "bypass": False}
-    for segment in _SEGMENT_SPLIT.split(command or ""):
-        try:
-            tokens = shlex.split(segment, comments=False, posix=True)
-        except ValueError:
-            if _FALLBACK.search(segment):
-                result["trigger"] = result["trigger"] or "push"
-            continue
-        while tokens and _ASSIGNMENT.match(tokens[0]):
-            name, _, value = tokens.pop(0).partition("=")
+
+def _simple_commands(tokens: list[str]):
+    current: list[str] = []
+    for token in tokens:
+        if token and all(c in _SEPARATORS for c in token):
+            if current:
+                yield current
+            current = []
+        else:
+            current.append(token)
+    if current:
+        yield current
+
+
+def _strip_wrappers(words: list[str], result: dict) -> list[str]:
+    """Drop VAR=value prefixes and transparent wrappers (env, sudo, timeout, …)."""
+    while words:
+        if _ASSIGNMENT.match(words[0]):
+            name, _, value = words.pop(0).partition("=")
             if name == BYPASS_ENV and value.lower() == "off":
                 result["bypass"] = True
-        if not tokens:
             continue
-        head = os.path.basename(tokens[0])
-        if head == "gh" and tokens[1:3] == ["pr", "create"]:
-            result["trigger"] = "pr"
+        head = os.path.basename(words[0])
+        if head not in _WRAPPERS:
+            return words
+        words.pop(0)
+        value_opts = _WRAPPER_VALUE_OPTS.get(head, set())
+        while words and words[0].startswith("-"):
+            option = words.pop(0)
+            if option in value_opts and words:
+                words.pop(0)
+        if head == "timeout" and words:
+            words.pop(0)  # the duration
+    return words
+
+
+def _classify(command: str, cwd: str | None, result: dict, depth: int) -> None:
+    try:
+        tokens = _tokens(_HEREDOC.sub("", command))
+    except ValueError:
+        if _FALLBACK.search(command):
+            result["trigger"] = result["trigger"] or "push"
+            result["repo_dir"] = result["repo_dir"] or cwd
+        return
+    for words in _simple_commands(tokens):
+        words = _strip_wrappers(list(words), result)
+        if not words:
+            continue
+        head = os.path.basename(words[0])
+        if head in ("cd", "pushd"):
+            target = next((w for w in words[1:] if not w.startswith("-")), None)
+            if target and target != "-":
+                cwd = os.path.join(cwd or "", os.path.expanduser(target))
+            continue
+        if head in _SHELLS and "-c" in words[1:] and depth < 3:
+            index = words.index("-c", 1)
+            if index + 1 < len(words):
+                _classify(words[index + 1], cwd, result, depth + 1)
+            continue
+        if head == "gh" and words[1:3] == ["pr", "create"]:
+            result["trigger"] = result["trigger"] or "pr"
+            result["repo_dir"] = result["repo_dir"] or cwd
             continue
         if head != "git":
             continue
-        index, repo_dir = 1, None
-        while index < len(tokens) and tokens[index].startswith("-"):
-            option = tokens[index]
-            if option in ("-C", "-c") and index + 1 < len(tokens):
+        index, repo_dir = 1, cwd
+        while index < len(words) and words[index].startswith("-"):
+            option = words[index]
+            if option in _GIT_VALUE_OPTS and index + 1 < len(words):
                 if option == "-C":
-                    repo_dir = os.path.join(repo_dir or "", tokens[index + 1])
+                    repo_dir = os.path.join(repo_dir or "", words[index + 1])
                 index += 2
                 continue
             index += 1
-        if index >= len(tokens) or tokens[index] != "push":
+        if index >= len(words) or words[index] != "push":
             continue
-        args = tokens[index + 1:]
+        args = words[index + 1:]
         if any(a in ("--dry-run", "-n", "--delete", "-d") for a in args):
             continue
         refspecs = [a for a in args if not a.startswith("-")][1:]
@@ -105,6 +163,20 @@ def classify_command(command: str) -> dict:
             continue  # deleting remote refs is not a candidate hand-off
         result["trigger"] = result["trigger"] or "push"
         result["repo_dir"] = result["repo_dir"] or repo_dir
+
+
+def classify_command(command: str) -> dict:
+    """Return {"trigger": None|"push"|"pr", "repo_dir": str|None, "bypass": bool}.
+
+    Only a real hand-off triggers the gate: dry runs and ref deletions do not.
+    Quotes, heredoc bodies and command substitutions inside quotes are data,
+    so a commit message or grep pattern that mentions `git push` never
+    triggers. `cd`, `git -C`, wrappers (env, sudo, timeout …) and `sh -c`
+    strings are followed. Unbalanced quoting falls back to a regex anchored
+    at a command start.
+    """
+    result = {"trigger": None, "repo_dir": None, "bypass": False}
+    _classify(command or "", None, result, 0)
     return result
 
 
@@ -143,7 +215,7 @@ def resolve_mode(section: dict, present: bool, bypass_inline: bool) -> tuple[str
     override = os.environ.get(BYPASS_ENV, "").strip().lower()
     if override in MODES:
         return override, "env"
-    mode = section.get("mode", "block" if present else DEFAULT_MODE_WITHOUT_CONFIG)
+    mode = section.get("mode", DEFAULT_MODE_WITHOUT_CONFIG)
     if mode not in MODES:
         raise ValueError(f"config/qa.json finalise_gate.mode must be one of {MODES}")
     return mode, "config" if present else "default"
@@ -170,13 +242,25 @@ def run_checks(root: Path, provider: str, timeout: int) -> dict:
     start = time.monotonic()
     cmd = [sys.executable, str(runner), "--provision", "--provider", provider,
            "--repo-root", str(root)]
-    try:
-        with log_path.open("w", encoding="utf-8", errors="replace") as log:
-            proc = subprocess.run(cmd, cwd=root, stdout=log, stderr=subprocess.STDOUT,
-                                  stdin=subprocess.DEVNULL, timeout=timeout)
-        code = proc.returncode
-    except subprocess.TimeoutExpired:
-        code = None
+    with log_path.open("w", encoding="utf-8", errors="replace") as log:
+        # Own process group: a timeout must also stop the recipes' children
+        # (dev servers, browsers), not just agent-check itself.
+        proc = subprocess.Popen(cmd, cwd=root, stdout=log, stderr=subprocess.STDOUT,
+                                stdin=subprocess.DEVNULL, start_new_session=True)
+        try:
+            code = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            code = None
+            for sig in (signal.SIGTERM, signal.SIGKILL):
+                try:
+                    os.killpg(proc.pid, sig)
+                except (ProcessLookupError, PermissionError):
+                    break
+                try:
+                    proc.wait(timeout=5)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
     duration_ms = round((time.monotonic() - start) * 1000)
     receipt = {}
     receipt_path = state / "receipt.json"
@@ -186,8 +270,16 @@ def run_checks(root: Path, provider: str, timeout: int) -> dict:
         except (OSError, json.JSONDecodeError):
             receipt = {}
     results = receipt.get("results", []) if isinstance(receipt, dict) else []
-    failed = [r for r in results if isinstance(r, dict) and r.get("status") == "failed"]
-    unavailable = [r for r in results if isinstance(r, dict) and r.get("status") == "unavailable"]
+    environments = environment_ids(root)
+    failed, unavailable = [], []
+    for item in results:
+        if not isinstance(item, dict) or item.get("status") not in ("failed", "unavailable"):
+            continue
+        # Setup failures (npm ci on a flaky network), per-check timeouts and
+        # self-declared unavailability are environment faults, not defects.
+        environmental = (item.get("status") == "unavailable" or item.get("id") in environments
+                         or item.get("reason") in ("timeout", f"exit={UNAVAILABLE_EXIT}"))
+        (unavailable if environmental else failed).append(item)
     base = {"duration_ms": duration_ms, "digest": str(receipt.get("digest", ""))[:12],
             "cached": bool(receipt.get("cached")), "log": str(log_path.relative_to(root))}
     if code == 0:
@@ -199,11 +291,21 @@ def run_checks(root: Path, provider: str, timeout: int) -> dict:
                 "summary": "agent-check blocked before running checks: " + blocked_reason(log_path)}
     if failed:
         names = ", ".join(f"{r.get('id')} ({r.get('reason')})" for r in failed)
-        return {**base, "outcome": "fail", "summary": f"failed: {names}"}
+        incomplete = "; could not run: " + ", ".join(
+            f"{r.get('id')} ({r.get('reason')})" for r in unavailable) if unavailable else ""
+        return {**base, "outcome": "fail", "summary": f"failed: {names}{incomplete}"}
     if unavailable:
         names = ", ".join(f"{r.get('id')} ({r.get('reason')})" for r in unavailable)
         return {**base, "outcome": "incomplete", "summary": f"unavailable: {names}"}
     return {**base, "outcome": "fail", "summary": f"agent-check exited {code}"}
+
+
+def environment_ids(root: Path) -> set[str]:
+    try:
+        config = json.loads((root / "config" / "agent-checks.json").read_text(encoding="utf-8"))
+        return {str(e.get("id")) for e in config.get("environments", []) if isinstance(e, dict)}
+    except (OSError, ValueError, AttributeError):
+        return set()
 
 
 def blocked_reason(log_path: Path) -> str:
@@ -259,7 +361,8 @@ def message_for(result: dict, provider: str, mode: str) -> str:
         lines.append("Validation is incomplete, not passed — CI stays authoritative. "
                      f"Re-run when the environment is fixed: {rerun}")
     if result.get("log"):
-        log_tail = tail(Path(result["root"]) / result["log"]) if result["outcome"] == "fail" else []
+        count = TAIL_LINES if result["outcome"] == "fail" else 10
+        log_tail = tail(Path(result["root"]) / result["log"], count)
         if log_tail:
             lines.append(f"Last {len(log_tail)} lines of {result['log']}:")
             lines.extend(log_tail)
@@ -277,12 +380,34 @@ def read_payload() -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def workspaces_for(adapter: str, payload: dict) -> list[Path]:
+    """The trust boundary the user opened; the gate never runs code outside it."""
+    if adapter == "cursor":
+        roots = [r for r in payload.get("workspace_roots") or [] if isinstance(r, str) and r]
+    elif adapter == "claude":
+        roots = [os.environ.get("CLAUDE_PROJECT_DIR", "")]
+    else:
+        roots = []
+    return [Path(r).resolve() for r in roots if r and Path(r).is_dir()]
+
+
+def within(root: Path, workspaces: list[Path]) -> bool:
+    if not workspaces:
+        return True
+    resolved = root.resolve()
+    return any(resolved == ws or ws in resolved.parents for ws in workspaces)
+
+
 def hook_target(adapter: str, payload: dict) -> tuple[str | None, str | None, bool, str]:
     """Return (trigger, start_dir, bypass, command) for a hook payload."""
     if adapter == "cursor":
         command = str(payload.get("command") or "")
-        roots = payload.get("workspace_roots") or []
-        start = payload.get("cwd") or (roots[0] if roots else None)
+        roots = [r for r in payload.get("workspace_roots") or [] if isinstance(r, str) and r]
+        start = payload.get("cwd") or None
+        # Cursor may report cwd as "" or "/"; fall back to the first workspace
+        # root that is a repository rather than silently allowing the push.
+        if roots and (not start or git_toplevel(Path(start)) is None):
+            start = next((r for r in roots if git_toplevel(Path(r))), roots[0])
     else:
         tool = str(payload.get("tool_name") or "")
         tool_input = payload.get("tool_input") or {}
@@ -311,15 +436,27 @@ def emit(adapter: str, decision: str, text: str) -> int:
         print(text, file=sys.stderr)
         return 2 if adapter in ("claude", "codex") else 1
     if text:
-        if adapter == "claude":
-            print(json.dumps({"systemMessage": text.splitlines()[0]}))
-        print(text, file=sys.stderr)
+        if adapter in ("claude", "codex"):
+            # Model-visible without blocking: the agent learns what failed
+            # or could not run, and the hand-off proceeds.
+            response = {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                               "additionalContext": text}}
+            if adapter == "claude":
+                response["systemMessage"] = text.splitlines()[0]
+            print(json.dumps(response))
+        else:
+            print(text, file=sys.stderr)
     return 0
 
 
-def gate(adapter: str, start: str | None, bypass_inline: bool, trigger: str) -> int:
+def gate(adapter: str, start: str | None, bypass_inline: bool, trigger: str,
+         workspaces: list[Path] | None = None) -> int:
     root = git_toplevel(Path(start or os.getcwd()))
     if root is None or not (root / "config" / "agent-checks.json").is_file():
+        return emit(adapter, "allow", "")
+    if not within(root, workspaces or []):
+        # A repository outside the opened workspace (a nested third-party
+        # clone elsewhere) is not trusted to run its recipes from a hook.
         return emit(adapter, "allow", "")
     provider = adapter if adapter in ("claude", "codex", "cursor") else (
         os.environ.get("AGENT_PROVIDER", "unknown").strip() or "unknown")
@@ -429,7 +566,7 @@ def main(argv: list[str] | None = None) -> int:
     trigger, start, bypass, _command = hook_target(args.hook, payload)
     if trigger is None:
         return emit(args.hook, "allow", "")
-    return gate(args.hook, start, bypass, trigger)
+    return gate(args.hook, start, bypass, trigger, workspaces_for(args.hook, payload))
 
 
 if __name__ == "__main__":
