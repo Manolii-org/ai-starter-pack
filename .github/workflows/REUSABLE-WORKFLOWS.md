@@ -3,7 +3,7 @@
 Canonical home for AI Starter Pack reusable GitHub Actions workflows. Consumed via:
 
 ```yaml
-uses: manolii-org/ai-starter-pack/.github/workflows/<name>-reusable.yml@v1.14.0
+uses: manolii-org/ai-starter-pack/.github/workflows/<name>-reusable.yml@v1.23.0
 ```
 
 Frozen at v1 (additive=non-breaking; rename/remove/default-change=v2).
@@ -32,11 +32,11 @@ sharing the receipt and pin-SHA controls introduced in v1.10.0:
 
 ```yaml
 - id: resolve
-  uses: Manolii-org/ai-starter-pack/.github/actions/resolve-held-promote-sha@v1.14.0
+  uses: Manolii-org/ai-starter-pack/.github/actions/resolve-held-promote-sha@v1.23.0
   with:
     sha: ${{ inputs.sha }}
 
-- uses: Manolii-org/ai-starter-pack/.github/actions/emit-deployment-receipt@v1.13.1
+- uses: Manolii-org/ai-starter-pack/.github/actions/emit-deployment-receipt@v1.23.0
   with:
     emit_when: alias-confirmed
     target_sha: ${{ steps.resolve.outputs.sha }}
@@ -173,7 +173,7 @@ permissions:
 
 jobs:
   ci:
-    uses: manolii-org/ai-starter-pack/.github/workflows/ci-reusable.yml@v1.14.0
+    uses: manolii-org/ai-starter-pack/.github/workflows/ci-reusable.yml@v1.23.0
     with:
       runs_on: ubuntu-latest
       node_version: '24'
@@ -217,7 +217,7 @@ permissions:
 
 jobs:
   assessment:
-    uses: manolii-org/ai-starter-pack/.github/workflows/pr-assessment-reusable.yml@v1.14.0
+    uses: manolii-org/ai-starter-pack/.github/workflows/pr-assessment-reusable.yml@v1.23.0
     with:
       provider_mode: proxy
       litellm_proxy_url: ${{ vars.LITELLM_PROXY_URL }}
@@ -251,7 +251,7 @@ immutable tag and want prompts and workflow to move together, pass the same tag:
 
 ```yaml
     with:
-      pack_ref: v1.14.0
+      pack_ref: v1.23.0
 ```
 
 The hydration list lives in the workflow-level `ASSESSMENT_RUNTIME_FILES` env.
@@ -504,7 +504,7 @@ jobs:
           EOF
   fast-tier:
     needs: detect
-    uses: manolii-org/ai-starter-pack/.github/workflows/fast-tier-reusable.yml@v1.14.0
+    uses: manolii-org/ai-starter-pack/.github/workflows/fast-tier-reusable.yml@v1.23.0
     with:
       gates: ${{ needs.detect.outputs.gates }}
       budget_minutes: 5
@@ -524,7 +524,7 @@ permissions:
   issues: write
 jobs:
   pre-production-tier:
-    uses: manolii-org/ai-starter-pack/.github/workflows/pre-production-tier-reusable.yml@v1.14.0
+    uses: manolii-org/ai-starter-pack/.github/workflows/pre-production-tier-reusable.yml@v1.23.0
     with:
       gates: >-
         [{"name":"e2e","applies":true,"command":"pnpm test:e2e"},
@@ -550,10 +550,10 @@ Phase-1 exit) — see `kernel/backup/README.md`.
 ```yaml
 jobs:
   validate-backup-manifest:
-    uses: manolii-org/ai-starter-pack/.github/workflows/backup-kernel-validate-reusable.yml@v1.14.0
+    uses: manolii-org/ai-starter-pack/.github/workflows/backup-kernel-validate-reusable.yml@v1.23.0
     with:
       manifest_path: config/backup-tenant.yaml
-      pack_ref: v1.14.0   # keep identical to the `uses:` pin — the pack cannot discover its own ref
+      pack_ref: v1.23.0   # keep identical to the `uses:` pin — the pack cannot discover its own ref
 ```
 
 ## pr-autofix-loop-reusable
@@ -592,10 +592,13 @@ on:
 
 # workflow_run payloads carry no pull_request/issue context — fall through to
 # the completed run's PR number, else its run id, so completions for different
-# PRs do not share a group and cancel each other.
+# PRs do not share a group. Never cancel in progress: every PR comment
+# (review bots, deploy bots, the relay) starts this workflow, and with
+# cancel-in-progress a comment the reusable then skips would cancel an agent
+# mid-fix. Queued runs re-check the loop-break and budget gates when they start.
 concurrency:
   group: pr-autofix-${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number || format('run-{0}', github.event.workflow_run.id) || github.run_id }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -604,7 +607,7 @@ permissions:
 
 jobs:
   autofix:
-    uses: Manolii-org/ai-starter-pack/.github/workflows/pr-autofix-loop-reusable.yml@v1.15.0
+    uses: Manolii-org/ai-starter-pack/.github/workflows/pr-autofix-loop-reusable.yml@v1.23.0
     with:
       provider_mode: proxy
       litellm_proxy_url: ${{ vars.LITELLM_PROXY_URL }}
@@ -628,6 +631,10 @@ produces no `execution_file` fails the job; skips (loop-break, budget,
 `skip-ai-review`, bot actors other than the relay, actors without write
 access) stay green. `GH_PAT` is optional; pushes made with `github.token` do
 not re-trigger PR checks.
+The standalone `pr-autofix-loop.yml` passes `--model` from the optional
+repository variable `AUTOFIX_MODEL`. Set it whenever `LITELLM_PROXY_URL`
+(or `ANTHROPIC_BASE_URL`) points at a proxy: a proxy serves only the model
+ids it routes, and without one the agent requests the CLI default model.
 
 **Instruction-surface hardening.** Before the agent runs, the checkout is
 pinned to the PR head SHA and `.claude/`, `.mcp.json`, `.claude.json`,
@@ -670,7 +677,7 @@ graph is sound, this one proves the migrations actually execute.
 ```yaml
 jobs:
   migration-run:
-    uses: Manolii-org/ai-starter-pack/.github/workflows/migration-run-gate-reusable.yml@v1.17.0
+    uses: Manolii-org/ai-starter-pack/.github/workflows/migration-run-gate-reusable.yml@v1.23.0
     with:
       db_image: mcr.microsoft.com/mssql/server:2022-latest
       db_ports_json: '["1433:1433"]'
@@ -701,7 +708,7 @@ HTML report, test-results (traces/failure screenshots), and the conventional
 ```yaml
 jobs:
   e2e:
-    uses: Manolii-org/ai-starter-pack/.github/workflows/e2e-playwright-reusable.yml@v1.18.0
+    uses: Manolii-org/ai-starter-pack/.github/workflows/e2e-playwright-reusable.yml@v1.23.0
     with:
       playwright_args_json: '["--grep", "@smoke"]'
     secrets:
@@ -737,7 +744,7 @@ reporter). An inert run emits `::warning::e2e-playwright INERT …` and still
 passes unless the caller sets `fail_on_inert: true` (default `false` in v1).
 See `docs/workflow-outcome-convention.md` § Activation contract.
 
-## ui-smoke (v1.23.0+)
+## ui-smoke (v1.24.0+)
 
 Runs the pack's `scripts/qa/ui-smoke.mjs` — the same script the agent
 finalise gate runs locally — against a deployed URL: HTTP status,
@@ -754,10 +761,10 @@ on: deployment_status
 jobs:
   ui-smoke:
     if: github.event.deployment_status.state == 'success'
-    uses: Manolii-org/ai-starter-pack/.github/workflows/ui-smoke-reusable.yml@v1.23.0
+    uses: Manolii-org/ai-starter-pack/.github/workflows/ui-smoke-reusable.yml@v1.24.0
     with:
       base_url: ${{ github.event.deployment_status.environment_url }}
-      pack_ref: v1.23.0
+      pack_ref: v1.24.0
     secrets:
       VERCEL_BYPASS_SECRET: ${{ secrets.VERCEL_BYPASS_SECRET }}
 ```
@@ -814,7 +821,7 @@ the caller below. Bind required checks to that full string, not bare
 ```yaml
 jobs:
   coverage:
-    uses: Manolii-org/ai-starter-pack/.github/workflows/coverage-ratchet-reusable.yml@v1.19.0
+    uses: Manolii-org/ai-starter-pack/.github/workflows/coverage-ratchet-reusable.yml@v1.23.0
     with:
       node_version: '22'
       install_command: npm ci --ignore-scripts
