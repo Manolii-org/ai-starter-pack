@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Activation contract
+
+- New outcome state **`INERT`** in `outcome-check-reusable` and
+  `scripts/lint-workflow-outcomes.py`: the check ran but could not detect the
+  failure it exists to catch. It publishes a neutral check-run and never
+  counts as success.
+- New workflow output **`activation`** on `coverage-ratchet-reusable`
+  (`active`/`inert`), `e2e-playwright-reusable` (`active`/`inert`/`unknown`:
+  inert when Playwright executed no test) and `pr-autofix-loop-reusable`
+  (`active`/`skipped`).
+- New opt-in input **`fail_on_inert`** (default `false`) on
+  `coverage-ratchet-reusable` (same effect as `require_baseline`) and
+  `e2e-playwright-reusable`. Inert e2e runs now emit
+  `::warning::e2e-playwright INERT …` and still pass by default. The default
+  is planned to flip to `true` in v2. Contract:
+  `docs/workflow-outcome-convention.md` § Activation contract.
+
 ### Supply chain
 
 - **SHA-pinned the remaining tag-pinned actions** in `migration-run-gate-reusable`,

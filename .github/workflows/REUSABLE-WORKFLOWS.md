@@ -618,6 +618,13 @@ for agent commits), and a final step fails the job if one was pushed anyway.
 Code at the PR head — tests, scripts and anything the base hooks call — still
 runs, as it must for Autofix to run the PR's own checks.
 
+**Activation (v1.23.0+).** Workflow output `activation` is `active` when the
+agent step ran and `skipped` when a gate declined the event. It is empty when
+the job did not run (the event failed the job `if:`) or failed before the
+agent step. Autofix has no inert state, so there is no `fail_on_inert` input:
+a missing credential, or an agent step with no execution file, fails the job.
+See `docs/workflow-outcome-convention.md` § Activation contract.
+
 
 ## bot-review-relay
 
