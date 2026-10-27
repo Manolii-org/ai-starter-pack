@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Supply chain
+
+- **SHA-pinned the remaining tag-pinned actions** in `migration-run-gate-reusable`,
+  `plugin-eval-gate`, `registry-lint` and the email-capture conformance
+  workflows (`actions/checkout` v4 → `11d5960a…` v4.4.0, `actions/setup-python`
+  v5 → `a26af69b…` v5.6.0 — the commits those floating tags resolved to, so
+  behaviour is unchanged).
+- New lint `tests/test_action_pins.py`: every remote `uses:` in
+  `.github/workflows/`, `.github/actions/` and `actions/` must be a 40-hex SHA
+  (Docker refs need a `sha256` digest); only local `./` paths are exempt.
+
+### Devin meta-plugin
+
+- `registry/platform/om` moved from `requiredPlugins` to `optionalPlugins` in
+  the root `.devin-plugin/plugin.json`, so tenants without a Knowledge Layer
+  backend can install the baseline (`registry/platform/framework`). **Behaviour
+  change for KL tenants:** `om` is no longer auto-installed by the meta-plugin —
+  add its `git-subdir` entry to your org manifest's `requiredPlugins`
+  (`docs/registry.md` § Install paths per surface).
+
 ### Coverage ratchet honesty
 
 - **`coverage-ratchet-reusable` no longer passes silently without a
