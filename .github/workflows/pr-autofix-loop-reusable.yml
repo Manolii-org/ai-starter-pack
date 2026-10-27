@@ -27,6 +27,14 @@ on:
       ANTHROPIC_API_KEY: { required: false, description: 'Required when provider_mode=anthropic.' }
       LITELLM_MASTER_KEY: { required: false, description: 'Required when provider_mode=proxy.' }
       GH_PAT: { required: false, description: 'Optional elevated token; falls back to GITHUB_TOKEN.' }
+    outputs:
+      activation:
+        description: >-
+          active (the agent executed, verified by its execution file) | skipped (a gate declined this event:
+          loop-break, fix cap, actor, stale or closed PR). Empty when the job
+          did not run or failed before reaching the agent. Never inert: missing
+          credentials and an agent that produced no execution fail the job.
+        value: ${{ jobs.autofix.outputs.activation }}
 
 permissions:
   contents: write
@@ -38,6 +46,8 @@ jobs:
     name: Autofix PR
     runs-on: ${{ inputs.runs_on }}
     timeout-minutes: 30 # an autofix pass that has not finished in 30m is a runaway — kill it
+    outputs:
+      activation: ${{ steps.verify_exec.outcome == 'success' && 'active' || ((steps.ref.outputs.skip == 'true' || steps.pr.outputs.skip == 'true' || steps.budget.outputs.skip == 'true') && 'skipped' || '') }}
     # Human collaborator reviews/comments, OR relayed bot review (**[@), OR CI workflow_run failure.
     # Do NOT blanket-exclude github-actions[bot] — that is the relay author.
     if: |
@@ -464,6 +474,7 @@ jobs:
       # produced no execution file never reached the model — fail loudly.
       # Skips (loop-break, budget, opt-out, bot actors) never reach this step.
       - name: Verify the agent executed
+        id: verify_exec
         if: steps.claude.outcome == 'success'
         env:
           EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}

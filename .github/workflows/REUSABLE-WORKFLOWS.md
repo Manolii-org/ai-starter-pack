@@ -127,15 +127,15 @@ when it drifts. Edit the workflow, then regenerate — never this table.
 | **backup-kernel-validate-reusable** | `manifest_path` (req), `pack_ref` | none | none |
 | **ci-reusable** | `runs_on=ubuntu-latest`, `node_version=24`, `package_manager=npm`, `pnpm_version`, `install_command`, `lint_command=npx eslint .`, `typecheck_command=npx tsc --noEmit`, `test_command=npm test -- --coverage`, `test_timeout_minutes=15`, `build_command=npm run build`, `build_timeout_minutes=15`, `audit_command`, `skip_lint=false`, `skip_typecheck=false`, `skip_test=false`, `skip_build=false`, `skip_security_audit=false` | none | none |
 | **claude-md-contract-reusable** | `runs_on=ubuntu-latest`, `python_version=3.12`, `require_contract=false` | none | none |
-| **coverage-ratchet-reusable** | `runs_on=ubuntu-latest`, `node_version`, `python_version`, `setup_command`, `install_command=npm ci`, `coverage_command` (req), `metric_command` (req), `baseline_file=.ci/coverage-baseline.txt`, `mode=enforce`, `require_baseline=false`, `auto_commit_baseline=false`, `cache_path`, `cache_key`, `timeout_minutes=30`, `job_timeout_minutes=65` | `GH_PAT` | `activation` |
-| **e2e-playwright-reusable** | `runs_on=ubuntu-latest`, `node_version=22`, `workdir=.`, `install_command=npm ci`, `build_command`, `browsers=chromium`, `playwright_args_json=[]`, `test_env`, `artifact_name`, `artifact_paths=playwright-report/ test-results/ e2e-...`, `retention_days=14`, `timeout_minutes=30`, `job_timeout_minutes=90`, `pack_ref=v1`, `classify_results=test-results/` | `E2E_TEST_USER_EMAIL`, `E2E_TEST_USER_PASSWORD`, `VERCEL_BYPASS_SECRET` | `test_failure_class`, `autofix_eligible`, `retryable` |
+| **coverage-ratchet-reusable** | `runs_on=ubuntu-latest`, `node_version`, `python_version`, `setup_command`, `install_command=npm ci`, `coverage_command` (req), `metric_command` (req), `baseline_file=.ci/coverage-baseline.txt`, `mode=enforce`, `require_baseline=false`, `fail_on_inert=false`, `auto_commit_baseline=false`, `cache_path`, `cache_key`, `timeout_minutes=30`, `job_timeout_minutes=65` | `GH_PAT` | `activation` |
+| **e2e-playwright-reusable** | `runs_on=ubuntu-latest`, `node_version=22`, `workdir=.`, `install_command=npm ci`, `build_command`, `browsers=chromium`, `playwright_args_json=[]`, `test_env`, `artifact_name`, `artifact_paths=playwright-report/ test-results/ e2e-...`, `retention_days=14`, `timeout_minutes=30`, `job_timeout_minutes=90`, `pack_ref=v1`, `classify_results=test-results/`, `fail_on_inert=false` | `E2E_TEST_USER_EMAIL`, `E2E_TEST_USER_PASSWORD`, `VERCEL_BYPASS_SECRET` | `activation`, `test_failure_class`, `autofix_eligible`, `retryable` |
 | **email-quality-reusable** | `pack_ref` (req), `profile_path=config/email-quality.json`, `sender_path` (req) | `UNSPAM_API_TOKEN` (req), `SENDER_TOKEN` | none |
 | **fast-tier-reusable** | `gates` (req), `budget_minutes=5`, `job_timeout_minutes=15`, `runs_on=ubuntu-latest`, `max_parallel=10`, `checkout_fetch_depth=0` | none | `verdict`, `breakdown` |
 | **integration-admission-reusable** | `config_path=config/integration-admission.json`, `base_sha` (req), `head_sha` (req), `installation_id` (req), `accepted_producer` (req), `pack_ref=v1`, `evidence_bundle_json=[]`, `runs_on=ubuntu-latest`, `shadow=true`, `timeout_minutes=15` | none | `plan`, `verdict` |
 | **migration-run-gate-reusable** | `db_image` (req), `db_ports_json` (req), `db_env_json` (req), `db_options`, `migrations_env_json` (req), `workdir=.`, `adapter=alembic`, `python_version=3.12`, `runs_on=ubuntu-latest`, `install_command` (req), `setup_command`, `run_prefix`, `downgrade_steps=1`, `alembic_check=false`, `url_env_var=ALEMBIC_DATABASE_URL` | none | none |
 | **outcome-check-reusable** | `outcome` (req), `operation` (req), `summary` (req), `head_sha` | none | none |
 | **pr-assessment-reusable** | `provider_mode=anthropic`, `litellm_proxy_url`, `model`, `runs_on=ubuntu-latest`, `pack_ref=v1`, `trusted_sync_author_id=215220684`, `jev_judge_shadow=off`, `jev_entity` | `ANTHROPIC_API_KEY`, `LITELLM_MASTER_KEY`, `JEV_TYPESAFE_API_KEY` | none |
-| **pr-autofix-loop-reusable** | `provider_mode=anthropic`, `litellm_proxy_url`, `model`, `runs_on=ubuntu-latest`, `max_successful_fixes=1` | `ANTHROPIC_API_KEY`, `LITELLM_MASTER_KEY`, `GH_PAT` | none |
+| **pr-autofix-loop-reusable** | `provider_mode=anthropic`, `litellm_proxy_url`, `model`, `runs_on=ubuntu-latest`, `max_successful_fixes=1` | `ANTHROPIC_API_KEY`, `LITELLM_MASTER_KEY`, `GH_PAT` | `activation` |
 | **pre-production-tier-reusable** | `gates` (req), `budget_minutes=45`, `job_timeout_minutes=60`, `runs_on=ubuntu-latest`, `max_parallel=4`, `environment`, `checkout_fetch_depth=0`, `open_issue_on_failure=false` | `GATE_SECRETS` | `verdict`, `breakdown` |
 | **restore-drill-reusable** | `resource_group` (req), `sql_server` (req), `source_database` (req), `sanity_queries=SELECT COUNT(*) AS table_count FROM I...`, `db_auth=sql-auth`, `sqlcmd_version=1.9.0`, `sqlcmd_sha256=b896bac71cf6ad8feca125bb42be61999116d...`, `timeout_minutes=45`, `runs_on=ubuntu-latest` | `DRILL_SQL_USER`, `DRILL_SQL_PASSWORD`, `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` | none |
 | **secret-scan-reusable** | `runs_on=ubuntu-latest`, `node_version=22`, `python_version=3.12`, `require_gitleaks_license=false`, `npm_audit_omit_dev=false`, `gitleaks_version=8.30.0` | `GITLEAKS_LICENSE` | none |
@@ -637,6 +637,13 @@ for agent commits), and a final step fails the job if one was pushed anyway.
 Code at the PR head — tests, scripts and anything the base hooks call — still
 runs, as it must for Autofix to run the PR's own checks.
 
+**Activation (v1.23.0+).** Workflow output `activation` is `active` when the
+agent step ran and its execution file was verified, and `skipped` when a gate declined the event. It is empty when
+the job did not run (the event failed the job `if:`) or failed before the
+agent step. Autofix has no inert state, so there is no `fail_on_inert` input:
+a missing credential, or an agent step with no execution file, fails the job.
+See `docs/workflow-outcome-convention.md` § Activation contract.
+
 
 ## bot-review-relay
 
@@ -719,6 +726,14 @@ keep identical to your `uses:` pin). It never changes the job conclusion. Downst
 retry `retryable == 'true'`, hand `autofix_eligible == 'true'` to code
 fixers, and escalate `environment` to whoever owns the secret/seed/config.
 
+Activation (v1.23.0+): the `activation` output is `active` when Playwright
+executed at least one test, `inert` when it executed none (every test skipped,
+for example because `E2E_TEST_USER_*` secrets are absent, or no test matched
+`--grep`), and `unknown` when no reporter summary is readable (a JSON-only
+reporter). An inert run emits `::warning::e2e-playwright INERT …` and still
+passes unless the caller sets `fail_on_inert: true` (default `false` in v1).
+See `docs/workflow-outcome-convention.md` § Activation contract.
+
 ## classify-playwright-failures action (v1.20.0+)
 
 The same classifier as a composite action for repos that run Playwright
@@ -753,7 +768,8 @@ warn in `report` mode.
 cannot fail`, prints the measured number to seed with, and sets the workflow
 output `activation=inert` (`active` once a baseline is compared). A required
 check bound to an inert ratchet can never fail. Set `require_baseline: true`
-(opt-in in v1, planned default in v2) to fail instead; a default-branch push
+(or its activation-contract name `fail_on_inert: true`; opt-in in v1, planned
+default in v2) to fail instead; a default-branch push
 that seeds the baseline via `auto_commit_baseline` is exempt (and that run
 fails if the seeding step cannot write the baseline).
 

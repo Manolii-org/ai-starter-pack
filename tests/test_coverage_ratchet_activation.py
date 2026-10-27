@@ -53,6 +53,17 @@ def test_inputs_are_additive_with_v1_defaults() -> None:
     assert "name" not in _spec()["jobs"]["coverage"], "job name feeds the `coverage / coverage` check"
 
 
+def test_fail_on_inert_is_the_contract_name_for_require_baseline() -> None:
+    spec = _spec()
+    call = (spec.get("on") or spec[True])["workflow_call"]
+    flag = call["inputs"]["fail_on_inert"]
+    assert flag["type"] == "boolean" and flag["default"] is False
+    envs = [s.get("env", {}).get("REQUIRE_BASELINE") for s in spec["jobs"]["coverage"]["steps"]]
+    wired = [e for e in envs if e]
+    assert len(wired) == 2  # compare step + auto-commit seeding check
+    assert set(wired) == {"${{ inputs.require_baseline || inputs.fail_on_inert }}"}
+
+
 @pytest.mark.parametrize("mode", ["enforce", "report"])
 def test_absent_baseline_is_inert_and_says_so(tmp_path: Path, mode: str) -> None:
     proc, outputs = _compare(tmp_path, baseline=None, mode=mode)

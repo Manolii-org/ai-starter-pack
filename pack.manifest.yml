@@ -24,6 +24,9 @@ features:
   langfuse_telemetry: false # OTEL tracing to Langfuse. Requires LANGFUSE_PUBLIC_KEY + SECRET.
   codex_adversarial: false  # Cross-provider adversarial PR review. Requires OPENAI_API_KEY.
   mesh_telemetry: false     # Agent-mesh contract telemetry (mesh-contract.yaml.template). Requires MESH_ENABLED wiring.
+  codex_review: true        # Codex PR review + security diff scan workflows (Doppler master/prd_codex). Default false under isolation_profile=strict.
+
+isolation_profile: standard # standard | strict — strict: hooks-only settings.json, no maintainer-hosted service coupling
 
 install_mode: unbranded     # branded | unbranded
 
@@ -36,9 +39,9 @@ feature_excludes:
   # Memory skills and the KL-access README stub — dormant without a KL MCP
   # backend + MCP_API_KEY. The eval pack and contract validators do NOT ship
   # to consumer instances; install the manolii-om marketplace plugin.
-  # langfuse_telemetry has no exclusions: scripts/otel-langfuse-headers.sh always
-  # ships (dormant without LANGFUSE_* keys) because settings.json references it
-  # via otelHeadersHelper regardless of the flag (render-consistency fix, 1.1.5).
+  # langfuse_telemetry has no file exclusions: scripts/otel-langfuse-headers.sh
+  # always ships (dormant without LANGFUSE_* keys); settings.json references it
+  # via otelHeadersHelper only when the flag is on.
   oss_routing:
     - docs/us-oss-eligibility-matrix.md
   kl_integration:
@@ -56,3 +59,23 @@ feature_excludes:
     - .claude/agents/codex-adversarial.md
   mesh_telemetry:
     - mesh-contract.yaml.template
+  codex_review:
+    - .github/workflows/codex-pr-review.yml
+    - .github/workflows/codex-security-diff-scan.yml
+  # Excluded when isolation_profile == 'strict' (a choice, not a bool flag).
+  isolation_profile_strict:
+    - .github/workflows/setup-env-secret.yml
+    - .github/workflows/dependabot-manual-automerge.yml
+    - .github/workflows/monitor-litellm.yml
+    - .github/workflows/publish-litellm-product-release.yml
+    - deploy/litellm-proxy/README.md
+    - litellm-product/README.md
+    - config/litellm-effective-config.example.yaml
+    - config/litellm-product-profile.example.json
+    - scripts/setup-litellm.sh
+    - scripts/build-litellm-product-asset.py
+    - scripts/render-litellm-product-profile.py
+    - tests/test_litellm_product_asset.py
+    - tests/test_render_litellm_product_profile.py
+    - scripts/tests/test_dependabot_manual_automerge.py
+    - tests/test_openrouter_retention_policy.py

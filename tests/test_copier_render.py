@@ -281,6 +281,15 @@ def test_cost_profile_lean_omits_measured_waste_callers(default_render):
         ({"cost_profile": "lean"},
          {"Hooks": 5, "Commands": 51, "Skills": 36, "Agents": 27,
               "Scripts": 56, "Husky": 3, "CI": 34, "Docs": 32}),
+        ({"codex_review": "false"},
+         {"Hooks": 5, "Commands": 51, "Skills": 36, "Agents": 27,
+              "Scripts": 56, "Husky": 3, "CI": 33, "Docs": 32}),
+        ({"isolation_profile": "strict"},
+         {"Hooks": 5, "Commands": 51, "Skills": 36, "Agents": 27,
+              "Scripts": 53, "Husky": 3, "CI": 29, "Docs": 32}),
+        ({"isolation_profile": "strict", "cost_profile": "lean"},
+         {"Hooks": 5, "Commands": 51, "Skills": 36, "Agents": 27,
+              "Scripts": 53, "Husky": 3, "CI": 29, "Docs": 32}),
     ],
 )
 def test_rendered_readme_counts_match_rendered_tree(flags, expected):
@@ -606,13 +615,15 @@ def test_pack_components_flags(tmp_path):
     )
 
 
-def test_otel_endpoint_answer(default_render, tmp_path):
+def test_otel_endpoint_answer(tmp_path):
     """Verify .claude/settings.json OTEL_EXPORTER_OTLP_ENDPOINT contract."""
-    # Default render should have the Langfuse endpoint
-    default_settings = default_render / ".claude" / "settings.json"
-    assert default_settings.exists(), ".claude/settings.json missing in default render"
+    # Telemetry render (langfuse_telemetry on) should have the Langfuse endpoint
+    telemetry_dst = tmp_path / "telemetry"
+    telemetry_dst.mkdir()
+    render(telemetry_dst, langfuse_telemetry="true")
+    default_settings = telemetry_dst / ".claude" / "settings.json"
+    assert default_settings.exists(), ".claude/settings.json missing in telemetry render"
 
-    import json
     default_content = json.loads(default_settings.read_text())
     default_otel = default_content.get("env", {}).get("OTEL_EXPORTER_OTLP_ENDPOINT")
     assert default_otel == "https://us.cloud.langfuse.com/api/public/otel", (
@@ -622,7 +633,7 @@ def test_otel_endpoint_answer(default_render, tmp_path):
     # Fresh render with custom otel_endpoint
     custom_dst = tmp_path / "custom_otel"
     custom_dst.mkdir()
-    render(custom_dst, otel_endpoint="https://otel.example.com/v1")
+    render(custom_dst, otel_endpoint="https://otel.example.com/v1", langfuse_telemetry="true")
 
     custom_settings = custom_dst / ".claude" / "settings.json"
     assert custom_settings.exists(), ".claude/settings.json missing in custom render"
@@ -723,3 +734,103 @@ def test_claude_hooks_false_does_not_claim_host_event(tmp_path):
     assert "Codex and Cursor do not emit this event" in docs
     agents = (dst / "AGENTS.md").read_text()
     assert "do not invent one" in agents
+
+
+TELEMETRY_ENV = {
+    "CLAUDE_CODE_ENABLE_TELEMETRY", "OTEL_METRICS_EXPORTER", "OTEL_TRACES_EXPORTER",
+    "OTEL_LOGS_EXPORTER", "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_PROTOCOL",
+}
+STRICT_EXCLUDED = {
+    ".github/workflows/codex-pr-review.yml",
+    ".github/workflows/codex-security-diff-scan.yml",
+    ".github/workflows/setup-env-secret.yml",
+    ".github/workflows/dependabot-manual-automerge.yml",
+    ".github/workflows/monitor-litellm.yml",
+    ".github/workflows/publish-litellm-product-release.yml",
+    "deploy/litellm-proxy/config.yaml",
+    "scripts/setup-litellm.sh",
+    "config/litellm-effective-config.example.yaml",
+    "config/litellm-product-profile.example.json",
+    "scripts/build-litellm-product-asset.py",
+    "scripts/render-litellm-product-profile.py",
+    "tests/test_litellm_product_asset.py",
+    "tests/test_render_litellm_product_profile.py",
+    "scripts/tests/test_dependabot_manual_automerge.py",
+    "tests/test_openrouter_retention_policy.py",
+}
+
+
+@pytest.fixture(scope="session")
+def strict_render(tmp_path_factory):
+    dst = tmp_path_factory.mktemp("strict")
+    render(dst, isolation_profile="strict")
+    return dst
+
+
+def test_telemetry_keys_follow_the_flag(default_render, tmp_path):
+    """Telemetry env + otelHeadersHelper only when langfuse_telemetry is on."""
+    default = json.loads((default_render / ".claude/settings.json").read_text())
+    assert not TELEMETRY_ENV & set(default["env"])
+    assert "otelHeadersHelper" not in default
+    # Everything else in the standard profile is unchanged.
+    assert default["skipDangerousModePermissionPrompt"] is True
+    assert default["permissions"]["defaultMode"] == "bypassPermissions"
+    assert default["permissions"]["allow"]
+    dst = tmp_path / "telemetry"
+    dst.mkdir()
+    render(dst, langfuse_telemetry="true")
+    on = json.loads((dst / ".claude/settings.json").read_text())
+    assert TELEMETRY_ENV <= set(on["env"])
+    assert on["otelHeadersHelper"] == "scripts/otel-langfuse-headers.sh"
+    assert {k: v for k, v in on.items() if k not in ("env", "otelHeadersHelper")} == \
+        {k: v for k, v in default.items() if k not in ("env", "otelHeadersHelper")}
+
+
+def test_strict_settings_are_hooks_and_deny_only(strict_render, default_render):
+    strict = json.loads((strict_render / ".claude/settings.json").read_text())
+    default = json.loads((default_render / ".claude/settings.json").read_text())
+    assert set(strict) == {"permissions", "hooks"}
+    assert strict["permissions"] == {"deny": default["permissions"]["deny"]}
+    assert strict["hooks"] == default["hooks"]
+
+
+def test_strict_excludes_manolii_coupled_files(strict_render, default_render):
+    default_files = file_set(default_render)
+    strict_files = file_set(strict_render)
+    assert STRICT_EXCLUDED <= default_files
+    assert not STRICT_EXCLUDED & strict_files
+    assert not any(f.startswith(("deploy/litellm-proxy/", "litellm-product/")) for f in strict_files)
+    removed = default_files - strict_files
+    assert removed <= STRICT_EXCLUDED | {f for f in default_files
+                                         if f.startswith(("deploy/litellm-proxy/", "litellm-product/"))}
+    answers = yaml.safe_load((strict_render / ".copier-answers.yml").read_text())
+    assert answers["isolation_profile"] == "strict" and answers["codex_review"] is False
+    components = yaml.safe_load((strict_render / "pack-components.yml").read_text())
+    assert components["instance"]["isolation_profile"] == "strict"
+
+
+def test_strict_readme_does_not_point_at_unrendered_proxy_assets(strict_render, default_render):
+    """Codex review, PR #238: strict renders must not instruct users to run or
+    read the LiteLLM files the strict profile excludes."""
+    strict = (strict_render / "README-STARTER-PACK.md").read_text()
+    for ref in ("setup-litellm.sh", "litellm-product/README.md", "deploy/litellm-proxy",
+                "config/litellm-product-profile.example.json"):
+        assert ref not in strict, ref
+    assert "isolation_profile=strict" in strict
+    default = (default_render / "README-STARTER-PACK.md").read_text()
+    assert "bash scripts/setup-litellm.sh" in default and "deploy/litellm-proxy/" in default
+
+
+def test_standard_keeps_codex_review_unless_opted_out(default_render, tmp_path):
+    codex = {".github/workflows/codex-pr-review.yml", ".github/workflows/codex-security-diff-scan.yml"}
+    assert codex <= file_set(default_render)
+    dst = tmp_path / "nocodex"
+    dst.mkdir()
+    render(dst, codex_review="false")
+    assert file_set(default_render) - file_set(dst) == codex
+
+
+@pytest.mark.parametrize("flag", ["oss_routing", "kl_integration", "langfuse_telemetry", "mesh_telemetry"])
+def test_strict_refuses_manolii_hosted_services(tmp_path, flag):
+    with pytest.raises(subprocess.CalledProcessError):
+        render(tmp_path / "bad", isolation_profile="strict", **{flag: "true"})

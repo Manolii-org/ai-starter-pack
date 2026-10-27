@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       outcome:
-        description: EXECUTED, NO_CHANGES, DEFERRED, POLICY_HELD, or FAILED
+        description: EXECUTED, NO_CHANGES, DEFERRED, POLICY_HELD, INERT, or FAILED
         required: true
         type: string
       operation:
@@ -45,6 +45,7 @@ jobs:
               NO_CHANGES: 'success',
               DEFERRED: 'neutral',
               POLICY_HELD: 'neutral',
+              INERT: 'neutral',
               FAILED: 'failure',
             };
             const conclusion = conclusions[process.env.OUTCOME];
@@ -65,6 +66,6 @@ jobs:
               },
               request: { timeout: 20000 },
             });
-            if (['DEFERRED', 'POLICY_HELD', 'FAILED'].includes(process.env.OUTCOME)) {
+            if (['DEFERRED', 'POLICY_HELD', 'INERT', 'FAILED'].includes(process.env.OUTCOME)) {
               core.setFailed(process.env.SUMMARY);
             }

@@ -1,21 +1,31 @@
 {
+{% if isolation_profile != 'strict' %}
   "skipDangerousModePermissionPrompt": true,
   "model": "claude-sonnet-4-6",
   "env": {
+{% if langfuse_telemetry %}
     "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+{% endif %}
     "CLAUDE_CODE_SUBAGENT_MODEL": "haiku",
     "MAIN_THREAD_EXECUTOR_MODEL": "claude-sonnet-4-6",
     "ADVISOR_BETA_ENABLED": "false",
-    "ENABLE_TOOL_SEARCH": "auto:5",
+    "ENABLE_TOOL_SEARCH": "auto:5"{{ ',' if langfuse_telemetry else '' }}
+{% if langfuse_telemetry %}
     "OTEL_METRICS_EXPORTER": "otlp",
     "OTEL_TRACES_EXPORTER": "otlp",
     "OTEL_LOGS_EXPORTER": "otlp",
     "OTEL_EXPORTER_OTLP_ENDPOINT": "{{ otel_endpoint }}",
     "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf"
+{% endif %}
   },
+{% if langfuse_telemetry %}
   "otelHeadersHelper": "scripts/otel-langfuse-headers.sh",
+{% endif %}
+{% endif %}
   "permissions": {
+{% if isolation_profile != 'strict' %}
     "defaultMode": "bypassPermissions",
+{% endif %}
     "deny": [
       "Bash(rm -rf /*)",
       "Bash(rm -rf ~*)",
@@ -34,7 +44,8 @@
       "mcp__*__kl_approve_action",
       "mcp__*__kl_undo_action",
       "mcp__*__kl_approve_email_action"
-    ],
+    ]{{ '' if isolation_profile == 'strict' else ',' }}
+{% if isolation_profile != 'strict' %}
     "allow": [
       "Bash(*)",
       "Edit(*)",
@@ -60,6 +71,7 @@
       "mcp__neon__*",
       "mcp__*"
     ]
+{% endif %}
   },
   "hooks": {
     "PreToolUse": [
