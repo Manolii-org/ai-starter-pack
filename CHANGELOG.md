@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+### Behaviour change — Autofix now acts
+
+- **`pr-autofix-loop` (reusable and standalone) was a silent no-op** since the
+  claude-code-action v1 pin: the step passed v0 inputs (`direct_prompt`,
+  `model`, `allowed_tools`), the action saw no prompt, logged `No trigger
+  found` and the job went green. Both workflows now pass `prompt` and
+  `claude_args` (`--allowedTools`, plus `--model` when the reusable's `model`
+  input is set). **After upgrading, Autofix WILL push `[autofix]` commits and
+  spend model tokens.** Callers that use `secrets.GITHUB_TOKEN` instead of
+  `GH_PAT` will not re-trigger PR checks after an autofix push. Standalone
+  instances receive the fix on `copier update`.
+- A dispatched agent step that produces no execution file now **fails the
+  job** instead of passing. Skip paths (loop-break, budget, opt-out label,
+  bot actors) are unchanged and stay green.
+
+### Security
+
+- **#169 hardening ported to `pr-autofix-loop-reusable`**: the checkout is
+  pinned to the validated head SHA, the head ref passes `git check-ref-format`
+  before `git checkout -B`, and the instruction surface (`.claude/`,
+  `.mcp.json`, `.claude.json`, `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`,
+  plus nested copies on either side) is restored from the PR base SHA before
+  the agent runs. The restore is marked skip-worktree / excluded so `git add
+  -A` can never commit the base copy over a PR's own changes. Consumers whose
+  PRs edit `CLAUDE.md` will see Autofix use the base copy. The prompt's capped,
+  untrusted CI-log rule now matches the standalone. The restore body is
+  byte-identical in both workflows (`tests/test_autofix_hardening.py`).
+
 ### Added
 
 - **`secret-scan-reusable` gains opt-in `npm_audit_omit_dev` input** (default
