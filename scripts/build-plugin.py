@@ -126,7 +126,7 @@ def assemble_plugin(rendered: Path, out: Path) -> dict:
             # install. Source keeps bare scripts/ for in-tree template use.
             for md in (out / comp).rglob("*.md"):
                 t = md.read_text(encoding="utf-8")
-                nt = re.sub(r'\b(python3|bash) (scripts/[^\s`"]+)',
+                nt = re.sub(r'\b(python3|bash|node) (scripts/[^\s`"]+)',
                             r'\1 "${CLAUDE_PLUGIN_ROOT}/\2"', t)
                 if nt != t:
                     md.write_text(nt, encoding="utf-8")

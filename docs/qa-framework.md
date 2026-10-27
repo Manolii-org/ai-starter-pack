@@ -145,4 +145,6 @@ gate a merge.
 4. Add the preview `ui-smoke-reusable` caller. Set `fail_on_inert: true` on
    any e2e caller whose suite must never be empty.
 5. Plugin-only consumers get the Claude gate from the plugin. The same
-   `config/agent-checks.json` and `config/qa.json` apply.
+   `config/agent-checks.json` and `config/qa.json` apply. A `ui-smoke`
+   recipe needs the script in the repository: copy `scripts/qa/ui-smoke.mjs`
+   or adopt through Copier.
