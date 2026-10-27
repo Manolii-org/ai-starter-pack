@@ -5,6 +5,8 @@
 >
 > Read this before asserting any model ID is "Anthropic-direct", before changing
 > `ANTHROPIC_BASE_URL`, and before pinning a model in `.claude/settings.json`.
+>
+> **Scope in this pack:** this document was carried over from the orchestrator repository this pack was extracted from. Paths listed under [Paths outside this pack](#paths-outside-this-pack) are not shipped here; treat them as references to that ecosystem, not files to look for in a rendered instance.
 
 > **Updated 2026-08-09:** sonnet-group primary remapped to DeepSeek V4 Flash 0731 (AA Max II 52). Fail-closed Llama 3.3 70B advisor unchanged. See `.ai/assessments/sonnet-flash-0731-2026-08-09.md`.
 
@@ -295,3 +297,27 @@ which is how this class of defect hides in the first place.
 | `MAIN_THREAD_EXECUTOR_MODEL=claude-sonnet-4-6` | still set | Classifier / executor helpers that read this env still name Sonnet; with the client un-proxied that ID is real Anthropic Sonnet, not DeepSeek |
 
 Do **not** re-add a top-level `"model"` pin while the client is un-proxied — that would freeze the session off Opus even though the proxy no longer forces it.
+
+## Paths outside this pack
+
+Referenced above but not shipped by the pack (`tests/test_doc_path_references.py` keeps this list exhaustive):
+
+- Orchestrator repository only:
+  - `.ai/assessments/sonnet-flash-0731-2026-08-09.md`
+  - `config/claude-md-content-parity.json`
+  - `config/model-routing.source.yaml`
+  - `deploy/openhands/openhands-system-prompt.md`
+  - `scripts/assessment/sdk_runner.py`
+  - `scripts/bootstrap_env.py`
+  - `scripts/check-model-plane-premise.py`
+  - `scripts/check-session-integrity.py`
+  - `scripts/claude-session-start.sh`
+  - `scripts/load-ecosystem.sh`
+  - `scripts/model-usage-report.py`
+  - `scripts/post-merge-retro.py`
+  - `scripts/post-tool-use.py`
+  - `scripts/test-proxy-routing-report.sh`
+  - `scripts/tests/test_lint_agent_routing.py`
+  - `scripts/tests/test_session_integrity.py`
+  - `scripts/tests/test_session_start_plane_separation.py`
+  - `templates/ai-starter-pack/`

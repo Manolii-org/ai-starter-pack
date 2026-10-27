@@ -218,6 +218,12 @@ _exclude:
   - .brand/**
   - scripts/render-pack.py
   - scripts/build-plugin.py
+  # Maintainer tool + its drift test: regenerates the pack's own
+  # REUSABLE-WORKFLOWS.md matrix; consumers call the reusables by tag.
+  - scripts/gen-reusable-matrix.py
+  - tests/test_reusable_matrix.py
+  # Pack-maintenance test: checks the pack's ported docs against the pack tree.
+  - tests/test_doc_path_references.py
   # Pack-only: the reusable workflow checks it out from the pack at pack_ref
   # (never a caller copy, since it holds the TypeSafe key).
   - scripts/jev_judge_shadow.py

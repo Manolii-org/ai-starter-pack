@@ -144,6 +144,29 @@
 - Unchanged: PR Assessment's LLM jobs still default to `["self-hosted","fly"]`
   outside the public pack; a strict instance sets `CI_RUNNER_OVERRIDE`.
 
+### Docs accuracy
+
+- The Input/Secret matrix in `REUSABLE-WORKFLOWS.md` is now generated from
+  every `*-reusable.yml` `workflow_call` schema (`scripts/gen-reusable-matrix.py`;
+  `tests/test_reusable_matrix.py` fails on drift) and gains an Outputs column.
+  This removes the phantom `paths_ignore` input on static-review and adds the
+  missing rows (backup-kernel, e2e-playwright, email-quality,
+  migration-run-gate, outcome-check) and inputs (`gitleaks_version`,
+  `runs_on`, `sqlcmd_sha256`, …).
+- `docs/ai-runtime-policy.md` and `docs/model-plane-boundary.md` list the
+  orchestrator-only and runtime-generated paths they reference
+  (`tests/test_doc_path_references.py` keeps the list exhaustive).
+- `docs/autofix-cost-alarms.md`: proxy mode with a non-LiteLLM
+  Anthropic-compatible endpoint (`LITELLM_MASTER_KEY` is the proxy key slot)
+  and provider-side spend alarms for tenants without LiteLLM/Langfuse.
+
+### Recorded v1 removals
+
+- `tia-shadow` and `mutation-testing-diff` workflows were removed inside v1
+  (`857e672`, "retire mutation-diff + tia-shadow workflows estate-wide"). Under
+  the v1 contract (rename/remove = v2) this should have waited for v2; there
+  were no callers at removal. Recorded here for the record; no restoration.
+
 ### Added
 
 - **`secret-scan-reusable` gains opt-in `npm_audit_omit_dev` input** (default
