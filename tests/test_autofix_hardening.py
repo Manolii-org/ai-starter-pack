@@ -285,3 +285,58 @@ def test_trusted_hook_blocks_surface_commits_after_the_action_restore(pr_checkou
                         capture_output=True, text=True)
     assert ok.returncode == 0, ok.stderr
     assert _git(work, "show", "--name-only", "--format=", "HEAD").split() == ["src/a.py"]
+
+
+def _hook_commit(work: Path, *, stage) -> subprocess.CompletedProcess[str]:
+    _git(work, "config", "user.email", "t@example.invalid")
+    _git(work, "config", "user.name", "t")
+    stage()
+    hooks = work.parent / "runner-temp/autofix-git-hooks"
+    env = {**os.environ, "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.hooksPath",
+           "GIT_CONFIG_VALUE_0": str(hooks)}
+    return subprocess.run(["git", "commit", "-qm", "[autofix] fix"], cwd=work, env=env,
+                          capture_output=True, text=True)
+
+
+def test_trusted_hook_sees_renamed_instruction_files(pr_checkout) -> None:
+    work, _base, bin_dir = pr_checkout
+    assert _run_restore(work, bin_dir).returncode == 0
+    _git(work, "reset", "-q")  # clear any staged restore so only the rename is staged
+    _git(work, "update-index", "--no-skip-worktree", "--", "sub/CLAUDE.md")
+    _git(work, "checkout", "--", "sub/CLAUDE.md")
+
+    def stage() -> None:
+        _git(work, "mv", "sub/CLAUDE.md", "sub/notes.md")
+
+    result = _hook_commit(work, stage=stage)
+    assert result.returncode != 0 and "sub/CLAUDE.md" in result.stderr
+
+
+def test_trusted_hook_sees_non_ascii_instruction_paths(pr_checkout) -> None:
+    work, _base, bin_dir = pr_checkout
+    assert _run_restore(work, bin_dir).returncode == 0
+
+    def stage() -> None:
+        _write(work, "é/CLAUDE.md", "injected\n")
+        _git(work, "add", "--", "é/CLAUDE.md")
+
+    result = _hook_commit(work, stage=stage)
+    assert result.returncode != 0 and "CLAUDE.md" in result.stderr
+
+
+@pytest.mark.parametrize("name", sorted(WORKFLOWS))
+def test_surface_check_fails_closed_when_commits_cannot_be_listed(name: str, tmp_path: Path) -> None:
+    gh = tmp_path / "gh"
+    gh.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    gh.chmod(0o755)
+    env = {**os.environ, "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}", "GH_TOKEN": "x",
+           "REPOSITORY": "example/repo", "HEAD_SHA": "a" * 40, "HEAD_REF": "feat"}
+    result = subprocess.run(["bash", "-c", _step(name, title=SURFACE_CHECK)["run"]], env=env,
+                            capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "could not run" in result.stdout
+
+
+def test_surface_check_reads_rename_sources() -> None:
+    run = _step("reusable", title=SURFACE_CHECK)["run"]
+    assert ".previous_filename // empty" in run

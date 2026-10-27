@@ -390,7 +390,7 @@ jobs:
           #!/usr/bin/env bash
           # Installed by the autofix workflow (outside the checkout): autofix commits
           # must never carry instruction-surface files.
-          bad=$(git diff --cached --name-only |
+          bad=$(git diff --cached --name-only --no-renames -z | tr '\0' '\n' |
             grep -E '(^|/)(\.claude/|CLAUDE\.md$|CLAUDE\.local\.md$|AGENTS\.md$)|^(\.mcp\.json|\.claude\.json|\.gitmodules|\.ripgreprc)$|^\.husky/' || true)
           if [ -n "$bad" ]; then
             echo "autofix: refusing to commit instruction-surface files (restored from the PR base, not part of the fix):" >&2
@@ -488,12 +488,12 @@ jobs:
           HEAD_ENC=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe="/"))' "$HEAD_REF")
           if ! SHAS=$(timeout -k 5 30 gh api "repos/${REPOSITORY}/compare/${HEAD_SHA}...${HEAD_ENC}" \
               --jq '.commits[] | select(.commit.message | startswith("[autofix]")) | .sha'); then
-            echo "::warning::Could not list autofix commits; instruction-surface check not performed"
-            exit 0
+            echo "::error::Could not list autofix commits; the instruction-surface check could not run"
+            exit 1
           fi
           bad=""
           for sha in $SHAS; do
-            files=$(timeout -k 5 30 gh api "repos/${REPOSITORY}/commits/${sha}" --jq '.files[].filename')
+            files=$(timeout -k 5 30 gh api "repos/${REPOSITORY}/commits/${sha}" --jq '.files[] | .filename, (.previous_filename // empty)')
             hit=$(printf '%s\n' "$files" |
               grep -E '(^|/)(\.claude/|CLAUDE\.md$|CLAUDE\.local\.md$|AGENTS\.md$)|^(\.mcp\.json|\.claude\.json|\.gitmodules|\.ripgreprc)$|^\.husky/' || true)
             [[ -n "$hit" ]] && bad+="${sha}: ${hit//$'\n'/, }"$'\n'
