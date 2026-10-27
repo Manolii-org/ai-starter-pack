@@ -36,8 +36,26 @@ def test_refuses_everything_else(tag: str) -> None:
     assert _validate(tag) != 0
 
 
-def test_only_pack_tags_move_the_major_alias() -> None:
-    assert STEPS["Move major-version alias"]["if"] == "${{ startsWith(inputs.tag, 'v') }}"
+def _alias(tag: str, tmp_path: Path) -> subprocess.CompletedProcess[str]:
+    """Run the alias step with a curl stub that records each call."""
+    log = tmp_path / "curl.log"
+    stub = tmp_path / "curl"
+    stub.write_text(f"#!/bin/sh\necho \"$@\" >> {log}\ncat >/dev/null\n", encoding="utf-8")
+    stub.chmod(0o755)
+    env = {**os.environ, "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}", "TAG": tag,
+           "SHA": "a" * 40, "REPO": "example/repo", "GH_TOKEN": "unused"}
+    proc = subprocess.run(["bash", "-c", STEPS["Move major-version alias"]["run"]], env=env,
+                          capture_output=True, text=True)
+    proc.calls = log.read_text() if log.exists() else ""  # type: ignore[attr-defined]
+    return proc
+
+
+def test_only_pack_tags_move_the_major_alias(tmp_path: Path) -> None:
+    assert "if" not in STEPS["Move major-version alias"], "outcome contract: load-bearing step"
+    component = _alias("email-capture-v0.2.6", tmp_path)
+    assert component.returncode == 0 and component.calls == ""  # type: ignore[attr-defined]
+    pack = _alias("v1.23.0", tmp_path)
+    assert pack.returncode == 0 and "git/refs/tags/v1" in pack.calls  # type: ignore[attr-defined]
 
 
 def test_tag_is_annotated_with_optional_notes() -> None:

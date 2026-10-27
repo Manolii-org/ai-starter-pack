@@ -115,8 +115,6 @@ jobs:
       # silently got stale content. Move it here so the documented contract is
       # the enforced one.
       - name: Move major-version alias
-        # Pack releases only: a component tag must never move the pack's v1.
-        if: ${{ startsWith(inputs.tag, 'v') }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag }}
@@ -124,33 +122,40 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          MAJOR="${TAG%%.*}"          # v1.9.0 -> v1
-          # inputs.sha is empty when the caller defaulted to main HEAD, so take
-          # the sha the create step actually tagged.
-          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
-            echo "Create step published no usable sha — leaving $MAJOR unmoved" >&2
-            exit 1
-          fi
-          # Lightweight on purpose: a moving alias cannot be an annotated tag
-          # object, and this matches how upstream actions publish @v<major>.
-          PAYLOAD=$(SHA="$SHA" python3 -c "import json,os; print(json.dumps({'sha': os.environ['SHA'], 'force': True}))")
-          # PATCH updates an existing alias; a first-ever major needs POST.
-          if printf 'Authorization: Bearer %s\n' "$GH_TOKEN" | curl -sf --max-time 30 -X PATCH \
-              -H @- \
-              -H "Accept: application/vnd.github+json" \
-              -H "Content-Type: application/json" \
-              "https://api.github.com/repos/$REPO/git/refs/tags/$MAJOR" \
-              -d "$PAYLOAD" >/dev/null; then
-            echo "Moved $MAJOR -> $SHA"
+          # Pack releases only: a component tag (email-capture-v*,
+          # feature-controls-v*) must never move the pack's major alias.
+          PACK_RE='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          if [[ "$TAG" =~ $PACK_RE ]]; then
+            MAJOR="${TAG%%.*}"          # v1.9.0 -> v1
+            # inputs.sha is empty when the caller defaulted to main HEAD, so take
+            # the sha the create step actually tagged.
+            if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+              echo "Create step published no usable sha — leaving $MAJOR unmoved" >&2
+              exit 1
+            fi
+            # Lightweight on purpose: a moving alias cannot be an annotated tag
+            # object, and this matches how upstream actions publish @v<major>.
+            PAYLOAD=$(SHA="$SHA" python3 -c "import json,os; print(json.dumps({'sha': os.environ['SHA'], 'force': True}))")
+            # PATCH updates an existing alias; a first-ever major needs POST.
+            if printf 'Authorization: Bearer %s\n' "$GH_TOKEN" | curl -sf --max-time 30 -X PATCH \
+                -H @- \
+                -H "Accept: application/vnd.github+json" \
+                -H "Content-Type: application/json" \
+                "https://api.github.com/repos/$REPO/git/refs/tags/$MAJOR" \
+                -d "$PAYLOAD" >/dev/null; then
+              echo "Moved $MAJOR -> $SHA"
+            else
+              CREATE=$(MAJOR="$MAJOR" SHA="$SHA" python3 -c "import json,os; print(json.dumps({'ref': 'refs/tags/' + os.environ['MAJOR'], 'sha': os.environ['SHA']}))")
+              printf 'Authorization: Bearer %s\n' "$GH_TOKEN" | curl -sf --max-time 30 -X POST \
+                -H @- \
+                -H "Accept: application/vnd.github+json" \
+                -H "Content-Type: application/json" \
+                "https://api.github.com/repos/$REPO/git/refs" \
+                -d "$CREATE"
+              echo "Created $MAJOR -> $SHA"
+            fi
           else
-            CREATE=$(MAJOR="$MAJOR" SHA="$SHA" python3 -c "import json,os; print(json.dumps({'ref': 'refs/tags/' + os.environ['MAJOR'], 'sha': os.environ['SHA']}))")
-            printf 'Authorization: Bearer %s\n' "$GH_TOKEN" | curl -sf --max-time 30 -X POST \
-              -H @- \
-              -H "Accept: application/vnd.github+json" \
-              -H "Content-Type: application/json" \
-              "https://api.github.com/repos/$REPO/git/refs" \
-              -d "$CREATE"
-            echo "Created $MAJOR -> $SHA"
+            echo "Component tag $TAG: the major alias belongs to pack releases and is left unmoved"
           fi
 
 
