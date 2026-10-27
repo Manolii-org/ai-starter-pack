@@ -1,6 +1,6 @@
 ---
 name: exploratory-bug-bash
-version: 1.0.0
+version: 1.1.0
 description: "Advisory AI exploratory testing (tester-army/e2e `explore`) against an isolated stack: LiteLLM actor/judge routing, bounded budgets, planted-bug calibration, and deterministic Playwright reproduction before any finding is confirmed."
 type: skill
 disable-model-invocation: true  # explicit /bug-bash or scheduled-session use only; never auto-invoked
@@ -20,6 +20,8 @@ intent_phrases:
   - "run a bug bash"
   - "exploratory test the app"
   - "find bugs nobody wrote a test for"
+  - "launch QA"
+  - "test like first-time users"
 ---
 
 # Skill: Exploratory Bug Bash
@@ -52,9 +54,10 @@ repo (its pins conflict with app Playwright versions), then `npm ci`.
 | File | Purpose |
 |---|---|
 | `package.json` | Exact pins: `e2e@0.15.1`, `@e2e-dev/web@0.11.1`, `playwright@1.63.0`. e2e is pre-1.0 — bump deliberately, re-calibrate after. |
-| `e2e.config.ts` | LiteLLM OpenAI-compatible provider; separate actor (vision) and judge routes; personas `default`/`skeptic`/`fuzzer`/`stateful`; budgets. |
+| `e2e.config.ts` | LiteLLM OpenAI-compatible provider; separate actor (vision) and judge routes; targets `web` (1280×720) and `web-mobile` (375×812); personas `default`/`skeptic`/`fuzzer`/`stateful` plus the launch set `impatient`/`trust-checker`/`literal`/`breaker`; budgets. |
 | `tests/auth.setup.e2e.ts` | Magic-link session setup per synthetic account (Supabase example; adapt). |
 | `run.py` | Binds env in-process and runs `npx e2e …` with telemetry off and `CI` unset. |
+| `charters.launch.example.txt` | The five first-time-user launch charters (§ Launch QA). |
 | `fanout.sh` | Runs a charter file in parallel, one output dir + log + exit line per charter. |
 | `charters.example.txt` | `slug|target|agent|charter` format. |
 
@@ -86,7 +89,8 @@ charter is specific enough.
 1. **Write charters** — one user goal per line, naming the account session,
    the start URL and what to cross-check. Pick a persona per charter:
    `skeptic` (counts/dates/names), `fuzzer` (input matrices), `stateful`
-   (reload/back/forward), `default` (first-time user).
+   (reload/back/forward), `default` (first-time user), or a launch persona
+   (§ Launch QA).
 2. **Calibrate (mandatory before trusting a run, and after every model or e2e
    bump).** In a separate worktree plant 3–4 small, realistic bugs on the
    charter paths (off-by-one count, relaxed validation, dropped field on save),
@@ -115,6 +119,47 @@ charter is specific enough.
    deterministic test, not the explorer, is what guards it from then on.
 6. **Report**: charters run, recall, candidates per bucket, confirmed bug PRs,
    model calls/tokens, wall time.
+
+## Launch QA (five first-time users)
+
+Run once per launch, landing (`Shippable: yes`) or substantial onboarding
+change — not per PR. It is the expensive lane: five charters at the budgets
+above are roughly 40–375 model calls. Cheaper lanes must already be green:
+the finalise gate, the PR `ui-smoke` against the preview, and
+`ui-smoke --profile launch` (slow-3G + 4× CPU on 375px) for the deterministic
+mobile/slow-network half of the brief. That last one replaces an LLM "slow
+3G user": the engine has no network throttling, and a timing budget is a
+measurement, not a judgement.
+
+| Persona | Target | Constraint (one per persona, so findings stay attributable) |
+|---|---|---|
+| `impatient` | `web` | Takes the most prominent CTA, never reads help, quits at the first error or retry |
+| `trust-checker` | `web` | Reads pricing, terms and privacy first; reports gaps or contradictions with the flow |
+| `default` | `web-mobile` | Whole journey on a 375px phone; every control reachable without zoom/scroll |
+| `literal` | `web` | Acts only on literal UI text; reports every label or error it must guess at |
+| `breaker` | `web` | Junk input, double-submits, back mid-flow |
+
+1. **Calibrate first** (§ Procedure 2) with the launch charters — a change to
+   `e2e.config.ts` or the charters changes the fingerprint, so an older
+   calibration no longer authorises the run.
+2. **Explore** `charters.launch.example.txt` (edited to your real journey and
+   its invariant) against an isolated preview: `./fanout.sh charters.launch.txt .e2e/out/launch 5`.
+   Each persona screenshots/videos every step; candidates carry the evidence.
+3. **Merge and rank** every candidate in one list by
+   **severity × journey stage** — a blocker before first success outranks
+   cosmetic issues anywhere — with the number of personas that hit it as the
+   tiebreaker. Five synthetic users are not frequency data: one persona
+   blocked on the critical path is P0.
+4. **Triage** each item into the § Procedure 4 buckets. Only `confirmed`
+   (a deterministic test that fails on base) is fixed in this pass;
+   `design-intent` goes to the owner, `fixture` to seed data.
+5. **Fix in one batched PR per area**, each fix with its regression test
+   (Playwright spec, `ui-smoke` route, or unit test). The tests — not a
+   persona re-run — are the proof, because model runs are non-deterministic
+   and "not seen again" proves little.
+6. **Re-run the five charters once** as a sanity pass on the fixed build and
+   record it. A recurring candidate after the fix means the regression test
+   does not cover it — extend the test, do not re-roll the explorer.
 
 ## Operationalising as a weekly advisory lane
 
