@@ -132,19 +132,22 @@ def test_standalone_rechecks_the_head_before_any_queued_work() -> None:
         assert "steps.claude.outcome" in step["if"]
 
 
-@pytest.mark.parametrize(("current", "validated", "gh_ok", "go"), [
-    ("abc123", "abc123", True, "true"),
-    ("def456", "abc123", True, "false"),   # an earlier autofix pushed while queued
-    ("", "abc123", False, "false"),        # unreadable head fails closed
-    ("abc123", "", True, "false"),         # preflight never validated a SHA
+@pytest.mark.parametrize(("pr", "validated", "go"), [
+    ("abc123\topen\tbug,docs", "abc123", "true"),
+    ("abc123\topen\t", "abc123", "true"),                    # no labels
+    ("def456\topen\t", "abc123", "false"),                   # an earlier autofix pushed while queued
+    (None, "abc123", "false"),                                 # unreadable PR fails closed
+    ("abc123\topen\t", "", "false"),                         # preflight never validated a SHA
+    ("abc123\tclosed\t", "abc123", "false"),                 # closed while queued (Codex, PR #251)
+    ("abc123\topen\tbug,skip-ai-review", "abc123", "false"), # opted out while queued (Codex, PR #251)
 ])
-def test_lock_check_skips_unless_the_validated_head_is_current(
-        tmp_path: Path, current: str, validated: str, gh_ok: bool, go: str) -> None:
+def test_lock_check_skips_unless_the_pr_is_still_eligible(
+        tmp_path: Path, pr: str | None, validated: str, go: str) -> None:
     step = next(s for s in _steps("standalone") if s.get("name") == LOCK_CHECK)
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     gh = bin_dir / "gh"
-    gh.write_text("#!/usr/bin/env bash\n" + (f"echo {current}\n" if gh_ok else "exit 1\n"))
+    gh.write_text("#!/usr/bin/env bash\n" + (f"printf '%s\\n' $'{pr}'\n" if pr is not None else "exit 1\n"))
     gh.chmod(0o755)
     out = tmp_path / "out"
     env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "GITHUB_OUTPUT": str(out),

@@ -301,10 +301,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      # Preflight ran before this job waited for the lock. If an earlier
-      # autofix (or anyone) pushed meanwhile, its loop-break, budget and head
-      # SHA are stale: skip, and let a newer event judge the new head. An
-      # unchanged head means unchanged commits, so the gates still hold.
+      # Preflight ran before this job waited for the lock. Re-read what can
+      # change meanwhile: the head (loop-break, budget and same-repo all derive
+      # from its commits), whether the PR is still open, and the opt-out
+      # label. Comment/review gates are fixed by the triggering event.
       - name: Re-check the PR head after acquiring the lock
         id: lock
         env:
@@ -314,10 +314,22 @@ jobs:
           VALIDATED: ${{ needs.preflight.outputs.head_sha }}
         run: |
           set -euo pipefail
-          CURRENT=$(timeout -k 5 30 gh api "repos/${REPOSITORY}/pulls/${PR_NUM}" --jq '.head.sha' 2>/dev/null || echo '')
-          if [[ -z "$VALIDATED" || -z "$CURRENT" || "$CURRENT" != "$VALIDATED" ]]; then
+          PR=$(timeout -k 5 30 gh api "repos/${REPOSITORY}/pulls/${PR_NUM}" \
+            --jq '[.head.sha, .state, ([.labels[].name] | join(","))] | @tsv' 2>/dev/null || echo '')
+          IFS=$'\t' read -r CURRENT STATE LABELS <<< "$PR" || true
+          REASON=''
+          if [[ -z "$VALIDATED" || -z "${CURRENT:-}" ]]; then
+            REASON="PR head unreadable or never validated"
+          elif [[ "$CURRENT" != "$VALIDATED" ]]; then
+            REASON="PR head moved from ${VALIDATED} to ${CURRENT}"
+          elif [[ "${STATE:-}" != "open" ]]; then
+            REASON="PR is ${STATE:-in an unknown state}"
+          elif [[ "${LABELS:-}" == *skip-ai-review* ]]; then
+            REASON="PR has the skip-ai-review label"
+          fi
+          if [[ -n "$REASON" ]]; then
             echo "go=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::PR head is ${CURRENT:-unreadable}, not the validated ${VALIDATED:-<none>}; skipping this queued autofix"
+            echo "::notice::${REASON}; skipping this queued autofix"
             exit 0
           fi
           echo "go=true" >> "$GITHUB_OUTPUT"
