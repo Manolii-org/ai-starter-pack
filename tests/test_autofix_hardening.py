@@ -81,19 +81,47 @@ def test_execution_file_is_a_declared_action_output() -> None:
     assert "execution_file" in outputs
 
 
-def _render_claude_args(model: str) -> list[str]:
+MODEL_SOURCE = {"reusable": "inputs.model", "standalone": "vars.AUTOFIX_MODEL"}
+
+
+def _render_claude_args(name: str, model: str) -> list[str]:
     """Render the GitHub expression, then tokenise like the action (shell-quote)."""
-    args = _step("reusable", uses=ACTION)["with"]["claude_args"]
-    expr = "${{ inputs.model != '' && format('--model \"{0}\"', inputs.model) || '' }}"
+    args = _step(name, uses=ACTION)["with"]["claude_args"]
+    src = MODEL_SOURCE[name]
+    expr = f"${{{{ {src} != '' && format('--model \"{{0}}\"', {src}) || '' }}}}"
     assert expr in args
     rendered = args.replace(expr, f'--model "{model}"' if model else "")
     return shlex.split(rendered)
 
 
-def test_claude_args_tokenise_with_and_without_model() -> None:
-    assert _render_claude_args("") == ["--allowedTools", "Bash,Edit,Write,Read,Glob,Grep"]
-    assert _render_claude_args("anthropic/claude-sonnet-4.5") == [
+@pytest.mark.parametrize("name", sorted(WORKFLOWS))
+def test_claude_args_tokenise_with_and_without_model(name: str) -> None:
+    """The standalone needs a model too: a proxy serves only the ids it routes,
+    and without --model the agent asks for the CLI default (acceptance run on
+    PR #250 failed after one turn)."""
+    assert _render_claude_args(name, "") == ["--allowedTools", "Bash,Edit,Write,Read,Glob,Grep"]
+    assert _render_claude_args(name, "anthropic/claude-sonnet-4.5") == [
         "--allowedTools", "Bash,Edit,Write,Read,Glob,Grep", "--model", "anthropic/claude-sonnet-4.5"]
+
+
+def test_standalone_lock_is_on_the_agent_job_and_never_cancels() -> None:
+    """A workflow-level cancel let a bot comment's run (skipped by preflight)
+    cancel an agent that had passed every gate (acceptance run on PR #250)."""
+    spec = yaml.safe_load(WORKFLOWS["standalone"].read_text(encoding="utf-8"))
+    assert "concurrency" not in spec
+    assert "concurrency" not in spec["jobs"]["preflight"]
+    lock = spec["jobs"]["autofix"]["concurrency"]
+    assert lock["cancel-in-progress"] is False
+    assert "needs.preflight.outputs.pr_number" in lock["group"]
+
+
+def test_documented_caller_never_cancels_an_agent_in_progress() -> None:
+    doc = (ROOT / ".github/workflows/REUSABLE-WORKFLOWS.md").read_text(encoding="utf-8")
+    blocks = [b.split("```", 1)[0] for b in doc.split("```yaml\n")[1:]]
+    callers = [yaml.safe_load(b) for b in blocks if "pr-autofix-loop-reusable.yml@" in b]
+    assert callers
+    for caller in callers:
+        assert caller["concurrency"]["cancel-in-progress"] is False
 
 
 @pytest.mark.parametrize("name", sorted(WORKFLOWS))
