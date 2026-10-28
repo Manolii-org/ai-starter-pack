@@ -39,8 +39,9 @@
 
 - **First release of `packages/feature-controls`.** npm
   `@manolii/feature-controls` (root `package.json`) and Python
-  `manolii-feature-controls` both declare `0.1.0`. After merge the release is
-  tagged `feature-controls-v0.1.0` on that `main` commit through
+  `manolii-feature-controls` both declare `0.1.0`. After merge, the
+  maintainer `feature-controls-release.py prepare`/`verify` dry run is run on
+  that `main` commit. It is then tagged `feature-controls-v0.1.0` through
   `release-tag.yml`. A component tag never moves `v1`. The SDK source is
   unchanged: it matches the PR #203 squash on `main` plus the README and
   the patched setuptools build backend (#219).

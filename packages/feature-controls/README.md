@@ -1,8 +1,9 @@
 # Feature-control SDK
 
-Released as component tag `feature-controls-v0.1.0`; both package versions
-(npm `@manolii/feature-controls`, Python `manolii-feature-controls`) read
-`0.1.0` at that tag. Releases follow the maintainer process in
+Version `0.1.0`: both packages (npm `@manolii/feature-controls`, Python
+`manolii-feature-controls`) declare it. Its component tag
+`feature-controls-v0.1.0` is cut on the `main` commit that carries this
+version. Until that tag exists, there is no release to pin. Releases follow the maintainer process in
 `docs/feature-controls-distribution.md` and are tagged `feature-controls-vX.Y.Z`
 through `.github/workflows/release-tag.yml`. Component tags never move the
 pack's `v1` alias.
