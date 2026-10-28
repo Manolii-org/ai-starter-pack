@@ -2,4 +2,4 @@
 
 
 def subtotal(prices_cents: list[int]) -> int:
-    return sum(prices_cents[1:])
+    return sum(prices_cents)
