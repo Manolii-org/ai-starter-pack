@@ -35,6 +35,17 @@
 - `docs/fly-runner-setup.md` § *Runner version policy*: what a fleet that disables runner
   auto-update must provide to stay inside GitHub's 30-day window.
 
+### Docs
+
+- **Autofix through an Anthropic-compatible gateway**
+  (`docs/autofix-cost-alarms.md` § Gateway authentication). Proxy mode sends
+  the key as `x-api-key`. OpenRouter accepts this (verified 2026-10-28), so
+  no new input is needed. The base URL takes no `/v1`, and `model` must be
+  set because the `tier-2-agentic` default is a LiteLLM alias. Gateways that
+  read only `Authorization: Bearer` are not supported yet. `GH_PAT` /
+  `MN_GH_AUTOMATION_TOKEN` are documented as tenant-owned naming conventions.
+  No behaviour change; nothing to upgrade.
+
 ## 1.24.0 — 2026-10-28
 
 Upgrade order for consumers:
