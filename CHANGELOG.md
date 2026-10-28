@@ -21,6 +21,9 @@
   - `AGENT_FINALISE_GATE=off` bypasses the gate and is recorded in
     `.ai/bypass-log.jsonl`.
   - Each run appends a cost/outcome row to `.ai/agent-checks/finalise-gate.jsonl`.
+  - A shell prefilter keeps the overhead to about 5 ms per shell call.
+  - PR-creation tools are matched under any MCP server name
+    (`mcp__.*__create_pull_request`).
   - It is a no-op without `config/agent-checks.json`.
 - **Behaviour for adopters.** A new owner-owned `config/qa.json` (in
   `_skip_if_exists`) ships `finalise_gate.mode: warn`. Failures and
@@ -28,8 +31,8 @@
   push or PR proceeds. `copier update` and plugin upgrades therefore never
   start blocking an existing repository. Set `mode: block` once your recipes
   pass; `block` is planned as the v2 default. `.cursor/hooks.json` and
-  `.codex/hooks.json` are also `_skip_if_exists`: an existing file is kept,
-  so add the gate entry by hand.
+  `.codex/hooks.json` are also `_skip_if_exists`, and so is
+  `.githooks/pre-push`: an existing file is kept, so add the gate entry by hand.
 - These are not source failures, so the gate never blocks on them:
   - environment setup failures;
   - per-check timeouts;
@@ -46,10 +49,14 @@
   - mobile overflow, or a missing `width=device-width` viewport;
   - serious or critical axe violations.
 
-  It infers routes from Next.js `app/` and `pages/` paths, starts and stops
+  It infers routes from Next.js `app/` and `pages/` paths (router roots only
+  at the repository root, `src/` or `apps|packages/<name>/`; page objects and
+  test/story files never become routes), ignores console errors logged by
+  third-party scripts, and starts and stops
   the dev server from `start_command`, and writes screenshots and ARIA
-  snapshots to the ignored `.ai/agent-checks/ui-smoke/`. `--profile launch`
-  adds a slow-3G + 4x CPU mobile budget. A bypass header is sent only to the
+  snapshots to the ignored `.ai/agent-checks/ui-smoke/`. The dev server's
+  output goes to `server.log` there. `--profile launch` adds a slow-3G + 4x
+  CPU mobile pass with DOMContentLoaded and LCP budgets. A bypass header is sent only to the
   app's origin, re-checked on every redirect hop. The run exits `3` when no browser
   or server is available, and a watchdog stops the dev server even if the
   run is killed.
