@@ -1,6 +1,22 @@
 # Changelog
 
-## Unreleased
+## 1.24.0 — 2026-10-28
+
+Upgrade order for consumers:
+
+1. Before bumping, decide the Autofix model for each repository that runs it
+   through a proxy without setting one. With no model set, v1.24.0 sends PR
+   context to `tier-2-agentic` (see "Changed"); repositories above
+   `internal` sensitivity, or that must stay with Anthropic, set `model` /
+   `AUTOFIX_MODEL` first (for example `claude-sonnet-5-5`).
+2. Pin every pack `uses:` to the v1.24.0 commit SHA (with a `# v1.24.0`
+   comment) in one PR; the Renovate preset's `manolii-ai-starter-pack` group
+   does this for you. Change any `pack_ref` input to the same release.
+3. Optional: list coding-agent bots in `trusted_agent_bots` /
+   `AUTOFIX_TRUSTED_AGENT_BOTS` so Autofix fixes CI failures on their PRs.
+
+No inputs were removed or renamed; every new input defaults to the previous
+behaviour except the Autofix model default described below.
 
 ### Added
 
