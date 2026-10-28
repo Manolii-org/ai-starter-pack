@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Added
+
+- **Autofix for PRs pushed by coding agents (opt-in).** New
+  `pr-autofix-loop-reusable` input `trusted_agent_bots` and standalone
+  repository variable `AUTOFIX_TRUSTED_AGENT_BOTS` list agent bot logins
+  (Devin, Codex cloud tasks, Cursor Cloud Agents) whose pushes may trigger
+  Autofix when CI fails. Off by default; CI-failure path and same-repository
+  heads only; `*` and malformed entries are dropped. The sanitised list
+  reaches the action's `allowed_bots` only on CI-failure runs, and every
+  `workflow_run` must come from this repository (checked by ID).
+
 ### Changed
 
 - **Autofix uses a lean model by default (ADR-0002).** When no model is set
