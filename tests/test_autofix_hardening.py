@@ -479,3 +479,15 @@ def test_allowed_bots_output_is_sanitised(bots: str, allowed: str, tmp_path) -> 
     subprocess.run(["bash", "-c", script], env={**os.environ, "TRUSTED_BOTS": bots, "GITHUB_OUTPUT": str(out)},
                    check=True)
     assert out.read_text() == f"allowed_bots={allowed}\n"
+
+
+def test_reusable_checks_head_repo_identity_on_every_trigger() -> None:
+    """The reusable compared repo IDs only on review/comment triggers and relied
+    on workflow_run.head_repository.fork for CI failures. A caller that is itself
+    a fork receives upstream PRs with fork=false, so a cross-repo head reached
+    the privileged checkout; opted-in agent bots widened that path."""
+    run = _step("reusable", title="Resolve PR number and head ref")["run"]
+    check = run.index("SAME=$(timeout -k 5 30 gh api")
+    assert '"$EVENT_NAME" != "workflow_run"' not in run[:check]
+    assert ".head.repo.id == .base.repo.id" in run[check:]
+    assert run.index('if [[ "$SAME" != "true" ]]') < run.index('echo "skip=false"')

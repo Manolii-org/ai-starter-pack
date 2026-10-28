@@ -137,22 +137,22 @@ jobs:
             echo "No PR number; skipping"
             exit 0
           fi
-          if [[ "$EVENT_NAME" != "workflow_run" ]]; then
-            # Review/comment triggers run with secrets + write token; checking
-            # out a cross-repo head would hand PR-controlled files those
-            # privileges. Compare repo IDs, not .fork — a caller that is itself
-            # a fork still has head.repo.fork=true on its own PRs.
-            # Bounded: a stalled gh api would otherwise eat the 30m job
-            # ceiling before reaching the safe skip path; a timeout lands in
-            # the same 'unknown' (skip) bucket as an API error.
-            SAME=$(timeout -k 5 30 gh api "repos/${REPOSITORY}/pulls/${PR_NUM}" \
-              --jq 'if .head.repo == null then "missing" elif (.head.repo.id == .base.repo.id) then "true" else "false" end' \
-              2>/dev/null || echo 'unknown')
-            if [[ "$SAME" != "true" ]]; then
-              echo "skip=true" >> "$GITHUB_OUTPUT"
-              echo "Cross-repo/unverifiable PR head (same_repo=$SAME) — autofix runs only on same-repo heads; skipping"
-              exit 0
-            fi
+          # Every trigger runs with secrets + write token; checking out a
+          # cross-repo head would hand PR-controlled files those privileges.
+          # Compare repo IDs, not .fork: a caller that is itself a fork still
+          # has head.repo.fork=true on its own PRs, and a PR from its upstream
+          # has fork=false, so the workflow_run .fork check above is not enough
+          # on its own (same rule as pr-autofix-loop.yml).
+          # Bounded: a stalled gh api would otherwise eat the 30m job
+          # ceiling before reaching the safe skip path; a timeout lands in
+          # the same 'unknown' (skip) bucket as an API error.
+          SAME=$(timeout -k 5 30 gh api "repos/${REPOSITORY}/pulls/${PR_NUM}" \
+            --jq 'if .head.repo == null then "missing" elif (.head.repo.id == .base.repo.id) then "true" else "false" end' \
+            2>/dev/null || echo 'unknown')
+          if [[ "$SAME" != "true" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Cross-repo/unverifiable PR head (same_repo=$SAME) — autofix runs only on same-repo heads; skipping"
+            exit 0
           fi
           if [[ "$EVENT_NAME" == "workflow_run" ]]; then
             # Fail closed: an unverifiable head means the failed run cannot be
