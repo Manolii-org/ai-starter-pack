@@ -247,8 +247,12 @@ jobs:
             done
             return 1
           }
+          # Agent bots reach the action only on the CI-failure path; comment
+          # and review triggers keep the relay bot alone.
           allowed_bots="github-actions"
-          for entry in $(trusted_bots); do allowed_bots+=",$entry"; done
+          if [[ "$EVENT_NAME" == "workflow_run" ]]; then
+            for entry in $(trusted_bots); do allowed_bots+=",$entry"; done
+          fi
           echo "allowed_bots=$allowed_bots" >> "$GITHUB_OUTPUT"
 
           # claude-code-action fails the job (rather than skipping) for bot
