@@ -113,9 +113,13 @@ def test_python_only_repo_is_npm_inert_without_failing(tmp_path: Path, manifests
     assert "::warning::" not in proc.stdout and "::error::" not in proc.stdout
 
 
-def test_tooling_only_pyproject_does_not_count_as_auditable(tmp_path: Path) -> None:
-    """A JS repo whose only Python file is tool config has nothing audited."""
-    proc, outputs = _detect(tmp_path, "npm-audit", ("pyproject.toml",), fail_on_inert="true")
+@pytest.mark.parametrize("files", [
+    ("pyproject.toml",),  # tool config only: the pip fallback sees no project graph
+    ("uv.lock",),  # Codex review: the pip job skips without pyproject.toml
+])
+def test_unauditable_python_files_do_not_count(tmp_path: Path, files) -> None:
+    """Whatever the npm job counts as auditable, the pip job must report active."""
+    proc, outputs = _detect(tmp_path, "npm-audit", files, fail_on_inert="true")
     assert proc.returncode == 1
     assert outputs["activation"] == "inert"
     assert "::error::secret-scan INERT" in proc.stdout
