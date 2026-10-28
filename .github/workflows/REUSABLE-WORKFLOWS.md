@@ -622,18 +622,28 @@ Product repos that deliberately keep Autofix off (e.g. Buro `bcp-core` ADR-0006)
 should not add this caller.
 
 **Agent-step contract.** The pinned `anthropics/claude-code-action` (v1) takes
-`prompt` and `claude_args`; the reusable passes `--allowedTools` and, when the
-`model` input is non-empty, `--model`. Releases before this fix passed v0
+`prompt` and `claude_args`; the reusable passes `--allowedTools` and `--model`.
+Releases before this fix passed v0
 inputs that the action ignored, so Autofix never ran — after upgrading it
 pushes `[autofix]` commits and spends tokens. A dispatched agent step that
 produces no `execution_file` fails the job; skips (loop-break, budget,
 `skip-ai-review`, bot actors other than the relay, actors without write
 access) stay green. `GH_PAT` is optional; pushes made with `github.token` do
 not re-trigger PR checks.
-The standalone `pr-autofix-loop.yml` passes `--model` from the optional
-repository variable `AUTOFIX_MODEL`. Set it whenever `LITELLM_PROXY_URL`
-(or `ANTHROPIC_BASE_URL`) points at a proxy: a proxy serves only the model
-ids it routes, and without one the agent requests the CLI default model.
+
+**Model (lean by default).** The agent always runs with an explicit model:
+the reusable's `model` input, or the standalone's repository variable
+`AUTOFIX_MODEL`; when unset, `tier-2-agentic` through a proxy and
+`claude-sonnet-5-5` with a direct Anthropic key (ADR-0002). Releases up to
+v1.23.0 fell back to the Claude Code CLI default (Opus), the most expensive
+option, which a proxy usually cannot serve.
+- `tier-2-agentic` is the pack LiteLLM alias for Kimi K2.6 (OSS weights,
+  `data_sensitivity_max: internal`). Repositories whose code is above
+  `internal` must set a model explicitly.
+- Other Anthropic-compatible proxies (for example OpenRouter) do not know
+  pack aliases: set the model to an id that proxy routes.
+- `claude-haiku-5-5` is cheaper still and can be set explicitly; it has not
+  been accepted as a default for multi-file fixes yet.
 
 **Instruction-surface hardening.** Before the agent runs, the checkout is
 pinned to the PR head SHA and `.claude/`, `.mcp.json`, `.claude.json`,

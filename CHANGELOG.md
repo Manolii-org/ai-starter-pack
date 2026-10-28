@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Changed
+
+- **Autofix uses a lean model by default (ADR-0002).** When no model is set
+  (reusable `model` input, standalone `AUTOFIX_MODEL`), the agent now runs
+  `tier-2-agentic` through a proxy and `claude-sonnet-5-5` with a direct
+  Anthropic key, instead of the Claude Code CLI default (Opus), which a proxy
+  usually cannot serve. Per-token cost falls by about 60% (direct) and 90%
+  (proxy). Set a model explicitly if your code is above `internal`
+  sensitivity or your proxy is not the pack's LiteLLM.
+
 ## 1.23.0 — 2026-10-27
 
 Upgrade order for consumers:
