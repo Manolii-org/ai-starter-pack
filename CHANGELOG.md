@@ -25,6 +25,16 @@
   `git -C /tmp/x push` could therefore run `/tmp/x`'s recipes. The workspace
   now falls back to the repository holding the hook's working directory.
 
+### Docs: legacy bare `v0.x` tags
+
+- `docs/email-capture.md` § Legacy bare `v0.x` tags lists every pre-namespace
+  tag (`v0.1.0-rc.1` to `v0.2.6`) with its kind, commit and component. They
+  stay frozen: never deleted or moved. `v0.2.4` and `v0.2.5` sit on
+  Codex-review commits, and `v0.2.6` is the same commit as
+  `email-capture-v0.2.6`. No tag changed; nothing to upgrade. Lanes still on
+  `v0.2.3` should move to `email-capture-v0.2.6` by SHA, after keeping
+  `allocate`/`await`/`release` in one job.
+
 ### Docs: shared rollout and runner-version practice
 
 - `docs/issue-lifecycle.md` § *Pending state as a retry queue*: use the closed-loop issue
@@ -35,15 +45,16 @@
 - `docs/fly-runner-setup.md` § *Runner version policy*: what a fleet that disables runner
   auto-update must provide to stay inside GitHub's 30-day window.
 
-### Docs: legacy bare `v0.x` tags
+### Docs
 
-- `docs/email-capture.md` § Legacy bare `v0.x` tags lists every pre-namespace
-  tag (`v0.1.0-rc.1` to `v0.2.6`) with its kind, commit and component. They
-  stay frozen: never deleted or moved. `v0.2.4` and `v0.2.5` sit on
-  Codex-review commits, and `v0.2.6` is the same commit as
-  `email-capture-v0.2.6`. No tag changed; nothing to upgrade. Lanes still on
-  `v0.2.3` should move to `email-capture-v0.2.6` by SHA, after keeping
-  `allocate`/`await`/`release` in one job.
+- **Autofix through an Anthropic-compatible gateway**
+  (`docs/autofix-cost-alarms.md` § Gateway authentication). Proxy mode sends
+  the key as `x-api-key`. OpenRouter accepts this (verified 2026-10-28), so
+  no new input is needed. The base URL takes no `/v1`, and `model` must be
+  set because the `tier-2-agentic` default is a LiteLLM alias. Gateways that
+  read only `Authorization: Bearer` are not supported yet. `GH_PAT` /
+  `MN_GH_AUTOMATION_TOKEN` are documented as tenant-owned naming conventions.
+  No behaviour change; nothing to upgrade.
 
 ## 1.24.0 — 2026-10-28
 
