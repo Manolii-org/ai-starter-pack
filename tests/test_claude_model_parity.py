@@ -17,12 +17,20 @@ ROOT = Path(__file__).resolve().parents[1]
 PROXY_INTERCEPTED = {"claude-haiku-4-5-20251001"}
 
 
+def _literal(path: str, name: str):
+    for node in ast.walk(ast.parse((ROOT / path).read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Assign) and any(getattr(t, "id", None) == name for t in node.targets):
+            return ast.literal_eval(node.value)
+    raise AssertionError(f"{name} not found in {path}")
+
+
 def _guard_claude_ids() -> set[str]:
-    tree = ast.parse((ROOT / "scripts/pre-tool-use.py").read_text(encoding="utf-8"))
-    for node in tree.body:
-        if isinstance(node, ast.Assign) and any(getattr(t, "id", None) == "ANTHROPIC_MODELS" for t in node.targets):
-            return {m for m in ast.literal_eval(node.value) if m.startswith("claude-")}
-    raise AssertionError("ANTHROPIC_MODELS not found")
+    return {m for m in _literal("scripts/pre-tool-use.py", "ANTHROPIC_MODELS") if m.startswith("claude-")}
+
+
+def _list_prices() -> dict[str, dict]:
+    """Anthropic list prices per MTok — the reference table in classify-message."""
+    return _literal("scripts/classify-message.py", "_PRICING_DEFAULT")
 
 
 def _cost_logger(monkeypatch):
@@ -44,3 +52,18 @@ def test_guard_ids_are_priced_and_classified(monkeypatch) -> None:
     ids = _guard_claude_ids()
     assert ids - set(logger._SUBAGENT_PRICING) == set()
     assert ids - PROXY_INTERCEPTED - logger._ANTHROPIC_DIRECT_MODELS == set()
+
+
+def test_cost_logger_prices_match_list_prices(monkeypatch) -> None:
+    """Main-thread and direct sub-agent rates both follow the list prices;
+    review rounds kept finding one table updated and another stale."""
+    logger = _cost_logger(monkeypatch)
+    prices = _list_prices()
+    for model in _guard_claude_ids() | {"haiku"}:
+        expected = prices[model]
+        if model.startswith("claude-"):
+            main = logger._MAIN_PER_M[model]
+            assert (main["in"], main["out"]) == (expected["in"], expected["out"]), model
+        sub = logger._SUBAGENT_PRICING[model]
+        got = (round(sub["input"] * 1_000_000, 6), round(sub["output"] * 1_000_000, 6))
+        assert got == (expected["in"], expected["out"]), model

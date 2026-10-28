@@ -19,9 +19,10 @@
   current Claude model (`claude-sonnet-5-5`, `fable`, …) as unregistered.
 - Cost estimates used wrong Anthropic prices (Opus 4.6/4.7 at $15/$75, Haiku
   4.5 at $0.30/$1.20); corrected, and Claude 5 prices added.
-- The session cost logger booked Claude 5 sub-agents at the Haiku proxy rate
-  as proxy spend; they are now priced and counted as Anthropic-direct. A
-  parity test keeps the guard, proxy routes and cost logger in step.
+- The session cost logger priced Claude 5 main threads at the Sonnet 4.6 rate,
+  booked Claude 5 sub-agents at the Haiku proxy rate as proxy spend, and kept
+  Haiku at $0.30/$1.20. All its tables now use list prices, and a parity test
+  keeps the guard, proxy routes and cost logger prices in step.
 
 ## 1.23.0 — 2026-10-27
 

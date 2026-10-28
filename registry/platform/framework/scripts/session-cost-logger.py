@@ -54,8 +54,14 @@ _MAIN_PER_M = {
     "claude-opus-4-7":           {"in": 5.00, "out": 25.00},
     "claude-opus-4-6":           {"in": 5.00, "out": 25.00},
     "claude-sonnet-4-6":         {"in": 3.00, "out": 15.00},
-    "claude-haiku-4-5-20251001": {"in": 0.30, "out":  1.20},
-    "claude-haiku-4-5":          {"in": 0.30, "out":  1.20},
+    "claude-haiku-4-5-20251001": {"in": 1.00, "out":  5.00},
+    "claude-haiku-4-5":          {"in": 1.00, "out":  5.00},
+    "claude-fable-5-1":          {"in": 10.00, "out": 50.00},
+    "claude-opus-5-5":           {"in": 4.00, "out": 20.00},
+    "claude-opus-5":             {"in": 5.00, "out": 25.00},
+    "claude-sonnet-5-5":         {"in": 2.00, "out": 10.00},
+    "claude-sonnet-5":           {"in": 2.00, "out": 10.00},
+    "claude-haiku-5-5":          {"in": 0.10, "out":  0.50},
 }
 _DEFAULT_MAIN_MODEL = "claude-sonnet-4-6"
 
@@ -170,9 +176,10 @@ _SUBAGENT_PRICING: dict[str, dict] = {
     "claude-sonnet-5":         {"input": 2.00 / 1_000_000, "output": 10.00 / 1_000_000},
     "claude-haiku-5-5":        {"input": 0.10 / 1_000_000, "output": 0.50 / 1_000_000},
     # Haiku aliases — Anthropic-direct rates unless LiteLLM proxy is active
-    "haiku": {"input": 0.30 / 1_000_000, "output": 1.20 / 1_000_000},
-    "claude-haiku-4-5-20251001": {"input": 0.30 / 1_000_000, "output": 1.20 / 1_000_000},
-    "claude-haiku-4-5":          {"input": 0.30 / 1_000_000, "output": 1.20 / 1_000_000},
+    # (the `haiku` alias resolves to Haiku 5.5 on Anthropic).
+    "haiku": {"input": 0.10 / 1_000_000, "output": 0.50 / 1_000_000},
+    "claude-haiku-4-5-20251001": {"input": 1.00 / 1_000_000, "output": 5.00 / 1_000_000},
+    "claude-haiku-4-5":          {"input": 1.00 / 1_000_000, "output": 5.00 / 1_000_000},
     "sonnet": {"input": 0.30 / 1_000_000, "output": 0.87 / 1_000_000},  # DeepSeek V4 Pro via proxy
     # Explicit tier-vision (Sonnet 4.6 when used as sub-agent, not via proxy)
     "tier-vision": {"input": 3.00 / 1_000_000, "output": 15.00 / 1_000_000},  # Claude Sonnet 4.6
