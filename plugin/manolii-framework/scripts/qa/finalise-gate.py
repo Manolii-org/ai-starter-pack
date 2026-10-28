@@ -478,7 +478,15 @@ def workspaces_for(adapter: str, payload: dict) -> list[Path]:
         roots = [os.environ.get("CLAUDE_PROJECT_DIR", "")]
     else:
         roots = []
-    return [Path(r).resolve() for r in roots if r and Path(r).is_dir()]
+    workspaces = [Path(r).resolve() for r in roots if r and Path(r).is_dir()]
+    if workspaces:
+        return workspaces
+    # No host-declared root (Codex, or an unset CLAUDE_PROJECT_DIR): the hook's
+    # own directory bounds trust, so a named `cd`/`git -C` path elsewhere
+    # never runs that path's recipes.
+    here = Path(str(payload.get("cwd") or "") or os.getcwd())
+    here = here if here.is_dir() else Path.cwd()
+    return [(git_toplevel(here) or here).resolve()]
 
 
 def within(root: Path, workspaces: list[Path]) -> bool:
