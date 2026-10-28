@@ -67,6 +67,17 @@ class ClassifyCommandTests(unittest.TestCase):
         self.assertEqual(info["repo_dir"], "../other")
         self.assertTrue(info["bypass"])
 
+    def test_inline_bypass_only_counts_when_it_reaches_the_hand_off(self):
+        for command in ("AGENT_FINALISE_GATE=off echo diag && git push",
+                        "AGENT_FINALISE_GATE=off git push && git push origin other",
+                        "export AGENT_FINALISE_GATE=off; unset AGENT_FINALISE_GATE; git push"):
+            info = self.classify(command)
+            self.assertEqual(info["trigger"], "push", command)
+            self.assertFalse(info["bypass"], command)
+        for command in ("AGENT_FINALISE_GATE=off git push", "export AGENT_FINALISE_GATE=off; git push",
+                        "export AGENT_FINALISE_GATE=off && bash -c 'git push'"):
+            self.assertTrue(self.classify(command)["bypass"], command)
+
     def test_unparseable_shell_falls_back_to_triggering(self):
         self.assertEqual(self.trigger("git push 'unterminated"), "push")
 

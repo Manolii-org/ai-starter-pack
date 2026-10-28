@@ -94,17 +94,22 @@ def _simple_commands(tokens: list[str]):
         yield current
 
 
-def _strip_wrappers(words: list[str], result: dict) -> list[str]:
-    """Drop VAR=value prefixes and transparent wrappers (env, sudo, timeout, …)."""
+def _strip_wrappers(words: list[str]) -> tuple[list[str], bool]:
+    """Drop VAR=value prefixes and transparent wrappers (env, sudo, timeout, …).
+
+    Returns the remaining words and whether this simple command itself
+    carries AGENT_FINALISE_GATE=off (a prefix applies to that command only).
+    """
+    bypass = False
     while words:
         if _ASSIGNMENT.match(words[0]):
             name, _, value = words.pop(0).partition("=")
-            if name == BYPASS_ENV and value.lower() == "off":
-                result["bypass"] = True
+            if name == BYPASS_ENV:
+                bypass = value.lower() == "off"
             continue
         head = os.path.basename(words[0])
         if head not in _WRAPPERS:
-            return words
+            return words, bypass
         words.pop(0)
         value_opts = _WRAPPER_VALUE_OPTS.get(head, set())
         while words and words[0].startswith("-"):
@@ -113,7 +118,7 @@ def _strip_wrappers(words: list[str], result: dict) -> list[str]:
                 words.pop(0)
         if head == "timeout" and words:
             words.pop(0)  # the duration
-    return words
+    return words, bypass
 
 
 def _classify(command: str, cwd: str | None, result: dict, depth: int) -> None:
@@ -125,10 +130,22 @@ def _classify(command: str, cwd: str | None, result: dict, depth: int) -> None:
             result["repo_dir"] = result["repo_dir"] or cwd
         return
     for words in _simple_commands(tokens):
-        words = _strip_wrappers(list(words), result)
+        words, local_bypass = _strip_wrappers(list(words))
         if not words:
             continue
         head = os.path.basename(words[0])
+        # `export AGENT_FINALISE_GATE=off` really does reach later commands in
+        # the same shell; `unset` withdraws it.
+        if head == "export":
+            for word in words[1:]:
+                name, _, value = word.partition("=")
+                if name == BYPASS_ENV:
+                    result["_exported"] = value.lower() == "off"
+            continue
+        if head == "unset" and BYPASS_ENV in words[1:]:
+            result["_exported"] = False
+            continue
+        bypassed = local_bypass or result.get("_exported", False)
         if head in ("cd", "pushd"):
             target = next((w for w in words[1:] if not w.startswith("-")), None)
             if target and target != "-":
@@ -137,11 +154,14 @@ def _classify(command: str, cwd: str | None, result: dict, depth: int) -> None:
         if head in _SHELLS and "-c" in words[1:] and depth < 3:
             index = words.index("-c", 1)
             if index + 1 < len(words):
-                _classify(words[index + 1], cwd, result, depth + 1)
+                inner = dict(result, _exported=bypassed)
+                _classify(words[index + 1], cwd, inner, depth + 1)
+                result.update({k: v for k, v in inner.items() if k != "_exported"})
             continue
         if head == "gh" and words[1:3] == ["pr", "create"]:
             result["trigger"] = result["trigger"] or "pr"
             result["repo_dir"] = result["repo_dir"] or cwd
+            result["_handoffs"].append(bypassed)
             continue
         if head != "git":
             continue
@@ -164,6 +184,7 @@ def _classify(command: str, cwd: str | None, result: dict, depth: int) -> None:
             continue  # deleting remote refs is not a candidate hand-off
         result["trigger"] = result["trigger"] or "push"
         result["repo_dir"] = result["repo_dir"] or repo_dir
+        result["_handoffs"].append(bypassed)
 
 
 def classify_command(command: str) -> dict:
@@ -173,11 +194,17 @@ def classify_command(command: str) -> dict:
     Quotes, heredoc bodies and command substitutions inside quotes are data,
     so a commit message or grep pattern that mentions `git push` never
     triggers. `cd`, `git -C`, wrappers (env, sudo, timeout …) and `sh -c`
-    strings are followed. Unbalanced quoting falls back to a regex anchored
+    strings are followed. The inline bypass counts only when it reaches the
+    hand-off itself (a prefix on that command, or an earlier `export`). Unbalanced quoting falls back to a regex anchored
     at a command start.
     """
-    result = {"trigger": None, "repo_dir": None, "bypass": False}
+    result = {"trigger": None, "repo_dir": None, "_handoffs": []}
     _classify(command or "", None, result, 0)
+    handoffs = result.pop("_handoffs")
+    result.pop("_exported", None)
+    # Bypassed only when every hand-off in the command carries the bypass;
+    # an assignment on some other command never reaches the push.
+    result["bypass"] = bool(handoffs) and all(handoffs)
     return result
 
 

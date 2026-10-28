@@ -58,8 +58,12 @@ Behaviour:
 - **Trust boundary**: the gate only runs recipes for a repository inside the
   opened workspace (`CLAUDE_PROJECT_DIR`, Cursor `workspace_roots`). Hook
   commands are anchored to the project, and a missing gate script exits 0.
-- **Bypass**: `AGENT_FINALISE_GATE=off` (environment or command prefix) is
-  allowed and appended to `.ai/bypass-log.jsonl`, which the pre-PR gate step 0 reads.
+- **Bypass**: `AGENT_FINALISE_GATE=off` is allowed and appended to
+  `.ai/bypass-log.jsonl`, which the pre-PR gate step 0 reads. It takes effect
+  from the session environment, as a prefix on the push or PR command itself,
+  or through an earlier `export` in the same command. A prefix on some other
+  command, as in `AGENT_FINALISE_GATE=off echo … && git push`, does not
+  bypass the push.
 - **Cost**: one row per run in `.ai/agent-checks/finalise-gate.jsonl`
   (provider, outcome, duration, cache hit).
 
