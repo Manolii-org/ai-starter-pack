@@ -1283,6 +1283,24 @@ def test_repo_manifest_schema_valid():
     jsonschema.validate(doc, schema)
 
 
+def test_shipped_caret_ref_resolves_to_the_current_pack_version():
+    """`ref: "^1.14"` in the shipped manifest must keep resolving the current
+    framework (caret semantics), and the committed native-guidance lock must
+    record that version, so a release bump cannot leave either behind."""
+    import re
+
+    import yaml
+    version = re.search(r'^version:\s*"([^"]+)"', (REPO / "pack.manifest.yml").read_text(), re.M).group(1)
+    framework = json.loads((REPO / "registry/platform/framework/.claude-plugin/plugin.json").read_text())
+    assert framework["version"] == version
+    ref = next(r["ref"] for r in yaml.safe_load((REPO / "ai-manifest.yaml").read_text())["requires"]
+               if r["plugin"] == "platform/framework")
+    # The resolver's own range check, not a re-derivation of caret semantics.
+    assert ref.startswith("^") and load_resolve_module().version_satisfies(version, ref), (ref, version)
+    lock = json.loads((REPO / ".ai/native-guidance-lock.json").read_text())
+    assert lock["ref"] == ref and lock["resolved_version"] == version
+
+
 def test_registry_lint_passes_on_repo():
     """The real registry in this repo passes its own gate."""
     r = subprocess.run([sys.executable, str(LINT)], capture_output=True, text=True)
