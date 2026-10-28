@@ -61,10 +61,11 @@ token than Sonnet 5.5. The #255 proof therefore most likely ran K3, and the
 **New decision.** With no model set, proxy-mode Autofix uses
 `tier-2-agentic-pro` (MiniMax M3, Fireworks, $0.30/$1.20). The direct-key
 default (`claude-sonnet-5-5`) and explicit overrides are unchanged.
-Proxies deployed from a template older than v1.24.1 have no
+Proxies deployed from a template older than v1.25.0 have no
 `tier-2-agentic-pro` alias, so Autofix checks the proxy's `/v1/models` list
-first and uses `tier-2-agentic` when the alias is missing. The upgrade does
-not fail Autofix on those proxies.
+first and uses `tier-2-agentic` when the alias is missing, so the upgrade
+does not fail Autofix on those proxies. The check ships in v1.25.1; v1.25.0
+requests the alias unconditionally.
 
 **Evidence.** Same two-file bug fixture on the Manolii CI proxy, one run per
 model unless noted (probe PRs #264–#266, closed unmerged):

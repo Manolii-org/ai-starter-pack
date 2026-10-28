@@ -60,7 +60,7 @@ exports it as `ANTHROPIC_API_KEY`. The key never goes to Anthropic, because
 - **Base URL has no `/v1`.** Claude Code appends `/v1/messages`, so pass
   `https://openrouter.ai/api`, not `https://openrouter.ai/api/v1`.
 - **Set `model`.** With `model` empty, proxy mode sends the pack's LiteLLM
-  alias default (`tier-2-agentic-pro` from v1.24.1, `tier-2-agentic`
+  alias default (`tier-2-agentic-pro` from v1.25.0, `tier-2-agentic`
   before). Other gateways reject a LiteLLM alias: OpenRouter returned 400
   `not a valid model ID` for `tier-2-agentic`. Use the gateway's own id. OpenRouter also maps
   bare Anthropic ids such as `claude-sonnet-5-5`, which keeps Claude Code's
