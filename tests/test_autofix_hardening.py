@@ -169,7 +169,7 @@ def test_documented_caller_never_cancels_an_agent_in_progress() -> None:
 @pytest.mark.parametrize("name", sorted(WORKFLOWS))
 def test_relay_bot_is_allowed_and_other_actors_skip_before_dispatch(name: str) -> None:
     step = _step(name, uses=ACTION)
-    assert step["with"]["allowed_bots"] == "github-actions"
+    assert step["with"]["allowed_bots"].startswith("github-actions${{ ")  # relay first; opt-in agent bots appended
     gate = _step(name, title="Determine skip conditions")
     assert gate["env"]["WR_ACTOR"] == "${{ github.event.workflow_run.actor.login || '' }}"
     run = gate["run"]
@@ -410,3 +410,46 @@ def test_surface_check_fails_closed_when_commits_cannot_be_listed(name: str, tmp
 def test_surface_check_reads_rename_sources() -> None:
     run = _step("reusable", title=SURFACE_CHECK)["run"]
     assert ".previous_filename // empty" in run
+
+
+TRUSTED_SOURCE = {"reusable": "inputs.trusted_agent_bots", "standalone": "vars.AUTOFIX_TRUSTED_AGENT_BOTS"}
+
+
+def _trusted_bot_fn(name: str) -> str:
+    run = _step(name, title="Determine skip conditions")["run"]
+    start = run.index("trusted_bot() {")
+    return run[start:run.index("\n}\n", start) + 3]
+
+
+@pytest.mark.parametrize("name", sorted(WORKFLOWS))
+def test_trusted_agent_bots_are_opt_in_and_ci_failure_only(name: str) -> None:
+    """Devin, Codex cloud and Cursor background agents push as bots; Autofix
+    skipped them unconditionally. The allowlist is opt-in, applies only to the
+    workflow_run (CI failure) path, and reaches the action's allowed_bots."""
+    src = TRUSTED_SOURCE[name]
+    gate = _step(name, title="Determine skip conditions")
+    assert gate["env"]["TRUSTED_BOTS"] == f"${{{{ {src} }}}}"
+    assert ('if [[ "$EVENT_NAME" == "workflow_run" && "$who" == *"[bot]" ]] && trusted_bot "$who"; then'
+            in gate["run"])
+    allowed = _step(name, uses=ACTION)["with"]["allowed_bots"]
+    assert allowed == f"github-actions${{{{ {src} != '' && format(',{{0}}', {src}) || '' }}}}"
+
+
+def test_trusted_bot_matcher_is_identical_in_both_workflows() -> None:
+    assert _trusted_bot_fn("standalone") == _trusted_bot_fn("reusable")
+
+
+@pytest.mark.parametrize(("bots", "who", "trusted"), [
+    ("", "devin-ai-integration[bot]", False),                                  # off by default
+    ("devin-ai-integration[bot]", "devin-ai-integration[bot]", True),
+    ("Devin-AI-Integration", "devin-ai-integration[bot]", True),               # action-style match
+    (" cursor[bot] , chatgpt-codex-connector[bot] ", "chatgpt-codex-connector[bot]", True),
+    ("cursor[bot]", "devin-ai-integration[bot]", False),
+    ("*", "devin-ai-integration[bot]", False),                                 # wildcard never honoured
+    ("devin", "devin-ai-integration[bot]", False),                             # no prefix matching
+    (",,", "github-actions[bot]", False),
+])
+def test_trusted_bot_matcher(bots: str, who: str, trusted: bool) -> None:
+    script = _trusted_bot_fn("reusable") + 'trusted_bot "$WHO"\n'
+    result = subprocess.run(["bash", "-c", script], env={**os.environ, "TRUSTED_BOTS": bots, "WHO": who})
+    assert (result.returncode == 0) is trusted

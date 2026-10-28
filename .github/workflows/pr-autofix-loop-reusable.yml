@@ -23,6 +23,7 @@ on:
       # Default hosted. Override only with an operator-approved isolated pool — never shared Fly CI.
       runs_on: { type: string, default: ubuntu-latest }
       max_successful_fixes: { type: string, default: '1', description: 'Max [autofix] commits per PR before skip (default 1)' }
+      trusted_agent_bots: { type: string, default: '', description: 'Comma-separated agent bot logins (e.g. devin-ai-integration[bot]) whose pushes may trigger Autofix on CI failure. Off by default; * is not honoured.' }
     secrets:
       ANTHROPIC_API_KEY: { required: false, description: 'Required when provider_mode=anthropic.' }
       LITELLM_MASTER_KEY: { required: false, description: 'Required when provider_mode=proxy.' }
@@ -209,6 +210,7 @@ jobs:
           PR_NUM: ${{ steps.ref.outputs.pr_number }}
           ACTOR: ${{ github.actor }}
           WR_ACTOR: ${{ github.event.workflow_run.actor.login || '' }}
+          TRUSTED_BOTS: ${{ inputs.trusted_agent_bots }}
           WR_NAME: ${{ github.event.workflow_run.name || '' }}
           WR_URL: ${{ github.event.workflow_run.html_url || '' }}
         run: |
@@ -248,12 +250,34 @@ jobs:
             fi
           fi
 
+          # Opt-in trusted agent bots (e.g. Devin, Codex cloud, Cursor
+          # background agents) whose pushes may trigger Autofix when CI fails.
+          # Only on the workflow_run path, only for [bot] actors, matched like
+          # the action's allowed_bots (case-insensitive, [bot] optional); '*'
+          # is never honoured. Fork heads were already refused above.
+          trusted_bot() {
+            local who="${1,,}" entry
+            who="${who%\[bot\]}"
+            IFS=',' read -ra entries <<< "${TRUSTED_BOTS:-}"
+            for entry in "${entries[@]}"; do
+              entry="${entry//[[:space:]]/}"
+              entry="${entry,,}"
+              entry="${entry%\[bot\]}"
+              [[ -n "$entry" && "$entry" != "*" && "$entry" == "$who" ]] && return 0
+            done
+            return 1
+          }
+
           # claude-code-action fails the job (rather than skipping) for bot
           # actors outside allowed_bots and for actors without write access.
-          # Only the relay bot is allowed; skip everything else before dispatch.
+          # Only the relay bot and opted-in agent bots are allowed; skip
+          # everything else before dispatch.
           for who in "$ACTOR" "${WR_ACTOR:-}"; do
             [[ -z "$who" ]] && continue
             if [[ "$who" == "github-actions[bot]" && "$EVENT_NAME" == "issue_comment" && "$COMMENT_BODY" == '**[@'* ]]; then
+              continue
+            fi
+            if [[ "$EVENT_NAME" == "workflow_run" && "$who" == *"[bot]" ]] && trusted_bot "$who"; then
               continue
             fi
             PERM=$(timeout -k 5 30 gh api "repos/${{ github.repository }}/collaborators/${who}/permission" --jq '.permission' 2>/dev/null || echo unknown)
@@ -434,8 +458,9 @@ jobs:
         with:
           anthropic_api_key: ${{ env.ANTHROPIC_API_KEY }}
           # The bot-review relay comments as github-actions[bot]; agent mode
-          # rejects non-human actors unless listed here.
-          allowed_bots: github-actions
+          # rejects non-human actors unless listed here. Opted-in agent bots
+          # are appended; preflight already refused every other bot.
+          allowed_bots: github-actions${{ inputs.trusted_agent_bots != '' && format(',{0}', inputs.trusted_agent_bots) || '' }}
           github_token: ${{ secrets.GH_PAT || github.token }}
           claude_args: |
             --allowedTools "Bash,Edit,Write,Read,Glob,Grep"

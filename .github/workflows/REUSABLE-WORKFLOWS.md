@@ -137,7 +137,7 @@ table.
 | **migration-run-gate-reusable** | `db_image` (req), `db_ports_json` (req), `db_env_json` (req), `db_options=''`, `migrations_env_json` (req), `workdir=.`, `adapter=alembic`, `python_version=3.12`, `runs_on=ubuntu-latest`, `install_command` (req), `setup_command=''`, `run_prefix=''`, `downgrade_steps=1`, `alembic_check=false: boolean`, `url_env_var=ALEMBIC_DATABASE_URL` | none | none |
 | **outcome-check-reusable** | `outcome` (req), `operation` (req), `summary` (req), `head_sha=''` | none | none |
 | **pr-assessment-reusable** | `provider_mode=anthropic`, `litellm_proxy_url=''`, `model=''`, `runs_on=ubuntu-latest`, `pack_ref=v1`, `trusted_sync_author_id=215220684: number`, `jev_judge_shadow=off`, `jev_entity=''` | `ANTHROPIC_API_KEY`, `LITELLM_MASTER_KEY`, `JEV_TYPESAFE_API_KEY` | none |
-| **pr-autofix-loop-reusable** | `provider_mode=anthropic`, `litellm_proxy_url=''`, `model=''`, `runs_on=ubuntu-latest`, `max_successful_fixes=1` | `ANTHROPIC_API_KEY`, `LITELLM_MASTER_KEY`, `GH_PAT` | `activation` |
+| **pr-autofix-loop-reusable** | `provider_mode=anthropic`, `litellm_proxy_url=''`, `model=''`, `runs_on=ubuntu-latest`, `max_successful_fixes=1`, `trusted_agent_bots=''` | `ANTHROPIC_API_KEY`, `LITELLM_MASTER_KEY`, `GH_PAT` | `activation` |
 | **pre-production-tier-reusable** | `gates` (req), `budget_minutes=45: number`, `job_timeout_minutes=60: number`, `runs_on=ubuntu-latest`, `max_parallel=4: number`, `environment=''`, `checkout_fetch_depth=0: number`, `open_issue_on_failure=false: boolean` | `GATE_SECRETS` | `verdict`, `breakdown` |
 | **restore-drill-reusable** | `resource_group` (req), `sql_server` (req), `source_database` (req), `sanity_queries=SELECT COUNT(*) AS table_count FROM INFORMATION_SCHEMA.TABLES`, `db_auth=sql-auth`, `sqlcmd_version=1.9.0`, `sqlcmd_sha256=b896bac71cf6ad8feca125bb42be61999116d8566a078ed475893372ccf8c0f2`, `timeout_minutes=45: number`, `runs_on=ubuntu-latest` | `DRILL_SQL_USER`, `DRILL_SQL_PASSWORD`, `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` | none |
 | **secret-scan-reusable** | `runs_on=ubuntu-latest`, `node_version=22`, `python_version=3.12`, `require_gitleaks_license=false: boolean`, `npm_audit_omit_dev=false: boolean`, `gitleaks_version=8.30.0` | `GITLEAKS_LICENSE` | none |
@@ -634,6 +634,19 @@ The standalone `pr-autofix-loop.yml` passes `--model` from the optional
 repository variable `AUTOFIX_MODEL`. Set it whenever `LITELLM_PROXY_URL`
 (or `ANTHROPIC_BASE_URL`) points at a proxy: a proxy serves only the model
 ids it routes, and without one the agent requests the CLI default model.
+
+**PRs pushed by coding agents (opt-in).** Devin, Codex cloud tasks and Cursor
+Cloud Agents push as GitHub App bots, and Autofix skips bot actors by
+default, so their CI failures are not fixed. List those bots in the
+reusable's `trusted_agent_bots` input (standalone: repository variable
+`AUTOFIX_TRUSTED_AGENT_BOTS`), comma-separated. Copy each login from the
+"triggered by" actor of a failed CI run on such a PR, for example
+`devin-ai-integration[bot]`. A listed bot is allowed only on the CI-failure
+(`workflow_run`) path and only for same-repository heads; its comments and
+reviews still reach Autofix only through the review relay. Matching follows
+the action's `allowed_bots` (case-insensitive, `[bot]` optional), and `*` is
+never honoured. The per-PR fix budget still applies, so Autofix pushes at
+most `max_successful_fixes` commits on top of the agent's own.
 
 **Instruction-surface hardening.** Before the agent runs, the checkout is
 pinned to the PR head SHA and `.claude/`, `.mcp.json`, `.claude.json`,

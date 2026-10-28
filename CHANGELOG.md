@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Added
+
+- **Autofix for PRs pushed by coding agents (opt-in).** New
+  `pr-autofix-loop-reusable` input `trusted_agent_bots` and standalone
+  repository variable `AUTOFIX_TRUSTED_AGENT_BOTS` list agent bot logins
+  (Devin, Codex cloud tasks, Cursor Cloud Agents) whose pushes may trigger
+  Autofix when CI fails. Off by default; CI-failure path and same-repository
+  heads only; `*` is never honoured. The list is also passed to the action's
+  `allowed_bots`.
+
 ## 1.23.0 — 2026-10-27
 
 Upgrade order for consumers:
