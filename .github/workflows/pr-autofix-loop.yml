@@ -97,6 +97,8 @@ jobs:
           WR_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch || '' }}
           WR_HEAD_SHA: ${{ github.event.workflow_run.head_sha || '' }}
           WR_FORK: ${{ github.event.workflow_run.head_repository.fork || false }}
+          WR_HEAD_REPO_ID: ${{ github.event.workflow_run.head_repository.id || '' }}
+          REPO_ID: ${{ github.event.repository.id }}
           REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
@@ -104,6 +106,13 @@ jobs:
             if [[ "$WR_FORK" == "true" ]]; then
               echo "skip=true" >> "$GITHUB_OUTPUT"
               echo "Fork PR workflow_run — no secrets; skipping"
+              exit 0
+            fi
+            # Bind the triggering run itself to this repository: .fork is
+            # false for a PR from the upstream of a forked deployment.
+            if [[ -z "$WR_HEAD_REPO_ID" || "$WR_HEAD_REPO_ID" != "$REPO_ID" ]]; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "workflow_run head repository is not this repository; skipping"
               exit 0
             fi
             PR_NUM="${WR_PR_NUM}"

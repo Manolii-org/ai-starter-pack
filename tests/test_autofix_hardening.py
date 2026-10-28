@@ -505,3 +505,23 @@ def test_reusable_checks_head_repo_identity_on_every_trigger() -> None:
     assert '"$EVENT_NAME" != "workflow_run"' not in run[:check]
     assert ".head.repo.id == .base.repo.id" in run[check:]
     assert run.index('if [[ "$SAME" != "true" ]]') < run.index('echo "skip=false"')
+
+
+@pytest.mark.parametrize("name", sorted(WORKFLOWS))
+@pytest.mark.parametrize(("head_id", "skipped"), [("42", False), ("7", True), ("", True)])
+def test_workflow_run_head_repository_must_be_this_repository(name: str, head_id: str, skipped: bool,
+                                                              tmp_path) -> None:
+    """The triggering run is bound to this repository by ID before any trusted-bot
+    gate; .fork alone misses a PR from the upstream of a forked deployment."""
+    step = _step(name, title="Resolve PR number and head ref")
+    assert step["env"]["WR_HEAD_REPO_ID"] == "${{ github.event.workflow_run.head_repository.id || '' }}"
+    assert step["env"]["REPO_ID"] == "${{ github.event.repository.id }}"
+    run = step["run"]
+    cut = run.rindex("\n", 0, run.index('PR_NUM="${WR_PR_NUM}"')) + 1
+    script = run[:cut] + "  echo reached\nfi\n"
+    out = tmp_path / "out"
+    env = {**os.environ, "EVENT_NAME": "workflow_run", "WR_FORK": "false", "WR_HEAD_REPO_ID": head_id,
+           "REPO_ID": "42", "GITHUB_OUTPUT": str(out)}
+    result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, check=True)
+    assert ("reached" not in result.stdout) is skipped
+    assert ("skip=true" in (out.read_text() if out.exists() else "")) is skipped
