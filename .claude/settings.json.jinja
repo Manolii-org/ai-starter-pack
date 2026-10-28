@@ -83,6 +83,16 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "matcher": "Bash|mcp__.*__create_pull_request",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "_G=\"${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || echo \"$PWD\")}/scripts/qa/finalise-gate.sh\"; [ -f \"$_G\" ] || exit 0; sh \"$_G\" claude",
+            "timeout": 1200
+          }
+        ]
       }
     ],
     "SessionStart": [

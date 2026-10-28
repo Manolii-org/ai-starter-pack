@@ -66,6 +66,16 @@ Execute all tests for changed files. If tests fail, fix before submitting. If no
 - Verify test files import the correct module (not a stale path)
 - Verify test assertions match test names
 - Verify stubs exercise the real code path, not just mock files
+- **Fixes for a reported or escaped defect** include a test that fails on the
+  base commit and passes with the fix, in the lane that should have caught it
+  (unit, e2e spec, or a `ui-smoke` route) — `docs/qa-framework.md`
+- **User-facing changes** were seen running: the finalise gate's `ui-smoke`
+  recipe (or `node scripts/qa/ui-smoke.mjs --routes <changed routes>`) passed,
+  or the PR states why it could not run
+
+The finalise gate (`scripts/qa/finalise-gate.py`) runs the affected recipes
+automatically at `git push` / PR creation; this step covers what recipes do
+not: new tests and journeys nobody has a recipe for yet.
 
 ## 4. Adversarial Security Tests (for security-claiming PRs)
 

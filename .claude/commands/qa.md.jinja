@@ -35,7 +35,15 @@ Map changed files to user-facing flows:
 
 ### 2. Launch Browser & Test
 
-Use Playwright to test each identified flow:
+Start with the deterministic smoke — it is cheap and catches the common
+breakages (HTTP errors, runtime/console errors, broken assets, mobile
+overflow, serious axe violations) on every affected route at 375px and 1280px:
+
+```bash
+node scripts/qa/ui-smoke.mjs --routes /,/changed-route   # docs/qa-framework.md
+```
+
+Then use Playwright to test each identified flow:
 
 ```typescript
 // Example test structure
@@ -125,7 +133,9 @@ Commits:
 
 - After implementing a feature (before PR)
 - After fixing a bug (verify the fix + check for side effects)
-- Before shipping to production (full QA pass)
+- Before shipping to production (full QA pass) — for a launch, also run
+  `ui-smoke --profile launch` and the five-persona Launch QA in the
+  `exploratory-bug-bash` skill
 - When investigating a reported issue (reproduce → fix → test)
 
 ## Tips

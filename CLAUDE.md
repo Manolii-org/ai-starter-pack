@@ -168,6 +168,8 @@ src/
 
 Before every PR: follow `docs/pre-pr-quality-gate.md`. Six checks: diff self-review, doc↔code verification, tests for changed files, adversarial security tests, rewrite diffing, and config source-of-truth validation. Skipping this gate is the largest source of avoidable review cycles.
 
+QA lanes (finalise gate at push/PR, `ui-smoke` on affected routes, preview/production smoke, launch personas): `docs/qa-framework.md`. Keep `config/agent-checks.json` recipes aligned with CI — the finalise gate runs them automatically.
+
 ## Skills
 
 **Always invoke:**

@@ -1,0 +1,8 @@
+# slug|target|agent|charter
+# Launch QA: five first-time users, one journey (landing page -> first success).
+# Replace /signup and "first success" with your app's real journey and invariant.
+launch-impatient|web|impatient|Starting at /, get from the landing page to your first successful result (sign up, then complete the main task once); the invariant is that the success state is reached without any error or retry
+launch-trust|web|trust-checker|Starting at /, before signing up find pricing, terms and privacy; then sign up; the invariant is that the price, plan limits and data use you read match what the sign-up flow shows
+launch-mobile|web-mobile|default|Starting at / on a phone, sign up and complete the main task once; the invariant is that every control is visible, reachable and tappable without zooming or horizontal scrolling
+launch-literal|web|literal|Starting at /, sign up and complete the main task once using only the words on screen; the invariant is that every step can be completed without guessing what a label or error means
+launch-breaker|web|breaker|Starting at /signup, attempt sign-up and the main task with junk input, double submits and back-navigation mid-flow; the invariant is that no duplicate account or record is created and no raw error reaches the user

@@ -10,6 +10,19 @@ if [[ "$CURRENT_BRANCH" == "main" || "$CURRENT_BRANCH" == "master" ]]; then
   exit 1
 fi
 
+# --- Phase 0: finalise gate (affected agent checks; docs/qa-framework.md) ---
+# Reads the ref list on stdin; a no-op until config/agent-checks.json exists.
+ROOT="$(git rev-parse --show-toplevel)"
+if [[ -f "$ROOT/scripts/qa/finalise-gate.sh" ]]; then
+  sh "$ROOT/scripts/qa/finalise-gate.sh" git-pre-push "$@" || exit 1
+  # Owners whose recipes already cover typecheck/lint/tests opt out of the
+  # full-repo legacy phases below with finalise_gate.replace_legacy_pre_push.
+  if python3 "$ROOT/scripts/qa/finalise-gate.py" --query replace-legacy-pre-push; then
+    echo "[pre-push] finalise gate covers typecheck/lint/tests (replace_legacy_pre_push)"
+    exit 0
+  fi
+fi
+
 # --- Phase 1: Parallel typecheck + lint ---
 echo "[pre-push] Phase 1: typecheck + lint (parallel)"
 
