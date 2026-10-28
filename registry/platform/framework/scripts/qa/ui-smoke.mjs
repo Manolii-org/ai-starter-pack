@@ -58,7 +58,7 @@ const DEFAULTS = {
   on_unavailable: 'fail',
   screenshots: true,
   aria_snapshots: true,
-  launch: { network: 'slow-3g', cpu_throttle: 4, max_dom_content_loaded_ms: 10000 },
+  launch: { network: 'slow-3g', cpu_throttle: 4, max_dom_content_loaded_ms: 10000, max_lcp_ms: 12000 },
 };
 // Chromium DevTools presets (kbps → bytes/s; latency ms).
 const NETWORKS = {
@@ -243,7 +243,18 @@ async function ensureServer(root, config, baseUrl) {
     throw new Unavailable(`no server at ${baseUrl} and ui_smoke.start_command is not set`);
   }
   const [cmd, ...cmdArgs] = config.start_command;
-  const child = spawn(cmd, cmdArgs, { cwd: root, detached: true, stdio: 'ignore', env: { ...process.env, BROWSER: 'none' } });
+  // Server output goes to a log beside the other artifacts, so a server that
+  // will not start explains itself without flooding the agent's context.
+  const logPath = path.join(root, ARTIFACT_DIR, 'server.log');
+  const logFd = fs.openSync(logPath, 'w');
+  const child = spawn(cmd, cmdArgs, { cwd: root, detached: true, stdio: ['ignore', logFd, logFd], env: { ...process.env, BROWSER: 'none' } });
+  fs.closeSync(logFd);
+  const logTail = () => {
+    try {
+      const lines = fs.readFileSync(logPath, 'utf8').split('\n').map((l) => l.trim()).filter(Boolean);
+      return lines.length ? ` — last output: ${trim(lines.slice(-3).join(' | '))}` : '';
+    } catch { return ''; }
+  };
   let exited = false;
   child.on('exit', () => { exited = true; });
   child.on('error', () => { exited = true; });
@@ -265,12 +276,12 @@ async function ensureServer(root, config, baseUrl) {
   }
   const deadline = Date.now() + config.ready_timeout_seconds * 1000;
   while (Date.now() < deadline) {
-    if (exited) throw new Unavailable(`start_command exited before ${baseUrl} was reachable`);
+    if (exited) throw new Unavailable(`start_command exited before ${baseUrl} was reachable${logTail()}`);
     if (await reachable(baseUrl)) return { stop };
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
   await stop();
-  throw new Unavailable(`${baseUrl} not reachable within ${config.ready_timeout_seconds}s of start_command`);
+  throw new Unavailable(`${baseUrl} not reachable within ${config.ready_timeout_seconds}s of start_command${logTail()}`);
 }
 
 // ── page checks ─────────────────────────────────────────────────────────────
@@ -331,12 +342,25 @@ async function checkPage(context, { route, viewport, baseUrl, config, axeSource,
     await page.waitForLoadState('load', { timeout: config.navigation_timeout_ms }).catch(() => {});
     await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {});
     if (launch) {
-      timing.dom_content_loaded_ms = await page.evaluate(() => {
+      // DOMContentLoaded plus Largest Contentful Paint (the Core Web Vital
+      // Lighthouse budgets use), read from the page's own buffered entries.
+      Object.assign(timing, await page.evaluate(() => new Promise((resolve) => {
         const nav = performance.getEntriesByType('navigation')[0];
-        return nav ? Math.round(nav.domContentLoadedEventEnd) : null;
-      });
+        const dcl = nav ? Math.round(nav.domContentLoadedEventEnd) : null;
+        let lcp = null;
+        try {
+          new PerformanceObserver((list) => {
+            const entries = list.getEntries();
+            if (entries.length) lcp = Math.round(entries[entries.length - 1].startTime);
+          }).observe({ type: 'largest-contentful-paint', buffered: true });
+        } catch { /* LCP unsupported: report DCL only */ }
+        setTimeout(() => resolve({ dom_content_loaded_ms: dcl, lcp_ms: lcp }), 250);
+      })));
       if (timing.dom_content_loaded_ms > config.launch.max_dom_content_loaded_ms) {
         issues.push(`slow on ${config.launch.network}: DOMContentLoaded ${timing.dom_content_loaded_ms}ms > ${config.launch.max_dom_content_loaded_ms}ms`);
+      }
+      if (timing.lcp_ms > config.launch.max_lcp_ms) {
+        issues.push(`slow on ${config.launch.network}: LCP ${timing.lcp_ms}ms > ${config.launch.max_lcp_ms}ms`);
       }
     }
     if (config.overflow_check && viewport.width <= 480 && status > 0 && status < 400) {
@@ -492,7 +516,8 @@ async function main() {
       report.results.push(result);
       const label = `${item.route} ${item.viewport.name}${item.launch ? ` launch(${config.launch.network})` : ''}`;
       if (result.issues.length === 0) {
-        console.log(`PASS ${label}${result.dom_content_loaded_ms ? ` dcl=${result.dom_content_loaded_ms}ms` : ''}`);
+        const perf = [result.dom_content_loaded_ms && `dcl=${result.dom_content_loaded_ms}ms`, result.lcp_ms && `lcp=${result.lcp_ms}ms`].filter(Boolean).join(' ');
+        console.log(`PASS ${label}${perf ? ` ${perf}` : ''}`);
       } else {
         const shown = result.issues.slice(0, MAX_ISSUES_PER_PAGE);
         const more = result.issues.length - shown.length;
