@@ -25,6 +25,32 @@
   `git -C /tmp/x push` could therefore run `/tmp/x`'s recipes. The workspace
   now falls back to the repository holding the hook's working directory.
 
+### Activation contract: secret-scan dependency audits
+
+- **`secret-scan-reusable` reports audits that ran nothing.** Before this,
+  a repository without a root `package-lock.json` got a green
+  `Dependency Vulnerability Audit` that audited nothing. A repository without
+  `requirements*.txt` / `pyproject.toml` got the same from
+  `Python Dependency Audit`.
+  - New outputs `npm_audit_activation` and `pip_audit_activation`
+    (`active` | `inert`).
+  - When neither audit can run, the run warns `secret-scan INERT`.
+  - New opt-in input `fail_on_inert` (default `false`) fails the
+    `Dependency Vulnerability Audit` job in that case.
+  - Gitleaks is unchanged, and so are the job names, and with them the
+    required-check names.
+- `docs/workflow-outcome-convention.md` lists the reusables reviewed and
+  deliberately left without an activation output, with the reason for each.
+
+Upgrade order for this change:
+
+1. Nothing is required: defaults are unchanged and no caller turns red.
+2. To make the audit a real gate, read `needs.<job>.outputs.npm_audit_activation`
+   / `pip_audit_activation`, or pass `fail_on_inert: true` once the repository
+   commits a root `package-lock.json` or a Python manifest. pnpm/yarn-only
+   repositories without Python stay `inert`; keep their package manager's
+   own audit.
+
 ## 1.24.0 — 2026-10-28
 
 Upgrade order for consumers:
