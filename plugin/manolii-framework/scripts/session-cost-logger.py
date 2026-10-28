@@ -163,6 +163,12 @@ _SUBAGENT_PRICING: dict[str, dict] = {
     "claude-sonnet-4-6":       {"input": 3.00 / 1_000_000, "output": 15.00 / 1_000_000},
     "claude-opus-4-7":         {"input": 5.00 / 1_000_000, "output": 25.00 / 1_000_000},
     "claude-opus-4-6":         {"input": 5.00 / 1_000_000, "output": 25.00 / 1_000_000},
+    "claude-fable-5-1":        {"input": 10.00 / 1_000_000, "output": 50.00 / 1_000_000},
+    "claude-opus-5-5":         {"input": 4.00 / 1_000_000, "output": 20.00 / 1_000_000},
+    "claude-opus-5":           {"input": 5.00 / 1_000_000, "output": 25.00 / 1_000_000},
+    "claude-sonnet-5-5":       {"input": 2.00 / 1_000_000, "output": 10.00 / 1_000_000},
+    "claude-sonnet-5":         {"input": 2.00 / 1_000_000, "output": 10.00 / 1_000_000},
+    "claude-haiku-5-5":        {"input": 0.10 / 1_000_000, "output": 0.50 / 1_000_000},
     # Haiku aliases — Anthropic-direct rates unless LiteLLM proxy is active
     "haiku": {"input": 0.30 / 1_000_000, "output": 1.20 / 1_000_000},
     "claude-haiku-4-5-20251001": {"input": 0.30 / 1_000_000, "output": 1.20 / 1_000_000},
@@ -179,7 +185,11 @@ if _PROXY_ACTIVE:
             "input": 0.112 / 1_000_000,
             "output": 0.224 / 1_000_000,
         }
-_ANTHROPIC_DIRECT_MODELS = {"claude-sonnet-4-6", "claude-opus-4-7", "claude-opus-4-6"}
+_ANTHROPIC_DIRECT_MODELS = {
+    "claude-sonnet-4-6", "claude-opus-4-7", "claude-opus-4-6",
+    "claude-fable-5-1", "claude-opus-5-5", "claude-opus-5",
+    "claude-sonnet-5-5", "claude-sonnet-5", "claude-haiku-5-5",
+}
 
 
 def parse_subagents(subagent_dir: Path) -> dict:

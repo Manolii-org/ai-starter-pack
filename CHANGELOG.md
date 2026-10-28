@@ -8,8 +8,10 @@
   list prices (catalog only, no re-routing); `platforms` refreshed for
   Claude Code (including web: proxy routing is unavailable there), Cursor
   Cloud Agents, Codex web and a new Devin entry, each with dated sources.
-- Proxy template: Anthropic passthrough routes for `claude-opus-5-5`,
-  `claude-sonnet-5-5` and `claude-haiku-5-5`.
+- Proxy template: Anthropic passthrough routes for every full Claude ID the
+  guard accepts (`claude-fable-5-1`, `claude-opus-5-5`, `claude-opus-5`,
+  `claude-sonnet-5-5`, `claude-sonnet-5`, `claude-haiku-5-5`, and the
+  previously unrouted `claude-opus-4-7`).
 
 ### Fixed
 
@@ -17,6 +19,9 @@
   current Claude model (`claude-sonnet-5-5`, `fable`, …) as unregistered.
 - Cost estimates used wrong Anthropic prices (Opus 4.6/4.7 at $15/$75, Haiku
   4.5 at $0.30/$1.20); corrected, and Claude 5 prices added.
+- The session cost logger booked Claude 5 sub-agents at the Haiku proxy rate
+  as proxy spend; they are now priced and counted as Anthropic-direct. A
+  parity test keeps the guard, proxy routes and cost logger in step.
 
 ## 1.23.0 — 2026-10-27
 
