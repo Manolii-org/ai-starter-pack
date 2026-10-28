@@ -25,6 +25,17 @@
   `git -C /tmp/x push` could therefore run `/tmp/x`'s recipes. The workspace
   now falls back to the repository holding the hook's working directory.
 
+### Docs
+
+- **Autofix through an Anthropic-compatible gateway**
+  (`docs/autofix-cost-alarms.md` § Gateway authentication). Proxy mode sends
+  the key as `x-api-key`. OpenRouter accepts this (verified 2026-10-28), so
+  no new input is needed. The base URL takes no `/v1`, and `model` must be
+  set because the `tier-2-agentic` default is a LiteLLM alias. Gateways that
+  read only `Authorization: Bearer` are not supported yet. `GH_PAT` /
+  `MN_GH_AUTOMATION_TOKEN` are documented as tenant-owned naming conventions.
+  No behaviour change; nothing to upgrade.
+
 ## 1.24.0 — 2026-10-28
 
 Upgrade order for consumers:
