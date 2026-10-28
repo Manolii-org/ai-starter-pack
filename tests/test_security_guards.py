@@ -299,6 +299,28 @@ allowed_paths: .env.example
         if response:
             self.assertNotEqual(response.get("decision"), "block")
 
+    def test_current_claude_models_are_registered_for_protected_agents(self):
+        """Claude 5 IDs and the fable alias were missing from ANTHROPIC_MODELS, so
+        a protected agent asking for a current Claude model was blocked as
+        unregistered (OSS-GUARD) while the 4.x IDs passed."""
+        for model in ("claude-sonnet-5-5", "claude-haiku-5-5", "claude-opus-5-5",
+                      "claude-fable-5-1", "fable"):
+            with self.subTest(model=model):
+                response = self.run_hook({
+                    "tool_name": "Agent",
+                    "tool_input": {
+                        "subagent_type": "secrets-handler",
+                        "model": model,
+                        "prompt": """Summarize credential metadata.
+
+SCOPE_BUDGET:
+allowed_paths: .env.example
+""",
+                    },
+                })
+                if response:
+                    self.assertNotEqual(response.get("decision"), "block", response.get("reason"))
+
     def test_restricted_secrets_handler_omitted_model_recommends_sonnet(self):
         """Missing model for secrets-handler should not fall back to haiku."""
         tool_input = {

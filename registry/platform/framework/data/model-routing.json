@@ -1,6 +1,6 @@
 {
-  "version": "5.9.0",
-  "last_synced": "2026-04-28T00:00:00Z",
+  "version": "5.10.0",
+  "last_synced": "2026-10-28",
   "instance_config": {
     "name": "your-org",
     "doppler_project": "your-doppler-project",
@@ -14,7 +14,71 @@
       "api_base": null,
       "data_region": "US",
       "soc2": true,
-      "trains_on_api_data": false
+      "trains_on_api_data": false,
+      "models": {
+        "$comment": "Catalog only: listing a model here does not route any agent or tier to it. Prices are USD per million tokens. Source: Anthropic first-party list prices, cached 2026-10-06 (claude-api model reference).",
+        "claude-fable-5-1": {
+          "label": "Claude Fable 5.1 (most capable)",
+          "context_window": 1000000,
+          "cost_per_m_input": 10.0,
+          "cost_per_m_output": 50.0,
+          "claude_code_alias": "fable"
+        },
+        "claude-opus-5-5": {
+          "label": "Claude Opus 5.5",
+          "context_window": 1000000,
+          "cost_per_m_input": 4.0,
+          "cost_per_m_output": 20.0,
+          "claude_code_alias": "opus",
+          "notes": "Effort defaults to medium; thinking cannot be disabled."
+        },
+        "claude-opus-5": {
+          "label": "Claude Opus 5 (previous Opus; Claude Code CLI default as claude-opus-5[1m] in Autofix runs up to v1.23.0)",
+          "context_window": 1000000,
+          "cost_per_m_input": 5.0,
+          "cost_per_m_output": 25.0
+        },
+        "claude-sonnet-5-5": {
+          "label": "Claude Sonnet 5.5",
+          "context_window": 1000000,
+          "cost_per_m_input": 2.0,
+          "cost_per_m_output": 10.0,
+          "claude_code_alias": "sonnet",
+          "notes": "Autofix direct-key default (ADR-0002)."
+        },
+        "claude-sonnet-5": {
+          "label": "Claude Sonnet 5",
+          "context_window": 1000000,
+          "cost_per_m_input": 2.0,
+          "cost_per_m_output": 10.0
+        },
+        "claude-haiku-5-5": {
+          "label": "Claude Haiku 5.5",
+          "context_window": 1000000,
+          "cost_per_m_input": 0.1,
+          "cost_per_m_output": 0.5,
+          "claude_code_alias": "haiku",
+          "notes": "Prices for prompts up to 100K tokens ($0.50/$2.50 beyond). Cheaper than every OSS tier except tier-4-extract/tier-5-latency."
+        },
+        "claude-opus-4-6": {
+          "label": "Claude Opus 4.6 (tier-0-opus)",
+          "context_window": 1000000,
+          "cost_per_m_input": 5.0,
+          "cost_per_m_output": 25.0
+        },
+        "claude-sonnet-4-6": {
+          "label": "Claude Sonnet 4.6 (tier-0-sonnet)",
+          "context_window": 1000000,
+          "cost_per_m_input": 3.0,
+          "cost_per_m_output": 15.0
+        },
+        "claude-haiku-4-5": {
+          "label": "Claude Haiku 4.5 (dated ID claude-haiku-4-5-20251001)",
+          "context_window": 200000,
+          "cost_per_m_input": 1.0,
+          "cost_per_m_output": 5.0
+        }
+      }
     },
     "fireworks": {
       "label": "Fireworks AI (US-hosted open models)",
@@ -1007,11 +1071,12 @@
   "platforms": {
     "claude_code": {
       "subscription": "Claude Max",
-      "docs_url": "https://docs.anthropic.com/en/docs/claude-code/overview",
+      "docs_url": "https://code.claude.com/docs/en/model-config",
       "available_models": [
         "opus",
         "sonnet",
-        "haiku"
+        "haiku",
+        "fable"
       ],
       "tier_map": {
         "light": "haiku",
@@ -1019,16 +1084,30 @@
         "heavy": "sonnet"
       },
       "pricing": {
-        "haiku": 2.4e-06,
-        "sonnet": 9e-06,
-        "opus": 1.5e-05
+        "$comment": "USD per million tokens (input/output) for the alias targets above; replaces the undated blended per-token figures.",
+        "haiku": {
+          "in": 0.1,
+          "out": 0.5
+        },
+        "sonnet": {
+          "in": 2.0,
+          "out": 10.0
+        },
+        "opus": {
+          "in": 4.0,
+          "out": 20.0
+        },
+        "fable": {
+          "in": 10.0,
+          "out": 50.0
+        }
       },
-      "notes": "Agent tool model param accepts: 'haiku', 'sonnet', 'opus'. All included in subscription.",
+      "notes": "Agent tool / sub-agent frontmatter `model:` accepts the aliases above, a full model ID (e.g. claude-sonnet-5-5) or `inherit`. Included in the subscription.",
       "env_vars": {
         "CLAUDE_CODE_SUBAGENT_MODEL": {
           "value": "haiku",
           "set_in": ".claude/settings.json env block",
-          "effect": "Defaults all built-in sub-agents (Explore, general-purpose) to haiku. Custom agents with explicit model: frontmatter are unaffected. Without this, built-in sub-agents inherit the parent session model (Opus).",
+          "effect": "Default model for sub-agents without their own model. Since Claude Code v2.1.251 the precedence is: per-invocation model, then agent frontmatter, then this variable, then the main model (before that the variable overrode frontmatter). Set CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1 (v2.1.257+) to force it on every sub-agent. Source: code.claude.com/docs/en/sub-agents, verified 2026-10-28.",
           "added": "2026-04-16"
         },
         "ANTHROPIC_BASE_URL": {
@@ -1047,20 +1126,74 @@
         "executor": "claude-sonnet-4-6",
         "advisor": "claude-opus-4-7",
         "advisor_beta": "anthropic-beta: advisor-tool-2026-03-01"
+      },
+      "alias_resolution": {
+        "opus": "claude-opus-5-5",
+        "sonnet": "claude-sonnet-5-5",
+        "haiku": "claude-haiku-5-5",
+        "fable": "claude-fable-5-1",
+        "note": "On the Anthropic API; other aliases: best, default, sonnet[1m], opus[1m], opusplan. Verified 2026-10-28 against code.claude.com/docs/en/model-config. Through a proxy, `haiku` and `sonnet` are pack OSS aliases instead (proxy_intercepted_models)."
+      },
+      "cloud_sessions": {
+        "surface": "Claude Code on the web (claude.ai/code)",
+        "proxy_routing": "unavailable",
+        "detail": "Cloud sessions are not part of an LLM-gateway deployment: ANTHROPIC_BASE_URL and other gateway variables set in a cloud environment are not applied, so pack OSS tiers (haiku/sonnet/tier-* aliases) cannot be reached from a cloud session. Model levers there are /model and /effort, sub-agent `model:` frontmatter and CLAUDE_CODE_SUBAGENT_MODEL, all on Anthropic models. The user's ~/.claude/settings.json is not read; the repo's .claude/settings.json is read for single-repo sessions.",
+        "sources": [
+          "https://code.claude.com/docs/en/llm-gateway-connect",
+          "https://code.claude.com/docs/en/claude-code-on-the-web",
+          "https://code.claude.com/docs/en/settings"
+        ],
+        "verified": "2026-10-28"
       }
     },
     "cursor": {
-      "pricing": "pay-per-use",
-      "docs_url": "https://docs.cursor.com/settings/models",
-      "orchestrator": "user-selected (via Cursor model picker)",
-      "sub_agent_delegation": "fireworks (via OpenAI-compatible endpoint — see fallback.tier_map)",
-      "notes": "Cursor supports custom OpenAI-compatible endpoints in Settings → Models. Add Fireworks as a provider so sub-agent work uses our open-source tier map instead of burning Cursor credits."
+      "pricing": "usage pool at the selected model's rate (Cloud Agents need Premium, Teams, Enterprise or a legacy paid plan)",
+      "docs_url": "https://cursor.com/docs/cloud-agent",
+      "orchestrator": "user-selected per run (Cursor model picker); sub-agent models selectable, falling back to the parent model when blocked (release notes 2026-10-19)",
+      "models": "Cursor models (Composer 2.5, Grok 4.x) plus third-party models (Claude, GPT, Gemini) at API list price on Premium and above",
+      "sub_agent_delegation": "desktop chat only: custom API keys / OpenAI-compatible endpoints are documented for chat models; their use by Cloud Agents is UNVERIFIED, so pack OSS tiers are not reachable from Cursor Cloud Agents",
+      "commit_identity": "Cursor Agent <cursoragent@cursor.com>, with a Co-authored-by trailer for the initiating user; the pushing GitHub bot login is not documented — copy it from a run before adding it to Autofix trusted_agent_bots",
+      "notes": "Background Agents were renamed Cloud Agents. Lean lever: pick a cheaper model per run or per sub-agent in Cursor.",
+      "sources": [
+        "https://cursor.com/docs/cloud-agent",
+        "https://cursor.com/docs/models-and-pricing",
+        "https://cursor.com/docs/release-notes/cloud-agents",
+        "https://cursor.com/help/models-and-usage/api-keys",
+        "https://cursor.com/docs/cloud-agent/security-network"
+      ],
+      "verified": "2026-10-28"
     },
     "codex_web": {
       "status": "excluded",
-      "reason": "Codex web is a sealed system — model selection is automatic, no user controls for cloud tasks. Models dynamically adjust reasoning effort per task complexity. Including it in routing would be pointless since there are no levers to pull.",
-      "docs_url": "https://openai.com/index/introducing-codex/",
-      "notes": "Re-evaluate if Codex web exposes model selection controls, or if there are reports of poor token efficiency / model allocation."
+      "reason": "No documented control routes Codex cloud tasks to other models: the composer shows a model and effort label, but user selection for cloud tasks is not documented, and config.toml `model` applies to the desktop app, CLI and IDE extension only. There is no routing lever for this registry to drive.",
+      "docs_url": "https://learn.chatgpt.com/docs/cloud",
+      "notes": "Docs moved from developers.openai.com/codex to learn.chatgpt.com. Codex reviews reach Autofix through the review relay (chatgpt-codex-connector). Re-evaluate when model choice for cloud tasks is documented.",
+      "sources": [
+        "https://learn.chatgpt.com/docs/cloud",
+        "https://learn.chatgpt.com/docs/model-selection",
+        "https://learn.chatgpt.com/docs/models",
+        "https://learn.chatgpt.com/docs/third-party/github"
+      ],
+      "verified": "2026-10-28"
+    },
+    "devin": {
+      "status": "limited",
+      "reason": "Devin chooses its own models. Users pick a mode/capability tier (SWE-2 with Medium/High/Max effort since 2026-09-21; a capability picker naming the models behind each tier since 2026-09-23), not a model ID or endpoint, so pack OSS tiers cannot be routed in.",
+      "docs_url": "https://docs.devin.ai/release-notes/2026.md",
+      "pack_adapters": [
+        "AGENTS.md (Devin section)",
+        ".devin/hooks.v1.json (generated from .claude/settings.json)",
+        "scripts/devin-hooks/",
+        "scripts/devin-session-bootstrap.sh"
+      ],
+      "github": "GitHub App 'Devin.ai Integration'; devin-ai-integration[bot] posts Devin Review comments (relayed to Autofix). For CI failures on Devin-pushed PRs, list the pushing bot in Autofix trusted_agent_bots.",
+      "lean_lever": "choose a lower capability tier or effort for routine sessions",
+      "sources": [
+        "https://docs.devin.ai/release-notes/2026.md",
+        "https://docs.devin.ai/integrations/gh.md",
+        "https://docs.devin.ai/product-guides/bot-comment-settings.md"
+      ],
+      "verified": "2026-10-28"
     }
   },
   "fallback": {

@@ -44,6 +44,47 @@ model_list:
       model: anthropic/claude-sonnet-4-6
       api_key: os.environ/ANTHROPIC_API_KEY
 
+  - model_name: claude-opus-4-7
+    litellm_params:
+      model: anthropic/claude-opus-4-7
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  # Current Claude family (Anthropic passthrough, list prices per MTok:
+  # Fable 5.1 $10/$50, Opus 5.5 $4/$20, Opus 5 $5/$25, Sonnet 5.5 and 5 $2/$10,
+  # Haiku 5.5 $0.10/$0.50). Every full Claude ID that scripts/pre-tool-use.py
+  # accepts has a route here (tests/test_claude_model_parity.py), so proxied
+  # clients and Autofix (`model` / AUTOFIX_MODEL) can request them by ID; no
+  # tier or alias routes here by default.
+  - model_name: claude-fable-5-1
+    litellm_params:
+      model: anthropic/claude-fable-5-1
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: claude-opus-5-5
+    litellm_params:
+      model: anthropic/claude-opus-5-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: claude-opus-5
+    litellm_params:
+      model: anthropic/claude-opus-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: claude-sonnet-5-5
+    litellm_params:
+      model: anthropic/claude-sonnet-5-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: claude-sonnet-5
+    litellm_params:
+      model: anthropic/claude-sonnet-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: claude-haiku-5-5
+    litellm_params:
+      model: anthropic/claude-haiku-5-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+
   # OSS heavy tier — SWE-Bench Pro 58.4 > Opus 4.6 at 57.3.
   # RESTRICTED: code-patch, agentic-loop, math-reasoning, bulk-extract ONLY.
   # EXCLUDED from: prose, code-review, ADRs, orchestration, client-facing, vision.

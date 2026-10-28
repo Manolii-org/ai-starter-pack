@@ -300,6 +300,13 @@ OSS_TIER_ALIASES = {
 ANTHROPIC_MODELS = {
     "sonnet",
     "opus",
+    "fable",
+    "claude-fable-5-1",
+    "claude-opus-5-5",
+    "claude-opus-5",
+    "claude-sonnet-5-5",
+    "claude-sonnet-5",
+    "claude-haiku-5-5",
     "claude-sonnet-4-6",
     "claude-opus-4-7",
     "claude-opus-4-6",

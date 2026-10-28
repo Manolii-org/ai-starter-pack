@@ -28,6 +28,28 @@
   weights, PRC-origin, hosted on Fireworks; cleared for `internal` data
   only). If that is not acceptable for a repository, set `model` /
   `AUTOFIX_MODEL` (for example `claude-sonnet-5-5`) before upgrading.
+- **Model registry 5.10.0 and platform matrix.** Claude 5 family catalog with
+  list prices (catalog only, no re-routing); `platforms` refreshed for
+  Claude Code (including web: proxy routing is unavailable there), Cursor
+  Cloud Agents, Codex web and a new Devin entry, each with dated sources.
+- Proxy template: Anthropic passthrough routes for every full Claude ID the
+  guard accepts (`claude-fable-5-1`, `claude-opus-5-5`, `claude-opus-5`,
+  `claude-sonnet-5-5`, `claude-sonnet-5`, `claude-haiku-5-5`, and the
+  previously unrouted `claude-opus-4-7`).
+
+### Fixed
+
+- The pre-tool-use guard blocked protected sub-agents that asked for a
+  current Claude model (`claude-sonnet-5-5`, `fable`, …) as unregistered.
+- Cost estimates used wrong Anthropic prices (Opus 4.6/4.7 at $15/$75, Haiku
+  4.5 at $0.30/$1.20); corrected, and Claude 5 prices added.
+- The session cost logger priced Claude 5 main threads at the Sonnet 4.6 rate,
+  booked Claude 5 sub-agents at the Haiku proxy rate as proxy spend, and kept
+  Haiku at $0.30/$1.20; the `opus` and `fable` aliases were unpriced and
+  `sonnet` was always charged at the proxy's DeepSeek rate. Every model name
+  the guard accepts is now priced as the Anthropic model it resolves to (proxy
+  rates only when a proxy is active), and a parity test keeps the guard,
+  proxy routes and cost logger in step.
 
 ## 1.23.0 — 2026-10-27
 
