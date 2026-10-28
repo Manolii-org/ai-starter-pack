@@ -17,6 +17,10 @@ Upgrade order for consumers:
 3. Optional: callers of `secret-scan-reusable` can read
    `npm_audit_activation` / `pip_audit_activation`, or set
    `fail_on_inert: true` (see "Activation contract" below).
+4. Operators who deploy their own LiteLLM proxy from the pack template:
+   redeploy it to drop the dead Together routes (see "Fixed").
+   `TOGETHER_API_KEY` is no longer needed. Proxies already deployed keep
+   their old config until redeployed.
 
 No inputs were removed or renamed. Every new input defaults to the previous
 behaviour; the Autofix proxy model default (item 1) is the only changed
