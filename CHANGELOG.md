@@ -1,15 +1,36 @@
 # Changelog
 
-## Unreleased
+## 1.25.0 — 2026-10-28
+
+Upgrade order for consumers:
+
+1. **Before bumping, check Autofix in proxy mode.** With no `model` set,
+   v1.25.0 sends PR context to `tier-2-agentic-pro` (MiniMax M3 on
+   Fireworks, with OpenRouter fallbacks) instead of `tier-2-agentic` (see
+   "Changed"). A repository whose data must stay with a particular provider
+   sets `model` / `AUTOFIX_MODEL` first. On a non-LiteLLM Anthropic-compatible
+   gateway, `model` is required anyway: any LiteLLM alias is rejected there
+   (`docs/autofix-cost-alarms.md` § Gateway authentication).
+2. Pin every pack `uses:` to the v1.25.0 commit SHA, with a `# v1.25.0`
+   comment, in one PR. The Renovate preset's `manolii-ai-starter-pack` group
+   does this. Change any `pack_ref` input to the same release.
+3. Optional: callers of `secret-scan-reusable` can read
+   `npm_audit_activation` / `pip_audit_activation`, or set
+   `fail_on_inert: true` (see "Activation contract" below).
+
+No inputs were removed or renamed. Every new input defaults to the previous
+behaviour; the Autofix proxy model default (item 1) is the only changed
+default. The feature-control SDK is released separately as component tag
+`feature-controls-v0.1.0`. Component tags never move `v1`.
 
 ### Feature-control SDK 0.1.0 (component release)
 
 - **First release of `packages/feature-controls`.** npm
   `@manolii/feature-controls` (root `package.json`) and Python
-  `manolii-feature-controls` both declare `0.1.0`. After merge, the
-  maintainer `feature-controls-release.py prepare`/`verify` dry run is run on
-  that `main` commit. It is then tagged `feature-controls-v0.1.0` through
-  `release-tag.yml`. A component tag never moves `v1`. The SDK source is
+  `manolii-feature-controls` both declare `0.1.0`. The maintainer
+  `feature-controls-release.py prepare`/`verify` dry run passed on `main`
+  commit `8c33fa2a16f80167f9274613343ab2aaab1eac9b`. That commit is tagged
+  `feature-controls-v0.1.0` (annotated, through `release-tag.yml`). A component tag never moves `v1`. The SDK source is
   unchanged: it matches the PR #203 squash on `main` plus the README and
   the patched setuptools build backend (#219).
 
