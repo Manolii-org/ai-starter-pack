@@ -25,6 +25,16 @@
   `git -C /tmp/x push` could therefore run `/tmp/x`'s recipes. The workspace
   now falls back to the repository holding the hook's working directory.
 
+### Docs: shared rollout and runner-version practice
+
+- `docs/issue-lifecycle.md` § *Pending state as a retry queue*: use the closed-loop issue
+  as the retry queue for deferred/blocked work (edit in place, bounded quiet, loud when
+  stuck or untracked).
+- `docs/workflow-outcome-convention.md` § *Retry polls for `DEFERRED` work*: how a poll
+  may pass quietly without breaking the "deferred is not success" rule.
+- `docs/fly-runner-setup.md` § *Runner version policy*: what a fleet that disables runner
+  auto-update must provide to stay inside GitHub's 30-day window.
+
 ### Feature-control SDK 0.1.0 (component release)
 
 - **First release of `packages/feature-controls`.** npm
@@ -196,16 +206,6 @@ not start blocking pushes.
   the guard accepts is now priced as the Anthropic model it resolves to (proxy
   rates only when a proxy is active), and a parity test keeps the guard,
   proxy routes and cost logger in step.
-
-### Docs: shared rollout and runner-version practice
-
-- `docs/issue-lifecycle.md` § *Pending state as a retry queue*: use the closed-loop issue
-  as the retry queue for deferred/blocked work (edit in place, bounded quiet, loud when
-  stuck or untracked).
-- `docs/workflow-outcome-convention.md` § *Retry polls for `DEFERRED` work*: how a poll
-  may pass quietly without breaking the "deferred is not success" rule.
-- `docs/fly-runner-setup.md` § *Runner version policy*: what a fleet that disables runner
-  auto-update must provide to stay inside GitHub's 30-day window.
 
 ## 1.23.0 — 2026-10-27
 
