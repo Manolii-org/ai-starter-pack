@@ -8,8 +8,15 @@
   inside a subshell no longer leaks into later commands, so
   `(cd sub && make) && git push` validates the current repository rather than
   `sub`. A `cd` inside a brace group (`{ cd sub; …; } && git push`) is now
-  followed, because it does persist. `git -C ~/path` expands `~`. Before this
-  fix, a nested repository could be validated in place of the pushed one.
+  followed, because it does persist. Before this fix, a nested repository
+  could be validated in place of the pushed one.
+- **The finalise gate validates every candidate repository.** These are the
+  starting directory, each `cd` target and each `git -C` target, in both
+  literal and `~`-expanded spellings. It denies if any of them fails.
+  Commands with quoted parentheses, brace groups in a pipeline, or a quoted
+  `~` can no longer route validation away from the repository that is
+  actually pushed. A command that names only one repository behaves exactly
+  as before.
 
 ## 1.24.0 — 2026-10-28
 

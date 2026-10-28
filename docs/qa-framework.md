@@ -55,6 +55,13 @@ Behaviour:
   no browser or server), and a blocked runner. That is an environment fault
   for its owner to fix once, not a source defect to retry around; CI stays
   the authority.
+- **Which repository**: the gate validates every adopted repository the
+  command could push from: the starting directory, each `cd` target and each
+  `git -C` target, with both literal and `~`-expanded spellings. It blocks if
+  any of them fails. Shell scoping (subshells, pipelines, quoting, `$( )`) is
+  never re-implemented closely enough to pick just one, so a parsing gap
+  cannot let the pushed repository skip validation. A typical command names
+  one repository; extra ones are cached runs.
 - **Trust boundary**: the gate only runs recipes for a repository inside the
   opened workspace (`CLAUDE_PROJECT_DIR`, Cursor `workspace_roots`). Hook
   commands are anchored to the project, and a missing gate script exits 0.

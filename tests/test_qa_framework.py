@@ -67,6 +67,25 @@ class ClassifyCommandTests(unittest.TestCase):
         self.assertEqual(info["repo_dir"], "../other")
         self.assertTrue(info["bypass"])
 
+    def test_candidates_always_include_the_directory_the_push_runs_from(self):
+        # Scope corners the tokenizer cannot see: the gate validates every
+        # candidate, so the real directory only has to be among them.
+        cases = {
+            "printf '%s' '('; cd nested; printf '%s' ')'; git push": "nested",  # quoted parens
+            "{ cd nested; } | cat; git push": None,                            # pipeline subshell
+            "(cd sub && make) && git push": None,
+            "cd sub; (cd deeper && ls); git push": "sub",
+            'git -C "~/proj" push': "~/proj",                                 # quoted tilde: literal
+            "git -C ~/proj push": os.path.expanduser("~/proj"),
+            "echo $(cd elsewhere) && git push": None,
+        }
+        for command, real in cases.items():
+            info = self.classify(command)
+            self.assertEqual(info["trigger"], "push", command)
+            self.assertIn(real, info["repo_dirs"], command)
+        self.assertEqual(self.classify("git push")["repo_dirs"], [None])
+        self.assertEqual(self.classify("echo git push")["repo_dirs"], [])
+
     def test_inline_bypass_only_counts_when_it_reaches_the_hand_off(self):
         for command in ("AGENT_FINALISE_GATE=off echo diag && git push",
                         "AGENT_FINALISE_GATE=off git push && git push origin other",
@@ -248,6 +267,45 @@ class FinaliseGateTests(GateRepo):
         self.assertFalse((self.root / ".ai/agent-checks/finalise-gate.log").exists())
         inside = self.run_hook("claude", CLAUDE_PROJECT_DIR=str(self.root.parent))
         self.assertEqual(inside.returncode, 2)
+
+    def make_nested_repo(self, *, failing: bool) -> Path:
+        nested = self.root / "nested"
+        (nested / "config").mkdir(parents=True)
+        (nested / "scripts" / "qa").mkdir(parents=True)
+        (nested / "src").mkdir()
+        shutil.copyfile(ROOT / "scripts" / "agent-check.py", nested / "scripts" / "agent-check.py")
+        (nested / ".gitignore").write_text(".ai/agent-checks/\n.ai/*.jsonl\n")
+        (nested / "src" / "value.py").write_text("value = 1\n")
+        (nested / "config" / "agent-checks.json").write_text(json.dumps({
+            "schema_version": 1, "base": "main", "environments": [],
+            "checks": [{"id": "nested-check", "paths": ["src/*"], "tools": ["python"],
+                        "commands": [[sys.executable, "-c", "raise SystemExit(1)" if failing else "pass"]]}]}))
+        (nested / "config" / "qa.json").write_text(json.dumps(
+            {"schema_version": 1, "finalise_gate": {"mode": "block"}}))
+        env = clean_env()
+        for args in (("init", "-q", "-b", "main"), ("add", "."),
+                     ("-c", "user.email=f@example.invalid", "-c", "user.name=F", "commit", "-qm", "n")):
+            subprocess.run(["git", *args], cwd=nested, check=True, capture_output=True, env=env)
+        (nested / "src" / "value.py").write_text("value = 2\n")  # candidate change in nested
+        return nested
+
+    def test_push_from_nested_repo_is_validated_despite_quoted_parentheses(self):
+        self.write_qa(mode="block")
+        self.make_nested_repo(failing=True)
+        command = "printf '%s' '('; cd nested; printf '%s' ')'; git push"
+        proc = self.run_hook("claude", {"tool_name": "Bash", "tool_input": {"command": command},
+                                        "cwd": str(self.root)})
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        self.assertIn("nested-check", proc.stderr)
+
+    def test_outer_repo_is_validated_when_brace_group_runs_in_a_pipeline(self):
+        self.write_qa(mode="block")
+        self.make_nested_repo(failing=False)
+        self.break_source()  # the outer repository, which `git push` really pushes, fails
+        proc = self.run_hook("claude", {"tool_name": "Bash", "cwd": str(self.root),
+                                        "tool_input": {"command": "{ cd nested; } | cat; git push"}})
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        self.assertIn("value-check", proc.stderr)
 
     def test_cursor_root_cwd_falls_back_to_workspace_root(self):
         self.write_qa(mode="block")
