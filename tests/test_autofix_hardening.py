@@ -82,37 +82,67 @@ def test_execution_file_is_a_declared_action_output() -> None:
 
 
 # Lean default per plane (ADR-0002); the CLI default without --model was Opus.
-MODEL_EXPR = {
-    "reusable": "inputs.model || (inputs.provider_mode == 'proxy' && 'tier-2-agentic-pro' || 'claude-sonnet-5-5')",
-    "standalone": "vars.AUTOFIX_MODEL || (steps.cred.outputs.key_source == 'proxy' && 'tier-2-agentic-pro' || 'claude-sonnet-5-5')",
-}
+# A shell step resolves the model so a proxy deployed from an older template,
+# which has no tier-2-agentic-pro alias, falls back to tier-2-agentic instead
+# of failing the run.
+MODEL_REF = {"reusable": "steps.model.outputs.model", "standalone": "steps.cred.outputs.model"}
+RESOLVER = {"reusable": "Resolve Autofix model", "standalone": "Resolve Anthropic credential"}
+PROXY_URL = "https://proxy.example.test/"
+SECRET = "sk-proxy-secret"
+LISTS_PRO = '{"data":[{"id":"tier-2-agentic"},{"id":"tier-2-agentic-pro"}]}'
+LISTS_OLD = '{"data":[{"id":"tier-2-agentic"},{"id":"tier-1-fast"}]}'
 
 
-def _resolve_model(explicit: str, proxy: bool) -> str:
-    """What MODEL_EXPR evaluates to under GitHub's `||`/`&&` semantics."""
-    return explicit or ("tier-2-agentic-pro" if proxy else "claude-sonnet-5-5")
-
-
-def _render_claude_args(name: str, model: str) -> list[str]:
-    """Render the GitHub expression, then tokenise like the action (shell-quote)."""
-    args = _step(name, uses=ACTION)["with"]["claude_args"]
-    expr = f"${{{{ {MODEL_EXPR[name]} }}}}"
-    assert f'--model "{expr}"' in args
-    return shlex.split(args.replace(expr, model))
+def _resolve(tmp_path: Path, name: str, explicit: str, proxy: bool, models: str | None) -> tuple[str, list[str]]:
+    """Run the workflow's resolver step with a fake curl; return (model, curl argv lines)."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "curl-calls"
+    curl = bin_dir / "curl"
+    body = f"printf '%s' '{models}'\n" if models is not None else "exit 22\n"
+    curl.write_text(f'#!/usr/bin/env bash\nprintf \'%s\\n\' "$*" >> "{calls}"\ncat > "{calls}.stdin"\n{body}')
+    curl.chmod(0o755)
+    out = tmp_path / "out"
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "GITHUB_OUTPUT": str(out)}
+    if name == "reusable":
+        env.update(EXPLICIT=explicit, SOURCE="proxy" if proxy else "direct",
+                   KEY=SECRET if proxy else "sk-ant-direct", BASE_URL=PROXY_URL if proxy else "")
+    else:
+        env.update(EXPLICIT=explicit, BASE_URL=PROXY_URL if proxy else "",
+                   PROXY_KEY=SECRET, DIRECT_KEY="sk-ant-direct")
+    result = subprocess.run(["bash", "-c", _step(name, title=RESOLVER[name])["run"]],
+                            env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    outputs = dict(line.split("=", 1) for line in out.read_text().splitlines())
+    return outputs["model"], calls.read_text().splitlines() if calls.exists() else []
 
 
 @pytest.mark.parametrize("name", sorted(WORKFLOWS))
-@pytest.mark.parametrize(("explicit", "proxy", "expected"), [
-    ("", True, "tier-2-agentic-pro"),       # MiniMax M3; acceptance probe PR #265
-    ("", False, "claude-sonnet-5-5"),
-    ("anthropic/claude-sonnet-4.5", True, "anthropic/claude-sonnet-4.5"),
-    ("claude-haiku-5-5", False, "claude-haiku-5-5"),
+@pytest.mark.parametrize(("explicit", "proxy", "models", "expected"), [
+    ("", True, LISTS_PRO, "tier-2-agentic-pro"),     # MiniMax M3; acceptance probe PR #265
+    ("", True, LISTS_OLD, "tier-2-agentic"),         # proxy from a pre-v1.24.1 template
+    ("", True, None, "tier-2-agentic"),              # model list unreachable
+    ("", False, LISTS_PRO, "claude-sonnet-5-5"),
+    ("anthropic/claude-sonnet-4.5", True, LISTS_OLD, "anthropic/claude-sonnet-4.5"),
+    ("claude-haiku-5-5", False, None, "claude-haiku-5-5"),
 ])
-def test_agent_always_gets_an_explicit_lean_model(name: str, explicit: str, proxy: bool, expected: str) -> None:
+def test_agent_always_gets_an_explicit_lean_model(
+        tmp_path: Path, name: str, explicit: str, proxy: bool, models: str | None, expected: str) -> None:
     """Without --model the agent used the CLI default (claude-opus-5[1m]), the
-    most expensive option, and through a proxy it failed outright (PR #253)."""
-    assert _resolve_model(explicit, proxy) == expected
-    assert _render_claude_args(name, expected) == [
+    most expensive option, and through a proxy it failed outright (PR #253).
+    Defaulting to an alias the proxy does not serve fails the same way."""
+    model, calls = _resolve(tmp_path, name, explicit, proxy, models)
+    assert model == expected
+    probed = not explicit and proxy
+    assert len(calls) == (1 if probed else 0)
+    if probed:
+        assert calls[0].endswith(f"{PROXY_URL.rstrip('/')}/v1/models")
+        assert SECRET not in calls[0], "the proxy key must not appear in curl's argv"
+        assert SECRET in (tmp_path / "curl-calls.stdin").read_text()
+    args = _step(name, uses=ACTION)["with"]["claude_args"]
+    expr = f"${{{{ {MODEL_REF[name]} }}}}"
+    assert f'--model "{expr}"' in args
+    assert shlex.split(args.replace(expr, model)) == [
         "--allowedTools", "Bash,Edit,Write,Read,Glob,Grep", "--model", expected]
 
 
@@ -120,7 +150,11 @@ def test_reusable_anthropic_model_env_matches_the_model_flag() -> None:
     """The pinned action passes ANTHROPIC_MODEL to the CLI and it wins over
     --model (F2), so a mismatch would silently override the default."""
     spec = yaml.safe_load(WORKFLOWS["reusable"].read_text(encoding="utf-8"))
-    assert spec["jobs"]["autofix"]["env"]["ANTHROPIC_MODEL"] == f"${{{{ {MODEL_EXPR['reusable']} }}}}"
+    assert "ANTHROPIC_MODEL" not in spec["jobs"]["autofix"].get("env", {})
+    step = _step("reusable", uses=ACTION)
+    assert step["env"]["ANTHROPIC_MODEL"] == f"${{{{ {MODEL_REF['reusable']} }}}}"
+    resolver = _step("reusable", title=RESOLVER["reusable"])
+    assert resolver["if"] == step["if"] == GATE
 
 
 def test_standalone_lock_is_on_the_agent_job_and_never_cancels() -> None:
