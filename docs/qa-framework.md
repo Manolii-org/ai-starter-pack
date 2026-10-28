@@ -55,8 +55,20 @@ Behaviour:
   no browser or server), and a blocked runner. That is an environment fault
   for its owner to fix once, not a source defect to retry around; CI stays
   the authority.
+- **Which repository**: the gate validates every adopted repository the
+  command could push from: the starting directory, each `cd` target and each
+  `git -C` target, with both literal and `~`-expanded spellings. It blocks if
+  any of them fails. Shell scoping (subshells, pipelines, quoting, `$( )`) is
+  never re-implemented closely enough to pick just one, so a parsing gap
+  cannot let the pushed repository skip validation. A typical command names
+  one repository; extra ones are cached runs. Several candidates run
+  concurrently, each capped at 1100 s, so a slow one cannot starve another and
+  together they finish inside the host's 1200 s hook timeout.
 - **Trust boundary**: the gate only runs recipes for a repository inside the
-  opened workspace (`CLAUDE_PROJECT_DIR`, Cursor `workspace_roots`). Hook
+  opened workspace (`CLAUDE_PROJECT_DIR`, Cursor `workspace_roots`). When the
+  host declares no root (Codex, or `CLAUDE_PROJECT_DIR` unset), the workspace
+  is the repository holding the hook's working directory. A `cd` or `git -C`
+  path outside it is never run. Hook
   commands are anchored to the project, and a missing gate script exits 0.
 - **Bypass**: `AGENT_FINALISE_GATE=off` is allowed and appended to
   `.ai/bypass-log.jsonl`, which the pre-PR gate step 0 reads. It takes effect

@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Finalise gate targets the repository that is actually pushed.** A `cd`
+  inside a subshell no longer leaks into later commands, so
+  `(cd sub && make) && git push` validates the current repository rather than
+  `sub`. A `cd` inside a brace group (`{ cd sub; …; } && git push`) is now
+  followed, because it does persist. Before this fix, a nested repository
+  could be validated in place of the pushed one.
+- **The finalise gate validates every candidate repository.** These are the
+  starting directory, each `cd` target and each `git -C` target, in both
+  literal and `~`-expanded spellings. It denies if any of them fails.
+  Commands with quoted parentheses, brace groups in a pipeline, or a quoted
+  `~` can no longer route validation away from the repository that is
+  actually pushed. A command that names only one repository behaves exactly
+  as before. Several candidates run concurrently, each capped at 1100 s, so
+  a slow one cannot starve another and together they stay inside the host's
+  1200 s hook timeout.
+- **Finalise gate trust boundary when the host declares no workspace.**
+  Codex hooks, and Claude hooks without `CLAUDE_PROJECT_DIR`, previously
+  treated every path as trusted. `(cd /tmp/x && make) && git push` or
+  `git -C /tmp/x push` could therefore run `/tmp/x`'s recipes. The workspace
+  now falls back to the repository holding the hook's working directory.
+
 ## 1.24.0 — 2026-10-28
 
 Upgrade order for consumers:
