@@ -126,7 +126,7 @@ def assemble_plugin(rendered: Path, out: Path) -> dict:
             # install. Source keeps bare scripts/ for in-tree template use.
             for md in (out / comp).rglob("*.md"):
                 t = md.read_text(encoding="utf-8")
-                nt = re.sub(r'\b(python3|bash) (scripts/[^\s`"]+)',
+                nt = re.sub(r'\b(python3|bash|node) (scripts/[^\s`"]+)',
                             r'\1 "${CLAUDE_PLUGIN_ROOT}/\2"', t)
                 if nt != t:
                     md.write_text(nt, encoding="utf-8")
@@ -264,7 +264,12 @@ def build_hooks_config() -> dict:
 
     return {
         "hooks": {
-            "PreToolUse":   [{"hooks": [cmd(f'python3 "{P}/scripts/pre-tool-use.py"', 5)]}],
+            "PreToolUse":   [
+                {"hooks": [cmd(f'python3 "{P}/scripts/pre-tool-use.py"', 5)]},
+                # Finalise gate: affected agent checks at the push / PR seam.
+                {"matcher": "Bash|mcp__.*__create_pull_request",
+                 "hooks": [cmd(f'sh "{P}/scripts/qa/finalise-gate.sh" claude', 1200)]},
+            ],
             "SessionStart": [{"hooks": [cmd(
                 f'python3 "{P}/scripts/guard_check.py" --clear-session-unfreezes || true; '
                 f'bash "{P}/hooks/session-start.sh"', 30

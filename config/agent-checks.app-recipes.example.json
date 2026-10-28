@@ -1,0 +1,47 @@
+{
+  "_comment": "Copy the environments/checks you need into config/agent-checks.json (owner-owned; never overwritten by copier update). Mirror your CI commands exactly; delete what your repo does not run. docs/qa-framework.md § Recipes.",
+  "environments": [
+    {
+      "id": "node-deps",
+      "inputs": ["package.json", "package-lock.json"],
+      "ready_paths": ["node_modules/.package-lock.json"],
+      "tools": ["node", "npm"],
+      "commands": [["npm", "ci", "--no-audit", "--no-fund"]],
+      "timeout_seconds": 600
+    }
+  ],
+  "checks": [
+    {
+      "id": "node-lint",
+      "paths": ["src/*", "app/*", "pages/*", "components/*", "lib/*", "eslint.config.*", "package.json"],
+      "environment": "node-deps",
+      "tools": ["node"],
+      "append_changed_paths": true,
+      "commands": [["npx", "--no-install", "eslint", "--no-warn-ignored"]]
+    },
+    {
+      "id": "node-typecheck",
+      "paths": ["src/*", "app/*", "pages/*", "components/*", "lib/*", "tsconfig*.json", "package.json"],
+      "environment": "node-deps",
+      "tools": ["node"],
+      "commands": [["npx", "--no-install", "tsc", "--noEmit"]]
+    },
+    {
+      "id": "node-unit",
+      "paths": ["src/*", "app/*", "pages/*", "components/*", "lib/*", "tests/*", "vitest.config.*", "package.json"],
+      "environment": "node-deps",
+      "tools": ["node"],
+      "commands": [["npx", "--no-install", "vitest", "related", "--run", "--passWithNoTests"]],
+      "append_changed_paths": true
+    },
+    {
+      "id": "ui-smoke",
+      "paths": ["src/app/*", "app/*", "src/pages/*", "pages/*", "src/components/*", "components/*", "*.css", "public/*", "config/qa.json"],
+      "environment": "node-deps",
+      "tools": ["node"],
+      "append_changed_paths": true,
+      "commands": [["node", "scripts/qa/ui-smoke.mjs"]],
+      "timeout_seconds": 300
+    }
+  ]
+}

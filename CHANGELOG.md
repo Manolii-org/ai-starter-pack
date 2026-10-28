@@ -2,6 +2,87 @@
 
 ## Unreleased
 
+### QA framework (`docs/qa-framework.md`)
+
+- **Finalise gate** `scripts/qa/finalise-gate.py`. It runs the repository's
+  affected `scripts/agent-check.py` recipes when an agent hands work off:
+  `git push`, `gh pr create`, or the GitHub PR-creation tool. It does not run
+  on every turn. It is wired for Claude Code (a second PreToolUse group in
+  `.claude/settings.json` and the plugin's `hooks.json`), Codex
+  (`.codex/hooks.json`, which must be trusted once with `/hooks`), Cursor
+  including cloud agents (`.cursor/hooks.json`) and git (`.githooks/pre-push`,
+  `.husky/pre-push`, or `--install-git-hook` for Devin and humans).
+  - An unchanged candidate is a cache hit of about 1s. Only a real check
+    failure blocks.
+  - A missing integration ref, missing toolchain or timeout is reported as
+    incomplete and allows the hand-off.
+  - The blocking message carries the failing check ids plus the last 30 log
+    lines, so the agent does not read the full log.
+  - `AGENT_FINALISE_GATE=off` bypasses the gate and is recorded in
+    `.ai/bypass-log.jsonl`.
+  - Each run appends a cost/outcome row to `.ai/agent-checks/finalise-gate.jsonl`.
+  - A shell prefilter keeps the overhead to about 5 ms per shell call.
+  - PR-creation tools are matched under any MCP server name
+    (`mcp__.*__create_pull_request`).
+  - It is a no-op without `config/agent-checks.json`.
+- **Behaviour for adopters.** A new owner-owned `config/qa.json` (in
+  `_skip_if_exists`) ships `finalise_gate.mode: warn`. Failures and
+  incomplete validation reach the agent as model-visible context, and the
+  push or PR proceeds. `copier update` and plugin upgrades therefore never
+  start blocking an existing repository. Set `mode: block` once your recipes
+  pass; `block` is planned as the v2 default. `.cursor/hooks.json` and
+  `.codex/hooks.json` are also `_skip_if_exists`, and so is
+  `.githooks/pre-push`: an existing file is kept, so add the gate entry by hand.
+- These are not source failures, so the gate never blocks on them:
+  - environment setup failures;
+  - per-check timeouts;
+  - recipes exiting `3` ("could not run here").
+
+  The gate only runs recipes for repositories inside the opened workspace.
+- `.husky/pre-push` runs the gate first. It skips its full-repo
+  typecheck/lint/test phases only when
+  `finalise_gate.replace_legacy_pre_push: true`. The default keeps the
+  current behaviour.
+- **`scripts/qa/ui-smoke.mjs`** checks the routes a change affects in real
+  Chromium at 375px and 1280px. It fails on:
+  - HTTP errors, runtime or console errors, and broken same-origin assets
+    (scripts, stylesheets, fonts and images);
+  - mobile overflow, or a missing `width=device-width` viewport;
+  - serious or critical axe violations.
+
+  It infers routes from Next.js `app/` and `pages/` paths (router roots only
+  at the repository root, `src/` or `apps|packages/<name>/`; page objects and
+  test/story files never become routes), ignores console errors logged by
+  third-party scripts, and starts and stops
+  the dev server from `start_command`, and writes screenshots and ARIA
+  snapshots to the ignored `.ai/agent-checks/ui-smoke/`. The dev server's
+  output goes to `server.log` there. `--profile launch` adds a slow-3G + 4x
+  CPU mobile pass with DOMContentLoaded and LCP budgets. A bypass header is sent only to the
+  app's origin, re-checked on every redirect hop. The run exits `3` when no browser
+  or server is available, and a watchdog stops the dev server even if the
+  run is killed.
+- **`ui-smoke-reusable.yml`** runs the same script against a preview
+  (`deployment_status`) or production (schedule) URL. It installs no app and
+  runs no build. Its output is `status`.
+- **`config/agent-checks.app-recipes.example.json`** has copy-ready Node
+  recipes: a frozen `npm ci` environment, lint and unit on changed paths,
+  typecheck, and `ui-smoke`.
+- **exploratory-bug-bash 1.1.0** adds:
+  - a `web-mobile` (375px) target;
+  - the launch personas `impatient`, `trust-checker`, `literal` and `breaker`;
+  - `charters.launch.example.txt`;
+  - § Launch QA, which ranks by severity × journey stage, proves fixes with
+    deterministic tests and allows one sanity re-run.
+
+  Changing `e2e.config.ts` changes the calibration fingerprint, so
+  recalibrate before the next scheduled run.
+- The `qa` agent is now a bounded procedure with a return contract: smoke
+  first, then journey, then classification. It was a stub. `/qa` starts with
+  the smoke.
+- `docs/pre-pr-quality-gate.md` § 3 adds two rules:
+  - a fix for an escaped defect carries a test that fails on base;
+  - a user-facing change was seen running.
+
 ### Added
 
 - **Autofix for PRs pushed by coding agents (opt-in).** New

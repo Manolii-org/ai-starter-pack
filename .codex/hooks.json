@@ -1,0 +1,18 @@
+{
+  "description": "ai-starter-pack finalise gate: run the repository's affected agent checks before git push / gh pr create (docs/qa-framework.md).",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^Bash$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "_G=\"$(git rev-parse --show-toplevel 2>/dev/null)/scripts/qa/finalise-gate.sh\"; [ -f \"$_G\" ] || exit 0; sh \"$_G\" codex",
+            "timeout": 1200,
+            "statusMessage": "Finalise gate: running affected agent checks"
+          }
+        ]
+      }
+    ]
+  }
+}
