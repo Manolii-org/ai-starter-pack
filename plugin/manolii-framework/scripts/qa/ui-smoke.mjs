@@ -125,6 +125,7 @@ function loadConfig(root, file) {
   }
   if (!['fail', 'skip'].includes(config.on_unavailable)) throw new ConfigError('ui_smoke.on_unavailable must be fail or skip');
   if (!Number.isInteger(config.max_routes) || config.max_routes < 1) throw new ConfigError('ui_smoke.max_routes must be a positive integer');
+  if (!(config.launch.network in NETWORKS)) throw new ConfigError(`ui_smoke.launch.network must be one of ${Object.keys(NETWORKS).join(', ')}`);
   return config;
 }
 
@@ -146,12 +147,18 @@ export function globToRegExp(glob) {
   return new RegExp(`^${out}$`); // nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp
 }
 
-const NEXT_APP = /^(?:.*\/)?(?:src\/)?app\/((?:[^/]+\/)*)(page|layout|template|loading|error|not-found)\.(?:[cm]?[jt]sx?|mdx)$/;
-const NEXT_PAGES = /^(?:.*\/)?(?:src\/)?pages\/(.*)\.(?:[cm]?[jt]sx?|mdx)$/;
+// Router roots only at the repository root, src/, or a monorepo
+// apps|packages/<name>/ prefix: a `pages/` folder elsewhere (Playwright page
+// objects, components/pages) is not a router and must not invent routes.
+const ROUTER_ROOT = String.raw`^(?:(?:apps|packages)\/[^/]+\/)?(?:src\/)?`;
+const NEXT_APP = new RegExp(`${ROUTER_ROOT}app\\/((?:[^/]+\\/)*)(page|layout|template|loading|error|not-found)\\.(?:[cm]?[jt]sx?|mdx)$`);
+const NEXT_PAGES = new RegExp(`${ROUTER_ROOT}pages\\/(.*)\\.(?:[cm]?[jt]sx?|mdx)$`);
+const NOT_A_ROUTE_FILE = /\.(?:test|spec|stories|story)\.[^/]+$/;
 
 // Map a Next.js file to the route it renders, or null when it is not a
 // route file. Dynamic segments resolve only through dynamic_samples.
 export function inferNextRoute(file, samples = {}) {
+  if (NOT_A_ROUTE_FILE.test(file)) return null;
   let segments;
   const app = file.match(NEXT_APP);
   if (app) {
@@ -285,8 +292,12 @@ async function checkPage(context, { route, viewport, baseUrl, config, axeSource,
   page.on('console', (message) => {
     if (message.type() !== 'error') return;
     const text = message.text();
-    // Resource failures are judged by the request rules below, with origin context.
-    if (/^Failed to load resource/.test(text) || ignoredConsole.some((r) => r.test(text))) return;
+    // Resource failures are judged by the request rules below, with origin
+    // context. Errors logged by third-party scripts (analytics, widgets) are
+    // not this app's defects and would make production smokes flap.
+    const source = message.location()?.url ?? '';
+    if (/^Failed to load resource/.test(text) || (source && !sameOrigin(source))
+        || ignoredConsole.some((r) => r.test(text))) return;
     issues.push(`console error: ${trim(text)}`);
   });
   page.on('requestfailed', (request) => {
@@ -462,12 +473,17 @@ async function main() {
         await context.route((url) => url.origin === origin, async (route) => {
           const request = route.request();
           const merged = { ...request.headers(), ...headers };
-          const response = await route.fetch({ headers: merged, maxRedirects: 0 });
-          const redirect = response.status() >= 300 && response.status() < 400;
-          if (request.isNavigationRequest() && !redirect && request.method() === 'GET') {
-            await route.continue({ headers: merged });
-          } else {
-            await route.fulfill({ response });
+          try {
+            const response = await route.fetch({ headers: merged, maxRedirects: 0 });
+            const redirect = response.status() >= 300 && response.status() < 400;
+            if (request.isNavigationRequest() && !redirect && request.method() === 'GET') {
+              await route.continue({ headers: merged });
+            } else {
+              await route.fulfill({ response });
+            }
+          } catch {
+            // Surface as a failed request instead of leaving it hanging.
+            await route.abort('failed').catch(() => {});
           }
         });
       }

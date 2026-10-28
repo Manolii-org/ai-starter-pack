@@ -11,7 +11,7 @@ CI remains the authority and a recurring environment fault must be fixed at
 its owner, not routed around with repeated pushes.
 
 Adapters (``--hook``):
-  claude        Claude Code PreToolUse (matcher Bash|mcp__github__create_pull_request)
+  claude        Claude Code PreToolUse (matcher Bash|mcp__.*__create_pull_request)
   codex         Codex PreToolUse (matcher Bash)
   cursor        Cursor beforeShellExecution (prints the permission JSON)
   git-pre-push  git pre-push hook (husky, .githooks or the installed shim)
@@ -52,7 +52,8 @@ UNAVAILABLE_EXIT = 3
 DEFAULT_TIMEOUT_SECONDS = 1100  # below the 1200s host hook timeout
 TAIL_LINES = 30
 TAIL_LINE_CHARS = 240
-PR_TOOLS = {"mcp__github__create_pull_request"}
+# Any MCP server name: mcp__github__…, mcp__plugin_github_github__…, etc.
+PR_TOOL = re.compile(r"^mcp__.+__create_pull_request$")
 BYPASS_ENV = "AGENT_FINALISE_GATE"
 
 
@@ -412,7 +413,7 @@ def hook_target(adapter: str, payload: dict) -> tuple[str | None, str | None, bo
         tool = str(payload.get("tool_name") or "")
         tool_input = payload.get("tool_input") or {}
         start = payload.get("cwd")
-        if tool in PR_TOOLS:
+        if PR_TOOL.match(tool):
             return "pr", start, False, tool
         if tool != "Bash":
             return None, start, False, ""
