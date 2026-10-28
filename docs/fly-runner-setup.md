@@ -152,11 +152,16 @@ A fleet that **disables** auto-update (to keep the baked runner authoritative) t
 over the clock and needs three things, none of which is optional:
 
 1. **Pin the version and its tarball hash together**, changed by one tool, so a
-   half-bump cannot ship.
+   half-bump cannot ship. Check the pin against GitHub's current registration minimum as
+   well, separately from release age: a pin can be young enough and still too old to
+   register a new or recreated runner. Keep the minimum in one named constant so it is
+   easy to update when GitHub changes it.
 2. **Measure the right age**: the age of the first release *newer than the pin*, not the
    age of the pin. Warn well before the limit (for example 10 days) and fail loudly
    with margin for a review and a rollout (for example 21 days). Treat "could not
-   decide" as a failure, never as healthy.
+   decide" as a failure, never as healthy. These thresholds model the normal 30-day
+   window only; GitHub may require a critical security release sooner, which an age
+   check cannot detect, so read the runner release notes as well.
 3. **Track the rollout, not just the merge**: a tenant that cannot take the new image
    (busy pool, provider account block) must stay visible and be retried automatically
    (`docs/issue-lifecycle.md` § Pending state as a retry queue). A pin that is current

@@ -45,8 +45,10 @@ retries instead of a separate store:
 
 `scripts/issue_lifecycle.py` does not implement steps 2 and 3 today: `signal` selects one
 exact key and comments on an existing issue, and there is no prefix-list or edit-in-place
-command. A consumer that wants this pattern keeps its own thin wrapper (list by label
-prefix, edit the body, close on recovery) and still follows the helper's ownership rules:
+command. A consumer that wants this pattern keeps its own thin wrapper (list open issues
+by the stable key or marker embedded in the body, edit the body, close on recovery; a label
+query only works if every producer applies the same label convention) and still follows the
+helper's ownership rules:
 close only machine-authored, unassigned issues, and only after a positive recovery check.
 Adding the operations to the helper would need a pack release, so it is tracked as follow-up
 work rather than assumed here.
