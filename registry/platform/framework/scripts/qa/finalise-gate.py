@@ -36,6 +36,7 @@ import signal
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 GATE_STATE = ".ai/agent-checks"
@@ -560,11 +561,11 @@ def candidate_roots(starts: list[str | None], workspaces: list[Path]) -> list[Pa
 
 
 def gate_one(root: Path, provider: str, bypass_inline: bool, trigger: str,
-             deadline: float | None = None) -> tuple[str, str]:
+             cap: int | None = None) -> tuple[str, str]:
     """Validate one repository; return (allow|warn|deny, message).
 
-    `deadline` (time.monotonic) caps this run so several candidates together
-    still finish inside the host's hook timeout.
+    `cap` bounds the repository's own timeout so concurrent candidates
+    finish inside the host's hook timeout.
     """
     try:
         section, present = load_qa_config(root)
@@ -580,12 +581,8 @@ def gate_one(root: Path, provider: str, bypass_inline: bool, trigger: str,
     timeout = section.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)
     if not isinstance(timeout, int) or timeout <= 0:
         timeout = DEFAULT_TIMEOUT_SECONDS
-    if deadline is not None:
-        remaining = int(deadline - time.monotonic())
-        if remaining <= 0:
-            return "warn", (f"FINALISE-GATE INCOMPLETE: no time left in the hook budget for {root}; "
-                            f"run `python3 scripts/agent-check.py --provider {provider}` there.")
-        timeout = min(timeout, remaining)
+    if cap is not None:
+        timeout = min(timeout, cap)
     result = run_checks(root, provider, timeout)
     result["root"] = str(root)
     record(root, {"ts": time.time(), "provider": provider, "trigger": trigger, "mode": mode,
@@ -610,9 +607,14 @@ def gate(adapter: str, starts: list[str | None], bypass_inline: bool, trigger: s
     if provider not in ("claude", "codex", "cursor", "devin", "unknown"):
         provider = "unknown"
     roots = candidate_roots(starts, workspaces or [])
-    # One budget across candidates; a single repository keeps its own timeout.
-    deadline = time.monotonic() + DEFAULT_TIMEOUT_SECONDS if len(roots) > 1 else None
-    outcomes = [(root, *gate_one(root, provider, bypass_inline, trigger, deadline)) for root in roots]
+    # Candidates run concurrently, each capped below the host hook timeout, so
+    # a slow (possibly mis-ranked) one can never starve the pushed repository.
+    # A single repository keeps its configured timeout.
+    cap = DEFAULT_TIMEOUT_SECONDS if len(roots) > 1 else None
+    with ThreadPoolExecutor(max_workers=max(len(roots), 1)) as pool:
+        results = list(pool.map(lambda root: gate_one(root, provider, bypass_inline, trigger, cap),
+                                roots))
+    outcomes = [(root, *result) for root, result in zip(roots, results)]
     messages = [(f"[{root}] " if len(roots) > 1 else "") + text
                 for root, _decision, text in outcomes if text]
     text = "\n\n".join(messages)
