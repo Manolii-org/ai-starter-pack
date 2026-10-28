@@ -44,6 +44,16 @@
   `git -C /tmp/x push` could therefore run `/tmp/x`'s recipes. The workspace
   now falls back to the repository holding the hook's working directory.
 
+### Docs: legacy bare `v0.x` tags
+
+- `docs/email-capture.md` § Legacy bare `v0.x` tags lists every pre-namespace
+  tag (`v0.1.0-rc.1` to `v0.2.6`) with its kind, commit and component. They
+  stay frozen: never deleted or moved. `v0.2.4` and `v0.2.5` sit on
+  Codex-review commits, and `v0.2.6` is the same commit as
+  `email-capture-v0.2.6`. No tag changed; nothing to upgrade. Lanes still on
+  `v0.2.3` should move to `email-capture-v0.2.6` by SHA, after keeping
+  `allocate`/`await`/`release` in one job.
+
 ### Docs: shared rollout and runner-version practice
 
 - `docs/issue-lifecycle.md` § *Pending state as a retry queue*: use the closed-loop issue
