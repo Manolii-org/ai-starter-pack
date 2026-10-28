@@ -2,4 +2,4 @@
 
 
 def money(cents: int) -> str:
-    return f"${cents / 10:.2f}"
+    return f"${cents / 100:.2f}"
