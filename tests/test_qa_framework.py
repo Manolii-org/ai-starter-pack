@@ -311,15 +311,36 @@ class FinaliseGateTests(GateRepo):
         self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
         self.assertIn("value-check", proc.stderr)
 
-    def test_candidates_share_one_budget_inside_the_host_timeout(self):
+    def test_candidates_run_concurrently_so_a_slow_one_cannot_starve_the_pushed_repo(self):
         self.write_qa(mode="block")
-        self.break_source()  # would deny if it ran
-        gate = load_gate()
-        decision, text = gate.gate_one(self.root, "claude", False, "push",
-                                       deadline=time.monotonic() - 1)
+        stamps = Path(self.temp.name) / "stamps"
+        stamps.mkdir()
+
+        def slow(name, code):
+            return [sys.executable, "-c",
+                    f"import pathlib,time; pathlib.Path({str(stamps / name)!r}).write_text(str(time.time())); "
+                    f"time.sleep(2); raise SystemExit({code})"]
+
+        nested = self.make_nested_repo(failing=False)
+        config = json.loads((nested / "config/agent-checks.json").read_text())
+        config["checks"][0]["commands"] = [slow("nested", 0)]
+        (nested / "config/agent-checks.json").write_text(json.dumps(config))
+        self.write_checks(slow("outer", 1))  # the repository really pushed fails
+        self.break_source()
+        proc = self.run_hook("claude", {"tool_name": "Bash", "cwd": str(self.root),
+                                        "tool_input": {"command": "{ cd nested; } | cat; git push"}})
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        self.assertIn("value-check", proc.stderr)
+        started = [float((stamps / name).read_text()) for name in ("nested", "outer")]
+        self.assertLess(abs(started[0] - started[1]), 1.5)  # overlapping, not sequential
+
+    def test_concurrent_candidates_are_capped_below_the_host_timeout(self):
+        self.write_qa(mode="block", timeout_seconds=5000)
+        self.write_checks([sys.executable, "-c", "import time; time.sleep(30)"])
+        self.break_source()
+        decision, text = load_gate().gate_one(self.root, "claude", False, "push", cap=1)
         self.assertEqual(decision, "warn")
-        self.assertIn("FINALISE-GATE INCOMPLETE", text)
-        self.assertFalse((self.root / ".ai/agent-checks/finalise-gate.log").exists())
+        self.assertIn("INCOMPLETE", text)
 
     def test_named_repo_outside_the_hook_directory_is_never_run_without_a_host_root(self):
         self.write_qa(mode="block")

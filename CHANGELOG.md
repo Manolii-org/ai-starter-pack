@@ -16,8 +16,9 @@
   Commands with quoted parentheses, brace groups in a pipeline, or a quoted
   `~` can no longer route validation away from the repository that is
   actually pushed. A command that names only one repository behaves exactly
-  as before. Several candidates share one 1100 s budget, so together they
-  stay inside the host's 1200 s hook timeout.
+  as before. Several candidates run concurrently, each capped at 1100 s, so
+  a slow one cannot starve another and together they stay inside the host's
+  1200 s hook timeout.
 - **Finalise gate trust boundary when the host declares no workspace.**
   Codex hooks, and Claude hooks without `CLAUDE_PROJECT_DIR`, previously
   treated every path as trusted. `(cd /tmp/x && make) && git push` or
