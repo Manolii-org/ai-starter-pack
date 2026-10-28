@@ -255,18 +255,29 @@ jobs:
           # Only on the workflow_run path, only for [bot] actors, matched like
           # the action's allowed_bots (case-insensitive, [bot] optional); '*'
           # is never honoured. Fork heads were already refused above.
-          trusted_bot() {
-            local who="${1,,}" entry
-            who="${who%\[bot\]}"
+          # The action's allowed_bots receives only this sanitised list, so a
+          # '*' or malformed entry can never widen it either.
+          trusted_bots() {
+            local entry
             IFS=',' read -ra entries <<< "${TRUSTED_BOTS:-}"
             for entry in "${entries[@]}"; do
               entry="${entry//[[:space:]]/}"
               entry="${entry,,}"
               entry="${entry%\[bot\]}"
-              [[ -n "$entry" && "$entry" != "*" && "$entry" == "$who" ]] && return 0
+              if [[ "$entry" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then echo "$entry"; fi
+            done
+          }
+          trusted_bot() {
+            local who="${1,,}" entry
+            who="${who%\[bot\]}"
+            for entry in $(trusted_bots); do
+              [[ "$entry" == "$who" ]] && return 0
             done
             return 1
           }
+          allowed_bots="github-actions"
+          for entry in $(trusted_bots); do allowed_bots+=",$entry"; done
+          echo "allowed_bots=$allowed_bots" >> "$GITHUB_OUTPUT"
 
           # claude-code-action fails the job (rather than skipping) for bot
           # actors outside allowed_bots and for actors without write access.
@@ -460,7 +471,7 @@ jobs:
           # The bot-review relay comments as github-actions[bot]; agent mode
           # rejects non-human actors unless listed here. Opted-in agent bots
           # are appended; preflight already refused every other bot.
-          allowed_bots: github-actions${{ inputs.trusted_agent_bots != '' && format(',{0}', inputs.trusted_agent_bots) || '' }}
+          allowed_bots: ${{ steps.pr.outputs.allowed_bots || 'github-actions' }}
           github_token: ${{ secrets.GH_PAT || github.token }}
           claude_args: |
             --allowedTools "Bash,Edit,Write,Read,Glob,Grep"

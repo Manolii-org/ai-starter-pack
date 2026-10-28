@@ -644,8 +644,9 @@ reusable's `trusted_agent_bots` input (standalone: repository variable
 `devin-ai-integration[bot]`. A listed bot is allowed only on the CI-failure
 (`workflow_run`) path and only for same-repository heads; its comments and
 reviews still reach Autofix only through the review relay. Matching follows
-the action's `allowed_bots` (case-insensitive, `[bot]` optional), and `*` is
-never honoured. The per-PR fix budget still applies, so Autofix pushes at
+the action's `allowed_bots` (case-insensitive, `[bot]` optional). `*` and
+anything that is not a plain login are dropped before the list reaches the
+action, so they are never honoured. The per-PR fix budget still applies, so Autofix pushes at
 most `max_successful_fixes` commits on top of the agent's own.
 
 **Instruction-surface hardening.** Before the agent runs, the checkout is
