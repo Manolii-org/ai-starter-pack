@@ -17,6 +17,11 @@
   `~` can no longer route validation away from the repository that is
   actually pushed. A command that names only one repository behaves exactly
   as before.
+- **Finalise gate trust boundary when the host declares no workspace.**
+  Codex hooks, and Claude hooks without `CLAUDE_PROJECT_DIR`, previously
+  treated every path as trusted. `(cd /tmp/x && make) && git push` or
+  `git -C /tmp/x push` could therefore run `/tmp/x`'s recipes. The workspace
+  now falls back to the repository holding the hook's working directory.
 
 ## 1.24.0 — 2026-10-28
 

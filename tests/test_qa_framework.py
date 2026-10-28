@@ -268,8 +268,8 @@ class FinaliseGateTests(GateRepo):
         inside = self.run_hook("claude", CLAUDE_PROJECT_DIR=str(self.root.parent))
         self.assertEqual(inside.returncode, 2)
 
-    def make_nested_repo(self, *, failing: bool) -> Path:
-        nested = self.root / "nested"
+    def make_nested_repo(self, *, failing: bool, path: Path | None = None) -> Path:
+        nested = path or self.root / "nested"
         (nested / "config").mkdir(parents=True)
         (nested / "scripts" / "qa").mkdir(parents=True)
         (nested / "src").mkdir()
@@ -306,6 +306,17 @@ class FinaliseGateTests(GateRepo):
                                         "tool_input": {"command": "{ cd nested; } | cat; git push"}})
         self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
         self.assertIn("value-check", proc.stderr)
+
+    def test_named_repo_outside_the_hook_directory_is_never_run_without_a_host_root(self):
+        self.write_qa(mode="block")
+        outside = self.make_nested_repo(failing=True, path=Path(self.temp.name).resolve() / "outside")
+        for adapter in ("codex", "claude"):  # Codex declares no root; Claude's is unset here
+            for command in (f"(cd {outside} && true) && git push", f"git -C {outside} push"):
+                proc = self.run_hook(adapter, {"tool_name": "Bash", "cwd": str(self.root),
+                                               "tool_input": {"command": command}})
+                self.assertEqual(proc.returncode, 0, f"{adapter}: {command}: {proc.stderr}")
+                self.assertNotIn("nested-check", proc.stdout + proc.stderr)
+                self.assertFalse((outside / ".ai/agent-checks").exists(), command)
 
     def test_cursor_root_cwd_falls_back_to_workspace_root(self):
         self.write_qa(mode="block")
