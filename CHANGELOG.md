@@ -4,6 +4,19 @@
 
 ### Changed
 
+- **Autofix uses a lean model by default (ADR-0002).** When no model is set
+  (reusable `model` input, standalone `AUTOFIX_MODEL`), the agent now runs
+  `tier-2-agentic` through a proxy and `claude-sonnet-5-5` with a direct
+  Anthropic key, instead of the Claude Code CLI default (Opus), which a proxy
+  usually cannot serve. Per-token cost falls by about 60% (direct) and 90%
+  (proxy). Set a model explicitly if your code is above `internal`
+  sensitivity or your proxy is not the pack's LiteLLM.
+  **Data routing:** in proxy mode with no model set, Autofix previously
+  failed before sending anything; it now sends PR context (diff, review
+  text, CI log excerpts) to `tier-2-agentic`, which is Kimi K2.6 (open
+  weights, PRC-origin, hosted on Fireworks; cleared for `internal` data
+  only). If that is not acceptable for a repository, set `model` /
+  `AUTOFIX_MODEL` (for example `claude-sonnet-5-5`) before upgrading.
 - **Model registry 5.10.0 and platform matrix.** Claude 5 family catalog with
   list prices (catalog only, no re-routing); `platforms` refreshed for
   Claude Code (including web: proxy routing is unavailable there), Cursor
