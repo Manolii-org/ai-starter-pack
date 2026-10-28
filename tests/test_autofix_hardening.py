@@ -470,7 +470,8 @@ def test_trusted_bot_matcher(bots: str, who: str, trusted: bool, tmp_path) -> No
     ("", "github-actions"),
     ("*", "github-actions"),                                                  # wildcard never reaches the action
     (" Devin-AI-Integration[bot] , * ,cursor", "github-actions,devin-ai-integration,cursor"),
-    ("a b,x;rm -rf /,$(id),evil\nallowed_bots=*", "github-actions,ab,evil"),
+    ("devin ai, cursor ", "github-actions,cursor"),                          # embedded space: dropped, not joined
+    ("x;rm -rf /,$(id),evil\nallowed_bots=*", "github-actions,evil"),
 ])
 def test_allowed_bots_output_is_sanitised(bots: str, allowed: str, tmp_path) -> None:
     out = tmp_path / "out"

@@ -261,7 +261,8 @@ jobs:
             local entry
             IFS=',' read -ra entries <<< "${TRUSTED_BOTS:-}"
             for entry in "${entries[@]}"; do
-              entry="${entry//[[:space:]]/}"
+              entry="${entry#"${entry%%[![:space:]]*}"}"
+              entry="${entry%"${entry##*[![:space:]]}"}"
               entry="${entry,,}"
               entry="${entry%\[bot\]}"
               if [[ "$entry" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then echo "$entry"; fi
