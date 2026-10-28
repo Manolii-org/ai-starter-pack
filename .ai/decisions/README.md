@@ -66,3 +66,4 @@ ADRs are immutable once accepted but can be superseded. To reverse a decision, c
 
 **ADR Index:**
 (Add links to accepted ADRs here as they are created)
+- [ADR-0002: Lean default models for Autofix](0002-autofix-default-models.md)

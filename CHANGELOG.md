@@ -9,8 +9,25 @@
   repository variable `AUTOFIX_TRUSTED_AGENT_BOTS` list agent bot logins
   (Devin, Codex cloud tasks, Cursor Cloud Agents) whose pushes may trigger
   Autofix when CI fails. Off by default; CI-failure path and same-repository
-  heads only; `*` is never honoured. The list is also passed to the action's
-  `allowed_bots`.
+  heads only; `*` and malformed entries are dropped. The sanitised list
+  reaches the action's `allowed_bots` only on CI-failure runs, and every
+  `workflow_run` must come from this repository (checked by ID).
+
+### Changed
+
+- **Autofix uses a lean model by default (ADR-0002).** When no model is set
+  (reusable `model` input, standalone `AUTOFIX_MODEL`), the agent now runs
+  `tier-2-agentic` through a proxy and `claude-sonnet-5-5` with a direct
+  Anthropic key, instead of the Claude Code CLI default (Opus), which a proxy
+  usually cannot serve. Per-token cost falls by about 60% (direct) and 90%
+  (proxy). Set a model explicitly if your code is above `internal`
+  sensitivity or your proxy is not the pack's LiteLLM.
+  **Data routing:** in proxy mode with no model set, Autofix previously
+  failed before sending anything; it now sends PR context (diff, review
+  text, CI log excerpts) to `tier-2-agentic`, which is Kimi K2.6 (open
+  weights, PRC-origin, hosted on Fireworks; cleared for `internal` data
+  only). If that is not acceptable for a repository, set `model` /
+  `AUTOFIX_MODEL` (for example `claude-sonnet-5-5`) before upgrading.
 
 ## 1.23.0 — 2026-10-27
 
