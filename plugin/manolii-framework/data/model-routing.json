@@ -306,12 +306,13 @@
           }
         },
         "secondary": {
-          "provider": "together",
-          "litellm_alias": "tier-0-oss-heavy-fallback-together",
-          "model_id_hint": "moonshotai/Kimi-K2.6",
-          "cost_per_m_input": 0.5,
-          "cost_per_m_output": 2.8,
-          "smoke_tested": "2026-04-27",
+          "provider": "openrouter",
+          "model_id_hint": "moonshotai/kimi-k2.6",
+          "cost_per_m_input": 0.65,
+          "cost_per_m_output": 3.41,
+          "context_window": 262144,
+          "litellm_alias": "tier-0-oss-heavy-fallback-openrouter",
+          "notes": "Repointed 2026-10-28 from Together, which stopped serving Kimi K2.6 serverless. OpenRouter US-hosted zero-data-retention endpoints only.",
           "vision": {
             "supported": true,
             "modalities": [
@@ -326,7 +327,7 @@
           "model_id_hint": "accounts/fireworks/models/glm-5p1",
           "cost_per_m_input": 1.4,
           "cost_per_m_output": 4.4,
-          "notes": "GLM-5.1 retained as cross-family fallback after K2.6 primary + Together K2.6 secondary. Different model family ensures tertiary survives a Kimi-family outage.",
+          "notes": "GLM-5.1 retained as cross-family fallback after K2.6 primary + OpenRouter K2.6 secondary. Different model family ensures tertiary survives a Kimi-family outage.",
           "vision": {
             "supported": false,
             "modalities": [
@@ -380,13 +381,13 @@
           }
         },
         "secondary": {
-          "provider": "together",
-          "litellm_alias": "tier-1-fast-fallback-together",
-          "model_id_hint": "moonshotai/Kimi-K2.6",
-          "smoke_tested": "2026-04-28",
-          "cost_per_m_input": 0.5,
-          "cost_per_m_output": 2.8,
-          "notes": "Kimi K2.6 on Together — cross-provider resilience. Different model from primary (PRC-origin, internal-clearance only).",
+          "provider": "openrouter",
+          "model_id_hint": "moonshotai/kimi-k2.6",
+          "cost_per_m_input": 0.65,
+          "cost_per_m_output": 3.41,
+          "context_window": 262144,
+          "litellm_alias": "tier-1-fast-fallback-openrouter",
+          "notes": "Repointed 2026-10-28 from Together, which stopped serving Kimi K2.6 serverless. OpenRouter US-hosted zero-data-retention endpoints only. Different model from primary (PRC-origin, internal-clearance only).",
           "vision": {
             "supported": false,
             "modalities": [
@@ -450,14 +451,13 @@
           "smoke_tested": "2026-04-28"
         },
         "secondary": {
-          "provider": "together",
-          "litellm_alias": "tier-2-agentic-fallback-kimi",
-          "model_id_hint": "moonshotai/Kimi-K2.6",
-          "cost_per_m_input": 0.5,
-          "cost_per_m_output": 2.8,
+          "provider": "openrouter",
+          "model_id_hint": "moonshotai/kimi-k2.6",
+          "cost_per_m_input": 0.65,
+          "cost_per_m_output": 3.41,
           "context_window": 262144,
-          "smoke_tested": "2026-04-27",
-          "notes": "K2.5 → K2.6 upgrade 2026-04-26: intelligence 47 → 54 (+7pp), same 262K context. Cross-provider + cross-model family overflow path. Needs smoke test before production reliance.",
+          "litellm_alias": "tier-2-agentic-fallback-kimi",
+          "notes": "Repointed 2026-10-28 from Together, which stopped serving Kimi K2.6 serverless. OpenRouter US-hosted zero-data-retention endpoints only.",
           "vision": {
             "supported": true,
             "modalities": [
@@ -473,27 +473,13 @@
           }
         },
         "tertiary": {
-          "provider": "fireworks",
-          "litellm_alias": "tier-2-agentic-fallback-fireworks",
-          "model_id_hint": "accounts/fireworks/models/kimi-k2p6",
+          "provider": "openrouter",
+          "model_id_hint": "qwen/qwen3.5-397b-a17b",
           "cost_per_m_input": 0.5,
-          "cost_per_m_output": 2.8,
+          "cost_per_m_output": 3.6,
           "context_window": 262144,
-          "smoke_tested": "2026-04-27",
-          "notes": "K2.5 → K2.6 upgrade 2026-04-26: intelligence 47 → 54. Day-0 serverless on Fireworks (fireworks.ai/models/fireworks/kimi-k2p6). Smoke tested 2026-04-27: 3/3 PASS via live proxy.",
-          "vision": {
-            "supported": true,
-            "modalities": [
-              "text",
-              "image"
-            ],
-            "mmmu_pro": 0.62,
-            "pricing": {
-              "per_1k_images_1mp_usd": 1.425,
-              "native_unit": "input_token_equivalent",
-              "native_rate_usd": 0.95
-            }
-          }
+          "litellm_alias": "tier-2-agentic-fallback-qwen",
+          "notes": "Repointed 2026-10-28 from Together, which now serves Qwen 3.5 397B on dedicated deployments only. Different model family. OpenRouter US-hosted zero-data-retention endpoints only."
         }
       },
       "vision": {
@@ -540,7 +526,7 @@
           "cost_per_m_input": 0.3,
           "cost_per_m_output": 1.2,
           "context_window": 1048576,
-          "notes": "Same model on a second provider (zero-data-retention endpoints only), so a Fireworks outage does not take out the chain."
+          "notes": "Same model on a second provider (US-hosted zero-data-retention endpoints only), so a Fireworks outage does not take out the chain."
         },
         "tertiary": {
           "provider": "fireworks",
@@ -620,13 +606,13 @@
           }
         },
         "tertiary": {
-          "provider": "together",
-          "litellm_alias": "tier-3-tool-fallback-kimi-together",
-          "model_id_hint": "moonshotai/Kimi-K2.6",
-          "smoke_tested": "2026-04-27",
-          "cost_per_m_input": 0.95,
-          "cost_per_m_output": 4.0,
-          "notes": "K2.5 → K2.6 upgrade 2026-04-26: intelligence 47 → 54. Last resort: same provider as primary (Together) but different model family. Native agentic + tool calling. Smoke tested 2026-04-27: 3/3 PASS via live proxy.",
+          "provider": "openrouter",
+          "model_id_hint": "moonshotai/kimi-k2.6",
+          "cost_per_m_input": 0.65,
+          "cost_per_m_output": 3.41,
+          "context_window": 262144,
+          "litellm_alias": "tier-3-tool-fallback-kimi-openrouter",
+          "notes": "Repointed 2026-10-28 from Together, which stopped serving Kimi K2.6 serverless. OpenRouter US-hosted zero-data-retention endpoints only. Last resort: same provider as the primary (OpenRouter) but a different model family.",
           "vision": {
             "supported": true,
             "modalities": [

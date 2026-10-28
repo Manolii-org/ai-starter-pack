@@ -40,6 +40,19 @@ Upgrade order for SDK consumers:
 
 ### Fixed
 
+- **The LiteLLM template no longer routes to dead Together models.** Together
+  stopped serving Kimi K2.6 and Qwen 3.5 397B serverless; both now need a
+  dedicated deployment, so every Together hop in the template returned HTTP
+  400. `tier-2-agentic` now runs Kimi K2.6 on Fireworks (as the registry
+  already said). Its Kimi and Qwen fallbacks, and the Kimi fallbacks of
+  `tier-0-oss-heavy`, `tier-1-fast` and `tier-3-tool`, move to OpenRouter.
+  Three fallback names change from `*-together` to `*-openrouter`.
+  `TOGETHER_API_KEY` is no longer needed; `setup-litellm.sh` stops asking for
+  it and smoke-tests `tier-2-agentic` with the Fireworks key. Every OpenRouter
+  route for Kimi, Qwen or MiniMax weights, including the new
+  `tier-2-agentic-pro` fallback, is pinned to US-hosted zero-data-retention
+  endpoints. Proxies already deployed from an older template keep their
+  config until redeployed.
 - **v1.24.0 overstated the Autofix saving.** Its notes called
   `tier-2-agentic` Kimi K2.6 at $0.50/$2.80, "about 90% cheaper". The
   template's K2.6 primary host (Together) no longer serves it, Fireworks K2.6

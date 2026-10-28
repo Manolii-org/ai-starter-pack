@@ -93,12 +93,11 @@ _prompt_key() {
 
 _prompt_key ANTHROPIC_KEY   "ANTHROPIC_API_KEY  (Claude passthrough + fallback routes)"        ANTHROPIC_API_KEY
 _prompt_key FIREWORKS_KEY   "FIREWORKS_API_KEY  (tier-1-fast, tier-0-oss-heavy)"               FIREWORKS_API_KEY
-_prompt_key TOGETHER_KEY    "TOGETHER_API_KEY   (tier-2-agentic — Kimi K2.6, sonnet alias)"    TOGETHER_API_KEY
 _prompt_key GROQ_KEY        "GROQ_API_KEY       (tier-4-extract, tier-5-latency)"              GROQ_API_KEY
-_prompt_key OPENROUTER_KEY  "OPENROUTER_API_KEY (tier-3-tool — Gemma 4 31B)"                   OPENROUTER_API_KEY
+_prompt_key OPENROUTER_KEY  "OPENROUTER_API_KEY (tier-3-tool — Gemma 4 31B; Kimi/Qwen/M3 fallbacks)" OPENROUTER_API_KEY
 
-if [ -z "$ANTHROPIC_KEY" ] && [ -z "$FIREWORKS_KEY" ] && [ -z "$TOGETHER_KEY" ] && [ -z "$GROQ_KEY" ] && [ -z "$OPENROUTER_KEY" ]; then
-  fail "At least one provider key is required (Anthropic, Fireworks, Together, Groq, or OpenRouter)."
+if [ -z "$ANTHROPIC_KEY" ] && [ -z "$FIREWORKS_KEY" ] && [ -z "$GROQ_KEY" ] && [ -z "$OPENROUTER_KEY" ]; then
+  fail "At least one provider key is required (Anthropic, Fireworks, Groq, or OpenRouter)."
 fi
 
 # ── 4. Deploy to Fly.io ───────────────────────────────────────────────────────
@@ -125,7 +124,6 @@ log "Pushing secrets to Fly..."
 SECRETS_ARGS=("LITELLM_MASTER_KEY=$LITELLM_MASTER_KEY")
 [ -n "$ANTHROPIC_KEY"   ] && SECRETS_ARGS+=("ANTHROPIC_API_KEY=$ANTHROPIC_KEY")
 [ -n "$FIREWORKS_KEY"   ] && SECRETS_ARGS+=("FIREWORKS_API_KEY=$FIREWORKS_KEY")
-[ -n "$TOGETHER_KEY"    ] && SECRETS_ARGS+=("TOGETHER_API_KEY=$TOGETHER_KEY")
 [ -n "$GROQ_KEY"        ] && SECRETS_ARGS+=("GROQ_API_KEY=$GROQ_KEY")
 [ -n "$OPENROUTER_KEY"  ] && SECRETS_ARGS+=("OPENROUTER_API_KEY=$OPENROUTER_KEY")
 
@@ -182,12 +180,12 @@ print('OK' if c.strip() else 'FAIL')" 2>/dev/null || echo "UNREACHABLE")
 
 [ -n "$FIREWORKS_KEY"   ] && _smoke_test "tier-1-fast"
 [ -n "$FIREWORKS_KEY"   ] && _smoke_test "tier-2-agentic-pro"
-[ -n "$TOGETHER_KEY"   ] && _smoke_test "tier-2-agentic"
+[ -n "$FIREWORKS_KEY"   ] && _smoke_test "tier-2-agentic"
 [ -n "$OPENROUTER_KEY" ] && _smoke_test "tier-3-tool"
 [ -n "$GROQ_KEY"       ] && _smoke_test "tier-4-extract"
 [ -n "$GROQ_KEY"       ] && _smoke_test "tier-5-latency"
 # sonnet is Fireworks-primary (DeepSeek V4 Pro) with a mandatory Groq advisor;
-# Together is only an optional fallback hop — gate on the keys the path needs.
+# gate on the keys the path needs.
 [ -n "$FIREWORKS_KEY" ] && [ -n "$GROQ_KEY" ] && _smoke_test "sonnet"
 [ -n "$FIREWORKS_KEY" ] && _smoke_test "haiku"
 
