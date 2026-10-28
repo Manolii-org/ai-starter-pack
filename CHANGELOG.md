@@ -16,7 +16,9 @@ Upgrade order for consumers:
    `AUTOFIX_TRUSTED_AGENT_BOTS` so Autofix fixes CI failures on their PRs.
 
 No inputs were removed or renamed; every new input defaults to the previous
-behaviour except the Autofix model default described below.
+behaviour except the Autofix model default described below. The new QA
+finalise gate ships in `warn` mode, so `copier update` and plugin upgrades do
+not start blocking pushes.
 
 ### QA framework (`docs/qa-framework.md`)
 
