@@ -432,8 +432,8 @@
         "internal",
         "public"
       ],
-      "cost_per_m_input": 0.5,
-      "cost_per_m_output": 2.8,
+      "cost_per_m_input": 0.95,
+      "cost_per_m_output": 4.0,
       "throughput_tok_per_sec": 140,
       "fallback_chain": {
         "primary": {
@@ -503,6 +503,48 @@
           "image"
         ],
         "mmmu_pro": 0.62
+      }
+    },
+    "tier-2-agentic-pro": {
+      "provider": "fireworks",
+      "model": "accounts/fireworks/models/minimax-m3",
+      "litellm_alias": "tier-2-agentic-pro",
+      "intelligence_score": 45,
+      "intelligence_index_version": "4.1.1",
+      "context_window": 1000000,
+      "use_cases": [
+        "autofix",
+        "long-tool-chains",
+        "multi-step-subagents",
+        "large-context"
+      ],
+      "data_clearance": [
+        "internal",
+        "public"
+      ],
+      "cost_per_m_input": 0.3,
+      "cost_per_m_output": 1.2,
+      "fallback_chain": {
+        "primary": {
+          "provider": "fireworks",
+          "litellm_alias": "tier-2-agentic-pro",
+          "model_id_hint": "accounts/fireworks/models/minimax-m3",
+          "context_window": 1000000,
+          "smoke_tested": "2026-10-28",
+          "notes": "Autofix acceptance probe on the Manolii CI proxy 2026-10-28 (two-file bug): fixed and pushed first time, 19 turns, 37 s."
+        },
+        "secondary": {
+          "provider": "fireworks",
+          "litellm_alias": "tier-2-agentic-fallback-fireworks",
+          "model_id_hint": "accounts/fireworks/models/kimi-k2p6",
+          "context_window": 262144
+        }
+      },
+      "vision": {
+        "supported": false,
+        "modalities": [
+          "text"
+        ]
       }
     },
     "tier-3-tool": {
@@ -1882,6 +1924,22 @@
         ]
       }
     },
+    "tier-2-agentic-pro": {
+      "resolves_to": "fireworks:accounts/fireworks/models/minimax-m3",
+      "model_id": "accounts/fireworks/models/minimax-m3",
+      "litellm_alias": "tier-2-agentic-pro",
+      "label": "MiniMax M3 (Fireworks) — agentic code repair, Autofix proxy default",
+      "data_sensitivity_max": "internal",
+      "requires_proxy": true,
+      "context_window": 1000000,
+      "notes": "Autofix proxy default (ADR-0002 amendment, 2026-10-28). PRC-origin (MiniMax) on US hosting — capped at internal. Do not use for restricted data.",
+      "vision": {
+        "supported": false,
+        "modalities": [
+          "text"
+        ]
+      }
+    },
     "tier-3-tool": {
       "resolves_to": "together:google/gemma-4-31b-it",
       "model_id": "google/gemma-4-31b-it",
@@ -2097,6 +2155,7 @@
   "proxy_fallback_aliases": {
     "tier-1-fast": "haiku",
     "tier-2-agentic": "claude-sonnet-4-6",
+    "tier-2-agentic-pro": "claude-sonnet-4-6",
     "tier-3-tool": "claude-sonnet-4-6",
     "tier-4-extract": "haiku",
     "tier-5-latency": "haiku",

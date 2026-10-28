@@ -85,7 +85,7 @@ def _load_routing_config():
                       "grep", "glob", "status", "boilerplate"]
     _TIER_MAP_DEFAULT = {"light": "haiku", "standard": "sonnet", "heavy": "sonnet"}
     _PROXY_DEFAULT = {
-        "tier-1-fast": "haiku", "tier-2-agentic": "sonnet",
+        "tier-1-fast": "haiku", "tier-2-agentic": "sonnet", "tier-2-agentic-pro": "sonnet",
         "tier-3-tool": "sonnet", "tier-4-extract": "haiku",
         "tier-5-latency": "haiku", "tier-0-oss-heavy": "sonnet",
     }

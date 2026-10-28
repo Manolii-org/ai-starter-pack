@@ -48,3 +48,30 @@ always wins.
 
 `.ai/assessments/autofix-default-models-2026-10-28.md` (15-item checklist,
 evidence and cost table). Review by 2026-11-27.
+
+## Amendment 2026-10-28 — proxy default moves to `tier-2-agentic-pro`
+
+**What was wrong.** The decision assumed `tier-2-agentic` is Kimi K2.6 at
+$0.50/$2.80. Neither held: the pack template's K2.6 primary (Together) was
+removed from serverless on 2026-08-19 and Fireworks K2.6 costs $0.95/$4.00,
+and the Manolii proxy maps `tier-2-agentic` to Kimi K3 at $3/$15, more per
+token than Sonnet 5.5. The #255 proof therefore most likely ran K3, and the
+"about 90% cheaper" claim did not hold on that proxy.
+
+**New decision.** With no model set, proxy-mode Autofix uses
+`tier-2-agentic-pro` (MiniMax M3, Fireworks, $0.30/$1.20). The direct-key
+default (`claude-sonnet-5-5`) and explicit overrides are unchanged.
+
+**Evidence.** Same two-file bug fixture on the Manolii CI proxy, one run per
+model unless noted (probe PRs #264–#266, closed unmerged):
+
+| Alias (model) | Result | Turns | Agent time | $/MTok in/out |
+|---|---|---|---|---|
+| `tier-2-agentic-pro` (MiniMax M3) | fixed and pushed | 19 | 37 s | 0.30 / 1.20 |
+| `tier-1-fast` (DeepSeek V4.1 Flash) | fixed and pushed | 14 | 30 s | 0.035 / 0.29 |
+| `candidate-luna-heavy` (GPT-6 Luna, high) | 1 of 2 runs pushed; the other stopped after 12 turns | 25 | 81 s | 0.10 / 0.50 |
+
+M3 is an agentic-class model with vendor-reported SWE-bench Verified ~85 and
+1M context; V4.1 Flash is the documented budget override. Luna is not
+reliable enough to be a default yet. One run per model on a small fixture is
+weak evidence: the 30-day review re-checks real Autofix outcomes.

@@ -58,3 +58,12 @@ action passes it to the CLI and it overrides `--model`.
 ## Not decided here
 
 Whether `claude-haiku-5-5` should replace `claude-sonnet-5-5` as the direct default. It is 20× cheaper but has no end-to-end Autofix run yet; it needs a direct-key acceptance run first.
+
+## Amendment 2026-10-28 (same day)
+
+The proxy row above is superseded. `tier-2-agentic` is not $0.50/$2.80:
+Fireworks Kimi K2.6 is $0.95/$4.00 and the Manolii proxy serves Kimi K3 on
+that alias at $3/$15. The proxy default is now `tier-2-agentic-pro` (MiniMax
+M3, $0.30/$1.20), chosen from a three-model acceptance probe recorded in
+ADR-0002's amendment. Data clearance is unchanged (`internal`, PRC-origin
+weights on US hosting).
