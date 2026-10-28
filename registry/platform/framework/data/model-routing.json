@@ -534,6 +534,15 @@
           "notes": "Autofix acceptance probe on the pack's CI proxy 2026-10-28 (two-file bug): fixed and pushed first time, 19 turns, 37 s."
         },
         "secondary": {
+          "provider": "openrouter",
+          "litellm_alias": "tier-2-agentic-pro-fallback-openrouter",
+          "model_id_hint": "minimax/minimax-m3",
+          "cost_per_m_input": 0.3,
+          "cost_per_m_output": 1.2,
+          "context_window": 1048576,
+          "notes": "Same model on a second provider (zero-data-retention endpoints only), so a Fireworks outage does not take out the chain."
+        },
+        "tertiary": {
           "provider": "fireworks",
           "litellm_alias": "tier-2-agentic-fallback-fireworks",
           "model_id_hint": "accounts/fireworks/models/kimi-k2p6",

@@ -152,6 +152,17 @@ model_list:
       model: fireworks_ai/accounts/fireworks/models/minimax-m3
       api_key: os.environ/FIREWORKS_API_KEY
       timeout: 600
+  - model_name: tier-2-agentic-pro-fallback-openrouter
+    litellm_params:
+      # Same model on a different provider, so a Fireworks outage does not take
+      # out the whole chain. Zero-data-retention endpoints only.
+      model: openrouter/minimax/minimax-m3
+      api_key: os.environ/OPENROUTER_API_KEY
+      timeout: 600
+      extra_body:
+        provider:
+          data_collection: deny
+          zdr: true
 
   # ═══════════════════════════════════════════════════════════════════════════
   # TIER 3 TOOL — high tool-call density (Gemma 4 31B: strong function-calling)
@@ -309,7 +320,7 @@ litellm_settings:
     - tier-0-oss-heavy: [tier-0-oss-heavy-fallback-together, tier-0-oss-heavy-fallback-glm]
     - tier-1-fast: [tier-1-fast-fallback-together, tier-1-fast-fallback-groq]
     - tier-2-agentic: [tier-2-agentic-fallback-fireworks, tier-2-agentic-fallback-qwen]
-    - tier-2-agentic-pro: [tier-2-agentic-fallback-fireworks]
+    - tier-2-agentic-pro: [tier-2-agentic-pro-fallback-openrouter, tier-2-agentic-fallback-fireworks]
     - tier-3-tool: [tier-3-tool-fallback-kimi-together, tier-3-tool-fallback-kimi-fireworks]
     - tier-4-extract: [tier-4-extract-fallback-fireworks, tier-4-extract-fallback-gptoss]
     - tier-5-latency: [tier-5-latency-fallback-gptoss, tier-5-latency-fallback-fireworks]

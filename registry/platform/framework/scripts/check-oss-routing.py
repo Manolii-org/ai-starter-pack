@@ -187,6 +187,8 @@ _HARDCODED_FALLBACKS: list[str] = [
     # tier-2-agentic
     "tier-2-agentic-fallback-kimi",
     "tier-2-agentic-fallback-fireworks",
+    # tier-2-agentic-pro (MiniMax M3 on a second provider)
+    "tier-2-agentic-pro-fallback-openrouter",
     # tier-3-tool (2026-05-23: Gemma 4 31B primary; Kimi K2.6 PRC fallbacks)
     "tier-3-tool-fallback-kimi-fireworks",
     "tier-3-tool-fallback-kimi-together",
