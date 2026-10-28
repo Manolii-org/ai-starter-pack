@@ -59,9 +59,10 @@ exports it as `ANTHROPIC_API_KEY`. The key never goes to Anthropic, because
   returned 401. No extra input is needed.
 - **Base URL has no `/v1`.** Claude Code appends `/v1/messages`, so pass
   `https://openrouter.ai/api`, not `https://openrouter.ai/api/v1`.
-- **Set `model`.** With `model` empty, proxy mode sends the LiteLLM alias
-  `tier-2-agentic`, which other gateways reject (OpenRouter returns 400
-  `not a valid model ID`). Use the gateway's own id. OpenRouter also maps
+- **Set `model`.** With `model` empty, proxy mode sends the pack's LiteLLM
+  alias default (`tier-2-agentic-pro` from v1.25.0, `tier-2-agentic`
+  before). Other gateways reject a LiteLLM alias: OpenRouter returned 400
+  `not a valid model ID` for `tier-2-agentic`. Use the gateway's own id. OpenRouter also maps
   bare Anthropic ids such as `claude-sonnet-5-5`, which keeps Claude Code's
   background Haiku-class calls working.
 - **Ignore "set `ANTHROPIC_API_KEY` to an empty string" for this workflow.**
