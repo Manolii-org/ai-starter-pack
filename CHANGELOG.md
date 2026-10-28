@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+### Feature-control SDK 0.1.0 (component release)
+
+- **First release of `packages/feature-controls`.** npm
+  `@manolii/feature-controls` (root `package.json`) and Python
+  `manolii-feature-controls` both declare `0.1.0`. After merge, the
+  maintainer `feature-controls-release.py prepare`/`verify` dry run is run on
+  that `main` commit. It is then tagged `feature-controls-v0.1.0` through
+  `release-tag.yml`. A component tag never moves `v1`. The SDK source is
+  unchanged: it matches the PR #203 squash on `main` plus the README and
+  the patched setuptools build backend (#219).
+
+Upgrade order for SDK consumers:
+
+1. Replace any pin to a commit that is not on `main` (for example a
+   pre-squash pull-request commit) with the full SHA that
+   `feature-controls-v0.1.0` points at. Pin the npm and Python dependencies
+   to the same SHA in one change, and regenerate the lockfile.
+2. pnpm consumers that grant build permission by name and version change
+   `@manolii/feature-controls@0.0.0` to `@manolii/feature-controls@0.1.0`
+   in the same change (`docs/feature-controls.md`).
+3. The pack's Renovate preset keeps SDK upgrades on reviewed,
+   dashboard-approved PRs. Prereleases are ignored.
+
 ### Changed
 
 - **Autofix proxy default is now `tier-2-agentic-pro` (MiniMax M3).** With no

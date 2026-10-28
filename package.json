@@ -1,6 +1,6 @@
 {
   "name": "@manolii/feature-controls",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "description": "Offline provider-backed feature control primitives",
   "license": "Apache-2.0",
