@@ -160,12 +160,21 @@ class FinaliseGateTests(GateRepo):
         refs = "refs/heads/x 1111111111111111111111111111111111111111 refs/heads/x 0000000000000000000000000000000000000000\n"
         self.assertEqual(self.run_hook("git-pre-push", stdin=refs).returncode, 1)
 
-    def test_pull_request_tool_is_gated(self):
+    def test_pull_request_tool_is_gated_under_any_mcp_server_name(self):
         self.write_qa(mode="block")
         self.break_source()
-        proc = self.run_hook("claude", {"tool_name": "mcp__github__create_pull_request",
-                                        "tool_input": {}, "cwd": str(self.root)})
-        self.assertEqual(proc.returncode, 2)
+        for tool in ("mcp__github__create_pull_request", "mcp__plugin_github_github__create_pull_request"):
+            proc = self.run_hook("claude", {"tool_name": tool, "tool_input": {}, "cwd": str(self.root)})
+            self.assertEqual(proc.returncode, 2, tool)
+        other = self.run_hook("claude", {"tool_name": "mcp__github__list_pull_requests",
+                                         "tool_input": {}, "cwd": str(self.root)})
+        self.assertEqual(other.returncode, 0)
+
+    def test_prefilter_skips_the_interpreter_for_ordinary_commands(self):
+        (self.root / "scripts/qa/finalise-gate.py").write_text("raise SystemExit(9)\n")
+        proc = self.run_hook("claude", {"tool_name": "Bash", "tool_input": {"command": "ls -la"},
+                                        "cwd": str(self.root)})
+        self.assertEqual(proc.returncode, 0)  # the broken interpreter path never ran
 
     def test_non_hand_off_never_runs_checks(self):
         self.write_qa(mode="block")
@@ -340,6 +349,9 @@ class UiSmokeSelectionTests(unittest.TestCase):
             "src/components/Button.tsx": None, "app/global-error.tsx": None,
             "app/ui/landing-page.tsx": None, "app/x/_components/page.tsx": None,
             "app/(.)photo/page.tsx": None, "app/@modal/settings/page.tsx": "/settings",
+            "e2e/pages/login-page.ts": None, "src/components/pages/Foo.tsx": None,
+            "pages/about.test.tsx": None, "apps/web/src/app/b/page.tsx": "/b",
+            "packages/site/pages/y.tsx": "/y", "foo/app/page.tsx": None,
         }
         got = self.node("Object.fromEntries(" + json.dumps(list(cases)) +
                         ".map((f) => [f, m.inferNextRoute(f)]))")
@@ -404,7 +416,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             return
         body = PAGES.get(self.path)
         self.send_response(200 if body else 404)
-        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Type", "text/javascript" if self.path.endswith(".js") else "text/html")
         self.end_headers()
         self.wfile.write((body or "missing").encode())
 
@@ -477,6 +489,30 @@ class UiSmokeBrowserTests(unittest.TestCase):
         self.assertTrue(app and all(h == "s3cret" for h in app), SEEN_HEADERS)
         self.assertTrue(third_party and all(h is None for h in third_party), SEEN_HEADERS)
         self.assertNotIn("s3cret", proc.stdout + proc.stderr)
+
+    def test_third_party_console_errors_are_not_app_failures(self):
+        other = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        threading.Thread(target=other.serve_forever, daemon=True).start()
+        self.addCleanup(other.shutdown)
+        PAGES["/widget.js"] = "console.error('third-party widget misconfigured')"
+        self.addCleanup(PAGES.pop, "/widget.js")
+        port = other.server_address[1]
+        PAGES["/3p"] = ("<!doctype html><html lang=en><head><title>t</title>"
+                        "<meta name=viewport content='width=device-width'>"
+                        f"<script src='http://localhost:{port}/widget.js'></script></head>"
+                        "<body><main>x</main><script>console.error('own app error')</script></body></html>")
+        self.addCleanup(PAGES.pop, "/3p")
+        proc = self.smoke("--routes", "/3p")
+        self.assertEqual(proc.returncode, 1, proc.stdout)
+        self.assertIn("own app error", proc.stdout)
+        self.assertNotIn("third-party widget", proc.stdout)
+
+    def test_unknown_launch_network_is_a_config_error(self):
+        (self.work / "config/qa.json").write_text(json.dumps(
+            {"schema_version": 1, "ui_smoke": {"launch": {"network": "slow-4g"}}}))
+        proc = self.smoke("--routes", "/")
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("launch.network", proc.stderr)
 
     def test_unreachable_server_is_reported_unavailable(self):
         proc = subprocess.run(["node", str(SMOKE), "--base-url", "http://127.0.0.1:9", "--routes", "/"],

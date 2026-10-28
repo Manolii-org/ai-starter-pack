@@ -24,7 +24,7 @@ per stop.
 
 | Host | Wiring (rendered by Copier; mirrored in the plugin) | Block signal |
 |---|---|---|
-| Claude Code | `.claude/settings.json` PreToolUse, matcher `Bash\|mcp__github__create_pull_request` | exit 2 + reason |
+| Claude Code | `.claude/settings.json` PreToolUse, matcher `Bash\|mcp__.*__create_pull_request` | exit 2 + reason |
 | Codex | `.codex/hooks.json` PreToolUse, matcher `^Bash$` (trust the hook once with `/hooks`) | exit 2 + reason |
 | Cursor (incl. cloud agents) | `.cursor/hooks.json` `beforeShellExecution`, matcher on `git push` / `gh pr create` | `{"permission":"deny","agent_message":…}` |
 | git (Devin, humans, any host) | `.githooks/pre-push`, `.husky/pre-push`, or `python3 scripts/qa/finalise-gate.py --install-git-hook` | non-zero exit |
@@ -34,9 +34,14 @@ Behaviour:
 - **No-op** unless `config/agent-checks.json` exists (the repository adopted
   agent validation), and for anything that is not a hand-off (`git push
   --dry-run`, ref deletions, every other command).
-- **Pass** → silent; the host's normal permission flow continues. Cursor
-  receives `allow` because its permission hooks need an answer; the matcher
-  limits that to push/PR commands.
+- **Pass** → silent; the host's normal permission flow continues. Cursor is
+  the exception: its permission hooks must answer, so commands its matcher
+  selects (any command mentioning `git … push` or `gh pr create`) receive
+  `allow` and are not additionally prompted. Teams that want a manual
+  confirmation before every Cursor push should keep that in Cursor's own
+  settings and remove the hook.
+- **Overhead**: about 5 ms per shell call. A shell prefilter skips the
+  interpreter unless the payload could be a hand-off.
 - **Check failure** → the failing check ids and the last 30 log lines go to
   the agent as model-visible context (`additionalContext` / `agent_message`).
   In `mode: warn` (the shipped default) the hand-off proceeds; in
@@ -86,7 +91,8 @@ fail fast when CI changes.
 fails on:
 
 - a document status of 400 or above, or a navigation failure;
-- an uncaught runtime error or a `console.error`;
+- an uncaught runtime error, or a `console.error` from the app's own origin
+  (errors logged by third-party scripts such as analytics or widgets are ignored);
 - a same-origin 5xx, or a broken script, stylesheet or font;
 - a missing `width=device-width` viewport, or horizontal overflow on mobile;
 - a `critical` or `serious` axe violation (WCAG 2.1 A/AA), checked once per route;
@@ -97,7 +103,10 @@ It writes a screenshot and an ARIA snapshot (`*.aria.yml`) per route into
 tokens than a screenshot when it checks structure.
 
 **Route selection (agent lane).** The recipe passes changed paths. Next.js
-`app/` and `pages/` files map to their route automatically. Dynamic routes
+`app/` and `pages/` files map to their route automatically. Only router
+roots at the repository root, under `src/`, or under a monorepo
+`apps/<name>/` or `packages/<name>/` count; `e2e/pages/` page objects and
+test/story files never become routes. Dynamic routes
 use `dynamic_samples`, e.g. `{"/blog/[slug]": "/blog/hello"}`. Other files
 use `routes[].sources` globs, then fall back to `always_routes`. The list is
 capped at `max_routes`, 6 by default.
@@ -112,8 +121,8 @@ watchdog if the run is killed outright.
 
 **Dependencies.** The app needs `playwright` and `axe-core` as
 devDependencies, plus `npx playwright install chromium`. When axe is not
-installed, `axe.required: true` fails the check rather than passing without
-it.
+installed, `axe.required: true` reports the smoke as unavailable (exit `3`)
+rather than passing without it.
 
 **Auth.** `storage_state` points at a saved Playwright storage state for a
 synthetic account. Never use real accounts.

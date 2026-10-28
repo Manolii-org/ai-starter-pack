@@ -267,7 +267,7 @@ def build_hooks_config() -> dict:
             "PreToolUse":   [
                 {"hooks": [cmd(f'python3 "{P}/scripts/pre-tool-use.py"', 5)]},
                 # Finalise gate: affected agent checks at the push / PR seam.
-                {"matcher": "Bash|mcp__github__create_pull_request",
+                {"matcher": "Bash|mcp__.*__create_pull_request",
                  "hooks": [cmd(f'sh "{P}/scripts/qa/finalise-gate.sh" claude', 1200)]},
             ],
             "SessionStart": [{"hooks": [cmd(
