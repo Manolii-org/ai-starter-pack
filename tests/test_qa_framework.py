@@ -371,6 +371,9 @@ class UiSmokeSelectionTests(unittest.TestCase):
         capped = select(["app/a/page.tsx", "app/b/page.tsx", "app/c/page.tsx"])
         self.assertEqual(capped["routes"], ["/a", "/b"])
         self.assertTrue(any("max_routes" in note for note in capped["notes"]))
+        everything = self.node(f"m.selectRoutes({json.dumps({**config, 'dynamic_samples': {'/blog/[slug]': '/blog/hello'}})}, "
+                               "{changed: [], all: true, routes: null})")
+        self.assertEqual(sorted(everything["routes"]), ["/", "/blog/hello", "/checkout"])
         dynamic = select(["app/blog/[slug]/page.tsx"])
         self.assertEqual(dynamic["routes"], ["/"])
         self.assertTrue(any("dynamic_samples" in note for note in dynamic["notes"]))

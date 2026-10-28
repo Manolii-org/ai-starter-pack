@@ -182,7 +182,10 @@ export function selectRoutes(config, args) {
   if (args.routes) return { routes: args.routes, notes: [] };
   const notes = [];
   if (args.all) {
-    const all = new Set([...config.always_routes, ...config.routes.map((r) => r.path)]);
+    // Every route the config names, including the concrete sample URLs that
+    // stand in for dynamic routes.
+    const all = new Set([...config.always_routes, ...config.routes.map((r) => r.path),
+      ...Object.values(config.dynamic_samples ?? {})]);
     return { routes: [...all], notes };
   }
   const selected = new Set();

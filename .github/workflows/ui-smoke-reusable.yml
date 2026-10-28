@@ -52,7 +52,7 @@ on:
         default: ''
         description: >-
           Comma-separated routes. Empty smokes every route in the config
-          (always_routes plus routes[].path).
+          (always_routes, routes[].path and the dynamic_samples URLs).
       profile:
         type: string
         required: false
