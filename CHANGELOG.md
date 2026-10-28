@@ -34,8 +34,11 @@
   4.5 at $0.30/$1.20); corrected, and Claude 5 prices added.
 - The session cost logger priced Claude 5 main threads at the Sonnet 4.6 rate,
   booked Claude 5 sub-agents at the Haiku proxy rate as proxy spend, and kept
-  Haiku at $0.30/$1.20. All its tables now use list prices, and a parity test
-  keeps the guard, proxy routes and cost logger prices in step.
+  Haiku at $0.30/$1.20; the `opus` and `fable` aliases were unpriced and
+  `sonnet` was always charged at the proxy's DeepSeek rate. Every model name
+  the guard accepts is now priced as the Anthropic model it resolves to (proxy
+  rates only when a proxy is active), and a parity test keeps the guard,
+  proxy routes and cost logger in step.
 
 ## 1.23.0 — 2026-10-27
 

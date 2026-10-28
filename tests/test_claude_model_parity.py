@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import json
 from pathlib import Path
 
 import yaml
@@ -24,8 +25,19 @@ def _literal(path: str, name: str):
     raise AssertionError(f"{name} not found in {path}")
 
 
+def _guard_anthropic_names() -> set[str]:
+    """Every model name the guard accepts as Anthropic: full IDs and aliases."""
+    return set(_literal("scripts/pre-tool-use.py", "ANTHROPIC_MODELS"))
+
+
 def _guard_claude_ids() -> set[str]:
-    return {m for m in _literal("scripts/pre-tool-use.py", "ANTHROPIC_MODELS") if m.startswith("claude-")}
+    return {m for m in _guard_anthropic_names() if m.startswith("claude-")}
+
+
+def _alias_resolution() -> dict[str, str]:
+    routing = json.loads((ROOT / ".claude/model-routing.json").read_text(encoding="utf-8"))
+    aliases = routing["platforms"]["claude_code"]["alias_resolution"]
+    return {k: v for k, v in aliases.items() if k != "note"}
 
 
 def _list_prices() -> dict[str, dict]:
@@ -33,8 +45,11 @@ def _list_prices() -> dict[str, dict]:
     return _literal("scripts/classify-message.py", "_PRICING_DEFAULT")
 
 
-def _cost_logger(monkeypatch):
-    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+def _cost_logger(monkeypatch, base_url: str | None = None):
+    if base_url is None:
+        monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    else:
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", base_url)
     spec = importlib.util.spec_from_file_location("session_cost_logger", ROOT / "scripts/session-cost-logger.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -67,3 +82,25 @@ def test_cost_logger_prices_match_list_prices(monkeypatch) -> None:
         sub = logger._SUBAGENT_PRICING[model]
         got = (round(sub["input"] * 1_000_000, 6), round(sub["output"] * 1_000_000, 6))
         assert got == (expected["in"], expected["out"]), model
+
+
+def test_every_accepted_name_is_priced_as_the_model_it_resolves_to(monkeypatch) -> None:
+    """Aliases the guard accepts (sonnet, opus, fable) and the haiku alias must be
+    priced as the Anthropic model they resolve to and counted as direct spend
+    when no proxy is active. Review rounds kept finding one more name unpriced."""
+    logger = _cost_logger(monkeypatch)
+    prices, aliases = _list_prices(), _alias_resolution()
+    for name in _guard_anthropic_names() | {"haiku"}:
+        expected = prices[aliases.get(name, name)]
+        sub = logger._SUBAGENT_PRICING[name]
+        got = (round(sub["input"] * 1_000_000, 6), round(sub["output"] * 1_000_000, 6))
+        assert got == (expected["in"], expected["out"]), name
+        if name not in PROXY_INTERCEPTED:
+            assert name in logger._ANTHROPIC_DIRECT_MODELS, name
+
+
+def test_proxy_intercepted_aliases_are_proxy_spend(monkeypatch) -> None:
+    logger = _cost_logger(monkeypatch, "https://litellm.example.test")
+    for alias in ("haiku", "sonnet"):
+        assert alias not in logger._ANTHROPIC_DIRECT_MODELS
+    assert logger._SUBAGENT_PRICING["sonnet"]["input"] == 0.30 / 1_000_000
