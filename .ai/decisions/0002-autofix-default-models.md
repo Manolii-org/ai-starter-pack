@@ -31,7 +31,9 @@ always wins.
 
 ### Negative
 - `tier-2-agentic` is capped at `internal` data sensitivity; repositories above
-  that must set a model.
+  that must set a model. Proxy-mode runs with no model previously failed before
+  sending anything; they now send PR context to a PRC-origin OSS model on
+  Fireworks. The CHANGELOG calls this out so consumers can set a model first.
 - Non-LiteLLM proxies do not know the alias and must set a model.
 - A behaviour change inside v1 (different model when unset); called out in the
   CHANGELOG.

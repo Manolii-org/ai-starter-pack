@@ -11,6 +11,12 @@
   usually cannot serve. Per-token cost falls by about 60% (direct) and 90%
   (proxy). Set a model explicitly if your code is above `internal`
   sensitivity or your proxy is not the pack's LiteLLM.
+  **Data routing:** in proxy mode with no model set, Autofix previously
+  failed before sending anything; it now sends PR context (diff, review
+  text, CI log excerpts) to `tier-2-agentic`, which is Kimi K2.6 (open
+  weights, PRC-origin, hosted on Fireworks; cleared for `internal` data
+  only). If that is not acceptable for a repository, set `model` /
+  `AUTOFIX_MODEL` (for example `claude-sonnet-5-5`) before upgrading.
 
 ## 1.23.0 — 2026-10-27
 
