@@ -82,16 +82,23 @@ def _tokens(command: str) -> list[str]:
 
 
 def _simple_commands(tokens: list[str]):
+    """Yield ("cmd", words) per simple command and ("open"|"close", None) at
+    each subshell boundary, so a `cd` inside `( … )` stays inside it."""
     current: list[str] = []
     for token in tokens:
         if token and all(c in _SEPARATORS for c in token):
             if current:
-                yield current
+                yield "cmd", current
             current = []
+            for char in token:
+                if char == "(":
+                    yield "open", None
+                elif char == ")":
+                    yield "close", None
         else:
             current.append(token)
     if current:
-        yield current
+        yield "cmd", current
 
 
 def _strip_wrappers(words: list[str]) -> tuple[list[str], bool]:
@@ -129,7 +136,19 @@ def _classify(command: str, cwd: str | None, result: dict, depth: int) -> None:
             result["trigger"] = result["trigger"] or "push"
             result["repo_dir"] = result["repo_dir"] or cwd
         return
-    for words in _simple_commands(tokens):
+    stack: list[str | None] = []
+    for kind, words in _simple_commands(tokens):
+        if kind == "open":
+            stack.append(cwd)  # a subshell's cd never escapes it
+            continue
+        if kind == "close":
+            cwd = stack.pop() if stack else cwd
+            continue
+        # Brace groups run in the current shell, so their cd persists.
+        while words and words[0] in ("{", "}"):
+            words = words[1:]
+        while words and words[-1] in ("{", "}"):
+            words = words[:-1]
         words, local_bypass = _strip_wrappers(list(words))
         if not words:
             continue
@@ -170,7 +189,7 @@ def _classify(command: str, cwd: str | None, result: dict, depth: int) -> None:
             option = words[index]
             if option in _GIT_VALUE_OPTS and index + 1 < len(words):
                 if option == "-C":
-                    repo_dir = os.path.join(repo_dir or "", words[index + 1])
+                    repo_dir = os.path.join(repo_dir or "", os.path.expanduser(words[index + 1]))
                 index += 2
                 continue
             index += 1

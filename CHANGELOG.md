@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Finalise gate targets the repository that is actually pushed.** A `cd`
+  inside a subshell no longer leaks into later commands, so
+  `(cd sub && make) && git push` validates the current repository rather than
+  `sub`. A `cd` inside a brace group (`{ cd sub; …; } && git push`) is now
+  followed, because it does persist. `git -C ~/path` expands `~`. Before this
+  fix, a nested repository could be validated in place of the pushed one.
+
 ## 1.24.0 — 2026-10-28
 
 Upgrade order for consumers:

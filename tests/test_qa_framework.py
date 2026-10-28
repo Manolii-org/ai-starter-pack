@@ -96,6 +96,12 @@ class ClassifyCommandTests(unittest.TestCase):
 
     def test_cd_selects_the_repository_that_is_pushed(self):
         self.assertEqual(self.classify("cd repoB && git push")["repo_dir"], "repoB")
+        # A subshell's cd never escapes it; a brace group's does.
+        self.assertIsNone(self.classify("(cd sub && make) && git push")["repo_dir"])
+        self.assertEqual(self.classify("(cd sub && git push)")["repo_dir"], "sub")
+        self.assertEqual(self.classify("cd sub; (cd deeper && ls); git push")["repo_dir"], "sub")
+        self.assertEqual(self.classify("{ cd sub; make; } && git push")["repo_dir"], "sub")
+        self.assertEqual(self.classify("git -C ~/proj push")["repo_dir"], os.path.expanduser("~/proj"))
         self.assertEqual(self.classify("cd a; cd b && git -C c push")["repo_dir"], os.path.join("a", "b", "c"))
 
 
