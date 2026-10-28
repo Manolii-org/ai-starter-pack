@@ -45,7 +45,9 @@ Legacy `manolii-org/master@v1` still serves `routing-lint` / `shared-config` unt
   place (some lanes check out `ref: v0.2.3`). New email-capture releases use the
   prefixed form only. Since `v0.2.4`, `await` and `release` must find the
   allocation in the same local registry `allocate` wrote — keep those steps in
-  one job (`docs/email-capture.md`).
+  one job (`docs/email-capture.md`). That document lists every legacy tag
+  with its commit and component; most legacy tags are lightweight, and
+  `v0.2.4`/`v0.2.5` sit on non-email-capture commits.
 
 Standalone by default: all external integrations (OSS routing, remote memory, browser automation, telemetry, cross-provider review) are feature-flagged off.
 
