@@ -142,6 +142,31 @@ flyctl deploy --app {YOUR_ORG}-gh-runner
 
 The runner will register with GitHub automatically and appear under Settings → Actions → Runners.
 
+## Runner version policy
+
+GitHub stops dispatching jobs to a self-hosted runner that has not installed a release
+within 30 days of its publication, and refuses registration below a minimum version
+(check GitHub's current runner documentation: the enforcement dates have moved before).
+The image above keeps the runner's own auto-update on, which satisfies this by default.
+A fleet that **disables** auto-update (to keep the baked runner authoritative) takes
+over the clock and needs three things, none of which is optional:
+
+1. **Pin the version and its tarball hash together**, changed by one tool, so a
+   half-bump cannot ship. Check the pin against GitHub's current registration minimum as
+   well, separately from release age: a pin can be young enough and still too old to
+   register a new or recreated runner. Keep the minimum in one named constant so it is
+   easy to update when GitHub changes it.
+2. **Measure the right age**: the age of the first release *newer than the pin*, not the
+   age of the pin. Warn well before the limit (for example 10 days) and fail loudly
+   with margin for a review and a rollout (for example 21 days). Treat "could not
+   decide" as a failure, never as healthy. These thresholds model the normal 30-day
+   window only; GitHub may require a critical security release sooner, which an age
+   check cannot detect, so read the runner release notes as well.
+3. **Track the rollout, not just the merge**: a tenant that cannot take the new image
+   (busy pool, provider account block) must stay visible and be retried automatically
+   (`docs/issue-lifecycle.md` § Pending state as a retry queue). A pin that is current
+   in git but not rolled is still out of date where it matters.
+
 ## Scaling
 
 To handle parallel CI jobs, scale to multiple machines:

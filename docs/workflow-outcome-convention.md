@@ -18,6 +18,28 @@ state change must not conclude `success` when that work was skipped.
 not the interface. A policy hold is operationally healthy but is not evidence
 that the held operation happened.
 
+## Retry polls for `DEFERRED` work
+
+A workflow may re-attempt `DEFERRED` work on a schedule. Keep the convention honest:
+
+- The **primary** attempt (the push, release or refresh that first could not do the
+  work) concludes non-success and opens one closed-loop tracking issue
+  (`docs/issue-lifecycle.md`).
+- A **poll** repeating a state that is already tracked and expected must still report
+  `DEFERRED`, never `EXECUTED`, but need not fail the scheduled run: a run that fails
+  every few hours is noise that hides real failures (and notifies whoever last edited
+  the schedule). Where the repository declares the outcome contract below, publish the
+  neutral `DEFERRED` check-run. Where a plain job conclusion is all the platform offers,
+  the job may pass only if its summary states `DEFERRED` and the tracking issue still
+  records it, so a green poll is never read as evidence the work happened. It must never
+  force the work: the poll re-runs the same verified gate.
+- A poll fails loudly when the outcome is anything other than the tracked, expected
+  state; when the tracked state is older than a stated threshold (the "needs a
+  human" bound); and whenever the tracking issue cannot be read or written.
+- Gate any downstream verification on the work step's **outcome**, not on job status:
+  with `continue-on-error` the job stays green and an implicit `success()` would
+  verify a target that was never changed.
+
 ## Contract and lint
 
 Repositories declare load-bearing jobs and an outcome reporter in
