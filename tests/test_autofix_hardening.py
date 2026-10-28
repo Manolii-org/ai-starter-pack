@@ -81,27 +81,46 @@ def test_execution_file_is_a_declared_action_output() -> None:
     assert "execution_file" in outputs
 
 
-MODEL_SOURCE = {"reusable": "inputs.model", "standalone": "vars.AUTOFIX_MODEL"}
+# Lean default per plane (ADR-0002); the CLI default without --model was Opus.
+MODEL_EXPR = {
+    "reusable": "inputs.model || (inputs.provider_mode == 'proxy' && 'tier-2-agentic' || 'claude-sonnet-5-5')",
+    "standalone": "vars.AUTOFIX_MODEL || (steps.cred.outputs.key_source == 'proxy' && 'tier-2-agentic' || 'claude-sonnet-5-5')",
+}
+
+
+def _resolve_model(explicit: str, proxy: bool) -> str:
+    """What MODEL_EXPR evaluates to under GitHub's `||`/`&&` semantics."""
+    return explicit or ("tier-2-agentic" if proxy else "claude-sonnet-5-5")
 
 
 def _render_claude_args(name: str, model: str) -> list[str]:
     """Render the GitHub expression, then tokenise like the action (shell-quote)."""
     args = _step(name, uses=ACTION)["with"]["claude_args"]
-    src = MODEL_SOURCE[name]
-    expr = f"${{{{ {src} != '' && format('--model \"{{0}}\"', {src}) || '' }}}}"
-    assert expr in args
-    rendered = args.replace(expr, f'--model "{model}"' if model else "")
-    return shlex.split(rendered)
+    expr = f"${{{{ {MODEL_EXPR[name]} }}}}"
+    assert f'--model "{expr}"' in args
+    return shlex.split(args.replace(expr, model))
 
 
 @pytest.mark.parametrize("name", sorted(WORKFLOWS))
-def test_claude_args_tokenise_with_and_without_model(name: str) -> None:
-    """The standalone needs a model too: a proxy serves only the ids it routes,
-    and without --model the agent asks for the CLI default (acceptance run on
-    PR #250 failed after one turn)."""
-    assert _render_claude_args(name, "") == ["--allowedTools", "Bash,Edit,Write,Read,Glob,Grep"]
-    assert _render_claude_args(name, "anthropic/claude-sonnet-4.5") == [
-        "--allowedTools", "Bash,Edit,Write,Read,Glob,Grep", "--model", "anthropic/claude-sonnet-4.5"]
+@pytest.mark.parametrize(("explicit", "proxy", "expected"), [
+    ("", True, "tier-2-agentic"),           # proven end to end on PR #255
+    ("", False, "claude-sonnet-5-5"),
+    ("anthropic/claude-sonnet-4.5", True, "anthropic/claude-sonnet-4.5"),
+    ("claude-haiku-5-5", False, "claude-haiku-5-5"),
+])
+def test_agent_always_gets_an_explicit_lean_model(name: str, explicit: str, proxy: bool, expected: str) -> None:
+    """Without --model the agent used the CLI default (claude-opus-5[1m]), the
+    most expensive option, and through a proxy it failed outright (PR #253)."""
+    assert _resolve_model(explicit, proxy) == expected
+    assert _render_claude_args(name, expected) == [
+        "--allowedTools", "Bash,Edit,Write,Read,Glob,Grep", "--model", expected]
+
+
+def test_reusable_anthropic_model_env_matches_the_model_flag() -> None:
+    """The pinned action passes ANTHROPIC_MODEL to the CLI and it wins over
+    --model (F2), so a mismatch would silently override the default."""
+    spec = yaml.safe_load(WORKFLOWS["reusable"].read_text(encoding="utf-8"))
+    assert spec["jobs"]["autofix"]["env"]["ANTHROPIC_MODEL"] == f"${{{{ {MODEL_EXPR['reusable']} }}}}"
 
 
 def test_standalone_lock_is_on_the_agent_job_and_never_cancels() -> None:
