@@ -61,7 +61,9 @@ Behaviour:
   any of them fails. Shell scoping (subshells, pipelines, quoting, `$( )`) is
   never re-implemented closely enough to pick just one, so a parsing gap
   cannot let the pushed repository skip validation. A typical command names
-  one repository; extra ones are cached runs.
+  one repository; extra ones are cached runs. Several candidates share one
+  1100 s budget, each still capped by its own `timeout_seconds`, so together
+  they finish inside the host's 1200 s hook timeout.
 - **Trust boundary**: the gate only runs recipes for a repository inside the
   opened workspace (`CLAUDE_PROJECT_DIR`, Cursor `workspace_roots`). When the
   host declares no root (Codex, or `CLAUDE_PROJECT_DIR` unset), the workspace

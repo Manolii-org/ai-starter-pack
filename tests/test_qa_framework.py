@@ -84,6 +84,10 @@ class ClassifyCommandTests(unittest.TestCase):
             self.assertEqual(info["trigger"], "push", command)
             self.assertIn(real, info["repo_dirs"], command)
         self.assertEqual(self.classify("git push")["repo_dirs"], [None])
+        # An unparseable inner `sh -c` still includes the starting directory.
+        unbalanced = self.classify("{ cd nested; } | cat; bash -c \"git push 'x\"")
+        self.assertEqual(unbalanced["trigger"], "push")
+        self.assertIn(None, unbalanced["repo_dirs"])
         self.assertEqual(self.classify("echo git push")["repo_dirs"], [])
 
     def test_inline_bypass_only_counts_when_it_reaches_the_hand_off(self):
@@ -306,6 +310,16 @@ class FinaliseGateTests(GateRepo):
                                         "tool_input": {"command": "{ cd nested; } | cat; git push"}})
         self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
         self.assertIn("value-check", proc.stderr)
+
+    def test_candidates_share_one_budget_inside_the_host_timeout(self):
+        self.write_qa(mode="block")
+        self.break_source()  # would deny if it ran
+        gate = load_gate()
+        decision, text = gate.gate_one(self.root, "claude", False, "push",
+                                       deadline=time.monotonic() - 1)
+        self.assertEqual(decision, "warn")
+        self.assertIn("FINALISE-GATE INCOMPLETE", text)
+        self.assertFalse((self.root / ".ai/agent-checks/finalise-gate.log").exists())
 
     def test_named_repo_outside_the_hook_directory_is_never_run_without_a_host_root(self):
         self.write_qa(mode="block")
