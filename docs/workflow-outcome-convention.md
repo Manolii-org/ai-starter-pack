@@ -72,7 +72,7 @@ outcome reporters can tell the two apart:
 | `coverage-ratchet-reusable` | `active`, `inert` | no committed baseline (`baseline_path`) | `fail_on_inert` or `require_baseline` |
 | `e2e-playwright-reusable` | `active`, `inert`, `unknown` | Playwright executed no test (all skipped, or none found); `unknown` when no reporter summary is readable | `fail_on_inert` |
 | `pr-autofix-loop-reusable` | `active`, `skipped` | never: missing credentials and an agent step that produced no execution already fail the job | none |
-| `secret-scan-reusable` | `npm_audit_activation` and `pip_audit_activation`, each `active`, `inert` | per audit: no root `package-lock.json` (npm), or no `requirements*.txt` / `pyproject.toml` (pip). The workflow is INERT for dependencies only when both are; Gitleaks always runs | `fail_on_inert` fails the `Dependency Vulnerability Audit` job when neither audit can run |
+| `secret-scan-reusable` | `npm_audit_activation` and `pip_audit_activation`, each `active`, `inert` | per audit: no root `package-lock.json` (npm), or no `requirements*.txt` / `uv.lock` (pip; a bare `pyproject.toml` still runs a fallback audit of the runner's own packages, so it reports `inert`). The workflow is INERT for dependencies only when both are; Gitleaks always runs | `fail_on_inert` fails the `Dependency Vulnerability Audit` job when neither audit can run |
 
 `secret-scan-reusable` warns `INERT` only when no dependency audit can run.
 A repository that legitimately has one ecosystem reports the other audit as
@@ -87,8 +87,9 @@ Reviewed and deliberately left without an activation output:
 - `restore-drill-reusable`: a drill that does not restore fails; there is no
   green no-op path.
 - `email-quality-reusable`: it runs only on default-branch push, schedule or
-  dispatch. On other events the job is `skipped`, which GitHub shows as
-  skipped rather than as a pass, and it is not intended as a PR check.
+  dispatch, and is not intended as a PR check. On other events the job is
+  `skipped`, and a skipped job **satisfies** a required status check, so never
+  bind it as one.
 
 Rules:
 

@@ -63,12 +63,37 @@ def test_active_is_set_only_by_the_step_that_audits(job: str) -> None:
     assert "activation=active" not in _step(job, "detect")["run"]
 
 
+def _pip_activation_block() -> str:
+    """The activation decision at the top of the pip audit step, runnable alone."""
+    run = _step("pip-audit", "audit")["run"]
+    start = run.index("if ls requirements*.txt")
+    return run[start:run.index("fi\n", start) + 3]
+
+
+@pytest.mark.parametrize(("files", "expected"), [
+    (("requirements.txt",), "active"),
+    (("pyproject.toml", "uv.lock"), "active"),
+    # Regression (review of this change): a bare pyproject.toml runs a
+    # fallback `pip-audit` that sees only the runner's own packages.
+    (("pyproject.toml",), "inert"),
+])
+def test_pip_reports_active_only_for_a_project_dependency_graph(tmp_path: Path, files, expected) -> None:
+    for name in files:
+        (tmp_path / name).write_text("", encoding="utf-8")
+    out = tmp_path / "github_output"
+    out.write_text("", encoding="utf-8")
+    proc = subprocess.run(["bash", "-e", "-c", _pip_activation_block()], cwd=tmp_path,
+                          env={**os.environ, "GITHUB_OUTPUT": str(out)}, capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    assert out.read_text().strip() == f"activation={expected}"
+
+
 def test_no_manifest_at_all_is_inert_and_warns(tmp_path: Path) -> None:
     proc, outputs = _detect(tmp_path, "npm-audit", ())
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert outputs == {"found": "false", "activation": "inert"}
     assert "::warning::secret-scan INERT: no package-lock.json, requirements*.txt or " \
-           "pyproject.toml" in proc.stdout
+           "uv.lock" in proc.stdout
 
 
 def test_fail_on_inert_fails_only_when_nothing_can_be_audited(tmp_path: Path) -> None:
@@ -79,16 +104,25 @@ def test_fail_on_inert_fails_only_when_nothing_can_be_audited(tmp_path: Path) ->
     assert "cannot fail" not in proc.stdout, "a failing run must not claim it cannot fail"
 
 
-@pytest.mark.parametrize("manifest", ["pyproject.toml", "requirements.txt", "requirements-dev.txt"])
-def test_python_only_repo_is_npm_inert_without_failing(tmp_path: Path, manifest: str) -> None:
-    proc, outputs = _detect(tmp_path, "npm-audit", (manifest,), fail_on_inert="true")
+@pytest.mark.parametrize("manifests", [("requirements.txt",), ("requirements-dev.txt",),
+                                       ("pyproject.toml", "uv.lock")])
+def test_python_only_repo_is_npm_inert_without_failing(tmp_path: Path, manifests) -> None:
+    proc, outputs = _detect(tmp_path, "npm-audit", manifests, fail_on_inert="true")
     assert proc.returncode == 0, proc.stdout
     assert outputs["activation"] == "inert"
     assert "::warning::" not in proc.stdout and "::error::" not in proc.stdout
 
 
+def test_tooling_only_pyproject_does_not_count_as_auditable(tmp_path: Path) -> None:
+    """A JS repo whose only Python file is tool config has nothing audited."""
+    proc, outputs = _detect(tmp_path, "npm-audit", ("pyproject.toml",), fail_on_inert="true")
+    assert proc.returncode == 1
+    assert outputs["activation"] == "inert"
+    assert "::error::secret-scan INERT" in proc.stdout
+
+
 def test_pnpm_repo_keeps_its_notice(tmp_path: Path) -> None:
-    proc, outputs = _detect(tmp_path, "npm-audit", ("pnpm-lock.yaml", "pyproject.toml"))
+    proc, outputs = _detect(tmp_path, "npm-audit", ("pnpm-lock.yaml", "requirements.txt"))
     assert proc.returncode == 0
     assert outputs["activation"] == "inert"
     assert "::notice::Skipping npm audit" in proc.stdout
