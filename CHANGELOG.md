@@ -61,7 +61,10 @@ Upgrade order for SDK consumers:
   on proxies that map it) also passed and is the documented budget override.
   Direct-key default and explicit `model` / `AUTOFIX_MODEL` overrides are
   unchanged. Data routing is unchanged: PRC-origin weights on US hosting,
-  `internal` data only.
+  `internal` data only. Proxies deployed from an older template do not have
+  the alias: Autofix checks the proxy's `/v1/models` list first and uses
+  `tier-2-agentic` there (with a notice) rather than failing. Redeploy the
+  proxy from this template to get M3.
 
 ### Fixed
 

@@ -635,7 +635,11 @@ not re-trigger PR checks.
 **Model (lean by default).** The agent always runs with an explicit model:
 the reusable's `model` input, or the standalone's repository variable
 `AUTOFIX_MODEL`; when unset, `tier-2-agentic-pro` through a proxy and
-`claude-sonnet-5-5` with a direct Anthropic key (ADR-0002). Releases up to
+`claude-sonnet-5-5` with a direct Anthropic key (ADR-0002). Before the run,
+Autofix reads the proxy's `/v1/models` list. If `tier-2-agentic-pro` is not
+listed (a proxy deployed from a template older than v1.24.1) or the list is
+unreachable, it uses `tier-2-agentic` and logs a notice instead of failing.
+Releases up to
 v1.23.0 fell back to the Claude Code CLI default (Opus), the most expensive
 option, which a proxy usually cannot serve.
 - `tier-2-agentic-pro` is the pack LiteLLM alias for MiniMax M3 (open
