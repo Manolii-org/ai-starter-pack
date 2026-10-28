@@ -533,7 +533,7 @@ jobs:
           # GITHUB_OUTPUT, so downstream steps re-select the secret by name.
           echo "key_source=$SOURCE" >> "$GITHUB_OUTPUT"
           # Lean default per plane (ADR-0002). A proxy deployed from a template
-          # older than v1.24.1 has no tier-2-agentic-pro alias, and asking for it
+          # older than v1.25.0 has no tier-2-agentic-pro alias, and asking for it
           # would fail the run, so it is used only when the proxy lists it.
           model="$EXPLICIT"
           if [ -z "$model" ] && [ "$SOURCE" != proxy ]; then model=claude-sonnet-5-5; fi
@@ -543,7 +543,7 @@ jobs:
             case "$models" in
               *'"tier-2-agentic-pro"'*) model=tier-2-agentic-pro ;;
               *) model=tier-2-agentic
-                 echo "::notice::The proxy does not list tier-2-agentic-pro; Autofix uses tier-2-agentic. Redeploy the proxy from the v1.24.1+ template, or set AUTOFIX_MODEL, to use MiniMax M3." ;;
+                 echo "::notice::The proxy does not list tier-2-agentic-pro; Autofix uses tier-2-agentic. Redeploy the proxy from the v1.25.0+ template, or set AUTOFIX_MODEL, to use MiniMax M3." ;;
             esac
           fi
           echo "model=$model" >> "$GITHUB_OUTPUT"

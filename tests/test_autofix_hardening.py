@@ -120,7 +120,7 @@ def _resolve(tmp_path: Path, name: str, explicit: str, proxy: bool, models: str 
 @pytest.mark.parametrize("name", sorted(WORKFLOWS))
 @pytest.mark.parametrize(("explicit", "proxy", "models", "expected"), [
     ("", True, LISTS_PRO, "tier-2-agentic-pro"),     # MiniMax M3; acceptance probe PR #265
-    ("", True, LISTS_OLD, "tier-2-agentic"),         # proxy from a pre-v1.24.1 template
+    ("", True, LISTS_OLD, "tier-2-agentic"),         # proxy from a pre-v1.25.0 template
     ("", True, None, "tier-2-agentic"),              # model list unreachable
     ("", False, LISTS_PRO, "claude-sonnet-5-5"),
     ("anthropic/claude-sonnet-4.5", True, LISTS_OLD, "anthropic/claude-sonnet-4.5"),
