@@ -128,13 +128,39 @@ def _strip_wrappers(words: list[str]) -> tuple[list[str], bool]:
     return words, bypass
 
 
+def _path_variants(base: str | None, target: str) -> list[str]:
+    """Join a cd/-C target, keeping literal and ~-expanded forms.
+
+    Quoting is lost in tokenizing and a quoted `~` is not expanded by the
+    shell, so both spellings are candidates; checking one extra repository
+    costs a cached run, missing the pushed one costs the gate its purpose.
+    """
+    forms = [target, os.path.expanduser(target)]
+    return list(dict.fromkeys(os.path.join(base or "", form) for form in forms))
+
+
+def _add_candidates(result: dict, *dirs: str | None) -> None:
+    for directory in dirs:
+        if directory not in result["_candidates"]:
+            result["_candidates"].append(directory)
+
+
 def _classify(command: str, cwd: str | None, result: dict, depth: int) -> None:
+    """Walk the simple commands of one shell string, recording hand-offs.
+
+    `cwd` is the best-guess directory (subshells scoped, brace groups kept).
+    Shell scoping has more corners than a tokenizer can see (quoted
+    parentheses, pipelines, `$( )`), so every directory the command names is
+    also recorded and the gate validates all of them; the guess only orders
+    them.
+    """
     try:
         tokens = _tokens(_HEREDOC.sub("", command))
     except ValueError:
         if _FALLBACK.search(command):
             result["trigger"] = result["trigger"] or "push"
             result["repo_dir"] = result["repo_dir"] or cwd
+            _add_candidates(result, cwd, *result["_seen"])
         return
     stack: list[str | None] = []
     for kind, words in _simple_commands(tokens):
@@ -168,7 +194,13 @@ def _classify(command: str, cwd: str | None, result: dict, depth: int) -> None:
         if head in ("cd", "pushd"):
             target = next((w for w in words[1:] if not w.startswith("-")), None)
             if target and target != "-":
-                cwd = os.path.join(cwd or "", os.path.expanduser(target))
+                variants = _path_variants(cwd, target)
+                # Unscoped chain too: if the scope guess is wrong, the
+                # directory the shell really ended in is still a candidate.
+                unscoped = result["_unscoped"]
+                result["_unscoped"] = _path_variants(unscoped, target)[-1]
+                result["_seen"].extend(variants + _path_variants(unscoped, target))
+                cwd = variants[-1]
             continue
         if head in _SHELLS and "-c" in words[1:] and depth < 3:
             index = words.index("-c", 1)
@@ -181,15 +213,18 @@ def _classify(command: str, cwd: str | None, result: dict, depth: int) -> None:
             result["trigger"] = result["trigger"] or "pr"
             result["repo_dir"] = result["repo_dir"] or cwd
             result["_handoffs"].append(bypassed)
+            _add_candidates(result, cwd, None, *result["_seen"])
             continue
         if head != "git":
             continue
-        index, repo_dir = 1, cwd
+        index, repo_dir, extra = 1, cwd, []
         while index < len(words) and words[index].startswith("-"):
             option = words[index]
             if option in _GIT_VALUE_OPTS and index + 1 < len(words):
                 if option == "-C":
-                    repo_dir = os.path.join(repo_dir or "", os.path.expanduser(words[index + 1]))
+                    variants = _path_variants(repo_dir, words[index + 1])
+                    extra.extend(variants)
+                    repo_dir = variants[-1]
                 index += 2
                 continue
             index += 1
@@ -204,10 +239,15 @@ def _classify(command: str, cwd: str | None, result: dict, depth: int) -> None:
         result["trigger"] = result["trigger"] or "push"
         result["repo_dir"] = result["repo_dir"] or repo_dir
         result["_handoffs"].append(bypassed)
+        _add_candidates(result, repo_dir, *extra, None, *result["_seen"])
 
 
 def classify_command(command: str) -> dict:
-    """Return {"trigger": None|"push"|"pr", "repo_dir": str|None, "bypass": bool}.
+    """Return {"trigger", "repo_dir", "repo_dirs", "bypass"} for one command.
+
+    `repo_dir` is the best guess at where the hand-off runs (None = the
+    starting directory); `repo_dirs` lists every candidate, best guess first,
+    and the gate validates each adopted repository among them.
 
     Only a real hand-off triggers the gate: dry runs and ref deletions do not.
     Quotes, heredoc bodies and command substitutions inside quotes are data,
@@ -217,10 +257,13 @@ def classify_command(command: str) -> dict:
     hand-off itself (a prefix on that command, or an earlier `export`). Unbalanced quoting falls back to a regex anchored
     at a command start.
     """
-    result = {"trigger": None, "repo_dir": None, "_handoffs": []}
+    result = {"trigger": None, "repo_dir": None, "_handoffs": [],
+              "_candidates": [], "_seen": [], "_unscoped": None}
     _classify(command or "", None, result, 0)
     handoffs = result.pop("_handoffs")
-    result.pop("_exported", None)
+    result["repo_dirs"] = result.pop("_candidates") if result["trigger"] else []
+    for key in ("_exported", "_seen", "_unscoped"):
+        result.pop(key, None)
     # Bypassed only when every hand-off in the command carries the bypass;
     # an assignment on some other command never reaches the push.
     result["bypass"] = bool(handoffs) and all(handoffs)
@@ -445,8 +488,8 @@ def within(root: Path, workspaces: list[Path]) -> bool:
     return any(resolved == ws or ws in resolved.parents for ws in workspaces)
 
 
-def hook_target(adapter: str, payload: dict) -> tuple[str | None, str | None, bool, str]:
-    """Return (trigger, start_dir, bypass, command) for a hook payload."""
+def hook_target(adapter: str, payload: dict) -> tuple[str | None, list[str | None], bool, str]:
+    """Return (trigger, candidate start dirs, bypass, command) for a hook payload."""
     if adapter == "cursor":
         command = str(payload.get("command") or "")
         roots = [r for r in payload.get("workspace_roots") or [] if isinstance(r, str) and r]
@@ -460,14 +503,14 @@ def hook_target(adapter: str, payload: dict) -> tuple[str | None, str | None, bo
         tool_input = payload.get("tool_input") or {}
         start = payload.get("cwd")
         if PR_TOOL.match(tool):
-            return "pr", start, False, tool
+            return "pr", [start], False, tool
         if tool != "Bash":
-            return None, start, False, ""
+            return None, [start], False, ""
         command = str(tool_input.get("command") or "") if isinstance(tool_input, dict) else ""
     info = classify_command(command)
-    if info["repo_dir"]:
-        start = os.path.join(start or os.getcwd(), info["repo_dir"])
-    return info["trigger"], start, info["bypass"], command
+    base = start or os.getcwd()
+    starts = [os.path.join(base, d) if d else base for d in info["repo_dirs"]] or [base]
+    return info["trigger"], starts, info["bypass"], command
 
 
 def emit(adapter: str, decision: str, text: str) -> int:
@@ -496,30 +539,31 @@ def emit(adapter: str, decision: str, text: str) -> int:
     return 0
 
 
-def gate(adapter: str, start: str | None, bypass_inline: bool, trigger: str,
-         workspaces: list[Path] | None = None) -> int:
-    root = git_toplevel(Path(start or os.getcwd()))
-    if root is None or not (root / "config" / "agent-checks.json").is_file():
-        return emit(adapter, "allow", "")
-    if not within(root, workspaces or []):
-        # A repository outside the opened workspace (a nested third-party
-        # clone elsewhere) is not trusted to run its recipes from a hook.
-        return emit(adapter, "allow", "")
-    provider = adapter if adapter in ("claude", "codex", "cursor") else (
-        os.environ.get("AGENT_PROVIDER", "unknown").strip() or "unknown")
-    if provider not in ("claude", "codex", "cursor", "devin", "unknown"):
-        provider = "unknown"
+def candidate_roots(starts: list[str | None], workspaces: list[Path]) -> list[Path]:
+    """Adopted repositories inside the workspace, deduplicated, in order."""
+    roots: list[Path] = []
+    for start in starts:
+        root = git_toplevel(Path(start or os.getcwd())) if start is None or Path(start).is_dir() else None
+        if (root is None or root in roots or not (root / "config" / "agent-checks.json").is_file()
+                or not within(root, workspaces)):
+            continue  # unadopted, or outside the opened workspace: never run
+        roots.append(root)
+    return roots
+
+
+def gate_one(root: Path, provider: str, bypass_inline: bool, trigger: str) -> tuple[str, str]:
+    """Validate one repository; return (allow|warn|deny, message)."""
     try:
         section, present = load_qa_config(root)
         mode, source = resolve_mode(section, present, bypass_inline)
     except ValueError as exc:
-        return emit(adapter, "allow", f"FINALISE-GATE INCOMPLETE: {exc}")
+        return "warn", f"FINALISE-GATE INCOMPLETE: {exc}"
     if mode == "off":
         if source in ("env", "inline"):
             record_bypass(root, provider, source)
         record(root, {"ts": time.time(), "provider": provider, "trigger": trigger,
                       "mode": mode, "outcome": "off", "source": source})
-        return emit(adapter, "allow", "")
+        return "allow", ""
     timeout = section.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)
     if not isinstance(timeout, int) or timeout <= 0:
         timeout = DEFAULT_TIMEOUT_SECONDS
@@ -529,11 +573,32 @@ def gate(adapter: str, start: str | None, bypass_inline: bool, trigger: str,
                   "outcome": result["outcome"], "duration_ms": result.get("duration_ms"),
                   "cached": result.get("cached"), "digest": result.get("digest")})
     if result["outcome"] == "pass":
-        return emit(adapter, "allow", "")
+        return "allow", ""
     text = message_for(result, provider, mode)
-    if result["outcome"] == "fail" and mode == "block":
+    return ("deny" if result["outcome"] == "fail" and mode == "block" else "warn"), text
+
+
+def gate(adapter: str, starts: list[str | None], bypass_inline: bool, trigger: str,
+         workspaces: list[Path] | None = None) -> int:
+    """Validate every adopted candidate repository; deny if any one denies.
+
+    A command usually names one repository. When it names several (cd into a
+    nested repo, `git -C`), each is checked, so a parsing gap can never let
+    the pushed repository skip validation.
+    """
+    provider = adapter if adapter in ("claude", "codex", "cursor") else (
+        os.environ.get("AGENT_PROVIDER", "unknown").strip() or "unknown")
+    if provider not in ("claude", "codex", "cursor", "devin", "unknown"):
+        provider = "unknown"
+    roots = candidate_roots(starts, workspaces or [])
+    outcomes = [(root, *gate_one(root, provider, bypass_inline, trigger)) for root in roots]
+    messages = [(f"[{root}] " if len(roots) > 1 else "") + text
+                for root, _decision, text in outcomes if text]
+    text = "\n\n".join(messages)
+    decisions = {decision for _root, decision, _text in outcomes}
+    if "deny" in decisions:
         return emit(adapter, "deny", text)
-    return emit(adapter, "warn", text)
+    return emit(adapter, "warn" if text else "allow", text)
 
 
 def git_pre_push() -> int:
@@ -541,7 +606,7 @@ def git_pre_push() -> int:
     lines = [line.split() for line in sys.stdin.read().splitlines() if line.strip()]
     if lines and all(len(p) >= 2 and set(p[1]) == {"0"} for p in lines):
         return 0  # every ref is a deletion
-    return gate("git-pre-push", os.getcwd(), False, "push")
+    return gate("git-pre-push", [os.getcwd()], False, "push")
 
 
 # ── git shim ────────────────────────────────────────────────────────────────
@@ -610,10 +675,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.hook == "git-pre-push":
         return git_pre_push()
     payload = read_payload()
-    trigger, start, bypass, _command = hook_target(args.hook, payload)
+    trigger, starts, bypass, _command = hook_target(args.hook, payload)
     if trigger is None:
         return emit(args.hook, "allow", "")
-    return gate(args.hook, start, bypass, trigger, workspaces_for(args.hook, payload))
+    return gate(args.hook, starts, bypass, trigger, workspaces_for(args.hook, payload))
 
 
 if __name__ == "__main__":
