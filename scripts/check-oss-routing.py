@@ -179,10 +179,10 @@ _HARDCODED_FALLBACKS: list[str] = [
     "claude-haiku-4-5-20251001-fireworks-fallback",
     "claude-haiku-4-5-20251001-groq-fallback",
     # tier-0-oss-heavy
-    "tier-0-oss-heavy-fallback-together",
+    "tier-0-oss-heavy-fallback-openrouter",
     "tier-0-oss-heavy-fallback-glm",
     # tier-1-fast
-    "tier-1-fast-fallback-together",
+    "tier-1-fast-fallback-openrouter",
     "tier-1-fast-fallback-groq",
     # tier-2-agentic
     "tier-2-agentic-fallback-kimi",
@@ -191,7 +191,7 @@ _HARDCODED_FALLBACKS: list[str] = [
     "tier-2-agentic-pro-fallback-openrouter",
     # tier-3-tool (2026-05-23: Gemma 4 31B primary; Kimi K2.6 PRC fallbacks)
     "tier-3-tool-fallback-kimi-fireworks",
-    "tier-3-tool-fallback-kimi-together",
+    "tier-3-tool-fallback-kimi-openrouter",
     # tier-3-tool-us fallbacks (v5.5.6 — all-US-origin chain; corrected gptoss20b→gptoss120b)
     "tier-3-tool-us-fallback-gptoss120b",
     "tier-3-tool-us-fallback-llama8b",
@@ -307,7 +307,7 @@ def _latency_threshold(alias: str) -> dict[str, int]:
     """Return latency thresholds for a given alias, with fallback headroom."""
     if alias in LATENCY_THRESHOLDS:
         return LATENCY_THRESHOLDS[alias]
-    # Derive from parent tier (e.g., "tier-1-fast-fallback-together" → "tier-1-fast")
+    # Derive from parent tier (e.g., "tier-1-fast-fallback-openrouter" → "tier-1-fast")
     for tier_name, thresholds in LATENCY_THRESHOLDS.items():
         if alias.startswith(tier_name):
             return {
