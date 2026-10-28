@@ -461,6 +461,15 @@ class UiSmokeBrowserTests(unittest.TestCase):
         self.assertIn("horizontal overflow", proc.stdout)
         self.assertIn("document HTTP 404", proc.stdout)
 
+    def test_broken_same_origin_image_fails(self):
+        PAGES["/img"] = ("<!doctype html><html lang=en><head><title>i</title>"
+                         "<meta name=viewport content='width=device-width'></head><body><main>"
+                         "<img alt='logo' src='/missing-logo.png'></main></body></html>")
+        self.addCleanup(PAGES.pop, "/img")
+        proc = self.smoke("--routes", "/img")
+        self.assertEqual(proc.returncode, 1, proc.stdout)
+        self.assertIn("image 404", proc.stdout)
+
     def test_missing_viewport_meta_is_a_mobile_failure(self):
         PAGES["/no-meta"] = "<!doctype html><html lang=en><head><title>x</title></head><body><main>x</main></body></html>"
         self.addCleanup(PAGES.pop, "/no-meta")

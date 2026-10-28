@@ -45,7 +45,8 @@
   current behaviour.
 - **`scripts/qa/ui-smoke.mjs`** checks the routes a change affects in real
   Chromium at 375px and 1280px. It fails on:
-  - HTTP errors, runtime or console errors, and broken same-origin assets;
+  - HTTP errors, runtime or console errors, and broken same-origin assets
+    (scripts, stylesheets, fonts and images);
   - mobile overflow, or a missing `width=device-width` viewport;
   - serious or critical axe violations.
 

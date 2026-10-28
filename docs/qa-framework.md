@@ -93,7 +93,7 @@ fails on:
 - a document status of 400 or above, or a navigation failure;
 - an uncaught runtime error, or a `console.error` from the app's own origin
   (errors logged by third-party scripts such as analytics or widgets are ignored);
-- a same-origin 5xx, or a broken script, stylesheet or font;
+- a same-origin 5xx, or a broken script, stylesheet, font or image;
 - a missing `width=device-width` viewport, or horizontal overflow on mobile;
 - a `critical` or `serious` axe violation (WCAG 2.1 A/AA), checked once per route;
 - with `--profile launch`, a slow-3G + 4× CPU mobile pass over its DOMContentLoaded or

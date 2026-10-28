@@ -289,7 +289,7 @@ async function ensureServer(root, config, baseUrl) {
 const trim = (text) => String(text).replace(/\s+/g, ' ').slice(0, ISSUE_CHARS);
 const slug = (route) => (route === '/' ? 'root' : route.replace(/^\//, '').replace(/[^A-Za-z0-9._-]+/g, '_'));
 
-async function checkPage(context, { route, viewport, baseUrl, config, axeSource, runAxe, launch, outDir }) {
+async function checkPage(context, { route, viewport, baseUrl, config, axeSource, primary, launch, outDir }) {
   const page = await context.newPage();
   const issues = [];
   const origin = new URL(baseUrl).origin;
@@ -321,7 +321,9 @@ async function checkPage(context, { route, viewport, baseUrl, config, axeSource,
     if (!sameOrigin(url) || requestIgnored(url) || response.request().isNavigationRequest()) return;
     const status = response.status();
     const type = response.request().resourceType();
-    if (status >= 500 || (status >= 400 && ['script', 'stylesheet', 'font'].includes(type))) {
+    // A missing image is as visible to a user as a missing script; fetch/xhr
+    // 4xx stay allowed because APIs answer 401/404 by design.
+    if (status >= 500 || (status >= 400 && ['script', 'stylesheet', 'font', 'image'].includes(type))) {
       issues.push(`${type} ${status}: ${trim(url)}`);
     }
   });
@@ -374,7 +376,7 @@ async function checkPage(context, { route, viewport, baseUrl, config, axeSource,
       if (!layout.responsive) issues.push('no responsive viewport meta (width=device-width): phones render a zoomed-out desktop layout');
       else if (layout.width - viewport.width > 2) issues.push(`horizontal overflow ${layout.width - viewport.width}px at ${viewport.width}px wide`);
     }
-    if (runAxe && axeSource) {
+    if (primary && axeSource) {
       await page.evaluate(axeSource);
       const result = await page.evaluate(async (tags) => window.axe.run(document, {
         runOnly: { type: 'tag', values: tags }, resultTypes: ['violations'],
@@ -387,7 +389,7 @@ async function checkPage(context, { route, viewport, baseUrl, config, axeSource,
     }
     const base = path.join(outDir, `${slug(route)}.${viewport.name}${launch ? '.launch' : ''}`);
     if (config.screenshots) await page.screenshot({ path: `${base}.png` }).catch(() => {});
-    if (config.aria_snapshots && runAxe && typeof page.locator('body').ariaSnapshot === 'function') {
+    if (config.aria_snapshots && primary && typeof page.locator('body').ariaSnapshot === 'function') {
       const aria = await page.locator('body').ariaSnapshot().catch(() => '');
       if (aria) fs.writeFileSync(`${base}.aria.yml`, aria.slice(0, 20000));
     }
@@ -470,10 +472,10 @@ async function main() {
       ? path.resolve(root, config.storage_state) : undefined;
     const plan = [];
     for (const route of routes) {
-      config.viewports.forEach((viewport, index) => plan.push({ route, viewport, runAxe: index === 0, launch: false }));
+      config.viewports.forEach((viewport, index) => plan.push({ route, viewport, primary: index === 0, launch: false }));
       if (args.profile === 'launch') {
         const mobile = config.viewports.find((v) => v.width <= 480) ?? config.viewports[0];
-        plan.push({ route, viewport: mobile, runAxe: false, launch: true });
+        plan.push({ route, viewport: mobile, primary: false, launch: true });
       }
     }
     for (const item of plan) {
