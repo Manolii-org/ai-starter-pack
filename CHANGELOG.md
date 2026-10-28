@@ -1,6 +1,21 @@
 # Changelog
 
-## Unreleased
+## 1.25.1 — 2026-10-28
+
+Upgrade order for consumers:
+
+1. Repositories whose Autofix runs through a LiteLLM proxy with no `model`
+   set: bump to v1.25.1. If the proxy was deployed from a template older
+   than v1.25.0, v1.25.0 made every Autofix run there fail on an unknown
+   model; v1.25.1 falls back to `tier-2-agentic`. Redeploy the proxy from
+   the current template to get MiniMax M3 (`tier-2-agentic-pro`).
+2. Pin every pack `uses:` to the v1.25.1 commit SHA, with a `# v1.25.1`
+   comment, in one PR. The Renovate preset's `manolii-ai-starter-pack` group
+   does this. Change any `pack_ref` input to the same release.
+
+No inputs were added, removed or renamed. The only behaviour change is the
+fallback above: on a proxy that lists `tier-2-agentic-pro`, v1.25.1 behaves
+exactly like v1.25.0.
 
 ### Fixed
 

@@ -53,7 +53,7 @@ Consumers pin pack reusables and actions by full commit SHA with a version
 comment:
 
 ```yaml
-uses: Manolii-org/ai-starter-pack/.github/workflows/secret-scan-reusable.yml@<40-hex-sha> # v1.25.0
+uses: Manolii-org/ai-starter-pack/.github/workflows/secret-scan-reusable.yml@<40-hex-sha> # v1.25.1
 ```
 
 Renovate's built-in `github-actions` manager already updates these pins (SHA
