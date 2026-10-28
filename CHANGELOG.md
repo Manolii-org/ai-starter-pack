@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Changed
+
+- **Model registry 5.10.0 and platform matrix.** Claude 5 family catalog with
+  list prices (catalog only, no re-routing); `platforms` refreshed for
+  Claude Code (including web: proxy routing is unavailable there), Cursor
+  Cloud Agents, Codex web and a new Devin entry, each with dated sources.
+- Proxy template: Anthropic passthrough routes for `claude-opus-5-5`,
+  `claude-sonnet-5-5` and `claude-haiku-5-5`.
+
+### Fixed
+
+- The pre-tool-use guard blocked protected sub-agents that asked for a
+  current Claude model (`claude-sonnet-5-5`, `fable`, …) as unregistered.
+- Cost estimates used wrong Anthropic prices (Opus 4.6/4.7 at $15/$75, Haiku
+  4.5 at $0.30/$1.20); corrected, and Claude 5 prices added.
+
 ## 1.23.0 — 2026-10-27
 
 Upgrade order for consumers:

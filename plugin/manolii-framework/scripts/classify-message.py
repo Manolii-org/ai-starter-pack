@@ -102,13 +102,22 @@ def _load_routing_config():
         "opus=MAIN THREAD ONLY — NEVER pass model=\"opus\" to any named sub-agent. "
         "Passing opus to a named sub-agent overrides its configured tier and wastes 5-16x cost."
     )
-    # Default pricing: Anthropic-published rates only
+    # Default pricing: Anthropic-published rates only (USD per million tokens,
+    # cached 2026-10-06). Short aliases carry the rate of the model they reach
+    # without a proxy (haiku -> Haiku 5.5); proxy rates come from the routing
+    # config (proxy_intercept_rates).
     _PRICING_DEFAULT = {
-        "claude-opus-4-7":           {"in": 15.00, "out": 75.00},
-        "claude-opus-4-6":           {"in": 15.00, "out": 75.00},
+        "claude-fable-5-1":          {"in": 10.00, "out": 50.00},
+        "claude-opus-5-5":           {"in":  4.00, "out": 20.00},
+        "claude-opus-5":             {"in":  5.00, "out": 25.00},
+        "claude-opus-4-7":           {"in":  5.00, "out": 25.00},
+        "claude-opus-4-6":           {"in":  5.00, "out": 25.00},
+        "claude-sonnet-5-5":         {"in":  2.00, "out": 10.00},
+        "claude-sonnet-5":           {"in":  2.00, "out": 10.00},
         "claude-sonnet-4-6":         {"in":  3.00, "out": 15.00},
-        "haiku":                     {"in":  0.30, "out":  1.20},
-        "claude-haiku-4-5-20251001": {"in":  0.30, "out":  1.20},
+        "claude-haiku-5-5":          {"in":  0.10, "out":  0.50},
+        "haiku":                     {"in":  0.10, "out":  0.50},
+        "claude-haiku-4-5-20251001": {"in":  1.00, "out":  5.00},
     }
     _PROXY_INTERCEPT_RATES_DEFAULT = {}
 
