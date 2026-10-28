@@ -25,8 +25,27 @@ Upgrade order for SDK consumers:
 3. The pack's Renovate preset keeps SDK upgrades on reviewed,
    dashboard-approved PRs. Prereleases are ignored.
 
+### Changed
+
+- **Autofix proxy default is now `tier-2-agentic-pro` (MiniMax M3).** With no
+  model set, proxy-mode Autofix uses MiniMax M3 on Fireworks ($0.30/$1.20 per
+  MTok) instead of `tier-2-agentic`. The pack LiteLLM template gains the
+  `tier-2-agentic-pro` route (fallbacks: M3 on OpenRouter, zero-data-retention
+  endpoints only, then Kimi K2.6 on Fireworks). M3 passed
+  the Autofix acceptance probe first time; `tier-1-fast` (DeepSeek V4.x Flash
+  on proxies that map it) also passed and is the documented budget override.
+  Direct-key default and explicit `model` / `AUTOFIX_MODEL` overrides are
+  unchanged. Data routing is unchanged: PRC-origin weights on US hosting,
+  `internal` data only.
+
 ### Fixed
 
+- **v1.24.0 overstated the Autofix saving.** Its notes called
+  `tier-2-agentic` Kimi K2.6 at $0.50/$2.80, "about 90% cheaper". The
+  template's K2.6 primary host (Together) no longer serves it, Fireworks K2.6
+  is $0.95/$4.00, and some proxies (including Manolii's) map the alias to
+  Kimi K3 at $3/$15, more per token than Sonnet 5.5. The registry price is
+  corrected and ADR-0002 is amended.
 - **Finalise gate targets the repository that is actually pushed.** A `cd`
   inside a subshell no longer leaks into later commands, so
   `(cd sub && make) && git push` validates the current repository rather than

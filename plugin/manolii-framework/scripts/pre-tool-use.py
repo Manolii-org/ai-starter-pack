@@ -292,6 +292,7 @@ OSS_TIER_ALIASES = {
     "tier-0-oss-heavy",
     "tier-1-fast",
     "tier-2-agentic",
+    "tier-2-agentic-pro",
     "tier-3-tool",
     "tier-3-tool-us",
     "tier-4-extract",

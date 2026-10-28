@@ -77,6 +77,7 @@ TIERS: list[str] = [
     "tier-0-oss-heavy",            # Kimi K2.6 on Fireworks
     "tier-1-fast",                 # DeepSeek V4 Flash on OpenRouter (2026-05-23 capability primary)
     "tier-2-agentic",              # Kimi K2.6 on Fireworks
+    "tier-2-agentic-pro",          # MiniMax M3 on Fireworks (Autofix proxy default)
     "tier-3-tool",                 # Gemma 4 31B on Together (2026-05-23 capability primary)
     "tier-3-tool-us",              # Gemma 4 31B on Together (US-origin chain)
     "tier-4-extract",              # DeepSeek V4 Flash on OpenRouter
@@ -149,6 +150,7 @@ LATENCY_THRESHOLDS: dict[str, dict[str, int]] = {
     "tier-3-tool":                 {"warn": 8000,  "fail": 20000},
     "tier-3-tool-us":              {"warn": 8000,  "fail": 20000},
     "tier-2-agentic":              {"warn": 10000, "fail": 25000},
+    "tier-2-agentic-pro":          {"warn": 15000, "fail": 30000},
     "tier-0-oss-heavy":            {"warn": 15000, "fail": 30000},
     "claude-haiku-4-5-20251001":   {"warn": 8000,  "fail": 20000},
     "haiku":                     {"warn": 8000,  "fail": 20000},
@@ -185,6 +187,8 @@ _HARDCODED_FALLBACKS: list[str] = [
     # tier-2-agentic
     "tier-2-agentic-fallback-kimi",
     "tier-2-agentic-fallback-fireworks",
+    # tier-2-agentic-pro (MiniMax M3 on a second provider)
+    "tier-2-agentic-pro-fallback-openrouter",
     # tier-3-tool (2026-05-23: Gemma 4 31B primary; Kimi K2.6 PRC fallbacks)
     "tier-3-tool-fallback-kimi-fireworks",
     "tier-3-tool-fallback-kimi-together",

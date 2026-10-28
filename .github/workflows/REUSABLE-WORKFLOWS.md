@@ -634,19 +634,27 @@ not re-trigger PR checks.
 
 **Model (lean by default).** The agent always runs with an explicit model:
 the reusable's `model` input, or the standalone's repository variable
-`AUTOFIX_MODEL`; when unset, `tier-2-agentic` through a proxy and
+`AUTOFIX_MODEL`; when unset, `tier-2-agentic-pro` through a proxy and
 `claude-sonnet-5-5` with a direct Anthropic key (ADR-0002). Releases up to
 v1.23.0 fell back to the Claude Code CLI default (Opus), the most expensive
 option, which a proxy usually cannot serve.
-- `tier-2-agentic` is the pack LiteLLM alias for Kimi K2.6 (open weights,
-  PRC-origin, hosted on Fireworks; `data_sensitivity_max: internal`). With
-  the default, proxy-mode Autofix sends PR context (diff, review text, CI
-  log excerpts) there. Repositories whose code is above `internal`, or that
-  must stay with Anthropic, must set a model explicitly.
+- `tier-2-agentic-pro` is the pack LiteLLM alias for MiniMax M3 (open
+  weights, PRC-origin, hosted on Fireworks; $0.30/$1.20 per MTok;
+  `data_sensitivity_max: internal`). With the default, proxy-mode Autofix
+  sends PR context (diff, review text, CI log excerpts) there. Repositories
+  whose code is above `internal`, or that must stay with Anthropic, must set
+  a model explicitly.
+- v1.24.0 defaulted to `tier-2-agentic`. On a proxy that maps that alias to
+  Kimi K3 ($3/$15), that default cost more per token than Sonnet 5.5; if you
+  pinned `tier-2-agentic` deliberately, check what your proxy serves.
+- `tier-1-fast` is the budget override on proxies that map it to a
+  DeepSeek V4.x Flash model (about a sixth of M3's price). It also passed the
+  acceptance probe, so set it when cost matters more than headroom on
+  multi-file fixes.
 - Other Anthropic-compatible proxies (for example OpenRouter) do not know
   pack aliases: set the model to an id that proxy routes.
-- `claude-haiku-5-5` is cheaper still and can be set explicitly; it has not
-  been accepted as a default for multi-file fixes yet.
+- `claude-haiku-5-5` is the cheap direct-key option; it has not been accepted
+  as a default for multi-file fixes yet.
 
 **PRs pushed by coding agents (opt-in).** Devin, Codex cloud tasks and Cursor
 Cloud Agents push as GitHub App bots, and Autofix skips bot actors by
