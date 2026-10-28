@@ -507,6 +507,15 @@ class UiSmokeBrowserTests(unittest.TestCase):
         self.assertIn("own app error", proc.stdout)
         self.assertNotIn("third-party widget", proc.stdout)
 
+    def test_launch_profile_enforces_the_lcp_budget(self):
+        (self.work / "config/qa.json").write_text(json.dumps({"schema_version": 1, "ui_smoke": {
+            "axe": {"enabled": False}, "viewports": [{"name": "mobile", "width": 375, "height": 700}],
+            "launch": {"max_lcp_ms": 1, "max_dom_content_loaded_ms": 60000}}}))
+        proc = self.smoke("--routes", "/", "--profile", "launch")
+        self.assertEqual(proc.returncode, 1, proc.stdout)
+        self.assertIn("LCP", proc.stdout)
+        self.assertIn("PASS / mobile", proc.stdout)  # only the throttled pass is over budget
+
     def test_unknown_launch_network_is_a_config_error(self):
         (self.work / "config/qa.json").write_text(json.dumps(
             {"schema_version": 1, "ui_smoke": {"launch": {"network": "slow-4g"}}}))

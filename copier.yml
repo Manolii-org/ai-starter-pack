@@ -372,6 +372,7 @@ _skip_if_exists:
   - config/qa.json
   - .cursor/hooks.json
   - .codex/hooks.json
+  - .githooks/pre-push
   - .claude/model-routing.json
   - .claude/mcp.json
   - .claude/hooks/session-start.sh

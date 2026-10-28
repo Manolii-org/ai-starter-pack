@@ -96,7 +96,9 @@ fails on:
 - a same-origin 5xx, or a broken script, stylesheet or font;
 - a missing `width=device-width` viewport, or horizontal overflow on mobile;
 - a `critical` or `serious` axe violation (WCAG 2.1 A/AA), checked once per route;
-- with `--profile launch`, a slow-3G + 4× CPU mobile pass over its DOMContentLoaded budget.
+- with `--profile launch`, a slow-3G + 4× CPU mobile pass over its DOMContentLoaded or
+  Largest Contentful Paint budget (`launch.max_dom_content_loaded_ms`, `launch.max_lcp_ms`).
+  This is a dependency-free Core Web Vitals budget; add Lighthouse CI only if you need its full audit.
 
 It writes a screenshot and an ARIA snapshot (`*.aria.yml`) per route into
 `.ai/agent-checks/ui-smoke/`. Reading the ARIA text costs an agent far fewer
@@ -117,7 +119,12 @@ group afterwards. If neither works, the result is `UI-SMOKE-UNAVAILABLE`, a
 failure while `on_unavailable` is `fail`. That failure exits `3`: CI fails on
 it, and the finalise gate reports it as incomplete rather than blocking. The
 dev server's process group is stopped on exit, on a signal, and by a
-watchdog if the run is killed outright.
+watchdog if the run is killed outright. Its output goes to
+`.ai/agent-checks/ui-smoke/server.log`; a server that will not start is
+reported with its last output lines. The `start_command` must not modify
+tracked files: agent-check fails a run whose inputs changed. Commit
+framework-generated files such as the `tsconfig.json` that `next dev`
+writes on its first run, or gitignore them, such as `next-env.d.ts`.
 
 **Dependencies.** The app needs `playwright` and `axe-core` as
 devDependencies, plus `npx playwright install chromium`. When axe is not
@@ -151,6 +158,16 @@ install or build. Callers:
 Make the preview smoke a required check only once it has been stable. A
 required check that flakes trains people to re-run it.
 
+Hosted monitoring-as-code (for example Checkly, whose browser checks are
+Playwright specs and which integrates with Vercel previews) is an
+alternative for L5. It is a vendor and cost decision for the owner; the
+scheduled reusable needs no new vendor.
+
+**Writing new e2e specs.** Playwright Test Agents (`npx playwright init-agents`,
+v1.56+) can draft a plan and specs for a new journey. Review generated specs
+like any code. Keep the healer local: self-healing selectors in CI can hide
+the regression the spec exists to catch.
+
 ## L3 / L4 — Personas
 
 Use `.claude/skills/exploratory-bug-bash`. It covers calibration with planted
@@ -171,7 +188,11 @@ gate a merge.
    and `start_command`.
 4. Add the preview `ui-smoke-reusable` caller. Set `fail_on_inert: true` on
    any e2e caller whose suite must never be empty.
-5. Plugin-only consumers get the Claude gate from the plugin. The same
+5. Install the Claude gate once. With both the plugin and a Copier-rendered
+   `.claude/settings.json`, it fires twice; the second run is a ~1s cache hit,
+   but pick one. Repositories with tracked symlinks never reuse a cached
+   pass, by agent-check's design, so a duplicate there repeats the full run.
+6. Plugin-only consumers get the Claude gate from the plugin. The same
    `config/agent-checks.json` and `config/qa.json` apply. A `ui-smoke`
    recipe needs the script in the repository: copy `scripts/qa/ui-smoke.mjs`
    or adopt through Copier.

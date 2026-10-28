@@ -35,7 +35,8 @@
     "launch": {
       "network": "slow-3g",
       "cpu_throttle": 4,
-      "max_dom_content_loaded_ms": 10000
+      "max_dom_content_loaded_ms": 10000,
+      "max_lcp_ms": 12000
     }
   }
 }
