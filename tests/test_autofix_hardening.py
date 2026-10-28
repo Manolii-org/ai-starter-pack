@@ -83,14 +83,14 @@ def test_execution_file_is_a_declared_action_output() -> None:
 
 # Lean default per plane (ADR-0002); the CLI default without --model was Opus.
 MODEL_EXPR = {
-    "reusable": "inputs.model || (inputs.provider_mode == 'proxy' && 'tier-2-agentic' || 'claude-sonnet-5-5')",
-    "standalone": "vars.AUTOFIX_MODEL || (steps.cred.outputs.key_source == 'proxy' && 'tier-2-agentic' || 'claude-sonnet-5-5')",
+    "reusable": "inputs.model || (inputs.provider_mode == 'proxy' && 'tier-2-agentic-pro' || 'claude-sonnet-5-5')",
+    "standalone": "vars.AUTOFIX_MODEL || (steps.cred.outputs.key_source == 'proxy' && 'tier-2-agentic-pro' || 'claude-sonnet-5-5')",
 }
 
 
 def _resolve_model(explicit: str, proxy: bool) -> str:
     """What MODEL_EXPR evaluates to under GitHub's `||`/`&&` semantics."""
-    return explicit or ("tier-2-agentic" if proxy else "claude-sonnet-5-5")
+    return explicit or ("tier-2-agentic-pro" if proxy else "claude-sonnet-5-5")
 
 
 def _render_claude_args(name: str, model: str) -> list[str]:
@@ -103,7 +103,7 @@ def _render_claude_args(name: str, model: str) -> list[str]:
 
 @pytest.mark.parametrize("name", sorted(WORKFLOWS))
 @pytest.mark.parametrize(("explicit", "proxy", "expected"), [
-    ("", True, "tier-2-agentic"),           # proven end to end on PR #255
+    ("", True, "tier-2-agentic-pro"),       # MiniMax M3; acceptance probe PR #265
     ("", False, "claude-sonnet-5-5"),
     ("anthropic/claude-sonnet-4.5", True, "anthropic/claude-sonnet-4.5"),
     ("claude-haiku-5-5", False, "claude-haiku-5-5"),

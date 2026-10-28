@@ -181,6 +181,7 @@ print('OK' if c.strip() else 'FAIL')" 2>/dev/null || echo "UNREACHABLE")
 }
 
 [ -n "$FIREWORKS_KEY"   ] && _smoke_test "tier-1-fast"
+[ -n "$FIREWORKS_KEY"   ] && _smoke_test "tier-2-agentic-pro"
 [ -n "$TOGETHER_KEY"   ] && _smoke_test "tier-2-agentic"
 [ -n "$OPENROUTER_KEY" ] && _smoke_test "tier-3-tool"
 [ -n "$GROQ_KEY"       ] && _smoke_test "tier-4-extract"
