@@ -188,8 +188,9 @@ def test_documented_caller_never_cancels_an_agent_in_progress() -> None:
 @pytest.mark.parametrize("name", sorted(WORKFLOWS))
 def test_relay_bot_is_allowed_and_other_actors_skip_before_dispatch(name: str) -> None:
     step = _step(name, uses=ACTION)
-    assert step["with"]["allowed_bots"] == "github-actions"
+    assert step["with"]["allowed_bots"].endswith("|| 'github-actions' }}")  # relay even if the list is unset
     gate = _step(name, title="Determine skip conditions")
+    assert 'allowed_bots="github-actions"\n' in gate["run"]  # relay first; opt-in agent bots appended
     assert gate["env"]["WR_ACTOR"] == "${{ github.event.workflow_run.actor.login || '' }}"
     run = gate["run"]
     assert '"$who" == "github-actions[bot]" && "$EVENT_NAME" == "issue_comment"' in run
@@ -429,3 +430,117 @@ def test_surface_check_fails_closed_when_commits_cannot_be_listed(name: str, tmp
 def test_surface_check_reads_rename_sources() -> None:
     run = _step("reusable", title=SURFACE_CHECK)["run"]
     assert ".previous_filename // empty" in run
+
+
+TRUSTED_SOURCE = {"reusable": "inputs.trusted_agent_bots", "standalone": "vars.AUTOFIX_TRUSTED_AGENT_BOTS"}
+
+
+def _trusted_bot_fn(name: str) -> str:
+    """The sanitiser, the matcher and the allowed_bots output line, as shipped."""
+    run = _step(name, title="Determine skip conditions")["run"]
+    start = run.index("trusted_bots() {")
+    end = run.index('>> "$GITHUB_OUTPUT"\n', run.index("trusted_bot() {"))
+    return run[start:end + len('>> "$GITHUB_OUTPUT"\n')]
+
+
+@pytest.mark.parametrize("name", sorted(WORKFLOWS))
+def test_trusted_agent_bots_are_opt_in_and_ci_failure_only(name: str) -> None:
+    """Devin, Codex cloud and Cursor background agents push as bots; Autofix
+    skipped them unconditionally. The allowlist is opt-in, applies only to the
+    workflow_run (CI failure) path, and reaches the action's allowed_bots."""
+    src = TRUSTED_SOURCE[name]
+    gate = _step(name, title="Determine skip conditions")
+    assert gate["env"]["TRUSTED_BOTS"] == f"${{{{ {src} }}}}"
+    assert ('if [[ "$EVENT_NAME" == "workflow_run" && "$who" == *"[bot]" ]] && trusted_bot "$who"; then'
+            in gate["run"])
+    allowed = _step(name, uses=ACTION)["with"]["allowed_bots"]
+    # Never the raw value: only the preflight's sanitised list reaches the action.
+    assert src not in allowed
+    if name == "standalone":
+        assert allowed == "${{ needs.preflight.outputs.allowed_bots || 'github-actions' }}"
+        spec = yaml.safe_load(WORKFLOWS[name].read_text(encoding="utf-8"))
+        assert spec["jobs"]["preflight"]["outputs"]["allowed_bots"] == "${{ steps.pr.outputs.allowed_bots }}"
+    else:
+        assert allowed == "${{ steps.pr.outputs.allowed_bots || 'github-actions' }}"
+
+
+def test_trusted_bot_matcher_is_identical_in_both_workflows() -> None:
+    assert _trusted_bot_fn("standalone") == _trusted_bot_fn("reusable")
+
+
+@pytest.mark.parametrize(("bots", "who", "trusted"), [
+    ("", "devin-ai-integration[bot]", False),                                  # off by default
+    ("devin-ai-integration[bot]", "devin-ai-integration[bot]", True),
+    ("Devin-AI-Integration", "devin-ai-integration[bot]", True),               # action-style match
+    (" cursor[bot] , chatgpt-codex-connector[bot] ", "chatgpt-codex-connector[bot]", True),
+    ("cursor[bot]", "devin-ai-integration[bot]", False),
+    ("*", "devin-ai-integration[bot]", False),                                 # wildcard never honoured
+    ("devin", "devin-ai-integration[bot]", False),                             # no prefix matching
+    (",,", "github-actions[bot]", False),
+])
+def test_trusted_bot_matcher(bots: str, who: str, trusted: bool, tmp_path) -> None:
+    script = "set -euo pipefail\n" + _trusted_bot_fn("reusable") + 'trusted_bot "$WHO"\n'
+    env = {**os.environ, "TRUSTED_BOTS": bots, "WHO": who, "EVENT_NAME": "workflow_run",
+           "GITHUB_OUTPUT": str(tmp_path / "out")}
+    result = subprocess.run(["bash", "-c", script], env=env)
+    assert (result.returncode == 0) is trusted
+
+
+@pytest.mark.parametrize(("bots", "allowed"), [
+    ("", "github-actions"),
+    ("*", "github-actions"),                                                  # wildcard never reaches the action
+    (" Devin-AI-Integration[bot] , * ,cursor", "github-actions,devin-ai-integration,cursor"),
+    ("devin ai, cursor ", "github-actions,cursor"),                          # embedded space: dropped, not joined
+    ("x;rm -rf /,$(id),evil\nallowed_bots=*", "github-actions,evil"),
+])
+def test_allowed_bots_output_is_sanitised(bots: str, allowed: str, tmp_path) -> None:
+    out = tmp_path / "out"
+    script = "set -euo pipefail\n" + _trusted_bot_fn("reusable")
+    env = {**os.environ, "TRUSTED_BOTS": bots, "EVENT_NAME": "workflow_run", "GITHUB_OUTPUT": str(out)}
+    subprocess.run(["bash", "-c", script], env=env, check=True)
+    assert out.read_text() == f"allowed_bots={allowed}\n"
+
+
+@pytest.mark.parametrize("name", sorted(WORKFLOWS))
+@pytest.mark.parametrize("event", ["issue_comment", "pull_request_review", "pull_request_review_comment"])
+def test_agent_bots_reach_the_action_only_on_workflow_run(name: str, event: str, tmp_path) -> None:
+    """A trusted bot with write access passes the collaborator check on comment
+    and review triggers too; the action's allowed_bots must not accept it there."""
+    out = tmp_path / "out"
+    script = "set -euo pipefail\n" + _trusted_bot_fn(name)
+    env = {**os.environ, "TRUSTED_BOTS": "devin-ai-integration[bot]", "EVENT_NAME": event,
+           "GITHUB_OUTPUT": str(out)}
+    subprocess.run(["bash", "-c", script], env=env, check=True)
+    assert out.read_text() == "allowed_bots=github-actions\n"
+
+
+def test_reusable_checks_head_repo_identity_on_every_trigger() -> None:
+    """The reusable compared repo IDs only on review/comment triggers and relied
+    on workflow_run.head_repository.fork for CI failures. A caller that is itself
+    a fork receives upstream PRs with fork=false, so a cross-repo head reached
+    the privileged checkout; opted-in agent bots widened that path."""
+    run = _step("reusable", title="Resolve PR number and head ref")["run"]
+    check = run.index("SAME=$(timeout -k 5 30 gh api")
+    assert '"$EVENT_NAME" != "workflow_run"' not in run[:check]
+    assert ".head.repo.id == .base.repo.id" in run[check:]
+    assert run.index('if [[ "$SAME" != "true" ]]') < run.index('echo "skip=false"')
+
+
+@pytest.mark.parametrize("name", sorted(WORKFLOWS))
+@pytest.mark.parametrize(("head_id", "skipped"), [("42", False), ("7", True), ("", True)])
+def test_workflow_run_head_repository_must_be_this_repository(name: str, head_id: str, skipped: bool,
+                                                              tmp_path) -> None:
+    """The triggering run is bound to this repository by ID before any trusted-bot
+    gate; .fork alone misses a PR from the upstream of a forked deployment."""
+    step = _step(name, title="Resolve PR number and head ref")
+    assert step["env"]["WR_HEAD_REPO_ID"] == "${{ github.event.workflow_run.head_repository.id || '' }}"
+    assert step["env"]["REPO_ID"] == "${{ github.event.repository.id }}"
+    run = step["run"]
+    cut = run.rindex("\n", 0, run.index('PR_NUM="${WR_PR_NUM}"')) + 1
+    script = run[:cut] + "  echo reached\nfi\n"
+    out = tmp_path / "out"
+    env = {**os.environ, "EVENT_NAME": "workflow_run", "WR_FORK": "false", "WR_HEAD_REPO_ID": head_id,
+           "REPO_ID": "42", "GITHUB_OUTPUT": str(out)}
+    result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, check=True)
+    assert ("reached" not in result.stdout) is skipped
+    assert ("skip=true" in (out.read_text() if out.exists() else "")) is skipped
