@@ -1,6 +1,7 @@
 # Pre-PR Quality Gate
 
-> Complete all checks below before creating any PR.
+> Complete the pre-creation checks below before creating any PR.
+> After creation, verify the submitted body as required in section 0b.
 > Skipping this gate is the single largest source of avoidable review cycles.
 
 ## 0. Check for Coverage Gaps
@@ -19,6 +20,19 @@ For each bypassed specialist scope in recent commits, apply the manual check:
 | `docs-fact-check` | Complete Step 2 (Cross-Check Documentation) |
 | `migration-safety` | Verify rollback file, BEGIN/COMMIT wrapper, IF NOT EXISTS guards |
 | `security-deep-dive` | Manually trace all input boundaries for unsanitised interpolation |
+
+## 0b. Populate the Repository PR Template
+
+Before creating a PR, read the repository's applicable PR template and fill in
+its required sections. This also applies when using a GitHub API or MCP tool:
+a supplied `body` must include the completed template; do not assume the client
+will insert it automatically. Use the repository's current template rather than
+a remembered or generic description.
+
+Keep scope, do-not-touch constraints, success criteria, test results, merge danger
+and rollback specific to the final diff. Mark unavailable checks honestly.
+Verify the submitted body after creation. Preserve any explicit hold on an
+existing PR; a template correction does not authorize changing or merging it.
 
 ## 1. Self-Review the Diff
 
