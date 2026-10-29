@@ -83,6 +83,10 @@ def test_floor_reads_the_whole_workflow_not_just_the_hunk(tmp_path: Path) -> Non
     "- run: helm upgrade --install app ./chart\n",
     "- run: terraform apply -auto-approve\n",
     "- run: az containerapp update -n app\n",
+    # Codex review: global options before the operation.
+    "- run: terraform -chdir=infra apply\n",
+    "- run: aws --region us-east-1 ecs update-service --cluster c\n",
+    "- run: kubectl --context prod apply -f k8s/\n",
 ])
 def test_floor_catches_every_deploy_shape(tmp_path: Path, body: str) -> None:
     cls = _classifier()

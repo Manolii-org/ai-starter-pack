@@ -579,11 +579,12 @@ def _parse_manifest(raw: str) -> dict:
 # runs the review every workflow got before RULE 1 was narrowed; a false
 # negative would drop it, so the marker deliberately errs broad.
 _WORKFLOW_PATH = re.compile(r"(?:^|/)\.github/workflows/[^/]+\.ya?ml$")
+# Match the tool, not its subcommand: a workflow that invokes a deploy-capable
+# CLI at all might deploy, and subcommand patterns miss global options placed
+# first (`terraform -chdir=x apply`, `aws --region r ecs update-service`).
 _DEPLOY_MARKER = re.compile(
-    r"deploy|\bfly(?:ctl)?\s+(?:secrets|scale|machines?)\b"
-    r"|\bkubectl\s+(?:apply|replace|patch|set|rollout|scale)\b|\bhelm\s+(?:upgrade|install|rollback)\b"
-    r"|\bterraform\s+apply\b|\bpulumi\s+up\b|\baws\s+\S+\s+update-"
-    r"|\baz\s+(?:\S+\s+){1,2}(?:update|up)\b|\bgcloud\s+(?:\S+\s+){1,3}(?:update|replace)\b",
+    r"deploy|(?<![\w./-])(?:fly|flyctl|kubectl|helm|kustomize|argocd|terraform|tofu|pulumi"
+    r"|aws|az|gcloud|vercel|netlify|wrangler|heroku|railway|cdk|sam|serverless)(?=\s|$)",
     re.I)
 
 
