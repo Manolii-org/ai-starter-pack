@@ -14,10 +14,13 @@
 - **PR Assessment no longer sends every workflow change to
   `systems-consistency`.** That agent checks the deployment surface (Fly
   config, deploy scripts, the CD workflow that applies them). RULE 1 of
-  `pr-classifier` now selects it only when a PR changes `deploy/**`, a
-  `fly.toml`, or a workflow that deploys or might. That covers deploy
-  commands, a `uses:` of a deploying action or reusable workflow, and edits
-  to such a workflow; when unsure, it still runs. Before this, CI-only workflow
+  `pr-classifier` now selects it only when a PR changes `deploy/**` or a
+  workflow that deploys or might. That covers deploy commands, a `uses:` of a
+  deploying action or reusable workflow, and edits to such a workflow; when
+  unsure, it still runs. The model sees only diff hunks, so
+  `run-pr-classifier.py` also reads each changed workflow in full, plus its
+  removed lines, and adds the agent itself when any non-comment line could
+  deploy. That floor can only add the review, never drop it. Before this, CI-only workflow
   edits (scans, lint, review automation) ran it without those files. Every
   check came back "could not be evaluated", and the Judge then truncated
   adjudicating those notes, so the PR got "assessment error" (#252). Such

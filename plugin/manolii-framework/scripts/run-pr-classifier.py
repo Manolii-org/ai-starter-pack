@@ -571,6 +571,49 @@ def _parse_manifest(raw: str) -> dict:
     return last_shaped
 
 
+# RULE 1 floor. The model sees only diff hunks, so an edit to a workflow that
+# also deploys elsewhere in the file could look CI-only. This deterministic
+# check reads the whole changed workflow (and the removed lines) and forces
+# systems-consistency when any non-comment line could deploy. It can only add
+# the agent, never remove it, so a false positive just runs the review.
+_WORKFLOW_PATH = re.compile(r"(?:^|/)\.github/workflows/[^/]+\.ya?ml$")
+_DEPLOY_MARKER = re.compile(r"deploy|\bfly(?:ctl)?\s+(?:secrets|scale|machines?)\b", re.I)
+
+
+def _deploy_lines(text: str) -> bool:
+    return any(_DEPLOY_MARKER.search(line) for line in text.splitlines()
+               if not line.lstrip().lstrip("+-").lstrip().startswith("#"))
+
+
+def _deploying_workflows(sections: dict[str, list[str]], repo_root: pathlib.Path) -> list[str]:
+    """Changed workflow paths whose full head file or diff lines could deploy."""
+    found = []
+    for path, texts in sorted(sections.items()):
+        if not _WORKFLOW_PATH.search(path):
+            continue
+        changed = "\n".join(line for text in texts for line in text.splitlines()
+                             if line[:1] in "+-" and not line.startswith(("+++", "---")))
+        try:
+            head = (repo_root / path).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            head = ""
+        if _deploy_lines(changed) or _deploy_lines(head):
+            found.append(path)
+    return found
+
+
+def _apply_deploy_floor(manifest: dict, deploying: list[str]) -> dict:
+    if not deploying or "systems-consistency" in manifest.get("invoke_agents", []):
+        return manifest
+    floored = dict(manifest)
+    floored["invoke_agents"] = [*manifest.get("invoke_agents", []), "systems-consistency"]
+    floored["depth"] = "broad"
+    floored["reason"] = (f"{manifest.get('reason', '')}; RULE 1 floor: deploying workflow "
+                         + ", ".join(deploying[:5])).lstrip("; ")
+    print(f"[classifier] RULE 1 floor added systems-consistency for {deploying[:5]}")
+    return floored
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Stage 0: classify PR diff.")
     parser.add_argument("--diff", default=os.path.join(tempfile.gettempdir(), "pr.diff"), help="Path to PR diff file")
@@ -667,6 +710,7 @@ def main() -> None:
     # Parse `diff --git` headers: `+++ b/` misses deletions (`+++ /dev/null`)
     # and renames.
     changed_paths = set()
+    workflow_sections: dict[str, list[str]] = {}
     # --- a/, +++ b/, "rename from/to" lines: Git does NOT quote spaces, so
     # `diff --git` regexes drop spaced paths; these lines never do. /dev/null is
     # the absent side of an add/delete — skip it, keep the real path (a dropped
@@ -701,6 +745,8 @@ def main() -> None:
             if _hm:
                 _paths.add(_hm.group(1))
         changed_paths |= _paths
+        for _p in _paths:
+            workflow_sections.setdefault(_p, []).append(_sec)
     changed_paths = sorted(changed_paths)
     def _categories(p: str) -> list[int]:
         return [
@@ -893,6 +939,8 @@ def main() -> None:
             sys.exit(1)
         print(f"[classifier] Failed ({exc}), using fallback manifest")
         manifest = _FALLBACK_MANIFEST
+
+    manifest = _apply_deploy_floor(manifest, _deploying_workflows(workflow_sections, pathlib.Path.cwd()))
 
     out = pathlib.Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
