@@ -80,3 +80,20 @@ M3 is an agentic-class model with vendor-reported SWE-bench Verified ~85 and
 1M context; V4.1 Flash is the documented budget override. Luna is not
 reliable enough to be a default yet. One run per model on a small fixture is
 weak evidence: the 30-day review re-checks real Autofix outcomes.
+
+## Amendment 2026-10-29 — no Anthropic API models adopted
+
+**Decision (owner).** The pack adopts no new Anthropic API model, and does
+not route Anthropic models through its open-weights aliases. Concretely:
+
+- The direct-key default is not moved to `claude-haiku-5-5`, and no
+  direct-key acceptance run will be done for it. `claude-sonnet-5-5` stays
+  the default only for repositories that choose direct mode with their own
+  Anthropic key; the pack's recommended plane is proxy mode with an
+  open-weights model.
+- The `haiku` and `tier-1-fast` aliases stay on open-weights models; they
+  are not re-routed to Anthropic's `claude-haiku-5-5`, even though its list
+  price is lower than the template's current `haiku` backend.
+
+The 30-day review (#258) drops its Haiku 5.5 question and keeps the failure
+rate and cost per fix checks.

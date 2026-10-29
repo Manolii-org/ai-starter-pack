@@ -59,6 +59,8 @@ action passes it to the CLI and it overrides `--model`.
 
 Whether `claude-haiku-5-5` should replace `claude-sonnet-5-5` as the direct default. It is 20× cheaper but has no end-to-end Autofix run yet; it needs a direct-key acceptance run first.
 
+**Resolved 2026-10-29:** no. The owner decided to adopt no new Anthropic API model and to route none through the pack's open-weights aliases (ADR-0002 amendment 2026-10-29), so no direct-key acceptance run will be done for `claude-haiku-5-5`. The existing direct-key default, `claude-sonnet-5-5`, is unchanged.
+
 ## Amendment 2026-10-28 (same day)
 
 The proxy row above is superseded. `tier-2-agentic` is not $0.50/$2.80:
