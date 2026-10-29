@@ -306,7 +306,7 @@ model_list:
   # ═══════════════════════════════════════════════════════════════════════════
   - model_name: tier-review
     litellm_params:
-      model: fireworks_ai/accounts/fireworks/models/deepseek-v4-flash
+      model: fireworks_ai/accounts/fireworks/models/deepseek-v4p1-flash
       api_key: os.environ/FIREWORKS_API_KEY
 
 litellm_settings:

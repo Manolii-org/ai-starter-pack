@@ -137,7 +137,7 @@
   "tier_definitions": {
     "tier-review": {
       "provider": "fireworks",
-      "model": "accounts/fireworks/models/deepseek-v4-flash",
+      "model": "accounts/fireworks/models/deepseek-v4p1-flash",
       "litellm_alias": "tier-review",
       "swebench": null,
       "baseline_swebench": null,
@@ -2042,10 +2042,10 @@
       }
     },
     "tier-review": {
-      "resolves_to": "fireworks:accounts/fireworks/models/deepseek-v4-flash",
-      "model_id": "accounts/fireworks/models/deepseek-v4-flash",
+      "resolves_to": "fireworks:accounts/fireworks/models/deepseek-v4p1-flash",
+      "model_id": "accounts/fireworks/models/deepseek-v4p1-flash",
       "litellm_alias": "tier-review",
-      "label": "Reasoning review (DeepSeek V4 Flash, Fireworks) — editorial / structured-output / code-review",
+      "label": "Reasoning review (DeepSeek V4.1 Flash, Fireworks) — editorial / structured-output / code-review",
       "data_sensitivity_max": "internal",
       "requires_proxy": true,
       "notes": "Reasoning-model review tier for editorial / structured-output / code-review tasks. Emits chain-of-thought before the answer — smoke tests must budget max_tokens >= ~1500 (see scripts/check-oss-routing.py TIER_MAX_TOKENS). Added 2026-06-18.",
