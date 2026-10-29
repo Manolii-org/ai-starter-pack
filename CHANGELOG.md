@@ -4,8 +4,9 @@
 
 ### Docs
 
-- **No Anthropic API models adopted (ADR-0002, 2026-10-29).** The Autofix
-  direct-key default will not move to `claude-haiku-5-5`, and the `haiku` /
+- **No new Anthropic API model adopted (ADR-0002, 2026-10-29).** The Autofix
+  direct-key default stays `claude-sonnet-5-5` and will not move to
+  `claude-haiku-5-5`, and the `haiku` /
   `tier-1-fast` aliases stay on open-weights models. Nothing changes in
   behaviour: this records the decision on the two open questions from
   v1.24.0.

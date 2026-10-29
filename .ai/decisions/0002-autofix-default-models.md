@@ -83,8 +83,8 @@ weak evidence: the 30-day review re-checks real Autofix outcomes.
 
 ## Amendment 2026-10-29 — no Anthropic API models adopted
 
-**Decision (owner).** The pack does not adopt Anthropic API models as
-defaults or as routes for its open-weights aliases. Concretely:
+**Decision (owner).** The pack adopts no new Anthropic API model, and does
+not route Anthropic models through its open-weights aliases. Concretely:
 
 - The direct-key default is not moved to `claude-haiku-5-5`, and no
   direct-key acceptance run will be done for it. `claude-sonnet-5-5` stays

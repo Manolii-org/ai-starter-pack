@@ -27,4 +27,4 @@ re-routing** · Sensitivity ceiling: unchanged per route.
 
 The pack's `haiku` OSS alias (GPT-OSS 120B, $0.80/$3.20) and `tier-1-fast` now cost more than Anthropic's own `claude-haiku-5-5` ($0.10/$0.50). Re-routing them is a routing change that needs its own decision.
 
-**Declined 2026-10-29.** The owner decided not to adopt Anthropic API models (ADR-0002 amendment 2026-10-29). Both aliases stay on open-weights models; the Claude 5 entries remain catalog and passthrough routes only. A cheaper open-weights backend for these aliases would be a separate routing change.
+**Declined 2026-10-29.** The owner decided to adopt no new Anthropic API model and to route none through the open-weights aliases (ADR-0002 amendment 2026-10-29). Both aliases stay on open-weights models. The Claude 5 entries remain catalog and passthrough routes, and `claude-sonnet-5-5` remains the existing Autofix direct-key default. A cheaper open-weights backend for these aliases would be a separate routing change.
