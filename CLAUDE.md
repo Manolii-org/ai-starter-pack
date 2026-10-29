@@ -1,4 +1,5 @@
 <!-- agent-validation:begin -->
+
 ## Validate candidates in the coding session
 
 Before the first edit, inspect the integration branch, owning instructions,
@@ -41,10 +42,13 @@ managed Claude instruction surface current and preserves other owner prose.
 
 This block is generated from `docs/agent-validation.md` by
 `python3 scripts/sync-agent-validation.py`; `--check` detects surface drift.
+
 <!-- agent-validation:end -->
 
 <!-- ai-starter-pack:development-policy:begin -->
+
 @.claude/skills/adaptable-development/SKILL.md
+
 <!-- ai-starter-pack:development-policy:end -->
 
 # {PROJECT_NAME}

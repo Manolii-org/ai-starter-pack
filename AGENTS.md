@@ -1,4 +1,5 @@
 <!-- agent-validation:begin -->
+
 ## Validate candidates in the coding session
 
 Before the first edit, inspect the integration branch, owning instructions,
@@ -41,10 +42,12 @@ managed Claude instruction surface current and preserves other owner prose.
 
 This block is generated from `docs/agent-validation.md` by
 `python3 scripts/sync-agent-validation.py`; `--check` detects surface drift.
+
 <!-- agent-validation:end -->
 
 <!-- ai-starter-pack:development-policy:begin -->
 <!-- Generated from platform/framework/skills/adaptable-development/SKILL.md; policy 1.0.1; sha256 e065684e4ad947ac3b6b8fdac475b4ba2ad80bdb37e40d8ea376b0c6d66b7371. -->
+
 # Adaptable development and design fidelity
 
 Build the current approved feature so likely changes stay local. Scale preparation and verification to the impact of the work; keep trivial unrelated edits proportionate.
@@ -64,6 +67,7 @@ For design handoffs, new features and substantial redesigns, first read `.claude
 For existing-app refactoring, first read `.claude/skills/compatibility-improvement/SKILL.md`: establish the current baseline, map affected consumers, make small reversible changes and prove preservation of relevant journeys, outputs and in-flight work.
 
 For material changes to shared boundaries, exercise one representative variation with proportionate existing tooling. Briefly record customisation locations, evidence, limitations and deferred work. Proceed through the authorised stage using the repository's current release rules.
+
 <!-- ai-starter-pack:development-policy:end -->
 
 # AGENTS.md — Multi-Agent Routing

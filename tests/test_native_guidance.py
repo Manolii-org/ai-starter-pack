@@ -103,7 +103,7 @@ def test_preview_install_repeat_and_check_preserve_local_guidance(consumer):
     result = run(consumer, "--apply")
     assert result.returncode == 0, result.stdout + result.stderr
     assert (root / "AGENTS.md").read_bytes().endswith(local)
-    assert (root / "CLAUDE.md").read_bytes().splitlines()[1] == b"@.claude/skills/adaptable-development/SKILL.md"
+    assert (root / "CLAUDE.md").read_bytes().splitlines()[2] == b"@.claude/skills/adaptable-development/SKILL.md"
     assert (root / ".cursor/rules/adaptable-development.mdc").read_text().startswith("---\n")
     assert "alwaysApply: true" in (root / ".cursor/rules/adaptable-development.mdc").read_text()
     installed = files(root)
@@ -211,7 +211,7 @@ def test_fake_import_does_not_satisfy_loading(consumer, example):
     assert run(consumer, "--apply").returncode == 0
     data = (root / "CLAUDE.md").read_bytes()
     assert native.live_import(data, b"@.claude/skills/adaptable-development/SKILL.md")
-    assert data.startswith(native.BEGIN + b"\n@.claude/skills/adaptable-development/SKILL.md\n")
+    assert data.startswith(native.BEGIN + b"\n\n@.claude/skills/adaptable-development/SKILL.md\n\n")
 
 
 @pytest.mark.parametrize("target", ["AGENTS.md", ".claude/skills/adaptable-development/SKILL.md"])
@@ -652,3 +652,64 @@ def test_shared_policy_metadata_declares_no_external_prerequisites(name):
     assert data["requires_mcp"] == []
     assert data["required_entities"] == []
     assert data["tags"] and all(isinstance(tag, str) for tag in data["tags"])
+
+
+@pytest.mark.parametrize("layout", ["root", "nested", "both"])
+def test_combined_validation_native_boundaries_are_formatter_stable(consumer, layout):
+    """Both actual renderers keep Markdown block spacing and owner bytes stable."""
+    root, _ = consumer
+    local = b"# Owner guidance\n\nKeep owner prose and `python3 scripts/agent-check.py --plan` unchanged.\n"
+    claudes = ([".claude/CLAUDE.md"] if layout == "nested" else
+               ["CLAUDE.md", ".claude/CLAUDE.md"] if layout == "both" else ["CLAUDE.md"])
+    for rel in ["AGENTS.md", *claudes]:
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(local)
+    policy = (REPO / "docs/agent-validation.md").read_bytes()
+    (root / "docs").mkdir()
+    (root / "docs/agent-validation.md").write_bytes(policy)
+    assert run(consumer, "--apply").returncode == 0
+    command = [sys.executable, str(REPO / "scripts/sync-agent-validation.py"),
+               "--repo-root", str(root)]
+    applied = subprocess.run(command, capture_output=True, timeout=30)
+    assert applied.returncode == 0, applied.stderr
+    primary = claudes[0]
+    for rel in ["AGENTS.md", primary]:
+        data = (root / rel).read_bytes()
+        assert data.endswith(local)
+        assert b"<!-- agent-validation:begin -->\n\n" + policy.strip() + b"\n\n<!-- agent-validation:end -->" in data
+        managed = native.block(data)
+        assert managed.endswith(b"\n\n" + native.END)
+        if rel == "AGENTS.md":
+            assert b". -->\n\n# Adaptable development" in managed
+            assert native.body((REPO / ".claude/skills/adaptable-development/SKILL.md").read_bytes()) in managed
+        else:
+            prefix = b"../" if primary.startswith(".claude/") else b""
+            target = b"@" + prefix + b".claude/skills/adaptable-development/SKILL.md"
+            assert managed == native.BEGIN + b"\n\n" + target + b"\n\n" + native.END
+            assert native.live_import(managed, target)
+    if layout == "both":
+        assert (root / claudes[1]).read_bytes() == local
+    cursor = (root / ".cursor/rules/agent-validation.mdc").read_bytes()
+    assert cursor.startswith(b"---\ndescription: Shared local validation and economical CI\nalwaysApply: true\n---\n")
+    before = files(root)
+    assert run(consumer, "--check").returncode == 0
+    assert run(consumer, "--apply").returncode == 0
+    assert subprocess.run([*command, "--check"], capture_output=True, timeout=30).returncode == 0
+    assert subprocess.run(command, capture_output=True, timeout=30).returncode == 0
+    assert files(root) == before
+
+
+@pytest.mark.parametrize("kind", ["policy", "import"])
+def test_legacy_raw_block_digest_allows_only_owned_spacing_upgrade(kind):
+    """Raw recorded ownership admits a layout upgrade, never a normalized edit."""
+    content = b"# Standing policy\n\nPreserve owner rules.\n" if kind == "policy" else b"@.claude/skills/adaptable-development/SKILL.md\n"
+    old = native.BEGIN + b"\n" + content + native.END
+    wanted = native.BEGIN + b"\n\n" + content + b"\n" + native.END
+    tail = b"\n\n# Local owner rules\nKeep this byte-for-byte.\n"
+    assert native.merge(old + tail, wanted, native.digest(old)) == wanted + tail
+    assert native.merge(wanted + tail, wanted, native.digest(wanted)) == wanted + tail
+    with pytest.raises(ValueError, match="edited"):
+        native.merge(old.replace(b"\n", b"\n\n", 1) + tail, wanted, native.digest(old))
+    with pytest.raises(ValueError, match="removed"):
+        native.merge(tail, wanted, native.digest(old))
