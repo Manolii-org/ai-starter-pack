@@ -601,10 +601,16 @@ def _deploying_workflows(sections: dict[str, list[str]], repo_root: pathlib.Path
             continue
         changed = "\n".join(line for text in texts for line in text.splitlines()
                              if line[:1] in "+-" and not line.startswith(("+++", "---")))
-        try:
-            head = (repo_root / path).read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            head = ""
+        # A pure rename out of .github/workflows/ has no +/- lines and no file
+        # at the old path, so also read the `rename to` target at head.
+        sources = [path, *(m.group(1).rstrip("\t").strip('"') for text in texts
+                           for m in re.finditer(r"^rename to (.+)$", text, re.M))]
+        head = ""
+        for source in sources:
+            try:
+                head += (repo_root / source).read_text(encoding="utf-8", errors="replace") + "\n"
+            except OSError:
+                pass
         if _deploy_lines(changed) or _deploy_lines(head):
             found.append(path)
     return found

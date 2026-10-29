@@ -100,6 +100,18 @@ def test_floor_catches_a_removed_deploy_step(tmp_path: Path) -> None:
     assert found == [".github/workflows/x.yml"]
 
 
+def test_floor_catches_a_deploy_workflow_renamed_away(tmp_path: Path) -> None:
+    # Pure rename: no hunk lines, and nothing left at the old path.
+    cls = _classifier()
+    (tmp_path / "disabled").mkdir()
+    (tmp_path / "disabled/deploy.yml").write_text("jobs:\n  d:\n    steps:\n      - run: fly deploy\n")
+    section = (" a/.github/workflows/deploy.yml b/disabled/deploy.yml\nsimilarity index 100%\n"
+               "rename from .github/workflows/deploy.yml\nrename to disabled/deploy.yml\n")
+    found = cls._deploying_workflows({".github/workflows/deploy.yml": [section],
+                                      "disabled/deploy.yml": [section]}, tmp_path)
+    assert found == [".github/workflows/deploy.yml"]
+
+
 def test_floor_leaves_ci_only_and_non_workflow_changes_alone(tmp_path: Path) -> None:
     cls = _classifier()
     wf = tmp_path / ".github/workflows/scan.yml"
