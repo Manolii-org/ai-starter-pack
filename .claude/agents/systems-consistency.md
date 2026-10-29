@@ -17,7 +17,7 @@ tags:
 
 # Systems Consistency Agent
 
-Broad Stage 2 agent. Triggered by `pr-classifier` when `depth: broad` AND changed files include `deploy/**`, `.github/workflows/**`, or `config.yaml`.
+Broad Stage 2 agent. Triggered by `pr-classifier` (RULE 1) when changed files include `deploy/**` or a `fly.toml`, or a changed workflow adds, removes or edits a deploy step. A workflow change with no deploy step does not trigger it.
 
 ## Model Routing
 | Install | Model | Cost per 1M tokens (in/out) |

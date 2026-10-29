@@ -11,6 +11,16 @@
   says not to dispatch those sub-agents until the proxy is back. The
   `proxy_fallback_aliases` map is removed from `.claude/model-routing.json`;
   the classifier ignores it if a consumer's copy still has one.
+- **PR Assessment no longer sends every workflow change to
+  `systems-consistency`.** That agent checks the deployment surface (Fly
+  config, deploy scripts, the CD workflow that applies them). RULE 1 of
+  `pr-classifier` now selects it only when a PR changes `deploy/**`, a
+  `fly.toml`, or a workflow's deploy step. Before this, CI-only workflow
+  edits (scans, lint, review automation) ran it without those files. Every
+  check came back "could not be evaluated", and the Judge then truncated
+  adjudicating those notes, so the PR got "assessment error" (#252). Such
+  PRs now skip the agent; the specialists still run. No inputs change.
+  Consumers pick this up with the agent files on their next pack update.
 
 ### Docs
 
