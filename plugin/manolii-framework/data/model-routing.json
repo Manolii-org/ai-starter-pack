@@ -1152,7 +1152,7 @@
           "status": "ACTIVE — set by SessionStart hook (scripts/claude-session-start.sh line 342) when proxy health check passes",
           "effect": "All Claude Code API traffic routes through the LiteLLM proxy. The proxy passes claude-sonnet-4-6, claude-opus-4-6 and claude-haiku-4-5-20251001 through to Anthropic directly (the dated haiku ID's Fireworks intercept was removed 2026-10-09). Intercepts: `haiku` pack alias → Fireworks GPT-OSS 120B ($0.30/$1.20); sonnet alias → Fireworks DeepSeek V4 Pro (PRC-origin on US infra, advisor-guardrailed, restricted_us_oss_ok max). Use claude-sonnet-4-6 (full ID) for Anthropic-direct Sonnet. Auth: ANTHROPIC_API_KEY is set to Bearer ${LITELLM_MASTER_KEY} by the SessionStart hook.",
           "verified": "2026-04-16: confirmed ANTHROPIC_BASE_URL=https://your-litellm-proxy.fly.dev in runtime env. Proxy alive. Test sub-agent with model=haiku dispatched successfully.",
-          "fallback": "If proxy health check fails, SessionStart sets LITELLM_FALLBACK_MODE=1 and routes natively to Anthropic."
+          "fallback": "If the proxy health check fails and LITELLM_FALLBACK_MODE=1 is set, the classifier tells the session not to dispatch tier-alias sub-agents. There is no Anthropic substitute for the open-weights tiers (ADR-0002 amendment 2026-10-29)."
         }
       },
       "main_thread_flip": {
@@ -2146,17 +2146,6 @@
         }
       }
     }
-  },
-  "proxy_fallback_aliases": {
-    "tier-1-fast": "haiku",
-    "tier-2-agentic": "claude-sonnet-4-6",
-    "tier-2-agentic-pro": "claude-sonnet-4-6",
-    "tier-3-tool": "claude-sonnet-4-6",
-    "tier-4-extract": "haiku",
-    "tier-5-latency": "haiku",
-    "tier-0-oss-heavy": "claude-sonnet-4-6",
-    "tier-3-tool-us": "claude-sonnet-4-6",
-    "tier-vision": "claude-sonnet-4-6"
   },
   "proxy_intercepted_models": {
     "claude-haiku-4-5-20251001": {

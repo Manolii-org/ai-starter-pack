@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Changed
+
+- **No Anthropic substitute when the proxy is down.** With
+  `LITELLM_FALLBACK_MODE=1`, the prompt classifier used to tell sessions to
+  replace the open-weights tier aliases with Anthropic models
+  (`tier-2-agentic` → `claude-sonnet-4-6`, `tier-1-fast` → `haiku`, …). It now
+  says not to dispatch those sub-agents until the proxy is back. The
+  `proxy_fallback_aliases` map is removed from `.claude/model-routing.json`;
+  the classifier ignores it if a consumer's copy still has one.
+
 ### Docs
 
 - **No new Anthropic API model adopted (ADR-0002, 2026-10-29).** The Autofix
