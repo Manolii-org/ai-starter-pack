@@ -71,15 +71,18 @@ Classify `door` and `blast_radius` for every diff, independent of routing:
 ```
 RULE 1: IF any file matches deploy/**/*.{sh,toml,yaml} OR **/fly.toml
   OR a changed workflow (.github/workflows/** or templates/**/.github/workflows/**)
-     whose diff adds, removes or edits a deploy step: a `fly`/`flyctl` command
-     that changes a running app (`deploy`, `secrets set`, `scale`, `machine update`),
-     `vercel deploy`, a call to a deploy/** or *deploy*.sh script, or a step that
-     applies a config file to a running service. Installing a CLI (for example
-     superfly/flyctl-actions/setup-flyctl) is not a deploy step
+     deploys, or might: it has a job or step (changed or in the visible
+     context) that changes a running service. That includes a `fly`/`flyctl`
+     command such as `deploy`, `secrets set`, `scale` or `machine update`;
+     `vercel deploy`; a deploy/** or *deploy*.sh script; a step applying config
+     to a running service; or a `uses:` of an action or reusable workflow that
+     deploys (for example a path or name containing `deploy`). Edits to such a
+     workflow's triggers, conditions, env or secrets count too.
   → invoke_agents: add "systems-consistency", depth: broad
-  A workflow change with no deploy step (CI, lint, scans, review or release
-  automation) does not trigger RULE 1: systems-consistency checks the
-  deployment surface, and without it every check is unevaluable.
+  Skip RULE 1 only for a workflow that clearly does not deploy: CI, lint,
+  scans, review, or release/tag automation. Installing a CLI (for example
+  superfly/flyctl-actions/setup-flyctl) is not a deploy step. When unsure
+  whether a workflow deploys, apply RULE 1.
 
 RULE 2: IF any file matches migrations/**/*.sql
   → invoke_skills: add "migration-safety"

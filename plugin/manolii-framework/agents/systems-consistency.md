@@ -17,7 +17,7 @@ tags:
 
 # Systems Consistency Agent
 
-Broad Stage 2 agent. Triggered by `pr-classifier` (RULE 1) when changed files include `deploy/**` or a `fly.toml`, or a changed workflow adds, removes or edits a deploy step. A workflow change with no deploy step does not trigger it.
+Broad Stage 2 agent. Triggered by `pr-classifier` (RULE 1) when changed files include `deploy/**` or a `fly.toml`, or a changed workflow deploys or might (a deploy command, a `uses:` of a deploying action or reusable workflow, or an edit to such a workflow). A workflow that clearly does not deploy does not trigger it.
 
 ## Model Routing
 | Install | Model | Cost per 1M tokens (in/out) |

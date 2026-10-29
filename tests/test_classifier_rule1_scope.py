@@ -30,8 +30,12 @@ def test_rule1_requires_a_deploy_step_for_workflow_changes(path: Path) -> None:
     rule = _rule1(path)
     first_line = rule.splitlines()[0]
     assert ".github/workflows" not in first_line, "workflow paths alone must not trigger RULE 1"
-    assert "deploy step" in rule
-    assert "does not trigger RULE 1" in rule
+    assert "Skip RULE 1 only for a workflow that clearly does not deploy" in rule
+    # Codex review: deploys through a reusable workflow or action count, and so
+    # do edits to an existing deploy workflow's triggers or conditions.
+    assert "`uses:` of an action or reusable workflow that" in rule
+    assert "triggers, conditions, env or secrets" in rule
+    assert "When unsure" in rule and "apply RULE 1" in rule
     assert 'add "systems-consistency"' in rule
     assert "deploy/**" in first_line and "fly.toml" in first_line
     # Codex review: installing flyctl deploys nothing.
@@ -40,5 +44,5 @@ def test_rule1_requires_a_deploy_step_for_workflow_changes(path: Path) -> None:
 
 def test_agent_trigger_description_matches_rule1() -> None:
     text = (ROOT / ".claude/agents/systems-consistency.md").read_text(encoding="utf-8")
-    assert "A workflow change with no deploy step does not trigger it." in text
+    assert "A workflow that clearly does not deploy does not trigger it." in text
     assert "`.github/workflows/**`, or `config.yaml`" not in text

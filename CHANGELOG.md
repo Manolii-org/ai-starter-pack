@@ -15,7 +15,9 @@
   `systems-consistency`.** That agent checks the deployment surface (Fly
   config, deploy scripts, the CD workflow that applies them). RULE 1 of
   `pr-classifier` now selects it only when a PR changes `deploy/**`, a
-  `fly.toml`, or a workflow's deploy step. Before this, CI-only workflow
+  `fly.toml`, or a workflow that deploys or might. That covers deploy
+  commands, a `uses:` of a deploying action or reusable workflow, and edits
+  to such a workflow; when unsure, it still runs. Before this, CI-only workflow
   edits (scans, lint, review automation) ran it without those files. Every
   check came back "could not be evaluated", and the Judge then truncated
   adjudicating those notes, so the PR got "assessment error" (#252). Such
