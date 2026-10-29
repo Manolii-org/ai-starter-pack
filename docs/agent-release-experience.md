@@ -90,6 +90,17 @@ Report measured changes; an architectural saving estimate is not a saving.
 
 ## Adoption and rollback
 
+`scripts/lib/release_subject.py` implements portable exact-candidate validation,
+complete release identity, approval-scope comparison and per-approval stage keys.
+It binds repository, target, source/artifact, ordered migrations/compatibility,
+verification, trusted policy/workflow revisions and exact recovery. Every changed
+field invalidates the comparison. Rejection, cancellation and expiry retain holds.
+The helper never grants execution authority: even a matching document returns
+`execution_authorized: false` and requires authenticated native approval proof.
+Owners must integrate it into their trusted controller, durable idempotency/fence
+and every actual production writer before retiring a pre-merge acknowledgement.
+Shipping the helper alone is preparation, not qualified boundary adoption.
+
 Inventory every production entry point and live protection first. Denied or
 missing observations remain unknown. Exercise development, staging, a held exact
 candidate, approval/rejection, changed-head invalidation, duplicate events,
