@@ -657,8 +657,10 @@ option, which a proxy usually cannot serve.
   multi-file fixes.
 - Other Anthropic-compatible proxies (for example OpenRouter) do not know
   pack aliases: set the model to an id that proxy routes.
-- `claude-haiku-5-5` is the cheap direct-key option; it has not been accepted
-  as a default for multi-file fixes yet.
+- The direct-key default stays `claude-sonnet-5-5` for repositories that
+  choose direct mode. The pack will not move it, or any proxy alias, to an
+  Anthropic API model such as `claude-haiku-5-5` (ADR-0002, 2026-10-29); for
+  lean runs, use proxy mode with an open-weights model.
 
 **PRs pushed by coding agents (opt-in).** Devin, Codex cloud tasks and Cursor
 Cloud Agents push as GitHub App bots, and Autofix skips bot actors by

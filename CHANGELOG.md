@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Docs
+
+- **No Anthropic API models adopted (ADR-0002, 2026-10-29).** The Autofix
+  direct-key default will not move to `claude-haiku-5-5`, and the `haiku` /
+  `tier-1-fast` aliases stay on open-weights models. Nothing changes in
+  behaviour: this records the decision on the two open questions from
+  v1.24.0.
+
 ## 1.25.1 — 2026-10-28
 
 Upgrade order for consumers:
