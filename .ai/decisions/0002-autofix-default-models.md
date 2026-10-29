@@ -94,6 +94,8 @@ not route Anthropic models through its open-weights aliases. Concretely:
 - The `haiku` and `tier-1-fast` aliases stay on open-weights models; they
   are not re-routed to Anthropic's `claude-haiku-5-5`, even though its list
   price is lower than the template's current `haiku` backend.
+- When the proxy is down, the session guidance names no Anthropic
+  substitute for the open-weights tiers (`proxy_fallback_aliases` removed).
 
 The 30-day review (#258) drops its Haiku 5.5 question and keeps the failure
 rate and cost per fix checks.
