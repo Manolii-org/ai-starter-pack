@@ -20,7 +20,10 @@
   unsure, it still runs. The model sees only diff hunks, so
   `run-pr-classifier.py` also reads each changed workflow in full, plus its
   removed lines, and adds the agent itself when any non-comment line could
-  deploy. That floor can only add the review, never drop it. Before this, CI-only workflow
+  deploy (including `kubectl`/`helm`/`terraform`/`pulumi` and cloud CLI
+  updates). That floor can only add the review, never drop it, and errs
+  broad: a plain "deploy" mention still gets the review, as every workflow
+  did before. Before this, CI-only workflow
   edits (scans, lint, review automation) ran it without those files. Every
   check came back "could not be evaluated", and the Judge then truncated
   adjudicating those notes, so the PR got "assessment error" (#252). Such

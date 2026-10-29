@@ -74,7 +74,8 @@ RULE 1: IF any file matches deploy/**/*.{sh,toml,yaml}
      deploys, or might: a job or step that changes a running service. That
      includes a `fly`/`flyctl` command such as `deploy`, `secrets set`, `scale`
      or `machine update`; `vercel deploy`; a deploy/** or *deploy*.sh script; a
-     step applying config to a running service; or a `uses:` of an action or
+     step applying config to a running service (for example `kubectl apply`,
+     `helm upgrade` or `terraform apply`); or a `uses:` of an action or
      reusable workflow that deploys (for example a path or name containing
      `deploy`). Edits to such a workflow's triggers, conditions, env or secrets
      count too.

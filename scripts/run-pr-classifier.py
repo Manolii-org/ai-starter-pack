@@ -575,9 +575,16 @@ def _parse_manifest(raw: str) -> dict:
 # also deploys elsewhere in the file could look CI-only. This deterministic
 # check reads the whole changed workflow (and the removed lines) and forces
 # systems-consistency when any non-comment line could deploy. It can only add
-# the agent, never remove it, so a false positive just runs the review.
+# the agent, never remove it. A false positive (a plain "deploy" mention) just
+# runs the review every workflow got before RULE 1 was narrowed; a false
+# negative would drop it, so the marker deliberately errs broad.
 _WORKFLOW_PATH = re.compile(r"(?:^|/)\.github/workflows/[^/]+\.ya?ml$")
-_DEPLOY_MARKER = re.compile(r"deploy|\bfly(?:ctl)?\s+(?:secrets|scale|machines?)\b", re.I)
+_DEPLOY_MARKER = re.compile(
+    r"deploy|\bfly(?:ctl)?\s+(?:secrets|scale|machines?)\b"
+    r"|\bkubectl\s+(?:apply|replace|patch|set|rollout|scale)\b|\bhelm\s+(?:upgrade|install|rollback)\b"
+    r"|\bterraform\s+apply\b|\bpulumi\s+up\b|\baws\s+\S+\s+update-"
+    r"|\baz\s+(?:\S+\s+){1,2}(?:update|up)\b|\bgcloud\s+(?:\S+\s+){1,3}(?:update|replace)\b",
+    re.I)
 
 
 def _deploy_lines(text: str) -> bool:

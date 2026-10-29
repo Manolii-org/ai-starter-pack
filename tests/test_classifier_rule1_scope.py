@@ -78,6 +78,11 @@ def test_floor_reads_the_whole_workflow_not_just_the_hunk(tmp_path: Path) -> Non
     "- uses: ./.github/workflows/deploy-reusable.yml\n",   # deploy via reusable workflow
     "- run: fly secrets set FOO=bar\n",                     # changes a running app
     "- run: ./scripts/deploy.sh\n",
+    # Codex review: config applied to a running service, no "deploy" word.
+    "- run: kubectl apply -f k8s/\n",
+    "- run: helm upgrade --install app ./chart\n",
+    "- run: terraform apply -auto-approve\n",
+    "- run: az containerapp update -n app\n",
 ])
 def test_floor_catches_every_deploy_shape(tmp_path: Path, body: str) -> None:
     cls = _classifier()
