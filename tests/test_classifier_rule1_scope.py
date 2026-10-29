@@ -34,6 +34,8 @@ def test_rule1_requires_a_deploy_step_for_workflow_changes(path: Path) -> None:
     assert "does not trigger RULE 1" in rule
     assert 'add "systems-consistency"' in rule
     assert "deploy/**" in first_line and "fly.toml" in first_line
+    # Codex review: installing flyctl deploys nothing.
+    assert "Installing a CLI" in rule and "is not a deploy step" in rule
 
 
 def test_agent_trigger_description_matches_rule1() -> None:

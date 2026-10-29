@@ -71,9 +71,11 @@ Classify `door` and `blast_radius` for every diff, independent of routing:
 ```
 RULE 1: IF any file matches deploy/**/*.{sh,toml,yaml} OR **/fly.toml
   OR a changed workflow (.github/workflows/** or templates/**/.github/workflows/**)
-     whose diff adds, removes or edits a deploy step: flyctl / `fly deploy` /
-     superfly/flyctl-actions, `vercel deploy`, a call to a deploy/** or
-     *deploy*.sh script, or a step that applies a config file to a running service
+     whose diff adds, removes or edits a deploy step: a `fly`/`flyctl` command
+     that changes a running app (`deploy`, `secrets set`, `scale`, `machine update`),
+     `vercel deploy`, a call to a deploy/** or *deploy*.sh script, or a step that
+     applies a config file to a running service. Installing a CLI (for example
+     superfly/flyctl-actions/setup-flyctl) is not a deploy step
   → invoke_agents: add "systems-consistency", depth: broad
   A workflow change with no deploy step (CI, lint, scans, review or release
   automation) does not trigger RULE 1: systems-consistency checks the
