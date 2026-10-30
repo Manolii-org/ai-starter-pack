@@ -7,7 +7,11 @@ name: Plugin Eval Gate
 
 on:
   push:
-    branches: [main, "claude/**"]
+    # main only. `claude/**` here ran the gate twice for every agent push to
+    # an open PR (push + pull_request use different concurrency keys, so
+    # neither cancels the other): ~185 duplicate 6-minute runs a week. The
+    # pull_request trigger already covers every PR head.
+    branches: [main]
     paths: ["**"]
   pull_request:
     paths: ["**"]
