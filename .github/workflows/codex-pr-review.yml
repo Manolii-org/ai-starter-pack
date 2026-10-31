@@ -102,7 +102,7 @@ jobs:
         if: steps.range.outputs.scannable == 'true'
         continue-on-error: true
         env:
-          # Mirrors Manolii-org/master config/model-routing.source.yaml
+          # Mirrors the orchestrator repo's config/model-routing.source.yaml
           # platforms.codex_cli flow `codex-pr-review` (standard tier; heavy when a
           # changed path matches policies.advisor_policy escalation patterns).
           # Change it there first. Runs no repository code (inline script only).
