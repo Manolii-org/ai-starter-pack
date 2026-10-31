@@ -197,7 +197,7 @@ def main(argv=None):
         doc = read_json(args.input)
         result = (validate_receipt(doc) if args.command == "validate" else
                   compare_metadata(doc, args.baseline, args.comparison, args.days, args.timezone))
-    except (ValueError, TypeError, KeyError, OSError) as exc:
+    except (ValueError, TypeError, KeyError, OSError, ArithmeticError, RecursionError) as exc:
         # Parser/IO exceptions can contain user-controlled text. Never echo them.
         print(json.dumps({"status": "invalid_evidence", "error_type": type(exc).__name__}), file=sys.stderr)
         return 2

@@ -331,12 +331,15 @@ def test_security_audit_tests_run_in_rendered_consumers(default_render, branded_
     """Portable evidence checks run without the pack's excluded build artifacts."""
     for rendered in (default_render, branded_render):
         assert not (rendered / "pack.manifest.yml").exists()
+        before = file_set(rendered)
         result = subprocess.run(
-            [sys.executable, "-m", "pytest", "-q", "tests/test_security_audit_evidence.py"],
+            [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests/test_security_audit_evidence.py"],
             cwd=rendered, capture_output=True, text=True, timeout=30,
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
         )
         assert result.returncode == 0, result.stdout + result.stderr
         assert re.search(r"\b\d+ passed, 1 skipped\b", result.stdout)
+        assert file_set(rendered) == before, "consumer checks must preserve shared render fixtures"
 
 
 def test_brand_answers_match_overlays(branded_render, default_render):

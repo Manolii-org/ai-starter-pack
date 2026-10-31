@@ -178,6 +178,25 @@ def test_cli_does_not_echo_untrusted_parse_errors_or_write_files(tmp_path):
     assert set(tmp_path.iterdir()) == before
 
 
+@pytest.mark.parametrize("case", ["overflow", "deep_nesting"])
+def test_cli_safely_refuses_numeric_and_json_resource_errors(tmp_path, case):
+    path = tmp_path / "untrusted.json"
+    if case == "overflow":
+        doc = metadata([scan("1", "2026-10-10T00:00:00Z", recorded_cost_usd="1e999999999")])
+        path.write_text(json.dumps(doc), encoding="utf-8")
+    else:
+        path.write_text("[" * 2000 + '"private_do_not_echo"' + "]" * 2000, encoding="utf-8")
+    run = subprocess.run([
+        sys.executable, str(SCRIPT), "compare", str(path),
+        "--baseline", "2026-10-09", "--comparison", "2026-10-20", "--days", "11",
+        "--timezone", "Australia/Sydney",
+    ], capture_output=True, text=True, timeout=10)
+    assert run.returncode == 2
+    assert json.loads(run.stderr)["status"] == "invalid_evidence"
+    assert "Traceback" not in run.stderr
+    assert "private_do_not_echo" not in run.stdout + run.stderr
+
+
 @pytest.mark.skipif(
     not (ROOT / "pack.manifest.yml").is_file(),
     reason="generated plugin and registry checks belong to the source pack",
