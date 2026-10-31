@@ -3,6 +3,7 @@ import copy
 import importlib.util
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -175,3 +176,40 @@ def test_cli_does_not_echo_untrusted_parse_errors_or_write_files(tmp_path):
     assert run.returncode == 2
     assert "private_do_not_echo" not in run.stderr + run.stdout
     assert set(tmp_path.iterdir()) == before
+
+
+def test_generated_skill_installs_with_its_helper_and_runs_outside_the_pack(tmp_path):
+    relative = Path("security-audit-evidence")
+    canonical = ROOT / ".claude/skills" / relative
+    registry = ROOT / "registry/platform/framework/skills" / relative
+    plugin = ROOT / "plugin/manolii-framework/skills" / relative
+    for leaf in ("SKILL.md", "contract.md", "scripts/audit_evidence.py"):
+        assert (canonical / leaf).read_bytes() == (registry / leaf).read_bytes()
+        assert (canonical / leaf).read_bytes() == (plugin / leaf).read_bytes()
+    # A small real registry keeps this installation test bounded while using
+    # exactly the generated capability bytes and the production resolver.
+    source = tmp_path / "source"
+    pack = source / "registry/platform/framework"
+    (pack / ".claude-plugin").mkdir(parents=True)
+    (pack / ".claude-plugin/plugin.json").write_text('{"name":"framework","version":"1.0.0"}')
+    shutil.copytree(registry, pack / "skills" / relative)
+    (source / "registry/plugins.json").write_text(json.dumps({"plugins": [{
+        "scope": "platform", "name": "framework", "path": "registry/platform/framework"}]}))
+    target = tmp_path / "consumer"
+    target.mkdir()
+    (target / "ai-manifest.yaml").write_text(
+        'version: 1\nuniverse: example\nrequires:\n  - plugin: platform/framework\n    ref: "1.0.0"\n'
+        'surfaces: [claude-code]\n')
+    result = subprocess.run([sys.executable, str(ROOT / "scripts/ai-resolve.py"),
+                             "--repo-root", str(target), "--registry", str(source), "--apply"],
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    installed = target / ".claude/skills" / relative
+    assert (installed / "contract.md").read_bytes() == (canonical / "contract.md").read_bytes()
+    data = tmp_path / "receipt.json"
+    data.write_text(json.dumps(receipt()), encoding="utf-8")
+    result = subprocess.run([sys.executable, "-I", "-B", str(installed / "scripts/audit_evidence.py"),
+                             "validate", str(data)], cwd=target,
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["coverage_complete"] is True
