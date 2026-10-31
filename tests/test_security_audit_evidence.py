@@ -178,6 +178,10 @@ def test_cli_does_not_echo_untrusted_parse_errors_or_write_files(tmp_path):
     assert set(tmp_path.iterdir()) == before
 
 
+@pytest.mark.skipif(
+    not (ROOT / "pack.manifest.yml").is_file(),
+    reason="generated plugin and registry checks belong to the source pack",
+)
 def test_generated_skill_installs_with_its_helper_and_runs_outside_the_pack(tmp_path):
     relative = Path("security-audit-evidence")
     canonical = ROOT / ".claude/skills" / relative

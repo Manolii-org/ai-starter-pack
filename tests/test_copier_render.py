@@ -327,6 +327,18 @@ def test_validation_layout_distribution_boundary(default_render, branded_render)
         assert (rendered / "scripts/tests/test_agent_check.py").is_file()
 
 
+def test_security_audit_tests_run_in_rendered_consumers(default_render, branded_render):
+    """Portable evidence checks run without the pack's excluded build artifacts."""
+    for rendered in (default_render, branded_render):
+        assert not (rendered / "pack.manifest.yml").exists()
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q", "tests/test_security_audit_evidence.py"],
+            cwd=rendered, capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert re.search(r"\b\d+ passed, 1 skipped\b", result.stdout)
+
+
 def test_brand_answers_match_overlays(branded_render, default_render):
     """Load .copier-answers.yml and verify brand fields match .brand/*.yml."""
     for render_dir, mode in [(branded_render, "branded"), (default_render, "unbranded")]:
