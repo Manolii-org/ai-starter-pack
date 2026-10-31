@@ -90,8 +90,55 @@ jobs:
           # `codex exec review --base` takes a ref; pin the base SHA to a
           # local branch so a drifting base tip cannot move the diff range.
           git branch -f codex-review-base "$BASE"
+          # --no-renames lists both sides of a rename so moving a file out of an
+          # escalation path still escalates; quotePath=false keeps paths literal.
+          git -c core.quotePath=false diff --name-only --no-renames "$BASE...$HEAD" \
+            > "$RUNNER_TEMP/codex-review-paths.txt"
           echo "scannable=true" >> "$GITHUB_OUTPUT"
           echo "Diff range: $BASE...$HEAD ($CHANGED files)"
+
+      - name: Resolve Codex model profile
+        id: profile
+        if: steps.range.outputs.scannable == 'true'
+        continue-on-error: true
+        env:
+          # Mirrors Manolii-org/master config/model-routing.source.yaml
+          # platforms.codex_cli flow `codex-pr-review` (standard tier; heavy when a
+          # changed path matches policies.advisor_policy escalation patterns).
+          # Change it there first. Runs no repository code (inline script only).
+          CODEX_REVIEW_MODEL: gpt-6.1-sol
+          CODEX_REVIEW_EFFORT: medium
+          CODEX_REVIEW_ESCALATED_MODEL: gpt-6.1-sol
+          CODEX_REVIEW_ESCALATED_EFFORT: xhigh
+          CODEX_REVIEW_ESCALATION_PATTERNS: "[\"**/*.sql\", \"**/auth/**\", \"**/crypto/**\", \"**/payment/**\", \"**/stripe/**\", \"schema.sql\", \"drizzle.config.*\", \"config.yaml\", \"model-routing.json\", \"fly.toml\", \"openapi.yaml\", \"trpc.*.ts\"]"
+        run: |
+          set -euo pipefail
+          # -I and a cwd outside the checkout: no PR-added module can shadow
+          # the stdlib on this secret-bearing job.
+          cd "$RUNNER_TEMP"
+          python3 -I - "$RUNNER_TEMP/codex-review-paths.txt" "$RUNNER_TEMP/codex-profile.args" <<'PY' >> "$GITHUB_OUTPUT"
+          import fnmatch, json, os, re, sys
+          from pathlib import PurePosixPath
+
+          def matches(path, pattern):
+              # Same semantics as master scripts/check-escalation-triggers.py.
+              if "**" in pattern:
+                  esc = re.escape(pattern).replace(r"\*\*/", "(?:.*/)?").replace(r"\*\*", ".*")
+                  esc = esc.replace(r"\*", "[^/]*").replace(r"\?", "[^/]")
+                  return re.match("^" + esc + "$", path) is not None
+              return fnmatch.fnmatch(path, pattern) or fnmatch.fnmatch(PurePosixPath(path).name, pattern)
+
+          paths = [p for p in open(sys.argv[1]).read().splitlines() if p.strip()]
+          patterns = json.loads(os.environ["CODEX_REVIEW_ESCALATION_PATTERNS"])
+          escalated = any(matches(p, pat) for p in paths for pat in patterns)
+          model = os.environ["CODEX_REVIEW_ESCALATED_MODEL" if escalated else "CODEX_REVIEW_MODEL"]
+          effort = os.environ["CODEX_REVIEW_ESCALATED_EFFORT" if escalated else "CODEX_REVIEW_EFFORT"]
+          args = ["-c", f'model="{model}"', "-c", f'review_model="{model}"',
+                  "-c", f'model_reasoning_effort="{effort}"']
+          open(sys.argv[2], "w").write("\n".join(args) + "\n")
+          tier = "heavy" if escalated else "standard"
+          print(f"label={model} · {effort} effort · {tier} tier" + (" (escalated)" if escalated else ""))
+          PY
 
       - name: Set up Node
         if: steps.range.outputs.scannable == 'true'
@@ -117,7 +164,7 @@ jobs:
           npm install --no-save --ignore-scripts \
             --registry https://registry.npmjs.org/ \
             --userconfig /dev/null \
-            @openai/codex@0.151.0
+            @openai/codex@0.163.0
           "$RUNNER_TEMP/codex-cli/node_modules/.bin/codex" --version
 
       - name: Materialize Codex subscription credential
@@ -186,8 +233,13 @@ jobs:
           # --base reviews committed changes against the pinned base ref.
           # Output is model-generated data — treat as untrusted text; the
           # report step truncates and neutralises it before posting.
+          PROFILE_ARGS=()
+          if [ -s "$RUNNER_TEMP/codex-profile.args" ]; then
+            mapfile -t PROFILE_ARGS < "$RUNNER_TEMP/codex-profile.args"
+          fi
           set +e
           timeout 20m "$RUNNER_TEMP/codex-cli/node_modules/.bin/codex" exec review \
+            --strict-config "${PROFILE_ARGS[@]}" \
             --base codex-review-base \
             --title "$PR_TITLE" \
             > "$REVIEW_OUT" 2>&1
@@ -285,6 +337,7 @@ jobs:
           AUTH_PRESENT: ${{ steps.auth.outputs.present }}
           RANGE_SCANNABLE: ${{ steps.range.outputs.scannable }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          MODEL_LABEL: ${{ steps.profile.outputs.label }}
         run: |
           python3 - <<'PY'
           import os, re
@@ -297,6 +350,8 @@ jobs:
           run_url = os.environ["RUN_URL"]
 
           lines = ["### Codex PR review (advisory, subscription)", ""]
+          if os.environ.get("MODEL_LABEL"):
+              lines += [f"Model: {os.environ['MODEL_LABEL']}", ""]
           if os.environ.get("RANGE_SCANNABLE") != "true":
               lines.append(
                   f"Review skipped for head `{head}`: empty or unresolvable "

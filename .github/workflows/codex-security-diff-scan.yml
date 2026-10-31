@@ -194,9 +194,14 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           # No --safety-identifier: it requires API-key auth and is rejected
           # under --auth chatgpt (subscription mode).
+          # Model + effort mirror Manolii-org/master platforms.codex_cli flow
+          # `codex-security-diff-scan` (heavy tier; xhigh is the tool's own scan
+          # default, so only the model moves off its gpt-5.6-sol default).
           codex-security scan . \
             --diff "$BASE_SHA" \
             --head "$HEAD_SHA" \
+            --model gpt-6.1-sol \
+            --effort xhigh \
             --auth chatgpt \
             --headless \
             --verbose \
