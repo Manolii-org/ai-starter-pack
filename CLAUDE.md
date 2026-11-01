@@ -12,11 +12,12 @@ python3 scripts/agent-check.py --provision --provider codex
 ```
 
 Use your actual provider (`claude`, `cursor`, `codex` or `devin`).
-Keep repository-owned `config/agent-checks.json` aligned with CI/toolchains.
+Keep owner `config/agent-checks.json` aligned with CI/toolchains.
 Missing tools or failed installs mean incomplete validation. Run explicitly
 until this host has a hook-execution receipt; files alone prove no hook ran.
 
-Batch fixes; use focused/regression tests. Independently review settled diffs,
+Batch fixes with focused tests; add regression tests for recurring defects.
+Independently review settled diffs,
 contracts, generated files and seams once at required scope/tier. Open ready only
 with a passing exact-head `agent-check` receipt, no expected pushes and no
 multi-repo/provider iteration. Else draft until final-head Fast Tier + secret scan
