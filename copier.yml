@@ -190,6 +190,9 @@ _exclude:
   - .svn
   - .svn/**
   # Pack-internal scaffolding (never ships)
+  # The pack's own leaf context manifest (master context governance); a rendered
+  # instance must author its own, never inherit the template's identity.
+  - /.ai/repo-context.yaml
   # Renovate preset: consumers extend it remotely via
   # "github>Manolii-org/ai-starter-pack" — copying it into a rendered repo
   # would shadow the shared preset with a stale local snapshot.

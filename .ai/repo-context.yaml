@@ -1,0 +1,24 @@
+schema_version: 1
+repo: Manolii-org/ai-starter-pack
+universe: manolii
+ip_owner: Manolii Pty Ltd
+purpose: Canonical AI Starter Pack — a Copier template, Claude Code plugin marketplace (manolii-framework), reusable CI workflows and Renovate preset that consumer repositories pin by release tag.
+front_door: README.md
+capabilities: [copier-template, plugin-marketplace, reusable-workflows, renovate-preset]
+commands:
+  render:
+    - copier copy gh:manolii-org/ai-starter-pack <dest>
+  validate:
+    - python3 scripts/agent-check.py --provider claude
+    - python3 scripts/sync-agent-validation.py --check
+authority:
+  - README.md
+  - README-STARTER-PACK.md
+  - AGENTS.md
+  - copier.yml
+  - config/agent-checks.json
+boundaries:
+  - Template files render into consumer repositories; this manifest describes the pack itself and is excluded from rendering (copier.yml _exclude).
+  - Consumers pin released tags; changes reach them only through a release, never by editing a consumer's rendered copy.
+  - Never hardcode credentials; consumer secrets come from each consumer's own environment.
+verified_at: "2026-11-01"
