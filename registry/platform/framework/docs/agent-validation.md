@@ -19,8 +19,14 @@ execution has a receipt. File presence alone proves no hook ran.
 Iterate with focused tests, batch corrections and independently review the
 settled diff once at the required scope/tier. Review contracts, generated
 outputs and process seams; add regression tests for recurring defects.
-Keep PRs draft while iterating; expensive draft-skipped lanes must also run
-on `ready_for_review`. Follow the owning repository's feature/release lanes.
+Keep PRs draft while iterating. A single-push agent PR may open ready only
+when a passing `agent-check` receipt binds its exact head SHA, no further
+pushes are expected, and it is not a multi-repo or provider-integration
+change still being iterated. Otherwise open draft, then mark ready after
+Fast Tier and secret scanning pass on the final head. Expensive lanes
+skipped on drafts must also run on `ready_for_review`; keep CodeRabbit
+`auto_review.drafts: false` so iterative pushes do not spend review budget.
+Follow the owning repository's feature/release lanes.
 
 Local receipts are reusable only for matching inputs, commands and tools;
 they grant no merge or protected-path authority. Run any additional owning
