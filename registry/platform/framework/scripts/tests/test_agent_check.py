@@ -502,8 +502,29 @@ class AgentCheckTests(unittest.TestCase):
     def test_missing_command_reports_unavailable_and_never_passes(self):
         self.config["checks"][0]["commands"] = [["agent-check-fixture-nonexistent"]]
         self.save_config()
-        self.run_check(expected=1)
+        result = self.run_check(expected=1)
         self.assertIn("unavailable", [r["status"] for r in self.receipt()["results"]])
+        self.assert_failure_summary(result)
+
+    def assert_failure_summary(self, result):
+        lines = result.stdout.splitlines()
+        summaries = [json.loads(line.removeprefix("AGENT-CHECK-RESULT "))
+                     for line in lines if line.startswith("AGENT-CHECK-RESULT ")]
+        expected = [{key: item[key] for key in ("id", "status", "reason")}
+                    for item in self.receipt()["results"] if item["status"] != "passed"]
+        self.assertTrue(expected)
+        self.assertEqual(summaries, expected)
+        verdict = next(i for i, line in enumerate(lines) if line.startswith("AGENT-CHECK-FAILED "))
+        self.assertTrue(all(i < verdict for i, line in enumerate(lines)
+                            if line.startswith("AGENT-CHECK-RESULT ")))
+
+    def test_all_failed_checks_are_summarised_without_passing_checks(self):
+        self.config["checks"] = [
+            {"id": name, "commands": [[sys.executable, "-c", f"raise SystemExit({code})"]]}
+            for name, code in (("pass", 0), ("first", 3), ("second", 4))
+        ]
+        self.save_config()
+        self.assert_failure_summary(self.run_check(expected=1))
 
     def test_receipts_must_be_ignored(self):
         (self.root / ".gitignore").write_text("")
@@ -573,8 +594,9 @@ class AgentCheckTests(unittest.TestCase):
     def test_ci_toolchain_mismatch_is_incomplete_validation(self):
         self.config["tool_requirements"] = {"python": "Python 0."}
         self.save_config()
-        self.run_check(expected=1)
+        result = self.run_check(expected=1)
         self.assertIn("unavailable", [r["status"] for r in self.receipt()["results"]])
+        self.assert_failure_summary(result)
 
     def test_changed_ci_command_requires_recipe_update(self):
         (self.root / "workflow.yml").write_text("run: new-command\n")

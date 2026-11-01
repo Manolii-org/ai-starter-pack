@@ -402,6 +402,12 @@ def main(argv=None) -> int:
         write_json(state / "receipt.json", receipt)
         if outcome == "passed" and cache_reusable:
             write_json(cache, receipt)
+        for result in results:
+            if result["status"] != "passed":
+                print("AGENT-CHECK-RESULT " + json.dumps(
+                    {key: result[key] for key in ("id", "status", "reason")},
+                    sort_keys=True,
+                ))
         print(f"AGENT-CHECK-{outcome.upper()} {candidate_digest[:12]}")
         return 0 if outcome == "passed" else 1
     except (OSError, ValueError, subprocess.CalledProcessError) as exc:
