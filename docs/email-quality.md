@@ -180,3 +180,5 @@ Sender hooks are trusted consumer code in the same OS trust domain as the CLI.
 Environment filtering reduces accidental exposure; it is not a sandbox against
 malicious same-user code reading process memory or local files. Never run an
 untrusted candidate's hook with a provider token.
+
+The provider's `Notification` tab is retained as its own category and counts as non-spam for descriptive reporting. It does not contribute to the primary Inbox acceptance threshold. Unknown tabs still fail closed.

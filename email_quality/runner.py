@@ -104,6 +104,8 @@ def assess(profile, kind, data):
         status = status.lower() if isinstance(status, str) else None
         value = row.get('tab') if status in ('success', 'delivered') else row.get('status')
         category = value.lower() if isinstance(value, str) else None
+        if category == 'notification':
+            normalized_counts.setdefault(category, 0)
         if category not in normalized_counts:
             raise QualityError('PROVIDER_INVALID')
         statuses.append(category)
@@ -115,7 +117,7 @@ def assess(profile, kind, data):
             placement['mailbox_id'] = mailbox['id']
         placements.append(placement)
     ratio = sum(s == 'inbox' for s in statuses) / len(statuses)
-    non_spam = sum(normalized_counts[c] for c in ('inbox', 'promotions', 'updates', 'newsletter'))
+    non_spam = sum(normalized_counts.get(c, 0) for c in ('inbox', 'promotions', 'updates', 'newsletter', 'notification'))
     return {'kind': kind, 'inbox_ratio': ratio, 'mailbox_count': len(statuses),
             'placement_counts': placement_counts,
             'normalized_placement_counts': normalized_counts,

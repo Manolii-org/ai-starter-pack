@@ -123,6 +123,18 @@ class QualityTests(unittest.TestCase):
             assess(self.profile, 'spam', {'status': 'pending_inbox_message_unknown', 'score': 100})
         self.assertFalse(assess(self.profile, 'spam', {'status': 'success', 'score': 0})['passed'])
 
+    def test_notification_tab_is_valid_but_not_primary_inbox_placement(self):
+        result = assess(self.profile, 'inbox', {'status': 'success', 'results': [
+            {'status': 'success', 'tab': 'Inbox'},
+            {'status': 'success', 'tab': 'Notification'},
+        ]})
+        self.assertEqual(result['inbox_ratio'], 0.5)
+        self.assertEqual(result['non_spam_ratio'], 1)
+        self.assertEqual(result['normalized_placement_counts']['notification'], 1)
+        self.assertEqual(result['placement_counts'], {'Inbox': 1, 'Notification': 1})
+        self.assertFalse(result['passed'])
+        jsonschema.validate(result, RECEIPT['properties']['results']['items'])
+
     def test_run_shares_one_deadline_and_preserves_completed_results(self):
         clock = [0]
         client = FakeClient()
