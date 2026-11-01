@@ -216,6 +216,130 @@ class AgentCheckTests(unittest.TestCase):
         result = self.run_check("--plan", expected=2)
         self.assertIn("tracked directories/submodules need a raw-input validation adapter", result.stderr)
 
+    def test_git_reads_are_bounded_and_timeout_revokes_old_evidence(self):
+        runner = load("agent-check")
+        calls = []
+        def bounded(command, **kwargs):
+            calls.append(command)
+            self.assertGreater(kwargs["timeout"], 0)
+            self.assertLessEqual(kwargs["timeout"], 30)
+            return subprocess.CompletedProcess(command, 0, b"", b"")
+        with mock.patch.object(runner.subprocess, "run", side_effect=bounded):
+            runner.git(self.root, "ls-files")
+            runner.require_unfiltered_tracked_inputs(self.root)
+        self.assertEqual(len(calls), 4)
+        self.run_check()
+        with mock.patch.object(runner, "plan_for", side_effect=subprocess.TimeoutExpired(["git"], 30)):
+            self.assertEqual(runner.main(["--repo-root", str(self.root), "--provider", "codex"]), 2)
+        self.assertFalse((self.root / ".ai/agent-checks/receipt.json").exists())
+
+    def clean_conversion_fixture(self, attributes, *, encoding="utf-8"):
+        path = self.root / "src/value.py"
+        (self.root / ".gitattributes").write_text("src/value.py " + attributes + "\n")
+        path.write_text("value = 1\n# $Id$\n", encoding=encoding)
+        self.git("add", ".gitattributes", "src/value.py")
+        self.git("commit", "-qm", "fixture checkout conversion")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        path.unlink()
+        self.git("checkout", "HEAD", "--", "src/value.py")
+        return path
+
+    def test_clean_crlf_checkout_does_not_select_unchanged_checks(self):
+        path = self.clean_conversion_fixture("text eol=crlf")
+        self.assertIn(b"\r\n", path.read_bytes())
+        plan = json.loads(self.run_check("--plan").stdout)
+        self.assertNotIn("src/value.py", plan["paths"])
+        self.assertEqual(plan["checks"], [])
+
+    def test_clean_encoded_checkout_does_not_select_unchanged_checks(self):
+        self.clean_conversion_fixture("working-tree-encoding=UTF-16LE", encoding="utf-16-le")
+        plan = json.loads(self.run_check("--plan").stdout)
+        self.assertNotIn("src/value.py", plan["paths"])
+        self.assertEqual(plan["checks"], [])
+
+    def test_ident_checkout_is_clean_but_an_edit_hidden_by_clean_conversion_is_checked(self):
+        self.config["checks"][0]["commands"] = [[sys.executable, "-c",
+            "from pathlib import Path; assert b'altered' not in Path('src/value.py').read_bytes()"]]
+        self.save_config()
+        self.git("add", "config/agent-checks.json")
+        path = self.clean_conversion_fixture("ident")
+        self.assertIn(b"$Id: ", path.read_bytes())
+        self.assertNotIn("src/value.py", json.loads(self.run_check("--plan").stdout)["paths"])
+        self.run_check()
+        import re
+        path.write_bytes(re.sub(rb"\$Id:.*?\$", b"$Id: altered $", path.read_bytes()))
+        self.assertEqual(self.git("diff", "HEAD"), b"")
+        plan = json.loads(self.run_check("--plan").stdout)
+        self.assertIn("src/value.py", plan["paths"])
+        self.run_check(expected=1)
+        self.assertFalse(self.receipt()["cached"])
+
+    def test_unexpanded_ident_equal_to_canonical_blob_still_selects_owning_check(self):
+        self.config["checks"][0]["commands"] = [[sys.executable, "-c",
+            "from pathlib import Path; assert b'$Id: ' in Path('src/value.py').read_bytes()"]]
+        self.save_config()
+        self.git("add", "config/agent-checks.json")
+        path = self.clean_conversion_fixture("ident")
+        self.run_check()
+        import re
+        path.write_bytes(re.sub(rb"\$Id:.*?\$", b"$Id$", path.read_bytes()))
+        self.assertEqual(self.git("diff", "HEAD"), b"")
+        self.assertIn("src/value.py", json.loads(self.run_check("--plan").stdout)["paths"])
+        self.run_check(expected=1)
+
+    def test_autocrlf_clean_checkout_and_canonical_lf_edit_are_distinct_inputs(self):
+        self.config["checks"][0]["commands"] = [[sys.executable, "-c",
+            "from pathlib import Path; assert bytes([13,10]) in Path('src/value.py').read_bytes()"]]
+        self.save_config()
+        self.git("add", "config/agent-checks.json")
+        self.git("commit", "-qm", "fixture CRLF owning check")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        self.git("config", "core.autocrlf", "true")
+        # Recreate the checkout: checkout-index does not replace an existing
+        # identical index entry merely because the checkout policy changed.
+        (self.root / "src/value.py").unlink()
+        self.git("checkout-index", "--force", "--all")
+        path = self.root / "src/value.py"
+        self.assertIn(b"\r\n", path.read_bytes())
+        self.assertNotIn("src/value.py", json.loads(self.run_check("--plan").stdout)["paths"])
+        self.run_check()
+        path.write_bytes(path.read_bytes().replace(b"\r\n", b"\n"))
+        self.assertEqual(self.git("diff", "HEAD"), b"")
+        self.assertIn("src/value.py", json.loads(self.run_check("--plan").stdout)["paths"])
+        self.run_check(expected=1)
+
+    def test_ignored_executable_mode_is_not_an_extra_changed_path(self):
+        self.git("config", "core.fileMode", "false")
+        (self.root / "src/value.py").chmod(0o755)
+        self.assertNotIn("src/value.py", json.loads(self.run_check("--plan").stdout)["paths"])
+
+    def test_legacy_crlf_checkout_and_canonical_lf_edit_are_distinct_inputs(self):
+        self.config["checks"][0]["commands"] = [[sys.executable, "-c",
+            "from pathlib import Path; assert bytes([13,10]) in Path('src/value.py').read_bytes()"]]
+        self.save_config()
+        self.git("add", "config/agent-checks.json")
+        self.git("config", "core.eol", "crlf")
+        path = self.clean_conversion_fixture("crlf")
+        self.assertIn(b"\r\n", path.read_bytes())
+        self.assertNotIn("src/value.py", json.loads(self.run_check("--plan").stdout)["paths"])
+        self.run_check()
+        path.write_bytes(path.read_bytes().replace(b"\r\n", b"\n"))
+        self.assertEqual(self.git("diff", "HEAD"), b"")
+        self.assertIn("src/value.py", json.loads(self.run_check("--plan").stdout)["paths"])
+        self.run_check(expected=1)
+
+    def test_regular_checkout_of_symlink_is_not_an_extra_changed_path(self):
+        path = self.root / "link.txt"
+        path.symlink_to("target")
+        self.git("add", "link.txt")
+        self.git("commit", "-qm", "fixture link")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        self.git("config", "core.symlinks", "false")
+        path.unlink()
+        self.git("checkout", "HEAD", "--", "link.txt")
+        self.assertFalse(path.is_symlink())
+        self.assertNotIn("link.txt", json.loads(self.run_check("--plan").stdout)["paths"])
+
     def test_absent_skip_worktree_is_allowed_for_sparse_checkout(self):
         self.git("update-index", "--skip-worktree", "src/value.py")
         (self.root / "src/value.py").unlink()
@@ -247,8 +371,9 @@ class AgentCheckTests(unittest.TestCase):
             original_sleep(seconds)
 
         with mock.patch.object(runner.os, "link", side_effect=paused_link), mock.patch.object(
-            runner.time, "sleep", side_effect=observed_wait
-        ), concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            runner, "time", wraps=runner.time
+        ) as clock, concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            clock.sleep.side_effect = observed_wait
             writer = pool.submit(runner.private_cache_key, self.root)
             try:
                 self.assertTrue(published.wait(5))
@@ -267,10 +392,11 @@ class AgentCheckTests(unittest.TestCase):
         runner.private_cache_key(self.root)
         path = self.root / ".ai/agent-checks/environment.key"
         os.link(path, path.with_name("unexpected-link"))
-        with mock.patch.object(runner.time, "sleep") as delay:
+        with mock.patch.object(runner, "time", wraps=runner.time) as clock:
+            clock.sleep.return_value = None
             with self.assertRaisesRegex(ValueError, "private regular file"):
                 runner.private_cache_key(self.root)
-            self.assertLessEqual(delay.call_count, 20)
+            self.assertLessEqual(clock.sleep.call_count, 20)
         self.assertEqual(path.stat().st_nlink, 2, "an unsafe key must not be repaired or replaced")
 
     def test_utf8_repository_and_receipts_ignore_default_locale(self):
@@ -417,10 +543,11 @@ class AgentCheckTests(unittest.TestCase):
             path.chmod(0o644)
             extra.unlink()
 
-        with mock.patch.object(runner.time, "sleep", side_effect=finish_with_unsafe_permissions) as wait:
+        with mock.patch.object(runner, "time", wraps=runner.time) as clock:
+            clock.sleep.side_effect = finish_with_unsafe_permissions
             with self.assertRaisesRegex(ValueError, "owned private regular file"):
                 runner.private_cache_key(self.root)
-        wait.assert_called_once()
+        clock.sleep.assert_called_once()
         self.assertEqual(path.stat().st_nlink, 1)
         self.assertEqual(path.stat().st_mode & 0o777, 0o644)
 

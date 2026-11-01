@@ -23,6 +23,7 @@ import time
 
 SCHEMA = "agent-check/v1"
 STATE = ".ai/agent-checks"
+GIT_TIMEOUT = 30
 TOOLS = {
     "python": [sys.executable, "--version"],
     "node": ["node", "--version"],
@@ -62,7 +63,7 @@ def git(root: Path, *args: str) -> bytes:
     if args and args[0] == "diff":
         # Evidence must describe bytes, independently of display-only drivers.
         args = (args[0], "--no-ext-diff", "--no-textconv", "--no-color", *args[1:])
-    result = subprocess.run(["git", *args], cwd=root, env=git_environment(), capture_output=True, check=True)
+    result = subprocess.run(["git", *args], cwd=root, env=git_environment(), capture_output=True, timeout=GIT_TIMEOUT, check=True)
     return result.stdout
 
 
@@ -75,7 +76,7 @@ def private_cache_key(root: Path) -> bytes:
     """Create one ignored private key without exposing inherited secret values."""
     path = inside(root, f"{STATE}/environment.key")
     if subprocess.run(["git", "check-ignore", "-q", str(path.relative_to(root))],
-                      cwd=root, env=git_environment()).returncode:
+                      cwd=root, env=git_environment(), timeout=GIT_TIMEOUT).returncode:
         raise ValueError(f"ignore {STATE}/environment.key before executing")
     path.parent.mkdir(parents=True, exist_ok=True)
     # Link a complete private temporary file into place atomically. A competing
@@ -127,13 +128,13 @@ def inside(root: Path, value: str) -> Path:
     return path
 
 
-def require_unfiltered_tracked_inputs(root: Path) -> None:
+def require_unfiltered_tracked_inputs(root: Path) -> set[str]:
     """Reject Git metadata that can conceal raw working-file changes."""
     names = subprocess.run(["git", "ls-files", "-z"], cwd=root,
-                           env=git_environment(), capture_output=True, check=True).stdout
+                           env=git_environment(), capture_output=True, timeout=GIT_TIMEOUT, check=True).stdout
     attributes = subprocess.run(["git", "check-attr", "--all", "-z", "--stdin"],
                                 input=names, cwd=root, env=git_environment(),
-                                capture_output=True, check=True).stdout.split(b"\0")
+                                capture_output=True, timeout=GIT_TIMEOUT, check=True).stdout.split(b"\0")
     if attributes[-1:] == [b""]:
         attributes.pop()
     if len(attributes) % 3:
@@ -142,7 +143,7 @@ def require_unfiltered_tracked_inputs(root: Path) -> None:
         raise ValueError("Git filter attributes are unsupported for local validation; "
                          "filtered working files need a raw-input validation adapter")
     flagged = subprocess.run(["git", "ls-files", "-v", "-z"], cwd=root,
-                             env=git_environment(), capture_output=True, check=True).stdout
+                             env=git_environment(), capture_output=True, timeout=GIT_TIMEOUT, check=True).stdout
     for entry in flagged.split(b"\0"):
         if not entry:
             continue
@@ -155,6 +156,9 @@ def require_unfiltered_tracked_inputs(root: Path) -> None:
         if tag.islower() or (tag == b"S" and os.path.lexists(path)):
             raise ValueError("Git index flags hide tracked working-file changes; "
                              "clear assume-unchanged/skip-worktree on present paths")
+    conversions = {b"text", b"crlf", b"eol", b"ident", b"working-tree-encoding"}
+    return {os.fsdecode(attributes[i]) for i in range(0, len(attributes), 3)
+            if attributes[i + 1] in conversions}
 
 
 def raw_tracked_inputs(root: Path) -> dict:
@@ -251,8 +255,38 @@ def matches(paths: list[str], patterns: list[str]) -> bool:
     return any(fnmatch.fnmatchcase(path, pattern) for path in paths for pattern in patterns)
 
 
+def working_tree_matches_base(root: Path, name: str, actual: tuple, baseline: tuple | None) -> bool:
+    """Compare to baseline checkout bytes, never clean away a working edit.
+
+    The caller has rejected external filters. Built-in checkout conversions
+    (CRLF, ident, encoding) are applied to the immutable base blob, so edits
+    hidden by clean conversion still select their owning checks.
+    """
+    if baseline is None or actual[0] == "missing":
+        return False
+    mode, identity = baseline
+    if actual[0] != mode:
+        regular = {"100644", "100755"}
+        file_mode = git(root, "config", "--type=bool", "--default=true", "--get", "core.filemode").strip()
+        symlinks = git(root, "config", "--type=bool", "--default=true", "--get", "core.symlinks").strip()
+        if not ((actual[0] in regular and mode in regular and file_mode == b"false")
+                or (actual[0] in regular and mode == "120000" and symlinks == b"false")):
+            return False
+    expected = (git(root, "cat-file", "blob", identity) if mode == "120000" else
+                git(root, "cat-file", "--filters", "--path=" + name, identity))
+    # raw_tracked_inputs has already validated the repository object format.
+    digest = hashlib.new("sha256" if len(identity) == 64 else "sha1")
+    digest.update(f"blob {len(expected)}\0".encode())
+    digest.update(expected)
+    return actual[1] == digest.hexdigest()
+
+
 def plan_for(root: Path, config: dict, base: str | None = None) -> dict:
-    require_unfiltered_tracked_inputs(root)
+    conversion_paths = require_unfiltered_tracked_inputs(root)
+    # Include conservative potential conversions even when bytes equal the
+    # canonical blob (e.g. an expanded ident replaced by literal $Id$).
+    autocrlf = git(root, "config", "--default=false", "--get", "core.autocrlf").strip().lower()
+    global_conversion = autocrlf not in {b"false", b"no", b"off", b"0", b"input"}
     ref = base or config["base"]
     base_sha = git(root, "merge-base", ref, "HEAD").decode().strip()
     changed: set[str] = set()
@@ -266,7 +300,8 @@ def plan_for(root: Path, config: dict, base: str | None = None) -> dict:
             mode, _, identity = metadata.decode().split()
             baseline[os.fsdecode(name)] = (mode, identity)
     changed.update(name for name, value in raw_tracked_inputs(root).items()
-                   if baseline.get(name) != value)
+                   if (value != baseline.get(name) or name in conversion_paths or global_conversion)
+                   and not working_tree_matches_base(root, name, value, baseline.get(name)))
     paths = sorted(changed)
     # Owners explicitly declare global inputs in each recipe. Framework-only
     # changes must not implicitly install/build every application in the repo.
@@ -384,7 +419,7 @@ def main(argv=None) -> int:
         # Receipts must be ignored even before first use; never commit local
         # evidence or accidentally add it to its own cache fingerprint.
         if subprocess.run(["git", "check-ignore", "-q", f"{STATE}/receipt.json"],
-                          cwd=root, env=git_environment()).returncode:
+                          cwd=root, env=git_environment(), timeout=GIT_TIMEOUT).returncode:
             raise ValueError(f"ignore {STATE}/ in .gitignore before executing")
         key = private_cache_key(root)
         before = snapshot(root)
@@ -514,7 +549,7 @@ def main(argv=None) -> int:
                 ))
         print(f"AGENT-CHECK-{outcome.upper()} {candidate_digest[:12]}")
         return 0 if outcome == "passed" else 1
-    except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
         if receipt_path is not None:
             try:
                 receipt_path.unlink(missing_ok=True)
