@@ -7,6 +7,9 @@
 # ecosystem-canonical config in manolii-org/master:.coderabbit.yaml.
 
 reviews:
+  # Keep commit statuses for merge gates while suppressing skip-status comments.
+  review_status: false
+  commit_status: true
   auto_review:
     enabled: true
     drafts: false
