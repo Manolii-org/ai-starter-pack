@@ -161,6 +161,45 @@ def require_unfiltered_tracked_inputs(root: Path) -> set[str]:
             if attributes[i + 1] in conversions}
 
 
+def directory_state(details: os.stat_result) -> tuple:
+    # Reading a directory may update atime, including on every strictatime
+    # filesystem scan. Identity, mode and mutation times carry the proof.
+    return (details.st_dev, details.st_ino, details.st_mode,
+            details.st_mtime_ns, details.st_ctime_ns)
+
+
+def empty_gitlink_identity(root: Path, name: str) -> str | None:
+    path = root / name
+    # Descriptor enumeration is unavailable on some hosts. The existing
+    # unsupported-submodule block remains their conservative fallback.
+    if os.scandir not in os.supports_fd:
+        return None
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        details = os.fstat(descriptor)
+        before = directory_state(details)
+        if not stat.S_ISDIR(details.st_mode) or directory_state(path.lstat()) != before:
+            return None
+        entries = git(root, "ls-files", "--stage", "-z", "--", name).split(b"\0")
+        if len(entries) != 2 or entries[1]:
+            return None
+        metadata, tracked_name = entries[0].split(b"\t", 1)
+        fields = metadata.split()
+        if (len(fields) != 3 or fields[0] != b"160000" or fields[2] != b"0"
+                or tracked_name != os.fsencode(name)):
+            return None
+        with os.scandir(descriptor) as scan:
+            if next(scan, None) is not None:
+                return None
+        if (directory_state(os.fstat(descriptor)) != before
+                or directory_state(path.lstat()) != before):
+            return None
+        return fields[1].decode("ascii")
+    finally:
+        os.close(descriptor)
+
+
 def raw_tracked_inputs(root: Path) -> dict:
     """Hash physical working bytes independently of Git's stat/index hints."""
     algorithm = git(root, "rev-parse", "--show-object-format").decode().strip()
@@ -188,16 +227,10 @@ def raw_tracked_inputs(root: Path) -> dict:
             # contain no working bytes; bind their stage-zero gitlink instead.
             # Initialized/nonempty modules still need a recursive raw adapter.
             if path.is_dir() and not path.is_symlink():
-                directory = path.lstat()
-                entries = git(root, "ls-files", "--stage", "-z", "--", name).split(b"\0")
-                if len(entries) == 2 and not entries[1]:
-                    metadata, tracked_name = entries[0].split(b"\t", 1)
-                    fields = metadata.split()
-                    if (len(fields) == 3 and fields[0] == b"160000" and fields[2] == b"0"
-                            and tracked_name == os.fsencode(name)
-                            and path.lstat() == directory and not any(path.iterdir())):
-                        result[name] = ("160000", fields[1].decode("ascii"))
-                        continue
+                identity = empty_gitlink_identity(root, name)
+                if identity is not None:
+                    result[name] = ("160000", identity)
+                    continue
             raise ValueError("tracked directories/submodules need a raw-input validation adapter")
         digest = hashlib.new(algorithm)
         digest.update(f"blob {len(content)}\0".encode())
