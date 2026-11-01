@@ -785,6 +785,14 @@ def strict_render(tmp_path_factory):
     return dst
 
 
+def test_pack_context_manifest_never_ships(default_render, strict_render):
+    """The pack's .ai/repo-context.yaml names Manolii-org/ai-starter-pack; a
+    rendered instance inheriting it would claim the template's identity."""
+    assert (ROOT / ".ai/repo-context.yaml").is_file()
+    for rendered in (default_render, strict_render):
+        assert not (rendered / ".ai/repo-context.yaml").exists()
+
+
 def test_telemetry_keys_follow_the_flag(default_render, tmp_path):
     """Telemetry env + otelHeadersHelper only when langfuse_telemetry is on."""
     default = json.loads((default_render / ".claude/settings.json").read_text())
