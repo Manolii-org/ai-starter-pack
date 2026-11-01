@@ -273,23 +273,23 @@ def test_cost_profile_lean_omits_measured_waste_callers(default_render):
 @pytest.mark.parametrize(
     ("flags", "expected"),
     [
-        ({}, {"Hooks": 5, "Commands": 51, "Skills": 36, "Agents": 27,
-              "Scripts": 56, "Husky": 3, "CI": 36, "Docs": 33}),
+        ({}, {"Hooks": 5, "Commands": 51, "Skills": 37, "Agents": 27,
+              "Scripts": 56, "Husky": 3, "CI": 36, "Docs": 34}),
         ({flag: "true" for flag in FEATURE_FLAGS},
-         {"Hooks": 5, "Commands": 54, "Skills": 40, "Agents": 28,
-              "Scripts": 56, "Husky": 3, "CI": 36, "Docs": 35}),
+         {"Hooks": 5, "Commands": 54, "Skills": 41, "Agents": 28,
+              "Scripts": 56, "Husky": 3, "CI": 36, "Docs": 36}),
         ({"cost_profile": "lean"},
-         {"Hooks": 5, "Commands": 51, "Skills": 36, "Agents": 27,
-              "Scripts": 56, "Husky": 3, "CI": 35, "Docs": 33}),
+         {"Hooks": 5, "Commands": 51, "Skills": 37, "Agents": 27,
+              "Scripts": 56, "Husky": 3, "CI": 35, "Docs": 34}),
         ({"codex_review": "false"},
-         {"Hooks": 5, "Commands": 51, "Skills": 36, "Agents": 27,
-              "Scripts": 56, "Husky": 3, "CI": 34, "Docs": 33}),
+         {"Hooks": 5, "Commands": 51, "Skills": 37, "Agents": 27,
+              "Scripts": 56, "Husky": 3, "CI": 34, "Docs": 34}),
         ({"isolation_profile": "strict"},
-         {"Hooks": 5, "Commands": 51, "Skills": 36, "Agents": 27,
-              "Scripts": 53, "Husky": 3, "CI": 30, "Docs": 33}),
+         {"Hooks": 5, "Commands": 51, "Skills": 37, "Agents": 27,
+              "Scripts": 53, "Husky": 3, "CI": 30, "Docs": 34}),
         ({"isolation_profile": "strict", "cost_profile": "lean"},
-         {"Hooks": 5, "Commands": 51, "Skills": 36, "Agents": 27,
-              "Scripts": 53, "Husky": 3, "CI": 30, "Docs": 33}),
+         {"Hooks": 5, "Commands": 51, "Skills": 37, "Agents": 27,
+              "Scripts": 53, "Husky": 3, "CI": 30, "Docs": 34}),
     ],
 )
 def test_rendered_readme_counts_match_rendered_tree(flags, expected):
@@ -325,6 +325,21 @@ def test_validation_layout_distribution_boundary(default_render, branded_render)
         assert not (rendered / "scripts/tests/test_agent_validation_layout.py").exists()
         # The existing default validation bundle remains available to callers.
         assert (rendered / "scripts/tests/test_agent_check.py").is_file()
+
+
+def test_security_audit_tests_run_in_rendered_consumers(default_render, branded_render):
+    """Portable evidence checks run without the pack's excluded build artifacts."""
+    for rendered in (default_render, branded_render):
+        assert not (rendered / "pack.manifest.yml").exists()
+        before = file_set(rendered)
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests/test_security_audit_evidence.py"],
+            cwd=rendered, capture_output=True, text=True, timeout=30,
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert re.search(r"\b\d+ passed, 1 skipped\b", result.stdout)
+        assert file_set(rendered) == before, "consumer checks must preserve shared render fixtures"
 
 
 def test_brand_answers_match_overlays(branded_render, default_render):
