@@ -154,6 +154,83 @@ class AgentCheckTests(unittest.TestCase):
                 result = self.run_check(expected=2)
                 self.assertIn("Git filter attributes are unsupported", result.stderr)
 
+    def test_index_flags_revoke_warm_validation_before_cache_or_selection(self):
+        for flag in ("--assume-unchanged", "--skip-worktree"):
+            with self.subTest(flag=flag):
+                self.change_source()
+                self.run_check()
+                self.git("update-index", flag, "src/value.py")
+                (self.root / "src/value.py").write_text("value = 0\n# changed\n")
+                for args in ((), ("--no-cache",), ("--plan",)):
+                    result = self.run_check(*args, expected=2)
+                    self.assertIn("Git index flags hide", result.stderr)
+                    self.assertNotIn("AGENT-CHECK-CACHED", result.stdout)
+                    self.assertFalse((self.root / ".ai/agent-checks/receipt.json").exists())
+                self.git("update-index", flag.replace("--", "--no-"), "src/value.py")
+
+    def test_fsmonitor_valid_cannot_hide_failing_bytes_from_a_warm_cache(self):
+        self.change_source()
+        self.git("add", "src/value.py")
+        self.git("commit", "-qm", "fixture candidate")
+        hook = self.root / ".git/fsmonitor-hook"
+        hook.write_text("#!/bin/sh\nprintf 'fixture-clock\\0'\n")
+        hook.chmod(0o755)
+        self.git("config", "core.fsmonitor", str(hook))
+        self.git("config", "core.fsmonitorHookVersion", "2")
+        self.run_check()
+        self.git("update-index", "--fsmonitor", "--fsmonitor-valid", "src/value.py")
+        (self.root / "src/value.py").write_text("value = 0\n# changed\n")
+        self.assertEqual(self.git("diff", "--binary", "HEAD"), b"")
+        plan = json.loads(self.run_check("--plan").stdout)
+        self.assertIn("src/value.py", plan["paths"])
+        self.assertIn("test", [item["id"] for item in plan["checks"]])
+        result = self.run_check(expected=1)
+        self.assertNotIn("AGENT-CHECK-CACHED", result.stdout)
+        self.assertFalse(self.receipt()["cached"])
+
+    def test_relaxed_stat_hints_cannot_hide_same_size_failing_bytes(self):
+        self.git("config", "core.trustctime", "false")
+        self.git("config", "core.checkStat", "minimal")
+        self.change_source()
+        path = self.root / "src/value.py"
+        os.utime(path, ns=(1_000_000_000, 1_000_000_000))
+        self.git("add", "src/value.py")
+        self.git("commit", "-qm", "fixture old-mtime candidate")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        self.run_check()
+        old = path.stat()
+        path.write_text("value = 0\n# changed\n")
+        os.utime(path, ns=(old.st_atime_ns, old.st_mtime_ns))
+        self.assertEqual(self.git("diff", "--binary", "HEAD"), b"")
+        plan = json.loads(self.run_check("--plan").stdout)
+        self.assertIn("src/value.py", plan["paths"])
+        self.assertIn("test", [item["id"] for item in plan["checks"]])
+        result = self.run_check(expected=1)
+        self.assertNotIn("AGENT-CHECK-CACHED", result.stdout)
+        self.assertFalse(self.receipt()["cached"])
+
+    def test_tracked_submodule_requires_a_raw_input_adapter(self):
+        head = self.git("rev-parse", "HEAD").decode().strip()
+        self.git("update-index", "--add", "--cacheinfo", "160000," + head + ",module")
+        (self.root / "module").mkdir()
+        result = self.run_check("--plan", expected=2)
+        self.assertIn("tracked directories/submodules need a raw-input validation adapter", result.stderr)
+
+    def test_absent_skip_worktree_is_allowed_for_sparse_checkout(self):
+        self.git("update-index", "--skip-worktree", "src/value.py")
+        (self.root / "src/value.py").unlink()
+        result = self.run_check("--plan")
+        self.assertNotIn("Git index flags hide", result.stderr)
+
+    def test_index_flag_paths_with_newlines_and_dangling_symlinks_are_checked(self):
+        path = self.root / "src/hidden\nvalue.py"
+        path.symlink_to("absent-target")
+        self.git("add", str(path.relative_to(self.root)))
+        self.git("commit", "-qm", "fixture symlink")
+        self.git("update-index", "--skip-worktree", str(path.relative_to(self.root)))
+        result = self.run_check("--plan", expected=2)
+        self.assertIn("Git index flags hide", result.stderr)
+
     def test_concurrent_key_reader_waits_for_publisher_to_remove_temporary_link(self):
         runner = load("agent-check")
         published, release, waiting = threading.Event(), threading.Event(), threading.Event()

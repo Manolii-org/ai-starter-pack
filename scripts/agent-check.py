@@ -128,7 +128,7 @@ def inside(root: Path, value: str) -> Path:
 
 
 def require_unfiltered_tracked_inputs(root: Path) -> None:
-    """Git clean/smudge filters can conceal raw working-file changes."""
+    """Reject Git metadata that can conceal raw working-file changes."""
     names = subprocess.run(["git", "ls-files", "-z"], cwd=root,
                            env=git_environment(), capture_output=True, check=True).stdout
     attributes = subprocess.run(["git", "check-attr", "--all", "-z", "--stdin"],
@@ -141,6 +141,51 @@ def require_unfiltered_tracked_inputs(root: Path) -> None:
     if any(attributes[i + 1] == b"filter" for i in range(0, len(attributes), 3)):
         raise ValueError("Git filter attributes are unsupported for local validation; "
                          "filtered working files need a raw-input validation adapter")
+    flagged = subprocess.run(["git", "ls-files", "-v", "-z"], cwd=root,
+                             env=git_environment(), capture_output=True, check=True).stdout
+    for entry in flagged.split(b"\0"):
+        if not entry:
+            continue
+        if len(entry) < 3 or entry[1:2] != b" ":
+            raise ValueError("cannot determine tracked Git index flags")
+        tag, path = entry[:1], root / os.fsdecode(entry[2:])
+        # Absent skip-worktree entries are normal in a sparse checkout. Existing
+        # paths (including dangling symlinks) can carry hidden, unvalidated bytes.
+        # Assume-unchanged is unsafe even when a working path has been removed.
+        if tag.islower() or (tag == b"S" and os.path.lexists(path)):
+            raise ValueError("Git index flags hide tracked working-file changes; "
+                             "clear assume-unchanged/skip-worktree on present paths")
+
+
+def raw_tracked_inputs(root: Path) -> dict:
+    """Hash physical working bytes independently of Git's stat/index hints."""
+    algorithm = git(root, "rev-parse", "--show-object-format").decode().strip()
+    if algorithm not in {"sha1", "sha256"}:
+        raise ValueError("unsupported Git object format for raw-input validation")
+    result = {}
+    for entry in git(root, "ls-files", "-t", "-z").split(b"\0"):
+        if not entry:
+            continue
+        if len(entry) < 3 or entry[1:2] != b" ":
+            raise ValueError("cannot determine tracked raw-input paths")
+        name = os.fsdecode(entry[2:])
+        path = root / name
+        if not os.path.lexists(path):
+            if entry[:1] != b"S":
+                result[name] = ("missing", "")
+            continue
+        if path.is_symlink():
+            mode, content = "120000", os.fsencode(os.readlink(path))
+        elif path.is_file():
+            mode = "100755" if path.stat().st_mode & 0o100 else "100644"
+            content = path.read_bytes()
+        else:
+            raise ValueError("tracked directories/submodules need a raw-input validation adapter")
+        digest = hashlib.new(algorithm)
+        digest.update(f"blob {len(content)}\0".encode())
+        digest.update(content)
+        result[name] = (mode, digest.hexdigest())
+    return result
 
 
 def snapshot(root: Path) -> dict:
@@ -166,6 +211,7 @@ def snapshot(root: Path) -> dict:
         "head": git(root, "rev-parse", "HEAD").decode().strip(),
         "tree": git(root, "rev-parse", "HEAD^{tree}").decode().strip(),
         "diff": sha(git(root, "diff", "--binary", "HEAD")),
+        "tracked_raw": raw_tracked_inputs(root),
         "untracked": untracked,
         "symlinks": symlinks,
     }
@@ -213,6 +259,14 @@ def plan_for(root: Path, config: dict, base: str | None = None) -> dict:
     for command in (("diff", "--no-renames", "--name-only", "-z", base_sha),
                     ("ls-files", "--others", "--exclude-standard", "-z")):
         changed.update(os.fsdecode(p) for p in git(root, *command).split(b"\0") if p)
+    baseline = {}
+    for entry in git(root, "ls-tree", "-r", "--full-tree", "-z", base_sha).split(b"\0"):
+        if entry:
+            metadata, name = entry.split(b"\t", 1)
+            mode, _, identity = metadata.decode().split()
+            baseline[os.fsdecode(name)] = (mode, identity)
+    changed.update(name for name, value in raw_tracked_inputs(root).items()
+                   if baseline.get(name) != value)
     paths = sorted(changed)
     # Owners explicitly declare global inputs in each recipe. Framework-only
     # changes must not implicitly install/build every application in the repo.
