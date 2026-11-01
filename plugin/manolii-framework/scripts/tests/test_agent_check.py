@@ -2,6 +2,7 @@
 """Exercise local execution, invalidation and native-surface delivery."""
 from __future__ import annotations
 
+import concurrent.futures
 import importlib.util
 import json
 import os
@@ -10,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -74,6 +76,125 @@ class AgentCheckTests(unittest.TestCase):
 
     def change_source(self):
         (self.root / "src/value.py").write_text("value = 1\n# changed\n")
+
+    def test_external_diff_cannot_hide_a_failing_edit_from_cached_validation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            driver = Path(temp) / "display-diff"
+            driver.write_text("#!/bin/sh\nprintf 'display only\\n'\n")
+            driver.chmod(0o755)
+            env = {**os.environ, "GIT_EXTERNAL_DIFF": str(driver)}
+            self.change_source()
+            first = self.run_check(env=env)
+            self.assertIn("AGENT-CHECK test:", first.stdout)
+            (self.root / "src/value.py").write_text("value = 0\n# changed\n")
+            self.run_check(expected=1, env=env)
+            self.assertFalse(self.receipt()["cached"])
+
+    def test_textconv_cannot_hide_a_failing_edit_from_cached_validation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            driver = Path(temp) / "textconv"
+            driver.write_text("#!/bin/sh\nprintf 'display only\\n'\n")
+            driver.chmod(0o755)
+            (self.root / ".gitattributes").write_text("src/value.py diff=display\n")
+            self.git("add", ".gitattributes")
+            self.git("commit", "-qm", "fixture attributes")
+            self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+            self.git("config", "diff.display.textconv", str(driver))
+            self.change_source()
+            first = self.run_check()
+            self.assertIn("AGENT-CHECK test:", first.stdout)
+            (self.root / "src/value.py").write_text("value = 0\n# changed\n")
+            self.run_check(expected=1)
+            self.assertFalse(self.receipt()["cached"])
+
+    def test_git_color_configuration_does_not_invalidate_a_valid_cache(self):
+        self.change_source()
+        self.run_check()
+        self.git("config", "color.ui", "always")
+        self.run_check()
+        self.assertTrue(self.receipt()["cached"])
+
+    def test_clean_filter_cannot_hide_a_failing_working_file(self):
+        driver = self.root / ".git/clean-source"
+        driver.write_text("#!" + sys.executable + "\nimport sys\nbody=sys.stdin.read()\n"
+                          "print('candidate' if '# changed' in body else 'base')\n")
+        driver.chmod(0o755)
+        (self.root / ".gitattributes").write_text("src/value.py filter=constant\n")
+        self.git("config", "filter.constant.clean", str(driver))
+        self.git("add", ".gitattributes", "src/value.py")
+        self.git("commit", "-qm", "fixture filter")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        self.change_source()
+        normalized = self.git("diff", "--binary", "HEAD")
+        (self.root / "src/value.py").write_text("value = 0\n# changed\n")
+        self.assertEqual(normalized, self.git("diff", "--binary", "HEAD"))
+        actual = subprocess.run(self.config["checks"][0]["commands"][0], cwd=self.root,
+                                capture_output=True)
+        self.assertNotEqual(actual.returncode, 0)
+        for args in ((), ("--no-cache",), ("--plan",)):
+            with self.subTest(args=args):
+                result = self.run_check(*args, expected=2)
+                self.assertIn("Git filter attributes are unsupported", result.stderr)
+                self.assertNotIn("AGENT-CHECK-CACHED", result.stdout)
+                self.assertFalse((self.root / ".ai/agent-checks/receipt.json").exists())
+
+    def test_enabling_local_filter_revokes_warm_validation_before_selection(self):
+        self.change_source()
+        self.run_check()
+        (self.root / ".git/info/attributes").write_text("src/value.py filter=local\n")
+        result = self.run_check(expected=2)
+        self.assertIn("Git filter attributes are unsupported", result.stderr)
+        self.assertNotIn("AGENT-CHECK test:", result.stdout)
+        self.assertFalse((self.root / ".ai/agent-checks/receipt.json").exists())
+
+    def test_filter_driver_names_cannot_masquerade_as_attribute_sentinels(self):
+        for value in ("unspecified", "unset", "set"):
+            with self.subTest(value=value):
+                (self.root / ".git/info/attributes").write_text(f"src/value.py filter={value}\n")
+                result = self.run_check(expected=2)
+                self.assertIn("Git filter attributes are unsupported", result.stderr)
+
+    def test_concurrent_key_reader_waits_for_publisher_to_remove_temporary_link(self):
+        runner = load("agent-check")
+        published, release, waiting = threading.Event(), threading.Event(), threading.Event()
+        original_link, original_sleep = runner.os.link, runner.time.sleep
+
+        def paused_link(*args, **kwargs):
+            original_link(*args, **kwargs)
+            published.set()
+            if not release.wait(5):
+                raise RuntimeError("Fixture publisher was not released")
+
+        def observed_wait(seconds):
+            waiting.set()
+            original_sleep(seconds)
+
+        with mock.patch.object(runner.os, "link", side_effect=paused_link), mock.patch.object(
+            runner.time, "sleep", side_effect=observed_wait
+        ), concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            writer = pool.submit(runner.private_cache_key, self.root)
+            try:
+                self.assertTrue(published.wait(5))
+                reader = pool.submit(runner.private_cache_key, self.root)
+                self.assertTrue(waiting.wait(1), "reader must observe the two-link publication window")
+            finally:
+                release.set()
+            self.assertTrue(writer.result(timeout=5) == reader.result(timeout=5))
+        path = self.root / ".ai/agent-checks/environment.key"
+        self.assertEqual(len(path.read_bytes()), 32)
+        self.assertEqual(path.stat().st_nlink, 1)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_persistent_cache_key_links_remain_rejected_with_a_bounded_wait(self):
+        runner = load("agent-check")
+        runner.private_cache_key(self.root)
+        path = self.root / ".ai/agent-checks/environment.key"
+        os.link(path, path.with_name("unexpected-link"))
+        with mock.patch.object(runner.time, "sleep") as delay:
+            with self.assertRaisesRegex(ValueError, "private regular file"):
+                runner.private_cache_key(self.root)
+            self.assertLessEqual(delay.call_count, 20)
+        self.assertEqual(path.stat().st_nlink, 2, "an unsafe key must not be repaired or replaced")
 
     def test_utf8_repository_and_receipts_ignore_default_locale(self):
         self.config["note"] = "Café validation"
@@ -205,6 +326,26 @@ class AgentCheckTests(unittest.TestCase):
         key.chmod(0o644)
         self.run_check(expected=2)
         self.assertFalse((state / "receipt.json").exists())
+
+
+
+    def test_key_permissions_are_rechecked_after_creator_link_wait(self):
+        runner = load("agent-check")
+        runner.private_cache_key(self.root)
+        path = self.root / ".ai/agent-checks/environment.key"
+        extra = path.with_name("creator-temporary-link")
+        os.link(path, extra)
+
+        def finish_with_unsafe_permissions(_seconds):
+            path.chmod(0o644)
+            extra.unlink()
+
+        with mock.patch.object(runner.time, "sleep", side_effect=finish_with_unsafe_permissions) as wait:
+            with self.assertRaisesRegex(ValueError, "owned private regular file"):
+                runner.private_cache_key(self.root)
+        wait.assert_called_once()
+        self.assertEqual(path.stat().st_nlink, 1)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o644)
 
     def test_untracked_file_to_symlink_cannot_reuse_the_regular_file_pass(self):
         target = self.root / "node_modules/value.txt"
@@ -369,14 +510,98 @@ class AgentCheckTests(unittest.TestCase):
                             "tool_requirements": {"node": "vfixture-1"}})
         self.save_config()
         env = {**os.environ, "PATH": str(binaries) + os.pathsep + os.environ["PATH"]}
-        self.run_check("--provision", env=env)
+        self.run_check("--provision", expected=1, env=env)
+        self.assertIn("later provisioning", next(r for r in self.receipt()["results"] if r["id"] == "first")["reason"])
         self.assertFalse(self.receipt()["cached"])
         self.run_check("--provision", env=env)
-        self.assertTrue(self.receipt()["cached"])
+        self.assertFalse(self.receipt()["cached"])
         self.run_check(env=env)
         self.assertTrue(self.receipt()["cached"])
         for name in ("first", "second"):
-            self.assertEqual((self.root / f"node_modules/{name}/installs").read_text(), "1")
+            self.assertEqual((self.root / f"node_modules/{name}/installs").read_text(), "11" if name == "first" else "1")
+
+    def test_newly_provisioned_environment_is_not_rekeyed_after_later_tool_change(self):
+        state = self.root / ".ai/agent-checks"
+        binaries = state / "bin"
+        binaries.mkdir(parents=True)
+        (state / "tool-version").write_text("vfixture-1")
+        binary = binaries / "node"
+        binary.write_text(f"#!{sys.executable}\nfrom pathlib import Path\n"
+                          "print(Path('.ai/agent-checks/tool-version').read_text())\n")
+        binary.chmod(0o755)
+        first = ("from pathlib import Path; import subprocess; "
+                 "p=Path('node_modules/first'); p.mkdir(parents=True,exist_ok=True); "
+                 "(p/'installed-tool-version').write_text(subprocess.check_output(['node','--version'],text=True).strip())")
+        second = ("from pathlib import Path; p=Path('node_modules/second'); p.mkdir(parents=True,exist_ok=True); "
+                  "Path('.ai/agent-checks/tool-version').write_text('vfixture-2')")
+        self.config["environments"] = [
+            {"id": "first", "tools": ["node"], "ready_paths": ["node_modules/first"], "commands": [[sys.executable, "-c", first]]},
+            {"id": "second", "tools": ["node"], "ready_paths": ["node_modules/second"], "commands": [[sys.executable, "-c", second]]},
+        ]
+        self.config["checks"] = [{**self.config["checks"][0], "id": f"check-{name}", "environment": name, "tools": ["node"]}
+                                 for name in ("first", "second")]
+        self.save_config()
+        env = {**os.environ, "PATH": str(binaries) + os.pathsep + os.environ["PATH"]}
+        self.run_check("--provision", expected=1, env=env)
+        failed = next(r for r in self.receipt()["results"] if r["id"] == "first")
+        self.assertEqual(failed["status"], "failed")
+        self.assertIn("later provisioning", failed["reason"])
+        self.assertEqual((self.root / "node_modules/first/installed-tool-version").read_text(), "vfixture-1")
+        self.assertFalse(any(r["id"].startswith("check-") for r in self.receipt()["results"]))
+        self.run_check("--provision", env=env)
+        self.assertEqual((self.root / "node_modules/first/installed-tool-version").read_text(), "vfixture-2")
+        self.run_check(env=env)
+        self.assertTrue(self.receipt()["cached"])
+
+    def test_later_provisioning_invalidates_an_earlier_cached_environment(self):
+        state = self.root / ".ai/agent-checks"
+        binaries = state / "bin"
+        binaries.mkdir(parents=True)
+        version = state / "tool-version"
+        version.write_text("vfixture-1")
+        binary = binaries / "node"
+        binary.write_text(f"#!{sys.executable}\nfrom pathlib import Path\n"
+                          "print(Path('.ai/agent-checks/tool-version').read_text())\n")
+        binary.chmod(0o755)
+        (self.root / "second.lock").write_text("vfixture-1")
+        environments = []
+        checks = []
+        for name in ("first", "second"):
+            setup = ("from pathlib import Path; "
+                     f"p=Path('node_modules/{name}'); p.mkdir(parents=True,exist_ok=True); "
+                     "c=p/'installs'; c.write_text(c.read_text()+'1' if c.exists() else '1')")
+            if name == "second":
+                setup += "; Path('.ai/agent-checks/tool-version').write_text(Path('second.lock').read_text())"
+            environments.append({"id": name, "inputs": ["second.lock" if name == "second" else "lock.json"],
+                                 "tools": ["node"], "ready_paths": [f"node_modules/{name}"],
+                                 "commands": [[sys.executable, "-c", setup]]})
+            checks.append({**self.config["checks"][0], "id": f"check-{name}",
+                           "environment": name, "tools": ["node"]})
+        self.config.update({"environments": environments, "checks": checks})
+        self.save_config()
+        env = {**os.environ, "PATH": str(binaries) + os.pathsep + os.environ["PATH"]}
+        self.run_check("--provision", env=env)
+        self.run_check("--provision", env=env)
+        self.assertTrue(self.receipt()["cached"])
+
+        (self.root / "second.lock").write_text("vfixture-2")
+        self.run_check("--provision", expected=1, env=env)
+        receipt = self.receipt()
+        failed = next(r for r in receipt["results"] if r["id"] == "first")
+        self.assertEqual(failed["status"], "failed")
+        self.assertIn("later provisioning", failed["reason"])
+        self.assertFalse(any(r["id"].startswith("check-") for r in receipt["results"]))
+        runner = load("agent-check")
+        old_receipt = state / "environments" / f"environment-{runner.sha(runner.encoded('first'))}.json"
+        self.assertFalse(old_receipt.exists())
+        self.assertEqual((self.root / "node_modules/first/installs").read_text(), "1")
+        self.assertEqual((self.root / "node_modules/second/installs").read_text(), "11")
+
+        self.run_check("--provision", env=env)
+        self.assertFalse(self.receipt()["cached"])
+        self.assertEqual((self.root / "node_modules/first/installs").read_text(), "11")
+        self.run_check(env=env)
+        self.assertTrue(self.receipt()["cached"])
 
     def test_failed_reinstall_cannot_revive_receipt_for_restored_tool_version(self):
         state = self.root / ".ai/agent-checks"

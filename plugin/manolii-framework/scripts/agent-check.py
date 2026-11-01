@@ -59,6 +59,9 @@ def git_environment(environ: dict | None = None) -> dict:
 
 
 def git(root: Path, *args: str) -> bytes:
+    if args and args[0] == "diff":
+        # Evidence must describe bytes, independently of display-only drivers.
+        args = (args[0], "--no-ext-diff", "--no-textconv", "--no-color", *args[1:])
     result = subprocess.run(["git", *args], cwd=root, env=git_environment(), capture_output=True, check=True)
     return result.stdout
 
@@ -93,10 +96,19 @@ def private_cache_key(root: Path) -> bytes:
         raise ValueError("environment cache key must be a private regular file")
     fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
     with os.fdopen(fd, "rb") as stream:
-        details = os.fstat(stream.fileno())
-        if (not stat.S_ISREG(details.st_mode) or stat.S_IMODE(details.st_mode) != 0o600
-                or details.st_uid != os.getuid() or details.st_nlink != 1):
-            raise ValueError("environment cache key must be an owned private regular file with mode 0600")
+        for attempt in range(20):
+            details = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(details.st_mode) or stat.S_IMODE(details.st_mode) != 0o600
+                    or details.st_uid != os.getuid()):
+                raise ValueError("environment cache key must be an owned private regular file with mode 0600")
+            if details.st_nlink == 1:
+                break
+            # A concurrent publisher briefly owns both the temporary and final names.
+            # Keep the same descriptor and require one link before reading any material.
+            # Persistent/extra links still fail closed; never replace or repair the key.
+            if details.st_nlink != 2 or attempt == 19:
+                raise ValueError("environment cache key must be an owned private regular file with mode 0600")
+            time.sleep(0.05)
         key = stream.read(33)
     if len(key) != 32:
         raise ValueError("environment cache key is invalid")
@@ -115,7 +127,24 @@ def inside(root: Path, value: str) -> Path:
     return path
 
 
+def require_unfiltered_tracked_inputs(root: Path) -> None:
+    """Git clean/smudge filters can conceal raw working-file changes."""
+    names = subprocess.run(["git", "ls-files", "-z"], cwd=root,
+                           env=git_environment(), capture_output=True, check=True).stdout
+    attributes = subprocess.run(["git", "check-attr", "--all", "-z", "--stdin"],
+                                input=names, cwd=root, env=git_environment(),
+                                capture_output=True, check=True).stdout.split(b"\0")
+    if attributes[-1:] == [b""]:
+        attributes.pop()
+    if len(attributes) % 3:
+        raise ValueError("cannot determine tracked Git filter attributes")
+    if any(attributes[i + 1] == b"filter" for i in range(0, len(attributes), 3)):
+        raise ValueError("Git filter attributes are unsupported for local validation; "
+                         "filtered working files need a raw-input validation adapter")
+
+
 def snapshot(root: Path) -> dict:
+    require_unfiltered_tracked_inputs(root)
     # Include staged AND unstaged edits, additions and deletions. Generated
     # ignored files are not evidence inputs; declare their source/config.
     untracked = {}
@@ -177,6 +206,7 @@ def matches(paths: list[str], patterns: list[str]) -> bool:
 
 
 def plan_for(root: Path, config: dict, base: str | None = None) -> dict:
+    require_unfiltered_tracked_inputs(root)
     ref = base or config["base"]
     base_sha = git(root, "merge-base", ref, "HEAD").decode().strip()
     changed: set[str] = set()
@@ -307,6 +337,7 @@ def main(argv=None) -> int:
         cache_reusable = not before["symlinks"]
         results = []
         provisioned = []
+        reused_environments = []
         results.append(execute(root, {"id": "diff-check", "commands": [["git", "diff", "--check", plan["base"]]]}, inherited))
         for environment in plan["environments"]:
             env_digest = environment_digest(root, environment, tools, key, inherited)
@@ -323,6 +354,7 @@ def main(argv=None) -> int:
             if (isinstance(previous_environment, dict) and previous_environment.get("digest") == env_digest
                     and isinstance(previous_environment.get("result"), dict)
                     and previous_environment["result"].get("status") == "passed" and ready):
+                reused_environments.append((environment, env_receipt, env_digest))
                 continue
             if not args.provision:
                 results.append({"id": environment["id"], "status": "unavailable",
@@ -338,7 +370,11 @@ def main(argv=None) -> int:
                 result.update(status="failed", reason="declared ready paths missing: " + ",".join(missing))
             results.append(result)
             if result["status"] == "passed":
-                provisioned.append((environment, env_receipt, input_digest, result))
+                # Bind setup to the tools it actually left ready, before a
+                # later selected environment can replace any of those tools.
+                tools = versions(root, plan, inherited)
+                validated_digest = environment_digest(root, environment, tools, key, inherited)
+                provisioned.append((environment, env_receipt, input_digest, validated_digest, result))
         # Provisioning may install tools. Missing tools must not be mistaken
         # for a source failure, or cached as a successful old fingerprint.
         tools = versions(root, plan, inherited)
@@ -354,12 +390,26 @@ def main(argv=None) -> int:
                 elif matching["status"] == "passed":
                     matching.update(status="failed", reason="declared ready paths missing: " + ",".join(missing))
                 (state / "environments" / f"environment-{sha(encoded(environment['id']))}.json").unlink(missing_ok=True)
-        # A later environment may install a tool used by an earlier one. Bind
-        # every new setup receipt to the final tool map and unchanged inputs.
-        for environment, env_receipt, input_digest, result in provisioned:
-            if result["status"] == "passed" and environment_digest(root, environment, {}, key, inherited) == input_digest:
-                env_digest = environment_digest(root, environment, tools, key, inherited)
-                write_json(env_receipt, {"digest": env_digest, "result": result})
+        # A cache hit was proved against the initial tools. Later setup can
+        # change a shared tool, so it must still match before checks can run.
+        # Revoke stale setup evidence and require a bounded fresh invocation.
+        for environment, env_receipt, reused_digest in reused_environments:
+            if environment_digest(root, environment, tools, key, inherited) != reused_digest:
+                env_receipt.unlink(missing_ok=True)
+                results.append({"id": environment["id"], "status": "failed",
+                                "reason": "cached environment invalidated by later provisioning; rerun with --provision"})
+        # New setups also keep their actual validated context. Never re-key an
+        # earlier setup as compatible with a tool installed by a later one.
+        for environment, env_receipt, input_digest, validated_digest, result in provisioned:
+            if result["status"] != "passed":
+                continue
+            if (environment_digest(root, environment, {}, key, inherited) != input_digest
+                    or environment_digest(root, environment, tools, key, inherited) != validated_digest):
+                env_receipt.unlink(missing_ok=True)
+                result.update(status="failed",
+                              reason="provisioned environment invalidated by later provisioning or changed inputs; rerun with --provision")
+            else:
+                write_json(env_receipt, {"digest": validated_digest, "result": result})
         identity = {"schema": SCHEMA, "source": sha(Path(__file__).read_bytes()),
                     "config": config, "plan": plan, "tools": tools, "snapshot": before,
                     "execution_environment": environment_fingerprint(key, {
