@@ -12,7 +12,7 @@ reviews:
   commit_status: true
   auto_review:
     enabled: true
-    drafts: false
+    drafts: false # Iterative drafts conserve review budget.
     ignore_title_keywords:
       - "chore: sync routing config and mesh artifacts from master"
       - "chore: sync capability tooling from master"

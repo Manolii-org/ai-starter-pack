@@ -10,23 +10,17 @@ Before pushing a candidate, run:
 python3 scripts/agent-check.py --provision --provider codex
 ```
 
-Use your actual provider (`claude`, `cursor`, `codex` or `devin`). The
-repository owns commands in `config/agent-checks.json`; keep them aligned
-with CI and its toolchain. Missing tools or failed installs are incomplete
-validation. This explicit command is required until this host's hook
-execution has a receipt. File presence alone proves no hook ran.
+Use your actual provider (`claude`, `cursor`, `codex` or `devin`).
+Keep owner `config/agent-checks.json` aligned with CI/toolchains.
+Missing tools or failed installs mean incomplete validation. Run explicitly
+until this host has a hook-execution receipt; files alone prove no hook ran.
 
-Iterate with focused tests, batch corrections and independently review the
-settled diff once at the required scope/tier. Review contracts, generated
-outputs and process seams; add regression tests for recurring defects.
-Keep PRs draft while iterating. A single-push agent PR may open ready only
-when a passing `agent-check` receipt binds its exact head SHA, no further
-pushes are expected, and it is not a multi-repo or provider-integration
-change still being iterated. Otherwise open draft, then mark ready after
-Fast Tier and secret scanning pass on the final head. Expensive lanes
-skipped on drafts must also run on `ready_for_review`; keep CodeRabbit
-`auto_review.drafts: false` so iterative pushes do not spend review budget.
-Follow the owning repository's feature/release lanes.
+Batch fixes with focused tests; add regression tests for recurring defects.
+Independently review settled diffs,
+contracts, generated files and seams once at required scope/tier. Open ready only
+with a passing exact-head `agent-check` receipt, no expected pushes and no
+multi-repo/provider iteration. Else draft until final-head Fast Tier + secret scan
+pass. Run draft-skipped lanes on `ready_for_review`; honor owner feature/release lanes.
 
 Local receipts are reusable only for matching inputs, commands and tools;
 they grant no merge or protected-path authority. Run any additional owning
