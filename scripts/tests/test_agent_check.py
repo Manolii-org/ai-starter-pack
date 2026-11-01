@@ -213,8 +213,77 @@ class AgentCheckTests(unittest.TestCase):
         head = self.git("rev-parse", "HEAD").decode().strip()
         self.git("update-index", "--add", "--cacheinfo", "160000," + head + ",module")
         (self.root / "module").mkdir()
+        (self.root / "module/working-file").write_text("unvalidated content")
         result = self.run_check("--plan", expected=2)
         self.assertIn("tracked directories/submodules need a raw-input validation adapter", result.stderr)
+
+    def test_empty_uninitialized_gitlink_binds_index_identity_and_selects_changes(self):
+        head = self.git("rev-parse", "HEAD").decode().strip()
+        self.git("update-index", "--add", "--cacheinfo", "160000," + head + ",module")
+        (self.root / "module").mkdir()
+        self.git("commit", "-qm", "empty gitlink")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        runner = load("agent-check")
+        self.assertEqual(runner.raw_tracked_inputs(self.root)["module"], ("160000", head))
+        self.git("config", "core.autocrlf", "true")
+        self.assertNotIn("module", json.loads(self.run_check("--plan").stdout)["paths"])
+        self.run_check()
+        replacement = self.git("rev-parse", "HEAD").decode().strip()
+        self.git("update-index", "--cacheinfo", "160000," + replacement + ",module")
+        self.assertIn("module", json.loads(self.run_check("--plan").stdout)["paths"])
+        self.assertNotIn("AGENT-CHECK-CACHED", self.run_check().stdout)
+
+    def test_empty_gitlink_cache_is_revoked_when_module_gains_content(self):
+        head = self.git("rev-parse", "HEAD").decode().strip()
+        self.git("update-index", "--add", "--cacheinfo", "160000," + head + ",module")
+        (self.root / "module").mkdir()
+        self.run_check()
+        (self.root / "module/.git").write_text("gitdir: fixture")
+        self.run_check(expected=2)
+        self.assertFalse((self.root / ".ai/agent-checks/receipt.json").exists())
+
+    def test_empty_directory_replacing_a_regular_tracked_file_stays_blocked(self):
+        (self.root / "src/value.py").unlink()
+        (self.root / "src/value.py").mkdir()
+        self.run_check("--plan", expected=2)
+
+    def test_empty_gitlink_does_not_reuse_absent_module_receipt(self):
+        head = self.git("rev-parse", "HEAD").decode().strip()
+        self.git("update-index", "--add", "--cacheinfo", "160000," + head + ",module")
+        self.run_check()
+        (self.root / "module").mkdir()
+        self.assertNotIn("AGENT-CHECK-CACHED", self.run_check().stdout)
+
+    def test_unmerged_empty_gitlink_stays_blocked(self):
+        head = self.git("rev-parse", "HEAD").decode().strip()
+        subprocess.run(["git", "update-index", "--index-info"], cwd=self.root,
+                       input=("160000 " + head + " 1\tmodule\n").encode(), check=True,
+                       env=load("agent-check").git_environment())
+        (self.root / "module").mkdir()
+        self.run_check("--plan", expected=2)
+
+    def test_gitlink_directory_must_remain_empty_and_identical_across_index_read(self):
+        head = self.git("rev-parse", "HEAD").decode().strip()
+        self.git("update-index", "--add", "--cacheinfo", "160000," + head + ",module")
+        module = self.root / "module"
+        module.mkdir()
+        runner = load("agent-check")
+        original = runner.git
+        for change in ("populate", "replace"):
+            with self.subTest(change=change):
+                def concurrent_read(root, *args):
+                    if args[:2] == ("ls-files", "--stage"):
+                        if change == "populate":
+                            (module / "unvalidated").write_text("changed during Git read")
+                        else:
+                            module.rename(self.root / "previous-module")
+                            module.mkdir()
+                    return original(root, *args)
+                with mock.patch.object(runner, "git", side_effect=concurrent_read):
+                    with self.assertRaisesRegex(ValueError, "raw-input validation adapter"):
+                        runner.raw_tracked_inputs(self.root)
+                if change == "populate":
+                    (module / "unvalidated").unlink()
 
     def test_git_reads_are_bounded_and_timeout_revokes_old_evidence(self):
         runner = load("agent-check")

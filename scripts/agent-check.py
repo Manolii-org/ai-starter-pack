@@ -184,6 +184,20 @@ def raw_tracked_inputs(root: Path) -> dict:
             mode = "100755" if path.stat().st_mode & 0o100 else "100644"
             content = path.read_bytes()
         else:
+            # Git creates empty directories for uninitialized submodules. They
+            # contain no working bytes; bind their stage-zero gitlink instead.
+            # Initialized/nonempty modules still need a recursive raw adapter.
+            if path.is_dir() and not path.is_symlink():
+                directory = path.lstat()
+                entries = git(root, "ls-files", "--stage", "-z", "--", name).split(b"\0")
+                if len(entries) == 2 and not entries[1]:
+                    metadata, tracked_name = entries[0].split(b"\t", 1)
+                    fields = metadata.split()
+                    if (len(fields) == 3 and fields[0] == b"160000" and fields[2] == b"0"
+                            and tracked_name == os.fsencode(name)
+                            and path.lstat() == directory and not any(path.iterdir())):
+                        result[name] = ("160000", fields[1].decode("ascii"))
+                        continue
             raise ValueError("tracked directories/submodules need a raw-input validation adapter")
         digest = hashlib.new(algorithm)
         digest.update(f"blob {len(content)}\0".encode())
@@ -265,6 +279,8 @@ def working_tree_matches_base(root: Path, name: str, actual: tuple, baseline: tu
     if baseline is None or actual[0] == "missing":
         return False
     mode, identity = baseline
+    if mode == "160000":
+        return actual == baseline
     if actual[0] != mode:
         regular = {"100644", "100755"}
         file_mode = git(root, "config", "--type=bool", "--default=true", "--get", "core.filemode").strip()
