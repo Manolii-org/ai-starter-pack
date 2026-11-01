@@ -39,13 +39,14 @@ Keep Claude's proprietary plugin inside its licensed Anthropic runtime; do not
 copy its prompts into other agents or this pack.
 
 Persist a metadata-only receipt using the contract in
-[the contract guide](contract.md). Run the bundled helper from this skill's
-directory (resolve it relative to the installed SKILL.md, not the caller cwd):
+[the contract guide](contract.md). Resolve the
+[bundled helper](scripts/audit_evidence.py) relative to this installed SKILL.md.
+Use that resolved absolute path as the script argument to Python 3.10+ and
+choose one of these argument lists:
 
-```bash
-python3 scripts/audit_evidence.py validate /path/to/private/receipt.json
-python3 scripts/audit_evidence.py compare /path/to/private/scan-metadata.json \
-  --baseline 2026-10-09 --comparison 2026-10-20 --days 11 --timezone Australia/Sydney
+```text
+validate /path/to/private/receipt.json
+compare /path/to/private/scan-metadata.json --baseline 2026-10-09 --comparison 2026-10-20 --days 11 --timezone Australia/Sydney
 ```
 
 The helper is offline, uses the Python standard library, reads only the supplied

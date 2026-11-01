@@ -228,6 +228,7 @@ def test_generated_skill_installs_with_its_helper_and_runs_outside_the_pack(tmp_
                             capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
     installed = target / ".claude/skills" / relative
+    assert (installed / "SKILL.md").read_bytes() == (canonical / "SKILL.md").read_bytes()
     assert (installed / "contract.md").read_bytes() == (canonical / "contract.md").read_bytes()
     data = tmp_path / "receipt.json"
     data.write_text(json.dumps(receipt()), encoding="utf-8")

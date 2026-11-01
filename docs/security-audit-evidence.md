@@ -5,13 +5,18 @@ offline evidence checker. It does not install a scanner, enable paid usage,
 read credentials, change model routing or start an automated security review.
 Each owner retains its finding, remediation and human-merge workflow.
 
-Edit `.claude/skills/security-audit-evidence/` only. Generate the branded plugin
-with `scripts/build-plugin.py` and the unbranded registry with
-`scripts/build-registry.py`. Both include `contract.md` and
-`scripts/audit_evidence.py` inside the skill directory; no separately installed
-root-level helper is required. Run the helper relative to the installed skill,
-using Python 3.10+ and its standard library. Timezone comparisons require the
-host's IANA timezone database (or its standard `tzdata` support).
+In the source pack, maintainers edit `.claude/skills/security-audit-evidence/`
+only and regenerate the branded plugin with `scripts/build-plugin.py` and the
+unbranded registry with `scripts/build-registry.py`. Those build scripts are
+excluded from rendered consumer projects. Consumers use their existing Copier
+update, framework plugin or registry-resolution workflow to install the skill;
+they do not regenerate pack artifacts in their application repository.
+
+Verify that the installed skill directory contains `SKILL.md`, `contract.md`
+and `scripts/audit_evidence.py`. Resolve the helper relative to that installed
+`SKILL.md` and pass its absolute path to Python 3.10+, using its standard
+library. Timezone comparisons require the host's IANA timezone database (or its
+standard `tzdata` support).
 
 Claude Code consumers can use the existing framework plugin or registry
 resolver. The resolver's general capability materialisation currently supports
