@@ -79,7 +79,8 @@ def assess(profile, kind, data):
     if data.get('status') in ('failed', 'error', 'cancelled'):
         raise QualityError('PROVIDER_TEST_FAILED')
     if data.get('status') not in ('completed', 'complete', 'finished', 'done', 'success'):
-        if data.get('status') not in ('pending', 'waiting', 'running', 'processing', 'queued', 'created'):
+        if data.get('status') not in ('pending', 'waiting', 'running', 'processing', 'queued', 'created',
+                                      'pending_inbox_message'):
             raise QualityError('PROVIDER_INVALID')
         return None
     if kind == 'spam':

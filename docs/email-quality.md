@@ -49,6 +49,9 @@ Do not paste their contents into agent prompts or ordinary logs.
 - `passed` / `assertion_failed` are completed tests evaluated against the profile.
 - `blocked` carries a typed code (configuration, authorization, quota, provider,
   timeout, sender, ambiguous mutation or private-state problem), never raw errors.
+- `pending_inbox_message` means the provider is waiting to receive the submitted
+  message. Poll within the same deadline and checkpoint; its provisional score
+  is not a completed result and must never trigger a second test or resend.
 - Calls and polling are bounded, responses are capped, redirects are refused,
   malformed/mismatched results fail closed, and POSTs are never automatically
   repeated. Completed state resumes without another test/send. Save the same
