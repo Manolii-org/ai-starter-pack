@@ -74,6 +74,11 @@ def start(client, state, profile, kind, deadline=None):
 
 
 def assess(profile, kind, data):
+    """Return a validated terminal result, or None while the provider is pending.
+
+    Descriptive non-spam tabs never count toward primary Inbox acceptance.
+    Unknown provider states or placements fail closed rather than becoming misses.
+    """
     if not isinstance(data, dict):
         raise QualityError('PROVIDER_INVALID')
     if data.get('status') in ('failed', 'error', 'cancelled'):

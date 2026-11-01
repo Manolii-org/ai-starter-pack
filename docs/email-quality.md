@@ -122,7 +122,7 @@ Placement compatibility (verified against public provider documentation on
 2026-10-19): per-mailbox `success` or `delivered` selects `tab`; legacy rows
 with the category in `status` remain supported. Mailbox status and category
 matching are case-insensitive. Supported categories are `Inbox`, `Spam`,
-`Missing`, `Promotions`, `Updates` and `Newsletter`. Unspam's
+`Missing`, `Promotions`, `Updates`, `Newsletter` and `Notification`. Unspam's
 [delivery-status guide](https://help.unspam.email/article/444-understanding-the-delivery-status)
 describes Newsletter as promotional placement; its
 [placement report](https://unspam.email/inbox-placement) distinguishes Updates
@@ -147,15 +147,18 @@ new pin and validating the consumer remain separate release steps.
 
 Newly completed inbox results also include optional reporting fields:
 
-- `normalized_placement_counts`: counts for all six supported lowercase categories
+- `normalized_placement_counts`: counts for the six original lowercase categories
   (`inbox`, `spam`, `missing`, `promotions`, `updates`, `newsletter`), including zeros.
+  The additional `notification` count appears only when that tab is observed,
+  preserving the shape of results without Notification placements.
   This is separate from the unchanged sparse, case-preserving `placement_counts`.
 - `placements`: up to 100 entries in provider result order, with `raw_placement`
   preserving the exact label, `placement` naming its lowercase category, and
   `mailbox_id` when a valid positive integer ID is available. Normal CLI completion
   still requires exactly the expected unique mailbox IDs. Addresses, provider
   names, sender details, test IDs and report URLs are excluded.
-- `non_spam_ratio`: `(Inbox + Promotions + Updates + Newsletter) / mailbox_count`.
+- `non_spam_ratio`:
+  `(Inbox + Promotions + Updates + Newsletter + Notification) / mailbox_count`.
   Spam and explicit Missing remain in the denominator. This is a descriptive
   ratio only; it does not affect `passed`. `inbox_ratio` remains the primary-Inbox
   ratio, with no duplicate alias or change to any configured acceptance threshold.
