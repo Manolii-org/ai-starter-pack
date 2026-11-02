@@ -15,8 +15,15 @@ export interface ReleaseBundle {
   schema_version: 1; scope: Scope; revision: number; catalog_revision: number;
   created_at: number; expires_at: number; provider_semantics: typeof PROVIDER_SEMANTICS;
   payload_sha256: string; payload_bytes: string; approval_ref: string;
+  deployment?: { source_sha: string; manifest: ReleaseManifest };
 }
-export interface KillState { schema_version: 1; scope: Scope; generation: number; expires_at: number; disabled: string[] }
+export interface DisableException { owner: string; reason: string; review_at: number }
+export interface KillState { schema_version: 1; scope: Scope; generation: number; expires_at: number; disabled: string[]; exceptions?: Record<string, DisableException> }
+export interface ReleaseFeature {
+  state: "development" | "ready"; owner: string; acceptance: string[];
+  applications: string[]; surfaces: string[]; ancestors?: string[];
+}
+export interface ReleaseManifest { schema_version: 1; features: Record<string, ReleaseFeature> }
 export interface Context {
   schema_version: 1; scope: Scope; application_id: string; surface_id: string; projection_source: "trusted-server"; context_scope: string;
   assignment_key: string; authorized: boolean; eligible: boolean; expires_at: number; excluded: string[];
@@ -31,6 +38,8 @@ export interface DurableControlStore {
 }
 export interface ApprovalVerifier {
   verify(message: Uint8Array, approvalRef: string, purpose: "release" | "kill"): Promise<boolean>;
+  /** Required for verified deployment inspection/qualification; legacy reads stay compatible. */
+  verifyKill?(kill: KillState, scope: Scope): Promise<boolean>;
 }
 export interface AssignmentKey { scope: Scope; assignment_boundary: AssignmentBoundary; experiment_key: string; allocation_epoch: number; unit_key: string }
 export interface Assignment { assignment_id: string; variant: string }

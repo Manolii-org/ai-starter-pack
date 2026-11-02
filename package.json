@@ -1,6 +1,6 @@
 {
   "name": "@manolii/feature-controls",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Offline provider-backed feature control primitives",
   "license": "Apache-2.0",
@@ -23,7 +23,8 @@
     "packages/feature-controls/ts/",
     "packages/feature-controls/tsconfig.json",
     "contracts/feature-controls/schema.json",
-    "docs/feature-controls.md"
+    "docs/feature-controls.md",
+    "docs/feature-release-policy.md"
   ],
   "scripts": {
     "build": "tsc -p packages/feature-controls/tsconfig.json",

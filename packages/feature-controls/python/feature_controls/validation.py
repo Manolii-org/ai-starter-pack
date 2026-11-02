@@ -8,7 +8,7 @@ from typing import Any
 
 from jsonschema import Draft7Validator, SchemaError
 
-from .types import AssignmentBoundary, Catalog, Context, Feature, ReleaseBundle
+from .types import AssignmentBoundary, Catalog, Context, Feature, ReleaseBundle, ReleaseManifest
 
 _SCHEMA = json.loads(files(__package__).joinpath("schema.json").read_text())
 _VALIDATORS = {name: Draft7Validator({**_SCHEMA, "$ref": f"#/$defs/{name}"}) for name in _SCHEMA["$defs"]}
@@ -79,6 +79,17 @@ def validate_catalog(catalog: Catalog) -> None:
             raise ValueError("invalid baseline or disabled value")
         walk(key, set())
 
+def compatible_release_manifest(local: ReleaseManifest, published: ReleaseManifest) -> bool:
+    validate_release_manifest(local)
+    validate_release_manifest(published)
+    for key, expected in local["features"].items():
+        actual = published["features"].get(key)
+        if not actual or expected["state"] == "ready" and actual["state"] != "ready" or any(
+                sorted(expected.get(field, [])) != sorted(actual.get(field, []))
+                for field in ("applications", "surfaces", "ancestors")):
+            return False
+    return True
+
 def payload_of(bundle: ReleaseBundle, catalog: Catalog) -> dict[str, Any]:
     validate("bundle", bundle)
     raw = bundle["payload_bytes"].encode("utf-8")
@@ -91,9 +102,16 @@ def payload_of(bundle: ReleaseBundle, catalog: Catalog) -> dict[str, Any]:
             any(type(payload[k]) is not dict for k in ("features", "savedGroups", "contextualBandits")) or \
             type(payload["experiments"]) is not list or payload["experiments"] or payload["savedGroups"] or payload["contextualBandits"]:
         raise ValueError("incomplete or unsupported payload")
-    if set(payload["features"]) != set(catalog["features"]):
+    managed = bundle.get("deployment", {}).get("manifest", {}).get("features", {})
+    if set(catalog["features"]) - set(payload["features"]):
         raise ValueError("incomplete feature catalog")
     for key, native in payload["features"].items():
+        if key not in catalog["features"] and key in managed:
+            if type(native) is not dict or set(native) != {"defaultValue"} or type(native["defaultValue"]) is not bool or native["defaultValue"] != (managed[key]["state"] == "ready"):
+                raise ValueError("invalid forward release feature")
+            continue
+        if key not in catalog["features"]:
+            raise ValueError("invalid native feature")
         feature = catalog["features"][key]
         if type(native) is not dict or set(native) - {"defaultValue", "rules"} or "defaultValue" not in native or not matches(native["defaultValue"], feature):
             raise ValueError("invalid native feature")
@@ -104,6 +122,16 @@ def payload_of(bundle: ReleaseBundle, catalog: Catalog) -> dict[str, Any]:
             for field in ("hashVersion", "bucketVersion"):
                 if field in rule:
                     rule[field] = int(rule[field])
+    if "deployment" in bundle:
+        manifest = bundle["deployment"]["manifest"]
+        for key, expected in release_catalog_features(manifest).items():
+            native = payload["features"].get(key)
+            if key in catalog["features"] and catalog["features"][key] != expected or type(native) is not dict or set(native) != {"defaultValue"} or \
+                    type(native["defaultValue"]) is not bool or native["defaultValue"] != (manifest["features"][key]["state"] == "ready"):
+                raise ValueError("release policy does not match catalogue or payload")
+    for key in list(payload["features"]):
+        if key not in catalog["features"]:
+            del payload["features"][key]
     return payload
 
 def _validate_rule(rule: Any, feature: Feature) -> None:
@@ -147,10 +175,52 @@ def _validate_rule(rule: Any, feature: Feature) -> None:
 def approval_message(bundle: ReleaseBundle) -> bytes:
     validate("bundle", bundle)
     s = bundle["scope"]
-    values = ["feature-controls/release/v1", s["ecosystem_id"], s["deployment_id"], s["environment_id"], s["feature_namespace"],
+    values = ["feature-controls/release/v2" if "deployment" in bundle else "feature-controls/release/v1", s["ecosystem_id"], s["deployment_id"], s["environment_id"], s["feature_namespace"],
               int(bundle["revision"]), int(bundle["catalog_revision"]), int(bundle["created_at"]), int(bundle["expires_at"]),
               bundle["provider_semantics"], bundle["payload_sha256"], bundle["approval_ref"]]
+    if "deployment" in bundle:
+        values.extend([bundle["deployment"]["source_sha"], hashlib.sha256(release_manifest_message(bundle["deployment"]["manifest"])).hexdigest()])
     return json.dumps(values, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+
+def validate_release_manifest(manifest: ReleaseManifest) -> None:
+    validate("release_manifest", manifest)
+    heights: dict[str, int] = {}
+    def visit(key: str, path: set[str]) -> int:
+        if key not in manifest["features"] or key in path or len(path) > 32:
+            raise ValueError("invalid release ancestry")
+        if key in heights:
+            return heights[key]
+        definition = manifest["features"][key]
+        if definition["state"] == "ready" and not definition["acceptance"]:
+            raise ValueError("ready feature needs acceptance references")
+        for reference in definition["acceptance"]:
+            if reference.startswith("/") or ".." in reference.split("/"):
+                raise ValueError("unsafe acceptance reference")
+        height = 0
+        for parent in definition.get("ancestors", []):
+            if definition["state"] == "ready" and manifest["features"].get(parent, {}).get("state") != "ready":
+                raise ValueError("ready feature has unfinished ancestor")
+            height = max(height, 1 + visit(parent, path | {key}))
+        if height > 32:
+            raise ValueError("release ancestry depth exceeded")
+        heights[key] = height
+        return height
+    for key in manifest["features"]:
+        visit(key, set())
+
+def release_catalog_features(manifest: ReleaseManifest) -> dict[str, Feature]:
+    validate_release_manifest(manifest)
+    return {key: {"value_type": "boolean", "baseline": False, "disabled_value": False, "failure": "deny",
+                  "allowed_values": [False, True], "applications": list(definition["applications"]),
+                  "surfaces": list(definition["surfaces"]), "ancestors": list(definition.get("ancestors", []))}
+            for key, definition in manifest["features"].items()}
+
+def release_manifest_message(manifest: ReleaseManifest) -> bytes:
+    validate_release_manifest(manifest)
+    entries = [[key, definition["state"], definition["owner"], definition["applications"], definition["surfaces"],
+                definition.get("ancestors", []), definition["acceptance"]]
+               for key, definition in sorted(manifest["features"].items())]
+    return json.dumps(["feature-controls/readiness/v1", entries], separators=(",", ":"), ensure_ascii=True).encode("utf-8")
 
 def attributes_of(context: Context) -> dict[str, Any]:
     graph = context["group_ancestors"]

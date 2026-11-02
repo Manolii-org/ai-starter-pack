@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "features": {
+    "checkout": {
+      "state": "ready",
+      "owner": "team.release",
+      "applications": [
+        "example-app"
+      ],
+      "surfaces": [
+        "web"
+      ],
+      "acceptance": [
+        "tests/feature_controls/release-policy.test.mjs"
+      ]
+    },
+    "next-checkout": {
+      "state": "development",
+      "owner": "team.release",
+      "applications": [
+        "example-app"
+      ],
+      "surfaces": [
+        "web"
+      ],
+      "acceptance": []
+    }
+  }
+}

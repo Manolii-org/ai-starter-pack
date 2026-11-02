@@ -4,13 +4,14 @@ import type { FeatureApiResponse, StickyAssignmentsDocument } from "@growthbook/
 import { Lifecycle, validateTime } from "./lifecycle.js";
 import type { RuntimeOptions } from "./lifecycle.js";
 import { allocationId, ascii, attributesOf, boundaryOf, matches, ownJson, payloadOf, sameScope, validate } from "./validation.js";
-import type { Assignment, AssignmentKey, AssignmentStore, Catalog, Context, ControlState, Decision, Event, EventSink, Feature, KillState, Snapshot } from "./types.js";
+import type { Assignment, AssignmentKey, AssignmentStore, Catalog, Context, ControlState, Decision, Event, EventSink, Feature, KillState, Scope, Snapshot } from "./types.js";
 class ReadOnlyStickyFixture extends StickyBucketServiceSync {
   constructor(private readonly doc: StickyAssignmentsDocument | null) { super(); }
   getAssignmentsSync(): StickyAssignmentsDocument | null { return this.doc; }
   saveAssignmentsSync(): void {}
 }
 export interface EvaluationOptions { preview?: boolean; now?: number }
+export interface ReleaseEvidence { schema_version: 1; source_sha: string; scope: Scope; controls: ControlState; snapshots: Snapshot[] }
 interface Capture { state: ControlState; payload?: Record<string, unknown>; invalid_bundle?: boolean; unavailable?: boolean }
 export class FeatureRuntime extends Lifecycle {
   constructor(catalog: Catalog, options: RuntimeOptions & { assignments?: AssignmentStore; events?: EventSink } = {}) {
@@ -22,6 +23,22 @@ export class FeatureRuntime extends Lifecycle {
   private readonly events?: EventSink;
   private readonly issued = new Map<string, Decision>();
   private readonly exposed = new Set<string>();
+  /** Operator probe only: private state is captured by the release-check process. */
+  async releaseEvidence(contexts: Context[], now?: number): Promise<ReleaseEvidence> {
+    const manifest = this.options.release_manifest, source = this.options.release_source_sha;
+    if (!manifest || !/^[0-9a-f]{40}$/.test(source ?? "") || contexts.length > 64) throw new Error("release probe configuration missing");
+    const snapshots: Snapshot[] = [], pairs = new Set<string>();
+    for (const context of structuredClone(contexts)) {
+      const pair = JSON.stringify([context.application_id, context.surface_id]);
+      if (pairs.has(pair)) throw new Error("duplicate probe context");
+      pairs.add(pair);
+      const keys = Object.keys(manifest.features).filter(key => manifest.features[key].applications.includes(context.application_id) &&
+        manifest.features[key].surfaces.includes(context.surface_id));
+      if (!keys.length) throw new Error("unexpected probe context");
+      for (let offset = 0; offset < keys.length; offset += 64) snapshots.push(await this.snapshot(keys.slice(offset, offset + 64), context.surface_id, context, { now }));
+    }
+    return { schema_version: 1, source_sha: source!, scope: structuredClone(this.catalog.scope), controls: await this.inspectForRelease(now), snapshots };
+  }
   async evaluate(key: string, surface_id: string, context: Context, options: EvaluationOptions = {}): Promise<Decision> {
     return this.evaluateCaptured(key, surface_id, structuredClone(context), { ...options });
   }

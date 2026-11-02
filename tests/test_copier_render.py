@@ -274,22 +274,22 @@ def test_cost_profile_lean_omits_measured_waste_callers(default_render):
     ("flags", "expected"),
     [
         ({}, {"Hooks": 5, "Commands": 51, "Skills": 37, "Agents": 27,
-              "Scripts": 60, "Husky": 3, "CI": 37, "Docs": 35}),
+              "Scripts": 60, "Husky": 3, "CI": 37, "Docs": 36}),
         ({flag: "true" for flag in FEATURE_FLAGS},
          {"Hooks": 5, "Commands": 54, "Skills": 41, "Agents": 28,
-              "Scripts": 60, "Husky": 3, "CI": 37, "Docs": 37}),
+              "Scripts": 60, "Husky": 3, "CI": 37, "Docs": 38}),
         ({"cost_profile": "lean"},
          {"Hooks": 5, "Commands": 51, "Skills": 37, "Agents": 27,
-              "Scripts": 60, "Husky": 3, "CI": 36, "Docs": 35}),
+              "Scripts": 60, "Husky": 3, "CI": 36, "Docs": 36}),
         ({"codex_review": "false"},
          {"Hooks": 5, "Commands": 51, "Skills": 37, "Agents": 27,
-              "Scripts": 60, "Husky": 3, "CI": 35, "Docs": 35}),
+              "Scripts": 60, "Husky": 3, "CI": 35, "Docs": 36}),
         ({"isolation_profile": "strict"},
          {"Hooks": 5, "Commands": 51, "Skills": 37, "Agents": 27,
-              "Scripts": 57, "Husky": 3, "CI": 31, "Docs": 35}),
+              "Scripts": 57, "Husky": 3, "CI": 31, "Docs": 36}),
         ({"isolation_profile": "strict", "cost_profile": "lean"},
          {"Hooks": 5, "Commands": 51, "Skills": 37, "Agents": 27,
-              "Scripts": 57, "Husky": 3, "CI": 31, "Docs": 35}),
+              "Scripts": 57, "Husky": 3, "CI": 31, "Docs": 36}),
     ],
 )
 def test_rendered_readme_counts_match_rendered_tree(flags, expected):
@@ -346,8 +346,8 @@ def test_release_capability_distribution_boundary(default_render, branded_render
                     "scripts/tests/fixtures/release-manifest.v1.json"):
             assert not (rendered / rel).exists()
         config = json.loads((rendered / "config/agent-checks.json").read_text())
-        assert all(c["id"] != "release-manifest-contract" for c in config["checks"])
-        assert all(e["id"] != "release-contract-python" for e in config["environments"])
+        assert all(c["id"] not in {"release-manifest-contract", "feature-controls", "feature-controls-distribution"} for c in config["checks"])
+        assert all(e["id"] not in {"release-contract-python", "feature-controls-python"} for e in config["environments"])
         fixture = ROOT / "scripts/tests/fixtures/release-manifest.v1.json"
         release_id = json.loads(fixture.read_text())["release_id"]
         validator = rendered / ".github/actions/validate-release-manifest/release_manifest.py"
@@ -413,8 +413,8 @@ def test_branded_attribution(branded_render, default_render):
 def test_agent_validation_base_uses_owner_ref(tmp_path, default_render, base_ref):
     """A real rendered CLI plans correctly with remote or local owner refs."""
     canonical = json.loads((ROOT / "config/agent-checks.json").read_text())
-    canonical["checks"] = [c for c in canonical["checks"] if c["id"] != "release-manifest-contract"]
-    canonical["environments"] = [e for e in canonical["environments"] if e["id"] != "release-contract-python"]
+    canonical["checks"] = [c for c in canonical["checks"] if c["id"] not in {"release-manifest-contract", "feature-controls", "feature-controls-distribution"}]
+    canonical["environments"] = [e for e in canonical["environments"] if e["id"] not in {"release-contract-python", "feature-controls-python"}]
     assert json.loads((default_render / "config/agent-checks.json").read_text()) == canonical
     dst = tmp_path / "custom-integration"
     render(dst, agent_validation_base=base_ref)
