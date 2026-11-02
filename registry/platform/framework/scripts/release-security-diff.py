@@ -20,6 +20,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import subprocess
 import sys
@@ -80,7 +81,14 @@ def facts(text: str | None) -> dict[str, set[str]]:
     f = empty
     on = doc.get("on", doc.get(True))  # PyYAML parses a bare `on:` key as True
     if isinstance(on, dict):
-        f["triggers"] = {str(k) for k in on}
+        # Include each trigger's configuration: widening
+        # `pull_request_target.branches` or `workflow_run.workflows` changes
+        # when privileged code runs even though the event name is unchanged.
+        f["triggers"] = {
+            str(k) if v in (None, {}, []) else
+            f"{k}: {json.dumps(v, sort_keys=True, default=str)}"
+            for k, v in on.items()
+        }
     elif isinstance(on, list):
         f["triggers"] = {str(k) for k in on}
     elif on:

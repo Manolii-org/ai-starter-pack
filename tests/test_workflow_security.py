@@ -259,6 +259,26 @@ def test_release_diff_reports_security_facts(tmp_path):
     assert "exfil.example.net" in text
 
 
+def test_release_diff_reports_trigger_configuration_changes(tmp_path):
+    """Same event name, broader scope: widening pull_request_target branches
+    must show up even though the trigger name is unchanged."""
+    repo = tmp_path / "r"
+    wf = repo / ".github" / "workflows" / "ci.yml"
+    wf.parent.mkdir(parents=True)
+    git(tmp_path, "init", "-q", "r")
+    git(repo, "config", "user.email", "t@example.com")
+    git(repo, "config", "user.name", "t")
+    wf.write_text("on:\n  pull_request_target:\n    branches: [main]\n"
+                  "jobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "base")
+    wf.write_text(wf.read_text().replace("branches: [main]", "branches: ['**']"))
+    git(repo, "commit", "-qam", "widen")
+    text = diff.report(repo, "HEAD~1", "HEAD")
+    assert '➕ `pull_request_target: {"branches": ["**"]}`' in text
+    assert '➖ `pull_request_target: {"branches": ["main"]}`' in text
+
+
 def test_release_diff_no_workflow_changes(tmp_path):
     repo = tmp_path / "r"
     repo.mkdir()

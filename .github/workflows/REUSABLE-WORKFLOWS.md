@@ -28,7 +28,14 @@ read it before approving the grouped Renovate PR.
 jobs:
   workflow-security:
     uses: Manolii-org/ai-starter-pack/.github/workflows/workflow-security-reusable.yml@<sha> # vX.Y.Z
+    with:
+      pack_ref: <sha> # vX.Y.Z — same commit as the uses: pin
 ```
+
+Pass `pack_ref` explicitly: the scripts are checked out from that commit, so
+they match the workflow you pinned. If `pack_ref` is empty the workflow falls
+back to `job.workflow_sha`, and fails loudly if that cannot be resolved —
+it never falls back to the pack's default branch.
 
 Fails when any `uses:` in your workflows or composite actions is not pinned to a
 full commit SHA — composite actions under `.github/actions/` and every local
