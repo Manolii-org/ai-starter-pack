@@ -1,0 +1,28 @@
+name: Validate release manifest
+description: Validate immutable release proposal shape and identity without granting execution authority
+inputs:
+  manifest:
+    description: Path to the prepared release manifest JSON
+    required: true
+  expected_release_id:
+    description: Expected identity from the trusted preparation dependency
+    required: true
+outputs:
+  release_id:
+    description: Validated immutable subject identity
+    value: ${{ steps.validate.outputs.release_id }}
+runs:
+  using: composite
+  steps:
+    - name: Install manifest schema validator
+      shell: bash
+      run: timeout 60s python3 -m pip install --quiet --timeout 15 --retries 2 'jsonschema==4.25.1'
+    - name: Validate release proposal
+      id: validate
+      shell: bash
+      env:
+        MANIFEST_PATH: ${{ inputs.manifest }}
+        EXPECTED_RELEASE_ID: ${{ inputs.expected_release_id }}
+      run: >-
+        python3 "$GITHUB_ACTION_PATH/release_manifest.py"
+        --manifest "$MANIFEST_PATH" --expected-release-id "$EXPECTED_RELEASE_ID"

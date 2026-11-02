@@ -99,6 +99,39 @@
           "scripts/install-agent-validation.py"
         ]
       ]
+    },
+    {
+      "id": "release-manifest-contract",
+      "paths": [
+        ".github/actions/validate-release-manifest/**",
+        "schemas/release-manifest.v1.schema.json",
+        "scripts/tests/test_release_manifest.py",
+        "docs/coordinated-releases.md",
+        ".github/workflows/REUSABLE-WORKFLOWS.md",
+        "schemas/release-adoption.v1.schema.json",
+        "scripts/tests/test_release_admission_git.py"
+      ],
+      "tools": [
+        "python"
+      ],
+      "commands": [
+        [
+          "python3",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "scripts/tests",
+          "-p",
+          "test_release_*.py",
+          "-q"
+        ],
+        [
+          "python3",
+          "scripts/registry-lint.py"
+        ]
+      ],
+      "timeout_seconds": 120
     }
   ]
 }
