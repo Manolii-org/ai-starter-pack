@@ -2,6 +2,12 @@
 
 This public core wraps immutable GrowthBook payloads; it does not authorize requests, host providers, create flags, analyze experiments, or supply production stores. Applications must authorize first and derive every context from trusted server data.
 
+Version 0.2 adds opt-in [automatic release readiness](feature-release-policy.md):
+reviewed ready features default on during normal deployment, unfinished source
+stays off, and durable intentional disables take precedence. Existing controls
+keep their current behavior until explicitly adopted. Upgrade all readers and
+publishers before activating the new signed metadata.
+
 ## Immutable installation
 
 Use a full 40-character source commit SHA, not a branch/tag:

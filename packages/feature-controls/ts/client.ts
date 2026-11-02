@@ -133,3 +133,17 @@ function copyJson(value: unknown): unknown {
   if (record(value)) return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, copyJson(v)]));
   return value;
 }
+
+/** Source readiness is a second fence, alongside authenticated server decisions. */
+export class ReleaseClient {
+  private readonly ready: Readonly<Record<string, boolean>>;
+  constructor(private readonly decisions: DecisionClient, states: Record<string, boolean>) {
+    if (!record(states) || Object.keys(states).length > 128 ||
+        Object.entries(states).some(([key, state]) => !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(key) || typeof state !== "boolean")) throw new Error("invalid client readiness");
+    this.ready = Object.freeze({ ...states });
+  }
+  enabled(key: string, now = Date.now()): boolean {
+    return Object.hasOwn(this.ready, key) && this.ready[key] &&
+      this.decisions.get(key, false, now, (value): value is boolean => typeof value === "boolean") === true;
+  }
+}

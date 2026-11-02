@@ -40,7 +40,7 @@ class Catalog(TypedDict):
     revision: int
     features: dict[str, Feature]
 
-class ReleaseBundle(TypedDict):
+class _ReleaseBundle(TypedDict):
     schema_version: Literal[1]
     scope: Scope
     revision: int
@@ -52,12 +52,41 @@ class ReleaseBundle(TypedDict):
     payload_bytes: str
     approval_ref: str
 
-class KillState(TypedDict):
+class ReleaseBundle(_ReleaseBundle, total=False):
+    deployment: "DeploymentPolicy"
+
+class DisableException(TypedDict):
+    owner: str
+    reason: str
+    review_at: int
+
+class _ReleaseFeature(TypedDict):
+    state: Literal["development", "ready"]
+    owner: str
+    acceptance: list[str]
+    applications: list[str]
+    surfaces: list[str]
+
+class ReleaseFeature(_ReleaseFeature, total=False):
+    ancestors: list[str]
+
+class ReleaseManifest(TypedDict):
+    schema_version: Literal[1]
+    features: dict[str, ReleaseFeature]
+
+class DeploymentPolicy(TypedDict):
+    source_sha: str
+    manifest: ReleaseManifest
+
+class _KillState(TypedDict):
     schema_version: Literal[1]
     scope: Scope
     generation: int
     expires_at: int
     disabled: list[str]
+
+class KillState(_KillState, total=False):
+    exceptions: dict[str, DisableException]
 
 class Context(TypedDict):
     application_id: str
@@ -89,6 +118,8 @@ class DurableControlStore(Protocol):
     def compare_and_swap(self, scope: Scope, expected: ControlState, next_state: ControlState) -> bool: ...
 
 class ApprovalVerifier(Protocol):
+    # Deployment inspection additionally requires an owning verify_kill(kill)
+    # implementation that authenticates the exact scoped stored message.
     def verify(self, message: bytes, approval_ref: str, purpose: Literal["release", "kill"]) -> bool: ...
 
 class Assignment(TypedDict):

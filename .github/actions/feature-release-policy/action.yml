@@ -1,0 +1,56 @@
+name: Feature release policy
+description: Validate readiness declarations and qualify effective runtime decisions through the owning deployment probe.
+inputs:
+  manifest:
+    description: Repository-relative source readiness manifest.
+    default: .feature-controls/releases.json
+  mode:
+    description: source or runtime; source validation never certifies activation.
+    default: source
+  probe-script:
+    description: Reviewed repository-relative live probe; required in runtime mode.
+    default: ''
+  expected-source-sha:
+    description: Exact source commit of the deployment being qualified.
+    default: ''
+  operation:
+    description: deploy or an explicitly authorised owning rollback.
+    default: deploy
+runs:
+  using: composite
+  steps:
+    - name: Set up policy checker Python
+      uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+      with:
+        python-version: '3.12'
+    - name: Validate feature readiness and release state
+      shell: bash
+      env:
+        POLICY_MANIFEST: ${{ inputs.manifest }}
+        POLICY_MODE: ${{ inputs.mode }}
+        POLICY_PROBE: ${{ inputs.probe-script }}
+        POLICY_SOURCE: ${{ inputs.expected-source-sha }}
+        POLICY_EVENT: ${{ github.event_name }}
+        POLICY_REF_PROTECTED: ${{ github.ref_protected }}
+        POLICY_OPERATION: ${{ inputs.operation }}
+      run: |
+        set -euo pipefail
+        if [ "$POLICY_MODE" = runtime ]; then
+          if [ "$POLICY_REF_PROTECTED" != true ]; then
+            echo 'Runtime qualification requires an owning protected release ref.' >&2
+            exit 1
+          fi
+          case "$POLICY_EVENT" in
+            push|workflow_dispatch|deployment_status|schedule) ;;
+            *) echo 'Runtime probes require an owning deployment event, never a PR event.' >&2; exit 1 ;;
+          esac
+        fi
+        policy_venv=$(mktemp -d "$RUNNER_TEMP/feature-release-policy.XXXXXX")
+        python3 -m venv "$policy_venv"
+        "$policy_venv/bin/pip" install --quiet 'jsonschema==4.23.0'
+        "$policy_venv/bin/python" "$GITHUB_ACTION_PATH/../../../scripts/feature-release-check.py" \
+          --repo-root "$GITHUB_WORKSPACE" \
+          --manifest "$POLICY_MANIFEST" --mode "$POLICY_MODE" \
+          --probe-script "$POLICY_PROBE" --expected-source-sha "$POLICY_SOURCE" \
+          --operation "$POLICY_OPERATION" \
+          --summary "$GITHUB_STEP_SUMMARY"

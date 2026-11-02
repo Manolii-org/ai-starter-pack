@@ -563,6 +563,8 @@ def test_copier_excludes_runtime_sources_and_preserves_consumer_dependencies_and
     destination.mkdir()
     shutil.copyfile(ROOT / "copier.yml", template / "copier.yml")
     excluded = [
+        "scripts/feature-release-check.py", ".github/actions/feature-release-policy/action.yml",
+        ".feature-controls/releases.json",
         "package.json", "package-lock.json", ".npmignore", "eslint.config.mjs", "tsconfig.json",
         "packages/feature-controls/typescript/package.json", "contracts/feature-controls/bundle.schema.json",
         "contracts/feature-controls-bundle.schema.json",

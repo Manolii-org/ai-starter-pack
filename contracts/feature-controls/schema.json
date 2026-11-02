@@ -232,6 +232,9 @@
         "approval_ref": {
           "type": "string",
           "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        },
+        "deployment": {
+          "$ref": "#/$defs/deployment_policy"
         }
       },
       "required": [
@@ -392,6 +395,17 @@
           },
           "maxItems": 128,
           "uniqueItems": true
+        },
+        "exceptions": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+          },
+          "maxProperties": 128,
+          "additionalProperties": {
+            "$ref": "#/$defs/disable_exception"
+          }
         }
       },
       "required": [
@@ -709,6 +723,136 @@
         "time_highwater"
       ],
       "additionalProperties": false
+    },
+    "disable_exception": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "owner",
+        "reason",
+        "review_at"
+      ],
+      "properties": {
+        "owner": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[ -~]+(?![\\s\\S])"
+        },
+        "review_at": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "release_feature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "owner",
+        "applications",
+        "surfaces",
+        "acceptance"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "development",
+            "ready"
+          ]
+        },
+        "owner": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+        },
+        "applications": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+          },
+          "minItems": 1,
+          "maxItems": 8,
+          "uniqueItems": true
+        },
+        "surfaces": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+          },
+          "minItems": 1,
+          "maxItems": 8,
+          "uniqueItems": true
+        },
+        "ancestors": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+          },
+          "maxItems": 32,
+          "uniqueItems": true
+        },
+        "acceptance": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9_.][A-Za-z0-9_./:-]*(?![\\s\\S])"
+          }
+        }
+      }
+    },
+    "release_manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "features"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "features": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}(?![\\s\\S])"
+          },
+          "maxProperties": 128,
+          "additionalProperties": {
+            "$ref": "#/$defs/release_feature"
+          }
+        }
+      }
+    },
+    "deployment_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_sha",
+        "manifest"
+      ],
+      "properties": {
+        "source_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}(?![\\s\\S])"
+        },
+        "manifest": {
+          "$ref": "#/$defs/release_manifest"
+        }
+      }
     }
   }
 }

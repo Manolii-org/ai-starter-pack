@@ -6,7 +6,11 @@
     "scripts/agent-check.py",
     "config/agent-checks.json",
     "scripts/sync-agent-validation.py",
-    "scripts/install-agent-validation.py"
+    "scripts/install-agent-validation.py",
+    "packages/feature-controls/**",
+    "contracts/feature-controls/**",
+    ".github/actions/feature-release-policy/**",
+    "scripts/feature-release-check.py"
   ],
   "environments": [
     {
@@ -70,6 +74,49 @@
           "pyyaml==6.0.3",
           "pytest==9.2.0",
           "copier==9.19.1"
+        ]
+      ],
+      "timeout_seconds": 600
+    },
+    {
+      "id": "feature-controls-python",
+      "inputs": [
+        "package.json",
+        "package-lock.json",
+        "packages/feature-controls/python/pyproject.toml",
+        "config/agent-checks.json"
+      ],
+      "ready_paths": [
+        "node_modules/.package-lock.json",
+        ".ai/agent-checks/feature-controls-venv/pyvenv.cfg"
+      ],
+      "tools": [
+        "npm",
+        "uv"
+      ],
+      "commands": [
+        [
+          "npm",
+          "ci"
+        ],
+        [
+          "uv",
+          "venv",
+          "--clear",
+          "--python",
+          "3.12",
+          ".ai/agent-checks/feature-controls-venv"
+        ],
+        [
+          "uv",
+          "pip",
+          "install",
+          "--python",
+          ".ai/agent-checks/feature-controls-venv/bin/python",
+          "-e",
+          "packages/feature-controls/python",
+          "pytest==8.3.5",
+          "ruff==0.15.8"
         ]
       ],
       "timeout_seconds": 600
@@ -193,6 +240,66 @@
       ],
       "timeout_seconds": 180,
       "environment": "release-contract-python"
+    },
+    {
+      "id": "feature-controls",
+      "paths": [
+        "packages/feature-controls/**",
+        "contracts/feature-controls/**",
+        "tests/feature_controls/**",
+        "scripts/feature-release-check.py",
+        ".github/actions/feature-release-policy/**",
+        ".feature-controls/**",
+        "package.json",
+        "package-lock.json",
+        "config/agent-checks.json",
+        "copier.yml",
+        "tests/test_feature_controls_distribution.py"
+      ],
+      "environment": "feature-controls-python",
+      "tools": [
+        "npm",
+        "node",
+        "uv"
+      ],
+      "commands": [
+        [
+          "npm",
+          "run",
+          "typecheck"
+        ],
+        [
+          "npm",
+          "test"
+        ],
+        [
+          "npx",
+          "--no-install",
+          "eslint",
+          "packages/feature-controls/ts"
+        ],
+        [
+          ".ai/agent-checks/feature-controls-venv/bin/python",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/feature_controls/provider_conformance.py",
+          "tests/feature_controls/release_policy_conformance.py",
+          "tests/feature_controls/release_policy_tool_conformance.py"
+        ],
+        [
+          ".ai/agent-checks/feature-controls-venv/bin/python",
+          "scripts/feature-release-check.py",
+          "--mode",
+          "source"
+        ],
+        [
+          ".ai/agent-checks/feature-controls-venv/bin/python",
+          "-c",
+          "from pathlib import Path; a=Path('contracts/feature-controls/schema.json'); b=Path('packages/feature-controls/python/feature_controls/schema.json'); assert a.read_bytes()==b.read_bytes(), 'feature-control schema mirrors differ'"
+        ]
+      ],
+      "timeout_seconds": 240
     }
   ]
 }
