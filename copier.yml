@@ -107,7 +107,7 @@ isolation_profile:
 
 codex_review:
   type: bool
-  help: Ship the Codex PR review + security diff scan workflows (they read a Doppler master/prd_codex service token). Defaults on for 'standard' (unchanged) and off for 'strict'.
+  help: Ship code/security requests and the trusted worker lifecycle (owner-authorised private CI profiles or explicit legacy OIDC). Defaults on for 'standard' and off for 'strict'.
   default: "{{ isolation_profile == 'standard' }}"
   validator: >-
     {% if codex_review and isolation_profile == 'strict' %}
@@ -313,6 +313,11 @@ _exclude:
   - tests/test_native_guidance.py
   - tests/test_session_terminal_callers.py
   - scripts/tests/test_agent_validation_layout.py
+  # Release capability consumers use the portable action and their own product
+  # qualification. These suites require the Pack-only registry/build machinery.
+  - scripts/tests/test_release_manifest.py
+  - scripts/tests/test_release_admission_git.py
+  - scripts/tests/fixtures/release-manifest.v1.json
   - .github/workflows/registry-lint.yml
   # Pack-only contract caller (require_contract: true would fail legacy
   # instances whose instance-owned CLAUDE.md predates the anchored sections).
