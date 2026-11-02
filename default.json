@@ -20,6 +20,15 @@
       "depNameTemplate": "Manolii-org/ai-starter-pack",
       "datasourceTemplate": "github-tags",
       "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "description": "Keep reusable-workflow `pack_ref:` inputs on the same pack release as the `uses:` line. Several reusables load pack scripts/prompts from `pack_ref`, so a `uses:` bump without it would run new workflow YAML against old code. Matches `pack_ref: <40-char SHA> # vX.Y.Z` and updates the SHA and version together, inside the grouped AI Starter Pack PR.",
+      "managerFilePatterns": ["/(^|/)\\.github/workflows/[^/]+\\.ya?ml$/"],
+      "matchStrings": ["pack_ref:\\s*['\\\"]?(?<currentDigest>[0-9a-f]{40})['\\\"]?\\s*#\\s*(?<currentValue>v\\d+\\.\\d+\\.\\d+)"],
+      "depNameTemplate": "Manolii-org/ai-starter-pack",
+      "datasourceTemplate": "github-tags",
+      "versioningTemplate": "semver"
     }
   ],
   "timezone": "Europe/London",
@@ -52,6 +61,12 @@
       "allowedVersions": "/^v?[1-9][0-9]*\\.[0-9]+\\.[0-9]+$/",
       "automerge": false,
       "platformAutomerge": false
+    },
+    {
+      "description": "Convert any remaining AI Starter Pack reusable-workflow/action TAG pins (`@v1.22.0`) to commit-SHA pins with a `# v1.22.0` trailer. A tag can be moved by anyone with write access to the pack; a SHA cannot. Scoped to the github-actions manager — the regex managers above track version strings, not digests. Inherits the group rule above: one reviewed PR, never automerged.",
+      "matchManagers": ["github-actions"],
+      "matchPackageNames": ["/^manolii-org\\/ai-starter-pack$/i"],
+      "pinDigests": true
     },
     {
       "description": "Feature-control SDK upgrades, including prereleases and Git source/pin/digest changes, always require a reviewed PR. Consumer overrides must preserve this policy.",

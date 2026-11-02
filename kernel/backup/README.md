@@ -48,5 +48,5 @@ Layout:
 ## Versioning
 
 Ships with the pack's normal release tags. Consumers pin
-`manolii-org/ai-starter-pack/.github/workflows/backup-kernel-validate-reusable.yml@v*`
-per the org pin policy (org-internal reusables: `@v*` tag pin).
+`manolii-org/ai-starter-pack/.github/workflows/backup-kernel-validate-reusable.yml@<sha> # vX.Y.Z`
+per the org pin policy (every `uses:` pins a full commit SHA).
