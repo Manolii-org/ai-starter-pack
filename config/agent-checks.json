@@ -39,6 +39,40 @@
         ]
       ],
       "timeout_seconds": 600
+    },
+    {
+      "id": "release-contract-python",
+      "inputs": [
+        "config/agent-checks.json"
+      ],
+      "ready_paths": [
+        ".ai/agent-checks/release-venv/pyvenv.cfg"
+      ],
+      "tools": [
+        "uv"
+      ],
+      "commands": [
+        [
+          "uv",
+          "venv",
+          "--clear",
+          "--python",
+          "3.12",
+          ".ai/agent-checks/release-venv"
+        ],
+        [
+          "uv",
+          "pip",
+          "install",
+          "--python",
+          ".ai/agent-checks/release-venv/bin/python",
+          "jsonschema==4.25.1",
+          "pyyaml==6.0.3",
+          "pytest==9.2.0",
+          "copier==9.19.1"
+        ]
+      ],
+      "timeout_seconds": 600
     }
   ],
   "checks": [
@@ -99,6 +133,66 @@
           "scripts/install-agent-validation.py"
         ]
       ]
+    },
+    {
+      "id": "release-manifest-contract",
+      "paths": [
+        ".github/actions/validate-release-manifest/**",
+        ".github/workflows/plugin-eval-gate.yml",
+        "copier.yml",
+        "config/agent-checks.json.jinja",
+        "schemas/release-manifest.v1.schema.json",
+        "scripts/tests/test_release_manifest.py",
+        "docs/coordinated-releases.md",
+        ".github/workflows/REUSABLE-WORKFLOWS.md",
+        "schemas/release-adoption.v1.schema.json",
+        "scripts/tests/test_release_admission_git.py",
+        "plugin/manolii-framework/schemas/release-adoption.v1.schema.json",
+        "plugin/manolii-framework/schemas/release-manifest.v1.schema.json",
+        "registry/platform/framework/schemas/release-adoption.v1.schema.json",
+        "registry/platform/framework/schemas/release-manifest.v1.schema.json",
+        "scripts/tests/fixtures/release-manifest.v1.json",
+        "config/agent-checks.json",
+        "schemas/deployment-contract.schema.json",
+        "README-STARTER-PACK.md.jinja",
+        "tests/test_copier_render.py"
+      ],
+      "tools": [
+        "uv"
+      ],
+      "commands": [
+        [
+          ".ai/agent-checks/release-venv/bin/python",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "scripts/tests",
+          "-p",
+          "test_release_*.py",
+          "-q"
+        ],
+        [
+          ".ai/agent-checks/release-venv/bin/python",
+          "scripts/registry-lint.py"
+        ],
+        [
+          ".ai/agent-checks/release-venv/bin/python",
+          "-c",
+          "from pathlib import Path; import sys; names=['release-adoption.v1.schema.json','release-manifest.v1.schema.json']; targets=['plugin/manolii-framework/schemas','registry/platform/framework/schemas']; ok=all((Path('schemas')/n).read_bytes()==(Path(t)/n).read_bytes() for t in targets for n in names); sys.exit(0 if ok else 'generated release schemas differ; run owning plugin and registry builders')"
+        ],
+        [
+          ".ai/agent-checks/release-venv/bin/python",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_copier_render.py",
+          "-k",
+          "test_rendered_readme_counts_match_rendered_tree or test_release_capability_distribution_boundary or test_agent_validation_base_uses_owner_ref"
+        ]
+      ],
+      "timeout_seconds": 180,
+      "environment": "release-contract-python"
     }
   ]
 }
