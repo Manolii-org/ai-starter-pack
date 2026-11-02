@@ -45,6 +45,23 @@ def snapshot(runtime, now=NOW):
     return runtime.snapshot(list(MANIFEST["features"]), "web", GOLDEN["context"], now=now)
 
 
+def test_normal_qualification_binds_signed_source_with_identical_manifests():
+    runtime, controls = setup(source=SOURCE_A)
+    candidate = FeatureRuntime(catalog(), trust_policy="local-test", controls=controls,
+                               release_manifest=MANIFEST, release_source_sha=SOURCE_B)
+    evidence = candidate.release_evidence([GOLDEN["context"]], NOW)
+    with pytest.raises(ValueError, match="deployed policy"):
+        assess_release(MANIFEST, GOLDEN["scope"], evidence["controls"], evidence["snapshots"],
+                       NOW, SOURCE_B, evidence["source_sha"])
+    assert assess_release(MANIFEST, GOLDEN["scope"], evidence["controls"], evidence["snapshots"],
+                          NOW, SOURCE_B, evidence["source_sha"], "rollback")["status"] == "passed"
+    candidate.activate(release(revision=2, source=SOURCE_B), 1, NOW)
+    published = candidate.release_evidence([GOLDEN["context"]], NOW)
+    assert assess_release(MANIFEST, GOLDEN["scope"], published["controls"], published["snapshots"],
+                          NOW, SOURCE_B, published["source_sha"])["status"] == "passed"
+    assert snapshot(runtime)["decisions"]["checkout"]["value"] is True
+
+
 def probe():
     runtime, controls = setup()
     initial = assess_release(MANIFEST, GOLDEN["scope"], controls.read(GOLDEN["scope"]), [snapshot(runtime)], NOW, SOURCE_A, SOURCE_A)

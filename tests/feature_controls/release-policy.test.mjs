@@ -27,6 +27,22 @@ test('a ready flag hidden by a local off fails qualification', async () => {
   assert.equal(report.rows[0].status, 'unexpected_off');
 });
 
+test('normal qualification binds the signed source even when manifests are identical', async () => {
+  const { runtime, controls } = await releaseSetup({}, readiness, sourceA);
+  const candidate = new FeatureRuntime(releaseCatalog(readiness), { trust_policy: 'local-test', controls,
+    release_manifest: readiness, release_source_sha: sourceB });
+  const evidence = await candidate.releaseEvidence([golden.context], golden.now);
+  assert.throws(() => assessRelease(readiness, golden.scope, evidence.controls, evidence.snapshots,
+    golden.now, sourceB, evidence.source_sha), /deployed policy/);
+  assert.equal(assessRelease(readiness, golden.scope, evidence.controls, evidence.snapshots,
+    golden.now, sourceB, evidence.source_sha, 'rollback').status, 'passed');
+  await candidate.activate(releaseBundle(readiness, 2, sourceB), 1, golden.now);
+  const published = await candidate.releaseEvidence([golden.context], golden.now);
+  assert.equal(assessRelease(readiness, golden.scope, published.controls, published.snapshots,
+    golden.now, sourceB, published.source_sha).status, 'passed');
+  assert.equal((await releaseSnapshot(runtime)).decisions.checkout.value, true);
+});
+
 test('emergency off remains effective immediately without paperwork, and requires follow-up', async () => {
   const { runtime, controls } = await releaseSetup();
   await runtime.updateKills(kill(2, ['checkout']), 'local-fixture', golden.now);

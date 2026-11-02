@@ -98,6 +98,7 @@ export function assessRelease(manifest: ReleaseManifest, scope: Scope, controls:
   if (!Object.keys(manifest.features).length) return { status: "no_features", rows: [], configuration_revision: controls.bundle?.revision ?? null, kill_generation: controls.kill?.generation ?? 0 };
   const { kill, bundle } = controls;
   if (!kill || !bundle || !bundle.deployment || !/^[0-9a-f]{40}$/.test(source_sha) || source_sha !== observed_source_sha ||
+      operation === "deploy" && bundle.deployment.source_sha !== source_sha ||
       !(operation === "rollback" ? compatibleReleaseManifest(manifest, bundle.deployment.manifest) :
         Buffer.from(releaseManifestMessage(bundle.deployment.manifest)).equals(Buffer.from(releaseManifestMessage(manifest)))) ||
       !sameScope(bundle.scope, scope) || bundle.created_at > now || bundle.expires_at <= now || controls.time_highwater > now ||

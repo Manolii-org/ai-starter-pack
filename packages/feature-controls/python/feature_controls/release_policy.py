@@ -104,6 +104,7 @@ def assess_release(manifest: ReleaseManifest, scope: Scope, controls: ControlSta
     if operation not in {"deploy", "rollback"}:
         raise ValueError("invalid release operation")
     if not kill or not bundle or "deployment" not in bundle or re.fullmatch(r"[0-9a-f]{40}", source_sha) is None or source_sha != observed_source_sha or \
+            operation == "deploy" and bundle["deployment"]["source_sha"] != source_sha or \
             not (compatible_release_manifest(manifest, bundle["deployment"]["manifest"]) if operation == "rollback" else
                  release_manifest_message(bundle["deployment"]["manifest"]) == release_manifest_message(manifest)) or \
             bundle["scope"] != scope or bundle["created_at"] > now or bundle["expires_at"] <= now or controls["time_highwater"] > now or \

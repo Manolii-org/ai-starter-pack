@@ -83,6 +83,9 @@ no new verifier port.
 
 `assessRelease` / `assess_release` checks expected versus independently observed
 source, policy, scope, revisions, kill generations, freshness, coverage and values.
+Normal deployment requires the signed approval's source SHA to match that exact
+artifact, including when its readiness declaration is unchanged. Publish a fresh
+approval for the new source without clearing any disables.
 Ready unexpectedly off fails. Unfinished unexpectedly on fails. Missing, mixed
 or fallback evidence is not green. The normal deployment also verifies actual
 feature journeys, not only boolean delivery.
