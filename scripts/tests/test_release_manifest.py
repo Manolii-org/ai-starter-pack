@@ -50,6 +50,26 @@ def subject(*, database=True, provider="vercel"):
 
 
 class ManifestTests(unittest.TestCase):
+    def test_coordinated_adoption_schema_preserves_decisions_or_requires_explicit_combination(self):
+        import json
+        from jsonschema import Draft202012Validator
+        fragment = json.loads((ROOT / "schemas/release-adoption.v1.schema.json").read_text())
+        validator = Draft202012Validator(fragment)
+        base = {"schema_version": 1, "mode": "coordinated", "profile_version": "fixture-v1",
+                "policy_reference": "policy-v1", "qualification_reference": "qualification-v1",
+                "release_owner": "release-owner", "recovery_owner": "recovery-owner",
+                "data_authority": "data-owner", "admission_stop": "owner-stop",
+                "approval_window_seconds": 300, "execution_budget_seconds": 1200,
+                "intermediate_window_seconds": 1800}
+        sequences = [[], ["activation"], ["schema", "activation"], ["release"]]
+        for installed in sequences:
+            for execution in sequences:
+                row = {**base, "installed_decisions": installed, "execution_decisions": execution}
+                self.assertEqual(not list(validator.iter_errors(row)), installed == execution)
+                row["combined_scope_adoption"] = "explicit-owner-policy-adoption"
+                expected = installed == execution or (installed == ["schema", "activation"] and execution == ["release"])
+                self.assertEqual(not list(validator.iter_errors(row)), expected)
+
     def test_adoption_and_existing_lane_schema_are_distinct_valid_contracts(self):
         schema = json.loads((ROOT / "schemas/release-adoption.v1.schema.json").read_text())
         release.jsonschema.Draft202012Validator.check_schema(schema)
