@@ -1,0 +1,93 @@
+name: Workflow Security (reusable)
+# Consumer-side workflow hardening:
+#   1. Every `uses:` in the caller's workflows and composite actions is pinned
+#      to a full commit SHA (fails otherwise). Tag pins of shared reusables run
+#      whatever the tag points at today — with the caller's secrets.
+#   2. actionlint on the caller's workflows (fails on errors).
+#   3. zizmor workflow-security audit: ratchet against the caller's baseline
+#      when `zizmor_baseline` exists in the caller repo; report-only otherwise.
+#
+# Usage (pin this reusable by SHA, with a version trailer for Renovate):
+#   jobs:
+#     workflow-security:
+#       uses: Manolii-org/ai-starter-pack/.github/workflows/workflow-security-reusable.yml@<sha> # vX.Y.Z
+#
+# Needs no secrets.
+
+on:
+  workflow_call:
+    inputs:
+      zizmor_baseline:
+        description: 'Path in the caller repo to a zizmor baseline (created with --write-baseline). Missing file = report-only.'
+        required: false
+        type: string
+        default: 'config/zizmor-baseline.json'
+      allow_ref:
+        description: 'Optional newline-separated full-match regexes for uses: refs to exempt from SHA pinning.'
+        required: false
+        type: string
+        default: ''
+      pack_ref:
+        description: 'Override the pack revision providing the scripts. Default: this reusable workflow''s own pinned commit.'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: Workflow security
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout caller
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          path: caller
+          persist-credentials: false
+
+      - name: Checkout pack scripts (this workflow's own revision)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: manolii-org/ai-starter-pack
+          ref: ${{ inputs.pack_ref || job.workflow_sha }}
+          path: pack
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: '3.12'
+
+      - name: Install pinned scanners
+        run: |
+          bash pack/scripts/install-workflow-scanners.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Every uses is SHA-pinned
+        env:
+          ALLOW_REF: ${{ inputs.allow_ref }}
+        run: |
+          args=()
+          while IFS= read -r rx; do
+            [ -n "$rx" ] && args+=(--allow-ref "$rx")
+          done <<< "$ALLOW_REF"
+          cd caller
+          python3 ../pack/scripts/check-pinned-uses.py "${args[@]}"
+
+      - name: actionlint
+        working-directory: caller
+        run: actionlint -shellcheck= -pyflakes=
+
+      - name: zizmor
+        working-directory: caller
+        env:
+          BASELINE: ${{ inputs.zizmor_baseline }}
+        run: |
+          if [ -f "$BASELINE" ]; then
+            python3 ../pack/scripts/workflow-security-ratchet.py --baseline "$BASELINE"
+          else
+            echo "::notice::No zizmor baseline at $BASELINE — report-only. Create one with: python3 scripts/workflow-security-ratchet.py --write-baseline --baseline $BASELINE"
+            zizmor --offline --no-progress --format github .github/workflows || true
+          fi

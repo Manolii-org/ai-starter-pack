@@ -54,6 +54,12 @@
       "platformAutomerge": false
     },
     {
+      "description": "Convert any remaining AI Starter Pack reusable-workflow/action TAG pins (`@v1.22.0`) to commit-SHA pins with a `# v1.22.0` trailer. A tag can be moved by anyone with write access to the pack; a SHA cannot. Scoped to the github-actions manager — the regex managers above track version strings, not digests. Inherits the group rule above: one reviewed PR, never automerged.",
+      "matchManagers": ["github-actions"],
+      "matchPackageNames": ["/^manolii-org\\/ai-starter-pack$/i"],
+      "pinDigests": true
+    },
+    {
       "description": "Feature-control SDK upgrades, including prereleases and Git source/pin/digest changes, always require a reviewed PR. Consumer overrides must preserve this policy.",
       "matchPackageNames": ["@manolii/feature-controls", "manolii-feature-controls"],
       "automerge": false,

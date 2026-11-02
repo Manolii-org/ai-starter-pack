@@ -1875,6 +1875,34 @@ def test_pack_surface_lowercase_slug_fails(tmp_path):
     assert any("x.md" in f.detail for f in fails)
 
 
+@pytest.mark.parametrize("text,leaks", [
+    # Supabase project refs: bare env form, API host, dashboard URL.
+    ("prod:" + "q" * 20, True),
+    ("project_ref = '" + "q" * 20 + "'", True),
+    ("https://" + "q" * 20 + ".supabase.co/rest/v1", True),
+    ("supabase.com/dashboard/project/" + "q" * 20, True),
+    # Documented placeholders stay allowed.
+    ("prod:abcdefghijklmnopqrst,staging:xyz789", False),
+    ("prod:abc123prodref", False),
+    ("https://abc123.supabase.co", False),
+    # Deployed app hostnames.
+    ("https://real-service.vercel.app/api/mcp", True),
+    ("https://real-proxy.fly.dev", True),
+    ("https://your-litellm-proxy.fly.dev", False),
+    ("https://myapp-litellm.fly.dev", False),
+    ("https://preview-xxx.vercel.app", False),
+    ('PROXY_URL="https://$APP_NAME.fly.dev"', False),
+    # Org slugs for every universe, not only the CPDcheck- prefix form.
+    ("see CPDcheck/some-private-repo", True),
+])
+def test_pack_surface_infra_identifier_patterns(text, leaks):
+    """Regression for a production Supabase ref that shipped publicly because
+    only the `db.<ref>.supabase.co` form was matched."""
+    mod = load_lint_module()
+    hit = any(rx.search(text) for rx in mod.PACK_SURFACE_RES)
+    assert hit is leaks, text
+
+
 def test_pack_surface_prefixed_canonical_slug_fails(tmp_path):
     """`Manolii-org/ai-starter-pack-private` is a DIFFERENT repo — the
     canonical-name exception must end at a true slug delimiter, not at

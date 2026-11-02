@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Security
+
+- **Production identifier removed; leak lint widened.** A production Supabase
+  project ref was shipped in the `migration-drift` skill examples because
+  `PACK-SURFACE` only matched the `db.<ref>.supabase.co` host form. The example
+  now uses a placeholder, and the lint also catches bare `prod:<ref>` values,
+  `<ref>.supabase.co` API hosts, dashboard URLs, real `*.fly.dev` /
+  `*.vercel.app` hostnames and `CPDcheck/<repo>` slugs (placeholders such as
+  `your-proxy.fly.dev` and `abcdefghijklmnopqrst` stay allowed). Org-private
+  registry mirrors should refresh `registry/platform/**`.
+- **New `Workflow Security` gate on this repo.** Every `uses:` must be
+  SHA-pinned, actionlint must be clean, and zizmor findings may not grow
+  beyond `config/zizmor-baseline.json` (82 known findings, burn-down only).
+  Pack PRs get a security diff in the job summary.
+- **New `workflow-security-reusable.yml`** gives consumers the same checks.
+- **Release security diff.** `release-tag.yml` now reports, for each pack
+  release, changes to triggers, permissions, secrets, external `uses:`,
+  event/input expressions in `run:` and hosts since the previous release.
+- **Renovate preset converts pack tag pins to SHA pins** (`pinDigests` for
+  the github-actions manager, still one grouped and reviewed PR).
+  `REUSABLE-WORKFLOWS.md` examples now show `@<sha> # vX.Y.Z`.
+
 ### Changed
 
 - **No Anthropic substitute when the proxy is down.** With

@@ -1,0 +1,15 @@
+# actionlint configuration. Only narrow, per-file ignores for known false
+# positives of the pinned actionlint version — never blanket rules.
+paths:
+  .github/workflows/backup-kernel-validate-reusable.yml:
+    ignore:
+      # job.workflow_sha is a documented reusable-workflow context that
+      # actionlint 1.7.7 does not model yet.
+      - 'property "workflow_sha" is not defined'
+  .github/workflows/workflow-security-reusable.yml:
+    ignore:
+      - 'property "workflow_sha" is not defined'
+  .github/workflows/migration-run-gate-reusable.yml:
+    ignore:
+      # ports comes from fromJSON(inputs.db_ports_json) — a sequence at runtime.
+      - '"ports" section must be sequence node'

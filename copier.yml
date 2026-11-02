@@ -314,6 +314,13 @@ _exclude:
   # instances whose instance-owned CLAUDE.md predates the anchored sections).
   # Consumers adopt via their own caller of claude-md-contract-reusable.yml.
   - .github/workflows/claude-md-contract.yml
+  # Pack-only workflow-security gate + its baseline of the PACK's own zizmor
+  # findings (a consumer's findings differ, so it would fail on first render),
+  # and the test that asserts on them. Consumers adopt via a caller of
+  # workflow-security-reusable.yml and generate their own baseline.
+  - .github/workflows/workflow-security.yml
+  - config/zizmor-baseline.json
+  - tests/test_workflow_security.py
   # Template-internal master content — present only in the master's
   # distribution copy (templates/ai-starter-pack/), declared TEMPLATE_ONLY in
   # scripts/check-pack-mirror-drift.py. Excluded so a render of the template

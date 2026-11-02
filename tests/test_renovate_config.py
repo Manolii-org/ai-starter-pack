@@ -45,6 +45,23 @@ def test_preset_pin_manager_extracts_supported_consumer_pins() -> None:
     ) is None
 
 
+def test_pack_workflow_pins_are_converted_to_sha_pins() -> None:
+    """Tag pins of pack reusables run whatever the tag points at today; the
+    preset must make Renovate pin them to commit SHAs (github-actions only —
+    the regex managers have no digest capture)."""
+    rules = json.loads((ROOT / "default.json").read_text())["packageRules"]
+    pin_rules = [r for r in rules if r.get("pinDigests") is True]
+    assert len(pin_rules) == 1
+    rule = pin_rules[0]
+    assert rule["matchManagers"] == ["github-actions"]
+    body, flags = rule["matchPackageNames"][0][1:].rsplit("/", 1)
+    name = re.compile(body, re.IGNORECASE if "i" in flags else 0)
+    assert name.search("Manolii-org/ai-starter-pack")
+    assert not name.search("actions/checkout")
+    # Must not re-enable automerge for pack pins.
+    assert "automerge" not in rule
+
+
 def test_pack_pins_are_grouped_into_one_reviewed_pr() -> None:
     rules = json.loads((ROOT / "default.json").read_text())["packageRules"]
     index, rule = next(

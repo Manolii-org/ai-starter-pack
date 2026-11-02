@@ -122,10 +122,25 @@ PACK_SURFACE_PATTERNS = [
     r"Buro-Built/[A-Za-z0-9_.-]+",
     r"Impaktful-Platform/[A-Za-z0-9_.-]+",
     r"CPDcheck-[A-Za-z0-9_.-]+",
+    r"CPDcheck/[A-Za-z0-9_.-]+",
     r"prj_[A-Za-z0-9]{15,}",
     r"db\.[a-z0-9]+\.supabase\.co",
+    # Supabase project refs are 20 lowercase letters. The `db.` host form
+    # above missed the bare ref, the API host and env-style `prod:<ref>`
+    # values — a production ref shipped publicly that way (2026-11-02).
+    # `abcdefghijklmnopqrst` is the documented placeholder ref.
+    r"(?<![a-z0-9.-])(?!abcdefghijklmnopqrst\b)[a-z]{20}\.supabase\.co\b",
+    r"supabase\.com/dashboard/project/(?!abcdefghijklmnopqrst\b)[a-z]{20}\b",
+    r"\b(?:prod|staging|preview|project[-_]?ref)\s*[:=]\s*[\"']?"
+    r"(?!abcdefghijklmnopqrst\b)[a-z]{20}\b",
     r"ep-[a-z0-9-]+\.[a-z0-9.-]*neon\.tech",
     r"\b[a-z0-9-]+\.internal\b",
+    # Deployed app hostnames name real infrastructure. The lookbehind stops a
+    # match starting mid-hostname (`your-proxy.fly.dev` must not yield
+    # `proxy.fly.dev`) or inside a variable (`$APP_NAME.fly.dev`); the
+    # lookahead exempts documented placeholders.
+    r"(?<![a-z0-9._$-])(?!(?:your|my|myapp|example|preview-x+)[-.])"
+    r"[a-z0-9][a-z0-9-]*\.(?:fly\.dev|vercel\.app)\b",
 ]
 # Owner/repo slugs and hostnames are matched case-insensitively — DNS and
 # git URLs don't care about casing, so `manolii-org/private-repo` must
