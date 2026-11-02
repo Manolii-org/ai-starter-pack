@@ -91,7 +91,10 @@ After successful schema application, record the original release ID, successful
 schema stage, completion time and per-target after-state in immutable evidence.
 The trusted observer rechecks current live artifacts, ledger and policy. The
 `activation_only` function prepares a new subject with empty SQL, the same pinned
-application/configuration, new preparation identity and a new protected decision.
+application/configuration, new preparation identity and a new protected decision. A combined-release
+profile preserves its `release` decision scope; separate schema/activation
+profiles request the remaining `activation` decision. Policy digests do not
+silently change meaning during continuation preparation.
 It links the predecessor and expected schema-evidence digest. Preparation never
 reserves a release or reuses an expired approval.
 
@@ -116,7 +119,8 @@ concurrent children cannot both advance one revision, including identical
 proposals created in the same second. An unknown write result holds for readback;
 it is not permission to execute or blindly repeat the mutation.
 
-`reserve` constructs a proposed state update; the caller must successfully
+`reserve` rejects an expired execution window using a timezone-aware admission
+clock, then constructs a proposed state update; the caller must successfully
 `compare_and_swap` the expected retained revision before claiming reservation.
 It blocks new normal releases during every unresolved prior phase and enforces
 one continuation per predecessor. Only `success`, `failed-before-writes` and
@@ -146,12 +150,15 @@ wait-start, not guaranteed dispatch order. Overflow cancels new requests. Declar
 `bounded-native` with its reconciliation route, rather than claiming unlimited
 durability, and keep `cancel-in-progress: false` on the production writer.
 
-Run the synthetic shared-core variation checks with:
+Run the owning synthetic shared-core, real-Git CAS and generated-drift checks with:
 
 ```bash
-python3 -m unittest discover -s scripts/tests -p test_release_manifest.py -q
-python3 scripts/registry-lint.py
+python3 scripts/agent-check.py --provider codex --provision
 ```
+
+This provisions the recipe's isolated Python 3.12 environment with pinned
+JSON Schema/PyYAML dependencies. The recipe covers its configuration and
+legacy lane-model schema inputs as well as the release capability.
 
 The final public candidate must also pass the existing secret scan. No model
 call, additional business database or new approval service is added to releases.

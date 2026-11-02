@@ -39,6 +39,38 @@
         ]
       ],
       "timeout_seconds": 600
+    },
+    {
+      "id": "release-contract-python",
+      "inputs": [
+        "config/agent-checks.json"
+      ],
+      "ready_paths": [
+        ".ai/agent-checks/release-venv/pyvenv.cfg"
+      ],
+      "tools": [
+        "uv"
+      ],
+      "commands": [
+        [
+          "uv",
+          "venv",
+          "--clear",
+          "--python",
+          "3.12",
+          ".ai/agent-checks/release-venv"
+        ],
+        [
+          "uv",
+          "pip",
+          "install",
+          "--python",
+          ".ai/agent-checks/release-venv/bin/python",
+          "jsonschema==4.25.1",
+          "pyyaml==6.0.3"
+        ]
+      ],
+      "timeout_seconds": 600
     }
   ],
   "checks": [
@@ -114,14 +146,16 @@
         "plugin/manolii-framework/schemas/release-manifest.v1.schema.json",
         "registry/platform/framework/schemas/release-adoption.v1.schema.json",
         "registry/platform/framework/schemas/release-manifest.v1.schema.json",
-        "scripts/tests/fixtures/release-manifest.v1.json"
+        "scripts/tests/fixtures/release-manifest.v1.json",
+        "config/agent-checks.json",
+        "schemas/deployment-contract.schema.json"
       ],
       "tools": [
-        "python"
+        "uv"
       ],
       "commands": [
         [
-          "python3",
+          ".ai/agent-checks/release-venv/bin/python",
           "-m",
           "unittest",
           "discover",
@@ -132,16 +166,17 @@
           "-q"
         ],
         [
-          "python3",
+          ".ai/agent-checks/release-venv/bin/python",
           "scripts/registry-lint.py"
         ],
         [
-          "python3",
+          ".ai/agent-checks/release-venv/bin/python",
           "-c",
-          "from pathlib import Path; names=['release-adoption.v1.schema.json','release-manifest.v1.schema.json']; targets=['plugin/manolii-framework/schemas','registry/platform/framework/schemas']; assert all((Path('schemas')/n).read_bytes()==(Path(t)/n).read_bytes() for t in targets for n in names), 'generated release schemas differ; run owning plugin and registry builders'"
+          "from pathlib import Path; import sys; names=['release-adoption.v1.schema.json','release-manifest.v1.schema.json']; targets=['plugin/manolii-framework/schemas','registry/platform/framework/schemas']; ok=all((Path('schemas')/n).read_bytes()==(Path(t)/n).read_bytes() for t in targets for n in names); sys.exit(0 if ok else 'generated release schemas differ; run owning plugin and registry builders')"
         ]
       ],
-      "timeout_seconds": 120
+      "timeout_seconds": 120,
+      "environment": "release-contract-python"
     }
   ]
 }

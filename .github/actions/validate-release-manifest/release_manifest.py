@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import sys
 
@@ -64,7 +65,14 @@ def digest(value: dict) -> str:
 
 
 def _instant(value: str) -> datetime:
-    result = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if not isinstance(value, str) or not re.fullmatch(
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z", value
+    ):
+        raise ManifestError("release times must be RFC 3339 UTC instants")
+    try:
+        result = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        raise ManifestError("release times must be RFC 3339 UTC instants") from None
     if result.utcoffset() != timezone.utc.utcoffset(result):
         raise ManifestError("release times must be UTC")
     return result
@@ -167,7 +175,8 @@ def activation_only(parent: dict, *, schema_evidence: dict, current: dict,
     for db in subject["databases"]:
         db["baseline"] = list(db["expected_after"])
         db["pending"] = []
-    subject.update(kind="activation-only", decision_sequence=["activation"],
+    continuation_decision = ["release"] if subject["decision_sequence"] == ["release"] else ["activation"]
+    subject.update(kind="activation-only", decision_sequence=continuation_decision,
                    timing=copy.deepcopy(timing), preparation=copy.deepcopy(preparation),
                    continuation={"parent_release_id": parent["release_id"],
                                  "schema_evidence_sha256": expected_evidence_sha256})

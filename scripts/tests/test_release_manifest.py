@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise actual manifest/action seams with synthetic product/provider inputs."""
 import copy
+from datetime import datetime, timezone
 import importlib
 import json
 import os
@@ -16,6 +17,7 @@ sys.path.insert(0, str(ACTION))
 release = importlib.import_module("release_manifest")
 state = importlib.import_module("release_state")
 approval = importlib.import_module("github_approval")
+ADMISSION_NOW = datetime(2026, 11, 1, 1, 15, tzinfo=timezone.utc)
 
 
 def subject(*, database=True, provider="vercel"):
@@ -84,6 +86,42 @@ class ManifestTests(unittest.TestCase):
             else:
                 bad["subject"]["kind"] = "release"
             self.assertTrue(list(validator.iter_errors(bad)), mutation)
+
+    def test_invalid_timestamps_fail_with_sanitized_domain_error(self):
+        for value in ["private-invalid-timeZ", "2026-13-01T00:00:00Z", "20261101T000000Z"]:
+            changed = subject()
+            changed["timing"]["selected_at"] = value
+            with self.assertRaises(release.ManifestError):
+                release.prepare(changed)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "invalid.json"
+            changed = subject()
+            changed["timing"]["selected_at"] = "private-invalid-timeZ"
+            path.write_text(json.dumps({"schema_version": 1, "release_id": release.digest(changed), "subject": changed}))
+            result = subprocess.run([sys.executable, str(ACTION / "release_manifest.py"),
+                                     "--manifest", str(path), "--dry-run"], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("RELEASE_MANIFEST_INVALID:", result.stderr)
+            self.assertNotIn("private-invalid-time", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+
+    def test_generated_comparison_survives_python_optimization(self):
+        config = json.loads((ROOT / "config/agent-checks.json").read_text())
+        recipe = next(r for r in config["checks"] if r["id"] == "release-manifest-contract")
+        self.assertIn("config/agent-checks.json", recipe["paths"])
+        self.assertIn("schemas/deployment-contract.schema.json", recipe["paths"])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for target in ["schemas", "plugin/manolii-framework/schemas", "registry/platform/framework/schemas"]:
+                (root / target).mkdir(parents=True)
+                for name in ["release-adoption.v1.schema.json", "release-manifest.v1.schema.json"]:
+                    (root / target / name).write_text("fixture")
+            command = [sys.executable, "-O", *recipe["commands"][-1][1:]]
+            self.assertEqual(subprocess.run(command, cwd=root, capture_output=True).returncode, 0)
+            (root / "registry/platform/framework/schemas/release-manifest.v1.schema.json").write_text("corrupt")
+            result = subprocess.run(command, cwd=root, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("generated release schemas differ", result.stderr)
 
     def test_deterministic_identity_preserves_meaning_and_array_order(self):
         original = subject()
@@ -245,6 +283,18 @@ class ContinuationTests(unittest.TestCase):
             with self.assertRaises(release.ManifestError):
                 release.activation_only(self.parent, **args)
 
+    def test_combined_release_continuation_preserves_installed_decision_scope(self):
+        parent_subject = copy.deepcopy(self.parent["subject"])
+        parent_subject["decision_sequence"] = ["release"]
+        parent = release.prepare(parent_subject)
+        evidence = {**self.evidence, "release_id": parent["release_id"]}
+        args = {**self.arguments, "schema_evidence": evidence,
+                "expected_evidence_sha256": release.digest(evidence)}
+        child = release.activation_only(parent, **args)["manifest"]
+        self.assertEqual(child["subject"]["decision_sequence"], ["release"])
+        self.assertEqual(child["subject"]["policy_sha256"], parent["subject"]["policy_sha256"])
+        self.assertEqual(child["subject"]["databases"][0]["pending"], [])
+
     def test_duplicate_or_unfenced_continuation_is_not_admitted(self):
         for changes in [{"admission_revision": ""}, {"admitted_continuation": "existing-release"}]:
             with self.assertRaises(release.ManifestError):
@@ -271,14 +321,14 @@ class AdmissionStateTests(unittest.TestCase):
             retained = {"schema_version": 1, "active": {"release_id": "0" * 64, "phase": phase},
                         "continuations": {}}
             with self.subTest(phase=phase), self.assertRaises(state.StateConflict):
-                state.reserve(retained, proposal)
+                state.reserve(retained, proposal, now=ADMISSION_NOW)
 
     def test_terminal_release_allows_later_subject(self):
         proposal = release.prepare(subject())
         for phase in ["success", "failed-before-writes", "recovered"]:
             retained = {"schema_version": 1, "active": {"release_id": "0" * 64, "phase": phase},
                         "continuations": {}}
-            self.assertEqual(state.reserve(retained, proposal)["active"]["release_id"], proposal["release_id"])
+            self.assertEqual(state.reserve(retained, proposal, now=ADMISSION_NOW)["active"]["release_id"], proposal["release_id"])
 
     def test_exactly_one_continuation_can_claim_predecessor(self):
         fixture = ContinuationTests()
@@ -286,13 +336,13 @@ class AdmissionStateTests(unittest.TestCase):
         child = release.activation_only(fixture.parent, **fixture.arguments)["manifest"]
         retained = {"schema_version": 1, "active": {"release_id": fixture.parent["release_id"],
                                                     "phase": "activation-held"}, "continuations": {}}
-        reserved = state.reserve(retained, child)
+        reserved = state.reserve(retained, child, now=ADMISSION_NOW)
         self.assertEqual(reserved["continuations"][fixture.parent["release_id"]], child["release_id"])
         with self.assertRaises(state.StateConflict):
-            state.reserve(reserved, child)
+            state.reserve(reserved, child, now=ADMISSION_NOW)
         reserved["active"] = retained["active"]
         with self.assertRaises(state.StateConflict):
-            state.reserve(reserved, child)
+            state.reserve(reserved, child, now=ADMISSION_NOW)
 
     def test_state_store_wire_uses_custom_ref_and_non_force_cas(self):
         from unittest.mock import Mock
@@ -374,6 +424,28 @@ class ApprovalCapabilityTests(unittest.TestCase):
             store.compare_and_swap("a" * 40, {"schema_version": 1, "active": None, "continuations": {}})
             messages.append(store.request.call_args_list[3].args[2]["message"])
         self.assertNotEqual(messages[0], messages[1])
+
+
+
+
+class AdmissionClockTests(unittest.TestCase):
+    def test_expired_or_naive_clock_scope_cannot_be_selected(self):
+        proposal = release.prepare(subject())
+        retained = {"schema_version": 1, "active": None, "continuations": {}}
+        for now in [datetime(2026, 11, 1, 2, tzinfo=timezone.utc),
+                    datetime(2026, 11, 2, tzinfo=timezone.utc)]:
+            with self.subTest(now=now), self.assertRaises(state.StateConflict):
+                state.reserve(retained, proposal, now=now)
+        with self.assertRaises(state.StateUnavailable):
+            state.reserve(retained, proposal, now=datetime(2026, 11, 1))
+        self.assertEqual(retained, {"schema_version": 1, "active": None, "continuations": {}})
+
+    def test_unexpired_scope_can_be_proposed_without_execution_authority(self):
+        proposal = release.prepare(subject())
+        retained = {"schema_version": 1, "active": None, "continuations": {}}
+        result = state.reserve(retained, proposal, now=ADMISSION_NOW)
+        self.assertEqual(result["active"], {"release_id": proposal["release_id"], "phase": "selected"})
+        self.assertIsNone(retained["active"])
 
 
 if __name__ == "__main__":

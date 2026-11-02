@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import copy
+from datetime import datetime, timezone
 import hashlib
 import json
 import re
@@ -14,7 +15,7 @@ import secrets
 from urllib.error import HTTPError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-from release_manifest import _invalid_constant, _pairs, validate
+from release_manifest import _instant, _invalid_constant, _pairs, validate
 
 MAX_STATE_BYTES = 1_000_000
 # Git's blob JSON includes base64 and line wrapping as well as the raw state.
@@ -181,12 +182,17 @@ def validate_state(state: dict) -> None:
         raise StateUnavailable("invalid active release state")
 
 
-def reserve(state: dict, manifest: dict) -> dict:
+def reserve(state: dict, manifest: dict, *, now: datetime | None = None) -> dict:
     """Construct next admission state; only a successful store CAS reserves it."""
     validate_state(state)
     validate(manifest)
     active = state["active"]
     subject = manifest["subject"]
+    admission_time = datetime.now(timezone.utc) if now is None else now
+    if not isinstance(admission_time, datetime) or admission_time.utcoffset() is None:
+        raise StateUnavailable("admission clock must be a timezone-aware instant")
+    if _instant(subject["timing"]["execute_before"]) <= admission_time:
+        raise StateConflict("expired release scope cannot be admitted")
     if subject["kind"] == "activation-only":
         parent = subject["continuation"]["parent_release_id"]
         if (not active or active["release_id"] != parent
