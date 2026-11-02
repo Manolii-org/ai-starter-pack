@@ -84,10 +84,39 @@ not the generic hosted HTTPS SPI (`backend: "hosted"`), which stays separate.
 - **Quiet window.** `await --quiet-window N` keeps observing for N seconds after
   the expected count and fails `MESSAGE_AMBIGUOUS` on a delayed duplicate.
 - **Inspection.** `inspect --allocation @a --messages @m --allow-host H
-  [--allow-path-prefix P] --output FILE` writes escaped text, https links on
+  [--allow-path-prefix P] --output FILE` writes plain text (tags, scripts and remote assets stripped, never rendered), https links on
   approved hosts/paths and numeric codes to a mode-0600 file; stdout only carries
   a count receipt. Expired allocations and messages outside the allocation are
   denied.
 
 Tooling identities stay distinct: component tag `email-capture-vX.Y.Z`, protocol
 schema `1.0`, and the Python `__version__` are separate values.
+
+## Configuration map and precedence
+
+| Variable | Meaning | Notes |
+|---|---|---|
+| `EMAIL_CAPTURE_MODE` | `off` / `hermetic` / `hosted` | Canonical; mixing with legacy `MAILDEV_URL`, `INBUCKET_URL`, `EMAIL_CAPTURE_API_URL`, `SMTP_HOST`, `SMTP_PORT` is rejected |
+| `EMAIL_CAPTURE_BACKEND` | `memory`, `mailpit`, `maildev`, `inbucket`, `hosted`, `resend` | `resend` only with mode `hosted` |
+| `EMAIL_CAPTURE_ENDPOINT` | Receiver base URL | `resend`: `https://api.resend.com` only |
+| `EMAIL_CAPTURE_ENVIRONMENT` | Capture environment label | Required for hosted; production labels rejected. Never overrides a consumer's own resource-identity check |
+| `EMAIL_CAPTURE_FIDELITY` | `provider-to-capture` / `deployed-substitution` | |
+| `EMAIL_CAPTURE_RETENTION` | `strict-purge` (default) / `provider-retained` | Must be `provider-retained` for `resend` |
+| `EMAIL_CAPTURE_HOSTED_TOKEN` | Receiver credential (process environment only) | Never in profile JSON; never defaulted from an application sending key |
+| `EMAIL_CAPTURE_PRIVATE_DIR` | Private (0700) workspace for registry, allocations, messages | Allocate, await and cleanup must share it |
+| `EMAIL_CAPTURE_ALLOCATION_REGISTRY` | Registry path override | Authoritative for allocation identity and cursor |
+| `EMAIL_CAPTURE_STARTER_ROOT` | Consumer-side checkout of this pack | Consumer convention, not read by the core |
+
+A profile JSON file wins over environment variables (`--profile`). Consumers translate their own environment
+(for example BCP's `NEXT_PUBLIC_ENV` / `VERCEL_ENV` / `NODE_ENV`) into `EMAIL_CAPTURE_ENVIRONMENT` in their launcher,
+and still verify the actual target (frontend URL and database identity) before any write. Supabase's historical
+`[inbucket]` / `supabase_inbucket` names remain although the service is Mailpit; live conformance keeps
+`EMAIL_CAPTURE_SMTP_HOST` / `EMAIL_CAPTURE_SMTP_PORT`.
+
+## Onboarding a new consumer (CPDcheck, Manolii applications)
+
+1. Pin this pack by full commit SHA (component tag `email-capture-vX.Y.Z` in a comment); never a branch or a caller-controlled ref when secrets are present.
+2. Keep application journeys, fixtures, tenant isolation and secret-store routes in the consumer; supply the receiver token only through the process environment of trusted test processes.
+3. Start hermetic (Mailpit). Add a hosted receiver only after qualifying it (ordering, pagination, quotas, key scope, retention) and recording its owner and retained-mail policy.
+4. Assert on normalized `content.text` / `content.html`; fail when content is absent. Make cleanup failure fail the run.
+5. Activation is a separate owning-repository step; this document does not authorise mass repinning or secret relocation.
