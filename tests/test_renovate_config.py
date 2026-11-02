@@ -45,6 +45,53 @@ def test_preset_pin_manager_extracts_supported_consumer_pins() -> None:
     ) is None
 
 
+def test_pack_ref_inputs_track_the_uses_pin() -> None:
+    """`pack_ref: <sha> # vX.Y.Z` must be updated with the `uses:` pin, or a
+    release PR runs new workflow YAML against old pack code."""
+    preset = json.loads((ROOT / "default.json").read_text())
+    manager = next(m for m in preset["customManagers"]
+                   if "pack_ref" in m["description"])
+    assert manager["depNameTemplate"] == "Manolii-org/ai-starter-pack"
+    assert manager["datasourceTemplate"] == "github-tags"
+    pattern = re.compile(manager["matchStrings"][0].replace("(?<", "(?P<"))
+    files = [re.compile(f.strip("/")) for f in manager["managerFilePatterns"]]
+    assert any(f.search(".github/workflows/ci.yml") for f in files)
+    assert not any(f.search("docs/ci.yml") for f in files)
+
+    sha = "3" * 40
+    for line in (f"      pack_ref: {sha} # v1.25.1 — keep identical to the uses: pin",
+                 f"      pack_ref: '{sha}'  #v1.25.1"):
+        m = pattern.search(line)
+        assert m, line
+        assert (m.group("currentDigest"), m.group("currentValue")) == (sha, "v1.25.1")
+    # Tag-form or unversioned pack_ref is not a digest pin and is not matched.
+    assert not pattern.search("      pack_ref: v1.25.1")
+    assert not pattern.search(f"      pack_ref: {sha}")
+
+    # Every SHA pack_ref example in the reusable docs is trackable.
+    doc = (ROOT / ".github/workflows/REUSABLE-WORKFLOWS.md").read_text()
+    examples = [l for l in doc.splitlines()
+                if re.match(r"\s*pack_ref:\s*['\"]?[0-9a-f]{40}", l)]
+    assert examples and all(pattern.search(l) for l in examples)
+
+
+def test_pack_workflow_pins_are_converted_to_sha_pins() -> None:
+    """Tag pins of pack reusables run whatever the tag points at today; the
+    preset must make Renovate pin them to commit SHAs (github-actions only —
+    the regex managers have no digest capture)."""
+    rules = json.loads((ROOT / "default.json").read_text())["packageRules"]
+    pin_rules = [r for r in rules if r.get("pinDigests") is True]
+    assert len(pin_rules) == 1
+    rule = pin_rules[0]
+    assert rule["matchManagers"] == ["github-actions"]
+    body, flags = rule["matchPackageNames"][0][1:].rsplit("/", 1)
+    name = re.compile(body, re.IGNORECASE if "i" in flags else 0)
+    assert name.search("Manolii-org/ai-starter-pack")
+    assert not name.search("actions/checkout")
+    # Must not re-enable automerge for pack pins.
+    assert "automerge" not in rule
+
+
 def test_pack_pins_are_grouped_into_one_reviewed_pr() -> None:
     rules = json.loads((ROOT / "default.json").read_text())["packageRules"]
     index, rule = next(

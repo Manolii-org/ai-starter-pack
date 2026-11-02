@@ -2,7 +2,9 @@ name: Codex Trusted Review Worker
 # Only GitHub's default-branch workflow_run implementation can obtain OIDC auth.
 # PR request workflows carry no subscription or Doppler credentials.
 on:
-  workflow_run:
+  # Required privilege split: trusted workflow_sha checkout only; exact upstream run,
+  # PR freshness and inert receipt admission are enforced before credentials/model use.
+  workflow_run: # zizmor: ignore[dangerous-triggers]
     workflows: ["Codex PR Review (advisory)", "Codex Security Diff Scan (advisory)"]
     types: [completed]
 permissions:

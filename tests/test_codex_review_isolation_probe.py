@@ -100,5 +100,5 @@ def test_probe_workflow_never_gets_credentials_or_calls_a_model():
     assert job['timeout-minutes'] == 6
     assert all(step.get('with', {}).get('persist-credentials') is False
                for step in job['steps'] if str(step.get('uses', '')).startswith('actions/checkout@'))
-    assert '@openai/codex@0.151.0' in text
+    assert '@openai/codex@0.163.0' in text
     assert 'if: always()' in text

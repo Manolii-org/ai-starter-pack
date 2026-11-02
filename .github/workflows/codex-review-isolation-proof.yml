@@ -26,10 +26,11 @@ jobs:
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: '24'
+      # Exact-version CLI in a credential-free ephemeral probe; lifecycle scripts disabled.
       - name: Install pinned CLI without lifecycle scripts
-        run: >-
+        run: >- # zizmor: ignore[adhoc-packages]
           npm install --prefix "$RUNNER_TEMP/isolation-cli" --no-save --ignore-scripts
-          --registry https://registry.npmjs.org/ --userconfig /dev/null @openai/codex@0.151.0
+          --registry https://registry.npmjs.org/ --userconfig /dev/null @openai/codex@0.163.0
       - name: Enable sandbox namespaces on this credential-free ephemeral runner
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Prove private file, symlink, proc and network denial

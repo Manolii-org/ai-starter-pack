@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+### Security
+
+- **Production identifier removed; leak lint widened.** A production Supabase
+  project ref was shipped in the `migration-drift` skill examples because
+  `PACK-SURFACE` only matched the `db.<ref>.supabase.co` host form. The example
+  now uses a placeholder, and the lint also catches bare `prod:<ref>` values,
+  `<ref>.supabase.co` API hosts, dashboard URLs, real `*.fly.dev` /
+  `*.vercel.app` hostnames and `CPDcheck/<repo>` slugs (placeholders such as
+  `your-proxy.fly.dev` and `abcdefghijklmnopqrst` stay allowed). Org-private
+  registry mirrors should refresh `registry/platform/**`.
+- **New `Workflow Security` gate on this repo.** Every `uses:` must be
+  SHA-pinned, actionlint must be clean, and zizmor findings may not grow
+  beyond `config/zizmor-baseline.json` (82 known findings, burn-down only).
+  Pack PRs get a security diff in the job summary.
+- **New `workflow-security-reusable.yml`** gives consumers the same checks.
+- **Release security diff.** `release-tag.yml` now reports, for each pack
+  release, changes to triggers, permissions, secrets, external `uses:`,
+  event/input expressions in `run:` and hosts since the previous release.
+- **Renovate preset converts pack tag pins to SHA pins** (`pinDigests` for
+  the github-actions manager, still one grouped and reviewed PR).
+  `REUSABLE-WORKFLOWS.md` examples now show `@<sha> # vX.Y.Z`.
+- **`pack_ref` follows the `uses:` pin.** Several reusables load pack code
+  from `pack_ref`, whose default is the moving `v1` alias — so a SHA-pinned
+  `uses:` still ran code from wherever `v1` points. Docs now set `pack_ref` to
+  the same commit SHA, and a Renovate regex manager updates
+  `pack_ref: <sha> # vX.Y.Z` together with the `uses:` pin. (The `v1` default
+  itself is unchanged: changing it is a v2 contract change.)
+- `check-pinned-uses.py` parses YAML (flow mappings and quoted keys are
+  checked too); `workflow-security-reusable.yml` fails loudly if its own pack
+  revision cannot be resolved, installs hash-pinned PyYAML, and audits
+  composite actions in report-only mode. The ratchet exits 2 on scanner
+  errors (1 = baseline drift).
+
 ### Changed
 
 - **No Anthropic substitute when the proxy is down.** With

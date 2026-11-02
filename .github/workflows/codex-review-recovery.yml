@@ -11,8 +11,9 @@ concurrency:
   cancel-in-progress: false
 jobs:
   recover:
-    if: github.event_name == 'workflow_run' || (github.actor == 'chatgpt-codex-connector[bot]' && (github.event_name == 'pull_request_review'
-      || github.event_name == 'pull_request_review_comment' || github.event.issue.pull_request))
+    # Authenticated bot identity admits native evidence only; scripts recheck exact PR/head.
+    # Other authors cannot use comment text to reach the bounded rerun operation.
+    if: github.event_name == 'workflow_run' || (github.actor == 'chatgpt-codex-connector[bot]' && (github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event.issue.pull_request)) # zizmor: ignore[bot-conditions]
     runs-on: ubuntu-slim
     timeout-minutes: 3
     steps:
@@ -102,11 +103,13 @@ jobs:
   pull_request_review_comment:
     types:
     - created
-  issue_comment:
+  # No contributor checkout or shell interpolation; authenticated native evidence only.
+  issue_comment: # zizmor: ignore[dangerous-triggers]
     types:
     - created
     - edited
-  workflow_run:
+  # Trusted workflow_sha checkout; recovery authenticates completed worker receipts.
+  workflow_run: # zizmor: ignore[dangerous-triggers]
     workflows:
     - Codex Trusted Review Worker
     types:
