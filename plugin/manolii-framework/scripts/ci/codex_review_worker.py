@@ -1047,8 +1047,9 @@ def publish(github, target, receipt, output):
     )
     text = final_code_turn(output) if lane == "code" else output
     # Markdown inside model text cannot terminate this plain-code fence.
+    text = text.replace("```", "` ` `").replace("<!--", "&lt;!--")
     truncated = len(text) > 45000
-    text = text.replace("```", "` ` `").replace("<!--", "&lt;!--")[:45000]
+    text = text[:45000]
     body = (
         marker
         + "\n### Codex "

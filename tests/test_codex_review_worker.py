@@ -661,12 +661,13 @@ def test_publication_rechecks_after_comment_pagination(tmp_path, monkeypatch, me
     assert not any(kwargs.get("method") for _, kwargs in github.requests)
 
 
+@pytest.mark.parametrize("review", ["review " * 9000, "<!--" * 10000])
 def test_long_output_has_complete_artifact_link_and_explicit_notice(
-    tmp_path, monkeypatch, metadata
+    tmp_path, monkeypatch, metadata, review
 ):
     github = FakeGitHub()
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary"))
-    output = "codex\n" + "review " * 9000
+    output = "codex\n" + review
     value = worker.receipt_for(
         TARGET,
         "completed",
