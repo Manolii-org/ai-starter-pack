@@ -58,11 +58,11 @@ When promoting a new model to primary in your LiteLLM proxy config file:
 
 1. **Prefer parallel over sequential tool calls** — 3 parallel tool calls idle the stream once; 3 sequential calls idle it 3 times. Always batch independent calls.
 2. **Avoid chaining slow tools** — database-query + file-read + external-API in sequence = 3× cold-start risk. Batch where the protocol allows, or interleave with fast local tools (Read, Grep) to keep the stream active.
-3. **Run heavy work in sub-agents, background for >30s tasks** — Sub-agents have their own stream. The parent stream only idles for the agent dispatch, not for each individual tool call within it. **Rule:** if an agent is expected to run >30 seconds (any deep-analyse, generate, or multi-file research task), use \`run_in_background: true\`. After dispatching background agents, immediately do lightweight main-thread work (Read a file, write a checkpoint, Grep) to keep the parent stream alive — dispatching background agents and going silent still times out. Never synchronously await 2+ parallel long-running agents without any main-thread activity.
-4. **Cap tool-heavy sequences** — If a plan requires >5 sequential HTTP calls, break it into sub-agent batches of 3-4 calls each.
+3. **Use available asynchronous execution for long work** and give meaningful progress updates. Delegation is optional and must fit the host's capabilities; elapsed time alone does not require another agent.
+4. **Batch independent HTTP calls** where supported. Keep dependent calls sequential; request count alone does not require delegation.
 5. **Watch for compounding idle time** — PostToolUse hook (15s budget) runs after every tool call. In a 20-tool sequence, even 3s average hook time = 60s of cumulative idle. Keep tool chains tight.
 6. **Never send a standalone text response before a pending write** — if your next action is a Write/Edit/Bash call, include the tool call in the same response turn as any intro text. A text-only response ("Writing the report now…") followed by silence times out before the tool fires. The one-sentence intro and the tool call must be in the same message.
-7. **Never Read a large file in full before the first write or advisor call** — reading a file >200 lines without \`limit\`/\`offset\` floods the context and extends the pre-work idle window. For orientation: use \`Bash tail -n 50 <file>\` or \`grep -n\` to locate a line number, then \`Read offset=X limit=40\` for just the relevant section.
+7. **Search first and bound routine output.** Read enough source for the decision; comprehension does not depend on a prior write or advisor call.
 
 ## Agent Scope & Timeout Prevention
 
@@ -103,15 +103,13 @@ Every changed line must trace directly to the user's request. If you cannot expl
 - Use AbortSignal.timeout() for all external HTTP calls in serverless environments
 - Fix root causes, not symptoms — every fix needs a "Root cause:" line in the commit or PR
 
-## Session Critic Timing (Concrete Rule)
+## Review Timing
 
-Dispatch a critic agent **before the first Edit or Write** on any task that:
-- Touches more than 2 files, OR
-- Has an approach that isn't explicitly stated in the task brief or user message
+Run affected deterministic checks while iterating and the owning candidate validation before publication. Extra local model feedback is optional on settled source; file count, routine checkpoints and read-only lookups do not require another agent call.
 
-Use `Agent(subagent_type="work-critic", model="sonnet", ...)` (or `quick-critic` with `model="haiku"` for routine checks) — always pin `model=`; an omitted model inherits the parent tier. The pack ships these critic agents under `.claude/agents/`; see `/verify-work`.
+Required independent current-head review still gates merge. Preserve unresolved findings, guarded paths, production approvals and the owning security/release reviews. Missing or incomplete review evidence is not approval.
 
-Skip the critic for: single-file edits, trivial reads, straightforward debugging, simple tool orchestration.
+When requesting optional critic feedback on a host that supports `Agent`, use `Agent(subagent_type="work-critic", model="sonnet", ...)` (or `quick-critic` with `model="haiku"` for routine checks). Always pin the approved `model=`; other hosts use their supported review path. Model routing and authority remain unchanged. The pack ships these agents under `.claude/agents/`; see `/verify-work`.
 
 ## Pre-PR Quality Gate (Required)
 
@@ -136,15 +134,7 @@ cd /tmp/TARGET-REPO && git checkout -b claude/BRANCH-NAME
 
 ## Pull Requests
 - After creating any PR (via create_pull_request tool or any method), **always output the PR URL as a clickable hyperlink** in the response text, formatted as \`[owner/repo#number](url)\`
-- Once one or more PRs have been created in the current chat session, **append a "PRs this session" footer to every subsequent response** listing all PRs created so far, regardless of topic. Format:
-
-\`\`\`
----
-**PRs this session**
-- [owner/repo#number](url) — short description
-\`\`\`
-
-- This footer must persist on every response for the remainder of the chat so the user never has to scroll up to find PR links
+- Link relevant PRs when reporting implementation, review or merge status. Unrelated replies do not need a persistent PR footer.
 
 ## Process
 - After significant sessions (3+ decisions, major changes), run \`/wrap-up\`
