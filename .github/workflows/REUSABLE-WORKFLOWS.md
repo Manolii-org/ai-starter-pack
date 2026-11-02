@@ -31,7 +31,8 @@ jobs:
 ```
 
 Fails when any `uses:` in your workflows or composite actions is not pinned to a
-full commit SHA (`allow_ref` takes newline-separated full-match regexes for
+full commit SHA — composite actions under `.github/actions/` and every local
+action a workflow calls as `uses: ./<dir>`, wherever it lives (`allow_ref` takes newline-separated full-match regexes for
 deliberate exceptions), and when actionlint reports errors. zizmor runs as a
 ratchet against `zizmor_baseline` (default `config/zizmor-baseline.json`) when
 that file exists, and report-only otherwise. Needs no secrets. Scanner

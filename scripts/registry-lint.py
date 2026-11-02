@@ -132,9 +132,9 @@ PACK_SURFACE_PATTERNS = [
     r"(?<![a-z0-9.-])(?!abcdefghijklmnopqrst\b)[a-z]{20}\.supabase\.co\b",
     r"supabase\.com/dashboard/project/(?!abcdefghijklmnopqrst\b)[a-z]{20}\b",
     # Key forms: `prod:<ref>`, `"prod": "<ref>"` (quoted JSON/YAML key) and
-    # prefixed env vars such as `SUPABASE_PROJECT_REF=<ref>` (`_` before the
+    # prefixed env vars such as `SUPABASE_PROJECT_REF=<ref>` / `SUPABASE_PROJECT_ID=<ref>` (`_` before the
     # key defeats `\b`, so the left edge is "not alphanumeric" instead).
-    r"(?<![a-z0-9])(?:prod|staging|preview|project[-_]?ref)[\"']?\s*[:=]\s*"
+    r"(?<![a-z0-9])(?:prod|staging|preview|project[-_]?(?:ref|id))[\"']?\s*[:=]\s*"
     r"[\"']?(?!abcdefghijklmnopqrst\b)[a-z]{20}\b",
     r"ep-[a-z0-9-]+\.[a-z0-9.-]*neon\.tech",
     r"\b[a-z0-9-]+\.internal\b",

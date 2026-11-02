@@ -1897,6 +1897,8 @@ def test_pack_surface_lowercase_slug_fails(tmp_path):
     # Quoted keys and prefixed env vars.
     ('{"prod": "' + "q" * 20 + '"}', True),
     ("SUPABASE_PROJECT_REF=" + "q" * 20, True),
+    ("SUPABASE_PROJECT_ID=" + "q" * 20, True),
+    ("project_id: \"" + "q" * 20 + "\"", True),
     ("NEXT_PUBLIC_PROD='" + "q" * 20 + "'", True),
     # Only the exact placeholder hostnames are exempt, not their prefixes.
     ("https://my-production.fly.dev", True),

@@ -89,6 +89,34 @@ def test_scan_covers_every_yaml_spelling(tmp_path):
     ]
 
 
+def test_job_ids_named_like_data_keys_are_still_checked(tmp_path):
+    """`env`/`with`/`inputs` are data keys inside a job or step, but directly
+    under `jobs:` they are job IDs and their `uses:` must be checked."""
+    wf = tmp_path / "ci.yml"
+    wf.write_text(
+        "env:\n  uses: not-an-action@v1\n"          # workflow-level env: data
+        "jobs:\n"
+        "  env:\n    uses: org/repo/.github/workflows/x.yml@v1\n"
+        "  with:\n    steps:\n      - uses: actions/cache@v4\n"
+    )
+    refs = [ref for _, ref, _ in pins.scan_file(wf, [])]
+    assert refs == ["org/repo/.github/workflows/x.yml@v1", "actions/cache@v4"]
+
+
+def test_local_actions_outside_github_actions_are_followed(tmp_path):
+    wf = tmp_path / ".github" / "workflows" / "ci.yml"
+    wf.parent.mkdir(parents=True)
+    wf.write_text("jobs:\n  a:\n    steps:\n      - uses: ./actions/build\n"
+                  "      - uses: ./missing/dir\n")
+    action = tmp_path / "actions" / "build" / "action.yml"
+    action.parent.mkdir(parents=True)
+    action.write_text("runs:\n  using: composite\n  steps:\n    - uses: actions/cache@v4\n")
+    assert pins.main(["--root", str(tmp_path)]) == 1
+    action.write_text("runs:\n  using: composite\n  steps:\n"
+                      f"    - uses: actions/cache@{SHA}\n")
+    assert pins.main(["--root", str(tmp_path)]) == 0
+
+
 def test_unparseable_yaml_fails_closed(tmp_path):
     wf = tmp_path / "bad.yml"
     wf.write_text("jobs: [unclosed\n")
@@ -178,7 +206,8 @@ def test_scanner_errors_exit_2_not_drift_1(tmp_path):
 
 def test_committed_baseline_is_well_formed():
     data = json.loads((ROOT / "config" / "zizmor-baseline.json").read_text())
-    assert data["findings"], "baseline should list the known findings"
+    # Burn-down target is zero findings, so an empty list is valid.
+    assert isinstance(data["findings"], list)
     for e in data["findings"]:
         assert set(e) == {"fingerprint", "ident", "path", "severity"}
         assert len(e["fingerprint"]) == 16

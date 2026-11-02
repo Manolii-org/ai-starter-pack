@@ -65,19 +65,48 @@ def iter_uses(node: yaml.Node):
     Walking parsed nodes (not text lines) covers every YAML spelling —
     flow mappings (`- {uses: x@v1}`), quoted keys (`"uses": x@v1`) and
     multi-document files — while node marks keep exact line numbers.
+
+    Keys directly under `jobs:` are job IDs, not data keys, so a job named
+    `env` or `with` is still checked.
     """
-    stack = [node]
+    stack: list[tuple[yaml.Node, str | None]] = [(node, None)]
     while stack:
-        cur = stack.pop()
+        cur, parent = stack.pop()
         if isinstance(cur, yaml.MappingNode):
             for key, value in cur.value:
                 name = key.value if isinstance(key, yaml.ScalarNode) else None
                 if name == "uses" and isinstance(value, yaml.ScalarNode):
                     yield value.start_mark.line + 1, str(value.value).strip()
-                elif name not in DATA_KEYS:
-                    stack.append(value)
+                elif parent == "jobs" or name not in DATA_KEYS:
+                    stack.append((value, name))
         elif isinstance(cur, yaml.SequenceNode):
-            stack.extend(cur.value)
+            stack.extend((item, parent) for item in cur.value)
+
+
+def local_action_files(path: Path, root: Path) -> list[Path]:
+    """Composite-action files referenced from ``path`` as `uses: ./dir`.
+
+    A local action can live anywhere in the repository (`./actions/build`),
+    not only under `.github/actions`; follow each reference to its
+    `action.yml` so the actions a workflow actually runs are always checked.
+    """
+    try:
+        docs = [d for d in yaml.compose_all(path.read_text(encoding="utf-8", errors="replace"))
+                if d is not None]
+    except yaml.YAMLError:
+        return []
+    found = []
+    for doc in docs:
+        for _, ref in iter_uses(doc):
+            if not ref.startswith("./") or ref.endswith((".yml", ".yaml")):
+                continue  # remote ref, or a local reusable workflow (already scanned)
+            base = (root / ref).resolve()
+            for name in ("action.yml", "action.yaml"):
+                candidate = base / name
+                if candidate.is_file():
+                    found.append(candidate)
+                    break
+    return found
 
 
 def scan_file(path: Path, allow: list[re.Pattern[str]]) -> list[tuple[int, str, str]]:
@@ -111,7 +140,17 @@ def main(argv: list[str] | None = None) -> int:
         print(f"invalid --allow-ref: {exc}", file=sys.stderr)
         return 2
 
-    targets = args.paths or default_targets(args.root)
+    targets = list(args.paths or default_targets(args.root))
+    # Follow local `uses: ./dir` references to their action files, wherever
+    # they live, so every composite action a workflow runs is scanned too.
+    seen = {p.resolve() for p in targets}
+    i = 0
+    while i < len(targets):
+        for extra in local_action_files(targets[i], args.root):
+            if extra.resolve() not in seen:
+                seen.add(extra.resolve())
+                targets.append(extra)
+        i += 1
     total = 0
     for path in targets:
         for lineno, ref, reason in scan_file(path, allow):
