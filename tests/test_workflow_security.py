@@ -259,6 +259,26 @@ def test_release_diff_reports_security_facts(tmp_path):
     assert "exfil.example.net" in text
 
 
+@pytest.mark.parametrize("expr,flagged", [
+    ("${{ github.event.issue.title }}", True),
+    ("${{ toJSON(github.event.issue.title) }}", True),
+    ("${{ format('{0}', inputs.command) }}", True),
+    ("${{ github.head_ref }}", True),
+    ("${{ github.event.pull_request.labels[0].name }}", True),
+    ("${{\n  inputs.cmd\n}}", True),
+    ("${{ github.sha }}", False),
+    ("${{ steps.x.outputs.inputs }}", False),
+    ("${{ matrix.inputs }}", False),
+])
+def test_run_expression_detection_covers_wrapped_references(expr, flagged):
+    """Attacker-influenceable contexts are reported wherever they appear in an
+    expression, not only as its first token."""
+    doc = ("on: push\njobs:\n  a:\n    runs-on: x\n    steps:\n"
+           "      - run: |\n          echo " + expr.replace("\n", "\n          ") + "\n")
+    found = diff.facts(doc)["run_expressions"]
+    assert bool(found) is flagged, (expr, found)
+
+
 def test_release_diff_reports_trigger_configuration_changes(tmp_path):
     """Same event name, broader scope: widening pull_request_target branches
     must show up even though the trigger name is unchanged."""

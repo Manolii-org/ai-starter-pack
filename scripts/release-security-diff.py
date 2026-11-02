@@ -8,7 +8,8 @@ report of what changed in the places that matter:
 
   * triggers (``on:``)                  * ``permissions:`` (workflow and job level)
   * secrets referenced                  * external ``uses:`` targets and pins
-  * ``github.event.*`` / ``inputs.*`` expressions inside ``run:`` scripts
+  * expressions inside ``run:`` scripts that reference ``github.event.*``,
+    ``github.head_ref`` or ``inputs.*`` anywhere (including inside functions)
   * network hosts named in ``run:`` scripts
 
 It is a report, not a gate: exit status is 0 unless git or YAML parsing fails.
@@ -30,7 +31,12 @@ import yaml
 
 SECRET_RE = re.compile(r"\bsecrets\.([A-Za-z_][A-Za-z0-9_]*)")
 ANY_EXPR_RE = re.compile(r"\$\{\{(.*?)\}\}", re.DOTALL)
-EXPR_RE = re.compile(r"\$\{\{\s*((?:github\.event|inputs)\.[^}]*?)\s*\}\}")
+# Contexts an outside actor can influence. Matched anywhere inside an expression,
+# so function-wrapped uses (`toJSON(github.event.issue.title)`,
+# `format('{0}', inputs.cmd)`) are reported too.
+UNTRUSTED_REF_RE = re.compile(
+    r"(?<![\w.])(?:github\.event\.[\w.\[\]'*-]+|github\.head_ref|inputs\.[\w-]+)")
+WS_RE = re.compile(r"\s+")
 HOST_RE = re.compile(r"https?://([A-Za-z0-9.-]+\.[A-Za-z]{2,})")
 WATCHED = re.compile(r"^\.github/(workflows/[^/]+\.ya?ml|actions/.+/action\.ya?ml)$")
 
@@ -115,7 +121,9 @@ def facts(text: str | None) -> dict[str, set[str]]:
             f["uses"].add(str(step["uses"]))
         run = step.get("run")
         if isinstance(run, str):
-            f["run_expressions"] |= {f"{job_id}: {e}" for e in EXPR_RE.findall(run)}
+            for expr in ANY_EXPR_RE.findall(run):
+                if UNTRUSTED_REF_RE.search(expr):
+                    f["run_expressions"].add(f"{job_id}: {WS_RE.sub(' ', expr).strip()}")
             f["hosts"] |= set(HOST_RE.findall(run))
     f["uses"] = {u for u in f["uses"] if not u.startswith("./")}
     return f
