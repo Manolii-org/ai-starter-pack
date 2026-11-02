@@ -22,249 +22,98 @@ tags:
 
 ## Standing Grant Entry
 
-`/proceed` and the exact trusted `<standing-grant>proceed</standing-grant>`
-additional-context marker mean the operator has authorised execution of an
-**already-clear** plan/session intent without another Green/Amber permission
-prompt. They do not authorise new scope, Red actions, guarded-path unfreeze,
-cross-entity mixing, or any do-not-touch class in `.claude/commands/proceed.md`.
-If intent is missing or ambiguous, terminate `blocked_on_human`; do not guess.
-Before PR follow-through, reconcile every session commitment as `DONE`,
-`NOT DONE`, or `DEFERRED` with evidence/reason.
+`/proceed` and trusted `<standing-grant>proceed</standing-grant>` additional-context authorize an **already-clear** intent without another Green/Amber prompt, never new scope, Red, guarded-path unfreeze, cross-entity mixing or `.claude/commands/proceed.md` do-not-touch classes. Missing/ambiguous intent → `blocked_on_human`; never guess. Reconcile every session commitment as `DONE`, `NOT DONE` or `DEFERRED`, with evidence/reason.
 
 ## Readiness and review recovery
 
-The author or authorized agent may mark a PR ready once its complete assigned
-initial scope and commitment ledger are satisfied, deterministic checks and
-user-facing verification pass, required fast checks and secret scanning pass on
-the current head, and no demonstrated HIGH defect or input/security refusal
-remains. Another person's approval is not a prerequisite to marking ready.
-Review workflows may run after readiness. Existing independent current-head
-MERGE review, CHANGES_REQUESTED vetoes, guarded paths, kill switches, native
-protections and Merge-When-Safe rules below remain unchanged.
+Author/authorized agent may mark ready after complete assigned initial scope/ledger, deterministic/user-facing verification, current-head fast checks/secret scanning, and no demonstrated HIGH/input-security refusal. Another person's approval is not required for readiness; review workflows may follow it. Independent current-head MERGE review, `CHANGES_REQUESTED`, guards, kill switches, native protections and Merge-When-Safe remain mandatory.
 
-Carry existing operator authorization through in-scope repairs and new heads;
-do not ask again solely because a hash changed. A finding holds the affected
-boundary while diagnosis, repair, verification and independent work continue.
-Reproduce and resolve actionable findings, batch each repair round and verify
-the new head. Observe existing automated fix owners before editing.
+Carry existing authority through in-scope repairs/new heads without renewed consent. Findings hold affected boundaries, not diagnosis/repair/verification/independent work. Reproduce/resolve findings, batch repairs, verify new heads; respect existing automated repair owners.
 
-An unavailable reviewer or rejected generated response is unavailable, never
-PASS. Preserve the actual result and any earlier finding hold. Respect existing
-retry and rejection guidance; never retry a denial unchanged, shop for a passing
-verdict, clear hold state by hand or bypass a hook. A draft-save receipt, where
-the repository actually implements one, authorizes only that bounded draft save.
-This policy does not install checkpoint machinery or grant merge authority.
+Unavailable/rejected review is never PASS: preserve results/prior holds and retry guidance. Never retry denial unchanged, verdict-shop, hand-clear holds or bypass hooks. Only an actually implemented draft-save receipt permits its bounded save; this policy installs neither checkpoint machinery nor merge authority.
 
-Keep one real monitoring owner or an accepted durable continuation. Do not claim
-background execution from a local note. After merge, complete the parent task's
-authorized source/behavior verification and cleanup before declaring completion
-and retiring its monitor. Keep each repository's entity, provider, data and
-deployment boundaries; a shared policy is not authorization to cross them.
+Keep one real owner/accepted durable continuation, never claim background work from notes. Complete authorized parent verification/cleanup before declaring done/retiring monitor. Preserve each repository's entity/provider/data/deployment boundaries; shared policy never grants cross-boundary authority.
 
 ## Ownership after a push or status reply
 
-A push, migration rename, new head SHA, or request to "reply with the new head
-SHA" is a progress update within an ongoing delivery task. Send the requested
-update and continue the existing review, repair, merge and verification loop.
-Only an explicit instruction to stop, hand off, or limit the task to
-implementation/publication narrows that scope.
+Pushes, migration renames, new SHAs and requests to report them are progress: reply, continue review/repair/merge/verification. Only explicit stop/handoff/implementation-publication limits narrow scope. Keep repair/merge/post-merge commitments separate; repair never clears parent checkpoint. Changed heads invalidate old checks/reviews; refresh within existing authority/budgets.
 
-Keep separate commitments for the repair, merge and requested post-merge work.
-Completing the repair must not complete the merge commitment or clear the
-parent checkpoint. A changed head invalidates old review/check evidence; refresh
-the current head and continue under the existing authorization and repair budget.
-
-Retain one continuation owner. Before yielding an unfinished task, record its
-repository/PR, full head SHA, remaining commitments, next action, precise blocker
-if any, and a verified wake or accepted durable handoff receipt. A SHA, local
-checkpoint or proposed owner is not an accepted handoff. Without a working
-continuation route, report `blocked_on_infra`; keep the task unfinished and
-complete other authorized work. Production approval holds only production.
+Before yielding, retain repository/PR/full head, unfinished commitments, next action/blocker and verified wake/accepted durable handoff receipt. A SHA, local checkpoint or proposed owner is not handoff. Without continuation, report `blocked_on_infra`, retain unfinished work, complete unaffected tasks. Production approval holds only production.
 
 ## Examples
 
-- Valid: "Rename the migration and reply with the new head SHA." During an
-  existing delivery task, push the repair, report the SHA, then verify the new
-  head, handle review and follow through to merge and requested acceptance.
-- Invalid: mark the task done after printing the SHA while its PR remains open.
-  An explicit "push only; stop before merge" instead ends at that stated boundary.
+“Rename and report SHA” continues delivery; “push only; stop before merge” ends at that boundary. Never declare done while its PR remains open.
 
 ## Inputs
 
-- **PR number** (required) — GitHub PR for autonomy output
-- **Handoff item id** (optional) — orchestrator task id; maps to producer issue URL
-- **Producer issue URL** (optional) — original issue that triggered kickoff
+Required PR number; optional handoff item id (maps to producer issue URL) and producer issue URL.
 
 ## Pre-Process QA (Ecosystem-Audit Phase 4.0)
 
-Record on the PR before entering outer loop:
-
-1. **Assumptions check** — diff matches stated scope; no unintended files touched
-2. **Obvious errors** — no hardcoded secrets, missing imports, syntax errors
-3. **Opportunities** — coverage gaps, test blind spots, follow-on scope
-4. **Continuity** — session context preserved, memory cache valid, no environmental drift
-
-Post findings as PR comment tagged `<!-- qa-pre-process -->`. Block on P0 errors only.
+Before loop, comment `<!-- qa-pre-process -->`: assumptions/scope; obvious errors (secrets/imports/syntax); opportunities (coverage/blind spots/follow-ons); continuity (context/cache/environment). Block only P0 errors.
 
 ## Outer Loop
 
-Max repair rounds (default 5; passive CI/review waits do not consume them): read from `config/autonomy-executor-policy.yaml` → `follow_through.max_rearms`.
+Policy: `config/autonomy-executor-policy.yaml`; max repair rounds default 5. Passive CI/review waits consume none.
 
-Bound passive heartbeat scheduling separately from repair attempts. Before
-arming a heartbeat, record the existing owner's explicit wait deadline or wake
-lease. If it has none, allow at most one one-shot heartbeat for the unchanged
-pending operation, then return to the existing subscription or accepted durable
-handoff. Do not reset an expired wait or chain new one-shots merely because the
-same check or review is still pending. At the bound, persist the pending status,
-evidence and actual continuation owner, and suspend this active wait chain;
-an infrastructure timeout is `blocked_on_infra`, not a new human-consent request
-or PASS. Retain a user-authorized durable owner's existing schedule. If no real
-continuation exists, terminate this invocation `blocked_on_infra` and follow
-that state's incident/escalation actions below; report monitoring as unavailable
-with the pending-work evidence. Resume active work on a substantive new event
-or decisive evidence under the existing retry rules.
+Bound passive heartbeats separately: record owner's explicit wait deadline/wake lease. Without one, permit only one one-shot for an unchanged pending operation, then existing subscription/accepted handoff. Never reset expired waits/chain one-shots. At bound, persist pending status/evidence/actual owner, suspend active wait chain; timeout means `blocked_on_infra`, never consent/PASS. Retain user-authorized durable schedules. Without real continuation, terminate this invocation blocked_on_infra, report monitoring unavailable with pending-work evidence, and perform incident/escalation actions. Resume active work on substantive events/decisive evidence under retry rules.
 
-Use the owning repository's runtime dispatch policy for the authenticated read
-loop. Where that policy uses a persistent named `infra` agent, reuse it with the
-required model/plane binding; do not create one per wake. Where the runtime uses
-a deterministic broker or a batched main-thread read, use that existing route.
-An unavailable agent type is not a reason to add a supervisor or stop an
-otherwise authorised supported route. Preserve secret-handling and sensitivity
-boundaries; a model alias is not proof of its actual provider.
+Use owning runtime dispatch policy: reuse its named `infra` agent/model-plane binding, deterministic broker or batched main-thread route. Unavailable agent types never justify new supervisors/stopping supported authorized routes. Preserve credential/sensitivity boundaries; aliases do not prove providers.
 
 Each round:
-1. Fetch PR metadata + CI status + review state + issue threads + the complete
-   current label array through that existing authorised route in one bounded
-   batch. Keep credentials and raw authenticated payloads out of delegated
-   model context; return only the permitted sanitised evidence.
-2. Run `check-amber-labels` against that complete label array. A Red result
-   first disables any auto-merge request armed by an earlier wake, then vetoes
-   all mutation and terminates `blocked_on_human`.
-3. Keep the existing PR-activity subscription or accepted durable wake owner as
-   the primary signal. For that owner's bounded heartbeat, use `create_trigger`
-   with `run_once_at` where supported; in remote sessions, fall back to
-   `ScheduleWakeup`, then one supported background wait. Only use a fallback
-   that delivers a real wake within the existing owner's policy. If none works,
-   skip heartbeat scheduling and retain the actual owner or accepted handoff.
-   Never simulate a wake with a blocking sleep or add a competing trigger/poller.
-4. Triage events: new review comments, CI failure, merge conflict, branch out of sync
-5. Decide: continue | terminal
-6. If continue: spawn inline fix or request human decision
-7. Count failed repairs, not passive wakes. Pending CI, automated review, reviewer infrastructure outages and duplicate informational events do not consume repair/no-delta budgets or create a human decision. After two failed repairs with the same cause, diagnose instead of repeating unchanged work. Preserve the empty Codex L4 seed exception below.
+1. Batch authorized PR/CI/review/thread/complete-label reads; keep credentials/raw authenticated payloads out of delegated model context; return permitted sanitized evidence.
+2. `check-amber-labels` on complete labels: Red disables previously armed auto-merge, vetoes all mutation and terminates blocked_on_human.
+3. Primary signal: existing PR subscription/accepted durable wake owner. Bounded heartbeat: `create_trigger`/`run_once_at`; remote fallback `ScheduleWakeup`, then supported background wait, only if a real policy-compliant wake results. Otherwise skip scheduling, retain actual owner/handoff. Never simulate wake with blocking sleep/competing trigger/poller.
+4. Triage reviews/CI/conflicts/drift; continue/terminate, inline repair or concrete human decision.
+5. Count failed repairs only, not passive/duplicate waits or reviewer outages. Diagnose after two same-cause failures; retain empty-seed exception.
 
 ## Termination Taxonomy
 
-| State | Trigger | Action |
-|-------|---------|--------|
-| `done` | Every Merge-When-Safe rule below is true, including qualifying review and veto gates | Merge (auto-merge preferred) |
-| `blocked_on_human` | A concrete required human approval, authority, design or risk decision | Notify once with the specific decision; ordinary pending automated review stays monitored |
-| `blocked_on_infra` | Shared infra (PAT / missing config / session proxy / Retry-After / Fly 502) or unmatched transient | Record/attach via the repo's infra-incident recorder (`infra-incident` label; ecosystems that ship `scripts/infra_incident.py` use it). Dependents stay listed; retries suppressed while the incident is open. One cheap GET probe; agents attach evidence and do not close. `infra_backoff_minutes` applies only when no matching open incident exists. Code/test failures are not this state — they remain visible via required checks. Do not `min(Retry-After, 30)` in hosted jobs. |
-| `superseded` | New PR opened for same scope, **or** a Codex L4 seed (`codex/audit-*` / `codex/mesh-*`) still has `changed_files=0` after one wake (or a connector summary with no commit) once an implementing session-prefix PR exists (`cursor/` or `claude/`, never `codex/`) | Close the seed; link the Act PR |
-| `gave_up` | `max_rearms` exhausted without a recoverable infra path or a specific human decision to request | Escalate with evidence; Red and other human-decision gates use `blocked_on_human` instead |
+| State | Trigger/action |
+|-------|----------------|
+| `done` | Every Merge-When-Safe rule below true, including review/vetoes; merge, preferring auto-merge. |
+| `blocked_on_human` | Concrete required human approval/authority/design/risk decision; notify once. Ordinary automated review stays monitored. |
+| `blocked_on_infra` | Shared PAT/config/proxy/Retry-After/Fly502 or unmatched transient: owning infra-incident recorder (`scripts/infra_incident.py` where shipped), label infra-incident, retain dependents. One cheap GET; attach evidence, never close. Open incidents suppress retries; otherwise infra_backoff_minutes. Code/test failures remain required-check failures. Never shorten hosted Retry-After to 30 seconds. |
+| `superseded` | New PR opened for the same scope, or empty L4 exception below; close seed only once its replacement PR exists, link Act PR. |
+| `gave_up` | max_rearms exhausted without recoverable infra/specific human decision; escalate evidence. Red/human gates use blocked_on_human. |
 
-**No-delta rule:** `follow_through.no_delta_limit` bounds repeated failed repairs, not passive CI/review waits or duplicate informational wakes. An unavailable review service is infrastructure, not missing execution consent. A required independent human merge approval is a real human hold; readiness needs no such preapproval. Do **not** apply the passive-wait exception to an empty Codex L4 seed: after **one** wake with `changed_files=0`, implement on a session prefix (`cursor/` or `claude/`, never `codex/`) per the orchestrator repo's `docs/runbooks/daily-leftover-act.md`. Only once that implementation PR actually exists, terminate the seed `superseded` and link the replacement PR. Until then, keep the seed open with the implementation work outstanding. A native `chatgpt-codex-connector` summary is not an implementation. Kickoff has no empty-seed closer.
+**No-delta rule:** bounds failed repairs, never passive/duplicate waits. Unavailable review is infra, not consent; required independent human merge approval is real, readiness needs no such preapproval. Empty `codex/audit-*`/`codex/mesh-*` L4 `changed_files=0` after one wake (including connector summary/no commit): implement on `cursor/` or `claude/`, never `codex/`, per `docs/runbooks/daily-leftover-act.md`. Keep seed open until implementation PR exists, then supersede/link it. Connector summaries aren't implementation; kickoff has no empty-seed closer.
 
-**Named required check:** Combined commit `status.state=success` is not CI green. A required check (e.g. a repo's anchor job) must be check-run `completed`/`success` on the **current head SHA**. `action_required` with zero jobs is not green.
+**Named required check:** current-head completed/success required anchor, never combined status or action_required/zero jobs.
 
-Two merge paths (do **not** call these Gate A / Gate B — those names are Daily 1 `AUDIT_AUTOPILOT` vs Codex kickoff):
-
-- **Trusted-packet squash** is leftover-Act only (`docs/runbooks/daily-leftover-act.md`): trusted `automated/sync-*` after `verify_sync_pr.py --mode merge`, or a stale green-intent fix PR whose product diff already exists. Trio green on the current SHA is enough. Advisory jobs (PR Assessment, Code Quality, Dismiss-stale, Fleet Scale Wake) are not that merge gate. `/watch-pr` never inherits leftover-Act trusted-packet squash.
-- **Implement Merge-When-Safe** (this skill's default, including empty-seed Act PRs): the anchor is a floor. Qualifying current-head review is still required. Anchor-green does not waive review, labels, or `CHANGES_REQUESTED`.
+Do not call these Gate A/B (Daily1 AUDIT_AUTOPILOT versus kickoff):
+- **Trusted-packet squash**: leftover-Act only; verified automated/sync-* (`verify_sync_pr.py --mode merge`) or stale green-intent fix already in product. Current-SHA trio suffices; advisory Assessment/Quality/Dismiss-stale/Fleet aren't its gate. `/watch-pr` never inherits leftover-Act trusted-packet squash.
+- **Implement Merge-When-Safe**: default, including empty-seed Act; anchor only floors review/labels/vetoes, never waives them.
 
 ## Escalation
 
-Emit one HTML comment in PR:
+Emit one PR HTML comment; notify/mention once per terminal state, never re-arm:
 ```html
 <!-- autonomy-terminal:v1
-{
-  "state": "blocked_on_human",
-  "reason": "required independent human merge approval is unavailable to automation",
-  "evidence": ["ci_passed", "threads_open"],
-  "owner_hint": "reviewer_github_login",
-  "handoff_item_id": "uuid-from-input",
-  "budgets_consumed": {
-    "rearms": 3,
-    "implement_spawns": 1,
-    "infra_backoff_attempts": 0
-  }
-}
+{"state":"blocked_on_human","reason":"required independent human merge approval is unavailable to automation","evidence":["ci_passed","threads_open"],"owner_hint":"reviewer_github_login","handoff_item_id":"uuid-from-input","budgets_consumed":{"rearms":3,"implement_spawns":1,"infra_backoff_attempts":0}}
 -->
 ```
 
-Notify once per terminal state via comment mention; do not re-arm after escalation.
-
 ## Merge-When-Safe Rules
 
-Merge only when ALL true:
-- Named required checks green on the current head SHA (not combined commit status; not "every advisory job")
-- Ignore `Fleet Scale Wake` and production migration-ledger drift on PRs: both are
-  advisory infrastructure signals, never PR-diff defects, and require no verify/comment ritual.
-- At least one independent hosted source review covers the current head SHA.
-  Accept an independent human or allowlisted bot `APPROVED` review, an existing
-  canonically verified clean Judge or native Codex review, or a completed
-  CodeRabbit clean summary validated by `scripts/ci/review_evidence.py --comments`
-  against authenticated GitHub data for this exact repository, PR and full head.
-  See the skill's companion `review-evidence.md`. A raw review count, empty acknowledgement,
-  ordinary comment, skipped/rate-limited attempt, stale summary or incomplete
-  assessment is never approval. Any current-head `CHANGES_REQUESTED` vetoes merge.
-- Review threads resolved (no open conversations)
-- No current-head review has state `CHANGES_REQUESTED`. A resolved conversation
-  does not dismiss or override a formal blocking review.
-- The automated gate verifies one of the qualifying semantic review legs above;
-  this is the same review requirement, not an additional reviewer or approval.
-- Guarded work meets the owning repository's authority and enforcement rules.
-  Reuse existing task authorization and its documented guard/audit mechanism;
-  preserve explicit restrictions and blocking guard decisions. A filename match
-  alone does not establish a new human decision.
-- Verify the controls actually consumed by the selected executor and merge
-  controller, using the owning repository's documented configuration and
-  defaults. For a controller that consumes `AUTO_MERGE_ENABLED`, verify that
-  control; do not add a separate `autonomy.follow_through.enabled` requirement
-  merely because this shared skill previously named it. Executor switches
-  apply only to their actual consumers. An absent value means enabled only
-  where the consuming implementation explicitly defines that default.
-  Unreadable control state is unavailable, not disabled or missing user consent.
-  Hold the affected mutation unless the existing trusted controller has a
-  verified applicable job-level decision and explicitly supports that fallback.
-  Never invent a flag, broaden credentials, spoof a hosted context or bypass
-  a denied permission to satisfy this check.
-- Immediately before enabling auto-merge or merging, refresh the complete label
-  array and rerun `check-amber-labels`. A Red result disables any armed
-  auto-merge request and terminates `blocked_on_human` without further mutation.
-- Auto-merge preferred when supported. A normal explicit expected-head merge
-  or required native merge queue uses the same review, authorization and CI gates;
-  lack of auto-merge support adds no human-approval requirement. Refresh head,
-  labels, checks, reviews and unresolved findings immediately before mutation.
-  Preserve remote protections, explicit human-merge holds and every review veto.
-  Never approve the implementing work under the author's identity or use admin
-  bypass to substitute for independent review.
+ALL must hold:
+- Named required checks pass exact head, never combined status/every advisory job. Ignore advisory Fleet Scale Wake and production migration-ledger drift: neither PR-diff defects nor verification/comment rituals.
+- Independent hosted exact-head source review: human/allowlisted bot APPROVED, canonically verified clean Judge/native Codex, or completed clean CodeRabbit summary validated by `scripts/ci/review_evidence.py --comments` against authenticated exact repo/PR/full SHA. See companion `review-evidence.md`. Counts, empty acknowledgements, ordinary/skipped/rate-limited/stale/incomplete publications never qualify. Current-head CHANGES_REQUESTED vetoes merge; resolve threads. Resolved conversations don't dismiss formal vetoes. Automated semantic-leg verification is this same requirement, not another approval.
+- Guarded work meets owning authority/enforcement: reuse existing authorization and documented guard/audit mechanism, preserve explicit restrictions/blocking decisions. A filename alone adds no human decision. Never merge Red/guarded work outside explicit authorization.
+- Verify controls actually consumed by selected executors/controllers and documented defaults. AUTO_MERGE_ENABLED applies to its consumers; never invent autonomy.follow_through.enabled merely from this skill. Absence enables only by default. Unreadable means unavailable, not disabled/missing consent: hold unless trusted controller explicitly supports verified applicable job-level fallback. Never invent switches, broaden credentials, spoof hosted context or evade denial.
+- Immediately refresh complete labels/check-amber-labels before merge/auto-merge. Red disables armed auto-merge and terminates blocked_on_human without further mutation.
+- Prefer auto-merge; explicit expected-head/native queue uses same review/authorization/CI gates; unsupported auto-merge adds no approval requirement. Refresh head/labels/checks/reviews/findings immediately. Preserve remote protections, human-merge holds/vetoes; never self-approve/admin-bypass.
 
-Reviewer quota, latency or unavailability is a monitored wait or infrastructure
-hold under the existing owner, not missing operator consent. Use another existing
-independent review leg when eligible; respect Retry-After and deduplicate requests.
-Only a concrete authority/risk decision or explicit human-merge policy requires a
-human handoff. Do not turn passive review waits into exhausted repair budgets.
-
-Never merge Red-tier or guarded paths outside the operator's explicit authorization.
-Never treat leftover-Act trusted-packet squash as a `/watch-pr` shortcut.
+Reviewer latency/quota/unavailability stays monitored/infra under existing owner; use eligible independent legs, respect Retry-After/deduplicate. Human handoff requires concrete authority/risk/policy; passive waits never exhaust repair budgets. Never give /watch-pr leftover-Act shortcut.
 
 ## Anti-Loop Budgets
 
-From `config/autonomy-executor-policy.yaml`:
-- `follow_through.max_rearms` — max failed repair/re-arm cycles (default 5); passive CI/review waits do not count
-- `follow_through.no_delta_limit` — consecutive failed repair attempts before diagnosis (default 2); passive waits do not count
-- `follow_through.infra_backoff_minutes` — ordered cooldown schedule for
-  unmatched transients only; skip while an open `infra-incident` matches.
-  Exhausting the list terminates `gave_up`. Open incidents suppress dependent
-  retries until the platform owner closes them.
-- `follow_through.max_implement_spawns_per_run` — max inline fix spawns (default 3)
-
-Enforce all budgets; escalate on exhaust.
+Enforce follow_through.max_rearms (default 5), follow_through.no_delta_limit (default 2; consecutive failed repair attempts before diagnosis), follow_through.infra_backoff_minutes (ordered unmatched-transient cooldown; open incident suppresses retries until platform owner closes; exhaustion→gave_up) and follow_through.max_implement_spawns_per_run (default 3). Escalate exhaustion; passive waits consume none.
 
 ## Explicit Design Notes
 
-This skill is the **SSOT for stop/escalate logic** across autonomy kickoff flows. `/watch-pr` defers to these terminal rules when invoked inside orchestrated autonomy. No looping outside these bounds; no silent retries. Leftover Daily 1/2 Act vs Codex L4 split and shared G3 incident recording (`infra-incident` label) live in the orchestrator repo's `docs/runbooks/` + `scripts/` — treat them as upstream references when they are not shipped here.
+Stop/escalation SSOT for orchestrated /watch-pr/kickoff: no unbounded loops/silent retries. Daily1/2 versus L4 and shared G3 incident recording are owning docs/runbooks/ + scripts/ references where absent here.
 
 ## Status Report
 
-When reporting loop progress, keep to ≤150 words. Include: PR link, terminal state (if any), last event type, round count, next action (continue/escalate/merge).
+≤150 words: PR link, terminal state if any, last event, round count, next action (continue/escalate/merge).
