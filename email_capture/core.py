@@ -109,11 +109,16 @@ _HERMETIC_BACKENDS = {"memory", "mailpit", "maildev", "inbucket"}
 _HOSTED_ENVIRONMENTS = {"test", "ci", "preview", "preprod", "staging"}
 _PRODUCTION_ENVIRONMENTS = {"prod", "production", "prd"}
 _FIDELITIES = {"provider-to-capture", "deployed-substitution"}
+_RETENTIONS = {"strict-purge", "provider-retained"}
+_HOSTED_BACKENDS = {"hosted", "resend"}
+RESEND_API_HOST = "api.resend.com"
+RESEND_MAX_PAGES = 10
+RESEND_PAGE_LIMIT = 100
 
 
 
 _PROFILE_JSON_KEYS = {
-    "schema_version", "mode", "backend", "endpoint", "environment", "ttl_seconds", "fidelity",
+    "schema_version", "mode", "backend", "endpoint", "environment", "ttl_seconds", "fidelity", "retention",
 }
 
 def _is_credential_profile_key(key: str) -> bool:
@@ -136,6 +141,7 @@ class Profile:
     environment: str
     ttl_seconds: int = 900
     fidelity: str = "provider-to-capture"
+    retention: str = "strict-purge"
 
     @classmethod
     def load(cls, path: str | None = None) -> "Profile":
@@ -179,7 +185,8 @@ class Profile:
         ttl = raw.get("ttl_seconds", 900)
         endpoint = raw.get("endpoint", "")
         fidelity = raw.get("fidelity", "provider-to-capture")
-        values = (version, mode, backend_name, environment, endpoint, fidelity)
+        retention = raw.get("retention", "strict-purge")
+        values = (version, mode, backend_name, environment, endpoint, fidelity, retention)
         if not all(isinstance(value, str) for value in values):
             raise CaptureError("CONFIG_INVALID", "profile fields have invalid types")
         if not isinstance(ttl, int) or isinstance(ttl, bool) or not 1 <= ttl <= 86400:
@@ -190,9 +197,15 @@ class Profile:
             raise CaptureError("CONFIG_INVALID", "unknown mode or backend")
         if mode == "hermetic" and backend_name not in _HERMETIC_BACKENDS:
             raise CaptureError("CONFIG_INVALID", "unknown mode or backend")
-        if mode == "hosted" and backend_name != "hosted":
+        if mode == "hosted" and backend_name not in _HOSTED_BACKENDS:
             raise CaptureError("CONFIG_INVALID", "hosted mode requires hosted backend")
-        if mode == "off" and backend_name not in _HERMETIC_BACKENDS | {"hosted"}:
+        if retention not in _RETENTIONS:
+            raise CaptureError("CONFIG_INVALID", "unknown retention policy")
+        if backend_name == "resend" and retention != "provider-retained":
+            raise CaptureError("CONFIG_INVALID", "resend retains received mail; set retention to provider-retained or use a strict-purge receiver")
+        if retention == "provider-retained" and backend_name != "resend":
+            raise CaptureError("CONFIG_INVALID", "provider-retained applies only to a retained-mail receiver")
+        if mode == "off" and backend_name not in _HERMETIC_BACKENDS | _HOSTED_BACKENDS:
             raise CaptureError("CONFIG_INVALID", "unknown mode or backend")
         if fidelity not in _FIDELITIES:
             raise CaptureError("CONFIG_INVALID", "unknown fidelity")
@@ -205,11 +218,13 @@ class Profile:
             raise CaptureError("CONFIG_INVALID", "hosted capture environment is not allowlisted")
         if mode == "hosted":
             _validate_hosted_endpoint(endpoint, env)
+            if backend_name == "resend":
+                _validate_resend_endpoint(endpoint, env)
             if not os.environ.get("EMAIL_CAPTURE_HOSTED_TOKEN"):
                 raise CaptureError("AUTHORIZATION_DENIED", "hosted token must come from EMAIL_CAPTURE_HOSTED_TOKEN")
         if mode == "hermetic" and backend_name != "memory":
             _validate_local_endpoint(endpoint)
-        return cls(mode, backend_name, endpoint, environment, ttl, fidelity)
+        return cls(mode, backend_name, endpoint, environment, ttl, fidelity, retention)
 
 
 class Backend(Protocol):
@@ -307,6 +322,16 @@ def atomic_write_json(path: Path, value: Any) -> None:
     finally:
         if os.path.exists(name):
             os.unlink(name)
+
+
+def _validate_resend_endpoint(endpoint: str, environment: str) -> None:
+    """Pin the vendor host so a receiving key is never sent to another origin."""
+    parsed = urllib.parse.urlparse(endpoint)
+    loopback = parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+    if loopback and environment == "test":
+        return
+    if parsed.scheme != "https" or parsed.hostname != RESEND_API_HOST or parsed.path not in ("", "/") or parsed.port not in (None, 443):
+        raise CaptureError("CONFIG_INVALID", "resend endpoint must be https://api.resend.com")
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -505,7 +530,13 @@ class HostedHttpBackend:
                 return None
             if error.code in {401, 403}:
                 raise CaptureError("AUTHORIZATION_DENIED", f"hosted HTTP {error.code}") from None
-            raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", f"hosted HTTP {error.code}") from None
+            failure = CaptureError("CAPTURE_INFRA_UNAVAILABLE", f"hosted HTTP {error.code}")
+            if error.code == 429:
+                try:
+                    failure.retry_after = max(0.0, float(error.headers.get("Retry-After", "1")))
+                except (TypeError, ValueError):
+                    failure.retry_after = 1.0
+            raise failure from None
         except (OSError, urllib.error.URLError) as error:
             raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", type(error).__name__) from None
         if not body:
@@ -597,6 +628,110 @@ class HostedHttpBackend:
             if _co_owners_still_live(detail, recipient):
                 continue
             self._request(f"/messages/{identifier}", "DELETE", allow_404=True)
+
+
+class ResendReceivingBackend(HostedHttpBackend):
+    """Native Resend received-email adapter (managed receiving, no webhook server).
+
+    The vendor list has no recipient filter, so every page is enumerated (bounded)
+    and matched on the exact ``to`` address before any body is fetched. An
+    enumeration that cannot finish is an infrastructure failure, never "no mail".
+    Resend exposes no received-email delete: the lifecycle is provider retention,
+    reported through ``retire`` and never as a purge.
+    """
+
+    poll_interval = 1.0
+
+    def __init__(self, profile: Profile):
+        super().__init__(profile)
+        self._details: dict[str, dict[str, Any]] = {}
+
+    def _call(self, path: str) -> Any:
+        """GET with deadline-aware 429 backoff."""
+        while True:
+            try:
+                return self._request(path)
+            except CaptureError as error:
+                wait = getattr(error, "retry_after", None)
+                deadline = getattr(self, "_deadline", None)
+                if wait is None or deadline is None or deadline - time.monotonic() <= wait:
+                    raise
+                time.sleep(wait)
+
+    def capabilities(self) -> dict[str, Any]:
+        return {
+            "schema_version": VERSION,
+            "backend": "resend",
+            "allocation_scope": "recipient",
+            "cursor": "received_at_id",
+            "mime": True,
+            "attachments": True,
+            "attachment_size": True,
+            "purge_scope": "none",
+            "retention": "provider-retained",
+            "fidelity": self.profile.fidelity,
+        }
+
+    def health(self) -> bool:
+        data = self._call("/emails/receiving?limit=1")
+        if isinstance(data, dict) and isinstance(data.get("data"), list):
+            return True
+        raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "resend receiving list has invalid shape")
+
+    def _summaries(self, recipient: str) -> list[dict[str, Any]]:
+        matched: list[dict[str, Any]] = []
+        after = ""
+        for _page in range(RESEND_MAX_PAGES):
+            query = {"limit": str(RESEND_PAGE_LIMIT)}
+            if after:
+                query["after"] = after
+            data = self._call("/emails/receiving?" + urllib.parse.urlencode(query))
+            if not isinstance(data, dict) or not isinstance(data.get("data"), list) or not isinstance(data.get("has_more"), bool):
+                raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "resend receiving list has invalid shape")
+            rows = data["data"]
+            for row in rows:
+                if not isinstance(row, dict):
+                    raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "receiver summary has invalid shape")
+                _message_id(row)
+                _require_well_formed_recipient_field(row)
+                if _summary_contains_recipient(row, recipient):
+                    matched.append(row)
+            if not data["has_more"]:
+                return matched
+            if not rows:
+                raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "resend pagination made no progress")
+            after = _message_id(rows[-1])
+        raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "resend enumeration incomplete (page bound reached)")
+
+    def list(self, allocation: dict[str, Any]) -> list[dict[str, Any]]:
+        recipient = allocation["recipient"].lower()
+        messages: list[dict[str, Any]] = []
+        for summary in self._summaries(recipient):
+            identifier = _message_id(summary)
+            detail = self._details.get(identifier)
+            if detail is None:
+                detail = self._call(f"/emails/receiving/{urllib.parse.quote(identifier, safe='')}?html_format=cid")
+                if not isinstance(detail, dict):
+                    raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "receiver detail has invalid shape")
+                if _message_id(detail) != identifier:
+                    raise CaptureError("AUTHORIZATION_DENIED", "detail id is outside allocation")
+                _require_well_formed_recipient_field(detail)
+                if not _summary_contains_recipient(detail, recipient):
+                    raise CaptureError("AUTHORIZATION_DENIED", "detail recipient is outside allocation")
+                created = summary.get("created_at")
+                if not isinstance(created, str) or not created:
+                    raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", "message lacks stable receive time")
+                detail["received_at"] = created
+                _require_hosted_attachments_shape(detail)
+                self._details[identifier] = detail
+            try:
+                messages.append(normalise_message(detail, "resend"))
+            except (TypeError, AttributeError, ValueError) as error:
+                raise CaptureError("CAPTURE_INFRA_UNAVAILABLE", type(error).__name__) from None
+        return messages
+
+    def purge(self, allocation: dict[str, Any]) -> None:
+        raise CaptureError("CAPABILITY_UNSUPPORTED", "resend retains received mail; use retire")
 
 
 class MemoryBackend:
@@ -926,6 +1061,8 @@ def backend(profile: Profile) -> Backend:
         return MemoryBackend(profile)
     if profile.backend == "hosted":
         return HostedHttpBackend(profile)
+    if profile.backend == "resend":
+        return ResendReceivingBackend(profile)
     return HttpBackend(profile)
 
 
@@ -1059,6 +1196,8 @@ def release_allocation(selected_backend: Backend, allocation: dict[str, Any]) ->
     unknown id to purge someone else's mailbox. The 30-day expiry sweep in
     ``allocate`` reclaims tombstones.
     """
+    if selected_backend.capabilities().get("purge_scope") == "none":
+        raise CaptureError("CAPABILITY_UNSUPPORTED", "receiver cannot purge; use retire for provider-retained mail")
     with _registry_lock():
         records = _read_registry()
         for record in records.values():
@@ -1081,9 +1220,36 @@ def release_allocation(selected_backend: Backend, allocation: dict[str, Any]) ->
         atomic_write_json(_registry_path(), records)
 
 
-def await_messages(selected_backend: Backend, allocation: dict[str, Any], timeout: float = 30, count: int = 1, not_before: str | None = None) -> tuple[list[dict[str, Any]], str]:
-    """Wait for an exact fresh count, including a full bounded negative window."""
-    if timeout < 0 or count < 0:
+def retire_allocation(selected_backend: Backend, allocation: dict[str, Any]) -> str:
+    """Close an allocation on a retained-mail receiver without claiming deletion.
+
+    The record becomes a tombstone marked ``retention=provider-retained`` so the
+    allocation can never read again. Provider-side copies expire under the
+    vendor's retention schedule; this is not a purge, and it revokes no sender
+    log, backup or authentication session. Strict-purge receivers must use
+    ``release``. Idempotent, and reachable for expired or pending_purge records.
+    """
+    capabilities = selected_backend.capabilities()
+    if capabilities.get("purge_scope") != "none" or capabilities.get("retention") != "provider-retained":
+        raise CaptureError("CAPABILITY_UNSUPPORTED", "retire applies only to provider-retained receivers")
+    with _registry_lock():
+        records = _read_registry()
+        for record in records.values():
+            if isinstance(record, dict) and record.get("allocation_id") == allocation.get("allocation_id"):
+                record["released"] = True
+                record["retention"] = "provider-retained"
+                record.pop("pending_purge", None)
+        atomic_write_json(_registry_path(), records)
+    return "retired_provider_retained"
+
+
+def await_messages(selected_backend: Backend, allocation: dict[str, Any], timeout: float = 30, count: int = 1, not_before: str | None = None, quiet_window: float = 0) -> tuple[list[dict[str, Any]], str]:
+    """Wait for an exact fresh count, including a full bounded negative window.
+
+    ``quiet_window`` keeps observing after the expected count is reached so a
+    delayed duplicate fails as MESSAGE_AMBIGUOUS instead of passing unseen.
+    """
+    if timeout < 0 or count < 0 or quiet_window < 0:
         raise CaptureError("CONFIG_INVALID", "timeout and count must be non-negative")
     if not_before:
         try:
@@ -1095,6 +1261,8 @@ def await_messages(selected_backend: Backend, allocation: dict[str, Any], timeou
     supports_deadline = hasattr(selected_backend, "request_timeout")
     original_timeout = getattr(selected_backend, "request_timeout", None)
     first_poll = True
+    reached: list[dict[str, Any]] | None = None
+    poll_interval = float(getattr(selected_backend, "poll_interval", 0.25))
     try:
         while True:
             if supports_deadline:
@@ -1119,13 +1287,23 @@ def await_messages(selected_backend: Backend, allocation: dict[str, Any], timeou
             else:
                 if len(fresh) > count:
                     raise CaptureError("MESSAGE_AMBIGUOUS", "more messages than expected")
-                if len(fresh) == count:
-                    advanced = f'{fresh[-1]["received_at"]}:{fresh[-1]["opaque_id"]}'
-                    allocation["cursor"] = advanced
-                    return fresh, advanced
-                if time.monotonic() >= deadline:
+                if reached is not None:
+                    if len(fresh) != len(reached):
+                        raise CaptureError("MESSAGE_AMBIGUOUS", "message set changed during quiet window")
+                    if time.monotonic() >= deadline:
+                        advanced = f'{reached[-1]["received_at"]}:{reached[-1]["opaque_id"]}'
+                        allocation["cursor"] = advanced
+                        return reached, advanced
+                elif len(fresh) == count:
+                    if quiet_window <= 0:
+                        advanced = f'{fresh[-1]["received_at"]}:{fresh[-1]["opaque_id"]}'
+                        allocation["cursor"] = advanced
+                        return fresh, advanced
+                    reached = fresh
+                    deadline = time.monotonic() + quiet_window
+                elif time.monotonic() >= deadline:
                     raise CaptureError("MESSAGE_TIMEOUT", "bounded wait expired")
-            time.sleep(min(0.25, max(0, deadline - time.monotonic())))
+            time.sleep(min(poll_interval, max(0, deadline - time.monotonic())))
     finally:
         if supports_deadline:
             selected_backend._deadline = None
@@ -1166,5 +1344,5 @@ def assert_messages(messages: list[dict[str, Any]], rules: dict[str, Any]) -> di
 
 def receipt(operation: str, result: str, started: float, **metadata: Any) -> dict[str, Any]:
     """Emit only allowlisted metadata."""
-    allowlist = {"mode", "entity", "repository", "run_id", "error_code", "cleanup_state", "assertion_count", "message_count", "cursor", "fidelity"}
+    allowlist = {"mode", "entity", "repository", "run_id", "error_code", "cleanup_state", "assertion_count", "message_count", "cursor", "fidelity", "retention_state", "journey", "action_outcome", "fixture_cleanup", "environment_check", "framework_commit"}
     return {"schema_version": VERSION, "operation": operation, "result": result, "duration_ms": round((time.monotonic() - started) * 1000), **{key: value for key, value in metadata.items() if key in allowlist}}

@@ -28,7 +28,8 @@
         "mailpit",
         "maildev",
         "inbucket",
-        "hosted"
+        "hosted",
+        "resend"
       ]
     },
     "endpoint": {
@@ -46,6 +47,12 @@
       "enum": [
         "provider-to-capture",
         "deployed-substitution"
+      ]
+    },
+    "retention": {
+      "enum": [
+        "strict-purge",
+        "provider-retained"
       ]
     }
   },
@@ -90,7 +97,10 @@
         ],
         "properties": {
           "backend": {
-            "const": "hosted"
+            "enum": [
+              "hosted",
+              "resend"
+            ]
           },
           "environment": {
             "type": "string",
@@ -176,6 +186,50 @@
             ]
           }
         }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "backend": {
+            "const": "resend"
+          }
+        },
+        "required": [
+          "backend"
+        ]
+      },
+      "then": {
+        "required": [
+          "retention"
+        ],
+        "properties": {
+          "retention": {
+            "const": "provider-retained"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "retention": {
+            "const": "provider-retained"
+          }
+        },
+        "required": [
+          "retention"
+        ]
+      },
+      "then": {
+        "properties": {
+          "backend": {
+            "const": "resend"
+          }
+        },
+        "required": [
+          "backend"
+        ]
       }
     }
   ]

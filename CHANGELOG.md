@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Added
+
+- **email-capture: native Resend receiving adapter, retained-mail lifecycle,
+  `retire`, `inspect`, `await --quiet-window`.** Additive and compatible with
+  schema `1.0`; strict-purge remains the default. See `docs/email-capture.md`
+  § Native Resend receiver. The next component tag is `email-capture-v0.3.0`
+  (not yet published).
+
 ### Changed
 
 - **No Anthropic substitute when the proxy is down.** With

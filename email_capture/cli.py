@@ -6,7 +6,8 @@ import json
 import time
 from pathlib import Path
 
-from .core import CaptureError, Profile, _read_registry, advance_registry_cursor, allocate, assert_messages, atomic_write_json, await_messages, backend, receipt, release_allocation
+from .core import CaptureError, Profile, _read_registry, advance_registry_cursor, allocate, assert_messages, atomic_write_json, await_messages, backend, receipt, release_allocation, retire_allocation
+from .inspect import inspect_message
 
 
 def read_json(value: str) -> dict | list:
@@ -80,12 +81,21 @@ def main(argv: list[str] | None = None) -> int:
     await_parser.add_argument("--timeout", type=float, default=30)
     await_parser.add_argument("--count", type=int, default=1)
     await_parser.add_argument("--not-before")
+    await_parser.add_argument("--quiet-window", type=float, default=0)
     await_parser.add_argument("--output", required=True)
     assert_parser = commands.add_parser("assert")
     assert_parser.add_argument("--messages", required=True)
     assert_parser.add_argument("--rules", required=True)
     release_parser = commands.add_parser("release")
     release_parser.add_argument("--allocation", required=True)
+    retire_parser = commands.add_parser("retire")
+    retire_parser.add_argument("--allocation", required=True)
+    inspect_parser = commands.add_parser("inspect")
+    inspect_parser.add_argument("--allocation", required=True)
+    inspect_parser.add_argument("--messages", required=True)
+    inspect_parser.add_argument("--allow-host", action="append", required=True)
+    inspect_parser.add_argument("--allow-path-prefix", action="append", default=[])
+    inspect_parser.add_argument("--output", required=True)
     commands.add_parser("capabilities")
     commands.add_parser("doctor")
     commands.add_parser("canary")
@@ -101,7 +111,7 @@ def main(argv: list[str] | None = None) -> int:
         elif arguments.command == "await":
             allocation_path = _private_input_path(arguments.allocation)
             allocation = _verified_allocation(arguments.allocation)
-            messages, cursor = await_messages(selected_backend, allocation, arguments.timeout, arguments.count, arguments.not_before)
+            messages, cursor = await_messages(selected_backend, allocation, arguments.timeout, arguments.count, arguments.not_before, arguments.quiet_window)
             atomic_write_json(Path(arguments.output), messages)
             advance_registry_cursor(str(allocation.get("allocation_id", "")), cursor)
             if allocation_path:
@@ -120,6 +130,25 @@ def main(argv: list[str] | None = None) -> int:
                 raise
             release_allocation(selected_backend, verified)
             emit(receipt("release", "passed", started, mode=profile.mode, cleanup_state="complete"))
+        elif arguments.command == "retire":
+            _private_input_path(arguments.allocation)
+            try:
+                verified = _verified_allocation(arguments.allocation, releasing=True)
+            except CaptureError as error:
+                if error.code == "ALLOCATION_RETIRED":
+                    emit(receipt("retire", "passed", started, mode=profile.mode, cleanup_state="already_released", retention_state="provider_retained"))
+                    return 0
+                raise
+            state = retire_allocation(selected_backend, verified)
+            emit(receipt("retire", "passed", started, mode=profile.mode, cleanup_state=state, retention_state="provider_retained"))
+        elif arguments.command == "inspect":
+            allocation = _verified_allocation(arguments.allocation)
+            messages = read_json(arguments.messages)
+            if not isinstance(messages, list):
+                raise CaptureError("CONFIG_INVALID", "messages must be a JSON array")
+            records = [inspect_message(message, allocation["recipient"], arguments.allow_host, arguments.allow_path_prefix) for message in messages]
+            atomic_write_json(Path(arguments.output), records)
+            emit(receipt("inspect", "passed", started, mode=profile.mode, message_count=len(records)))
         elif arguments.command == "capabilities":
             emit(selected_backend.capabilities())
         elif arguments.command == "canary":

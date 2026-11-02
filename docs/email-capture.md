@@ -56,3 +56,38 @@ one job before you re-pin. Email-capture files means `email_capture/`,
 `bin/email-capture` and `schemas/email-capture/`. The module's
 `__version__` still reads `0.2.3` from `v0.2.3` through
 `email-capture-v0.2.6`; the tag, not that string, identifies the release.
+
+
+## Native Resend receiver and retained-mail lifecycle (additive)
+
+`backend: "resend"` (hosted mode only) reads Resend managed receiving through
+`GET /emails/receiving` and `GET /emails/receiving/{id}`; it is a native adapter,
+not the generic hosted HTTPS SPI (`backend: "hosted"`), which stays separate.
+
+- **Endpoint.** `https://api.resend.com` only (loopback HTTP in `test`).
+- **Token.** `EMAIL_CAPTURE_HOSTED_TOKEN` must be a receiving-capable key from a
+  dedicated QA organisation. There is no fallback to `RESEND_API_KEY`. A holder of
+  that key can read the whole QA organisation; allocation checks are framework
+  discipline, not vendor isolation.
+- **Enumeration.** The vendor list has no recipient filter. Pages of 100 are read
+  (bounded at 10 pages), matched on the exact `to` address, and only then are
+  bodies fetched (once per message per process). An unfinishable scan is
+  `CAPTURE_INFRA_UNAVAILABLE`, never "no mail". Polling is 1 s; HTTP 429 backs off
+  by `Retry-After` while the await deadline allows.
+- **Retention.** The profile must set `"retention": "provider-retained"`
+  (default `strict-purge`). A strict-purge profile rejects this receiver. Resend
+  has no received-mail delete, so `release` returns `CAPABILITY_UNSUPPORTED`; use
+  `email-capture retire --allocation @file`, which closes the allocation (no further
+  reads) and reports `retention_state: provider_retained`. Retirement is not a
+  purge and does not remove sender logs, backups or revoke Auth sessions. It
+  remains reachable for expired and pending-purge allocations.
+- **Quiet window.** `await --quiet-window N` keeps observing for N seconds after
+  the expected count and fails `MESSAGE_AMBIGUOUS` on a delayed duplicate.
+- **Inspection.** `inspect --allocation @a --messages @m --allow-host H
+  [--allow-path-prefix P] --output FILE` writes escaped text, https links on
+  approved hosts/paths and numeric codes to a mode-0600 file; stdout only carries
+  a count receipt. Expired allocations and messages outside the allocation are
+  denied.
+
+Tooling identities stay distinct: component tag `email-capture-vX.Y.Z`, protocol
+schema `1.0`, and the Python `__version__` are separate values.
