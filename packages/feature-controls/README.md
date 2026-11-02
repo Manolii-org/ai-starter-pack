@@ -29,4 +29,4 @@ see `docs/feature-controls.md`.
 ## Automatic release policy
 
 See [the readiness, override and qualification contract](../../docs/feature-release-policy.md).
-Deploy compatible SDK/publisher support before emitting v2 control metadata; wire snapshots stay on generation1.
+Deploy compatible SDK/publisher support before emitting v2 control metadata; wire snapshots stay on `schema_version` 1.
