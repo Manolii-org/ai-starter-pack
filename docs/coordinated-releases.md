@@ -150,14 +150,15 @@ wait-start, not guaranteed dispatch order. Overflow cancels new requests. Declar
 `bounded-native` with its reconciliation route, rather than claiming unlimited
 durability, and keep `cancel-in-progress: false` on the production writer.
 
-Run the owning synthetic shared-core, real-Git CAS and generated-drift checks with:
+From a pack checkout, run the owning shared-core, real-Git CAS, generated-drift
+and consumer-render checks with:
 
 ```bash
 python3 scripts/agent-check.py --provider codex --provision
 ```
 
 This provisions the recipe's isolated Python 3.12 environment with pinned
-JSON Schema/PyYAML dependencies. The recipe covers its configuration and
+JSON Schema/PyYAML and pytest/Copier dependencies. The recipe covers its configuration and
 legacy lane-model schema inputs as well as the release capability.
 
 The final public candidate must also pass the existing secret scan. No model

@@ -136,7 +136,11 @@ class ManifestTests(unittest.TestCase):
                 (root / target).mkdir(parents=True)
                 for name in ["release-adoption.v1.schema.json", "release-manifest.v1.schema.json"]:
                     (root / target / name).write_text("fixture")
-            command = [sys.executable, "-O", *recipe["commands"][-1][1:]]
+            comparisons = [command for command in recipe["commands"]
+                           if len(command) == 3 and command[1] == "-c"
+                           and "generated release schemas differ" in command[2]]
+            self.assertEqual(len(comparisons), 1)
+            command = [sys.executable, "-O", *comparisons[0][1:]]
             self.assertEqual(subprocess.run(command, cwd=root, capture_output=True).returncode, 0)
             (root / "registry/platform/framework/schemas/release-manifest.v1.schema.json").write_text("corrupt")
             result = subprocess.run(command, cwd=root, capture_output=True, text=True)

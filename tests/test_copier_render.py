@@ -274,22 +274,22 @@ def test_cost_profile_lean_omits_measured_waste_callers(default_render):
     ("flags", "expected"),
     [
         ({}, {"Hooks": 5, "Commands": 51, "Skills": 37, "Agents": 27,
-              "Scripts": 56, "Husky": 3, "CI": 36, "Docs": 34}),
+              "Scripts": 56, "Husky": 3, "CI": 36, "Docs": 35}),
         ({flag: "true" for flag in FEATURE_FLAGS},
          {"Hooks": 5, "Commands": 54, "Skills": 41, "Agents": 28,
-              "Scripts": 56, "Husky": 3, "CI": 36, "Docs": 36}),
+              "Scripts": 56, "Husky": 3, "CI": 36, "Docs": 37}),
         ({"cost_profile": "lean"},
          {"Hooks": 5, "Commands": 51, "Skills": 37, "Agents": 27,
-              "Scripts": 56, "Husky": 3, "CI": 35, "Docs": 34}),
+              "Scripts": 56, "Husky": 3, "CI": 35, "Docs": 35}),
         ({"codex_review": "false"},
          {"Hooks": 5, "Commands": 51, "Skills": 37, "Agents": 27,
-              "Scripts": 56, "Husky": 3, "CI": 34, "Docs": 34}),
+              "Scripts": 56, "Husky": 3, "CI": 34, "Docs": 35}),
         ({"isolation_profile": "strict"},
          {"Hooks": 5, "Commands": 51, "Skills": 37, "Agents": 27,
-              "Scripts": 53, "Husky": 3, "CI": 30, "Docs": 34}),
+              "Scripts": 53, "Husky": 3, "CI": 30, "Docs": 35}),
         ({"isolation_profile": "strict", "cost_profile": "lean"},
          {"Hooks": 5, "Commands": 51, "Skills": 37, "Agents": 27,
-              "Scripts": 53, "Husky": 3, "CI": 30, "Docs": 34}),
+              "Scripts": 53, "Husky": 3, "CI": 30, "Docs": 35}),
     ],
 )
 def test_rendered_readme_counts_match_rendered_tree(flags, expected):
@@ -325,6 +325,22 @@ def test_validation_layout_distribution_boundary(default_render, branded_render)
         assert not (rendered / "scripts/tests/test_agent_validation_layout.py").exists()
         # The existing default validation bundle remains available to callers.
         assert (rendered / "scripts/tests/test_agent_check.py").is_file()
+
+
+def test_release_capability_distribution_boundary(default_render, branded_render):
+    """Consumers receive the documented release capability and canonical schemas."""
+    paths = (
+        "docs/coordinated-releases.md",
+        "schemas/release-manifest.v1.schema.json",
+        "schemas/release-adoption.v1.schema.json",
+        ".github/actions/validate-release-manifest/action.yml",
+        ".github/actions/validate-release-manifest/release_manifest.py",
+        ".github/actions/validate-release-manifest/release_state.py",
+        ".github/actions/validate-release-manifest/github_approval.py",
+    )
+    for rendered in (default_render, branded_render):
+        for rel in paths:
+            assert (rendered / rel).read_bytes() == (ROOT / rel).read_bytes()
 
 
 def test_security_audit_tests_run_in_rendered_consumers(default_render, branded_render):

@@ -67,7 +67,9 @@
           "--python",
           ".ai/agent-checks/release-venv/bin/python",
           "jsonschema==4.25.1",
-          "pyyaml==6.0.3"
+          "pyyaml==6.0.3",
+          "pytest==9.2.0",
+          "copier==9.19.1"
         ]
       ],
       "timeout_seconds": 600
@@ -148,7 +150,9 @@
         "registry/platform/framework/schemas/release-manifest.v1.schema.json",
         "scripts/tests/fixtures/release-manifest.v1.json",
         "config/agent-checks.json",
-        "schemas/deployment-contract.schema.json"
+        "schemas/deployment-contract.schema.json",
+        "README-STARTER-PACK.md.jinja",
+        "tests/test_copier_render.py"
       ],
       "tools": [
         "uv"
@@ -173,6 +177,15 @@
           ".ai/agent-checks/release-venv/bin/python",
           "-c",
           "from pathlib import Path; import sys; names=['release-adoption.v1.schema.json','release-manifest.v1.schema.json']; targets=['plugin/manolii-framework/schemas','registry/platform/framework/schemas']; ok=all((Path('schemas')/n).read_bytes()==(Path(t)/n).read_bytes() for t in targets for n in names); sys.exit(0 if ok else 'generated release schemas differ; run owning plugin and registry builders')"
+        ],
+        [
+          ".ai/agent-checks/release-venv/bin/python",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_copier_render.py",
+          "-k",
+          "test_rendered_readme_counts_match_rendered_tree or test_release_capability_distribution_boundary"
         ]
       ],
       "timeout_seconds": 120,
