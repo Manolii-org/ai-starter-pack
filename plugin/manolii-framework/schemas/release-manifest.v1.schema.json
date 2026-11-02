@@ -432,7 +432,51 @@
             }
           ]
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "activation-only"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "continuation": {
+                "type": "object"
+              },
+              "decision_sequence": {
+                "enum": [
+                  [
+                    "activation"
+                  ],
+                  [
+                    "release"
+                  ]
+                ]
+              },
+              "databases": {
+                "items": {
+                  "properties": {
+                    "pending": {
+                      "maxItems": 0
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "continuation": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
     }
   }
 }
