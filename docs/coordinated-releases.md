@@ -151,15 +151,37 @@ wait-start, not guaranteed dispatch order. Overflow cancels new requests. Declar
 durability, and keep `cancel-in-progress: false` on the production writer.
 
 From a pack checkout, run the owning shared-core, real-Git CAS, generated-drift
-and consumer-render checks with:
+and consumer-render checks for a changed candidate with:
 
 ```bash
 python3 scripts/agent-check.py --provider codex --provision
 ```
 
 This provisions the recipe's isolated Python 3.12 environment with pinned
-JSON Schema/PyYAML and pytest/Copier dependencies. The recipe covers its configuration and
-legacy lane-model schema inputs as well as the release capability.
+JSON Schema/PyYAML and pytest/Copier dependencies. The recipe covers its
+configuration and legacy lane-model schema inputs as well as the release
+capability. The runner selects recipes by changed paths, so a clean checkout
+can legitimately skip this recipe.
+
+To run the release recipe regardless of changed paths, start at the pack root
+with `uv` installed and execute its trusted owner-defined commands explicitly:
+
+```bash
+python3 - <<'PY'
+import json
+import subprocess
+from pathlib import Path
+
+config = json.loads(Path("config/agent-checks.json").read_text())
+recipe = next(c for c in config["checks"] if c["id"] == "release-manifest-contract")
+environment = next(e for e in config["environments"] if e["id"] == recipe["environment"])
+for command in environment["commands"] + recipe["commands"]:
+    subprocess.run(command, check=True)
+PY
+```
+
+This runs the same provisioning, tests and drift checks without relying on
+change selection; it does not issue an agent-check receipt or release authority.
 
 The final public candidate must also pass the existing secret scan. No model
 call, additional business database or new approval service is added to releases.
