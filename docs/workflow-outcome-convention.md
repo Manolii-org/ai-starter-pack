@@ -11,11 +11,34 @@ state change must not conclude `success` when that work was skipped.
 | `NO_CHANGES` | The operation ran, measured the destination, and found no delta. | Yes |
 | `DEFERRED` | Work was not attempted because a temporary owner held the resource. | No; publish a neutral check-run |
 | `POLICY_HELD` | A deliberate approval or production policy prevented execution. | No; publish a neutral check-run |
+| `INERT` | The check ran but could not detect the failure it exists to catch (for example no baseline, or no test executed). | No; publish a neutral check-run |
 | `FAILED` | Work was attempted and did not establish the required end state. | No; publish a failure check-run |
 
-`DEFERRED` and `POLICY_HELD` must appear in the check name and summary. Colour is
+`DEFERRED`, `POLICY_HELD` and `INERT` must appear in the check name and summary. Colour is
 not the interface. A policy hold is operationally healthy but is not evidence
 that the held operation happened.
+
+## Retry polls for `DEFERRED` work
+
+A workflow may re-attempt `DEFERRED` work on a schedule. Keep the convention honest:
+
+- The **primary** attempt (the push, release or refresh that first could not do the
+  work) concludes non-success and opens one closed-loop tracking issue
+  (`docs/issue-lifecycle.md`).
+- A **poll** repeating a state that is already tracked and expected must still report
+  `DEFERRED`, never `EXECUTED`, but need not fail the scheduled run: a run that fails
+  every few hours is noise that hides real failures (and notifies whoever last edited
+  the schedule). Where the repository declares the outcome contract below, publish the
+  neutral `DEFERRED` check-run. Where a plain job conclusion is all the platform offers,
+  the job may pass only if its summary states `DEFERRED` and the tracking issue still
+  records it, so a green poll is never read as evidence the work happened. It must never
+  force the work: the poll re-runs the same verified gate.
+- A poll fails loudly when the outcome is anything other than the tracked, expected
+  state; when the tracked state is older than a stated threshold (the "needs a
+  human" bound); and whenever the tracking issue cannot be read or written.
+- Gate any downstream verification on the work step's **outcome**, not on job status:
+  with `continue-on-error` the job stays green and an implicit `success()` would
+  verify a target that was never changed.
 
 ## Contract and lint
 
@@ -37,3 +60,57 @@ The reporter is diagnostic only. It must never bypass an environment approval,
 production acknowledgement, advisory lock, backup, dry run, or reviewer gate.
 For an apply workflow, record the destination state before and after execution;
 a green shell exit alone is not an execution receipt.
+
+## Activation contract (reusable gates)
+
+A required check that cannot fail is not a gate. Reusables whose green result
+can mean "nothing was checked" expose an `activation` output, so callers and
+outcome reporters can tell the two apart:
+
+| Reusable | `activation` values | Inert when | Opt-in failure |
+|---|---|---|---|
+| `coverage-ratchet-reusable` | `active`, `inert` | no committed baseline (`baseline_path`) | `fail_on_inert` or `require_baseline` |
+| `e2e-playwright-reusable` | `active`, `inert`, `unknown` | Playwright executed no test (all skipped, or none found); `unknown` when no reporter summary is readable | `fail_on_inert` |
+| `pr-autofix-loop-reusable` | `active`, `skipped` | never: missing credentials and an agent step that produced no execution already fail the job | none |
+| `secret-scan-reusable` | `npm_audit_activation` and `pip_audit_activation`, each `active`, `inert` | per audit: no root `package-lock.json` (npm), or no `requirements*.txt` / `uv.lock` (pip; a bare `pyproject.toml` still runs a fallback audit of the runner's own packages, so it reports `inert`). The workflow is INERT for dependencies only when both are; Gitleaks always runs | `fail_on_inert` fails the `Dependency Vulnerability Audit` job when neither audit can run |
+
+`secret-scan-reusable` warns `INERT` only when no dependency audit can run.
+A repository that legitimately has one ecosystem reports the other audit as
+`inert` through its output, without an annotation on every run.
+
+Reviewed and deliberately left without an activation output:
+
+- `migration-run-gate-reusable`: every run applies all migrations to a
+  throwaway database, so it cannot pass without acting.
+- `pre-production-tier-reusable` / `fast-tier-reusable`: they already reject
+  a gate with no command and report per-gate pass/skip/fail counts.
+- `restore-drill-reusable`: a drill that does not restore fails; there is no
+  green no-op path.
+- `email-quality-reusable`: it runs only on default-branch push, schedule or
+  dispatch, and is not intended as a PR check. On other events the job is
+  `skipped`, and a skipped job **satisfies** a required status check, so never
+  bind it as one.
+
+Rules:
+
+- An inert run always emits a `::warning::` naming the workflow and the word
+  `INERT`, and sets `activation=inert`.
+- `fail_on_inert` defaults to `false` in v1, so no existing caller turns red.
+  It is planned to default to `true` in v2.
+- `skipped` (autofix) is a legitimate decline of one event (loop-break,
+  budget, actor, stale head), not an inert gate.
+- A caller that publishes an outcome check maps `activation=inert` to the
+  `INERT` state of `outcome-check-reusable` (neutral check-run, never
+  success). A failed job is `FAILED` whatever its activation: check the job
+  result first.
+
+```yaml
+  report:
+    needs: coverage
+    if: ${{ always() }}
+    uses: Manolii-org/ai-starter-pack/.github/workflows/outcome-check-reusable.yml@<sha> # vX.Y.Z
+    with:
+      operation: coverage ratchet
+      outcome: ${{ needs.coverage.result != 'success' && 'FAILED' || (needs.coverage.outputs.activation == 'inert' && 'INERT' || 'EXECUTED') }}
+      summary: activation=${{ needs.coverage.outputs.activation }}
+```

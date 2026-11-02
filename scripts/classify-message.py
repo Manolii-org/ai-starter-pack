@@ -84,11 +84,6 @@ def _load_routing_config():
     _LIGHT_DEFAULT = ["list", "count", "find", "search", "rename", "format", "lint",
                       "grep", "glob", "status", "boilerplate"]
     _TIER_MAP_DEFAULT = {"light": "haiku", "standard": "sonnet", "heavy": "sonnet"}
-    _PROXY_DEFAULT = {
-        "tier-1-fast": "haiku", "tier-2-agentic": "sonnet",
-        "tier-3-tool": "sonnet", "tier-4-extract": "haiku",
-        "tier-5-latency": "haiku", "tier-0-oss-heavy": "sonnet",
-    }
     _DISPATCH_RULE_DEFAULT = (
         "DISPATCH RULE: The tier above is for the MAIN THREAD ONLY. "
         "For Agent tool calls, select by sub-task type — NOT by main-thread tier: "
@@ -102,13 +97,22 @@ def _load_routing_config():
         "opus=MAIN THREAD ONLY — NEVER pass model=\"opus\" to any named sub-agent. "
         "Passing opus to a named sub-agent overrides its configured tier and wastes 5-16x cost."
     )
-    # Default pricing: Anthropic-published rates only
+    # Default pricing: Anthropic-published rates only (USD per million tokens,
+    # cached 2026-10-06). Short aliases carry the rate of the model they reach
+    # without a proxy (haiku -> Haiku 5.5); proxy rates come from the routing
+    # config (proxy_intercept_rates).
     _PRICING_DEFAULT = {
-        "claude-opus-4-7":           {"in": 15.00, "out": 75.00},
-        "claude-opus-4-6":           {"in": 15.00, "out": 75.00},
+        "claude-fable-5-1":          {"in": 10.00, "out": 50.00},
+        "claude-opus-5-5":           {"in":  4.00, "out": 20.00},
+        "claude-opus-5":             {"in":  5.00, "out": 25.00},
+        "claude-opus-4-7":           {"in":  5.00, "out": 25.00},
+        "claude-opus-4-6":           {"in":  5.00, "out": 25.00},
+        "claude-sonnet-5-5":         {"in":  2.00, "out": 10.00},
+        "claude-sonnet-5":           {"in":  2.00, "out": 10.00},
         "claude-sonnet-4-6":         {"in":  3.00, "out": 15.00},
-        "haiku":                     {"in":  0.30, "out":  1.20},
-        "claude-haiku-4-5-20251001": {"in":  0.30, "out":  1.20},
+        "claude-haiku-5-5":          {"in":  0.10, "out":  0.50},
+        "haiku":                     {"in":  0.10, "out":  0.50},
+        "claude-haiku-4-5-20251001": {"in":  1.00, "out":  5.00},
     }
     _PROXY_INTERCEPT_RATES_DEFAULT = {}
 
@@ -132,9 +136,6 @@ def _load_routing_config():
         overrides = cfg.get("overrides", {})
         tier_map = {"light": "haiku", "standard": "sonnet", "heavy": "sonnet"}
         tier_map.update(cfg.get("platforms", {}).get("claude_code", {}).get("tier_map", {}) or {})
-
-        proxy_raw = cfg.get("proxy_fallback_aliases", {})
-        proxy = {k: v for k, v in proxy_raw.items() if not k.startswith("$")}
 
         skill_cfg = cfg.get("skill_routing", {})
         skill_map = {}
@@ -219,7 +220,6 @@ def _load_routing_config():
             overrides.get("escalate_to_standard", _STANDARD_DEFAULT),
             overrides.get("deescalate_to_light", _LIGHT_DEFAULT),
             tier_map,
-            proxy or _PROXY_DEFAULT,
             skill_map,
             dispatch_rule,
             pricing_from_config,
@@ -228,11 +228,11 @@ def _load_routing_config():
     except Exception as e:
         print(f"classify-message: failed to load model-routing.json, using defaults: {e}", file=sys.stderr)
         return (_HEAVY_DEFAULT, _STANDARD_DEFAULT, _LIGHT_DEFAULT,
-                _TIER_MAP_DEFAULT, _PROXY_DEFAULT, {}, _DISPATCH_RULE_DEFAULT,
+                _TIER_MAP_DEFAULT, {}, _DISPATCH_RULE_DEFAULT,
                 _PRICING_DEFAULT, _PROXY_INTERCEPT_RATES_DEFAULT)
 
 
-HEAVY_KW, STANDARD_KW, LIGHT_KW, TIER_MODEL_MAP, PROXY_FALLBACK, SKILL_TIER_MAP, DISPATCH_RULE, _MODEL_PRICING, _PROXY_INTERCEPT_RATES = _load_routing_config()
+HEAVY_KW, STANDARD_KW, LIGHT_KW, TIER_MODEL_MAP, SKILL_TIER_MAP, DISPATCH_RULE, _MODEL_PRICING, _PROXY_INTERCEPT_RATES = _load_routing_config()
 PROXY_DOWN = os.environ.get("LITELLM_FALLBACK_MODE") == "1"
 
 # --- Daily spend circuit breaker ---
@@ -875,10 +875,12 @@ def main():
         # Critical: opus is MAIN THREAD ONLY. haiku-tier agents use haiku; sonnet-tier use sonnet.
         lines.append(DISPATCH_RULE)
         if PROXY_DOWN:
-            subs = ", ".join(f"{k} → {v}" for k, v in PROXY_FALLBACK.items())
+            # No Anthropic substitute for the open-weights tiers (ADR-0002
+            # amendment 2026-10-29): name none, so the work waits for the proxy.
             lines.append(
                 "PROXY DOWN: LiteLLM proxy is unreachable. Do NOT use tier aliases "
-                "as Agent model parameters — they will fail. Substitute: " + subs
+                "as Agent model parameters — they will fail. There is no substitute "
+                "model: do not dispatch those sub-agents until the proxy is back."
             )
         lines.append("</model-routing>")
 

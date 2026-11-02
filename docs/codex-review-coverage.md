@@ -63,7 +63,21 @@ Encrypted reasoning may be replayed only after that same broker has received it
 in a validated successful provider response. Unsupported client changes fail
 closed and require fresh protocol qualification.
 
-## OIDC configuration and bootstrap
+## Personal account profiles
+
+The dormant default uses `personal_profiles`: each team member authorises their
+own account. Protected host policy selects repo first, then organisation, with
+no cross-organisation/default account fallback. See
+[owner onboarding, nomination and activation](codex-personal-review-profiles.md).
+The pinned code CLI uses GPT-6.1-Sol at medium for ordinary code, xhigh for
+escalated code and every security review. Account changes preserve completed
+review evidence; queued work rechecks its reserved consent and assignment.
+
+## Legacy OIDC configuration and bootstrap
+
+This section describes the separate opt-in `legacy_oidc` mode. The two credential
+modes are mutually exclusive.
+
 
 `scripts/ci/codex-review-worker.json` is instance-owned and disabled by default.
 Copier updates and capability sync must preserve it. Configure a dedicated
@@ -111,15 +125,17 @@ summary SHAs must resolve uniquely through GitHub. Findings need not be clean to
 prove execution; merge reviews and blocking security findings still apply.
 
 Before a model call the worker persists an authenticated revision/lane/policy
-attempt reservation. A failed/cancelled attempt suppresses automatic model
-retries within artifact retention; it never satisfies coverage. Disabled or
+attempt reservation. An attempt that may have started inference suppresses automatic model retries
+within artifact retention. An authenticated zero-inference failure may be
+explicitly rearmed by a new request; an unknown cancelled attempt remains
+blocked. Neither failure proves coverage. Disabled or
 unprovisioned requests cannot reserve an attempt. Exact-head native proof or a
 successful trusted worker result avoids duplicate inference. Concurrency
 serializes repository/PR/head/lane work; no hosted polling or quota retry exists.
 
 Worker proof authenticates the producing workflow ID/path/event/repository,
 default branch, official artifact ownership, full repository/PR/base/head/lane,
-policy/config/tool closure and image identity. Signed download redirects never
+review-policy/tool closure (funding assignments are bound separately) and image identity. Signed download redirects never
 receive the GitHub token. Bounded inert ZIP/JSON is validated without extraction.
 A completed result requires a host-observed completed provider turn plus a
 validated, digest-bound full `review.txt`. The code verdict comes from the
@@ -137,7 +153,7 @@ comment can authorize merge by itself.
 
 ## Limits and operating checks
 
-The code CLI is pinned to 0.151.0. Security CLI 0.2.0 retains its exact embedded
+The code CLI is pinned to 0.163.0. Security CLI 0.2.0 retains its exact embedded
 Codex/SDK 0.162.0-alpha.15 closure. Do not force the standalone code CLI version
 into the Security SDK or assume one runtime's probe certifies the other.
 
@@ -150,11 +166,10 @@ to 768 MiB address space/180 CPU seconds/240 wall seconds, 2,000 history depth,
 unresolvable/oversized range is incomplete coverage, not an exemption. Split or
 rebase an oversized/stale PR, or review a capacity change; never bypass review.
 
-Sensitive selection includes auth, tenant/RLS/schema, credentials, dependencies,
-CI permissions, network/crypto, deployment, merge, release, holds and policy
-controls, including both sides of renames. Ordinary resolved diffs receive an
-explicit security exemption. This path policy does not prove other files safe;
-existing static, dependency, secret and human checks still apply.
+Every resolved nonempty code-review diff receives a dedicated security review,
+including ordinary application/docs paths, deletions and renames. Only a proven
+empty diff is exempt. Historical `security_exempt` receipts cannot satisfy this
+policy. Existing static, dependency, secret and human checks still apply.
 
 Run the distributed receipt, workflow, broker and controller tests. Run the
 container qualification on a Docker-capable host with only synthetic auth.
@@ -167,7 +182,7 @@ existing deployment/promotion/merge controls and entity isolation.
 
 ## Subscription protocol compatibility
 
-Both pinned executables explicitly use `gpt-5.6-sol`; the trusted broker rejects
+Both pinned executables explicitly use `gpt-6.1-sol`; the trusted broker rejects
 other model names and the tool receipt records the model. The subscription
 service may label a completed Responses SSE body `text/plain`. The broker
 normalizes that label only after validating a completed Responses event stream;

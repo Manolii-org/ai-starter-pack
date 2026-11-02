@@ -571,6 +571,63 @@ def _parse_manifest(raw: str) -> dict:
     return last_shaped
 
 
+# RULE 1 floor. The model sees only diff hunks, so an edit to a workflow that
+# also deploys elsewhere in the file could look CI-only. This deterministic
+# check reads the whole changed workflow (and the removed lines) and forces
+# systems-consistency when any non-comment line could deploy. It can only add
+# the agent, never remove it. A false positive (a plain "deploy" mention) just
+# runs the review every workflow got before RULE 1 was narrowed; a false
+# negative would drop it, so the marker deliberately errs broad.
+_WORKFLOW_PATH = re.compile(r"(?:^|/)\.github/workflows/[^/]+\.ya?ml$")
+# Match the tool, not its subcommand: a workflow that invokes a deploy-capable
+# CLI at all might deploy, and subcommand patterns miss global options placed
+# first (`terraform -chdir=x apply`, `aws --region r ecs update-service`).
+_DEPLOY_MARKER = re.compile(
+    r"deploy|(?<![\w./-])(?:fly|flyctl|kubectl|helm|kustomize|argocd|terraform|tofu|pulumi"
+    r"|aws|az|gcloud|vercel|netlify|wrangler|heroku|railway|cdk|sam|serverless)(?=\s|$)",
+    re.I)
+
+
+def _deploy_lines(text: str) -> bool:
+    return any(_DEPLOY_MARKER.search(line) for line in text.splitlines()
+               if not line.lstrip().lstrip("+-").lstrip().startswith("#"))
+
+
+def _deploying_workflows(sections: dict[str, list[str]], repo_root: pathlib.Path) -> list[str]:
+    """Changed workflow paths whose full head file or diff lines could deploy."""
+    found = []
+    for path, texts in sorted(sections.items()):
+        if not _WORKFLOW_PATH.search(path):
+            continue
+        changed = "\n".join(line for text in texts for line in text.splitlines()
+                             if line[:1] in "+-" and not line.startswith(("+++", "---")))
+        # A pure rename out of .github/workflows/ has no +/- lines and no file
+        # at the old path, so also read the `rename to` target at head.
+        sources = [path, *(m.group(1).rstrip("\t").strip('"') for text in texts
+                           for m in re.finditer(r"^rename to (.+)$", text, re.M))]
+        head = ""
+        for source in sources:
+            try:
+                head += (repo_root / source).read_text(encoding="utf-8", errors="replace") + "\n"
+            except OSError:
+                pass
+        if _deploy_lines(changed) or _deploy_lines(head):
+            found.append(path)
+    return found
+
+
+def _apply_deploy_floor(manifest: dict, deploying: list[str]) -> dict:
+    if not deploying or "systems-consistency" in manifest.get("invoke_agents", []):
+        return manifest
+    floored = dict(manifest)
+    floored["invoke_agents"] = [*manifest.get("invoke_agents", []), "systems-consistency"]
+    floored["depth"] = "broad"
+    floored["reason"] = (f"{manifest.get('reason', '')}; RULE 1 floor: deploying workflow "
+                         + ", ".join(deploying[:5])).lstrip("; ")
+    print(f"[classifier] RULE 1 floor added systems-consistency for {deploying[:5]}")
+    return floored
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Stage 0: classify PR diff.")
     parser.add_argument("--diff", default=os.path.join(tempfile.gettempdir(), "pr.diff"), help="Path to PR diff file")
@@ -667,6 +724,7 @@ def main() -> None:
     # Parse `diff --git` headers: `+++ b/` misses deletions (`+++ /dev/null`)
     # and renames.
     changed_paths = set()
+    workflow_sections: dict[str, list[str]] = {}
     # --- a/, +++ b/, "rename from/to" lines: Git does NOT quote spaces, so
     # `diff --git` regexes drop spaced paths; these lines never do. /dev/null is
     # the absent side of an add/delete — skip it, keep the real path (a dropped
@@ -701,6 +759,8 @@ def main() -> None:
             if _hm:
                 _paths.add(_hm.group(1))
         changed_paths |= _paths
+        for _p in _paths:
+            workflow_sections.setdefault(_p, []).append(_sec)
     changed_paths = sorted(changed_paths)
     def _categories(p: str) -> list[int]:
         return [
@@ -893,6 +953,8 @@ def main() -> None:
             sys.exit(1)
         print(f"[classifier] Failed ({exc}), using fallback manifest")
         manifest = _FALLBACK_MANIFEST
+
+    manifest = _apply_deploy_floor(manifest, _deploying_workflows(workflow_sections, pathlib.Path.cwd()))
 
     out = pathlib.Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)

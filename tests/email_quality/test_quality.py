@@ -99,6 +99,42 @@ class QualityTests(unittest.TestCase):
             code, result = self.invoke('status')
         self.assertEqual((code, result['outcome']), (0, 'ready'))
 
+    def test_pending_inbox_message_waits_for_delivery_without_recreating_or_passing(self):
+        client = FakeClient()
+        state = self.state()
+        try:
+            start(client, state, self.profile, 'spam')
+            responses = iter([
+                {'id': 'opaque-id', 'status': 'pending_inbox_message', 'score': 0, 'results': []},
+                {'id': 'opaque-id', 'status': 'success', 'score': 90, 'results': []},
+            ])
+            client.result = lambda *args: next(responses)
+            with patch('email_quality.runner.time.sleep'):
+                result = wait(client, state, self.profile, 'spam')
+            self.assertEqual(result, {'kind': 'spam', 'score': 90, 'passed': True})
+            self.assertEqual(client.creates, 1)
+
+        finally:
+            state.close()
+
+    def test_pending_message_is_not_a_score_and_unknown_statuses_still_fail_closed(self):
+        self.assertIsNone(assess(self.profile, 'spam', {'status': 'pending_inbox_message', 'score': 0}))
+        with self.assertRaises(QualityError):
+            assess(self.profile, 'spam', {'status': 'pending_inbox_message_unknown', 'score': 100})
+        self.assertFalse(assess(self.profile, 'spam', {'status': 'success', 'score': 0})['passed'])
+
+    def test_notification_tab_is_valid_but_not_primary_inbox_placement(self):
+        result = assess(self.profile, 'inbox', {'status': 'success', 'results': [
+            {'status': 'success', 'tab': 'Inbox'},
+            {'status': 'success', 'tab': 'Notification'},
+        ]})
+        self.assertEqual(result['inbox_ratio'], 0.5)
+        self.assertEqual(result['non_spam_ratio'], 1)
+        self.assertEqual(result['normalized_placement_counts']['notification'], 1)
+        self.assertEqual(result['placement_counts'], {'Inbox': 1, 'Notification': 1})
+        self.assertFalse(result['passed'])
+        jsonschema.validate(result, RECEIPT['properties']['results']['items'])
+
     def test_run_shares_one_deadline_and_preserves_completed_results(self):
         clock = [0]
         client = FakeClient()

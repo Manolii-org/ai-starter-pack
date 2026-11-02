@@ -12,23 +12,11 @@ from pathlib import Path
 QUOTA = re.compile(r"(?:usage limits?|quota).{0,100}(?:reached|exceeded|exhausted)|"
                    r"(?:reached|exceeded|exhausted).{0,100}(?:usage limits?|quota)|"
                    r"insufficient_quota|rate_limit_exceeded", re.I | re.S)
-SENSITIVE = re.compile(
-    r"(?:^|/)(?:ci|\.github|\.gitlab|\.ai|\.claude|\.codex|\.cursor|\.githooks|auth(?:entication|orization)?|security|secrets?|"
-    r"migrations?|supabase|policies|permissions|deploy|infrastructure|terraform|"
-    r"crypto(?:graphy)?|network|webhooks?|audit|tenants?)(?:/|[_.-]|$)|"
-    r"(?:^|[/_.-])(?:deploy(?:ment)?|merge|hold|feature[-_]train|polic(?:y|ies)|guard|release|rollout)(?:/|[_.-]|$)|"
-    r"(?:^|/)(?:middleware|proxy|schema|Dockerfile|docker-compose|CODEOWNERS)(?:[./_-]|$)|"
-    r"(?:^|[/_.-])(?:rls|oauth|jwt|ssrf|csrf|acl|rbac|encryption|signing|"
-    r"saniti[sz](?:er|ation)|redact(?:ion|or)?|credentials?|secrets?|tokens?|session|payment|billing|boundaries|isolation|safety|authorization|authentication)(?:/|[_.-]|$)|"
-    r"(?:^|/)(?:package(?:-lock)?\.json|composer\.(?:json|lock)|Gemfile(?:\.lock)?|Cargo\.toml|pyproject\.toml|Pipfile(?:\.lock)?|pnpm-lock\.yaml|yarn\.lock|"
-    r"requirements[^/]*\.txt|uv\.lock|poetry\.lock|go\.(?:mod|sum)|Cargo\.lock)$",
-    re.I,
-)
 
 
 def security_required(paths: list[str]) -> bool:
-    """Unknown input is not an exemption; callers must prove a resolved range."""
-    return any(SENSITIVE.search(path) for path in paths)
+    """Every resolved nonempty code-review diff receives a security review."""
+    return bool(paths)
 
 
 def final_code_turn(raw: str) -> str:
@@ -44,7 +32,7 @@ def final_code_turn(raw: str) -> str:
 def classify(lane: str, env: dict[str, str], output: str | None) -> tuple[str, str, int | None]:
     """Pure, fail-closed execution classification from step outcomes and output."""
     range_state = env.get("RANGE_STATE", "unresolved")
-    if range_state == "empty" or (lane == "security" and range_state == "security_exempt"):
+    if range_state == "empty":
         return "exempt", range_state, None
     if range_state != "ready":
         return "failed_range", "unresolved_diff", None

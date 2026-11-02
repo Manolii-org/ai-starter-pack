@@ -1,6 +1,7 @@
 # Pre-PR Quality Gate
 
-> Complete all checks below before creating any PR.
+> Complete the pre-creation checks below before creating any PR.
+> After creation, verify the submitted body as required in section 0b.
 > Skipping this gate is the single largest source of avoidable review cycles.
 
 ## 0. Check for Coverage Gaps
@@ -19,6 +20,19 @@ For each bypassed specialist scope in recent commits, apply the manual check:
 | `docs-fact-check` | Complete Step 2 (Cross-Check Documentation) |
 | `migration-safety` | Verify rollback file, BEGIN/COMMIT wrapper, IF NOT EXISTS guards |
 | `security-deep-dive` | Manually trace all input boundaries for unsanitised interpolation |
+
+## 0b. Populate the Repository PR Template
+
+Before creating a PR, read the repository's applicable PR template and fill in
+its required sections. This also applies when using a GitHub API or MCP tool:
+a supplied `body` must include the completed template; do not assume the client
+will insert it automatically. Use the repository's current template rather than
+a remembered or generic description.
+
+Keep scope, do-not-touch constraints, success criteria, test results, merge danger
+and rollback specific to the final diff. Mark unavailable checks honestly.
+Verify the submitted body after creation. Preserve any explicit hold on an
+existing PR; a template correction does not authorize changing or merging it.
 
 ## 1. Self-Review the Diff
 
@@ -66,6 +80,16 @@ Execute all tests for changed files. If tests fail, fix before submitting. If no
 - Verify test files import the correct module (not a stale path)
 - Verify test assertions match test names
 - Verify stubs exercise the real code path, not just mock files
+- **Fixes for a reported or escaped defect** include a test that fails on the
+  base commit and passes with the fix, in the lane that should have caught it
+  (unit, e2e spec, or a `ui-smoke` route) — `docs/qa-framework.md`
+- **User-facing changes** were seen running: the finalise gate's `ui-smoke`
+  recipe (or `node scripts/qa/ui-smoke.mjs --routes <changed routes>`) passed,
+  or the PR states why it could not run
+
+The finalise gate (`scripts/qa/finalise-gate.py`) runs the affected recipes
+automatically at `git push` / PR creation; this step covers what recipes do
+not: new tests and journeys nobody has a recipe for yet.
 
 ## 4. Adversarial Security Tests (for security-claiming PRs)
 

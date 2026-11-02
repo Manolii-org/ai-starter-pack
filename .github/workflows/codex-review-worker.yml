@@ -17,8 +17,10 @@ concurrency:
 jobs:
   execute:
     name: Trusted subscription review (advisory findings)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    # Set only after restricted workflow access and persistent-host qualification.
+    # Personal-profile mode requires protected host policy and private repositories.
+    runs-on: ${{ fromJSON(vars.CODEX_TRUSTED_REVIEW_RUNNER || '"ubuntu-24.04"') }}
+    timeout-minutes: 60
     continue-on-error: true
     steps:
       - name: Check out trusted controller revision

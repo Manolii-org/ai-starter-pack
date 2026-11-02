@@ -21,6 +21,7 @@ instance:
   doppler_project: "{{ doppler_project }}"
   doppler_config: "{{ doppler_config }}"
   fly_app: "{{ fly_app }}"
+  isolation_profile: "{{ isolation_profile }}"
   repo_vars:
 {% if oss_routing %}
     - LITELLM_PROXY_URL
@@ -38,7 +39,8 @@ instance:
   # fly sections are printed as a manual checklist (not locally verifiable).
   required_secrets:
     github:
-      # Subscription reviews use the separately provisioned trusted-worker OIDC identity.
+      # Subscription reviews require a separately provisioned trusted worker: owner-authorised
+      # personal sessions, or an explicitly selected legacy OIDC identity.
 {% if oss_routing %}
       - DOPPLER_SERVICE_TOKEN_LITELLM
       - FLY_API_TOKEN

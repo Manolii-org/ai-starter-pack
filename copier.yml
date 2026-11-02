@@ -86,6 +86,34 @@ cost_profile:
     - lean
   default: standard
 
+# ── Isolation profile (D-c / D-f: opt-in in v1) ────────────────────────────
+# 'standard' renders exactly what earlier releases rendered. 'strict' is for
+# tenants that cannot use maintainer-hosted services (LiteLLM proxy, Knowledge
+# Layer, Langfuse, the maintainer's Doppler, mesh telemetry): hooks-only
+# .claude/settings.json (no bypassPermissions, no
+# skipDangerousModePermissionPrompt, no model/env/telemetry keys) and none of
+# the maintainer-coupled CI callers or LiteLLM deploy/publish files.
+isolation_profile:
+  type: str
+  help: "'standard' (default, unchanged) or 'strict' (no maintainer-hosted service coupling, hooks-only settings.json)"
+  choices:
+    - standard
+    - strict
+  default: standard
+  validator: >-
+    {% if isolation_profile == 'strict' and (oss_routing or kl_integration or langfuse_telemetry or mesh_telemetry) %}
+    isolation_profile=strict excludes maintainer-hosted services: set oss_routing, kl_integration, langfuse_telemetry and mesh_telemetry to false
+    {% endif %}
+
+codex_review:
+  type: bool
+  help: Ship the Codex PR review + security diff scan workflows (they read a Doppler master/prd_codex service token). Defaults on for 'standard' (unchanged) and off for 'strict'.
+  default: "{{ isolation_profile == 'standard' }}"
+  validator: >-
+    {% if codex_review and isolation_profile == 'strict' %}
+    isolation_profile=strict excludes the Codex review workflows (private CI requires its own trusted account host): set codex_review to false
+    {% endif %}
+
 # The source pack uses origin/main; new instances choose their own existing
 # integration ref. Later updates preserve the repository-owned recipe.
 agent_validation_base:
@@ -166,6 +194,9 @@ _exclude:
   - .github/workflows/codex-review-isolation-proof.yml
   - tests/codex_review_isolation_probe.py
   - tests/test_codex_review_isolation_probe.py
+  # The pack's own leaf context manifest (master context governance); a rendered
+  # instance must author its own, never inherit the template's identity.
+  - /.ai/repo-context.yaml
   # Renovate preset: consumers extend it remotely via
   # "github>Manolii-org/ai-starter-pack" — copying it into a rendered repo
   # would shadow the shared preset with a stale local snapshot.
@@ -198,6 +229,12 @@ _exclude:
   - .brand/**
   - scripts/render-pack.py
   - scripts/build-plugin.py
+  # Maintainer tool + its drift test: regenerates the pack's own
+  # REUSABLE-WORKFLOWS.md matrix; consumers call the reusables by tag.
+  - scripts/gen-reusable-matrix.py
+  - tests/test_reusable_matrix.py
+  # Pack-maintenance test: checks the pack's ported docs against the pack tree.
+  - tests/test_doc_path_references.py
   # Pack-only: the reusable workflow checks it out from the pack at pack_ref
   # (never a caller copy, since it holds the TypeSafe key).
   - scripts/jev_judge_shadow.py
@@ -213,6 +250,13 @@ _exclude:
   # also carries its own skipif guard, so an instance that already has a copy
   # skips rather than fails.
   - tests/test_hydrate_assessment.py
+  # Template-repo-only test: asserts on the pack root's .devin-plugin/plugin.json
+  # meta-plugin, which is not rendered; shipping it aborts the instance's pytest
+  # at collection.
+  - tests/test_devin_meta_plugin.py
+  # Pack proxy callback SDK-shape regressions use the owning CI test dependency.
+  # Consumer applications own their deployed proxy SDK and its integration tests.
+  - tests/test_advisor_fallback_envelope.py
   # Template-repo-only test: asserts on plugin/manolii-framework/, a build
   # artifact excluded below. Shipping it would require guessing at runtime
   # whether a checkout is the pack or a consumer; every filename signal
@@ -267,6 +311,8 @@ _exclude:
   - scripts/bootstrap-mirror.py
   - tests/test_registry.py
   - tests/test_native_guidance.py
+  - tests/test_session_terminal_callers.py
+  - scripts/tests/test_agent_validation_layout.py
   - .github/workflows/registry-lint.yml
   # Pack-only contract caller (require_contract: true would fail legacy
   # instances whose instance-owned CLAUDE.md predates the anchored sections).
@@ -303,6 +349,26 @@ _exclude:
   - "{% if not codex_adversarial %}.claude/agents/codex-adversarial.md{% endif %}"
   - "{% if not mesh_telemetry %}mesh-contract.yaml.template{% endif %}"
   - "{% if cost_profile == 'lean' %}.github/workflows/monitor-litellm.yml{% endif %}"
+  - "{% if not codex_review %}.github/workflows/codex-pr-review.yml{% endif %}"
+  - "{% if not codex_review %}.github/workflows/codex-security-diff-scan.yml{% endif %}"
+  - "{% if not codex_review %}.github/workflows/codex-review-worker.yml{% endif %}"
+  - "{% if not codex_review %}.github/workflows/codex-review-recovery.yml{% endif %}"
+  # isolation_profile=strict: the maintainer's Doppler / LiteLLM / fleet-coupled files.
+  - "{% if isolation_profile == 'strict' %}.github/workflows/setup-env-secret.yml{% endif %}"
+  - "{% if isolation_profile == 'strict' %}.github/workflows/dependabot-manual-automerge.yml{% endif %}"
+  - "{% if isolation_profile == 'strict' %}.github/workflows/monitor-litellm.yml{% endif %}"
+  - "{% if isolation_profile == 'strict' %}.github/workflows/publish-litellm-product-release.yml{% endif %}"
+  - "{% if isolation_profile == 'strict' %}deploy/litellm-proxy{% endif %}"
+  - "{% if isolation_profile == 'strict' %}litellm-product{% endif %}"
+  - "{% if isolation_profile == 'strict' %}config/litellm-effective-config.example.yaml{% endif %}"
+  - "{% if isolation_profile == 'strict' %}config/litellm-product-profile.example.json{% endif %}"
+  - "{% if isolation_profile == 'strict' %}scripts/setup-litellm.sh{% endif %}"
+  - "{% if isolation_profile == 'strict' %}scripts/build-litellm-product-asset.py{% endif %}"
+  - "{% if isolation_profile == 'strict' %}scripts/render-litellm-product-profile.py{% endif %}"
+  - "{% if isolation_profile == 'strict' %}tests/test_litellm_product_asset.py{% endif %}"
+  - "{% if isolation_profile == 'strict' %}tests/test_render_litellm_product_profile.py{% endif %}"
+  - "{% if isolation_profile == 'strict' %}scripts/tests/test_dependabot_manual_automerge.py{% endif %}"
+  - "{% if isolation_profile == 'strict' %}tests/test_openrouter_retention_policy.py{% endif %}"
   - "*.zip"
 
 # Instance-owned files: written on first copy, never overwritten by
@@ -311,6 +377,12 @@ _skip_if_exists:
   - scripts/ci/codex-review-worker.json
   - CLAUDE.md
   - config/agent-checks.json
+  # QA framework owner config + host hook files a consumer may already own
+  # (docs/qa-framework.md § Adopting). Written on first copy only.
+  - config/qa.json
+  - .cursor/hooks.json
+  - .codex/hooks.json
+  - .githooks/pre-push
   - .claude/model-routing.json
   - .claude/mcp.json
   - .claude/hooks/session-start.sh

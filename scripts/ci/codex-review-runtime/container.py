@@ -86,7 +86,10 @@ def bounded(command, *, cwd, seconds=1100):
 
 
 def main():
-    lane, base, head = sys.argv[1:]
+    lane, base, head, *options = sys.argv[1:]
+    reasoning = options[0] if len(options) == 1 else "xhigh" if not options else ""
+    if reasoning not in {"medium", "xhigh"}:
+        raise SystemExit("invalid reasoning policy")
     if lane not in {"code", "security"} or any(
         len(sha) != 40 or any(c not in "0123456789abcdef" for c in sha)
         for sha in (base, head)
@@ -174,7 +177,9 @@ def main():
     relay = http.server.HTTPServer(("127.0.0.1", 8123), Relay)
     threading.Thread(target=relay.serve_forever, daemon=True).start()
     config = [
-        'model="gpt-5.6-sol"',
+        'model="gpt-6.1-sol"',
+        'review_model="gpt-6.1-sol"',
+        'model_reasoning_effort="' + reasoning + '"',
         'model_provider="review"',
         'model_providers.review={name="review",base_url="http://127.0.0.1:8123/v1",wire_api="responses",requires_openai_auth=false,supports_websockets=false,request_max_retries=0,stream_max_retries=0}',
         "analytics.enabled=false",

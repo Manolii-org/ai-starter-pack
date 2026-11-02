@@ -634,7 +634,7 @@ def test_stateless_request_rejects_capabilities_before_host_auth(tmp_path, extra
 
 
 @pytest.mark.parametrize('body', [
-    json.dumps(review_payload()).replace('"model": "gpt-5.6-sol"', '"model": "gpt-5.6-sol", "model": "gpt-5.6-sol"').encode(),
+    json.dumps(review_payload()).replace('"model": "gpt-6.1-sol"', '"model": "gpt-6.1-sol", "model": "gpt-6.1-sol"').encode(),
     *[json.dumps(review_payload() | {'tools': [{'type': 'function', 'name': 'local',
        'parameters': {'type': 'object', 'default': 123456789}}]}).replace('123456789', constant).encode()
       for constant in ('NaN', 'Infinity', '-Infinity', '1e999')],

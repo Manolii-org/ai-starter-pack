@@ -10,18 +10,45 @@ Canonical home for the AI Starter Pack: a [Copier](https://copier.readthedocs.io
 
 ## Consumer pins (Prompt 11)
 
-Go-forward release: **`v1.14.0`** (annotated tag on `main`).
+Go-forward release: **`v1.25.1`** (annotated tag on `main`).
 
 ```yaml
 # Reusable workflows
-uses: Manolii-org/ai-starter-pack/.github/workflows/ci-reusable.yml@v1.14.0
+uses: Manolii-org/ai-starter-pack/.github/workflows/ci-reusable.yml@v1.25.1
 # Plugin
-# /plugin install manolii-framework@v1.14.0
+# /plugin install manolii-framework@v1.25.1
 ```
 
-Renovate preset: `extends: ["github>Manolii-org/ai-starter-pack"]` (optionally pin `#v1.14.0`).
+Prefer pinning the release commit SHA with a `# v1.25.1` comment
+(`uses: …/ci-reusable.yml@<commit-sha> # v1.25.1`); the Renovate preset's
+`manolii-ai-starter-pack` group proposes every pack bump as one reviewed PR.
+That PR updates `uses:` pins but not `pack_ref` inputs: where a caller passes
+`pack_ref` (for example `backup-kernel-validate-reusable`), change it to the
+same release in that PR, or the workflow keeps loading the previous one.
+
+Renovate preset: `extends: ["github>Manolii-org/ai-starter-pack"]` (optionally pin `#v1.25.1`).
 
 Legacy `manolii-org/master@v1` still serves `routing-lint` / `shared-config` until those move to the pack — dual Renovate extends are expected during dual-run.
+
+### Tag namespaces
+
+- **Pack releases** are bare `vX.Y.Z` annotated tags, cut only through
+  `.github/workflows/release-tag.yml` (workflow dispatch); that workflow also
+  moves the floating `v1` alias. Never hand-create or move a release tag —
+  consumers pin them, including by mutable tag checkout.
+- **Component releases** use prefixed tags: `email-capture-vX.Y.Z` for the
+  email-capture CLI and `feature-controls-vX.Y.Z` for the feature-control SDK
+  (cut through the same workflow; they never move `v1`). Copier, Renovate and
+  semver tooling ignore prefixed tags, so a component version never reads as a
+  pack release.
+- The bare `v0.1.x`–`v0.2.x` tags are legacy email-capture tags and stay in
+  place (some lanes check out `ref: v0.2.3`). New email-capture releases use the
+  prefixed form only. Since `v0.2.4`, `await` and `release` must find the
+  allocation in the same local registry `allocate` wrote — keep those steps in
+  one job (`docs/email-capture.md`). That document lists every legacy tag
+  with its commit and component. Most legacy tags are lightweight, and
+  `v0.2.4`–`v0.2.6` sit on Codex-review commits (`v0.2.6` is also
+  `email-capture-v0.2.6`).
 
 Standalone by default: all external integrations (OSS routing, remote memory, browser automation, telemetry, cross-provider review) are feature-flagged off.
 

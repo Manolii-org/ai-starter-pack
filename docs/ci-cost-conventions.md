@@ -123,6 +123,20 @@ fail that suite.
   ≥$0.01/run that is not a required check runs on the Fly pool via the
   fork-safe selector, on a settle-time (workflow_run/debounce), or nightly —
   never inline on every `pull_request`.
+  **Public Pack maintenance exception:** the four LLM jobs in the standalone
+  `pr-assessment.yml` may use standard `ubuntu-latest` on normal qualified PR
+  events only for repository ID `1268261727`, full name
+  `Manolii-org/ai-starter-pack`, and explicit `public` visibility together.
+  An unset/empty `CI_RUNNER_OVERRIDE` enables that fallback; an explicit override
+  keeps precedence. Fork isolation remains outermost. Copied, private, renamed,
+  transferred or uncertain identities keep the Fly fallback. This is not an
+  exemption for fleet product CI or other heavy advisory checks, and does not
+  establish that Assessment is a required check. GitHub documents no incremental
+  standard-hosted runner-minute charge for public repositories; provider calls
+  and storage remain subject to their existing charges and limits. Draft skips,
+  concurrency cancellation, review coverage, timeouts, model/data routes and
+  cost acceptance rules remain unchanged. No savings are claimed.
+  See [GitHub Actions billing](https://docs.github.com/en/billing/concepts/product-billing/github-actions).
 - **R3 — required checks are never path-filtered.** `on.pull_request.paths`
   on a required workflow leaves the check 'Expected' forever. Relevance
   gating is job-level instead: a slim detect job emits a scope, the gated

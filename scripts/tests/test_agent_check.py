@@ -2,6 +2,8 @@
 """Exercise local execution, invalidation and native-surface delivery."""
 from __future__ import annotations
 
+import concurrent.futures
+from contextlib import nullcontext
 import importlib.util
 import json
 import os
@@ -10,6 +12,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -74,6 +78,515 @@ class AgentCheckTests(unittest.TestCase):
 
     def change_source(self):
         (self.root / "src/value.py").write_text("value = 1\n# changed\n")
+
+    def test_external_diff_cannot_hide_a_failing_edit_from_cached_validation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            driver = Path(temp) / "display-diff"
+            driver.write_text("#!/bin/sh\nprintf 'display only\\n'\n")
+            driver.chmod(0o755)
+            env = {**os.environ, "GIT_EXTERNAL_DIFF": str(driver)}
+            self.change_source()
+            first = self.run_check(env=env)
+            self.assertIn("AGENT-CHECK test:", first.stdout)
+            (self.root / "src/value.py").write_text("value = 0\n# changed\n")
+            self.run_check(expected=1, env=env)
+            self.assertFalse(self.receipt()["cached"])
+
+    def test_textconv_cannot_hide_a_failing_edit_from_cached_validation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            driver = Path(temp) / "textconv"
+            driver.write_text("#!/bin/sh\nprintf 'display only\\n'\n")
+            driver.chmod(0o755)
+            (self.root / ".gitattributes").write_text("src/value.py diff=display\n")
+            self.git("add", ".gitattributes")
+            self.git("commit", "-qm", "fixture attributes")
+            self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+            self.git("config", "diff.display.textconv", str(driver))
+            self.change_source()
+            first = self.run_check()
+            self.assertIn("AGENT-CHECK test:", first.stdout)
+            (self.root / "src/value.py").write_text("value = 0\n# changed\n")
+            self.run_check(expected=1)
+            self.assertFalse(self.receipt()["cached"])
+
+    def test_git_color_configuration_does_not_invalidate_a_valid_cache(self):
+        self.change_source()
+        self.run_check()
+        self.git("config", "color.ui", "always")
+        self.run_check()
+        self.assertTrue(self.receipt()["cached"])
+
+    def test_clean_filter_cannot_hide_a_failing_working_file(self):
+        driver = self.root / ".git/clean-source"
+        driver.write_text("#!" + sys.executable + "\nimport sys\nbody=sys.stdin.read()\n"
+                          "print('candidate' if '# changed' in body else 'base')\n")
+        driver.chmod(0o755)
+        (self.root / ".gitattributes").write_text("src/value.py filter=constant\n")
+        self.git("config", "filter.constant.clean", str(driver))
+        self.git("add", ".gitattributes", "src/value.py")
+        self.git("commit", "-qm", "fixture filter")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        self.change_source()
+        normalized = self.git("diff", "--binary", "HEAD")
+        (self.root / "src/value.py").write_text("value = 0\n# changed\n")
+        self.assertEqual(normalized, self.git("diff", "--binary", "HEAD"))
+        actual = subprocess.run(self.config["checks"][0]["commands"][0], cwd=self.root,
+                                capture_output=True)
+        self.assertNotEqual(actual.returncode, 0)
+        for args in ((), ("--no-cache",), ("--plan",)):
+            with self.subTest(args=args):
+                result = self.run_check(*args, expected=2)
+                self.assertIn("Git filter attributes are unsupported", result.stderr)
+                self.assertNotIn("AGENT-CHECK-CACHED", result.stdout)
+                self.assertFalse((self.root / ".ai/agent-checks/receipt.json").exists())
+
+    def test_enabling_local_filter_revokes_warm_validation_before_selection(self):
+        self.change_source()
+        self.run_check()
+        (self.root / ".git/info/attributes").write_text("src/value.py filter=local\n")
+        result = self.run_check(expected=2)
+        self.assertIn("Git filter attributes are unsupported", result.stderr)
+        self.assertNotIn("AGENT-CHECK test:", result.stdout)
+        self.assertFalse((self.root / ".ai/agent-checks/receipt.json").exists())
+
+    def test_filter_driver_names_cannot_masquerade_as_attribute_sentinels(self):
+        for value in ("unspecified", "unset", "set"):
+            with self.subTest(value=value):
+                (self.root / ".git/info/attributes").write_text(f"src/value.py filter={value}\n")
+                result = self.run_check(expected=2)
+                self.assertIn("Git filter attributes are unsupported", result.stderr)
+
+    def test_index_flags_revoke_warm_validation_before_cache_or_selection(self):
+        for flag in ("--assume-unchanged", "--skip-worktree"):
+            with self.subTest(flag=flag):
+                self.change_source()
+                self.run_check()
+                self.git("update-index", flag, "src/value.py")
+                (self.root / "src/value.py").write_text("value = 0\n# changed\n")
+                for args in ((), ("--no-cache",), ("--plan",)):
+                    result = self.run_check(*args, expected=2)
+                    self.assertIn("Git index flags hide", result.stderr)
+                    self.assertNotIn("AGENT-CHECK-CACHED", result.stdout)
+                    self.assertFalse((self.root / ".ai/agent-checks/receipt.json").exists())
+                self.git("update-index", flag.replace("--", "--no-"), "src/value.py")
+
+    def test_fsmonitor_valid_cannot_hide_failing_bytes_from_a_warm_cache(self):
+        self.change_source()
+        self.git("add", "src/value.py")
+        self.git("commit", "-qm", "fixture candidate")
+        hook = self.root / ".git/fsmonitor-hook"
+        hook.write_text("#!/bin/sh\nprintf 'fixture-clock\\0'\n")
+        hook.chmod(0o755)
+        self.git("config", "core.fsmonitor", str(hook))
+        self.git("config", "core.fsmonitorHookVersion", "2")
+        self.run_check()
+        self.git("update-index", "--fsmonitor", "--fsmonitor-valid", "src/value.py")
+        (self.root / "src/value.py").write_text("value = 0\n# changed\n")
+        self.assertEqual(self.git("diff", "--binary", "HEAD"), b"")
+        plan = json.loads(self.run_check("--plan").stdout)
+        self.assertIn("src/value.py", plan["paths"])
+        self.assertIn("test", [item["id"] for item in plan["checks"]])
+        result = self.run_check(expected=1)
+        self.assertNotIn("AGENT-CHECK-CACHED", result.stdout)
+        self.assertFalse(self.receipt()["cached"])
+
+    def test_relaxed_stat_hints_cannot_hide_same_size_failing_bytes(self):
+        self.git("config", "core.trustctime", "false")
+        self.git("config", "core.checkStat", "minimal")
+        self.change_source()
+        path = self.root / "src/value.py"
+        os.utime(path, ns=(1_000_000_000, 1_000_000_000))
+        self.git("add", "src/value.py")
+        self.git("commit", "-qm", "fixture old-mtime candidate")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        self.run_check()
+        old = path.stat()
+        path.write_text("value = 0\n# changed\n")
+        os.utime(path, ns=(old.st_atime_ns, old.st_mtime_ns))
+        self.assertEqual(self.git("diff", "--binary", "HEAD"), b"")
+        plan = json.loads(self.run_check("--plan").stdout)
+        self.assertIn("src/value.py", plan["paths"])
+        self.assertIn("test", [item["id"] for item in plan["checks"]])
+        result = self.run_check(expected=1)
+        self.assertNotIn("AGENT-CHECK-CACHED", result.stdout)
+        self.assertFalse(self.receipt()["cached"])
+
+    def test_tracked_submodule_requires_a_raw_input_adapter(self):
+        head = self.git("rev-parse", "HEAD").decode().strip()
+        self.git("update-index", "--add", "--cacheinfo", "160000," + head + ",module")
+        (self.root / "module").mkdir()
+        (self.root / "module/working-file").write_text("unvalidated content")
+        result = self.run_check("--plan", expected=2)
+        self.assertIn("tracked directories/submodules need a raw-input validation adapter", result.stderr)
+
+    def test_empty_uninitialized_gitlink_binds_index_identity_and_selects_changes(self):
+        head = self.git("rev-parse", "HEAD").decode().strip()
+        self.git("update-index", "--add", "--cacheinfo", "160000," + head + ",module")
+        (self.root / "module").mkdir()
+        self.git("commit", "-qm", "empty gitlink")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        runner = load("agent-check")
+        self.assertEqual(runner.raw_tracked_inputs(self.root)["module"], ("160000", head))
+        self.git("config", "core.autocrlf", "true")
+        self.assertNotIn("module", json.loads(self.run_check("--plan").stdout)["paths"])
+        self.run_check()
+        replacement = self.git("rev-parse", "HEAD").decode().strip()
+        self.git("update-index", "--cacheinfo", "160000," + replacement + ",module")
+        self.assertIn("module", json.loads(self.run_check("--plan").stdout)["paths"])
+        self.assertNotIn("AGENT-CHECK-CACHED", self.run_check().stdout)
+
+    def test_empty_gitlink_cache_is_revoked_when_module_gains_content(self):
+        head = self.git("rev-parse", "HEAD").decode().strip()
+        self.git("update-index", "--add", "--cacheinfo", "160000," + head + ",module")
+        (self.root / "module").mkdir()
+        self.run_check()
+        (self.root / "module/.git").write_text("gitdir: fixture")
+        self.run_check(expected=2)
+        self.assertFalse((self.root / ".ai/agent-checks/receipt.json").exists())
+
+    def test_empty_directory_replacing_a_regular_tracked_file_stays_blocked(self):
+        (self.root / "src/value.py").unlink()
+        (self.root / "src/value.py").mkdir()
+        self.run_check("--plan", expected=2)
+
+    def test_empty_gitlink_does_not_reuse_absent_module_receipt(self):
+        head = self.git("rev-parse", "HEAD").decode().strip()
+        self.git("update-index", "--add", "--cacheinfo", "160000," + head + ",module")
+        self.run_check()
+        (self.root / "module").mkdir()
+        self.assertNotIn("AGENT-CHECK-CACHED", self.run_check().stdout)
+
+    def test_unmerged_empty_gitlink_stays_blocked(self):
+        head = self.git("rev-parse", "HEAD").decode().strip()
+        subprocess.run(["git", "update-index", "--index-info"], cwd=self.root,
+                       input=("160000 " + head + " 1\tmodule\n").encode(), check=True,
+                       env=load("agent-check").git_environment())
+        (self.root / "module").mkdir()
+        self.run_check("--plan", expected=2)
+
+    def test_gitlink_directory_must_remain_empty_and_identical_across_index_read(self):
+        head = self.git("rev-parse", "HEAD").decode().strip()
+        self.git("update-index", "--add", "--cacheinfo", "160000," + head + ",module")
+        module = self.root / "module"
+        module.mkdir()
+        runner = load("agent-check")
+        original = runner.git
+        for change in ("populate", "replace"):
+            with self.subTest(change=change):
+                def concurrent_read(root, *args):
+                    if args[:2] == ("ls-files", "--stage"):
+                        if change == "populate":
+                            (module / "unvalidated").write_text("changed during Git read")
+                        else:
+                            module.rename(self.root / "previous-module")
+                            module.mkdir()
+                    return original(root, *args)
+                with mock.patch.object(runner, "git", side_effect=concurrent_read):
+                    with self.assertRaisesRegex(ValueError, "raw-input validation adapter"):
+                        runner.raw_tracked_inputs(self.root)
+                if change == "populate":
+                    (module / "unvalidated").unlink()
+
+    def test_gitlink_scan_stays_bound_across_an_aba_name_swap(self):
+        head = self.git("rev-parse", "HEAD").decode().strip()
+        self.git("update-index", "--add", "--cacheinfo", "160000," + head + ",module")
+        module = self.root / "module"
+        module.mkdir()
+        (module / "unvalidated").write_text("must not disappear from the scan")
+        runner = load("agent-check")
+        scandir, listdir = os.scandir, os.listdir
+        saved = self.root / "original-module"
+        def swap_scan(value):
+            module.rename(saved)
+            module.mkdir()
+            try:
+                with scandir(value) as scan:
+                    entries = list(scan)
+            finally:
+                module.rmdir()
+                saved.rename(module)
+            return nullcontext(iter(entries))
+        def swap_list(value):
+            if Path(value) != module:
+                return listdir(value)
+            module.rename(saved)
+            module.mkdir()
+            try:
+                return listdir(value)
+            finally:
+                module.rmdir()
+                saved.rename(module)
+        # Model coarse mutation timestamps: inode binding must independently
+        # prevent scanning a replacement and accepting the restored original.
+        with mock.patch.object(runner.os, "scandir", side_effect=swap_scan) as scan_mock, \
+             mock.patch.object(runner.os, "listdir", side_effect=swap_list), \
+             mock.patch.object(runner.os, "supports_fd", os.supports_fd | {scan_mock}), \
+             mock.patch.object(runner, "directory_state", create=True,
+                               side_effect=lambda s: (s.st_dev, s.st_ino, s.st_mode)):
+            with self.assertRaisesRegex(ValueError, "raw-input validation adapter"):
+                runner.raw_tracked_inputs(self.root)
+
+    def test_gitlink_path_must_still_identify_scanned_directory(self):
+        head = self.git("rev-parse", "HEAD").decode().strip()
+        self.git("update-index", "--add", "--cacheinfo", "160000," + head + ",module")
+        module = self.root / "module"
+        module.mkdir()
+        runner = load("agent-check")
+        original = os.scandir
+        def replace_after_scan(value):
+            with original(value) as scan:
+                entries = list(scan)
+            module.rename(self.root / "original-module")
+            module.mkdir()
+            return nullcontext(iter(entries))
+        with mock.patch.object(runner.os, "scandir", side_effect=replace_after_scan) as scan_mock, \
+             mock.patch.object(runner.os, "supports_fd", os.supports_fd | {scan_mock}), \
+             mock.patch.object(runner, "directory_state", create=True,
+                               side_effect=lambda s: (s.st_dev, s.st_ino, s.st_mode)):
+            with self.assertRaisesRegex(ValueError, "raw-input validation adapter"):
+                runner.raw_tracked_inputs(self.root)
+
+    def test_gitlink_access_time_changes_do_not_block_repeated_validation(self):
+        head = self.git("rev-parse", "HEAD").decode().strip()
+        self.git("update-index", "--add", "--cacheinfo", "160000," + head + ",module")
+        (self.root / "module").mkdir()
+        runner = load("agent-check")
+        fstat, lstat = os.fstat, Path.lstat
+        count = 0
+        def access_only(details):
+            nonlocal count
+            count += 1
+            return SimpleNamespace(**{name: (count if name in ("st_atime", "st_atime_ns") else getattr(details, name))
+                                      for name in dir(details) if name.startswith("st_")})
+        with mock.patch.object(runner.os, "fstat", side_effect=lambda fd: access_only(fstat(fd))), \
+             mock.patch.object(Path, "lstat", autospec=True,
+                               side_effect=lambda path: access_only(lstat(path))):
+            for _ in range(3):
+                self.assertEqual(runner.raw_tracked_inputs(self.root)["module"], ("160000", head))
+
+    def test_gitlink_without_descriptor_enumeration_stays_blocked(self):
+        head = self.git("rev-parse", "HEAD").decode().strip()
+        self.git("update-index", "--add", "--cacheinfo", "160000," + head + ",module")
+        (self.root / "module").mkdir()
+        runner = load("agent-check")
+        with mock.patch.object(runner.os, "supports_fd", set()), \
+             mock.patch.object(runner.os, "open", side_effect=AssertionError("unsupported directory open")):
+            with self.assertRaisesRegex(ValueError, "raw-input validation adapter"):
+                runner.raw_tracked_inputs(self.root)
+
+    def test_gitlink_descriptor_is_closed_on_success_and_git_timeout(self):
+        head = self.git("rev-parse", "HEAD").decode().strip()
+        self.git("update-index", "--add", "--cacheinfo", "160000," + head + ",module")
+        (self.root / "module").mkdir()
+        runner = load("agent-check")
+        original = os.open
+        for timeout in (False, True):
+            descriptors = []
+            def opened(*args, **kwargs):
+                descriptor = original(*args, **kwargs)
+                descriptors.append(descriptor)
+                return descriptor
+            try:
+                with mock.patch.object(runner.os, "open", side_effect=opened):
+                    if timeout:
+                        with mock.patch.object(runner, "git", side_effect=subprocess.TimeoutExpired("git", 30)):
+                            with self.assertRaises(subprocess.TimeoutExpired):
+                                runner.empty_gitlink_identity(self.root, "module")
+                    else:
+                        self.assertEqual(runner.empty_gitlink_identity(self.root, "module"), head)
+                self.assertEqual(len(descriptors), 1)
+                for descriptor in descriptors:
+                    with self.assertRaises(OSError):
+                        os.fstat(descriptor)
+            finally:
+                for descriptor in descriptors:
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        pass
+
+    def test_git_reads_are_bounded_and_timeout_revokes_old_evidence(self):
+        runner = load("agent-check")
+        calls = []
+        def bounded(command, **kwargs):
+            calls.append(command)
+            self.assertGreater(kwargs["timeout"], 0)
+            self.assertLessEqual(kwargs["timeout"], 30)
+            return subprocess.CompletedProcess(command, 0, b"", b"")
+        with mock.patch.object(runner.subprocess, "run", side_effect=bounded):
+            runner.git(self.root, "ls-files")
+            runner.require_unfiltered_tracked_inputs(self.root)
+        self.assertEqual(len(calls), 4)
+        self.run_check()
+        with mock.patch.object(runner, "plan_for", side_effect=subprocess.TimeoutExpired(["git"], 30)):
+            self.assertEqual(runner.main(["--repo-root", str(self.root), "--provider", "codex"]), 2)
+        self.assertFalse((self.root / ".ai/agent-checks/receipt.json").exists())
+
+    def clean_conversion_fixture(self, attributes, *, encoding="utf-8"):
+        path = self.root / "src/value.py"
+        (self.root / ".gitattributes").write_text("src/value.py " + attributes + "\n")
+        path.write_text("value = 1\n# $Id$\n", encoding=encoding)
+        self.git("add", ".gitattributes", "src/value.py")
+        self.git("commit", "-qm", "fixture checkout conversion")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        path.unlink()
+        self.git("checkout", "HEAD", "--", "src/value.py")
+        return path
+
+    def test_clean_crlf_checkout_does_not_select_unchanged_checks(self):
+        path = self.clean_conversion_fixture("text eol=crlf")
+        self.assertIn(b"\r\n", path.read_bytes())
+        plan = json.loads(self.run_check("--plan").stdout)
+        self.assertNotIn("src/value.py", plan["paths"])
+        self.assertEqual(plan["checks"], [])
+
+    def test_clean_encoded_checkout_does_not_select_unchanged_checks(self):
+        self.clean_conversion_fixture("working-tree-encoding=UTF-16LE", encoding="utf-16-le")
+        plan = json.loads(self.run_check("--plan").stdout)
+        self.assertNotIn("src/value.py", plan["paths"])
+        self.assertEqual(plan["checks"], [])
+
+    def test_ident_checkout_is_clean_but_an_edit_hidden_by_clean_conversion_is_checked(self):
+        self.config["checks"][0]["commands"] = [[sys.executable, "-c",
+            "from pathlib import Path; assert b'altered' not in Path('src/value.py').read_bytes()"]]
+        self.save_config()
+        self.git("add", "config/agent-checks.json")
+        path = self.clean_conversion_fixture("ident")
+        self.assertIn(b"$Id: ", path.read_bytes())
+        self.assertNotIn("src/value.py", json.loads(self.run_check("--plan").stdout)["paths"])
+        self.run_check()
+        import re
+        path.write_bytes(re.sub(rb"\$Id:.*?\$", b"$Id: altered $", path.read_bytes()))
+        self.assertEqual(self.git("diff", "HEAD"), b"")
+        plan = json.loads(self.run_check("--plan").stdout)
+        self.assertIn("src/value.py", plan["paths"])
+        self.run_check(expected=1)
+        self.assertFalse(self.receipt()["cached"])
+
+    def test_unexpanded_ident_equal_to_canonical_blob_still_selects_owning_check(self):
+        self.config["checks"][0]["commands"] = [[sys.executable, "-c",
+            "from pathlib import Path; assert b'$Id: ' in Path('src/value.py').read_bytes()"]]
+        self.save_config()
+        self.git("add", "config/agent-checks.json")
+        path = self.clean_conversion_fixture("ident")
+        self.run_check()
+        import re
+        path.write_bytes(re.sub(rb"\$Id:.*?\$", b"$Id$", path.read_bytes()))
+        self.assertEqual(self.git("diff", "HEAD"), b"")
+        self.assertIn("src/value.py", json.loads(self.run_check("--plan").stdout)["paths"])
+        self.run_check(expected=1)
+
+    def test_autocrlf_clean_checkout_and_canonical_lf_edit_are_distinct_inputs(self):
+        self.config["checks"][0]["commands"] = [[sys.executable, "-c",
+            "from pathlib import Path; assert bytes([13,10]) in Path('src/value.py').read_bytes()"]]
+        self.save_config()
+        self.git("add", "config/agent-checks.json")
+        self.git("commit", "-qm", "fixture CRLF owning check")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        self.git("config", "core.autocrlf", "true")
+        # Recreate the checkout: checkout-index does not replace an existing
+        # identical index entry merely because the checkout policy changed.
+        (self.root / "src/value.py").unlink()
+        self.git("checkout-index", "--force", "--all")
+        path = self.root / "src/value.py"
+        self.assertIn(b"\r\n", path.read_bytes())
+        self.assertNotIn("src/value.py", json.loads(self.run_check("--plan").stdout)["paths"])
+        self.run_check()
+        path.write_bytes(path.read_bytes().replace(b"\r\n", b"\n"))
+        self.assertEqual(self.git("diff", "HEAD"), b"")
+        self.assertIn("src/value.py", json.loads(self.run_check("--plan").stdout)["paths"])
+        self.run_check(expected=1)
+
+    def test_ignored_executable_mode_is_not_an_extra_changed_path(self):
+        self.git("config", "core.fileMode", "false")
+        (self.root / "src/value.py").chmod(0o755)
+        self.assertNotIn("src/value.py", json.loads(self.run_check("--plan").stdout)["paths"])
+
+    def test_legacy_crlf_checkout_and_canonical_lf_edit_are_distinct_inputs(self):
+        self.config["checks"][0]["commands"] = [[sys.executable, "-c",
+            "from pathlib import Path; assert bytes([13,10]) in Path('src/value.py').read_bytes()"]]
+        self.save_config()
+        self.git("add", "config/agent-checks.json")
+        self.git("config", "core.eol", "crlf")
+        path = self.clean_conversion_fixture("crlf")
+        self.assertIn(b"\r\n", path.read_bytes())
+        self.assertNotIn("src/value.py", json.loads(self.run_check("--plan").stdout)["paths"])
+        self.run_check()
+        path.write_bytes(path.read_bytes().replace(b"\r\n", b"\n"))
+        self.assertEqual(self.git("diff", "HEAD"), b"")
+        self.assertIn("src/value.py", json.loads(self.run_check("--plan").stdout)["paths"])
+        self.run_check(expected=1)
+
+    def test_regular_checkout_of_symlink_is_not_an_extra_changed_path(self):
+        path = self.root / "link.txt"
+        path.symlink_to("target")
+        self.git("add", "link.txt")
+        self.git("commit", "-qm", "fixture link")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        self.git("config", "core.symlinks", "false")
+        path.unlink()
+        self.git("checkout", "HEAD", "--", "link.txt")
+        self.assertFalse(path.is_symlink())
+        self.assertNotIn("link.txt", json.loads(self.run_check("--plan").stdout)["paths"])
+
+    def test_absent_skip_worktree_is_allowed_for_sparse_checkout(self):
+        self.git("update-index", "--skip-worktree", "src/value.py")
+        (self.root / "src/value.py").unlink()
+        result = self.run_check("--plan")
+        self.assertNotIn("Git index flags hide", result.stderr)
+
+    def test_index_flag_paths_with_newlines_and_dangling_symlinks_are_checked(self):
+        path = self.root / "src/hidden\nvalue.py"
+        path.symlink_to("absent-target")
+        self.git("add", str(path.relative_to(self.root)))
+        self.git("commit", "-qm", "fixture symlink")
+        self.git("update-index", "--skip-worktree", str(path.relative_to(self.root)))
+        result = self.run_check("--plan", expected=2)
+        self.assertIn("Git index flags hide", result.stderr)
+
+    def test_concurrent_key_reader_waits_for_publisher_to_remove_temporary_link(self):
+        runner = load("agent-check")
+        published, release, waiting = threading.Event(), threading.Event(), threading.Event()
+        original_link, original_sleep = runner.os.link, runner.time.sleep
+
+        def paused_link(*args, **kwargs):
+            original_link(*args, **kwargs)
+            published.set()
+            if not release.wait(5):
+                raise RuntimeError("Fixture publisher was not released")
+
+        def observed_wait(seconds):
+            waiting.set()
+            original_sleep(seconds)
+
+        with mock.patch.object(runner.os, "link", side_effect=paused_link), mock.patch.object(
+            runner, "time", wraps=runner.time
+        ) as clock, concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            clock.sleep.side_effect = observed_wait
+            writer = pool.submit(runner.private_cache_key, self.root)
+            try:
+                self.assertTrue(published.wait(5))
+                reader = pool.submit(runner.private_cache_key, self.root)
+                self.assertTrue(waiting.wait(1), "reader must observe the two-link publication window")
+            finally:
+                release.set()
+            self.assertTrue(writer.result(timeout=5) == reader.result(timeout=5))
+        path = self.root / ".ai/agent-checks/environment.key"
+        self.assertEqual(len(path.read_bytes()), 32)
+        self.assertEqual(path.stat().st_nlink, 1)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_persistent_cache_key_links_remain_rejected_with_a_bounded_wait(self):
+        runner = load("agent-check")
+        runner.private_cache_key(self.root)
+        path = self.root / ".ai/agent-checks/environment.key"
+        os.link(path, path.with_name("unexpected-link"))
+        with mock.patch.object(runner, "time", wraps=runner.time) as clock:
+            clock.sleep.return_value = None
+            with self.assertRaisesRegex(ValueError, "private regular file"):
+                runner.private_cache_key(self.root)
+            self.assertLessEqual(clock.sleep.call_count, 20)
+        self.assertEqual(path.stat().st_nlink, 2, "an unsafe key must not be repaired or replaced")
 
     def test_utf8_repository_and_receipts_ignore_default_locale(self):
         self.config["note"] = "Café validation"
@@ -205,6 +718,27 @@ class AgentCheckTests(unittest.TestCase):
         key.chmod(0o644)
         self.run_check(expected=2)
         self.assertFalse((state / "receipt.json").exists())
+
+
+
+    def test_key_permissions_are_rechecked_after_creator_link_wait(self):
+        runner = load("agent-check")
+        runner.private_cache_key(self.root)
+        path = self.root / ".ai/agent-checks/environment.key"
+        extra = path.with_name("creator-temporary-link")
+        os.link(path, extra)
+
+        def finish_with_unsafe_permissions(_seconds):
+            path.chmod(0o644)
+            extra.unlink()
+
+        with mock.patch.object(runner, "time", wraps=runner.time) as clock:
+            clock.sleep.side_effect = finish_with_unsafe_permissions
+            with self.assertRaisesRegex(ValueError, "owned private regular file"):
+                runner.private_cache_key(self.root)
+        clock.sleep.assert_called_once()
+        self.assertEqual(path.stat().st_nlink, 1)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o644)
 
     def test_untracked_file_to_symlink_cannot_reuse_the_regular_file_pass(self):
         target = self.root / "node_modules/value.txt"
@@ -369,14 +903,98 @@ class AgentCheckTests(unittest.TestCase):
                             "tool_requirements": {"node": "vfixture-1"}})
         self.save_config()
         env = {**os.environ, "PATH": str(binaries) + os.pathsep + os.environ["PATH"]}
-        self.run_check("--provision", env=env)
+        self.run_check("--provision", expected=1, env=env)
+        self.assertIn("later provisioning", next(r for r in self.receipt()["results"] if r["id"] == "first")["reason"])
         self.assertFalse(self.receipt()["cached"])
         self.run_check("--provision", env=env)
-        self.assertTrue(self.receipt()["cached"])
+        self.assertFalse(self.receipt()["cached"])
         self.run_check(env=env)
         self.assertTrue(self.receipt()["cached"])
         for name in ("first", "second"):
-            self.assertEqual((self.root / f"node_modules/{name}/installs").read_text(), "1")
+            self.assertEqual((self.root / f"node_modules/{name}/installs").read_text(), "11" if name == "first" else "1")
+
+    def test_newly_provisioned_environment_is_not_rekeyed_after_later_tool_change(self):
+        state = self.root / ".ai/agent-checks"
+        binaries = state / "bin"
+        binaries.mkdir(parents=True)
+        (state / "tool-version").write_text("vfixture-1")
+        binary = binaries / "node"
+        binary.write_text(f"#!{sys.executable}\nfrom pathlib import Path\n"
+                          "print(Path('.ai/agent-checks/tool-version').read_text())\n")
+        binary.chmod(0o755)
+        first = ("from pathlib import Path; import subprocess; "
+                 "p=Path('node_modules/first'); p.mkdir(parents=True,exist_ok=True); "
+                 "(p/'installed-tool-version').write_text(subprocess.check_output(['node','--version'],text=True).strip())")
+        second = ("from pathlib import Path; p=Path('node_modules/second'); p.mkdir(parents=True,exist_ok=True); "
+                  "Path('.ai/agent-checks/tool-version').write_text('vfixture-2')")
+        self.config["environments"] = [
+            {"id": "first", "tools": ["node"], "ready_paths": ["node_modules/first"], "commands": [[sys.executable, "-c", first]]},
+            {"id": "second", "tools": ["node"], "ready_paths": ["node_modules/second"], "commands": [[sys.executable, "-c", second]]},
+        ]
+        self.config["checks"] = [{**self.config["checks"][0], "id": f"check-{name}", "environment": name, "tools": ["node"]}
+                                 for name in ("first", "second")]
+        self.save_config()
+        env = {**os.environ, "PATH": str(binaries) + os.pathsep + os.environ["PATH"]}
+        self.run_check("--provision", expected=1, env=env)
+        failed = next(r for r in self.receipt()["results"] if r["id"] == "first")
+        self.assertEqual(failed["status"], "failed")
+        self.assertIn("later provisioning", failed["reason"])
+        self.assertEqual((self.root / "node_modules/first/installed-tool-version").read_text(), "vfixture-1")
+        self.assertFalse(any(r["id"].startswith("check-") for r in self.receipt()["results"]))
+        self.run_check("--provision", env=env)
+        self.assertEqual((self.root / "node_modules/first/installed-tool-version").read_text(), "vfixture-2")
+        self.run_check(env=env)
+        self.assertTrue(self.receipt()["cached"])
+
+    def test_later_provisioning_invalidates_an_earlier_cached_environment(self):
+        state = self.root / ".ai/agent-checks"
+        binaries = state / "bin"
+        binaries.mkdir(parents=True)
+        version = state / "tool-version"
+        version.write_text("vfixture-1")
+        binary = binaries / "node"
+        binary.write_text(f"#!{sys.executable}\nfrom pathlib import Path\n"
+                          "print(Path('.ai/agent-checks/tool-version').read_text())\n")
+        binary.chmod(0o755)
+        (self.root / "second.lock").write_text("vfixture-1")
+        environments = []
+        checks = []
+        for name in ("first", "second"):
+            setup = ("from pathlib import Path; "
+                     f"p=Path('node_modules/{name}'); p.mkdir(parents=True,exist_ok=True); "
+                     "c=p/'installs'; c.write_text(c.read_text()+'1' if c.exists() else '1')")
+            if name == "second":
+                setup += "; Path('.ai/agent-checks/tool-version').write_text(Path('second.lock').read_text())"
+            environments.append({"id": name, "inputs": ["second.lock" if name == "second" else "lock.json"],
+                                 "tools": ["node"], "ready_paths": [f"node_modules/{name}"],
+                                 "commands": [[sys.executable, "-c", setup]]})
+            checks.append({**self.config["checks"][0], "id": f"check-{name}",
+                           "environment": name, "tools": ["node"]})
+        self.config.update({"environments": environments, "checks": checks})
+        self.save_config()
+        env = {**os.environ, "PATH": str(binaries) + os.pathsep + os.environ["PATH"]}
+        self.run_check("--provision", env=env)
+        self.run_check("--provision", env=env)
+        self.assertTrue(self.receipt()["cached"])
+
+        (self.root / "second.lock").write_text("vfixture-2")
+        self.run_check("--provision", expected=1, env=env)
+        receipt = self.receipt()
+        failed = next(r for r in receipt["results"] if r["id"] == "first")
+        self.assertEqual(failed["status"], "failed")
+        self.assertIn("later provisioning", failed["reason"])
+        self.assertFalse(any(r["id"].startswith("check-") for r in receipt["results"]))
+        runner = load("agent-check")
+        old_receipt = state / "environments" / f"environment-{runner.sha(runner.encoded('first'))}.json"
+        self.assertFalse(old_receipt.exists())
+        self.assertEqual((self.root / "node_modules/first/installs").read_text(), "1")
+        self.assertEqual((self.root / "node_modules/second/installs").read_text(), "11")
+
+        self.run_check("--provision", env=env)
+        self.assertFalse(self.receipt()["cached"])
+        self.assertEqual((self.root / "node_modules/first/installs").read_text(), "11")
+        self.run_check(env=env)
+        self.assertTrue(self.receipt()["cached"])
 
     def test_failed_reinstall_cannot_revive_receipt_for_restored_tool_version(self):
         state = self.root / ".ai/agent-checks"
@@ -502,8 +1120,29 @@ class AgentCheckTests(unittest.TestCase):
     def test_missing_command_reports_unavailable_and_never_passes(self):
         self.config["checks"][0]["commands"] = [["agent-check-fixture-nonexistent"]]
         self.save_config()
-        self.run_check(expected=1)
+        result = self.run_check(expected=1)
         self.assertIn("unavailable", [r["status"] for r in self.receipt()["results"]])
+        self.assert_failure_summary(result)
+
+    def assert_failure_summary(self, result):
+        lines = result.stdout.splitlines()
+        summaries = [json.loads(line.removeprefix("AGENT-CHECK-RESULT "))
+                     for line in lines if line.startswith("AGENT-CHECK-RESULT ")]
+        expected = [{key: item[key] for key in ("id", "status", "reason")}
+                    for item in self.receipt()["results"] if item["status"] != "passed"]
+        self.assertTrue(expected)
+        self.assertEqual(summaries, expected)
+        verdict = next(i for i, line in enumerate(lines) if line.startswith("AGENT-CHECK-FAILED "))
+        self.assertTrue(all(i < verdict for i, line in enumerate(lines)
+                            if line.startswith("AGENT-CHECK-RESULT ")))
+
+    def test_all_failed_checks_are_summarised_without_passing_checks(self):
+        self.config["checks"] = [
+            {"id": name, "commands": [[sys.executable, "-c", f"raise SystemExit({code})"]]}
+            for name, code in (("pass", 0), ("first", 3), ("second", 4))
+        ]
+        self.save_config()
+        self.assert_failure_summary(self.run_check(expected=1))
 
     def test_receipts_must_be_ignored(self):
         (self.root / ".gitignore").write_text("")
@@ -573,8 +1212,9 @@ class AgentCheckTests(unittest.TestCase):
     def test_ci_toolchain_mismatch_is_incomplete_validation(self):
         self.config["tool_requirements"] = {"python": "Python 0."}
         self.save_config()
-        self.run_check(expected=1)
+        result = self.run_check(expected=1)
         self.assertIn("unavailable", [r["status"] for r in self.receipt()["results"]])
+        self.assert_failure_summary(result)
 
     def test_changed_ci_command_requires_recipe_update(self):
         (self.root / "workflow.yml").write_text("run: new-command\n")

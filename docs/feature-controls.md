@@ -11,11 +11,11 @@ npm install "git+https://github.com/Manolii-org/ai-starter-pack.git#<FULL_COMMIT
 pip install "git+https://github.com/Manolii-org/ai-starter-pack.git@<FULL_COMMIT_SHA>#subdirectory=packages/feature-controls/python"
 ```
 
-The root npm bridge exports `@manolii/feature-controls` and `@manolii/feature-controls/client`. Its explicit files allowlist contains compiled/source SDK, schema and this document (npm also includes mandatory metadata, README and license). Safe `prepare` only builds strict TypeScript. GrowthBook is pinned to JS `1.8.0` / Python `3.2.0`; package semver `0.0.0` is independent of wire version. There is no registry publication. A verified SHA-256 `npm pack` tarball is another handoff artifact, not a registry version. npm cannot install from a git subdirectory; committed consumers must not use local `file:` dependencies.
+The root npm bridge exports `@manolii/feature-controls` and `@manolii/feature-controls/client`. Its explicit files allowlist contains compiled/source SDK, schema and this document (npm also includes mandatory metadata, README and license). Safe `prepare` only builds strict TypeScript. GrowthBook is pinned to JS `1.8.0` / Python `3.2.0`; package semver (`0.1.0` from `feature-controls-v0.1.0`) is independent of wire version. There is no registry publication. A verified SHA-256 `npm pack` tarball is another handoff artifact, not a registry version. npm cannot install from a git subdirectory; committed consumers must not use local `file:` dependencies.
 
 ### pnpm Git build permission
 
-Git build permission is **pnpm-version-sensitive**, not a pnpm-major contract. The **strictest, preferred** source-specific contract below is verified on **11.17.0 and 11.28.5**. The dependency remains the full-SHA Git spec from above; the permission key uses the **resolved codeload tarball URL**, not the literal Git dependency spec and not package version 0.0.0.
+Git build permission is **pnpm-version-sensitive**, not a pnpm-major contract. The **strictest, preferred** source-specific contract below is verified on **11.17.0 and 11.28.5**. The dependency remains the full-SHA Git spec from above; the permission key uses the **resolved codeload tarball URL**, not the literal Git dependency spec and not the package version.
 
 Verbatim isolated replay configuration in pnpm-workspace.yaml (candidate evidence, not an approved consumer pin):
 
@@ -31,9 +31,9 @@ Where source keys are unsupported, the **portable fallback** is package name plu
 
     strictDepBuilds: true
     allowBuilds:
-      "@manolii/feature-controls@0.0.0": true
+      "@manolii/feature-controls@0.1.0": true
 
-This fallback is verified on 11.5.2 with the same SHA-pinned dependency above; a wrong-version permission is denied. Use the package version declared by that exact SDK source, not an invented registry version. It is **not equivalent** to source-specific approval: pnpm permits build scripts for any source with that name/version, while the dependency declaration and lockfile carry source binding. Version 0.0.0 is shared by multiple candidate commits; it does not identify a source revision. Review the exact repository/SHA and all resolved occurrences of this package before granting permission. Re-review source/lockfile changes even when the package version is unchanged.
+This fallback is verified on 11.5.2 with the same SHA-pinned dependency above; a wrong-version permission is denied. Use the package version declared by that exact SDK source, not an invented registry version. It is **not equivalent** to source-specific approval: pnpm permits build scripts for any source with that name/version, while the dependency declaration and lockfile carry source binding. A package version is shared by every commit until the next version bump (`0.0.0` covered every pre-release commit); it does not identify a source revision. When you move to a new release, update this key to the version that release declares. Review the exact repository/SHA and all resolved occurrences of this package before granting permission. Re-review source/lockfile changes even when the package version is unchanged.
 
 Never use package-wide/global lifecycle permission, version ranges or unpinned sources. Keep strictDepBuilds enabled and verify a fresh install, exact Git SHA in the lockfile, and both imports under the consumer's pinned pnpm version. A reviewed toolchain change can retain stricter source-specific approval. A SHA-256-verified prebuilt tarball imports with scripts blocked in a separate local smoke; that does **not** validate Git preparation or authorize committed machine-local file dependencies, registry publication or consumer delivery. Consumer manifests, lockfiles and version-specific permissions remain consumer-owned.
 

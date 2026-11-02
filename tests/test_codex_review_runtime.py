@@ -56,7 +56,8 @@ def test_actual_pinned_tool_execution_and_outer_boundary(tmp_path, monkeypatch, 
     image = worker.build_image(tmp_path)
     directory = tmp_path / "broker"
     directory.mkdir(mode=0o700)
-    target = {"lane": lane, "base_sha": base, "head_sha": head}
+    target = {"lane": lane, "base_sha": base, "head_sha": head,
+              "reasoning_effort": "medium" if lane == "code" else "xhigh"}
     profile = worker.qualify_sandbox(image, source, directory, target)
     probe = """import json,os,socket
 from pathlib import Path
@@ -137,7 +138,7 @@ text('SYNTHETIC_WORKBENCH_OK');
             "object": "response",
             "created_at": 1,
             "status": "completed",
-            "model": "gpt-5.6-sol",
+            "model": "gpt-6.1-sol",
             "output": [message],
             "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
         }
@@ -165,7 +166,8 @@ text('SYNTHETIC_WORKBENCH_OK');
         }
     )
     with serve(
-        directory / "model.sock", auth, transport=upstream, max_seconds=100
+        directory / "model.sock", auth, transport=upstream, max_seconds=100,
+        expected_effort=target["reasoning_effort"],
     ) as broker:
         result = worker.run_container(image, source, directory, target, profile=profile)
         assert broker.successful_turns == 2

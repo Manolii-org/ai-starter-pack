@@ -69,8 +69,23 @@ Classify `door` and `blast_radius` for every diff, independent of routing:
 ## Classification Rules
 
 ```
-RULE 1: IF any file matches deploy/**/*.{sh,toml,yaml} OR .github/workflows/** OR templates/**/.github/workflows/**
+RULE 1: IF any file matches deploy/**/*.{sh,toml,yaml}
+  OR a changed workflow (.github/workflows/** or templates/**/.github/workflows/**)
+     deploys, or might: a job or step that changes a running service. That
+     includes a `fly`/`flyctl` command such as `deploy`, `secrets set`, `scale`
+     or `machine update`; `vercel deploy`; a deploy/** or *deploy*.sh script; a
+     step applying config to a running service (for example `kubectl apply`,
+     `helm upgrade` or `terraform apply`); or a `uses:` of an action or
+     reusable workflow that deploys (for example a path or name containing
+     `deploy`). Edits to such a workflow's triggers, conditions, env or secrets
+     count too.
   → invoke_agents: add "systems-consistency", depth: broad
+  Skip RULE 1 only for a workflow that clearly does not deploy: CI, lint,
+  scans, review, or release/tag automation. Installing a CLI (for example
+  superfly/flyctl-actions/setup-flyctl) is not a deploy step. When unsure
+  whether a workflow deploys, apply RULE 1. You see only the diff, so the
+  runner also reads each changed workflow in full and adds systems-consistency
+  itself when any line could deploy.
 
 RULE 2: IF any file matches migrations/**/*.sql
   → invoke_skills: add "migration-safety"

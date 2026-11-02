@@ -55,9 +55,10 @@ def test_sensitive_paths_require_security(path):
     assert receipt.security_required([path])
 
 
-def test_ordinary_paths_can_be_explicitly_exempted():
-    assert not receipt.security_required(["docs/style.md", "src/components/Button.tsx"])
-    assert receipt.classify("security", READY | {"RANGE_STATE": "security_exempt"}, None)[0] == "exempt"
+def test_ordinary_paths_require_security_and_old_exemptions_fail_closed():
+    assert receipt.security_required(["docs/style.md", "src/components/Button.tsx"])
+    assert not receipt.security_required([])
+    assert receipt.classify("security", READY | {"RANGE_STATE": "security_exempt"}, None)[0] == "failed_range"
 
 
 def test_receipt_identity_and_no_model_text():

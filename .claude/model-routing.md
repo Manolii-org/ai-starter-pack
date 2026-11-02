@@ -41,7 +41,8 @@ When the LiteLLM proxy is enabled, application code routes to these stable tier 
 | `tier-0-sonnet` | Anthropic | claude-sonnet-4-6 | 79.6% | $3 | $15 | any | Implement, debug, review |
 | `tier-0-oss-heavy` | Fireworks | Kimi K2.6 | 58.6%† | $0.50 | $2.80 | internal/public | SWE-patch, bulk-extract, math — **RESTRICTED USE** |
 | `tier-1-fast` | Fireworks | DeepSeek V3.2 | 73.1% | $0.56 | $1.68 | internal/public | Boilerplate, single-step, format |
-| `tier-2-agentic` | Together | Kimi K2.5 | 76.8% | $0.50 | $2.80 | internal/public | Long tool chains, 262K context |
+| `tier-2-agentic` | Fireworks | Kimi K2.6 | — | $0.95 | $4.00 | internal/public | Long tool chains, 262K context |
+| `tier-2-agentic-pro` | Fireworks | MiniMax M3 | — | $0.30 | $1.20 | internal/public | Agentic code repair (Autofix proxy default), 1M context |
 | `tier-3-tool` | Fireworks | GLM-4.7 | 75.0% | $0.60 | $2.20 | internal/public | Tool-heavy agents (90.6% tool-call success) |
 | `tier-4-extract` | Groq | Llama 3.1 8B | 60.0% | $0.05 | $0.08 | internal/public | Grep, count, extract, bulk classification |
 | `tier-5-latency` | Groq (LPU) | Llama 3.1 8B | — | $0.05 | $0.08 | internal/public | DOM selection, real-time classification (~800 tok/s) |
@@ -174,7 +175,7 @@ The proxy translates stable tier names (`tier-1-fast`, `tier-2-agentic`, etc.) i
 ### Prerequisites
 
 - Fly.io account + `flyctl` CLI
-- API keys: `FIREWORKS_API_KEY`, `TOGETHER_API_KEY`, `GROQ_API_KEY`, `ANTHROPIC_API_KEY`
+- API keys: `FIREWORKS_API_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY`, `ANTHROPIC_API_KEY`
 - (Optional) Doppler for secrets management
 
 ### Quick start
@@ -190,7 +191,7 @@ flyctl secrets set \
   LITELLM_MASTER_KEY="$(openssl rand -hex 24)" \
   ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
   FIREWORKS_API_KEY="$FIREWORKS_API_KEY" \
-  TOGETHER_API_KEY="$TOGETHER_API_KEY" \
+  OPENROUTER_API_KEY="$OPENROUTER_API_KEY" \
   GROQ_API_KEY="$GROQ_API_KEY" \
   --app myapp-litellm
 flyctl deploy --app myapp-litellm
@@ -223,7 +224,7 @@ for TIER in tier-1-fast tier-2-agentic tier-3-tool tier-4-extract tier-5-latency
 done
 ```
 
-> **Note:** Always live-probe Together models before relying on them in production. Together's `/v1/models` catalog includes dedicated-only endpoints not available on serverless plans — `model_not_available` errors at call time are the only reliable signal.
+> **Note:** Always live-probe a provider route before relying on it in production. Provider catalogs (Together's `/v1/models`, for example) list dedicated-only models alongside serverless ones — an error at call time is the only reliable signal. The template's Kimi, Qwen and MiniMax fallbacks run on OpenRouter, pinned to US-hosted zero-data-retention endpoints (`&openrouter_us_zdr` in `deploy/litellm-proxy/config.yaml`).
 
 ---
 

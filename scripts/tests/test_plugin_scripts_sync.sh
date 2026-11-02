@@ -14,6 +14,9 @@ PAIRS=(
   instruction-load-audit.py
   verify-instruction-load-audit.py
   rotate-jsonl-receipt.py
+  qa/finalise-gate.py
+  qa/finalise-gate.sh
+  qa/ui-smoke.mjs
 )
 fail=0
 for rel in "${PAIRS[@]}"; do

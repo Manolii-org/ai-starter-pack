@@ -77,6 +77,7 @@ TIERS: list[str] = [
     "tier-0-oss-heavy",            # Kimi K2.6 on Fireworks
     "tier-1-fast",                 # DeepSeek V4 Flash on OpenRouter (2026-05-23 capability primary)
     "tier-2-agentic",              # Kimi K2.6 on Fireworks
+    "tier-2-agentic-pro",          # MiniMax M3 on Fireworks (Autofix proxy default)
     "tier-3-tool",                 # Gemma 4 31B on Together (2026-05-23 capability primary)
     "tier-3-tool-us",              # Gemma 4 31B on Together (US-origin chain)
     "tier-4-extract",              # DeepSeek V4 Flash on OpenRouter
@@ -149,6 +150,7 @@ LATENCY_THRESHOLDS: dict[str, dict[str, int]] = {
     "tier-3-tool":                 {"warn": 8000,  "fail": 20000},
     "tier-3-tool-us":              {"warn": 8000,  "fail": 20000},
     "tier-2-agentic":              {"warn": 10000, "fail": 25000},
+    "tier-2-agentic-pro":          {"warn": 15000, "fail": 30000},
     "tier-0-oss-heavy":            {"warn": 15000, "fail": 30000},
     "claude-haiku-4-5-20251001":   {"warn": 8000,  "fail": 20000},
     "haiku":                     {"warn": 8000,  "fail": 20000},
@@ -177,17 +179,19 @@ _HARDCODED_FALLBACKS: list[str] = [
     "claude-haiku-4-5-20251001-fireworks-fallback",
     "claude-haiku-4-5-20251001-groq-fallback",
     # tier-0-oss-heavy
-    "tier-0-oss-heavy-fallback-together",
+    "tier-0-oss-heavy-fallback-openrouter",
     "tier-0-oss-heavy-fallback-glm",
     # tier-1-fast
-    "tier-1-fast-fallback-together",
+    "tier-1-fast-fallback-openrouter",
     "tier-1-fast-fallback-groq",
     # tier-2-agentic
     "tier-2-agentic-fallback-kimi",
     "tier-2-agentic-fallback-fireworks",
+    # tier-2-agentic-pro (MiniMax M3 on a second provider)
+    "tier-2-agentic-pro-fallback-openrouter",
     # tier-3-tool (2026-05-23: Gemma 4 31B primary; Kimi K2.6 PRC fallbacks)
     "tier-3-tool-fallback-kimi-fireworks",
-    "tier-3-tool-fallback-kimi-together",
+    "tier-3-tool-fallback-kimi-openrouter",
     # tier-3-tool-us fallbacks (v5.5.6 — all-US-origin chain; corrected gptoss20b→gptoss120b)
     "tier-3-tool-us-fallback-gptoss120b",
     "tier-3-tool-us-fallback-llama8b",
@@ -303,7 +307,7 @@ def _latency_threshold(alias: str) -> dict[str, int]:
     """Return latency thresholds for a given alias, with fallback headroom."""
     if alias in LATENCY_THRESHOLDS:
         return LATENCY_THRESHOLDS[alias]
-    # Derive from parent tier (e.g., "tier-1-fast-fallback-together" → "tier-1-fast")
+    # Derive from parent tier (e.g., "tier-1-fast-fallback-openrouter" → "tier-1-fast")
     for tier_name, thresholds in LATENCY_THRESHOLDS.items():
         if alias.startswith(tier_name):
             return {

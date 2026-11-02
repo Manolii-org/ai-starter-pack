@@ -7,6 +7,8 @@ an external, credential-free container. Failures are explicit incomplete states.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+from functools import partial
 import hashlib
 import io
 import json
@@ -14,6 +16,7 @@ import os
 from pathlib import Path
 import re
 import selectors
+import signal
 import subprocess
 import sys
 import tempfile
@@ -32,7 +35,10 @@ from codex_review_broker import (
     Subscription,
     serve,
 )
-from codex_review_receipt import build_receipt, final_code_turn, security_required
+from codex_review_receipt import build_receipt, final_code_turn
+from codex_review_receipt import security_required as security_required
+import codex_review_profiles as profiles
+from codex_review_models import effort
 
 HERE = Path(__file__).resolve().parent
 WORKFLOW = ".github/workflows/codex-review-worker.yml"
@@ -50,7 +56,7 @@ SAFE_SLUG = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 TOOLS = {
     "model": REVIEW_MODEL,
-    "code": "0.151.0",
+    "code": "0.163.0",
     "security": "0.2.0",
     "security_codex": "0.162.0-alpha.15",
     "security_sdk": "0.162.0-alpha.15",
@@ -67,7 +73,8 @@ def policy_hash():
         "codex_review_worker.py",
         "codex_review_broker.py",
         "codex_review_receipt.py",
-        "codex-review-worker.json",
+        "codex_review_profiles.py",
+        "codex_review_models.py",
         "codex-review-runtime/Dockerfile",
         "codex-review-runtime/container.py",
         "codex-review-runtime/seccomp.json",
@@ -327,10 +334,30 @@ def read_receipt(raw, target, policy, *, run_id, workflow_sha):
         raise Incomplete("invalid_receipt_result")
     if receipt["state"] == "exempt" and receipt.get("reason") not in {
         "empty",
-        "security_exempt",
     }:
         raise Incomplete("invalid_receipt_result")
+    funding = receipt.get("funding_profile")
+    if funding is not None:
+        required = {"repository", "profile", "owner", "generation", "account_sha256",
+                    "host_sha256", "host_access_sha256", "consent_sha256", "assignment_sha256"}
+        if (not isinstance(funding, dict) or set(funding) != required
+                or funding.get("repository") != target["repository"].lower()
+                or not profiles.valid(profiles.SLUG, funding.get("profile"))
+                or not profiles.valid(profiles.SLUG, funding.get("owner"))
+                or type(funding.get("generation")) is not int or funding["generation"] < 1
+                or any(not profiles.valid(profiles.HASH, funding.get(key))
+                       for key in ("account_sha256", "host_sha256", "host_access_sha256", "consent_sha256", "assignment_sha256"))
+                or profiles.digest({key: value for key, value in funding.items() if key != "assignment_sha256"})
+                != funding["assignment_sha256"]):
+            raise Incomplete("invalid_receipt_funding")
+    started = receipt.get("provider_invocation_started")
+    if (started is not None and type(started) is not bool) or (
+        started is False and (receipt["state"] == "completed" or receipt.get("successful_provider_turns") != 0)
+    ):
+        raise Incomplete("invalid_receipt_invocation")
     if receipt["state"] == "completed":
+        if funding is not None and not isinstance(receipt.get("capacity_snapshot"), dict):
+            raise Incomplete("invalid_receipt_funding")
         if (
             not output
             or hashlib.sha256(output.encode()).hexdigest()
@@ -366,6 +393,7 @@ def prior_receipt(github, target, repository, *, ignore_run=None):
     # Query exact artifact names, not thousands of unrelated workflow runs.
     # An attempt reservation prevents automatic retries after cancellation or
     # publication failure. It can never satisfy coverage.
+    no_inference_runs = set()
     for prefix in ("codex-trusted", "codex-attempt"):
         name = (
             f"{prefix}-{target['pull_request']}-{target['lane']}-{target['head_sha']}"
@@ -397,6 +425,16 @@ def prior_receipt(github, target, repository, *, ignore_run=None):
                     run_id=run["id"],
                     workflow_sha=run["head_sha"],
                 )
+                if (prefix == "codex-trusted" and receipt["state"] not in {"completed", "exempt"}
+                        and receipt.get("provider_invocation_started") is False
+                        and receipt.get("successful_provider_turns") == 0):
+                    # Authenticated zero-inference admission/install failures
+                    # can be explicitly rearmed by a new request. Ignore only
+                    # their own reservation; unknown/cancelled attempts block.
+                    no_inference_runs.add(run["id"])
+                    continue
+                if prefix == "codex-attempt" and run["id"] in no_inference_runs:
+                    continue
                 if prefix == "codex-attempt" and (
                     receipt["state"] != "blocked_previous_attempt"
                     or receipt["reason"] != "attempt_reserved"
@@ -442,6 +480,7 @@ def verify_reservation(github, target, repository):
         or receipt["reason"] != "attempt_reserved"
     ):
         raise Incomplete("attempt_reservation_unverified")
+    return receipt
 
 
 def native_proof(github, target):
@@ -643,6 +682,34 @@ def scoped_subscription(config):
         return Subscription(json.loads(secret))
     except (OSError, ValueError, KeyError, BrokerError, urllib.error.URLError) as exc:
         raise Incomplete("blocked_credentials") from exc
+
+
+def configured_profile(config, target, repository, *, reserved=None):
+    if config.get("enabled") is not True:
+        raise Incomplete("blocked_credentials")
+    mode = config.get("credential_mode", "legacy_oidc")
+    if mode == "personal_profiles":
+        if config.get("identity") or repository.get("private") is not True:
+            raise Incomplete("blocked_credentials")
+        return profiles.select(target["repository"], target["lane"], reserved=reserved)
+    if mode != "legacy_oidc" or not config.get("identity") or reserved is not None:
+        raise Incomplete("blocked_credentials")
+    return None
+
+
+@contextmanager
+def review_subscription(config, target, repository, funding):
+    configured_profile(config, target, repository, reserved=funding)
+    if config.get("credential_mode") == "personal_profiles":
+        if funding is None:
+            raise Incomplete("blocked_credentials")
+        # Only administratively restricted, trusted controller workflows may
+        # execute on this host. The external registry checks the exact workflow
+        # against a current administrator's access-verification receipt.
+        with profiles.session(funding, target["repository"], target["lane"]) as (auth, snapshot):
+            yield Subscription(auth), snapshot
+    else:
+        yield scoped_subscription(config), None
 
 
 def git_input(directory, target, token):
@@ -852,7 +919,7 @@ def container_args(image, source, broker_directory, target, name, *, profile=Non
         args += ["--env", key + "="]
     if profile:
         args += ["--security-opt", "apparmor=" + profile]
-    args += [image, target["lane"], target["base_sha"], target["head_sha"]]
+    args += [image, target["lane"], target["base_sha"], target["head_sha"], target.get("reasoning_effort", "xhigh")]
     return args
 
 
@@ -862,7 +929,7 @@ def qualify_sandbox(image, source, directory, target):
     for attempt in range(2):
         name = "codex-probe-" + os.urandom(8).hex()
         args = container_args(image, source, directory, target, name, profile=profile)[
-            :-4
+            :-5
         ]
         args += [
             "--entrypoint",
@@ -943,17 +1010,22 @@ def run_container(image, source, directory, target, *, profile=None):
         raise Incomplete("failed_scan") from exc
 
 
-def receipt_for(target, state, reason, image, *, output="", successful_turns=0):
+def receipt_for(target, state, reason, image, *, output="", successful_turns=0, funding=None, capacity=None,
+                provider_invocation_started=None):
     return {
         "output_sha256": hashlib.sha256(output.encode()).hexdigest()
         if state == "completed"
         else None,
         "successful_provider_turns": successful_turns,
+        "provider_invocation_started": provider_invocation_started,
         **target,
         "schema": "codex-trusted-review/v2",
         "state": state,
         "reason": reason,
         "billing_mode": "subscription",
+        "funding_profile": funding,
+        "capacity_snapshot": capacity,
+        "funding_enforcement": "owner_credit_controls_required",
         "auth_boundary": "external_broker",
         "policy_sha256": policy_hash(),
         "tools": TOOLS,
@@ -994,6 +1066,9 @@ def publish(github, target, receipt, output):
     elif receipt["state"] != "exempt":
         body += "No completed review is available for this revision.\n"
     if receipt["state"] == "completed":
+        funding = receipt.get("funding_profile")
+        if funding:
+            body += "\nSubscription profile: `" + funding["profile"] + "` (owner `" + funding["owner"] + "`).\n"
         body += (
             ("\nComment shortened. " if truncated else "\n")
             + "Complete review.txt: [trusted run artifacts](https://github.com/"
@@ -1025,9 +1100,11 @@ def publish(github, target, receipt, output):
         )
 
 
-def execute(github, target, repository, directory):
+def execute(github, target, repository, directory, *, funding=None):
     image = "sha256:" + "0" * 64
     output = ""
+    provider_started = False
+    result_receipt_for = partial(receipt_for, funding=funding)
     try:
         previous = prior_receipt(
             github, target, repository, ignore_run=int(os.environ["GITHUB_RUN_ID"])
@@ -1051,39 +1128,53 @@ def execute(github, target, repository, directory):
                     previous["image_id"],
                     output=previous.get("_output", ""),
                     successful_turns=previous.get("successful_provider_turns", 0),
+                    funding=previous.get("funding_profile"),
+                    capacity=previous.get("capacity_snapshot"),
+                    provider_invocation_started=previous.get("provider_invocation_started"),
                 ),
                 previous.get("_output", ""),
                 True,
             )
         source, paths = git_input(directory, target, github.token)
-        if not paths or (target["lane"] == "security" and not security_required(paths)):
+        if not paths:
             return (
-                receipt_for(
-                    target, "exempt", "empty" if not paths else "security_exempt", image
+                result_receipt_for(
+                    target, "exempt", "empty", image
                 ),
                 "",
                 True,
             )
         config = json.loads((HERE / "codex-review-worker.json").read_text())
-        if config.get("enabled") is not True or not config.get("identity"):
-            raise Incomplete("blocked_credentials")
+        configured_profile(config, target, repository, reserved=funding)
+        runtime_target = {**target, "reasoning_effort": effort(target["lane"], paths)}
         image = build_image(directory)
         if not fresh(github, target):
             raise Incomplete("superseded_revision")
         socket_directory = directory / "broker"
         socket_directory.mkdir(mode=0o700)
-        profile = qualify_sandbox(image, source, socket_directory, target)
+        profile = qualify_sandbox(image, source, socket_directory, runtime_target)
         if not fresh(github, target):
             raise Incomplete("superseded_revision")
-        subscription = scoped_subscription(config)
-        with serve(
-            socket_directory / "model.sock",
-            subscription,
-            max_requests=MAX_REQUESTS[target["lane"]],
-        ) as broker:
-            result = run_container(
-                image, source, socket_directory, target, profile=profile
-            )
+        with review_subscription(config, target, repository, funding) as (subscription, snapshot):
+            # Account admission can wait for another bounded scan. Recheck
+            # revision and late native proof after that wait, before any spend.
+            if not fresh(github, target):
+                raise Incomplete("superseded_revision")
+            if native_proof(github, target):
+                return result_receipt_for(target, "blocked_previous_attempt", "native_proof_available", image,
+                                          provider_invocation_started=False), "", False
+            with serve(
+                socket_directory / "model.sock",
+                subscription,
+                max_requests=MAX_REQUESTS[target["lane"]],
+                expected_effort=runtime_target["reasoning_effort"],
+            ) as broker:
+                # Conservatively latch before the scanner can make its first
+                # request. A later failure/cancellation must never auto-retry.
+                provider_started = True
+                result = run_container(
+                    image, source, socket_directory, runtime_target, profile=profile
+                )
         if broker.terminal_error:
             raise Incomplete(
                 "blocked_quota"
@@ -1122,19 +1213,23 @@ def execute(github, target, repository, directory):
         }
         result_receipt = build_receipt(target["lane"], env, output)
         return (
-            receipt_for(
+            result_receipt_for(
                 target,
                 result_receipt["state"],
                 result_receipt["reason"],
                 image,
                 output=output,
                 successful_turns=broker.audit()["successful_provider_turns"],
+                capacity=snapshot,
+                provider_invocation_started=True,
             ),
             output,
             True,
         )
     except (Incomplete, OSError, ValueError, subprocess.SubprocessError) as exc:
-        state = str(exc) if isinstance(exc, Incomplete) else "failed_scan"
+        reason = str(exc) if isinstance(exc, (Incomplete, profiles.ProfileError)) else "failed_scan"
+        state = ("blocked_quota" if reason in {"profile_capacity_exhausted", "profile_session_busy"}
+                 else "blocked_credentials" if isinstance(exc, profiles.ProfileError) else reason)
         if state not in {
             "blocked_credentials",
             "blocked_quota",
@@ -1144,7 +1239,8 @@ def execute(github, target, repository, directory):
             "failed_output",
         }:
             state = "failed_scan"
-        return receipt_for(target, state, state, image), "", True
+        return result_receipt_for(target, state, reason, image,
+                                   provider_invocation_started=provider_started), "", True
 
 
 def rerun_completion(github, request, lane, target):
@@ -1162,6 +1258,10 @@ def rerun_completion(github, request, lane, target):
 
 
 def main():
+    def cancelled(_signum, _frame):
+        raise Incomplete("controller_cancelled")
+
+    signal.signal(signal.SIGTERM, cancelled)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "operation", choices=["prepare", "run", "coverage", "recover", "publish"]
@@ -1215,12 +1315,12 @@ def main():
         ):
             raise Incomplete("operator_disabled")
         config = json.loads((HERE / "codex-review-worker.json").read_text())
-        if config.get("enabled") is not True or not config.get("identity"):
-            raise Incomplete("blocked_credentials")
+        funding = configured_profile(config, target, repository)
         destination = Path(os.environ["RUNNER_TEMP"]) / "codex-trusted-attempt"
         destination.mkdir(mode=0o700, exist_ok=True)
         receipt = receipt_for(
-            target, "blocked_previous_attempt", "attempt_reserved", "sha256:" + "0" * 64
+            target, "blocked_previous_attempt", "attempt_reserved", "sha256:" + "0" * 64,
+            funding=funding,
         )
         (destination / "receipt.json").write_text(
             json.dumps(receipt, sort_keys=True) + "\n"
@@ -1230,7 +1330,7 @@ def main():
                 f"artifact=codex-attempt-{target['pull_request']}-{target['lane']}-{target['head_sha']}\nneeded=true\n"
             )
         return
-    verify_reservation(github, target, repository)
+    reservation = verify_reservation(github, target, repository)
     if os.environ.get("CODEX_REVIEW_ENABLED") == "false" or (
         target["lane"] == "security"
         and os.environ.get("CODEX_SECURITY_ENABLED") == "false"
@@ -1239,7 +1339,12 @@ def main():
     with tempfile.TemporaryDirectory(
         prefix="codex-trusted-", dir=os.environ["RUNNER_TEMP"]
     ) as temporary:
-        receipt, output, created = execute(github, target, repository, Path(temporary))
+        receipt, output, created = execute(github, target, repository, Path(temporary),
+                                           funding=reservation.get("funding_profile"))
+    if not created:
+        rerun_completion(github, request, target["lane"], target)
+        print("Exact native proof arrived during account admission; no model execution.")
+        return
     if created:
         destination = Path(os.environ["RUNNER_TEMP"]) / "codex-trusted-result"
         destination.mkdir(mode=0o700, exist_ok=True)

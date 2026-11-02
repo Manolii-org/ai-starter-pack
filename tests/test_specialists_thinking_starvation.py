@@ -35,6 +35,8 @@ SPEC.loader.exec_module(MODULE)
 
 @pytest.fixture(autouse=True)
 def admitted_transport_fixture(monkeypatch):
+    # Unit fixtures must not inherit the CI launcher; hosted cases set explicit context.
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
     # These are transport/input unit tests with fake responses, not authority
     # evidence. test_review_route_admission exercises real policy admission.
     monkeypatch.setattr(MODULE, "require_direct_llm_admission", lambda: None)

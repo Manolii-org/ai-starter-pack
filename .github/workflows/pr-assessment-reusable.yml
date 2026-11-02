@@ -968,6 +968,8 @@ jobs:
 
       - name: Run judge
         env:
+          REVIEW_SKILLS: ${{ needs.classify.outputs.invoke_skills }}
+          REVIEW_AGENTS: ${{ needs.classify.outputs.invoke_agents }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}

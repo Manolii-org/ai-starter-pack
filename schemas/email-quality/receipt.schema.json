@@ -123,7 +123,7 @@
             "type": "object",
             "minProperties": 1,
             "propertyNames": {
-              "pattern": "^([Ii][Nn][Bb][Oo][Xx]|[Ss][Pp][Aa][Mm]|[Mm][Ii][Ss][Ss][Ii][Nn][Gg]|[Pp][Rr][Oo][Mm][Oo][Tt][Ii][Oo][Nn][Ss]|[Uu][Pp][Dd][Aa][Tt][Ee][Ss]|[Nn][Ee][Ww][Ss][Ll][Ee][Tt][Tt][Ee][Rr])$"
+              "pattern": "^([Ii][Nn][Bb][Oo][Xx]|[Ss][Pp][Aa][Mm]|[Mm][Ii][Ss][Ss][Ii][Nn][Gg]|[Pp][Rr][Oo][Mm][Oo][Tt][Ii][Oo][Nn][Ss]|[Uu][Pp][Dd][Aa][Tt][Ee][Ss]|[Nn][Ee][Ww][Ss][Ll][Ee][Tt][Tt][Ee][Rr]|[Nn][Oo][Tt][Ii][Ff][Ii][Cc][Aa][Tt][Ii][Oo][Nn])$"
             },
             "additionalProperties": {
               "type": "integer",
@@ -158,6 +158,10 @@
               "newsletter": {
                 "type": "integer",
                 "minimum": 0
+              },
+              "notification": {
+                "type": "integer",
+                "minimum": 0
               }
             },
             "required": [
@@ -184,7 +188,7 @@
               "properties": {
                 "raw_placement": {
                   "type": "string",
-                  "pattern": "^([Ii][Nn][Bb][Oo][Xx]|[Ss][Pp][Aa][Mm]|[Mm][Ii][Ss][Ss][Ii][Nn][Gg]|[Pp][Rr][Oo][Mm][Oo][Tt][Ii][Oo][Nn][Ss]|[Uu][Pp][Dd][Aa][Tt][Ee][Ss]|[Nn][Ee][Ww][Ss][Ll][Ee][Tt][Tt][Ee][Rr])(?![\\s\\S])"
+                  "pattern": "^([Ii][Nn][Bb][Oo][Xx]|[Ss][Pp][Aa][Mm]|[Mm][Ii][Ss][Ss][Ii][Nn][Gg]|[Pp][Rr][Oo][Mm][Oo][Tt][Ii][Oo][Nn][Ss]|[Uu][Pp][Dd][Aa][Tt][Ee][Ss]|[Nn][Ee][Ww][Ss][Ll][Ee][Tt][Tt][Ee][Rr]|[Nn][Oo][Tt][Ii][Ff][Ii][Cc][Aa][Tt][Ii][Oo][Nn])(?![\\s\\S])"
                 },
                 "placement": {
                   "enum": [
@@ -193,7 +197,8 @@
                     "missing",
                     "promotions",
                     "updates",
-                    "newsletter"
+                    "newsletter",
+                    "notification"
                   ]
                 },
                 "mailbox_id": {
@@ -204,7 +209,7 @@
             }
           },
           "non_spam_ratio": {
-            "description": "Inbox plus Promotions, Updates and Newsletter over all expected mailboxes. Reporting only; never a pass/fail threshold.",
+            "description": "Inbox plus Promotions, Updates, Newsletter and Notification over all expected mailboxes. Reporting only; never a pass/fail threshold.",
             "type": "number",
             "minimum": 0,
             "maximum": 1

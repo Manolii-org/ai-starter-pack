@@ -265,6 +265,68 @@ def add_artifact(github, data, prefix="codex-trusted"):
     github.archives[99] = archive(data)
 
 
+@pytest.mark.parametrize("started,rearmable", [(False, True), (True, False), (None, False)])
+def test_only_proven_zero_inference_can_rearm_its_own_reservation(metadata, started, rearmable):
+    github = FakeGitHub()
+    failed = worker.receipt_for(TARGET, "blocked_quota", "profile_session_busy",
+                                "sha256:" + "d" * 64,
+                                provider_invocation_started=started)
+    add_artifact(github, failed)
+    reservation = worker.receipt_for(TARGET, "blocked_previous_attempt", "attempt_reserved",
+                                     "sha256:" + "0" * 64)
+    github.artifacts.append({"id": 100, "name": f"codex-attempt-1-code-{HEAD}",
+                             "expired": False, "size_in_bytes": 1000,
+                             "workflow_run": {"id": 30, "head_sha": CONTROLLER}})
+    github.archives[100] = archive(reservation)
+    proof = worker.prior_receipt(github, TARGET, REPOSITORY)
+    assert (proof is None) is rearmable
+    # A different producer's unresolved reservation must still suppress retry.
+    if rearmable:
+        github.data["/actions/runs/31"] = {**RUN, "id": 31}
+        github.artifacts[-1]["workflow_run"]["id"] = 31
+        github.archives[100] = archive({**reservation, "producer_run_id": 31})
+        assert worker.prior_receipt(github, TARGET, REPOSITORY)["reason"] == "attempt_reserved"
+
+
+def test_ordinary_security_diff_reaches_the_scanner_boundary(metadata, tmp_path, monkeypatch):
+    monkeypatch.setattr(worker, "prior_receipt", lambda *a, **k: None)
+    monkeypatch.setattr(worker, "git_input", lambda *a: (tmp_path, ["docs/style.md"]))
+    monkeypatch.setattr(worker, "configured_profile", lambda *a, **k: None)
+    calls = []
+
+    def image(_):
+        calls.append(True)
+        raise worker.Incomplete("failed_install")
+
+    monkeypatch.setattr(worker, "build_image", image)
+    result, _, _ = worker.execute(FakeGitHub(), {**TARGET, "lane": "security"}, REPOSITORY, tmp_path)
+    assert calls and result["state"] == "failed_install"
+    assert result["provider_invocation_started"] is False
+
+
+def test_revision_is_rechecked_after_account_wait_before_any_inference(metadata, tmp_path, monkeypatch):
+    from contextlib import contextmanager
+
+    waiting = []
+    monkeypatch.setattr(worker, "prior_receipt", lambda *a, **k: None)
+    monkeypatch.setattr(worker, "git_input", lambda *a: (tmp_path, ["docs/style.md"]))
+    monkeypatch.setattr(worker, "configured_profile", lambda *a, **k: None)
+    monkeypatch.setattr(worker, "build_image", lambda *a: "sha256:" + "d" * 64)
+    monkeypatch.setattr(worker, "qualify_sandbox", lambda *a: None)
+    monkeypatch.setattr(worker, "fresh", lambda *a: not waiting)
+    monkeypatch.setattr(worker, "run_container", lambda *a, **k: pytest.fail("stale revision reached inference"))
+
+    @contextmanager
+    def admitted(*a):
+        waiting.append(True)
+        yield None, None
+
+    monkeypatch.setattr(worker, "review_subscription", admitted)
+    result, _, _ = worker.execute(FakeGitHub(), TARGET, REPOSITORY, tmp_path)
+    assert result["reason"] == "superseded_revision"
+    assert result["provider_invocation_started"] is False
+
+
 def test_only_authenticated_producer_artifact_satisfies(metadata):
     github = FakeGitHub()
     add_artifact(github, receipt())

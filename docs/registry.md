@@ -201,8 +201,13 @@ evidence of native policy installation.
 ## Install paths per surface
 
 - **Devin:** the pack root is a meta-plugin (`.devin-plugin/plugin.json`) whose
-  `requiredPlugins` install `registry/platform/*` via `git-subdir`. Enterprise
-  manifest installs it org-wide; org manifests pin universe plugins and use
+  `requiredPlugins` install the baseline (`registry/platform/framework`) via
+  `git-subdir`. `registry/platform/om` (Operational Memory) needs a Knowledge
+  Layer backend, so it is listed under `optionalPlugins`: endorsed, never
+  auto-installed. Tenants with a KL backend add the same `git-subdir` entry
+  (`path: registry/platform/om`) to their org manifest's `requiredPlugins`;
+  KL-less tenants install the baseline unchanged. Enterprise manifest installs
+  the meta-plugin org-wide; org manifests pin universe plugins and use
   `forbiddenPlugins` globs (e.g. `buro/*` forbidden outside Buro). Repos pin or
   forbid in `.devin/config.json`. Deny-wins across scopes.
 - **Claude Code:** the registry is a marketplace — `.claude-plugin/marketplace.json`

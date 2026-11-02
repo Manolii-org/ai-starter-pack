@@ -28,9 +28,13 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+# The provider child is launched with Python -I; admit only this trusted
+# installed controller directory, never cwd or a PR's import path.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from codex_review_models import MODEL
 
 UPSTREAM = "https://chatgpt.com/backend-api/codex/responses"
-REVIEW_MODEL = "gpt-5.6-sol"
+REVIEW_MODEL = MODEL
 MAX_INPUT = 2 * 1024 * 1024
 MAX_OUTPUT = 32 * 1024 * 1024
 MAX_METADATA = 4096
@@ -163,6 +167,8 @@ def review_request(raw, server):
           {"model", "input", "store", "stream"})
     if payload["model"] != REVIEW_MODEL or payload["store"] is not False or payload["stream"] is not True:
         raise ValueError("stateless subscription review required")
+    if server.expected_effort is not None and (payload.get("reasoning") or {}).get("effort") != server.expected_effort:
+        raise ValueError("review reasoning policy mismatch")
     # Bound recursive validation independently of Python's JSON recursion limit.
     pending = [(payload, 0)]
     nodes = 0
@@ -595,8 +601,10 @@ class ModelBroker(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
         max_connections=4,
         parse_seconds=5,
         turn_seconds=300,
+        expected_effort=None,
     ):
         self.subscription = subscription
+        self.expected_effort = expected_effort
         self.transport = transport
         self.max_requests = max_requests
         self.deadline = time.monotonic() + max_seconds

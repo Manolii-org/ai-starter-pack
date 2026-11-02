@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeShellExecution": [
+      {
+        "command": "./scripts/qa/finalise-gate.sh cursor",
+        "matcher": "\\bgit\\b.*\\bpush\\b|\\bgh\\s+pr\\s+create\\b",
+        "timeout": 1200
+      }
+    ]
+  }
+}

@@ -54,8 +54,14 @@ _MAIN_PER_M = {
     "claude-opus-4-7":           {"in": 5.00, "out": 25.00},
     "claude-opus-4-6":           {"in": 5.00, "out": 25.00},
     "claude-sonnet-4-6":         {"in": 3.00, "out": 15.00},
-    "claude-haiku-4-5-20251001": {"in": 0.30, "out":  1.20},
-    "claude-haiku-4-5":          {"in": 0.30, "out":  1.20},
+    "claude-haiku-4-5-20251001": {"in": 1.00, "out":  5.00},
+    "claude-haiku-4-5":          {"in": 1.00, "out":  5.00},
+    "claude-fable-5-1":          {"in": 10.00, "out": 50.00},
+    "claude-opus-5-5":           {"in": 4.00, "out": 20.00},
+    "claude-opus-5":             {"in": 5.00, "out": 25.00},
+    "claude-sonnet-5-5":         {"in": 2.00, "out": 10.00},
+    "claude-sonnet-5":           {"in": 2.00, "out": 10.00},
+    "claude-haiku-5-5":          {"in": 0.10, "out":  0.50},
 }
 _DEFAULT_MAIN_MODEL = "claude-sonnet-4-6"
 
@@ -163,11 +169,21 @@ _SUBAGENT_PRICING: dict[str, dict] = {
     "claude-sonnet-4-6":       {"input": 3.00 / 1_000_000, "output": 15.00 / 1_000_000},
     "claude-opus-4-7":         {"input": 5.00 / 1_000_000, "output": 25.00 / 1_000_000},
     "claude-opus-4-6":         {"input": 5.00 / 1_000_000, "output": 25.00 / 1_000_000},
+    "claude-fable-5-1":        {"input": 10.00 / 1_000_000, "output": 50.00 / 1_000_000},
+    "claude-opus-5-5":         {"input": 4.00 / 1_000_000, "output": 20.00 / 1_000_000},
+    "claude-opus-5":           {"input": 5.00 / 1_000_000, "output": 25.00 / 1_000_000},
+    "claude-sonnet-5-5":       {"input": 2.00 / 1_000_000, "output": 10.00 / 1_000_000},
+    "claude-sonnet-5":         {"input": 2.00 / 1_000_000, "output": 10.00 / 1_000_000},
+    "claude-haiku-5-5":        {"input": 0.10 / 1_000_000, "output": 0.50 / 1_000_000},
     # Haiku aliases — Anthropic-direct rates unless LiteLLM proxy is active
-    "haiku": {"input": 0.30 / 1_000_000, "output": 1.20 / 1_000_000},
-    "claude-haiku-4-5-20251001": {"input": 0.30 / 1_000_000, "output": 1.20 / 1_000_000},
-    "claude-haiku-4-5":          {"input": 0.30 / 1_000_000, "output": 1.20 / 1_000_000},
-    "sonnet": {"input": 0.30 / 1_000_000, "output": 0.87 / 1_000_000},  # DeepSeek V4 Pro via proxy
+    # (the `haiku` alias resolves to Haiku 5.5 on Anthropic).
+    "haiku": {"input": 0.10 / 1_000_000, "output": 0.50 / 1_000_000},
+    "claude-haiku-4-5-20251001": {"input": 1.00 / 1_000_000, "output": 5.00 / 1_000_000},
+    "claude-haiku-4-5":          {"input": 1.00 / 1_000_000, "output": 5.00 / 1_000_000},
+    # Claude Code aliases on Anthropic (model-routing.json alias_resolution).
+    "sonnet": {"input": 2.00 / 1_000_000, "output": 10.00 / 1_000_000},  # Sonnet 5.5
+    "opus":   {"input": 4.00 / 1_000_000, "output": 20.00 / 1_000_000},  # Opus 5.5
+    "fable":  {"input": 10.00 / 1_000_000, "output": 50.00 / 1_000_000},  # Fable 5.1
     # Explicit tier-vision (Sonnet 4.6 when used as sub-agent, not via proxy)
     "tier-vision": {"input": 3.00 / 1_000_000, "output": 15.00 / 1_000_000},  # Claude Sonnet 4.6
 }
@@ -179,7 +195,17 @@ if _PROXY_ACTIVE:
             "input": 0.112 / 1_000_000,
             "output": 0.224 / 1_000_000,
         }
-_ANTHROPIC_DIRECT_MODELS = {"claude-sonnet-4-6", "claude-opus-4-7", "claude-opus-4-6"}
+    # The proxy intercepts `sonnet` onto DeepSeek V4 Pro.
+    _SUBAGENT_PRICING["sonnet"] = {"input": 0.30 / 1_000_000, "output": 0.87 / 1_000_000}
+_ANTHROPIC_DIRECT_MODELS = {
+    "claude-sonnet-4-6", "claude-opus-4-7", "claude-opus-4-6",
+    "claude-fable-5-1", "claude-opus-5-5", "claude-opus-5",
+    "claude-sonnet-5-5", "claude-sonnet-5", "claude-haiku-5-5",
+    "opus", "fable",
+}
+if not _PROXY_ACTIVE:
+    # Without a proxy the haiku and sonnet aliases are Anthropic models too.
+    _ANTHROPIC_DIRECT_MODELS |= {"haiku", "sonnet"}
 
 
 def parse_subagents(subagent_dir: Path) -> dict:

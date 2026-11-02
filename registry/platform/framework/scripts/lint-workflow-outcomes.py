@@ -13,7 +13,7 @@ SKIP_WORDS = re.compile(
     r"\b(skip(?:ped|ping)?|defer(?:red|ring)?|hold|no[- ]?op|absent|missing|not set)\b",
     re.I,
 )
-OUTCOMES = {"EXECUTED", "NO_CHANGES", "DEFERRED", "POLICY_HELD", "FAILED"}
+OUTCOMES = {"EXECUTED", "NO_CHANGES", "DEFERRED", "POLICY_HELD", "INERT", "FAILED"}
 WRITE_VALUE = r"(?:write|['\"]write['\"])"
 
 
@@ -306,7 +306,7 @@ def lint_contract(repo: Path, relative: str, contract: dict) -> list[str]:
             "failure"
             if outcome == "FAILED"
             else "neutral"
-            if outcome in {"DEFERRED", "POLICY_HELD"}
+            if outcome in {"DEFERRED", "POLICY_HELD", "INERT"}
             else "success"
         )
         for outcome in outcomes

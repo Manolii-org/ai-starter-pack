@@ -1,0 +1,207 @@
+name: UI Smoke (Reusable)
+# Reusable workflow_call form. Caller owns `on:`.
+# Cite: .github/workflows/REUSABLE-WORKFLOWS.md, docs/qa-framework.md
+#
+# Loads the routes in the caller's config/qa.json `ui_smoke` section against a
+# deployed URL in real Chromium (375px and 1280px) and fails on: document
+# HTTP >= 400, uncaught runtime/console errors, broken same-origin assets,
+# mobile horizontal overflow or a missing responsive viewport, and
+# serious/critical axe violations. `profile: launch` adds a slow-3G + 4x CPU
+# mobile pass with a DOMContentLoaded budget.
+#
+# It is the same scripts/qa/ui-smoke.mjs the agent finalise gate runs
+# locally, loaded from the pack at `pack_ref`. Cheap by design: no app
+# install or build — only playwright + axe-core into a temp prefix, with the
+# Chromium download cached. Typical wall time is 2-3 minutes.
+#
+# Preview deployments (Vercel sends deployment_status):
+#
+#   on: deployment_status
+#   jobs:
+#     ui-smoke:
+#       if: github.event.deployment_status.state == 'success'
+#       uses: Manolii-org/ai-starter-pack/.github/workflows/ui-smoke-reusable.yml@<tag-or-sha>
+#       with:
+#         base_url: ${{ github.event.deployment_status.environment_url }}
+#         pack_ref: <same tag-or-sha>
+#       secrets:
+#         VERCEL_BYPASS_SECRET: ${{ secrets.VERCEL_BYPASS_SECRET }}
+#
+# Production synthetic monitor (same specs, on a schedule):
+#
+#   on: { schedule: [{ cron: '17 */2 * * *' }] }
+#   jobs:
+#     ui-smoke:
+#       uses: Manolii-org/ai-starter-pack/.github/workflows/ui-smoke-reusable.yml@<tag-or-sha>
+#       with: { base_url: https://app.example.com, pack_ref: <same tag-or-sha> }
+#
+# Security: caller-controlled strings reach node as argv via env (never
+# re-parsed as shell source); the bypass secret travels via `secrets:` and is
+# sent only to the base URL's origin as x-vercel-protection-bypass.
+
+on:
+  workflow_call:
+    inputs:
+      base_url:
+        type: string
+        required: true
+        description: Deployed URL to smoke (preview environment_url or production).
+      routes:
+        type: string
+        required: false
+        default: ''
+        description: >-
+          Comma-separated routes. Empty smokes every route in the config
+          (always_routes, routes[].path and the dynamic_samples URLs).
+      profile:
+        type: string
+        required: false
+        default: default
+        description: "`default`, or `launch` to add the slow-3G mobile pass."
+      config_path:
+        type: string
+        required: false
+        default: config/qa.json
+        description: Caller config holding the `ui_smoke` section.
+      pack_ref:
+        type: string
+        required: false
+        default: v1
+        description: >-
+          Ref of Manolii-org/ai-starter-pack to load ui-smoke.mjs from.
+          Callers on an immutable pin should pass the same tag.
+      playwright_version:
+        type: string
+        required: false
+        default: '1.63.0'
+        description: Exact playwright version (also keys the browser cache).
+      axe_core_version:
+        type: string
+        required: false
+        default: '4.10.3'
+        description: Exact axe-core version.
+      node_version:
+        type: string
+        required: false
+        default: '22'
+        description: Node version for setup-node.
+      runs_on:
+        type: string
+        required: false
+        default: ubuntu-latest
+        description: Runner label.
+      timeout_minutes:
+        type: number
+        required: false
+        default: 10
+        description: Job timeout.
+      artifact_name:
+        type: string
+        required: false
+        default: ''
+        description: Artifact name override; defaults to ui-smoke-<caller repo name>.
+    outputs:
+      status:
+        description: "passed | failed | unavailable (from report.json); empty if the smoke never ran."
+        value: ${{ jobs.ui-smoke.outputs.status }}
+    secrets:
+      VERCEL_BYPASS_SECRET:
+        required: false
+        description: >-
+          Vercel automation bypass secret — lands as
+          VERCEL_AUTOMATION_BYPASS_SECRET, which the default config maps to
+          the x-vercel-protection-bypass header.
+
+permissions:
+  contents: read
+
+jobs:
+  ui-smoke:
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    outputs:
+      status: ${{ steps.report.outputs.status }}
+    env:
+      BASE_URL: ${{ inputs.base_url }}
+      ROUTES: ${{ inputs.routes }}
+      PROFILE: ${{ inputs.profile }}
+      CONFIG_PATH: ${{ inputs.config_path }}
+      PW_VERSION: ${{ inputs.playwright_version }}
+      AXE_VERSION: ${{ inputs.axe_core_version }}
+    steps:
+      - name: Checkout caller config
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+          sparse-checkout: ${{ inputs.config_path }}
+          sparse-checkout-cone-mode: false
+
+      - name: Checkout pack ui-smoke
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: Manolii-org/ai-starter-pack
+          ref: ${{ inputs.pack_ref }}
+          path: .manolii-pack-qa
+          persist-credentials: false
+          sparse-checkout: scripts/qa/ui-smoke.mjs
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Install playwright + axe-core (temp prefix, no app install)
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          case "$PW_VERSION$AXE_VERSION" in *[!0-9.]*) echo "::error::versions must be exact x.y.z"; exit 1 ;; esac
+          npm install --no-save --no-audit --no-fund --prefix "$RUNNER_TEMP/qa" \
+            "playwright@$PW_VERSION" "axe-core@$AXE_VERSION"
+
+      - name: Cache Chromium
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: ~/.cache/ms-playwright
+          key: ms-playwright-chromium-${{ runner.os }}-${{ inputs.playwright_version }}
+
+      - name: Install Chromium
+        shell: bash
+        timeout-minutes: 5
+        run: '"$RUNNER_TEMP/qa/node_modules/.bin/playwright" install --with-deps chromium'
+
+      - name: Run UI smoke
+        shell: bash
+        env:
+          NODE_PATH: ${{ runner.temp }}/qa/node_modules
+          VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_BYPASS_SECRET }}
+        run: |
+          args=(--config "$CONFIG_PATH" --base-url "$BASE_URL" --profile "$PROFILE")
+          if [ -n "$ROUTES" ]; then args+=(--routes "$ROUTES"); else args+=(--all); fi
+          node .manolii-pack-qa/scripts/qa/ui-smoke.mjs "${args[@]}"
+
+      - name: Read report status
+        id: report
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          python3 -c '
+          import json, os
+          try:
+              status = json.load(open(".ai/agent-checks/ui-smoke/report.json")).get("status", "")
+          except (OSError, ValueError):
+              status = ""
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"status={status}\n")
+          '
+
+      - name: Upload smoke artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ inputs.artifact_name != '' && inputs.artifact_name || format('ui-smoke-{0}', github.event.repository.name) }}
+          overwrite: true
+          retention-days: 14
+          path: .ai/agent-checks/ui-smoke/
+          if-no-files-found: ignore
+          # report.json and screenshots live under the hidden .ai/ directory.
+          include-hidden-files: true

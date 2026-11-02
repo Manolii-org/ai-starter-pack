@@ -467,3 +467,37 @@ class TestMainInteractiveFlow:
         result2 = self._run_main(d, env_extra={"LITELLM_MASTER_KEY": "v"})
         assert result2.returncode == 0
         assert (d / ".ai" / "setup-complete").exists()
+
+
+class TestStrictProfile:
+    """isolation_profile=strict does not render the LiteLLM/KL/Langfuse assets,
+    so setup must not offer them (Codex review, PR #238)."""
+
+    def test_is_strict_profile(self, tmp_path):
+        path = tmp_path / "pack-components.yml"
+        assert m.is_strict_profile(path) is False  # missing file
+        path.write_text(SAMPLE_CONTRACT)
+        assert m.is_strict_profile(path) is False
+        path.write_text(SAMPLE_CONTRACT.replace('  fly_app: "t-litellm"\n',
+                                                '  fly_app: "t-litellm"\n  isolation_profile: "strict"\n'))
+        assert m.is_strict_profile(path) is True
+        path.write_text(SAMPLE_CONTRACT.replace('  fly_app: "t-litellm"\n',
+                                                '  fly_app: "t-litellm"\n  isolation_profile: "standard"\n'))
+        assert m.is_strict_profile(path) is False
+
+    def test_strict_setup_skips_refused_features(self, monkeypatch):
+        asked = []
+        monkeypatch.setattr(m, "is_strict_profile", lambda *a: True)
+        monkeypatch.setattr(m, "ask_yn", lambda prompt, default=False: asked.append(prompt) or True)
+        choices = m.run_setup()
+        assert {k: choices[k] for k in m.STRICT_REFUSED} == dict.fromkeys(m.STRICT_REFUSED, False)
+        assert choices["browserbase"] is True
+        assert len(asked) == 1 and "Browserbase" in asked[0]
+
+    def test_standard_setup_asks_all_four(self, monkeypatch):
+        asked = []
+        monkeypatch.setattr(m, "is_strict_profile", lambda *a: False)
+        monkeypatch.setattr(m, "ask_yn", lambda prompt, default=False: asked.append(prompt) or False)
+        choices = m.run_setup()
+        assert len(asked) == 4
+        assert set(choices) == set(m.CHOICE_REQUIRED_KEYS)

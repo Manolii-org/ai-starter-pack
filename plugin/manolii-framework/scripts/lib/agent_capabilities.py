@@ -26,6 +26,63 @@ class RouteAdmissionError(ValueError):
     """The requested transport has no admitted consumer policy (no secrets)."""
 
 
+def assessment_context(environ=None):
+    """Local artifact provenance under an existing trusted Actions launcher.
+
+    This is not provider execution acknowledgement or standalone authentication.
+    The workflow restores producers from base, clears candidate files, and binds
+    artifact transfer to this run. Candidate/model fields cannot choose the roster.
+    Local legacy callers remain compatible; hosted missing context fails closed.
+    """
+    env = os.environ if environ is None else environ
+    if env.get("GITHUB_ACTIONS") != "true":
+        return None
+    try:
+        event = _load_json(env.get("GITHUB_EVENT_PATH", ""), "launch event")
+        repository = event["repository"]["full_name"]
+        head = event["pull_request"]["head"]["sha"]
+        base = event["pull_request"]["base"]["sha"]
+        run, attempt = env.get("GITHUB_RUN_ID", ""), env.get("GITHUB_RUN_ATTEMPT", "")
+        if (repository != env.get("GITHUB_REPOSITORY")
+                or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)
+                or not all(isinstance(x, str) and re.fullmatch(r"[0-9a-f]{40}", x) for x in (head, base))
+                or not all(isinstance(x, str) and re.fullmatch(r"[1-9][0-9]*", x) for x in (run, attempt))):
+            raise ValueError("invalid context")
+        return {"version": 1, "repository": repository, "head": head, "base": base,
+                "run": run, "attempt": attempt}
+    except (OSError, UnicodeError, TypeError, ValueError, KeyError, AttributeError):
+        raise ValueError("assessment launcher context unavailable") from None
+
+
+def bind_review_candidate(data):
+    """Stamp runner-owned provenance after parsing; never trust model metadata."""
+    context = assessment_context()
+    if context is not None:
+        data = {**data, "_assessment": context}
+    return data
+
+
+def selected_review_roles(environ=None):
+    """Read both phase selections from trusted workflow control, not artifacts."""
+    env = os.environ if environ is None else environ
+    if env.get("GITHUB_ACTIONS") != "true":
+        return None
+    if any(key not in env for key in ("REVIEW_SKILLS", "REVIEW_AGENTS")):
+        raise ValueError("assessment selected-role roster unavailable")
+    result = set()
+    for key in ("REVIEW_SKILLS", "REVIEW_AGENTS"):
+        raw = env[key]
+        if raw == "":
+            continue
+        roles = raw.split(",")
+        if any(not re.fullmatch(r"[a-z][a-z0-9-]*", role) for role in roles):
+            raise ValueError("assessment selected-role roster invalid")
+        if result.intersection(roles) or len(set(roles)) != len(roles):
+            raise ValueError("assessment selected-role roster ambiguous")
+        result.update(roles)
+    return result
+
+
 def require_direct_llm_admission(repo_root=None, environ=None):
     """Admit the external-consumer lane before looking up any credential.
 
