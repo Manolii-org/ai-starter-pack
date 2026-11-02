@@ -274,22 +274,22 @@ def test_cost_profile_lean_omits_measured_waste_callers(default_render):
     ("flags", "expected"),
     [
         ({}, {"Hooks": 5, "Commands": 51, "Skills": 37, "Agents": 27,
-              "Scripts": 60, "Husky": 3, "CI": 37, "Docs": 34}),
+              "Scripts": 60, "Husky": 3, "CI": 37, "Docs": 35}),
         ({flag: "true" for flag in FEATURE_FLAGS},
          {"Hooks": 5, "Commands": 54, "Skills": 41, "Agents": 28,
-              "Scripts": 60, "Husky": 3, "CI": 37, "Docs": 36}),
+              "Scripts": 60, "Husky": 3, "CI": 37, "Docs": 37}),
         ({"cost_profile": "lean"},
          {"Hooks": 5, "Commands": 51, "Skills": 37, "Agents": 27,
-              "Scripts": 60, "Husky": 3, "CI": 36, "Docs": 34}),
+              "Scripts": 60, "Husky": 3, "CI": 36, "Docs": 35}),
         ({"codex_review": "false"},
          {"Hooks": 5, "Commands": 51, "Skills": 37, "Agents": 27,
-              "Scripts": 60, "Husky": 3, "CI": 35, "Docs": 34}),
+              "Scripts": 60, "Husky": 3, "CI": 35, "Docs": 35}),
         ({"isolation_profile": "strict"},
          {"Hooks": 5, "Commands": 51, "Skills": 37, "Agents": 27,
-              "Scripts": 57, "Husky": 3, "CI": 31, "Docs": 34}),
+              "Scripts": 57, "Husky": 3, "CI": 31, "Docs": 35}),
         ({"isolation_profile": "strict", "cost_profile": "lean"},
          {"Hooks": 5, "Commands": 51, "Skills": 37, "Agents": 27,
-              "Scripts": 57, "Husky": 3, "CI": 31, "Docs": 34}),
+              "Scripts": 57, "Husky": 3, "CI": 31, "Docs": 35}),
     ],
 )
 def test_rendered_readme_counts_match_rendered_tree(flags, expected):
@@ -325,6 +325,39 @@ def test_validation_layout_distribution_boundary(default_render, branded_render)
         assert not (rendered / "scripts/tests/test_agent_validation_layout.py").exists()
         # The existing default validation bundle remains available to callers.
         assert (rendered / "scripts/tests/test_agent_check.py").is_file()
+
+
+def test_release_capability_distribution_boundary(default_render, branded_render):
+    """Consumers receive the documented release capability and canonical schemas."""
+    paths = (
+        "docs/coordinated-releases.md",
+        "schemas/release-manifest.v1.schema.json",
+        "schemas/release-adoption.v1.schema.json",
+        ".github/actions/validate-release-manifest/action.yml",
+        ".github/actions/validate-release-manifest/release_manifest.py",
+        ".github/actions/validate-release-manifest/release_state.py",
+        ".github/actions/validate-release-manifest/github_approval.py",
+    )
+    for rendered in (default_render, branded_render):
+        for rel in paths:
+            assert (rendered / rel).read_bytes() == (ROOT / rel).read_bytes()
+        for rel in ("scripts/tests/test_release_manifest.py",
+                    "scripts/tests/test_release_admission_git.py",
+                    "scripts/tests/fixtures/release-manifest.v1.json"):
+            assert not (rendered / rel).exists()
+        config = json.loads((rendered / "config/agent-checks.json").read_text())
+        assert all(c["id"] != "release-manifest-contract" for c in config["checks"])
+        assert all(e["id"] != "release-contract-python" for e in config["environments"])
+        fixture = ROOT / "scripts/tests/fixtures/release-manifest.v1.json"
+        release_id = json.loads(fixture.read_text())["release_id"]
+        validator = rendered / ".github/actions/validate-release-manifest/release_manifest.py"
+        result = subprocess.run(
+            [sys.executable, str(validator), "--manifest", str(fixture),
+             "--expected-release-id", release_id, "--dry-run"],
+            cwd=rendered, capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "authority=none" in result.stdout
 
 
 def test_security_audit_tests_run_in_rendered_consumers(default_render, branded_render):
@@ -380,6 +413,8 @@ def test_branded_attribution(branded_render, default_render):
 def test_agent_validation_base_uses_owner_ref(tmp_path, default_render, base_ref):
     """A real rendered CLI plans correctly with remote or local owner refs."""
     canonical = json.loads((ROOT / "config/agent-checks.json").read_text())
+    canonical["checks"] = [c for c in canonical["checks"] if c["id"] != "release-manifest-contract"]
+    canonical["environments"] = [e for e in canonical["environments"] if e["id"] != "release-contract-python"]
     assert json.loads((default_render / "config/agent-checks.json").read_text()) == canonical
     dst = tmp_path / "custom-integration"
     render(dst, agent_validation_base=base_ref)

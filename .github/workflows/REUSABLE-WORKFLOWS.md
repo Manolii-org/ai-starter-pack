@@ -953,6 +953,17 @@ diffs `base...head`, fails when a block-mode guard's paths changed without a
 [`docs/guarded-paths.md`](../../docs/guarded-paths.md) for the taxonomy and a
 ready-to-paste caller job.
 
+## Coordinated release proposal validation
+
+`.github/actions/validate-release-manifest` validates the version 1 immutable
+subject against `schemas/release-manifest.v1.schema.json` and its independently
+retained expected ID. It grants no execution authority. Generic activation-only
+continuation and Git admission CAS helpers live beside it; provider approval
+binding remains an explicit qualification gate. See
+[`docs/coordinated-releases.md`](../../docs/coordinated-releases.md) for the
+ownership, legacy/shadow rollout and recovery contracts. Pin a reviewed immutable
+release containing this action; existing products are not automatically adopted.
+
 ## Registry + contract schemas and validators
 
 - `schemas/automation-registry.schema.json` + `scripts/validate-automation-registry.py`

@@ -1,2 +1,5 @@
 {% set canonical %}{% include "config/agent-checks.json" %}{% endset %}
-{{ dict(canonical | from_json, base=agent_validation_base) | tojson(indent=2) }}
+{% set owner = canonical | from_json %}
+{% set checks = owner.checks | rejectattr('id', 'equalto', 'release-manifest-contract') | list %}
+{% set environments = owner.environments | rejectattr('id', 'equalto', 'release-contract-python') | list %}
+{{ dict(owner, base=agent_validation_base, checks=checks, environments=environments) | tojson(indent=2) }}
