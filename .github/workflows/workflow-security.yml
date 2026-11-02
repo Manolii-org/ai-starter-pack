@@ -15,6 +15,7 @@ on:
       - 'scripts/workflow-security-ratchet.py'
       - 'scripts/release-security-diff.py'
       - 'scripts/install-workflow-scanners.sh'
+      - 'config/workflow-security-requirements.txt'
   push:
     branches: [main]
     paths:
@@ -24,6 +25,7 @@ on:
       - 'scripts/workflow-security-ratchet.py'
       - 'scripts/release-security-diff.py'
       - 'scripts/install-workflow-scanners.sh'
+      - 'config/workflow-security-requirements.txt'
 
 permissions:
   contents: read
@@ -52,7 +54,7 @@ jobs:
       - name: Install pinned scanners
         run: |
           bash scripts/install-workflow-scanners.sh "$RUNNER_TEMP/bin"
-          python3 -m pip install --quiet --disable-pip-version-check pyyaml==6.0.2
+          python3 -m pip install --quiet --disable-pip-version-check --require-hashes --only-binary=:all: -r config/workflow-security-requirements.txt
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
       - name: Every uses is SHA-pinned

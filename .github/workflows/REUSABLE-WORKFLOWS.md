@@ -34,10 +34,27 @@ Fails when any `uses:` in your workflows or composite actions is not pinned to a
 full commit SHA (`allow_ref` takes newline-separated full-match regexes for
 deliberate exceptions), and when actionlint reports errors. zizmor runs as a
 ratchet against `zizmor_baseline` (default `config/zizmor-baseline.json`) when
-that file exists, and report-only otherwise — create the baseline with
-`python3 scripts/workflow-security-ratchet.py --write-baseline`. Needs no
-secrets. Scanner versions and hashes are pinned in
-`scripts/install-workflow-scanners.sh`.
+that file exists, and report-only otherwise. Needs no secrets. Scanner
+versions and hashes are pinned in `scripts/install-workflow-scanners.sh`.
+
+To create the baseline (Linux x86_64, Python 3.12), use the scripts and
+scanners from the **same pack commit** your `uses:` line pins, run from your
+repository root:
+
+```bash
+PACK_SHA=<the commit SHA in your uses: line>
+git clone --quiet https://github.com/Manolii-org/ai-starter-pack.git /tmp/pack
+git -C /tmp/pack checkout --quiet "$PACK_SHA"
+bash /tmp/pack/scripts/install-workflow-scanners.sh /tmp/pack-bin
+python3 /tmp/pack/scripts/workflow-security-ratchet.py \
+  --zizmor /tmp/pack-bin/zizmor --write-baseline
+git add config/zizmor-baseline.json
+```
+
+Copier-rendered repos already have `scripts/workflow-security-ratchet.py`;
+they still need the pinned zizmor from `install-workflow-scanners.sh`. Fix
+findings rather than baselining them where you can; the baseline may only
+shrink afterwards.
 
 ## Runner selection — opt into `ubuntu-slim` for light jobs
 
@@ -274,12 +291,14 @@ So adopting the pipeline in a repo that has no `.claude/` tree at all is a
 conditional on the probe, an unreachable or mistyped `pack_ref` cannot break a
 repo that needs no hydration.
 
-`pack_ref` defaults to the moving `v1` alias. If you pin the reusable to an
-immutable tag and want prompts and workflow to move together, pass the same tag:
+`pack_ref` defaults to the moving `v1` alias, which loads the pack's prompts
+and scripts from wherever `v1` points today — with your secrets — even when the
+`uses:` line is SHA-pinned. **Pass the same commit SHA as your `uses:` pin** so
+prompts and workflow are immutable and move together:
 
 ```yaml
     with:
-      pack_ref: v1.25.1
+      pack_ref: 321810f558463b2363d3372d669efcd3ea8283ec # v1.25.1 — keep identical to the uses: pin
 ```
 
 The hydration list lives in the workflow-level `ASSESSMENT_RUNTIME_FILES` env.
@@ -581,7 +600,7 @@ jobs:
     uses: manolii-org/ai-starter-pack/.github/workflows/backup-kernel-validate-reusable.yml@321810f558463b2363d3372d669efcd3ea8283ec # v1.25.1
     with:
       manifest_path: config/backup-tenant.yaml
-      pack_ref: v1.25.1   # keep identical to the `uses:` pin — the pack cannot discover its own ref
+      pack_ref: 321810f558463b2363d3372d669efcd3ea8283ec # v1.25.1 — keep identical to the `uses:` pin
 ```
 
 ## pr-autofix-loop-reusable
@@ -799,8 +818,8 @@ Failure classification (v1.20.0+, advisory): every run ends with a
 reports under `classify_results` (default `test-results/`; add
 `['json', { outputFile: 'test-results/results.json' }]` to the config's CI
 reporters for per-test precision) and otherwise parses the captured reporter
-stdout. The classifier is loaded from the pack at `pack_ref` (default `v1`;
-keep identical to your `uses:` pin). It never changes the job conclusion. Downstream automation should
+stdout. The classifier is loaded from the pack at `pack_ref` (default: the moving
+`v1` alias — set it to the same commit SHA as your `uses:` pin). It never changes the job conclusion. Downstream automation should
 retry `retryable == 'true'`, hand `autofix_eligible == 'true'` to code
 fixers, and escalate `environment` to whoever owns the secret/seed/config.
 
@@ -832,7 +851,7 @@ jobs:
     uses: Manolii-org/ai-starter-pack/.github/workflows/ui-smoke-reusable.yml@321810f558463b2363d3372d669efcd3ea8283ec # v1.25.1
     with:
       base_url: ${{ github.event.deployment_status.environment_url }}
-      pack_ref: v1.25.1
+      pack_ref: 321810f558463b2363d3372d669efcd3ea8283ec # v1.25.1 — keep identical to the uses: pin
     secrets:
       VERCEL_BYPASS_SECRET: ${{ secrets.VERCEL_BYPASS_SECRET }}
 ```

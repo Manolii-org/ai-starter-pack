@@ -20,6 +20,15 @@
       "depNameTemplate": "Manolii-org/ai-starter-pack",
       "datasourceTemplate": "github-tags",
       "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "description": "Keep reusable-workflow `pack_ref:` inputs on the same pack release as the `uses:` line. Several reusables load pack scripts/prompts from `pack_ref`, so a `uses:` bump without it would run new workflow YAML against old code. Matches `pack_ref: <40-char SHA> # vX.Y.Z` and updates the SHA and version together, inside the grouped AI Starter Pack PR.",
+      "managerFilePatterns": ["/(^|/)\\.github/workflows/[^/]+\\.ya?ml$/"],
+      "matchStrings": ["pack_ref:\\s*['\\\"]?(?<currentDigest>[0-9a-f]{40})['\\\"]?\\s*#\\s*(?<currentValue>v\\d+\\.\\d+\\.\\d+)"],
+      "depNameTemplate": "Manolii-org/ai-starter-pack",
+      "datasourceTemplate": "github-tags",
+      "versioningTemplate": "semver"
     }
   ],
   "timezone": "Europe/London",

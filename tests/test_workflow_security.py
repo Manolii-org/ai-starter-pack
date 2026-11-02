@@ -64,6 +64,36 @@ def test_scan_reports_line_and_skips_comments(tmp_path):
     ]
 
 
+def test_scan_covers_every_yaml_spelling(tmp_path):
+    """Flow mappings and quoted keys are valid YAML that GitHub executes;
+    a line regex missed both."""
+    wf = tmp_path / "ci.yml"
+    wf.write_text(
+        "jobs:\n"
+        "  a:\n"
+        "    steps:\n"
+        "      - {uses: actions/checkout@v6}\n"
+        "      - \"uses\": actions/setup-python@v6\n"
+        "      - uses: |-\n"
+        "          actions/cache@v4\n"
+        "      - uses: some/action@" + SHA + "\n"
+        "        with:\n"
+        "          uses: not-an-action@v1\n"  # an input value, not a reference
+    )
+    found = [(line, ref) for line, ref, _ in pins.scan_file(wf, [])]
+    assert found == [
+        (4, "actions/checkout@v6"),
+        (5, "actions/setup-python@v6"),
+        (6, "actions/cache@v4"),  # block scalar: reported at its `|-` line
+    ]
+
+
+def test_unparseable_yaml_fails_closed(tmp_path):
+    wf = tmp_path / "bad.yml"
+    wf.write_text("jobs: [unclosed\n")
+    assert pins.scan_file(wf, [])[0][1] == "<unparseable>"
+
+
 def test_allow_ref_and_exit_codes(tmp_path):
     wf = tmp_path / ".github" / "workflows" / "ci.yml"
     wf.parent.mkdir(parents=True)
@@ -129,6 +159,20 @@ def test_ratchet_new_gone_and_duplicates(tmp_path):
     # Ignored (zizmor: ignore) findings never count.
     zz.write_text(json.dumps(known + [finding(ident="artipacked", ignored=True)]))
     assert ratchet.main(["--input", str(zz), "--baseline", str(baseline)]) == 0
+
+
+def test_scanner_errors_exit_2_not_drift_1(tmp_path):
+    """Callers must tell 'scanner broken' (2) from 'baseline drift' (1)."""
+    with pytest.raises(SystemExit) as missing:
+        ratchet.run_zizmor(str(tmp_path / "no-such-zizmor"), ["."])
+    assert missing.value.code == 2
+
+    fake = tmp_path / "fake-zizmor"
+    fake.write_text("#!/bin/sh\necho 'not json'\nexit 3\n")
+    fake.chmod(0o755)
+    with pytest.raises(SystemExit) as garbage:
+        ratchet.run_zizmor(str(fake), ["."])
+    assert garbage.value.code == 2
 
 
 def test_committed_baseline_is_well_formed():

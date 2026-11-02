@@ -183,7 +183,7 @@ jobs:
           TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          python3 -m pip install --quiet --disable-pip-version-check pyyaml==6.0.2
+          python3 -m pip install --quiet --disable-pip-version-check --require-hashes --only-binary=:all: -r config/workflow-security-requirements.txt
           git fetch --quiet --tags origin
           PREV=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' | grep -vxF "$TAG" | sort -V \
             | awk -v t="$TAG" 'BEGIN{split(substr(t,2),c,".")} {split(substr($0,2),p,"."); if (p[1]<c[1] || (p[1]==c[1] && (p[2]<c[2] || (p[2]==c[2] && p[3]<c[3])))) last=$0} END{print last}')

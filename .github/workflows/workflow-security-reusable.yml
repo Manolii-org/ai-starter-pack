@@ -42,6 +42,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Resolve pack revision
+        # job.workflow_sha is the commit of the workflow file that defines this
+        # job — for a reusable workflow, the caller's pinned pack commit. If it
+        # ever resolved empty, checkout would silently fall back to the pack's
+        # default branch (mutable code with the caller's token), so fail loudly
+        # instead and ask for an explicit pack_ref.
+        id: pack
+        env:
+          PACK_REF: ${{ inputs.pack_ref || job.workflow_sha }}
+        run: |
+          if [ -z "$PACK_REF" ]; then
+            echo "::error::Could not resolve this workflow's own pack commit; pass pack_ref: <40-char commit SHA>"
+            exit 1
+          fi
+          echo "ref=$PACK_REF" >> "$GITHUB_OUTPUT"
+
       - name: Checkout caller
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -52,7 +68,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           repository: manolii-org/ai-starter-pack
-          ref: ${{ inputs.pack_ref || job.workflow_sha }}
+          ref: ${{ steps.pack.outputs.ref }}
           path: pack
           persist-credentials: false
 
@@ -63,6 +79,7 @@ jobs:
       - name: Install pinned scanners
         run: |
           bash pack/scripts/install-workflow-scanners.sh "$RUNNER_TEMP/bin"
+          python3 -m pip install --quiet --disable-pip-version-check --require-hashes --only-binary=:all: -r pack/config/workflow-security-requirements.txt
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
       - name: Every uses is SHA-pinned
@@ -89,5 +106,8 @@ jobs:
             python3 ../pack/scripts/workflow-security-ratchet.py --baseline "$BASELINE"
           else
             echo "::notice::No zizmor baseline at $BASELINE — report-only. Create one with: python3 scripts/workflow-security-ratchet.py --write-baseline --baseline $BASELINE"
-            zizmor --offline --no-progress --format github .github/workflows || true
+            # Same surface as the ratchet: workflows plus composite actions.
+            targets=(.github/workflows)
+            [ -d .github/actions ] && targets+=(.github/actions)
+            zizmor --offline --no-progress --format github "${targets[@]}" || true
           fi

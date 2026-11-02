@@ -23,6 +23,17 @@
 - **Renovate preset converts pack tag pins to SHA pins** (`pinDigests` for
   the github-actions manager, still one grouped and reviewed PR).
   `REUSABLE-WORKFLOWS.md` examples now show `@<sha> # vX.Y.Z`.
+- **`pack_ref` follows the `uses:` pin.** Several reusables load pack code
+  from `pack_ref`, whose default is the moving `v1` alias — so a SHA-pinned
+  `uses:` still ran code from wherever `v1` points. Docs now set `pack_ref` to
+  the same commit SHA, and a Renovate regex manager updates
+  `pack_ref: <sha> # vX.Y.Z` together with the `uses:` pin. (The `v1` default
+  itself is unchanged: changing it is a v2 contract change.)
+- `check-pinned-uses.py` parses YAML (flow mappings and quoted keys are
+  checked too); `workflow-security-reusable.yml` fails loudly if its own pack
+  revision cannot be resolved, installs hash-pinned PyYAML, and audits
+  composite actions in report-only mode. The ratchet exits 2 on scanner
+  errors (1 = baseline drift).
 
 ### Changed
 

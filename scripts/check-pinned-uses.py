@@ -23,8 +23,12 @@ import re
 import sys
 from pathlib import Path
 
-USES_RE = re.compile(r"""^\s*(?:-\s*)?uses:\s*['"]?([^'"\s#]+)""")
+import yaml
+
 SHA_REF_RE = re.compile(r"@[0-9a-f]{40}$")
+# Mapping keys whose values are data, not step/job definitions: a `uses` key
+# nested under these is an input value, never an action reference.
+DATA_KEYS = {"with", "env", "inputs", "outputs", "secrets", "vars"}
 DIGEST_RE = re.compile(r"@sha256:[0-9a-f]{64}$")
 
 
@@ -55,19 +59,41 @@ def classify(ref: str, allow: list[re.Pattern[str]]) -> str | None:
     return None
 
 
+def iter_uses(node: yaml.Node):
+    """Yield (line, ref) for every `uses:` key in the composed YAML tree.
+
+    Walking parsed nodes (not text lines) covers every YAML spelling —
+    flow mappings (`- {uses: x@v1}`), quoted keys (`"uses": x@v1`) and
+    multi-document files — while node marks keep exact line numbers.
+    """
+    stack = [node]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, yaml.MappingNode):
+            for key, value in cur.value:
+                name = key.value if isinstance(key, yaml.ScalarNode) else None
+                if name == "uses" and isinstance(value, yaml.ScalarNode):
+                    yield value.start_mark.line + 1, str(value.value).strip()
+                elif name not in DATA_KEYS:
+                    stack.append(value)
+        elif isinstance(cur, yaml.SequenceNode):
+            stack.extend(cur.value)
+
+
 def scan_file(path: Path, allow: list[re.Pattern[str]]) -> list[tuple[int, str, str]]:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    try:
+        docs = [d for d in yaml.compose_all(text) if d is not None]
+    except yaml.YAMLError as exc:
+        line = getattr(getattr(exc, "problem_mark", None), "line", -1) + 1
+        return [(line, "<unparseable>", f"YAML parse error: {exc}")]
     violations = []
-    for lineno, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
-        stripped = line.lstrip()
-        if stripped.startswith("#"):
-            continue
-        m = USES_RE.match(line)
-        if not m:
-            continue
-        reason = classify(m.group(1), allow)
-        if reason:
-            violations.append((lineno, m.group(1), reason))
-    return violations
+    for doc in docs:
+        for lineno, ref in iter_uses(doc):
+            reason = classify(ref, allow)
+            if reason:
+                violations.append((lineno, ref, reason))
+    return sorted(violations)
 
 
 def main(argv: list[str] | None = None) -> int:

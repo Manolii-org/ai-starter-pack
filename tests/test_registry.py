@@ -1894,6 +1894,14 @@ def test_pack_surface_lowercase_slug_fails(tmp_path):
     ('PROXY_URL="https://$APP_NAME.fly.dev"', False),
     # Org slugs for every universe, not only the CPDcheck- prefix form.
     ("see CPDcheck/some-private-repo", True),
+    # Quoted keys and prefixed env vars.
+    ('{"prod": "' + "q" * 20 + '"}', True),
+    ("SUPABASE_PROJECT_REF=" + "q" * 20, True),
+    ("NEXT_PUBLIC_PROD='" + "q" * 20 + "'", True),
+    # Only the exact placeholder hostnames are exempt, not their prefixes.
+    ("https://my-production.fly.dev", True),
+    ("https://your-service.vercel.app", True),
+    ("https://example.vercel.app", False),
 ])
 def test_pack_surface_infra_identifier_patterns(text, leaks):
     """Regression for a production Supabase ref that shipped publicly because
@@ -1901,6 +1909,21 @@ def test_pack_surface_infra_identifier_patterns(text, leaks):
     mod = load_lint_module()
     hit = any(rx.search(text) for rx in mod.PACK_SURFACE_RES)
     assert hit is leaks, text
+
+
+@pytest.mark.parametrize("owner,line,exempt", [
+    # A verified CPDcheck mirror may name its own CPDcheck/<repo> slugs...
+    ("cpdcheck", "see CPDcheck/cpd-quiz-frontend", True),
+    ("cpdcheck", "see CPDcheck-legacy-name", True),
+    # ...but never another org's, and other mirrors may not name CPDcheck's.
+    ("cpdcheck", "CPDcheck/a and Buro-Built/b", False),
+    ("buro-built", "see CPDcheck/cpd-quiz-frontend", False),
+    # Infra identifiers are never owner-exempt.
+    ("cpdcheck", "prod:" + "q" * 20, False),
+])
+def test_pack_surface_owner_exemption_covers_every_slug_pattern(owner, line, exempt):
+    mod = load_lint_module()
+    assert (mod._surface_hits(line, owner) == []) is exempt
 
 
 def test_pack_surface_prefixed_canonical_slug_fails(tmp_path):

@@ -131,15 +131,20 @@ PACK_SURFACE_PATTERNS = [
     # `abcdefghijklmnopqrst` is the documented placeholder ref.
     r"(?<![a-z0-9.-])(?!abcdefghijklmnopqrst\b)[a-z]{20}\.supabase\.co\b",
     r"supabase\.com/dashboard/project/(?!abcdefghijklmnopqrst\b)[a-z]{20}\b",
-    r"\b(?:prod|staging|preview|project[-_]?ref)\s*[:=]\s*[\"']?"
-    r"(?!abcdefghijklmnopqrst\b)[a-z]{20}\b",
+    # Key forms: `prod:<ref>`, `"prod": "<ref>"` (quoted JSON/YAML key) and
+    # prefixed env vars such as `SUPABASE_PROJECT_REF=<ref>` (`_` before the
+    # key defeats `\b`, so the left edge is "not alphanumeric" instead).
+    r"(?<![a-z0-9])(?:prod|staging|preview|project[-_]?ref)[\"']?\s*[:=]\s*"
+    r"[\"']?(?!abcdefghijklmnopqrst\b)[a-z]{20}\b",
     r"ep-[a-z0-9-]+\.[a-z0-9.-]*neon\.tech",
     r"\b[a-z0-9-]+\.internal\b",
     # Deployed app hostnames name real infrastructure. The lookbehind stops a
     # match starting mid-hostname (`your-proxy.fly.dev` must not yield
-    # `proxy.fly.dev`) or inside a variable (`$APP_NAME.fly.dev`); the
-    # lookahead exempts documented placeholders.
-    r"(?<![a-z0-9._$-])(?!(?:your|my|myapp|example|preview-x+)[-.])"
+    # `proxy.fly.dev`) or inside a variable (`$APP_NAME.fly.dev`). The
+    # lookahead exempts only the exact documented placeholder hostnames — a
+    # prefix rule would also exempt real names like `my-production.fly.dev`.
+    r"(?<![a-z0-9._$-])(?!(?:your-litellm-proxy|your-proxy|myapp-litellm|"
+    r"your-memory-server|your-app|example|preview-x+)\.(?:fly\.dev|vercel\.app)\b)"
     r"[a-z0-9][a-z0-9-]*\.(?:fly\.dev|vercel\.app)\b",
 ]
 # Owner/repo slugs and hostnames are matched case-insensitively — DNS and
@@ -801,7 +806,7 @@ def _surface_hits(line: str, mirror_owner: str | None) -> list[str]:
         # infra identifier that happens to share the org prefix
         # (`buro-built-prod.internal`) must still trip the boundary.
         h = hit.lower()
-        if idx < 3:                        # `Org/repo` slug patterns
+        if idx < 3 or idx == 4:            # `Org/repo` slug patterns
             return h.startswith(mirror_owner + "/")
         if idx == 3:                       # `CPDcheck-<repo>` has no '/'
             return mirror_owner == "cpdcheck" and h.startswith("cpdcheck-")

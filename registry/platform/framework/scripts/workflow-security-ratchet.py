@@ -78,7 +78,9 @@ def run_zizmor(zizmor: str, paths: list[str]) -> list[dict]:
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     except FileNotFoundError:
-        raise SystemExit(f"zizmor not found ({zizmor}); install the pinned version first")
+        print(f"zizmor not found ({zizmor}); install the pinned version first",
+              file=sys.stderr)
+        raise SystemExit(2)
     # zizmor exits non-zero when it has findings; a JSON array on stdout is success.
     try:
         data = json.loads(proc.stdout or "null")
@@ -86,7 +88,9 @@ def run_zizmor(zizmor: str, paths: list[str]) -> list[dict]:
         data = None
     if not isinstance(data, list):
         sys.stderr.write(proc.stderr[-2000:])
-        raise SystemExit(f"zizmor did not return a JSON findings list (exit {proc.returncode})")
+        print(f"zizmor did not return a JSON findings list (exit {proc.returncode})",
+              file=sys.stderr)
+        raise SystemExit(2)
     return data
 
 
