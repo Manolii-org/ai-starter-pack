@@ -266,6 +266,7 @@ jobs:
     with:
       provider_mode: proxy
       litellm_proxy_url: ${{ vars.LITELLM_PROXY_URL }}
+      pack_ref: 321810f558463b2363d3372d669efcd3ea8283ec # v1.25.1 — keep identical to the uses: pin
     secrets:
       LITELLM_MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY }}
 ```
@@ -798,6 +799,7 @@ jobs:
     uses: Manolii-org/ai-starter-pack/.github/workflows/e2e-playwright-reusable.yml@321810f558463b2363d3372d669efcd3ea8283ec # v1.25.1
     with:
       playwright_args_json: '["--grep", "@smoke"]'
+      pack_ref: 321810f558463b2363d3372d669efcd3ea8283ec # v1.25.1 — keep identical to the uses: pin
     secrets:
       E2E_TEST_USER_EMAIL: ${{ secrets.E2E_TEST_USER_EMAIL }}
       E2E_TEST_USER_PASSWORD: ${{ secrets.E2E_TEST_USER_PASSWORD }}

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -241,3 +242,41 @@ def test_release_diff_no_workflow_changes(tmp_path):
     (repo / "a.txt").write_text("2")
     git(repo, "commit", "-qam", "2")
     assert "No workflow or action files changed." in diff.report(repo, "HEAD~1", "HEAD")
+
+
+# --- documented callers pin pack_ref -----------------------------------------
+
+def _reusables_with_mutable_pack_ref_default() -> set[str]:
+    """Reusables whose `pack_ref` input defaults to a tag/alias, not a SHA."""
+    import yaml
+    out = set()
+    for wf in (ROOT / ".github" / "workflows").glob("*-reusable.yml"):
+        doc = yaml.safe_load(wf.read_text())
+        on = doc.get("on", doc.get(True)) or {}
+        inputs = ((on.get("workflow_call") or {}).get("inputs") or {})
+        default = (inputs.get("pack_ref") or {}).get("default")
+        if default and not re.fullmatch(r"[0-9a-f]{40}", str(default)):
+            out.add(wf.stem)
+    return out
+
+
+def test_documented_callers_pin_pack_ref_to_the_uses_sha():
+    """A SHA-pinned `uses:` still runs mutable pack code when `pack_ref` is left
+    at its `v1` default, so every documented caller must set both to one SHA."""
+    import re as _re
+    mutable = _reusables_with_mutable_pack_ref_default()
+    assert {"pr-assessment-reusable", "ui-smoke-reusable"} <= mutable
+    doc = (ROOT / ".github/workflows/REUSABLE-WORKFLOWS.md").read_text()
+    blocks = _re.findall(r"```ya?ml\n(.*?)```", doc, flags=_re.S)
+    checked = 0
+    for block in blocks:
+        for m in _re.finditer(
+                r"uses: [Mm]anolii-org/ai-starter-pack/\.github/workflows/"
+                r"([a-z0-9-]+)\.yml@([0-9a-f]{40})", block):
+            name, sha = m.groups()
+            if name not in mutable:
+                continue
+            checked += 1
+            assert _re.search(rf"pack_ref:\s*['\"]?{sha}\b", block), (
+                f"{name} example must set pack_ref: {sha}")
+    assert checked >= 3
