@@ -59,6 +59,32 @@ class ManifestTests(unittest.TestCase):
         self.assertIn("repos", lane["required"])
         self.assertNotIn("repo", lane["required"])
 
+    def test_schema_itself_rejects_invalid_activation_only_subjects(self):
+        from jsonschema import Draft202012Validator
+        schema = json.loads((ROOT / "schemas/release-manifest.v1.schema.json").read_text())
+        validator = Draft202012Validator(schema)
+        normal = json.loads((ROOT / "scripts/tests/fixtures/release-manifest.v1.json").read_text())
+        self.assertEqual(release.validate(normal), normal)
+        activation = copy.deepcopy(normal)
+        activation["subject"].update(kind="activation-only", decision_sequence=["activation"],
+                                     continuation={"parent_release_id": "a" * 64, "schema_evidence_sha256": "b" * 64})
+        for db in activation["subject"]["databases"]:
+            db["pending"] = []
+            db["expected_after"] = list(db["baseline"])
+        activation = release.prepare(activation["subject"])
+        self.assertFalse(list(validator.iter_errors(activation)))
+        for mutation in ["missing-evidence", "pending-sql", "no-protected-decision", "normal-with-parent"]:
+            bad = copy.deepcopy(activation)
+            if mutation == "missing-evidence":
+                bad["subject"]["continuation"] = None
+            elif mutation == "pending-sql":
+                bad["subject"]["databases"][0]["pending"] = ["00002"]
+            elif mutation == "no-protected-decision":
+                bad["subject"]["decision_sequence"] = []
+            else:
+                bad["subject"]["kind"] = "release"
+            self.assertTrue(list(validator.iter_errors(bad)), mutation)
+
     def test_deterministic_identity_preserves_meaning_and_array_order(self):
         original = subject()
         reversed_keys = dict(reversed(list(original.items())))

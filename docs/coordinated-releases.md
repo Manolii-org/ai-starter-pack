@@ -40,6 +40,13 @@ retains the expected ID separately from the downloaded manifest. The validator
 checks that independent expectation; matching it still does not attest what a
 human approved or what is currently deployed.
 
+The schema itself requires activation-only proposals to link predecessor/schema
+evidence, select a new protected decision and carry empty pending migration lists.
+Normal releases cannot claim continuation metadata. The portable validator also
+checks identity, ledger and cross-field consistency. A synthetic complete normal
+manifest is in `scripts/tests/fixtures/release-manifest.v1.json`; it is test data,
+not a current approval or a deployable release.
+
 Use the composite at `.github/actions/validate-release-manifest` with `manifest`
 and `expected_release_id` from the trusted preparation dependency. It installs the
 same pinned JSON Schema validator as the receipt action, validates, and returns
