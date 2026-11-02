@@ -94,6 +94,80 @@
           "approval_window_seconds",
           "execution_budget_seconds",
           "intermediate_window_seconds"
+        ],
+        "oneOf": [
+          {
+            "properties": {
+              "installed_decisions": {
+                "const": []
+              },
+              "execution_decisions": {
+                "const": []
+              }
+            }
+          },
+          {
+            "properties": {
+              "installed_decisions": {
+                "const": [
+                  "activation"
+                ]
+              },
+              "execution_decisions": {
+                "const": [
+                  "activation"
+                ]
+              }
+            }
+          },
+          {
+            "properties": {
+              "installed_decisions": {
+                "const": [
+                  "schema",
+                  "activation"
+                ]
+              },
+              "execution_decisions": {
+                "const": [
+                  "schema",
+                  "activation"
+                ]
+              }
+            }
+          },
+          {
+            "properties": {
+              "installed_decisions": {
+                "const": [
+                  "release"
+                ]
+              },
+              "execution_decisions": {
+                "const": [
+                  "release"
+                ]
+              }
+            }
+          },
+          {
+            "required": [
+              "combined_scope_adoption"
+            ],
+            "properties": {
+              "installed_decisions": {
+                "const": [
+                  "schema",
+                  "activation"
+                ]
+              },
+              "execution_decisions": {
+                "const": [
+                  "release"
+                ]
+              }
+            }
+          }
         ]
       }
     }
