@@ -44,6 +44,11 @@
         "provider-to-capture",
         "deployed-substitution"
       ]
+    },
+    "retention": {
+      "enum": [
+        "provider-retained"
+      ]
     }
   }
 }

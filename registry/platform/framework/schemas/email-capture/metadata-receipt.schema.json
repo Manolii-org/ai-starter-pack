@@ -59,6 +59,30 @@
         "provider-to-capture",
         "deployed-substitution"
       ]
+    },
+    "retention_state": {
+      "type": "string",
+      "maxLength": 200
+    },
+    "journey": {
+      "type": "string",
+      "maxLength": 200
+    },
+    "action_outcome": {
+      "type": "string",
+      "maxLength": 200
+    },
+    "fixture_cleanup": {
+      "type": "string",
+      "maxLength": 200
+    },
+    "environment_check": {
+      "type": "string",
+      "maxLength": 200
+    },
+    "framework_commit": {
+      "type": "string",
+      "maxLength": 200
     }
   }
 }
