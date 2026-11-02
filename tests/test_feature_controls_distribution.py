@@ -316,6 +316,8 @@ def test_full_sha_git_bridge_installs_without_registry_publication(source, tmp_p
     env = {"PATH": os.environ["PATH"], "HOME": str(home),
            "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": f"url.file://{root}.insteadOf",
            "GIT_CONFIG_VALUE_0": RELEASE.SOURCE_URL}
+    # Preserve the same transport as the actual artifact builder, with no app auth.
+    env.update({key: os.environ[key] for key in RELEASE.BUILD_TRANSPORT_ENV if key in os.environ})
     npm_pin = UPGRADE.pin_for("npm", NPM_NAME, sha)
     RELEASE.run(["npm", "install", "--ignore-scripts", "--no-audit", "--no-fund", npm_pin], consumer_root, env)
     installed = json.loads((consumer_root / "node_modules" / NPM_NAME / "package.json").read_text())
@@ -603,3 +605,30 @@ def test_copier_excludes_runtime_sources_and_preserves_consumer_dependencies_and
             "/docs/feature-controls-distribution.md",
             "scripts/feature-controls-release.py"} <= set(
         yaml.safe_load((ROOT / "copier.yml").read_text())["_exclude"])
+
+
+def test_actual_artifact_builder_preserves_network_transport_but_not_application_credentials(source, tmp_path, monkeypatch):
+    root, _ = source
+    inherited = {"PATH": "/synthetic/bin", "HTTP_PROXY": "http://proxy.invalid:8080",
+                 "HTTPS_PROXY": "http://proxy.invalid:8080", "NO_PROXY": "localhost",
+                 "http_proxy": "http://proxy.invalid:8080", "https_proxy": "http://proxy.invalid:8080",
+                 "SSL_CERT_FILE": "/synthetic/ca.pem", "REQUESTS_CA_BUNDLE": "/synthetic/ca.pem",
+                 "NODE_EXTRA_CA_CERTS": "/synthetic/ca.pem", "PIP_CERT": "/synthetic/ca.pem",
+                 "GH_TOKEN": "synthetic-application-credential", "DOPPLER_TOKEN": "synthetic-application-credential",
+                 "FEATURE_CONTROLS_APPROVAL_KEY": "synthetic-application-credential",
+                 "NODE_TLS_REJECT_UNAUTHORIZED": "0", "NODE_OPTIONS": "--require synthetic-injection"}
+    monkeypatch.setattr(RELEASE.os, "environ", inherited)
+
+    class CapturedBuild(Exception):
+        pass
+
+    def capture(args, cwd, env=None):
+        for key in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy",
+                    "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS", "PIP_CERT"):
+            assert env.get(key) == inherited[key], f"isolated builder dropped transport setting {key}"
+        assert {"GH_TOKEN", "DOPPLER_TOKEN", "FEATURE_CONTROLS_APPROVAL_KEY", "NODE_TLS_REJECT_UNAUTHORIZED", "NODE_OPTIONS"}.isdisjoint(env)
+        raise CapturedBuild()
+
+    monkeypatch.setattr(RELEASE, "run", capture)
+    with pytest.raises(CapturedBuild):
+        RELEASE.build_artifacts(root, tmp_path / "network-build")

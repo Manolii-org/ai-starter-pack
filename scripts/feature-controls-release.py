@@ -28,6 +28,13 @@ DIGEST = re.compile(r"[0-9a-f]{64}")
 VERSION = re.compile(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(alpha|beta|rc)\.(0|[1-9]\d*))?")
 ROOT = Path(__file__).resolve().parents[1]
 
+BUILD_TRANSPORT_ENV = (
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+    "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+    "NODE_EXTRA_CA_CERTS", "PIP_CERT", "NPM_CONFIG_CAFILE",
+)
+
 
 def load_json(text: str) -> dict:
     def unique(pairs: list[tuple[str, object]]) -> dict:
@@ -172,7 +179,10 @@ def build_artifacts(source: Path, output: Path) -> list[Path]:
     output.mkdir()
     home = output / "build-home"
     home.mkdir()
-    env = {key: os.environ[key] for key in ("PATH", "SYSTEMROOT") if key in os.environ}
+    # Managed executors reach public registries through the configured proxy and
+    # CA bundle. Retain that transport, without forwarding application credentials,
+    # registry tokens, shell startup files or TLS-verification bypass switches.
+    env = {key: os.environ[key] for key in ("PATH", "SYSTEMROOT", *BUILD_TRANSPORT_ENV) if key in os.environ}
     env.update(HOME=str(home), SOURCE_DATE_EPOCH="315532800", TZ="UTC", LC_ALL="C",
                PYTHONHASHSEED="0", PIP_DISABLE_PIP_VERSION_CHECK="1")
     npm = load_json((source / "package.json").read_text())
