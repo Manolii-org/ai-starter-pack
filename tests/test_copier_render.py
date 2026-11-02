@@ -341,6 +341,23 @@ def test_release_capability_distribution_boundary(default_render, branded_render
     for rendered in (default_render, branded_render):
         for rel in paths:
             assert (rendered / rel).read_bytes() == (ROOT / rel).read_bytes()
+        for rel in ("scripts/tests/test_release_manifest.py",
+                    "scripts/tests/test_release_admission_git.py",
+                    "scripts/tests/fixtures/release-manifest.v1.json"):
+            assert not (rendered / rel).exists()
+        config = json.loads((rendered / "config/agent-checks.json").read_text())
+        assert all(c["id"] != "release-manifest-contract" for c in config["checks"])
+        assert all(e["id"] != "release-contract-python" for e in config["environments"])
+        fixture = ROOT / "scripts/tests/fixtures/release-manifest.v1.json"
+        release_id = json.loads(fixture.read_text())["release_id"]
+        validator = rendered / ".github/actions/validate-release-manifest/release_manifest.py"
+        result = subprocess.run(
+            [sys.executable, str(validator), "--manifest", str(fixture),
+             "--expected-release-id", release_id, "--dry-run"],
+            cwd=rendered, capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "authority=none" in result.stdout
 
 
 def test_security_audit_tests_run_in_rendered_consumers(default_render, branded_render):
@@ -396,6 +413,8 @@ def test_branded_attribution(branded_render, default_render):
 def test_agent_validation_base_uses_owner_ref(tmp_path, default_render, base_ref):
     """A real rendered CLI plans correctly with remote or local owner refs."""
     canonical = json.loads((ROOT / "config/agent-checks.json").read_text())
+    canonical["checks"] = [c for c in canonical["checks"] if c["id"] != "release-manifest-contract"]
+    canonical["environments"] = [e for e in canonical["environments"] if e["id"] != "release-contract-python"]
     assert json.loads((default_render / "config/agent-checks.json").read_text()) == canonical
     dst = tmp_path / "custom-integration"
     render(dst, agent_validation_base=base_ref)

@@ -138,6 +138,9 @@
       "id": "release-manifest-contract",
       "paths": [
         ".github/actions/validate-release-manifest/**",
+        ".github/workflows/plugin-eval-gate.yml",
+        "copier.yml",
+        "config/agent-checks.json.jinja",
         "schemas/release-manifest.v1.schema.json",
         "scripts/tests/test_release_manifest.py",
         "docs/coordinated-releases.md",
@@ -185,10 +188,10 @@
           "-q",
           "tests/test_copier_render.py",
           "-k",
-          "test_rendered_readme_counts_match_rendered_tree or test_release_capability_distribution_boundary"
+          "test_rendered_readme_counts_match_rendered_tree or test_release_capability_distribution_boundary or test_agent_validation_base_uses_owner_ref"
         ]
       ],
-      "timeout_seconds": 120,
+      "timeout_seconds": 180,
       "environment": "release-contract-python"
     }
   ]

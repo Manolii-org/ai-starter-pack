@@ -132,6 +132,10 @@ preserve active/recovery-held identities and prevent replay of expired scopes.
 
 ## Rollout and compatibility
 
+Copier consumers receive the portable release action and schemas. Pack-maintenance
+tests and their validation recipe stay in the pack checkout; consumers add their
+product qualification to their existing CI and owner validation recipes.
+
 Publish readers/schemas before producers; keep strict receipt v1/v2 unchanged.
 Companion records join through the receipt's explicit `promote_run_url`, exact
 attempt and immutable artifact ID. They do not infer identity from run titles or
