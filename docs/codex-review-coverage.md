@@ -151,6 +151,12 @@ completion, after the producer finishes. It rechecks the live revision and
 reruns only a failed coverage job, never the model job. No output artifact or
 comment can authorize merge by itself.
 
+Recovery permits one completion-only retry per request run and lane. A request
+whose `run_attempt` is no longer 1 cannot reserve or execute another worker
+attempt, including the native-proof path. Both recovery routes re-read that
+budget before retrying; a persistent coverage failure remains failed for
+inspection instead of restarting the worker/recovery cycle.
+
 ## Limits and operating checks
 
 The code CLI is pinned to 0.163.0. Security CLI 0.2.0 retains its exact embedded

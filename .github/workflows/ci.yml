@@ -186,6 +186,17 @@ jobs:
       - name: Fallback install if cache miss
         run: test -d node_modules || npm ci
       - run: npm test -- --coverage
+      - name: Feature-control Python and cross-language conformance
+        if: hashFiles('packages/feature-controls/python/pyproject.toml') != ''
+        run: |
+          python3 -m venv "$RUNNER_TEMP/feature-control-conformance"
+          "$RUNNER_TEMP/feature-control-conformance/bin/pip" install --quiet -e ./packages/feature-controls/python pytest==8.3.5
+          "$RUNNER_TEMP/feature-control-conformance/bin/python" -m pytest -q tests/feature_controls/provider_conformance.py tests/feature_controls/release_policy_conformance.py tests/feature_controls/release_policy_tool_conformance.py
+      - name: Feature release source declaration
+        if: hashFiles('packages/feature-controls/python/pyproject.toml') != ''
+        run: |
+          "$RUNNER_TEMP/feature-control-conformance/bin/python" scripts/feature-release-check.py \
+            --repo-root "$GITHUB_WORKSPACE" --mode source --summary "$GITHUB_STEP_SUMMARY"
       # Uncomment to upload coverage to a service (Codecov, Coveralls, etc.):
       # - uses: codecov/codecov-action@v4
       #   with:

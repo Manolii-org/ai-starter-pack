@@ -70,7 +70,7 @@ jobs:
             const run = response.data.workflow_runs.find(item =>
               item.head_sha === pull.head.sha && item.path === '.github/workflows/' + workflow_id
               && (item.pull_requests || []).some(pr => pr.number === pull_number));
-            if (!run || run.conclusion !== 'failure') continue;
+            if (!run || run.conclusion !== 'failure' || run.run_attempt !== 1) continue;
             const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
               owner, repo, run_id: run.id, per_page: 100,
             });
@@ -79,6 +79,9 @@ jobs:
             // Recheck after reads: never restart a superseded revision.
             const live = (await github.rest.pulls.get({owner, repo, pull_number})).data;
             if (live.head.sha !== pull.head.sha || live.draft || live.state !== 'open') return;
+            const latest = (await github.rest.actions.getWorkflowRun({owner, repo, run_id: run.id})).data;
+            if (latest.run_attempt !== 1 || latest.status !== 'completed'
+                || latest.head_sha !== pull.head.sha) continue;
             await github.rest.actions.reRunJobForWorkflowRun({owner, repo, job_id: job.id});
             core.info('Retried completion job ' + job.id + ' for ' + pull.head.sha + '; no model rerun.');
           }

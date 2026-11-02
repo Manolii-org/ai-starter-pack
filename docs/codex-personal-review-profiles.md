@@ -62,6 +62,7 @@ separate qualification. Do not copy personal sessions into public CI secrets.
    The administrator installs that consent separately from repository source
    at `/etc/codex-review/consents/<profile>.json`.
 
+The administrator installs the registry at `/etc/codex-review/profiles.json`.
 Registry and consent files and all parent directories must be root-owned,
 regular files/directories, with no symlinks or group/world write permission.
 Repository source cannot grant owner consent. The administrator's access

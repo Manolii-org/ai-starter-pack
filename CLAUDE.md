@@ -119,7 +119,7 @@ src/
 
 1. Never hardcode credentials — all secrets from environment variables
 2. Validate all input at API boundaries with Zod
-3. Run full validation before committing (`{pnpm typecheck && pnpm lint && pnpm test}`)
+3. Run affected deterministic checks while iterating and the owning candidate validation before publication; reuse only matching complete receipts
 4. Use `AbortSignal.timeout()` for all external HTTP calls
 5. Fix root causes, not symptoms — every fix needs a `Root cause:` explanation
 6. Every API route needs a security marker: `// PUBLIC:`, `// USER:`, `// ADMIN:`, `// WEBHOOK:`
@@ -176,7 +176,7 @@ QA lanes (finalise gate at push/PR, `ui-smoke` on affected routes, preview/produ
 
 **Always invoke:**
 - `conventions` — project coding standards
-- `self-code-review` — required before every commit
+- `self-code-review` — review settled diffs before publication; use affected deterministic checks at checkpoints
 
 **PR Assessment (invoked automatically by pr-classifier):**
 - `test-adequacy` — flags changed functions with no test update

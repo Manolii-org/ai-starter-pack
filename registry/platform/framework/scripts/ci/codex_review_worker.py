@@ -1226,8 +1226,12 @@ def execute(github, target, repository, directory, *, funding=None):
             output,
             True,
         )
-    except (Incomplete, OSError, ValueError, subprocess.SubprocessError) as exc:
+    except (Incomplete, OSError, ValueError, subprocess.SubprocessError, BrokerError) as exc:
         reason = str(exc) if isinstance(exc, (Incomplete, profiles.ProfileError)) else "failed_scan"
+        if isinstance(exc, BrokerError) and str(exc) in {
+            "subscription_auth_required", "invalid_subscription_auth"
+        }:
+            reason = "blocked_credentials"
         state = ("blocked_quota" if reason in {"profile_capacity_exhausted", "profile_session_busy"}
                  else "blocked_credentials" if isinstance(exc, profiles.ProfileError) else reason)
         if state not in {
@@ -1253,6 +1257,12 @@ def rerun_completion(github, request, lane, target):
             and job.get("conclusion") == "failure"
             and fresh(github, target)
         ):
+            live = github.json(f"/actions/runs/{int(request['id'])}")
+            if (type(live.get("run_attempt")) is not int
+                    or live["run_attempt"] != 1
+                    or live.get("status") != "completed"
+                    or live.get("head_sha") != target["head_sha"]):
+                return
             github.json(f"/actions/jobs/{int(job['id'])}/rerun", method="POST")
             return
 
@@ -1291,6 +1301,11 @@ def main():
         != github.repository + "/" + WORKFLOW + "@" + default_ref
     ):
         raise Incomplete("untrusted_controller_revision")
+    # A completion-only rerun emits workflow_run again. It must never reserve
+    # another model attempt or recursively rerun itself, even with native proof.
+    if type(request.get("run_attempt")) is not int or request["run_attempt"] != 1:
+        print("Request retry already consumed; no reservation or recovery.")
+        return
     if native_proof(github, target):
         rerun_completion(github, request, target["lane"], target)
         print("Exact native proof already satisfies this revision; no model execution.")
@@ -1314,6 +1329,14 @@ def main():
             and os.environ.get("CODEX_SECURITY_ENABLED") == "false"
         ):
             raise Incomplete("operator_disabled")
+        previous = prior_receipt(
+            github, target, repository, ignore_run=int(os.environ["GITHUB_RUN_ID"])
+        )
+        if previous:
+            if previous["state"] in {"completed", "exempt"}:
+                rerun_completion(github, request, target["lane"], target)
+            print("Existing trusted attempt retained; no new reservation.")
+            return
         config = json.loads((HERE / "codex-review-worker.json").read_text())
         funding = configured_profile(config, target, repository)
         destination = Path(os.environ["RUNNER_TEMP"]) / "codex-trusted-attempt"

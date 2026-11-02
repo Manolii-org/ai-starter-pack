@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { Ajv } from "ajv";
 import schema from "../../../contracts/feature-controls/schema.json" with { type: "json" };
-import type { AssignmentBoundary, Catalog, Context, Feature, Json, ReleaseBundle, Scope } from "./types.js";
+import type { AssignmentBoundary, Catalog, Context, Feature, Json, ReleaseBundle, ReleaseManifest, Scope } from "./types.js";
 const ajv = new Ajv({ strict: true, ownProperties: true });
 ajv.addSchema(schema);
 const validators = new Map<string, ReturnType<typeof ajv.compile>>();
@@ -67,6 +67,48 @@ export function validateCatalog(catalog: Catalog): void {
     walk(key, new Set());
   }
 }
+/** Source-owned readiness. A declaration is intent, never proof of acceptance. */
+export function validateReleaseManifest(manifest: ReleaseManifest): void {
+  validate("release_manifest", manifest);
+  const heights = new Map<string, number>();
+  const visit = (key: string, path: Set<string>): number => {
+    if (!Object.hasOwn(manifest.features, key) || path.has(key) || path.size > 32) throw new Error("invalid release ancestry");
+    if (heights.has(key)) return heights.get(key)!;
+    const definition = manifest.features[key];
+    if (definition.state === "ready" && !definition.acceptance.length) throw new Error("ready feature needs acceptance references");
+    for (const reference of definition.acceptance) {
+      if (reference.startsWith("/") || reference.split("/").includes("..")) throw new Error("unsafe acceptance reference");
+    }
+    const ancestors = definition.ancestors ?? [];
+    const height = Math.max(0, ...ancestors.map(parent => {
+      if (definition.state === "ready" && manifest.features[parent]?.state !== "ready") throw new Error("ready feature has unfinished ancestor");
+      return 1 + visit(parent, new Set([...path, key]));
+    }));
+    if (height > 32) throw new Error("release ancestry depth exceeded");
+    heights.set(key, height); return height;
+  };
+  for (const key of Object.keys(manifest.features)) visit(key, new Set());
+}
+
+export function releaseCatalogFeatures(manifest: ReleaseManifest): Record<string, Feature> {
+  validateReleaseManifest(manifest);
+  return Object.fromEntries(Object.entries(manifest.features).map(([key, definition]) => [key, {
+    value_type: "boolean", baseline: false, disabled_value: false, failure: "deny",
+    allowed_values: [false, true], applications: [...definition.applications],
+    surfaces: [...definition.surfaces], ancestors: [...(definition.ancestors ?? [])],
+  }]));
+}
+
+export function compatibleReleaseManifest(local: ReleaseManifest, published: ReleaseManifest): boolean {
+  validateReleaseManifest(local); validateReleaseManifest(published);
+  return Object.entries(local.features).every(([key, expected]) => {
+    const actual = published.features[key];
+    return !!actual && !(expected.state === "ready" && actual.state !== "ready") &&
+      (["applications", "surfaces", "ancestors"] as const).every(field =>
+        JSON.stringify([...(expected[field] ?? [])].sort()) === JSON.stringify([...(actual[field] ?? [])].sort()));
+  });
+}
+
 export function payloadOf(bundle: ReleaseBundle, catalog: Catalog): Record<string, unknown> {
   validate("bundle", bundle);
   if (!sameScope(bundle.scope, catalog.scope) || bundle.catalog_revision !== catalog.revision ||
@@ -81,9 +123,15 @@ export function payloadOf(bundle: ReleaseBundle, catalog: Catalog): Record<strin
   if (!Array.isArray(p.experiments) || p.experiments.length || Object.keys(p.savedGroups as object).length ||
       Object.keys(p.contextualBandits as object).length || Object.keys(p).some(k => !["features", "experiments", "savedGroups", "contextualBandits"].includes(k))) throw new Error("unsupported payload capability");
   const features = p.features as Record<string, Record<string, unknown>>;
-  if (Object.keys(features).length !== Object.keys(catalog.features).length) throw new Error("incomplete feature catalog");
+  const managed = bundle.deployment?.manifest.features ?? {};
+  if (Object.keys(catalog.features).some(key => !Object.hasOwn(features, key))) throw new Error("incomplete feature catalog");
   for (const [key, native] of Object.entries(features)) {
     const feature = Object.hasOwn(catalog.features, key) ? catalog.features[key] : undefined;
+    if (!feature && Object.hasOwn(managed, key)) {
+      if (!native || typeof native !== "object" || Array.isArray(native) || Object.keys(native).length !== 1 ||
+          native.defaultValue !== (managed[key].state === "ready")) throw new Error("invalid forward release feature");
+      continue;
+    }
     if (!feature || !native || typeof native !== "object" || Object.keys(native).some(k => !["defaultValue", "rules"].includes(k)) ||
         !matches(native.defaultValue, feature)) throw new Error("invalid native feature");
     if (native.rules !== undefined && !Array.isArray(native.rules)) throw new Error("invalid rules");
@@ -115,14 +163,35 @@ export function payloadOf(bundle: ReleaseBundle, catalog: Catalog): Record<strin
       if (rule.coverage !== undefined && (typeof rule.coverage !== "number" || !Number.isFinite(rule.coverage) || rule.coverage < 0 || rule.coverage > 1 || rule.hashVersion !== 2 || rule.seed === undefined)) throw new Error("invalid coverage");
     }
   }
+  if (bundle.deployment) {
+    const definitions = releaseCatalogFeatures(bundle.deployment.manifest);
+    for (const [key, expected] of Object.entries(definitions)) {
+      const native = features[key];
+      if (catalog.features[key] && !sameJson(catalog.features[key] as unknown as Json, expected as unknown as Json) ||
+          !native || Object.keys(native).length !== 1 ||
+          native.defaultValue !== (bundle.deployment.manifest.features[key].state === "ready")) throw new Error("release policy does not match catalogue or payload");
+    }
+  }
+  // Project only authenticated source-owned future keys; retain the exact approved bytes/hash.
+  for (const key of Object.keys(features)) if (!Object.hasOwn(catalog.features, key)) delete features[key];
   return p;
+}
+export function releaseManifestMessage(manifest: ReleaseManifest): Uint8Array {
+  validateReleaseManifest(manifest);
+  return Buffer.from(JSON.stringify(["feature-controls/readiness/v1", Object.keys(manifest.features).sort().map(key => {
+    const feature = manifest.features[key];
+    return [key, feature.state, feature.owner, feature.applications, feature.surfaces, feature.ancestors ?? [], feature.acceptance];
+  })]), "utf8");
 }
 export function approvalMessage(bundle: ReleaseBundle): Uint8Array {
   validate("bundle", bundle);
   const s = bundle.scope;
-  return Buffer.from(JSON.stringify(["feature-controls/release/v1", s.ecosystem_id, s.deployment_id, s.environment_id, s.feature_namespace,
+  const message: unknown[] = [bundle.deployment ? "feature-controls/release/v2" : "feature-controls/release/v1", s.ecosystem_id, s.deployment_id, s.environment_id, s.feature_namespace,
     bundle.revision, bundle.catalog_revision, bundle.created_at, bundle.expires_at, bundle.provider_semantics,
-    bundle.payload_sha256, bundle.approval_ref]), "utf8");
+    bundle.payload_sha256, bundle.approval_ref];
+  if (bundle.deployment) message.push(bundle.deployment.source_sha,
+    createHash("sha256").update(releaseManifestMessage(bundle.deployment.manifest)).digest("hex"));
+  return Buffer.from(JSON.stringify(message), "utf8");
 }
 
 export function boundaryOf(feature: Feature, context: Context): AssignmentBoundary {

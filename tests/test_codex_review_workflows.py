@@ -215,7 +215,8 @@ new AsyncFunction('github','core','context','process',p.script)(github,core,cont
         ("Codex review: Didn’t find any major issues.\nReviewed commit: bbbbbbbbbb", 0),
     ],
 )
-def test_actual_recovery_reruns_only_completion_jobs(body, expected):
+@pytest.mark.parametrize("attempt,live_attempt", [(1, 1), (2, 2), (1, 2)])
+def test_actual_recovery_reruns_only_completion_jobs(body, expected, attempt, live_attempt):
     data = yaml.safe_load(
         (ROOT / ".github/workflows/codex-review-recovery.yml").read_text()
     )
@@ -224,8 +225,9 @@ def test_actual_recovery_reruns_only_completion_jobs(body, expected):
 const fs=require('fs'),p=JSON.parse(fs.readFileSync(0,'utf8')),sha='a'.repeat(40),rerun=[];
 const pull={state:'open',draft:false,head:{sha}};
 const github={rest:{pulls:{get:async()=>({data:pull}),getReview:async()=>({data:{commit_id:['inline_remapped_stale','inline_remapped_stale_formaltext','inline_parent_old'].includes(p.body)?'b'.repeat(40):sha,user:{login:'chatgpt-codex-connector[bot]'},state:p.body==='inline_parent_pending'?'PENDING':'COMMENTED'}})},actions:{
-listWorkflowRuns:async args=>({data:{workflow_runs:[{id:'other-pr',head_sha:sha,path:'.github/workflows/'+args.workflow_id,conclusion:'failure',pull_requests:[{number:99}]},{id:args.workflow_id,head_sha:sha,path:'.github/workflows/'+args.workflow_id,conclusion:'failure',pull_requests:[{number:1}]}]}}),
+listWorkflowRuns:async args=>({data:{workflow_runs:[{id:'other-pr',run_attempt:p.attempt,head_sha:sha,path:'.github/workflows/'+args.workflow_id,conclusion:'failure',pull_requests:[{number:99}]},{id:args.workflow_id,run_attempt:p.attempt,head_sha:sha,path:'.github/workflows/'+args.workflow_id,conclusion:'failure',pull_requests:[{number:1}]}]}}),
 listJobsForWorkflowRun:async args=>({data:[{id:1,name:'Codex review (subscription)',conclusion:'failure'},{id:args.run_id,name:args.run_id==='codex-pr-review.yml'?'Codex review coverage':'Codex security coverage',conclusion:'failure'}]}),
+getWorkflowRun:async()=>({data:{run_attempt:p.live_attempt,status:'completed',head_sha:sha}}),
 reRunJobForWorkflowRun:async args=>rerun.push(args.job_id)
 }},paginate:async(fn,args)=>(await fn(args)).data};
 const context={repo:{owner:'example',repo:'project'},payload:{issue:{number:1,pull_request:{url:'https://api.github.com/repos/example/project/pulls/1'}},comment:{body:p.body,commit_id:['inline','inline_parent_old','inline_remapped_stale','inline_remapped_stale_formaltext','inline_parent_pending','quota_inline'].includes(p.body)?sha:'b'.repeat(40),original_commit_id:['inline_remapped_stale','inline_remapped_stale_formaltext'].includes(p.body)?'b'.repeat(40):sha,path:'src/file.ts',pull_request_review_id:123}}};
@@ -239,13 +241,13 @@ new AsyncFunction('github','core','context',p.script)(github,{info:()=>{}},conte
 """
     result = subprocess.run(
         ["node", "-e", runner],
-        input=json.dumps({"script": script, "body": body}),
+        input=json.dumps({"script": script, "body": body, "attempt": attempt, "live_attempt": live_attempt}),
         capture_output=True,
         text=True,
         check=True,
         timeout=10,
     )
-    assert json.loads(result.stdout) == (expected if isinstance(expected, list) else [])
+    assert json.loads(result.stdout) == (expected if isinstance(expected, list) and attempt == live_attempt == 1 else [])
 
 
 def test_inline_recovery_has_native_event_admission():

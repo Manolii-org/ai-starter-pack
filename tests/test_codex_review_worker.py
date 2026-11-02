@@ -41,6 +41,7 @@ PR = {
     "user": {"login": "review-author"},
 }
 REQUEST = {
+    "run_attempt": 1,
     "id": 3,
     "path": ".github/workflows/codex-pr-review.yml",
     "event": "pull_request",
@@ -694,6 +695,85 @@ def test_recovery_rechecks_after_job_lookup():
     github.pages = pages
     worker.rerun_completion(github, REQUEST, "code", TARGET)
     assert not any(kwargs.get("method") == "POST" for _, kwargs in github.requests)
+
+
+@pytest.mark.parametrize("attempt,allowed", [(1, True), (2, False), (None, False), (True, False), ("1", False)])
+def test_completion_retry_budget_uses_live_request(attempt, allowed):
+    github = FakeGitHub()
+    github.data["/actions/runs/3"]["run_attempt"] = attempt
+    github.data["/actions/runs/3/jobs?filter=latest"] = [
+        {"id": 4, "name": worker.JOBS["code"], "conclusion": "failure"}
+    ]
+    worker.rerun_completion(github, REQUEST, "code", TARGET)
+    assert any(kwargs.get("method") == "POST" for _, kwargs in github.requests) is allowed
+
+
+@pytest.mark.parametrize("operation", ["prepare", "run", "publish"])
+def test_completion_rerun_never_reserves_or_invokes_again(metadata, tmp_path, monkeypatch, operation):
+    github = FakeGitHub()
+    github.data["/actions/runs/3"]["run_attempt"] = 2
+    monkeypatch.setattr(worker, "GitHub", lambda *_: github)
+    monkeypatch.setattr(worker, "native_proof", lambda *_: pytest.fail("retry reached native proof/recovery"))
+    monkeypatch.setattr(worker, "configured_profile", lambda *a, **k: pytest.fail("retry reached credentials"))
+    monkeypatch.setattr(worker, "execute", lambda *a, **k: pytest.fail("retry reached execution"))
+    event = tmp_path / "event.json"
+    event.write_text('{"workflow_run":{"id":3}}')
+    for name, value in {
+        "GITHUB_REPOSITORY": REPO, "GH_TOKEN": "synthetic",
+        "GITHUB_EVENT_PATH": str(event), "GITHUB_REF": "refs/heads/main",
+        "GITHUB_EVENT_NAME": "workflow_run",
+        "GITHUB_WORKFLOW_REF": REPO + "/" + worker.WORKFLOW + "@refs/heads/main",
+        "RUNNER_TEMP": str(tmp_path), "GITHUB_OUTPUT": str(tmp_path / "output"),
+    }.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(sys, "argv", ["worker", operation])
+    worker.main()
+    assert not (tmp_path / "codex-trusted-attempt").exists()
+    assert not any(kwargs.get("method") == "POST" for _, kwargs in github.requests)
+
+
+@pytest.mark.parametrize("state", ["completed", "blocked_previous_attempt"])
+def test_prepare_retains_existing_attempt_before_credentials(metadata, tmp_path, monkeypatch, state):
+    github = FakeGitHub()
+    monkeypatch.setattr(worker, "GitHub", lambda *_: github)
+    monkeypatch.setattr(worker, "native_proof", lambda *_: False)
+    monkeypatch.setattr(worker, "prior_receipt", lambda *a, **k: {"state": state})
+    monkeypatch.setattr(worker, "configured_profile", lambda *a, **k: pytest.fail("existing attempt reached credentials"))
+    event = tmp_path / "event.json"
+    event.write_text('{"workflow_run":{"id":3}}')
+    for name, value in {
+        "GITHUB_REPOSITORY": REPO, "GH_TOKEN": "synthetic",
+        "GITHUB_EVENT_PATH": str(event), "GITHUB_REF": "refs/heads/main",
+        "GITHUB_EVENT_NAME": "workflow_run",
+        "GITHUB_WORKFLOW_REF": REPO + "/" + worker.WORKFLOW + "@refs/heads/main",
+        "RUNNER_TEMP": str(tmp_path), "GITHUB_OUTPUT": str(tmp_path / "output"),
+        "CODEX_REVIEW_ENABLED": "true",
+    }.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(sys, "argv", ["worker", "prepare"])
+    worker.main()
+    assert not (tmp_path / "codex-trusted-attempt").exists()
+
+
+@pytest.mark.parametrize("diagnostic,state", [
+    ("invalid_subscription_auth", "blocked_credentials"),
+    ("subscription_auth_required", "blocked_credentials"),
+    ("other_broker_failure", "failed_scan"),
+])
+def test_credential_broker_failures_leave_zero_inference_receipt(metadata, tmp_path, monkeypatch, diagnostic, state):
+    monkeypatch.setattr(worker, "prior_receipt", lambda *a, **k: None)
+    monkeypatch.setattr(worker, "git_input", lambda *a: (tmp_path, ["src/app.py"]))
+    monkeypatch.setattr(worker, "configured_profile", lambda *a, **k: None)
+    monkeypatch.setattr(worker, "build_image", lambda *a: "sha256:" + "d" * 64)
+    monkeypatch.setattr(worker, "qualify_sandbox", lambda *a: None)
+    def refused(*args):
+        raise worker.BrokerError(diagnostic)
+    monkeypatch.setattr(worker, "review_subscription", refused)
+    monkeypatch.setattr(worker, "run_container", lambda *a, **k: pytest.fail("invalid credentials reached inference"))
+    result, output, created = worker.execute(FakeGitHub(), TARGET, REPOSITORY, tmp_path)
+    assert created and not output and result["state"] == state
+    assert result["provider_invocation_started"] is False
+    assert result["successful_provider_turns"] == 0
 
 
 def test_disabled_prepare_cannot_reserve_a_model_attempt(tmp_path, monkeypatch):
