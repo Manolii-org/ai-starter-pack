@@ -311,7 +311,37 @@ def _sensitive_evidence_path(name: str) -> bool:
             or path.suffix.lower() in {".pem", ".key", ".p12", ".pfx", ".jks"})
 
 
-_CREDENTIAL_ASSIGNMENT = re.compile(r"(?i)\b([A-Za-z0-9_]*(?:api[_-]?key|secret|token|password|passwd))(\s*(?::=|[:=])\s*)(['\"]?)[^\s'\"]{8,}\3")
+_CREDENTIAL_SUFFIXES = (
+    "KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "AUTHORIZATION",
+    "CREDENTIAL", "PASSPHRASE", "JWT", "DSN",
+)
+_ASSIGNMENT_HEADER = re.compile(r"(?<![A-Za-z0-9_.+\-])([A-Za-z0-9_.+\-]++)[\"']?\s*(?::=|[:=])\s*")
+_ASSIGNMENT_VALUE = re.compile(r"[\"']?[^\s\"']{8,}")
+# Independent generic classes from the existing canonical screening contract.
+# Reference-only source proofs apply to assignment identifiers alone; these
+# checks always see the complete original string, including source literals.
+_GENERIC_EVIDENCE_PATTERNS = (
+    re.compile(r"(?i)(bearer|basic)\s+[A-Za-z0-9._\-+/=]{20,}"),
+    # Include a diff's leading +/- marker in the maximal URI-like token.
+    # Restricting its first character to a letter would miss added/removed URLs.
+    re.compile(r"(?i)(?<![a-z0-9+.\-])[a-z0-9+.\-]++://[^\s/\"'`@]+@[^\s/\"'`]+"),
+    re.compile(r"(?i)(postgres(?:ql)?|mysql|mongodb|redis|rediss|amqp|amqps)(?:\+[a-z0-9_.\-]+)?://[^\s'\"`]+"),
+    re.compile(r"(?i)https?://[a-zA-Z0-9._\-]+\.(fly\.dev|vercel\.app|supabase\.co|neon\.tech|railway\.app|render\.com)(?:/[^\s]*)?"),
+    re.compile(r"-----BEGIN (?:[A-Z0-9 ]*PRIVATE KEY|CERTIFICATE)-----"),
+)
+
+
+def _credential_field(name: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9_.+\-]++", name)
+                and name.upper().endswith(_CREDENTIAL_SUFFIXES))
+
+
+def _credential_assignment(text: str) -> bool:
+    # Consume only headers, never a noncredential field's value: a second
+    # sensitive assignment can occur inside that value on the same line.
+    return any(_credential_field(match.group(1))
+               and _ASSIGNMENT_VALUE.match(text, match.end())
+               for match in _ASSIGNMENT_HEADER.finditer(text))
 
 
 class _VerifiedSourceText(str):
@@ -383,10 +413,9 @@ def _source_text(text: str, path: str) -> str:
 
     def add_identifier(target):
         name = target.id if isinstance(target, ast.Name) else target.attr if isinstance(target, ast.Attribute) else None
-        # Reuse the exact generic field-name grammar; the synthetic RHS is
-        # only a recognizer probe, never source or credential material.
-        match = _CREDENTIAL_ASSIGNMENT.fullmatch(f"{name} = reference_probe") if name else None
-        if match and match.group(1) == name:
+        # Reuse the exact field-name grammar. Only this identifier's span,
+        # backed by a complete reference-only AST expression, is exempt.
+        if name and _credential_field(name):
             end = position(target, True)
             start = end - len(name)
             # AST identifiers are NFKC-normalized. Never let normalized name
@@ -442,7 +471,7 @@ def _numbered_source(text: str, start: int = 1, end: int | None = None) -> str:
 def _require_safe_packet(value) -> None:
     """Refuse detected sensitive material; never redact code and claim completeness.
 
-    Use the canonical shipped token catalog and credential-assignment refusal.
+    Use the canonical shipped token catalog and generic credential refusal.
     Only locally proved reference expressions in Git source are exempt from
     the generic assignment heuristic; catalog matches are never exempt.
     The pack-only Jev redactor is intentionally
@@ -475,13 +504,16 @@ def _require_safe_packet(value) -> None:
                 offset = b
             pieces.append(item[offset:])
             generic_text = "".join(pieces)
-            if (any(pattern.search(item) for pattern in patterns)
-                    or _CREDENTIAL_ASSIGNMENT.search(generic_text)):
+            if (any(pattern.search(item) for pattern in (*patterns, *_GENERIC_EVIDENCE_PATTERNS))
+                    or _credential_assignment(generic_text)):
                 raise ValueError("sensitive review material requires approved sanitized evidence")
         elif isinstance(item, dict):
             for key, child in item.items():
                 check(key)
                 check(child)
+                if (isinstance(key, str) and _credential_field(key)
+                        and isinstance(child, (str, int, float)) and re.search(r"\S{8,}", str(child))):
+                    raise ValueError("sensitive review material requires approved sanitized evidence")
         elif isinstance(item, (list, tuple)):
             for child in item:
                 check(child)
