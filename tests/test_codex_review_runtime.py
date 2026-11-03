@@ -103,6 +103,7 @@ for name,value in [('scan-manifest.json',manifest),('findings.json',{'findings':
             "id": "msg_fixture",
             "status": "completed",
             "role": "assistant",
+            "phase": "final_answer",
             "content": [
                 {"type": "output_text", "text": '{"findings":[]}', "annotations": []}
             ],
@@ -133,25 +134,34 @@ text('SYNTHETIC_WORKBENCH_OK');
                 + json.dumps({"cmd": command, "max_output_tokens": 2000})
                 + "));",
             }
+        output = [message]
+        if len(requests) == 1:
+            output.insert(0, {
+                "type": "message", "id": "msg_commentary", "status": "completed",
+                "role": "assistant", "phase": "commentary",
+                "content": [{"type": "output_text", "text": "Inspecting the synthetic fixture.", "annotations": []}],
+            })
         response = {
             "id": "resp_" + str(len(requests)),
             "object": "response",
             "created_at": 1,
             "status": "completed",
             "model": "gpt-6.1-sol",
-            "output": [message],
+            "output": output,
             "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
         }
-        data = (
+        data = "".join(
             "event: response.output_item.done\ndata: "
             + json.dumps(
                 {
                     "type": "response.output_item.done",
-                    "output_index": 0,
-                    "item": message,
+                    "output_index": index,
+                    "item": item,
                 }
             )
-            + "\n\nevent: response.completed\ndata: "
+            + "\n\n" for index, item in enumerate(output)
+        ) + (
+            "event: response.completed\ndata: "
             + json.dumps({"type": "response.completed", "response": response})
             + "\n\n"
         )
@@ -178,6 +188,12 @@ text('SYNTHETIC_WORKBENCH_OK');
     if lane == "security":
         assert json.loads(result["output"])["findings"] == []
     assert len(requests) == 2
+    commentary = [item for item in requests[-1]["input"]
+                  if item.get("role") == "assistant" and item.get("phase") == "commentary"]
+    assert len(commentary) == 1
+    # The newer code CLI retains status; the Security SDK's older client omits it.
+    if lane == "code":
+        assert commentary[0]["status"] == "completed"
     # The fake model must receive actual SDK tool output, not a mocked subprocess.
     assert "SYNTHETIC_BOUNDARY_OK" in json.dumps(outputs)
     if lane == "security":

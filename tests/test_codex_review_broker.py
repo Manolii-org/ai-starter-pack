@@ -673,6 +673,52 @@ def test_inline_function_history_strips_account_metadata_and_resource_ids(tmp_pa
         assert payload['tools'] == sent[0]['tools']
 
 
+@pytest.mark.parametrize('metadata', [
+    {'status': 'completed', 'phase': 'commentary'},
+    {'status': 'completed', 'phase': 'final_answer'},
+    {'status': 'completed'}, {'phase': 'commentary'},
+])
+def test_completed_assistant_metadata_survives_stateless_admission(tmp_path, metadata):
+    payload = review_payload()
+    payload['input'].append({'type': 'message', 'role': 'assistant',
+                             'id': 'untrusted-message-id',
+                             'content': [{'type': 'output_text', 'text': 'Local review history.', 'annotations': []}],
+                             **metadata})
+    sent = []
+    def upstream(body, headers, **kwargs):
+        sent.append(json.loads(body))
+        return Response()
+    path = tmp_path / 'model.sock'
+    with broker.serve(path, auth(), transport=upstream):
+        assert request(path, body=json.dumps(payload))[0] == 200
+    item = sent[0]['input'][-1]
+    assert 'id' not in item
+    assert all(item[key] == value for key, value in metadata.items())
+
+
+@pytest.mark.parametrize('changes', [
+    {'phase': 'analysis'}, {'phase': None}, {'phase': {'commentary': True}},
+    {'status': 'in_progress'}, {'status': None}, {'status': 'completed\n'},
+    {'role': 'user'}, {'role': 'developer'}, {'role': 'system'},
+    {'previous_response_id': 'resp_foreign'},
+    {'content': [{'type': 'input_file', 'file_id': 'file_foreign'}]},
+])
+def test_assistant_metadata_cannot_widen_roles_or_capabilities(tmp_path, changes):
+    payload = review_payload()
+    payload['input'].append({'type': 'message', 'role': 'assistant',
+                             'status': 'completed', 'phase': 'commentary',
+                             'content': [{'type': 'output_text', 'text': 'Review history.'}],
+                             **changes})
+    subscription = auth()
+    def forbidden(*args, **kwargs):
+        pytest.fail('Invalid assistant metadata reached auth or upstream')
+    subscription.headers = forbidden
+    path = tmp_path / 'model.sock'
+    with broker.serve(path, subscription, transport=forbidden) as server:
+        assert request(path, body=json.dumps(payload))[0] == 400
+        assert server.calls == 0
+
+
 @pytest.mark.parametrize('changes', [
     {'parameters': {'type': 'object', '$ref': 'https://example.invalid/schema'}},
     {'parameters': {'type': 'object', '$schema': 'https://example.invalid/schema'}},

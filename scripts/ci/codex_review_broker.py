@@ -218,9 +218,16 @@ def review_request(raw, server):
             raise ValueError("inline history object required")
         kind = item.get("type", "message")
         if kind == "message":
-            shape(item, {"type", "id", "role", "content"}, {"role", "content"})
+            shape(item, {"type", "id", "role", "content", "status", "phase"}, {"role", "content"})
             if item["role"] not in {"system", "developer", "user", "assistant"}:
                 raise ValueError("unsupported message role")
+            if any(key in item for key in ("status", "phase")):
+                if item["role"] != "assistant":
+                    raise ValueError("assistant metadata on non-assistant message")
+                if "status" in item and item["status"] != "completed":
+                    raise ValueError("unsupported assistant message status")
+                if "phase" in item and item["phase"] not in ("commentary", "final_answer"):
+                    raise ValueError("unsupported assistant message phase")
             text_content(item["content"])
         elif kind == "additional_tools":
             shape(item, {"type", "id", "role", "tools"}, {"type", "role", "tools"})
