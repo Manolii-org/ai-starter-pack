@@ -135,3 +135,25 @@ def test_kimi_serverless_routes_and_metadata_use_verified_replacement():
         assert tier["context_window"] == 1048576
         assert tier["intelligence_score"] is None  # Never inherit the previous model's score.
     assert "tier-2-agentic-pro" in routing["data_classification"]["internal"]["allowed_tiers"]
+
+
+def test_kimi_replacement_does_not_inherit_performance_qualification():
+    routing = json.loads((ROOT / ".claude/model-routing.json").read_text())
+    fields = {
+        "tier-0-oss-heavy": ("swebench_pro", "swebench_verified", "baseline_swebench_pro"),
+        "tier-2-agentic": ("swebench", "baseline_swebench", "gdpval_aa_elo", "throughput_tok_per_sec"),
+    }
+    for name, metrics in fields.items():
+        tier = routing["tier_definitions"][name]
+        assert tier["model"] == "accounts/fireworks/models/kimi-k3"
+        for metric in metrics:
+            assert tier[metric] is None, (name, metric)
+        assert tier["fallback_chain"]["primary"]["smoke_tested"] is None
+    assert routing["tier_aliases"]["tier-2-agentic"]["throughput_tok_per_sec"] is None
+    for name in ("standard", "heavy"):
+        assert routing["fallback"]["tier_map"][name]["params"] is None
+    assert routing["browser_automation"]["stagehand_llm"]["secondary"]["monthly_estimate_20_tasks_day"] is None
+    threshold = routing["sync_sources"]["intelligence_ratings"]["tier_thresholds"]["heavy_tier_oss"]
+    assert "intelligence_score >= 42" in threshold and ">5pp" in threshold
+    assert "Current primary: Kimi K3, unqualified" in threshold
+    assert "Smoke test + 8-case fitness eval required" in routing["tier_definitions"]["tier-0-oss-heavy"]["eval_status"]
