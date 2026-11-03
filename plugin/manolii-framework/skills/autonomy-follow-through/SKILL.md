@@ -26,7 +26,7 @@ tags:
 
 ## Readiness and review recovery
 
-Author/authorized agent may mark ready after complete assigned initial scope/ledger, deterministic/user-facing verification, current-head fast checks/secret scanning, and no demonstrated HIGH/input-security refusal. Another person's approval is not required for readiness; review workflows may follow it. Independent current-head MERGE review, `CHANGES_REQUESTED`, guards, kill switches, native protections and Merge-When-Safe remain mandatory.
+Author/authorized agent may mark ready after complete assigned initial scope/ledger, deterministic/user-facing verification pass, current-head fast checks/secret scanning pass, and no demonstrated HIGH/input-security refusal. Another person's approval is not required for readiness; review workflows may follow it. Independent current-head MERGE review, `CHANGES_REQUESTED`, guards, kill switches, native protections and Merge-When-Safe remain mandatory.
 
 Carry existing authority through in-scope repairs/new heads without renewed consent. Findings hold affected boundaries, not diagnosis/repair/verification/independent work. Reproduce/resolve findings, batch repairs, verify new heads; respect existing automated repair owners.
 
@@ -50,7 +50,7 @@ Required PR number; optional handoff item id (maps to producer issue URL) and pr
 
 ## Pre-Process QA (Ecosystem-Audit Phase 4.0)
 
-Before loop, comment `<!-- qa-pre-process -->`: assumptions/scope; obvious errors (secrets/imports/syntax); opportunities (coverage/blind spots/follow-ons); continuity (context/cache/environment). Block only P0 errors.
+Before loop, post a PR comment tagged `<!-- qa-pre-process -->`: assumptions/scope; obvious errors (secrets/imports/syntax); opportunities (coverage/blind spots/follow-ons); continuity (context/cache/environment). Block only P0 errors.
 
 ## Outer Loop
 
