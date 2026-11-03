@@ -987,7 +987,7 @@ class Judge:
                 candidate_findings = data.get("findings", [])
                 if expected_roles is not None:
                     if (source not in expected_roles or source != candidate_file.stem
-                            or data.get("_assessment") != context):
+                            or data.get("_assessment") != _policy_module.candidate_assessment_context(source)):
                         raise ValueError("assessment artifact provenance invalid")
                     seen_roles.add(source)
                 estate_security = (

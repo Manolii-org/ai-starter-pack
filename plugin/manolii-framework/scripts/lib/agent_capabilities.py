@@ -55,6 +55,30 @@ def assessment_context(environ=None):
         raise ValueError("assessment launcher context unavailable") from None
 
 
+def candidate_assessment_context(role, environ=None):
+    """Bind an artifact to its trusted producing job, including retained jobs.
+
+    GitHub retains successful prerequisite outputs when only failed jobs rerun.
+    Never infer the producing attempt from candidate/model-controlled metadata.
+    """
+    env = os.environ if environ is None else environ
+    context = assessment_context(env)
+    if context is None:
+        return None
+    if role not in selected_review_roles(env):
+        raise ValueError("assessment producer role unavailable")
+    phase = "SKILLS" if role in env["REVIEW_SKILLS"].split(",") else "AGENTS"
+    attempt = env.get("REVIEW_" + phase + "_ATTEMPT")
+    # Initial launches cannot retain an earlier producer. Legacy first-attempt
+    # callers remain compatible; reruns require explicit trusted job outputs.
+    if attempt is None and context["attempt"] == "1":
+        attempt = "1"
+    if (not isinstance(attempt, str) or not re.fullmatch(r"[1-9][0-9]*", attempt)
+            or int(attempt) > int(context["attempt"])):
+        raise ValueError("assessment producing attempt unavailable")
+    return {**context, "attempt": attempt}
+
+
 def bind_review_candidate(data):
     """Stamp runner-owned provenance after parsing; never trust model metadata."""
     context = assessment_context()
