@@ -256,7 +256,8 @@ _run_intent_drift() {
     # backslash sequences, etc. that would occur with unquoted <<PYEOF interpolation).
     export _DRIFT_PROMPT="$original_prompt"
     export _DRIFT_STATS="$diff_summary"
-    export _DRIFT_GUARD_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+    _DRIFT_GUARD_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" || return 0
+    export _DRIFT_GUARD_ROOT
 
     python3 - <<'PYEOF' 2>/dev/null || true
 import json, os, time, signal, sys
