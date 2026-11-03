@@ -20,7 +20,7 @@ name: PR Assessment (Reusable)
 on:
   workflow_call:
     inputs:
-      provider_mode: { type: string, default: anthropic, description: 'anthropic (direct ANTHROPIC_API_KEY) | proxy (LiteLLM via ANTHROPIC_BASE_URL + LITELLM_MASTER_KEY).' }
+      provider_mode: { type: string, default: anthropic, description: 'anthropic requires an existing ANTHROPIC_API_KEY, vars.ANTHROPIC_DIRECT_BASE_URL and committed external llm-anthropic capability admission; proxy uses litellm_proxy_url and LITELLM_MASTER_KEY.' }
       litellm_proxy_url: { type: string, default: '', description: 'Proxy base URL for proxy mode; pass vars.LITELLM_PROXY_URL.' }
       model: { type: string, default: '', description: 'Optional model id override; empty = script/action default.' }
       runs_on: { type: string, default: ubuntu-latest }
@@ -221,6 +221,28 @@ jobs:
           # workspace would be walked by later steps (skill discovery,
           # artifact globs) and by the caller's own tooling.
           rm -rf .pack-hydrate
+
+      - name: Validate direct-provider prerequisites
+        if: inputs.provider_mode == 'anthropic'
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import importlib.machinery
+          import importlib.util
+          from pathlib import Path
+
+          class SourceOnly(importlib.machinery.SourceFileLoader):
+              def get_code(self, fullname):
+                  return self.source_to_code(self.get_data(self.path), self.path)
+
+          path = Path("scripts/lib/agent_capabilities.py")
+          loader = SourceOnly("_direct_prerequisites", str(path))
+          spec = importlib.util.spec_from_loader(loader.name, loader)
+          policy = importlib.util.module_from_spec(spec)
+          loader.exec_module(policy)
+          policy.configured_direct_endpoint()
+          print("Direct provider origin and immutable external capability policy verified")
+          PY
 
       - name: Get PR diff
         id: diff

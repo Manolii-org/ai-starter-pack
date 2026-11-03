@@ -92,8 +92,12 @@ model_list:
   # data_clearance: internal + public (NOT restricted_us_oss_ok).
   - model_name: tier-0-oss-heavy
     litellm_params:
-      model: fireworks_ai/accounts/fireworks/models/kimi-k2p6
+      model: fireworks_ai/accounts/fireworks/models/kimi-k3
       api_key: os.environ/FIREWORKS_API_KEY
+    model_info:
+      input_cost_per_token: 0.000003
+      cache_read_input_token_cost: 0.0000003
+      output_cost_per_token: 0.000015
   - model_name: tier-0-oss-heavy-fallback-openrouter
     litellm_params:
       model: openrouter/moonshotai/kimi-k2.6
@@ -138,8 +142,12 @@ model_list:
   # ═══════════════════════════════════════════════════════════════════════════
   - model_name: tier-2-agentic
     litellm_params:
-      model: fireworks_ai/accounts/fireworks/models/kimi-k2p6
+      model: fireworks_ai/accounts/fireworks/models/kimi-k3
       api_key: os.environ/FIREWORKS_API_KEY
+    model_info:
+      input_cost_per_token: 0.000003
+      cache_read_input_token_cost: 0.0000003
+      output_cost_per_token: 0.000015
   - model_name: tier-2-agentic-fallback-kimi
     litellm_params:
       model: openrouter/moonshotai/kimi-k2.6
@@ -148,8 +156,12 @@ model_list:
   # Fireworks K2.6 under a distinct name — the tier-2-agentic-pro chain's last hop.
   - model_name: tier-2-agentic-fallback-fireworks
     litellm_params:
-      model: fireworks_ai/accounts/fireworks/models/kimi-k2p6
+      model: fireworks_ai/accounts/fireworks/models/kimi-k3
       api_key: os.environ/FIREWORKS_API_KEY
+    model_info:
+      input_cost_per_token: 0.000003
+      cache_read_input_token_cost: 0.0000003
+      output_cost_per_token: 0.000015
   - model_name: tier-2-agentic-fallback-qwen
     litellm_params:
       model: openrouter/qwen/qwen3.5-397b-a17b
@@ -196,8 +208,12 @@ model_list:
       extra_body: *openrouter_us_zdr
   - model_name: tier-3-tool-fallback-kimi-fireworks
     litellm_params:
-      model: fireworks_ai/accounts/fireworks/models/kimi-k2p6
+      model: fireworks_ai/accounts/fireworks/models/kimi-k3
       api_key: os.environ/FIREWORKS_API_KEY
+    model_info:
+      input_cost_per_token: 0.000003
+      cache_read_input_token_cost: 0.0000003
+      output_cost_per_token: 0.000015
 
   # ═══════════════════════════════════════════════════════════════════════════
   # TIER 4 EXTRACT — grep, count, format, lint, bulk classification
@@ -323,9 +339,8 @@ litellm_settings:
   # Fallback chains: primary fails → secondary → tertiary.
   # Claude tiers do NOT automatically fall back to OSS — explicitly route if needed.
   fallbacks:
-    - claude-haiku-4-5-20251001: [claude-haiku-4-5-20251001-anthropic]
-    # The `haiku` short alias (scripts/run-*.py, Claude Code) needs the same
-    # Anthropic-direct safety net the dated ID has.
+    # Full Anthropic IDs retain native semantics; retries handle transient failures.
+    # The OSS `haiku` short alias retains an independent Anthropic safety net.
     - haiku: [claude-haiku-4-5-20251001-anthropic]
     - sonnet: [sonnet-us-fallback-gptoss120b, sonnet-us-fallback-llama8b]
     - tier-0-oss-heavy: [tier-0-oss-heavy-fallback-openrouter, tier-0-oss-heavy-fallback-glm]

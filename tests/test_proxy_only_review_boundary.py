@@ -1,16 +1,42 @@
 """Exercise distributed template transports with synthetic credentials only."""
 import importlib.util
 import json
+import os
 import runpy
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES = ROOT / "scripts"
+
+
+@pytest.mark.parametrize("admitted", [False, True])
+def test_reusable_workflow_checks_actual_direct_admission_before_classification(tmp_path, admitted):
+    workflow = yaml.safe_load((ROOT / ".github/workflows/pr-assessment-reusable.yml").read_text())
+    steps = workflow["jobs"]["classify"]["steps"]
+    names = [step.get("name") for step in steps]
+    assert names.index("Hydrate assessment runtime") < names.index("Validate direct-provider prerequisites") < names.index("Run pr-classifier")
+    step = steps[names.index("Validate direct-provider prerequisites")]
+    assert step["if"] == "inputs.provider_mode == 'anthropic'"
+    helper = tmp_path / "scripts/lib/agent_capabilities.py"
+    helper.parent.mkdir(parents=True)
+    (helper.parent / "__init__.py").write_text("raise AssertionError('ambient package initializer')\n")
+    helper.write_text("def configured_direct_endpoint():\n"
+                      + ("    return 'verified-origin'\n" if admitted else
+                         "    raise ValueError('missing immutable external capability admission')\n"))
+    result = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=tmp_path,
+                            env={"PATH": os.environ["PATH"]}, capture_output=True, text=True, timeout=15)
+    assert (result.returncode == 0) is admitted
+    if admitted:
+        assert "immutable external capability policy verified" in result.stdout
+    else:
+        assert "missing immutable external capability admission" in result.stderr
 
 
 def load(name, monkeypatch):

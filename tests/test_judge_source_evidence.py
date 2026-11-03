@@ -7,6 +7,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlunsplit
 
 import pytest
 
@@ -27,6 +28,42 @@ def _fixture_text(template):
     """
     return (template.replace("@credential@", "password")
             .replace("@CREDENTIAL@", "PASSWORD").replace("@auth@", "token"))
+
+
+def _generic_material(kind):
+    """Explicit offline examples of generic classes, not provider-shaped keys."""
+    opaque = "offline-fixture-value"
+    if kind.startswith("field:"):
+        return f"{kind.split(':', 1)[1]} = {opaque!r}"
+    if kind == "quoted-field":
+        return json.dumps({"credential": opaque})
+    if kind in {"bearer", "basic"}:
+        return kind.title() + " " + "offline" * 5
+    if kind == "service-url":
+        return "https://" + "offline-fixture." + "fly.dev/source"
+    if kind == "uppercase-service-url":
+        return _generic_material("service-url").upper()
+    if kind == "certificate":
+        label = "CERTIFICATE"
+        return f"-----BEGIN {label}-----\noffline-fixture-value\n-----END {label}-----"
+    scheme = {"database": "postgresql", "database-driver": "postgresql+psycopg2",
+              "sqlserver-driver": "mssql+pyodbc", "custom-uri": "offline+transport"}.get(kind, "https")
+    userinfo = "offline-user"
+    if kind != "userinfo-only":
+        userinfo += ":" + opaque
+    if kind == "encoded-userinfo":
+        userinfo = "offline%2Duser%3A" + opaque
+    return urlunsplit((scheme, userinfo + "@example.invalid", "/source", "", ""))
+
+
+GENERIC_MATERIAL_KINDS = (
+    "http-userinfo", "userinfo-only", "encoded-userinfo", "bearer", "basic",
+    "database", "database-driver", "sqlserver-driver", "custom-uri",
+    "service-url", "uppercase-service-url", "certificate", "quoted-field",
+    *("field:" + name for name in (
+        "authorization", "credential", "passphrase", "SERVICE_KEY", "SERVICE_JWT", "SERVICE_DSN",
+    )),
+)
 
 
 def git(root, *args):
@@ -435,11 +472,13 @@ def test_tracked_credential_paths_are_refused_before_blob_read(repo, monkeypatch
 
 
 @pytest.mark.parametrize("field", ["tracked_source", "candidate_prose"])
+@pytest.mark.parametrize("kind", ("assignment", *GENERIC_MATERIAL_KINDS))
 def test_sensitive_strings_refuse_dispatch_before_json_escaping(
-    repo, monkeypatch, field
+    repo, monkeypatch, field, kind
 ):
     root, head = repo
-    sensitive = _fixture_text('@CREDENTIAL@ = "offline-fixture-value"')
+    sensitive = (_fixture_text('@CREDENTIAL@ = "offline-fixture-value"')
+                 if kind == "assignment" else _generic_material(kind))
     f = finding()
     if field == "tracked_source":
         (root / "policy.py").write_text(sensitive + "\n")
@@ -464,6 +503,84 @@ def test_sensitive_strings_refuse_dispatch_before_json_escaping(
         assert sensitive not in json.dumps(e)
         # Unavailable source must short-circuit, not ask a model for a verdict.
     assert judge.invoke_judge_agent([f]) is None
+
+
+@pytest.mark.parametrize("kind", GENERIC_MATERIAL_KINDS)
+def test_generic_material_is_refused_in_raw_and_proved_source(kind):
+    sensitive = _generic_material(kind)
+    source = _fixture_text('@auth@ = os.getenv("TOKEN"); ') + sensitive
+    for value in (sensitive, j._source_text(source, "source.py"),
+                  j._numbered_source(j._source_text(source, "source.py")),
+                  "+" + sensitive, "-" + sensitive,
+                  {"nested": [sensitive]}, {sensitive: "ordinary"}):
+        with pytest.raises(ValueError, match="sensitive review material"):
+            j._require_safe_packet(value)
+
+
+@pytest.mark.parametrize("name", ["credential", "authorization", "SERVICE_KEY", "__SERVICE_JWT", "SERVICE_DSN"])
+@pytest.mark.parametrize("value", ["offline-fixture-value", 12345678, 12.345678])
+def test_packet_credential_fields_have_no_json_producer_exemption(name, value):
+    with pytest.raises(ValueError, match="sensitive review material"):
+        j._require_safe_packet({"nested": [{name: value}]})
+    for short in ("short", 1234567):
+        j._require_safe_packet({name: short})
+    j._require_safe_packet({"ordinary_field": "offline-fixture-value"})
+
+
+@pytest.mark.parametrize("kind", GENERIC_MATERIAL_KINDS)
+def test_generic_material_outside_diff_never_reaches_actual_request(repo, monkeypatch, kind):
+    root, _ = repo
+    (root / "link.py").unlink()
+    sensitive = _generic_material(kind)
+    (root / "context.md").write_text(sensitive)
+    git(root, "add", "-A")
+    git(root, "commit", "-m", "Offline immutable context fixture")
+    head = git(root, "rev-parse", "HEAD")
+    monkeypatch.setenv("PR_BASE_SHA", head)  # Context is outside the empty diff.
+    f = finding()
+    evidence = j._judge_evidence([f], head)
+    assert evidence["locations"][loc(f)]["status"] == "available"
+    assert evidence["repository_context"]["status"] == "unavailable_or_over_budget"
+    assert sensitive not in json.dumps(evidence)
+    monkeypatch.setattr(j, "_endpoint", lambda **kw:
+                        ("offline", "https://example.invalid/v1/messages", False))
+    sent = []
+
+    def transport(request, **kwargs):
+        body = json.loads(request.data)
+        assert sensitive not in request.data.decode()
+        sent.append(body)
+        return Response(json.dumps({"content": [{"type": "text", "text": json.dumps(answer(f))}],
+                                    "stop_reason": "end_turn"}).encode())
+
+    monkeypatch.setattr(j, "_urlopen_https", transport)
+    result = j.Judge("unused", 1, head).invoke_judge_agent([f])
+    assert sent and result is not None
+
+
+@pytest.mark.parametrize("name", ["SERVICE_KEY", "__SERVICE_JWT", "SERVICE_DSN", "1credential", "api-key"])
+@pytest.mark.parametrize("value", ["12345678", "'12345678'", '"12345678"'])
+def test_assignment_suffixes_and_quoted_keys_refuse_exact_eight_char_values(name, value):
+    for source in (f"{name} = {value}", f'"{name}": {value}',
+                   f'ordinary = "prefix; {name} = {value}"'):
+        with pytest.raises(ValueError, match="sensitive review material"):
+            j._require_safe_packet(source)
+
+
+def test_long_names_preserve_reference_proof_without_hiding_later_assignments():
+    name = "_" + "A" * 32000 + "_DSN"
+    reference = f'{name} = os.getenv("OFFLINE_REFERENCE")'
+    proved = j._source_text(reference, "source.py")
+    j._require_safe_packet(proved)
+    with pytest.raises(ValueError, match="sensitive review material"):
+        j._require_safe_packet(j._source_text(reference + "; " + _generic_material("field:credential"), "source.py"))
+
+
+def test_large_non_url_and_hyphenated_identifiers_remain_safe():
+    # One maximal token must not restart a greedy scan at every character or
+    # hyphen. Exercise the real source-size ceiling without a timing waiver.
+    j._require_safe_packet("offline-scheme+" * 140000)
+    j._require_safe_packet("ordinary-field-" * 130000 + " = ordinary")
 
 
 @pytest.mark.parametrize("unavailable", ["missing", "sensitive", "budget"])
