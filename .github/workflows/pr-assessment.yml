@@ -84,7 +84,8 @@ jobs:
             echo "::error::Assessment state root must be a real directory" >&2
             exit 1
           fi
-          git fetch --depth=1 origin "$BASE_SHA"
+          # Checkout already fetched full history without persisted credentials.
+          git cat-file -e "${BASE_SHA}^{commit}" || { echo "::error::Trusted base object unavailable"; exit 1; }
           # rm first: `git checkout BASE -- dir` overwrites base content but
           # leaves PR-added files (e.g. scripts/json.py shadowing stdlib) live
           # in lanes that carry secrets.
@@ -417,7 +418,8 @@ jobs:
             echo "::error::Assessment state root must be a real directory" >&2
             exit 1
           fi
-          git fetch --depth=1 origin "$BASE_SHA"
+          # Checkout already fetched full history without persisted credentials.
+          git cat-file -e "${BASE_SHA}^{commit}" || { echo "::error::Trusted base object unavailable"; exit 1; }
           # rm first: `git checkout BASE -- dir` overwrites base content but
           # leaves PR-added files (e.g. scripts/json.py shadowing stdlib) live
           # in lanes that carry secrets.
@@ -513,7 +515,8 @@ jobs:
             echo "::error::Assessment state root must be a real directory" >&2
             exit 1
           fi
-          git fetch --depth=1 origin "$BASE_SHA"
+          # Checkout already fetched full history without persisted credentials.
+          git cat-file -e "${BASE_SHA}^{commit}" || { echo "::error::Trusted base object unavailable"; exit 1; }
           # rm first: `git checkout BASE -- dir` overwrites base content but
           # leaves PR-added files (e.g. scripts/json.py shadowing stdlib) live
           # in lanes that carry secrets.
@@ -605,7 +608,7 @@ jobs:
           fi
           # Do not re-shallow the base after the complete checkout: Judge
           # also needs the common ancestor for its exact base...head diff.
-          git fetch origin "$BASE_SHA"
+          git cat-file -e "${BASE_SHA}^{commit}" || { echo "::error::Trusted base object unavailable"; exit 1; }
           # rm first: `git checkout BASE -- dir` overwrites base content but
           # leaves PR-added files (e.g. scripts/json.py shadowing stdlib) live
           # in lanes that carry secrets.

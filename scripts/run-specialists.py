@@ -308,19 +308,16 @@ def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int
         if data is None:
             raise RuntimeError("API call produced no response")
 
-        text = ""
-        for block in data.get("content", []):
-            if block.get("type") == "text":
-                text = block["text"]
-                break
+        text = "".join(block.get("text", "") for block in data.get("content", [])
+                       if isinstance(block, dict) and block.get("type") == "text")
         if text:
-            if (_budget_attempt == 0 and validate is not None
-                    and data.get("stop_reason") == "max_tokens"
-                    and not validate(text)):
-                # Truncated mid-payload (e.g. reasoning + findings JSON cut
-                # at the declared budget): one doubled-budget retry.
-                budget *= 2
-                continue
+            if data.get("stop_reason") == "max_tokens":
+                # A parseable example is not proof that the final verdict was
+                # completed. Retry output-limited responses once, then refuse.
+                if _budget_attempt == 0:
+                    budget *= 2
+                    continue
+                raise ValueError("specialist response remained output-limited")
             return text
         if _budget_attempt == 0:
             # An empty first block on attempt 0 is either starvation
@@ -342,28 +339,52 @@ def _parse_findings(raw: str) -> dict:
     block, then the last balanced object that carries a "findings" key.
     """
     text = raw.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        end = next((i for i, ln in enumerate(lines[1:], 1) if ln.startswith("```")), len(lines))
-        text = "\n".join(lines[1:end])
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
-    for block in reversed(re.findall(r"```(?:json)?\s*\n(.*?)```", raw, re.S)):
-        try:
-            candidate = json.loads(block.strip())
-        except json.JSONDecodeError:
+    def complete_tail(end):
+        tail = raw[end:].lstrip()
+        if tail.startswith("```"):
+            tail = tail[3:]
+        return not any(marker in tail for marker in ("{", "[", "```"))
+
+    # Only outermost JSON boundaries are candidates. A nested findings object
+    # cannot stand in for an unfinished enclosing response.
+    starts = []
+    stack = []
+    quoted = False
+    escaped = False
+    for offset, char in enumerate(raw):
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
             continue
-        if isinstance(candidate, dict) and "findings" in candidate:
-            return candidate
+        if stack and char == '"':
+            quoted = True
+        elif char in "{[":
+            if not stack and char == "{":
+                starts.append(offset)
+            stack.append(char)
+        elif char in "}]" and stack:
+            if (stack[-1], char) in (("{", "}"), ("[", "]")):
+                stack.pop()
+            else:
+                # Malformed outer JSON must never expose a nested candidate.
+                break
     decoder = json.JSONDecoder()
-    for match in reversed(list(re.finditer(r"\{", raw))):
+    for start in reversed(starts):
         try:
-            obj, _ = decoder.raw_decode(raw, match.start())
+            obj, end = decoder.raw_decode(raw, start)
         except json.JSONDecodeError:
             continue
         if isinstance(obj, dict) and "findings" in obj:
+            if not complete_tail(end):
+                continue
             return obj
     raise json.JSONDecodeError("no findings JSON in response", raw, 0)
 
