@@ -371,7 +371,12 @@ def configured_direct_endpoint() -> str:
         valid = False
     if not valid:
         raise RouteAdmissionError("direct review denied: explicit HTTPS Anthropic origin required")
-    return base.rstrip("/") + "/v1/messages"
+    # Serialize only the admitted origin, never the raw environment spelling.
+    # urlsplit normalizes control characters; carrying the original string into
+    # the HTTP client would restore those characters after validation.
+    return urllib.parse.urlunsplit(
+        (parsed.scheme, parsed.hostname.lower().rstrip("."), "/v1/messages", "", "")
+    )
 
 
 if __name__ == "__main__":
