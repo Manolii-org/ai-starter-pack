@@ -578,9 +578,18 @@ def test_explicit_direct_origin_is_validated_after_admission(external, monkeypat
         policy.configured_direct_endpoint()
 
 
-def test_explicit_direct_origin_preserves_admitted_first_party_origin(external):
+@pytest.mark.parametrize("base", [
+    "https://api.anthropic.com",
+    "https://API.ANTHROPIC.COM:443/",
+    "https://api.anthropic.com./",
+    "https://api.anthropic.com/\n",
+    "https://api.anthro\tpic.com",
+    "\thttps://api.anthropic.com\r\n",
+])
+def test_explicit_direct_origin_preserves_admitted_first_party_origin(external, monkeypatch, base):
     root, manifest, commit = external
     commit()
+    monkeypatch.setenv("ANTHROPIC_DIRECT_BASE_URL", base)
     assert policy.configured_direct_endpoint() == "https://api.anthropic.com/v1/messages"
 
 
