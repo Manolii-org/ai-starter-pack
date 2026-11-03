@@ -30,11 +30,11 @@
     },
     "AGENTS.md": {
       "kind": "block",
-      "sha256": "f85e6ca5fe19c99e50676e54cd62339c0951d32f6edc1ca6e0b54b8a55a0da82"
+      "sha256": "0d41e14779616c0c805c92694016d8792208cbd6f618c889333c679408c3cecd"
     },
     "CLAUDE.md": {
       "kind": "block",
-      "sha256": "ba00ea14eb3642e06960658bbab241b81238e21c556a01f5e854c7794cc94ecb"
+      "sha256": "97527a606bc5c01be51b5e51880e3fae092136edafa4147596e6598f7727454a"
     }
   },
   "plugin": "platform/framework",
