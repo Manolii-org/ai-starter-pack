@@ -1,5 +1,6 @@
 """Offline checks of immutable evidence and the real Judge request/decision path."""
 
+import ast
 import hashlib
 import importlib.util
 import io
@@ -740,10 +741,18 @@ def test_non_utf8_git_source_is_unavailable_without_lossy_replacement(repo, monk
     'os.getenv("GITHUB_TOKEN")', 'os.environ.get("GITHUB_TOKEN")',
     'os.environ["GITHUB_TOKEN"]', 'get_password()',
     'os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")',
+    'os.getenv("GITHUB_TOKEN", "")', 'os.getenv("GITHUB_TOKEN", None)',
+    'os.environ.get("GITHUB_TOKEN", "")', 'os.environ.get("GITHUB_TOKEN", None)',
+    'os.getenv("GITHUB_TOKEN", default="")', 'os.getenv("GITHUB_TOKEN", default=None)',
+    'os.environ.get("GITHUB_TOKEN", default="")', 'os.environ.get("GITHUB_TOKEN", default=None)',
 ])
 def test_reference_only_git_source_survives_numbering_and_real_request(repo, monkeypatch, rhs):
-    root, _ = repo
     source = _fixture_text(f'π = 1; @auth@ = {rhs}\n')
+    _assert_reference_only_git_request(repo, monkeypatch, source)
+
+
+def _assert_reference_only_git_request(repo, monkeypatch, source):
+    root, _ = repo
     (root / "policy.py").write_text(source)
     (root / "link.py").unlink()
     git(root, "add", "-A")
@@ -754,7 +763,9 @@ def test_reference_only_git_source_survives_numbering_and_real_request(repo, mon
     row = evidence["locations"][loc(f)]
     assert row["status"] == "available" and row["whole_file"]
     assert row["content_sha256"] == hashlib.sha256(source.encode()).hexdigest()
-    assert row["text"] == "1: " + source.rstrip("\n")
+    assert row["text"] == "\n".join(
+        f"{number}: {line}" for number, line in enumerate(source.removesuffix("\n").split("\n"), 1)
+    )
     assert evidence["repository_context"]["status"] == "complete_tracked_head"
     j._require_safe_packet(evidence)  # Proof survives both numbered source projections.
     # Raw diff statements have no source-span proof: no excerpts or false
@@ -780,6 +791,15 @@ def test_reference_only_git_source_survives_numbering_and_real_request(repo, mon
     _fixture_text('@credential@ = "offline-fixture-value"'), _fixture_text('@credential@ = offline_fixture_value'),
     _fixture_text('@credential@ = 1234567890'), _fixture_text('@credential@ = os.getenv("@CREDENTIAL@", "literal-default")'),
     _fixture_text('@credential@ = os.getenv("@CREDENTIAL@", default="literal-default")'),
+    _fixture_text('@credential@ = os.environ.get("@CREDENTIAL@", "literal-default")'),
+    _fixture_text('@credential@ = os.environ.get("@CREDENTIAL@", default="literal-default")'),
+    _fixture_text('@credential@ = os.getenv("@CREDENTIAL@", default=other_value)'),
+    _fixture_text('@credential@ = os.getenv("@CREDENTIAL@", False)'),
+    _fixture_text('@credential@ = os.getenv("@CREDENTIAL@", b"")'),
+    _fixture_text('@credential@ = os.getenv("@CREDENTIAL@", "", default=None)'),
+    _fixture_text('@credential@ = os.getenv("@CREDENTIAL@", "", None)'),
+    _fixture_text('@credential@ = os.getenv("@CREDENTIAL@", **options)'),
+    _fixture_text('@credential@ = os.getenv("@CREDENTIAL@", *options)'),
     _fixture_text('@credential@ = get_@credential@("literal-value")'), _fixture_text('@credential@ = unknown_getter()'),
     _fixture_text('@credential@ = os.getenv("@CREDENTIAL@") + "literal-value"'),
     _fixture_text('@credential@ = os.getenv("@CREDENTIAL@") if condition else get_@credential@()'),
@@ -797,6 +817,23 @@ def test_reference_proof_does_not_exempt_literals_or_unproved_text(source):
                   j._numbered_source(j._source_text(source, "source.py"))):
         with pytest.raises(ValueError, match="sensitive review material"):
             j._require_safe_packet({"evidence": value})
+
+
+@pytest.mark.parametrize("rhs", ['os.getenv("OFFLINE_REFERENCE", "")',
+                                  'os.environ.get("OFFLINE_REFERENCE", default=None)'])
+@pytest.mark.parametrize("suffix", [
+    _fixture_text('; @credential@ = "offline-fixture-value"'),
+    _fixture_text('  # @credential@ = offline_fixture_value'),
+    '  # ' + _generic_material("bearer"),
+    '  # catalog fixture: ' + 'ghp_' + 'a' * 36,
+])
+def test_empty_default_proof_does_not_cover_other_sensitive_material(rhs, suffix):
+    source = _fixture_text(f'@auth@ = {rhs}') + suffix
+    proved = j._source_text(source, "source.py")
+    assert proved.reference_spans
+    for value in (proved, j._numbered_source(proved)):
+        with pytest.raises(ValueError, match="sensitive review material"):
+            j._require_safe_packet(value)
 
 
 def test_reference_proof_never_exempts_catalog_or_other_packet_fields():
@@ -831,6 +868,20 @@ def test_actual_judge_environment_bindings_have_verified_source_proof():
     proved = j._source_text(source, "scripts/run-judge.py")
     assert proved == source and _fixture_text("self.@auth@ = os.getenv") in source
     j._require_safe_packet(proved)
+
+
+def test_shipped_cost_logger_empty_default_binding_has_source_proof(repo, monkeypatch):
+    path = "scripts/session-cost-logger.py"
+    source = (ROOT / path).read_text()
+    function = next(node for node in ast.parse(source).body
+                    if isinstance(node, ast.FunctionDef) and node.name == "_langfuse_from_doppler")
+    context = ast.get_source_segment(source, function)
+    assert _fixture_text('@auth@ = os.environ.get("DOPPLER_TOKEN_PRD", "")') in context
+    proved = j._source_text(context, path)
+    assert proved == context and proved.reference_spans
+    j._require_safe_packet(proved)
+    j._require_safe_packet(j._numbered_source(proved))
+    _assert_reference_only_git_request(repo, monkeypatch, context + "\n")
 
 
 @pytest.mark.parametrize("condition", ["api_key", "not api_key", "ready and not self.token", "left == password"])

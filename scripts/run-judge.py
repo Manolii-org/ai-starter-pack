@@ -398,16 +398,27 @@ def _source_text(text: str, path: str) -> str:
     def env_name(node):
         return isinstance(node, ast.Constant) and isinstance(node.value, str) and bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", node.value))
 
+    def empty_default(node):
+        return isinstance(node, ast.Constant) and (node.value is None or node.value == "")
+
     def reference(node):
         if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or):
             return all(reference(value) for value in node.values)
         if isinstance(node, ast.Subscript):
             return dotted(node.value) == "os.environ" and env_name(node.slice)
-        if not isinstance(node, ast.Call) or node.keywords:
+        if not isinstance(node, ast.Call):
             return False
         name = dotted(node.func)
-        return ((name in {"os.getenv", "os.environ.get"} and len(node.args) == 1 and env_name(node.args[0]))
-                or (name == "get_password" and not node.args))
+        if name == "get_password":
+            return not node.args and not node.keywords
+        if name not in {"os.getenv", "os.environ.get"} or not 1 <= len(node.args) <= 2 or not env_name(node.args[0]):
+            return False
+        if len(node.args) == 2:
+            return not node.keywords and empty_default(node.args[1])
+        return not node.keywords or (
+            len(node.keywords) == 1 and node.keywords[0].arg == "default"
+            and empty_default(node.keywords[0].value)
+        )
 
     spans = []
 
