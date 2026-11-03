@@ -1132,3 +1132,27 @@ def test_direct_route_does_not_receive_proxy_correlation(repo, monkeypatch):
     monkeypatch.setattr(j, "_urlopen_https", transport)
     assert j.Judge("unused", 1, head).invoke_judge_agent([finding()])["complete"]
     assert len(sent) == 1 and "metadata" not in sent[0]
+
+
+@pytest.mark.parametrize("separator", ["\u2028", "\u2029", "\x85"])
+@pytest.mark.parametrize("ending", ["\n", "\r\n"])
+def test_unicode_string_separators_preserve_physical_git_locations(repo, separator, ending, monkeypatch):
+    root, _ = repo
+    source = f'value = "before{separator}after"{ending}result = 1{ending}'
+    compile(source, 'policy.py', 'exec')
+    (root / 'policy.py').write_bytes(source.encode())
+    git(root, 'add', 'policy.py')
+    git(root, 'commit', '-qm', 'physical source lines')
+    head = git(root, 'rev-parse', 'HEAD')
+    valid, invalid = finding(line=2), finding(line=3)
+    packet = j._judge_evidence([valid, invalid], head)
+    row = packet['locations'][loc(valid)]
+    assert row['status'] == 'available' and row['total_lines'] == 2
+    assert row['text'] == f'1: value = "before{separator}after"\n2: result = 1'
+    assert packet['locations'][loc(invalid)]['status'] == 'line_out_of_range'
+    # The deletion fallback must not invent an old-source third line either.
+    monkeypatch.setenv('PR_BASE_SHA', head)
+    git(root, 'rm', 'policy.py')
+    git(root, 'commit', '-qm', 'delete physical source')
+    deleted = j._judge_evidence([invalid], git(root, 'rev-parse', 'HEAD'))
+    assert deleted['locations'][loc(invalid)]['status'] != 'available'

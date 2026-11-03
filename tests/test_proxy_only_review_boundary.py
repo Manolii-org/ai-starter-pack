@@ -285,3 +285,70 @@ def test_stop_critic_does_not_dispatch_without_its_privacy_guard(tmp_path, monke
     with pytest.raises((OSError, RuntimeError)):
         runpy.run_path(str(stop_code))
     build.assert_not_called()
+
+
+def legacy_runner(name, tmp_path, monkeypatch, helper):
+    path = tmp_path / 'scripts' / (name + '.py')
+    path.parent.mkdir(exist_ok=True)
+    path.write_bytes((TEMPLATES / (name + '.py')).read_bytes())
+    if helper:
+        policy = path.parent / 'lib/agent_capabilities.py'
+        policy.parent.mkdir()
+        policy.write_text('class RouteAdmissionError(ValueError): pass\n')
+    spec = importlib.util.spec_from_file_location('legacy_' + name.replace('-', '_'), path)
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, module)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize('helper', [False, True])
+@pytest.mark.parametrize('name', ['run-broad-agents', 'run-specialists'])
+def test_legacy_hosted_runtime_refuses_before_transport(name, helper, tmp_path, monkeypatch):
+    monkeypatch.setenv('GITHUB_ACTIONS', 'true')
+    transport = Mock(side_effect=AssertionError('must not create transport'))
+    monkeypatch.setattr('urllib.request.build_opener', transport)
+    with pytest.raises(ValueError, match='candidate provenance runtime missing'):
+        legacy_runner(name, tmp_path, monkeypatch, helper)
+    transport.assert_not_called()
+
+
+@pytest.mark.parametrize('helper', [False, True])
+def test_legacy_local_broad_proxy_result_is_written(helper, tmp_path, monkeypatch):
+    monkeypatch.delenv('GITHUB_ACTIONS', raising=False)
+    module = legacy_runner('run-broad-agents', tmp_path, monkeypatch, helper)
+    agent = module.AgentConfig('systems-consistency', 'sonnet', 'internal', 'system', 'instructions')
+    monkeypatch.setattr(module, 'parse_agent_file', lambda _: agent)
+    monkeypatch.setattr(module, 'get_changed_files', lambda: [])
+    monkeypatch.setattr(module, 'invoke_agent', lambda *a: {
+        'source': agent.name, 'findings': [], '_assessment': {'attempt': 'forged'}})
+    source = tmp_path / 'input.diff'
+    source.write_text('+complete source\n')
+    output = tmp_path / 'candidates'
+    monkeypatch.setattr(sys, 'argv', ['run-broad-agents.py', '--agents', agent.name,
+        '--diff', str(source), '--candidates-dir', str(output)])
+    assert module.main() == 0
+    assert json.loads((output / (agent.name + '.json')).read_text()) == {
+        'source': agent.name, 'findings': []}
+
+
+@pytest.mark.parametrize('helper', [False, True])
+def test_legacy_local_specialist_writes_results_and_both_skip_markers(helper, tmp_path, monkeypatch):
+    monkeypatch.delenv('GITHUB_ACTIONS', raising=False)
+    module = legacy_runner('run-specialists', tmp_path, monkeypatch, helper)
+    monkeypatch.setenv('LITELLM_PROXY_URL', 'https://proxy.example')
+    monkeypatch.setenv('LLM_API_KEY', 'synthetic-proxy-key')
+    monkeypatch.setattr(module, '_load_skill', lambda _: ({'model': 'haiku'}, 'instructions'))
+    monkeypatch.setattr(module, '_call_api', lambda *a, **k: json.dumps({
+        'source': 'ordinary', 'findings': [], '_assessment': {'attempt': 'forged'}}))
+    output = tmp_path / 'candidates'
+    output.mkdir()
+    assert module._invoke_skill('ordinary', '+complete source\n', output) == ('ordinary', None)
+    assert json.loads((output / 'ordinary.json').read_text()) == {'source': 'ordinary', 'findings': []}
+    module._write_skip_marker('security-boundary-test', output, 'api_error')
+    first_party = json.loads((output / 'security-boundary-test.json').read_text())
+    assert first_party['first_party'] is True and first_party['skipped'] == 'api_error'
+    module._write_skipped_marker('ordinary', output, 'api_error')
+    assert json.loads((output / 'ordinary.json').read_text())['skipped'] == 'api_error'
+    with pytest.raises(module.RouteAdmissionError):
+        module.configured_direct_endpoint()
