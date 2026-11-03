@@ -295,6 +295,10 @@ def legacy_runner(name, tmp_path, monkeypatch, helper):
         policy = path.parent / 'lib/agent_capabilities.py'
         policy.parent.mkdir()
         policy.write_text('class RouteAdmissionError(ValueError): pass\n')
+    if name == 'run-judge':
+        companion = path.parent / 'lib/protected_review.py'
+        companion.parent.mkdir(exist_ok=True)
+        companion.write_bytes((TEMPLATES / 'lib/protected_review.py').read_bytes())
     spec = importlib.util.spec_from_file_location('legacy_' + name.replace('-', '_'), path)
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, spec.name, module)
@@ -352,3 +356,25 @@ def test_legacy_local_specialist_writes_results_and_both_skip_markers(helper, tm
     assert json.loads((output / 'ordinary.json').read_text())['skipped'] == 'api_error'
     with pytest.raises(module.RouteAdmissionError):
         module.configured_direct_endpoint()
+
+
+@pytest.mark.parametrize('helper', [False, True])
+@pytest.mark.parametrize('hosted', [False, True])
+def test_legacy_judge_local_compatibility_retains_hosted_provenance_guard(helper, hosted, tmp_path, monkeypatch):
+    if hosted:
+        monkeypatch.setenv('GITHUB_ACTIONS', 'true')
+    else:
+        monkeypatch.delenv('GITHUB_ACTIONS', raising=False)
+    module = legacy_runner('run-judge', tmp_path, monkeypatch, helper)
+    output = tmp_path / 'candidates'
+    output.mkdir()
+    (output / 'ordinary.json').write_text(json.dumps({'source': 'ordinary', 'findings': []}))
+    instance = module.Judge(str(output), 1, 'a' * 40)
+    instance.judge_log_dir = tmp_path / 'judge-logs'
+    seen = []
+    monkeypatch.setattr(instance, '_post_no_findings_comment', lambda: seen.append('clean'))
+    monkeypatch.setattr(instance, '_post_advisory_warning', lambda detail: seen.append('incomplete') or False)
+    monkeypatch.setattr(module, '_urlopen_https', Mock(side_effect=AssertionError('no provider dispatch')))
+    assert instance.run() == 0
+    assert seen == (['incomplete'] if hosted else ['clean'])
+    assert bool(instance._candidate_load_errors) is hosted

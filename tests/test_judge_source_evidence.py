@@ -1156,3 +1156,36 @@ def test_unicode_string_separators_preserve_physical_git_locations(repo, separat
     git(root, 'commit', '-qm', 'delete physical source')
     deleted = j._judge_evidence([invalid], git(root, 'rev-parse', 'HEAD'))
     assert deleted['locations'][loc(invalid)]['status'] != 'available'
+
+
+@pytest.mark.parametrize("final_style", ['fenced', 'bare'])
+def test_judge_uses_final_keep_verdict_instead_of_earlier_drop_example(repo, monkeypatch, final_style):
+    _, head = repo
+    candidate = finding()
+    example = '```json\n' + json.dumps(answer(candidate, 'drop')) + '\n```\n'
+    final = json.dumps(answer(candidate, 'keep'))
+    if final_style == 'fenced':
+        final = '```json\n' + final + '\n```'
+    monkeypatch.setattr(j, '_endpoint', lambda **kw: ('offline', 'https://example.invalid/v1/messages', True))
+    monkeypatch.setattr(j, '_urlopen_https', lambda *a, **kw: Response(json.dumps({
+        'content': [{'type': 'text', 'text': example}, {'type': 'text', 'text': final}],
+        'stop_reason': 'end_turn'}).encode()))
+    result = j.Judge('unused', 1, head).invoke_judge_agent([candidate])
+    assert result['complete'] and result['surviving'] == [candidate.to_dict()]
+
+
+@pytest.mark.parametrize("tail", [
+    'Final: {"version":2,"decisions":[',
+    '```json\n{"version":2,"decisions":[',
+    '{"wrapper":{"version":2,"decisions":[]},"unfinished":"',
+    '[{"version":2,"decisions":[]}, {"unfinished":"',
+    '{"metadata":"no final adjudication"}',
+])
+def test_judge_never_salvages_an_earlier_drop_when_final_verdict_is_invalid(repo, monkeypatch, tail):
+    _, head = repo
+    candidate = finding()
+    text = '```json\n' + json.dumps(answer(candidate, 'drop')) + '\n```\n' + tail
+    monkeypatch.setattr(j, '_endpoint', lambda **kw: ('offline', 'https://example.invalid/v1/messages', True))
+    monkeypatch.setattr(j, '_urlopen_https', lambda *a, **kw: Response(json.dumps({
+        'content': [{'type': 'text', 'text': text}], 'stop_reason': 'end_turn'}).encode()))
+    assert j.Judge('unused', 1, head).invoke_judge_agent([candidate]) is None
