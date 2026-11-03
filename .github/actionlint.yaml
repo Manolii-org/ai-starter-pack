@@ -13,3 +13,9 @@ paths:
     ignore:
       # ports comes from fromJSON(inputs.db_ports_json) — a sequence at runtime.
       - '"ports" section must be sequence node'
+
+# ubuntu-slim is a GitHub-hosted label introduced after pinned actionlint 1.7.7.
+# This parser allowlist does not change runner selection or workflow permissions.
+self-hosted-runner:
+  labels:
+    - ubuntu-slim

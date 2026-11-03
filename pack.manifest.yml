@@ -22,9 +22,10 @@ features:
   kl_integration: false     # Remote knowledge layer memory backend (kl_* MCP tools).
   browserbase: false        # Browserbase browser automation. Requires BROWSERBASE_API_KEY.
   langfuse_telemetry: false # OTEL tracing to Langfuse. Requires LANGFUSE_PUBLIC_KEY + SECRET.
-  codex_adversarial: false  # Cross-provider adversarial PR review. Requires OPENAI_API_KEY.
+  codex_adversarial: false  # Optional native Codex MCP agent; configure its provider credentials separately.
   mesh_telemetry: false     # Agent-mesh contract telemetry (mesh-contract.yaml.template). Requires MESH_ENABLED wiring.
-  codex_review: true        # Codex PR review + security diff scan workflows (Doppler master/prd_codex). Default false under isolation_profile=strict.
+  codex_review: true        # Code/security request, trusted worker and recovery workflows.
+  # Owner-authorised personal sessions or explicit legacy OIDC mode; strict defaults off.
 
 isolation_profile: standard # standard | strict — strict: hooks-only settings.json, no maintainer-hosted service coupling
 

@@ -86,18 +86,6 @@
       "severity": "Low"
     },
     {
-      "fingerprint": "c5fd7d5e19a54e15",
-      "ident": "adhoc-packages",
-      "path": ".github/workflows/codex-pr-review.yml",
-      "severity": "Low"
-    },
-    {
-      "fingerprint": "ed7055ffd1d90302",
-      "ident": "adhoc-packages",
-      "path": ".github/workflows/codex-security-diff-scan.yml",
-      "severity": "Low"
-    },
-    {
       "fingerprint": "4092faca39207f25",
       "ident": "template-injection",
       "path": ".github/workflows/coverage-ratchet-reusable.yml",

@@ -1,0 +1,6 @@
+seccomp.json and apparmor originate from OpenAI Codex Security, commit
+05ff204ee048ac9eba5504cd85beea8c332b3153:
+https://github.com/openai/codex-security/tree/05ff204ee048ac9eba5504cd85beea8c332b3153/docker
+The AppArmor profile name/peer selectors are changed to codex-review-container.
+Both profiles keep dropped capabilities and no-new-privileges; no unconfined
+profile, privileged container, host network/PID namespace or Docker socket is used.

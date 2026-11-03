@@ -16,8 +16,8 @@ Production-grade AI-assisted development from day one. {{ATTRIBUTION_LINE}}
 | **Multi-model routing** | `.claude/model-routing.json`, `.claude/model-routing.md`{% if isolation_profile != 'strict' %}, `deploy/litellm-proxy/`{% endif %} | 9-tier framework: Anthropic Claude + Fireworks/Together/Groq/OpenRouter OSS models |
 | **Scripts** | `scripts/` ({{ 60 - (3 if isolation_profile == 'strict' else 0) }} files) | Utilities: knowledge index, skill graph, system self-check, model routing, LiteLLM product asset/profile verification, pre-tool enforcement (scope-budget / broad-dispatch / token-leak guards), injection scan, canary tokens, safe-env helpers, pack drift check, session-stop checklist, instruction-load receipts, explicit workflow-outcome lint, closed-loop issue lifecycle, OTEL/Langfuse headers, ai-resolve capability resolver, automation-registry validation, deployment-contract check, vercel-build-guard, Devin lifecycle and durable admission, workflow security (SHA-pin check, zizmor ratchet, release security diff) |
 | **Husky** | `.husky/` (3 files) | Git hooks: pre-commit, commit-msg, pre-push |
-| **CI** | `.github/workflows/` ({{ 37 - (1 if cost_profile == 'lean' or isolation_profile == 'strict' else 0) - (0 if codex_review else 2) - (3 if isolation_profile == 'strict' else 0) }} files) | CI, PR assessment, static review, secret scanning, tier gates, Integration Admission{% if isolation_profile != 'strict' %}, provenance-attested LiteLLM releases{% endif %}, plus the reusable-workflow library consumers call by tag{% if cost_profile == 'lean' %} — `cost_profile=lean` omitted `monitor-litellm.yml`{% endif %}{% if not codex_review %} — `codex_review=false` omitted the Codex review workflows{% endif %}{% if isolation_profile == 'strict' %} — `isolation_profile=strict` omitted the maintainer-coupled callers and LiteLLM deploy/publish files{% endif %} |
-| **Docs** | `docs/` ({{ 36 + (1 if oss_routing else 0) + (1 if kl_integration else 0) }} files) | Quality gate, output-token discipline, OSS delegation, instruction-load observability, feature-train G-P4, opt-in Jev judge shadow, capability registry consumption (ai-manifest + ai-resolve); security (MCP response hygiene, token-leak hygiene, audit evidence); portable feature-control, agent-release, coordinated-release and explicit validation-layout contracts; governance (model-change protocol, model-config schema{% if oss_routing %}, US-OSS eligibility{% endif %}){% if kl_integration %}; remote-memory access{% endif %} |
+| **CI** | `.github/workflows/` ({{ 39 - (1 if cost_profile == 'lean' or isolation_profile == 'strict' else 0) - (0 if codex_review else 4) - (3 if isolation_profile == 'strict' else 0) }} files) | CI, PR assessment, static review, secret scanning, tier gates, Integration Admission{% if isolation_profile != 'strict' %}, provenance-attested LiteLLM releases{% endif %}, plus the reusable-workflow library consumers call by tag{% if cost_profile == 'lean' %} — `cost_profile=lean` omitted `monitor-litellm.yml`{% endif %}{% if not codex_review %} — `codex_review=false` omitted the Codex review workflows{% endif %}{% if isolation_profile == 'strict' %} — `isolation_profile=strict` omitted the maintainer-coupled callers and LiteLLM deploy/publish files{% endif %} |
+| **Docs** | `docs/` ({{ 38 + (1 if oss_routing else 0) + (1 if kl_integration else 0) }} files) | Quality gate, output-token discipline, OSS delegation, instruction-load observability, feature-train G-P4, opt-in Jev judge shadow, capability registry consumption (ai-manifest + ai-resolve); security (MCP response hygiene, token-leak hygiene, audit evidence); portable feature-control, agent-release, coordinated-release and explicit validation-layout contracts; governance (model-change protocol, model-config schema{% if oss_routing %}, US-OSS eligibility{% endif %}){% if kl_integration %}; remote-memory access{% endif %} |
 | **Config** | `.claude/settings.json`, `.mcp.json` | Hook wiring, MCP server setup (Context7 + GitHub included), permissions |
 | **Templates** | `CLAUDE.md`, `AGENTS.md` | Fill-in project documentation |
 
@@ -39,7 +39,7 @@ flags in `pack.manifest.yml`:
 - **Remote memory backend** (`kl_integration`) — memory is local git-tracked JSONL by
   default; a remote MCP memory backend is opt-in.
 - **Browser automation** (`browserbase`), **telemetry** (`langfuse_telemetry`), and
-  **cross-provider adversarial review** (`codex_adversarial`, needs `OPENAI_API_KEY`) — opt-in.
+  **native Codex MCP adversarial review** (`codex_adversarial`, configure its MCP provider credentials separately) — opt-in.
   Claude Code telemetry keys (`CLAUDE_CODE_ENABLE_TELEMETRY`, `OTEL_*`,
   `otelHeadersHelper`) are written to `.claude/settings.json` only when
   `langfuse_telemetry` is on.
@@ -54,9 +54,9 @@ flags in `pack.manifest.yml`:
   `mesh_telemetry`. PR Assessment's LLM jobs still default to the self-hosted
   `["self-hosted","fly"]` labels outside the public pack — set the repository
   variable `CI_RUNNER_OVERRIDE='["ubuntu-latest"]'` on a strict instance.
-- **Codex review** (`codex_review`) — ships `codex-pr-review.yml` and
-  `codex-security-diff-scan.yml` (they read a Doppler `master/prd_codex` service
-  token). Defaults on for `standard` (unchanged) and off for `strict`.
+- **Codex review** (`codex_review`) — ships credential-free code/security request workflows,
+  trusted worker and recovery workflows. Personal-profile execution requires
+  separately authorised private CI accounts and a qualified trusted host. Defaults on for `standard` (unchanged) and off for `strict`.
 
 Run `python3 scripts/pack-drift-check.py` after customising to verify the pack stays
 self-consistent (README counts, feature-exclude paths, sub-agent models) and free of
