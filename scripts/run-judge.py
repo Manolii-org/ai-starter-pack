@@ -901,6 +901,46 @@ def _unique_candidate_fields(pairs):
     return result
 
 
+def _parse_judge_verdict(raw: str):
+    """Use the final complete outer JSON value, never an earlier example.
+
+    Nested objects inside an unfinished wrapper are not standalone verdicts.
+    Anything after the selected object must be whitespace or its closing fence.
+    """
+    try:
+        return json.loads(raw.strip())
+    except json.JSONDecodeError:
+        pass
+    starts, stack = [], []
+    quoted = escaped = False
+    for offset, char in enumerate(raw):
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+            continue
+        if stack and char == '"':
+            quoted = True
+        elif char in "{[":
+            if not stack and char == "{":
+                starts.append(offset)
+            stack.append(char)
+        elif char in "}]" and stack:
+            if (stack[-1], char) not in (("{", "}"), ("[", "]")):
+                raise ValueError("malformed adjudication wrapper")
+            stack.pop()
+    if not starts:
+        raise ValueError("adjudication JSON unavailable")
+    # Do not recover an earlier value if the final response is incomplete.
+    value, end = json.JSONDecoder().raw_decode(raw, starts[-1])
+    if raw[end:].strip() not in {"", "```"}:
+        raise ValueError("ambiguous adjudication tail")
+    return value
+
+
 class Judge:
     """PR assessment judge: loads candidates, applies filters, posts review."""
 
@@ -972,10 +1012,14 @@ class Judge:
         seen_roles = set()
         expected_roles = context = None
         try:
-            expected_roles = _policy_module.selected_review_roles()
-            context = _policy_module.assessment_context()
-            if context is not None and context["head"] != self.sha:
-                raise ValueError("assessment head mismatch")
+            # These are hosted provenance controls. Local legacy callers have
+            # no Actions roster/context, just as the current helper returns None.
+            if os.environ.get("GITHUB_ACTIONS") == "true":
+                policy = globals().get("_policy_module")
+                expected_roles = getattr(policy, "selected_review_roles")()
+                context = getattr(policy, "assessment_context")()
+                if expected_roles is None or context is None or context["head"] != self.sha:
+                    raise ValueError("assessment launcher context unavailable")
         except (AttributeError, ValueError):
             self._candidate_load_errors += 1
 
@@ -1301,16 +1345,7 @@ Only keep original IDs that pass all four gates. Never post to GitHub yourself."
                 raise KeyError("no text blocks in judge response content")
             logger.info("Judge response received (%d characters)", len(response_text))
 
-            # Parse JSON, stripping markdown fences if present
-            json_text = response_text
-            if "```json" in json_text:
-                json_text = json_text.split("```json")[1].split("```")[0]
-            elif "```" in json_text:
-                json_text = json_text.split("```")[1].split("```")[0]
-
-            if result.get("stop_reason") == "max_tokens":
-                raise ValueError("truncated adjudication is incomplete")
-            judge_result = json.loads(json_text.strip())
+            judge_result = _parse_judge_verdict(response_text)
             adjudicated = _validate_judge_decisions(judge_result, findings, evidence, investigations)
             blocked = {f.finding_id for f in findings if (f.file, f.line) in self._specificity_conflicted_locations}
             if blocked:

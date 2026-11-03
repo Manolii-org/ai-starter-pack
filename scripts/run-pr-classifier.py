@@ -276,7 +276,7 @@ def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int
     # ~1k-token chain-of-thought exhausts a small declared budget and returns
     # stop_reason=max_tokens with an empty text block). Proxied calls get
     # headroom on top of the declared answer budget, plus one doubled retry
-    # if the answer still comes back starved. Anthropic-direct keeps the
+    # if the response remains output-limited. Anthropic-direct keeps the
     # declared budget verbatim.
     budget = max_tokens + _PROXY_THINKING_HEADROOM if proxied else max_tokens
     for _budget_attempt in range(2):
@@ -294,16 +294,23 @@ def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int
         )
         with _urlopen_https(req, timeout=60, host=urllib.parse.urlparse(api_url).hostname or "") as resp:
             data = json.loads(resp.read().decode("utf-8"))
-        text = ""
-        for block in data.get("content", []):
+        blocks = data.get("content", [])
+        if not isinstance(blocks, list) or any(not isinstance(block, dict) for block in blocks):
+            raise ValueError("classifier content blocks invalid")
+        text_parts = []
+        for block in blocks:
             if block.get("type") == "text":
-                text = block["text"]
-                break
-        if text or data.get("stop_reason") != "max_tokens" or not proxied:
-            return text
-        # Thinking starved the answer: double the budget once and retry.
-        budget *= 2
-    return ""
+                if not isinstance(block.get("text"), str):
+                    raise ValueError("classifier text block invalid")
+                text_parts.append(block["text"])
+        text = "".join(text_parts)
+        if data.get("stop_reason") == "max_tokens":
+            if proxied and _budget_attempt == 0:
+                budget *= 2  # Existing bounded retry, even for parseable examples.
+                continue
+            raise ValueError("classifier output limit reached; manifest incomplete")
+        return text
+    raise ValueError("classifier manifest unavailable")
 
 
 # Keys the classifier manifest may carry — a candidate object must intersect

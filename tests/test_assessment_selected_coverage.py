@@ -261,3 +261,13 @@ def test_artifact_cannot_claim_a_different_successful_producer_attempt(launch, m
     monkeypatch.setenv('REVIEW_AGENTS_ATTEMPT', '2')
     instance.run()
     assert instance._candidate_load_errors and seen[0][0] == 'incomplete'
+
+
+
+def test_hosted_policy_helper_cannot_erase_required_launcher_context(launch, monkeypatch):
+    judge, instance, artifact, seen = launch
+    complete(artifact)
+    monkeypatch.setattr(judge._policy_module, 'selected_review_roles', lambda: None)
+    monkeypatch.setattr(judge._policy_module, 'assessment_context', lambda: None)
+    instance.run()
+    assert instance._candidate_load_errors and seen[0][0] == 'incomplete'
