@@ -14,8 +14,6 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-# Routed through the proxy on purpose (OSS-intercepted Haiku); not direct spend.
-PROXY_INTERCEPTED = {"claude-haiku-4-5-20251001"}
 
 
 def _literal(path: str, name: str):
@@ -66,7 +64,7 @@ def test_guard_ids_are_priced_and_classified(monkeypatch) -> None:
     logger = _cost_logger(monkeypatch)
     ids = _guard_claude_ids()
     assert ids - set(logger._SUBAGENT_PRICING) == set()
-    assert ids - PROXY_INTERCEPTED - logger._ANTHROPIC_DIRECT_MODELS == set()
+    assert ids - logger._ANTHROPIC_DIRECT_MODELS == set()
 
 
 def test_cost_logger_prices_match_list_prices(monkeypatch) -> None:
@@ -95,12 +93,13 @@ def test_every_accepted_name_is_priced_as_the_model_it_resolves_to(monkeypatch) 
         sub = logger._SUBAGENT_PRICING[name]
         got = (round(sub["input"] * 1_000_000, 6), round(sub["output"] * 1_000_000, 6))
         assert got == (expected["in"], expected["out"]), name
-        if name not in PROXY_INTERCEPTED:
-            assert name in logger._ANTHROPIC_DIRECT_MODELS, name
+        assert name in logger._ANTHROPIC_DIRECT_MODELS, name
 
 
 def test_proxy_intercepted_aliases_are_proxy_spend(monkeypatch) -> None:
     logger = _cost_logger(monkeypatch, "https://litellm.example.test")
     for alias in ("haiku", "sonnet"):
         assert alias not in logger._ANTHROPIC_DIRECT_MODELS
-    assert logger._SUBAGENT_PRICING["sonnet"]["input"] == 0.30 / 1_000_000
+    routing = json.loads((ROOT / ".claude/model-routing.json").read_text())
+    expected = routing["proxy_intercepted_models"]["sonnet"]["cost_per_m_input"]
+    assert logger._SUBAGENT_PRICING["sonnet"]["input"] == expected / 1_000_000
