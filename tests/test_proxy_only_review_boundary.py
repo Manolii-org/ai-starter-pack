@@ -109,7 +109,8 @@ def test_broad_never_dispatches_without_safe_proxy(base, key, monkeypatch):
 
 
 @pytest.fixture
-def stop_code(tmp_path):
+def stop_code(tmp_path, monkeypatch):
+    monkeypatch.setenv("_DRIFT_GUARD_ROOT", str(ROOT))
     text = (TEMPLATES / "session-stop-checklist.sh").read_text()
     section = text[text.index('_run_intent_drift() {'):]
     code = section.split("python3 - <<'PYEOF'", 1)[1].split("\n", 1)[1].split("\nPYEOF", 1)[0]
@@ -257,3 +258,30 @@ def test_stop_critic_rejects_late_results_and_interrupts_blocking_reads(delay, t
     assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
     if delay == "trickling-body":
         assert armed == [15.0, 0.0]
+
+
+@pytest.mark.parametrize("field", ["_DRIFT_PROMPT", "_DRIFT_STATS"])
+@pytest.mark.parametrize("kind", ["catalog", "assignment"])
+def test_stop_critic_screens_sensitive_input_before_transport(field, kind, monkeypatch, stop_code):
+    monkeypatch.setenv("LITELLM_PROXY_URL", "https://proxy.example")
+    monkeypatch.setenv("LLM_API_KEY", "synthetic-proxy-key")
+    # A catalog-shaped synthetic token, never a live credential.
+    unsafe = ("Credential maintenance: ghp_" + "x" * 36 if kind == "catalog"
+              else "SERVICE_API_KEY" + " = " + "synthetic-value-for-refusal")
+    monkeypatch.setenv(field, unsafe)
+    build = Mock(side_effect=AssertionError("sensitive input must not create transport"))
+    monkeypatch.setattr("urllib.request.build_opener", build)
+    with pytest.raises(ValueError):
+        runpy.run_path(str(stop_code))
+    build.assert_not_called()
+
+
+def test_stop_critic_does_not_dispatch_without_its_privacy_guard(tmp_path, monkeypatch, stop_code):
+    monkeypatch.setenv("_DRIFT_GUARD_ROOT", str(tmp_path / "missing-guard"))
+    monkeypatch.setenv("LITELLM_PROXY_URL", "https://proxy.example")
+    monkeypatch.setenv("LLM_API_KEY", "synthetic-proxy-key")
+    build = Mock(side_effect=AssertionError("missing privacy guard must not create transport"))
+    monkeypatch.setattr("urllib.request.build_opener", build)
+    with pytest.raises((OSError, RuntimeError)):
+        runpy.run_path(str(stop_code))
+    build.assert_not_called()

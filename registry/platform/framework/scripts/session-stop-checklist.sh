@@ -256,9 +256,13 @@ _run_intent_drift() {
     # backslash sequences, etc. that would occur with unquoted <<PYEOF interpolation).
     export _DRIFT_PROMPT="$original_prompt"
     export _DRIFT_STATS="$diff_summary"
+    export _DRIFT_GUARD_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
     python3 - <<'PYEOF' 2>/dev/null || true
-import json, os, time, signal
+import json, os, time, signal, sys
+import importlib.machinery
+import importlib.util
+from pathlib import Path
 from contextlib import contextmanager
 from urllib.request import Request, HTTPRedirectHandler, build_opener
 from urllib.parse import urlparse
@@ -266,6 +270,44 @@ from datetime import datetime, timezone
 
 _original_prompt = os.environ.get("_DRIFT_PROMPT", "")
 _diff_stats = os.environ.get("_DRIFT_STATS", "")
+
+# Refuse sensitive intent data with the existing shipped privacy screen.
+# These are owner-source imports; no PR bytecode or package initializer is used.
+class _PrivacySourceLoader(importlib.machinery.SourceFileLoader):
+    def get_code(self, fullname):
+        return self.source_to_code(self.get_data(self.path), self.path)
+
+
+def _screen_intent():
+    root = os.environ.get("_DRIFT_GUARD_ROOT")
+    if not root:
+        raise RuntimeError("session critic requires its source privacy guard")
+    root = Path(root)
+    public_guard = root / "scripts/run-judge.py"
+    guard_path = public_guard if public_guard.is_file() else root / "scripts/lib/session_critic.py"
+    name = "_intent_privacy_guard"
+    spec = importlib.util.spec_from_file_location(
+        name, guard_path, loader=_PrivacySourceLoader(name, str(guard_path)))
+    if spec is None or spec.loader is None:
+        raise RuntimeError("session critic requires a privacy loader")
+    previous_path = list(sys.path)
+    try:
+        sys.path[:0] = [str(root / "scripts"), str(root / "scripts/lib")]
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+        packet = {"prompt": _original_prompt, "diff_stats": _diff_stats}
+        if public_guard.is_file():
+            module._require_safe_packet(packet)
+        elif any(module.screen_artifact(text, source_root=root).blocked
+                 for text in (_original_prompt, _diff_stats)):
+            raise ValueError("session critic input refused by privacy screen")
+    finally:
+        sys.path[:] = previous_path
+        sys.modules.pop(name, None)
+
+
+_screen_intent()
 
 # Resolve only the governed LiteLLM endpoint; never clear its compatibility alias.
 proxy_url = os.environ.get("LITELLM_PROXY_URL") or os.environ.get("ANTHROPIC_BASE_URL")

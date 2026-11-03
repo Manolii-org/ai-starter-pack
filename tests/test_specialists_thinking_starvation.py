@@ -321,3 +321,44 @@ def test_whole_input_transport_overflow_records_first_party_skip(monkeypatch, tm
     assert "request size limit" in error
     marker = json.loads((tmp_path / "security-boundary-test.json").read_text())
     assert marker["first_party"] is True and marker["skipped"] == "api_error"
+
+
+@pytest.mark.parametrize("prefix", ["", "Prose before example\n"])
+def test_earlier_example_cannot_certify_a_truncated_final_verdict(prefix):
+    raw = prefix + '```json\n{"findings": []}\n```\nActual verdict: {"findings": [{"message":'
+    with pytest.raises(json.JSONDecodeError):
+        MODULE._parse_findings(raw)
+
+
+def test_output_limited_parseable_example_is_retried_then_rejected(monkeypatch):
+    _patch_endpoint(monkeypatch, proxied=True)
+    raw = '```json\n{"findings": []}\n```\nActual verdict: {"findings": ['
+    response = _api_payload([{"type": "text", "text": raw}], stop_reason="max_tokens")
+    sent = _fake_urlopen(monkeypatch, [response, response])
+    with pytest.raises(ValueError, match="output-limited"):
+        MODULE._call_api("system", "synthetic request", "sonnet", 800, validate=lambda _: True)
+    assert len(sent) == 2
+    assert sent[1]["max_tokens"] == sent[0]["max_tokens"] * 2
+
+
+def test_all_text_blocks_contribute_to_the_final_verdict(monkeypatch):
+    _patch_endpoint(monkeypatch, proxied=True)
+    response = _api_payload([
+        {"type": "text", "text": 'Example: ```json\n{"findings": []}\n```\nFinal: '},
+        {"type": "thinking", "thinking": "synthetic reasoning"},
+        {"type": "text", "text": '{"findings": [{"id": "actual"}]}'},
+    ])
+    sent = _fake_urlopen(monkeypatch, [response])
+    raw = MODULE._call_api("system", "synthetic request", "sonnet", 800)
+    assert MODULE._parse_findings(raw)["findings"] == [{"id": "actual"}]
+    assert len(sent) == 1
+
+
+@pytest.mark.parametrize("prefix", ["", 'example {"findings":[]}\n'])
+@pytest.mark.parametrize("enclosure", [
+    '{"wrapper":{"findings":[]},"unfinished":"',
+    '[{"findings":[]}, {"unfinished":"',
+])
+def test_nested_findings_cannot_certify_an_unfinished_outer_response(prefix, enclosure):
+    with pytest.raises(json.JSONDecodeError):
+        MODULE._parse_findings(prefix + enclosure)
