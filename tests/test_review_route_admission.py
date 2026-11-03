@@ -370,7 +370,10 @@ def test_judge_cli_repo_override_cannot_change_route_identity(monkeypatch, tmp_p
 
 @pytest.mark.parametrize('name', ['run-specialists.py', 'run-judge.py', 'run-pr-classifier.py', 'run-broad-agents.py'])
 @pytest.mark.parametrize('helper', [None, '# older helper without admission\n'])
-def test_old_helper_preserves_proxy_but_never_admits_direct(monkeypatch, tmp_path, name, helper):
+def test_old_helper_preserves_local_proxy_but_never_admits_direct(monkeypatch, tmp_path, name, helper):
+    # This is the supported local legacy path; hosted missing-provenance refusal
+    # is exercised separately before transport creation.
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
     import shutil
     scripts = tmp_path / 'scripts'
     scripts.mkdir()
