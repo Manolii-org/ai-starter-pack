@@ -367,6 +367,13 @@ refuses direct-only policy contexts.
 Tests use synthetic credentials and mocked requests; they do not contact either
 provider or load production configuration.
 
+Reusable workflows default to direct-provider mode. This requires an existing
+Anthropic credential, the explicit `ANTHROPIC_DIRECT_BASE_URL` repository
+variable, and committed external `llm-anthropic` capability admission in the
+trusted base revision. They validate the origin and immutable admission after
+runtime hydration and before classification. A credential alone never grants
+admission. Estate consumers must select the governed proxy mode instead.
+
 Standalone and reusable GitHub workflows forward the non-secret repository
 variable `ANTHROPIC_DIRECT_BASE_URL` in every review phase. External direct-mode
 consumers must configure that origin explicitly; a credential or capability

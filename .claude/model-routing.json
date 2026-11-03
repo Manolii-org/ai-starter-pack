@@ -237,14 +237,14 @@
     },
     "tier-0-oss-heavy": {
       "provider": "fireworks",
-      "model": "accounts/fireworks/models/kimi-k2p6",
+      "model": "accounts/fireworks/models/kimi-k3",
       "litellm_alias": "tier-0-oss-heavy",
-      "label": "Kimi K2.6 (OSS heavy tier) — RESTRICTED USE",
+      "label": "Kimi K3 (OSS heavy tier) — RESTRICTED USE",
       "swebench_pro": 0.586,
       "swebench_verified": 0.802,
       "baseline_swebench_pro": 0.586,
-      "intelligence_score": 54,
-      "context_window": 262144,
+      "intelligence_score": null,
+      "context_window": 1048576,
       "context_cap_runtime": 64000,
       "use_cases": {
         "allowed": [
@@ -281,8 +281,8 @@
         "internal",
         "public"
       ],
-      "cost_per_m_input": 0.5,
-      "cost_per_m_output": 2.8,
+      "cost_per_m_input": 3.0,
+      "cost_per_m_output": 15.0,
       "weaknesses": [
         "Smoke test null as of 2026-05-10 — run against Fireworks serverless before relying on primary",
         "8-case fitness eval not yet run — GLM-5.1 baseline comparison pending",
@@ -295,15 +295,17 @@
         "primary": {
           "provider": "fireworks",
           "litellm_alias": "tier-0-oss-heavy",
-          "model_id_hint": "accounts/fireworks/models/kimi-k2p6",
+          "model_id_hint": "accounts/fireworks/models/kimi-k3",
           "smoke_tested": null,
           "vision": {
             "supported": true,
             "modalities": [
               "text",
               "image"
-            ]
-          }
+            ],
+            "$source": "https://fireworks.ai/models/fireworks/kimi-k3: image input and function calling supported; inherited image benchmarks/prices are not qualified for this model."
+          },
+          "$model_source": "https://fireworks.ai/models/fireworks/kimi-k3 (serverless; $3/$0.30/$15 per million input/cached/output; 1,048,576 context). Catalog verified 2026-11-04; no inference qualification claimed."
         },
         "secondary": {
           "provider": "openrouter",
@@ -341,8 +343,11 @@
         "modalities": [
           "text",
           "image"
-        ]
-      }
+        ],
+        "$source": "https://fireworks.ai/models/fireworks/kimi-k3: image input and function calling supported; inherited image benchmarks/prices are not qualified for this model."
+      },
+      "$benchmark_note": "Kimi K3 has no qualified canonical v4.1.1 score here; the prior K2.6 score is not inherited.",
+      "$model_source": "https://fireworks.ai/models/fireworks/kimi-k3 (serverless; $3/$0.30/$15 per million input/cached/output; 1,048,576 context). Catalog verified 2026-11-04; no inference qualification claimed."
     },
     "tier-1-fast": {
       "provider": "fireworks",
@@ -417,13 +422,13 @@
     },
     "tier-2-agentic": {
       "provider": "fireworks",
-      "model": "accounts/fireworks/models/kimi-k2p6",
+      "model": "accounts/fireworks/models/kimi-k3",
       "litellm_alias": "tier-2-agentic",
       "swebench": 0.768,
       "baseline_swebench": 0.768,
-      "intelligence_score": 54,
+      "intelligence_score": null,
       "gdpval_aa_elo": 1531,
-      "context_window": 262144,
+      "context_window": 1048576,
       "use_cases": [
         "long-tool-chains",
         "multi-step-subagents",
@@ -433,22 +438,24 @@
         "internal",
         "public"
       ],
-      "cost_per_m_input": 0.95,
-      "cost_per_m_output": 4.0,
+      "cost_per_m_input": 3.0,
+      "cost_per_m_output": 15.0,
       "throughput_tok_per_sec": 140,
       "fallback_chain": {
         "primary": {
           "provider": "fireworks",
           "litellm_alias": "tier-2-agentic",
-          "model_id_hint": "accounts/fireworks/models/kimi-k2p6",
-          "context_window": 262144,
+          "model_id_hint": "accounts/fireworks/models/kimi-k3",
+          "context_window": 1048576,
           "vision": {
             "supported": false,
             "modalities": [
               "text"
-            ]
+            ],
+            "$source": "https://fireworks.ai/models/fireworks/kimi-k3: image input and function calling supported; inherited image benchmarks/prices are not qualified for this model."
           },
-          "smoke_tested": "2026-04-28"
+          "smoke_tested": null,
+          "$model_source": "https://fireworks.ai/models/fireworks/kimi-k3 (serverless; $3/$0.30/$15 per million input/cached/output; 1,048,576 context). Catalog verified 2026-11-04; no inference qualification claimed."
         },
         "secondary": {
           "provider": "openrouter",
@@ -488,8 +495,11 @@
           "text",
           "image"
         ],
-        "mmmu_pro": 0.62
-      }
+        "mmmu_pro": null,
+        "$source": "https://fireworks.ai/models/fireworks/kimi-k3: image input and function calling supported; inherited image benchmarks/prices are not qualified for this model."
+      },
+      "$benchmark_note": "Kimi K3 has no qualified canonical v4.1.1 score here; the prior K2.6 score is not inherited.",
+      "$model_source": "https://fireworks.ai/models/fireworks/kimi-k3 (serverless; $3/$0.30/$15 per million input/cached/output; 1,048,576 context). Catalog verified 2026-11-04; no inference qualification claimed."
     },
     "tier-2-agentic-pro": {
       "provider": "fireworks",
@@ -531,8 +541,9 @@
         "tertiary": {
           "provider": "fireworks",
           "litellm_alias": "tier-2-agentic-fallback-fireworks",
-          "model_id_hint": "accounts/fireworks/models/kimi-k2p6",
-          "context_window": 262144
+          "model_id_hint": "accounts/fireworks/models/kimi-k3",
+          "context_window": 1048576,
+          "$model_source": "https://fireworks.ai/models/fireworks/kimi-k3 (serverless; $3/$0.30/$15 per million input/cached/output; 1,048,576 context). Catalog verified 2026-11-04; no inference qualification claimed."
         }
       },
       "vision": {
@@ -586,24 +597,22 @@
         "secondary": {
           "provider": "fireworks",
           "litellm_alias": "tier-3-tool-fallback-kimi-fireworks",
-          "model_id_hint": "accounts/fireworks/models/kimi-k2p6",
-          "smoke_tested": "2026-04-27",
-          "cost_per_m_input": 0.95,
-          "cost_per_m_output": 4.0,
-          "notes": "K2.5 → K2.6 upgrade 2026-04-26: intelligence 47 → 54. Cross-provider first hop from OpenRouter primary. Smoke tested 2026-04-27: 3/3 PASS via live proxy.",
+          "model_id_hint": "accounts/fireworks/models/kimi-k3",
+          "smoke_tested": null,
+          "cost_per_m_input": 3.0,
+          "cost_per_m_output": 15.0,
+          "notes": "Kimi K3 catalog availability verified; no inference or benchmark qualification claimed for this replacement.",
           "vision": {
             "supported": true,
             "modalities": [
               "text",
               "image"
             ],
-            "mmmu_pro": 0.62,
-            "pricing": {
-              "per_1k_images_1mp_usd": 1.425,
-              "native_unit": "input_token_equivalent",
-              "native_rate_usd": 0.95
-            }
-          }
+            "mmmu_pro": null,
+            "pricing": null,
+            "$source": "https://fireworks.ai/models/fireworks/kimi-k3: image input and function calling supported; inherited image benchmarks/prices are not qualified for this model."
+          },
+          "$model_source": "https://fireworks.ai/models/fireworks/kimi-k3 (serverless; $3/$0.30/$15 per million input/cached/output; 1,048,576 context). Catalog verified 2026-11-04; no inference qualification claimed."
         },
         "tertiary": {
           "provider": "openrouter",
@@ -1075,6 +1084,7 @@
         "tier-0-oss-heavy",
         "tier-1-fast",
         "tier-2-agentic",
+        "tier-2-agentic-pro",
         "tier-3-tool",
         "tier-4-extract",
         "tier-5-latency",
@@ -1271,41 +1281,45 @@
         }
       },
       "standard": {
-        "model_id": "accounts/fireworks/models/kimi-k2p6",
-        "label": "Kimi K2.6",
+        "model_id": "accounts/fireworks/models/kimi-k3",
+        "label": "Kimi K3",
         "params": "1T MoE (32B active)",
-        "cost_per_m_input": 0.5,
-        "cost_per_m_output": 2.8,
-        "context_window": 262144,
+        "cost_per_m_input": 3.0,
+        "cost_per_m_output": 15.0,
+        "context_window": 1048576,
         "serverless": true,
         "function_calling": true,
         "thinking": false,
-        "notes": "Non-thinking mode. Repointed 2026-05-01 from DeepSeek V3.2 (Fireworks serverless retirement 2026-05-14). Frontier open-source for everyday tasks, agent work, function calling.",
+        "notes": "Kimi K3 catalog availability verified; no inference or benchmark qualification claimed for this replacement.",
         "vision": {
           "supported": false,
           "modalities": [
             "text"
-          ]
-        }
+          ],
+          "$source": "https://fireworks.ai/models/fireworks/kimi-k3: image input and function calling supported; inherited image benchmarks/prices are not qualified for this model."
+        },
+        "$model_source": "https://fireworks.ai/models/fireworks/kimi-k3 (serverless; $3/$0.30/$15 per million input/cached/output; 1,048,576 context). Catalog verified 2026-11-04; no inference qualification claimed."
       },
       "heavy": {
-        "model_id": "accounts/fireworks/models/kimi-k2p6",
-        "label": "Kimi K2.6 (Reasoning)",
+        "model_id": "accounts/fireworks/models/kimi-k3",
+        "label": "Kimi K3 (Reasoning)",
         "params": "1T MoE (32B active)",
-        "cost_per_m_input": 0.5,
-        "cost_per_m_output": 2.8,
-        "context_window": 262144,
+        "cost_per_m_input": 3.0,
+        "cost_per_m_output": 15.0,
+        "context_window": 1048576,
         "serverless": true,
         "function_calling": true,
         "thinking": true,
-        "notes": "Promoted 2026-05-10: GLM-5.1 → Kimi K2.6. int=54, SWE-Pro 58.6%, IV=28. PRC-origin weights (Moonshot AI). GLM-5.1 retained as tertiary fallback in tier-0-oss-heavy fallback chain.",
+        "notes": "Kimi K3 catalog availability verified; no inference or benchmark qualification claimed for this replacement.",
         "vision": {
           "supported": true,
           "modalities": [
             "text",
             "image"
-          ]
-        }
+          ],
+          "$source": "https://fireworks.ai/models/fireworks/kimi-k3: image input and function calling supported; inherited image benchmarks/prices are not qualified for this model."
+        },
+        "$model_source": "https://fireworks.ai/models/fireworks/kimi-k3 (serverless; $3/$0.30/$15 per million input/cached/output; 1,048,576 context). Catalog verified 2026-11-04; no inference qualification claimed."
       }
     },
     "alternatives": {
@@ -1800,19 +1814,21 @@
         }
       },
       "secondary": {
-        "model_id": "openai/accounts/fireworks/models/kimi-k2p6",
-        "label": "Kimi K2.6 (via Fireworks)",
-        "cost_per_action": 0.0005,
+        "model_id": "openai/accounts/fireworks/models/kimi-k3",
+        "label": "Kimi K3 (via Fireworks)",
+        "cost_per_action": null,
         "monthly_estimate_20_tasks_day": 1.5,
         "env_var": "FIREWORKS_API_KEY",
         "base_url": "https://api.fireworks.ai/inference/v1",
-        "notes": "Repointed 2026-05-01 from DeepSeek V3.2 (Fireworks serverless retirement 2026-05-14). Kimi K2.6 is the Fireworks-recommended replacement; ~100-200 tok/s but 262K context. Automatic fallback on Groq rate-limit or 5xx.",
+        "notes": "Kimi K3 catalog availability verified; no inference or benchmark qualification claimed for this replacement.",
         "vision": {
           "supported": false,
           "modalities": [
             "text"
-          ]
-        }
+          ],
+          "$source": "https://fireworks.ai/models/fireworks/kimi-k3: image input and function calling supported; inherited image benchmarks/prices are not qualified for this model."
+        },
+        "$model_source": "https://fireworks.ai/models/fireworks/kimi-k3 (serverless; $3/$0.30/$15 per million input/cached/output; 1,048,576 context). Catalog verified 2026-11-04; no inference qualification claimed."
       },
       "tertiary": {
         "model_id": "google/gemini-2.5-flash",
@@ -1869,21 +1885,23 @@
   },
   "tier_aliases": {
     "tier-0-oss-heavy": {
-      "resolves_to": "fireworks:accounts/fireworks/models/kimi-k2p6",
-      "model_id": "accounts/fireworks/models/kimi-k2p6",
+      "resolves_to": "fireworks:accounts/fireworks/models/kimi-k3",
+      "model_id": "accounts/fireworks/models/kimi-k3",
       "litellm_alias": "tier-0-oss-heavy",
-      "label": "Kimi K2.6 (Fireworks) — OSS heavy tier, RESTRICTED USE",
+      "label": "Kimi K3 (Fireworks) — OSS heavy tier, RESTRICTED USE",
       "data_sensitivity_max": "internal",
       "requires_proxy": true,
-      "context_window": 262144,
-      "notes": "Promoted 2026-05-10: GLM-5.1 → Kimi K2.6. ONLY route here when task tag is in tier-0-oss-heavy.use_cases.allowed AND USE_OSS_FALLBACK is set. NOT a default; explicit opt-in only. Do not use for restricted_us_oss_ok or restricted data.",
+      "context_window": 1048576,
+      "notes": "Kimi K3 catalog availability verified; no inference or benchmark qualification claimed for this replacement.",
       "vision": {
         "supported": true,
         "modalities": [
           "text",
           "image"
-        ]
-      }
+        ],
+        "$source": "https://fireworks.ai/models/fireworks/kimi-k3: image input and function calling supported; inherited image benchmarks/prices are not qualified for this model."
+      },
+      "$model_source": "https://fireworks.ai/models/fireworks/kimi-k3 (serverless; $3/$0.30/$15 per million input/cached/output; 1,048,576 context). Catalog verified 2026-11-04; no inference qualification claimed."
     },
     "tier-1-fast": {
       "resolves_to": "fireworks:accounts/fireworks/models/gpt-oss-120b",
@@ -1903,21 +1921,23 @@
       }
     },
     "tier-2-agentic": {
-      "resolves_to": "fireworks:accounts/fireworks/models/kimi-k2p6",
-      "model_id": "accounts/fireworks/models/kimi-k2p6",
+      "resolves_to": "fireworks:accounts/fireworks/models/kimi-k3",
+      "model_id": "accounts/fireworks/models/kimi-k3",
       "litellm_alias": "tier-2-agentic",
-      "label": "Kimi K2.6 (Fireworks) — agentic multi-step",
+      "label": "Kimi K3 (Fireworks) — agentic multi-step",
       "data_sensitivity_max": "internal",
       "requires_proxy": true,
-      "context_window": 262144,
+      "context_window": 1048576,
       "throughput_tok_per_sec": 140,
-      "notes": "Agentic tier for multi-step subagents, session transcript mining, and long tool chains. 262K context. PRC-origin (Moonshot AI) — capped at internal. Do not use for restricted data.",
+      "notes": "Kimi K3 catalog availability verified; no inference or benchmark qualification claimed for this replacement.",
       "vision": {
         "supported": false,
         "modalities": [
           "text"
-        ]
-      }
+        ],
+        "$source": "https://fireworks.ai/models/fireworks/kimi-k3: image input and function calling supported; inherited image benchmarks/prices are not qualified for this model."
+      },
+      "$model_source": "https://fireworks.ai/models/fireworks/kimi-k3 (serverless; $3/$0.30/$15 per million input/cached/output; 1,048,576 context). Catalog verified 2026-11-04; no inference qualification claimed."
     },
     "tier-2-agentic-pro": {
       "resolves_to": "fireworks:accounts/fireworks/models/minimax-m3",
@@ -2240,8 +2260,8 @@
       "cost_per_m_output": 3.48
     },
     "sonnet-internal": {
-      "label": "sonnet-internal (internal-only, Kimi K2.6 Fireworks dual-key)",
-      "resolves_to": "fireworks:kimi-k2p6 (dual-key load balanced)",
+      "label": "sonnet-internal (internal-only, Kimi K3 Fireworks dual-key)",
+      "resolves_to": "fireworks:kimi-k3 (dual-key load balanced)",
       "data_sensitivity_max": "internal",
       "proxy_live_since": "2026-04-20",
       "warning": "PRC-origin (Moonshot AI / Kimi). ONLY for data_sensitivity: internal agents. Do NOT assign to restricted_us_oss_ok or restricted agents.",
@@ -2249,13 +2269,15 @@
         "primary": {
           "provider": "fireworks",
           "litellm_alias": "sonnet-internal",
-          "model_id_hint": "kimi-k2p6 (dual-key)",
+          "model_id_hint": "kimi-k3 (dual-key)",
           "vision": {
             "supported": false,
             "modalities": [
               "text"
-            ]
-          }
+            ],
+            "$source": "https://fireworks.ai/models/fireworks/kimi-k3: image input and function calling supported; inherited image benchmarks/prices are not qualified for this model."
+          },
+          "$model_source": "https://fireworks.ai/models/fireworks/kimi-k3 (serverless; $3/$0.30/$15 per million input/cached/output; 1,048,576 context). Catalog verified 2026-11-04; no inference qualification claimed."
         },
         "secondary": {
           "provider": "together",
@@ -2284,8 +2306,10 @@
         "supported": false,
         "modalities": [
           "text"
-        ]
-      }
+        ],
+        "$source": "https://fireworks.ai/models/fireworks/kimi-k3: image input and function calling supported; inherited image benchmarks/prices are not qualified for this model."
+      },
+      "$model_source": "https://fireworks.ai/models/fireworks/kimi-k3 (serverless; $3/$0.30/$15 per million input/cached/output; 1,048,576 context). Catalog verified 2026-11-04; no inference qualification claimed."
     }
   },
   "tiers": {

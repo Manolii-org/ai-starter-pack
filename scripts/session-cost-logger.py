@@ -166,6 +166,12 @@ def parse_session(session_file: Path) -> dict:
 
 
 _SUBAGENT_PRICING: dict[str, dict] = {
+    # Current Fireworks serverless heavy/agentic model, including stable routes.
+    **{name: {"input": 3.00 / 1_000_000, "output": 15.00 / 1_000_000}
+       for name in ("kimi-k3", "accounts/fireworks/models/kimi-k3",
+                    "fireworks_ai/accounts/fireworks/models/kimi-k3",
+                    "tier-0-oss-heavy", "tier-2-agentic",
+                    "tier-2-agentic-fallback-fireworks", "tier-3-tool-fallback-kimi-fireworks")},
     # Anthropic-direct sub-agents (full model ID bypasses proxy)
     "claude-sonnet-4-6":       {"input": 3.00 / 1_000_000, "output": 15.00 / 1_000_000},
     "claude-opus-4-7":         {"input": 5.00 / 1_000_000, "output": 25.00 / 1_000_000},

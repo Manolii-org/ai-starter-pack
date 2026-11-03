@@ -102,3 +102,16 @@ def test_unknown_model_keeps_warning_and_plane_specific_estimate(monkeypatch, tm
     assert result["subagent_proxy_cost"] == cost
     assert result["subagent_ant_cost"] == 0
     assert result["subagent_total_cost"] == cost
+
+
+@pytest.mark.parametrize("model", ["kimi-k3", "accounts/fireworks/models/kimi-k3",
+                                  "fireworks_ai/accounts/fireworks/models/kimi-k3",
+                                  "tier-0-oss-heavy", "tier-2-agentic",
+                                  "tier-2-agentic-fallback-fireworks", "tier-3-tool-fallback-kimi-fireworks"])
+def test_migrated_serverless_model_uses_its_actual_rates_and_provider_bucket(tmp_path, model):
+    logger = load("scripts/session-cost-logger.py")
+    transcript(tmp_path, [model])
+    result = logger.parse_subagents(tmp_path)
+    assert result["subagent_ant_cost"] == 0
+    assert result["subagent_proxy_cost"] == 18
+    assert result["subagent_total_cost"] == 18

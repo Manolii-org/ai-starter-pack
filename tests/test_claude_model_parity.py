@@ -104,3 +104,34 @@ def test_proxy_intercepted_aliases_are_proxy_spend(monkeypatch) -> None:
     routing = json.loads((ROOT / ".claude/model-routing.json").read_text())
     expected = routing["proxy_intercepted_models"]["sonnet"]["cost_per_m_input"]
     assert logger._SUBAGENT_PRICING["sonnet"]["input"] == expected / 1_000_000
+
+
+def test_native_haiku_has_no_redundant_fallback_and_short_alias_is_independent():
+    config = yaml.safe_load((ROOT / "deploy/litellm-proxy/config.yaml").read_text())
+    models = {row["model_name"]: row["litellm_params"]["model"] for row in config["model_list"]}
+    fallbacks = {key: value for row in config["litellm_settings"]["fallbacks"] for key, value in row.items()}
+    assert "claude-haiku-4-5-20251001" not in fallbacks
+    assert models["claude-haiku-4-5-20251001"].startswith("anthropic/")
+    assert models["haiku"].startswith("fireworks_ai/")
+    assert fallbacks["haiku"] == ["claude-haiku-4-5-20251001-anthropic"]
+    assert models[fallbacks["haiku"][0]].startswith("anthropic/")
+
+
+def test_kimi_serverless_routes_and_metadata_use_verified_replacement():
+    config = yaml.safe_load((ROOT / "deploy/litellm-proxy/config.yaml").read_text())
+    routing = json.loads((ROOT / ".claude/model-routing.json").read_text())
+    aliases = {"tier-0-oss-heavy", "tier-2-agentic", "tier-2-agentic-fallback-fireworks", "tier-3-tool-fallback-kimi-fireworks"}
+    for row in config["model_list"]:
+        assert row["litellm_params"]["model"] != "fireworks_ai/accounts/fireworks/models/kimi-k2p6"
+        if row["model_name"] in aliases:
+            assert row["litellm_params"]["model"] == "fireworks_ai/accounts/fireworks/models/kimi-k3"
+            assert row["model_info"] == {"input_cost_per_token": 0.000003,
+                                          "cache_read_input_token_cost": 0.0000003,
+                                          "output_cost_per_token": 0.000015}
+    for name in ("tier-0-oss-heavy", "tier-2-agentic"):
+        tier = routing["tier_definitions"][name]
+        assert tier["model"] == "accounts/fireworks/models/kimi-k3"
+        assert (tier["cost_per_m_input"], tier["cost_per_m_output"]) == (3.0, 15.0)
+        assert tier["context_window"] == 1048576
+        assert tier["intelligence_score"] is None  # Never inherit the previous model's score.
+    assert "tier-2-agentic-pro" in routing["data_classification"]["internal"]["allowed_tiers"]
