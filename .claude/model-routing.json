@@ -240,9 +240,9 @@
       "model": "accounts/fireworks/models/kimi-k3",
       "litellm_alias": "tier-0-oss-heavy",
       "label": "Kimi K3 (OSS heavy tier) — RESTRICTED USE",
-      "swebench_pro": 0.586,
-      "swebench_verified": 0.802,
-      "baseline_swebench_pro": 0.586,
+      "swebench_pro": null,
+      "swebench_verified": null,
+      "baseline_swebench_pro": null,
       "intelligence_score": null,
       "context_window": 1048576,
       "context_cap_runtime": 64000,
@@ -284,13 +284,13 @@
       "cost_per_m_input": 3.0,
       "cost_per_m_output": 15.0,
       "weaknesses": [
-        "Smoke test null as of 2026-05-10 — run against Fireworks serverless before relying on primary",
+        "Kimi K3 smoke and fitness qualification not yet recorded; verify the current Fireworks route before production reliance.",
         "8-case fitness eval not yet run — GLM-5.1 baseline comparison pending",
         "PRC censorship on politically sensitive topics (Moonshot AI CN weights)",
-        "~100% tool call rate inherited from K2.5 base — no published BFCL score specific to K2.6",
+        "No Kimi K3 BFCL/tool-call score qualified here; prior K2.5/K2.6 measurements are not inherited.",
         "Chinese character / non-English leakage risk not confirmed absent (verify in fitness eval)"
       ],
-      "eval_status": "promoted-pending-smoke-test. Smoke test + 8-case fitness eval required before production reliance. See reports/tier-0-oss-heavy-evaluation-2026-05-10.md for rationale. GLM-5.1 retained as tertiary fallback.",
+      "eval_status": "catalog-migrated-pending-qualification. Smoke test + 8-case fitness eval required before production reliance. The 2026-05-10 evaluation report describes the previous K2.6 model; GLM-5.1 remains the tertiary fallback.",
       "fallback_chain": {
         "primary": {
           "provider": "fireworks",
@@ -329,7 +329,7 @@
           "model_id_hint": "accounts/fireworks/models/glm-5p1",
           "cost_per_m_input": 1.4,
           "cost_per_m_output": 4.4,
-          "notes": "GLM-5.1 retained as cross-family fallback after K2.6 primary + OpenRouter K2.6 secondary. Different model family ensures tertiary survives a Kimi-family outage.",
+          "notes": "GLM-5.1 retained as cross-family fallback after K3 primary + OpenRouter K2.6 secondary. Different model family ensures tertiary survives a Kimi-family outage.",
           "vision": {
             "supported": false,
             "modalities": [
@@ -346,7 +346,7 @@
         ],
         "$source": "https://fireworks.ai/models/fireworks/kimi-k3: image input and function calling supported; inherited image benchmarks/prices are not qualified for this model."
       },
-      "$benchmark_note": "Kimi K3 has no qualified canonical v4.1.1 score here; the prior K2.6 score is not inherited.",
+      "$benchmark_note": "Kimi K3 has no qualified canonical intelligence, SWE, GDPval or throughput baseline here; prior K2.6 measurements are not inherited.",
       "$model_source": "https://fireworks.ai/models/fireworks/kimi-k3 (serverless; $3/$0.30/$15 per million input/cached/output; 1,048,576 context). Catalog verified 2026-11-04; no inference qualification claimed."
     },
     "tier-1-fast": {
@@ -424,10 +424,10 @@
       "provider": "fireworks",
       "model": "accounts/fireworks/models/kimi-k3",
       "litellm_alias": "tier-2-agentic",
-      "swebench": 0.768,
-      "baseline_swebench": 0.768,
+      "swebench": null,
+      "baseline_swebench": null,
       "intelligence_score": null,
-      "gdpval_aa_elo": 1531,
+      "gdpval_aa_elo": null,
       "context_window": 1048576,
       "use_cases": [
         "long-tool-chains",
@@ -440,7 +440,7 @@
       ],
       "cost_per_m_input": 3.0,
       "cost_per_m_output": 15.0,
-      "throughput_tok_per_sec": 140,
+      "throughput_tok_per_sec": null,
       "fallback_chain": {
         "primary": {
           "provider": "fireworks",
@@ -498,7 +498,7 @@
         "mmmu_pro": null,
         "$source": "https://fireworks.ai/models/fireworks/kimi-k3: image input and function calling supported; inherited image benchmarks/prices are not qualified for this model."
       },
-      "$benchmark_note": "Kimi K3 has no qualified canonical v4.1.1 score here; the prior K2.6 score is not inherited.",
+      "$benchmark_note": "Kimi K3 has no qualified canonical intelligence, SWE, GDPval or throughput baseline here; prior K2.6 measurements are not inherited.",
       "$model_source": "https://fireworks.ai/models/fireworks/kimi-k3 (serverless; $3/$0.30/$15 per million input/cached/output; 1,048,576 context). Catalog verified 2026-11-04; no inference qualification claimed."
     },
     "tier-2-agentic-pro": {
@@ -1283,7 +1283,7 @@
       "standard": {
         "model_id": "accounts/fireworks/models/kimi-k3",
         "label": "Kimi K3",
-        "params": "1T MoE (32B active)",
+        "params": null,
         "cost_per_m_input": 3.0,
         "cost_per_m_output": 15.0,
         "context_window": 1048576,
@@ -1303,7 +1303,7 @@
       "heavy": {
         "model_id": "accounts/fireworks/models/kimi-k3",
         "label": "Kimi K3 (Reasoning)",
-        "params": "1T MoE (32B active)",
+        "params": null,
         "cost_per_m_input": 3.0,
         "cost_per_m_output": 15.0,
         "context_window": 1048576,
@@ -1817,7 +1817,7 @@
         "model_id": "openai/accounts/fireworks/models/kimi-k3",
         "label": "Kimi K3 (via Fireworks)",
         "cost_per_action": null,
-        "monthly_estimate_20_tasks_day": 1.5,
+        "monthly_estimate_20_tasks_day": null,
         "env_var": "FIREWORKS_API_KEY",
         "base_url": "https://api.fireworks.ai/inference/v1",
         "notes": "Kimi K3 catalog availability verified; no inference or benchmark qualification claimed for this replacement.",
@@ -1869,7 +1869,7 @@
       },
       "tier_thresholds": {
         "restricted_tier_eligibility": "gdpval_aa_elo >= 1550 required for code-review / security / architecture tasks. Currently only Anthropic models qualify. No non-PRC US-origin model meets this threshold (best: Gemma 4 31B at 1124).",
-        "heavy_tier_oss": "intelligence_score >= 42 for tier-0-oss-heavy (current: Kimi K2.6 at 54, MiniMax M2.7 at 50). Drift alert if current model drops >5pp below baseline.",
+        "heavy_tier_oss": "intelligence_score >= 42 for tier-0-oss-heavy. Current primary: Kimi K3, unqualified here; prior K2.6 measurements must not qualify K3. Drift alert if current model drops >5pp below a qualified baseline; record a K3 baseline before comparing.",
         "standard_tier_oss": "intelligence_score >= 40 for tier-1-fast / tier-2-agentic.",
         "tool_tier_oss": "tool_calling_success_rate >= 85% for tier-3-tool.",
         "extract_tier_oss": "Speed (tok/s) is the primary signal for tier-4-extract and tier-5-latency; intelligence_score secondary."
@@ -1928,7 +1928,7 @@
       "data_sensitivity_max": "internal",
       "requires_proxy": true,
       "context_window": 1048576,
-      "throughput_tok_per_sec": 140,
+      "throughput_tok_per_sec": null,
       "notes": "Kimi K3 catalog availability verified; no inference or benchmark qualification claimed for this replacement.",
       "vision": {
         "supported": false,
@@ -2012,7 +2012,7 @@
       "label": "Llama 3.1 8B Instant (Groq LPU) — bulk extraction",
       "data_sensitivity_max": "internal",
       "requires_proxy": true,
-      "notes": "Cheapest extraction tier ($0.05/$0.08). QUALITY BOUNDARY: only route here for binary/multi-class classification, format/lint, grep/count, and DOM element selection — tasks with well-defined correct answers. Do NOT route email enrichment, standing-order evaluation, summarization, or any multi-step reasoning here; those require tier-2-agentic (Kimi K2.6) minimum. Background pipeline: email classification → tier-4-extract (correct); email enrichment/recommendation → tier-2-agentic (correct). Groq Developer rate limit ~1000 rpm; LiteLLM fallback chain routes overflow to Together Llama 3.3 70B Instruct Turbo, then Together DeepSeek V3.2 Exp. Do not use for restricted data.",
+      "notes": "Cheapest extraction tier ($0.05/$0.08). QUALITY BOUNDARY: only route here for binary/multi-class classification, format/lint, grep/count, and DOM element selection — tasks with well-defined correct answers. Do NOT route email enrichment, standing-order evaluation, summarization, or any multi-step reasoning here; those require tier-2-agentic (currently Kimi K3; separate qualification required) minimum. Background pipeline: email classification → tier-4-extract (correct); email enrichment/recommendation → tier-2-agentic (correct). Groq Developer rate limit ~1000 rpm; LiteLLM fallback chain routes overflow to Together Llama 3.3 70B Instruct Turbo, then Together DeepSeek V3.2 Exp. Do not use for restricted data.",
       "vision": {
         "supported": false,
         "modalities": [
