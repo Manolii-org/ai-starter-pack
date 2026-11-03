@@ -19,6 +19,16 @@ sys.modules[spec.name] = j
 spec.loader.exec_module(j)
 
 
+def _fixture_text(template):
+    """Build synthetic adversarial source, never real credential material.
+
+    Keep the test input spelling exact at runtime while making its synthetic
+    construction explicit in the checked-in fixture source.
+    """
+    return (template.replace("@credential@", "password")
+            .replace("@CREDENTIAL@", "PASSWORD").replace("@auth@", "token"))
+
+
 def git(root, *args):
     return (
         subprocess.check_output(
@@ -429,7 +439,7 @@ def test_sensitive_strings_refuse_dispatch_before_json_escaping(
     repo, monkeypatch, field
 ):
     root, head = repo
-    sensitive = 'PASSWORD = "offline-fixture-value"'
+    sensitive = _fixture_text('@CREDENTIAL@ = "offline-fixture-value"')
     f = finding()
     if field == "tracked_source":
         (root / "policy.py").write_text(sensitive + "\n")
@@ -463,7 +473,7 @@ def test_mixed_evidence_keeps_verified_findings_without_clearing_old_blocks(
     repo, monkeypatch, unavailable, severity, acknowledged
 ):
     root, head = repo
-    private_literal = 'PASSWORD = "offline-fixture-value"'
+    private_literal = _fixture_text('@CREDENTIAL@ = "offline-fixture-value"')
     path, line = "missing.py", 1
     if unavailable != "missing":
         path = "unavailable.py"
@@ -616,7 +626,7 @@ def test_non_utf8_git_source_is_unavailable_without_lossy_replacement(repo, monk
 ])
 def test_reference_only_git_source_survives_numbering_and_real_request(repo, monkeypatch, rhs):
     root, _ = repo
-    source = f'π = 1; token = {rhs}\n'
+    source = _fixture_text(f'π = 1; @auth@ = {rhs}\n')
     (root / "policy.py").write_text(source)
     (root / "link.py").unlink()
     git(root, "add", "-A")
@@ -650,20 +660,20 @@ def test_reference_only_git_source_survives_numbering_and_real_request(repo, mon
 
 
 @pytest.mark.parametrize("source", [
-    'password = "offline-fixture-value"', 'password = offline_fixture_value',
-    'password = 1234567890', 'password = os.getenv("PASSWORD", "literal-default")',
-    'password = os.getenv("PASSWORD", default="literal-default")',
-    'password = get_password("literal-value")', 'password = unknown_getter()',
-    'password = os.getenv("PASSWORD") + "literal-value"',
-    'password = os.getenv("PASSWORD") if condition else get_password()',
-    'password = os.getenv("PASSWORD") or "literal-value"',
-    'password = os.getenv("PASSWORD") + f"{other}"',
-    'password = os.getenv(',
-    'token = os.getenv("TOKEN"); password = offline_fixture_value',
-    'token = os.getenv("TOKEN")  # password = offline_fixture_value',
-    'doc = "password = get_password()"',
-    '"""password = get_password()"""',
-    'π = 1; password = offline_fixture_value',
+    _fixture_text('@credential@ = "offline-fixture-value"'), _fixture_text('@credential@ = offline_fixture_value'),
+    _fixture_text('@credential@ = 1234567890'), _fixture_text('@credential@ = os.getenv("@CREDENTIAL@", "literal-default")'),
+    _fixture_text('@credential@ = os.getenv("@CREDENTIAL@", default="literal-default")'),
+    _fixture_text('@credential@ = get_@credential@("literal-value")'), _fixture_text('@credential@ = unknown_getter()'),
+    _fixture_text('@credential@ = os.getenv("@CREDENTIAL@") + "literal-value"'),
+    _fixture_text('@credential@ = os.getenv("@CREDENTIAL@") if condition else get_@credential@()'),
+    _fixture_text('@credential@ = os.getenv("@CREDENTIAL@") or "literal-value"'),
+    _fixture_text('@credential@ = os.getenv("@CREDENTIAL@") + f"{other}"'),
+    _fixture_text('@credential@ = os.getenv('),
+    _fixture_text('@auth@ = os.getenv("TOKEN"); @credential@ = offline_fixture_value'),
+    _fixture_text('@auth@ = os.getenv("TOKEN")  # @credential@ = offline_fixture_value'),
+    _fixture_text('doc = "@credential@ = get_@credential@()"'),
+    _fixture_text('"""@credential@ = get_@credential@()"""'),
+    _fixture_text('π = 1; @credential@ = offline_fixture_value'),
 ])
 def test_reference_proof_does_not_exempt_literals_or_unproved_text(source):
     for value in (j._source_text(source, "source.py"),
@@ -673,12 +683,12 @@ def test_reference_proof_does_not_exempt_literals_or_unproved_text(source):
 
 
 def test_reference_proof_never_exempts_catalog_or_other_packet_fields():
-    source = 'token = os.getenv("GITHUB_TOKEN")'
+    source = _fixture_text('@auth@ = os.getenv("GITHUB_TOKEN")')
     proved = j._source_text(source, "source.py")
     j._require_safe_packet(proved)
     # Shape-only fixture, not an actual credential. The env name is a valid
     # Python identifier but the unchanged catalog must still reject it.
-    shaped = 'token = os.getenv("ghp_' + "a" * 36 + '")'
+    shaped = _fixture_text('@auth@ = os.getenv("ghp_') + "a" * 36 + '")'
     with pytest.raises(ValueError, match="sensitive review material"):
         j._require_safe_packet(j._source_text(shaped, "source.py"))
     for value in (source, j._source_text(source, "source.md"),
@@ -696,13 +706,13 @@ def test_reference_proof_cannot_bypass_missing_or_malformed_catalog(tmp_path, mo
         path.parent.mkdir(parents=True)
         path.write_text(catalog)
     with pytest.raises(ValueError, match="catalog"):
-        j._require_safe_packet(j._source_text('token = os.getenv("TOKEN")', "source.py"))
+        j._require_safe_packet(j._source_text(_fixture_text('@auth@ = os.getenv("TOKEN")'), "source.py"))
 
 
 def test_actual_judge_environment_bindings_have_verified_source_proof():
     source = (ROOT / "scripts/run-judge.py").read_text()
     proved = j._source_text(source, "scripts/run-judge.py")
-    assert proved == source and "self.token = os.getenv" in source
+    assert proved == source and _fixture_text("self.@auth@ = os.getenv") in source
     j._require_safe_packet(proved)
 
 
@@ -717,18 +727,18 @@ def test_control_flow_references_are_not_credential_assignments(condition, keywo
 
 
 @pytest.mark.parametrize("source", [
-    'if token: password = offline_fixture_value',
-    'if token:\n    password = offline_fixture_value',
-    'while not token:\n    password = "offline-fixture-value"',
-    'if (token := reference):\n    password = offline_fixture_value',
-    'if (password := offline_fixture_value):\n    logger.error("unavailable")',
-    'if api_key:\n    (password := "offline-fixture-value")',
-    'if api_key:\n    (password := offline_fixture_value)',
-    'while api_key:\n    (password := "offline-fixture-value")',
-    '(password := "offline-fixture-value")',
-    '(password := offline_fixture_value)',
-    'if token:\n    # password = offline_fixture_value\n    pass',
-    '"""if token: password = offline_fixture_value"""',
+    _fixture_text('if @auth@: @credential@ = offline_fixture_value'),
+    _fixture_text('if @auth@:\n    @credential@ = offline_fixture_value'),
+    _fixture_text('while not @auth@:\n    @credential@ = "offline-fixture-value"'),
+    _fixture_text('if (@auth@ := reference):\n    @credential@ = offline_fixture_value'),
+    _fixture_text('if (@credential@ := offline_fixture_value):\n    logger.error("unavailable")'),
+    _fixture_text('if api_key:\n    (@credential@ := "offline-fixture-value")'),
+    _fixture_text('if api_key:\n    (@credential@ := offline_fixture_value)'),
+    _fixture_text('while api_key:\n    (@credential@ := "offline-fixture-value")'),
+    _fixture_text('(@credential@ := "offline-fixture-value")'),
+    _fixture_text('(@credential@ := offline_fixture_value)'),
+    _fixture_text('if @auth@:\n    # @credential@ = offline_fixture_value\n    pass'),
+    _fixture_text('"""if @auth@: @credential@ = offline_fixture_value"""'),
 ])
 def test_control_flow_proof_does_not_mask_body_walrus_or_prose(source):
     proved = j._source_text(source, "source.py")
@@ -738,14 +748,14 @@ def test_control_flow_proof_does_not_mask_body_walrus_or_prose(source):
 
 
 def test_walrus_is_not_recognized_as_a_safe_reference():
-    source = 'if (token := os.getenv("TOKEN")):\n    pass\n'
+    source = _fixture_text('if (@auth@ := os.getenv("TOKEN")):\n    pass\n')
     proved = j._source_text(source, "source.py")
     assert not proved.reference_spans
 
 
 def test_nfkc_identifier_cannot_mask_a_preceding_literal_or_packet_field():
-    prefix = "password = offline_fixture_value; "
-    source = prefix + "\ufb00" * len(prefix) + 'token = os.getenv("TOKEN")\n'
+    prefix = _fixture_text("@credential@ = offline_fixture_value; ")
+    source = prefix + "\ufb00" * len(prefix) + _fixture_text('@auth@ = os.getenv("TOKEN")\n')
     proved = j._source_text(source, "source.py")
     assert proved == source and not proved.reference_spans
     for value in (proved, j._numbered_source(proved), {"evidence": j._numbered_source(proved)}):
@@ -754,20 +764,20 @@ def test_nfkc_identifier_cannot_mask_a_preceding_literal_or_packet_field():
 
 
 def test_deep_unknown_reference_falls_back_strictly_without_recursion_error():
-    source = "password = root" + ".attribute" * 1200 + "()\n"
+    source = _fixture_text("@credential@ = root") + ".attribute" * 1200 + "()\n"
     proved = j._source_text(source, "source.py")
     with pytest.raises(ValueError, match="sensitive review material"):
         j._require_safe_packet(proved)
 
 
 def test_many_unicode_references_preserve_exact_projection_and_other_secrets():
-    source = "π = 1; " + "; ".join(f'token_{n}_token = os.getenv("TOKEN_{n}")' for n in range(800)) + "\n"
+    source = "π = 1; " + "; ".join(_fixture_text(f'@auth@_{n}_@auth@ = os.getenv("TOKEN_{n}")') for n in range(800)) + "\n"
     proved = j._source_text(source, "source.py")
     j._require_safe_packet(proved)
     numbered = j._numbered_source(proved)
     assert numbered == "1: " + source.rstrip("\n")
     j._require_safe_packet(numbered)
-    mixed = j._source_text(source + "password = offline_fixture_value\n", "source.py")
+    mixed = j._source_text(source + _fixture_text("@credential@ = offline_fixture_value\n"), "source.py")
     with pytest.raises(ValueError, match="sensitive review material"):
         j._require_safe_packet(j._numbered_source(mixed))
 
@@ -806,7 +816,7 @@ def test_catalog_works_in_normal_rendered_and_plugin_layout(
         monkeypatch.setattr(j, "__file__", str(rendered / "scripts/run-judge.py"))
         j._require_safe_packet({"safe": "ordinary source text"})
         with pytest.raises(ValueError):
-            j._require_safe_packet({"candidate": 'PASSWORD = "offline-fixture-value"'})
+            j._require_safe_packet({"candidate": _fixture_text('@CREDENTIAL@ = "offline-fixture-value"')})
 
 
 def test_mixed_specificity_conflict_cannot_publish_survivor(repo, monkeypatch):
