@@ -11,17 +11,17 @@ Before pushing a candidate, run:
 python3 scripts/agent-check.py --provision --provider codex
 ```
 
-Use your actual provider (`claude`, `cursor`, `codex` or `devin`). The
-repository owns commands in `config/agent-checks.json`; keep them aligned
-with CI and its toolchain. Missing tools or failed installs are incomplete
-validation. This explicit command is required until this host's hook
-execution has a receipt. File presence alone proves no hook ran.
+Use your actual provider (`claude`, `cursor`, `codex` or `devin`).
+Keep owner `config/agent-checks.json` aligned with CI/toolchains.
+Missing tools or failed installs mean incomplete validation. Run explicitly
+until this host has a hook-execution receipt; files alone prove no hook ran.
 
-Iterate with focused tests, batch corrections and independently review the
-settled diff once at the required scope/tier. Review contracts, generated
-outputs and process seams; add regression tests for recurring defects.
-Keep PRs draft while iterating; expensive draft-skipped lanes must also run
-on `ready_for_review`. Follow the owning repository's feature/release lanes.
+Batch fixes with focused tests; add regression tests for recurring defects.
+Independently review settled diffs,
+contracts, generated files and seams once at required scope/tier. Open ready only
+with a passing exact-head `agent-check` receipt, no expected pushes and no
+multi-repo/provider iteration. Else draft until final-head Fast Tier + secret scan
+pass. Run draft-skipped lanes on `ready_for_review`; honor owner feature/release lanes.
 
 Local receipts are reusable only for matching inputs, commands and tools;
 they grant no merge or protected-path authority. Run any additional owning
@@ -32,7 +32,9 @@ than repeated code pushes. Measure total agent, workspace and CI cost.
 Reusable results also bind the effective execution environment without recording
 its values. Keep the ignored private cache key and dependency state local; do
 not upload them. Candidates containing symlinks still run their checks, but
-cannot reuse or save a cached PASS based only on Git's link text.
+cannot reuse or save a cached PASS based only on Git's link text. Tracked files
+with Git filter attributes block local validation before selection or cache reuse;
+filtered working files require a raw-input adapter to validate their actual bytes.
 
 Install only on an isolated task branch. The installer preserves the owner's
 integration `base` and optional `protected_branches`, including the current
@@ -117,7 +119,7 @@ src/
 
 1. Never hardcode credentials — all secrets from environment variables
 2. Validate all input at API boundaries with Zod
-3. Run full validation before committing (`{pnpm typecheck && pnpm lint && pnpm test}`)
+3. Run affected deterministic checks while iterating and the owning candidate validation before publication; reuse only matching complete receipts
 4. Use `AbortSignal.timeout()` for all external HTTP calls
 5. Fix root causes, not symptoms — every fix needs a `Root cause:` explanation
 6. Every API route needs a security marker: `// PUBLIC:`, `// USER:`, `// ADMIN:`, `// WEBHOOK:`
@@ -174,7 +176,7 @@ QA lanes (finalise gate at push/PR, `ui-smoke` on affected routes, preview/produ
 
 **Always invoke:**
 - `conventions` — project coding standards
-- `self-code-review` — required before every commit
+- `self-code-review` — review settled diffs before publication; use affected deterministic checks at checkpoints
 
 **PR Assessment (invoked automatically by pr-classifier):**
 - `test-adequacy` — flags changed functions with no test update

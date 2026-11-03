@@ -38,6 +38,26 @@ class ReadOnlyStickyFixture(InMemoryStickyBucketService):
         pass
 
 class FeatureRuntime(Lifecycle):
+    def release_evidence(self, contexts: list[Context], now: int | None = None) -> dict[str, Any]:
+        """Private operator evidence; never expose control state to browsers."""
+        manifest, source = self.release_manifest, self.release_source_sha
+        if manifest is None or source is None or len(source) != 40 or any(char not in "0123456789abcdef" for char in source) or len(contexts) > 64:
+            raise ValueError("release probe configuration missing")
+        snapshots = []
+        pairs = set()
+        for context in deepcopy(contexts):
+            pair = (context["application_id"], context["surface_id"])
+            if pair in pairs:
+                raise ValueError("duplicate probe context")
+            pairs.add(pair)
+            keys = [key for key, definition in manifest["features"].items() if context["application_id"] in definition["applications"] and context["surface_id"] in definition["surfaces"]]
+            if not keys:
+                raise ValueError("unexpected probe context")
+            for offset in range(0, len(keys), 64):
+                snapshots.append(self.snapshot(keys[offset:offset + 64], context["surface_id"], context, now=now))
+        return {"schema_version": 1, "source_sha": source, "scope": deepcopy(self._catalog["scope"]),
+                "controls": self.inspect_for_release(now), "snapshots": snapshots}
+
     def __init__(self, catalog: Catalog, *, assignments: AssignmentStore | None = None,
                  events: EventSink | None = None, **kwargs: Any):
         super().__init__(catalog, **kwargs)

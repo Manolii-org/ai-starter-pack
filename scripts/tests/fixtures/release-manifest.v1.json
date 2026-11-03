@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "release_id": "3bac8f32d21e3bbbfc4b9338e79fcadc3d3c92586aba6c981e0f41a2d8937a24",
+  "subject": {
+    "repo": "example/product",
+    "environment": "production",
+    "kind": "release",
+    "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "control_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "capability_sha": "cccccccccccccccccccccccccccccccccccccccc",
+    "profile_version": "1",
+    "policy_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "decision_sequence": [
+      "schema",
+      "activation"
+    ],
+    "preparation": {
+      "run_id": 10,
+      "run_attempt": 1,
+      "job": "prepare"
+    },
+    "artifacts": [
+      {
+        "target": "web",
+        "provider": "vercel",
+        "artifact_id": "candidate",
+        "artifact_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "config_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "before_artifact_id": "previous",
+        "recovery_artifact_id": "previous",
+        "databases": [
+          "primary"
+        ]
+      }
+    ],
+    "databases": [
+      {
+        "id": "primary",
+        "adapter": "legacy-sequence",
+        "baseline": [
+          "001"
+        ],
+        "pending": [
+          "002"
+        ],
+        "expected_after": [
+          "001",
+          "002"
+        ],
+        "migration_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "backup_required": true
+      }
+    ],
+    "qualification": {
+      "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "run_id": 9,
+      "run_attempt": 2,
+      "artifact_id": 8,
+      "artifact_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "schema_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "migration_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "fixture_version": "fixture-v1"
+    },
+    "timing": {
+      "selected_at": "2026-11-01T00:00:00Z",
+      "approval_deadline": "2026-11-01T01:00:00Z",
+      "execute_before": "2026-11-01T02:00:00Z",
+      "intermediate_seconds": 3600
+    },
+    "recovery": {
+      "owner": "release-owner",
+      "data_authority": "data-owner",
+      "allowed_actions": [
+        "hold",
+        "code-rollback"
+      ],
+      "automatic_data_loss_threshold": 0
+    },
+    "continuation": null
+  }
+}

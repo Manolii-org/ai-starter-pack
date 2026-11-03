@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import importlib.machinery
 import importlib.util
 import json
 import os
@@ -62,15 +63,29 @@ def relative_name(value: str) -> str:
     return value
 
 
+class _SnapshotSourceLoader(importlib.machinery.SourceFileLoader):
+    """Load only captured bundle bytes, never a later file or bytecode cache."""
+
+    def __init__(self, name: str, path: str, data: bytes):
+        super().__init__(name, path)
+        self._source = bytes(data)
+
+    def get_code(self, fullname: str):
+        if fullname != self.name:
+            raise ImportError("snapshot loader cannot handle another module")
+        return self.source_to_code(self._source, self.path)
+
+
 def load_module(name: str, path: Path, data: bytes | None = None):
     spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:
         raise ValueError(f"cannot load bundled {name}")
+    spec.loader = _SnapshotSourceLoader(name, str(path), path.read_bytes() if data is None else data)
     module = importlib.util.module_from_spec(spec)
     previous = sys.dont_write_bytecode
     try:
         sys.dont_write_bytecode = True
-        exec(compile(path.read_bytes() if data is None else data, str(path), "exec"), module.__dict__)
+        spec.loader.exec_module(module)
     finally:
         sys.dont_write_bytecode = previous
     return module
@@ -476,7 +491,9 @@ def validate_provenance(value: dict):
         raise ValueError("malformed alias provenance")
     for alias, entry in record["aliases"].items():
         raw = b"../.github/skills"
-        oid = hashlib.sha1(b"blob " + str(len(raw)).encode() + b"\0" + raw).hexdigest()
+        # Git's object format requires SHA-1 here; integrity also binds SHA-256.
+        oid = hashlib.sha1(b"blob " + str(len(raw)).encode() + b"\0" + raw,
+                           usedforsecurity=False).hexdigest()
         if entry != {"mode": "120000", "blob": oid, "target": raw.decode(), "sha256": digest(raw)}:
             raise ValueError(f"malformed alias provenance: {alias}")
     expected = {name: {"canonical": str(destination(Path("/"), name, True)).removeprefix("/"),

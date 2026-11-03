@@ -74,12 +74,18 @@ def start(client, state, profile, kind, deadline=None):
 
 
 def assess(profile, kind, data):
+    """Return a validated terminal result, or None while the provider is pending.
+
+    Descriptive non-spam tabs never count toward primary Inbox acceptance.
+    Unknown provider states or placements fail closed rather than becoming misses.
+    """
     if not isinstance(data, dict):
         raise QualityError('PROVIDER_INVALID')
     if data.get('status') in ('failed', 'error', 'cancelled'):
         raise QualityError('PROVIDER_TEST_FAILED')
     if data.get('status') not in ('completed', 'complete', 'finished', 'done', 'success'):
-        if data.get('status') not in ('pending', 'waiting', 'running', 'processing', 'queued', 'created'):
+        if data.get('status') not in ('pending', 'waiting', 'running', 'processing', 'queued', 'created',
+                                      'pending_inbox_message'):
             raise QualityError('PROVIDER_INVALID')
         return None
     if kind == 'spam':
@@ -103,6 +109,8 @@ def assess(profile, kind, data):
         status = status.lower() if isinstance(status, str) else None
         value = row.get('tab') if status in ('success', 'delivered') else row.get('status')
         category = value.lower() if isinstance(value, str) else None
+        if category == 'notification':
+            normalized_counts.setdefault(category, 0)
         if category not in normalized_counts:
             raise QualityError('PROVIDER_INVALID')
         statuses.append(category)
@@ -114,7 +122,7 @@ def assess(profile, kind, data):
             placement['mailbox_id'] = mailbox['id']
         placements.append(placement)
     ratio = sum(s == 'inbox' for s in statuses) / len(statuses)
-    non_spam = sum(normalized_counts[c] for c in ('inbox', 'promotions', 'updates', 'newsletter'))
+    non_spam = sum(normalized_counts.get(c, 0) for c in ('inbox', 'promotions', 'updates', 'newsletter', 'notification'))
     return {'kind': kind, 'inbox_ratio': ratio, 'mailbox_count': len(statuses),
             'placement_counts': placement_counts,
             'normalized_placement_counts': normalized_counts,

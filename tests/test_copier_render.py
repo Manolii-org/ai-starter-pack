@@ -273,23 +273,23 @@ def test_cost_profile_lean_omits_measured_waste_callers(default_render):
 @pytest.mark.parametrize(
     ("flags", "expected"),
     [
-        ({}, {"Hooks": 5, "Commands": 51, "Skills": 36, "Agents": 27,
-              "Scripts": 56, "Husky": 3, "CI": 36, "Docs": 33}),
+        ({}, {"Hooks": 5, "Commands": 51, "Skills": 37, "Agents": 27,
+              "Scripts": 60, "Husky": 3, "CI": 39, "Docs": 38}),
         ({flag: "true" for flag in FEATURE_FLAGS},
-         {"Hooks": 5, "Commands": 54, "Skills": 40, "Agents": 28,
-              "Scripts": 56, "Husky": 3, "CI": 36, "Docs": 35}),
+         {"Hooks": 5, "Commands": 54, "Skills": 41, "Agents": 28,
+              "Scripts": 60, "Husky": 3, "CI": 39, "Docs": 40}),
         ({"cost_profile": "lean"},
-         {"Hooks": 5, "Commands": 51, "Skills": 36, "Agents": 27,
-              "Scripts": 56, "Husky": 3, "CI": 35, "Docs": 33}),
+         {"Hooks": 5, "Commands": 51, "Skills": 37, "Agents": 27,
+              "Scripts": 60, "Husky": 3, "CI": 38, "Docs": 38}),
         ({"codex_review": "false"},
-         {"Hooks": 5, "Commands": 51, "Skills": 36, "Agents": 27,
-              "Scripts": 56, "Husky": 3, "CI": 34, "Docs": 33}),
+         {"Hooks": 5, "Commands": 51, "Skills": 37, "Agents": 27,
+              "Scripts": 60, "Husky": 3, "CI": 35, "Docs": 38}),
         ({"isolation_profile": "strict"},
-         {"Hooks": 5, "Commands": 51, "Skills": 36, "Agents": 27,
-              "Scripts": 53, "Husky": 3, "CI": 30, "Docs": 33}),
+         {"Hooks": 5, "Commands": 51, "Skills": 37, "Agents": 27,
+              "Scripts": 57, "Husky": 3, "CI": 31, "Docs": 38}),
         ({"isolation_profile": "strict", "cost_profile": "lean"},
-         {"Hooks": 5, "Commands": 51, "Skills": 36, "Agents": 27,
-              "Scripts": 53, "Husky": 3, "CI": 30, "Docs": 33}),
+         {"Hooks": 5, "Commands": 51, "Skills": 37, "Agents": 27,
+              "Scripts": 57, "Husky": 3, "CI": 31, "Docs": 38}),
     ],
 )
 def test_rendered_readme_counts_match_rendered_tree(flags, expected):
@@ -325,6 +325,54 @@ def test_validation_layout_distribution_boundary(default_render, branded_render)
         assert not (rendered / "scripts/tests/test_agent_validation_layout.py").exists()
         # The existing default validation bundle remains available to callers.
         assert (rendered / "scripts/tests/test_agent_check.py").is_file()
+
+
+def test_release_capability_distribution_boundary(default_render, branded_render):
+    """Consumers receive the documented release capability and canonical schemas."""
+    paths = (
+        "docs/coordinated-releases.md",
+        "schemas/release-manifest.v1.schema.json",
+        "schemas/release-adoption.v1.schema.json",
+        ".github/actions/validate-release-manifest/action.yml",
+        ".github/actions/validate-release-manifest/release_manifest.py",
+        ".github/actions/validate-release-manifest/release_state.py",
+        ".github/actions/validate-release-manifest/github_approval.py",
+    )
+    for rendered in (default_render, branded_render):
+        for rel in paths:
+            assert (rendered / rel).read_bytes() == (ROOT / rel).read_bytes()
+        for rel in ("scripts/tests/test_release_manifest.py",
+                    "scripts/tests/test_release_admission_git.py",
+                    "scripts/tests/fixtures/release-manifest.v1.json"):
+            assert not (rendered / rel).exists()
+        config = json.loads((rendered / "config/agent-checks.json").read_text())
+        assert all(c["id"] not in {"release-manifest-contract", "feature-controls", "feature-controls-distribution"} for c in config["checks"])
+        assert all(e["id"] not in {"release-contract-python", "feature-controls-python"} for e in config["environments"])
+        fixture = ROOT / "scripts/tests/fixtures/release-manifest.v1.json"
+        release_id = json.loads(fixture.read_text())["release_id"]
+        validator = rendered / ".github/actions/validate-release-manifest/release_manifest.py"
+        result = subprocess.run(
+            [sys.executable, str(validator), "--manifest", str(fixture),
+             "--expected-release-id", release_id, "--dry-run"],
+            cwd=rendered, capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "authority=none" in result.stdout
+
+
+def test_security_audit_tests_run_in_rendered_consumers(default_render, branded_render):
+    """Portable evidence checks run without the pack's excluded build artifacts."""
+    for rendered in (default_render, branded_render):
+        assert not (rendered / "pack.manifest.yml").exists()
+        before = file_set(rendered)
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests/test_security_audit_evidence.py"],
+            cwd=rendered, capture_output=True, text=True, timeout=30,
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert re.search(r"\b\d+ passed, 1 skipped\b", result.stdout)
+        assert file_set(rendered) == before, "consumer checks must preserve shared render fixtures"
 
 
 def test_brand_answers_match_overlays(branded_render, default_render):
@@ -365,6 +413,8 @@ def test_branded_attribution(branded_render, default_render):
 def test_agent_validation_base_uses_owner_ref(tmp_path, default_render, base_ref):
     """A real rendered CLI plans correctly with remote or local owner refs."""
     canonical = json.loads((ROOT / "config/agent-checks.json").read_text())
+    canonical["checks"] = [c for c in canonical["checks"] if c["id"] not in {"release-manifest-contract", "feature-controls", "feature-controls-distribution"}]
+    canonical["environments"] = [e for e in canonical["environments"] if e["id"] not in {"release-contract-python", "feature-controls-python"}]
     assert json.loads((default_render / "config/agent-checks.json").read_text()) == canonical
     dst = tmp_path / "custom-integration"
     render(dst, agent_validation_base=base_ref)
@@ -399,7 +449,7 @@ def test_skip_if_exists_contract():
     copier_config = yaml.safe_load((ROOT / "copier.yml").read_text())
     skip_if_exists = set(copier_config.get("_skip_if_exists", []))
 
-    expected = {"CLAUDE.md", ".claude/model-routing.json", ".claude/mcp.json", ".claude/hooks/session-start.sh", "ai-manifest.yaml", "config/agent-checks.json",
+    expected = {"CLAUDE.md", ".claude/model-routing.json", ".claude/mcp.json", ".claude/hooks/session-start.sh", "ai-manifest.yaml", "config/agent-checks.json", "scripts/ci/codex-review-worker.json",
                 # QA framework owner config + host hook files (docs/qa-framework.md)
                 "config/qa.json", ".cursor/hooks.json", ".codex/hooks.json",
                 ".githooks/pre-push"}
@@ -423,6 +473,8 @@ def test_skip_if_exists_contract():
         recipes.write_text('{"owner": "local"}\n')
         settings = dst / ".claude/settings.json"
         settings.write_text("{}\n")
+        review_policy = dst / "scripts/ci/codex-review-worker.json"
+        review_policy.write_text('{"enabled":true,"identity":"instance-owned-fixture"}\n')
 
         # Re-render with --overwrite
         cmd = [
@@ -441,12 +493,14 @@ def test_skip_if_exists_contract():
         subprocess.run(cmd, check=True)
 
         # Sentinel should survive
+        assert review_policy.read_text() == '{"enabled":true,"identity":"instance-owned-fixture"}\n'
         assert claude_file.read_text() == "LOCAL\n"
         assert session_hook.read_text() == "#!/bin/sh\necho LOCAL\n"
         assert recipes.read_text() == '{"owner": "local"}\n'
         # The lifecycle migration is deliberately outside the instance-owned
         # hook, so an update still wires cleanup for existing consumers.
         assert "guard_check.py --clear-session-unfreezes" in settings.read_text()
+        assert review_policy.read_text() == '{"enabled":true,"identity":"instance-owned-fixture"}\n'
         assert claude_file.read_text() == "LOCAL\n", "CLAUDE.md was overwritten"
 
         # But other files should be updated
@@ -548,7 +602,7 @@ def test_pack_components_contract(default_render):
     required_secrets = instance.get("required_secrets", {})
     github_secrets = required_secrets.get("github", [])
     assert github_secrets == ["ANTHROPIC_API_KEY"], (
-        f"required_secrets.github: expected ['ANTHROPIC_API_KEY'], got {github_secrets}"
+        f"required_secrets.github: expected direct-provider credential, got {github_secrets}"
     )
 
     doppler_secrets = required_secrets.get("doppler", {})
@@ -574,7 +628,7 @@ def test_pack_components_flags(tmp_path):
     """Verify pack-components.yml with oss_routing and mesh_telemetry flags."""
     dst = tmp_path / "flags_render"
     dst.mkdir()
-    render(dst, oss_routing="true", mesh_telemetry="true")
+    render(dst, oss_routing="true", mesh_telemetry="true", codex_adversarial="true")
 
     pack_file = dst / "pack-components.yml"
     assert pack_file.exists(), "pack-components.yml missing"
@@ -616,6 +670,20 @@ def test_pack_components_flags(tmp_path):
     assert litellm_proxy.get("enabled") is True, (
         f"components.litellm_proxy.enabled: expected True, got {litellm_proxy.get('enabled')}"
     )
+
+
+def test_native_codex_agent_does_not_impose_static_review_credentials(tmp_path):
+    """Native MCP onboarding must not require the unrelated worker's old token."""
+    dst = tmp_path / "native_codex_render"
+    render(dst, codex_adversarial="true")
+    required = yaml.safe_load((dst / "pack-components.yml").read_text())["instance"]["required_secrets"]
+    assert required["github"] == ["ANTHROPIC_API_KEY"]
+    assert required["doppler"]["keys"] == []
+    assert (dst / ".claude/agents/codex-adversarial.md").exists()
+    for workflow in ["codex-pr-review.yml", "codex-security-diff-scan.yml", "codex-review-worker.yml"]:
+        content = (dst / ".github/workflows" / workflow).read_text()
+        assert "DOPPLER_TOKEN_CODEX" not in content
+        assert "OPENAI_API_KEY" not in content
 
 
 def test_otel_endpoint_answer(tmp_path):
@@ -744,8 +812,11 @@ TELEMETRY_ENV = {
     "OTEL_LOGS_EXPORTER", "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_PROTOCOL",
 }
 STRICT_EXCLUDED = {
+    "tests/test_codex_review_workflows.py",
     ".github/workflows/codex-pr-review.yml",
     ".github/workflows/codex-security-diff-scan.yml",
+    ".github/workflows/codex-review-worker.yml",
+    ".github/workflows/codex-review-recovery.yml",
     ".github/workflows/setup-env-secret.yml",
     ".github/workflows/dependabot-manual-automerge.yml",
     ".github/workflows/monitor-litellm.yml",
@@ -768,6 +839,14 @@ def strict_render(tmp_path_factory):
     dst = tmp_path_factory.mktemp("strict")
     render(dst, isolation_profile="strict")
     return dst
+
+
+def test_pack_context_manifest_never_ships(default_render, strict_render):
+    """The pack's .ai/repo-context.yaml names Manolii-org/ai-starter-pack; a
+    rendered instance inheriting it would claim the template's identity."""
+    assert (ROOT / ".ai/repo-context.yaml").is_file()
+    for rendered in (default_render, strict_render):
+        assert not (rendered / ".ai/repo-context.yaml").exists()
 
 
 def test_telemetry_keys_follow_the_flag(default_render, tmp_path):
@@ -846,7 +925,9 @@ def test_strict_readme_does_not_point_at_unrendered_proxy_assets(strict_render, 
 
 
 def test_standard_keeps_codex_review_unless_opted_out(default_render, tmp_path):
-    codex = {".github/workflows/codex-pr-review.yml", ".github/workflows/codex-security-diff-scan.yml"}
+    codex = {".github/workflows/codex-pr-review.yml", ".github/workflows/codex-security-diff-scan.yml",
+             ".github/workflows/codex-review-worker.yml", ".github/workflows/codex-review-recovery.yml"}
+    codex.add("tests/test_codex_review_workflows.py")
     assert codex <= file_set(default_render)
     dst = tmp_path / "nocodex"
     dst.mkdir()

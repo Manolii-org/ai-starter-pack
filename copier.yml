@@ -57,7 +57,7 @@ langfuse_telemetry:
 
 codex_adversarial:
   type: bool
-  help: Cross-provider adversarial PR review agent. Requires OPENAI_API_KEY.
+  help: Optional native Codex MCP adversarial agent; separate from subscription CLI review. Configure its MCP provider credentials separately.
   default: false
 
 mesh_telemetry:
@@ -107,11 +107,11 @@ isolation_profile:
 
 codex_review:
   type: bool
-  help: Ship the Codex PR review + security diff scan workflows (they read a Doppler master/prd_codex service token). Defaults on for 'standard' (unchanged) and off for 'strict'.
+  help: Ship code/security requests and the trusted worker lifecycle (owner-authorised private CI profiles or explicit legacy OIDC). Defaults on for 'standard' and off for 'strict'.
   default: "{{ isolation_profile == 'standard' }}"
   validator: >-
     {% if codex_review and isolation_profile == 'strict' %}
-    isolation_profile=strict excludes the Codex review workflows (they read a maintainer Doppler token): set codex_review to false
+    isolation_profile=strict excludes the Codex review workflows (private CI requires its own trusted account host): set codex_review to false
     {% endif %}
 
 # The source pack uses origin/main; new instances choose their own existing
@@ -190,6 +190,13 @@ _exclude:
   - .svn
   - .svn/**
   # Pack-internal scaffolding (never ships)
+  # Synthetic qualification is source-repository CI, not a consumer workflow.
+  - .github/workflows/codex-review-isolation-proof.yml
+  - tests/codex_review_isolation_probe.py
+  - tests/test_codex_review_isolation_probe.py
+  # The pack's own leaf context manifest (master context governance); a rendered
+  # instance must author its own, never inherit the template's identity.
+  - /.ai/repo-context.yaml
   # Renovate preset: consumers extend it remotely via
   # "github>Manolii-org/ai-starter-pack" — copying it into a rendered repo
   # would shadow the shared preset with a stale local snapshot.
@@ -204,6 +211,13 @@ _exclude:
   - tests/test_feature_controls_distribution.py
   - scripts/feature-controls-release.py
   - scripts/feature-controls-upgrade.py
+  # The readiness action loads the SDK from this immutable component checkout.
+  # Consumers reference it remotely; copying these files without the SDK breaks it.
+  - scripts/feature-release-check.py
+  - /.github/actions/feature-release-policy
+  - /.github/actions/feature-release-policy/**
+  - /.feature-controls
+  - /.feature-controls/**
   - /docs/feature-controls-distribution.md
   - /package.json
   - /package-lock.json
@@ -306,11 +320,23 @@ _exclude:
   - tests/test_native_guidance.py
   - tests/test_session_terminal_callers.py
   - scripts/tests/test_agent_validation_layout.py
+  # Release capability consumers use the portable action and their own product
+  # qualification. These suites require the Pack-only registry/build machinery.
+  - scripts/tests/test_release_manifest.py
+  - scripts/tests/test_release_admission_git.py
+  - scripts/tests/fixtures/release-manifest.v1.json
   - .github/workflows/registry-lint.yml
   # Pack-only contract caller (require_contract: true would fail legacy
   # instances whose instance-owned CLAUDE.md predates the anchored sections).
   # Consumers adopt via their own caller of claude-md-contract-reusable.yml.
   - .github/workflows/claude-md-contract.yml
+  # Pack-only workflow-security gate + its baseline of the PACK's own zizmor
+  # findings (a consumer's findings differ, so it would fail on first render),
+  # and the test that asserts on them. Consumers adopt via a caller of
+  # workflow-security-reusable.yml and generate their own baseline.
+  - .github/workflows/workflow-security.yml
+  - config/zizmor-baseline.json
+  - tests/test_workflow_security.py
   # Template-internal master content — present only in the master's
   # distribution copy (templates/ai-starter-pack/), declared TEMPLATE_ONLY in
   # scripts/check-pack-mirror-drift.py. Excluded so a render of the template
@@ -344,6 +370,9 @@ _exclude:
   - "{% if cost_profile == 'lean' %}.github/workflows/monitor-litellm.yml{% endif %}"
   - "{% if not codex_review %}.github/workflows/codex-pr-review.yml{% endif %}"
   - "{% if not codex_review %}.github/workflows/codex-security-diff-scan.yml{% endif %}"
+  - "{% if not codex_review %}.github/workflows/codex-review-worker.yml{% endif %}"
+  - "{% if not codex_review %}.github/workflows/codex-review-recovery.yml{% endif %}"
+  - "{% if not codex_review %}tests/test_codex_review_workflows.py{% endif %}"
   # isolation_profile=strict: the maintainer's Doppler / LiteLLM / fleet-coupled files.
   - "{% if isolation_profile == 'strict' %}.github/workflows/setup-env-secret.yml{% endif %}"
   - "{% if isolation_profile == 'strict' %}.github/workflows/dependabot-manual-automerge.yml{% endif %}"
@@ -365,6 +394,7 @@ _exclude:
 # Instance-owned files: written on first copy, never overwritten by
 # `copier update` (report §4 Lever A / ADR-0023 Decision 1).
 _skip_if_exists:
+  - scripts/ci/codex-review-worker.json
   - CLAUDE.md
   - config/agent-checks.json
   # QA framework owner config + host hook files a consumer may already own

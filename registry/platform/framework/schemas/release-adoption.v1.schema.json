@@ -1,0 +1,193 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ai-starter-pack:release-adoption:v1",
+  "title": "Release adoption declaration v1",
+  "description": "Optional adoption declaration. Omission means legacy; declarations never attest live approval or authorize execution.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "mode"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "mode": {
+      "enum": [
+        "legacy",
+        "shadow",
+        "coordinated"
+      ]
+    },
+    "profile_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "policy_reference": {
+      "type": "string",
+      "minLength": 1
+    },
+    "installed_decisions": {
+      "$ref": "#/$defs/decisionSequence"
+    },
+    "execution_decisions": {
+      "$ref": "#/$defs/decisionSequence"
+    },
+    "combined_scope_adoption": {
+      "type": "string",
+      "minLength": 1
+    },
+    "qualification_reference": {
+      "type": "string",
+      "minLength": 1
+    },
+    "release_owner": {
+      "type": "string",
+      "minLength": 1
+    },
+    "recovery_owner": {
+      "type": "string",
+      "minLength": 1
+    },
+    "data_authority": {
+      "type": "string",
+      "minLength": 1
+    },
+    "admission_stop": {
+      "type": "string",
+      "minLength": 1
+    },
+    "approval_window_seconds": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "execution_budget_seconds": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "intermediate_window_seconds": {
+      "type": "integer",
+      "minimum": 1
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "mode": {
+            "const": "coordinated"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "profile_version",
+          "policy_reference",
+          "installed_decisions",
+          "execution_decisions",
+          "qualification_reference",
+          "release_owner",
+          "recovery_owner",
+          "data_authority",
+          "admission_stop",
+          "approval_window_seconds",
+          "execution_budget_seconds",
+          "intermediate_window_seconds"
+        ],
+        "oneOf": [
+          {
+            "properties": {
+              "installed_decisions": {
+                "const": []
+              },
+              "execution_decisions": {
+                "const": []
+              }
+            }
+          },
+          {
+            "properties": {
+              "installed_decisions": {
+                "const": [
+                  "activation"
+                ]
+              },
+              "execution_decisions": {
+                "const": [
+                  "activation"
+                ]
+              }
+            }
+          },
+          {
+            "properties": {
+              "installed_decisions": {
+                "const": [
+                  "schema",
+                  "activation"
+                ]
+              },
+              "execution_decisions": {
+                "const": [
+                  "schema",
+                  "activation"
+                ]
+              }
+            }
+          },
+          {
+            "properties": {
+              "installed_decisions": {
+                "const": [
+                  "release"
+                ]
+              },
+              "execution_decisions": {
+                "const": [
+                  "release"
+                ]
+              }
+            }
+          },
+          {
+            "required": [
+              "combined_scope_adoption"
+            ],
+            "properties": {
+              "installed_decisions": {
+                "const": [
+                  "schema",
+                  "activation"
+                ]
+              },
+              "execution_decisions": {
+                "const": [
+                  "release"
+                ]
+              }
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "decisionSequence": {
+      "type": "array",
+      "enum": [
+        [],
+        [
+          "activation"
+        ],
+        [
+          "schema",
+          "activation"
+        ],
+        [
+          "release"
+        ]
+      ]
+    }
+  }
+}

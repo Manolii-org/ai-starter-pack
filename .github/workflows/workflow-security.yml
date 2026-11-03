@@ -1,0 +1,75 @@
+name: Workflow Security
+# Gate for this PUBLIC repo's own workflows and actions: every `uses:` is
+# SHA-pinned, actionlint is clean, and zizmor finds nothing beyond the
+# committed baseline (config/zizmor-baseline.json — burn-down only). On PRs it
+# also writes a security diff (triggers, permissions, secrets, external uses,
+# event expressions in run:, hosts) to the job summary for the reviewer.
+# Consumers get the same checks via workflow-security-reusable.yml.
+
+on:
+  pull_request:
+    paths:
+      - '.github/**'
+      - 'config/zizmor-baseline.json'
+      - 'scripts/check-pinned-uses.py'
+      - 'scripts/workflow-security-ratchet.py'
+      - 'scripts/release-security-diff.py'
+      - 'scripts/install-workflow-scanners.sh'
+      - 'config/workflow-security-requirements.txt'
+  push:
+    branches: [main]
+    paths:
+      - '.github/**'
+      - 'config/zizmor-baseline.json'
+      - 'scripts/check-pinned-uses.py'
+      - 'scripts/workflow-security-ratchet.py'
+      - 'scripts/release-security-diff.py'
+      - 'scripts/install-workflow-scanners.sh'
+      - 'config/workflow-security-requirements.txt'
+
+permissions:
+  contents: read
+
+# R4: PR-scoped lane — newer pushes cancel stale runs on the same ref;
+# main-line keys stay SHA-unique so queued runs never cancel each other.
+concurrency:
+  group: workflow-security-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  scan:
+    name: Workflow security (pins, actionlint, zizmor)
+    runs-on: ${{ fromJSON(vars.LIGHT_RUNNER || '["ubuntu-slim"]') }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: '3.12'
+
+      - name: Install pinned scanners
+        run: |
+          bash scripts/install-workflow-scanners.sh "$RUNNER_TEMP/bin"
+          python3 -m pip install --quiet --disable-pip-version-check --require-hashes --only-binary=:all: -r config/workflow-security-requirements.txt
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Every uses is SHA-pinned
+        run: python3 scripts/check-pinned-uses.py
+
+      - name: actionlint
+        run: actionlint -shellcheck= -pyflakes=
+
+      - name: zizmor (ratchet against baseline)
+        run: python3 scripts/workflow-security-ratchet.py
+
+      - name: Security diff vs base (job summary)
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          python3 scripts/release-security-diff.py --base "$BASE_SHA" --head HEAD \
+            --summary "$GITHUB_STEP_SUMMARY" > /dev/null

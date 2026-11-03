@@ -23,6 +23,7 @@ import time
 
 SCHEMA = "agent-check/v1"
 STATE = ".ai/agent-checks"
+GIT_TIMEOUT = 30
 TOOLS = {
     "python": [sys.executable, "--version"],
     "node": ["node", "--version"],
@@ -59,7 +60,10 @@ def git_environment(environ: dict | None = None) -> dict:
 
 
 def git(root: Path, *args: str) -> bytes:
-    result = subprocess.run(["git", *args], cwd=root, env=git_environment(), capture_output=True, check=True)
+    if args and args[0] == "diff":
+        # Evidence must describe bytes, independently of display-only drivers.
+        args = (args[0], "--no-ext-diff", "--no-textconv", "--no-color", *args[1:])
+    result = subprocess.run(["git", *args], cwd=root, env=git_environment(), capture_output=True, timeout=GIT_TIMEOUT, check=True)
     return result.stdout
 
 
@@ -72,7 +76,7 @@ def private_cache_key(root: Path) -> bytes:
     """Create one ignored private key without exposing inherited secret values."""
     path = inside(root, f"{STATE}/environment.key")
     if subprocess.run(["git", "check-ignore", "-q", str(path.relative_to(root))],
-                      cwd=root, env=git_environment()).returncode:
+                      cwd=root, env=git_environment(), timeout=GIT_TIMEOUT).returncode:
         raise ValueError(f"ignore {STATE}/environment.key before executing")
     path.parent.mkdir(parents=True, exist_ok=True)
     # Link a complete private temporary file into place atomically. A competing
@@ -93,10 +97,19 @@ def private_cache_key(root: Path) -> bytes:
         raise ValueError("environment cache key must be a private regular file")
     fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
     with os.fdopen(fd, "rb") as stream:
-        details = os.fstat(stream.fileno())
-        if (not stat.S_ISREG(details.st_mode) or stat.S_IMODE(details.st_mode) != 0o600
-                or details.st_uid != os.getuid() or details.st_nlink != 1):
-            raise ValueError("environment cache key must be an owned private regular file with mode 0600")
+        for attempt in range(20):
+            details = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(details.st_mode) or stat.S_IMODE(details.st_mode) != 0o600
+                    or details.st_uid != os.getuid()):
+                raise ValueError("environment cache key must be an owned private regular file with mode 0600")
+            if details.st_nlink == 1:
+                break
+            # A concurrent publisher briefly owns both the temporary and final names.
+            # Keep the same descriptor and require one link before reading any material.
+            # Persistent/extra links still fail closed; never replace or repair the key.
+            if details.st_nlink != 2 or attempt == 19:
+                raise ValueError("environment cache key must be an owned private regular file with mode 0600")
+            time.sleep(0.05)
         key = stream.read(33)
     if len(key) != 32:
         raise ValueError("environment cache key is invalid")
@@ -115,7 +128,119 @@ def inside(root: Path, value: str) -> Path:
     return path
 
 
+def require_unfiltered_tracked_inputs(root: Path) -> set[str]:
+    """Reject Git metadata that can conceal raw working-file changes."""
+    names = subprocess.run(["git", "ls-files", "-z"], cwd=root,
+                           env=git_environment(), capture_output=True, timeout=GIT_TIMEOUT, check=True).stdout
+    attributes = subprocess.run(["git", "check-attr", "--all", "-z", "--stdin"],
+                                input=names, cwd=root, env=git_environment(),
+                                capture_output=True, timeout=GIT_TIMEOUT, check=True).stdout.split(b"\0")
+    if attributes[-1:] == [b""]:
+        attributes.pop()
+    if len(attributes) % 3:
+        raise ValueError("cannot determine tracked Git filter attributes")
+    if any(attributes[i + 1] == b"filter" for i in range(0, len(attributes), 3)):
+        raise ValueError("Git filter attributes are unsupported for local validation; "
+                         "filtered working files need a raw-input validation adapter")
+    flagged = subprocess.run(["git", "ls-files", "-v", "-z"], cwd=root,
+                             env=git_environment(), capture_output=True, timeout=GIT_TIMEOUT, check=True).stdout
+    for entry in flagged.split(b"\0"):
+        if not entry:
+            continue
+        if len(entry) < 3 or entry[1:2] != b" ":
+            raise ValueError("cannot determine tracked Git index flags")
+        tag, path = entry[:1], root / os.fsdecode(entry[2:])
+        # Absent skip-worktree entries are normal in a sparse checkout. Existing
+        # paths (including dangling symlinks) can carry hidden, unvalidated bytes.
+        # Assume-unchanged is unsafe even when a working path has been removed.
+        if tag.islower() or (tag == b"S" and os.path.lexists(path)):
+            raise ValueError("Git index flags hide tracked working-file changes; "
+                             "clear assume-unchanged/skip-worktree on present paths")
+    conversions = {b"text", b"crlf", b"eol", b"ident", b"working-tree-encoding"}
+    return {os.fsdecode(attributes[i]) for i in range(0, len(attributes), 3)
+            if attributes[i + 1] in conversions}
+
+
+def directory_state(details: os.stat_result) -> tuple:
+    # Reading a directory may update atime, including on every strictatime
+    # filesystem scan. Identity, mode and mutation times carry the proof.
+    return (details.st_dev, details.st_ino, details.st_mode,
+            details.st_mtime_ns, details.st_ctime_ns)
+
+
+def empty_gitlink_identity(root: Path, name: str) -> str | None:
+    path = root / name
+    # Descriptor enumeration is unavailable on some hosts. The existing
+    # unsupported-submodule block remains their conservative fallback.
+    if os.scandir not in os.supports_fd:
+        return None
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        details = os.fstat(descriptor)
+        before = directory_state(details)
+        if not stat.S_ISDIR(details.st_mode) or directory_state(path.lstat()) != before:
+            return None
+        entries = git(root, "ls-files", "--stage", "-z", "--", name).split(b"\0")
+        if len(entries) != 2 or entries[1]:
+            return None
+        metadata, tracked_name = entries[0].split(b"\t", 1)
+        fields = metadata.split()
+        if (len(fields) != 3 or fields[0] != b"160000" or fields[2] != b"0"
+                or tracked_name != os.fsencode(name)):
+            return None
+        with os.scandir(descriptor) as scan:
+            if next(scan, None) is not None:
+                return None
+        if (directory_state(os.fstat(descriptor)) != before
+                or directory_state(path.lstat()) != before):
+            return None
+        return fields[1].decode("ascii")
+    finally:
+        os.close(descriptor)
+
+
+def raw_tracked_inputs(root: Path) -> dict:
+    """Hash physical working bytes independently of Git's stat/index hints."""
+    algorithm = git(root, "rev-parse", "--show-object-format").decode().strip()
+    if algorithm not in {"sha1", "sha256"}:
+        raise ValueError("unsupported Git object format for raw-input validation")
+    result = {}
+    for entry in git(root, "ls-files", "-t", "-z").split(b"\0"):
+        if not entry:
+            continue
+        if len(entry) < 3 or entry[1:2] != b" ":
+            raise ValueError("cannot determine tracked raw-input paths")
+        name = os.fsdecode(entry[2:])
+        path = root / name
+        if not os.path.lexists(path):
+            if entry[:1] != b"S":
+                result[name] = ("missing", "")
+            continue
+        if path.is_symlink():
+            mode, content = "120000", os.fsencode(os.readlink(path))
+        elif path.is_file():
+            mode = "100755" if path.stat().st_mode & 0o100 else "100644"
+            content = path.read_bytes()
+        else:
+            # Git creates empty directories for uninitialized submodules. They
+            # contain no working bytes; bind their stage-zero gitlink instead.
+            # Initialized/nonempty modules still need a recursive raw adapter.
+            if path.is_dir() and not path.is_symlink():
+                identity = empty_gitlink_identity(root, name)
+                if identity is not None:
+                    result[name] = ("160000", identity)
+                    continue
+            raise ValueError("tracked directories/submodules need a raw-input validation adapter")
+        digest = hashlib.new(algorithm)
+        digest.update(f"blob {len(content)}\0".encode())
+        digest.update(content)
+        result[name] = (mode, digest.hexdigest())
+    return result
+
+
 def snapshot(root: Path) -> dict:
+    require_unfiltered_tracked_inputs(root)
     # Include staged AND unstaged edits, additions and deletions. Generated
     # ignored files are not evidence inputs; declare their source/config.
     untracked = {}
@@ -137,6 +262,7 @@ def snapshot(root: Path) -> dict:
         "head": git(root, "rev-parse", "HEAD").decode().strip(),
         "tree": git(root, "rev-parse", "HEAD^{tree}").decode().strip(),
         "diff": sha(git(root, "diff", "--binary", "HEAD")),
+        "tracked_raw": raw_tracked_inputs(root),
         "untracked": untracked,
         "symlinks": symlinks,
     }
@@ -176,13 +302,55 @@ def matches(paths: list[str], patterns: list[str]) -> bool:
     return any(fnmatch.fnmatchcase(path, pattern) for path in paths for pattern in patterns)
 
 
+def working_tree_matches_base(root: Path, name: str, actual: tuple, baseline: tuple | None) -> bool:
+    """Compare to baseline checkout bytes, never clean away a working edit.
+
+    The caller has rejected external filters. Built-in checkout conversions
+    (CRLF, ident, encoding) are applied to the immutable base blob, so edits
+    hidden by clean conversion still select their owning checks.
+    """
+    if baseline is None or actual[0] == "missing":
+        return False
+    mode, identity = baseline
+    if mode == "160000":
+        return actual == baseline
+    if actual[0] != mode:
+        regular = {"100644", "100755"}
+        file_mode = git(root, "config", "--type=bool", "--default=true", "--get", "core.filemode").strip()
+        symlinks = git(root, "config", "--type=bool", "--default=true", "--get", "core.symlinks").strip()
+        if not ((actual[0] in regular and mode in regular and file_mode == b"false")
+                or (actual[0] in regular and mode == "120000" and symlinks == b"false")):
+            return False
+    expected = (git(root, "cat-file", "blob", identity) if mode == "120000" else
+                git(root, "cat-file", "--filters", "--path=" + name, identity))
+    # raw_tracked_inputs has already validated the repository object format.
+    digest = hashlib.new("sha256" if len(identity) == 64 else "sha1")
+    digest.update(f"blob {len(expected)}\0".encode())
+    digest.update(expected)
+    return actual[1] == digest.hexdigest()
+
+
 def plan_for(root: Path, config: dict, base: str | None = None) -> dict:
+    conversion_paths = require_unfiltered_tracked_inputs(root)
+    # Include conservative potential conversions even when bytes equal the
+    # canonical blob (e.g. an expanded ident replaced by literal $Id$).
+    autocrlf = git(root, "config", "--default=false", "--get", "core.autocrlf").strip().lower()
+    global_conversion = autocrlf not in {b"false", b"no", b"off", b"0", b"input"}
     ref = base or config["base"]
     base_sha = git(root, "merge-base", ref, "HEAD").decode().strip()
     changed: set[str] = set()
     for command in (("diff", "--no-renames", "--name-only", "-z", base_sha),
                     ("ls-files", "--others", "--exclude-standard", "-z")):
         changed.update(os.fsdecode(p) for p in git(root, *command).split(b"\0") if p)
+    baseline = {}
+    for entry in git(root, "ls-tree", "-r", "--full-tree", "-z", base_sha).split(b"\0"):
+        if entry:
+            metadata, name = entry.split(b"\t", 1)
+            mode, _, identity = metadata.decode().split()
+            baseline[os.fsdecode(name)] = (mode, identity)
+    changed.update(name for name, value in raw_tracked_inputs(root).items()
+                   if (value != baseline.get(name) or name in conversion_paths or global_conversion)
+                   and not working_tree_matches_base(root, name, value, baseline.get(name)))
     paths = sorted(changed)
     # Owners explicitly declare global inputs in each recipe. Framework-only
     # changes must not implicitly install/build every application in the repo.
@@ -300,13 +468,14 @@ def main(argv=None) -> int:
         # Receipts must be ignored even before first use; never commit local
         # evidence or accidentally add it to its own cache fingerprint.
         if subprocess.run(["git", "check-ignore", "-q", f"{STATE}/receipt.json"],
-                          cwd=root, env=git_environment()).returncode:
+                          cwd=root, env=git_environment(), timeout=GIT_TIMEOUT).returncode:
             raise ValueError(f"ignore {STATE}/ in .gitignore before executing")
         key = private_cache_key(root)
         before = snapshot(root)
         cache_reusable = not before["symlinks"]
         results = []
         provisioned = []
+        reused_environments = []
         results.append(execute(root, {"id": "diff-check", "commands": [["git", "diff", "--check", plan["base"]]]}, inherited))
         for environment in plan["environments"]:
             env_digest = environment_digest(root, environment, tools, key, inherited)
@@ -323,6 +492,7 @@ def main(argv=None) -> int:
             if (isinstance(previous_environment, dict) and previous_environment.get("digest") == env_digest
                     and isinstance(previous_environment.get("result"), dict)
                     and previous_environment["result"].get("status") == "passed" and ready):
+                reused_environments.append((environment, env_receipt, env_digest))
                 continue
             if not args.provision:
                 results.append({"id": environment["id"], "status": "unavailable",
@@ -338,7 +508,11 @@ def main(argv=None) -> int:
                 result.update(status="failed", reason="declared ready paths missing: " + ",".join(missing))
             results.append(result)
             if result["status"] == "passed":
-                provisioned.append((environment, env_receipt, input_digest, result))
+                # Bind setup to the tools it actually left ready, before a
+                # later selected environment can replace any of those tools.
+                tools = versions(root, plan, inherited)
+                validated_digest = environment_digest(root, environment, tools, key, inherited)
+                provisioned.append((environment, env_receipt, input_digest, validated_digest, result))
         # Provisioning may install tools. Missing tools must not be mistaken
         # for a source failure, or cached as a successful old fingerprint.
         tools = versions(root, plan, inherited)
@@ -354,12 +528,26 @@ def main(argv=None) -> int:
                 elif matching["status"] == "passed":
                     matching.update(status="failed", reason="declared ready paths missing: " + ",".join(missing))
                 (state / "environments" / f"environment-{sha(encoded(environment['id']))}.json").unlink(missing_ok=True)
-        # A later environment may install a tool used by an earlier one. Bind
-        # every new setup receipt to the final tool map and unchanged inputs.
-        for environment, env_receipt, input_digest, result in provisioned:
-            if result["status"] == "passed" and environment_digest(root, environment, {}, key, inherited) == input_digest:
-                env_digest = environment_digest(root, environment, tools, key, inherited)
-                write_json(env_receipt, {"digest": env_digest, "result": result})
+        # A cache hit was proved against the initial tools. Later setup can
+        # change a shared tool, so it must still match before checks can run.
+        # Revoke stale setup evidence and require a bounded fresh invocation.
+        for environment, env_receipt, reused_digest in reused_environments:
+            if environment_digest(root, environment, tools, key, inherited) != reused_digest:
+                env_receipt.unlink(missing_ok=True)
+                results.append({"id": environment["id"], "status": "failed",
+                                "reason": "cached environment invalidated by later provisioning; rerun with --provision"})
+        # New setups also keep their actual validated context. Never re-key an
+        # earlier setup as compatible with a tool installed by a later one.
+        for environment, env_receipt, input_digest, validated_digest, result in provisioned:
+            if result["status"] != "passed":
+                continue
+            if (environment_digest(root, environment, {}, key, inherited) != input_digest
+                    or environment_digest(root, environment, tools, key, inherited) != validated_digest):
+                env_receipt.unlink(missing_ok=True)
+                result.update(status="failed",
+                              reason="provisioned environment invalidated by later provisioning or changed inputs; rerun with --provision")
+            else:
+                write_json(env_receipt, {"digest": validated_digest, "result": result})
         identity = {"schema": SCHEMA, "source": sha(Path(__file__).read_bytes()),
                     "config": config, "plan": plan, "tools": tools, "snapshot": before,
                     "execution_environment": environment_fingerprint(key, {
@@ -402,9 +590,15 @@ def main(argv=None) -> int:
         write_json(state / "receipt.json", receipt)
         if outcome == "passed" and cache_reusable:
             write_json(cache, receipt)
+        for result in results:
+            if result["status"] != "passed":
+                print("AGENT-CHECK-RESULT " + json.dumps(
+                    {key: result[key] for key in ("id", "status", "reason")},
+                    sort_keys=True,
+                ))
         print(f"AGENT-CHECK-{outcome.upper()} {candidate_digest[:12]}")
         return 0 if outcome == "passed" else 1
-    except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
         if receipt_path is not None:
             try:
                 receipt_path.unlink(missing_ok=True)

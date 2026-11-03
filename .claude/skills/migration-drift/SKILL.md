@@ -61,7 +61,7 @@ The plugin bundle intentionally does NOT ship the `templates/supabase-migration-
 
 1. **Variable** `MIGRATION_DRIFT_PROJECTS` (GitHub repo settings → Variables):
    - Format: `entity:supabase_ref,entity:supabase_ref,...`
-   - Example: `prod:wccgdisnrbvstnnzppld,staging:xyz789`
+   - Example: `prod:abc123prodref,staging:xyz789`
    - Find refs in Supabase console (Settings → General)
 
 2. **Secret** `SUPABASE_ACCESS_TOKEN` (GitHub repo settings → Secrets):
@@ -130,7 +130,7 @@ Before relying on CI:
 
 ```bash
 export SUPABASE_ACCESS_TOKEN="<your-pat>"
-export MIGRATION_DRIFT_PROJECTS="prod:wccgdisnrbvstnnzppld"
+export MIGRATION_DRIFT_PROJECTS="prod:abc123prodref"
 
 python3 scripts/check-migration-drift-mgmt.py \
   --projects "$MIGRATION_DRIFT_PROJECTS" \

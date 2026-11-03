@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import py_compile
 import re
 import shutil
 import subprocess
@@ -111,6 +112,82 @@ def imported(source):
     spec.loader.exec_module(module)
     module.SOURCE = source
     return module
+
+
+def test_module_loader_uses_snapshot_even_with_valid_disk_bytecode(tmp_path):
+    module = imported(ROOT)
+    path = tmp_path / "bundled.py"
+    path.write_text("VALUE = 'disk'\n")
+    py_compile.compile(str(path), doraise=True)
+    before = snapshot(tmp_path)
+    loaded = module.load_module("frozen_bundle", path, b"VALUE = 'snapshot'\n")
+    assert loaded.VALUE == "snapshot"
+    assert loaded.__name__ == "frozen_bundle"
+    assert loaded.__file__ == str(path)
+    assert loaded.__spec__.origin == str(path)
+    assert snapshot(tmp_path) == before
+
+
+def test_module_loader_reads_once_and_ignores_subsequent_disk_change(tmp_path, monkeypatch):
+    module = imported(ROOT)
+    path = tmp_path / "bundled.py"
+    path.write_bytes(b"VALUE = 'captured'\n")
+    original = Path.read_bytes
+    reads = []
+
+    def capture(candidate):
+        data = original(candidate)
+        if candidate == path:
+            reads.append(candidate)
+            path.write_bytes(b"raise RuntimeError('changed disk must not execute')\n")
+        return data
+
+    monkeypatch.setattr(Path, "read_bytes", capture)
+    assert module.load_module("captured_bundle", path).VALUE == "captured"
+    assert reads == [path]
+
+
+@pytest.mark.parametrize("initial", [False, True])
+def test_module_loader_restores_bytecode_policy_on_error(tmp_path, monkeypatch, initial):
+    module = imported(ROOT)
+    path = tmp_path / "bundled.py"
+    monkeypatch.setattr(sys, "dont_write_bytecode", initial)
+    before = snapshot(tmp_path)
+    with pytest.raises(RuntimeError, match="synthetic source failure"):
+        module.load_module("failed_bundle", path, b"raise RuntimeError('synthetic source failure')\n")
+    assert sys.dont_write_bytecode is initial
+    assert "failed_bundle" not in sys.modules
+    assert snapshot(tmp_path) == before
+
+
+def test_snapshot_loader_rejects_another_module_name(tmp_path):
+    module = imported(ROOT)
+    loader = module._SnapshotSourceLoader("expected", str(tmp_path / "bundled.py"), b"VALUE = 1\n")
+    with pytest.raises(ImportError, match="another module"):
+        loader.get_code("another")
+
+
+def test_alias_git_identity_declares_nonsecurity_sha1(producers, consumer, monkeypatch):
+    module = imported(producers["source"][0])
+    original = module.hashlib.sha1
+    calls = []
+
+    def fips_sha1(data, **kwargs):
+        if kwargs.get("usedforsecurity") is not False:
+            raise ValueError("security SHA-1 unavailable in synthetic FIPS host")
+        calls.append(kwargs)
+        return original(data, **kwargs)
+
+    monkeypatch.setattr(module.hashlib, "sha1", fips_sha1)
+    assert module.main(["--repo-root", str(consumer), "--layout", LAYOUT_NAME]) == 0
+    assert calls and all(value == {"usedforsecurity": False} for value in calls)
+    record = json.loads((consumer / RECEIPT).read_text())
+    raw = b"../.github/skills"
+    expected = subprocess.check_output(["git", "hash-object", "--stdin"], cwd=consumer,
+                                       input=raw, env=ENV, timeout=15).decode().strip()
+    for value in record["layout"]["aliases"].values():
+        assert value["blob"] == expected
+        assert value["sha256"] == hashlib.sha256(raw).hexdigest()
 
 
 @pytest.mark.parametrize("kind", ["source", "plugin", "registry"])

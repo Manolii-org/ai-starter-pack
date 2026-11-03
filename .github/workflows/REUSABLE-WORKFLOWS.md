@@ -3,14 +3,66 @@
 Canonical home for AI Starter Pack reusable GitHub Actions workflows. Consumed via:
 
 ```yaml
-uses: manolii-org/ai-starter-pack/.github/workflows/<name>-reusable.yml@v1.25.1
+uses: manolii-org/ai-starter-pack/.github/workflows/<name>-reusable.yml@321810f558463b2363d3372d669efcd3ea8283ec # v1.25.1
 ```
 
 Frozen at v1 (additive=non-breaking; rename/remove/default-change=v2).
 
-Pin pack releases (`vX.Y.Z`, full commit SHA preferred). Component tags
-(`email-capture-vX.Y.Z`, `feature-controls-vX.Y.Z`) are not pack releases and
-never move `v1`; see README § Tag namespaces.
+**Pin the full commit SHA of a pack release, with the version as a trailing
+comment** (`@<sha> # vX.Y.Z`). A tag pin runs whatever the tag points at today,
+with your secrets; a SHA cannot be moved. Renovate (via the
+`github>Manolii-org/ai-starter-pack` preset) converts remaining tag pins and
+proposes each release as one grouped, reviewed PR. `workflow-security-reusable.yml`
+enforces SHA pins in your repo. Component tags (`email-capture-vX.Y.Z`,
+`feature-controls-vX.Y.Z`) are not pack releases and never move `v1`; see
+README § Tag namespaces.
+
+Each pack release's job summary (`release-tag.yml` → *release security diff*)
+lists what changed since the previous release in triggers, permissions, secrets
+referenced, external `uses:`, event/input expressions inside `run:` and hosts —
+read it before approving the grouped Renovate PR.
+
+## Workflow security (`workflow-security-reusable.yml`)
+
+```yaml
+jobs:
+  workflow-security:
+    uses: Manolii-org/ai-starter-pack/.github/workflows/workflow-security-reusable.yml@<sha> # vX.Y.Z
+    with:
+      pack_ref: <sha> # vX.Y.Z — same commit as the uses: pin
+```
+
+Pass `pack_ref` explicitly: the scripts are checked out from that commit, so
+they match the workflow you pinned. If `pack_ref` is empty the workflow falls
+back to `job.workflow_sha`, and fails loudly if that cannot be resolved —
+it never falls back to the pack's default branch.
+
+Fails when any `uses:` in your workflows or composite actions is not pinned to a
+full commit SHA — composite actions under `.github/actions/` and every local
+action a workflow calls as `uses: ./<dir>`, wherever it lives (`allow_ref` takes newline-separated full-match regexes for
+deliberate exceptions), and when actionlint reports errors. zizmor runs as a
+ratchet against `zizmor_baseline` (default `config/zizmor-baseline.json`) when
+that file exists, and report-only otherwise. Needs no secrets. Scanner
+versions and hashes are pinned in `scripts/install-workflow-scanners.sh`.
+
+To create the baseline (Linux x86_64, Python 3.12), use the scripts and
+scanners from the **same pack commit** your `uses:` line pins, run from your
+repository root:
+
+```bash
+PACK_SHA=<the commit SHA in your uses: line>
+git clone --quiet https://github.com/Manolii-org/ai-starter-pack.git /tmp/pack
+git -C /tmp/pack checkout --quiet "$PACK_SHA"
+bash /tmp/pack/scripts/install-workflow-scanners.sh /tmp/pack-bin
+python3 /tmp/pack/scripts/workflow-security-ratchet.py \
+  --zizmor /tmp/pack-bin/zizmor --write-baseline
+git add config/zizmor-baseline.json
+```
+
+Copier-rendered repos already have `scripts/workflow-security-ratchet.py`;
+they still need the pinned zizmor from `install-workflow-scanners.sh`. Fix
+findings rather than baselining them where you can; the baseline may only
+shrink afterwards.
 
 ## Runner selection — opt into `ubuntu-slim` for light jobs
 
@@ -32,11 +84,11 @@ sharing the receipt and pin-SHA controls introduced in v1.10.0:
 
 ```yaml
 - id: resolve
-  uses: Manolii-org/ai-starter-pack/.github/actions/resolve-held-promote-sha@v1.25.1
+  uses: Manolii-org/ai-starter-pack/.github/actions/resolve-held-promote-sha@321810f558463b2363d3372d669efcd3ea8283ec # v1.25.1
   with:
     sha: ${{ inputs.sha }}
 
-- uses: Manolii-org/ai-starter-pack/.github/actions/emit-deployment-receipt@v1.25.1
+- uses: Manolii-org/ai-starter-pack/.github/actions/emit-deployment-receipt@321810f558463b2363d3372d669efcd3ea8283ec # v1.25.1
   with:
     emit_when: alias-confirmed
     target_sha: ${{ steps.resolve.outputs.sha }}
@@ -144,6 +196,7 @@ table.
 | **static-review-reusable** | `runs_on=ubuntu-latest`, `node_version=24`, `python_version=3.14` | none | none |
 | **tier-gate-summary-reusable** | `gate_name` (req), `tier=fast`, `applies: boolean` (req), `skip_reason=no files in scope changed`, `command=''`, `runs_on=ubuntu-latest`, `working_directory=.`, `timeout_minutes=10: number`, `setup_command=''`, `checkout_fetch_depth=0: number` | none | `verdict`, `applied` |
 | **ui-smoke-reusable** | `base_url` (req), `routes=''`, `profile=default`, `config_path=config/qa.json`, `pack_ref=v1`, `playwright_version=1.63.0`, `axe_core_version=4.10.3`, `node_version=22`, `runs_on=ubuntu-latest`, `timeout_minutes=10: number`, `artifact_name=''` | `VERCEL_BYPASS_SECRET` | `status` |
+| **workflow-security-reusable** | `zizmor_baseline=config/zizmor-baseline.json`, `allow_ref=''`, `pack_ref=''` | none | none |
 
 <!-- reusable-matrix:end -->
 
@@ -173,7 +226,7 @@ permissions:
 
 jobs:
   ci:
-    uses: manolii-org/ai-starter-pack/.github/workflows/ci-reusable.yml@v1.25.1
+    uses: manolii-org/ai-starter-pack/.github/workflows/ci-reusable.yml@321810f558463b2363d3372d669efcd3ea8283ec # v1.25.1
     with:
       runs_on: ubuntu-latest
       node_version: '24'
@@ -217,10 +270,11 @@ permissions:
 
 jobs:
   assessment:
-    uses: manolii-org/ai-starter-pack/.github/workflows/pr-assessment-reusable.yml@v1.25.1
+    uses: manolii-org/ai-starter-pack/.github/workflows/pr-assessment-reusable.yml@321810f558463b2363d3372d669efcd3ea8283ec # v1.25.1
     with:
       provider_mode: proxy
       litellm_proxy_url: ${{ vars.LITELLM_PROXY_URL }}
+      pack_ref: 321810f558463b2363d3372d669efcd3ea8283ec # v1.25.1 — keep identical to the uses: pin
     secrets:
       LITELLM_MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY }}
 ```
@@ -246,12 +300,14 @@ So adopting the pipeline in a repo that has no `.claude/` tree at all is a
 conditional on the probe, an unreachable or mistyped `pack_ref` cannot break a
 repo that needs no hydration.
 
-`pack_ref` defaults to the moving `v1` alias. If you pin the reusable to an
-immutable tag and want prompts and workflow to move together, pass the same tag:
+`pack_ref` defaults to the moving `v1` alias, which loads the pack's prompts
+and scripts from wherever `v1` points today — with your secrets — even when the
+`uses:` line is SHA-pinned. **Pass the same commit SHA as your `uses:` pin** so
+prompts and workflow are immutable and move together:
 
 ```yaml
     with:
-      pack_ref: v1.25.1
+      pack_ref: 321810f558463b2363d3372d669efcd3ea8283ec # v1.25.1 — keep identical to the uses: pin
 ```
 
 The hydration list lives in the workflow-level `ASSESSMENT_RUNTIME_FILES` env.
@@ -504,7 +560,7 @@ jobs:
           EOF
   fast-tier:
     needs: detect
-    uses: manolii-org/ai-starter-pack/.github/workflows/fast-tier-reusable.yml@v1.25.1
+    uses: manolii-org/ai-starter-pack/.github/workflows/fast-tier-reusable.yml@321810f558463b2363d3372d669efcd3ea8283ec # v1.25.1
     with:
       gates: ${{ needs.detect.outputs.gates }}
       budget_minutes: 5
@@ -524,7 +580,7 @@ permissions:
   issues: write
 jobs:
   pre-production-tier:
-    uses: manolii-org/ai-starter-pack/.github/workflows/pre-production-tier-reusable.yml@v1.25.1
+    uses: manolii-org/ai-starter-pack/.github/workflows/pre-production-tier-reusable.yml@321810f558463b2363d3372d669efcd3ea8283ec # v1.25.1
     with:
       gates: >-
         [{"name":"e2e","applies":true,"command":"pnpm test:e2e"},
@@ -550,10 +606,10 @@ Phase-1 exit) — see `kernel/backup/README.md`.
 ```yaml
 jobs:
   validate-backup-manifest:
-    uses: manolii-org/ai-starter-pack/.github/workflows/backup-kernel-validate-reusable.yml@v1.25.1
+    uses: manolii-org/ai-starter-pack/.github/workflows/backup-kernel-validate-reusable.yml@321810f558463b2363d3372d669efcd3ea8283ec # v1.25.1
     with:
       manifest_path: config/backup-tenant.yaml
-      pack_ref: v1.25.1   # keep identical to the `uses:` pin — the pack cannot discover its own ref
+      pack_ref: 321810f558463b2363d3372d669efcd3ea8283ec # v1.25.1 — keep identical to the `uses:` pin
 ```
 
 ## pr-autofix-loop-reusable
@@ -607,7 +663,7 @@ permissions:
 
 jobs:
   autofix:
-    uses: Manolii-org/ai-starter-pack/.github/workflows/pr-autofix-loop-reusable.yml@v1.25.1
+    uses: Manolii-org/ai-starter-pack/.github/workflows/pr-autofix-loop-reusable.yml@321810f558463b2363d3372d669efcd3ea8283ec # v1.25.1
     with:
       provider_mode: proxy
       litellm_proxy_url: ${{ vars.LITELLM_PROXY_URL }}
@@ -717,7 +773,7 @@ graph is sound, this one proves the migrations actually execute.
 ```yaml
 jobs:
   migration-run:
-    uses: Manolii-org/ai-starter-pack/.github/workflows/migration-run-gate-reusable.yml@v1.25.1
+    uses: Manolii-org/ai-starter-pack/.github/workflows/migration-run-gate-reusable.yml@321810f558463b2363d3372d669efcd3ea8283ec # v1.25.1
     with:
       db_image: mcr.microsoft.com/mssql/server:2022-latest
       db_ports_json: '["1433:1433"]'
@@ -748,9 +804,10 @@ HTML report, test-results (traces/failure screenshots), and the conventional
 ```yaml
 jobs:
   e2e:
-    uses: Manolii-org/ai-starter-pack/.github/workflows/e2e-playwright-reusable.yml@v1.25.1
+    uses: Manolii-org/ai-starter-pack/.github/workflows/e2e-playwright-reusable.yml@321810f558463b2363d3372d669efcd3ea8283ec # v1.25.1
     with:
       playwright_args_json: '["--grep", "@smoke"]'
+      pack_ref: 321810f558463b2363d3372d669efcd3ea8283ec # v1.25.1 — keep identical to the uses: pin
     secrets:
       E2E_TEST_USER_EMAIL: ${{ secrets.E2E_TEST_USER_EMAIL }}
       E2E_TEST_USER_PASSWORD: ${{ secrets.E2E_TEST_USER_PASSWORD }}
@@ -771,8 +828,8 @@ Failure classification (v1.20.0+, advisory): every run ends with a
 reports under `classify_results` (default `test-results/`; add
 `['json', { outputFile: 'test-results/results.json' }]` to the config's CI
 reporters for per-test precision) and otherwise parses the captured reporter
-stdout. The classifier is loaded from the pack at `pack_ref` (default `v1`;
-keep identical to your `uses:` pin). It never changes the job conclusion. Downstream automation should
+stdout. The classifier is loaded from the pack at `pack_ref` (default: the moving
+`v1` alias — set it to the same commit SHA as your `uses:` pin). It never changes the job conclusion. Downstream automation should
 retry `retryable == 'true'`, hand `autofix_eligible == 'true'` to code
 fixers, and escalate `environment` to whoever owns the secret/seed/config.
 
@@ -801,10 +858,10 @@ on: deployment_status
 jobs:
   ui-smoke:
     if: github.event.deployment_status.state == 'success'
-    uses: Manolii-org/ai-starter-pack/.github/workflows/ui-smoke-reusable.yml@v1.25.1
+    uses: Manolii-org/ai-starter-pack/.github/workflows/ui-smoke-reusable.yml@321810f558463b2363d3372d669efcd3ea8283ec # v1.25.1
     with:
       base_url: ${{ github.event.deployment_status.environment_url }}
-      pack_ref: v1.25.1
+      pack_ref: 321810f558463b2363d3372d669efcd3ea8283ec # v1.25.1 — keep identical to the uses: pin
     secrets:
       VERCEL_BYPASS_SECRET: ${{ secrets.VERCEL_BYPASS_SECRET }}
 ```
@@ -861,7 +918,7 @@ the caller below. Bind required checks to that full string, not bare
 ```yaml
 jobs:
   coverage:
-    uses: Manolii-org/ai-starter-pack/.github/workflows/coverage-ratchet-reusable.yml@v1.25.1
+    uses: Manolii-org/ai-starter-pack/.github/workflows/coverage-ratchet-reusable.yml@321810f558463b2363d3372d669efcd3ea8283ec # v1.25.1
     with:
       node_version: '22'
       install_command: npm ci --ignore-scripts
@@ -903,6 +960,17 @@ diffs `base...head`, fails when a block-mode guard's paths changed without a
 `guard-ok:<id>` PR label or `Guarded-Path: <id>` commit trailer. See
 [`docs/guarded-paths.md`](../../docs/guarded-paths.md) for the taxonomy and a
 ready-to-paste caller job.
+
+## Coordinated release proposal validation
+
+`.github/actions/validate-release-manifest` validates the version 1 immutable
+subject against `schemas/release-manifest.v1.schema.json` and its independently
+retained expected ID. It grants no execution authority. Generic activation-only
+continuation and Git admission CAS helpers live beside it; provider approval
+binding remains an explicit qualification gate. See
+[`docs/coordinated-releases.md`](../../docs/coordinated-releases.md) for the
+ownership, legacy/shadow rollout and recovery contracts. Pin a reviewed immutable
+release containing this action; existing products are not automatically adopted.
 
 ## Registry + contract schemas and validators
 

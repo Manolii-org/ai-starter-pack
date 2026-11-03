@@ -1,0 +1,8 @@
+{
+  "enabled": false,
+  "credential_mode": "personal_profiles",
+  "identity": null,
+  "audience": "codex-review-worker",
+  "project": "codex-review",
+  "config": "prd"
+}

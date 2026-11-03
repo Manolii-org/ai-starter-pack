@@ -109,6 +109,11 @@ jobs:
       - name: Review evidence regressions
         run: python3 -m pytest scripts/tests/test_review_evidence.py -q
 
+      - name: Release manifest and admission contracts
+        run: >-
+          python3 -m unittest discover -s scripts/tests
+          -p 'test_release_*.py' -q
+
       - name: Plugin hook + drift guards
         run: |
           # Codex P2 2026-08-22 (#71): these three guards were only documented for
