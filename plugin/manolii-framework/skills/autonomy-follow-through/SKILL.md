@@ -73,7 +73,7 @@ Each round:
 |-------|----------------|
 | `done` | Every Merge-When-Safe rule below true, including review/vetoes; merge, preferring auto-merge. |
 | `blocked_on_human` | Concrete required human approval/authority/design/risk decision; notify once. Ordinary automated review stays monitored. |
-| `blocked_on_infra` | Shared PAT/config/proxy/Retry-After/Fly502 or unmatched transient: owning infra-incident recorder (`scripts/infra_incident.py` where shipped), label infra-incident, retain dependents. One cheap GET; attach evidence, never close. Open incidents suppress retries; otherwise infra_backoff_minutes. Code/test failures remain required-check failures. Never shorten hosted Retry-After to 30 seconds. |
+| `blocked_on_infra` | Shared PAT/config/proxy/Retry-After/Fly502 or unmatched transient: owning infra-incident recorder (`scripts/infra_incident.py` where shipped), label infra-incident, retain dependents. One cheap GET; attach evidence, never close. Open incidents suppress retries; otherwise infra_backoff_minutes. Code/test failures remain required-check failures. Never shorten hosted `Retry-After` to 30 seconds. |
 | `superseded` | New PR opened for the same scope, or empty L4 exception below; close seed only once its replacement PR exists, link Act PR. |
 | `gave_up` | max_rearms exhausted without recoverable infra/specific human decision; escalate evidence. Red/human gates use blocked_on_human. |
 
