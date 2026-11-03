@@ -484,6 +484,8 @@ jobs:
           path: .ai/sast-findings.json
 
   specialists:
+    outputs:
+      assessment_attempt: ${{ github.run_attempt }}
     name: Specialist Skills
     runs-on: ${{ inputs.runs_on }}
     timeout-minutes: 15
@@ -650,6 +652,8 @@ jobs:
           path: .ai/candidates/
 
   broad-agents:
+    outputs:
+      assessment_attempt: ${{ github.run_attempt }}
     name: Broad Agents
     runs-on: ${{ inputs.runs_on }}
     timeout-minutes: 20
@@ -972,6 +976,8 @@ jobs:
 
       - name: Run judge
         env:
+          REVIEW_SKILLS_ATTEMPT: ${{ needs.specialists.outputs.assessment_attempt }}
+          REVIEW_AGENTS_ATTEMPT: ${{ needs['broad-agents'].outputs.assessment_attempt }}
           REVIEW_SKILLS: ${{ needs.classify.outputs.invoke_skills }}
           REVIEW_AGENTS: ${{ needs.classify.outputs.invoke_agents }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

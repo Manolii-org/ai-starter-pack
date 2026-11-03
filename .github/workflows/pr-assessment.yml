@@ -382,6 +382,8 @@ jobs:
           path: .ai/sast-findings.json
 
   specialists:
+    outputs:
+      assessment_attempt: ${{ github.run_attempt }}
     name: Specialist Skills
     runs-on: >-
       ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
@@ -484,6 +486,8 @@ jobs:
           path: .ai/candidates/
 
   broad-agents:
+    outputs:
+      assessment_attempt: ${{ github.run_attempt }}
     name: Broad Agents
     runs-on: >-
       ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
@@ -661,6 +665,8 @@ jobs:
 
       - name: Run judge
         env:
+          REVIEW_SKILLS_ATTEMPT: ${{ needs.specialists.outputs.assessment_attempt }}
+          REVIEW_AGENTS_ATTEMPT: ${{ needs['broad-agents'].outputs.assessment_attempt }}
           REVIEW_SKILLS: ${{ needs.classify.outputs.invoke_skills }}
           REVIEW_AGENTS: ${{ needs.classify.outputs.invoke_agents }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

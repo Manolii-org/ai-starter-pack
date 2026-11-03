@@ -160,6 +160,10 @@ def test_workflow_passes_both_trusted_phase_outputs_to_real_judge(workflow):
     assert step['env']['REVIEW_SKILLS'] == '${{ needs.classify.outputs.invoke_skills }}'
     assert step['env']['REVIEW_AGENTS'] == '${{ needs.classify.outputs.invoke_agents }}'
     assert 'python3 scripts/run-judge.py' in step['run']
+    assert jobs['specialists']['outputs']['assessment_attempt'] == '${{ github.run_attempt }}'
+    assert jobs['broad-agents']['outputs']['assessment_attempt'] == '${{ github.run_attempt }}'
+    assert step['env']['REVIEW_SKILLS_ATTEMPT'] == '${{ needs.specialists.outputs.assessment_attempt }}'
+    assert step['env']['REVIEW_AGENTS_ATTEMPT'] == "${{ needs['broad-agents'].outputs.assessment_attempt }}"
 
 
 def test_duplicate_fields_do_not_override_incomplete_marker(launch):
@@ -217,3 +221,43 @@ def test_real_advisory_response_is_not_downstream_acceptance(launch, monkeypatch
     reviews = [{'commit_id': instance.sha, 'state': 'COMMENTED', 'body': sent[0]['body'],
                 'user': {'login': 'chatgpt-codex-connector[bot]', 'type': 'Bot'}}]
     assert downstream.bot_review_verdict(reviews, instance.sha) == 'none'
+
+
+@pytest.mark.parametrize("skills_attempt,agents_attempt", [("1", "1"), ("1", "2"), ("2", "1"), ("2", "2")])
+def test_failed_job_rerun_accepts_exact_retained_producer_context(launch, monkeypatch, skills_attempt, agents_attempt):
+    _, instance, artifact, seen = launch
+    monkeypatch.setenv('GITHUB_RUN_ATTEMPT', skills_attempt)
+    artifact('shell-security')
+    artifact('security-boundary-test')
+    monkeypatch.setenv('GITHUB_RUN_ATTEMPT', agents_attempt)
+    artifact('security-deep-dive')
+    artifact('systems-consistency')
+    monkeypatch.setenv('GITHUB_RUN_ATTEMPT', '2')
+    monkeypatch.setenv('REVIEW_SKILLS_ATTEMPT', skills_attempt)
+    monkeypatch.setenv('REVIEW_AGENTS_ATTEMPT', agents_attempt)
+    assert instance.run() == 0 and seen == [('clean', '')]
+    assert instance._candidate_load_errors == 0
+
+
+@pytest.mark.parametrize("producing", [None, '', '0', '3', 'wrong', '01', '-1'])
+def test_rerun_without_valid_trusted_producer_output_stays_incomplete(launch, monkeypatch, producing):
+    _, instance, artifact, seen = launch
+    complete(artifact)
+    monkeypatch.setenv('GITHUB_RUN_ATTEMPT', '2')
+    for phase in ['SKILLS', 'AGENTS']:
+        if producing is None:
+            monkeypatch.delenv('REVIEW_' + phase + '_ATTEMPT', raising=False)
+        else:
+            monkeypatch.setenv('REVIEW_' + phase + '_ATTEMPT', producing)
+    instance.run()
+    assert instance._candidate_load_errors and seen[0][0] == 'incomplete'
+
+
+def test_artifact_cannot_claim_a_different_successful_producer_attempt(launch, monkeypatch):
+    _, instance, artifact, seen = launch
+    complete(artifact)
+    monkeypatch.setenv('GITHUB_RUN_ATTEMPT', '2')
+    monkeypatch.setenv('REVIEW_SKILLS_ATTEMPT', '2')
+    monkeypatch.setenv('REVIEW_AGENTS_ATTEMPT', '2')
+    instance.run()
+    assert instance._candidate_load_errors and seen[0][0] == 'incomplete'
