@@ -44,6 +44,7 @@ def _list_prices() -> dict[str, dict]:
 
 
 def _cost_logger(monkeypatch, base_url: str | None = None):
+    monkeypatch.setenv("CLAUDE_CLIENT_USE_PROXY", "0")
     if base_url is None:
         monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
     else:
