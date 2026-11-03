@@ -17,6 +17,7 @@ import ast
 from array import array
 from bisect import bisect_left
 import hashlib
+import importlib.machinery
 import importlib.util
 import json
 import logging
@@ -31,18 +32,27 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Optional
 
+class _HydratedSourceLoader(importlib.machinery.SourceFileLoader):
+    """Import the hydrated source directly, without consulting bytecode caches."""
+
+    def get_code(self, fullname):
+        return self.source_to_code(self.get_data(self.path), self.path)
+
+
+def _source_spec(name, path):
+    return importlib.util.spec_from_file_location(
+        name, path, loader=_HydratedSourceLoader(name, str(path)))
+
+
 # Load the exact hydrated helper, never an ambient/PR-added lib package initializer.
 # The launcher still owns complete runtime custody; this is not shell isolation.
 try:
-    _policy_spec = importlib.util.spec_from_file_location(
+    _policy_spec = _source_spec(
         "_assessment_route_policy", Path(__file__).resolve().parent / "lib/agent_capabilities.py")
     if _policy_spec is None or _policy_spec.loader is None:
         raise ImportError("missing policy loader")
     _policy_module = importlib.util.module_from_spec(_policy_spec)
-    # Execute hydrated source bytes, not a PR-retained bytecode cache.
-    _policy_path = _policy_spec.origin
-    exec(compile(Path(_policy_path).read_bytes(), _policy_path, "exec"),
-         _policy_module.__dict__)
+    _policy_spec.loader.exec_module(_policy_module)
     RouteAdmissionError = _policy_module.RouteAdmissionError
     require_direct_llm_admission = _policy_module.require_direct_llm_admission
     configured_direct_endpoint = _policy_module.configured_direct_endpoint
@@ -60,11 +70,11 @@ except (ImportError, OSError, AttributeError):
 
 # Qualification helper follows the same hydrated-source custody as route policy.
 _protected_path = Path(__file__).resolve().parent / "lib/protected_review.py"
-_protected_spec = importlib.util.spec_from_file_location("_protected_review", _protected_path)
+_protected_spec = _source_spec("_protected_review", _protected_path)
 if _protected_spec is None or _protected_spec.loader is None:
     raise ImportError("missing protected-review loader")
 protected_review = importlib.util.module_from_spec(_protected_spec)
-exec(compile(_protected_path.read_bytes(), str(_protected_path), "exec"), protected_review.__dict__)
+_protected_spec.loader.exec_module(protected_review)
 
 logging.basicConfig(
     level=logging.INFO,

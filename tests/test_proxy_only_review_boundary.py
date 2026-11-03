@@ -1,6 +1,7 @@
 """Exercise distributed template transports with synthetic credentials only."""
 import importlib.util
 import json
+import runpy
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -108,10 +109,13 @@ def test_broad_never_dispatches_without_safe_proxy(base, key, monkeypatch):
 
 
 @pytest.fixture
-def stop_code():
+def stop_code(tmp_path):
     text = (TEMPLATES / "session-stop-checklist.sh").read_text()
     section = text[text.index('_run_intent_drift() {'):]
-    return section.split("python3 - <<'PYEOF'", 1)[1].split("\n", 1)[1].split("\nPYEOF", 1)[0]
+    code = section.split("python3 - <<'PYEOF'", 1)[1].split("\n", 1)[1].split("\nPYEOF", 1)[0]
+    script = tmp_path / "stop_critic.py"
+    script.write_text(code)
+    return script
 
 
 @pytest.mark.parametrize("base,key,policy", [("", "synthetic", ""), ("https://api.anthropic.com", "synthetic", ""),
@@ -124,7 +128,7 @@ def test_stop_critic_rejects_direct_paths_before_client_creation(base, key, poli
     monkeypatch.setenv("LLM_API_KEY", key)
     monkeypatch.setenv("CLIENT_AI_POLICY", policy)
     with pytest.raises(RuntimeError, match="requires"):
-        exec(compile(stop_code, "template-stop-critic", "exec"), {})
+        runpy.run_path(str(stop_code))
     transport.assert_not_called()
 
 
@@ -147,7 +151,7 @@ def test_stop_critic_preserves_proxy_and_uses_only_proxy_auth(monkeypatch, stop_
     monkeypatch.setitem(sys.modules, "anthropic", SimpleNamespace(Anthropic=sdk))
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://proxy.example")
     monkeypatch.setenv("LLM_API_KEY", "Bearer <placeholder>")
-    exec(compile(stop_code, "template-stop-critic", "exec"), {})
+    runpy.run_path(str(stop_code))
     sdk.assert_not_called()
     assert "unavailable" not in capsys.readouterr().out
     assert opener.open.call_count == 1
@@ -196,7 +200,7 @@ def test_stop_critic_reasoning_retry_is_bounded(outcome, tmp_path, monkeypatch, 
         return response
 
     monkeypatch.setattr("urllib.request.build_opener", lambda *args: SimpleNamespace(open=transport))
-    exec(compile(stop_code, "template-stop-critic", "exec"), {})
+    runpy.run_path(str(stop_code))
     expected = 1 if outcome == "deadline" else 2
     assert len(calls) == expected
     assert [json.loads(request.data)["max_tokens"] for request, _ in calls] == [4196, 8392][:expected]
@@ -245,7 +249,7 @@ def test_stop_critic_rejects_late_results_and_interrupts_blocking_reads(delay, t
     opener = Mock()
     opener.open.return_value = response
     monkeypatch.setattr("urllib.request.build_opener", lambda *args: opener)
-    exec(compile(stop_code, "template-stop-critic", "exec"), {})
+    runpy.run_path(str(stop_code))
     assert opener.open.call_count == 1
     assert not (tmp_path / ".ai/drift-alerts").exists()
     assert "Critic unavailable; no scope verdict recorded" in capsys.readouterr().out

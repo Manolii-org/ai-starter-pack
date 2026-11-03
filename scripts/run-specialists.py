@@ -12,6 +12,7 @@ Exit codes:
   1 = fatal error (API key missing, diff file missing)
 """
 import concurrent.futures
+import importlib.machinery
 import importlib.util
 import json
 import os
@@ -24,18 +25,27 @@ import urllib.parse
 import urllib.request
 from typing import Optional
 
+class _HydratedSourceLoader(importlib.machinery.SourceFileLoader):
+    """Import the hydrated source directly, without consulting bytecode caches."""
+
+    def get_code(self, fullname):
+        return self.source_to_code(self.get_data(self.path), self.path)
+
+
+def _source_spec(name, path):
+    return importlib.util.spec_from_file_location(
+        name, path, loader=_HydratedSourceLoader(name, str(path)))
+
+
 # Load the exact hydrated helper, never an ambient/PR-added lib package initializer.
 # The launcher still owns complete runtime custody; this is not shell isolation.
 try:
-    _policy_spec = importlib.util.spec_from_file_location(
+    _policy_spec = _source_spec(
         "_assessment_route_policy", pathlib.Path(__file__).resolve().parent / "lib/agent_capabilities.py")
     if _policy_spec is None or _policy_spec.loader is None:
         raise ImportError("missing policy loader")
     _policy_module = importlib.util.module_from_spec(_policy_spec)
-    # Execute hydrated source bytes, not a PR-retained bytecode cache.
-    _policy_path = _policy_spec.origin
-    exec(compile(pathlib.Path(_policy_path).read_bytes(), _policy_path, "exec"),
-         _policy_module.__dict__)
+    _policy_spec.loader.exec_module(_policy_module)
     RouteAdmissionError = _policy_module.RouteAdmissionError
     require_direct_llm_admission = _policy_module.require_direct_llm_admission
     configured_direct_endpoint = _policy_module.configured_direct_endpoint
@@ -56,11 +66,11 @@ except (ImportError, OSError, AttributeError):
 # when this companion is absent. Never import a package initializer or .pyc.
 try:
     _protected_path = pathlib.Path(__file__).resolve().parent / "lib/protected_review.py"
-    _protected_spec = importlib.util.spec_from_file_location("_assessment_protected_review", _protected_path)
+    _protected_spec = _source_spec("_assessment_protected_review", _protected_path)
     if _protected_spec is None or _protected_spec.loader is None:
         raise ImportError("missing protected review loader")
     protected_review = importlib.util.module_from_spec(_protected_spec)
-    exec(compile(_protected_path.read_bytes(), str(_protected_path), "exec"), protected_review.__dict__)
+    _protected_spec.loader.exec_module(protected_review)
 except (ImportError, OSError, AttributeError, SyntaxError):
     protected_review = None
 
@@ -598,7 +608,7 @@ def main() -> None:
 
     # Read diff
     if diff_file is None:
-        diff_file = pathlib.Path(os.environ.get("DIFF_FILE", "/tmp/pr.diff"))
+        diff_file = pathlib.Path(os.environ.get("DIFF_FILE", ".ai/pr.diff"))
     if diff_file.exists():
         diff = diff_file.read_text(encoding="utf-8", errors="replace")
     else:

@@ -13,6 +13,7 @@ Usage:
 """
 
 import argparse
+import importlib.machinery
 import importlib.util
 import hashlib
 import math
@@ -34,18 +35,27 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 import yaml
 
+class _HydratedSourceLoader(importlib.machinery.SourceFileLoader):
+    """Import the hydrated source directly, without consulting bytecode caches."""
+
+    def get_code(self, fullname):
+        return self.source_to_code(self.get_data(self.path), self.path)
+
+
+def _source_spec(name, path):
+    return importlib.util.spec_from_file_location(
+        name, path, loader=_HydratedSourceLoader(name, str(path)))
+
+
 # Load the exact hydrated helper, never an ambient/PR-added lib package initializer.
 # The launcher still owns complete runtime custody; this is not shell isolation.
 try:
-    _policy_spec = importlib.util.spec_from_file_location(
+    _policy_spec = _source_spec(
         "_assessment_route_policy", Path(__file__).resolve().parent / "lib/agent_capabilities.py")
     if _policy_spec is None or _policy_spec.loader is None:
         raise ImportError("missing policy loader")
     _policy_module = importlib.util.module_from_spec(_policy_spec)
-    # Execute hydrated source bytes, not a PR-retained bytecode cache.
-    _policy_path = _policy_spec.origin
-    exec(compile(Path(_policy_path).read_bytes(), _policy_path, "exec"),
-         _policy_module.__dict__)
+    _policy_spec.loader.exec_module(_policy_module)
     RouteAdmissionError = _policy_module.RouteAdmissionError
     require_direct_llm_admission = _policy_module.require_direct_llm_admission
     configured_direct_endpoint = _policy_module.configured_direct_endpoint
@@ -357,11 +367,11 @@ def _deep_screen_helpers():
     # Reuse the existing canonical Judge source/privacy guard. Its modules are
     # already part of the hydrated broad/Judge runtime. Do not execute Git blobs.
     path = Path(__file__).resolve().with_name("run-judge.py")
-    spec = importlib.util.spec_from_file_location("_deep_dive_source_guard", path)
+    spec = _source_spec("_deep_dive_source_guard", path)
     if spec is None or spec.loader is None:
         raise ValueError("deep-dive source guard unavailable")
     module = importlib.util.module_from_spec(spec)
-    exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)
+    spec.loader.exec_module(module)
     return module
 
 
@@ -711,11 +721,11 @@ def parse_security_deep_dive_output(raw: str, packet: dict, *, stop_reason: str)
 def _deep_leg_contract():
     """Read existing dormant leg constants, never inventory, credentials or HTTP."""
     path = Path(__file__).resolve().parent / "lib/protected_review.py"
-    spec = importlib.util.spec_from_file_location("_deep_leg_contract", path)
+    spec = _source_spec("_deep_leg_contract", path)
     if spec is None or spec.loader is None:
         raise ValueError("deep-dive leg contract unavailable")
     module = importlib.util.module_from_spec(spec)
-    exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)
+    spec.loader.exec_module(module)
     return module
 
 
@@ -1336,7 +1346,7 @@ def main():
     parser.add_argument(
         "--diff",
         type=Path,
-        default=Path(os.getenv("DIFF_FILE", "/tmp/pr.diff")),
+        default=Path(os.getenv("DIFF_FILE", ".ai/pr.diff")),
         help="Path to PR diff file",
     )
     parser.add_argument(
