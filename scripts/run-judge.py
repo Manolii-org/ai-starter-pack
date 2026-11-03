@@ -409,12 +409,20 @@ def _source_text(text: str, path: str) -> str:
     return _VerifiedSourceText(text, spans)
 
 
+def _physical_source_lines(text: str, keepends: bool = False) -> list[str]:
+    """Git blob locations count LF boundaries, not Unicode text separators."""
+    parts = text.split("\n")
+    if keepends:
+        return [part + "\n" for part in parts[:-1]] + ([parts[-1]] if parts[-1] else [])
+    return parts[:-1] if parts[-1] == "" else parts
+
+
 def _numbered_source(text: str, start: int = 1, end: int | None = None) -> str:
     """Project proved source spans through the existing numbered-window format."""
     parts, spans, raw_offset, output_offset = [], [], 0, 0
     references = iter(sorted(getattr(text, "reference_spans", ())))
     pending = next(references, None)
-    for number, raw_line in enumerate(text.splitlines(keepends=True), 1):
+    for number, raw_line in enumerate(_physical_source_lines(text, keepends=True), 1):
         line = raw_line.rstrip("\r\n")
         selected = number >= start and (end is None or number <= end)
         prefix = f"{number}: "
@@ -687,7 +695,7 @@ def _judge_evidence(findings: list[Finding], head: str) -> dict:
             # Unsupported encodings remain explicitly unavailable.
             decoded = _source_text(body.decode("utf-8"), finding.file)
             _require_safe_packet(decoded)
-            lines = decoded.splitlines()
+            lines = _physical_source_lines(decoded)
             if finding.line is not None and finding.line > len(lines):
                 row["status"] = "line_out_of_range"
                 continue
@@ -728,7 +736,7 @@ def _judge_evidence(findings: list[Finding], head: str) -> dict:
                 if len(match) != 1 or match[0][0] not in {b"100644", b"100755"}:
                     continue
                 body = _git_bounded(root, "cat-file", "blob", match[0][2].decode(), limit=min(20000, _EVIDENCE_MAX_FILE_BYTES))
-                if b"\0" in body or (row["line"] is not None and row["line"] > len(body.decode("utf-8").splitlines())):
+                if b"\0" in body or (row["line"] is not None and row["line"] > len(_physical_source_lines(body.decode("utf-8")))):
                     continue
                 _require_safe_packet(_source_text(body.decode("utf-8"), row["file"]))
                 row.update(status="available", revision=base, source_state="deleted_at_head",

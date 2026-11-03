@@ -60,7 +60,7 @@ try:
     require_direct_llm_admission = _policy_module.require_direct_llm_admission
     configured_direct_endpoint = _policy_module.configured_direct_endpoint
 except (ImportError, OSError, AttributeError):
-    # Mixed/older consumer runtime: preserve ordinary proxy calls, but never
+    # Mixed/older consumer runtime: preserve local proxy calls, but never
     # admit a direct call without the shared policy implementation.
     class RouteAdmissionError(ValueError):
         pass
@@ -70,6 +70,17 @@ except (ImportError, OSError, AttributeError):
 
     def configured_direct_endpoint():
         raise RouteAdmissionError("direct review denied: compatible policy runtime missing")
+
+
+# Older local proxy-only consumers can still write candidates. Hosted runners
+# must have the provenance API before any transport can be constructed.
+_bind_review_candidate = getattr(globals().get("_policy_module"), "bind_review_candidate", None)
+if not callable(_bind_review_candidate):
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        raise RouteAdmissionError("assessment candidate provenance runtime missing")
+
+    def _bind_review_candidate(data):
+        return {key: value for key, value in data.items() if key != "_assessment"}
 
 
 logging.basicConfig(
@@ -1267,7 +1278,7 @@ def run_broad_agents(
         if not config:
             # Unknown capability on failed load is conservative missing coverage,
             # never permission to run an ordinary/proxy replacement.
-            (output_dir / f"{agent_name}.json").write_text(json.dumps(_policy_module.bind_review_candidate({
+            (output_dir / f"{agent_name}.json").write_text(json.dumps(_bind_review_candidate({
                 "source": agent_name, "findings": [], "skipped": "load_error",
                 "first_party": True}), indent=2), encoding="utf-8")
             continue
@@ -1285,7 +1296,7 @@ def run_broad_agents(
         logger.error("Complete diff exceeds explicit owner limit; no agent dispatched")
         for agent in agents_to_run:
             (output_dir / f"{agent.name}.json").write_text(
-                json.dumps(_policy_module.bind_review_candidate(_incomplete(agent, "input_limit")), indent=2), encoding="utf-8")
+                json.dumps(_bind_review_candidate(_incomplete(agent, "input_limit")), indent=2), encoding="utf-8")
         return 0  # Durable incomplete markers, never a completed review.
 
     runnable = agents_to_run
@@ -1320,7 +1331,7 @@ def run_broad_agents(
             results[agent_name] = findings
             out_file = output_dir / f"{agent_name}.json"
             out_file.write_text(
-                json.dumps(_policy_module.bind_review_candidate(findings), indent=2),
+                json.dumps(_bind_review_candidate(findings), indent=2),
                 encoding="utf-8",
             )
             logger.info(f"Wrote {agent_name} findings to {out_file}")

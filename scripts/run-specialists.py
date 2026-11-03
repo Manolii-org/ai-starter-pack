@@ -50,7 +50,7 @@ try:
     require_direct_llm_admission = _policy_module.require_direct_llm_admission
     configured_direct_endpoint = _policy_module.configured_direct_endpoint
 except (ImportError, OSError, AttributeError):
-    # Mixed/older consumer runtime: preserve ordinary proxy calls, but never
+    # Mixed/older consumer runtime: preserve local proxy calls, but never
     # admit a direct call without the shared policy implementation.
     class RouteAdmissionError(ValueError):
         pass
@@ -60,6 +60,17 @@ except (ImportError, OSError, AttributeError):
 
     def configured_direct_endpoint():
         raise RouteAdmissionError("direct review denied: compatible policy runtime missing")
+
+
+# Older local proxy-only consumers can still write candidates. Hosted runners
+# must have the provenance API before any transport can be constructed.
+_bind_review_candidate = getattr(globals().get("_policy_module"), "bind_review_candidate", None)
+if not callable(_bind_review_candidate):
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        raise RouteAdmissionError("assessment candidate provenance runtime missing")
+
+    def _bind_review_candidate(data):
+        return {key: value for key, value in data.items() if key != "_assessment"}
 
 
 # Optional for older direct-only consumers; explicit estate mode fails closed
@@ -410,7 +421,7 @@ def _write_skip_marker(skill_name: str, output_dir: pathlib.Path, reason: str) -
     output_file = output_dir / f"{skill_name}.json"
     output_file.write_text(
         json.dumps(
-            _policy_module.bind_review_candidate({"source": skill_name, "findings": [],
+            _bind_review_candidate({"source": skill_name, "findings": [],
              "first_party": True, "skipped": reason}),
             indent=2,
         ) + "\n",
@@ -566,7 +577,7 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
 
         # Write findings to file
         output_file = output_dir / f"{skill_name}.json"
-        output_file.write_text(json.dumps(_policy_module.bind_review_candidate(data), indent=2) + "\n", encoding="utf-8")
+        output_file.write_text(json.dumps(_bind_review_candidate(data), indent=2) + "\n", encoding="utf-8")
         finding_count = len(data.get("findings", []))
         print(f"[{skill_name}] {finding_count} findings written to {output_file}")
         return skill_name, None
@@ -597,7 +608,7 @@ def _write_skipped_marker(skill_name: str, output_dir: pathlib.Path, reason: str
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / f"{skill_name}.json").write_text(
         json.dumps(
-            _policy_module.bind_review_candidate({"source": skill_name, "findings": [], "skipped": reason}),
+            _bind_review_candidate({"source": skill_name, "findings": [], "skipped": reason}),
             indent=2,
         ) + "\n",
         encoding="utf-8",
